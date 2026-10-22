@@ -1,5 +1,6 @@
 import type { PoolClient } from 'pg';
 import { emitDomainEvent } from '../domain-events/emit.js';
+import { markWorkPending } from '../pendingWork.js';
 import {
   assertLegalStageTransition,
   StageInputError,
@@ -142,6 +143,10 @@ export async function recordStage(
     subjectId: workItemId,
     payload: { workItemId, fromStage, toStage },
   });
+
+  // D#598 P1f-5d: an item that reaches a final stage may have branches to remove. This only wakes the cleanup cron (a hint: the stage is read again, and
+  // the standard backstop looks now and then); nothing about the move is stamped.
+  if (toStage === 'merged' || toStage === 'closed_unmerged' || toStage === 'closed') void markWorkPending('branch-cleanup');
 
   return { recorded: true, transitionId };
 }

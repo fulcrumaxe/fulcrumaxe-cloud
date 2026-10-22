@@ -14,6 +14,7 @@
     { "method": "PATCH", "path": "/api/v1/budgets", "expect": 401 },
     { "method": "GET", "path": "/api/cron/api-sweep", "expect": 401 },
     { "method": "POST", "path": "/api/cron/api-sweep", "expect": 401 },
+    { "method": "GET", "path": "/api/cron/branch-cleanup", "expect": 401 },
     { "method": "GET", "path": "/api/cron/compute-settle-sweep", "expect": 401 },
     { "method": "GET", "path": "/api/cron/handoff-sweep", "expect": 401 },
     { "method": "GET", "path": "/api/cron/invariant-sweep", "expect": 401 },

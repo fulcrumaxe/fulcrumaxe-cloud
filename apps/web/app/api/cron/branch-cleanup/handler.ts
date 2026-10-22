@@ -1,0 +1,58 @@
+import { timingSafeEqual } from "node:crypto";
+import { NextRequest, NextResponse } from "next/server";
+import { runGatedTick } from "@fx/core/src/pendingWork";
+import type { BranchCleanupWorker } from "../../../../lib/worker";
+
+/** The GitHub client opener the worker's sweep takes (the worker keeps the type; this app only passes the function through). */
+type BranchCleanupGithub = Parameters<BranchCleanupWorker["sweepBranchCleanups"]>[0]["github"];
+
+/**
+ * D#598 P1f-5d: the branch cleanup sweep. When a paired item is closed or merged, the private branches the platform pushed for it are removed while they
+ * still point at the commit the platform recorded (packages/worker/src/branchCleanup.ts). The cron fires every minute and is behind the pending-work marker
+ * (D#454 H3c): an item reaching a final stage marks `branch-cleanup` pending (recordStage), a pass that could not finish asks to be looked at again 15 minutes
+ * on, and the first pass that leaves nothing waiting clears it. With no marker the tick opens no connection and makes no outbound call; the standard backstop
+ * still looks now and then.
+ *
+ * Same auth as ../setup-request-check/handler.ts: `Authorization: Bearer <CRON_SECRET>`, an unset secret fails closed, nothing in the request names a tenant.
+ * The reply carries counts only.
+ */
+
+export interface BranchCleanupHandlerDeps {
+  cronSecret: string;
+  /** Called only after the request is authenticated and the tick has decided to connect. Null while not configured. */
+  getWorker(): Promise<BranchCleanupWorker | null>;
+  /** The GitHub client opener (production: lib/github/installationHttp.ts). */
+  github: BranchCleanupGithub;
+  log(line: string): void;
+  now?(): number;
+}
+
+function isAuthorized(authHeader: string | null, cronSecret: string): boolean {
+  if (!cronSecret || !authHeader) return false;
+  const expected = Buffer.from(`Bearer ${cronSecret}`, "utf8");
+  const actual = Buffer.from(authHeader, "utf8");
+  if (expected.length !== actual.length) return false;
+  return timingSafeEqual(expected, actual);
+}
+
+export async function branchCleanupHandler(req: NextRequest, deps: BranchCleanupHandlerDeps): Promise<NextResponse> {
+  if (!isAuthorized(req.headers.get("authorization"), deps.cronSecret)) {
+    return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
+  }
+  const ran = await runGatedTick(
+    "branch-cleanup",
+    async () => {
+      const worker = await deps.getWorker();
+      if (worker === null) {
+        deps.log("branch cleanup: worker not configured");
+        return { result: { configured: false }, workFound: false, nextDueAt: null };
+      }
+      const { nextDueAt, ...counts } = await worker.sweepBranchCleanups({ github: deps.github });
+      return { result: counts, workFound: counts.listed > 0, nextDueAt };
+    },
+    deps.log,
+    deps.now,
+  );
+  if (ran === null) return NextResponse.json({ skipped: true, reason: "no_pending_work" }, { status: 200 });
+  return NextResponse.json(ran.result, { status: 200 });
+}

@@ -22,6 +22,12 @@ import { getInstallationToken, type AccessTokenRequester, type InstallationToken
  *                  contents:read, one repository. Because contents:read could otherwise reach file contents, this kind has its own
  *                  exact list, GET only: the repository, one branch ref, one tree and one blob by id. Not commits, not `contents`.
  *
+ *   - `branch_delete` D#598 P1f-5d: removes ONE branch of a private repository and nothing else. Token: the `branch_delete` purpose
+ *                  (`contents: write`, one repository, minted fresh and revoked by `close()`). The client is pinned to the one branch it was
+ *                  opened for, which must be one of the two shapes the platform pushes (`fx/issue-<n>` or `fx/<run id>-g<generation>`), and
+ *                  allows exactly: `GET` the repository, `GET` that branch's ref, and `DELETE` that branch's ref ONCE. A push, a second
+ *                  branch, a second delete and every other path are refused before a token is used.
+ *
  * What it keeps, so a bug in a caller cannot widen it:
  *   - the host is api.github.com and the path must start with `/repos/<owner>/<name>/` for the repository the client was
  *     opened for: any other path throws before a token is used;
@@ -31,10 +37,10 @@ import { getInstallationToken, type AccessTokenRequester, type InstallationToken
  *     GitHub's own `message` cut short. It never hears a token, a header or a request body.
  */
 
-export type InstallationHttpKind = "read" | "merge_gate" | "runner_pr" | "repo_map";
+export type InstallationHttpKind = "read" | "merge_gate" | "runner_pr" | "repo_map" | "branch_delete";
 
 export interface InstallationHttpRequest {
-  method: "GET" | "POST" | "PUT" | "PATCH";
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   /** Starts with `/repos/<owner>/<name>/`; `runner_pr` may also name `/graphql` (POST only). */
   path: string;
   query?: Readonly<Record<string, string | number>>;
@@ -47,6 +53,8 @@ export interface InstallationHttpResponse {
 export interface InstallationHttp {
   /** Resolves for any HTTP status; rejects only on a transport failure (or a request this client refuses). */
   request(req: InstallationHttpRequest): Promise<InstallationHttpResponse>;
+  /** A `branch_delete` client revokes its token here (`DELETE /installation/token`); it never throws. Other kinds have nothing to release. */
+  close?(): Promise<void>;
 }
 
 export interface InstallationHttpLogEntry {
@@ -75,7 +83,12 @@ export interface InstallationHttpTarget {
    * fence, not this flag, decides what a GraphQL call may ask for. A `runner_pr` client always may.
    */
   allowGraphql?: boolean;
+  /** `branch_delete` only: the one branch the client may read and delete. Required for that kind, refused for every other. */
+  branch?: string;
 }
+
+/** The branches the platform pushes to a private repository: the item's pull request branch, or a runner run's branch. Nothing else is ever deleted. */
+export const DELETABLE_BRANCH = /^fx\/(?:issue-[1-9][0-9]{0,9}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}-g[1-9][0-9]{0,5})$/;
 
 const CALL_TIMEOUT_MS = 15_000;
 const RUNNER_PR_PERMISSIONS = Object.freeze({ metadata: "read", contents: "read", pull_requests: "write" } as const);
@@ -112,26 +125,45 @@ function repoMapAllowed(method: string, path: string, prefix: string): boolean {
 
 export function createInstallationHttp(deps: InstallationHttpDeps): (kind: InstallationHttpKind, target: InstallationHttpTarget) => Promise<InstallationHttp> {
   const fetchImpl = deps.fetchImpl ?? fetch;
+  /** `DELETE /installation/token` with the token itself as the bearer; a failure leaves the token to lapse at GitHub's own expiry. */
+  const revokeInstallationToken = async (token: string): Promise<void> => {
+    try {
+      await fetchImpl("https://api.github.com/installation/token", {
+        method: "DELETE",
+        headers: { accept: "application/vnd.github+json", authorization: `Bearer ${token}`, "user-agent": "fulcrumaxe-cloud", "x-github-api-version": "2022-11-28" },
+        redirect: "error",
+        signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+      });
+    } catch {
+      // fx-swallow-ok: a revoke that cannot be made leaves the token to lapse at GitHub's own expiry; nothing else can use it (it never leaves this closure)
+    }
+  };
 
   return async (kind, target) => {
     if (!GH_OWNER_LOGIN_RE.test(target.owner) || !GH_REPO_NAME_RE.test(target.name)) throw new InstallationHttpError("invalid_coordinates");
+    if ((kind === "branch_delete") !== (target.branch !== undefined) || (target.branch !== undefined && !DELETABLE_BRANCH.test(target.branch))) throw new InstallationHttpError("invalid_coordinates");
     const installation = await deps.resolveInstallation(target.repoId);
     if (!installation) throw new InstallationHttpError("no_installation");
     const token = await getInstallationToken({
       installationId: installation.installationId,
       appKind: installation.appKind,
-      purpose: kind === "merge_gate" ? "merge_gate" : "run",
-      role: kind === "merge_gate" ? "merge_gate" : kind === "runner_pr" ? "runner_pr" : kind === "repo_map" ? "repo_map" : "pr_read",
+      purpose: kind === "merge_gate" ? "merge_gate" : kind === "branch_delete" ? "branch_delete" : "run",
+      role: kind === "merge_gate" ? "merge_gate" : kind === "branch_delete" ? "branch_delete" : kind === "runner_pr" ? "runner_pr" : kind === "repo_map" ? "repo_map" : "pr_read",
       scope: { repositories: [target.name], permissions: kind === "merge_gate" ? {} : kind === "runner_pr" ? RUNNER_PR_PERMISSIONS : kind === "repo_map" ? REPO_MAP_PERMISSIONS : { metadata: "read", pull_requests: "read" } },
       appCredentials: deps.appCredentials,
       requester: deps.requester,
       cache: deps.cache,
+      ...(kind === "branch_delete" ? { revoke: revokeInstallationToken } : {}),
     });
     const prefix = `/repos/${target.owner}/${target.name}/`;
     // The repository itself (`GET /repos/<owner>/<name>`, no trailing slash) is also allowed, for GET only: D#6 R3b reads its `private` flag.
     const repoRoot = prefix.slice(0, -1);
+    let deleted = false;
 
     return {
+      async close() {
+        if (kind === "branch_delete") await revokeInstallationToken(token);
+      },
       async request(req) {
         const graphql = (kind === "runner_pr" || target.allowGraphql === true) && req.method === "POST" && req.path === GRAPHQL_PATH;
         const allowed = graphql || (req.method === "GET" && req.path === repoRoot) || (req.path.startsWith(prefix) && PATH_RE.test(req.path));
@@ -141,9 +173,19 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
         if (kind === "runner_pr" && !(graphql || runnerPrAllowed(req.method, req.path, prefix))) throw new InstallationHttpError("path_refused");
         // `repo_map` holds contents:read, so it too gets an exact list (no `contents`, commits, archives or `..`).
         if (kind === "repo_map" && !repoMapAllowed(req.method, req.path, prefix)) throw new InstallationHttpError("path_refused");
+        // `branch_delete` holds contents:write, so it gets the narrowest list there is: read the one branch, delete the one branch, once.
+        if (kind === "branch_delete") {
+          const read = req.method === "GET" && (req.path === repoRoot || req.path === `${prefix}git/ref/heads/${target.branch}`);
+          const remove = req.method === "DELETE" && req.path === `${prefix}git/refs/heads/${target.branch}` && req.query === undefined && req.body === undefined;
+          if (!read && !remove) throw new InstallationHttpError("path_refused");
+          if (remove && deleted) throw new InstallationHttpError("already_used");
+          if (remove) deleted = true;
+        }
         if (kind === "read" && req.method !== "GET" && !graphql) throw new InstallationHttpError("method_refused");
         // PATCH is for `runner_pr` alone (closing a pull request); the other kinds never needed it and never get it.
         if (req.method === "PATCH" && kind !== "runner_pr") throw new InstallationHttpError("method_refused");
+        // DELETE is for `branch_delete` alone, and only on its pinned ref (checked above).
+        if (req.method === "DELETE" && kind !== "branch_delete") throw new InstallationHttpError("method_refused");
         if (kind === "runner_pr" && req.method === "PUT") throw new InstallationHttpError("method_refused");
         const url = new URL(`https://api.github.com${req.path}`);
         for (const [k, v] of Object.entries(req.query ?? {})) url.searchParams.set(k, String(v));
@@ -154,6 +196,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
             headers: {
               accept: "application/vnd.github+json",
               authorization: `Bearer ${token}`,
+              ...(kind === "branch_delete" ? { "user-agent": "fulcrumaxe-cloud" } : {}),
               "x-github-api-version": "2022-11-28",
               ...(req.body !== undefined ? { "content-type": "application/json" } : {}),
             },
