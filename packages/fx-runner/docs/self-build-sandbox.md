@@ -184,5 +184,7 @@ It has its own time cap, not the 1800 s per-command one, and the whole process g
 - **Result.** Exit code, duration, timed-out flag, skipped-test count and the last 4096 bytes of redacted output go on `done`; a check that does not pass ends the run
   `check_failed`, with the branch pushed for the fix round and nothing pushed to the public repository.
 - **Both git paths (R-CHK-2b).** A local job (path B) and a cloud-verified job (path A, through the cloud's git proxy) run the check the same way: the same launch, the
-  same sandbox the agent ran in, and the same merge-base pin, read from the same local mirror (path A asks for no ticket and fetches nothing for it). Path A builds no dev
-  shell yet, so a check that needs one fails closed there (`check_no_dev_shell`); a check without the dev shell runs.
+  same sandbox the agent ran in, and the same merge-base pin, read from the same local mirror (path A asks for no ticket and fetches nothing for it). Path A also builds
+  the dev shell as path B does (R-CHK-2c): from the same mirror, from the default branch's flake only (a branch commit is replaced by its merge-base, so a flake
+  edit on the branch never changes the shell), only for a job with signed allowances, through the same Nix step. A check that needs the dev shell where none
+  was built still fails closed (`check_no_dev_shell`); a check without the dev shell runs.
