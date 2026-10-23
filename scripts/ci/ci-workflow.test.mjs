@@ -301,8 +301,7 @@ test("rerun script: a missing token, repository or a malformed SHA is refused be
 test("ci.yml: the token stays read-only (top level contents read; jobs add at most pull-requests read; nothing that writes)", () => {
   assert.deepEqual(ciDoc.permissions, { contents: "read" });
   for (const [name, job] of Object.entries(ciDoc.jobs)) {
-    if (name === "pr-gates") assert.equal(job.permissions, undefined, "pr-gates takes the top-level token as it is");
-    else assert.deepEqual(job.permissions, { contents: "read", "pull-requests": "read" }, name);
+    assert.deepEqual(job.permissions, { contents: "read", "pull-requests": "read" }, name);
   }
 });
 
@@ -1267,10 +1266,14 @@ test("pr-gates: public pull requests only, no secrets, read-only token, body and
   assert.equal(runs.length, 2);
   for (const s of runs) assert.doesNotMatch(s.run, /\$\{\{/, "an expression inside a run block");
   const link = prGates.steps.find((s) => s.name === "PR link policy");
-  assert.match(link.run, /\.pull_request\.body/);
+  assert.match(link.run, /gh api "repos\/\$\{GITHUB_REPOSITORY\}\/pulls\/\$\{PR_NUMBER\}" --jq '\.body \/\/ ""' > "\$body_file"/);
+  assert.match(link.run, /\.pull_request\.body/, "event payload is the fallback");
   assert.match(link.run, /GITHUB_EVENT_PATH/);
+  assert.match(link.run, /PR body source: current body/);
+  assert.match(link.run, /PR body source: event payload/);
   assert.match(link.run, /PR_BODY_FILE="\$body_file" bash scripts\/ci\/pr-link-policy\.sh/);
-  assert.equal(link.env, undefined, "the body must not sit in an env: block: the runner prints that block into the log");
+  assert.deepEqual(link.env, { GH_TOKEN: "${{ github.token }}", PR_NUMBER: "${{ github.event.pull_request.number }}" }, "only the token and PR number sit in env:, never the body (the runner prints that block into the log)");
+  assert.deepEqual(prGates.permissions, { contents: "read", "pull-requests": "read" });
   const deny = prGates.steps.find((s) => s.name === "Publish denylist");
   assert.deepEqual(deny.env, { BASE_REF: "${{ github.event.pull_request.base.ref }}" });
   assert.equal(deny.run, 'bash scripts/ci/publish-denylist.sh "origin/${BASE_REF}"');

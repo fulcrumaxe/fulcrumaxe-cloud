@@ -471,7 +471,7 @@ fi
 if [[ $VIOLATIONS -gt 0 ]]; then
   echo
   echo "FAIL: $VIOLATIONS link-policy rule(s) violated. Edit the PR body and"
-  echo "      re-run this check — a PR body can be corrected with no residue,"
+  echo "      re-run this check (CI re-reads the current body on each run) — a PR body can be corrected with no residue,"
   echo "      which is why this rule is enforced here rather than on commits."
   exit 1
 fi
