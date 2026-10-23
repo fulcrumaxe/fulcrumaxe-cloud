@@ -1,3 +1,4 @@
+import type { PoolClient } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, type RunnerCloudDeps, type SessionPrincipal } from "./http.js";
 
@@ -41,23 +42,39 @@ export function blockError(block: RunnerRepoBlock): RunnerHttpError {
  */
 export async function refuseNonPrivateRepos(deps: RunnerCloudDeps, principal: SessionPrincipal, repoIds: readonly string[], currentOf?: string): Promise<void> {
   if (repoIds.length === 0) return;
-  const toRead = await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client) => {
-    const role = (await client.query<{ role: string | null }>("SELECT current_member_role() AS role")).rows[0]?.role;
-    if (role !== "owner" && role !== "admin") return [];
-    let wanted = [...new Set(repoIds.map((id) => id.toLowerCase()))];
-    if (currentOf !== undefined) {
-      const runner = (await client.query<{ allowed_repo_ids: string[] }>("SELECT allowed_repo_ids FROM runners WHERE id = $1", [currentOf])).rows[0];
-      // A runner this caller cannot see is the definer's refusal (404), not a reason to ask GitHub anything.
-      if (!runner) return [];
-      const held = new Set(runner.allowed_repo_ids.map((id) => id.toLowerCase()));
-      wanted = wanted.filter((id) => !held.has(id));
-    }
-    if (wanted.length === 0) return [];
-    const { rows } = await client.query<{ id: string }>("SELECT id FROM repos WHERE id = ANY ($1::uuid[]) ORDER BY id", [wanted]);
-    return rows.map((r) => r.id);
-  });
-  for (const repoId of toRead) {
-    const block = blockFor(await readRepoVisibility(deps, principal.accountId, repoId));
+  const toRead = await withTenant(deps.appUserPool, principal.accountId, principal.userId, (client) => reposToRead(client, repoIds, currentOf));
+  await refuseUnlessPrivate(deps, principal.accountId, toRead);
+}
+
+/**
+ * The same refusal on the caller's own tenant connection, so it can sit inside the transaction that binds (CWE-367: a check made in one
+ * transaction and a write in another leaves a gap in which a concurrent remove + re-add skips the visibility read). The caller takes a
+ * lock that serialises writers of the runner's repo set first, so the "already held" set read here is the committed, current one.
+ */
+export async function refuseNonPrivateReposIn(client: PoolClient, deps: RunnerCloudDeps, principal: SessionPrincipal, repoIds: readonly string[], currentOf?: string): Promise<void> {
+  if (repoIds.length === 0) return;
+  await refuseUnlessPrivate(deps, principal.accountId, await reposToRead(client, repoIds, currentOf));
+}
+
+async function refuseUnlessPrivate(deps: RunnerCloudDeps, accountId: string, repoIds: readonly string[]): Promise<void> {
+  for (const repoId of repoIds) {
+    const block = blockFor(await readRepoVisibility(deps, accountId, repoId));
     if (block !== null) throw blockError(block);
   }
+}
+
+async function reposToRead(client: PoolClient, repoIds: readonly string[], currentOf?: string): Promise<string[]> {
+  const role = (await client.query<{ role: string | null }>("SELECT current_member_role() AS role")).rows[0]?.role;
+  if (role !== "owner" && role !== "admin") return [];
+  let wanted = [...new Set(repoIds.map((id) => id.toLowerCase()))];
+  if (currentOf !== undefined) {
+    const runner = (await client.query<{ allowed_repo_ids: string[] }>("SELECT allowed_repo_ids FROM runners WHERE id = $1", [currentOf])).rows[0];
+    // A runner this caller cannot see is the definer's refusal (404), not a reason to ask GitHub anything.
+    if (!runner) return [];
+    const held = new Set(runner.allowed_repo_ids.map((id) => id.toLowerCase()));
+    wanted = wanted.filter((id) => !held.has(id));
+  }
+  if (wanted.length === 0) return [];
+  const { rows } = await client.query<{ id: string }>("SELECT id FROM repos WHERE id = ANY ($1::uuid[]) ORDER BY id", [wanted]);
+  return rows.map((r) => r.id);
 }
