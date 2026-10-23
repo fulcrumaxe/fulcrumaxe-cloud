@@ -283,3 +283,38 @@ describe("refusals are sentences of the copy, never the server's text", () => {
     expect(refusalWords(undefined, COPY)).toBe("copy:saveFailed");
   });
 });
+
+describe("runner_blocked: a repo on a runner that is not private now", () => {
+  it.each([
+    ["runner_local", "public_repo", "copy:publicRepo"],
+    ["runner_verified", "public_repo", "copy:publicRepo"],
+    ["runner_local", "repo_visibility_unknown", "copy:visibilityUnknown"],
+  ])("a %s repo the server reports as %s shows %s, and the mode stays as stored", async (mode, blocked, words) => {
+    const { ctl } = await ready({ execution_mode: mode, runner_blocked: blocked });
+    const m = model(ctl);
+    expect(m.blocked).toBe(words);
+    expect(option(m, mode).checked).toBe(true);
+  });
+  it("nothing blocked, a missing field (an older server) or a code it does not know shows nothing", async () => {
+    for (const over of [{ runner_blocked: null }, {}, { runner_blocked: "something_new" }]) {
+      const { ctl } = await ready({ execution_mode: "runner_local", ...over });
+      expect(model(ctl).blocked, JSON.stringify(over)).toBe("");
+    }
+  });
+  it("a sandbox repo never shows as blocked, and moving a blocked repo to the sandbox clears it", async () => {
+    expect(model((await ready({ execution_mode: "sandbox", runner_blocked: "public_repo" })).ctl).blocked).toBe("");
+    const { ctl } = await ready({ execution_mode: "runner_local", runner_blocked: "public_repo" }, { POST: { execution_mode: "sandbox", changed: true } });
+    ctl.choose("sandbox");
+    ctl.type(NAME);
+    await ctl.apply();
+    expect(model(ctl)).toMatchObject({ saved: true, blocked: "" });
+  });
+  it("a repo that turns public after it was set shows as blocked on the next read", async () => {
+    let blocked = null;
+    const { ctl } = await ready({}, { GET: () => body({ execution_mode: "runner_local", runner_blocked: blocked }) });
+    expect(model(ctl).blocked).toBe("");
+    blocked = "public_repo";
+    await ctl.load(true);
+    expect(model(ctl).blocked).toBe("copy:publicRepo");
+  });
+});

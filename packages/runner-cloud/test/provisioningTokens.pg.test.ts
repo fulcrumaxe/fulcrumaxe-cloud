@@ -26,7 +26,7 @@ describe("provisioning tokens [pg]", () => {
   afterEach(() => vi.restoreAllMocks());
 
   const fresh = (): Promise<F2Fixture> => seedF2(h.admin);
-  const mint = (f: F2Fixture, userId: string, body: unknown) => respond(() => mintProvisioningToken(h.deps(), { accountId: f.accountId, userId }, body));
+  const mint = (f: F2Fixture, userId: string, body: unknown) => respond(() => mintProvisioningToken(h.deps({ repoVisibility: async () => "private" }), { accountId: f.accountId, userId }, body));
   const list = (f: F2Fixture, userId: string) => respond(() => listProvisioningTokens(h.deps(), { accountId: f.accountId, userId }));
   const revoke = (f: F2Fixture, userId: string, id: string) => respond(() => revokeProvisioningToken(h.deps(), { accountId: f.accountId, userId }, id));
   const register = (key: ReturnType<typeof newKey>, token: string, over: { ip?: string; deps?: Parameters<Harness["deps"]>[0] } = {}) =>

@@ -4,6 +4,7 @@ import { COPY } from "@fulcrumaxe/runner-protocol";
 import { humanMergeOnly } from "@fx/db/src/humanMergeOnly.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { CLOUD_VERIFIED_COPY_SHA256, isRunnerMode, recordRunStatusMove, type FailureReason } from "@fx/runner";
+import { blockError, blockFor, readRepoVisibility } from "./repoPrivacy.js";
 import { setAsideSandboxAllowances } from "./sandboxAllowances.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 
@@ -13,8 +14,7 @@ const SHA256 = /^[0-9a-f]{64}$/;
 /** The sha256 of the Local auto-merge string the server ships. A client proves it showed this wording by sending it back. */
 export const LOCAL_AUTO_MERGE_COPY_SHA256 = createHash("sha256").update(COPY.localAutoMerge, "utf8").digest("hex");
 
-/** What a repo's visibility read can say. Anything that is not a clear "private" is not enough to put a repo on a runner. */
-export type RepoVisibilityAnswer = "private" | "public" | "unknown";
+export type { RepoVisibilityAnswer } from "./repoPrivacy.js";
 
 /**
  * The sha256 of the cloud-verified string the server ships; sent back by a client that showed it (D#6 R5b-2b-ii). Defined in `@fx/runner`
@@ -175,9 +175,8 @@ export async function setExecutionMode(deps: RunnerCloudDeps, principal: Session
       return repo;
     });
     if (parsed.mode !== "sandbox" && first.execution_mode !== parsed.mode) {
-      const seen = await readVisibility(deps, principal.accountId, repoId);
-      if (seen === "public") throw new RunnerHttpError(409, "public_repo", "a public repository cannot run on a runner");
-      if (seen !== "private") throw new RunnerHttpError(409, "repo_visibility_unknown", "the repository's visibility could not be read");
+      const block = blockFor(await readRepoVisibility(deps, principal.accountId, repoId));
+      if (block !== null) throw blockError(block);
     }
     return await respond(
       await run(async (client) => {
@@ -232,13 +231,4 @@ export async function setExecutionMode(deps: RunnerCloudDeps, principal: Session
 
 function respond(done: { repo: { execution_mode: string }; autoMerge: boolean; changed: boolean; cancelledRuns?: number }): RunnerHttpResponse {
   return { status: 200, body: { ...(state(done.repo, done.autoMerge) as object), changed: done.changed, cancelled_runs: done.cancelledRuns ?? 0 }, headers: { "cache-control": "no-store" } };
-}
-
-async function readVisibility(deps: RunnerCloudDeps, accountId: string, repoId: string): Promise<RepoVisibilityAnswer> {
-  try {
-    return (await deps.repoVisibility?.(accountId, repoId)) ?? "unknown";
-  } catch {
-    // fx-swallow-ok: a failed read is "unknown", which refuses (409 repo_visibility_unknown)
-    return "unknown";
-  }
 }

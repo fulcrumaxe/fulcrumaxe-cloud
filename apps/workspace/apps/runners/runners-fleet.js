@@ -168,6 +168,12 @@ export const ADD_SENTENCES = {
   400: "One of those repos isn't in this account any more. Reload and pick again.",
   other: "That couldn't be made. Try again.",
 };
+/** A refused repo, by the server's code (409): a runner is never bound to a repo that isn't private. */
+export const ADD_REPO_SENTENCES = {
+  public_repo: "One of those repos is public. A public repository can't run on a runner, so pick only private ones.",
+  repo_visibility_unknown: "A repo's visibility couldn't be read. Try again in a moment.",
+};
+const addSentence = (e) => (statusOf(e) === 409 && e && Object.hasOwn(ADD_REPO_SENTENCES, e.code) ? ADD_REPO_SENTENCES[e.code] : sentence(ADD_SENTENCES, e));
 
 /** Labels typed as "gpu, macos" to a list, or null when one is not a valid label (1 to 32 of a-z, 0-9 and -, up to 16). */
 export function parseLabels(input) {
@@ -252,7 +258,7 @@ export function createAdder({ call = api, signal, origin = "", onChange = () => 
         if (asked.path === "token") loadTokens();
       } catch (e) {
         if (cancelled(e) || mine !== sheet) return;
-        set({ ...asked, phase: "form", error: sentence(ADD_SENTENCES, e).replace("{limit}", String(tokens.limit)) });
+        set({ ...asked, phase: "form", error: addSentence(e).replace("{limit}", String(tokens.limit)) });
       }
     },
     async revoke(id) {

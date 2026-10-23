@@ -3,6 +3,7 @@ import { CredentialMode } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { UNNAMED_MEMBER } from "./memberRole.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
+import { refuseNonPrivateRepos } from "./repoPrivacy.js";
 
 /** A provisioning token lives an hour unless the request asks for less or more (D#605 FL-6). */
 export const PROVISIONING_TOKEN_DEFAULT_TTL_SECONDS = 60 * 60;
@@ -33,7 +34,8 @@ const bad = (): RunnerHttpError => new RunnerHttpError(400, "invalid_message", "
 /**
  * POST /api/runners/provisioning-tokens (a session route). An owner or admin mints a token: the account and the minter are the session's, never the
  * body's. `runner_provisioning_token_mint` (0786) checks the role, the repos, the lifetime and the five-outstanding limit in one transaction. The secret
- * is in this one reply and nowhere else: not stored, not logged, not in a URL.
+ * is in this one reply and nowhere else: not stored, not logged, not in a URL. A repo that is not private (or whose visibility cannot be read)
+ * is refused first, with 409 `public_repo` or `repo_visibility_unknown`: a runner is never bound to a public repo.
  */
 export async function mintProvisioningToken(deps: RunnerCloudDeps, principal: SessionPrincipal, input: unknown): Promise<RunnerHttpResponse> {
   const body = typeof input === "object" && input !== null && !Array.isArray(input) ? (input as Record<string, unknown>) : null;
@@ -49,6 +51,7 @@ export async function mintProvisioningToken(deps: RunnerCloudDeps, principal: Se
   if (typeof ttl !== "number" || !Number.isInteger(ttl) || ttl < MIN_TTL_SECONDS || ttl > PROVISIONING_TOKEN_MAX_TTL_SECONDS) throw bad();
   if (name !== null && (typeof name !== "string" || name.length > 64)) throw bad();
   const repoIds = [...new Set((repos as string[]).map((r) => r.toLowerCase()))];
+  await refuseNonPrivateRepos(deps, principal, repoIds);
 
   const token = newProvisioningToken();
   try {

@@ -3,6 +3,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { CLOUD_VERIFIED_COPY_SHA256, hasUsableKey } from "./executionMode.js";
 import { RunnerHttpError, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 import { requireMemberRole } from "./memberRole.js";
+import { blockFor, readRepoVisibility } from "./repoPrivacy.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -38,6 +39,11 @@ const PICKER_COPY = {
  * checks it on the write), whether a usable model key is connected (`key_required` is true when not: a boolean, never key material), the
  * sha256 of the cloud-verified wording this server ships (sent back on the opt-in as `copy_sha256`), whether the caller may change the
  * mode, and the picker's words.
+ *
+ * `runner_blocked` (D#6 runner public guard): on a repo that is on a runner (local-only or cloud-verified), the visibility is read live
+ * and a repo that is public now, or whose visibility cannot be read, answers `public_repo` or `repo_visibility_unknown`: every runner job
+ * of it is refused until it is private again or moved to the sandbox, and the picker says so. `null` when nothing blocks it, and always
+ * on a sandbox repo (no read is made for one).
  */
 export async function getRepoMode(deps: RunnerCloudDeps, principal: SessionPrincipal, repoId: string): Promise<RunnerHttpResponse> {
   if (!UUID.test(repoId)) throw new RunnerHttpError(404, "not_found", "no such repository");
@@ -47,6 +53,9 @@ export async function getRepoMode(deps: RunnerCloudDeps, principal: SessionPrinc
     if (!repo) throw new RunnerHttpError(404, "not_found", "no such repository");
     return { repo, role, usableKey: await hasUsableKey(client, principal.accountId) };
   });
+  // Read after the tenant transaction: the visibility read goes to GitHub.
+  const onRunner = repo.execution_mode === "runner_local" || repo.execution_mode === "runner_verified";
+  const runnerBlocked = onRunner ? blockFor(await readRepoVisibility(deps, principal.accountId, repoId)) : null;
   return {
     status: 200,
     body: {
@@ -56,6 +65,7 @@ export async function getRepoMode(deps: RunnerCloudDeps, principal: SessionPrinc
       key_required: !usableKey,
       copy_sha256: CLOUD_VERIFIED_COPY_SHA256,
       can_change: role === "owner" || role === "admin",
+      runner_blocked: runnerBlocked,
       copy: PICKER_COPY,
     },
     headers: { "cache-control": "no-store" },
