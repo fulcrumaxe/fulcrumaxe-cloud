@@ -42,5 +42,7 @@
   "steps": [],
   "notice": null,
   "actions": [],
-  "close_on_github": false
+  "close_on_github": false,
+  "request_changes_blocked": null,
+  "change_requests": []
 }

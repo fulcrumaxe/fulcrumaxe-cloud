@@ -512,8 +512,30 @@ export interface Operations {
         state: "open" | "withdrawn";
         sentence: string | null;
       }) | (null);
-      actions: Array<"build_again" | "respec" | "back_to_discussion" | "treat_as_feature" | "close" | "reopen" | "retry_push" | "open_pr">;
+      actions: Array<"request_changes" | "build_again" | "respec" | "back_to_discussion" | "treat_as_feature" | "close" | "reopen" | "retry_push" | "open_pr">;
       close_on_github: boolean;
+      request_changes_blocked: ("live" | "rounds") | (null);
+      change_requests: Array<{
+        mine: boolean;
+        name: string | null;
+        note: string;
+        at: string;
+        state: "waiting" | "sent" | "dropped";
+        run_id: (string) | (null);
+      }>;
+    };
+  };
+  requestChangesWorkItem: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      note: string;
+    };
+    response: {
+      action_id: string;
+      state: "accepted" | "claimed" | "done" | "refused" | "failed";
     };
   };
   respecWorkItem: {
@@ -4087,6 +4109,17 @@ export const operations = {
     pathParams: ["id"],
     queryParams: [],
     hasBody: false,
+  },
+  requestChangesWorkItem: {
+    method: "POST",
+    path: "/api/v1/work-items/{id}/request-changes",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
   },
   respecWorkItem: {
     method: "POST",

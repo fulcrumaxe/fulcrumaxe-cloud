@@ -18,7 +18,7 @@ import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { recordStage } from './recordStage.js';
 import { IllegalStageTransitionError } from './stages.js';
-import { BACK_TO_DISCUSSION_REF_PREFIX, operatorVerdict, readOperatorFacts, type OperatorAction, type OperatorVerdict } from './operatorActions.js';
+import { BACK_TO_DISCUSSION_REF_PREFIX, REQUEST_CHANGES_NOTE_MAX, REQUEST_CHANGES_REF_PREFIX, operatorVerdict, readOperatorFacts, type OperatorAction, type OperatorVerdict } from './operatorActions.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -59,6 +59,14 @@ async function move(client: PoolClient, workItemId: string, toStage: 'discussing
   } catch (err) {
     if (err instanceof IllegalStageTransitionError) throw new OperatorMovedOnError();
     throw err;
+  }
+}
+
+/** The note of a Request changes was empty or too long. Nothing was written. */
+export class RequestChangesNoteError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RequestChangesNoteError';
   }
 }
 
@@ -153,5 +161,37 @@ export async function requestPublicChangeAction(ctx: OperatorMoveCtx, workItemId
   await withTenant(ctx.pool, accountId, userId, async (client) => {
     const facts = await allowed(client, ctx, workItemId, action);
     await audit(client, 'work_item.sent_back', { work_item_id: workItemId, action, from_stage: facts.stage, public_change_state: facts.push?.state ?? null });
+  });
+}
+
+/**
+ * Request changes: a person asks for a fix round on the item's open pull request. In ONE transaction, with the item's row locked: the table's verdict, the
+ * person's note recorded as a run note of the item that this person accepts at once (the corrections functions write both audit rows), and the move into
+ * Changes requested whose source names that note (`request_changes:<correction id>`). The stage driver is asked to run afterwards (the route does that, as
+ * for Back to discussion); it reads the note as pending while its correction is still `accepted`, starts the fix round first, and the executor's run carries
+ * the note inside the untrusted-content fence (corrections/driver.ts), which stamps it applied.
+ *
+ * The note is the person's own text, kept as sent (trimmed): it is fenced where it is used, never here. `reviewer` is `acceptance` because the transition's
+ * table requires one of its three reviewers for this stage; the source is what says a person asked.
+ */
+export async function requestChanges(ctx: OperatorMoveCtx, workItemId: string, note: string): Promise<{ correctionId: string; fromStage: string }> {
+  if (!UUID_RE.test(workItemId)) throw new NotFoundError('not found');
+  const text = typeof note === 'string' ? note.trim() : '';
+  if (text === '') throw new RequestChangesNoteError('say what to change');
+  if (Array.from(text).length > REQUEST_CHANGES_NOTE_MAX) throw new RequestChangesNoteError(`a note is at most ${REQUEST_CHANGES_NOTE_MAX} characters`);
+  if (text.includes('\u0000')) throw new RequestChangesNoteError('the note holds a character that cannot be stored');
+  const { accountId, userId } = ctx.principal;
+  return withTenant(ctx.pool, accountId, userId, async (client) => {
+    const facts = await allowed(client, ctx, workItemId, 'request_changes');
+    const created = await client.query<{ id: string }>("SELECT work_item_correction_create($1::uuid, 'person', 'run_note', $2::text) AS id", [workItemId, text]);
+    const correctionId = created.rows[0]!.id;
+    await client.query("SELECT work_item_correction_decide($1::uuid, 'accepted', 'workspace')", [correctionId]);
+    try {
+      await recordStage(client, { workItemId, toStage: 'changes_requested', reviewer: 'acceptance', at: new Date(), source: 'control_plane', sourceRef: `${REQUEST_CHANGES_REF_PREFIX}${correctionId}`, actor: 'person' });
+    } catch (err) {
+      if (err instanceof IllegalStageTransitionError) throw new OperatorMovedOnError();
+      throw err;
+    }
+    return { correctionId, fromStage: facts.stage };
   });
 }

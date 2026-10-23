@@ -376,9 +376,10 @@ export async function advanceStartFixStep(
   failing: Array<{ role: string; runId: string }>,
   retry = 0,
   spendAttempt = 0,
+  person = false,
 ): Promise<FixOut> {
   "use step";
-  return startFixBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, ctx, pr, actionId, round, failing, retry, spendAttempt);
+  return startFixBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, ctx, pr, actionId, round, failing, retry, spendAttempt, person);
 }
 
 export async function advanceFixDescentStep(ctx: Pick<ReviewCtx, "repoId" | "owner" | "name" | "executionMode" | "prExecutionMode">, base: string, head: string): Promise<DescentOut> {
@@ -1095,12 +1096,12 @@ async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number
  * stays where it is, each denied ask leaves the stage's wait fact on the head, and the next ask (five minutes later, up to four hours) is a new attempt with its own key.
  * Any answer that is not a limit pause (a start, a halt, any other refusal) ends the wait and is returned as it came.
  */
-async function askFixUntilAllowed(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; branch: string }, round: number, failing: Array<{ role: string; runId: string }>, rereview: number): Promise<{ fix: FixOut; attempt: number; pause: string | null }> {
+async function askFixUntilAllowed(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; branch: string }, round: number, failing: Array<{ role: string; runId: string }>, rereview: number, person = false): Promise<{ fix: FixOut; attempt: number; pause: string | null }> {
   const { accountId, userId, workItemId, actionId } = args;
   let attempt = firstAttemptOf(args);
   let waited = 0;
   for (;;) {
-    const fix = await advanceStartFixStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, actionId, round, failing, rereview, attempt > 0 ? attempt : undefined);
+    const fix = await advanceStartFixStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, actionId, round, failing, rereview, attempt > 0 ? attempt : undefined, person);
     const pause = fix.ok ? null : pauseOf(fix.reason);
     if (pause === null) return { fix, attempt, pause: null };
     await waitOnHead(args, "fix_round", pause, attempt, pr, rereview);
@@ -1245,6 +1246,102 @@ async function recheckMergeOnly(args: AdvanceStartArgs, input: Parameters<typeof
  * everyone passed; a fix round (a RESUME of the build's session) when someone asked for changes; then the review again on
  * the new head. See the file header for every way it stops.
  */
+/**
+ * Waits for a fix run to end, restarting it on the new side when its item moved there (D#599 PL-2, keyed by the worker). Answers the run followed last and
+ * how it stands: `done` false when the wait ran out.
+ */
+async function followFix(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; branch: string }, round: number, failing: Array<{ role: string; runId: string }>, rereview: number, runId: string, attempt: number, person = false): Promise<{ runId: string; fixed: BuildRunOutcome }> {
+  const { accountId, userId, workItemId, actionId } = args;
+  let waited = 0;
+  let fixed = await advanceBuildOutcomeStep(accountId, runId);
+  let pendingWaited = 0;
+  for (let restarts = 0; ; restarts++) {
+    while (!fixed.done && waited < BUILD_WAIT_MS && pendingWaited < RUNNER_PENDING_CEILING_MS) {
+      const queued = fixed.queuedOnRunner;
+      await sleep(BUILD_POLL_MS);
+      if (queued) pendingWaited += BUILD_POLL_MS;
+      else waited += BUILD_POLL_MS;
+      fixed = await advanceBuildOutcomeStep(accountId, runId);
+    }
+    // D#599 PL-2: the fix run was queued on a side the item has left; the same fix round starts again on the new side (keyed by the worker).
+    if (fixed.done && fixed.failureReason === PLACEMENT_CHANGED && restarts < PLACEMENT_RESTARTS_MAX) {
+      const again = await advanceStartFixStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, actionId, round, failing, rereview, attempt > 0 ? attempt : undefined, person);
+      if (again.ok && again.runId !== null && again.runId !== runId) {
+        await advanceLogStep("advance.fix_restarted", { work_item_id: workItemId, from_run_id: runId, run_id: again.runId, reason: PLACEMENT_CHANGED });
+        runId = again.runId;
+        fixed = await advanceBuildOutcomeStep(accountId, again.runId);
+        continue;
+      }
+    }
+    return { runId, fixed };
+  }
+}
+
+/** The fixed code the driver stops with when a person's fix round pushed nothing: the person asked for a change and none was made, so nothing is reviewed or merged. */
+const PERSON_FIX_NO_CHANGE = "person_fix_pushed_nothing";
+
+/**
+ * A person's Request changes: one fix round on the pull request's current head, before any review. The executor gets the person's note (a fenced run
+ * note the worker adds and stamps applied) and the findings of any reviewer that asked for changes on this head. The round counts toward the item's fix
+ * rounds and waits on spending limits as every fix round does. Answers the context to review the new head with, or the end of the workflow.
+ */
+async function personFixRound(args: AdvanceStartArgs, ctx: ReviewCtx): Promise<{ ctx: ReviewCtx } | { end: Result }> {
+  const { accountId, userId, workItemId, actionId } = args;
+  const found = await advanceFindPrStep(ctx);
+  if (!found.ok) {
+    await stopped(args, "person_fix_pr", found.reason);
+    return { end: { status: "no_pr", detail: found.reason } };
+  }
+  const pr = { number: found.number, headSha: found.headSha, branch: found.branch };
+  // Reviewers that asked for changes on this very head: their findings go to the executor with the note. A pass, or a run with no verdict, adds nothing.
+  const failing: Array<{ role: string; runId: string }> = [];
+  for (const r of await advanceReviewRunsStep(accountId, userId, workItemId, args.haltEpoch, pr.headSha, 0)) {
+    const o = await advanceReviewerOutcomeStep(accountId, r.runId);
+    if (o.done && !o.noVerdict && !o.environmentFailure && o.verdict === "needs-fix") failing.push({ role: r.role, runId: r.runId });
+  }
+  const round = (ctx.fixRoundsStarted ?? 0) + 1;
+  const ask = await askFixUntilAllowed(args, ctx, pr, round, failing, 0, true);
+  if (ask.pause !== null) return { end: await pausedEnd(workItemId, "fix_round", ask.pause, ask.attempt) };
+  if (isHaltReason(ask.fix.reason)) return { end: await haltedEnd(args, "person_fix") };
+  if (!ask.fix.ok || ask.fix.runId === null) {
+    await stopped(args, "person_fix", ask.fix.reason ?? "refused", { head: pr.headSha, pr: pr.number, round });
+    return { end: { status: "fix_refused", detail: ask.fix.reason ?? undefined } };
+  }
+  const next: ReviewCtx = { ...ctx, fixRoundsStarted: round };
+  const { runId, fixed } = await followFix(args, next, pr, round, failing, 0, ask.fix.runId, ask.attempt, true);
+  const failed = async (code: string): Promise<{ end: Result }> => {
+    await advanceEventStep(accountId, userId, workItemId, { kind: "fix_round_failed", dedupeKey: `fixfail:${pr.headSha}:${actionId}`, code, headSha: pr.headSha, runId });
+    return { end: { status: "fix_failed", detail: code } };
+  };
+  if (!fixed.done) {
+    await advanceCancelStep(accountId, userId, workItemId, fixed.tailRunId);
+    return failed("wait_timeout");
+  }
+  await advanceLogStep("advance.fixed", { work_item_id: workItemId, round, run_id: runId, run_status: fixed.status, person: true });
+  if (fixed.status === "succeeded") {
+    const decision = await advanceDecisionStep(accountId, userId, workItemId, args.haltEpoch, fixed.tailRunId);
+    if (isHaltReason(decision)) return { end: await haltedEnd(args, "decision") };
+    if (decision === "parked") return { end: await waitingOnAnswer(args, fixed.tailRunId) };
+  }
+  const noCommit = fixed.status === "failed" && fixed.failureReason === "no_commit";
+  if (fixed.status !== "succeeded" && !noCommit) return failed(`run_${fixed.status}`.replace(/[^a-z0-9_]/g, "_"));
+  const after = await advanceFindPrStep(next);
+  if (!after.ok) {
+    await stopped(args, "review_pr", after.reason);
+    return { end: { status: "no_pr", detail: after.reason } };
+  }
+  if (after.headSha === pr.headSha) {
+    // Nothing was pushed for the person's request: stop and say so. The reviewers do not look again at a commit the person asked to change.
+    await advanceEventStep(accountId, userId, workItemId, { kind: "fix_pushed_nothing", dedupeKey: `nothing:${pr.headSha}:${actionId}:person`, code: "person_request", headSha: pr.headSha, prNumber: pr.number, runId });
+    await stopped(args, "person_fix", PERSON_FIX_NO_CHANGE, { head: pr.headSha, pr: pr.number, round });
+    return { end: { status: "needs_human", detail: PERSON_FIX_NO_CHANGE } };
+  }
+  const descent = await advanceFixDescentStep(next, pr.headSha, after.headSha);
+  if (descent.state !== "descends" && descent.state !== "not_needed") return failed(descent.state === "rewritten" ? "branch_rewritten" : "compare_unavailable");
+  if (fixed.status !== "succeeded") return failed(`run_${fixed.status}`.replace(/[^a-z0-9_]/g, "_"));
+  return { ctx: next };
+}
+
 async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promise<Result> {
   const { accountId, userId, workItemId, actionId } = args;
 
@@ -1255,6 +1352,12 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     return { status: "failed", detail: `review_${loaded.reason}` };
   }
   let ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, fixRoundsStarted: loaded.fixRoundsStarted, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode };
+  // A person pressed Request changes: their fix round comes first, on the pull request's current head. The review below then checks the new head, as after any fix.
+  if (loaded.personRequestPending) {
+    const person = await personFixRound(args, ctx);
+    if ("end" in person) return person.end;
+    ctx = person.ctx;
+  }
 
   // C44-7: a fix round that proved "no change needed" asks the reviewers that wanted the fix to look again at the SAME head, once per head.
   // `again` is that pending look; `lookedAgain` holds the heads already given theirs (workflow state, rebuilt by a replay from the same step results).
@@ -1387,7 +1490,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     const failing = verdicts.filter((v) => v.verdict !== "pass").map((v) => ({ role: v.role, runId: v.runId }));
     const fixAsk = await askFixUntilAllowed(args, ctx, pr, round.nextRound ?? round.round + 1, failing, rereview);
     if (fixAsk.pause !== null) return pausedEnd(workItemId, "fix_round", fixAsk.pause, fixAsk.attempt);
-    let fix = fixAsk.fix;
+    let fix: FixOut = fixAsk.fix;
     if (isHaltReason(fix.reason)) return haltedEnd(args, "fix");
     // The fix round is now started: the next review of this item is the round after it (the security reviewer's step-back counts these).
     ctx = { ...ctx, fixRoundsStarted: round.nextRound ?? round.round + 1 };
@@ -1395,29 +1498,9 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "fix", reason: fix.reason ?? "none" });
       return { status: "fix_refused", detail: fix.reason ?? undefined };
     }
-    let waited = 0;
-    let fixed = await advanceBuildOutcomeStep(accountId, fix.runId);
-    let pendingWaited = 0;
-    for (let restarts = 0; ; restarts++) {
-      while (!fixed.done && waited < BUILD_WAIT_MS && pendingWaited < RUNNER_PENDING_CEILING_MS) {
-        const queued = fixed.queuedOnRunner;
-        await sleep(BUILD_POLL_MS);
-        if (queued) pendingWaited += BUILD_POLL_MS;
-        else waited += BUILD_POLL_MS;
-        fixed = await advanceBuildOutcomeStep(accountId, fix.runId as string);
-      }
-      // D#599 PL-2: the fix run was queued on a side the item has left; the same fix round starts again on the new side (keyed by the worker).
-      if (fixed.done && fixed.failureReason === PLACEMENT_CHANGED && restarts < PLACEMENT_RESTARTS_MAX) {
-        const again = await advanceStartFixStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, actionId, round.nextRound ?? round.round + 1, failing, rereview, fixAsk.attempt > 0 ? fixAsk.attempt : undefined);
-        if (again.ok && again.runId !== null && again.runId !== fix.runId) {
-          await advanceLogStep("advance.fix_restarted", { work_item_id: workItemId, from_run_id: fix.runId, run_id: again.runId, reason: PLACEMENT_CHANGED });
-          fix = again;
-          fixed = await advanceBuildOutcomeStep(accountId, again.runId);
-          continue;
-        }
-      }
-      break;
-    }
+    const followed = await followFix(args, ctx, pr, round.nextRound ?? round.round + 1, failing, rereview, fix.runId, fixAsk.attempt);
+    fix = { ...fix, runId: followed.runId };
+    const fixed = followed.fixed;
     if (!fixed.done) {
       await advanceCancelStep(accountId, userId, workItemId, fixed.tailRunId);
       await advanceEventStep(accountId, userId, workItemId, { kind: "fix_round_failed", dedupeKey: `fixfail:${pr.headSha}:${actionId}`, code: "wait_timeout", headSha: pr.headSha, runId: fix.runId });

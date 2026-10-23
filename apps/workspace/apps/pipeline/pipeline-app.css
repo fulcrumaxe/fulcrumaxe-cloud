@@ -122,6 +122,10 @@
 .pl-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .pl-act[hidden] { display: none; }
 .pl-dialog { box-sizing: border-box; width: min(92vw, 360px); max-height: 90vh; overflow: auto; padding: 0; background: var(--bg-surface, #0a0a0a); border: 1px solid var(--accent, #1aff80); color: var(--text-primary, #1aff80); font-family: var(--font-mono, monospace); font-size: 0.85rem; }
+.pl-note-box { box-sizing: border-box; width: 100%; min-height: 6rem; resize: vertical; background: var(--bg-surface, #0a0a0a); color: var(--text-primary, #1aff80); border: 1px solid var(--accent, #1aff80); font: inherit; padding: 0.4rem; }
+.pl-note-box:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+.pl-op-asked { list-style: none; margin: 0.5rem 0; padding: 0; }
+.pl-op-asked li p { margin: 0.15rem 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .pl-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
 .pl-dialog-body { padding: 14px; }
 .pl-dialog-title { margin: 0 0 8px; font-size: 1rem; }

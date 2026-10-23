@@ -9,7 +9,7 @@ import { redactText } from '@fx/runtime/src/redact.js';
 import { setupPauseFor, type SetupHold, type SetupRequest } from '../setup-requests/store.js';
 import { parseAcceptanceScope } from '../specs/acceptanceScope.js';
 import { readPublicChange, type PublicChange } from '../repos/publicChange.js';
-import { BACK_TO_DISCUSSION_REF_PREFIX, closeOnGithub, operatorActionsFor, readOperatorFacts, type OperatorAction } from './operatorActions.js';
+import { BACK_TO_DISCUSSION_REF_PREFIX, REQUEST_CHANGES_NOTE_MAX, REQUEST_CHANGES_REF_PREFIX, closeOnGithub, operatorActionsFor, operatorVerdict, readOperatorFacts, type OperatorAction } from './operatorActions.js';
 
 /**
  * What the pipeline is doing for one work item, read for the Pipeline app's detail panel. Read only: every value here
@@ -182,7 +182,28 @@ export interface WorkItemActivity {
   actions: OperatorAction[];
   /** True when the caller could close this item but it has an open pull request: the app says to close the pull request on GitHub instead of offering Close. */
   close_on_github: boolean;
+  /**
+   * Why Request changes is not offered on an open pull request the caller could otherwise ask about: `live` (agents are working on it now) or `rounds` (its fix
+   * rounds are used up). Null when it is offered, or when it does not apply at all (no open pull request, a member, an external item).
+   */
+  request_changes_blocked: 'live' | 'rounds' | null;
+  /** The item's Request changes notes, newest last: who asked (`mine` when it was the caller), the note as written, and whether its fix round has taken it. */
+  change_requests: ActivityChangeRequest[];
 }
+
+/** One Request changes press. `state`: `waiting` (no fix run has taken the note yet), `sent` (the fix run `run_id` carried it), `dropped` (it was withdrawn). */
+export interface ActivityChangeRequest {
+  mine: boolean;
+  /** The asker's name, or null when it is the caller (`mine`) or the member left. */
+  name: string | null;
+  note: string;
+  at: string;
+  state: 'waiting' | 'sent' | 'dropped';
+  run_id: string | null;
+}
+
+/** At most this many Request changes notes are listed (the newest). */
+export const MAX_CHANGE_REQUESTS = 10;
 
 export interface ActivityCtx {
   pool: Pool;
@@ -646,6 +667,20 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
 
     // What this caller may do now: the same table the action routes ask. A caller with no role gets none.
     const facts = ctx.principal.role ? await readOperatorFacts(client, workItemId, ctx.principal.role) : null;
+    const changeVerdict = facts ? operatorVerdict('request_changes', facts) : null;
+    const requestChangesBlocked = facts?.pr_open === true && changeVerdict !== null && !changeVerdict.ok && (changeVerdict.reason === 'live' || changeVerdict.reason === 'rounds') ? changeVerdict.reason : null;
+    // The notes a person sent with Request changes: the transitions it recorded name them. The text is the person's own, shown as plain text.
+    const changeRows = (
+      await client.query<{ body: string; status: string; decided_by: string | null; name: string | null; created_at: Date; applied_run_id: string | null }>(
+        `SELECT left(c.body, $3::int) AS body, c.status, c.decided_by, COALESCE(NULLIF(u.name, ''), NULLIF(u.github_login, '')) AS name, c.created_at, c.applied_run_id
+           FROM work_item_transitions t
+           JOIN work_item_corrections c ON c.work_item_id = t.work_item_id AND t.source_ref = $2::text || c.id::text AND c.kind = 'run_note'
+           LEFT JOIN users u ON u.id = c.decided_by
+          WHERE t.work_item_id = $1::uuid AND t.to_stage = 'changes_requested'
+          ORDER BY c.created_at DESC, c.id DESC LIMIT $4::int`,
+        [workItemId, REQUEST_CHANGES_REF_PREFIX, REQUEST_CHANGES_NOTE_MAX, MAX_CHANGE_REQUESTS],
+      )
+    ).rows;
 
     return {
       stage: item.stage,
@@ -689,6 +724,15 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       setup_pause: await setupPauseFor(client, workItemId),
       actions: facts ? operatorActionsFor(facts) : [],
       close_on_github: facts ? closeOnGithub(facts) : false,
+      request_changes_blocked: requestChangesBlocked,
+      change_requests: changeRows.reverse().map((c) => ({
+        mine: c.decided_by === userId,
+        name: c.decided_by === userId ? null : c.name,
+        note: safeModelText(c.body, REQUEST_CHANGES_NOTE_MAX),
+        at: c.created_at.toISOString(),
+        state: c.status === 'applied' ? ('sent' as const) : c.status === 'accepted' ? ('waiting' as const) : ('dropped' as const),
+        run_id: c.applied_run_id,
+      })),
     };
   });
 }
