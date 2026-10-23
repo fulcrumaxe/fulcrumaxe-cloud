@@ -170,7 +170,7 @@ interface Ending {
 }
 
 /** The `FailureReason` an event can end a run with. */
-export type RunnerEndReason = "usage_limit" | "credential_mismatch" | "job_refused" | "public_repo" | "agent_failed" | "wall_clock_limit" | "runner_setup_failed" | "runner_lost" | "push_rejected";
+export type RunnerEndReason = "usage_limit" | "credential_mismatch" | "job_refused" | "public_repo" | "agent_failed" | "wall_clock_limit" | "runner_setup_failed" | "runner_lost" | "push_rejected" | "resource_limit";
 
 /**
  * What each terminal event records (the first one stored in a batch wins). `run_ended` (D#6 R4a-2, correction C24 section 1) is keyed
@@ -188,6 +188,8 @@ const RUN_ENDED_ENDINGS = {
   runner_shutdown: { to: "failed", reason: "runner_lost", followUp: true },
   // D#6 R4a-3b (C25 section 1.4): the fix round's branch moved while the agent worked. A retry runs on the new head, so no automatic follow-up.
   push_rejected: { to: "failed", reason: "push_rejected", followUp: false },
+  // D#6 RUNNER-AGENT-NO-FULLCHECK: the job's own memory limit ended the agent. The same job would hit the same limit, so no automatic follow-up.
+  resource_limit: { to: "failed", reason: "resource_limit", followUp: false },
 } as const satisfies Record<Exclude<RunEndedReason, "handed_off" | "check_failed">, Ending>;
 /**
  * D#599 HO-1: `handed_off` is deliberately not in the table. The event is stored and ends nothing here; the handoff completion

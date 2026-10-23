@@ -138,9 +138,9 @@ describe("LocalOnlyEvent", () => {
 
   describe("run_ended (D#6 R4a-2, C24 section 1)", () => {
     const ended = { ...EVENT, type: "run_ended" };
-    it("is a local-only event type, with exactly the nine reasons", () => {
+    it("is a local-only event type, with exactly the ten reasons", () => {
       expect(LOCAL_ONLY_EVENT_TYPES).toContain("run_ended");
-      expect(Object.keys(DETAILS_OF_RUN_ENDED).sort()).toEqual(["agent_failed", "check_failed", "handed_off", "job_refused", "push_rejected", "repo_not_private", "runner_setup", "runner_shutdown", "wall_clock"]);
+      expect(Object.keys(DETAILS_OF_RUN_ENDED).sort()).toEqual(["agent_failed", "check_failed", "handed_off", "job_refused", "push_rejected", "repo_not_private", "resource_limit", "runner_setup", "runner_shutdown", "wall_clock"]);
     });
 
     it("takes each reason, and for the two reasons with a closed detail set, each of that set's codes", () => {
@@ -162,7 +162,7 @@ describe("LocalOnlyEvent", () => {
       expect(LocalOnlyEvent.safeParse({ ...ended, reason: "job_refused", detail: "auth_missing" }).success).toBe(false);
       expect(LocalOnlyEvent.safeParse({ ...ended, reason: "runner_setup", detail: "duplicate_job" }).success).toBe(false);
       expect(LocalOnlyEvent.safeParse({ ...ended, reason: "runner_setup", detail: "free text from an error message" }).success).toBe(false);
-      for (const reason of ["agent_failed", "repo_not_private", "wall_clock", "runner_shutdown", "push_rejected"]) {
+      for (const reason of ["agent_failed", "repo_not_private", "wall_clock", "runner_shutdown", "push_rejected", "resource_limit"]) {
         expect(LocalOnlyEvent.safeParse({ ...ended, reason, detail: "other" }).success, reason).toBe(false);
         expect(LocalOnlyEvent.safeParse({ ...ended, reason, detail: "duplicate_job" }).success, reason).toBe(false);
       }

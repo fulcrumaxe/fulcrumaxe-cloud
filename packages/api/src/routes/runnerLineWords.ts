@@ -13,6 +13,8 @@ export function runEndedSentence(why: { reason: string; detail: string | null; s
       return jobRefusedText(why.detail ?? "other");
     case "agent_failed":
       return COPY.agentFailed;
+    case "resource_limit":
+      return COPY.resourceLimit;
     case "push_rejected":
       return COPY.pushRejected;
     case "handed_off":

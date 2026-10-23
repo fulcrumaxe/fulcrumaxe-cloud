@@ -55,6 +55,15 @@ export type PromptRuntime = "sandbox" | "runner";
 export const promptRuntimeOf = (executionMode: string | null | undefined, role?: string): PromptRuntime => (role !== undefined ? (runsInOurSandbox(executionMode, role) ? "sandbox" : "runner") : isRunnerMode(executionMode) ? "runner" : "sandbox");
 
 /**
+ * D#6 RUNNER-AGENT-NO-FULLCHECK: what an agent on a runner runs itself, in every runner prompt (build, fix round, each review). A job on a runner has a memory
+ * limit of its own, and agents that ran the repository's whole check inside it (more than once, piped through `tail` or `grep`) were ended by the kernel's
+ * OOM killer with no verdict. When the repository has an approved check, the runner runs it on the commit itself, in a step of its own. The prompt does not
+ * know whether there is one, so it says "if"; the runner adds the exact command when the job carries it, and denies that command to the agent's shell.
+ */
+export const RUNNER_TESTS_LINE =
+  "Run only the tests that cover the files this change touches, and say which ones you ran. Do not run the repository's whole check or full test suite (such as its top-level check script), not even piped through tail or grep: a run on your machine has its own memory limit, and the whole suite can exceed it and end your run. If the repository has an approved check, the runner runs it on this commit itself, separately, after you finish.";
+
+/**
  * D#599 PL-2b-2: whether a round is on the other side of the one that opened the pull request. `opened` is the mode of the item's newest executor run (the
  * side the pull request was built on), `effective` the item's mode now (its placement, else the repository's). Absent `opened` is no round to compare.
  */
@@ -203,7 +212,7 @@ function buildRunnerExecutorPrompt(input: ExecutorPromptInput, options?: Assembl
     "1. You are on the branch the platform checked out for this run. Stay on it: do not create, switch, rename or delete branches, and do not detach HEAD.",
     ...(input.rebuild === true ? ["   An earlier attempt at this issue may have failed. This run starts from a fresh branch; its work is not here, so do not look for it."] : []),
     "2. Implement the change with tests. Keep it small and in the project's existing style.",
-    "3. Run the project's tests until they pass (see package.json or the project's own README for the command).",
+    `3. Run the tests for your change until they pass (see package.json or the project's own README for the command). ${RUNNER_TESTS_LINE}`,
     "4. Stage only the files you changed, by name (`git add <path> ...`). Never `git add -A`, `git add .` or `commit -a` with new files: the sandbox leaves empty placeholder files in the checkout, and they must not be committed.",
     `5. Commit as the bot: git -c user.name="${BOT_NAME}" -c user.email="${BOT_EMAIL}" commit -m "<message>"`,
     `6. Do not push, do not change remotes, and do not call the GitHub API. When you finish, the platform publishes your commit and opens the pull request (body \`Closes #${number}\`) for you.`,

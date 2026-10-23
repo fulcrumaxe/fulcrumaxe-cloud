@@ -529,6 +529,8 @@ describe("runner claim, heartbeat and events [pg]", () => {
         ["job_refused", "review_wrong_role", "failed", "job_refused"],
         ["repo_not_private", undefined, "failed", "public_repo"],
         ["agent_failed", undefined, "failed", "agent_failed"],
+        // The job's own memory limit ended the agent: a reason of its own, not agent_failed.
+        ["resource_limit", undefined, "failed", "resource_limit"],
         ["wall_clock", undefined, "timed_out", "wall_clock_limit"],
         ["runner_setup", "claude_binary_missing", "failed", "runner_setup_failed"],
         ["runner_setup", "other", "failed", "runner_setup_failed"],

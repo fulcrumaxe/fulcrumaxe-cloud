@@ -126,7 +126,14 @@ describe("a job with a check", () => {
     await r.handle(await r.claim(withCheck()));
     expect(checkNote(CHECK)).toContain("`bash scripts/check.sh`");
     expect(checkNote(CHECK)).not.toContain("nix develop");
-    expect(r.starts[0]!.prompt).toContain(checkNote(CHECK));
+    expect(r.starts[0]!.prompt).toContain(checkNote(CHECK, "executor"));
+  });
+
+  it("hands the signed vector to the agent's start, so the engine denies it to the agent's shell (the runner runs it, the agent does not)", async () => {
+    const r = rig();
+    await r.handle(await r.claim(withCheck()));
+    expect(r.starts[0]!.checkArgv).toEqual(CHECK.argv);
+    expect(r.starts[0]!.prompt).toContain("Do not run that command yourself");
   });
 
   it("a failing check still pushes the run branch, never enters the public-push hook, and ends the run check_failed; done carries the result", async () => {
@@ -194,7 +201,9 @@ describe("a job with a check", () => {
     await r.handle(await r.claim(jobFor()));
     expect(r.order).toEqual(["agent", "sandbox_deleted", "publish", "hook"]);
     expect(bodies("/done")[0]).not.toHaveProperty("check");
-    expect(r.starts[0]!.prompt).not.toContain("the runner runs this repository's check");
+    expect(r.starts[0]!.prompt).not.toContain("the runner runs this repository's approved check");
+    expect(r.starts[0]!.prompt).not.toContain("Do not run that command yourself");
+    expect(r.starts[0]!).not.toHaveProperty("checkArgv");
   });
 
   it("holds the job's one admission slot for the whole check, and takes no second", async () => {

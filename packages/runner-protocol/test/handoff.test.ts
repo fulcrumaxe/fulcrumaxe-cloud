@@ -105,11 +105,11 @@ describe("run_ended handed_off (HO-1)", () => {
     expect(LEGACY_REASONS.has(handedOff.reason)).toBe(false);
   });
 
-  it("an older runner's run_ended still parses on the newer cloud, and only handed_off and check_failed are new", () => {
+  it("an older runner's run_ended still parses on the newer cloud, and only handed_off, check_failed and resource_limit are new", () => {
     const legacy = fixture("run-ended-legacy.json") as { reason: string };
     expect(LEGACY_REASONS.has(legacy.reason)).toBe(true);
     expect(LocalOnlyEvent.safeParse(legacy).success).toBe(true);
     for (const reason of LEGACY_REASONS) expect(RUN_ENDED_REASONS).toContain(reason);
-    expect(RUN_ENDED_REASONS.filter((r) => !LEGACY_REASONS.has(r))).toEqual(["handed_off", "check_failed"]);
+    expect(RUN_ENDED_REASONS.filter((r) => !LEGACY_REASONS.has(r))).toEqual(["handed_off", "check_failed", "resource_limit"]);
   });
 });

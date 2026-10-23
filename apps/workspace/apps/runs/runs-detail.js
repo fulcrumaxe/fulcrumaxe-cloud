@@ -111,6 +111,8 @@ export function costRows(cost, status, runnerUsage, usageNote) {
 const RUN_ENDED_LINES = {
   job_refused: (d) => "Your runner refused this job (" + d + "). Update the runner, then retry.",
   agent_failed: () => "The agent stopped without finishing. Retry, or open the run for details.",
+  // D#6 RUNNER-AGENT-NO-FULLCHECK: the job's own memory limit ended the agent (COPY.resourceLimit; a test compares the two).
+  resource_limit: () => "This job hit its memory limit on your runner, so the agent was stopped before it finished. Retry, or give jobs more memory on that machine (`fx-runner config set budget.light.memory` or `budget.heavy.memory`).",
   push_rejected: () => "Your runner could not push to the pull request's branch, because the branch changed while the agent was working. Retry to run on the new head.",
 };
 const SETUP_LINES = {

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { RUNNER_TESTS_LINE } from "../../src/advance/build.js";
 import { buildFixPrompt, buildReviewPrompt, type FixPromptInput, type ReviewPromptInput } from "../../src/review/reviewPrompts.js";
 import { expectOneGenuineEnvelope } from "../plan/helpers/panelFixtures.js";
 
@@ -45,6 +46,21 @@ describe("buildReviewPrompt by runtime", () => {
   it.each(ROLES)("D#598 P7d: the runner prompt for %s tells the reviewer how to report that the tests could not run, and the sandbox prompt is unchanged", (role) => {
     expect(buildReviewPrompt({ ...BASE, role, runtime: "runner" })).toContain('set "environment_failure" to true');
     expect(buildReviewPrompt({ ...BASE, role })).not.toContain("environment_failure");
+  });
+
+  it.each(ROLES)("RUNNER-AGENT-NO-FULLCHECK: the runner prompt for %s says to run only the affected tests, never the whole check; the sandbox prompt is unchanged", (role) => {
+    const p = buildReviewPrompt({ ...BASE, role, runtime: "runner", ...(role === "debater" ? { prior: PRIOR } : {}) });
+    expect(p).toContain(RUNNER_TESTS_LINE);
+    expect(RUNNER_TESTS_LINE).toMatch(/^Run only the tests that cover the files this change touches/);
+    expect(RUNNER_TESTS_LINE).toContain("Do not run the repository's whole check or full test suite");
+    expect(RUNNER_TESTS_LINE).toContain("the runner runs it on this commit itself, separately, after you finish");
+    expect(buildReviewPrompt({ ...BASE, role })).not.toContain("Run only the tests");
+  });
+
+  it("RUNNER-AGENT-NO-FULLCHECK: the runner fix prompt carries the same line; the sandbox and cross-side fix prompts do not", () => {
+    expect(buildFixPrompt({ ...FIX, runtime: "runner" })).toContain(RUNNER_TESTS_LINE);
+    expect(buildFixPrompt(FIX)).not.toContain(RUNNER_TESTS_LINE);
+    expect(buildFixPrompt({ ...FIX, crossSide: true })).not.toContain(RUNNER_TESTS_LINE);
   });
 
   it.each(ROLES)("G7: the runner prompt for %s names none of the sandbox's git steps, the head sha and the three-dot diff from HEAD", (role) => {

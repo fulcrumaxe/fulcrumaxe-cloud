@@ -62,6 +62,7 @@ describe("the runner copy (D#6 R2b)", () => {
       jobRefused: "Your runner refused this job ({detail}). Update the runner, then retry.",
       sandboxUnavailable: "Sandbox not working on this machine ({reason}). Run `fx-runner doctor` there to see the fix.",
       agentFailed: "The agent stopped without finishing. Retry, or open the run for details.",
+      resourceLimit: "This job hit its memory limit on your runner, so the agent was stopped before it finished. Retry, or give jobs more memory on that machine (`fx-runner config set budget.light.memory` or `budget.heavy.memory`).",
       runnerSetupFailed: "Your runner could not start the agent ({detail}). Check the runner's setup, then retry.",
       pushRejected: "Your runner could not push to the pull request's branch, because the branch changed while the agent was working. Retry to run on the new head.",
       pushTooLarge:

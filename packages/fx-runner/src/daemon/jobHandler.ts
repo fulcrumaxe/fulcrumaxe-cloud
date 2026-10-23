@@ -411,7 +411,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     try {
       const started: { base?: string } = {};
       const promptNotes: string[] = [];
-      if (job.check !== undefined) promptNotes.push(checkNote(job.check));
+      if (job.check !== undefined) promptNotes.push(checkNote(job.check, job.role));
       const checkHeld: { outcome?: CheckOutcome } = {};
       const repoMapHeld: { map?: { version: string; text: string } } = {};
       // D#6 RUNNER-CWD-1: what the workspace held right before the agent started, so the CLI's placeholders made during the run can be cleared before the check and the publish.

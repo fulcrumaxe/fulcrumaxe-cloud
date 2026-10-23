@@ -121,6 +121,8 @@ const STATES: StateSeed[] = [
   },
   { name: 'runner-usage-not-priced', status: 'succeeded', events: [started], usage: { input: 500, output: 100, usd: null, model: 'unpriced-model' } },
   { name: 'runner-usage-not-recorded', status: 'succeeded', events: [started] },
+  // The job's memory limit ended the agent: its own sentence, never the plain "agent stopped" one. Last, so the other fixtures keep their ids.
+  { name: 'runner-failed-resource-limit', status: 'failed', events: [started, ended(2, 'resource_limit'), failed(3, 'resource_limit')] },
 ];
 
 /** D#6 C42-3 against real Postgres: the activity and insight reads of every state of a run on a person's machine, pinned as fixtures. */
@@ -248,6 +250,8 @@ describe('runner run states through getWorkItemActivity and getRunInsight (D#6 C
     // The runner protocol's own sentences, one per reason that has one; the rest keep the plain form.
     expect(text('runner-failed-job-refused')[1]).toBe('Your runner refused this job (duplicate_job).');
     expect(text('runner-failed-agent-failed')[1]).toBe('The agent stopped without finishing. Retry, or open the run for details.');
+    expect(text('runner-failed-resource-limit')[1]).toBe("This job hit its memory limit on your runner, so the agent was stopped before it finished. Retry, or give jobs more memory on that machine (`fx-runner config set budget.light.memory` or `budget.heavy.memory`).");
+    expect(results.get('runner-failed-resource-limit')!.activity.runs[0].lines[1]!.text).toMatch(/memory limit/);
     expect(text('runner-failed-push-rejected')[1]).toMatch(/^Your runner could not push to the pull request's branch/);
     expect(text('runner-failed-runner-setup')[1]).toMatch(/^The runner could not update its local copy of this repository/);
     expect(text('runner-failed-push-too-large')[1]).toBe('This push is 7 MB; the limit through our proxy is 4 MB. A person can push this commit, or you can switch this repo to local-only (auto-merge turns off).');
