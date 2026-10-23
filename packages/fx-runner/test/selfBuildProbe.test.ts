@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -259,7 +259,11 @@ describe("the probe, with no sandbox, on a throwaway home", () => {
     expect(fn).toBeDefined();
     const check = (dir: string): number | null => spawnSync("bash", ["-c", `${fn}\nproc_is_ours "$1"`, "bash", dir]).status;
     expect(check("/proc/self")).toBe(0); // our own process directory
-    if ((process.getuid?.() ?? 0) !== 0) expect(check("/proc/1")).toBe(1); // init is root's: refused for anyone else
+    // Init is root's: refused for anyone else. In a process table of our own (the runner's check starts the tests in a new PID namespace) every
+    // process there is ours, init included, so the root directory stands in as the thing owned by someone else.
+    const uid = process.getuid?.() ?? 0;
+    const notOurs = statSync("/proc/1").uid !== uid ? "/proc/1" : "/";
+    if (uid !== 0) expect(check(notOurs)).toBe(1);
     // Order matters: the ownership test comes before the kill, inside the scan.
     const scan = /^kill_decoys\(\) \{[\s\S]*?^\}/m.exec(source)?.[0] ?? "";
     expect(scan.indexOf('proc_is_ours "$d" || continue')).toBeGreaterThan(-1);
