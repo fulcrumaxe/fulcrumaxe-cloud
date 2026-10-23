@@ -16,6 +16,45 @@ export const LEASE_SECONDS = 90;
 export const DUE_SLACK_SECONDS = 600;
 /** Lap time above this many intervals is a breach. */
 export const LAP_ALERT_FACTOR = 2;
+/**
+ * The reconcile gate lets an idle reconciler connect only every fourth hourly slot (4 hours). Two jobs are seeded at 900 s and keep that
+ * cadence by events instead: the code that creates their work marks the reconciler, and a tick that leaves such work behind reports their due
+ * time (the reconcile handler in apps/web). While one of them has work, its lap is judged against its own interval, as for any job (breach
+ * at 30 minutes). While it has none, nothing is waiting and the reconciler may sleep, so its lap is judged against this idle cadence.
+ */
+export const IDLE_RECONCILE_CADENCE_SECONDS = 4 * 60 * 60;
+/** The two 15-minute jobs that sit behind the reconcile gate. */
+export const FAST_RECONCILE_JOBS = ['sandbox_reap_terminal', 'model_credits_revalidate'] as const;
+const GATED_FAST_JOBS: ReadonlySet<string> = new Set(FAST_RECONCILE_JOBS);
+
+/** True while any model connection is broken for out-of-credit: the credits job has something to re-check. */
+export async function hasBrokenCredits(pool: Pick<Pool, 'query'>): Promise<boolean> {
+  const { rows } = await pool.query<{ pending: boolean }>(
+    "SELECT EXISTS (SELECT 1 FROM model_connections WHERE status = 'broken' AND last_error_code = 'credits_exhausted') AS pending",
+  );
+  return rows[0]?.pending === true;
+}
+
+/**
+ * The interval a job's lap is judged against: its seeded one, except for a gated 15-minute job with nothing to do, which is judged
+ * against the idle reconcile cadence. `hasWork` is whether that job has work now (see jobsWithWork).
+ */
+export function lapBasisSeconds(name: string, intervalSeconds: number, hasWork: boolean): number {
+  return GATED_FAST_JOBS.has(name) && !hasWork ? Math.max(intervalSeconds, IDLE_RECONCILE_CADENCE_SECONDS) : intervalSeconds;
+}
+
+/**
+ * Which gated jobs have work, from what the platform_ops login can see. Credits: a connection broken for out-of-credit. Terminal reap: the job's
+ * last pass stopped on its budget (`last_result_code = 'budget'`). Work only a writer's marker knows about (an item just reached a final stage) is
+ * in no row this login can read, so it is not counted here; the reap job then runs on the reconcile tick that marker causes.
+ */
+export async function jobsWithWork(pool: Pick<Pool, 'query'>): Promise<ReadonlySet<string>> {
+  const out = new Set<string>();
+  if (await hasBrokenCredits(pool)) out.add('model_credits_revalidate');
+  const { rows } = await pool.query<{ name: string }>("SELECT name FROM reconcile_jobs WHERE name = 'sandbox_reap_terminal' AND last_result_code = 'budget'");
+  if (rows.length > 0) out.add('sandbox_reap_terminal');
+  return out;
+}
 
 /** The shape of `reportError` from `@fx/telemetry`; the tick takes it as a dependency so this package does no I/O of its own. */
 export type ReportError = (err: unknown, ctx: { stage: string; route: string; code?: string }) => void;
@@ -266,6 +305,7 @@ export function isLapBreach(lapSeconds: number, intervalSeconds: number): boolea
 
 /** What the digest and the launch check read: every job's lap time, from database time. */
 export async function readLapTimes(pool: Pool): Promise<LapTime[]> {
+  const working = await jobsWithWork(pool);
   const { rows } = await pool.query<{
     name: string;
     interval_seconds: number;
@@ -284,7 +324,7 @@ export async function readLapTimes(pool: Pool): Promise<LapTime[]> {
     intervalSeconds: row.interval_seconds,
     lapSeconds: row.lap,
     neverCompleted: row.never,
-    breach: isLapBreach(row.lap, row.interval_seconds),
+    breach: isLapBreach(row.lap, lapBasisSeconds(row.name, row.interval_seconds, working.has(row.name))),
     lastResultCode: row.last_result_code,
     lastOkAt: row.last_ok_at,
   }));

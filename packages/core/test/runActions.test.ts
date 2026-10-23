@@ -32,7 +32,7 @@ describe('requestRunAction marks the run-action sweep', () => {
     expect(sets).toEqual([]);
     await requestRunAction({ pool: fakePool({ replayed: false }, []), principal }, input, { signal });
     await new Promise((r) => setTimeout(r, 0));
-    expect(sets).toEqual(['pending:run-action-sweep']);
+    expect(sets.filter((k) => k.startsWith('pending:'))).toEqual(['pending:run-action-sweep']);
   });
 });
 

@@ -15,7 +15,7 @@ import { getWorker } from "../../../../lib/worker";
 const SECRET = "test-cron-secret-that-is-long-enough-0123";
 
 function fakeDeps(overrides: Partial<ReconcileHandlerDeps> = {}): ReconcileHandlerDeps {
-  return { cronSecret: SECRET, enabled: true, platformOpsPool: {} as never, reportError: () => undefined, ...overrides };
+  return { cronSecret: SECRET, enabled: true, platformOpsPool: { query: async () => ({ rows: [{ pending: false, due: null }] }) } as never, reportError: () => undefined, ...overrides };
 }
 
 function requestWithAuth(authorization: string | null): NextRequest {

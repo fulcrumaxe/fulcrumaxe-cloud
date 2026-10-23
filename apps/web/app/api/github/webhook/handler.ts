@@ -19,6 +19,7 @@ import { intakeAllowlist } from "../../../../lib/github/intakeTrust";
 import { issueAuthorPermission } from "../../../../lib/github/issueAuthorPermission";
 import { repoHasEngineLoop } from "../../../../lib/github/repoHasEngineLoop";
 import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
+import { markWorkPending } from "@fx/core/src/pendingWork";
 
 /**
  * D#2 H13a: GitHub App webhook intake. Every piece of actual logic --
@@ -186,6 +187,9 @@ export async function githubWebhookHandler(
   // deleted/suspended state) before the per-kind gate decides anything else.
   if (eventName === "installation") {
     await recordInstallationLifecycle(deps, app.kind, payload);
+    // Wakes the reconciler for the next cron tick (it is otherwise gated to every fourth slot). Its jobs still run on their own intervals, so this
+    // does not re-sync installations sooner by itself (that job is 6-hourly); it makes sure a tick is not skipped while one is due.
+    void markWorkPending("reconcile");
   }
 
   const result: HandleWebhookResult = await handle(deps, eventName, payload as GithubWebhookPayload, deliveryId, app.kind);

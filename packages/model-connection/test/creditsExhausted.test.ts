@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
-import { CREDITS_EXHAUSTED_CODE, isCreditsExhaustedAnswer } from '../src/creditsExhausted.js';
+import { afterEach, describe, expect, it } from 'vitest';
+import { setPendingHooks } from '@fx/core/src/pendingWork.js';
+import { CREDITS_EXHAUSTED_CODE, isCreditsExhaustedAnswer, markCreditsExhaustedWithClient } from '../src/creditsExhausted.js';
 import { requestFor } from '../src/httpClient.js';
 import { CREDITS_EXHAUSTED_ANSWERS, NOT_CREDITS_ANSWERS } from './helpers/creditsAnswers.js';
 
@@ -55,5 +56,29 @@ describe('the re-validation call spends no model tokens', () => {
     expect(['/v1/credits', '/v1/models']).toContain(new URL(req.url).pathname);
     expect(Object.keys(req)).not.toContain('body');
     expect(req.url).not.toMatch(/completions|messages|responses/);
+  });
+});
+
+describe('markCreditsExhaustedWithClient wakes the reconciler', () => {
+  afterEach(() => setPendingHooks(null));
+  const clientReturning = (rows: { id: string }[]) => ({ query: async () => ({ rows, rowCount: rows.length }) }) as never;
+  const hooked = () => {
+    const sets: string[] = [];
+    setPendingHooks({ store: { get: async () => null, set: async (k: string) => void sets.push(k), delete: async () => undefined } });
+    return sets;
+  };
+
+  it('a connection newly broken for credits marks reconcile pending, so the 15-minute re-check job is not left to the slow cadence', async () => {
+    const sets = hooked();
+    expect(await markCreditsExhaustedWithClient(clientReturning([{ id: 'c1' }]), 'acct')).toBe(true);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sets).toContain('pending:reconcile');
+  });
+
+  it('a connection already broken (no row changed) marks nothing', async () => {
+    const sets = hooked();
+    expect(await markCreditsExhaustedWithClient(clientReturning([]), 'acct')).toBe(false);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sets).toEqual([]);
   });
 });

@@ -15,6 +15,8 @@ import {
   createModelKeyHealthJob,
   createStripeSubscriptionsJob,
   effectiveSandboxReapMode,
+  FAST_RECONCILE_JOBS,
+  hasBrokenCredits,
   parseSandboxReapMode,
   RECONCILE_ROUTE,
   runTick,
@@ -29,9 +31,38 @@ import {
 } from "@fx/reconcile";
 import { getWorker } from "../../../../lib/worker";
 
+const [TERMINAL_JOB, CREDITS_JOB] = FAST_RECONCILE_JOBS;
+
+/** How far ahead the gate looks again when the 15-minute jobs' state could not be read: their own cadence, so a read failure never lets work wait. */
+const FAST_JOB_RETRY_MS = 15 * 60_000;
+
+/**
+ * When the gate should next connect for the 15-minute jobs (FAST_RECONCILE_JOBS in @fx/reconcile: the reconcile gate lets an unmarked
+ * reconciler connect on every fourth backstop slot, so they keep their cadence by events instead), or null when neither has anything left to do.
+ *  - model_credits_revalidate has work while any connection is still broken for out-of-credit (the pass re-checks it; a top-up clears it);
+ *  - sandbox_reap_terminal has work left when its pass this tick stopped on a budget, or was skipped as not yet due (its last pass was under
+ *    15 minutes ago, so the marker that woke us came too early to run it): either way the next look is at the job's own due time.
+ * The due time is the job's `next_due_at`, never earlier than now. Reads two small rows with the pool the tick already holds.
+ */
+export async function reconcileNextDueAt(pool: Pick<TickDeps["pool"], "query">, summary: TickSummary, now: number = Date.now()): Promise<number | null> {
+  const pending: string[] = [];
+  const terminal = summary.results.find((r) => r.job === TERMINAL_JOB)?.result;
+  if (terminal === "budget" || terminal === "not_due") pending.push(TERMINAL_JOB);
+  if (await hasBrokenCredits(pool)) pending.push(CREDITS_JOB);
+  if (pending.length === 0) return null;
+  const { rows } = await pool.query<{ due: number }>(
+    "SELECT (EXTRACT(EPOCH FROM min(next_due_at)) * 1000)::float8 AS due FROM reconcile_jobs WHERE name = ANY($1::text[])",
+    [pending],
+  );
+  const due = rows[0]?.due;
+  return typeof due === "number" && Number.isFinite(due) ? Math.max(due, now) : now;
+}
+
 /**
  * The reconciler cron (every 15 minutes, at minutes 7, 22, 37 and 52; each job has its own seeded interval, so the slower jobs
- * still run on theirs). Same shape as the other cron handlers: route.ts stays thin, this
+ * still run on theirs). A tick first passes the no-database gate: unmarked it connects on every fourth backstop slot only, and it connects on
+ * the next cron tick after a marker (an installation change, a sandbox reaching a final state, a credits failure) or after a due time left by
+ * the 15-minute jobs. Same shape as the other cron handlers: route.ts stays thin, this
  * file holds the logic, and handler.test.ts is a fast route-layer test with no real Postgres. The lease, budget, cursor
  * and lap-time behaviour is @fx/reconcile's own real-Postgres suite.
  *
@@ -211,6 +242,7 @@ export async function reconcileHandler(
   if (!isAuthorized(req.headers.get("authorization"), cronSecret)) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
+  let nextDueAt: number | null = null;
   const run = async (): Promise<TickSummary> => {
     const deps = injected ?? defaultReconcileDeps();
     // The sandbox jobs reach the reaper only through the worker. Under either kill switch (FX_RECONCILE_ENABLED=0, or the mode off or
@@ -227,7 +259,7 @@ export async function reconcileHandler(
       reportError: deps.reportError,
       effectiveMode: async () => effectiveSandboxReapMode(deps.sandboxReapMode, (await deps.readSandboxReapDbMode?.()) ?? null),
     };
-    return runTickFn({
+    const summary = await runTickFn({
       pool: deps.platformOpsPool,
       jobs: buildReconcileJobs({
         githubInstallations: githubInstallationsJobFromEnv(deps.platformOpsPool, deps.reportError),
@@ -240,14 +272,22 @@ export async function reconcileHandler(
       enabled: deps.enabled,
       reportError: deps.reportError,
     });
+    // Work the 15-minute jobs left behind keeps the gate connecting at their cadence; a failed read falls back to the slow cadence (reported).
+    try {
+      nextDueAt = summary.enabled ? await reconcileNextDueAt(deps.platformOpsPool, summary) : null;
+    } catch (err) {
+      // Unknown means "maybe work": look again at the jobs' own cadence rather than letting the slow cadence sit on it.
+      nextDueAt = Date.now() + FAST_JOB_RETRY_MS;
+      deps.reportError(err, { stage: "reconcile.next_due", route: RECONCILE_ROUTE });
+    }
+    return summary;
   };
-  // Normally every tick runs (the reconciler has no pending-work marker). While staging is paused the same no-database
-  // gate used by the sweeps applies, so a tick connects only when 12 hours have passed since the last one; the
-  // deps (and so the pool) are built inside `run`, after the gate.
-  if (!isStagingPaused()) {
-    return NextResponse.json(await run(), { status: 200 });
-  }
-  const ran = await runGatedTick("reconcile", async () => ({ result: await run(), workFound: true, nextDueAt: null }));
-  if (ran === null) return NextResponse.json({ skipped: true, reason: "staging_paused" }, { status: 200 });
+  // Every tick goes through the gate (see the header above). What the jobs find must not keep the busy-deployment slots alive by itself,
+  // so the tick reports workFound false; only the due time left by the 15-minute jobs is carried forward.
+  const ran = await runGatedTick("reconcile", async () => {
+    const result = await run();
+    return { result, workFound: false, nextDueAt };
+  });
+  if (ran === null) return NextResponse.json({ skipped: true, reason: isStagingPaused() ? "staging_paused" : "not_due" }, { status: 200 });
   return NextResponse.json(ran.result, { status: 200 });
 }

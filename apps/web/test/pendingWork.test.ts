@@ -148,19 +148,200 @@ describe("a writer that enqueues work", () => {
   });
 });
 
-describe("the 30-minute backstop", () => {
-  it("connects with no marker once the last connect is 30 minutes old, and not before", async () => {
-    await tick();
-    clock.value += BACKSTOP_MS - MIN;
-    expect((await tick()).run).not.toHaveBeenCalled();
-    clock.value += MIN;
-    const { run } = await tick();
-    expect(run).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(logs.at(-1)!)).toMatchObject({ reason: "backstop", marker: "miss", connected: true });
+const HOUR = 60 * MIN;
+const ACTIVITY = "activity:any";
+const SWEEPS = ["api-sweep", "run-action-sweep", "compute-settle-sweep", "runner-sweeper", "invariant-sweep"] as const;
+const START = 1_800_000_000_000; // a multiple of both slot lengths, so a test's minute 0 is a slot start
+
+/** Marks the deployment busy (or not) without touching any sweep's marker. */
+function setActivity(at: number | null): void {
+  if (at === null) region.entries.delete(ACTIVITY);
+  else region.entries.set(ACTIVITY, { json: JSON.stringify(at), expiresAt: clock.value + 24 * HOUR });
+}
+
+/** One cron tick for one sweep at the current fake time; returns whether it connected. */
+async function minute(name: (typeof SWEEPS)[number] | "reconcile"): Promise<boolean> {
+  const run = vi.fn(async () => ({ result: "swept", workFound: false, nextDueAt: null }));
+  await runGatedTick(name, run, (l) => logs.push(l), () => clock.value);
+  return run.mock.calls.length === 1;
+}
+
+/** Steps a wall clock minute by minute and lists the minutes (counted from `from`) at which `name` connected. */
+async function connectMinutes(name: (typeof SWEEPS)[number] | "reconcile", from: number, minutes: number): Promise<number[]> {
+  const out: number[] = [];
+  for (let i = 0; i < minutes; i++) {
+    clock.value = from + i * MIN;
+    if (await minute(name)) out.push(i);
+  }
+  return out;
+}
+
+describe("the backstop is aligned to wall-clock slots", () => {
+  it("busy deployment: a sweep connects at the first tick of each 30-minute slot, whatever minute it last ran", async () => {
+    setActivity(START);
+    clock.value = START + 7 * MIN; // first ever tick, mid-slot: no record, so it connects
+    expect(await minute("api-sweep")).toBe(true);
+    clock.value = START + 29 * MIN;
+    expect(await minute("api-sweep")).toBe(false); // 22 minutes since its last run, same slot
+    clock.value = START + 30 * MIN;
+    expect(await minute("api-sweep")).toBe(true); // 23 minutes since its last run, but a slot boundary has passed
+    expect(JSON.parse(logs.at(-1)!)).toMatchObject({ reason: "backstop", marker: "miss", last_run: "hit", connected: true, backstop_ms: 30 * MIN });
+    clock.value = START + 59 * MIN + 59_999;
+    expect(await minute("api-sweep")).toBe(false);
+    clock.value = START + 60 * MIN;
+    expect(await minute("api-sweep")).toBe(true);
   });
 
-  it("the first tick after a deploy (no record of a connect) connects", async () => {
-    expect((await tick()).run).toHaveBeenCalledTimes(1);
+  it("idle deployment: slots are an hour long", async () => {
+    expect(await minute("api-sweep")).toBe(true); // START, first tick
+    const minutes = await connectMinutes("api-sweep", START + MIN, 3 * 60);
+    expect(minutes.map((m) => m + 1)).toEqual([60, 120, 180]);
+    const lastConnect = logs.map((l) => JSON.parse(l)).filter((l) => l.connected).at(-1);
+    expect(lastConnect).toMatchObject({ reason: "backstop", connected: true, backstop_ms: HOUR }); // the line names the slot actually used
+  });
+
+  it("work seen more than 24 hours ago no longer counts; work seen within the day does", async () => {
+    setActivity(START - 24 * HOUR - 1); // idle: one ms past the window
+    expect(await minute("api-sweep")).toBe(true);
+    clock.value = START + 30 * MIN;
+    expect(await minute("api-sweep")).toBe(false); // idle: still in the hour slot
+    setActivity(clock.value - 24 * HOUR + MIN);
+    expect(await minute("api-sweep")).toBe(true); // busy: the half-hour boundary counts
+  });
+
+  it("every sweep, however its own last run drifted, connects in the same minutes of the same slots", async () => {
+    setActivity(START);
+    // Each sweep starts at its own minute, so their last runs are all different.
+    const offsets = [3, 11, 17, 23, 29];
+    for (const [i, name] of SWEEPS.entries()) {
+      clock.value = START + offsets[i]! * MIN;
+      expect(await minute(name)).toBe(true);
+    }
+    const from = START + 30 * MIN;
+    const perSweep = new Map<string, number[]>();
+    // Interleave the sweeps the way the crons do: every sweep gets a tick every minute.
+    for (let i = 0; i < 4 * 60; i++) {
+      clock.value = from + i * MIN;
+      setActivity(clock.value); // keep it busy for the whole window
+      for (const name of SWEEPS) if (await minute(name)) perSweep.set(name, [...(perSweep.get(name) ?? []), i]);
+    }
+    for (const name of SWEEPS) expect(perSweep.get(name), name).toEqual([0, 30, 60, 90, 120, 150, 180, 210]);
+  });
+
+  it("a last-run miss is overdue, then the sweep is on the slot grid", async () => {
+    setActivity(START);
+    clock.value = START + 12 * MIN;
+    expect(await minute("api-sweep")).toBe(true);
+    region.entries.delete("lastrun:api-sweep"); // evicted
+    clock.value = START + 14 * MIN;
+    expect(await minute("api-sweep")).toBe(true);
+    clock.value = START + 20 * MIN;
+    expect(await minute("api-sweep")).toBe(false);
+    clock.value = START + 30 * MIN;
+    expect(await minute("api-sweep")).toBe(true);
+  });
+
+  it("a marker still connects on the tick after its time, whatever the slot", async () => {
+    expect(await minute("api-sweep")).toBe(true);
+    clock.value = START + 41 * MIN;
+    await markWorkPending("api-sweep", { now: clock.value });
+    clock.value += MIN;
+    expect(await minute("api-sweep")).toBe(true);
+    expect(JSON.parse(logs.at(-1)!).reason).toBe("marker");
+  });
+
+  it("the activity key is read only when it can change the answer", async () => {
+    expect(await minute("api-sweep")).toBe(true);
+    region.calls = { get: 0, set: 0, delete: 0 };
+    clock.value = START + 10 * MIN;
+    await minute("api-sweep");
+    expect(region.calls.get).toBe(2); // same half-hour slot: marker + last run only
+    clock.value = START + 31 * MIN;
+    await minute("api-sweep");
+    expect(region.calls.get).toBe(5); // crossed a half-hour boundary: marker, last run, activity
+  });
+
+  it("an unreadable activity key counts as busy, so the half-hour slot applies", async () => {
+    expect(await minute("api-sweep")).toBe(true);
+    clock.value = START + 31 * MIN;
+    region.throwing = true;
+    expect((await readTickGate("api-sweep", clock.value)).connect).toBe(true);
+  });
+
+  it("paused keeps the plain 12-hour elapsed rule, not slots", async () => {
+    const run = vi.fn(async () => ({ result: "swept", workFound: false, nextDueAt: null }));
+    const paused = (at: number) => runGatedTick("api-sweep", run, () => {}, () => at, {});
+    vi.stubEnv("FX_STAGING_PAUSED", "1");
+    try {
+      await paused(START + 5 * MIN);
+      await paused(START + 5 * MIN + 12 * HOUR - 1);
+      expect(run).toHaveBeenCalledTimes(1);
+      await paused(START + 5 * MIN + 12 * HOUR);
+      expect(run).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("an idle sweep's last-run record outlives the longest slot, so it does not read as a miss and connect early", async () => {
+    expect(await minute("reconcile")).toBe(true);
+    const entry = region.entries.get("lastrun:reconcile")!;
+    expect(entry.expiresAt - clock.value).toBeGreaterThan(4 * HOUR);
+  });
+});
+
+describe("the reconciler runs every fourth slot while nothing marks it", () => {
+  it("busy: once every 2 hours, on the slot grid", async () => {
+    setActivity(START);
+    clock.value = START + 5 * MIN;
+    expect(await minute("reconcile")).toBe(true); // first tick
+    const from = START + 30 * MIN;
+    const minutes: number[] = [];
+    for (let i = 0; i < 6 * 60; i++) {
+      clock.value = from + i * MIN;
+      setActivity(clock.value);
+      if (await minute("reconcile")) minutes.push(i);
+    }
+    expect(minutes).toEqual([90, 210, 330]); // the 2-hour slots at START + 2h, 4h, 6h
+  });
+
+  it("idle: once every 4 hours", async () => {
+    expect(await minute("reconcile")).toBe(true);
+    const minutes = await connectMinutes("reconcile", START + MIN, 9 * 60);
+    expect(minutes.map((m) => m + 1)).toEqual([240, 480]);
+    const lastConnect = logs.map((l) => JSON.parse(l)).filter((l) => l.connected).at(-1);
+    expect(lastConnect).toMatchObject({ reason: "backstop", connected: true, backstop_ms: 4 * HOUR });
+  });
+
+  it("an installation marker runs it on the next tick, then it goes back to the slow grid", async () => {
+    setActivity(START);
+    expect(await minute("reconcile")).toBe(true);
+    clock.value = START + 40 * MIN;
+    await markWorkPending("reconcile", { now: clock.value });
+    clock.value += MIN;
+    expect(await minute("reconcile")).toBe(true);
+    expect(JSON.parse(logs.at(-1)!).reason).toBe("marker");
+    clock.value = START + 2 * HOUR - MIN;
+    setActivity(clock.value);
+    expect(await minute("reconcile")).toBe(false); // still in the 2-hour slot of the marker run
+    clock.value = START + 2 * HOUR;
+    expect(await minute("reconcile")).toBe(true);
+  });
+});
+
+describe("what keeps the half-hour slots", () => {
+  it("a writer's marker records activity for 24 hours", async () => {
+    await markWorkPending("api-sweep", { now: clock.value });
+    const entry = region.entries.get(ACTIVITY)!;
+    expect(JSON.parse(entry.json)).toBe(clock.value);
+    expect(entry.expiresAt - clock.value).toBe(24 * HOUR);
+  });
+
+  it("a connecting tick that found work records it; one that found none does not", async () => {
+    await tick({ workFound: false });
+    expect(region.entries.has(ACTIVITY)).toBe(false);
+    await tick({ workFound: true }, { force: true });
+    expect(JSON.parse(region.entries.get(ACTIVITY)!.json)).toBe(clock.value);
   });
 });
 
