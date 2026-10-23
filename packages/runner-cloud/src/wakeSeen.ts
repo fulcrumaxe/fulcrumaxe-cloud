@@ -10,7 +10,7 @@
  * The cached stamp only ever makes a runner look MORE recently heard. A miss (eviction, another region, a cold cache) falls back to the
  * database stamp, so it can never make a live runner read offline. A value that is not a plausible time is ignored, never repaired.
  */
-import { RUNNER_ONLINE_SECONDS } from "@fx/runner";
+import { RUNNER_ONLINE_SECONDS, RUNNER_WAKE_LIVENESS_SECONDS } from "@fx/runner";
 
 /** The Runtime Cache namespace of the wake path's entries. */
 export const RUNNER_WAKE_CACHE_NAMESPACE = "fx-runner-wake";
@@ -27,9 +27,10 @@ export const RUNNER_SEEN_REFRESH_MS = 60_000;
 
 /**
  * How long a wake-capable runner may go unheard before it reads offline: one 30-minute safety slot plus 5 minutes' grace. Between the ordinary
- * online window (120 s) and this, it stays online and the fleet says "Last heard N min ago" instead of a false "offline".
+ * online window (120 s) and this, it stays online and the fleet says "Last heard N min ago" instead of a false "offline". Defined once, with the
+ * liveness rule every consumer shares (@fx/runner runnerLiveness.ts); re-exported here for the wake path's other names.
  */
-export const RUNNER_WAKE_LIVENESS_SECONDS = 35 * 60;
+export { RUNNER_WAKE_LIVENESS_SECONDS };
 /** The safety slot the runner's own claim lines up to. */
 export const RUNNER_WAKE_SLOT_SECONDS = 30 * 60;
 

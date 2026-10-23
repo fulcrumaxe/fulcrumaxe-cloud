@@ -69,6 +69,7 @@ import { purgeAap } from "./aapPurge.js";
 import { createRunnerNoticeSweeper, runnerNoticeReports, type RunnerNoticeSweeper } from "./runnerNotices.js";
 import { createRunnerQueueSweeper, type RunnerQueueSweeper } from "./runnerQueueSweep.js";
 import { createRunnerClaimFacade, type RunnerClaimFacade } from "./runnerClaims.js";
+import { configuredWakeKey, readWakeKey } from "@fx/runner-cloud";
 import { createRunnerDoneFacade, type RunnerDoneFacade } from "./runnerDone.js";
 import { createRunnerLeaseSweeper, type RunnerLeaseSweeper } from "./runnerLeaseSweep.js";
 import { createRunHandoffs, type RunHandoffs } from "./runHandoffs.js";
@@ -341,7 +342,9 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     const runActions = createRunActionFacade(pools.runnerPool, registry);
     const runnerLeases = createRunnerLeaseFacade(pools.runnerPool);
     const runnerQueue = createRunnerQueueSweeper(pools.runnerPool, { onError: (runId) => console.warn(JSON.stringify({ event: "runner.queue_sweep_failed", run_id: runId })) });
-    const runnerNotices = createRunnerNoticeSweeper(pools.runnerPool, runnerNoticeReports({ report: reportError, warn: (line) => console.warn(line) }));
+    // D#6 RUNNER-WAKE: the wake gate is the one minting uses (a usable FX_RUNNER_WAKE_KEY), read on each call so a changed setting applies at once.
+    const wakeEnabled = (): boolean => configuredWakeKey(() => readWakeKey(env)) !== null;
+    const runnerNotices = createRunnerNoticeSweeper(pools.runnerPool, { ...runnerNoticeReports({ report: reportError, warn: (line) => console.warn(line) }), wakeEnabled });
     const authorCheck = options.ports.authorCheck ?? (() => null);
     const resolveRunSeat = createSeatResolver({ pool: pools.runnerPool, isOperatorAccount: (accountId) => operatorMode(env, accountId).active });
     // The three pieces a preview needs, wired together: its seat (from the resolver), the production run starter and the prompt builder.
@@ -374,7 +377,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       },
       onError: (runId) => console.warn(JSON.stringify({ event: "run.handoff_failed", run_id: runId })),
     });
-    const runnerClaims = createRunnerClaimFacade(pools.runnerPool, { visibility: repoVisibility, followUp, onError: (runId) => console.warn(JSON.stringify({ event: "runner.follow_up_failed", run_id: runId })), onHandedOff: (i) => runHandoffs.completeRunHandoff({ ...i, forced: false }) });
+    const runnerClaims = createRunnerClaimFacade(pools.runnerPool, { visibility: repoVisibility, followUp, wakeEnabled, onError: (runId) => console.warn(JSON.stringify({ event: "runner.follow_up_failed", run_id: runId })), onHandedOff: (i) => runHandoffs.completeRunHandoff({ ...i, forced: false }) });
     const runnerDone = createRunnerDoneFacade(pools.runnerPool);
     // D#6 R5a-2b (C27 section 1.6): the ticket key is read here, once. Without it (or without the forward host) the ticket route answers 503 and nothing else changes.
     const gitTicketSigner = loadGitTicketSigner(env);

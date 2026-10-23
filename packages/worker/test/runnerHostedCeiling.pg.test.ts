@@ -25,7 +25,7 @@ describe("the account ceiling by plan [pg]", () => {
   let seq = 0;
 
   const flat = { maxConcurrentRunnerJobs: 16, maxConcurrentHeavyRunnerJobs: 8, maxRunWallClockMs: 7_200_000 };
-  const make = (over: { hostedLimits?: HostedLimitsSource } = {}): RunnerClaimFacade =>
+  const make = (over: { hostedLimits?: HostedLimitsSource; wakeEnabled?: () => boolean } = {}): RunnerClaimFacade =>
     createRunnerClaimFacade(writerPool, { visibility: { visibility: async () => "private" }, now: () => T0, randomBetween: (min) => min, limits: () => flat, ...over });
   const eight: ClaimCapacity = { light: { limit: 4, in_use: 0 }, heavy: { limit: 4, in_use: 0 } };
 
@@ -171,6 +171,53 @@ describe("the account ceiling by plan [pg]", () => {
       expect(ceiling).toEqual({ total: 8, heavy: 8, perRepo: 8 });
       const second = await newRunner({ declared: [8, 4] });
       expect((await accountCeiling(admin, { accountId: A.accountId, claimingRunnerId: second, nowMs: T0, runnerPlan: flat, hosted: hostedLimitsFromPlanData })).total).toBe(16);
+    });
+
+    it("D#6 RUNNER-WAKE: an idle wake runner between its safety claims adds its capacity while the wake gate is open; a plain or dead wake runner adds nothing", async () => {
+      await setting(20, 20);
+      const claimer = await newRunner({ declared: [4, 4] });
+      const wake = await newRunner({ declared: [4, 4], seenMsAgo: 10 * 60_000 });
+      const plain = await newRunner({ declared: [4, 4], seenMsAgo: 10 * 60_000 });
+      await admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, ARRAY['wake_v1'])", [wake, A.accountId]);
+      const total = async (wakeEnabled?: boolean) => (await accountCeiling(admin, { accountId: A.accountId, claimingRunnerId: claimer, nowMs: T0, runnerPlan: flat, hosted: hostedLimitsFromPlanData, wakeEnabled })).total;
+      // The claimer's 8 plus the wake runner's 8; the plain runner 10 min quiet is offline.
+      expect(await total(true)).toBe(16);
+      // Gate closed (no key, no grant): the wake runner is offline after 120 s like any other.
+      expect(await total(false)).toBe(8);
+      expect(await total()).toBe(8);
+      // Dead: no claim for longer than the window.
+      await admin.query("UPDATE runners SET last_seen_at = $2 WHERE id = $1", [wake, new Date(T0 - 35 * 60_000 - 1000)]);
+      expect(await total(true)).toBe(8);
+      // (16 above, not 24: the plain runner 10 min quiet never counted.)
+      void plain;
+    });
+
+    it("D#6 RUNNER-WAKE: the claim passes its wake gate to the ceiling: a wake runner holding 4 and gone quiet for 10 min still counts only while the gate is open", async () => {
+      const four: ClaimCapacity = { light: { limit: 2, in_use: 0 }, heavy: { limit: 2, in_use: 0 } };
+      const setup = async (): Promise<string> => {
+        await setting(12, 12);
+        const b = await newRunner();
+        await admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, ARRAY['wake_v1'])", [b, A.accountId]);
+        await fill(6);
+        expect((await drain(make(), [b], four)).running).toBe(4);
+        // b's last claim was 10 minutes ago; it is between its safety claims.
+        await admin.query("UPDATE runners SET last_seen_at = $2 WHERE id = $1", [b, new Date(T0 - 10 * 60_000)]);
+        return newRunner();
+      };
+      // Gate closed: b is offline, so the ceiling is a's own 8, and with b's 4 running a takes 4.
+      const a = await setup();
+      expect((await drain(make(), [a])).running).toBe(8);
+      // Gate open (a fresh account): b's 4 count, the ceiling is min(12, 8 + 4) = 12, and a takes its own 8.
+      A = await seedAccount(admin, randomUUID());
+      repos = [A.repoId];
+      for (let i = 0; i < 2; i++) {
+        const id = randomUUID();
+        await admin.query("INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, execution_mode) VALUES ($1, $2, $3, $4, 'team', 'runner_local')", [id, A.accountId, A.installationId, 9100 + i]);
+        repos.push(id);
+      }
+      await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [A.repoId]);
+      const a2 = await setup();
+      expect((await drain(make({ wakeEnabled: () => true }), [a2])).running).toBe(12);
     });
 
     it("hands out nothing when the plan data cannot give the account its figures, or does not know its plan", async () => {

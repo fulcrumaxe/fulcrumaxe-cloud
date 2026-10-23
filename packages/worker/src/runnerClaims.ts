@@ -134,6 +134,11 @@ export interface RunnerClaimDeps {
   limits?: RunnerLimitsSource;
   /** A hosted plan's runner figures (D#605 FL-12a). Defaults to the plan data; tests inject fixed ones. */
   hostedLimits?: HostedLimitsSource;
+  /**
+   * D#6 RUNNER-WAKE: the deployment's wake gate, read on every claim. Open: a wake-capable runner between its safety claims still counts as a live
+   * peer for routing and toward the account ceiling (`runnerLiveSql`). Absent: closed, the plain 120-second test.
+   */
+  wakeEnabled?: () => boolean;
   /** Dispatches the follow-up run after a usage limit. Absent: the child is made (pending, without a job) and the queue sweep expires it. */
   followUp?: FollowUpPorts;
   /** Told when the work after an accepted batch (the follow-up's dispatch) failed; the batch itself stays accepted. */
@@ -286,6 +291,7 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
   const between = deps.randomBetween ?? ((min, max) => randomInt(min, max + 1));
   const limits = deps.limits ?? runnerLimits;
   const hostedLimits = deps.hostedLimits ?? hostedLimitsFromPlanData;
+  const wakeEnabled = (): boolean => deps.wakeEnabled?.() === true;
 
   async function loadRunner(accountId: string, runnerId: string) {
     const runner = await withTenant(runnerPool, accountId, async (client) => {
@@ -375,7 +381,7 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
         [accountId, LIGHT_JOB_ROLES],
       );
       // The account's ceiling by its plan (D#605 FL-12a): the runner plan's flat figures, or a hosted plan's setting held under its live runners' capacity.
-      const caps = await accountCeiling(client, { accountId, claimingRunnerId: runnerId, nowMs: now(), runnerPlan: limits(accountId), hosted: hostedLimits });
+      const caps = await accountCeiling(client, { accountId, claimingRunnerId: runnerId, nowMs: now(), runnerPlan: limits(accountId), hosted: hostedLimits, wakeEnabled: wakeEnabled() });
       if (Number(account.rows[0]!.total) >= caps.total) return "at_limit" as const;
       if (heavy && Number(account.rows[0]!.heavy) >= caps.heavy) return "heavy_limit" as const;
       if (caps.perRepo !== null) {
@@ -439,7 +445,7 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
 
         const autoRepos = await autoApprovableRepos(accountId, runnerId, runner);
         // D#605 FL-4: this runner's facts and labels and its available preferred peers, read once for the poll; the rules in the candidate query only narrow what it allows.
-        const routing = await withTenant(runnerPool, accountId, (client) => loadPollRouting(client, { accountId, runnerId, nowMs: now() }));
+        const routing = await withTenant(runnerPool, accountId, (client) => loadPollRouting(client, { accountId, runnerId, nowMs: now(), wakeEnabled: wakeEnabled() }));
         const tried: string[] = [];
         let heavyBlocked = false; // the account's heavy cap was met under the lock: stop offering heavy runs this poll
         const seen = new Map<string, "private" | "public" | "unknown">();
@@ -450,7 +456,7 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
           const candidates = await withTenant(runnerPool, accountId, async (client) => {
             // Repos already at their running limit offer no candidate: left in, their oldest runs would fill the few candidates each poll
             // looks at and starve every other repo. The claim re-checks the count under the account lock, so a stale read here costs a skip, not a breach.
-            const ceiling = await accountCeiling(client, { accountId, claimingRunnerId: runnerId, nowMs: now(), runnerPlan: limits(accountId), hosted: hostedLimits });
+            const ceiling = await accountCeiling(client, { accountId, claimingRunnerId: runnerId, nowMs: now(), runnerPlan: limits(accountId), hosted: hostedLimits, wakeEnabled: wakeEnabled() });
             const fullRepos = ceiling.perRepo === null ? [] : (await client.query<{ repo_id: string }>(
               "SELECT dispatch_repo_id AS repo_id FROM agent_runs WHERE account_id = $1 AND runtime = 'runner' AND status = 'running' AND dispatch_repo_id IS NOT NULL GROUP BY dispatch_repo_id HAVING count(*) >= $2::int",
               [accountId, ceiling.perRepo],

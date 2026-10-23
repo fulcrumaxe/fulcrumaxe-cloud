@@ -104,8 +104,10 @@ same transaction. The merge gate reads it through `createPgLocalReviewOptIn`.
 - **The list.** `GET /api/runners` (session, any member) returns each runner's id, credential mode, who registered it,
   binary version, last-seen time and one derived state: `revoked`, `outdated` (protocol below the supported floor), `paused` or `draining` (a person set it in
   `runner_settings`; the claim answers it idle with `retry_after` 300, so it is shown before the online test and never reads `offline`;
-  `state_note` says "Resumes within 5 min"), `offline` (no request for `RUNNER_ONLINE_SECONDS` = 120 s, the one figure the covering
-  test of a waiting run and the waiting notice share), `busy` (holds a running run whose lease has not run out) or `online_idle`, in that
+  `state_note` says "Resumes within 5 min"), `offline` (not live by the one liveness rule, `runnerIsLive` / `runnerLiveSql` in `@fx/runner`:
+  nothing heard for `RUNNER_ONLINE_SECONDS` = 120 s, or, for a runner that listed `wake_v1` while the wake key is configured,
+  for `RUNNER_WAKE_LIVENESS_SECONDS` = 35 min, counting its cached wake checks; the covering test of a waiting run, the handoff's
+  covering test, the waiting notice and the claim's routing and account ceiling all use the same rule), `busy` (holds a running run whose lease has not run out) or `online_idle`, in that
   order of precedence. A runner revoked by its registrant leaving reads `state_note` "Revoked: registrant left". A paused or draining
   runner does not cover a waiting run in the read model. It selects
   no key, thumbprint, repo list or nonce. `getRunWaitReason(runId)` derives why a run waits (`waiting_for_runner`,
@@ -181,7 +183,7 @@ same transaction. The merge gate reads it through `createPgLocalReviewOptIn`.
   switch must show the number of queued runs that will be cancelled before the user confirms; that screen is a later change.
 - The sweeper also sends two notices per waiting run, once each, as `run_events` rows: `runner.waiting` at the first tick at
   or after 15 minutes from dispatch when no runner is online for the run's repo (a runner counts when it is not revoked, was
-  heard from within 120 s, and has the repo in its own `allowed_repo_ids`; an empty list takes no repo, as in the claim), and
+  live by the shared rule (120 s, or the wake window for a wake runner while the wake key is configured), and has the repo in its own `allowed_repo_ids`; an empty list takes no repo, as in the claim), and
   `runner.ttl_reminder` at the first tick at or after 48 hours. The wait reason in the read model uses the same test. The row
   is also the marker that it was sent. The tick reads the runs that still owe a notice, soonest due first
   (`agent_run_list_runner_runs_owing_notice`, owned by the NOLOGIN role `runner_notice_lister`), so runs that have both

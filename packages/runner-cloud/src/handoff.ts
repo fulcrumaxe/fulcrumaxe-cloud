@@ -47,7 +47,11 @@ export interface HandoffCloudTarget {
   >;
 }
 
-export interface HandoffDeps extends Pick<RunnerCloudDeps, "appUserPool" | "now" | "repoVisibility"> {
+/**
+ * `runnerSeen` and `wakeKey` (D#6 RUNNER-WAKE) make the covering test the fleet read's own: a wake runner between its safety claims covers the repo.
+ * Absent, the database stamp and the plain 120-second window decide, as before.
+ */
+export interface HandoffDeps extends Pick<RunnerCloudDeps, "appUserPool" | "now" | "repoVisibility" | "runnerSeen" | "wakeKey"> {
   /** Absent: a move to the cloud answers 503 `handoff_unavailable`. */
   cloudTarget?: HandoffCloudTarget | null;
   /** Whether a job to a runner can be signed (the job-signing key pair is set and valid). Absent or false: a move to a runner answers 503 `handoff_unavailable`. */
@@ -85,9 +89,14 @@ function definerRefusal(error: unknown): unknown {
   }
 }
 
-/** A runner of the account that could take the run now: live, not full, listed for the repo, and not the one the run is on. */
+/**
+ * A runner of the account that could take the run now: live, not full, listed for the repo, and not the one the run is on. "Live" is the fleet
+ * read's state, so the merged rule (the later of the database stamp and the cached wake check, the wake window only while the wake gate is open)
+ * decides here exactly as on the runner list. A cache miss or failure reads the database stamp alone: a wake runner whose last claim is inside its
+ * window still covers (it claims within one wake poll once the run is queued), and nothing that might be dead is guessed live.
+ */
 async function coveringRunnerExists(deps: HandoffDeps, principal: SessionPrincipal, repoId: string, sourceRunnerId: string | null): Promise<boolean> {
-  const runners = await readRunners({ appUserPool: deps.appUserPool, now: deps.now }, principal.accountId, principal.userId);
+  const runners = await readRunners({ appUserPool: deps.appUserPool, now: deps.now, runnerSeen: deps.runnerSeen, wakeKey: deps.wakeKey }, principal.accountId, principal.userId);
   return runners.some((r) => {
     if (r.id === sourceRunnerId || !r.repos.some((g) => g.id === repoId)) return false;
     if (r.state === "online_idle") return true;

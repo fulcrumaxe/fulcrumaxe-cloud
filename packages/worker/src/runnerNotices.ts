@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 import type { ReportContext } from "@fx/telemetry";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { isRunnerMode, RUNNER_ONLINE_SECONDS, RUNNER_TTL_REMINDER_MS, RUNNER_WAITING_NOTICE_MS, RUN_EVENTS_SEQ_LOCK_SQL, recordRunnerNotice, runEventsSeqLockKey } from "@fx/runner";
+import { isRunnerMode, RUNNER_ONLINE_SECONDS, RUNNER_TTL_REMINDER_MS, RUNNER_WAITING_NOTICE_MS, RUN_EVENTS_SEQ_LOCK_SQL, recordRunnerNotice, runEventsSeqLockKey, runnerLiveSql } from "@fx/runner";
 
 /**
  * D#6 R2b (correction C14 section 4): the two notices a run waiting for a runner can raise.
@@ -15,8 +15,8 @@ import { isRunnerMode, RUNNER_ONLINE_SECONDS, RUNNER_TTL_REMINDER_MS, RUNNER_WAI
  * also the marker that it was sent: a notice is written only while no row of its kind exists, under the same per-run lock
  * every `run_events` writer takes, so overlapping ticks cannot send it twice and there is no second place to keep in step.
  * A notice for a run that is no longer waiting is never written. "No runner online" is FOR THE RUN'S REPO, the reading the wait
- * reason in `@fx/runner-cloud` uses too: a runner counts only if it is not revoked, was heard from within `onlineWithinMs` (the 120
- * seconds the runner list uses), and has the run's repo in its own `allowed_repo_ids`. A live runner whose list leaves the repo out
+ * reason in `@fx/runner-cloud` uses too: a runner counts only if it is not revoked, is live by `runnerLiveSql` (the 120 seconds
+ * the runner list uses, `onlineWithinMs`, or the wake window for a wake runner while the wake gate is open), and has the run's repo in its own `allowed_repo_ids`. A live runner whose list leaves the repo out
  * can never claim the run, so it must not hold the notice back; and an empty list takes no repo (the claim reads it that way;
  * only `allowed_roles` reads empty as "all").
  *
@@ -56,6 +56,8 @@ export interface RunnerNoticeDeps {
   now?: () => number;
   /** A runner heard from within this long counts as online. */
   onlineWithinMs?: number;
+  /** D#6 RUNNER-WAKE: the deployment's wake gate. Open: a wake-capable runner counts as online for the wake window (`runnerLiveSql`). Absent: closed. */
+  wakeEnabled?: () => boolean;
   retryDelayMs?: number;
   onError?: (runId: string, error: unknown) => void;
   /** Called once in a tick whose list came back full (50): more runs may be waiting behind it. */
@@ -118,7 +120,7 @@ export function createRunnerNoticeSweeper(pool: Pool, deps: RunnerNoticeDeps = {
                       EXISTS (SELECT 1 FROM run_events e WHERE e.run_id = a.id AND e.kind = 'runner.waiting') AS has_waiting,
                       EXISTS (SELECT 1 FROM run_events e WHERE e.run_id = a.id AND e.kind = 'runner.ttl_reminder') AS has_reminder,
                       EXISTS (SELECT 1 FROM runners r WHERE r.account_id = a.account_id AND r.revoked_at IS NULL
-                                 AND r.last_seen_at > $3::timestamptz - make_interval(secs => $4)
+                                 AND ${runnerLiveSql({ runner: "r", now: "$3", onlineSeconds: "$4", wakeEnabled: deps.wakeEnabled?.() === true })}
                                  AND a.dispatch_repo_id = ANY(r.allowed_repo_ids)) AS runner_online
                  FROM agent_runs a WHERE a.id = $1 AND a.account_id = $2`,
               [row.run_id, row.account_id, new Date(now()), onlineWithinMs / 1000],
