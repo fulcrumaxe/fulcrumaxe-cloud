@@ -35,9 +35,7 @@ export function endOfRefusal(refusal: JobRefusal | "duplicate_job"): RunEnd {
 }
 
 const SETUP_CODES: ReadonlySet<string> = new Set(RUNNER_SETUP_DETAILS.filter((code) => code !== "other"));
-// `resource_limit` (D#6 C43-5): the job went past its own memory budget and was stopped by it. The cloud sees an agent failure (no retry);
-// the closed reason stays on the runner's side.
-const AGENT_CODES: ReadonlySet<string> = new Set(["agent_error", "no_result", "agent_exit", "resource_limit"]);
+const AGENT_CODES: ReadonlySet<string> = new Set(["agent_error", "no_result", "agent_exit"]);
 
 /**
  * The end to report for a run that `runJob` returned `failed` for. Null means report nothing: a credential mismatch ends the run on
@@ -48,6 +46,9 @@ export function endOfFailure(code: string, sizeMb?: number): RunEnd | null {
   if (code === "credential_mismatch") return null;
   if (code === "wall_clock") return { reason: "wall_clock" };
   if (code === "push_rejected") return { reason: "push_rejected" };
+  // `resource_limit` (D#6 C43-5): the kernel ended the job in its own scope for going past its memory budget. It has its own reason on the wire (it used to be sent as
+  // `agent_failed`, which reads as the agent giving up), so the run view can say the job hit its memory limit. A retry would hit the same limit: the cloud makes none.
+  if (code === "resource_limit") return { reason: "resource_limit" };
   if (AGENT_CODES.has(code)) return { reason: "agent_failed" };
   if (code === "push_too_large") return { reason: "runner_setup", detail: "push_too_large", ...(sizeMb === undefined ? {} : { sizeMb }) };
   if (SETUP_CODES.has(code)) return { reason: "runner_setup", detail: code as RunEndedDetail };

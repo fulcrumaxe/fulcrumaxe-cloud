@@ -81,6 +81,8 @@ export type FailureReason =
   | "job_refused"
   /** D#6 R4a-2 (C24 section 1): the agent stopped without a result. It would stop the same way again, so no follow-up is made. */
   | "agent_failed"
+  /** D#6 RUNNER-AGENT-NO-FULLCHECK: the runner job's own memory limit ended the agent (the kernel's OOM killer in the job's scope). Same on a retry, so no follow-up. */
+  | "resource_limit"
   /** D#6 R4a-2 (C24 section 1): the runner could not start the agent (sandbox, binary, login or flags). Same on a retry, so no follow-up. */
   | "runner_setup_failed"
   /** D#6 R2b (C24 section 2): a repo left `runner_local`, and its queued runner runs were cancelled with it (the user's own change ended them). */

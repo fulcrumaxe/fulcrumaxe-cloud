@@ -530,6 +530,8 @@ describe("what the cloud is told when a run does not finish (D#6 R4a-2, C24 sect
       ["agent_error", "agent_failed"],
       ["no_result", "agent_failed"],
       ["agent_exit", "agent_failed"],
+      // The job's own memory limit ended the agent (C43-5): its own reason, so the run view says so instead of "the agent stopped".
+      ["resource_limit", "resource_limit"],
       ["wall_clock", "wall_clock"],
       ["sandbox_unavailable", "runner_setup", "sandbox_unavailable"],
       ["claude_binary_missing", "runner_setup", "claude_binary_missing"],

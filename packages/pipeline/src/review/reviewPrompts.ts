@@ -1,7 +1,7 @@
 import { agentOutputBlock } from "../plan/envelope.js";
 import { assemblePrompt, type AssembledPrompt, type AssembleOptions, type NoteItem, type RenderedMemory } from "../prompt/assemblePrompt.js";
 import { MAX_FINDINGS, MAX_FINDING_CHARS } from "./findingCaps.js";
-import { BOT_EMAIL, BOT_NAME, branchFor, type PromptRuntime } from "../advance/build.js";
+import { BOT_EMAIL, BOT_NAME, RUNNER_TESTS_LINE, branchFor, type PromptRuntime } from "../advance/build.js";
 
 /**
  * D#483 P3: the prompts of the review stage. Built here, in the pipeline package, from values the platform holds (the repo
@@ -120,6 +120,7 @@ export function assembleReviewPrompt(input: ReviewPromptInput): AssembledPrompt 
           `  git diff origin/${baseRef}...HEAD`,
           `Confirm \`git rev-parse HEAD\` prints ${headSha} before you review. If it does not, your verdict is \`fail\` and the summary says the workspace was at the wrong commit.`,
           "Do not commit: you only report.",
+          RUNNER_TESTS_LINE,
           ENV_FAILURE_LINE,
         ]
       : [
@@ -213,7 +214,8 @@ export function assembleFixPrompt(input: FixPromptInput, options?: AssembleOptio
     ? [
         `You are the executor. The reviewers asked for changes on pull request #${input.pr} (${input.owner}/${input.name}, issue #${input.issue}).`,
         "The repository is checked out in your working directory, on the pull request's branch. Stay on it: do not create, switch, rename or delete branches, and do not detach HEAD.",
-        `You are fixing commit ${input.headSha}. Fix every finding below, keep the change small, update or add tests, and run the tests until they pass.`,
+        `You are fixing commit ${input.headSha}. Fix every finding below, keep the change small, update or add tests, and run the tests for your change until they pass.`,
+        RUNNER_TESTS_LINE,
         "Stage only the files you changed, by name (`git add <path> ...`). Never `git add -A`, `git add .` or `commit -a` with new files: the sandbox leaves empty placeholder files in the checkout, and they must not be committed.",
         `Commit as the bot: git -c user.name="${BOT_NAME}" -c user.email="${BOT_EMAIL}" commit -m "<message>"`,
         "Do not push, do not change remotes, do not open a pull request and do not call the GitHub API. The platform publishes your commit to the existing pull request.",

@@ -48,3 +48,34 @@ export function denyRules(protectedList: ProtectedPaths): string[] {
   const both = (tool: "Read" | "Edit", abs: string): string[] => [`${tool}(${anchored(abs)})`, `${tool}(${anchored(abs)}/**)`];
   return [...protectedList.noAccess.flatMap((abs) => [...both("Read", abs), ...both("Edit", abs)]), ...protectedList.noEdit.flatMap((abs) => both("Edit", abs))];
 }
+
+/** One word of an approved check that a `Bash(...)` rule can carry literally: no space, quote, glob, escape or rule delimiter. */
+const CHECK_WORD = /^[A-Za-z0-9._/=+@%,:-]{1,200}$/;
+const SHELLS: ReadonlySet<string> = new Set(["bash", "sh"]);
+
+/**
+ * D#6 RUNNER-AGENT-NO-FULLCHECK: `Bash` deny rules for the repository's approved check, so the agent does not run the whole suite inside its own job (the
+ * runner runs it after the agent, in a step of its own with its own limits). Each spelling is denied bare and as a prefix (`Bash(cmd)`, `Bash(cmd:*)`); the
+ * CLI matches a rule against each command of a pipeline or `&&` chain, so `cmd 2>&1 | tail` is refused too. Spellings: the signed vector as it is, and for a
+ * script started by `bash` or `sh`, the same script under either shell, started directly, with and without a leading `./`.
+ *
+ * This is the verbatim command and its plain spellings, not a sandbox: an agent that hides the command (a wrapper script, `eval`) is not stopped by it, and
+ * the prompt note says plainly not to run it in any form. A vector with a word that cannot be written literally gets no rules (the note still applies); it
+ * never refuses the start, since the check is the person's own approved command.
+ */
+export function checkCommandDenyRules(argv: readonly string[] | undefined): string[] {
+  if (argv === undefined || argv.length === 0 || argv.length > 32 || !argv.every((word) => CHECK_WORD.test(word))) return [];
+  const commands = [argv.join(" ")];
+  const [first, script, ...rest] = argv;
+  if (first !== undefined && SHELLS.has(first) && script !== undefined && !script.startsWith("-") && !script.startsWith("/")) {
+    const bare = script.startsWith("./") ? script.slice(2) : script;
+    for (const form of [bare, `./${bare}`]) {
+      for (const lead of ["bash ", "sh ", ""]) {
+        // Started directly, a name with no slash is looked up on PATH: that is another command, not this script.
+        if (lead === "" && !form.includes("/")) continue;
+        commands.push([`${lead}${form}`, ...rest].join(" "));
+      }
+    }
+  }
+  return [...new Set(commands)].flatMap((command) => [`Bash(${command})`, `Bash(${command}:*)`]);
+}

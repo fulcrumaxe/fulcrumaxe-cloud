@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { buildExecutorPrompt, promptRuntimeOf } from "../src/advance/build.js";
+import { RUNNER_TESTS_LINE, buildExecutorPrompt, promptRuntimeOf } from "../src/advance/build.js";
 import { buildFixPrompt } from "../src/review/reviewPrompts.js";
 import { expectOneGenuineEnvelope } from "./plan/helpers/panelFixtures.js";
 
@@ -58,6 +58,13 @@ describe("buildExecutorPrompt by runtime", () => {
     expect(p).toContain('user.name="fulcrumaxe-bot"');
     expect(p).toContain("Closes #41");
     expect(p).toContain("SPEC (version 3):");
+  });
+
+  it.each([{ rebuild: false }, { rebuild: true }])("RUNNER-AGENT-NO-FULLCHECK (rebuild=$rebuild): the runner build runs only the tests for its change, never the whole check; the sandbox prompt does not say so", ({ rebuild }) => {
+    const p = buildExecutorPrompt({ ...BUILD, rebuild, runtime: "runner" });
+    expect(p).toContain(RUNNER_TESTS_LINE);
+    expect(p).not.toContain("Run the project's tests until they pass");
+    expect(buildExecutorPrompt({ ...BUILD, rebuild })).not.toContain(RUNNER_TESTS_LINE);
   });
 
   it("the runner envelope keeps verdict, tests and summary, and drops branch and pr_number (the agent makes neither)", () => {
