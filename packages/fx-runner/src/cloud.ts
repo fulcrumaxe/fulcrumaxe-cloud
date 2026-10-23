@@ -88,11 +88,22 @@ export async function readCapped(response: Response, max: number): Promise<strin
 }
 
 /** Sends one signed POST. Network failures are reported in fixed words; a reply is returned as it came. */
-export async function signedPost(input: SignedPost): Promise<CloudReply> {
-  const text = JSON.stringify(input.body);
+export function signedPost(input: SignedPost): Promise<CloudReply> {
+  return signedRequest("POST", JSON.stringify(input.body), { "content-type": "application/json" }, input);
+}
+
+/**
+ * D#6 RUNNER-WAKE: one signed GET with an empty body, for the wake check. The signature is the same as every other runner request (method, full
+ * URI, digest of the empty body). `headers` are the route's own (the wake token and the Accept), sent only to `origin` like the rest.
+ */
+export function signedGet(input: Omit<SignedPost, "body"> & { headers: Record<string, string> }): Promise<CloudReply> {
+  return signedRequest("GET", "", input.headers, input);
+}
+
+async function signedRequest(method: "GET" | "POST", text: string, extra: Record<string, string>, input: Omit<SignedPost, "body">): Promise<CloudReply> {
   const url = `${input.origin}${input.path}`;
   const headers = signRequest({
-    method: "POST",
+    method,
     url,
     body: text,
     privateKey: input.key.privateKey,
@@ -103,9 +114,9 @@ export async function signedPost(input: SignedPost): Promise<CloudReply> {
   let response: Response;
   try {
     response = await input.fetchFn(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", ...headers, ...bypassHeaders(input.bypass, input.origin, url) },
-      body: text,
+      method,
+      headers: { ...extra, ...headers, ...bypassHeaders(input.bypass, input.origin, url) },
+      ...(method === "GET" ? {} : { body: text }),
       redirect: "error",
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });

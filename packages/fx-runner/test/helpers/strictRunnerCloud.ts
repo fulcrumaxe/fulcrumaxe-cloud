@@ -1,9 +1,30 @@
+import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
   CLAIM_IDLE_RETRY_AFTER_SECONDS, ClaimMessage, ClaimReply, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage, HelloMessage,
-  HeartbeatReply, SeqNotIncreasingReply, StopReply, jwkThumbprint, verifyRunnerRequest, type Ed25519Jwk, type LocalOnlyEvent, type SignedJob, type StopReason,
+  HeartbeatReply, HelloReply, SeqNotIncreasingReply, StopReply, WAKE_CAPABILITY, WakeGrant, jwkThumbprint, verifyRunnerRequest, type Ed25519Jwk, type LocalOnlyEvent,
+  type SignedJob, type StopReason,
 } from "@fulcrumaxe/runner-protocol";
+
+/**
+ * D#6 RUNNER-WAKE: the wake half of the fake, against the contract the wake route is built to: `GET /api/runner/wake`, an empty body, the
+ * runner's usual signature (method, full URI, digest of the empty body; no nonce is spent), `Accept: application/json` (anything else 406), the
+ * token as `Authorization: Bearer <token>` and only a token this cloud minted (else 401), and the reply exactly `{epoch, due_at}`. With
+ * `enabled` the hello and claim replies carry a grant for a runner whose latest hello listed `wake_v1`. With `oldCloud` the hello refuses
+ * `wake_v1` as a cloud built before it does (its capability list is a strict enum: 400 invalid_message, nothing recorded).
+ */
+export interface FakeWake {
+  enabled: boolean;
+  oldCloud: boolean;
+  epoch: number;
+  dueAt: number | null;
+  pollSeconds: number;
+  /** Tokens minted so far; only these are accepted. */
+  tokens: string[];
+  /** Answer this many wake checks with 503 before answering normally. */
+  failNext: number;
+}
 
 /**
  * A stand-in for the cloud's hello, claim, heartbeat, events and done routes (runner-cloud's claim, heartbeat and ingestEvents; `done`
@@ -50,6 +71,7 @@ export interface StrictRunnerCloud {
   stopRun(runId: string, reason: StopReason): void;
   /** Where the next `done` for a run answers 503 `{retry_after}` and writes nothing: this many times. */
   githubDown: number;
+  wake: FakeWake;
   close(): Promise<void>;
 }
 
@@ -90,7 +112,16 @@ export async function startStrictRunnerCloud(): Promise<StrictRunnerCloud> {
       if (run) run.stop = reason;
     },
     githubDown: 0,
+    wake: { enabled: false, oldCloud: false, epoch: 0, dueAt: null, pollSeconds: 20, tokens: [], failNext: 0 },
     close: async () => undefined,
+  };
+  /** Whether the runner's latest accepted hello listed `wake_v1` (the real cloud keeps this in runner_capabilities). */
+  let helloAskedWake = false;
+  const grant = (): { wake?: WakeGrant } => {
+    if (!state.wake.enabled || !helloAskedWake) return {};
+    const token = `${randomBytes(24).toString("base64url")}.${randomBytes(32).toString("base64url")}`;
+    state.wake.tokens.push(token);
+    return { wake: WakeGrant.parse({ token, poll_s: state.wake.pollSeconds, transport: "poll" }) };
   };
 
   const server: Server = createServer((req, res) => {
@@ -101,6 +132,28 @@ export async function startStrictRunnerCloud(): Promise<StrictRunnerCloud> {
     const refuse = (status: number, code: string): void => send(status, { error: { code, message: code } });
     void (async () => {
       const path = req.url ?? "";
+      if (path === "/api/runner/wake") {
+        if (req.method !== "GET") return refuse(405, "method_not_allowed");
+        const raw = await readBody(req);
+        if (!raw || raw.length > 0) return refuse(400, "invalid_message");
+        const headers = Object.fromEntries(Object.entries(req.headers).map(([k, v]) => [k, Array.isArray(v) ? v.join(", ") : v]));
+        let verified;
+        try {
+          verified = await verifyRunnerRequest({ method: "GET", url: `${state.origin}${path}`, headers: headers as Record<string, string | undefined>, body: "" }, (keyid) => jwks.get(keyid));
+        } catch {
+          return refuse(401, "unauthorized");
+        }
+        if (!keys.has(verified.keyid)) return refuse(401, "unauthorized");
+        if (headers.accept !== "application/json") return refuse(406, "not_acceptable");
+        const bearer = /^Bearer (\S+)$/.exec(headers.authorization ?? "")?.[1];
+        if (bearer === undefined || !state.wake.tokens.includes(bearer)) return refuse(401, "unauthorized");
+        state.seen.push({ path, body: undefined, nonce: verified.nonce });
+        if (state.wake.failNext > 0) {
+          state.wake.failNext -= 1;
+          return refuse(503, "unavailable");
+        }
+        return send(200, { epoch: state.wake.epoch, due_at: state.wake.dueAt });
+      }
       const match = /^\/api\/runner\/(?:(hello|claim|heartbeat)|runs\/([^/]+)\/(events|done))$/.exec(path);
       if (req.method !== "POST" || !match) return refuse(404, "not_found");
       const route = (match[1] ?? match[3]) as "hello" | "claim" | "heartbeat" | "events" | "done";
@@ -134,18 +187,23 @@ export async function startStrictRunnerCloud(): Promise<StrictRunnerCloud> {
       const schemas = { hello: HelloMessage, claim: ClaimMessage, heartbeat: HeartbeatMessage, events: EventsMessage, done: DoneMessage } as const;
       const message = schemas[route].safeParse(json);
       if (!message.success) return refuse(400, "invalid_message");
-      if (route === "hello") return send(200, { protocol_version: 1 });
+      if (route === "hello") {
+        const asked = ((message.data as { capabilities?: string[] }).capabilities ?? []).includes(WAKE_CAPABILITY);
+        if (asked && state.wake.oldCloud) return refuse(400, "invalid_message");
+        helloAskedWake = asked;
+        return send(200, HelloReply.parse({ protocol_version: 1, ...grant() }));
+      }
       if (route === "claim") {
         // As the real route: a poll that names `sandbox_unavailable` takes no job, whatever is queued, and answers retry_after only.
         if ((message.data as { sandbox_unavailable?: string }).sandbox_unavailable !== undefined) {
-          return send(200, ClaimReply.parse({ retry_after: CLAIM_IDLE_RETRY_AFTER_SECONDS }), { "retry-after": String(CLAIM_IDLE_RETRY_AFTER_SECONDS) });
+          return send(200, ClaimReply.parse({ retry_after: CLAIM_IDLE_RETRY_AFTER_SECONDS, ...grant() }), { "retry-after": String(CLAIM_IDLE_RETRY_AFTER_SECONDS) });
         }
         const next = queue.shift();
-        if (!next) return send(200, ClaimReply.parse({ retry_after: CLAIM_IDLE_RETRY_AFTER_SECONDS }), { "retry-after": String(CLAIM_IDLE_RETRY_AFTER_SECONDS) });
+        if (!next) return send(200, ClaimReply.parse({ retry_after: CLAIM_IDLE_RETRY_AFTER_SECONDS, ...grant() }), { "retry-after": String(CLAIM_IDLE_RETRY_AFTER_SECONDS) });
         const run = state.runs.get(next.job.run_id) ?? { generation: 0, over: false, lastSeq: -1, stop: undefined, doneReply: undefined, events: [], endedBy: undefined };
         run.generation += 1;
         state.runs.set(next.job.run_id, run);
-        return send(200, ClaimReply.parse({ signed_job: next, run_id: next.job.run_id, lease_generation: run.generation }));
+        return send(200, ClaimReply.parse({ signed_job: next, run_id: next.job.run_id, lease_generation: run.generation, ...grant() }));
       }
 
       const body = message.data as { run_id: string; lease_generation: number; events?: LocalOnlyEvent[] };

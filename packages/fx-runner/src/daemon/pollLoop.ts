@@ -13,6 +13,7 @@ import type { Admission } from "./admission.js";
 import type { Claimed, RunnerClient } from "./client.js";
 import type { Clock } from "./lease.js";
 import type { SandboxGate } from "./sandboxGate.js";
+import { WAKE_FALLBACK_CLAIM_SECONDS, safetyClaimAt, type WakeTracker } from "./wake.js";
 
 export const BACKOFF_START_SECONDS = 5;
 export const BACKOFF_MAX_SECONDS = 300;
@@ -26,12 +27,23 @@ export type PollEvent =
   | { event: "claimed"; runId: string }
   | { event: "discarded"; runId: string }
   | { event: "refused"; runId: string; reason: "class_full" }
-  | { event: "job_error" };
+  | { event: "job_error" }
+  /** D#6 RUNNER-WAKE: a wake check said to claim (`reason`), or the safety slot came round (`safety`). */
+  | { event: "wake_claim"; reason: "epoch" | "due" | "no_baseline" | "safety" }
+  /** D#6 RUNNER-WAKE: the wake route failed 3 times in a row; plain 60-second claims until a claim brings a grant again. */
+  | { event: "wake_fallback" };
 
 export type PollEnd = "stopped" | "unauthorized" | "restart";
 
 export interface PollDeps {
-  client: Pick<RunnerClient, "claim">;
+  /** `wake` is needed only with a `wake` tracker. */
+  client: Pick<RunnerClient, "claim"> & Partial<Pick<RunnerClient, "wake">>;
+  /**
+   * D#6 RUNNER-WAKE: the runner's wake state, seeded with the hello's grant. With it, an idle answer is waited out by checking the wake route
+   * every `poll_s` and claiming only when it says so or the safety slot comes round (wake.ts). Without it, or while no grant is held, the
+   * loop waits the cloud's `retry_after` as before.
+   */
+  wake?: WakeTracker;
   clock: Clock;
   /** Asked before every claim (C16 section 1.3). A closed gate means no claim: the poll reports the reason and takes no job. Required: no loop runs without one. */
   gate: SandboxGate;
@@ -84,16 +96,68 @@ export async function pollLoop(deps: PollDeps): Promise<PollEnd> {
       for (const sleeper of sleepers) sleeper.abort();
     });
   };
+  /** Waits `ms`, or less when a job ends meanwhile and the loop could claim again. True when a job's end cut it short. */
+  async function nap(ms: number): Promise<boolean> {
+    if (running.size === 0) {
+      await deps.clock.sleep(ms, deps.signal);
+      return false;
+    }
+    const ended = new AbortController();
+    sleepers.add(ended);
+    try {
+      await deps.clock.sleep(ms, AbortSignal.any([deps.signal, ended.signal]));
+    } finally {
+      sleepers.delete(ended);
+    }
+    return ended.signal.aborted;
+  }
   /** Waits `seconds`, or less when a job ends meanwhile and the loop could claim again. */
   async function waitForWork(seconds: number): Promise<void> {
-    if (running.size === 0) return wait(seconds);
-    const wake = new AbortController();
-    sleepers.add(wake);
-    try {
-      await deps.clock.sleep(seconds * 1000, AbortSignal.any([deps.signal, wake.signal]));
-    } finally {
-      sleepers.delete(wake);
+    await nap(seconds * 1000);
+  }
+
+  /**
+   * D#6 RUNNER-WAKE: waits out an idle answer of `retryAfter` seconds by checking the wake route every `poll_s`. Returns when the loop should
+   * claim: a check said so, the safety time came, the checks failed 3 times in a row, a job ended, or the loop was asked to stop.
+   */
+  async function waitForWake(retryAfter: number): Promise<void> {
+    const tracker = deps.wake!;
+    const check = deps.client.wake!;
+    const safetyAt = safetyClaimAt(deps.clock.now().getTime(), retryAfter, random);
+    for (;;) {
+      const mode = tracker.mode();
+      if (mode.kind !== "poll") return;
+      const left = safetyAt - deps.clock.now().getTime();
+      if (left <= 0) {
+        log({ event: "wake_claim", reason: "safety" });
+        return;
+      }
+      if (await nap(Math.min(mode.grant.poll_s * 1000, left))) return;
+      if (deps.signal.aborted) return;
+      if (deps.clock.now().getTime() >= safetyAt) {
+        log({ event: "wake_claim", reason: "safety" });
+        return;
+      }
+      const reply = await check(mode.grant.token);
+      if (reply.kind === "wake") {
+        const decision = tracker.onWake({ epoch: reply.epoch, dueAt: reply.dueAt }, deps.clock.now().getTime());
+        if (decision.claim) {
+          log({ event: "wake_claim", reason: decision.reason });
+          return;
+        }
+      } else if (tracker.onWakeFailure()) {
+        log({ event: "wake_fallback" });
+        return;
+      }
     }
+  }
+
+  /** How an idle answer is waited out: by wake checks while a grant is held, 60-second claims while fallen back, else the cloud's `retry_after`. */
+  async function waitIdle(retryAfter: number): Promise<void> {
+    const mode = deps.wake?.mode() ?? { kind: "none" as const };
+    if (mode.kind === "poll" && deps.client.wake !== undefined) return waitForWake(retryAfter);
+    if (mode.kind === "fallback") return waitForWork(Math.min(retryAfter, WAKE_FALLBACK_CLAIM_SECONDS));
+    return waitForWork(retryAfter);
   }
 
   try {
@@ -127,6 +191,7 @@ export async function pollLoop(deps: PollDeps): Promise<PollEnd> {
         await wait(backoff());
       } else if (reply.kind === "claimed") {
         failures = 0;
+        deps.wake?.onClaim(reply.wake, deps.clock.now().getTime());
         // Asked to stop while the claim was in flight: the run is not started. Its lease runs out and the cloud reissues it.
         if (deps.signal.aborted) {
           log({ event: "discarded", runId: reply.runId });
@@ -142,9 +207,11 @@ export async function pollLoop(deps: PollDeps): Promise<PollEnd> {
         start(reply);
       } else if (reply.kind === "idle" || reply.kind === "rate_limited") {
         failures = 0;
+        if (reply.kind === "idle") deps.wake?.onClaim(reply.wake, deps.clock.now().getTime());
         log(gate.open ? { event: reply.kind, waitSeconds: reply.retryAfter } : { event: "sandbox_unavailable", reason: gate.reason, waitSeconds: reply.retryAfter });
-        // Only an idle answer may be cut short by a job ending; the cloud's throttle (`rate_limited`) is waited out in full.
-        if (reply.kind === "idle") await waitForWork(reply.retryAfter);
+        // Only an idle answer may be cut short by a job ending; the cloud's throttle (`rate_limited`) is waited out in full. A closed sandbox's
+        // status poll keeps the cloud's own cadence: no wake check can make it take a job.
+        if (reply.kind === "idle") await (gate.open ? waitIdle(reply.retryAfter) : waitForWork(reply.retryAfter));
         else await wait(reply.retryAfter);
       } else {
         if (reply.status === 401) return "unauthorized";

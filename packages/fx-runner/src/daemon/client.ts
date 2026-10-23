@@ -4,11 +4,12 @@
  * list is never sent and a reply it does not describe is never believed: it is an error with a closed code.
  */
 import {
-  ClaimMessage, ClaimRateLimitedReply, HelloMessage, ClaimReply, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
+  ClaimMessage, ClaimRateLimitedReply, HelloMessage, HelloReply, ClaimReply, WAKE_CAPABILITY, type WakeGrant, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
   GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply,
   PLANE_PUSH_PAIRING_PATH, PLANE_PUSH_REPORT_PATH, PLANE_PUSH_TOKEN_PATH, PlanePushPairingMessage, PlanePushPairingReply, PlanePushReportMessage, PlanePushReportReply, PlanePushTokenMessage, PlanePushTokenReply, type ClaimCapacity, type ContextLedgerWire, type DoneCheck, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
 } from "@fulcrumaxe/runner-protocol";
-import { errorCodeOf, signedPost, type CloudReply } from "../cloud.js";
+import { errorCodeOf, signedGet, signedPost, type CloudReply } from "../cloud.js";
+import { WAKE_PATH, parseWakeReply } from "./wake.js";
 import type { RunnerKey } from "../keys.js";
 
 export const HELLO_PATH = "/api/runner/hello";
@@ -24,8 +25,11 @@ export interface CallError {
   code?: string;
 }
 
-export type Claimed = { kind: "claimed"; signedJob: SignedJob; runId: string; leaseGeneration: number };
-export type ClaimResult = Claimed | { kind: "idle"; retryAfter: number } | { kind: "rate_limited"; retryAfter: number } | CallError;
+/** `wake` is the grant the reply carried (D#6 RUNNER-WAKE), absent when it carried none. */
+export type Claimed = { kind: "claimed"; signedJob: SignedJob; runId: string; leaseGeneration: number; wake?: WakeGrant };
+export type ClaimResult = Claimed | { kind: "idle"; retryAfter: number; wake?: WakeGrant } | { kind: "rate_limited"; retryAfter: number } | CallError;
+/** D#6 RUNNER-WAKE: a wake check's answer: the account's wake epoch and the earliest due time, both ms (due null when none). */
+export type WakeResult = { kind: "wake"; epoch: number; dueAt: number | null } | CallError;
 /** `handoff` is present only when the cloud asked for the run to move to the other side; `deadline` is the UTC instant after which it takes the last pushed commit. */
 export type HeartbeatResult = { kind: "ok"; leaseExpiresAt: string; handoff?: { deadline: string } } | { kind: "stop"; reason: StopReason } | CallError;
 export type EventsResult =
@@ -75,7 +79,9 @@ export interface DoneInput {
 
 export interface RunnerClient {
   /** D#605 FL-2: says what this build and machine are. Best effort: the caller keeps going on any answer, and a cloud that predates `facts` answers 400. */
-  hello(message: HelloMessage): Promise<{ kind: "ok" } | CallError>;
+  hello(message: HelloMessage): Promise<{ kind: "ok"; wake?: WakeGrant } | CallError>;
+  /** D#6 RUNNER-WAKE: the no-database wake check, with the token of the grant held. Never a claim: it hands out nothing. */
+  wake(token: string): Promise<WakeResult>;
   /**
    * Asks for a run. With `sandboxUnavailable` it is the status poll of a runner that cannot sandbox a job (C16 section 1.3): the reply is
    * `retry_after` only, and a reply that carries a job is an error, never a claim, so nothing a misbehaving cloud sends can be run.
@@ -119,8 +125,32 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
 
   return {
     async hello(message) {
-      const reply = await send(HELLO_PATH, HelloMessage.parse(message));
-      return reply?.status === 200 ? { kind: "ok" } : fail(reply);
+      const parsed = HelloMessage.parse(message);
+      let reply = await send(HELLO_PATH, parsed);
+      // D#6 RUNNER-WAKE: a cloud from before `wake_v1` refuses the unknown capability with 400 invalid_message and records nothing, so the same
+      // hello goes again without it, and the runner works as it did before (plain claims, no grant).
+      if (reply?.status === 400 && errorCodeOf(reply.body) === "invalid_message" && parsed.capabilities?.includes(WAKE_CAPABILITY)) {
+        reply = await send(HELLO_PATH, { ...parsed, capabilities: parsed.capabilities.filter((c) => c !== WAKE_CAPABILITY) });
+      }
+      if (reply?.status !== 200) return fail(reply);
+      // The hello is best effort: a 200 whose body is not a protocol reply still counts, it just brings no grant.
+      const body = HelloReply.safeParse(reply.body);
+      return body.success && body.data.wake !== undefined ? { kind: "ok", wake: body.data.wake } : { kind: "ok" };
+    },
+
+    async wake(token) {
+      let reply: CloudReply | undefined;
+      try {
+        reply = await signedGet({ origin: config.origin, path: WAKE_PATH, key: config.key, now: config.now(), fetchFn: config.fetchFn, bypass: config.bypass, headers: { authorization: `Bearer ${token}`, accept: "application/json" } });
+      } catch {
+        // fx-swallow-ok: signedGet reports a network failure in fixed words; the caller counts it as a failed check
+        reply = undefined;
+      }
+      if (reply?.status === 200) {
+        const parsed = parseWakeReply(reply.body);
+        return parsed === undefined ? fail(reply, "invalid_reply") : { kind: "wake", epoch: parsed.epoch, dueAt: parsed.due_at };
+      }
+      return fail(reply);
     },
 
     async claim(sandboxUnavailable, capacity) {
@@ -132,9 +162,10 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
         // A status poll takes no job: a reply with one is refused here, so no code path past this point can run it.
         if (sandboxUnavailable !== undefined && "signed_job" in parsed.data) return fail(reply, "invalid_reply");
         // The reply schema also refuses a claim whose `run_id` differs from the signed job's own.
+        const wake = parsed.data.wake === undefined ? {} : { wake: parsed.data.wake };
         return "signed_job" in parsed.data
-          ? { kind: "claimed", signedJob: parsed.data.signed_job, runId: parsed.data.run_id, leaseGeneration: parsed.data.lease_generation }
-          : { kind: "idle", retryAfter: parsed.data.retry_after };
+          ? { kind: "claimed", signedJob: parsed.data.signed_job, runId: parsed.data.run_id, leaseGeneration: parsed.data.lease_generation, ...wake }
+          : { kind: "idle", retryAfter: parsed.data.retry_after, ...wake };
       }
       if (reply?.status === 429) {
         const parsed = ClaimRateLimitedReply.safeParse(reply.body);

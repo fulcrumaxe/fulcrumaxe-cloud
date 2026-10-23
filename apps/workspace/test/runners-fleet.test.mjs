@@ -97,6 +97,12 @@ describe("states", () => {
     expect(parts({ state: "revoked", state_note: null }).words).toBe("Revoked");
     for (const state of Object.keys(STATE_WORDS)) expect(parts({ state }).mark).not.toBe("");
   });
+
+  it("a wake-capable runner heard from within its slot shows when it was last heard, after its state", () => {
+    expect(parts({ state: "online_idle", state_note: "Last heard 7 min ago" })).toEqual({ mark: "●", words: "Online · Last heard 7 min ago" });
+    expect(parts({ state: "busy", load_label: "Busy · 1 of 2", state_note: "Last heard 3 min ago" }).words).toBe("Busy · 1 of 2 · Last heard 3 min ago");
+    expect(parts({ state: "online_idle", state_note: null }).words).toBe("Online");
+  });
   it("says Update needed beside the version of an outdated runner only", () => {
     expect(versionText(readRunner(wire({ state: "outdated" })))).toBe("0.9.1 · Update needed");
     expect(versionText(readRunner(wire()))).toBe("0.9.1");

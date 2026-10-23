@@ -5,6 +5,8 @@ import { RESUMES_WITHIN_NOTE, RUNNER_ONLINE_SECONDS } from "@fx/runner";
 import { UNNAMED_MEMBER } from "./memberRole.js";
 import { accountLineOf, fleetControlsOf, type AccountLine, type FleetControls } from "./fleetView.js";
 import { MIN_SUPPORTED_PROTOCOL_VERSION, RunnerHttpError, type RunnerCloudDeps } from "./http.js";
+import { RUNNER_WAKE_LIVENESS_SECONDS } from "./wakeSeen.js";
+import { configuredWakeKey } from "./wakeToken.js";
 
 /**
  * D#6 R2b criterion 13 (the read model) and criterion 16 (`GET /api/runners`, correction C6 section 2).
@@ -36,6 +38,47 @@ export interface RunnerFacts {
   paused?: boolean;
   /** D#605 FL-3: `runner_settings.draining` is true. Absent reads as not draining. */
   draining?: boolean;
+  /** D#6 RUNNER-WAKE: the runner's last wake check, from the cache (wakeSeen.ts). Absent or null: only the database stamp counts. */
+  seenAt?: Date | null;
+  /**
+   * D#6 RUNNER-WAKE: it holds a wake grant, so it claims only on work or at its safety slot: its latest hello listed `wake_v1` AND the cloud's
+   * wake key is configured (no key, no grant). Absent reads as false.
+   */
+  wakeCapable?: boolean;
+}
+
+/** Pure. When the runner was last heard from: the later of the database stamp and the cached wake check. */
+export function lastHeardAt(facts: Pick<RunnerFacts, "lastSeenAt" | "seenAt">): Date | null {
+  const db = facts.lastSeenAt;
+  const cached = facts.seenAt ?? null;
+  if (db === null) return cached;
+  if (cached === null) return db;
+  return cached.getTime() > db.getTime() ? cached : db;
+}
+
+/**
+ * Pure. Whether the runner counts as heard from: within `RUNNER_ONLINE_SECONDS` (120) of its last request, or, for a wake-capable runner, within
+ * `RUNNER_WAKE_LIVENESS_SECONDS` (35 min: one safety slot plus grace). Both edges are inclusive.
+ */
+function heardRecently(facts: RunnerFacts, now: Date): boolean {
+  const heard = lastHeardAt(facts);
+  if (heard === null) return false;
+  const quietMs = now.getTime() - heard.getTime();
+  if (quietMs <= RUNNER_ONLINE_SECONDS * 1000) return true;
+  return facts.wakeCapable === true && quietMs <= RUNNER_WAKE_LIVENESS_SECONDS * 1000;
+}
+
+/**
+ * Pure. "Last heard N min ago" (whole minutes, rounded down) for a runner that reads online or busy but is past the ordinary 120-second window,
+ * which only a wake-capable runner can be; null otherwise, so the screen shows no note.
+ */
+export function lastHeardNote(state: RunnerState, facts: Pick<RunnerFacts, "lastSeenAt" | "seenAt">, now: Date): string | null {
+  if (state !== "online_idle" && state !== "busy") return null;
+  const heard = lastHeardAt(facts);
+  if (heard === null) return null;
+  const quietMs = now.getTime() - heard.getTime();
+  if (quietMs <= RUNNER_ONLINE_SECONDS * 1000) return null;
+  return `Last heard ${Math.floor(quietMs / 60_000)} min ago`;
 }
 
 /** The light roles as an SQL array literal. The list is a constant of the protocol (role names), never input, and the pattern below keeps it so. */
@@ -86,7 +129,8 @@ export function loadLabel(state: RunnerState, running: RunnerRunning, capacity: 
  * The one state of a runner. Precedence, highest first: `revoked` (nothing else matters once the key is dead),
  * `outdated` (below the supported floor: it is refused at `hello`, and an upgrade is the only fix, so it says so even while it is quiet),
  * `paused` and `draining` (D#605 FL-3: set by a person, answered idle by the claim, and shown BEFORE the online test, because a runner told to
- * wait 5 minutes is quiet for longer than the online window and must not read `offline`), `offline` (no request for 120 seconds), `busy`, `online_idle`. A runner that has never said `hello` has no protocol
+ * wait 5 minutes is quiet for longer than the online window and must not read `offline`), `offline` (no request for 120 seconds; D#6 RUNNER-WAKE: for a
+ * wake-capable runner, nothing heard for 35 minutes, counting its cached wake checks), `busy`, `online_idle`. A runner that has never said `hello` has no protocol
  * version and is not outdated: it is offline until it is heard from.
  */
 export function classifyRunner(facts: RunnerFacts, now: Date, min: number = MIN_SUPPORTED_PROTOCOL_VERSION): RunnerState {
@@ -95,11 +139,11 @@ export function classifyRunner(facts: RunnerFacts, now: Date, min: number = MIN_
   if (facts.paused === true) return "paused";
   // D#605 FL-8: a drain lets running work finish, and when the last run ends the runner reads as paused (it still takes nothing new until resumed).
   if (facts.draining === true) return facts.busy ? "draining" : "paused";
-  if (facts.lastSeenAt === null || now.getTime() - facts.lastSeenAt.getTime() > RUNNER_ONLINE_SECONDS * 1000) return "offline";
+  if (!heardRecently(facts, now)) return "offline";
   return facts.busy ? "busy" : "online_idle";
 }
 
-type ReadDeps = Pick<RunnerCloudDeps, "appUserPool" | "now" | "minSupportedProtocolVersion" | "accountRunnerCaps" | "accountJobLimit" | "maxRunners">;
+type ReadDeps = Pick<RunnerCloudDeps, "appUserPool" | "now" | "minSupportedProtocolVersion" | "accountRunnerCaps" | "accountJobLimit" | "maxRunners" | "runnerSeen" | "wakeKey">;
 
 export interface RunnerRow {
   id: string;
@@ -179,6 +223,7 @@ interface RawRunner {
   revoked_reason: string | null;
   paused: boolean;
   draining: boolean;
+  wake_capable: boolean;
   sandbox_unavailable: SandboxUnavailableReason | null;
   consent_granted: boolean | null;
   consent_changed_at: Date | null;
@@ -252,6 +297,7 @@ export async function readFleet(deps: ReadDeps, accountId: string, userId: strin
         `SELECT r.id, r.credential_mode, r.registered_by, COALESCE(NULLIF(u.name, ''), NULLIF(u.github_login, ''), $3) AS registered_by_name,
                 r.binary_version, r.protocol_version, r.last_seen_at, r.revoked_at, r.revoked_reason, s.reason AS sandbox_unavailable,
                 COALESCE(st.paused_at IS NOT NULL, false) AS paused, COALESCE(st.draining, false) AS draining,
+                COALESCE('wake_v1' = ANY(rc.capabilities), false) AS wake_capable,
                 pc.granted AS consent_granted, pc.created_at AS consent_changed_at, r.allowed_repo_ids,
                 EXISTS (SELECT 1 FROM agent_runs a
                          WHERE a.account_id = r.account_id AND a.runner_id = r.id AND a.status = 'running' AND a.lease_expires_at > $2) AS busy,
@@ -267,6 +313,7 @@ export async function readFleet(deps: ReadDeps, accountId: string, userId: strin
                                       FROM agent_runs a WHERE a.account_id = r.account_id AND a.runner_id = r.id AND a.status = 'running' AND a.lease_expires_at > $2) live
                 LEFT JOIN runner_sandbox_status s ON s.runner_id = r.id AND s.account_id = r.account_id
                 LEFT JOIN runner_settings st ON st.runner_id = r.id AND st.account_id = r.account_id
+                LEFT JOIN runner_capabilities rc ON rc.runner_id = r.id AND rc.account_id = r.account_id
                 LEFT JOIN LATERAL (SELECT c.granted, c.created_at FROM runner_plan_consents c
                                     WHERE c.account_id = r.account_id AND c.runner_id = r.id ORDER BY c.version DESC LIMIT 1) pc ON true
           WHERE r.account_id = $1
@@ -318,24 +365,42 @@ export async function readFleet(deps: ReadDeps, accountId: string, userId: strin
           seesAddress = role === "owner" || role === "admin";
           return read(client);
         });
+  // D#6 RUNNER-WAKE: the cached wake checks, asked only for this account's live runners (read above under its tenant context), after the
+  // transaction, so a slow cache never holds a connection. No reader, or a failing one, leaves the database stamps alone.
+  // The 35-minute window is for a runner that really holds a grant, so it claims only at its slot. Listing `wake_v1` is not enough: hello and
+  // claim mint a grant only while the cloud's wake key is configured (wakeToken.ts), and without one every runner claims each minute, so a
+  // silent runner must read offline after the ordinary 120 s.
+  const wakeOn = configuredWakeKey(deps.wakeKey) !== null;
+  let seen: ReadonlyMap<string, Date> = new Map();
+  const live = rows.filter((r) => r.revoked_at === null).map((r) => r.id);
+  if (deps.runnerSeen && live.length > 0) {
+    try {
+      seen = await deps.runnerSeen(live, now);
+    } catch {
+      // fx-swallow-ok: a cache failure means the database stamp alone decides, which is the behaviour before the wake path existed
+      seen = new Map();
+    }
+  }
   const runsOf = new Map<string, Array<{ id: string; label: string }>>();
   for (const run of runs) runsOf.set(run.runner_id, [...(runsOf.get(run.runner_id) ?? []), { id: run.id, label: `fulcrumaxe ${run.role} · ${run.repo_name ?? "a repository"}` }]);
   const runners = rows.map((r): RunnerRow => {
     // A revoked runner takes no work, so it shows neither a load nor a capacity.
     const running = r.revoked_at === null ? { light: Number(r.running_light), heavy: Number(r.running_heavy) } : { light: 0, heavy: 0 };
     const capacity = r.revoked_at === null ? capacityOf(r.cap_declared === null ? null : { declared: r.cap_declared, light_limit: r.cap_light_limit, heavy_limit: r.cap_heavy_limit, limited_by: r.cap_limited_by }, running) : null;
-    const state = classifyRunner({ revokedAt: r.revoked_at, protocolVersion: r.protocol_version, lastSeenAt: r.last_seen_at, busy: r.busy, paused: r.paused, draining: r.draining }, now, min);
+    const facts: RunnerFacts = { revokedAt: r.revoked_at, protocolVersion: r.protocol_version, lastSeenAt: r.last_seen_at, busy: r.busy, paused: r.paused, draining: r.draining, seenAt: seen.get(r.id) ?? null, wakeCapable: wakeOn && r.wake_capable };
+    const state = classifyRunner(facts, now, min);
+    const heard = r.revoked_at === null ? lastHeardAt(facts) : r.last_seen_at;
     const revokedReason = r.revoked_at !== null && r.revoked_reason === "member_demoted" ? ("registrant_left" as const) : null;
     return {
     id: r.id,
     credential_mode: r.credential_mode,
     registered_by: { id: r.registered_by, name: r.registered_by_name },
     binary_version: r.binary_version,
-    last_seen_at: r.last_seen_at === null ? null : r.last_seen_at.toISOString(),
+    last_seen_at: heard === null ? null : heard.toISOString(),
     // A revoked runner polls no more, so a stale reason is not shown for it.
     sandbox_unavailable: r.revoked_at === null ? r.sandbox_unavailable : null,
     state,
-    state_note: state === "paused" || state === "draining" ? RESUMES_WITHIN_NOTE : revokedReason === "registrant_left" && state === "revoked" ? REVOKED_REGISTRANT_LEFT_NOTE : null,
+    state_note: state === "paused" || state === "draining" ? RESUMES_WITHIN_NOTE : revokedReason === "registrant_left" && state === "revoked" ? REVOKED_REGISTRANT_LEFT_NOTE : lastHeardNote(state, facts, now),
     revoked_reason: state === "revoked" ? revokedReason : null,
     running,
     capacity,
