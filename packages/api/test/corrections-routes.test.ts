@@ -374,7 +374,7 @@ describe('D#597 CC-2a: correction routes', () => {
     const o = await owner();
     const item = await seedItem(o.accountId);
     const t = await tokenFor(o, ['read', 'runs:cancel', 'work_items:write', 'discussions:write', 'corrections:write']);
-    for (const verb of ['approve', 'respec', 'back-to-discussion', 'treat-as-feature', 'close', 'reopen']) {
+    for (const verb of ['approve', 'respec', 'back-to-discussion', 'treat-as-feature', 'close', 'reopen', 'request-changes']) {
       const res = await call(t, 'POST', `/work-items/${item}/${verb}`);
       expect(res.status, verb).toBe(403);
       expect(await err(res), verb).toBe('session_required');

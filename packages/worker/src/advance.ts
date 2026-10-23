@@ -14,7 +14,7 @@ import { ITEM_PR_BRANCH, JobMemorySchema, type JobMemory } from "@fulcrumaxe/run
 import { attachRunNotes, correctionReasonCode, listRunNoteIds, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
 import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readSandboxBoundPullRequest, recordSandboxContinuesBound, DispatchFailedError, JobIssueError, RUNNER_RUN_BRANCH, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { reportError } from "@fx/telemetry";
-import { envelopeRunUsd } from "@fx/spend";
+import { checkFixRound, envelopeRunUsd } from "@fx/spend";
 import { checkRoundHeadroom } from "./panelHeadroom.js";
 import type { RaiseEnvelopeAsk } from "./envelopeAsk.js";
 import { ingestRunMemoryProposals } from "./memoryIntake.js";
@@ -274,6 +274,8 @@ export interface AdvanceReviewContext extends AdvancePrSource {
   /** Fix rounds already started (the driver events); the security reviewer's step-back starts at review round 3. */
   fixRoundsStarted?: number;
   debaterEnabled: boolean;
+  /** A person's Request changes is waiting for its fix round (the pipeline's loader derives it). The driver starts that round before any review. */
+  personRequestPending?: boolean;
 }
 export type AdvanceReviewLoad = { ok: true; ctx: AdvanceReviewContext } | { ok: false; reason: string };
 
@@ -338,8 +340,13 @@ export interface AdvanceFixRequest {
   spendAttempt?: number;
   /** Which review the card shows as asking for changes. */
   reviewer: "code" | "security" | "acceptance";
-  /** A reviewer run whose verdict asked for the changes. */
-  failingRunId: string;
+  /** A reviewer run whose verdict asked for the changes. Absent only for a person's round (`person`) with no reviewer finding on the head. */
+  failingRunId?: string;
+  /**
+   * A person pressed Request changes: their note reaches the run as an accepted run note (fenced, like every run note), and the item is already at
+   * Changes requested (the press moved it). Never set by a reviewer's round.
+   */
+  person?: boolean;
   /** D#6 R4d-1 (C32): the repository's execution mode the fix prompt was built for. Another mode at start refuses `execution_mode_changed`. */
   expectedExecutionMode?: string;
   /** D#600 CX-2: the prompt's sections (code, bytes, hash, trimmed bytes) from the assembler, stored on the run's context ledger. Absent: none recorded. */
@@ -1388,7 +1395,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const review = deps.review;
     if (!review || !deps.registry) return { ok: false, reason: "resume_unavailable" };
     const sane =
-      UUID_RE.test(req.actionId) && UUID_RE.test(req.failingRunId) &&
+      UUID_RE.test(req.actionId) && (req.failingRunId === undefined ? req.person === true : UUID_RE.test(req.failingRunId)) &&
+      (req.person === undefined || req.person === true) &&
       Number.isSafeInteger(req.issue) && req.issue > 0 &&
       SHA_RE.test(req.headSha) &&
       typeof req.prompt === "string" && req.prompt !== "" && req.prompt.length <= MAX_FIX_PROMPT_CHARS &&
@@ -1406,6 +1414,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (!sane) return { ok: false, reason: "invalid_input" };
     const bad = await guardStep(who);
     if (bad) return { ok: false, reason: bad.reason ?? "refused" };
+    // The plan's fix-round limit, for every round (a reviewer's round is decided under it already; a person's round is held to the same number).
+    if (checkFixRound(req.round) === "escalate") return { ok: false, reason: "max_fix_rounds" };
 
     // D#483 S5-k1d: the attempt after a spending-limit denial goes last, after the re-review retry (`:r<n>`), so the two never collide.
     const attemptKey = `${req.headSha}:${req.actionId}${req.retry ? `:r${req.retry}` : ""}${req.spendAttempt ? `:s${req.spendAttempt}` : ""}`;
@@ -1464,7 +1474,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (state.stage !== "changes_requested") {
       try {
         await withTenant(runnerPool, who.accountId, (client) =>
-          recordStage(client, { workItemId: who.workItemId, toStage: "changes_requested", reviewer: req.reviewer, at: new Date(), source: "control_plane", sourceRef: `fix-round:${req.failingRunId}` }),
+          recordStage(client, { workItemId: who.workItemId, toStage: "changes_requested", reviewer: req.reviewer, at: new Date(), source: "control_plane", sourceRef: `fix-round:${req.failingRunId ?? attemptKey}` }),
         );
       } catch (err) {
         if (err instanceof StageHaltedError) return refuse("item_halted");

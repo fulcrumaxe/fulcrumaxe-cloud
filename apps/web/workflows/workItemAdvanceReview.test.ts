@@ -76,6 +76,9 @@ interface World {
   listRuns?: boolean;
   /** The round is decided by the real rule (decideRound), not scripted. */
   realDecide?: boolean;
+  /** A person's Request changes waits for its fix round (the review load says so), and the fix rounds already started. */
+  personRequest?: boolean;
+  fixRoundsStarted?: number;
 }
 
 function fresh(over: Partial<World> = {}): World {
@@ -109,7 +112,7 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
     advanceLoadItem: vi.fn(async () => item),
     advanceLoadReview: vi.fn(async () =>
       w.loadReview.ok
-        ? { ok: true as const, ctx: { workItemId: ITEM, stage: "pr_opened", repoId: REPO, owner: "acme", name: "widgets", issue: 7, tier: w.tier, specVersion: w.loadReview.specVersion ?? w.pinned, debaterEnabled: w.debaterEnabled, executionMode: w.mode ?? "sandbox", recordedPr: w.recorded ?? null } }
+        ? { ok: true as const, ctx: { workItemId: ITEM, stage: "pr_opened", repoId: REPO, owner: "acme", name: "widgets", issue: 7, tier: w.tier, specVersion: w.loadReview.specVersion ?? w.pinned, debaterEnabled: w.debaterEnabled, executionMode: w.mode ?? "sandbox", recordedPr: w.recorded ?? null, fixRoundsStarted: w.fixRoundsStarted ?? 0, ...(w.personRequest ? { personRequestPending: true } : {}) } }
         : { ok: false as const, reason: w.loadReview.reason ?? "no_spec" },
     ),
     advanceLoadSpecText: vi.fn(async (_who: unknown, v: number) => (v === w.pinned ? { version: v, body: "SPEC BODY: the footer shows the year." } : null)),
@@ -1499,5 +1502,86 @@ describe("Approve after a reviewer gave up (Needs a person, reviewer_no_verdict)
     const t = setup(fresh({ listRuns: true, realDecide: true, storedNoVerdict: { "code-reviewer": 1 }, verdict: (role, _h, step) => (role === "code-reviewer" && step === reviewStep(H1, "code-reviewer") ? OOM : PASS) }), HELD);
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged", detail: undefined });
     expect(reviewerSteps(t.started, "code-reviewer")).toEqual([reviewStep(H1, "code-reviewer"), reviewStep(H1, "code-reviewer", 0, 1)]);
+  });
+});
+
+// Request changes: a person's note waits for its fix round, which the driver starts before any review (the reviewers had passed).
+describe("Request changes: a person's fix round comes first", () => {
+  const AT_CHANGES: AdvanceItem = { ...AT_PR, stage: "changes_requested" };
+  const PASS = { status: "succeeded", envelope: { verdict: "pass", findings: [], summary: "fine" } };
+
+  it("the fix round starts on the pull request's current head, marked as the person's, numbered after the rounds already used; then the reviewers check the NEW head and the merge is checked", async () => {
+    const t = setup(fresh({ personRequest: true, fixRoundsStarted: 1, listRuns: true, realDecide: true, verdict: () => PASS }), AT_CHANGES);
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged", detail: undefined });
+    expect(t.worker.advanceStartFix).toHaveBeenCalledTimes(1);
+    const [who, req] = t.worker.advanceStartFix.mock.calls[0]!;
+    expect(who).toEqual(WHO);
+    expect(req).toMatchObject({ issue: 7, headSha: H1, round: 2, person: true, actionId: ARGS.actionId, reviewer: "acceptance" });
+    expect(req.failingRunId).toBeUndefined();
+    expect(req.prompt.startsWith("You are the executor. A person who owns this work asked for changes on pull request #41")).toBe(true);
+    expect(req.prompt).not.toContain("REVIEWER FINDINGS:");
+    // No reviewer ran on the head the person asked about; both ran on the head the fix pushed.
+    expect(t.started.filter((s) => s.headSha === H1)).toEqual([]);
+    expect(t.started.filter((s) => s.headSha === H2).map((s) => s.role).sort()).toEqual(["acceptance-tester", "code-reviewer"]);
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(1);
+  });
+
+  it("a reviewer that asked for changes on that same head has its findings passed alongside the note", async () => {
+    const asks = (role: string, head: string) => (role === "code-reviewer" && head === H1 ? { status: "succeeded", envelope: { verdict: "needs-fix", findings: ["src/a.ts:3 - wrong word"], summary: "one" } } : PASS);
+    const w = fresh({ listRuns: true, realDecide: true, verdict: asks, fixPushes: null });
+    const t = setup(w, AT_CHANGES);
+    // A first review of H1 leaves the code reviewer's needs-fix keyed on that head; its fix is refused, so the item waits for a person.
+    w.fix = { ok: false, reason: "resume_failed" };
+    await workItemAdvanceWorkflow(ARGS);
+    w.fix = { ok: true };
+    w.fixPushes = H2;
+    w.personRequest = true;
+    t.worker.advanceStartFix.mockClear();
+    expect((await workItemAdvanceWorkflow({ ...ARGS, actionId: "66666666-6666-4666-8666-666666666666" })).status).toBe("merged");
+    const req = t.worker.advanceStartFix.mock.calls[0]![1];
+    expect(req.person).toBe(true);
+    expect(req.reviewer).toBe("code");
+    expect(req.prompt).toContain("REVIEWER FINDINGS:");
+    expect(req.prompt).toContain("src/a.ts:3 - wrong word");
+  });
+
+  it("a fix that pushes nothing stops for a person: nothing is reviewed or merged", async () => {
+    const t = setup(fresh({ personRequest: true, fixPushes: null }), AT_CHANGES);
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "person_fix_pushed_nothing" });
+    expect(t.started).toEqual([]);
+    expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "fix_pushed_nothing", code: "person_request" }));
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "person_fix_pushed_nothing" }));
+  });
+
+  it("a spending limit makes it wait like any fix round, and asks again as a new attempt; nothing is reviewed meanwhile", async () => {
+    const w = fresh({ personRequest: true });
+    const t = setup(w, AT_CHANGES);
+    let asks = 0;
+    t.worker.advanceStartFix.mockImplementation(async (_who: unknown, req: AdvanceFixRequest) => {
+      asks += 1;
+      if (asks === 1) return { ok: false as const, reason: "account_budget_reached" };
+      w.head = H2;
+      return { ok: true as const, runId: `fix-${req.round}` };
+    });
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+    const calls = t.worker.advanceStartFix.mock.calls.map((c) => c[1]);
+    expect(calls.map((r) => r.spendAttempt)).toEqual([undefined, 1]);
+    expect(calls.every((r) => r.person === true)).toBe(true);
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stage_waiting", stage: "fix_round", code: "account_budget_reached" }));
+  });
+
+  it("a refused start (the fix-round limit, among others) ends with the refusal recorded and nothing reviewed", async () => {
+    const t = setup(fresh({ personRequest: true, fix: { ok: false, reason: "max_fix_rounds" } }), AT_CHANGES);
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "fix_refused", detail: "max_fix_rounds" });
+    expect(t.started).toEqual([]);
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "max_fix_rounds" }));
+  });
+
+  it("with no request pending, Continue the review runs the reviewers first, as before", async () => {
+    const t = setup(fresh(), AT_CHANGES);
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+    expect(t.worker.advanceStartFix).not.toHaveBeenCalled();
+    expect(t.started.filter((s) => s.headSha === H1).length).toBeGreaterThan(0);
   });
 });

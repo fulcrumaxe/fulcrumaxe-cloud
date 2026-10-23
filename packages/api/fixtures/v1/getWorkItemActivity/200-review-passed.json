@@ -163,5 +163,7 @@
   ],
   "notice": null,
   "actions": [],
-  "close_on_github": true
+  "close_on_github": true,
+  "request_changes_blocked": null,
+  "change_requests": []
 }

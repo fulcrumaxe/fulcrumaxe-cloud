@@ -20,6 +20,8 @@
     "close"
   ],
   "close_on_github": false,
+  "request_changes_blocked": null,
+  "change_requests": [],
   "public_change": {
     "state": "scanning",
     "code": null,

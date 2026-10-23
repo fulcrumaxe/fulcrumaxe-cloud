@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { requestRunAction } from "@fx/core/src/runActions/index.js";
-import { OperatorMovedOnError, OperatorRefusedError, checkRespec, closeWorkItem, reopenWorkItem, requestPublicChangeAction, sendBackToDiscussion, treatAsFeature } from "@fx/core/src/work-items/operatorMoves.js";
+import { withTenant } from "@fx/db/src/withTenant.js";
+import { OperatorMovedOnError, OperatorRefusedError, RequestChangesNoteError, checkRespec, closeWorkItem, reopenWorkItem, requestChanges, requestPublicChangeAction, sendBackToDiscussion, treatAsFeature } from "@fx/core/src/work-items/operatorMoves.js";
+import { REQUEST_CHANGES_NOTE_MAX } from "@fx/core/src/work-items/operatorActions.js";
 import type { OperatorVerdict } from "@fx/core/src/work-items/operatorActions.js";
 import type { RouteContext, RouteEntry } from "../registry.js";
-import { ActionNotAvailableError, AlreadyRunningError, ExternalRequiresHumanError, NoRepoError, RunActionsUnavailableError } from "../errors.js";
+import { ActionNotAvailableError, AlreadyRunningError, ApiError, EscalateError, ExternalRequiresHumanError, NoRepoError, RunActionsUnavailableError } from "../errors.js";
 import { ForbiddenError } from "@fx/core/src/tenancy/errors.js";
 import { UNAVAILABLE_TEXT, STATES, UUID_RE, acceptedSchema, idParamsSchema, mapDbError, notFound, runActionDeps } from "./run-actions.js";
 
@@ -39,6 +41,8 @@ function refuse(v: Extract<OperatorVerdict, { ok: false }>): never {
       throw new NoRepoError(v.message);
     case "live":
       throw new AlreadyRunningError(v.message);
+    case "rounds":
+      throw new EscalateError(v.message);
     default:
       throw new ActionNotAvailableError(v.message);
   }
@@ -131,6 +135,42 @@ async function openPr(ctx: RouteContext, id: string) {
   return r.kind === "opened" ? { work_item_id: id, result: "opened" as const, code: null, pr_number: r.prNumber } : { work_item_id: id, result: "refused" as const, code: r.code, pr_number: null };
 }
 
+/** The note: the person's own words, at least one character that is not a space and at most REQUEST_CHANGES_NOTE_MAX characters (code points, as the store counts). */
+const requestChangesBody = z
+  .object({ note: z.string().refine((v) => v.trim() !== "" && Array.from(v.trim()).length <= REQUEST_CHANGES_NOTE_MAX && !v.includes("\u0000"), { message: `1 to ${REQUEST_CHANGES_NOTE_MAX} characters` }) })
+  .strict();
+
+/**
+ * Request changes: the person's note and the move into Changes requested (one transaction, in @fx/core), then the stage driver's `advance_work_item`, which
+ * starts the fix round first because the note is pending. A keyed repeat writes nothing again: with the same note it answers with the action the first request
+ * was given, with another note it is refused (`idempotency_key_reused`).
+ */
+async function requestChangesRoute(ctx: RouteContext, id: string, note: string) {
+  if (!UUID_RE.test(id)) throw notFound();
+  const signal = runActionDeps.getRunActionSignal();
+  if (!signal) throw new RunActionsUnavailableError();
+  const key = ctx.idempotencyKey || undefined;
+  const { accountId, userId, tokenId } = ctx.principal;
+  const seen = key
+    ? await withTenant(ctx.pool, accountId, userId, tokenId, async (client) => (await client.query("SELECT 1 FROM run_action_requests WHERE requested_by = $1 AND idempotency_key = $2", [`session:${userId}`, key])).rowCount !== 0)
+    : false;
+  if (!seen) {
+    await guarded(() =>
+      requestChanges({ pool: ctx.pool, principal: ctx.principal, idempotencyKey: key ?? null }, id, note).catch((err: unknown) => {
+        if (err instanceof RequestChangesNoteError) throw new ApiError(422, "invalid_note", err.message);
+        throw err;
+      }),
+    );
+  }
+  // The note is part of what the key names: the same key with another note is a different request. The API's idempotency layer refuses that first (422
+  // `idempotency_key_reused`, any route); this hash keeps the run-action record refusing it the same way once that layer's 24-hour record is gone.
+  const noteHash = createHash("sha256").update(note.trim()).digest("hex");
+  const requestHash = createHash("sha256").update(`request_changes:${id.toLowerCase()}:${noteHash}`).digest("hex");
+  const result = await requestRunAction({ pool: ctx.pool, principal: ctx.principal }, { kind: "advance_work_item", targetId: id, idempotencyKey: key, requestHash }, { signal }).catch(mapDbError);
+  if (result.replayed) ctx.markReplayed?.();
+  return { action_id: result.actionId, state: result.state as (typeof STATES)[number] };
+}
+
 const reopenedSchema = z.object({ work_item_id: z.string().uuid(), stage: z.literal("triaged") });
 
 const common = {
@@ -146,6 +186,27 @@ const SHARED_ERRORS =
   "Error `session_required` or `insufficient_role` (owner or admin only), or `external_requires_human` (only an internal work item can be moved from here; there is no override).";
 
 export const workItemActionRoutes: RouteEntry[] = [
+  {
+    ...common,
+    path: "/api/v1/work-items/{id}/request-changes",
+    operationId: "requestChangesWorkItem",
+    summary: "Ask for changes on a work item's open pull request",
+    description:
+      `Session only, owner or admin; a token is refused. Body \`{ note }\`: what to change, 1 to ${REQUEST_CHANGES_NOTE_MAX} characters. \`Idempotency-Key\` is optional. ` +
+      "Records the note on the work item (as a run note the caller accepts, with its audit rows), moves the item to `changes_requested`, and asks the pipeline to start a fix round: the executor works on the same pull request branch with the note (passed to it as data inside the untrusted-content fence, alongside any reviewer findings on the current commit), then the reviewers check the new commit and the merge is checked as usual. " +
+      "Answers 202 `{ action_id, state }`; the outcome arrives through `GET /api/v1/run-actions/{id}`. The fix round counts toward the item's fix-round limit and waits on spending limits like any other. A fix that pushes nothing stops at `needs_human`. " +
+      "Allowed only for an internal work item with a repository, a GitHub issue and a published Spec, at `pr_opened`, `changes_requested` or `review_passed`, or at `needs_human` when it came there from one of those (its pull request was open), with no live run (pending, running or paused) and a fix round left. A keyed repeat with the same note writes nothing and answers with the first request's `action_id`; the same key with a different note is 422 `idempotency_key_reused`, as on every route, and nothing is written. GitHub reviews and pull request comments are not read for this.",
+    bodySchema: requestChangesBody,
+    responseSchema: acceptedSchema,
+    successStatus: 202,
+    extraResponses: {
+      "422": "Error `validation_failed` or `invalid_note` (the note is empty or longer than the limit), or `idempotency_key_reused` (the key was already used with a different note).",
+      "403": SHARED_ERRORS,
+      "409": "Error `action_not_available` (no open pull request, no Spec, or no GitHub issue), `no_repo` (no repository), `already_running` (agents are already working on it) or `escalate` (the item has used its fix rounds).",
+      "503": UNAVAILABLE_TEXT,
+    },
+    handler: (ctx, input) => requestChangesRoute(ctx, input.params.id!, (input.body as z.infer<typeof requestChangesBody>).note),
+  },
   {
     ...common,
     path: "/api/v1/work-items/{id}/respec",

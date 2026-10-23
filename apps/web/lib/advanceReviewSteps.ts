@@ -76,7 +76,8 @@ export interface ReviewCtx extends AdvancePrSource {
   debaterEnabled: boolean;
 }
 
-export type ReviewLoaded = ({ ok: true } & ReviewCtx) | { ok: false; reason: string };
+/** `personRequestPending`: a person's Request changes waits for its fix round, which the driver starts before any review. Not kept in the context: it is spent by that round. */
+export type ReviewLoaded = ({ ok: true; personRequestPending: boolean } & ReviewCtx) | { ok: false; reason: string };
 
 /** The review context, and the Spec version the review is pinned to: the one the person approved (`pinned`). A newer version since refuses `spec_changed`. */
 export async function reviewLoadBody(worker: ReviewWorker | null, who: StepWho, pinned: number | null): Promise<ReviewLoaded> {
@@ -85,7 +86,7 @@ export async function reviewLoadBody(worker: ReviewWorker | null, who: StepWho, 
   if (!out.ok) return { ok: false, reason: out.reason };
   const c = out.ctx;
   if (pinned !== null && c.specVersion !== pinned) return { ok: false, reason: "spec_changed" };
-  return { ok: true, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, tier: c.tier, specVersion: c.specVersion, fixRoundsStarted: c.fixRoundsStarted ?? 0, debaterEnabled: c.debaterEnabled, executionMode: c.executionMode, recordedPr: c.recordedPr, prExecutionMode: c.prExecutionMode };
+  return { ok: true, personRequestPending: c.personRequestPending === true, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, tier: c.tier, specVersion: c.specVersion, fixRoundsStarted: c.fixRoundsStarted ?? 0, debaterEnabled: c.debaterEnabled, executionMode: c.executionMode, recordedPr: c.recordedPr, prExecutionMode: c.prExecutionMode };
 }
 
 export interface PrFound {
@@ -393,10 +394,12 @@ export async function startFixBody(
   failing: ReadonlyArray<{ role: string; runId: string }>,
   retry = 0,
   spendAttempt = 0,
+  person = false,
 ): Promise<FixOut> {
   if (!worker) return { ok: false, runId: null, reason: "worker_unavailable" };
   const first = failing[0];
-  if (!first) return { ok: false, runId: null, reason: "invalid_input" };
+  // A person's round may have no reviewer finding: their note is the request (it reaches the run as a fenced run note).
+  if (!first && !person) return { ok: false, runId: null, reason: "invalid_input" };
   const spec = await worker.advanceLoadSpecText(who, ctx.specVersion);
   if (spec === null) return { ok: false, runId: null, reason: "spec_changed" };
   const findings: FixFinding[] = [];
@@ -417,7 +420,7 @@ export async function startFixBody(
     const runtime = promptRuntimeOf(ctx.executionMode);
     // D#600 CX-4a: the findings the caps cut are spilled and marked: a sandbox round reads /fx/context, a runner round the files its runner writes (CX-4b, from the signed job).
     const spillOptions = { spill: true };
-    const base = { owner: ctx.owner, name: ctx.name, issue: ctx.issue, pr: pr.number, headSha: pr.headSha, branch: pr.branch, version: spec.version, spec: spec.body, findings, runtime, ...(crossSide ? { crossSide } : {}) };
+    const base = { owner: ctx.owner, name: ctx.name, issue: ctx.issue, pr: pr.number, headSha: pr.headSha, branch: pr.branch, version: spec.version, spec: spec.body, findings, runtime, ...(crossSide ? { crossSide } : {}), ...(person ? { person } : {}) };
     // A sandbox fix round resumes the build's own session, so it sends only the unchanged line, and the worker checks that line against the Spec version pinned on
     // the run being continued before it goes out. A runner round may be a follow-up in a fresh session after a lost one, so it keeps the body.
     if (runtime === "sandbox" && spec.sha256 !== undefined) {
@@ -445,8 +448,9 @@ export async function startFixBody(
     ...(retry > 0 ? { retry } : {}),
     // D#483 S5-k1d: the number of the ask when an earlier ask of this round was denied by a spending limit (the first ask carries none).
     ...(spendAttempt > 0 ? { spendAttempt } : {}),
-    reviewer: REVIEWER_OF_ROLE[first.role] ?? "code",
-    failingRunId: first.runId,
+    reviewer: first ? (REVIEWER_OF_ROLE[first.role] ?? "code") : "acceptance",
+    ...(first ? { failingRunId: first.runId } : {}),
+    ...(person ? { person: true } : {}),
     expectedExecutionMode: ctx.executionMode,
     // The pull request the pipeline just found on GitHub: a cross-side round works on its branch. The worker checks it against the item's own record.
     ...(crossSide ? { pr: { number: pr.number, branch: pr.branch } } : {}),

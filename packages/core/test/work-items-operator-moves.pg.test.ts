@@ -4,8 +4,9 @@ import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
 import { NotFoundError } from '../src/tenancy/errors.js';
-import { BACK_TO_DISCUSSION_REF_PREFIX } from '../src/work-items/operatorActions.js';
-import { OperatorRefusedError, closeWorkItem, reopenWorkItem, sendBackToDiscussion, treatAsFeature, type OperatorMoveCtx } from '../src/work-items/operatorMoves.js';
+import { loadPlanData } from '@fx/plan-data';
+import { BACK_TO_DISCUSSION_REF_PREFIX, REQUEST_CHANGES_REF_PREFIX } from '../src/work-items/operatorActions.js';
+import { OperatorRefusedError, RequestChangesNoteError, closeWorkItem, reopenWorkItem, requestChanges, sendBackToDiscussion, treatAsFeature, type OperatorMoveCtx } from '../src/work-items/operatorMoves.js';
 
 /**
  * The writes behind Close, Back to discussion and Treat as a feature, against a real Postgres: one transaction each (the move or
@@ -196,5 +197,57 @@ describe('operator moves (D#483)', () => {
     await expect(treatAsFeature(ctx(t, 'owner'), id)).rejects.toMatchObject({ verdict: { reason: 'live' } });
     await expect(closeWorkItem(ctx(t, 'owner'), id)).rejects.toMatchObject({ verdict: { reason: 'live' } });
     expect(await audits(t)).toEqual([]);
+  });
+
+  describe('Request changes', () => {
+    const notes = async (id: string) =>
+      (await admin.query<{ id: string; kind: string; origin: string; status: string; body: string; created_by: string; decided_by: string; decided_via: string }>(`SELECT id, kind, origin, status, body, created_by, decided_by, decided_via FROM work_item_corrections WHERE work_item_id = $1 ORDER BY created_at`, [id])).rows;
+
+    it.each(['pr_opened', 'review_passed', 'changes_requested'])('at %s: the note is an accepted run note of the person, and the move into Changes requested names it, in one transaction', async (stage) => {
+      const t = await tenant();
+      const { id } = await item(t, { stage });
+      const out = await requestChanges(ctx(t, 'owner'), id, '  Fix the typo "recieve" in the comment.  ');
+      expect(out).toEqual({ correctionId: expect.any(String), fromStage: stage });
+      expect(await stageOf(id)).toBe('changes_requested');
+      expect(await notes(id)).toEqual([{ id: out.correctionId, kind: 'run_note', origin: 'person', status: 'accepted', body: 'Fix the typo "recieve" in the comment.', created_by: t.userId, decided_by: t.userId, decided_via: 'workspace' }]);
+      expect(await moves(id)).toEqual([expect.objectContaining({ from_stage: stage, to_stage: 'changes_requested', source: 'control_plane', source_ref: `${REQUEST_CHANGES_REF_PREFIX}${out.correctionId}` })]);
+      const reviewer = (await admin.query<{ reviewer: string }>(`SELECT reviewer FROM work_item_transitions WHERE work_item_id = $1`, [id])).rows[0]!.reviewer;
+      expect(reviewer).toBe('acceptance');
+      expect((await admin.query(`SELECT action FROM audit_log WHERE account_id = $1 AND action LIKE 'work_item.correction_%' ORDER BY created_at`, [t.accountId])).rows.map((r) => r.action)).toEqual(['work_item.correction_proposed', 'work_item.correction_accepted']);
+    });
+
+    it('at Needs a person: only when it came there from an open pull request', async () => {
+      const t = await tenant();
+      const fromPr = await item(t, { stage: 'needs_human' });
+      await admin.query(`INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'review_passed', 'needs_human', now(), 'control_plane', 'x')`, [t.accountId, fromPr.id]);
+      await requestChanges(ctx(t, 'owner'), fromPr.id, 'rename it');
+      expect(await stageOf(fromPr.id)).toBe('changes_requested');
+      const fromBuild = await item(t, { stage: 'needs_human' });
+      await admin.query(`INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'in_progress', 'needs_human', now(), 'control_plane', 'y')`, [t.accountId, fromBuild.id]);
+      await expect(requestChanges(ctx(t, 'owner'), fromBuild.id, 'rename it')).rejects.toMatchObject({ verdict: { reason: 'stage' } });
+      expect(await notes(fromBuild.id)).toEqual([]);
+    });
+
+    it('refuses, writing nothing: a member, a stage with no pull request, no Spec, a live run, an empty or long note, and an item out of fix rounds', async () => {
+      const t = await tenant();
+      const open = await item(t, { stage: 'pr_opened' });
+      await expect(requestChanges(ctx(t, 'member'), open.id, 'x')).rejects.toMatchObject({ verdict: { reason: 'role' } });
+      await expect(requestChanges(ctx(t, 'owner'), open.id, '   ')).rejects.toBeInstanceOf(RequestChangesNoteError);
+      await expect(requestChanges(ctx(t, 'owner'), open.id, 'é'.repeat(2001))).rejects.toBeInstanceOf(RequestChangesNoteError);
+      const building = await item(t, { stage: 'in_progress' });
+      await expect(requestChanges(ctx(t, 'owner'), building.id, 'x')).rejects.toMatchObject({ verdict: { reason: 'stage' } });
+      const noSpec = await item(t, { stage: 'pr_opened', spec: false });
+      await expect(requestChanges(ctx(t, 'owner'), noSpec.id, 'x')).rejects.toMatchObject({ verdict: { reason: 'state' } });
+      const live = await item(t, { stage: 'review_passed' });
+      await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'code-reviewer', 'local', 'running')`, [randomUUID(), t.accountId, live.id]);
+      await expect(requestChanges(ctx(t, 'owner'), live.id, 'x')).rejects.toMatchObject({ verdict: { reason: 'live' } });
+      const spent = await item(t, { stage: 'changes_requested' });
+      for (let i = 0; i < loadPlanData().caps.maxFixRounds; i++) {
+        await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key) VALUES ($1, $2, 'fix_round_started', $3)`, [t.accountId, spent.id, `r${i}`]);
+      }
+      await expect(requestChanges(ctx(t, 'owner'), spent.id, 'x')).rejects.toMatchObject({ verdict: { reason: 'rounds' } });
+      for (const i of [open, building, noSpec, live, spent]) expect(await notes(i.id)).toEqual([]);
+      expect(await stageOf(open.id)).toBe('pr_opened');
+    });
   });
 });

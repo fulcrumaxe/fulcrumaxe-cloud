@@ -21,6 +21,8 @@
     "open_pr"
   ],
   "close_on_github": false,
+  "request_changes_blocked": null,
+  "change_requests": [],
   "public_change": {
     "state": "pushed_pr_not_opened",
     "code": null,

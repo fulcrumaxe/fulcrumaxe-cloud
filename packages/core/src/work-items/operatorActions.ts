@@ -13,6 +13,7 @@
  * Pure: facts in, a verdict out.
  */
 import type { PoolClient } from 'pg';
+import { loadPlanData } from '@fx/plan-data';
 import { mayOpenPublicPullRequest, mayRetryPublish, readRetryFacts, type RetryFacts } from '../repos/planePushRecord.js';
 import { parseAcceptanceScope } from '../specs/acceptanceScope.js';
 import { ADVANCE_PANEL_KINDS, advanceActionFor, type AdvanceFacts } from './advance.js';
@@ -25,7 +26,7 @@ import { isLegalStageTransition } from './stages.js';
  */
 export const BACK_TO_DISCUSSION_REF_PREFIX = 'back_to_discussion:';
 
-export const OPERATOR_ACTIONS = ['build_again', 'respec', 'back_to_discussion', 'treat_as_feature', 'close', 'reopen', 'retry_push', 'open_pr'] as const;
+export const OPERATOR_ACTIONS = ['request_changes', 'build_again', 'respec', 'back_to_discussion', 'treat_as_feature', 'close', 'reopen', 'retry_push', 'open_pr'] as const;
 export type OperatorAction = (typeof OPERATOR_ACTIONS)[number];
 
 /**
@@ -47,6 +48,15 @@ export const REOPENABLE_STAGES: readonly string[] = Object.freeze(['closed']);
  */
 export const CLOSE_ON_GITHUB_STAGES: readonly string[] = Object.freeze(['pr_opened', 'changes_requested', 'review_passed']);
 
+/**
+ * Request changes: a person asks for a fix round on the item's open pull request, with a short note the executor reads. Offered at the three pull-request
+ * stages, and at Needs a person when the item reached it from one of them (its pull request was open then; the stage driver looks it up on GitHub again
+ * before the fix round starts). Every transition it records into Changes requested has a source that starts with this, followed by the note's correction id.
+ */
+export const REQUEST_CHANGES_REF_PREFIX = 'request_changes:';
+/** The most characters a Request changes note may hold (the corrections table's own limit is higher). */
+export const REQUEST_CHANGES_NOTE_MAX = 2000;
+
 /** What the table needs to know about an item and the person asking. */
 export interface OperatorFacts extends AdvanceFacts {
   provenance: string;
@@ -63,15 +73,22 @@ export interface OperatorFacts extends AdvanceFacts {
   spec_file_list_known: boolean;
   /** D#598 P1f-6b: the item's change to its paired public repository (absent or null: it has none). Asked by Try the push again and Open the pull request again. */
   push?: RetryFacts | null;
+  /**
+   * The item has an open pull request as far as the platform's own records say: it is at a pull-request stage, or at Needs a person having come there from
+   * one. Absent: unknown, and Request changes is refused (fail closed). Read by `readOperatorFacts`.
+   */
+  pr_open?: boolean;
+  /** Fix rounds already started for the item (its `fix_round_started` driver events). Absent: unknown, and Request changes is refused. */
+  fix_rounds_started?: number;
 }
 
-export type OperatorRefusal = 'role' | 'external' | 'no_repo' | 'no_issue' | 'live' | 'stage' | 'state';
+export type OperatorRefusal = 'role' | 'external' | 'no_repo' | 'no_issue' | 'live' | 'stage' | 'state' | 'rounds';
 export type OperatorVerdict = { ok: true } | { ok: false; reason: OperatorRefusal; message: string };
 
 const no = (reason: OperatorRefusal, message: string): OperatorVerdict => ({ ok: false, reason, message });
 
 /** The actions the stage driver carries out (they need the repository and the issue behind the item). */
-const DRIVEN: readonly OperatorAction[] = ['build_again', 'respec', 'back_to_discussion', 'treat_as_feature'];
+const DRIVEN: readonly OperatorAction[] = ['request_changes', 'build_again', 'respec', 'back_to_discussion', 'treat_as_feature'];
 
 /** Whether the caller may do `action` to the item now; or why not. The first refusal in this order wins: who, what, where, busy, stage. */
 export function operatorVerdict(action: OperatorAction, f: OperatorFacts): OperatorVerdict {
@@ -85,6 +102,14 @@ export function operatorVerdict(action: OperatorAction, f: OperatorFacts): Opera
   if (f.live_run) return no('live', 'agents are already working on this work item');
   const stageFacts = { stage: f.stage, discussion_id: f.discussion_id, kind: f.kind, has_spec: f.has_spec };
   switch (action) {
+    case 'request_changes': {
+      const prStage = CLOSE_ON_GITHUB_STAGES.includes(f.stage);
+      if (!(prStage || f.stage === 'needs_human') || f.pr_open !== true || !isLegalStageTransition(f.stage, 'changes_requested')) return no('stage', `work item is ${f.stage} with no open pull request`);
+      if (!f.has_spec) return no('state', 'work item has no published Spec to fix against');
+      // The next fix round must be one the plan allows: the same bound the reviewers' fix rounds use (`checkFixRound` in @fx/spend reads the same number).
+      if (f.fix_rounds_started === undefined || f.fix_rounds_started + 1 > loadPlanData().caps.maxFixRounds) return no('rounds', 'this pull request has used all its fix rounds');
+      return { ok: true };
+    }
     case 'build_again': {
       const v = advanceActionFor(stageFacts);
       if (!v.ok) return no(v.reason, v.message);
@@ -140,17 +165,21 @@ export function closeOnGithub(f: Pick<OperatorFacts, 'stage' | 'provenance' | 'r
  * second sees the first's stage. Null when the item does not exist for this account.
  */
 export async function readOperatorFacts(client: PoolClient, workItemId: string, role: string, lock = false): Promise<OperatorFacts | null> {
-  const { rows } = await client.query<{ stage: string; provenance: string; repo_id: string | null; gh_number: string | null; discussion_id: string | null; kind: string | null; has_spec: boolean; acceptance_files: unknown; live_run: boolean }>(
+  const { rows } = await client.query<{ stage: string; provenance: string; repo_id: string | null; gh_number: string | null; discussion_id: string | null; kind: string | null; has_spec: boolean; acceptance_files: unknown; live_run: boolean; needs_human_from: string | null; fix_rounds_started: string }>(
     `SELECT w.stage, w.provenance, w.repo_id, w.gh_number, w.discussion_id, d.kind,
             EXISTS (SELECT 1 FROM spec_versions s WHERE s.work_item_id = w.id AND s.erased_at IS NULL) AS has_spec,
             (SELECT s.frontmatter -> 'acceptance_files' FROM spec_versions s WHERE s.work_item_id = w.id AND s.erased_at IS NULL ORDER BY s.version DESC LIMIT 1) AS acceptance_files,
-            EXISTS (SELECT 1 FROM agent_runs r WHERE r.work_item_id = w.id AND r.status NOT IN ('succeeded', 'failed', 'timed_out', 'killed_spend', 'refused_spend', 'cancelled')) AS live_run
+            EXISTS (SELECT 1 FROM agent_runs r WHERE r.work_item_id = w.id AND r.status NOT IN ('succeeded', 'failed', 'timed_out', 'killed_spend', 'refused_spend', 'cancelled')) AS live_run,
+            (SELECT t.from_stage FROM work_item_transitions t WHERE t.work_item_id = w.id AND t.to_stage = 'needs_human' ORDER BY t.at DESC, t.created_at DESC LIMIT 1) AS needs_human_from,
+            (SELECT count(*)::text FROM work_item_driver_events e WHERE e.work_item_id = w.id AND e.kind = 'fix_round_started') AS fix_rounds_started
        FROM work_items w LEFT JOIN discussions d ON d.id = w.discussion_id
       WHERE w.id = $1::uuid${lock ? ' FOR UPDATE OF w' : ''}`,
     [workItemId],
   );
   const r = rows[0];
   if (!r) return null;
-  const { acceptance_files: acceptanceFiles, ...rest } = r;
-  return { ...rest, role, spec_file_list_known: parseAcceptanceScope(acceptanceFiles).kind === 'known', push: await readRetryFacts(client, workItemId) };
+  const { acceptance_files: acceptanceFiles, needs_human_from: needsHumanFrom, fix_rounds_started: fixRounds, ...rest } = r;
+  // Derived, never stamped: a pull-request stage has its pull request open (closing or merging it moves the stage), and so does Needs a person reached from one.
+  const prOpen = CLOSE_ON_GITHUB_STAGES.includes(r.stage) || (r.stage === 'needs_human' && needsHumanFrom !== null && CLOSE_ON_GITHUB_STAGES.includes(needsHumanFrom));
+  return { ...rest, role, spec_file_list_known: parseAcceptanceScope(acceptanceFiles).kind === 'known', push: await readRetryFacts(client, workItemId), pr_open: prOpen, fix_rounds_started: Number(fixRounds) };
 }

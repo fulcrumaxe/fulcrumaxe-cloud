@@ -10,6 +10,7 @@ import { hashToken } from '../src/tokens/resolve.js';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
 import { runActionDeps } from '../src/routes/run-actions.js';
+import { maxFixRounds } from '@fx/spend';
 import { seedAccountWithMember } from './helpers/seed.js';
 
 interface Identity {
@@ -683,6 +684,123 @@ describe('work item actions: back to discussion, treat as a feature, close', () 
       expect((await post(p, path(item))).status).toBe(200);
       expect(await code(await post(p, path(item)))).toBe('action_not_available');
       expect((await post(p, `/work-items/${item}/close`)).status).toBe(200);
+    });
+  });
+
+  describe('Request changes', () => {
+    const path = (id: string) => `/work-items/${id}/request-changes`;
+    const note = (text: string) => ({ body: JSON.stringify({ note: text }) });
+    const notesOf = async (item: string) => (await admin.query<{ body: string; status: string; kind: string }>('SELECT body, status, kind FROM work_item_corrections WHERE work_item_id = $1', [item])).rows;
+
+    it.each([
+      ['owner', 'review_passed'],
+      ['admin', 'pr_opened'],
+      ['owner', 'changes_requested'],
+    ] as const)('an %s asks for changes at %s: 202, the note is stored as an accepted run note, the item moves to changes_requested, and the stage driver is asked', async (role, stage) => {
+      const p = await person(role);
+      const { item } = await seed(p.accountId, { stage });
+      const res = await post(p, path(item), note('Change "recieve" to "receive" in the comment.'));
+      expect(res.status).toBe(202);
+      const body = (await res.json()) as Accepted;
+      expect(await one('SELECT 1 AS x FROM run_action_requests WHERE id = $1 AND kind = $2 AND target_id = $3', [body.action_id, 'advance_work_item', item])).toBeTruthy();
+      expect(signal.sent).toEqual([{ actionId: body.action_id, accountId: p.accountId, kind: 'advance_work_item' }]);
+      expect(await stageOf(item)).toBe('changes_requested');
+      expect(await notesOf(item)).toEqual([{ body: 'Change "recieve" to "receive" in the comment.', status: 'accepted', kind: 'run_note' }]);
+    });
+
+    it('a keyed repeat writes nothing again and answers with the same action', async () => {
+      const p = await person('owner');
+      const { item } = await seed(p.accountId, { stage: 'review_passed' });
+      const first = (await (await post(p, path(item), { headers: { 'idempotency-key': 'rc1' }, ...note('one') })).json()) as Accepted;
+      const again = await post(p, path(item), { headers: { 'idempotency-key': 'rc1' }, ...note('one') });
+      expect(again.status).toBe(202);
+      expect(((await again.json()) as Accepted).action_id).toBe(first.action_id);
+      expect(await notesOf(item)).toHaveLength(1);
+      expect(await transitions(p.accountId)).toBe(1);
+    });
+
+    it('the same key with a different note is refused idempotency_key_reused (422, the API-wide answer), and nothing more is written; the same note again stays 202', async () => {
+      const p = await person('owner');
+      const { item } = await seed(p.accountId, { stage: 'review_passed' });
+      const first = (await (await post(p, path(item), { headers: { 'idempotency-key': 'rc2' }, ...note('one') })).json()) as Accepted;
+      const other = await post(p, path(item), { headers: { 'idempotency-key': 'rc2' }, ...note('two') });
+      expect(other.status).toBe(422);
+      expect(await code(other)).toBe('idempotency_key_reused');
+      expect(await notesOf(item)).toEqual([expect.objectContaining({ body: 'one' })]);
+      expect(await transitions(p.accountId)).toBe(1);
+      expect(await requests(p.accountId)).toBe(1);
+      const same = await post(p, path(item), { headers: { 'idempotency-key': 'rc2' }, ...note('one') });
+      expect(same.status).toBe(202);
+      expect(((await same.json()) as Accepted).action_id).toBe(first.action_id);
+    });
+
+    it.each(['triaged', 'discussing', 'spec_ready', 'in_progress', 'merged', 'closed'])('an item at %s is 409 action_not_available and nothing is written', async (stage) => {
+      const p = await person('owner');
+      const { item } = await seed(p.accountId, { stage });
+      const res = await post(p, path(item), note('x'));
+      expect(res.status).toBe(409);
+      expect(await code(res)).toBe('action_not_available');
+      await expectUntouched(p.accountId, item, stage);
+      expect(await notesOf(item)).toEqual([]);
+    });
+
+    it('needs_human that did not come from a pull request is 409 action_not_available', async () => {
+      const p = await person('owner');
+      const { item } = await seed(p.accountId, { stage: 'needs_human' });
+      expect(await code(await post(p, path(item), note('x')))).toBe('action_not_available');
+      expect(await notesOf(item)).toEqual([]);
+    });
+
+    it('a member is 403 insufficient_role and a token is 403 session_required; nothing is written', async () => {
+      const m = await person('member');
+      const mine = await seed(m.accountId, { stage: 'review_passed' });
+      const res = await post(m, path(mine.item), note('x'));
+      expect(res.status).toBe(403);
+      expect(await code(res)).toBe('insufficient_role');
+      await expectUntouched(m.accountId, mine.item, 'review_passed');
+      const p = await person('owner');
+      const { item } = await seed(p.accountId, { stage: 'review_passed' });
+      const t = await tokenFor(p, ['read', 'runs:cancel', 'work_items:write']);
+      const tok = await post(t, path(item), note('x'));
+      expect(tok.status).toBe(403);
+      expect(await code(tok)).toBe('session_required');
+      await expectUntouched(p.accountId, item, 'review_passed');
+    });
+
+    it('an empty note, a note over 2000 characters, a missing note and an extra field are 422 validation_failed; nothing is written', async () => {
+      const p = await person('owner');
+      const { item } = await seed(p.accountId, { stage: 'review_passed' });
+      for (const body of [JSON.stringify({ note: '   ' }), JSON.stringify({ note: 'a'.repeat(2001) }), JSON.stringify({}), JSON.stringify({ note: 'x', extra: 1 })]) {
+        const res = await post(p, path(item), { body });
+        expect(res.status, body.slice(0, 40)).toBe(422);
+      }
+      await expectUntouched(p.accountId, item, 'review_passed');
+      expect((await post(p, path(item), note('a'.repeat(2000)))).status).toBe(202);
+    });
+
+    it('a live run is 409 already_running, and an item that used its fix rounds is 409 escalate; nothing is written', async () => {
+      const p = await person('owner');
+      const busy = await seed(p.accountId, { stage: 'review_passed' });
+      await seedRun(p.accountId, busy.item, 'running');
+      expect(await code(await post(p, path(busy.item), note('x')))).toBe('already_running');
+      const spent = await seed(p.accountId, { stage: 'changes_requested' });
+      for (let i = 0; i < maxFixRounds(); i++) {
+        await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key) VALUES ($1, $2, 'fix_round_started', $3)`, [p.accountId, spent.item, `r${i}`]);
+      }
+      const res = await post(p, path(spent.item), note('x'));
+      expect(res.status).toBe(409);
+      expect(await code(res)).toBe('escalate');
+      expect(await notesOf(busy.item)).toEqual([]);
+      expect(await notesOf(spent.item)).toEqual([]);
+      expect(await requests(p.accountId)).toBe(0);
+    });
+
+    it("another account's item is 404", async () => {
+      const p = await person('owner');
+      const other = await person('owner');
+      const { item } = await seed(other.accountId, { stage: 'review_passed' });
+      expect((await post(p, path(item), note('x'))).status).toBe(404);
+      expect(await notesOf(item)).toEqual([]);
     });
   });
 });

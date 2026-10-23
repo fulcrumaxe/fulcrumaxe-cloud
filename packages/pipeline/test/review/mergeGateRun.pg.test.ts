@@ -343,6 +343,29 @@ describe("loadReviewContext and loadSpecText", () => {
     expect(r).toMatchObject({ ok: true, ctx: { tier: "critical", specVersion: 1, debaterMode: "always", owner: "acme", name: "widgets", issue: 7, autoMerge: true, blockExternalAutoMerge: false } });
   });
 
+  it("personRequestPending: true while a Request changes note is accepted and no run has taken it; false before, after it is applied, and for a plain run note", async () => {
+    const w = await world();
+    const pending = async () => {
+      const r = await loadReviewContext(h.runWriterPool, w.accountId, w.workItemId);
+      return r.ok ? r.ctx.personRequestPending : null;
+    };
+    expect(await pending()).toBe(false);
+    const note = async (body: string) =>
+      (
+        await h.admin.query<{ id: string }>(
+          "INSERT INTO work_item_corrections (account_id, work_item_id, origin, kind, body, status, decided_via, decided_at, content_hash) VALUES ($1, $2, 'person', 'run_note', $3, 'accepted', 'workspace', now(), encode(sha256(convert_to($3, 'UTF8')), 'hex')) RETURNING id",
+          [w.accountId, w.workItemId, body],
+        )
+      ).rows[0]!.id;
+    await note("a plain note for the next run");
+    expect(await pending()).toBe(false);
+    const asked = await note("rename the field");
+    await h.admin.query("INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, reviewer, at, source, source_ref) VALUES ($1, $2, 'pr_opened', 'changes_requested', 'acceptance', now(), 'control_plane', $3)", [w.accountId, w.workItemId, `request_changes:${asked}`]);
+    expect(await pending()).toBe(true);
+    await h.admin.query("UPDATE work_item_corrections SET status = 'applied', applied_at = now() WHERE id = $1", [asked]);
+    expect(await pending()).toBe(false);
+  });
+
   it.each([
     ["an external item", "UPDATE work_items SET provenance = 'external' WHERE id = $1", "external_requires_human"],
     ["an item with no repository", "UPDATE work_items SET repo_id = NULL WHERE id = $1", "no_repo"],

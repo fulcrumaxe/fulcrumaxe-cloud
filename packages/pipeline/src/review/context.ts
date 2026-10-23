@@ -33,6 +33,11 @@ export interface ReviewContext {
   /** Raw values of the repository's guard settings; only `@fx/trust` interprets them. */
   autoMerge: unknown;
   blockExternalAutoMerge: unknown;
+  /**
+   * A person pressed Request changes and the fix round that carries their note has not taken it yet: a transition into Changes requested whose source
+   * names a run note (`request_changes:<id>`) that is still `accepted`. Derived from the rows, never stamped: the fix run stamps the note `applied`.
+   */
+  personRequestPending: boolean;
 }
 
 export type ReviewContextRefusal = "not_found" | "external_requires_human" | "no_repo" | "no_issue_link" | "tier_unknown" | "no_spec";
@@ -53,6 +58,7 @@ interface Row {
   debater_mode: string | null;
   auto_merge: unknown;
   block_external: unknown;
+  person_request: boolean;
 }
 
 export async function loadReviewContext(pool: Pool, accountId: string, workItemId: string): Promise<LoadReviewContextResult> {
@@ -61,7 +67,11 @@ export async function loadReviewContext(pool: Pool, accountId: string, workItemI
       `SELECT w.stage, w.provenance, w.repo_id, r.gh_repo_id, ${effectiveModeSql("w", "r")} AS execution_mode, w.gh_number, r.gh_owner, r.gh_name, d.kind, s.version,
               (SELECT count(*)::text FROM work_item_driver_events e WHERE e.account_id = w.account_id AND e.work_item_id = w.id AND e.kind = 'fix_round_started') AS fix_rounds,
               (SELECT rs.mode FROM role_settings rs WHERE rs.account_id = w.account_id AND rs.repo_id = w.repo_id AND rs.role = 'debater') AS debater_mode,
-              r.settings->'autoMerge' AS auto_merge, r.settings->'blockExternalAutoMerge' AS block_external
+              r.settings->'autoMerge' AS auto_merge, r.settings->'blockExternalAutoMerge' AS block_external,
+              EXISTS (SELECT 1 FROM work_item_transitions t
+                        JOIN work_item_corrections c ON c.account_id = t.account_id AND c.work_item_id = t.work_item_id AND t.source_ref = 'request_changes:' || c.id::text
+                       WHERE t.account_id = w.account_id AND t.work_item_id = w.id AND t.to_stage = 'changes_requested'
+                         AND c.kind = 'run_note' AND c.status = 'accepted') AS person_request
          FROM work_items w
          LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
          LEFT JOIN discussions d ON d.account_id = w.account_id AND d.id = w.discussion_id
@@ -101,6 +111,7 @@ export async function loadReviewContext(pool: Pool, accountId: string, workItemI
       debaterMode: row.debater_mode,
       autoMerge: row.auto_merge,
       blockExternalAutoMerge: row.block_external,
+      personRequestPending: row.person_request === true,
     },
   };
 }
