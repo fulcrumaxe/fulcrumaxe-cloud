@@ -167,6 +167,101 @@ export function markWorkPending(name: SweepName, opts: { since?: number; kick?: 
   return write;
 }
 
+/** How long an account's runner-work values live in the store. A runner that missed them falls back to its slow claim. */
+export const RUNNER_WORK_TTL_SECONDS = 24 * 60 * 60;
+
+/** The cache key of the account's "latest bump" epoch: work became claimable at this time (ms). */
+export function runnerWorkKeyFor(accountId: string): string {
+  return `wake:acct:${accountId}`;
+}
+/** The cache key of the account's earliest not-yet-passed due time (ms): work that becomes claimable later (a `claimable_after`). */
+export function runnerWorkDueKeyFor(accountId: string): string {
+  return `wake-due:acct:${accountId}`;
+}
+
+/**
+ * One stdout line for a failed runner-work write. Deliberately NOT `hooks.reportError`: that path opens a database
+ * connection (capped error rows), and this signal exists so an idle account never needs one.
+ */
+function logRunnerWorkFailure(stage: string, err: unknown): void {
+  try {
+    console.log(JSON.stringify({ event: "runner_work.mark_failed", stage, error: err instanceof Error ? err.message : String(err) }));
+  } catch {
+    // fx-swallow-ok: a logger that throws must never reach the writer
+  }
+}
+
+function runnerWorkWrite(hooks: PendingHooks, work: () => Promise<void>): Promise<void> {
+  const write = work().catch((err: unknown) => {
+    // fx-swallow-ok: a lost hint, logged to stdout (never the database); the runner's slow claim finds the work
+    logRunnerWorkFailure("runner_work.write", err);
+  });
+  try {
+    hooks.keepAlive?.(write);
+  } catch (err) {
+    // fx-swallow-ok: a failing hook never reaches the writer; logged to stdout (not the database) by the helper
+    logRunnerWorkFailure("runner_work.hook", err);
+  }
+  return write;
+}
+
+/**
+ * Called by a writer right after the row that makes runner work claimable has COMMITTED. Two values per account, both
+ * in the no-DB store where a cheap wake check reads them:
+ *  - no `since` (or one that has passed): the epoch is set to that time, "latest bump";
+ *  - a `since` in the future (work claimable later, such as a `claimable_after`): the DUE value keeps the MINIMUM
+ *    not-yet-passed due time. A later time does not replace an earlier one still in the future.
+ * Dropping a later due time is safe only because the consumer re-derives it: when the server answers a runner claim it
+ * reads the next future `claimable_after` of the account's runner runs from the database and calls `remarkRunnerDue`
+ * (see the claim in packages/worker/src/runnerClaims.ts). The get-then-set here is not atomic, so two concurrent marks
+ * can leave the later value; that is acceptable for a hint, because the same re-derivation corrects it and the runner's
+ * slow claim is the safety net.
+ * Same contract as `markWorkPending`: never throws, never waits on the store, bounded, a no-op without hooks. A failed
+ * write is a lost hint and is logged to stdout, never to the database.
+ */
+export function markRunnerWork(accountId: string, opts: { since?: number; now?: number } = {}): Promise<void> {
+  const hooks = getPendingHooks();
+  if (!hooks || typeof accountId !== "string" || accountId === "") return Promise.resolve();
+  const now = opts.now ?? Date.now();
+  const since = opts.since ?? now;
+  return runnerWorkWrite(hooks, async () => {
+    if (since > now) {
+      const due = asTime(await bounded(Promise.resolve(hooks.store.get(runnerWorkDueKeyFor(accountId)))));
+      if (due !== null && due > now && due <= since) return;
+      await bounded(Promise.resolve(hooks.store.set(runnerWorkDueKeyFor(accountId), since, RUNNER_WORK_TTL_SECONDS)));
+      return;
+    }
+    await bounded(Promise.resolve(hooks.store.set(runnerWorkKeyFor(accountId), since, RUNNER_WORK_TTL_SECONDS)));
+  });
+}
+
+/**
+ * The consumer's half: sets the DUE value to `nextDueAt`, the earliest `claimable_after` still in the future that the
+ * database reported for the account's runner runs, replacing whatever was stored (the database is the truth, the stored
+ * value only a hint). With null (nothing left in the future) the stored value is DELETED, so a due time that has passed
+ * does not make every later idle claim look again. Same failure contract as `markRunnerWork`: a failed write or delete
+ * is swallowed and logged to stdout.
+ */
+export function remarkRunnerDue(accountId: string, nextDueAt: number | null): Promise<void> {
+  const hooks = getPendingHooks();
+  if (!hooks || accountId === "") return Promise.resolve();
+  if (nextDueAt === null) return runnerWorkWrite(hooks, () => bounded(Promise.resolve(hooks.store.delete(runnerWorkDueKeyFor(accountId)))));
+  return runnerWorkWrite(hooks, () => bounded(Promise.resolve(hooks.store.set(runnerWorkDueKeyFor(accountId), nextDueAt, RUNNER_WORK_TTL_SECONDS))));
+}
+
+/** Reads the stored due time for an account (null on a miss, an error or no store). Never throws; no database. */
+export async function readRunnerDue(accountId: string): Promise<number | null> {
+  const hooks = getPendingHooks();
+  if (!hooks) return null;
+  try {
+    return asTime(await bounded(Promise.resolve(hooks.store.get(runnerWorkDueKeyFor(accountId)))));
+  } catch (err) {
+    // fx-swallow-ok: a missed hint read; logged to stdout (not the database) and the caller treats it as "no stored value"
+    logRunnerWorkFailure("runner_work.read", err);
+    return null;
+  }
+}
+
 /** Notes that work exists (a writer just recorded some, or a tick found some): this keeps the slots at 30 minutes. */
 async function recordActivity(store: PendingStore, now: number): Promise<void> {
   await bounded(Promise.resolve(store.set(ACTIVITY_KEY, now, ACTIVITY_WINDOW_MS / 1000)));

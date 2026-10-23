@@ -1,3 +1,4 @@
+import { markRunnerWork } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 
@@ -41,6 +42,8 @@ export async function approveRun(deps: RunnerCloudDeps, principal: SessionPrinci
       const { rows } = await client.query<{ approved: boolean }>("SELECT agent_run_approve($1) AS approved", [runId]);
       return rows[0]?.approved === true;
     });
+    // The approval has committed: it is what lets the registrant's runner take this run.
+    if (changed) void markRunnerWork(principal.accountId);
     return { status: 200, body: { approved: true, changed }, headers: { "cache-control": "no-store" } };
   } catch (error) {
     if (error instanceof RunnerHttpError) throw error;

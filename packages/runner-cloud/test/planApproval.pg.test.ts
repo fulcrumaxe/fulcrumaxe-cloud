@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { runnerWorkKeyFor, setPendingHooks } from "@fx/core/src/pendingWork.js";
 import { COPY } from "@fulcrumaxe/runner-protocol";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
@@ -409,5 +410,89 @@ describe("runner-run approval and the dial [pg]", () => {
   it("the copy the screens need is in COPY and not retyped", () => {
     expect(COPY.approvalAuto).toContain("{person}");
     expect(COPY.planConsentText).toContain("without asking each time");
+  });
+});
+
+describe("the runner-work hint from the approval routes [pg]", () => {
+  let h: Harness;
+  beforeAll(async () => {
+    h = await harness();
+  });
+  afterAll(() => h.close());
+  const entries = new Map<string, number>();
+  beforeEach(() => {
+    entries.clear();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    setPendingHooks({ store: { get: async (k) => entries.get(k) ?? null, set: async (k, v) => void entries.set(k, v), delete: async (k) => void entries.delete(k) } });
+  });
+  afterEach(() => {
+    setPendingHooks(null);
+    vi.restoreAllMocks();
+  });
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+  const fresh = (): Promise<F2Fixture> => seedF2(h.admin);
+  async function newRepo(f: F2Fixture): Promise<string> {
+    const installationId = randomUUID();
+    await h.admin.query("INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, floor(random() * 2000000000)::bigint + 1, 'team')", [installationId, f.accountId]);
+    const id = randomUUID();
+    await h.admin.query("INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name, execution_mode) VALUES ($1, $2, $3, floor(random() * 2000000000)::bigint + 1, 'team', 'acme', $4, 'runner_local')", [id, f.accountId, installationId, `app-${id.slice(0, 8)}`]);
+    return id;
+  }
+  async function pendingRun(f: F2Fixture, repo: string): Promise<string> {
+    const id = randomUUID();
+    await h.admin.query("INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id, initiated_by) VALUES ($1, $2, 'executor', 'runner', 'pending', 'runner_local', $3, $4)", [id, f.accountId, repo, f.m1]);
+    return id;
+  }
+  async function subscriptionRunner(f: F2Fixture, by: string, repos: string[]): Promise<string> {
+    const id = await insertRunner(h.admin, f.accountId, by, { credentialMode: "subscription" });
+    await h.admin.query("UPDATE runners SET last_seen_at = now(), protocol_version = 1, allowed_repo_ids = $2::uuid[] WHERE id = $1", [id, repos]);
+    return id;
+  }
+  const deps = () => h.deps({ now: () => new Date() });
+  const key = (f: F2Fixture) => runnerWorkKeyFor(f.accountId);
+
+  it("approveRun marks the account after the approval commits; a refused approval leaves no key", async () => {
+    const f = await fresh();
+    const repo = await newRepo(f);
+    const other = await newRepo(f);
+    await subscriptionRunner(f, f.a2, [other]);
+    await subscriptionRunner(f, f.a1, [repo]);
+    const id = await pendingRun(f, repo);
+    expect((await respond(() => approveRun(deps(), { accountId: f.accountId, userId: f.a2 }, id))).status).toBe(409);
+    await flush();
+    expect(entries.has(key(f))).toBe(false);
+    expect((await respond(() => approveRun(deps(), { accountId: f.accountId, userId: f.a1 }, id))).status).toBe(200);
+    await flush();
+    expect(entries.get(key(f))).toBeGreaterThan(0);
+  });
+
+  it("turning consent on marks the account; withdrawing it, repeating it and a refused request do not", async () => {
+    const f = await fresh();
+    const runnerId = await subscriptionRunner(f, f.a1, []);
+    const consent = (by: string, granted: boolean) => respond(() => setPlanConsent(deps(), { accountId: f.accountId, userId: by }, runnerId, { granted }));
+    expect((await consent(f.m2, true)).status).toBe(403);
+    expect((await consent(f.a1, false)).status).toBe(200);
+    await flush();
+    expect(entries.has(key(f))).toBe(false);
+    expect((await consent(f.a1, true)).status).toBe(200);
+    await flush();
+    expect(entries.get(key(f))).toBeGreaterThan(0);
+    entries.clear();
+    expect((await consent(f.a1, true))).toMatchObject({ status: 200, body: { changed: false } });
+    await flush();
+    expect(entries.has(key(f))).toBe(false);
+  });
+
+  it("moving the dial off ask marks the account; moving it to ask and a refused change do not", async () => {
+    const f = await fresh();
+    const repo = await newRepo(f);
+    const put = (by: string, input: unknown) => respond(() => setPlanApprovalDial(deps(), { accountId: f.accountId, userId: by }, repo, input));
+    expect((await put(f.m1, { disposition: "act" })).status).toBe(403);
+    expect((await put(f.o1, { disposition: "ask" })).status).toBe(200);
+    await flush();
+    expect(entries.has(key(f))).toBe(false);
+    expect((await put(f.o1, { disposition: "act" })).status).toBe(200);
+    await flush();
+    expect(entries.get(key(f))).toBeGreaterThan(0);
   });
 });

@@ -16,7 +16,7 @@ import {
   type SignedJob,
   type StopReason,
 } from "@fulcrumaxe/runner-protocol";
-import { markWorkPending } from "@fx/core/src/pendingWork.js";
+import { markRunnerWork, markWorkPending, readRunnerDue, remarkRunnerDue } from "@fx/core/src/pendingWork.js";
 import { RUNNER_RUN_CATALOGUE_VERSION } from "@fx/db/src/runnerPlanDial.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { MAX_RAW_TOOL_EVENTS_PER_RUN, RAW_CAPPED_TYPES, RUNNER_MODES_SQL, effectiveModeSql, insertRunnerEvent, eventForStorage, noteRunnerActivityCap, projectRunnerProgress, writeRunStatusOn, type FailureReason, type RepoVisibilityPort } from "@fx/runner";
@@ -299,6 +299,26 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
     return runner;
   }
 
+  /**
+   * The consumer's half of the runner-work hint (see markRunnerWork in core): the stored "due" value keeps only the earliest future
+   * claimable_after, so after a claim the next one still in the future is read from the rows and written back. One LIMIT 1 read, run only
+   * when the claim handed out work or the stored due time has passed; the idle path otherwise adds none. A failure is a lost hint.
+   */
+  const rederiveDue = async (accountId: string): Promise<void> => {
+    try {
+      const next = await withTenant(runnerPool, accountId, async (client) => {
+        const { rows } = await client.query<{ claimable_after: Date }>(
+          "SELECT claimable_after FROM agent_runs WHERE account_id = $1 AND runtime = 'runner' AND status = 'pending' AND job_signed IS NOT NULL AND claimable_after > $2::timestamptz ORDER BY claimable_after LIMIT 1",
+          [accountId, new Date(now())],
+        );
+        return rows[0]?.claimable_after ?? null;
+      });
+      await remarkRunnerDue(accountId, next === null ? null : next.getTime());
+    } catch {
+      // fx-swallow-ok: the wake hint only; the runner's slow claim still finds the work, and the claim's own answer must not change
+    }
+  };
+
   const idle = async (accountId: string): Promise<ClaimRunnerRunResult> => {
     // A run held back until a reset time, and one with no job yet (a dispatch that has not finished or never will), is not work a
     // runner could take now, so neither shortens the poll (C22 section 3).
@@ -309,6 +329,8 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
       );
       return rows.length > 0;
     });
+    const storedDue = await readRunnerDue(accountId);
+    if (storedDue !== null && storedDue <= now()) await rederiveDue(accountId);
     return { kind: "idle", retryAfter: queued ? between(CLAIM_QUEUED_RETRY_AFTER_SECONDS.min, CLAIM_QUEUED_RETRY_AFTER_SECONDS.max) : CLAIM_IDLE_RETRY_AFTER_SECONDS };
   };
 
@@ -493,6 +515,7 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
           // marker; best effort, and an earlier marker is never pushed later). Heartbeats do not mark: a tick that connects
           // re-derives the next due time from the rows.
           void markWorkPending("runner-sweeper", { since: now() + RUNNER_LEASE_SECONDS * 1000 });
+          await rederiveDue(accountId);
           return { kind: "claimed", signedJob: parsed.data, runId: candidate.id, leaseGeneration: claimed.generation };
         }
         return idle(accountId);
@@ -514,7 +537,7 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
         // In the batch the numbers strictly increase (C21 section 2); a batch that does not is refused before anything is read.
         for (let i = 1; i < input.events.length; i++) if (input.events[i]!.seq <= input.events[i - 1]!.seq) return { outcome: "seq_order" };
         const maxWallClockMs = limits(input.accountId).maxRunWallClockMs;
-        const result = await withTenant(runnerPool, input.accountId, async (client): Promise<IngestRunnerEventsResult & { followUp?: FollowUpOutcome | null; handedOff?: boolean }> => {
+        const result = await withTenant(runnerPool, input.accountId, async (client): Promise<IngestRunnerEventsResult & { followUp?: FollowUpOutcome | null; handedOff?: boolean; queued?: boolean }> => {
           const at = new Date(now());
           // Fence first, without moving the lease: a refused batch must leave it alone. The fence takes the run row's lock and
           // holds it to the end of this transaction, so the last accepted number read below cannot move under it.
@@ -585,9 +608,13 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
           // A usage limit or a shutdown makes the run that follows it, in this same transaction: the child commits with the status move or not at all.
           const followUp = ending.followUp ? await requestFollowUp(client, input.runId) : null;
           const lease = await client.query<{ lease_expires_at: Date }>("SELECT lease_expires_at FROM agent_runs WHERE id = $1 AND account_id = $2", [input.runId, input.accountId]);
-          return { outcome: "accepted", stored, duplicates, conflicts, ended: ending.reason as RunnerEndReason, leaseExpiresAt: lease.rows[0]!.lease_expires_at, followUp };
+          // A run that ended frees the account's capacity; if claimable runs are waiting, a runner can take one now.
+          const queued = (await client.query("SELECT 1 FROM agent_runs WHERE account_id = $1 AND runtime = 'runner' AND status = 'pending' AND job_signed IS NOT NULL LIMIT 1", [input.accountId])).rows.length > 0;
+          return { outcome: "accepted", stored, duplicates, conflicts, ended: ending.reason as RunnerEndReason, leaseExpiresAt: lease.rows[0]!.lease_expires_at, followUp, queued };
         });
-        const { followUp, handedOff, ...reply } = result as IngestRunnerEventsResult & { followUp?: FollowUpOutcome | null; handedOff?: boolean };
+        const { followUp, handedOff, queued, ...reply } = result as IngestRunnerEventsResult & { followUp?: FollowUpOutcome | null; handedOff?: boolean; queued?: boolean };
+        // After the commit: the run's end freed capacity while runs wait (a no-DB hint; never awaited, never fails the batch).
+        if (queued) void markRunnerWork(input.accountId);
         // After the commit, and whatever happens the batch stays accepted: the handoff finishes here or on the next sweep tick.
         if (handedOff && deps.onHandedOff) await deps.onHandedOff({ accountId: input.accountId, runId: input.runId }).catch((error: unknown) => deps.onError?.(input.runId, error));
         if (followUp && deps.followUp) {
