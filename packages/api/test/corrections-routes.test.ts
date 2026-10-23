@@ -146,7 +146,10 @@ describe('D#597 CC-2a: correction routes', () => {
     expect((await call(o, 'POST', url, { kind: 'shout', body: 'x' })).status).toBe(422);
     const long = await call(o, 'POST', url, { kind: 'question', body: 'x'.repeat(4001) });
     expect(long.status).toBe(422);
-    expect(JSON.stringify(await long.json())).not.toContain('4000');
+    // check the message only: the body also carries a random request id whose hex can contain "4000"
+    const longBody = (await long.json()) as { error: { code: string; message?: string; details?: unknown } };
+    expect(longBody.error.code).toBe('validation_failed');
+    expect(JSON.stringify({ ...longBody.error, request_id: undefined })).not.toMatch(/\b4,?000\b/);
     expect((await call(o, 'POST', url, { kind: 'priority', body: '{"priority":"now"}' })).status).toBe(422);
     expect((await call(o, 'POST', url, { kind: 'priority', body: 'urgent' })).status).toBe(422);
     expect((await call(o, 'POST', url, { kind: 'new_item', body: '{"title":"t","kind":"nope","body":"b"}' })).status).toBe(422);
