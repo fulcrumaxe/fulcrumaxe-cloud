@@ -704,6 +704,12 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
         ) {
           return { applied: 'transitioned', workItemId, recorded: false };
         }
+        // D#598: the same for a close or a merge that arrives after the item is already at that very stage (the worker read the pull request's state
+        // back from GitHub when this delivery was late or lost, packages/worker prSlotReconcile.ts, and recorded the same move). Also refused before
+        // anything is written, so it is a no-op and not a failed delivery.
+        if (err instanceof IllegalStageTransitionError && (mapped.toStage === 'merged' || mapped.toStage === 'closed_unmerged') && err.from === mapped.toStage) {
+          return { applied: 'transitioned', workItemId, recorded: false };
+        }
         throw err;
       }
 

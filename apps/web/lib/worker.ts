@@ -6,6 +6,7 @@ import { getAuthorCheck } from "./github/authorCheck";
 import { openVerifyReader } from "./github/planSource";
 import { createAppRepoVisibility } from "./github/repoVisibility";
 import { createBuildWithRepoMap } from "./github/repoMap";
+import { createPrStateReader } from "./github/prState";
 import { createAppContinuationBase } from "./github/runnerPullRequest";
 import { createPlanePublishPorts } from "./github/planePublish";
 import { createAppContinuationBinding } from "./github/continuationBinding";
@@ -59,8 +60,8 @@ export type SetupRequestCheckWorker = Pick<Worker, "sweepSetupRequestChecks">;
 /** What the decision-ask answer route asks of the worker (D#598 P8c-2a): the answer runs on the worker's receipt pool, which is never handed out. */
 export type DecisionAskAnswerWorker = Pick<Worker, "answerDecisionAsk">;
 
-/** What the branch cleanup cron asks of the worker (D#598 P1f-5d): one pass of the cleanup sweep. */
-export type BranchCleanupWorker = Pick<Worker, "sweepBranchCleanups">;
+/** What the branch cleanup cron asks of the worker (D#598 P1f-5d): one pass of the cleanup sweep, and (D#598) one pass of the stale pull-request sweep. */
+export type BranchCleanupWorker = Pick<Worker, "sweepBranchCleanups" | "sweepPrSlotHolders">;
 
 /** What the claim verifier cron asks of the worker (D#483 S4-b2b): one pass of the verifier sweep. */
 export type ProposalVerifySweepWorker = Pick<Worker, "sweepProposalVerification">;
@@ -73,7 +74,7 @@ export type WorkerOptionsProvider = () => CreateWorkerOptions | null;
 const productionProvider: WorkerOptionsProvider = () => {
   const env = process.env;
   if (!env.VERCEL_TEAM_ID?.trim() || !env.VERCEL_PROJECT_ID?.trim()) return null;
-  return { vercel: productionVercelCredentials(env), ports: { hooks: createHooksPort(), authorCheck: getAuthorCheck, follow: createFollow(), repoVisibility: createAppRepoVisibility(), continuationBase: createAppContinuationBase(), continuationBinding: createAppContinuationBinding(), planePublish: createPlanePublishPorts(env) }, previewPrompt: buildPreviewPrompt, verify: { prompt: buildVerifierPrompt, record: recordFromOutput, github: openVerifyReader }, advance: { startAdvance: createStartAdvance(), triage: triageIssueItem, panel: runPanelForItem, spec: runSpecForItem, build: createBuildWithRepoMap(), buildFailed: markBuildNeedsHuman, buildWaitReason: readBuildWaitReason, review: createReviewDeps(), lightSpec: publishLightSpec, respec: publishRespec, amendSpec: publishAmendment }, targetOverrides: { keepAlive: createVercelKeepAlive(waitUntil) } };
+  return { vercel: productionVercelCredentials(env), ports: { hooks: createHooksPort(), authorCheck: getAuthorCheck, follow: createFollow(), repoVisibility: createAppRepoVisibility(), continuationBase: createAppContinuationBase(), continuationBinding: createAppContinuationBinding(), planePublish: createPlanePublishPorts(env) }, previewPrompt: buildPreviewPrompt, verify: { prompt: buildVerifierPrompt, record: recordFromOutput, github: openVerifyReader }, advance: { startAdvance: createStartAdvance(), triage: triageIssueItem, panel: runPanelForItem, spec: runSpecForItem, build: createBuildWithRepoMap(), buildFailed: markBuildNeedsHuman, buildWaitReason: readBuildWaitReason, prState: createPrStateReader(), review: createReviewDeps(), lightSpec: publishLightSpec, respec: publishRespec, amendSpec: publishAmendment }, targetOverrides: { keepAlive: createVercelKeepAlive(waitUntil) } };
 };
 
 let provider: WorkerOptionsProvider = productionProvider;

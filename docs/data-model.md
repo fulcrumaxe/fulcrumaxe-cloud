@@ -56,6 +56,7 @@ Every `CREATE TABLE` in `packages/db/migrations/*.sql` at HEAD, one row each (49
 | `discovery_settings` | `0849_discovery_settings.sql` | tenant | yes |
 | `setup_requests` | `0856_setup_requests.sql`, `0874_setup_request_lister.sql`, `0877_setup_request_repaused.sql` | tenant (`app_user` SELECT, INSERT and a column-limited UPDATE; owner or admin to propose or decide; no DELETE; the cross-account due list is `setup_request_list_due`, run-writer only) | yes |
 | `branch_cleanups` | `0886_branch_cleanup_lister.sql` | tenant (`app_user` SELECT and INSERT; no UPDATE or DELETE; the cross-account due list is `branch_cleanup_list_due`, run-writer only) | yes |
+| `pr_slot_reconciles` | `0894_pr_slot_reconcile.sql` | tenant (`app_user` SELECT, INSERT and UPDATE; one row per item, the last time GitHub was asked about its pull request; the cross-account due list is `pr_slot_reconcile_list_due`, run-writer only) | yes |
 | `discovery_runs` | `0859_discovery_runs.sql` | tenant (`app_user` SELECT, a four-column INSERT and column-scoped state UPDATE; no DELETE) | yes |
 | `proposal_intake_events` | `0861_proposal_intake.sql` | tenant (`app_user` SELECT and a four-column INSERT; no UPDATE or DELETE) | yes |
 | `idempotency_keys` | `0600_api_core.sql` | tenant | yes |

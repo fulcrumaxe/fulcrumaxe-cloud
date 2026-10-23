@@ -18,6 +18,7 @@ import { checkRoundHeadroom } from "./panelHeadroom.js";
 import type { RaiseEnvelopeAsk } from "./envelopeAsk.js";
 import { ingestRunMemoryProposals } from "./memoryIntake.js";
 import { isItemWaitingOnAnswer } from "@fx/db/src/decisionAsks.js";
+import { reconcileSlotHolders, type PrStateOpen } from "./prSlotReconcile.js";
 import type { DecisionIntake, DecisionStepCode } from "./decisionIntake.js";
 import { isContextSpill, type ContextAssembly, type ContextSection, type ContextSpill } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
@@ -211,6 +212,12 @@ export interface AdvanceModuleDeps {
    * Asked once when a build is approved, so the answer can say "waiting" and not "started". Advisory (no lock): the workflow's own start decides. Absent or failing, the answer is "started".
    */
   buildWaitReason?: ((pool: Pool, accountId: string, workItemId: string) => Promise<string | null>) | null;
+  /**
+   * D#598, injected from apps/web: the read-only GitHub client (fenced for a `runner_local` repository). When a build start finds the slots held, the
+   * holders that have a pull request are checked on GitHub (each at most once per window) and one closed or merged without its webhook is moved as the
+   * webhook would; the start is then asked once more. Absent: no holder is checked.
+   */
+  prState?: PrStateOpen | null;
   /** D#483 S5-d: raises the `spend_past_envelope` ask (receipt login) when a start is denied by the item's spend envelope. Absent, the denial still pauses the item and no ask is raised. */
   raiseEnvelopeAsk?: RaiseEnvelopeAsk | null;
   /** D#7 DP4b-2: reads a succeeded executor run's decision fields (receipts, asks, refusals) on the receipt login. Absent, `advanceDecision` answers `none`. */
@@ -1200,7 +1207,18 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (spendAttempt !== undefined && !(Number.isSafeInteger(spendAttempt) && spendAttempt >= 0 && spendAttempt <= MAX_WAITING_ATTEMPT)) return { status: "refused", reason: "invalid_input" };
     const bad = await guardStep(who);
     if (bad) return bad;
-    const out = await deps.build(runnerPool, who.accountId, who.workItemId, approvalId, portsFor(who), { ...(expectedVersion !== undefined ? { expectedVersion } : {}), ...(spendAttempt !== undefined && spendAttempt > 0 ? { spendAttempt } : {}) });
+    const buildOptions = { ...(expectedVersion !== undefined ? { expectedVersion } : {}), ...(spendAttempt !== undefined && spendAttempt > 0 ? { spendAttempt } : {}) };
+    let out = await deps.build(runnerPool, who.accountId, who.workItemId, approvalId, portsFor(who), buildOptions);
+    // D#598: the slots are held. A holder whose pull request was closed or merged without its webhook holds one for good, so the holders are checked on
+    // GitHub (each at most once per window); when one was moved out, the start is asked once more. A check that fails changes nothing and the wait goes on.
+    if (out.status === "refused" && out.reason != null && BUILD_SLOT_WAIT_REASONS.includes(out.reason) && deps.prState) {
+      const moved = await reconcileSlotHolders(runnerPool, deps.prState, who.accountId, who.workItemId, out.reason).catch((err: unknown) => {
+        // fx-swallow-ok: the check is a best-effort extra; a fixed line is logged (ids and a code only) and the build keeps waiting as before
+        console.warn(JSON.stringify({ event: "advance.pr_slot_reconcile_failed", work_item_id: who.workItemId, code: (err as { code?: string } | null)?.code ?? "error" }));
+        return 0;
+      });
+      if (moved > 0) out = await deps.build(runnerPool, who.accountId, who.workItemId, approvalId, portsFor(who), buildOptions);
+    }
     console.info(JSON.stringify({ event: "advance.build", work_item_id: who.workItemId, status: out.status, reason: out.reason ?? null, run_id: out.runId ?? null }));
     if (out.status === "started" && out.runId) await recordCorrectionsApplied(who, out.runId);
     // A build that did not start is a fact of the item (its code is a fixed word the start named).
