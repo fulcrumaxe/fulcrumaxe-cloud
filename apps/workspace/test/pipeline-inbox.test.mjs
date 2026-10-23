@@ -6,7 +6,7 @@
 // survives an unknown outcome only.
 import { describe, expect, it } from "vitest";
 import { ApiFailure } from "../apps/_lib/api.js";
-import { approveBlock, checkSentences, claimVerdict, evidenceLabel, AMOUNT_LABEL, AMOUNT_SENTENCE, LOW_BUDGET_SENTENCE, checkAmount, prefillAmount, DETACHED_SENTENCE, INBOX_DONE as DONE, FILTERS, NOT_STARTED, REFUSALS, INBOX_SENDING as SENDING, approvedSentence, badgesFor, detailsFor, outcomeUnknown, refusalSentence, stageWords, validProposal } from "../apps/pipeline/pipeline-actions.js";
+import { DETAIL_FAILED_SENTENCE, DETAIL_PENDING_SENTENCE, NOT_CHECKED_SENTENCE, VERIFY_WAIT_SENTENCES, unfinishedCheckLine, approveBlock, checkSentences, claimVerdict, evidenceLabel, AMOUNT_LABEL, AMOUNT_SENTENCE, LOW_BUDGET_SENTENCE, checkAmount, prefillAmount, DETACHED_SENTENCE, INBOX_DONE as DONE, FILTERS, NOT_STARTED, REFUSALS, INBOX_SENDING as SENDING, approvedSentence, badgesFor, detailsFor, outcomeUnknown, refusalSentence, stageWords, validProposal } from "../apps/pipeline/pipeline-actions.js";
 
 const BAD = /\b(null|undefined|NaN|\[object)/;
 const base = { id: "p1", title: "Add dark mode", state: "new", sources: ["github_issue"], gh_number: 12, discussion_number: null, task_key: null, category_hint: null, estimate_usd: null, milestone_key: null, milestone_title: null };
@@ -59,6 +59,17 @@ describe("S4-h: the check on a proposal", () => {
     expect(checkSentences({ verification: "check_failed", verify_retry: false, verify_attempts_max: 3 })).toEqual(["The check didn't finish after 3 tries, so this proposal stays unconfirmed."]);
     expect(checkSentences({ verification: "check_failed", verify_retry: false })).toEqual([]);
     expect(checkSentences({ verification: "refuted" })).toEqual([]);
+  });
+  it("unfinishedCheckLine names a pending check's wait: one plain sentence each for daily_limit and daily_spend, the pending sentence otherwise", () => {
+    const pending = { verification: "pending" };
+    expect(unfinishedCheckLine(pending, "daily_limit")).toBe("Waiting: today's limit for checking outside proposals is reached — it is checked tomorrow.");
+    expect(unfinishedCheckLine(pending, "daily_spend")).toBe("Waiting: this repository's daily checking budget is used — it is checked tomorrow.");
+    for (const wait of ["queued", null, undefined, "", "odd", "toString", 3]) expect(unfinishedCheckLine(pending, wait), String(wait)).toBe(DETAIL_PENDING_SENTENCE);
+    // The wait only changes a pending check's line.
+    expect(unfinishedCheckLine({ verification: "check_failed" }, "daily_limit")).toBe(DETAIL_FAILED_SENTENCE);
+    expect(unfinishedCheckLine({ verification: "not_checked" }, "daily_spend")).toBe(NOT_CHECKED_SENTENCE);
+    expect(unfinishedCheckLine({ verification: "verified" }, "daily_spend")).toBe("");
+    for (const s of Object.values(VERIFY_WAIT_SENTENCES)) expect(s).not.toMatch(BAD);
   });
   it("approveBlock names why Approve is off in Being checked and Not checked only", () => {
     expect(approveBlock({ inbox_section: "being_checked" })).toBe("You can approve this once it's been checked.");

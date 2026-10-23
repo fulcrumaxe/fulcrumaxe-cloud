@@ -3,6 +3,7 @@ import { withTenant } from '../tenancy/withTenant.js';
 import { ENGINE_LOOP_MARKER } from '../plan/executeImport.js';
 import { decideOwnerProcess } from '../plan/ownerProcess.js';
 import { cleanText } from '../plan/roadmapFile.js';
+import { markWorkPending } from '../pendingWork.js';
 
 /**
  * D#483 S4-c: one install or payment discovery, and the sweep that withdraws what a removed repository leaves behind.
@@ -164,6 +165,8 @@ export async function runDiscovery(deps: DiscoveryRunDeps, runId: string): Promi
         JSON.stringify({ imported: payload.length, with_preview: withPreview, owner_process: owner }),
       ]);
     });
+    // The transaction has committed: new proposals start `pending` for the claim verifier. Void and best-effort (a hint; the backstop is the floor).
+    if (payload.length > 0) void markWorkPending('proposal-verify-sweep');
     return { state: 'succeeded', imported: payload.length, withPreview, owner };
   } catch (err) {
     // fx-swallow-ok: the failure is recorded on the run row as a closed code (never the error's text, which can carry a host or a token)

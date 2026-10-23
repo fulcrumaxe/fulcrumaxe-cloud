@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { withTenant } from '@fx/db/src/withTenant.js';
@@ -328,6 +328,23 @@ describe('proposal verification read (S4-i)', () => {
       expect(d.evidence[0]!.ref).toBe('a<b>.md:1-2');
       expect(d.evidence[0]!.url).toBe(`https://github.com/acme/widgets/blob/${SHA}/a%3Cb%3E.md#L1-L2`);
     });
+  });
+
+  it('verify_wait: settings that cannot be read do not fail the detail read; a pending proposal reads queued and a code is logged', async () => {
+    const id = await newProposal(a, repoA, { provenance: 'external' });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const d = await getProposal(ctxOf(a), id, () => {
+        throw new Error('plan data is broken');
+      });
+      expect(d).toMatchObject({ verification: 'pending', verify_wait: 'queued' });
+      const lines = warn.mock.calls.map((c) => String(c[0]));
+      expect(lines.some((l) => l.includes('discovery_settings_failed'))).toBe(true);
+      // No value from the failure leaks into the log line.
+      expect(lines.join('\n')).not.toContain('broken');
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('readProposal inside a transaction carries the same counts the decision routes return', async () => {

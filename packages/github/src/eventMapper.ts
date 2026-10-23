@@ -18,6 +18,7 @@ import { withPlatformOps } from '@fx/core/src/tenancy/withPlatformOps.js';
 import { syncFailureTag } from './syncFailureTag.js';
 import { installationDiscoveryRef } from './installDiscovery.js';
 import { decideOwnerProcess } from '@fx/core/src/plan/ownerProcess.js';
+import { markWorkPending } from '@fx/core/src/pendingWork.js';
 import { applyIssueChange, fencedIssueSummary, proposalTitle, proposeFromIssue, type IssueChange, type ProposeOutcome } from './issueProposal.js';
 
 /**
@@ -940,6 +941,16 @@ export async function handleGithubWebhookEvent(
       mapped,
     ),
   );
+
+  // D#483 S4-b2b: a proposal is `pending` for the claim verifier from the moment its row commits: a new outsider proposal (intake), or an
+  // edited one sent back through `proposal_requeue_verification`. Marked after the commit, void and best-effort, so an idle platform's
+  // sweep connects on its next tick instead of waiting out the backstop.
+  if (
+    (result.applied === 'proposed' && result.created) ||
+    (result.applied === 'proposal_changed' && result.count > 0 && mapped.kind === 'issue_proposal_change' && mapped.change.change === 'edited')
+  ) {
+    void markWorkPending('proposal-verify-sweep');
+  }
 
   // H17b-2: the transaction has committed. A sync failure never fails the delivery.
   if (result.applied === 'repos_detached' && result.syncRequested && deps.syncRepos) {

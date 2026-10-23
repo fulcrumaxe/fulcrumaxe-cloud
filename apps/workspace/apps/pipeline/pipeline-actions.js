@@ -675,9 +675,19 @@ export const NO_CLAIMS_SENTENCE = "There was nothing to check in this proposal."
 export const DETAIL_PENDING_SENTENCE = "Not checked yet. Claims and evidence show here once the check is done.";
 export const DETAIL_FAILED_SENTENCE = "The check didn't finish, so there are no claims or evidence to show.";
 
-/** The line for a proposal whose check has not produced a result (pending, check failed, not checked); "" once a check has finished. */
-export function unfinishedCheckLine(p) {
-  if (p.verification === "pending") return DETAIL_PENDING_SENTENCE;
+// D#483 S4-b2b: why a pending check is waiting, from the detail's `verify_wait`. `queued` (and anything this build does not know) keeps the
+// plain pending sentence above.
+export const VERIFY_WAIT_SENTENCES = {
+  daily_limit: "Waiting: today's limit for checking outside proposals is reached — it is checked tomorrow.",
+  daily_spend: "Waiting: this repository's daily checking budget is used — it is checked tomorrow.",
+};
+
+/**
+ * The line for a proposal whose check has not produced a result (pending, check failed, not checked); "" once a check has finished.
+ * `wait` is the detail's `verify_wait`; it only changes the line of a pending check.
+ */
+export function unfinishedCheckLine(p, wait) {
+  if (p.verification === "pending") return typeof wait === "string" && Object.hasOwn(VERIFY_WAIT_SENTENCES, wait) ? VERIFY_WAIT_SENTENCES[wait] : DETAIL_PENDING_SENTENCE;
   if (p.verification === "check_failed") return DETAIL_FAILED_SENTENCE;
   if (p.verification === "not_checked") return NOT_CHECKED_SENTENCE;
   return "";
@@ -1009,6 +1019,7 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
         status: "ready",
         claims: got.claims.filter((c) => c && typeof c.id === "string" && typeof c.text === "string"),
         evidence: got.evidence.filter((e) => e && typeof e.id === "string" && typeof e.kind === "string"),
+        wait: typeof got.verify_wait === "string" ? got.verify_wait : null,
         stamp,
       });
     } catch {
@@ -1233,7 +1244,7 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
     if (!d || d.status === "loading") return wrap(h("p", { class: "pl-inbox-line", role: "status", "data-testid": "pl-inbox-detail-loading" }, "Loading…"));
     if (d.status === "error")
       return wrap(h("p", { role: "alert", "data-testid": "pl-inbox-detail-error" }, "The proposals couldn't be loaded."), h("button", { type: "button", class: "pl-btn", "data-focus": p.id + ":retry", onClick: () => void fetchDetail(p) }, "Try again"));
-    const unfinished = unfinishedCheckLine(p);
+    const unfinished = unfinishedCheckLine(p, d.wait);
     // Nothing to list and no finished check: one line about the check, not "nothing to check" / "no evidence". Rows that do exist are still shown.
     if (unfinished && !d.claims.length && !d.evidence.length) return wrap(h("p", { class: "pl-inbox-line", "data-testid": "pl-check-status", "data-verification": str(p.verification) }, unfinished));
     const claims = d.claims.length

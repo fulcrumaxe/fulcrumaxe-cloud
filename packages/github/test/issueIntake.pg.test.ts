@@ -7,6 +7,7 @@ import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { runQueuedDiscoveries } from "@fx/core/src/discovery/run.js";
 import { queueDiscoveries } from "@fx/db/src/discoveryRuns.js";
 import { ENGINE_LOOP_MARKER } from "@fx/core/src/plan/executeImport.js";
+import { setPendingHooks } from "@fx/core/src/pendingWork.js";
 import type { GithubWebhookDbDeps, GithubWebhookPayload, HandleWebhookResult } from "../src/eventMapper.js";
 import { handleGithubWebhookEventForApp } from "../src/webhookGate.js";
 import { verifyWebhookSignature } from "../src/webhookSignature.js";
@@ -317,6 +318,39 @@ describe("an outside author's new issue becomes a proposal (D#483 S4-d)", () => 
     // An issue with no proposal (a trusted author's, which became a work item): closing it changes nothing.
     const none = await deliver(deps, payload(r, 96, "stranger", { action: "closed" }));
     expect(none).toMatchObject({ result: { result: { applied: "proposal_changed", count: 0 } } });
+  });
+
+  it("S4-b2b: a new outsider proposal and an edit that sends one back to pending each mark the verifier's sweep pending; a replay, a rate-limited issue, a close and a trusted author's issue do not", async () => {
+    const markers = new Map<string, number>();
+    setPendingHooks({ store: { get: async (k) => markers.get(k) ?? null, set: async (k, v) => void markers.set(k, v), delete: async (k) => void markers.delete(k) } });
+    const marked = () => markers.has("pending:proposal-verify-sweep");
+    try {
+      const r = await tenant();
+      const { deps } = await github({ stranger: "read", boss: "admin" }, [issueItem(120, "stranger"), issueItem(121, "boss")]);
+      // Intake insert.
+      const first = await deliver(deps, payload(r, 120, "stranger"));
+      expect(first).toMatchObject({ result: { result: { applied: "proposed", created: true } } });
+      expect(marked()).toBe(true);
+      // A replay under a new delivery id creates nothing and marks nothing.
+      markers.clear();
+      await deliver(deps, payload(r, 120, "stranger"));
+      expect(marked()).toBe(false);
+      // A close, and a trusted author's issue (a work item, no proposal), mark nothing.
+      await deliver(deps, payload(r, 120, "stranger", { action: "closed" }));
+      await deliver(deps, payload(r, 121, "boss", { association: "OWNER" }));
+      expect(marked()).toBe(false);
+      // Edit: the requeue loop sends the proposal back to pending.
+      await deliver(deps, payload(r, 120, "stranger", { action: "reopened" }));
+      expect(marked()).toBe(false);
+      await deliver(deps, payload(r, 120, "stranger", { action: "edited", title: "Better", body: "New text" }));
+      expect(marked()).toBe(true);
+      // An edit of an issue with no proposal requeues nothing.
+      markers.clear();
+      await deliver(deps, payload(r, 121, "boss", { action: "edited", title: "Better", body: "New text" }));
+      expect(marked()).toBe(false);
+    } finally {
+      setPendingHooks(null);
+    }
   });
 
   it("who owns the proposal follows the repository (S3 rule E6): internal_loop where the engine loop is installed, product otherwise; unreadable means left for the next discovery", async () => {

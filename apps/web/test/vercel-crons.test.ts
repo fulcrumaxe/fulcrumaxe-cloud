@@ -40,9 +40,13 @@ describe("apps/web/vercel.json", () => {
     expect(config.crons.filter((c) => c.path === "/api/cron/branch-cleanup")).toEqual([{ path: "/api/cron/branch-cleanup", schedule: "* * * * *" }]);
   });
 
+  it("the claim verifier sweep (D#483 S4-b2b) runs every 15 minutes, behind its own pending-work marker; one pass at a time holds the sweep's advisory lock", () => {
+    expect(config.crons.filter((c) => c.path === "/api/cron/proposal-verify-sweep")).toEqual([{ path: "/api/cron/proposal-verify-sweep", schedule: "*/15 * * * *" }]);
+  });
+
   it("changes nothing else: a crons list (each entry just a path and a schedule, no sweep at every minute) and the workflow step's function limit (pinned in stepMaxDuration.test.ts)", () => {
     expect(Object.keys(config)).toEqual(["functions", "crons"]);
     for (const cron of config.crons) expect(Object.keys(cron).sort()).toEqual(["path", "schedule"]);
-    for (const path of [...Object.keys(EXPECTED), "/api/cron/runner-sweeper", "/api/cron/stage-resume-sweep"]) expect(config.crons.find((c) => c.path === path)?.schedule).not.toBe("* * * * *");
+    for (const path of [...Object.keys(EXPECTED), "/api/cron/runner-sweeper", "/api/cron/stage-resume-sweep", "/api/cron/proposal-verify-sweep"]) expect(config.crons.find((c) => c.path === path)?.schedule).not.toBe("* * * * *");
   });
 });

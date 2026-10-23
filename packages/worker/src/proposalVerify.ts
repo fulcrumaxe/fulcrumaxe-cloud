@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { MAX_VERIFY_ATTEMPTS } from "@fx/core/src/plan/proposalVerification.js";
+import { proposalVerifyKey, verifyHold, verifySourceRefs } from "@fx/core/src/plan/proposalVerifyLimits.js";
 import { reportError } from "@fx/telemetry";
 import { PROPOSAL_VERIFIER_ROLE, VERIFIER_WORKDIR, type StartAgentRunInput } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
@@ -14,7 +15,9 @@ import type { SeatRequest, SeatResult } from "./seat.js";
  *  2. For each, under its own tenant, the run for its current attempt is looked up by its idempotency key,
  *     `proposal-verify:<id>:<text_hash_8>:<attempts>` (`verifyKey`): the text is part of the key, so an edited proposal sent back to `pending`
  *     (attempts at 0 again) starts a fresh key space instead of meeting a run made for its old text.
- *     - No run yet: an external proposal over its repository's daily limit waits ("daily limit") with nothing reserved. Otherwise the
+ *     - No run yet: an external proposal over its repository's daily limit waits ("daily limit") with nothing reserved, and so does any
+ *       proposal whose run would take its repository's verifier spend today past `perRepoDailyUsd` ("daily cap"). Both limits are
+ *       @fx/core's proposalVerifyLimits.ts, the same functions the detail route's `verify_wait` reads (S4-b2b). Otherwise the
  *       default branch's head is read through the read-only plan client and pinned, the seat is resolved (purpose "verify": the per-proposal
  *       figure is both the run's cap and its reservation) and the run starts: role proposal-verifier, the pinned commit itself fetched and
  *       checked out read-only (the launch fails if it cannot be, which records `check_failed`), the pinned sha on the run row (`head_sha`), and
@@ -34,7 +37,6 @@ export const VERIFY_LIST_LIMIT = 50;
 /** A pass stops starting proposals after this long, leaving the rest to the next tick. */
 export const VERIFY_PASS_BUDGET_MS = 40_000;
 const SWEEP_LOCK = "fx:proposal_verify_sweep";
-const KEY_PREFIX = "proposal-verify:";
 const ENDED = new Set(["succeeded", "refused_spend", "failed", "timed_out", "killed_spend", "cancelled"]);
 const SHA_RE = /^[0-9a-f]{40}$/;
 
@@ -51,7 +53,7 @@ export interface VerifyRepoReader {
   headSha(): Promise<string>;
   readFile(path: string, sha: string): Promise<string | null>;
 }
-export type VerifySettings = { on: false; code: string } | { on: true; verifyPerProposalUsd: number; externalVerifiesPerRepoPerDay: number };
+export type VerifySettings = { on: false; code: string } | { on: true; perRepoDailyUsd: number; verifyPerProposalUsd: number; externalVerifiesPerRepoPerDay: number };
 
 export interface ProposalVerifyDeps {
   /** The runner login's pool (it holds EXECUTE on the list). */
@@ -77,10 +79,12 @@ export interface ProposalVerifyCounts {
   waiting: number;
   recorded: number;
   daily_limit: number;
+  /** Held by `perRepoDailyUsd`: the repository's verifier spend today leaves no room for one more reservation. */
+  daily_cap: number;
   skipped: number;
   failed: number;
 }
-type Outcome = "started" | "waiting" | "recorded" | "daily_limit" | "skipped";
+type Outcome = "started" | "waiting" | "recorded" | "daily_limit" | "daily_cap" | "skipped";
 
 interface ProposalRow {
   id: string;
@@ -105,30 +109,14 @@ interface RunRow {
 
 const FAILED: VerifyRecord = { verification: "check_failed", verified_sha: null, claims: [], evidence: [] };
 
-/**
- * External proposals of one repository whose verifier run was started this UTC day: the one counter the daily limit refuses by (and
- * the read side's `verify_wait` will derive from). Counted from the run claims, so it needs no stamp of its own. It counts run STARTS:
- * every attempt's key is a row, so a retry of the same proposal takes another place in the day. That is intended: each attempt spends.
- * The proposal id is read as the second `:` field of the key (`verifyKey`), which the text hash after it does not move.
- */
-export async function externalVerifiesToday(client: Pick<PoolClient, "query">, accountId: string, repoId: string): Promise<number> {
-  const { rows } = await client.query<{ n: number }>(
-    `SELECT count(*)::int AS n FROM agent_run_idempotency_keys k
-       JOIN proposals p ON p.account_id = k.account_id AND p.id::text = split_part(k.idempotency_key, ':', 2)
-      WHERE k.account_id = $1 AND k.idempotency_key LIKE $3 AND k.created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
-        AND p.repo_id = $2 AND p.provenance = 'external'`,
-    [accountId, repoId, `${KEY_PREFIX}%`],
-  );
-  return rows[0]?.n ?? 0;
-}
+/** The daily external counter, defined once in @fx/core (the read side's `verify_wait` derives from it too). */
+export { externalVerifiesToday } from "@fx/core/src/plan/proposalVerifyLimits.js";
 
 const eligible = (p: { verification: string; verify_attempts: number }): boolean =>
   p.verification === "pending" || (p.verification === "check_failed" && p.verify_attempts < MAX_VERIFY_ATTEMPTS);
-const sourceRefs = (p: ProposalRow): string[] => [p.gh_number, p.discussion_number].filter((n): n is number => n !== null).map((n) => `#${n}`);
-/** The first 8 hex of a hash of the proposal text the request hash covers (title, summary, source refs). */
-const textHash8 = (p: ProposalRow): string => createHash("sha256").update(JSON.stringify([p.title, p.summary, sourceRefs(p)])).digest("hex").slice(0, 8);
-/** The current attempt's run key. The id stays the second `:` field (externalVerifiesToday reads it there). */
-const verifyKey = (p: ProposalRow): string => `${KEY_PREFIX}${p.id}:${textHash8(p)}:${p.verify_attempts}`;
+const sourceRefs = verifySourceRefs;
+/** The current attempt's run key (@fx/core's `proposalVerifyKey`, which the limits count by). */
+const verifyKey = proposalVerifyKey;
 /** What the run was started for: a run made for other text (an edited proposal sent back to `pending`) is not its answer. */
 const requestHash = (p: ProposalRow): string =>
   createHash("sha256").update(JSON.stringify(["proposal-verify", p.id, p.verify_attempts, p.title, p.summary, sourceRefs(p)])).digest("hex");
@@ -188,14 +176,16 @@ export function createProposalVerifySweep(deps: ProposalVerifyDeps): () => Promi
       if (!p || !eligible(p)) return null;
       const key = verifyKey(p);
       const run = await readRun(client, accountId, key);
-      // The daily limit is read before anything is reserved: a proposal over it starts nothing and stays `pending`.
-      const over = run === undefined && p.provenance === "external" && (await externalVerifiesToday(client, accountId, p.repo_id)) >= settings.externalVerifiesPerRepoPerDay;
-      return { p, key, run, over };
+      // Both daily limits are read before anything is reserved: a proposal held by either starts nothing and stays as it is.
+      // `verifyHold` is the same function the detail route's `verify_wait` reads, so the two cannot disagree.
+      const hold = run === undefined ? await verifyHold(client, accountId, p, settings) : null;
+      return { p, key, run, hold };
     });
     if (found === null) return "skipped";
-    const { p, key, run, over } = found;
+    const { p, key, run, hold } = found;
     if (run !== undefined) return settle(accountId, p, run);
-    if (over) return "daily_limit";
+    if (hold === "daily_limit") return "daily_limit";
+    if (hold === "daily_spend") return "daily_cap";
     if (!p.gh_owner || !p.gh_name) return "skipped";
 
     const repo = { repoId: p.repo_id, owner: p.gh_owner, name: p.gh_name };
@@ -234,8 +224,15 @@ export function createProposalVerifySweep(deps: ProposalVerifyDeps): () => Promi
   }
 
   return async function sweepProposalVerification(): Promise<ProposalVerifyCounts> {
-    const counts: ProposalVerifyCounts = { listed: 0, started: 0, waiting: 0, recorded: 0, daily_limit: 0, skipped: 0, failed: 0 };
-    const settings = deps.settings();
+    const counts: ProposalVerifyCounts = { listed: 0, started: 0, waiting: 0, recorded: 0, daily_limit: 0, daily_cap: 0, skipped: 0, failed: 0 };
+    let settings: VerifySettings;
+    try {
+      settings = deps.settings();
+    } catch (err) {
+      // Fail closed: settings that cannot be read verify nothing. The pass ends idle with a code; the next tick asks again.
+      reportError(err, { stage: "proposal_verify.settings" });
+      return { ...counts, idle: "discovery_settings_failed" };
+    }
     if (!settings.on) return { ...counts, idle: settings.code };
     // One pass at a time: a transaction-scoped try-lock on its own connection, held for the whole pass and ended with it. That connection
     // stays checked out for the whole pass (up to VERIFY_PASS_BUDGET_MS plus one run), so the pool needs at least one more free connection

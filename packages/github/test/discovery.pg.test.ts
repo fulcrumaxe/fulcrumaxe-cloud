@@ -6,6 +6,7 @@ import { queueDiscoveries } from "@fx/db/src/discoveryRuns.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { runDiscovery, runQueuedDiscoveries, withdrawDisconnectedProposals, type DiscoveryRunDeps, type PreviewHint } from "@fx/core/src/discovery/run.js";
 import { ENGINE_LOOP_MARKER } from "@fx/core/src/plan/executeImport.js";
+import { setPendingHooks } from "@fx/core/src/pendingWork.js";
 import type { GithubWebhookDbDeps, GithubWebhookPayload } from "../src/eventMapper.js";
 import { handleGithubWebhookEventForApp } from "../src/webhookGate.js";
 import { completeInstall } from "../src/installCallback.js";
@@ -121,6 +122,31 @@ describe("install and payment discovery (D#483 S4-c)", () => {
     // A.S4-1: the counts of work items and of runs are unchanged.
     expect(await counts(r)).toEqual(before);
     expect(await runRows(r)).toMatchObject([{ trigger: "activation", trigger_ref: "sub_1", state: "succeeded", counts: { imported: 50, with_preview: 0, owner_process: "product" } }]);
+  });
+
+  it("S4-b2b: a discovery that wrote proposals marks the claim verifier's sweep pending, after the commit; one that wrote nothing does not", async () => {
+    const markers = new Map<string, number>();
+    setPendingHooks({ store: { get: async (k) => markers.get(k) ?? null, set: async (k, v) => void markers.set(k, v), delete: async (k) => void markers.delete(k) } });
+    try {
+      const r = await tenant();
+      const factory = await github([issue(1), issue(2)]);
+      await queue(r, "activation", "sub_wake");
+      const [out] = await runQueuedDiscoveries(depsFor(r, factory));
+      expect(out).toMatchObject({ state: "succeeded", imported: 2 });
+      // The rows are committed by the time the marker is there.
+      expect((await proposals(r)).length).toBe(2);
+      expect([...markers.keys()]).toContain("pending:proposal-verify-sweep");
+
+      // A skipped run (no subscription: the free preview) writes nothing and marks nothing.
+      markers.clear();
+      const free = await tenant({ active: false });
+      await queue(free, "activation", "sub_free");
+      const [skipped] = await runQueuedDiscoveries(depsFor(free, factory));
+      expect(skipped).toMatchObject({ state: "skipped" });
+      expect([...markers.keys()]).not.toContain("pending:proposal-verify-sweep");
+    } finally {
+      setPendingHooks(null);
+    }
   });
 
   it("reads issues with state=open, sort=updated, direction=desc, follows the Link header past a page of pull requests, and sends only allowlisted GraphQL", async () => {

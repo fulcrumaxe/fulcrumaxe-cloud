@@ -10,6 +10,7 @@ export type { RunnerLimits, RunnerLimitsSource } from "./runnerLimits.js";
 export type { RunnerLeaseSweeper, RunnerLeaseSweepResult } from "./runnerLeaseSweep.js";
 export type { RunHandoffs, RunHandoffSweepResult, CompleteRunHandoffInput, CompleteRunHandoffResult, DoneHandoffResult } from "./runHandoffs.js";
 export type { RunnerQueueSweeper, RunnerQueueSweepResult } from "./runnerQueueSweep.js";
+export type { ProposalVerifyCounts, VerifyRepoReader, VerifyRecord } from "./proposalVerify.js";
 export type { RunnerNoticeSweeper, RunnerNoticeResult } from "./runnerNotices.js";
 export type { InvariantSweeper, InvariantSweepResult } from "./invariantSweep.js";
 export { RunActionInputError, RunActionUnavailableError, RunActionForbiddenError, RunActionRefusedError } from "./runActions.js";
