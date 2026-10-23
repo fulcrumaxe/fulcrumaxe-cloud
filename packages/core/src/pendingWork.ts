@@ -233,8 +233,69 @@ export function markRunnerWork(accountId: string, opts: { since?: number; now?: 
       await bounded(Promise.resolve(hooks.store.set(runnerWorkDueKeyFor(accountId), since, RUNNER_WORK_TTL_SECONDS)));
       return;
     }
+    // The run of bumps this one belongs to (see runnerWorkFirstKeyFor). A failed read only starts a new run: the epoch write below never waits on it.
+    const look = (key: string): Promise<number | null> => bounded(Promise.resolve(hooks.store.get(key))).then(asTime, () => null);
+    const [prev, first] = await Promise.all([look(runnerWorkKeyFor(accountId)), look(runnerWorkFirstKeyFor(accountId))]);
+    const chained = prev !== null && first !== null && first <= prev && prev <= since && since - prev < RUNNER_WORK_CHAIN_GAP_MS;
     await bounded(Promise.resolve(hooks.store.set(runnerWorkKeyFor(accountId), since, RUNNER_WORK_TTL_SECONDS)));
+    if (!chained) await bounded(Promise.resolve(hooks.store.set(runnerWorkFirstKeyFor(accountId), since, RUNNER_WORK_TTL_SECONDS)));
   });
+}
+
+/**
+ * D#6 RUNNER-PING: bumps less than this apart form one run, and the account's FIRST-bump value keeps the start of the run. Without it, work marked
+ * every minute would keep the epoch younger than the 90-second reply window for ever, and a dead runner would never be noticed.
+ */
+export const RUNNER_WORK_CHAIN_GAP_MS = 90_000;
+
+/** The cache key of the first bump of the account's current run of bumps (ms); `runnerWorkKeyFor` holds the latest. */
+export function runnerWorkFirstKeyFor(accountId: string): string {
+  return `wake-first:acct:${accountId}`;
+}
+
+/** The cache key of the last "Check runner now" a person sent to this runner (ms). */
+export function runnerCheckKeyFor(runnerId: string): string {
+  return `wake-check:rid:${runnerId}`;
+}
+
+/**
+ * D#6 RUNNER-PING: records that a person asked this runner to answer now. Awaited and bounded; resolves false when there is no store or the write
+ * failed, so the route can say the check could not be sent. The value lives a day: a "Not responding" stays until the runner is heard from again.
+ */
+export async function recordRunnerCheck(runnerId: string, sentAt: number): Promise<boolean> {
+  const hooks = getPendingHooks();
+  if (!hooks || runnerId === "") return false;
+  try {
+    await bounded(Promise.resolve(hooks.store.set(runnerCheckKeyFor(runnerId), sentAt, RUNNER_WORK_TTL_SECONDS)));
+    return true;
+  } catch (err) {
+    // fx-swallow-ok: the route answers 503 check_unavailable on false; logged to stdout (not the database) by the helper
+    logRunnerWorkFailure("runner_check.write", err);
+    return false;
+  }
+}
+
+/** What the fleet read needs to tell a runner that does not answer: the account's latest and first bump, and each runner's last check (ms). */
+export interface RunnerReplyHints {
+  epoch: number | null;
+  first: number | null;
+  checks: ReadonlyMap<string, number>;
+}
+
+/** Reads those hints in one parallel round, with NO database access. Never throws: a miss or a failure is simply no value (nothing is flagged). */
+export async function readRunnerReplyHints(accountId: string, runnerIds: readonly string[]): Promise<RunnerReplyHints> {
+  const hooks = getPendingHooks();
+  const none: RunnerReplyHints = { epoch: null, first: null, checks: new Map() };
+  if (!hooks || accountId === "") return none;
+  const get = (key: string): Promise<number | null> => bounded(Promise.resolve(hooks.store.get(key))).then(asTime, (err: unknown) => (logRunnerWorkFailure("runner_reply.read", err), null));
+  const ids = [...new Set(runnerIds)].filter((id) => id !== "");
+  const [epoch, first, ...checks] = await Promise.all([get(runnerWorkKeyFor(accountId)), get(runnerWorkFirstKeyFor(accountId)), ...ids.map((id) => get(runnerCheckKeyFor(id)))]);
+  const found = new Map<string, number>();
+  ids.forEach((id, i) => {
+    const at = checks[i];
+    if (at !== null && at !== undefined) found.set(id, at);
+  });
+  return { epoch: epoch ?? null, first: first ?? null, checks: found };
 }
 
 /**

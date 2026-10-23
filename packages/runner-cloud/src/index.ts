@@ -18,7 +18,8 @@ export {
 export { REGISTER_PATH, registerRunner } from "./register.js";
 export { ROTATE_PATH, rotateRunnerKey } from "./rotate.js";
 export { REVOKE_PATH, revokeAllRunners, revokeRunner, selfRevokeRunner } from "./revoke.js";
-export { FLEET_SETTING_ACTIONS, applyRunnerSetting, removeRunner, setRunnerRepos, type FleetSettingAction } from "./fleetControls.js";
+export { FLEET_SETTING_ACTIONS, applyRunnerSetting, checkRunner, removeRunner, setRunnerRepos, type FleetSettingAction } from "./fleetControls.js";
+export { RUNNER_CHECK_REPLY_MS, RUNNER_WORK_REPLY_MS, checkStatusOf, ignoredWork, runnerReplyOf, type RunnerCheckStatus, type RunnerReply } from "./runnerReply.js";
 export { CLAIM_PATH, claimRun } from "./claim.js";
 export { HEARTBEAT_PATH, heartbeatRun } from "./heartbeat.js";
 export { eventsPath, ingestEvents } from "./ingestEvents.js";

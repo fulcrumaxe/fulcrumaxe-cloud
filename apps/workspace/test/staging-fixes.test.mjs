@@ -44,12 +44,12 @@ describe("item 1: the runner state matrix as the card words it (D#605 FL-8: a dr
   }
   it("a paused or draining runner offers Resume and not Pause; any other offers Pause and Finish current work", () => {
     const labels = (o) => controlList(readRunner(wire(o))).map((c) => c.label);
-    expect(labels({ state: "paused", paused: true })).toEqual(["Resume", "Rename", "Remove"]);
-    expect(labels({ state: "paused", draining: true })).toEqual(["Resume", "Rename", "Remove"]);
-    expect(labels({ state: "online_idle" })).toEqual(["Pause", "Finish current work", "Rename", "Remove"]);
+    expect(labels({ state: "paused", paused: true })).toEqual(["Resume", "Rename", "Check runner now", "Remove"]);
+    expect(labels({ state: "paused", draining: true })).toEqual(["Resume", "Rename", "Check runner now", "Remove"]);
+    expect(labels({ state: "online_idle" })).toEqual(["Pause", "Finish current work", "Rename", "Check runner now", "Remove"]);
   });
   it("every state has words", () => {
-    for (const s of ["online_idle", "busy", "paused", "draining", "offline", "outdated", "revoked"]) expect(STATE_WORDS[s]).toBeTruthy();
+    for (const s of ["online_idle", "busy", "paused", "draining", "not_responding", "offline", "outdated", "revoked"]) expect(STATE_WORDS[s]).toBeTruthy();
   });
 });
 

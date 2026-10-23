@@ -7,7 +7,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { launchRunId } from "../apps/runs/runs-storage.js";
 import {
-  ACTION_SENTENCES, ADD_REPO_SENTENCES, ADD_SENTENCES, ONLY_ADMINS, STATE_WORDS, accountText, actionUrl, capacityText, commandsFor, controlList, createAdder, createFleet, factsText, loadRepoChoices, parseLabels,
+  ACTION_SENTENCES, ADD_REPO_SENTENCES, ADD_SENTENCES, CHECK_POLL_MS, ONLY_ADMINS, STATE_WORDS, accountText, actionUrl, capacityText, commandsFor, controlList, createAdder, createFleet, factsText, loadRepoChoices, parseLabels,
   provText, readFleet, readRunner, runnerLimitText, stateParts, versionText,
 } from "../apps/runners/runners-fleet.js";
 
@@ -119,14 +119,14 @@ describe("states", () => {
 
 describe("controls", () => {
   it("offers Pause and Finish current work on a running runner, and Resume once it is held", () => {
-    expect(controlList(readRunner(wire())).map((c) => c.action)).toEqual(["pause", "drain", "rename", "remove"]);
-    expect(controlList(readRunner(wire({ paused: true }))).map((c) => c.action)).toEqual(["resume", "rename", "remove"]);
-    expect(controlList(readRunner(wire({ draining: true }))).map((c) => c.action)).toEqual(["resume", "rename", "remove"]);
+    expect(controlList(readRunner(wire())).map((c) => c.action)).toEqual(["pause", "drain", "rename", "check", "remove"]);
+    expect(controlList(readRunner(wire({ paused: true }))).map((c) => c.action)).toEqual(["resume", "rename", "check", "remove"]);
+    expect(controlList(readRunner(wire({ draining: true }))).map((c) => c.action)).toEqual(["resume", "rename", "check", "remove"]);
   });
   it("carries the reason of each control the caller may not use", () => {
     const why = "Only the person who registered this runner, or an owner or admin, can do this.";
     const no = { allowed: false, reason: why };
-    const list = controlList(readRunner(wire({ controls: { pause: no, drain: no, resume: no, rename: no, remove: no } })));
+    const list = controlList(readRunner(wire({ controls: { pause: no, drain: no, resume: no, rename: no, remove: no, check: no } })));
     expect(list.every((c) => c.allowed === false && c.reason === why)).toBe(true);
   });
   it("offers none on a removed runner, which has controls null", () => {
@@ -388,5 +388,68 @@ describe("the Runs app's launch argument (what the fleet's run links send)", () 
   it("opens nothing when there is no argument", () => {
     expect(launchRunId(undefined)).toBe("");
     expect(launchRunId(null)).toBe("");
+  });
+});
+
+// D#6 RUNNER-PING: "Check runner now". The cloud decides every state; the page words it and reads again while the check is in flight.
+describe("Check runner now", () => {
+  const parts = (over) => stateParts(readRunner(wire(over)));
+  it("words the three outcomes: Checking…, Online · just now, Not responding — no reply in 60 s", () => {
+    expect(parts({ state: "online_idle", check: { status: "checking", sent_at: "2026-10-15T12:00:00.000Z" } }).words).toBe("Checking…");
+    expect(parts({ state: "online_idle", state_note: "just now", check: { status: "answered", sent_at: "2026-10-15T12:00:00.000Z" } }).words).toBe("Online · just now");
+    expect(parts({ state: "not_responding", state_note: "no reply in 60 s", check: { status: "no_reply", sent_at: "2026-10-15T12:00:00.000Z" } })).toEqual({ mark: "◌", words: "Not responding — no reply in 60 s" });
+    expect(parts({ state: "not_responding", state_note: "didn't pick up new work within 90 s", check: null }).words).toBe("Not responding — didn't pick up new work within 90 s");
+    expect(parts({ state: "not_responding", state_note: null }).words).toBe("Not responding");
+    // A held runner keeps its own words even with a check in flight; an unknown status is ignored.
+    expect(parts({ state: "paused", state_note: "Resumes within 5 min", check: { status: "checking" } }).words).toBe("Paused · Resumes within 5 min");
+    expect(readRunner(wire({ check: { status: "whatever" } })).check).toBe("");
+    expect(STATE_WORDS.not_responding).toBe("Not responding");
+  });
+
+  it("offers the button with the cloud's reason when it is off", () => {
+    const no = { allowed: false, reason: "This runner checks in every minute on its own." };
+    const c = controlList(readRunner(wire({ controls: { ...ALL_OK, check: no } }))).find((x) => x.action === "check");
+    expect(c).toEqual({ action: "check", label: "Check runner now", allowed: false, reason: no.reason });
+  });
+
+  it("posts once, then reads every 5 s while the check is in flight, and stops once the cloud has the answer", async () => {
+    const answers = ["checking", "checking", "no_reply"];
+    let sent = false;
+    const { call, log } = fakeCall({
+      "GET /api/runners": () => {
+        if (!sent) return body([wire()]);
+        const status = answers.shift() ?? "no_reply";
+        return body([wire(status === "no_reply" ? { state: "not_responding", state_note: "no reply in 60 s", check: { status } } : { check: { status } })]);
+      },
+      ["POST " + actionUrl(R1, "check")]: () => ((sent = true), { runner_id: R1, sent_at: "2026-10-15T12:00:00.000Z" }),
+    });
+    const timers = [];
+    const fleet = createFleet({ call, schedule: (fn, ms) => timers.push({ fn, ms }) });
+    await fleet.load();
+    expect(timers).toHaveLength(0); // an idle page never polls
+    expect(await fleet.act(R1, "check")).toBe("");
+    expect(log.filter(([m]) => m === "POST")).toEqual([["POST", actionUrl(R1, "check"), {}]]);
+    expect(stateParts(fleet.state.fleet.runners[0]).words).toBe("Checking…");
+    expect(timers).toEqual([{ fn: expect.any(Function), ms: CHECK_POLL_MS }]);
+    timers.shift().fn();
+    await flush();
+    expect(timers).toHaveLength(1); // still checking: one more read, one timer at a time
+    timers.shift().fn();
+    await flush();
+    expect(stateParts(fleet.state.fleet.runners[0]).words).toBe("Not responding — no reply in 60 s");
+    expect(timers).toHaveLength(0);
+  });
+
+  it("stops polling once the page is closed, and says so plainly when the check could not be sent", async () => {
+    const ac = new AbortController();
+    const { call } = fakeCall({ "GET /api/runners": body([wire({ check: { status: "checking" } })]), ["POST " + actionUrl(R1, "check")]: fail(503, "check_unavailable") });
+    const timers = [];
+    const fleet = createFleet({ call, signal: ac.signal, schedule: (fn, ms) => timers.push({ fn, ms }) });
+    expect(await fleet.act(R1, "check")).toBe("The check couldn't be sent. Try again in a moment.");
+    expect(timers).toHaveLength(1);
+    ac.abort();
+    timers.shift().fn();
+    await flush();
+    expect(timers).toHaveLength(0);
   });
 });

@@ -5,18 +5,20 @@ import { RESUMES_WITHIN_NOTE, RUNNER_ONLINE_SECONDS, runnerIsLive, runnerLastHea
 import { UNNAMED_MEMBER } from "./memberRole.js";
 import { accountLineOf, fleetControlsOf, type AccountLine, type FleetControls } from "./fleetView.js";
 import { MIN_SUPPORTED_PROTOCOL_VERSION, RunnerHttpError, type RunnerCloudDeps } from "./http.js";
+import { readRunnerReplyHints } from "@fx/core/src/pendingWork.js";
+import { ANSWERED_NOTE, NO_REPLY_TO_CHECK_NOTE, NO_REPLY_TO_WORK_NOTE, runnerReplyOf, type RunnerReply } from "./runnerReply.js";
 import { configuredWakeKey } from "./wakeToken.js";
 
 /**
  * D#6 R2b criterion 13 (the read model) and criterion 16 (`GET /api/runners`, correction C6 section 2).
  *
  * Every state here is derived from rows at read time, never stored, so it cannot go stale and has no stamp to clear:
- *  - a runner is exactly one of `online_idle`, `busy`, `paused`, `draining`, `offline`, `outdated` or `revoked`;
+ *  - a runner is exactly one of `online_idle`, `busy`, `paused`, `draining`, `not_responding`, `offline`, `outdated` or `revoked`;
  *  - a run waiting on something is exactly one of five reasons, or none.
  * Both read through the caller's tenant context, so another account's runner or run does not exist here.
  */
 
-export const RUNNER_STATES = ["online_idle", "busy", "paused", "draining", "offline", "outdated", "revoked"] as const;
+export const RUNNER_STATES = ["online_idle", "busy", "paused", "draining", "not_responding", "offline", "outdated", "revoked"] as const;
 export type RunnerState = (typeof RUNNER_STATES)[number];
 
 export const RUN_WAIT_REASONS = ["waiting_for_runner", "waiting_for_account_cap", "waiting_for_runner_slot", "waiting_for_approval", "waiting_for_runner_update", "runner_too_old_for_check", "runner_lost_retrying", "timed_out_waiting", "paused_usage_limit"] as const;
@@ -44,6 +46,8 @@ export interface RunnerFacts {
    * wake key is configured (no key, no grant). Absent reads as false.
    */
   wakeCapable?: boolean;
+  /** D#6 RUNNER-PING (runnerReply.ts): it left a person's check, or marked work, unanswered. Absent or null: it is not known to ignore anything. */
+  noReply?: "check" | "work" | null;
 }
 
 /** Pure. When the runner was last heard from: the later of the database stamp and the cached wake check (`runnerLastHeardAt`, the shared rule). */
@@ -122,7 +126,8 @@ export function loadLabel(state: RunnerState, running: RunnerRunning, capacity: 
  * `paused` and `draining` (D#605 FL-3: set by a person, answered idle by the claim, and shown BEFORE the online test, because a runner told to
  * wait 5 minutes is quiet for longer than the online window and must not read `offline`), `offline` (no request for 120 seconds; D#6 RUNNER-WAKE: for a
  * wake-capable runner, nothing heard for 35 minutes, counting its cached wake checks), `busy`, `online_idle`. A runner that has never said `hello` has no protocol
- * version and is not outdated: it is offline until it is heard from.
+ * version and is not outdated: it is offline until it is heard from. `not_responding` (D#6 RUNNER-PING) comes after paused and draining: a runner
+ * that left a check unanswered reads it whatever its window says, and one that left marked work unanswered reads it instead of online.
  */
 export function classifyRunner(facts: RunnerFacts, now: Date, min: number = MIN_SUPPORTED_PROTOCOL_VERSION): RunnerState {
   if (facts.revokedAt !== null) return "revoked";
@@ -130,7 +135,10 @@ export function classifyRunner(facts: RunnerFacts, now: Date, min: number = MIN_
   if (facts.paused === true) return "paused";
   // D#605 FL-8: a drain lets running work finish, and when the last run ends the runner reads as paused (it still takes nothing new until resumed).
   if (facts.draining === true) return facts.busy ? "draining" : "paused";
+  // D#6 RUNNER-PING: an unanswered check stays until the runner is heard from, even past its window; ignored work only matters while it would read online.
+  if (facts.noReply === "check") return "not_responding";
   if (!heardRecently(facts, now)) return "offline";
+  if (facts.noReply === "work") return "not_responding";
   return facts.busy ? "busy" : "online_idle";
 }
 
@@ -193,6 +201,8 @@ export interface RunnerRow {
   controls: FleetControls | null;
   /** C-605-1: for a runner revoked because its registrant left, and only for an owner or admin: what "Register this machine again" pre-fills. Cloud-side data, no secret. */
   register_again: { name: string; labels: string[]; repo_ids: string[] } | null;
+  /** D#6 RUNNER-PING: the last "Check runner now" and where it stands; null when none was sent, or for an older runner (no wake grant). */
+  check: RunnerReply["check"];
 }
 
 interface RawRunnerRun {
@@ -222,6 +232,7 @@ interface RawRunner {
   busy: boolean;
   running_light: string;
   running_heavy: string;
+  lease_until: Date | null;
   cap_declared: boolean | null;
   cap_light_limit: number | null;
   cap_heavy_limit: number | null;
@@ -292,7 +303,7 @@ export async function readFleet(deps: ReadDeps, accountId: string, userId: strin
                 pc.granted AS consent_granted, pc.created_at AS consent_changed_at, r.allowed_repo_ids,
                 EXISTS (SELECT 1 FROM agent_runs a
                          WHERE a.account_id = r.account_id AND a.runner_id = r.id AND a.status = 'running' AND a.lease_expires_at > $2) AS busy,
-                live.light AS running_light, live.heavy AS running_heavy,
+                live.light AS running_light, live.heavy AS running_heavy, live.lease_until,
                 cap.declared AS cap_declared, cap.light_limit AS cap_light_limit, cap.heavy_limit AS cap_heavy_limit, cap.limited_by AS cap_limited_by,
                 pt.created_by AS prov_minted_by, COALESCE(NULLIF(pu.name, ''), NULLIF(pu.github_login, ''), $3) AS prov_minted_by_name, host(pt.first_ip) AS prov_first_ip,
                 st.name AS set_name, st.labels AS set_labels, st.paused_by, st.drained_by
@@ -300,7 +311,8 @@ export async function readFleet(deps: ReadDeps, accountId: string, userId: strin
                 LEFT JOIN runner_provisioning_tokens pt ON pt.runner_id = r.id AND pt.account_id = r.account_id
                 LEFT JOIN users pu ON pu.id = pt.created_by
                 LEFT JOIN runner_capacity cap ON cap.runner_id = r.id AND cap.account_id = r.account_id
-                CROSS JOIN LATERAL (SELECT count(*) FILTER (WHERE a.role = ANY(${LIGHT_ROLES_SQL})) AS light, count(*) FILTER (WHERE NOT a.role = ANY(${LIGHT_ROLES_SQL})) AS heavy
+                CROSS JOIN LATERAL (SELECT count(*) FILTER (WHERE a.role = ANY(${LIGHT_ROLES_SQL})) AS light, count(*) FILTER (WHERE NOT a.role = ANY(${LIGHT_ROLES_SQL})) AS heavy,
+                                           max(a.lease_expires_at) AS lease_until
                                       FROM agent_runs a WHERE a.account_id = r.account_id AND a.runner_id = r.id AND a.status = 'running' AND a.lease_expires_at > $2) live
                 LEFT JOIN runner_sandbox_status s ON s.runner_id = r.id AND s.account_id = r.account_id
                 LEFT JOIN runner_settings st ON st.runner_id = r.id AND st.account_id = r.account_id
@@ -372,13 +384,17 @@ export async function readFleet(deps: ReadDeps, accountId: string, userId: strin
       seen = new Map();
     }
   }
+  // D#6 RUNNER-PING: the account's work bumps and the runners' checks, from the same no-database store, also after the transaction (runnerReply.ts).
+  const hints = live.length > 0 ? await readRunnerReplyHints(accountId, live) : { epoch: null, first: null, checks: new Map<string, number>() };
   const runsOf = new Map<string, Array<{ id: string; label: string }>>();
   for (const run of runs) runsOf.set(run.runner_id, [...(runsOf.get(run.runner_id) ?? []), { id: run.id, label: `fulcrumaxe ${run.role} · ${run.repo_name ?? "a repository"}` }]);
   const runners = rows.map((r): RunnerRow => {
     // A revoked runner takes no work, so it shows neither a load nor a capacity.
     const running = r.revoked_at === null ? { light: Number(r.running_light), heavy: Number(r.running_heavy) } : { light: 0, heavy: 0 };
     const capacity = r.revoked_at === null ? capacityOf(r.cap_declared === null ? null : { declared: r.cap_declared, light_limit: r.cap_light_limit, heavy_limit: r.cap_heavy_limit, limited_by: r.cap_limited_by }, running) : null;
-    const facts: RunnerFacts = { revokedAt: r.revoked_at, protocolVersion: r.protocol_version, lastSeenAt: r.last_seen_at, busy: r.busy, paused: r.paused, draining: r.draining, seenAt: seen.get(r.id) ?? null, wakeCapable: wakeOn && r.wake_capable };
+    const wakeCapable = wakeOn && r.wake_capable;
+    const reply = r.revoked_at === null ? runnerReplyOf({ runnerId: r.id, wakeCapable, sandboxDown: r.sandbox_unavailable !== null, lastSeenAt: r.last_seen_at, leaseUntil: r.lease_until, hints, now }) : { check: null, noReply: null };
+    const facts: RunnerFacts = { revokedAt: r.revoked_at, protocolVersion: r.protocol_version, lastSeenAt: r.last_seen_at, busy: r.busy, paused: r.paused, draining: r.draining, seenAt: seen.get(r.id) ?? null, wakeCapable, noReply: reply.noReply };
     const state = classifyRunner(facts, now, min);
     const heard = r.revoked_at === null ? lastHeardAt(facts) : r.last_seen_at;
     const revokedReason = r.revoked_at !== null && r.revoked_reason === "member_demoted" ? ("registrant_left" as const) : null;
@@ -391,7 +407,8 @@ export async function readFleet(deps: ReadDeps, accountId: string, userId: strin
     // A revoked runner polls no more, so a stale reason is not shown for it.
     sandbox_unavailable: r.revoked_at === null ? r.sandbox_unavailable : null,
     state,
-    state_note: state === "paused" || state === "draining" ? RESUMES_WITHIN_NOTE : revokedReason === "registrant_left" && state === "revoked" ? REVOKED_REGISTRANT_LEFT_NOTE : lastHeardNote(state, facts, now),
+    state_note: state === "paused" || state === "draining" ? RESUMES_WITHIN_NOTE : revokedReason === "registrant_left" && state === "revoked" ? REVOKED_REGISTRANT_LEFT_NOTE : state === "not_responding" ? (reply.noReply === "check" ? NO_REPLY_TO_CHECK_NOTE : NO_REPLY_TO_WORK_NOTE) : state === "online_idle" && reply.check?.status === "answered" && heard !== null && now.getTime() - heard.getTime() <= RUNNER_ONLINE_SECONDS * 1000 ? ANSWERED_NOTE : lastHeardNote(state, facts, now),
+    check: reply.check,
     revoked_reason: state === "revoked" ? revokedReason : null,
     running,
     capacity,
@@ -416,7 +433,7 @@ export async function readFleet(deps: ReadDeps, accountId: string, userId: strin
     controls:
       viewerSeen.role === null || userId === null || r.revoked_at !== null
         ? null
-        : fleetControlsOf({ role: viewerSeen.role, userId, registeredBy: r.registered_by, paused: r.paused, pausedBy: r.paused_by, draining: r.draining, drainedBy: r.drained_by }),
+        : fleetControlsOf({ role: viewerSeen.role, userId, registeredBy: r.registered_by, paused: r.paused, pausedBy: r.paused_by, draining: r.draining, drainedBy: r.drained_by, wakeCapable }),
     register_again:
       revokedReason === "registrant_left" && seesAddress
         ? { name: r.set_name ?? "", labels: r.set_labels ?? [], repo_ids: [...new Set(r.allowed_repo_ids)].filter((id) => repos.has(id)) }
