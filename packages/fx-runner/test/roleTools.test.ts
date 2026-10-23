@@ -1,5 +1,5 @@
 import { RUNNER_ELIGIBLE_ROLES } from "@fulcrumaxe/runner-protocol";
-import { roleToolsDigest as cloudDigest, toolsForRole } from "@fx/runner";
+import { roleToolsDigest as cloudDigest, runnerToolsForRole as toolsForRole } from "@fx/runner";
 import { describe, expect, it } from "vitest";
 import { ROLE_TOOLS, UnknownRoleError, roleToolsDigest, roleToolsFor } from "../src/job/roleTools.js";
 
@@ -10,6 +10,8 @@ describe("role table", () => {
     expect(Object.keys(ROLE_TOOLS).sort()).toEqual([...RUNNER_ELIGIBLE_ROLES].sort());
   });
 
+  // D#483 S4-b2c: the cloud's list for a runner job (`runnerToolsForRole`): `toolsForRole` for every role but the claim verifier, whose sandbox list names
+  // the sandbox's own checkout; its runner job is signed with the bare three instead.
   it("each entry deep-equals the cloud's list for the role minus the banned names", () => {
     for (const role of RUNNER_ELIGIBLE_ROLES) {
       expect(roleToolsFor(role), role).toEqual(toolsForRole(role).filter((tool) => !banned(tool)));

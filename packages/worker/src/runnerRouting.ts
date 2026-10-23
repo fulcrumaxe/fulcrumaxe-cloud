@@ -1,5 +1,5 @@
 import type { PoolClient } from "pg";
-import { LIGHT_JOB_ROLES, MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, MAX_TOTAL_CAPACITY, RUNNER_ELIGIBLE_ROLES } from "@fulcrumaxe/runner-protocol";
+import { LIGHT_JOB_ROLES, MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, MAX_TOTAL_CAPACITY, RUNNER_CAPABILITY_FOR_ROLE, RUNNER_ELIGIBLE_ROLES } from "@fulcrumaxe/runner-protocol";
 import { RUNNER_HANDOFF_MIN_PROTOCOL_VERSION, RUNNER_ONLINE_SECONDS, PREFER_HOLD_MAX_SECONDS } from "@fx/runner";
 
 /**
@@ -37,6 +37,7 @@ interface PeerRow {
   id: string;
   allowed_repo_ids: string[];
   allowed_roles: string[];
+  capabilities: string[] | null;
   stamp: string | null;
   declared: boolean | null;
   light_limit: number | null;
@@ -60,6 +61,18 @@ function freeSlots(row: PeerRow): { light: boolean; heavy: boolean } {
   return { light: free, heavy: free };
 }
 
+/**
+ * D#483 S4-b2c: the roles a runner may be offered, given what its latest hello advertised (`runner_capabilities`, 0893). A capability-gated role
+ * (`RUNNER_CAPABILITY_FOR_ROLE`) stays only when the list names its capability; a runner with no row has none. Every other role is untouched.
+ */
+export function rolesForCapabilities(roles: readonly string[], capabilities: readonly string[] | null | undefined): string[] {
+  const held = capabilities ?? [];
+  return roles.filter((role) => {
+    const needed = Object.hasOwn(RUNNER_CAPABILITY_FOR_ROLE, role) ? RUNNER_CAPABILITY_FOR_ROLE[role as keyof typeof RUNNER_CAPABILITY_FOR_ROLE] : undefined;
+    return needed === undefined || held.includes(needed);
+  });
+}
+
 /** Reads, in the caller's tenant transaction, what the candidate query needs about the polling runner and its available peers. */
 export async function loadPollRouting(client: PoolClient, input: { accountId: string; runnerId: string; nowMs: number }): Promise<PollRouting> {
   const own = await client.query<{ os: string | null; arch: string | null; sandbox_engine: string | null; labels: string[] | null }>(
@@ -72,11 +85,12 @@ export async function loadPollRouting(client: PoolClient, input: { accountId: st
   );
   const eligible: readonly string[] = RUNNER_ELIGIBLE_ROLES;
   const { rows } = await client.query<PeerRow>(
-    `SELECT r.id, r.allowed_repo_ids, r.allowed_roles, c.declared, c.light_limit, c.heavy_limit, run.light, run.heavy,
+    `SELECT r.id, r.allowed_repo_ids, r.allowed_roles, cap.capabilities, c.declared, c.light_limit, c.heavy_limit, run.light, run.heavy,
             to_char(st.last_claim_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS stamp
        FROM runners r
        LEFT JOIN runner_settings s ON s.runner_id = r.id AND s.account_id = r.account_id
        LEFT JOIN runner_capacity c ON c.runner_id = r.id AND c.account_id = r.account_id
+       LEFT JOIN runner_capabilities cap ON cap.runner_id = r.id AND cap.account_id = r.account_id
        LEFT JOIN runner_claim_stamps st ON st.runner_id = r.id AND st.account_id = r.account_id
        LEFT JOIN LATERAL (
          SELECT count(*) FILTER (WHERE a.role = ANY($5::text[])) AS light, count(*) FILTER (WHERE NOT a.role = ANY($5::text[])) AS heavy
@@ -90,7 +104,7 @@ export async function loadPollRouting(client: PoolClient, input: { accountId: st
   );
   const peers = [];
   for (const row of rows) {
-    const roles = row.allowed_roles.length === 0 ? [...eligible] : row.allowed_roles.filter((role) => eligible.includes(role));
+    const roles = rolesForCapabilities(row.allowed_roles.length === 0 ? [...eligible] : row.allowed_roles.filter((role) => eligible.includes(role)), row.capabilities);
     if (row.allowed_repo_ids.length === 0 || roles.length === 0) continue;
     const free = freeSlots(row);
     peers.push({ id: row.id, repos: row.allowed_repo_ids, roles, light_free: free.light, heavy_free: free.heavy, stamp: row.stamp });

@@ -15,3 +15,9 @@ export function versionLine(): string {
 
 /** The protocol version this build speaks on `hello` (the cloud accepts the current one and the one before it). */
 export const RUNNER_PROTOCOL_VERSION: number = CURRENT_PROTOCOL_VERSION;
+
+/**
+ * D#483 S4-b2c: the capability-gated job kinds this build runs, sent on `hello` (`HelloMessage.capabilities`). The cloud offers the claim
+ * verifier's job only to a runner whose latest hello listed `proposal_verifier`; the protocol version does not move for it.
+ */
+export const RUNNER_BUILD_CAPABILITIES: Array<"proposal_verifier"> = ["proposal_verifier"];

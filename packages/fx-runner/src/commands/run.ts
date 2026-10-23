@@ -33,7 +33,7 @@ import { isPaused, loadSettings } from "../runnerSettings.js";
 import { budgetsOf, capUnenforced, setUpJobLimits, UNENFORCED_LINE, type JobLimits } from "../sandbox/jobLimits.js";
 import { createJobsInHand } from "../daemon/jobsInHand.js";
 import { readHostFacts } from "../hostFacts.js";
-import { RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../version.js";
+import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../version.js";
 import { createRunnerClient } from "../daemon/client.js";
 import { createSandboxGate } from "../daemon/sandboxGate.js";
 import type { EngineKit } from "../daemon/engineKit.js";
@@ -378,7 +378,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       // that is down or a 426 changes nothing here (the claim loop answers all of them in its own words), and no job decision reads the facts.
       const facts = readHostFacts();
       await client
-        .hello({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: credentials.mode === "api_key", isolation: "host_sandbox", ...(facts === undefined ? {} : { facts }) })
+        .hello({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: credentials.mode === "api_key", isolation: "host_sandbox", ...(facts === undefined ? {} : { facts }), capabilities: RUNNER_BUILD_CAPABILITIES })
         .catch(() => undefined);
       const end = await pollLoop({
         client,

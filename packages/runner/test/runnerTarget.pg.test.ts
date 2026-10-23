@@ -80,12 +80,12 @@ describe("RunnerTarget [pg]", () => {
       expect(t.port.calls).toHaveLength(0);
     });
 
-    it("the eligible set is the runner-protocol list plus the four reviewers, nothing else", () => {
+    it("the eligible set is the runner-protocol list plus the four reviewers and the claim verifier (D#483 S4-b2c), nothing else", () => {
       expect([...RUNNER_TARGET_ROLES].sort()).toEqual(
         [
           "executor", "project-manager", "technical-architect", "product-owner", "cost-analyst", "performance-expert",
           "security-expert", "docs-writer", "accessibility-reviewer",
-          "code-reviewer", "security-reviewer", "acceptance-tester", "debater",
+          "code-reviewer", "security-reviewer", "acceptance-tester", "debater", "proposal-verifier",
         ].sort(),
       );
     });

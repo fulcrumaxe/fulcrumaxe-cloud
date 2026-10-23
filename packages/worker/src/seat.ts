@@ -115,7 +115,9 @@ export function createSeatResolver(deps: SeatDeps): (request: SeatRequest) => Pr
     const role = verify ? VERIFY_LIMITS_ROLE : request.role;
     const entry = getRoleEntry(role);
     if (entry === undefined) return refuse("unknown_role");
-    const loadCard = verify ? (_r: string, o?: { runtime: CardRuntime }) => (o?.runtime === "runner" ? undefined : loadPlatformCard(request.role)) : (deps.loadCard ?? loadProductCard);
+    // D#483 S4-b2c: the verifier's one card on either runtime (it names no path and no tool beyond "the file tools you are given"); whether a run may
+    // go to a runner at all is the sweep's decision (cloud-verified repositories only) and the runner target's (a Local-only one refuses the role).
+    const loadCard = verify ? (_r: string, _o?: { runtime: CardRuntime }) => loadPlatformCard(request.role) : (deps.loadCard ?? loadProductCard);
     // A role with no card is refused before anything is read. The card for the run's runtime is picked once the repository is read.
     if (loadCard(role) === undefined) return refuse("no_card");
     if (typeof accountId !== "string" || !UUID_RE.test(accountId)) return refuse("account_not_found");

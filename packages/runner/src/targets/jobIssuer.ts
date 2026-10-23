@@ -10,6 +10,8 @@ import {
   CONTEXT_WINDOW_JOB_MIN_PROTOCOL,
   ITEM_PR_BRANCH,
   REVIEW_JOB_ROLES,
+  jobCarriesPinnedCommit,
+  PROPOSAL_VERIFIER_ROLE,
   RUNNER_ELIGIBLE_ROLES,
   SESSION_ID_PATTERN,
   JobSchema,
@@ -23,7 +25,7 @@ import {
 } from "@fulcrumaxe/runner-protocol";
 import { readItemRules } from "@fx/core/src/context/contextRules.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { toolsForRole } from "../agentConfig.js";
+import { runnerToolsForRole } from "../agentConfig.js";
 import { RUNNER_RUN_BRANCH, readRecordedRunnerBranch, recordRunnerDispatchBase, writeRunnerJob } from "../runStatusWriter.js";
 import type { ExecutionRun } from "../executionTarget.js";
 import { RUNNER_QUEUE_TTL_MS, type JobIssuer, type JobMode, type RepoVisibilityPort, type RunContinues } from "./runnerTarget.js";
@@ -103,9 +105,9 @@ export function createJobSigner(input: { keyId: string; privateKey: KeyObject })
 /** The branch prefix of every run branch the executor works on. */
 export const RUNNER_BRANCH_PREFIX = "fx/";
 
-/** The SHA-256 of the role's tool allow list, as the runner must compute it from its own table: sorted, canonical JSON. */
+/** The SHA-256 of the role's tool allow list, as the runner must compute it from its own table: sorted, canonical JSON (`runnerToolsForRole`). */
 export function roleToolsDigest(role: string): string {
-  return sha256Text(canonicalJson([...toolsForRole(role)].sort()));
+  return sha256Text(canonicalJson([...runnerToolsForRole(role)].sort()));
 }
 
 /** What the job needs that the run itself does not carry. */
@@ -341,8 +343,9 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
 
       // D#6 R4d-4 (C33 section 1.2): a review job names the commit to review, from the run's stored head (`agent_runs.head_sha`), never parsed out
       // of the prompt. A review with no valid head, or whose prompt names a different commit, is refused and nothing is recorded.
+      // D#483 S4-b2c: the claim verifier's job names its pinned commit the same way (the commit its cites are re-read at), under the same checks.
       let review: Job["review"];
-      if ((REVIEW_JOB_ROLES as readonly string[]).includes(role)) {
+      if (jobCarriesPinnedCommit(role)) {
         const head = run.headSha;
         if (typeof head !== "string" || !REVIEW_SHA.test(head)) throw new JobIssueError("review_without_head");
         if (!run.prompt.includes(head)) throw new JobIssueError("review_sha_prompt_mismatch");
@@ -393,9 +396,10 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
       // D#6 R7a (C35): the approved allowances ride in the job only when the set has entries, and only after they clear the floor again here (the
       // constant may have tightened since the approval). A set that does not is refused and nothing is recorded: never signed without it.
       // The approved check (R-CHK-1) rides in its own key, read from the same stored row and held to the same schema; a check that no longer parses refuses the job too.
+      // D#483 S4-b2c: the claim verifier runs no command, so its job carries neither (it holds no Bash, and nothing runs after it).
       let sandboxAllowances: Job["sandbox_allowances"];
       let check: Job["check"];
-      if (context.sandboxAllowances) {
+      if (context.sandboxAllowances && role !== PROPOSAL_VERIFIER_ROLE) {
         const set = parseAllowanceSet(context.sandboxAllowances);
         if (!set.ok) throw new JobIssueError("sandbox_allowances_invalid");
         if (set.set.entries.length > 0) sandboxAllowances = { entries: set.set.entries, command_timeout_s: set.set.command_timeout_s as number };

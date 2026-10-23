@@ -77,6 +77,35 @@ describe("facts on hello and the runner name on register [pg]", () => {
     });
   });
 
+  // D#483 S4-b2c: the capabilities a runner advertises, stored through their own definer on every hello.
+  describe("hello capabilities", () => {
+    const capsRow = async (id: string) => ((await h.admin.query("SELECT capabilities FROM runner_capabilities WHERE runner_id = $1", [id])).rows[0]?.capabilities as string[] | undefined) ?? null;
+
+    it("stores what the hello lists, for the signing runner only, and a later hello without them clears them (a downgrade)", async () => {
+      const f = await fresh();
+      const key = newKey();
+      const id = await registerKey(h.admin, f.accountId, f.a1, key);
+      const other = await registerKey(h.admin, f.accountId, f.a1, newKey());
+      expect((await hello(key, { ...LEGACY_HELLO, capabilities: ["proposal_verifier"] })).status).toBe(200);
+      expect(await capsRow(id)).toEqual(["proposal_verifier"]);
+      expect(await capsRow(other)).toBeNull();
+      // An older build (no capabilities key at all) is still a 200, and its row now says none.
+      expect((await hello(key, LEGACY_HELLO)).status).toBe(200);
+      expect(await capsRow(id)).toEqual([]);
+    });
+
+    it("refuses an unknown or repeated capability as 400 invalid_message, and changes nothing", async () => {
+      const f = await fresh();
+      const key = newKey();
+      const id = await registerKey(h.admin, f.accountId, f.a1, key);
+      await hello(key, { ...LEGACY_HELLO, capabilities: ["proposal_verifier"] });
+      for (const capabilities of [["shell"], ["proposal_verifier", "proposal_verifier"], "proposal_verifier"]) {
+        expect((await hello(key, { ...LEGACY_HELLO, capabilities })).status, JSON.stringify(capabilities)).toBe(400);
+      }
+      expect(await capsRow(id)).toEqual(["proposal_verifier"]);
+    });
+  });
+
   describe("register (criteria 2 and 3)", () => {
     it("writes the runner's name as the default name of the new row, and nothing else of its settings", async () => {
       const f = await fresh();

@@ -6,7 +6,7 @@
 import { z } from "zod";
 import { CONTEXT_MAX_COUNT, CONTEXT_MAX_TOOL_CALLS, CONTEXT_SECTION_CODES, CONTEXT_TOOL_ENUM, CONTEXT_TRIMMED_REASONS } from "./contextLedger.js";
 import { MAX_ENVELOPE_INPUT_BYTES } from "./envelope.js";
-import { SESSION_ID_PATTERN } from "./job.js";
+import { RUNNER_CAPABILITIES, SESSION_ID_PATTERN } from "./job.js";
 
 /** The isolation tiers a runner can report. Display only. There is no "none". */
 export const ISOLATION_TIERS = ["microvm", "vm_container", "container", "host_sandbox"] as const;
@@ -297,6 +297,14 @@ export const HelloMessage = z
     isolation: IsolationTier,
     // D#605 FL-2: what this machine is, read from the operating system. Optional: a runner built before this sends none, and the cloud accepts both.
     facts: RunnerFacts.optional(),
+    // D#483 S4-b2c: the job kinds this build can run beyond the protocol version's, closed codes, each at most once. Optional: absent is none. The
+    // cloud stores the list as sent on every hello (a downgraded runner loses what it no longer sends) and offers a capability-gated role only to a
+    // runner that listed it. A claim by a semi-trusted machine: it only narrows what the claim offers, never widens a permission.
+    capabilities: z
+      .array(z.enum(RUNNER_CAPABILITIES))
+      .max(RUNNER_CAPABILITIES.length)
+      .refine((list) => new Set(list).size === list.length, { message: "a capability appears once" })
+      .optional(),
   })
   .strict();
 export type HelloMessage = z.infer<typeof HelloMessage>;

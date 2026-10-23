@@ -15,7 +15,7 @@ const EDIT_TOOLS: ReadonlySet<string> = new Set(["Edit", "Write", "MultiEdit", "
 const RULE_META = /[*?[\]{}!\\()\n\r]/;
 
 /** `//abs/path`: the CLI's spelling of an absolute path. A path that cannot be written literally is refused, never guessed at. */
-function anchored(abs: string): string {
+export function anchored(abs: string): string {
   if (!path.isAbsolute(abs) || RULE_META.test(abs)) throw new EngineRefusal("bad_start_options", "path cannot be written as a permission rule");
   return `/${abs.length > 1 && abs.endsWith("/") ? abs.slice(0, -1) : abs}`;
 }
