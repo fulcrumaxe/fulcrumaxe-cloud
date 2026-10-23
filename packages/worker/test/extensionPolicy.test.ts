@@ -136,13 +136,13 @@ describe("extension policy: end to end on the fake SDK port (9)", () => {
     };
     const get = async () => sandbox as never;
     const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: { create: get, get }, limits });
-    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("reviewer"), timeoutMs: 80_000_000 });
+    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 80_000_000 });
     const onExtended = vi.fn();
     const extension: ExtensionPolicy = { ...policyFor(runOf({ role: role as never }))!, meteredUsd: () => 1, onExtended };
     const started = port.startDetached(handle, {
-      runId: "run-1", role: "reviewer", roleCard: "card", prompt: "go", model: "sonnet-5", workdir: "/vercel/sandbox/repo", capUsd: 5,
-      networkPolicy: keyedPolicy(networkPolicy("reviewer", "team", { provider: "ai_gateway", githubForwardHost: "gh-proxy.fulcrumaxe.app" })),
-      env: buildSandboxEnv("reviewer"), onEvent: () => undefined, extension,
+      runId: "run-1", role: "code-reviewer", roleCard: "card", prompt: "go", model: "sonnet-5", workdir: "/vercel/sandbox/repo", capUsd: 5,
+      networkPolicy: keyedPolicy(networkPolicy("code-reviewer", "team", { provider: "ai_gateway", githubForwardHost: "gh-proxy.fulcrumaxe.app" })),
+      env: buildSandboxEnv("code-reviewer"), onEvent: () => undefined, extension,
     });
     started.hookFired.catch(() => undefined);
     return { ended: started.hookFired, onExtended };

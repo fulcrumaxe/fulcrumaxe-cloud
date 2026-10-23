@@ -19,7 +19,7 @@ import { keyedPolicy } from "./helpers/keyedPolicy.js";
 /** D#2 COMPUTE-SETTLE CS-1: the Vercel port's `measure`, `readCounters`, pinned resources and session report (fake SDK). */
 
 const NAME = "rn-8-reviewer-run-1";
-const createOpts = { sandboxName: NAME, retention: retentionPolicyFor("reviewer"), timeoutMs: 7_200_000 };
+const createOpts = { sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 };
 
 const full = (id: string, extra: Partial<SdkSession> = {}): SdkSession => ({
   id,
@@ -92,13 +92,13 @@ const handle: SandboxHandle = { runId: "", sandboxName: NAME };
 function startOpts(overrides: Partial<StartDetachedOptions> = {}): StartDetachedOptions {
   return {
     runId: "run-1",
-    role: "reviewer",
+    role: "code-reviewer",
     roleCard: "card",
     prompt: "go",
     model: "sonnet-5",
     capUsd: 5,
-    networkPolicy: keyedPolicy(networkPolicy("reviewer", "team", { provider: "ai_gateway", githubForwardHost: "gh-proxy.fulcrumaxe.app" })),
-    env: buildSandboxEnv("reviewer"),
+    networkPolicy: keyedPolicy(networkPolicy("code-reviewer", "team", { provider: "ai_gateway", githubForwardHost: "gh-proxy.fulcrumaxe.app" })),
+    env: buildSandboxEnv("code-reviewer"),
     onEvent: () => {},
     ...overrides,
   };

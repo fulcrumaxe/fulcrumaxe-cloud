@@ -27,7 +27,7 @@ vi.mock("node:crypto", async (orig) => ({ ...(await orig<typeof import("node:cry
 const WORKDIR = "/vercel/sandbox/repo";
 const NAME = "rn-8-reviewer-run-1";
 /** The role `startAndResume` runs as (the fixture options below). */
-const START_OPTS_ROLE = "reviewer";
+const START_OPTS_ROLE = "code-reviewer";
 
 /** The fixture's file list, pinned so it cannot silently shrink. */
 const FIXTURE_FILES = [
@@ -66,21 +66,21 @@ function recordingSdk() {
 const startOpts = (workdir: string | undefined = WORKDIR, excludes?: readonly string[]): StartDetachedOptions => ({
   ...(excludes === undefined ? {} : { excludes }),
   runId: "run-1",
-  role: "reviewer",
+  role: "code-reviewer",
   roleCard: "card",
   prompt: "go",
   model: "sonnet-5",
   workdir,
   capUsd: 5,
-  networkPolicy: keyedPolicy(networkPolicy("reviewer", "team", { provider: "ai_gateway", githubForwardHost: "gh-proxy.fulcrumaxe.app" })),
-  env: buildSandboxEnv("reviewer"),
+  networkPolicy: keyedPolicy(networkPolicy("code-reviewer", "team", { provider: "ai_gateway", githubForwardHost: "gh-proxy.fulcrumaxe.app" })),
+  env: buildSandboxEnv("code-reviewer"),
   onEvent: () => {},
 });
 
 async function startAndResume(workdir: string | undefined = WORKDIR, excludes?: readonly string[]) {
   const { log, sdk } = recordingSdk();
   const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk });
-  const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("reviewer"), timeoutMs: 7_200_000 });
+  const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
   await port.startDetached(handle, startOpts(workdir, excludes)).hookFired.catch(() => undefined);
   await port.resume(handle, "sess-9", "next", startOpts(workdir, excludes)).hookFired.catch(() => undefined);
   return log;
@@ -242,7 +242,7 @@ describe("SS-PATH: the config directory and the workdir never overlap", () => {
     it(`refuses workdir ${workdir} before any SDK call, on start and resume`, async () => {
       const { log, sdk } = recordingSdk();
       const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk });
-      const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("reviewer"), timeoutMs: 7_200_000 });
+      const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
       expect(() => port.startDetached(handle, startOpts(workdir))).toThrow();
       expect(() => port.resume(handle, "sess-9", "next", startOpts(workdir))).toThrow();
       expect(log).toEqual([]);

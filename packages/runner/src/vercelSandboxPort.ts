@@ -39,6 +39,7 @@ import {
   FX_AGENT_MCP_PATH,
   agentSettingsFor,
   disabledToolsFor,
+  toolsForRole,
   FX_AGENT_SETTINGS_PATH,
   FX_LIMIT_HOOK_PATH,
   FX_LIMIT_HOOK_SCRIPT,
@@ -867,6 +868,8 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
     // D#598 P1f-5a: no agent is ever launched in a publish sandbox (any role), and the publish role has no model connection (any sandbox).
     assertNoAgentInPublishSandbox(handle.sandboxName, opts.role);
     assertSandboxEnvMatchesRole(opts.role, opts.env);
+    // A role with no tool list is refused here (UnknownRoleError, `unknown_role`), before any agent file is written or command run.
+    toolsForRole(opts.role);
     // This run's limits: the port's defaults under whatever the run carries. Invalid values throw here, before anything starts.
     // A run that carries limits (they come from a tenant's settings) is held to the platform bounds as well.
     const limits = resolveRunLimits({ ...portLimits, ...opts.limits }, { bounded: opts.limits !== undefined });

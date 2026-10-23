@@ -236,13 +236,13 @@ function createSdkFake() {
 function startOpts(overrides: Partial<StartDetachedOptions> = {}): StartDetachedOptions {
   return {
     runId: "run-1",
-    role: "reviewer",
+    role: "code-reviewer",
     roleCard: "card",
     prompt: "go",
     model: "sonnet-5",
     capUsd: 5,
-    networkPolicy: keyedPolicy(networkPolicy("reviewer", "team", { provider: "ai_gateway", githubForwardHost: "gh-proxy.fulcrumaxe.app" })),
-    env: buildSandboxEnv("reviewer"),
+    networkPolicy: keyedPolicy(networkPolicy("code-reviewer", "team", { provider: "ai_gateway", githubForwardHost: "gh-proxy.fulcrumaxe.app" })),
+    env: buildSandboxEnv("code-reviewer"),
     onEvent: () => {},
     ...overrides,
   };
@@ -255,7 +255,7 @@ function event(seq: number, type: NormalizedEvent["type"] = "assistant"): Record
     : { type: "assistant", message: { content: [{ type: "text", text: `m${seq}` }] } };
 }
 
-const createOpts = { sandboxName: NAME, retention: retentionPolicyFor("reviewer"), timeoutMs: 7_200_000 };
+const createOpts = { sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 };
 
 const savedEnv: Record<string, string | undefined> = {};
 beforeEach(() => {
@@ -619,7 +619,7 @@ describe("running the agent", () => {
     expect((await hookFired)?.seq).toBe(2);
     expect(seen).toEqual([0, 1, 2]);
     const run = fake.calls.filter((c) => c.op === "runCommand").at(-1);
-    expect(run?.params).toMatchObject({ detached: true, env: buildSandboxEnv("reviewer") });
+    expect(run?.params).toMatchObject({ detached: true, env: buildSandboxEnv("code-reviewer") });
     const policy = fake.calls.find((c) => c.op === "updateNetworkPolicy")?.params.policy as { allow: Record<string, unknown> };
     expect(Object.keys(policy.allow).length).toBeGreaterThan(0);
   });
@@ -1001,14 +1001,14 @@ describe("H14c-3-1 CARRY-12: the tenant key is a header transform on the model h
   });
 
   it("the anthropic host gets x-api-key with the raw key", async () => {
-    const rules = networkPolicy("reviewer", "team", { provider: "anthropic", githubForwardHost: "gh-proxy.fulcrumaxe.app" });
+    const rules = networkPolicy("code-reviewer", "team", { provider: "anthropic", githubForwardHost: "gh-proxy.fulcrumaxe.app" });
     Object.defineProperty(rules[0]!, "authValue", { value: "raw-key", enumerable: false });
     const policy = (await sentFor(rules)) as { allow: Record<string, unknown> };
     expect(policy.allow["api.anthropic.com"]).toStrictEqual([{ transform: [{ headers: { "x-api-key": "raw-key" } }] }]);
   });
 
   it("a model rule with no key is refused, not allowed keyless", () => {
-    expect(() => sdkNetworkPolicy(networkPolicy("reviewer", "team", { provider: "ai_gateway", githubForwardHost: "gh-proxy.fulcrumaxe.app" }))).toThrow(/no key/);
+    expect(() => sdkNetworkPolicy(networkPolicy("code-reviewer", "team", { provider: "ai_gateway", githubForwardHost: "gh-proxy.fulcrumaxe.app" }))).toThrow(/no key/);
   });
 
   it("the sandbox env is exactly buildSandboxEnv(role) and holds no key", async () => {
@@ -1018,7 +1018,7 @@ describe("H14c-3-1 CARRY-12: the tenant key is a header transform on the model h
     const handle = await port.createSandbox(createOpts);
     await port.startDetached(handle, startOpts()).hookFired;
     const run = fake.calls.find((c) => c.op === "runCommand");
-    expect(run?.params.env).toStrictEqual(buildSandboxEnv("reviewer"));
+    expect(run?.params.env).toStrictEqual(buildSandboxEnv("code-reviewer"));
     const elsewhere = fake.calls.filter((c) => c.op !== "updateNetworkPolicy");
     expect(JSON.stringify(elsewhere)).not.toContain("fake-key-for-tests");
   });

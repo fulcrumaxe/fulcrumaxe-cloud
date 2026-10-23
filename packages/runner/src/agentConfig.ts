@@ -54,8 +54,11 @@ const LOOK_HELPERS = ["Bash(ls:*)", "Bash(cat:*)", "Bash(grep:*)", "Bash(find:*)
  *  - the reviewers (code, security), acceptance-tester and debater: read and plain `Bash`, so they can run the tests.
  *    NO edit or write tool. They can still write files from the shell, so the guarantee that matters is that a
  *    reviewer's changes are never published: the gh-proxy refuses a reviewer push and the workspace is discarded.
- *  - every other role (the panel seats, the project manager and the like): read, curl (reads of GitHub, which the proxy
- *    allows them), git and read-only helpers.
+ *  - the other roles of the role manifest (the panel seats, the project manager and the like), each named below: read,
+ *    curl (reads of GitHub, which the proxy allows them), git and read-only helpers.
+ *  - the platform roles (`PLATFORM_ROLES`, not in the manifest): the claim verifier's confined list (`PROPOSAL_VERIFIER_ROLE`).
+ *  - a role that is not named here gets NOTHING: `toolsForRole` throws `UnknownRoleError` (code `unknown_role`), so no
+ *    settings file is written and the run does not start. There is no fallback list; a new role must be added here.
  */
 export const EXECUTOR_TOOLS: readonly string[] = Object.freeze([...READ_TOOLS, "Edit", "MultiEdit", "Write", "NotebookEdit", "Bash"]);
 export const REVIEWER_TOOLS: readonly string[] = Object.freeze([...READ_TOOLS, "Bash"]);
@@ -67,12 +70,55 @@ const TOOLS_BY_ROLE: Readonly<Record<string, readonly string[]>> = Object.freeze
   "security-reviewer": REVIEWER_TOOLS,
   "acceptance-tester": REVIEWER_TOOLS,
   debater: REVIEWER_TOOLS,
+  "project-manager": OTHER_ROLE_TOOLS,
+  "technical-architect": OTHER_ROLE_TOOLS,
+  "product-owner": OTHER_ROLE_TOOLS,
+  "cost-analyst": OTHER_ROLE_TOOLS,
+  "performance-expert": OTHER_ROLE_TOOLS,
+  "security-expert": OTHER_ROLE_TOOLS,
+  researcher: OTHER_ROLE_TOOLS,
+  "feedback-scanner": OTHER_ROLE_TOOLS,
+  "incident-commander": OTHER_ROLE_TOOLS,
+  "browser-tester": OTHER_ROLE_TOOLS,
+  "tui-tester": OTHER_ROLE_TOOLS,
+  "docs-writer": OTHER_ROLE_TOOLS,
+  "release-manager": OTHER_ROLE_TOOLS,
+  "runbook-writer": OTHER_ROLE_TOOLS,
+  "accessibility-reviewer": OTHER_ROLE_TOOLS,
+  "ux-designer": OTHER_ROLE_TOOLS,
+  "mission-analyst": OTHER_ROLE_TOOLS,
+  "run-analyst": OTHER_ROLE_TOOLS,
+  "analytics-engineer": OTHER_ROLE_TOOLS,
+  "visual-verifier": OTHER_ROLE_TOOLS,
+  "quality-sweep": OTHER_ROLE_TOOLS,
 });
 
-/** The tool allow list for a role; a role not named above gets the look-only list. */
+/**
+ * The roles the platform itself runs that are not in the role manifest, each with its own settings below (today only the
+ * claim verifier, `PROPOSAL_VERIFIER_ROLE`). Named here so the manifest parity check can allow exactly these and nothing else.
+ */
+export const PLATFORM_ROLES: readonly string[] = Object.freeze(["proposal-verifier"]);
+
+/** The roles that have a tool list: the table's, in table order, then the platform roles. Every other name is refused by `toolsForRole`. */
+export const TOOL_LISTED_ROLES: readonly string[] = Object.freeze([...Object.keys(TOOLS_BY_ROLE), ...PLATFORM_ROLES]);
+
+/** Thrown for a role with no entry in the tool table. Nothing is written or started for it. */
+export class UnknownRoleError extends Error {
+  readonly code = "unknown_role";
+  constructor(role: unknown) {
+    super(`no tool list for role ${JSON.stringify(String(role)).slice(0, 80)}`);
+    this.name = "UnknownRoleError";
+  }
+}
+
+/**
+ * The tool allow list for a role. Fails closed: a role not named above throws `UnknownRoleError`; there is no fallback
+ * list. Own-property lookup only, so names like `constructor` and `__proto__` are unknown too.
+ */
 export function toolsForRole(role: string): readonly string[] {
   if (role === PROPOSAL_VERIFIER_ROLE) return VERIFIER_ALLOW;
-  return Object.hasOwn(TOOLS_BY_ROLE, role) ? TOOLS_BY_ROLE[role]! : OTHER_ROLE_TOOLS;
+  if (typeof role !== "string" || !Object.hasOwn(TOOLS_BY_ROLE, role)) throw new UnknownRoleError(role);
+  return TOOLS_BY_ROLE[role]!;
 }
 
 /**

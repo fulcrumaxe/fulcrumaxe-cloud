@@ -128,14 +128,14 @@ function harness(version = `${CLAUDE_CLI_VERSION} (Claude Code)`) {
 function startOpts(overrides: Partial<StartDetachedOptions> = {}): StartDetachedOptions {
   return {
     runId: "run-1",
-    role: "reviewer",
+    role: "code-reviewer",
     roleCard: ROLE_CARD,
     prompt: PROMPT,
     model: "sonnet-5",
     workdir: "/vercel/sandbox/repo",
     capUsd: 5,
-    networkPolicy: keyedPolicy(networkPolicy("reviewer", "team", { provider: "ai_gateway", githubForwardHost: "gh-proxy.fulcrumaxe.app" })),
-    env: buildSandboxEnv("reviewer"),
+    networkPolicy: keyedPolicy(networkPolicy("code-reviewer", "team", { provider: "ai_gateway", githubForwardHost: "gh-proxy.fulcrumaxe.app" })),
+    env: buildSandboxEnv("code-reviewer"),
     onEvent: () => {},
     ...overrides,
   };
@@ -151,7 +151,7 @@ async function start(h: ReturnType<typeof harness>, overrides: Partial<StartDeta
     sdk: h.sdk,
     onInvalidEvent: (r) => void invalid.push(r),
   });
-  const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("reviewer"), timeoutMs: 7_200_000 });
+  const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
   const { hookFired } = port.startDetached(handle, startOpts({ onEvent: (e) => void delivered.push(e), ...overrides }));
   return { hookFired, invalid, delivered, port, handle };
 }
@@ -180,7 +180,7 @@ describe("EV-CMD: claude print mode, prompt on stdin, pinned version", () => {
 
     const h2 = harness();
     const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: h2.sdk });
-    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("reviewer"), timeoutMs: 7_200_000 });
+    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
     const resumed = port.resume(handle, "sess-9", "next", startOpts());
     h2.exit(0);
     await resumed.hookFired;
@@ -245,7 +245,7 @@ describe("EV-CMD: claude print mode, prompt on stdin, pinned version", () => {
     h.exit(0);
     await s.hookFired;
     expect(JSON.stringify(h.calls)).not.toContain(HOOK_TOKEN);
-    expect(h.calls.filter((c) => c.op === "runCommand").every((c) => JSON.stringify((c.params as { env: unknown }).env) === JSON.stringify(buildSandboxEnv("reviewer")))).toBe(true);
+    expect(h.calls.filter((c) => c.op === "runCommand").every((c) => JSON.stringify((c.params as { env: unknown }).env) === JSON.stringify(buildSandboxEnv("code-reviewer")))).toBe(true);
   });
 });
 
@@ -278,7 +278,7 @@ describe("C55 criterion 16: --model is an explicit table lookup, never the price
   it("a model missing from the table throws before any SDK command or file write", async () => {
     const h = harness();
     const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: h.sdk });
-    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("reviewer"), timeoutMs: 7_200_000 });
+    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
     for (const model of ["gpt-9", "toString", "haiku"]) {
       expect(() => port.startDetached(handle, startOpts({ model }))).toThrow(/CLI model name/);
     }
@@ -292,7 +292,7 @@ describe("EV-MAP: the port maps like the local runtime", () => {
     vi.setSystemTime(new Date("2026-09-29T00:00:00Z"));
     const lines = readFileSync(path.join(here, "..", "..", "runtime", "test", "fixtures", "stream-json-run.jsonl"), "utf8").trim().split("\n");
     const { normalizeMessage } = await import("@fx/runtime/src/local/index.js");
-    const expected = lines.map((l, i) => normalizeMessage({ runId: "run-1", role: "reviewer", backend: "claude-code" }, JSON.parse(l), i));
+    const expected = lines.map((l, i) => normalizeMessage({ runId: "run-1", role: "code-reviewer", backend: "claude-code" }, JSON.parse(l), i));
     const { delivered, last } = await run(lines);
     expect(delivered).toEqual(expected);
     expect(last).toEqual(expected[4]);
@@ -312,8 +312,8 @@ describe("EV-ID: identity and seq are the runner's", () => {
     const forged = { runId: "run-OTHER", role: "executor", seq: -5, ts: "1970-01-01T00:00:00Z" };
     const { delivered } = await run([JSON.stringify({ ...forged, type: "assistant" }), JSON.stringify({ ...forged, type: "result", result: "x" })]);
     expect(delivered.map((e) => [e.runId, e.role, e.seq, e.ts > "2020"])).toEqual([
-      ["run-1", "reviewer", 0, true],
-      ["run-1", "reviewer", 1, true],
+      ["run-1", "code-reviewer", 0, true],
+      ["run-1", "code-reviewer", 1, true],
     ]);
   });
 });
@@ -360,7 +360,7 @@ describe("EV-EXIT: completion is the command's exit, never a line", () => {
 
   it("(e) exit with no result at all fails, and carries nothing from the sandbox", async () => {
     const { last } = await run([asst("no result follows")], 0);
-    expect(last).toMatchObject({ type: "error", isError: true, runId: "run-1", role: "reviewer" });
+    expect(last).toMatchObject({ type: "error", isError: true, runId: "run-1", role: "code-reviewer" });
     expect(last?.agentOutput).toBeUndefined();
   });
 });
@@ -857,7 +857,7 @@ describe("H14c-5b-1 over SandboxTarget and the real port [pg]", () => {
 });
 
 describe("EV-SETTLE: a run settles max(metered, the final valid total_cost_usd, 0)", () => {
-  const done = (costUsd?: number): NormalizedEvent => ({ runId: "r", role: "reviewer", seq: 3, type: "result", ts: "t", costUsd });
+  const done = (costUsd?: number): NormalizedEvent => ({ runId: "r", role: "code-reviewer", seq: 3, type: "result", ts: "t", costUsd });
   it.each([
     ["a reported figure below the metered total never lowers it", 5.5, 1, 5.5],
     ["a higher reported figure raises it", 2, 3, 3],
@@ -881,7 +881,7 @@ describe("H14c-5b-2a: the runner's own limits on the port (MP-TURNS, MP-CLOCK, M
     const h = harness();
     const delivered: NormalizedEvent[] = [];
     const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: h.sdk, limits });
-    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("reviewer"), timeoutMs: 7_200_000 });
+    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
     const { hookFired } = port.startDetached(handle, startOpts({ onEvent: (e) => void delivered.push(e) }));
     const settled = hookFired.then((value) => ({ value }), (error: unknown) => ({ error }));
     await tick(); // the agent command is running and the guard is armed
@@ -907,7 +907,7 @@ describe("H14c-5b-2a: the runner's own limits on the port (MP-TURNS, MP-CLOCK, M
     const h = harness();
     const create = vi.fn(h.sdk.create);
     const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: { ...h.sdk, create }, limits: { maxRunMs: 1000 } });
-    const opts = { sandboxName: NAME, retention: retentionPolicyFor("reviewer") };
+    const opts = { sandboxName: NAME, retention: retentionPolicyFor("code-reviewer") };
     await expect(port.createSandbox({ ...opts, timeoutMs: 1000 })).rejects.toThrow(/maxRunMs/);
     expect(create).not.toHaveBeenCalled();
     await expect(port.createSandbox({ ...opts, timeoutMs: 1001 })).resolves.toBeDefined();
@@ -951,7 +951,7 @@ describe("H14c-5b-2a: the runner's own limits on the port (MP-TURNS, MP-CLOCK, M
   it("MP-TURNS: the argv carries --max-turns from the limits and --max-budget-usd from the run's cap", async () => {
     const h = harness();
     const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: h.sdk, limits: { maxTurns: 7 } });
-    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("reviewer"), timeoutMs: 7_200_000 });
+    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
     const { hookFired } = port.startDetached(handle, startOpts({ capUsd: 2.5 }));
     h.exit(0);
     await hookFired;

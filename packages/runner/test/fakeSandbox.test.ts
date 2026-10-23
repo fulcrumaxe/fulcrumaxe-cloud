@@ -5,6 +5,7 @@ import { buildSandboxEnv } from "../src/sandboxEnv.js";
 import { networkPolicy } from "../src/networkPolicy.js";
 import { retentionPolicyFor, sandboxNameFor } from "../src/sandboxNaming.js";
 import { createStubRuntime } from "./helpers/stubRuntime.js";
+import { UnknownRoleError } from "../src/agentConfig.js";
 import type { NormalizedEvent } from "../src/types.js";
 
 function detachedOpts(overrides: Partial<StartDetachedOptions> = {}): StartDetachedOptions {
@@ -124,6 +125,14 @@ describe("fakeSandbox (SandboxPort test double)", () => {
    * place that should assert `env` really is `buildSandboxEnv(role)`
    * rather than trusting the caller built it correctly.
    */
+  it("refuses a role with no tool list on start and resume, as the real port does", () => {
+    const { port } = createFakeSandbox(createStubRuntime([RESULT_EVENT]));
+    const handle: SandboxHandle = { runId: "", sandboxName: "executor-run-1" };
+    const opts = detachedOpts({ role: "no-such-role" });
+    expect(() => port.startDetached(handle, opts)).toThrow(UnknownRoleError);
+    expect(() => port.resume(handle, "cc-session-1", "resume prompt", opts)).toThrow(UnknownRoleError);
+  });
+
   describe("env must equal buildSandboxEnv(role) (H09 security review, informational 1)", () => {
     it("startDetached rejects an env with an extra, non-buildSandboxEnv key", () => {
       const { port } = createFakeSandbox(createStubRuntime());
