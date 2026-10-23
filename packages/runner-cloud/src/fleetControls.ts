@@ -1,7 +1,7 @@
 import { isValidRunnerName } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
-import { refuseNonPrivateRepos } from "./repoPrivacy.js";
+import { refuseNonPrivateReposIn } from "./repoPrivacy.js";
 import { failLeases } from "./revoke.js";
 
 /**
@@ -112,8 +112,11 @@ export async function setRunnerRepos(deps: RunnerCloudDeps, principal: SessionPr
   const given = argument(input, "repo_ids");
   if (!Array.isArray(given) || given.length > 100 || !given.every((id) => typeof id === "string" && UUID.test(id))) return invalid();
   try {
-    await refuseNonPrivateRepos(deps, principal, given as string[], runnerId);
+    // One transaction for the held-set read, the visibility reads and the write. The advisory lock serialises writers of this runner's set,
+    // so a concurrent remove + re-add waits, then sees the committed set: a repo it re-adds is read again, never skipped as "already held".
     const repoIds = await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`runner_repos:${runnerId.toLowerCase()}`]);
+      await refuseNonPrivateReposIn(client, deps, principal, given as string[], runnerId);
       await client.query("SELECT runner_repos_set($1, $2::uuid[])", [runnerId, given]);
       return (await client.query<{ allowed_repo_ids: string[] }>("SELECT allowed_repo_ids FROM runners WHERE id = $1", [runnerId])).rows[0]?.allowed_repo_ids ?? [];
     });

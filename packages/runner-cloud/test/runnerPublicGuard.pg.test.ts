@@ -165,6 +165,38 @@ describe("binding a runner to a repo that is not private [pg]", () => {
       expect(await repoIds(id)).toEqual([]);
     });
 
+    it("a concurrent remove + re-add cannot re-bind a repo that turned public: the held set is read under the lock, so the re-add reads visibility again (CWE-367)", async () => {
+      const f = await fresh();
+      const [repo, other] = [await newRepo(f), await newRepo(f)];
+      const id = await insertRunner(h.admin, f.accountId, f.m1);
+      await h.admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[] WHERE id = $1", [id, [repo]]);
+
+      // Call A swaps repo for other. Its read of `other` is held open, so A holds the runner's lock while B starts.
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let entered!: () => void;
+      const inGate = new Promise<void>((resolve) => (entered = resolve));
+      const gated: NonNullable<RunnerCloudDeps["repoVisibility"]> = async () => {
+        entered();
+        await gate;
+        return "private";
+      };
+      const a = set(h.deps({ repoVisibility: gated }), f, f.o1, id, [other]);
+      await inGate;
+      // Call B re-adds `repo`, which is public now. It started while A still listed `repo` as held.
+      const p = port({ [repo]: "public" });
+      const b = set(h.deps({ repoVisibility: p.repoVisibility }), f, f.o1, id, [repo]);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      release();
+      const [ra, rb] = await Promise.all([a, b]);
+
+      expect(ra.status).toBe(200);
+      expect(rb.status).toBe(409);
+      expect(code(rb)).toBe("public_repo");
+      expect(p.reads).toEqual([repo]);
+      expect(await repoIds(id)).toEqual([other]);
+    });
+
     it("another account's runner is the definer's 404, and GitHub is never asked", async () => {
       const f = await fresh();
       const g = await fresh();

@@ -7,6 +7,7 @@ import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse,
 import { hasUsableKey } from "./executionMode.js";
 import { auditPlacementChange, type Placement } from "./itemPlacement.js";
 import { requireMemberRole } from "./memberRole.js";
+import { blockError, blockFor, readRepoVisibility } from "./repoPrivacy.js";
 import { readRunners } from "./readModel.js";
 import { withRunnerSession, type VerifiedRunner } from "./verifyRunnerRequest.js";
 
@@ -94,15 +95,6 @@ async function coveringRunnerExists(deps: HandoffDeps, principal: SessionPrincip
   });
 }
 
-async function readVisibility(deps: HandoffDeps, accountId: string, repoId: string): Promise<"private" | "public" | "unknown"> {
-  try {
-    return (await deps.repoVisibility?.(accountId, repoId)) ?? "unknown";
-  } catch {
-    // fx-swallow-ok: a failed read is "unknown", which refuses (409 repo_visibility_unknown)
-    return "unknown";
-  }
-}
-
 /**
  * POST /api/v1/runs/:id/handoff {to} (owner or admin). In order, and every refusal before the first write:
  *  1. the run is a running run of an item, not already on `to`, with no live handoff, and (a runner run) its runner's stored protocol version
@@ -158,9 +150,8 @@ export async function requestHandoff(deps: HandoffDeps, principal: SessionPrinci
   });
 
   if (target === "runner") {
-    const seen = await readVisibility(deps, principal.accountId, facts.repoId);
-    if (seen === "public") throw new RunnerHttpError(409, "public_repo", "a public repository cannot run on a runner");
-    if (seen !== "private") throw new RunnerHttpError(409, "repo_visibility_unknown", "the repository's visibility could not be read");
+    const block = blockFor(await readRepoVisibility(deps, principal.accountId, facts.repoId));
+    if (block !== null) throw blockError(block);
     if (!(await coveringRunnerExists(deps, principal, facts.repoId, facts.run.runner_id))) throw new RunnerHttpError(409, "no_runner_online", "no runner is online with room for this repository");
   }
 
