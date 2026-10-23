@@ -1,10 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { bwrapArgs } from "../src/sandbox/probe.js";
 import { grantsOf } from "../src/sandbox/allowances.js";
-import { sandboxSettings } from "../src/sandbox/sandboxSettings.js";
+import { SHARED_TEMP_DIRS, sandboxSettings } from "../src/sandbox/sandboxSettings.js";
 import { bwrapCanCreateNamespaces } from "./helpers/bwrapProbe.js";
 import { tmpRoot } from "./helpers/tmpRoot.js";
 
@@ -21,6 +21,8 @@ const usable = ((): boolean => {
 })();
 
 const CANARY = "FX-R7B-CANARY-b1946ac92492d2347c6235b4d2611184";
+/** The shared temp directories as the builder lists them: as written and where they really are. */
+const sharedTemp: readonly string[] = SHARED_TEMP_DIRS.flatMap((dir) => [dir, existsSync(dir) ? realpathSync(dir) : dir]);
 let root: string;
 let home: string;
 let scratch: string;
@@ -119,9 +121,10 @@ describe.skipIf(!usable)("R7b: the allowances in a real bubblewrap sandbox", () 
   });
 
   it("canaries: nothing outside the allowances can be written, with the allowances applied", () => {
-    // The home directory is a scratch tmpfs inside the sandbox, so a write there succeeds and vanishes; what counts is that the host never sees it.
-    for (const target of [path.join(home, "fx-probe"), path.join(home, ".bashrc"), path.join(otherStore, "x")]) inSandbox(`echo pwned > ${target}`);
-    for (const target of ["/etc/fx-probe", path.join(root, "outside"), path.join(root, "shared-read", "x")]) {
+    // The home directory and the shared temp directories (denied for reading, D#6 RUNNER-CWD-1; `root` is under the temp directory) are a scratch tmpfs inside
+    // the sandbox, so a write there succeeds and vanishes; what counts is that the host never sees it.
+    for (const target of [path.join(home, "fx-probe"), path.join(home, ".bashrc"), path.join(otherStore, "x"), path.join(root, "outside")]) inSandbox(`echo pwned > ${target}`);
+    for (const target of ["/etc/fx-probe", path.join(root, "shared-read", "x")]) {
       expect(inSandbox(`echo pwned > ${target}`).code, target).not.toBe(0);
     }
     expect(existsSync(path.join(otherStore, "x"))).toBe(false);
@@ -186,7 +189,8 @@ describe.skipIf(!usable)("R7b: the runner's roots with the cache directory outsi
     });
     // the same block with the three roots taken out of denyRead: what this PR's base did when the cache was outside the home directory
     const filesystem = blocks.filesystem as { denyRead: string[] };
-    weakened = { ...blocks, filesystem: { ...filesystem, denyRead: filesystem.denyRead.filter((entry) => ![path.join(cacheHome, "workspaces"), path.join(cacheHome, "tmp"), storeRoot].includes(entry)) } };
+    // (the shared temp directories, denied since D#6 RUNNER-CWD-1, are taken out too: this test's cache directory sits under the temp directory)
+    weakened = { ...blocks, filesystem: { ...filesystem, denyRead: filesystem.denyRead.filter((entry) => ![path.join(cacheHome, "workspaces"), path.join(cacheHome, "tmp"), storeRoot].includes(entry) && !sharedTemp.includes(entry)) } };
   });
   afterAll(() => rmSync(base, { recursive: true, force: true }));
 

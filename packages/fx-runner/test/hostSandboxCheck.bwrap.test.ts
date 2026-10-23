@@ -118,7 +118,9 @@ describe.skipIf(!usable)("R-CHK-2: the check under the job's own sandbox rules",
   });
 
   it("cannot open a Unix-domain socket (the user bus, a container runtime and a display server are reached that way), though the same program can from here and without the filter", async () => {
-    const sock = path.join(root, "outside.sock");
+    // A host-side listener at a path the check can see (its own workspace): since D#6 RUNNER-CWD-1 the shared temp directory `root` sits in is
+    // hidden from a job, so a socket there would be refused for that reason and the unfiltered control below would prove nothing about the filter.
+    const sock = path.join(workspace, "s.sock");
     const server = createServer((socket) => socket.end("hi"));
     await new Promise<void>((resolve) => server.listen(sock, resolve));
     try {

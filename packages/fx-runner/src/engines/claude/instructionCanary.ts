@@ -1,6 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import type { InstructionCanaryResult } from "../../instructionCanaryState.js";
 import { claudeArgv } from "./argv.js";
@@ -26,8 +25,8 @@ export interface InstructionCanaryOptions {
   /** The model the check asks. A short, cheap one; the check reads no reasoning, only whether the token is in the reply. */
   cliModel?: string;
   timeoutMs?: number;
-  /** Where the temporary directory is made. Defaults to the system temp directory. */
-  tempRoot?: string;
+  /** Where the temporary directory is made: the runner's own launch root (D#6 RUNNER-CWD-1). Required, so no caller falls back to the shared temp directory. */
+  tempRoot: string;
 }
 
 const CANARY_MODEL = "haiku";
@@ -42,7 +41,7 @@ export function canaryArgvFingerprint(): string {
 
 /** Runs the check once: one model turn. Never throws for what the CLI does; a run that did not finish is `instruction_canary_inconclusive`. */
 export async function runInstructionCanary(opts: InstructionCanaryOptions): Promise<InstructionCanaryResult> {
-  const root = mkdtempSync(path.join(opts.tempRoot ?? tmpdir(), "fxr-canary-"));
+  const root = mkdtempSync(path.join(opts.tempRoot, "fxr-canary-"));
   try {
     const token = `FXCANARY-${randomBytes(12).toString("hex")}`;
     const work = path.join(root, "work");

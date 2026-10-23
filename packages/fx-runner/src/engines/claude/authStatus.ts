@@ -1,4 +1,6 @@
+import type { LaunchPlace } from "../../launchDir.js";
 import { runCapture, type SpawnFn } from "./capture.js";
+import { shortQuestionEnv } from "../../daemon/cliStubs.js";
 
 export type AuthMode = "subscription" | "api_key";
 
@@ -18,8 +20,9 @@ export interface AuthResult {
  * accepted method of this mode, on exit 0 with parseable output inside the time limit; every other case is false, and
  * the caller refuses the job. Only `authMethod` is read: an email, an organisation or any other field is dropped here.
  */
-export async function authPresent(mode: AuthMode, opts: { binaryPath: string; env: Record<string, string>; spawn: SpawnFn; timeoutMs?: number }): Promise<AuthResult> {
-  const out = await runCapture(opts.spawn, opts.binaryPath, ["auth", "status"], opts.env, opts.timeoutMs ?? 10_000);
+export async function authPresent(mode: AuthMode, opts: { binaryPath: string; env: Record<string, string>; spawn: SpawnFn; launch: LaunchPlace; timeoutMs?: number }): Promise<AuthResult> {
+  // D#6 RUNNER-CWD-1: a fresh empty launch directory and scrubbing off, as for `--version` (`pin.ts`); HOME stays the user's own, where the login is.
+  const out = await runCapture(opts.spawn, opts.launch, opts.binaryPath, ["auth", "status"], shortQuestionEnv(opts.env), opts.timeoutMs ?? 10_000);
   if (out.timedOut || out.code !== 0) return { present: false };
   let method: unknown;
   try {
@@ -43,8 +46,8 @@ export interface AuthState {
  * output that is not JSON, a method label that is not a plain word or an exit code other than 0 and 1 is `unknown`. Otherwise
  * it is `yes` (the accepted method of this mode, on exit 0) or `no`. Only the method label is read, as there.
  */
-export async function authState(mode: AuthMode, opts: { binaryPath: string; env: Record<string, string>; spawn: SpawnFn; timeoutMs?: number }): Promise<AuthState> {
-  const out = await runCapture(opts.spawn, opts.binaryPath, ["auth", "status"], opts.env, opts.timeoutMs ?? 10_000);
+export async function authState(mode: AuthMode, opts: { binaryPath: string; env: Record<string, string>; spawn: SpawnFn; launch: LaunchPlace; timeoutMs?: number }): Promise<AuthState> {
+  const out = await runCapture(opts.spawn, opts.launch, opts.binaryPath, ["auth", "status"], shortQuestionEnv(opts.env), opts.timeoutMs ?? 10_000);
   if (out.timedOut || (out.code !== 0 && out.code !== 1)) return { state: "unknown" };
   let method: unknown;
   try {

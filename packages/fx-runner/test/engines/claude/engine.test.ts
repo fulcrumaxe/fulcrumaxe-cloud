@@ -5,11 +5,12 @@ import type { LocalOnlyEvent } from "@fulcrumaxe/runner-protocol";
 import { outcomeOf } from "../../../src/engines/claude/engine.js";
 import { storedBinarySource } from "../../../src/engines/claude/pin.js";
 import { FULL_HELP, ON_BLOCK, RUN_ID, helpWithout, authText, engineFor, makeFake, makeRig, streamWith } from "./rig.js";
+import { testLaunch } from "../../helpers/launch.js";
 
 describe("engine preflight: each refusal happens before the job's process exists", () => {
   it("a stored path that is gone is claude_binary_missing with zero spawns", async () => {
     const rig = makeRig();
-    rig.config.binary = storedBinarySource({ storedPath: path.join(rig.root, "gone"), cacheDir: path.join(rig.root, "cache"), spawn: rig.config.spawn! });
+    rig.config.binary = storedBinarySource({ launch: testLaunch(), storedPath: path.join(rig.root, "gone"), cacheDir: path.join(rig.root, "cache"), spawn: rig.config.spawn! });
     await expect(engineFor(rig).start(rig.startOptions())).rejects.toMatchObject({ code: "claude_binary_missing" });
     expect(rig.spawns).toEqual([]);
   });

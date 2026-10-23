@@ -2,7 +2,9 @@ import { randomBytes } from "node:crypto";
 import { accessSync, constants, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { REQUIRED_FLAGS } from "./argv.js";
+import type { LaunchPlace } from "../../launchDir.js";
 import { runCapture, type SpawnFn } from "./capture.js";
+import { shortQuestionEnv } from "../../daemon/cliStubs.js";
 import { EngineRefusal } from "./refusal.js";
 
 /**
@@ -98,16 +100,18 @@ export interface BinaryReport {
  * answer is cached in `cacheDir`, so a new version is checked afresh). It never throws for what the binary says, and makes no
  * model request. `storedBinarySource` (before each job) and `fx-runner doctor` both read this one answer.
  */
-export async function inspectBinary(opts: { storedPath: string; cacheDir: string; spawn: SpawnFn; timeoutMs?: number }, env: Record<string, string>): Promise<BinaryReport> {
+export async function inspectBinary(opts: { storedPath: string; cacheDir: string; spawn: SpawnFn; launch: LaunchPlace; timeoutMs?: number }, env: Record<string, string>): Promise<BinaryReport> {
   const timeout = opts.timeoutMs ?? 10_000;
-  const reported = await runCapture(opts.spawn, opts.storedPath, ["--version"], env, timeout);
+  // D#6 RUNNER-CWD-1: in a fresh empty launch directory, with subprocess scrubbing off (a short question starts no tool), so the CLI's start-up placeholders land nowhere that lasts.
+  const quiet = shortQuestionEnv(env);
+  const reported = await runCapture(opts.spawn, opts.launch, opts.storedPath, ["--version"], quiet, timeout);
   const version = reported.code === 0 ? parseVersion(reported.stdout) : undefined;
   if (version === undefined || !versionSupported(version)) return { version, missingFlags: undefined };
   const cacheFile = path.join(opts.cacheDir, "claude-flags.json");
   const cache = readCache(cacheFile);
   let entry = Object.hasOwn(cache, version) ? cache[version] : undefined;
   if (entry === undefined || !Array.isArray(entry.missing)) {
-    const help = await runCapture(opts.spawn, opts.storedPath, ["--help"], env, timeout, 512 * 1024);
+    const help = await runCapture(opts.spawn, opts.launch, opts.storedPath, ["--help"], quiet, timeout, 512 * 1024);
     if (help.code !== 0) return { version, missingFlags: undefined };
     entry = { missing: missingFlags(help.stdout) };
     mkdirSync(opts.cacheDir, { recursive: true, mode: 0o700 });
@@ -130,7 +134,7 @@ export async function inspectBinary(opts: { storedPath: string; cacheDir: string
  * with an upgrade hint). `--help` must list every flag the argument list uses (`claude_flags_unsupported`, naming them).
  * No model request.
  */
-export function storedBinarySource(opts: { storedPath: string; cacheDir: string; spawn: SpawnFn; timeoutMs?: number }): BinarySource {
+export function storedBinarySource(opts: { storedPath: string; cacheDir: string; spawn: SpawnFn; launch: LaunchPlace; timeoutMs?: number }): BinarySource {
   return async (env) => {
     assertRunnable(opts.storedPath);
     const report = await inspectBinary(opts, env);

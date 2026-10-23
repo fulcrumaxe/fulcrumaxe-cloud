@@ -5,6 +5,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runCapture } from "../src/engines/claude/capture.js";
+import { testLaunch } from "./helpers/launch.js";
 import { createNixShell, findTool, identityVia, NIX_FIXED_ARGS } from "../src/daemon/nixShell.js";
 import { buildNixView, viewedArgv, type NixViewFs } from "../src/sandbox/nixView.js";
 import { bwrapCanCreateNamespaces } from "./helpers/bwrapProbe.js";
@@ -74,7 +75,7 @@ describe.skipIf(!usable)("R7c fix round 2: the nix client sees only an allowlist
   const nixBin = () => realpathSync(NIX!);
   let lastStderr = "";
   const capture = async (command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number) => {
-    const out = await runCapture(spawn, command, args, env, timeoutMs, 8 * 1024 * 1024, 8192);
+    const out = await runCapture(spawn, testLaunch(), command, args, env, timeoutMs, 8 * 1024 * 1024, 8192);
     if (args.includes("print-dev-env")) lastStderr = out.stderr ?? "";
     return out;
   };

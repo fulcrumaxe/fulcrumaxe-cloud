@@ -1,7 +1,8 @@
 import path from "node:path";
 import type { EngineKit } from "../../daemon/engineKit.js";
 import { cleanEnv, type CleanEnvOptions, type CredentialMode } from "../../job/cleanEnv.js";
-import { runCapture, runForeground, runInstall, type SpawnFn } from "./capture.js";
+import { ensureLaunchRoot, LaunchRefused, type LaunchPlace } from "../../launchDir.js";
+import { runCapture, runForeground, runForegroundLaunched, runInstall, type SpawnFn } from "./capture.js";
 import { authState } from "./authStatus.js";
 import { createClaudeEngine } from "./engine.js";
 import { type InstructionCanaryResult, guardJobBuild } from "../../instructionCanaryState.js";
@@ -32,16 +33,32 @@ export function canaryGuardedSource(input: { binaryPath: string; stateDir: strin
   };
 }
 
-/** The kit for the user's installed Claude Code CLI. `spawnFn` is the real process start, handed in by the program's entry point. */
-export function createClaudeKit(spawnFn: SpawnFn, options: { instructionCanary?: boolean } = {}): EngineKit {
+/**
+ * The kit for the user's installed Claude Code CLI. `spawnFn` is the real process start, handed in by the program's entry point, and `launch`
+ * the runner's launch root with the two places a launch may never be (D#6 RUNNER-CWD-1): every program this kit starts that has no directory of
+ * its own (the CLI's short questions, git, the sandbox probe, the tmux client) starts in a fresh empty directory under it.
+ */
+export function createClaudeKit(spawnFn: SpawnFn, options: { instructionCanary?: boolean; launch: LaunchPlace }): EngineKit {
   const starter = { spawn: spawnFn };
+  const launch = options.launch;
+  // The instruction canary's model turn runs in its own scratch directory (holding the canary file), made under the launch root too; no launch root, no check (inconclusive).
+  const canary = (input: { binaryPath: string; credentials: CredentialMode; envOptions: CleanEnvOptions }): Promise<InstructionCanaryResult> => {
+    let tempRoot: string;
+    try {
+      tempRoot = ensureLaunchRoot(launch);
+    } catch (error) {
+      if (!(error instanceof LaunchRefused)) throw error;
+      return Promise.resolve({ ok: false, reason: "instruction_canary_inconclusive" });
+    }
+    return runInstructionCanary({ binaryPath: input.binaryPath, env: cleanEnv(input.credentials, input.envOptions), spawn: spawnFn, tempRoot });
+  };
   const sessionsFile = (stateDir: string): string => path.join(stateDir, "sessions.json");
   return {
     locate: resolveClaudePath,
     inspect: async (input) => {
       const env = cleanEnv({ mode: "subscription" }, input.envOptions);
-      const binary = await inspectBinary({ storedPath: input.binaryPath, cacheDir: input.stateDir, spawn: spawnFn }, env);
-      const login = input.loginMode === undefined ? { state: "unknown" as const } : await authState(input.loginMode, { binaryPath: input.binaryPath, env, spawn: spawnFn });
+      const binary = await inspectBinary({ storedPath: input.binaryPath, cacheDir: input.stateDir, spawn: spawnFn, launch }, env);
+      const login = input.loginMode === undefined ? { state: "unknown" as const } : await authState(input.loginMode, { binaryPath: input.binaryPath, env, spawn: spawnFn, launch });
       return {
         version: binary.version,
         minimumVersion: MIN_CLAUDE_VERSION,
@@ -54,15 +71,15 @@ export function createClaudeKit(spawnFn: SpawnFn, options: { instructionCanary?:
     // D#601 MEM-7: one model turn at the start of `run`, so only the program's entry point turns it on (the tests that count spawns do not).
     ...(options.instructionCanary === true
       ? {
-          instructionCanary: (input: { binaryPath: string; credentials: CredentialMode; envOptions: CleanEnvOptions }) => runInstructionCanary({ binaryPath: input.binaryPath, env: cleanEnv(input.credentials, input.envOptions), spawn: spawnFn }),
+          instructionCanary: canary,
           instructionCanaryKey: canaryArgvFingerprint,
         }
       : {}),
     makeRuntime: (input) =>
       createClaudeEngine({
         binary: options.instructionCanary === true
-          ? canaryGuardedSource(input, storedBinarySource({ storedPath: input.binaryPath, cacheDir: input.stateDir, spawn: spawnFn }), () => runInstructionCanary({ binaryPath: input.binaryPath, env: cleanEnv(input.credentials, input.envOptions), spawn: spawnFn }))
-          : storedBinarySource({ storedPath: input.binaryPath, cacheDir: input.stateDir, spawn: spawnFn }),
+          ? canaryGuardedSource(input, storedBinarySource({ storedPath: input.binaryPath, cacheDir: input.stateDir, spawn: spawnFn, launch }), () => canary(input))
+          : storedBinarySource({ storedPath: input.binaryPath, cacheDir: input.stateDir, spawn: spawnFn, launch }),
         credentials: input.credentials,
         envOptions: input.jobEnv === undefined ? input.envOptions : { ...input.envOptions, jobEnv: input.jobEnv },
         sandboxSettings: input.sandboxSettings,
@@ -71,6 +88,7 @@ export function createClaudeKit(spawnFn: SpawnFn, options: { instructionCanary?:
         logDir: path.join(input.stateDir, "logs"),
         sessionsFile: sessionsFile(input.stateDir),
         spawn: spawnFn,
+        launch,
         ...(input.limits === undefined ? {} : { limits: input.limits }),
         onLocalEvent: input.onLocalEvent,
         ...(input.onNearLimit === undefined ? {} : { onNearLimit: input.onNearLimit }),
@@ -79,16 +97,16 @@ export function createClaudeKit(spawnFn: SpawnFn, options: { instructionCanary?:
     recordSession: (stateDir, sessionId, workspace) => recordSession(sessionsFile(stateDir), sessionId, workspace),
     sessionOfRun: (stateDir, runId) => sessionOfRun(path.join(stateDir, "logs", `${runId}.jsonl`)),
     // The first 2 K of error output is kept too: path A reads the proxy's HTTP status from it (never logged or sent).
-    capture: (command, args, env, timeoutMs) => runCapture(starter.spawn, command, args, env, timeoutMs, undefined, 2048),
-    captureLarge: (command, args, env, timeoutMs) => runCapture(starter.spawn, command, args, env, timeoutMs, 8 * 1024 * 1024, 2048),
+    capture: (command, args, env, timeoutMs) => runCapture(starter.spawn, launch, command, args, env, timeoutMs, undefined, 2048),
+    captureLarge: (command, args, env, timeoutMs) => runCapture(starter.spawn, launch, command, args, env, timeoutMs, 8 * 1024 * 1024, 2048),
     installCapture: (command, args, env, cwd, timeoutMs, tailChars, signal) => runInstall(starter.spawn, command, args, env, cwd, timeoutMs, tailChars, signal),
-    foreground: (command, args, env) => runForeground(starter.spawn, command, args, env),
+    foreground: (command, args, env) => runForegroundLaunched(starter.spawn, launch, command, args, env),
     takeOver(input) {
       const { argv, cwd } = takeoverCommand(input);
       return runForeground(starter.spawn, input.binaryPath, argv, cleanEnv(input.credentials, input.envOptions), cwd);
     },
     captureWithStderr: async (command, args, env, timeoutMs) => {
-      const out = await runCapture(starter.spawn, command, args, env, timeoutMs, 4096, 4096);
+      const out = await runCapture(starter.spawn, launch, command, args, env, timeoutMs, 4096, 4096);
       return { code: out.code, stdout: out.stdout, stderr: out.stderr ?? "", timedOut: out.timedOut };
     },
   };

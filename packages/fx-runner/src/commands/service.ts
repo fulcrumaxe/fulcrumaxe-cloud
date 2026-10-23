@@ -28,6 +28,8 @@ import { STATE_DIR_NAME, loadRegistration } from "../config.js";
 import type { CommandContext } from "../context.js";
 import { MACOS_PREVIEW_NOTICE } from "../platformSupport.js";
 import { BYPASS_ENV_NAME } from "../protectionBypass.js";
+import { cacheRootsFor } from "../daemon/mirror.js";
+import { daemonDirOf } from "../launchDir.js";
 
 export const SYSTEMD_UNIT_NAME = "fx-runner.service";
 export const LAUNCHD_LABEL = "dev.fulcrumaxe.fx-runner";
@@ -54,6 +56,8 @@ export interface ServiceHost {
   platform: NodeJS.Platform;
   /** `XDG_CONFIG_HOME`, looked up by name by the caller. */
   xdgConfigHome?: string | undefined;
+  /** `XDG_CACHE_HOME`, looked up by name by the caller: where a per-user service's working directory is (`<cache>/fx-runner/launch/daemon`). */
+  xdgCacheHome?: string | undefined;
   /** What the unit runs: the program's absolute path(s), then `run`. */
   command: readonly string[];
   /** The shell's PATH, looked up by name by the caller; its plain absolute entries go into the unit. */
@@ -102,6 +106,11 @@ export interface UnitInput {
   logFile: string;
   /** Set for a system service: the account it runs as. `stateDir` is then always set, and is also the service's HOME. */
   system?: { user: string };
+  /**
+   * D#6 RUNNER-CWD-1: the service's working directory, the runner's own empty `<launch root>/daemon`, never the home directory the service manager
+   * would use otherwise. The agent CLI writes placeholder files into the directory it starts in; `run` changes there itself too, before it starts anything.
+   */
+  workingDirectory: string;
 }
 
 export function renderSystemdUnit(input: UnitInput): string {
@@ -116,6 +125,8 @@ export function renderSystemdUnit(input: UnitInput): string {
     "Type=simple",
     ...(system === undefined ? [] : [`User=${system.user}`]),
     `ExecStart=${input.command.join(" ")}`,
+    // `-`: a directory that is not there yet is not an error; `run` makes it and changes into it before it starts anything.
+    `WorkingDirectory=-${input.workingDirectory}`,
   ];
   if (input.pathEntries.length > 0) lines.push(`Environment="PATH=${input.pathEntries.join(":")}"`);
   lines.push(`Environment="${SERVICE_ENV_NAME}=1"`);
@@ -150,6 +161,8 @@ export function renderLaunchdPlist(input: UnitInput): string {
     `  <array>`,
     ...input.command.map((arg) => `    <string>${xml(arg)}</string>`),
     `  </array>`,
+    `  <key>WorkingDirectory</key>`,
+    `  <string>${xml(input.workingDirectory)}</string>`,
     ...(env.length === 0 ? [] : [`  <key>EnvironmentVariables</key>`, `  <dict>`, ...env, `  </dict>`]),
     `  <key>RunAtLoad</key>`,
     `  <true/>`,
@@ -331,7 +344,10 @@ export function serviceCommand(action: string | undefined, ctx: CommandContext, 
   }
   // A system service gets a fixed PATH: the installing person's (often sudo's, or one with a user-writable directory in it) is not inherited.
   const pathEntries = system ? SYSTEM_PATH_ENTRIES : (host.path ?? "").split(":").filter((entry) => path.isAbsolute(entry) && PLAIN.test(entry));
+  // The service's working directory: under the launch root of the HOME the service runs with (the state directory for a system service).
+  const workingDirectory = plainPath(daemonDirOf(cacheRootsFor({ home: system ? stateRoot : home!, platform: host.platform, xdgCacheHome: system ? undefined : host.xdgCacheHome }).launchRoot), "the service's working directory");
   const text = target.render({
+    workingDirectory,
     command,
     pathEntries,
     ...(stateDir === undefined ? {} : { stateDir }),
@@ -340,6 +356,8 @@ export function serviceCommand(action: string | undefined, ctx: CommandContext, 
     ...(account === undefined ? {} : { system: { user: account } }),
   });
 
+  // A per-user service's working directory is made now (0700, owned by this user), so launchd can change into it at the first start.
+  if (!system) mkdirSync(workingDirectory, { recursive: true, mode: 0o700 });
   if (existing.kind === "ours" && existing.text === text) {
     ctx.out(`Already installed: ${target.file} is up to date.`);
   } else {
@@ -362,6 +380,7 @@ export function serviceCommand(action: string | undefined, ctx: CommandContext, 
     ctx.out(`It runs one instance as ${account}, with its files in ${stateRoot}, and starts at boot. Nothing is started yet. Create the state directory, register as ${account}, then start it:`);
     ctx.out(`  install -d -m 0700 -o ${account} ${stateRoot}`);
     if (darwin) ctx.out(`  install -d -m 0755 -o root -g wheel ${SYSTEM_LOG_DIR_DARWIN}`);
+    if (darwin) ctx.out(`  install -d -m 0700 -o ${account} ${workingDirectory}`);
     ctx.out(`  sudo -u ${account} env FX_RUNNER_HOME=${stateRoot} fx-runner register --code-stdin --credential-mode <mode> --cloud-url <url>`);
     for (const step of target.start) ctx.out(`  ${step}`);
     if (darwin) ctx.out(MACOS_PREVIEW_NOTICE);

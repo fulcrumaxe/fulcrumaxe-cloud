@@ -7,6 +7,7 @@ import { createClaudeKit } from "../src/engines/claude/kit.js";
 import { probeMachine } from "../src/sandbox/probe.js";
 import { createSandboxHost } from "../src/sandbox/probeHost.js";
 import { fakeSandboxHost } from "./helpers/fakeSandboxHost.js";
+import { testLaunch } from "./helpers/launch.js";
 
 type Run = Parameters<typeof createSandboxHost>[0];
 const noRun: Run = async () => ({ code: 0, stdout: "", stderr: "", timedOut: false });
@@ -69,7 +70,7 @@ describe("the real host behind the probe", () => {
   });
 
   it("the engine kit's capture keeps a short piece of the error output, bounded, and the exit code", async () => {
-    const kit = createClaudeKit(spawn);
+    const kit = createClaudeKit(spawn, { launch: testLaunch() });
     const out = await kit.captureWithStderr("/bin/sh", ["-c", "echo out; yes e | head -c 20000 >&2; exit 3"], { PATH: "/usr/bin:/bin" }, 5000);
     expect(out.code).toBe(3);
     expect(out.stdout).toBe("out\n");

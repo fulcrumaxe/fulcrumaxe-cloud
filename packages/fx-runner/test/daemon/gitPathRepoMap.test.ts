@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GitCapture } from "../../src/daemon/git.js";
 import { createGitPath, type GitJob } from "../../src/daemon/gitPath.js";
 import { runCapture } from "../../src/engines/claude/capture.js";
+import { testLaunch } from "../helpers/launch.js";
 
 /**
  * D#600 CX-3b: `GitPath.repoMap` over a real mirror made by the real git path: the map is of the commit the workspace was made from, it reads the
@@ -44,7 +45,7 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-const capture = (max?: number): GitCapture => (command, args, env, timeoutMs) => runCapture(spawn, command, args, env, timeoutMs, max, 2048);
+const capture = (max?: number): GitCapture => (command, args, env, timeoutMs) => runCapture(spawn, testLaunch(), command, args, env, timeoutMs, max, 2048);
 const makeGitPath = (large: boolean) =>
   createGitPath({ capture: capture(), ...(large ? { captureLarge: capture(8 * 1024 * 1024) } : {}), mirrorsRoot: path.join(root, "cache", "mirrors"), stateDir: path.join(root, "state"), remoteUrl: () => remoteUrl });
 

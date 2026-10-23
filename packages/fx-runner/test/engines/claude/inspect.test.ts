@@ -7,9 +7,10 @@ import { authState, type AuthMode } from "../../../src/engines/claude/authStatus
 import { inspectBinary } from "../../../src/engines/claude/pin.js";
 import { cleanEnv } from "../../../src/job/cleanEnv.js";
 import { FULL_HELP, authText, helpWithout, makeFake } from "./harness.js";
+import { testLaunch } from "../../helpers/launch.js";
 
 const env = (): Record<string, string> => cleanEnv({ mode: "subscription" });
-const authOpts = (binaryPath: string, timeoutMs?: number) => ({ binaryPath, env: env(), spawn, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
+const authOpts = (binaryPath: string, timeoutMs?: number) => ({ binaryPath, env: env(), spawn, launch: testLaunch(), ...(timeoutMs === undefined ? {} : { timeoutMs }) });
 const made: string[] = [];
 const cache = (): string => {
   const dir = mkdtempSync(path.join(tmpdir(), "r4a4_inspect-"));
@@ -56,27 +57,27 @@ describe("authState keeps `no` apart from `unknown`", () => {
 describe("inspectBinary answers without a verdict, and never throws for what the binary says", () => {
   it("a good build: its version and no missing flag", async () => {
     const fake = makeFake();
-    expect(await inspectBinary({ storedPath: fake.binary, cacheDir: cache(), spawn }, env())).toEqual({ version: "2.1.294", missingFlags: [] });
+    expect(await inspectBinary({ launch: testLaunch(), storedPath: fake.binary, cacheDir: cache(), spawn }, env())).toEqual({ version: "2.1.294", missingFlags: [] });
   });
 
   it("a build below the minimum: the version, and --help is not read", async () => {
     const fake = makeFake({ version: "2.1.293 (Claude Code)" });
-    expect(await inspectBinary({ storedPath: fake.binary, cacheDir: cache(), spawn }, env())).toEqual({ version: "2.1.293", missingFlags: undefined });
+    expect(await inspectBinary({ launch: testLaunch(), storedPath: fake.binary, cacheDir: cache(), spawn }, env())).toEqual({ version: "2.1.293", missingFlags: undefined });
     expect(fake.calls()).toEqual(["--version "]);
   });
 
   it("an unparseable version has no version and no flag answer", async () => {
     const fake = makeFake({ version: "garbled" });
-    expect(await inspectBinary({ storedPath: fake.binary, cacheDir: cache(), spawn }, env())).toEqual({ version: undefined, missingFlags: undefined });
+    expect(await inspectBinary({ launch: testLaunch(), storedPath: fake.binary, cacheDir: cache(), spawn }, env())).toEqual({ version: undefined, missingFlags: undefined });
   });
 
   it("a missing flag is named, and the answer is cached by version", async () => {
     const fake = makeFake({ help: helpWithout(FULL_HELP, "--tools") });
     const dir = cache();
-    const first = await inspectBinary({ storedPath: fake.binary, cacheDir: dir, spawn }, env());
+    const first = await inspectBinary({ launch: testLaunch(), storedPath: fake.binary, cacheDir: dir, spawn }, env());
     expect(first.missingFlags).toEqual(["--tools"]);
     expect(JSON.parse(readFileSync(path.join(dir, "claude-flags.json"), "utf8"))["2.1.294"]).toEqual({ missing: ["--tools"] });
-    await inspectBinary({ storedPath: fake.binary, cacheDir: dir, spawn }, env());
+    await inspectBinary({ launch: testLaunch(), storedPath: fake.binary, cacheDir: dir, spawn }, env());
     expect(fake.calls().filter((c) => c === "--help ")).toHaveLength(1);
   });
 });

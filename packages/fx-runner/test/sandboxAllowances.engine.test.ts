@@ -9,6 +9,7 @@ import { createWorkspaceStore } from "../src/job/workspace.js";
 import { createHostSandbox } from "../src/sandbox/hostSandbox.js";
 import { RUN_ID, makeFake, makeRig } from "./engines/claude/rig.js";
 import { sampleJob } from "./helpers/sampleJob.js";
+import { testLaunch } from "./helpers/launch.js";
 
 /**
  * D#6 R7b: a unit test that `command_timeout_s` reaches the engine's settings, over the whole path with nothing stubbed between the parts: the
@@ -19,7 +20,7 @@ async function runWith(allowances: boolean) {
   const fake = makeFake();
   const rig = makeRig({ fake });
   const stateDir = path.join(rig.root, "state");
-  const kit = createClaudeKit(spawn);
+  const kit = createClaudeKit(spawn, { launch: testLaunch() });
   const host = createHostSandbox({
     credentials: { mode: "subscription" },
     makeRuntime: (sandbox, protectedList, jobEnv) =>

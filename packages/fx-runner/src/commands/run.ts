@@ -52,6 +52,7 @@ import { createAutoUpdate, type UpdateHost } from "../update/updater.js";
 import { createUpdater, type UpdateHooks } from "./update.js";
 import { createFileLedger, LedgerLockedError, type FileLedger } from "../daemon/ledger.js";
 import { cacheRootsFor, mirrorKeepClear, type RepoRef } from "../daemon/mirror.js";
+import { LaunchRefused, prepareDaemonDir } from "../launchDir.js";
 import { abortOnSignals, pollLoop, type PollEvent } from "../daemon/pollLoop.js";
 import { removeStaleLedgerTemp } from "../daemon/staleTemp.js";
 import { spillRootFor, sweepStaleSpill } from "../job/spillFiles.js";
@@ -84,6 +85,11 @@ export interface RunHost {
   /** `kill(pid, 0)`: throws `ESRCH` for a program that is gone, `EPERM` for one that belongs to another user. */
   kill: (pid: number, signal: 0) => unknown;
   engine: EngineKit;
+  /**
+   * Changes this process's working directory (D#6 RUNNER-CWD-1). `run` calls it once, before it starts anything, with its own empty directory under
+   * the launch root, so nothing it starts inherits the directory it was started in (a service's is the home directory, a person's may be a checkout).
+   */
+  chdir: (dir: string) => void;
   /** The machine behind the sandbox probe (the same host `doctor` uses): the process start and the file reads. */
   sandbox: SandboxHost;
   /** The kernel release string; the machine's own when left out. Tests set it. */
@@ -199,6 +205,13 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
   const credentials: CredentialMode = live?.credentials ?? { mode: "subscription" };
   const home = host.home;
   if (home === undefined || !path.isAbsolute(home)) throw new CliError("cannot find your home directory");
+  // D#6 RUNNER-CWD-1: into the daemon's own empty directory before anything is started. One that cannot be made stops the command: fail closed.
+  try {
+    host.chdir(prepareDaemonDir({ root: cacheRootsFor({ home, platform: host.platform, xdgCacheHome: host.xdgCacheHome }).launchRoot, home, uid: host.uid }));
+  } catch (error) {
+    if (!(error instanceof LaunchRefused)) throw error;
+    throw new CliError("the runner's own working directory under its cache directory could not be made, so nothing is started");
+  }
 
   const searchPath = hooks.searchPath ?? cleanEnv(credentials).PATH ?? "";
   const { binaryPath, toolDirs } = localTools(host, searchPath);

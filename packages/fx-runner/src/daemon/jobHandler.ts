@@ -37,6 +37,7 @@ import { GitPathError } from "./git.js";
 import type { GitPath } from "./gitPath.js";
 import type { PlaneBaseLedger, PlanePushOutcome, PlanePushRunEnd } from "./planePush.js";
 import type { Published } from "./push.js";
+import { clearCliStubs, stubBaseline, type StubBaseline } from "./workspaceStubs.js";
 import { startLease, type Clock, type Lease, type LeaseEnd, type EventRelay } from "./lease.js";
 import { endOfFailure, endOfRefusal, RUN_ENDED_RETRY_MS, RUN_ENDED_TRIES, runEndedEvent, sendRunEndedAlone, SHUTDOWN_REPORT_MS, type RunEnd } from "./runEnded.js";
 import { verifyJob, type JobRefusal } from "./verifyJob.js";
@@ -413,6 +414,11 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       if (job.check !== undefined) promptNotes.push(checkNote(job.check));
       const checkHeld: { outcome?: CheckOutcome } = {};
       const repoMapHeld: { map?: { version: string; text: string } } = {};
+      // D#6 RUNNER-CWD-1: what the workspace held right before the agent started, so the CLI's placeholders made during the run can be cleared before the check and the publish.
+      let stubsBefore: StubBaseline | undefined;
+      const clearStubs = (workspace: string): void => {
+        if (stubsBefore !== undefined) clearCliStubs(workspace, stubsBefore);
+      };
       let result: RunJobResult;
       let notReady: string | undefined;
       try {
@@ -437,6 +443,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
               // The resumed session gets the same dev shell a fresh start would (same step, same skips), built at the resumed head.
               if (grant !== undefined) await prepareNix(job, git, grant, resumed.base, promptNotes);
               await prepareDeps(job, wanted.workspace, promptNotes, stopRun, mark);
+              stubsBefore = stubBaseline(wanted.workspace);
             }
             else {
               const fresh = { kind: "fresh", branch: job.continues.branch } as const;
@@ -454,12 +461,15 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             // D#6 R7c: the repo's Nix dev shell, only for a job with signed, approved allowances. A skip or a failure leaves the job without one.
             if (grant !== undefined) await prepareNix(job, git, grant, started.base, promptNotes);
             await prepareDeps(job, workspace, promptNotes, stopRun, mark);
+            stubsBefore = stubBaseline(workspace);
           };
           const granted = withReadGrants(deps.sandbox, git.readGrants(job));
           const withGrants = grant === undefined ? granted : withAllowances(granted, grant);
           const allowed = withSpillDir(withExcludes(withGrants, job.excludes), spillHeld?.dir);
           usedPort = allowed;
           const afterAgent = async (sandboxHandle: SandboxHandle, workspace: string): Promise<void> => {
+            // Before the check's before-and-after comparison of the protected files, so a placeholder is neither checked nor reported as a change.
+            clearStubs(workspace);
             const check = job.check;
             if (check === undefined) return;
             const closed = closedCheck;
@@ -518,7 +528,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       // The cloud asked for the run to move and the agent has been stopped: checkpoint, push, and say `handed_off`. A run that never got a workspace
       // and a base (a setup failure) has nothing to hand off and is reported as the failure it is.
       if (handoff !== undefined && result.workspace !== undefined && started.base !== undefined) {
-        const handed = await handOff({ claimed, job, lease, git, sandbox: usedPort, stopRun, workspace: result.workspace, base: started.base, sessionId: result.status === "done" ? result.sessionId : undefined, deadline: handoff.deadline });
+        const handed = await handOff({ claimed, job, lease, git, sandbox: usedPort, stopRun, workspace: result.workspace, base: started.base, sessionId: result.status === "done" ? result.sessionId : undefined, deadline: handoff.deadline, clearStubs });
         if (handed.status === "aborted") abandonSend = !(await reportShutdown(lease));
         return handed;
       }
@@ -536,6 +546,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       let published: Published = { pushed: false };
       try {
         if (started.base === undefined) throw new GitPathError("push_failed");
+        clearStubs(result.workspace);
         published = await git.publish(job, claimed, result.workspace, started.base, () => lease.ended() !== undefined);
       } catch (error) {
         if (!(error instanceof GitPathError)) throw error;
@@ -592,7 +603,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
    * deadline; then the push; then one `run_ended` `handed_off`: `pushed`, `push_failed` (the push was refused or failed) or `deadline` (no time was left
    * to push). Past the deadline the cloud has fenced this side, so nothing is pushed then. Nothing from the note is sent.
    */
-  async function handOff(input: { claimed: Claimed; job: Job; lease: Lease; git: GitPath; sandbox: SandboxPort; stopRun: AbortSignal; workspace: string; base: string; sessionId: string | undefined; deadline: Date }): Promise<JobResult> {
+  async function handOff(input: { claimed: Claimed; job: Job; lease: Lease; git: GitPath; sandbox: SandboxPort; stopRun: AbortSignal; workspace: string; base: string; sessionId: string | undefined; deadline: Date; clearStubs: (workspace: string) => void }): Promise<JobResult> {
     const { claimed, job, lease, deadline } = input;
     const sessionId = input.sessionId ?? deps.sessionOfRun?.(claimed.runId);
     const turnMs = Math.min(deadline.getTime() - deps.clock.now().getTime() - HANDOFF_PUSH_MARGIN_MS, CHECKPOINT_MAX_TURN_MS);
@@ -612,7 +623,8 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     let detail: (typeof HANDED_OFF_DETAILS)[number] = "deadline";
     if (deps.clock.now().getTime() < deadline.getTime()) {
       try {
-        // Pushed or nothing new to push: either way the branch holds everything the run committed.
+        // Pushed or nothing new to push: either way the branch holds everything the run committed. The checkpoint turn started the CLI again: clear first.
+        input.clearStubs(input.workspace);
         await input.git.publish(job, claimed, input.workspace, input.base, () => lease.ended() !== undefined);
         detail = "pushed";
       } catch (error) {

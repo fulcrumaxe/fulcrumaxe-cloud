@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runCapture } from "../src/engines/claude/capture.js";
+import { testLaunch } from "./helpers/launch.js";
 import { createGitPath } from "../src/daemon/gitPath.js";
 
 /**
@@ -12,7 +13,7 @@ import { createGitPath } from "../src/daemon/gitPath.js";
  * when it is in that branch's history; a commit that exists only on a run branch is `not_default_branch`.
  */
 const LOCK = JSON.stringify({ nodes: { root: {} }, root: "root", version: 7 });
-const capture = (command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number) => runCapture(spawn, command, args, env, timeoutMs, 8 * 1024 * 1024, 4096);
+const capture = (command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number) => runCapture(spawn, testLaunch(), command, args, env, timeoutMs, 8 * 1024 * 1024, 4096);
 
 function git(cwd: string, ...args: string[]): string {
   const out = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" });

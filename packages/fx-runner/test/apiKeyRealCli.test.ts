@@ -11,6 +11,7 @@ import { createWorkspaceStore } from "../src/job/workspace.js";
 import { createHostSandbox } from "../src/sandbox/hostSandbox.js";
 import { resolveSandboxTools, sandboxToolDirs } from "../src/sandbox/select.js";
 import { sampleJob } from "./helpers/sampleJob.js";
+import { testLaunch } from "./helpers/launch.js";
 
 /**
  * D#6 R5b-3 real contract, at $0: the installed agent CLI is started through the runner's own path (`runJob`, the host sandbox, the engine) in
@@ -56,7 +57,8 @@ describe.skipIf(!ON)("the real agent CLI with an invalid API key", () => {
       envOptions,
       makeRuntime: (sandbox, protectedList) =>
         createClaudeEngine({
-          binary: storedBinarySource({ storedPath: binary, cacheDir: path.join(scratch, "cache"), spawn }),
+          binary: storedBinarySource({ launch: testLaunch(), storedPath: binary, cacheDir: path.join(scratch, "cache"), spawn }),
+          launch: testLaunch(),
           credentials,
           envOptions,
           sandboxSettings: sandbox,

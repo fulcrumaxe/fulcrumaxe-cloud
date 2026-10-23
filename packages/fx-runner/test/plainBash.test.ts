@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { RUNNER_ELIGIBLE_ROLES } from "@fulcrumaxe/runner-protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runCapture } from "../src/engines/claude/capture.js";
+import { testLaunch } from "./helpers/launch.js";
 import { confineFileTools, denyRules } from "../src/engines/claude/filePermissions.js";
 import { settingsFor } from "../src/engines/claude/settingsFile.js";
 import { createGitPath, PUSHING_ROLES, type GitJob } from "../src/daemon/gitPath.js";
@@ -145,9 +146,12 @@ describe.skipIf(!usable)("C44-5: plain Bash inside the real sandbox (bubblewrap,
   it("a write outside the workspace and the job temp dir is refused with a non-zero exit and leaves nothing", () => {
     const outside = path.join(root, "outside.txt");
     const elsewhere = path.join(home, "dropped.txt");
-    expect(inSandbox(`echo x > ${outside}`).code).not.toBe(0);
-    // Inside the home directory the sandbox may give the command a scratch view, so the exit status is not the signal there: what matters is that nothing reaches the host.
+    expect(inSandbox("echo x > /etc/fx-plainbash-probe").code).not.toBe(0);
+    // Inside the home directory and the shared temp directories (denied for reading since D#6 RUNNER-CWD-1, so the sandbox lays a scratch tmpfs over
+    // them, as the CLI's own sandbox does) the exit status is not the signal: what matters is that nothing reaches the host. `root` is under the temp directory.
+    inSandbox(`echo x > ${outside}`);
     inSandbox(`echo x > ${elsewhere}`);
+    expect(existsSync("/etc/fx-plainbash-probe")).toBe(false);
     expect(existsSync(outside)).toBe(false);
     expect(existsSync(elsewhere)).toBe(false);
     expect(inSandbox(`echo x > ${workspace}/inside.txt`).code).toBe(0);
@@ -185,7 +189,7 @@ describe("C44-5: a reviewer's work is never published", () => {
       sh("-C", seed, "push", remote, "main");
       const calls: Array<readonly string[]> = [];
       const gitPath = createGitPath({
-        capture: (command, args, env, timeoutMs) => (calls.push(args), runCapture(spawn, command, args, env, timeoutMs)),
+        capture: (command, args, env, timeoutMs) => (calls.push(args), runCapture(spawn, testLaunch(), command, args, env, timeoutMs)),
         mirrorsRoot: path.join(dir, "cache", "mirrors"),
         stateDir: path.join(dir, "state"),
         remoteUrl: () => pathToFileURL(remote).href,

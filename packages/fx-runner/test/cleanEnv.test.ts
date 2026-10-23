@@ -218,6 +218,17 @@ describe("cleanEnv allowlist", () => {
     }
   });
 
+  it("the descriptor table's exact name is allowed in the workspace cleanup's file only; anything longer, other /proc paths and any other file are still refused", () => {
+    const stubs = "src/daemon/workspaceStubs.ts";
+    const exact = 'const PROC_FD = "/proc/self/fd"; const at = (fd: number, leaf: string) => `${PROC_FD}/${fd}/${leaf}`;';
+    expect(envAccessViolations(exact, stubs)).toEqual([]);
+    expect(envAccessViolations(exact, "src/daemon/snapshot.ts")).not.toEqual([]);
+    expect(envAccessViolations(exact)).not.toEqual([]);
+    for (const sample of ["const p = '/proc/self/fd/';", "const p = '/proc/self/fd/0';", "const p = '/proc/self/fdinfo';", "const p = '/proc/self/environ';", "const p = '/proc/self/fd' + '/../environ';", "const p = '/proc/1/fd';", "const p = '/proc/';", "const p = path.join('/proc', 'self', 'fd');"]) {
+      expect(envAccessViolations(sample, stubs), sample).not.toEqual([]);
+    }
+  });
+
   it.each(BYPASSES)("the guard flags a bypass: %s", (_name, sample) => {
     expect(envAccessViolations(sample), sample).not.toEqual([]);
   });

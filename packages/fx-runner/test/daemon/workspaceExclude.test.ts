@@ -17,6 +17,7 @@ import { createMirrors, type Mirrors, type RepoRef } from "../../src/daemon/mirr
 import { EXCLUDE_BEGIN, EXCLUDE_DIR_NAMES, EXCLUDE_FILE_NAMES, excludeBlock, writeWorkspaceExclude } from "../../src/daemon/workspaceExclude.js";
 import { SANDBOX_PROTECTED_FILES } from "../../src/daemon/sandboxStubs.js";
 import { runCapture } from "../../src/engines/claude/capture.js";
+import { testLaunch } from "../helpers/launch.js";
 import { OBSERVED_ROOT_STUBS } from "../helpers/sandboxStubFixture.js";
 
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 30_000 });
@@ -47,7 +48,7 @@ const lease = { runId: "0b1b6c52-7a43-4d5e-8a77-0f0f0f0f0f01", leaseGeneration: 
 
 /** Real git through the real process path; `hook` runs after each command, so a test can swap something in right after a checkout. */
 const capture: GitCapture = async (command, args, env, timeoutMs) => {
-  const out = await runCapture(spawn, command, args, { ...env, ...SETUP_ENV() }, timeoutMs);
+  const out = await runCapture(spawn, testLaunch(), command, args, { ...env, ...SETUP_ENV() }, timeoutMs);
   hook?.(args);
   return out;
 };
