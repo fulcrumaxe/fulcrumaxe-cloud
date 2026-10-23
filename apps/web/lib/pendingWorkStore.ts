@@ -1,7 +1,7 @@
 import { getCache, waitUntil } from "@vercel/functions";
 import { setPendingHooks, type PendingHooks, type PendingStore } from "@fx/core/src/pendingWork";
 import { apiSweepKickerFromEnv } from "@fx/webhooks";
-import { reportError as reportServerError } from "@fx/telemetry";
+import { createErrorReporter } from "@fx/telemetry";
 
 /**
  * D#454 H3c: the production store behind the sweeps' "work pending" marker is Vercel Runtime Cache
@@ -26,9 +26,16 @@ export function runtimeCacheStore(): PendingStore {
   };
 }
 
-/** A cache timeout or error, or a failed kick: one coded report (stdout line, plus the capped Postgres count when configured). */
+/**
+ * A reporter with no sink: it writes the coded stdout line and nothing else. The process-wide reporter would also count
+ * the error class in Postgres, and that opens a database connection, so a flaky cache would wake the database just to
+ * report itself. The gate exists to avoid exactly that, so its failures stay on stdout.
+ */
+const stdoutOnly = createErrorReporter({ service: "web" });
+
+/** A cache timeout or error, or a failed kick: one coded stdout line, never a database write. */
 function reportError(err: unknown, stage: string): void {
-  reportServerError(err, { stage, code: "internal_error" });
+  stdoutOnly.reportError(err, { stage, code: "internal_error" });
 }
 
 /** Installs the store, the post-response keep-alive and, when the run-action kick URL and secret are set, the api-sweep kick. */
