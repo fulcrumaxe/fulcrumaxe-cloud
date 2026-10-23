@@ -29,7 +29,7 @@ concurrency:
 #
 # The top-level token is `contents: read` and nothing else. The two jobs that run the scope steps add
 # `pull-requests: read` for themselves (they read the pull request's current labels to see `ci:full`);
-# `pr-gates` needs nothing more. Read-only everywhere; nothing in this workflow can write to the repository.
+# `pr-gates` adds it too, to read the pull request's current body. Read-only everywhere; nothing in this workflow can write to the repository.
 permissions:
   contents: read
 
@@ -111,11 +111,14 @@ jobs:
   # The two public-plane gates that look at what a pull request publishes: the PR body may cite only the code
   # repo (and carries a Discussion reference), and the diff may not add a path the private overlay owns.
   # Public pull requests only: on the private repo the overlay paths are the whole point. Needs no secrets and
-  # no write access. The body is read from the event file into a file, never put in `env:` (the runner would
+  # no write access. The body is read into a file, never put in `env:` (the runner would
   # print it into the log) and never spliced into the script; the base branch name arrives through `env:`.
   pr-gates:
     if: vars.CI_DISABLED != 'true' && github.event_name == 'pull_request' && github.event.repository.private == false
     runs-on: ${{ github.event.repository.private && (vars.CI_RUNS_ON || 'self-hosted') || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      pull-requests: read
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -124,11 +127,23 @@ jobs:
           # The denylist diffs origin/<base>...HEAD, which needs the merge base.
           fetch-depth: 0
 
+      # The body is fetched from the API at run time: a re-run replays the ORIGINAL event payload, so
+      # reading the payload alone would keep checking the old body after someone edited it. The payload is
+      # only the fallback when the API call fails. The token and PR number arrive through `env:` (neither is
+      # the body); the body itself goes straight into a file.
       - name: PR link policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           body_file="$RUNNER_TEMP/pr-body.txt"
-          jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH" > "$body_file"
+          if gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.body // ""' > "$body_file"; then
+            echo "PR body source: current body fetched from the API"
+          else
+            echo "PR body source: event payload (API call failed; a re-run may see a stale body)"
+            jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH" > "$body_file"
+          fi
           PR_BODY_FILE="$body_file" bash scripts/ci/pr-link-policy.sh
 
       - name: Publish denylist
