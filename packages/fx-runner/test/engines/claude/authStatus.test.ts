@@ -3,8 +3,9 @@ import { authPresent, type AuthMode } from "../../../src/engines/claude/authStat
 import { cleanEnv } from "../../../src/job/cleanEnv.js";
 import { authText, makeFake } from "./harness.js";
 import { spawn } from "node:child_process";
+import { testLaunch } from "../../helpers/launch.js";
 
-const opts = (binaryPath: string, timeoutMs?: number) => ({ binaryPath, env: cleanEnv({ mode: "subscription" }), spawn, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
+const opts = (binaryPath: string, timeoutMs?: number) => ({ binaryPath, env: cleanEnv({ mode: "subscription" }), spawn, launch: testLaunch(), ...(timeoutMs === undefined ? {} : { timeoutMs }) });
 
 const CASES: Array<[string, AuthMode, boolean]> = [
   ["auth.claude_ai.json", "subscription", true],

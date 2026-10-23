@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createGit, GitPathError, type GitCapture } from "../../src/daemon/git.js";
 import { LISTING_CAP, MAP_DEADLINE_MS, parseListing, readRepoMap } from "../../src/daemon/repoMap.js";
 import { runCapture } from "../../src/engines/claude/capture.js";
+import { testLaunch } from "../helpers/launch.js";
 import { REPO_MAP_MAX_BYTES, REPO_MAP_TRUNCATED_MARKER, buildRepoMap, repoMapDigest } from "../../src/job/repoMap.js";
 import { SHARED, largeTree } from "../helpers/repoMapFixture.js";
 
@@ -40,7 +41,7 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-const captureOf = (max?: number): GitCapture => (command, args, env, timeoutMs) => runCapture(spawn, command, args, env, timeoutMs, max, 2048);
+const captureOf = (max?: number): GitCapture => (command, args, env, timeoutMs) => runCapture(spawn, testLaunch(), command, args, env, timeoutMs, max, 2048);
 /** The daemon's two captures: the ordinary 64 K one, and the 8 MB one for the listing. */
 const gitsOf = (large = true) => ({ listing: createGit({ capture: captureOf(large ? LISTING_CAP : undefined) }), small: createGit({ capture: captureOf() }), listingCap: large ? LISTING_CAP : 64 * 1024 });
 
@@ -192,7 +193,7 @@ describe("the deadline on the whole map build (D#600 CX-3b)", () => {
         void args;
         pids.push(child.pid!);
         return child;
-      }) as unknown as typeof spawn, "git", [], env, timeoutMs);
+      }) as unknown as typeof spawn, testLaunch(), "git", [], env, timeoutMs);
     const git = createGit({ capture: stalling });
     const out = await readRepoMap({ listing: git, small: git, listingCap: LISTING_CAP }, "/m.git", SHA40, { deadlineMs: 300 });
     expect(out).toBeNull();

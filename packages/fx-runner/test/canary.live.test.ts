@@ -11,6 +11,7 @@ import { resolveSandboxTools, sandboxToolDirs } from "../src/sandbox/select.js";
 import { selfTestCard } from "./helpers/canaryCard.js";
 import { callStatus, classifyLinkEdit } from "./helpers/canaryClassify.js";
 import { sampleJob } from "./helpers/sampleJob.js";
+import { testLaunch } from "./helpers/launch.js";
 
 /**
  * The real-binary canary for file-tool confinement. It runs ONE short model turn with the user's own login, so it is
@@ -172,7 +173,8 @@ describe.skipIf(!ON)("canary: the real binary cannot reach outside the workspace
       envOptions,
       makeRuntime: (sandbox, protectedList) =>
         createClaudeEngine({
-          binary: storedBinarySource({ storedPath: binary, cacheDir: path.join(scratch, "cache"), spawn }),
+          binary: storedBinarySource({ launch: testLaunch(), storedPath: binary, cacheDir: path.join(scratch, "cache"), spawn }),
+          launch: testLaunch(),
           credentials: { mode: "subscription" },
           envOptions,
           sandboxSettings: sandbox,

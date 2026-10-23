@@ -6,6 +6,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runCapture } from "../src/engines/claude/capture.js";
+import { testLaunch } from "./helpers/launch.js";
 import { allowedUris, createNixShell, isTrustedUser, lockIsPinned, NIX_FIXED_ARGS, type NixSource } from "../src/daemon/nixShell.js";
 import type { NixViewFs } from "../src/sandbox/nixView.js";
 import { NIX_ENV_NAMES, filterDevEnv } from "../src/job/nixShellEnv.js";
@@ -81,7 +82,7 @@ exec env -i $vars "$@"
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-const capture = (command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number) => runCapture(spawn, command, args, env, timeoutMs, 8 * 1024 * 1024, 2048);
+const capture = (command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number) => runCapture(spawn, testLaunch(), command, args, env, timeoutMs, 8 * 1024 * 1024, 2048);
 const flake = (lock: string | null = GOOD_LOCK): NixSource => ({ kind: "flake", mirrorDir: "/cache/mirrors/abc.git", lock });
 const calls = (): string[] => (existsSync(path.join(dir, "calls.log")) ? readFileSync(path.join(dir, "calls.log"), "utf8").trim().split("\n") : []);
 const devCalls = (): string[] => calls().filter((line) => line.includes("print-dev-env"));

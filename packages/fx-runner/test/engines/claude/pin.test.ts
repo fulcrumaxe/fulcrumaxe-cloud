@@ -7,6 +7,7 @@ import { MIN_CLAUDE_VERSION, compareVersions, parseVersion, resolveClaudePath, s
 import { cleanEnv } from "../../../src/job/cleanEnv.js";
 import { PACKAGE_DIR } from "../../helpers/srcFiles.js";
 import { DEFAULT_VERSION, FULL_HELP, countingSpawn, helpWithout, makeFake, type Fake } from "./harness.js";
+import { testLaunch } from "../../helpers/launch.js";
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -14,7 +15,7 @@ const tempDir = (): string => mkdtempSync(path.join(tmpdir(), "r4b12_pin-"));
 
 function source(fake: Fake, over: { storedPath?: string; cacheDir?: string } = {}) {
   const counted = countingSpawn();
-  const load = storedBinarySource({ storedPath: over.storedPath ?? fake.binary, cacheDir: over.cacheDir ?? tempDir(), spawn: counted.spawn });
+  const load = storedBinarySource({ launch: testLaunch(), storedPath: over.storedPath ?? fake.binary, cacheDir: over.cacheDir ?? tempDir(), spawn: counted.spawn });
   return { load: () => load(cleanEnv({ mode: "subscription" })), spawns: counted.spawns };
 }
 

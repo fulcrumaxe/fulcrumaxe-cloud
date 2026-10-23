@@ -1,7 +1,7 @@
 import { spawn, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -28,6 +28,7 @@ import { fakeSandboxHost } from "../helpers/fakeSandboxHost.js";
 import { startStrictRunnerCloud, type StrictRunnerCloud } from "../helpers/strictRunnerCloud.js";
 import { KEY_ID, KEYRING, OTHER_KEYRING, signedJob } from "../helpers/signedJob.js";
 import { PACKAGE_DIR } from "../helpers/srcFiles.js";
+import { testLaunch } from "../helpers/launch.js";
 
 let root: string;
 let home: string;
@@ -84,7 +85,7 @@ type Signals = EventEmitter & RunHost["signals"];
 const newSignals = (): Signals => new EventEmitter() as unknown as Signals;
 
 /** What the program's entry point hands `run`: the real pid, the real kill and the real process start. */
-const hostWith = (signals: RunHost["signals"]): RunHost => ({ home, platform: "linux", signals, pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), engine: createClaudeKit(spawn), sandbox: fakeSandboxHost() });
+const hostWith = (signals: RunHost["signals"]): RunHost => ({ home, platform: "linux", signals, pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), chdir: () => undefined, engine: createClaudeKit(spawn, { launch: testLaunch() }), sandbox: fakeSandboxHost() });
 
 /** A machine with room for everything: the composed-daemon tests are about other things than this machine's free memory. */
 const GB = 1024 ** 3;
@@ -179,6 +180,34 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
     await until(() => claims() >= 1);
     expect(hellos()).toHaveLength(1);
     expect(await stop(run)).toMatchObject({ code: 0 });
+  });
+});
+
+describe("1-cwd. the daemon leaves the directory it was started in before it starts anything (D#6 RUNNER-CWD-1)", () => {
+  it("changes into <cache>/fx-runner/launch/daemon (0700, empty) first, and every program the kit then starts runs elsewhere", async () => {
+    const order: string[] = [];
+    const counting = ((command: string, ...rest: unknown[]) => {
+      order.push(`spawn ${path.basename(command)}`);
+      return (spawn as unknown as (...args: unknown[]) => ReturnType<typeof spawn>)(command, ...rest);
+    }) as typeof spawn;
+    const run = start({ host: { chdir: (dir) => order.push(`chdir ${dir}`), engine: createClaudeKit(counting, { launch: testLaunch() }) } });
+    await until(() => claims() >= 1);
+    const daemonDir = path.join(home, ".cache", "fx-runner", "launch", "daemon");
+    expect(order[0]).toBe(`chdir ${realpathSync(daemonDir)}`);
+    expect(order.filter((step) => step.startsWith("chdir"))).toHaveLength(1);
+    expect(statSync(daemonDir).mode & 0o777).toBe(0o700);
+    expect(readdirSync(daemonDir)).toEqual([]);
+    expect(await stop(run)).toMatchObject({ code: 0 });
+  });
+
+  it("a launch root that cannot be made stops the command before anything is started", async () => {
+    // The cache directory's place is taken by a file.
+    writeFileSync(path.join(home, ".cache"), "");
+    const order: string[] = [];
+    const result = await start({ host: { chdir: (dir) => order.push(dir) } }).done;
+    expect(result.code).not.toBe(0);
+    expect(result.message).toContain("working directory");
+    expect(order).toEqual([]);
   });
 });
 
@@ -487,7 +516,7 @@ describe("5. the composed daemon: a signal stops the job within 5 seconds and re
 describe("6b. the instruction-file canary holds claiming (D#601 MEM-7)", () => {
   const claimBodies = (): unknown[] => cloud.seen.filter((s) => s.path === "/api/runner/claim").map((s) => s.body);
   const withCanary = (result: { ok: true } | { ok: false; reason: "instruction_file_loaded" }): Partial<RunHost> => ({
-    engine: { ...createClaudeKit(spawn), instructionCanary: async () => result, instructionCanaryKey: () => "test-key" },
+    engine: { ...createClaudeKit(spawn, { launch: testLaunch() }), instructionCanary: async () => result, instructionCanaryKey: () => "test-key" },
   });
 
   it("a build that loads the file: the claim declares no room, a job the cloud hands over anyway is refused unstarted, the named reason is said and stored for `status`", async () => {

@@ -1,9 +1,12 @@
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { CREDENTIAL_FLOOR, MODEL_HOST, SandboxGrantRefused, assertEnabledSandbox, assertPlainHost, sandboxSettings } from "../src/sandbox/sandboxSettings.js";
+import { CREDENTIAL_FLOOR, MODEL_HOST, SandboxGrantRefused, assertEnabledSandbox, assertPlainHost, sandboxSettings, SHARED_TEMP_DIRS } from "../src/sandbox/sandboxSettings.js";
 import { PACKAGE_DIR, srcFiles } from "./helpers/srcFiles.js";
+
+/** D#6 RUNNER-CWD-1: the shared temp directories every job is denied, as the builder lists them (as written and where they really are). */
+const SHARED_TEMP = [...new Set(SHARED_TEMP_DIRS.flatMap((dir) => [dir, existsSync(dir) ? realpathSync(dir) : dir]))];
 
 const HOME = "/home/jane";
 const STATE = "/home/jane/.fx-runner";
@@ -34,7 +37,7 @@ describe("sandboxSettings: the shell sandbox a job runs under", () => {
 
   it("denies reads of the home directory, and re-allows only the workspace and temp directory", () => {
     const s = block();
-    expect(s.filesystem.denyRead).toEqual([HOME, STATE, BIN, base.workspaceRoot, base.tempRoot]);
+    expect(s.filesystem.denyRead).toEqual([...new Set([HOME, STATE, BIN, base.workspaceRoot, base.tempRoot, ...SHARED_TEMP])]);
     expect(s.filesystem.allowRead).toEqual([base.workspace, base.tempDir]);
   });
 
@@ -157,7 +160,7 @@ describe("the mirrors root (git path B, correction C25 section 2)", () => {
     expect(s.filesystem.allowRead).toEqual([base.workspace, base.tempDir, OBJECTS]);
     expect(s.filesystem.allowWrite).toEqual([base.workspace, base.tempDir]);
     expect(s.filesystem.denyWrite).toEqual([STATE, BIN, MIRRORS]);
-    expect(s.filesystem.denyRead).toEqual([HOME, STATE, BIN, base.workspaceRoot, base.tempRoot, MIRRORS]);
+    expect(s.filesystem.denyRead).toEqual([...new Set([HOME, STATE, BIN, base.workspaceRoot, base.tempRoot, MIRRORS, ...SHARED_TEMP])]);
   });
 
   it("changes nothing when no mirrors root is given", () => {

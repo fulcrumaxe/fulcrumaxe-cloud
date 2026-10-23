@@ -70,12 +70,12 @@ describe("the system unit (Linux)", () => {
   });
 
   it("is the render function's output, so the golden file pins the real code path", () => {
-    const input: UnitInput = { command: COMMAND, pathEntries: SYSTEM_PATH_ENTRIES, stateDir: "/var/lib/fx-runner", logFile: "/var/lib/fx-runner/service.log", system: { user: "fxrunner" } };
+    const input: UnitInput = { command: COMMAND, workingDirectory: "/var/lib/fx-runner/.cache/fx-runner/launch/daemon", pathEntries: SYSTEM_PATH_ENTRIES, stateDir: "/var/lib/fx-runner", logFile: "/var/lib/fx-runner/service.log", system: { user: "fxrunner" } };
     expect(renderSystemdUnit(input)).toBe(golden("fx-runner.system.service"));
   });
 
   it("the per-user unit is unchanged: no User=, no hardening lines, default.target", () => {
-    const text = renderSystemdUnit({ command: COMMAND, pathEntries: [], logFile: "/x/service.log" });
+    const text = renderSystemdUnit({ command: COMMAND, workingDirectory: "/w/launch/daemon", pathEntries: [], logFile: "/x/service.log" });
     expect(text).not.toMatch(/^User=|NoNewPrivileges|ProtectSystem|ProtectHome|StateDirectory/m);
     expect(text).toContain("WantedBy=default.target");
   });
@@ -224,12 +224,12 @@ describe("the LaunchDaemon (macOS)", () => {
   });
 
   it("is the render function's output", () => {
-    const input: UnitInput = { command: COMMAND, pathEntries: SYSTEM_PATH_ENTRIES, stateDir: "/usr/local/var/fx-runner", logFile: "/Library/Logs/fx-runner/service.log", system: { user: "fxrunner" } };
+    const input: UnitInput = { command: COMMAND, workingDirectory: "/usr/local/var/fx-runner/Library/Caches/fx-runner/launch/daemon", pathEntries: SYSTEM_PATH_ENTRIES, stateDir: "/usr/local/var/fx-runner", logFile: "/Library/Logs/fx-runner/service.log", system: { user: "fxrunner" } };
     expect(renderLaunchdPlist(input)).toBe(golden("fx-runner.system.plist"));
   });
 
   it("the per-user agent has no UserName", () => {
-    expect(renderLaunchdPlist({ command: COMMAND, pathEntries: [], logFile: "/x/service.log" })).not.toContain("UserName");
+    expect(renderLaunchdPlist({ command: COMMAND, workingDirectory: "/w/launch/daemon", pathEntries: [], logFile: "/x/service.log" })).not.toContain("UserName");
   });
 
   it("refuses root by name, writes into LaunchDaemons and prints the system launchctl commands", () => {

@@ -10,6 +10,7 @@ import { claudeArgv } from "./argv.js";
 import { confineFileTools, readRulesFor } from "./filePermissions.js";
 import { authPresent } from "./authStatus.js";
 import type { SpawnFn } from "./capture.js";
+import type { LaunchPlace } from "../../launchDir.js";
 import { initCredentialMatches, isInitLine } from "./credentialCheck.js";
 import { MIN_CLAUDE_VERSION, versionSupported, type BinarySource } from "./pin.js";
 import { EngineRefusal } from "./refusal.js";
@@ -49,6 +50,8 @@ export interface EngineConfig {
   /** The local session index, written when a run ends. */
   sessionsFile: string;
   spawn?: SpawnFn;
+  /** Where the job's `auth status` question starts (D#6 RUNNER-CWD-1): a fresh empty directory under the runner's launch root, never the daemon's own directory. */
+  launch: LaunchPlace;
   /** How long a stopped agent gets to exit on SIGTERM before everything left in its process group is killed. Default 3000. */
   killGraceMs?: number;
   /** D#6 C43-5: the job's hard memory and task limits (a transient scope). Absent where none can be enforced. */
@@ -136,7 +139,7 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
     const binary = await config.binary(env);
     // The minimum is enforced here too, so a BinarySource other than storedBinarySource cannot get a build below it past the engine.
     if (!versionSupported(binary.version)) throw new EngineRefusal("claude_version_unsupported", `version ${binary.version} is older than ${MIN_CLAUDE_VERSION}; upgrade Claude Code`);
-    if (!(await authPresent(config.credentials.mode, { binaryPath: binary.path, env, spawn: spawnFn })).present) throw new EngineRefusal("auth_missing");
+    if (!(await authPresent(config.credentials.mode, { binaryPath: binary.path, env, spawn: spawnFn, launch: config.launch })).present) throw new EngineRefusal("auth_missing");
 
     const excludes = (opts as EngineStartOptions).excludes;
     const files = writeJobFiles(jobDir, workdir, opts.role, config.sandboxSettings, config.protectedPaths, excludes, (opts as EngineStartOptions).spillDir);

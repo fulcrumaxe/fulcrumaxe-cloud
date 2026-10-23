@@ -142,6 +142,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "bad_segment",
   // Local runner (D#6): the daemon ledger is held by another process.
   "ledger_locked",
+  // Local runner (D#6 RUNNER-CWD-1a): a program launch directory the runner refuses (not fresh, empty, owned and private, or not inside its launch root).
+  "launch_dir_refused",
   // Local runner (D#6 R4a-3): the git path (mirror, workspace, push) failed, or refused a ref or a run it will not push.
   "mirror_failed",
   "mirror_dir_insecure",

@@ -19,6 +19,7 @@ import { until } from "../helpers/manualClock.js";
 import { KEYRING, signedJob } from "../helpers/signedJob.js";
 import { startStrictRunnerCloud, type StrictRunnerCloud } from "../helpers/strictRunnerCloud.js";
 import { program, updateWorld, type UpdateWorld } from "../helpers/updateWorld.js";
+import { testLaunch } from "../helpers/launch.js";
 
 /**
  * The composed daemon with self-update (D#6 R6-2b): the claim loop is the real one against a strict fake cloud, the release client is a
@@ -64,7 +65,7 @@ function start(hostOver: Partial<UpdateWorld["host"]> = {}, hooks: Partial<RunHo
   const signals = new EventEmitter() as unknown as RunHost["signals"] & EventEmitter;
   const out: string[] = [];
   const ctx: CommandContext = { stateDir: w.stateDir, out: (l) => out.push(l), err: (l) => out.push(l), now: () => new Date(), fetchFn: fetch };
-  const host: RunHost = { home, platform: "linux", signals, pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), engine: createClaudeKit(spawn), sandbox: fakeSandboxHost() };
+  const host: RunHost = { home, platform: "linux", signals, pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), chdir: () => undefined, engine: createClaudeKit(spawn, { launch: testLaunch() }), sandbox: fakeSandboxHost() };
   const done = runCommand(ctx, host, { keyrings: { [originHash(cloud.origin)!]: KEYRING }, searchPath: toolbin, updateTuf: w.tuf, jobLimits: { enforced: true }, ...hooks }, { ...w.host, ...hostOver });
   return { signals, out, done };
 }

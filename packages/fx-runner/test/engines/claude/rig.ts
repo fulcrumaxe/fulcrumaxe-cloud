@@ -6,6 +6,7 @@ import { createClaudeEngine, type EngineConfig } from "../../../src/engines/clau
 import { protectedPaths } from "../../../src/sandbox/sandboxSettings.js";
 import { storedBinarySource } from "../../../src/engines/claude/pin.js";
 import { RUN_ID, countingSpawn, fixtureText, makeFake, type Fake } from "./harness.js";
+import { testLaunch } from "../../helpers/launch.js";
 
 export * from "./harness.js";
 
@@ -29,7 +30,8 @@ export function makeRig(over: { fake?: Fake; credentials?: EngineConfig["credent
   mkdirSync(workdir);
   const { spawn: counting, spawns } = countingSpawn();
   const config: EngineConfig = {
-    binary: storedBinarySource({ storedPath: fake.binary, cacheDir: path.join(root, "cache"), spawn: counting }),
+    binary: storedBinarySource({ launch: testLaunch(), storedPath: fake.binary, cacheDir: path.join(root, "cache"), spawn: counting }),
+    launch: testLaunch(),
     credentials: over.credentials ?? { mode: "subscription" },
     sandboxSettings: over.sandbox ?? ON_BLOCK,
     protectedPaths: protectedPaths({ home: path.join(root, "home"), stateDir: path.join(root, "home", ".fx-runner"), binaryDir: path.dirname(fake.binary) }),

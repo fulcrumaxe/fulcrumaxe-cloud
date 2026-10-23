@@ -1,4 +1,5 @@
 import type { spawn } from "node:child_process";
+import { LaunchRefused, openLaunchDir, type LaunchPlace } from "../../launchDir.js";
 import { DEFAULT_KILL_GRACE_MS, OWN_PROCESS_GROUP, terminateGroup } from "./processGroup.js";
 
 export type SpawnFn = typeof spawn;
@@ -11,40 +12,58 @@ export interface Captured {
   /** Only filled when the caller asked for it (`stderrChars` above 0); empty otherwise. */
   stderr?: string;
   timedOut: boolean;
+  /** Set when the launch directory was refused (`launchDir.ts`): nothing was started, and `code` is null as for a program that could not start. */
+  launchRefused?: true;
 }
 
 /**
  * Runs `command args` with an explicit environment, no shell and a time limit, and returns its exit code and the first
  * `maxChars` (64 K by default) of its output (and, only when `stderrChars` is above 0, that many characters of its error output). Used for the short questions asked of the pinned binary (`--version`, `auth status`); a model
  * run uses the engine's own spawn.
+ *
+ * D#6 RUNNER-CWD-1: the program starts in a fresh, empty, 0700 directory under the runner's launch root (`place`), never in the caller's working
+ * directory or the home directory, and that directory is removed afterwards with whatever the program left in it. A launch directory that
+ * cannot be made or does not pass its checks starts nothing (fail closed): the answer is then the one for a program that could not start.
  */
-export function runCapture(spawnFn: SpawnFn, command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number, maxChars: number = DEFAULT_CAPTURE_CHARS, stderrChars = 0): Promise<Captured> {
-  return new Promise((resolve) => {
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-    let settled = false;
-    const finish = (code: number | null): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({ code, stdout, stderr, timedOut });
-    };
-    const child = spawnFn(command, [...args], { env, shell: false, stdio: ["ignore", "pipe", stderrChars > 0 ? "pipe" : "ignore"] });
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGKILL");
-      finish(null);
-    }, timeoutMs);
-    child.stdout?.on("data", (chunk: Buffer) => {
-      if (stdout.length < maxChars) stdout += chunk.toString("utf8");
+export async function runCapture(spawnFn: SpawnFn, place: LaunchPlace, command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number, maxChars: number = DEFAULT_CAPTURE_CHARS, stderrChars = 0): Promise<Captured> {
+  let launch: { dir: string; remove(): void };
+  try {
+    launch = openLaunchDir(place);
+  } catch (error) {
+    if (!(error instanceof LaunchRefused)) throw error;
+    return { code: null, stdout: "", stderr: "", timedOut: false, launchRefused: true };
+  }
+  const cwd = launch.dir;
+  try {
+    return await new Promise<Captured>((resolve) => {
+      let stdout = "";
+      let stderr = "";
+      let timedOut = false;
+      let settled = false;
+      const finish = (code: number | null): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ code, stdout, stderr, timedOut });
+      };
+      const child = spawnFn(command, [...args], { cwd, env, shell: false, stdio: ["ignore", "pipe", stderrChars > 0 ? "pipe" : "ignore"] });
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGKILL");
+        finish(null);
+      }, timeoutMs);
+      child.stdout?.on("data", (chunk: Buffer) => {
+        if (stdout.length < maxChars) stdout += chunk.toString("utf8");
+      });
+      child.stderr?.on("data", (chunk: Buffer) => {
+        if (stderr.length < stderrChars) stderr += chunk.toString("utf8").slice(0, stderrChars - stderr.length);
+      });
+      child.on("error", () => finish(null));
+      child.on("close", (code) => finish(code));
     });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      if (stderr.length < stderrChars) stderr += chunk.toString("utf8").slice(0, stderrChars - stderr.length);
-    });
-    child.on("error", () => finish(null));
-    child.on("close", (code) => finish(code));
-  });
+  } finally {
+    launch.remove();
+  }
 }
 
 /**
@@ -141,12 +160,34 @@ export function runInstall(spawnFn: SpawnFn, command: string, args: readonly str
 
 /**
  * Runs `command args` in the foreground with the terminal's own streams, an explicit environment and no shell, and resolves with its exit
- * code (null when it could not start or was killed). For the two interactive commands: the tmux client of `attach`, and the agent a take-over resumes.
+ * code (null when it could not start or was killed). For the two interactive commands: the tmux client of `attach` (in a fresh launch
+ * directory, `runForegroundLaunched`), and the agent a take-over resumes (in the run's workspace).
  */
-export function runForeground(spawnFn: SpawnFn, command: string, args: readonly string[], env: Record<string, string>, cwd?: string): Promise<number | null> {
+export function runForeground(spawnFn: SpawnFn, command: string, args: readonly string[], env: Record<string, string>, cwd: string): Promise<number | null> {
   return new Promise((resolve) => {
     const child = spawnFn(command, [...args], { cwd, env, shell: false, stdio: "inherit" });
     child.on("error", () => resolve(null));
     child.on("close", (code) => resolve(code));
   });
+}
+
+/** `runForeground` in a fresh launch directory (`launchDir.ts`), removed afterwards; a refused launch directory starts nothing and gives null. */
+export async function runForegroundLaunched(spawnFn: SpawnFn, place: LaunchPlace, command: string, args: readonly string[], env: Record<string, string>): Promise<number | null> {
+  let launch: { dir: string; remove(): void };
+  try {
+    launch = openLaunchDir(place);
+  } catch (error) {
+    if (!(error instanceof LaunchRefused)) throw error;
+    return null;
+  }
+  const cwd = launch.dir;
+  try {
+    return await new Promise<number | null>((resolve) => {
+      const child = spawnFn(command, [...args], { cwd, env, shell: false, stdio: "inherit" });
+      child.on("error", () => resolve(null));
+      child.on("close", (code) => resolve(code));
+    });
+  } finally {
+    launch.remove();
+  }
 }

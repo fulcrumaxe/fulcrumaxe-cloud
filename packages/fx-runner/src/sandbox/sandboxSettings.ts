@@ -52,6 +52,14 @@ export function toolchainCredentialFiles(prefix: string): string[] {
   return [...new Set([prefix, realOf(prefix)].flatMap((root) => TOOLCHAIN_PREFIX_CREDENTIAL_FILES.map((file) => path.join(root, file))))];
 }
 
+/**
+ * D#6 RUNNER-CWD-1: the machine's shared temp directories, denied for reading on every job (as written and where they really are, so `/tmp` is also
+ * `/private/tmp` on macOS). Other sessions and programs keep files there; a job's own temp directory is under the runner's cache directory and is
+ * re-allowed with the workspace (a narrower allow wins), as is any allowance path a job was granted strictly below one of them; an allowance
+ * that is or contains one of them is refused (`assertClearOfSharedTemp`).
+ */
+export const SHARED_TEMP_DIRS: readonly string[] = Object.freeze(["/tmp", "/var/tmp", "/dev/shm"]);
+
 /** System-wide places that are never granted, whatever a job asks for. */
 const NEVER_GRANTED: readonly string[] = Object.freeze(["/", "/etc", "/Library/Keychains"]);
 
@@ -196,6 +204,16 @@ export function canGrantRead(value: string, input: { home: string; stateDir: str
   }
 }
 
+/**
+ * Refuses an allowance path that is, or contains, one of the machine's shared temp directories (`SHARED_TEMP_DIRS`), as written and once
+ * symlinks are followed on either side: such a grant would re-allow the whole directory the job's `denyRead` hides. A strict subdirectory
+ * (`/tmp/fx-scratch`) is still a grant of its own.
+ */
+function assertClearOfSharedTemp(label: string, value: string): string {
+  for (const grant of [value, realOf(value)]) for (const dir of SHARED_TEMP_DIRS) for (const shared of [dir, realOf(dir)]) if (inside(grant, shared, true)) throw new SandboxGrantRefused(`sandboxSettings: ${label} may not be or contain a shared temp directory`);
+  return value;
+}
+
 const MIRROR_OBJECTS = /^[^/\\]+\.git[/\\]objects$/;
 
 /**
@@ -253,8 +271,8 @@ export function sandboxSettings(input: SandboxInput): Record<string, unknown> {
   // grant that sits in the runner's own cache directory (in the home directory), strictly under its root and clear of the other runner areas.
   const store = input.packageStore === undefined ? undefined : assertGrantable("package store", input.packageStore.dir, home, [...guarded, path.normalize(input.workspaceRoot), path.normalize(input.tempRoot), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot])], [path.normalize(input.packageStore.root)]);
   const keepClear = [...guarded, home, path.normalize(input.workspaceRoot), path.normalize(input.tempRoot), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot]), ...(spillRoot === undefined ? [] : [spillRoot]), ...(store === undefined ? [] : [store])];
-  const allowRead = (input.allowanceReadPaths ?? []).map((value) => assertGrantable("allowance read path", value, home, keepClear, [value], true));
-  const allowWrite = (input.allowanceWritePaths ?? []).map((value) => assertGrantable("allowance write path", value, home, keepClear, [value], true));
+  const allowRead = (input.allowanceReadPaths ?? []).map((value) => assertClearOfSharedTemp("allowance read path", assertGrantable("allowance read path", value, home, keepClear, [value], true)));
+  const allowWrite = (input.allowanceWritePaths ?? []).map((value) => assertClearOfSharedTemp("allowance write path", assertGrantable("allowance write path", value, home, keepClear, [value], true)));
   const storeRoot = input.packageStoreRoot !== undefined ? path.normalize(input.packageStoreRoot) : input.packageStore === undefined ? undefined : path.normalize(input.packageStore.root);
   const toolchainDeny = [...new Set(toolchainRead.flatMap(toolchainCredentialFiles))];
   const domains = [...new Set([MODEL_HOST, ...(input.registries ?? []), ...(input.extraDomains ?? [])].map(assertPlainHost))];
@@ -273,7 +291,7 @@ export function sandboxSettings(input: SandboxInput): Record<string, unknown> {
       denyWrite: unique([path.normalize(input.stateDir), path.normalize(input.binaryDir), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot])]),
       // The workspace, temp and package-store roots are denied like the mirrors root and the home directory: a cache directory outside the home
       // directory would leave them readable. This job's own workspace, temp directory and store are re-allowed below (a narrower allow wins).
-      denyRead: unique([home, path.normalize(input.stateDir), path.normalize(input.binaryDir), path.normalize(input.workspaceRoot), path.normalize(input.tempRoot), ...(storeRoot === undefined ? [] : [storeRoot]), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot]), ...(spillRoot === undefined ? [] : [spillRoot]), ...toolchainDeny]),
+      denyRead: unique([home, path.normalize(input.stateDir), path.normalize(input.binaryDir), path.normalize(input.workspaceRoot), path.normalize(input.tempRoot), ...(storeRoot === undefined ? [] : [storeRoot]), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot]), ...(spillRoot === undefined ? [] : [spillRoot]), ...toolchainDeny, ...SHARED_TEMP_DIRS.flatMap((dir) => [dir, realOf(dir)])]),
       allowRead: unique([workspace, tempDir, ...extraRead, ...toolchainRead, ...allowRead, ...allowWrite, ...(store === undefined ? [] : [store])]),
     },
     credentials: { files: [...floor, ...toolchainDeny].map((file) => ({ path: file, mode: "deny" })), envVars: [] as unknown[] },

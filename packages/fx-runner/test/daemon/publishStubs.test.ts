@@ -17,6 +17,7 @@ import { isSandboxStubName, SANDBOX_PROTECTED_FILES } from "../../src/daemon/san
 import { takeSnapshot } from "../../src/daemon/snapshot.js";
 import { assertGitDirShape, assertWorkspaceGit } from "../../src/daemon/workspaceGit.js";
 import { runCapture } from "../../src/engines/claude/capture.js";
+import { testLaunch } from "../helpers/launch.js";
 import { addHardLink, addSandboxStubs, OBSERVED_ROOT_STUBS } from "../helpers/sandboxStubFixture.js";
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -46,7 +47,7 @@ const remoteRefs = (): string => sh("ls-remote", remote);
 
 const lease = { runId: "0b1b6c52-7a43-4d5e-8a77-0f0f0f0f0f0f", leaseGeneration: 1 };
 const job: GitJob = { repo: { id: "4b7f0a3e-0d4e-4c1b-9a53-2f6a2f0d9c11", owner: "acme", name: "widgets", private: true }, continues: null, branch_prefix: "fx/", role: "executor" };
-const capture: GitCapture = (command, args, env, timeoutMs) => runCapture(spawn, command, args, env, timeoutMs);
+const capture: GitCapture = (command, args, env, timeoutMs) => runCapture(spawn, testLaunch(), command, args, env, timeoutMs);
 
 beforeEach(() => {
   root = mkdtempSync(path.join(tmpdir(), "fxr-stubs-"));

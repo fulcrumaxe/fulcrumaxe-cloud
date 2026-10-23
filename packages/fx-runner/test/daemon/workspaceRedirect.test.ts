@@ -15,6 +15,7 @@ import { createGitPath, type GitJob } from "../../src/daemon/gitPath.js";
 import { pushPlan } from "../../src/daemon/push.js";
 import { assertWorkspaceGit, readSmallRegular } from "../../src/daemon/workspaceGit.js";
 import { runCapture } from "../../src/engines/claude/capture.js";
+import { testLaunch } from "../helpers/launch.js";
 
 // Every case runs real git several times; under a loaded machine (Gate 1 beside other jobs) the 5 s default has been overrun by a case that takes about 0.4 s alone.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -56,7 +57,7 @@ const has = (repo: string, sha: string): boolean => {
 
 const lease = { runId: "0b1b6c52-7a43-4d5e-8a77-0f0f0f0f0f0f", leaseGeneration: 1 };
 const job: GitJob = { repo: { id: randomUUID(), owner: "acme", name: "widgets", private: true }, continues: null, branch_prefix: "fx/", role: "executor" };
-const capture: GitCapture = (command, args, env, timeoutMs) => runCapture(spawn, command, args, env, timeoutMs);
+const capture: GitCapture = (command, args, env, timeoutMs) => runCapture(spawn, testLaunch(), command, args, env, timeoutMs);
 
 beforeEach(() => {
   root = mkdtempSync(path.join(tmpdir(), "fxr-redirect-"));

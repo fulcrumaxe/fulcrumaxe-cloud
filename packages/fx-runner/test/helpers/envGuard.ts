@@ -83,6 +83,9 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/daemon/workspaceExclude.ts": ["fs", "path"], // D#6 C44-3: no-follow append to the workspace's own `.git/info/exclude`
   "src/daemon/workspaceGit.ts": ["fs", "path"], // lstat of the agent-written `.git`: nothing in it is followed
   "src/engines/claude/capture.ts": ["child_process"],
+  "src/launchDir.ts": ["fs", "path"], // D#6 RUNNER-CWD-1: the 0700 launch root, one fresh mkdtemp directory per program start (lstat, realpath and an empty-listing check before the start), and its removal afterwards
+  "src/daemon/cliStubs.ts": ["fs", "path"], // D#6 RUNNER-CWD-1: doctor's look for the CLI's empty placeholder files: lstat, a directory listing and a no-follow read of `.git/info/exclude`; nothing is written
+  "src/daemon/workspaceStubs.ts": ["fs", "path"], // D#6 RUNNER-CWD-1: lstat of a job workspace's placeholder names before the run, then unlink/rmdir of the empty ones made since and a no-follow truncate of `.git/info/exclude` back to its bytes from before
   "src/engines/claude/engine.ts": ["child_process", "path"],
   "src/engines/claude/instructionCanary.ts": ["crypto", "fs", "os", "path"], // D#601 MEM-7: a random canary token, a 0700 scratch directory holding a canary CLAUDE.md and two empty settings files (removed after the check), and the temp directory location; the CLI is started only through runCaptureWithInput in capture.ts
   "src/engines/claude/filePermissions.ts": ["path"],
@@ -205,7 +208,7 @@ function spawnValueProblem(node: ts.Identifier, file: string): boolean {
       ts.isCallExpression(parent.parent) &&
       parent.parent.arguments[0] === parent &&
       ts.isIdentifier(parent.parent.expression) &&
-      (parent.parent.expression.text === "runCapture" || parent.parent.expression.text === "runForeground" || parent.parent.expression.text === "runInstall" || parent.parent.expression.text === "runCaptureWithInput");
+      (parent.parent.expression.text === "runCapture" || parent.parent.expression.text === "runForeground" || parent.parent.expression.text === "runInstall" || parent.parent.expression.text === "runCaptureWithInput" || parent.parent.expression.text === "runForegroundLaunched");
     return !(seamLeft || runCaptureArg);
   }
   return true;

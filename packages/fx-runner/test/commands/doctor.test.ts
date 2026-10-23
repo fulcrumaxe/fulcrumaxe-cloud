@@ -18,6 +18,7 @@ import { failing, fakeSandboxHost } from "../helpers/fakeSandboxHost.js";
 import { findOnPath } from "../helpers/findOnPath.js";
 import { VERCEL_PROTECTED_ROOT_BODY, ownCloud401Response, vercelProtectedResponse } from "../helpers/vercelProtected.js";
 import type { ScopeSupport } from "../../src/sandbox/jobLimits.js";
+import { testLaunch } from "../helpers/launch.js";
 
 const SCOPES_OK: ScopeSupport = { ok: true, tools: { systemdRun: "/x/systemd-run", systemctl: "/x/systemctl", env: "/x/env" }, runtimeDir: "/run/user/1000" };
 
@@ -65,7 +66,7 @@ interface Result {
 async function doctor(over: { host?: Partial<DoctorHost>; fetchFn?: typeof fetch; now?: () => Date; bypass?: CommandContext["bypass"]; sandboxOnly?: boolean } = {}): Promise<Result> {
   const lines: string[] = [];
   const ctx: CommandContext = { stateDir, uid: process.getuid?.(), out: (l) => lines.push(l), err: (l) => lines.push(l), now: over.now ?? (() => new Date()), fetchFn: over.fetchFn ?? ((async () => new Response("", { status: 200 })) as typeof fetch), ...(over.bypass === undefined ? {} : { bypass: over.bypass }) };
-  const host: DoctorHost = { platform: "linux", shellVars: [], engine: createClaudeKit(spawn), home: root, sandbox: fakeSandboxHost(), scopeSupport: SCOPES_OK, ...over.host };
+  const host: DoctorHost = { platform: "linux", shellVars: [], engine: createClaudeKit(spawn, { launch: testLaunch() }), home: root, sandbox: fakeSandboxHost(), scopeSupport: SCOPES_OK, ...over.host };
   const code = await doctorCommand(ctx, host, over.sandboxOnly === undefined ? {} : { sandboxOnly: over.sandboxOnly });
   return { code, out: lines.join("\n") };
 }
@@ -367,7 +368,7 @@ describe("shell variables and secrets", () => {
       stdout: (t) => (out += t),
       stderr: (t) => (out += t),
       fetchFn: (async () => new Response("")) as typeof fetch,
-      doctorHost: { platform: "linux", shellVars: ["ANTHROPIC_API_KEY"], engine: createClaudeKit(spawn), home: root, sandbox: fakeSandboxHost(), scopeSupport: SCOPES_OK },
+      doctorHost: { platform: "linux", shellVars: ["ANTHROPIC_API_KEY"], engine: createClaudeKit(spawn, { launch: testLaunch() }), home: root, sandbox: fakeSandboxHost(), scopeSupport: SCOPES_OK },
     });
     expect(code).toBe(0);
     expect(out).toContain("ANTHROPIC_API_KEY is set");

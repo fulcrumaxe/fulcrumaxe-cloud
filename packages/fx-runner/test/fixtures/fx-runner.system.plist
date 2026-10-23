@@ -13,6 +13,8 @@
     <string>/opt/fx-runner/bin/fx-runner.mjs</string>
     <string>run</string>
   </array>
+  <key>WorkingDirectory</key>
+  <string>/usr/local/var/fx-runner/Library/Caches/fx-runner/launch/daemon</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>

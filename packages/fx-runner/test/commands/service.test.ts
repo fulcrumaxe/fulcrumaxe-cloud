@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -32,7 +32,7 @@ const macFile = (): string => path.join(home, "Library", "LaunchAgents", `${LAUN
 
 describe("the generated text, exactly", () => {
   it("systemd unit with the default state directory", () => {
-    expect(renderSystemdUnit({ command: COMMAND, pathEntries: ["/usr/bin", "/home/someone/.local/bin"], logFile: "/home/someone/.fx-runner/service.log" })).toBe(
+    expect(renderSystemdUnit({ command: COMMAND, workingDirectory: "/w/launch/daemon", pathEntries: ["/usr/bin", "/home/someone/.local/bin"], logFile: "/home/someone/.fx-runner/service.log" })).toBe(
       [
         "# Managed by fx-runner service install. Run it again to rewrite this file; fx-runner service uninstall removes it.",
         "[Unit]",
@@ -41,6 +41,7 @@ describe("the generated text, exactly", () => {
         "[Service]",
         "Type=simple",
         "ExecStart=/opt/node/bin/node /opt/fx-runner/bin/fx-runner.mjs run",
+        "WorkingDirectory=-/w/launch/daemon",
         'Environment="PATH=/usr/bin:/home/someone/.local/bin"',
         'Environment="FX_RUNNER_SERVICE=1"',
         "Restart=on-failure",
@@ -75,13 +76,13 @@ describe("the generated text, exactly", () => {
   });
 
   it("systemd unit with another state directory and no PATH", () => {
-    const text = renderSystemdUnit({ command: COMMAND, pathEntries: [], stateDir: "/srv/fx", logFile: "/srv/fx/service.log" });
+    const text = renderSystemdUnit({ command: COMMAND, workingDirectory: "/w/launch/daemon", pathEntries: [], stateDir: "/srv/fx", logFile: "/srv/fx/service.log" });
     expect(text).toContain('Environment="FX_RUNNER_HOME=/srv/fx"');
     expect(text).not.toContain("PATH=");
   });
 
   it("launchd agent", () => {
-    expect(renderLaunchdPlist({ command: COMMAND, pathEntries: ["/usr/bin", "/opt/homebrew/bin"], logFile: "/Users/someone/.fx-runner/service.log" })).toBe(
+    expect(renderLaunchdPlist({ command: COMMAND, workingDirectory: "/w/launch/daemon", pathEntries: ["/usr/bin", "/opt/homebrew/bin"], logFile: "/Users/someone/.fx-runner/service.log" })).toBe(
       [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
@@ -96,6 +97,8 @@ describe("the generated text, exactly", () => {
         "    <string>/opt/fx-runner/bin/fx-runner.mjs</string>",
         "    <string>run</string>",
         "  </array>",
+        "  <key>WorkingDirectory</key>",
+        "  <string>/w/launch/daemon</string>",
         "  <key>EnvironmentVariables</key>",
         "  <dict>",
         "    <key>PATH</key>",
@@ -123,9 +126,27 @@ describe("the generated text, exactly", () => {
     );
   });
 
+  it("D#6 RUNNER-CWD-1: an installed unit runs in the runner's own empty directory under its cache, never the home directory, and install makes it 0700", () => {
+    const daemonDir = path.join(home, ".cache", "fx-runner", "launch", "daemon");
+    expect(run("install").code).toBe(0);
+    const unit = readFileSync(linuxFile(), "utf8");
+    expect(unit.split("\n")).toContain(`WorkingDirectory=-${daemonDir}`);
+    expect(unit).not.toContain(`WorkingDirectory=-${home}\n`);
+    expect(statSync(daemonDir).isDirectory()).toBe(true);
+    expect(statSync(daemonDir).mode & 0o777).toBe(0o700);
+    expect(readdirSync(daemonDir)).toEqual([]);
+    // XDG_CACHE_HOME moves it, as it moves the rest of the cache directory
+    const cache = path.join(home, "xdg-cache");
+    run("install", { host: { xdgCacheHome: cache } });
+    expect(readFileSync(linuxFile(), "utf8")).toContain(`WorkingDirectory=-${path.join(cache, "fx-runner", "launch", "daemon")}`);
+    run("install", { host: { platform: "darwin" } });
+    const plist = readFileSync(macFile(), "utf8");
+    expect(plist).toContain(`  <key>WorkingDirectory</key>\n  <string>${path.join(home, "Library", "Caches", "fx-runner", "launch", "daemon")}</string>`);
+  });
+
   it("both formats open with the marker the uninstall path looks for", () => {
-    expect(renderSystemdUnit({ command: COMMAND, pathEntries: [], logFile: "/l" })).toContain(SERVICE_MARKER);
-    expect(renderLaunchdPlist({ command: COMMAND, pathEntries: [], logFile: "/l" })).toContain(SERVICE_MARKER);
+    expect(renderSystemdUnit({ command: COMMAND, workingDirectory: "/w/launch/daemon", pathEntries: [], logFile: "/l" })).toContain(SERVICE_MARKER);
+    expect(renderLaunchdPlist({ command: COMMAND, workingDirectory: "/w/launch/daemon", pathEntries: [], logFile: "/l" })).toContain(SERVICE_MARKER);
   });
 });
 
@@ -133,14 +154,14 @@ describe("the protection bypass file's path in the unit", () => {
   const FILE = "/srv/runner/bypass-file";
 
   it("systemd carries the path as an Environment line, and launchd as an EnvironmentVariables entry", () => {
-    expect(renderSystemdUnit({ command: COMMAND, pathEntries: [], bypassFile: FILE, logFile: "/l" })).toContain(`Environment="FX_RUNNER_PROTECTION_BYPASS_FILE=${FILE}"`);
-    const plist = renderLaunchdPlist({ command: COMMAND, pathEntries: [], bypassFile: FILE, logFile: "/l" });
+    expect(renderSystemdUnit({ command: COMMAND, workingDirectory: "/w/launch/daemon", pathEntries: [], bypassFile: FILE, logFile: "/l" })).toContain(`Environment="FX_RUNNER_PROTECTION_BYPASS_FILE=${FILE}"`);
+    const plist = renderLaunchdPlist({ command: COMMAND, workingDirectory: "/w/launch/daemon", pathEntries: [], bypassFile: FILE, logFile: "/l" });
     expect(plist).toContain(`<key>FX_RUNNER_PROTECTION_BYPASS_FILE</key>\n    <string>${FILE}</string>`);
   });
 
   it("without the variable neither unit mentions it", () => {
-    expect(renderSystemdUnit({ command: COMMAND, pathEntries: [], logFile: "/l" })).not.toContain("PROTECTION_BYPASS");
-    expect(renderLaunchdPlist({ command: COMMAND, pathEntries: [], logFile: "/l" })).not.toContain("PROTECTION_BYPASS");
+    expect(renderSystemdUnit({ command: COMMAND, workingDirectory: "/w/launch/daemon", pathEntries: [], logFile: "/l" })).not.toContain("PROTECTION_BYPASS");
+    expect(renderLaunchdPlist({ command: COMMAND, workingDirectory: "/w/launch/daemon", pathEntries: [], logFile: "/l" })).not.toContain("PROTECTION_BYPASS");
   });
 
   it("install writes the path, never the secret: the file is not even read", () => {

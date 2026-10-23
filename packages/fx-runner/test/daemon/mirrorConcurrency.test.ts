@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createGit, type GitCapture } from "../../src/daemon/git.js";
 import { createMirrors, type Mirrors, type RepoRef } from "../../src/daemon/mirror.js";
 import { runCapture } from "../../src/engines/claude/capture.js";
+import { testLaunch } from "../helpers/launch.js";
 
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 30_000 });
 
@@ -84,7 +85,7 @@ const capture: GitCapture = async (command, args, env, timeoutMs) => {
     await sleep(FETCH_PAUSE_MS);
   }
   try {
-    return await runCapture(spawn, command, args, { ...env, ...SETUP_ENV() }, timeoutMs);
+    return await runCapture(spawn, testLaunch(), command, args, { ...env, ...SETUP_ENV() }, timeoutMs);
   } finally {
     if (isFetch) {
       inFlight.set(mirror, (inFlight.get(mirror) ?? 1) - 1);
