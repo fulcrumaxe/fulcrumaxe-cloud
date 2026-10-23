@@ -267,6 +267,37 @@ describe("the read model [pg]", () => {
       expect(await reason(f, pending)).toBe("waiting_for_runner");
     });
 
+    it("D#6 RUNNER-WAKE: the wait reason shares the fleet's liveness rule: a wake runner 10 min quiet covers the run, a plain one or a dead wake runner does not", async () => {
+      const wakeKey = () => Buffer.alloc(32, 7);
+      const wakeReason = (f: F2Fixture, id: string, over: Record<string, unknown> = { wakeKey }) => getRunWaitReason({ ...deps(), ...over }, f.accountId, id);
+      const wakeCap = (f: F2Fixture, id: string) => h.admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, ARRAY['wake_v1'])", [id, f.accountId]);
+
+      // An idle wake runner between its safety claims: online on the list, and it covers the run.
+      const a = await fresh();
+      const idle = await runner(a, { lastSeen: ago(600) });
+      await wakeCap(a, idle);
+      const waitingA = await run(a, { initiatedBy: a.a1 });
+      expect(await wakeReason(a, waitingA)).toBeNull();
+      const listed = await respond(() => listRunners({ ...deps(), wakeKey }, { accountId: a.accountId, userId: a.a1 }));
+      expect((listed.body as { runners: Array<{ id: string; state: string }> }).runners.find((r) => r.id === idle)?.state).toBe("online_idle");
+      // No wake key configured: no grant, so the same runner is gone after 120 s, in the wait reason as on the list.
+      expect(await wakeReason(a, waitingA, {})).toBe("waiting_for_runner");
+
+      // A plain runner quiet for 10 min does not cover it.
+      const b = await fresh();
+      await runner(b, { lastSeen: ago(600) });
+      expect(await wakeReason(b, await run(b, { initiatedBy: b.a1 }))).toBe("waiting_for_runner");
+
+      // A dead wake runner (no claim for longer than the window) does not cover it.
+      const c = await fresh();
+      const dead = await runner(c, { lastSeen: ago(2101) });
+      await wakeCap(c, dead);
+      expect(await wakeReason(c, await run(c, { initiatedBy: c.a1 }))).toBe("waiting_for_runner");
+      // The window's edge is inclusive, as on the list.
+      await h.admin.query("UPDATE runners SET last_seen_at = $2 WHERE id = $1", [dead, ago(2100)]);
+      expect(await wakeReason(c, (await h.admin.query<{ id: string }>("SELECT id FROM agent_runs WHERE account_id = $1", [c.accountId])).rows[0]!.id)).toBeNull();
+    });
+
     it("a paused or draining runner does not cover a run: the run reads waiting_for_runner until a runner that can take it is there", async () => {
       const f = await fresh();
       const id = await runner(f);

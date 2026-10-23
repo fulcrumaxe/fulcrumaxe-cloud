@@ -190,6 +190,39 @@ describe("run handoff request, cancel and heartbeat [pg]", () => {
       expect(await placement(w.item)).toBe("runner");
     });
 
+    it("D#6 RUNNER-WAKE: the covering test reads runners as the fleet does: an idle wake runner 10 min quiet covers, a plain one or a dead wake runner does not", async () => {
+      const wakeKey = () => Buffer.alloc(32, 7);
+      const wakeCap = (w: World, id: string) => h.admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, ARRAY['wake_v1'])", [id, w.f.accountId]);
+      const ask = (w: World, r: string, over: Partial<HandoffDeps>) => requestHandoff(handoffDeps({ cloudTarget: null, ...over }), as(w.f, w.f.o1), r, "runner");
+
+      // An idle wake runner between its safety claims (last claim 10 min ago): it covers, so the move is accepted.
+      const a = await world("runner_local", "cloud");
+      const ra = await run(a, "cloud");
+      await wakeCap(a, await runner(a, { secondsAgo: 600 }));
+      // Without the wake key no runner holds a grant: the same runner is gone after 120 s.
+      expect((await refusal(ask(a, ra, {}))).code).toBe("no_runner_online");
+      expect((await ask(a, ra, { wakeKey })).status).toBe(202);
+
+      // A plain runner quiet for 10 min does not cover.
+      const b = await world("runner_local", "cloud");
+      const rb = await run(b, "cloud");
+      await runner(b, { secondsAgo: 600 });
+      expect((await refusal(ask(b, rb, { wakeKey }))).code).toBe("no_runner_online");
+      await untouched(b, rb, "cloud");
+
+      // A dead wake runner: no claim for longer than the window and no cached wake check.
+      const c = await world("runner_local", "cloud");
+      const rc = await run(c, "cloud");
+      const dead = await runner(c, { secondsAgo: 2200 });
+      await wakeCap(c, dead);
+      expect((await refusal(ask(c, rc, { wakeKey, runnerSeen: async () => new Map() }))).code).toBe("no_runner_online");
+      // A failing cache reads the database stamp alone: still absent, never guessed live.
+      expect((await refusal(ask(c, rc, { wakeKey, runnerSeen: async () => { throw new Error("cache down"); } }))).code).toBe("no_runner_online");
+      await untouched(c, rc, "cloud");
+      // Its cached wake check 30 s ago is contact, as on the list: the later of the two stamps decides.
+      expect((await ask(c, rc, { wakeKey, runnerSeen: async (ids) => new Map(ids.filter((id) => id === dead).map((id) => [id, new Date(Date.now() - 30_000)])) })).status).toBe(202);
+    });
+
     it("names the reason when the runner side is not ready, and writes nothing: no runner, one gone quiet, one that does not list the repo, a full one, a repo not on a runner, a public or unreadable repo, no signing keys", async () => {
       const w = await world();
       const r = await run(w, "cloud");

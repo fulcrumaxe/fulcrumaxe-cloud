@@ -2,6 +2,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { UNNAMED_MEMBER, requireMemberRole } from "./memberRole.js";
 import { readUnapprovedRunFacts, waitReasonOf } from "./readModel.js";
 import type { RunnerCloudDeps, RunnerHttpResponse, SessionPrincipal } from "./http.js";
+import { configuredWakeKey } from "./wakeToken.js";
 
 /** The most waiting runs one read returns. */
 export const APPROVALS_LIMIT = 50;
@@ -30,7 +31,7 @@ export async function listApprovals(deps: RunnerCloudDeps, principal: SessionPri
   const now = (deps.now ?? (() => new Date()))();
   const approvals = await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client): Promise<ApprovalEntry[]> => {
     await requireMemberRole(client);
-    const waiting = (await readUnapprovedRunFacts(client, principal.accountId, now, SCAN_LIMIT))
+    const waiting = (await readUnapprovedRunFacts(client, principal.accountId, now, SCAN_LIMIT, configuredWakeKey(deps.wakeKey) !== null))
       .filter((run) => run.dispatch_repo_id !== null && waitReasonOf(run, now) === "waiting_for_approval")
       .slice(0, APPROVALS_LIMIT);
     if (waiting.length === 0) return [];

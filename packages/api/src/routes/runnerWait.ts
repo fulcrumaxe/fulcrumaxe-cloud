@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { Pool } from "pg";
 import { waitText } from "@fulcrumaxe/runner-protocol";
-import { getRunWait } from "@fx/runner-cloud";
+import { getRunWait, readWakeKey } from "@fx/runner-cloud";
 import { runnerLimitsFor } from "@fx/spend";
 
 /**
@@ -19,10 +19,11 @@ function accountRunnerCaps(): { total: number; heavy: number } {
 
 /**
  * The wait of one run, or null. Only a runner run that is pending has one; any other run is not read at all, so a
- * sandbox run's body is unchanged. The read is `getRunWait`'s own tenant-scoped read for the caller's account.
+ * sandbox run's body is unchanged. The read is `getRunWait`'s own tenant-scoped read for the caller's account. The wake key is read only to
+ * know whether the wake gate is open (D#6 RUNNER-WAKE), so a wake runner between its safety claims is not told as "waiting for a runner".
  */
 export async function readRunWait(pool: Pool, accountId: string, run: { id: string; runtime?: string; status: string }): Promise<RunWait | null> {
   if (run.runtime !== "runner" || run.status !== "pending") return null;
-  const { reason, limited_by, min_protocol } = await getRunWait({ appUserPool: pool, accountRunnerCaps }, accountId, run.id);
+  const { reason, limited_by, min_protocol } = await getRunWait({ appUserPool: pool, accountRunnerCaps, wakeKey: () => readWakeKey(process.env) }, accountId, run.id);
   return reason === null ? null : { reason, limited_by, text: waitText(reason, limited_by, min_protocol ?? null) };
 }

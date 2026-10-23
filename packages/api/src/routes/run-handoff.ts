@@ -9,7 +9,14 @@ import { SESSION_LIMITS } from "../ratelimit/session.js";
  * move to a runner both answer 503 `handoff_unavailable`. apps/web fills it in (the cloud target needs the seat resolver and the spend
  * package; the signing check reads the environment).
  */
-export const handoffRouteDeps: { cloudTarget: HandoffCloudTarget | null; runnerJobsConfigured: () => boolean; repoVisibility?: HandoffDeps["repoVisibility"] } = {
+export const handoffRouteDeps: {
+  cloudTarget: HandoffCloudTarget | null;
+  runnerJobsConfigured: () => boolean;
+  repoVisibility?: HandoffDeps["repoVisibility"];
+  /** D#6 RUNNER-WAKE: the cached wake checks and the wake key, so the covering test reads runners as the fleet does. Absent: database stamp, 120 s. */
+  runnerSeen?: HandoffDeps["runnerSeen"];
+  wakeKey?: HandoffDeps["wakeKey"];
+} = {
   cloudTarget: null,
   runnerJobsConfigured: () => false,
 };
@@ -37,7 +44,7 @@ async function viaService<T>(run: () => Promise<{ body: unknown }>): Promise<T> 
   }
 }
 
-const deps = (ctx: RouteContext): HandoffDeps => ({ appUserPool: ctx.pool, cloudTarget: handoffRouteDeps.cloudTarget, runnerJobsConfigured: handoffRouteDeps.runnerJobsConfigured, repoVisibility: handoffRouteDeps.repoVisibility });
+const deps = (ctx: RouteContext): HandoffDeps => ({ appUserPool: ctx.pool, cloudTarget: handoffRouteDeps.cloudTarget, runnerJobsConfigured: handoffRouteDeps.runnerJobsConfigured, repoVisibility: handoffRouteDeps.repoVisibility, runnerSeen: handoffRouteDeps.runnerSeen, wakeKey: handoffRouteDeps.wakeKey });
 
 /** "The v1 contract" > runs: move a running run to the other side (D#599 HO-2a). */
 export const runHandoffRoutes: RouteEntry[] = [
