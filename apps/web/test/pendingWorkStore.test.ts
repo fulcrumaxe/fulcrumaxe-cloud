@@ -25,6 +25,10 @@ let region = "iad1";
 let mode: "ok" | "error" | "hang" = "ok";
 const seen: Array<{ method: string; path: string; revalidate: string | undefined; auth: string | undefined; name: string | undefined }> = [];
 let server: Server;
+// The cron backstop is wall-clock slots (30 min). A tick clock taken from Date.now() can straddle a slot boundary, which
+// reads as "overdue" and connects. These ticks run on a fixed clock that starts exactly on a slot boundary (1.8e12 is a
+// multiple of 30 minutes); the cache server's own TTL clock stays real.
+const SLOT_START = 1_800_000_000_000;
 
 function table(): Map<string, Entry> {
   if (!regions.has(region)) regions.set(region, new Map());
@@ -133,7 +137,7 @@ describe("runtimeCacheStore through the real client", () => {
   it("a marker written in one region is not seen by a tick in another: that tick connects on the backstop and then skips", async () => {
     setPendingHooks({ store: runtimeCacheStore() });
     const run = vi.fn(async () => ({ result: "swept", workFound: true, nextDueAt: null }));
-    const tick = () => runGatedTick("api-sweep", run, () => {}, Date.now);
+    const tick = () => runGatedTick("api-sweep", run, () => {}, () => SLOT_START + 5 * 60_000);
 
     await tick(); // iad1 connects and records it
     await markWorkPending("api-sweep"); // a writer in iad1
@@ -149,7 +153,7 @@ describe("runtimeCacheStore through the real client", () => {
   it("a full tick over the real client: no marker, no connection; marker, connection", async () => {
     setPendingHooks({ store: runtimeCacheStore() });
     const run = vi.fn(async () => ({ result: "swept", workFound: true, nextDueAt: null }));
-    const t0 = Date.now();
+    const t0 = SLOT_START + 5 * 60_000; // inside one slot, so "no marker, same slot" can only answer none
     const tick = (at: number) => runGatedTick("run-action-sweep", run, () => {}, () => at);
     await tick(t0);
     run.mockClear();
