@@ -10555,6 +10555,12 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "pr_footer": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     }
                   },
                   "required": [
@@ -10562,7 +10568,8 @@
                     "code_repo",
                     "overlay_globs",
                     "identifier_rules_path",
-                    "plan_data_rules_path"
+                    "plan_data_rules_path",
+                    "pr_footer"
                   ],
                   "additionalProperties": false
                 }
@@ -10687,6 +10694,12 @@
                       "string",
                       "null"
                     ]
+                  },
+                  "pr_footer": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -10733,6 +10746,12 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "pr_footer": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     }
                   },
                   "required": [
@@ -10740,7 +10759,8 @@
                     "code_repo",
                     "overlay_globs",
                     "identifier_rules_path",
-                    "plan_data_rules_path"
+                    "plan_data_rules_path",
+                    "pr_footer"
                   ],
                   "additionalProperties": false
                 }

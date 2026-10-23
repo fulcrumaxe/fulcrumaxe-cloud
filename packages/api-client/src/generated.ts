@@ -1198,6 +1198,7 @@ export interface Operations {
       overlay_globs: Array<string>;
       identifier_rules_path: string | null;
       plan_data_rules_path: string | null;
+      pr_footer: string | null;
     };
   };
   putRepoPairing: {
@@ -1210,6 +1211,7 @@ export interface Operations {
       overlay_globs: Array<string>;
       identifier_rules_path?: string | null;
       plan_data_rules_path?: string | null;
+      pr_footer?: string | null;
     };
     response: {
       enabled: boolean;
@@ -1217,6 +1219,7 @@ export interface Operations {
       overlay_globs: Array<string>;
       identifier_rules_path: string | null;
       plan_data_rules_path: string | null;
+      pr_footer: string | null;
     };
   };
   deleteRepoPairing: {

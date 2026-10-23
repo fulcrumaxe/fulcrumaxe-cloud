@@ -5,6 +5,8 @@ import { requireOwnerOrAdmin, type MembershipRole } from '../tenancy/authorize.j
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { assertRepoIdShape } from './read.js';
+import { redactEventText } from '../events/redact.js';
+import { checkPrFooter } from '@fulcrumaxe/runner-protocol/planePushText';
 
 /**
  * A repository's optional pairing with a public code repo. NO ROW MEANS OFF: the state is derived from the current row, never
@@ -25,6 +27,8 @@ export interface SetRepoPairingInput {
   overlayGlobs: string[];
   identifierRulesPath?: string | null;
   planDataRulesPath?: string | null;
+  /** Optional pull request body footer template; omitted, null or empty means none. */
+  prFooter?: string | null;
 }
 
 // These three mirror the CHECK constraints in migration 0799, so a bad value is a 422 with its field instead of a database error.
@@ -58,6 +62,18 @@ function validate(input: SetRepoPairingInput): void {
       invalid('a rule file must be one plain path inside the private repo', field);
     }
   }
+  const footer = footerOrNull(input.prFooter);
+  if (footer !== null) {
+    const why = checkPrFooter(footer, input.codeRepo);
+    if (why !== null) invalid(why, 'pr_footer');
+    // A public pull request body: nothing shaped like a credential, in a known format or as a long unbroken token.
+    if (redactEventText(footer) !== footer || /[A-Za-z0-9+_=-]{32,}/.test(footer)) invalid('the footer looks like it contains a secret', 'pr_footer');
+  }
+}
+
+/** Empty (or only spaces) is "none"; anything else is kept exactly, and `validate` refuses what it dislikes. */
+function footerOrNull(v: string | null | undefined): string | null {
+  return typeof v === 'string' && v.trim() === '' ? null : (v ?? null);
 }
 
 interface PairingRow {
@@ -65,25 +81,27 @@ interface PairingRow {
   overlay_globs: string[];
   identifier_rules_path: string | null;
   plan_data_rules_path: string | null;
+  pr_footer: string | null;
 }
 
 function toPairing(row: PairingRow | undefined): RepoPairing {
-  if (!row) return { enabled: false, codeRepo: null, overlayGlobs: [], identifierRulesPath: null, planDataRulesPath: null };
+  if (!row) return { enabled: false, codeRepo: null, overlayGlobs: [], identifierRulesPath: null, planDataRulesPath: null, prFooter: null };
   return {
     enabled: true,
     codeRepo: row.code_repo,
     overlayGlobs: row.overlay_globs,
     identifierRulesPath: row.identifier_rules_path,
     planDataRulesPath: row.plan_data_rules_path,
+    prFooter: row.pr_footer,
   };
 }
 
 /** The audit payload keeps the API's snake_case names, so the log reads the same as the response. */
 function auditShape(p: RepoPairing): Record<string, unknown> {
-  return { enabled: p.enabled, code_repo: p.codeRepo, overlay_globs: p.overlayGlobs, identifier_rules_path: p.identifierRulesPath, plan_data_rules_path: p.planDataRulesPath };
+  return { enabled: p.enabled, code_repo: p.codeRepo, overlay_globs: p.overlayGlobs, identifier_rules_path: p.identifierRulesPath, plan_data_rules_path: p.planDataRulesPath, pr_footer: p.prFooter };
 }
 
-const PAIRING_COLUMNS = 'code_repo, overlay_globs, identifier_rules_path, plan_data_rules_path';
+const PAIRING_COLUMNS = 'code_repo, overlay_globs, identifier_rules_path, plan_data_rules_path, pr_footer';
 
 /** The repo's own `owner/name` (null before a sync), also proving the repo is the caller's: a missing or other-tenant repo is a NotFoundError. */
 async function ownFullName(client: PoolClient, repoId: string): Promise<string | null> {
@@ -128,14 +146,14 @@ export async function setRepoPairing(ctx: RepoPairingCtx, repoId: string, input:
     }
     const { rows: beforeRows } = await client.query<PairingRow>(`SELECT ${PAIRING_COLUMNS} FROM repo_pairing WHERE repo_id = $1 FOR UPDATE`, [repoId]);
     const { rows } = await client.query<PairingRow>(
-      `INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs, identifier_rules_path, plan_data_rules_path, updated_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs, identifier_rules_path, plan_data_rules_path, pr_footer, updated_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (repo_id) DO UPDATE
           SET code_repo = EXCLUDED.code_repo, overlay_globs = EXCLUDED.overlay_globs,
-              identifier_rules_path = EXCLUDED.identifier_rules_path, plan_data_rules_path = EXCLUDED.plan_data_rules_path,
+              identifier_rules_path = EXCLUDED.identifier_rules_path, plan_data_rules_path = EXCLUDED.plan_data_rules_path, pr_footer = EXCLUDED.pr_footer,
               updated_by = EXCLUDED.updated_by, updated_at = now()
        RETURNING ${PAIRING_COLUMNS}`,
-      [repoId, accountId, input.codeRepo, input.overlayGlobs, input.identifierRulesPath ?? null, input.planDataRulesPath ?? null, userId],
+      [repoId, accountId, input.codeRepo, input.overlayGlobs, input.identifierRulesPath ?? null, input.planDataRulesPath ?? null, footerOrNull(input.prFooter), userId],
     );
     const after = toPairing(rows[0]);
     await audit(client, 'repo_pairing.set', { repo_id: repoId, before: auditShape(toPairing(beforeRows[0])), after: auditShape(after) });

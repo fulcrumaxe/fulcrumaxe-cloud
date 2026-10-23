@@ -1,5 +1,5 @@
 /**
- * D#598 P1f-2b: the public pull request title and body for a paired repo's change. A PURE function of the work item's title and the run id and
+ * D#598 P1f-2b: the public pull request title and body for a paired repo's change. A PURE function of the work item's title, the run id and the pairing's footer template (with the item's issue number),
  * nothing else, so the runner route and the sandbox publish step (P1f-5) cannot build different text, and nothing an agent wrote can reach either
  * string (R-597-1): the item title is a person's, the run id is ours, and the body does not even read the title.
  *
@@ -64,14 +64,72 @@ export interface PlanePushText {
   body: string;
 }
 
-/** The only inputs are the item's title and the run id. Do not add a third. */
-export function buildPlanePushText(input: { itemTitle: string; runId: string }): PlanePushText {
+/**
+ * The per-pairing pull request footer. A template an owner sets in the pairing settings (empty means none, the default): one line of plain text with
+ * at most two placeholders, `{issue_number}` (the work item's issue number) and `{run_id}` (the executor run id). A literal footer with no placeholder
+ * works too. The check below is what the pairing write applies; the same placeholder set is what the render accepts.
+ */
+export const PR_FOOTER_MAX_LENGTH = 200;
+export const PR_FOOTER_PLACEHOLDERS = ["issue_number", "run_id"] as const;
+const PLACEHOLDER = /\{([^{}]*)\}/g;
+/** Any scheme, `www.`, or a bare `name.tld` (with whatever follows it up to a space): all counted as a link. */
+const FOOTER_LINK = /(?:[a-z][a-z0-9+.-]*:\/\/|www\.)\S*|\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b\S*/gi;
+
+function placeholdersOk(template: string): boolean {
+  for (const m of template.matchAll(PLACEHOLDER)) {
+    if (!(PR_FOOTER_PLACEHOLDERS as readonly string[]).includes(m[1]!)) return false;
+  }
+  return !/[{}]/.test(template.replace(PLACEHOLDER, ""));
+}
+
+/**
+ * Why a footer template is refused, or null when it is acceptable. `codeRepo` is the paired public repo: a link to it is the only link allowed
+ * (a link to the private repo would publish its name; any other link would send strangers off-site from a pull request we open).
+ */
+export function checkPrFooter(template: unknown, codeRepo: string): string | null {
+  if (typeof template !== "string") return "the footer must be text";
+  if (template.length === 0 || template.length > PR_FOOTER_MAX_LENGTH) return `the footer must be 1 to ${PR_FOOTER_MAX_LENGTH} characters`;
+  if (template.trim() !== template) return "the footer may not start or end with a space";
+  if (template.search(CONTROL) >= 0 || template.search(SPACING) >= 0) return "the footer must be one line without control characters";
+  if (template.search(INVISIBLE) >= 0) return "the footer has an invisible character";
+  if (template.includes("@")) return "the footer may not contain @ (it would notify a person)";
+  // Markdown and HTML make links and hidden markup from these, in forms no URL pattern sees (a backslash-escaped host, an entity, an anchor tag, a comment, a details block).
+  if (/[[\]<>\\&`]/.test(template)) return "the footer may not contain any of [ ] < > \\ & or a backtick";
+  // A reference to an issue (another repo's owner/repo#1, GH-1, or a bare #1) makes GitHub add a backlink under our identity. D#6 (a letter before the #) is not one.
+  if (/[\w.-]+\/[\w.-]+#/.test(template) || /\bgh-\d/i.test(template) || /(?:^|[^\w])#(?:\d|\{)/.test(template)) return "the footer may not reference an issue (write it like D#6, with a letter before the #)";
+  if (!placeholdersOk(template)) return `the footer may use only these placeholders: ${PR_FOOTER_PLACEHOLDERS.map((n) => `{${n}}`).join(", ")}`;
+  const own = new RegExp(`^https://github\\.com/${codeRepo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:[/?#]\\S*)?$`, "i");
+  for (const link of template.matchAll(FOOTER_LINK)) {
+    if (link[0].includes("..") || !own.test(link[0].replace(/[.,;:!)]+$/, ""))) return "the footer may link only to the paired public repository";
+  }
+  return null;
+}
+
+/** Why a stored footer is left off this pull request, or null when it renders (or there is none). The only reason today: it needs an issue number the item lacks. */
+export function prFooterSkipReason(template: string | null | undefined, issueNumber: number | null | undefined): "no_issue_number" | null {
+  if (!template) return null;
+  return template.includes("{issue_number}") && (issueNumber === null || issueNumber === undefined) ? "no_issue_number" : null;
+}
+
+/** The footer line for this run, or null (no template, a placeholder without a value, or a template with a placeholder this build does not know). */
+export function renderPrFooter(template: string | null | undefined, vars: { issueNumber?: number | null; runId: string }): string | null {
+  if (!template || !placeholdersOk(template) || prFooterSkipReason(template, vars.issueNumber) !== null) return null;
+  return template.replace(PLACEHOLDER, (_all, name: string) => (name === "run_id" ? vars.runId : String(vars.issueNumber)));
+}
+
+/**
+ * The item's title and the run id build the text; the optional footer (the pairing's template and the item's issue number) is appended to the body
+ * after a blank line. Both are ours, never an agent's.
+ */
+export function buildPlanePushText(input: { itemTitle: string; runId: string; prFooter?: string | null; issueNumber?: number | null }): PlanePushText {
   if (typeof input.runId !== "string" || !RUN_ID.test(input.runId)) throw new Error("buildPlanePushText: the run id must be a lowercase uuid");
   const item = typeof input.itemTitle === "string" ? input.itemTitle : "";
   // Clean, cut, clean again: a cut can leave a trailing space, and the second pass is a no-op on anything else.
   const cut = clean(truncate(clean(item), MAX_PLANE_TITLE_LENGTH));
   const fallback = `Change from fulcrumaxe run ${input.runId.slice(0, 8)}`;
   const title = cut.length > 0 && PLANE_TITLE_LINE.test(cut) && cut.trim() === cut ? cut : fallback;
-  const body = ["This change was prepared by a fulcrumaxe run and checked against the paired repository's rules before it was sent.", "", `Run: ${input.runId}`, ""].join("\n");
-  return { title, body };
+  const lines = ["This change was prepared by a fulcrumaxe run and checked against the paired repository's rules before it was sent.", "", `Run: ${input.runId}`, ""];
+  const footer = renderPrFooter(input.prFooter, { issueNumber: input.issueNumber, runId: input.runId });
+  if (footer !== null) lines.push(footer, "");
+  return { title, body: lines.join("\n") };
 }

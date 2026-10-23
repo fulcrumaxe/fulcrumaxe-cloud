@@ -43,7 +43,7 @@ describe("plane-push routes [pg]", () => {
   let itemTitle = "Add the export button";
   let pairing: Awaited<ReturnType<NonNullable<RunnerLeaseOps["planePushPairing"]>>>;
 
-  const granted = (): Awaited<ReturnType<Ops["planePushGrant"]>> => ({ kind: "granted", attemptId: randomUUID(), id: PLANE, codeRepo: "acme/widgets-public", branch: BRANCH, itemTitle });
+  const granted = (): Awaited<ReturnType<Ops["planePushGrant"]>> => ({ kind: "granted", attemptId: randomUUID(), id: PLANE, codeRepo: "acme/widgets-public", branch: BRANCH, itemTitle, prFooter: null, issueNumber: null });
   const withToken = (): Awaited<ReturnType<Ops["planePushReportContext"]>> => ({ kind: "context", plane: { id: PLANE, codeRepo: "acme/widgets-public", branch: BRANCH, pairingDigest: STAMP, state: "building" }, attempt: { id: randomUUID(), tokenIssued: true, finished: false, outcome: null } });
 
   const leases: RunnerLeaseOps = {

@@ -162,6 +162,23 @@ describe("the paired publish step [pg]", () => {
       expect(github.asked).toEqual(["pushed", "pr"]);
     });
 
+    it("the pairing's footer goes into the body handed to the publish hook (which scans it); off by default", async () => {
+      await publish().publishPairedChange({ accountId: A.accountId, executorRunId });
+      const bodyOf = () => JSON.parse(fake.state.writtenFiles.filter((f) => f.path.endsWith("input.json")).pop()!.content).body as string;
+      expect(bodyOf()).toBe(`This change was prepared by a fulcrumaxe run and checked against the paired repository's rules before it was sent.\n\nRun: ${executorRunId}\n`);
+
+      await admin.query("UPDATE repo_pairing SET pr_footer = 'Refs D#{issue_number}' WHERE repo_id = $1", [A.repoId]);
+      const second = randomUUID();
+      await admin.query(`INSERT INTO work_items (id, account_id, repo_id, kind, gh_number, provenance, stage) VALUES ($1, $2, $3, 'feature', 43, 'internal', 'spec_ready')`, [second, A.accountId, A.repoId]);
+      await withTenant(appPool, A.accountId, (c) => stampPlanePush(c, { accountId: A.accountId, workItemId: second, repoId: A.repoId }));
+      const run2 = randomUUID();
+      await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id, head_sha) VALUES ($1, $2, $3, 'executor', 'production', 'succeeded', 'sandbox', $4, $5)`, [run2, A.accountId, second, A.repoId, BASE]);
+      await publish().publishPairedChange({ accountId: A.accountId, executorRunId: run2 });
+      expect(bodyOf()).toMatch(/\n\nRefs D#43\n$/);
+      // The sandbox path needs the issue number to find the private branch (fx/issue-N), so a missing one is bad_input before any text is built; the
+      // missing-number footer skip is tested on the runner token and reopen paths.
+    });
+
     it("the run summary carries the seconds and a cost priced from 1 vCPU: half of what the pinned 2 gives", async () => {
       await publish().publishPairedChange({ accountId: A.accountId, executorRunId });
       const [run] = await publishRuns();

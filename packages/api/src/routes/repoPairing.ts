@@ -9,6 +9,8 @@ const pairingResponseSchema = z.object({
   overlay_globs: z.array(z.string()),
   identifier_rules_path: z.string().nullable(),
   plan_data_rules_path: z.string().nullable(),
+  /** The public pull request body footer template; null when none (the default). */
+  pr_footer: z.string().nullable(),
 });
 
 const repoIdParamsSchema = z.object({ id: z.string() });
@@ -20,6 +22,7 @@ const putPairingBodySchema = z
     overlay_globs: z.array(z.string()).max(MAX_OVERLAY_GLOBS),
     identifier_rules_path: z.string().nullable().optional(),
     plan_data_rules_path: z.string().nullable().optional(),
+    pr_footer: z.string().nullable().optional(),
   })
   .strict();
 
@@ -30,6 +33,7 @@ function toItem(p: RepoPairing): z.infer<typeof pairingResponseSchema> {
     overlay_globs: p.overlayGlobs,
     identifier_rules_path: p.identifierRulesPath,
     plan_data_rules_path: p.planDataRulesPath,
+    pr_footer: p.prFooter ?? null,
   };
 }
 
@@ -71,6 +75,7 @@ export const repoPairingRoutes: RouteEntry[] = [
           overlayGlobs: body.overlay_globs,
           identifierRulesPath: body.identifier_rules_path,
           planDataRulesPath: body.plan_data_rules_path,
+          prFooter: body.pr_footer,
         }),
       );
     },

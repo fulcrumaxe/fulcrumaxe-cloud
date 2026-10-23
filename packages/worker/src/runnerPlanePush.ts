@@ -2,6 +2,8 @@ import type { Pool, PoolClient } from "pg";
 import type { StopReason } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { pairingDigest, readPlanePush, recordVerifiedOutcome, type PlaneRefusalEntry, type PlanePushOutcomeState, type PlanePushRow } from "@fx/core/src/repos/planePushRecord.js";
+import { insertRunEvent } from "@fx/runner";
+import { prFooterSkipReason } from "@fulcrumaxe/runner-protocol/planePushText";
 import { guarded } from "./runActions.js";
 import { leaseVerdict, requireLease, stopReasonFor, type HeartbeatRunnerRunInput } from "./runnerClaims.js";
 import { runnerLimits, type RunnerLimitsSource } from "./runnerLimits.js";
@@ -60,7 +62,7 @@ export type PlanePushGrantResult =
   /** The row already has the three push attempts the schema allows. */
   | { kind: "attempts_exhausted" }
   /** `itemTitle` is the work item's title as stored: untrusted text that only `buildPlanePushText` may turn into public text. */
-  | ({ kind: "granted"; attemptId: string; itemTitle: string } & PlanePushFacts);
+  | ({ kind: "granted"; attemptId: string; itemTitle: string; /** The pairing's PR footer template and the item's issue number: inputs to the text builder only. */ prFooter: string | null; issueNumber: number | null } & PlanePushFacts);
 
 export type PlanePushReportContextResult =
   | { kind: "fenced"; reason: StopReason }
@@ -175,8 +177,13 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           );
           // The item's title for the public pull request text. A missing row cannot happen under the run's own foreign key; it reads as an empty
           // title, which the text builder turns into its fixed run-id title.
-          const { rows: titles } = await client.query<{ title: string | null }>("SELECT title FROM work_items WHERE id = $1 AND account_id = $2", [row.workItemId, input.accountId]);
-          return { kind: "granted", attemptId: made[0]!.id, itemTitle: titles[0]?.title ?? "", ...facts(row) };
+          const { rows: titles } = await client.query<{ title: string | null; gh_number: string | null }>("SELECT title, gh_number::text AS gh_number FROM work_items WHERE id = $1 AND account_id = $2", [row.workItemId, input.accountId]);
+          const { rows: footers } = await client.query<{ pr_footer: string | null }>("SELECT pr_footer FROM repo_pairing WHERE repo_id = $1 AND account_id = $2", [row.repoId, input.accountId]);
+          const prFooter = footers[0]?.pr_footer ?? null;
+          const issueNumber = titles[0]?.gh_number == null ? null : Number(titles[0].gh_number);
+          // A footer that needs an issue number this item lacks is left off the body; the run says so.
+          if (prFooterSkipReason(prFooter, issueNumber) !== null) await insertRunEvent(client, input.accountId, input.runId, "plane.pr_footer_skipped", { reason: "no_issue_number" });
+          return { kind: "granted", attemptId: made[0]!.id, itemTitle: titles[0]?.title ?? "", prFooter, issueNumber, ...facts(row) };
         });
       }),
 

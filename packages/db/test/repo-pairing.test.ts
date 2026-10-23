@@ -18,11 +18,11 @@ describe('repo_pairing (migration 0799)', () => {
   let aMember: string;
 
   const insert = (who: SeedRefs, repoId: string, over: Record<string, unknown> = {}) => {
-    const v = { code_repo: 'acme/pub', overlay_globs: ['docs/**'], identifier_rules_path: null, plan_data_rules_path: null, ...over };
+    const v = { code_repo: 'acme/pub', overlay_globs: ['docs/**'], identifier_rules_path: null, plan_data_rules_path: null, pr_footer: null, ...over };
     return withTenant(appUserPool, who.accountId, who.userId, (c) =>
       c.query(
-        `INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs, identifier_rules_path, plan_data_rules_path) VALUES ($1, $2, $3, $4, $5, $6)`,
-        [repoId, who.accountId, v.code_repo, v.overlay_globs, v.identifier_rules_path, v.plan_data_rules_path],
+        `INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs, identifier_rules_path, plan_data_rules_path, pr_footer) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [repoId, who.accountId, v.code_repo, v.overlay_globs, v.identifier_rules_path, v.plan_data_rules_path, v.pr_footer],
       ),
     );
   };
@@ -97,11 +97,23 @@ describe('repo_pairing (migration 0799)', () => {
       ['a glob in the identifier rule path', { identifier_rules_path: 'r/*.txt' }],
       ['a brace in the plan-data rule path', { plan_data_rules_path: 'r/{a,b}.json' }],
       ['an empty rule path', { identifier_rules_path: '' }],
+      ['an empty footer', { pr_footer: '' }],
+      ['a 201-character footer', { pr_footer: 'x'.repeat(201) }],
+      ['a newline in the footer', { pr_footer: 'a\nb' }],
     ];
     for (const [label, over] of bad) {
       await expect(insert(a, repo, over), label).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });
     }
     expect((await admin.query(`SELECT 1 FROM repo_pairing WHERE repo_id = $1`, [repo])).rows).toHaveLength(0);
+  });
+
+  it('stores a footer of 1 to 200 characters, or none', async () => {
+    const repo = await freshRepo(a);
+    await insert(a, repo, { pr_footer: 'x'.repeat(200) });
+    expect((await admin.query(`SELECT pr_footer FROM repo_pairing WHERE repo_id = $1`, [repo])).rows[0].pr_footer).toHaveLength(200);
+    const repo2 = await freshRepo(a);
+    await insert(a, repo2);
+    expect((await admin.query(`SELECT pr_footer FROM repo_pairing WHERE repo_id = $1`, [repo2])).rows[0].pr_footer).toBeNull();
   });
 
   it('is removed with its repo, and a repo with no row is simply off', async () => {

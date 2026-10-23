@@ -20,13 +20,14 @@ interface Pairing {
   overlay_globs: string[];
   identifier_rules_path: string | null;
   plan_data_rules_path: string | null;
+  pr_footer: string | null;
 }
 interface ErrorBody {
   error: { code: string };
   details?: { path: string; code: string }[];
 }
 
-const OFF: Pairing = { enabled: false, code_repo: null, overlay_globs: [], identifier_rules_path: null, plan_data_rules_path: null };
+const OFF: Pairing = { enabled: false, code_repo: null, overlay_globs: [], identifier_rules_path: null, plan_data_rules_path: null, pr_footer: null };
 const GOOD = { code_repo: 'acme/widgets-public', overlay_globs: ['.autonomous-team/**', 'docs/ops/*.md'] };
 
 /**
@@ -120,7 +121,7 @@ describe('repo pairing API', () => {
     const repoId = await seedRepo(owner.accountId, { owner: 'acme', name: 'widgets' });
     const res = await call(owner, 'PUT', `/repos/${repoId}/pairing`, GOOD);
     expect(res.status).toBe(200);
-    const expected: Pairing = { enabled: true, ...GOOD, identifier_rules_path: null, plan_data_rules_path: null };
+    const expected: Pairing = { enabled: true, ...GOOD, identifier_rules_path: null, plan_data_rules_path: null, pr_footer: null };
     expect(await res.json()).toEqual(expected);
     expect(await get(owner, repoId)).toEqual(expected);
     expect(await audits(owner.accountId)).toEqual([{ action: 'repo_pairing.set', payload: { repo_id: repoId, before: OFF, after: expected } }]);
@@ -136,7 +137,7 @@ describe('repo pairing API', () => {
     const res = await call(owner, 'PUT', `/repos/${repoId}/pairing`, second);
     expect(res.status).toBe(200);
     // A PUT is a replace: the rule files left out are cleared, not kept.
-    const expected: Pairing = { enabled: true, ...second, identifier_rules_path: null, plan_data_rules_path: null };
+    const expected: Pairing = { enabled: true, ...second, identifier_rules_path: null, plan_data_rules_path: null, pr_footer: null };
     expect(await get(owner, repoId)).toEqual(expected);
     const log = await audits(owner.accountId);
     expect(log.map((l) => l.action)).toEqual(['repo_pairing.set', 'repo_pairing.set']);
@@ -168,6 +169,14 @@ describe('repo pairing API', () => {
       ['a glob in a rule file path', { ...GOOD, identifier_rules_path: 'rules/*.txt' }, 'identifier_rules_path'],
       ['an absolute rule file path', { ...GOOD, plan_data_rules_path: '/rules.json' }, 'plan_data_rules_path'],
       ['an empty rule file path', { ...GOOD, plan_data_rules_path: '' }, 'plan_data_rules_path'],
+      ['an unknown footer placeholder', { ...GOOD, pr_footer: 'Refs D#{discussion}' }, 'pr_footer'],
+      ['a footer over 200 characters', { ...GOOD, pr_footer: 'x'.repeat(201) }, 'pr_footer'],
+      ['a two-line footer', { ...GOOD, pr_footer: 'a\nb' }, 'pr_footer'],
+      ['a footer link to another site', { ...GOOD, pr_footer: 'see https://example.com/x' }, 'pr_footer'],
+      ['a footer link to the private repo', { ...GOOD, pr_footer: 'see https://github.com/acme/widgets' }, 'pr_footer'],
+      ['a footer with a mention', { ...GOOD, pr_footer: 'cc @someone' }, 'pr_footer'],
+      ['a footer holding a token', { ...GOOD, pr_footer: 'key ghp_abcdefghijklmnopqrstuvwxyz0123' }, 'pr_footer'],
+      ['a footer holding a long opaque string', { ...GOOD, pr_footer: 'x ' + 'Ab3'.repeat(12) }, 'pr_footer'],
     ];
     for (const [label, body, field] of cases) {
       const res = await call(owner, 'PUT', url, body);
@@ -184,6 +193,27 @@ describe('repo pairing API', () => {
     expect((await call(owner, 'PUT', url)).status).toBe(422);
     expect(await rowCount(repoId)).toBe(0);
     expect(await audits(owner.accountId)).toEqual([]);
+  });
+
+  it('stores a footer template, returns it, audits it, and clears it with null, empty text or an omitted field (a replace)', async () => {
+    const owner = await seedAccountWithMember(admin, { role: 'owner' });
+    const repoId = await seedRepo(owner.accountId, { owner: 'acme', name: 'widgets' });
+    const url = `/repos/${repoId}/pairing`;
+    for (const footer of ['Refs D#6', 'Refs D#{issue_number} run {run_id}', 'See https://github.com/acme/widgets-public/issues/1']) {
+      const res = await call(owner, 'PUT', url, { ...GOOD, pr_footer: footer });
+      expect(res.status, footer).toBe(200);
+      expect(((await res.json()) as Pairing).pr_footer).toBe(footer);
+      expect((await get(owner, repoId)).pr_footer).toBe(footer);
+    }
+    const log = await audits(owner.accountId);
+    expect(log[log.length - 1]!.payload.after).toMatchObject({ pr_footer: 'See https://github.com/acme/widgets-public/issues/1' });
+    for (const cleared of [{ pr_footer: null }, { pr_footer: '' }, { pr_footer: '   ' }, {}]) {
+      await call(owner, 'PUT', url, { ...GOOD, pr_footer: 'Refs D#6' });
+      const res = await call(owner, 'PUT', url, { ...GOOD, ...cleared });
+      expect(res.status, JSON.stringify(cleared)).toBe(200);
+      expect(((await res.json()) as Pairing).pr_footer, JSON.stringify(cleared)).toBeNull();
+      expect((await admin.query(`SELECT pr_footer FROM repo_pairing WHERE repo_id = $1`, [repoId])).rows[0].pr_footer).toBeNull();
+    }
   });
 
   it('accepts glob characters in the private paths and the largest allowed list', async () => {

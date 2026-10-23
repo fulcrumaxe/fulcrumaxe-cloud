@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { PLANE_IDENTITY_EMAIL, PLANE_IDENTITY_NAME, readPlanePushIdentity } from "../src/repos/planePushIdentity.js";
-import { MAX_PLANE_TITLE_LENGTH, PLANE_TITLE_LINE, buildPlanePushText } from "../src/repos/planePushText.js";
+import { MAX_PLANE_TITLE_LENGTH, PLANE_TITLE_LINE, buildPlanePushText, checkPrFooter, prFooterSkipReason } from "../src/repos/planePushText.js";
 
 /**
  * D#598 P1f-2b: the public pull request text and the platform identity. Both are pure and read nothing but their arguments, so they are
@@ -147,9 +147,9 @@ describe("buildPlanePushText: the body", () => {
   });
 });
 
-describe("buildPlanePushText takes the item title and the run id and nothing else", () => {
-  it("by type: exactly { itemTitle: string; runId: string }", () => {
-    expectTypeOf(buildPlanePushText).parameters.toEqualTypeOf<[{ itemTitle: string; runId: string }]>();
+describe("buildPlanePushText takes the item title, the run id and the pairing footer inputs and nothing else", () => {
+  it("by type: exactly the title, the run id and the optional footer template with the issue number", () => {
+    expectTypeOf(buildPlanePushText).parameters.toEqualTypeOf<[{ itemTitle: string; runId: string; prFooter?: string | null; issueNumber?: number | null }]>();
     expectTypeOf(buildPlanePushText).returns.toEqualTypeOf<{ title: string; body: string }>();
     expect(buildPlanePushText.length).toBe(1);
   });
@@ -180,7 +180,8 @@ describe("buildPlanePushText takes the item title and the run id and nothing els
     for (const top of ["packages", "apps"]) walk(path.join(root, top));
     // packages/worker/src/planePublish.ts is the sandbox twin of the runner token route: it calls the builder with the item's stored title and the executor run's id,
     // both the platform's own rows, and nothing an agent wrote (the hook's output is parsed and verified separately and never reaches this call).
-    expect(importers.sort()).toEqual(["packages/core/src/repos/planePushText.ts", "packages/runner-cloud/src/planePush.ts", "packages/runner-protocol/src/planePush/planePushRoute.ts", "packages/runner-protocol/src/replies.ts", "packages/worker/src/planePublish.ts"]);
+    // pairing.ts only validates the footer template (checkPrFooter) and runnerPlanePush.ts only asks whether a footer would be skipped (prFooterSkipReason); neither builds text.
+    expect(importers.sort()).toEqual(["packages/core/src/repos/pairing.ts", "packages/core/src/repos/planePushText.ts", "packages/runner-cloud/src/planePush.ts", "packages/runner-protocol/src/planePush/planePushRoute.ts", "packages/runner-protocol/src/replies.ts", "packages/worker/src/planePublish.ts", "packages/worker/src/runnerPlanePush.ts"]);
   });
 });
 
@@ -235,5 +236,66 @@ describe("readPlanePushIdentity", () => {
     expect(route).toContain("const IDENTITY = PLANE_IDENTITY_NAME;");
     expect(route).toContain("const EMAIL = PLANE_IDENTITY_EMAIL;");
     expect(route).toContain("const GIT_SAFE_LINE = PLANE_TITLE_LINE;");
+  });
+});
+
+describe("the per-pairing pull request footer", () => {
+  const BASE = buildPlanePushText({ itemTitle: "x", runId: RUN }).body;
+  const withFooter = (prFooter: string | null | undefined, issueNumber: number | null = 7) => buildPlanePushText({ itemTitle: "x", runId: RUN, prFooter, issueNumber }).body;
+
+  it("off by default: no template, null or empty gives today's body", () => {
+    expect(withFooter(undefined)).toBe(BASE);
+    expect(withFooter(null)).toBe(BASE);
+    expect(withFooter("")).toBe(BASE);
+  });
+  it("a literal footer is appended after a blank line", () => {
+    expect(withFooter("Refs D#6")).toBe(`${BASE}\nRefs D#6\n`);
+  });
+  it("renders {issue_number}", () => {
+    expect(withFooter("Refs D#{issue_number}", 42)).toBe(`${BASE}\nRefs D#42\n`);
+  });
+  it("renders {run_id}, and both together", () => {
+    expect(withFooter("Run {run_id}")).toBe(`${BASE}\nRun ${RUN}\n`);
+    expect(withFooter("{issue_number}/{run_id}/{issue_number}", 3)).toBe(`${BASE}\n3/${RUN}/3\n`);
+  });
+  it("a placeholder with no value drops the footer and keeps today's body", () => {
+    expect(withFooter("Refs D#{issue_number}", null)).toBe(BASE);
+    expect(prFooterSkipReason("Refs D#{issue_number}", null)).toBe("no_issue_number");
+    expect(prFooterSkipReason("Refs D#{issue_number}", 5)).toBeNull();
+    expect(prFooterSkipReason("Refs D#6", null)).toBeNull();
+    expect(prFooterSkipReason(null, null)).toBeNull();
+  });
+  it("a stored template with an unknown placeholder renders nothing", () => {
+    expect(withFooter("Refs {discussion}")).toBe(BASE);
+  });
+});
+
+describe("checkPrFooter", () => {
+  const ok = (t: string) => checkPrFooter(t, "acme/widgets-public");
+  it("accepts literals and the two placeholders", () => {
+    for (const t of ["Refs D#6", "Refs D#{issue_number}", "Run {run_id} for D#{issue_number}", "D#12 and D#{issue_number}", "See https://github.com/acme/widgets-public/issues/3."]) expect(ok(t), t).toBeNull();
+  });
+  it("refuses an unknown placeholder, a stray brace and an empty placeholder", () => {
+    for (const t of ["Refs {discussion}", "Refs {", "Refs }", "Refs {}", "Refs {{run_id}}"]) expect(ok(t), t).not.toBeNull();
+  });
+  it("refuses too long, multi-line, padded, control and invisible text", () => {
+    for (const t of ["x".repeat(201), "a\nb", " a", "a ", "a\u0000b", "a\u200bb", ""]) expect(ok(t), JSON.stringify(t)).not.toBeNull();
+    expect(ok("x".repeat(200))).toBeNull();
+  });
+  it("refuses the Markdown and HTML link bypasses and the characters they need", () => {
+    for (const t of ["[docs](//evil\\.com/x)", "[docs](//evil&#46;com/x)", "[docs](//93.184.215.14/x)", "[docs](//пример.рф)", '<a href="//evil&#46;com">docs</a>', "a <!-- hidden --> b", "<details>x</details>", "`code`", "a & b", "back\\slash", "x]", "x[", "x>", "x<"]) expect(ok(t), t).not.toBeNull();
+  });
+  it("refuses issue references: owner/repo#N, GH-N and a bare #N (also #{issue_number})", () => {
+    for (const t of ["Refs torvalds/linux#1", "Refs GH-5", "gh-12", "Refs #6", "#6", "for #{issue_number}", "(#7)", "Run {run_id} for #{issue_number}"]) expect(ok(t), t).not.toBeNull();
+  });
+  it("refuses .. inside an allowed link", () => {
+    expect(ok("https://github.com/acme/widgets-public/../../evil/repo")).not.toBeNull();
+  });
+  it("refuses @ mentions", () => {
+    expect(ok("cc @someone")).not.toBeNull();
+  });
+  it("allows a link only to the paired repo", () => {
+    for (const t of ["https://example.com/x", "www.example.com", "example.com/x", "https://github.com/acme/other", "https://github.com/acme/widgets-public-evil", "https://github.com/acme/widgets-private", "http://user@github.com/acme/widgets-public"]) expect(ok(t), t).not.toBeNull();
+    expect(ok("https://github.com/Acme/Widgets-Public/pull/1")).toBeNull();
   });
 });
