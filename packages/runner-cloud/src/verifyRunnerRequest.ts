@@ -25,6 +25,8 @@ export interface VerifiedRunner {
   readonly credentialMode: string;
   /** The thumbprint of the key the request was verified against. */
   readonly jkt: string;
+  /** The public `x` of that key (it is public). The wake token carries it so the wake endpoint can check a signature with no lookup. */
+  readonly publicKeyX: string;
 }
 
 const minted = new WeakSet<object>();
@@ -115,7 +117,7 @@ export async function verifyRunnerRequest(
     }
     if (!fresh) throw new RunnerHttpError(409, "nonce_reused", "this request was already received");
   }
-  return mint({ runnerId: row.id, accountId: row.account_id, registeredBy: row.registered_by, credentialMode: row.credential_mode, jkt: row.jkt });
+  return mint({ runnerId: row.id, accountId: row.account_id, registeredBy: row.registered_by, credentialMode: row.credential_mode, jkt: row.jkt, publicKeyX: row.public_key_jwk.x });
 }
 
 /**

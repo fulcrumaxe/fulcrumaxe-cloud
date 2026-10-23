@@ -2,6 +2,7 @@ import { CLAIM_IDLE_RETRY_AFTER_SECONDS, CLAIM_MIN_INTERVAL_SECONDS, ClaimMessag
 import { PAUSED_RETRY_AFTER_SECONDS } from "@fx/runner";
 import { asRunner, parseJsonBody, parseMessage, requireLeases, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
+import { configuredWakeKey, wakeGrantFor } from "./wakeToken.js";
 
 export const CLAIM_PATH = "/api/runner/claim";
 /** The longest `retry_after` an idle claim answer may carry (the protocol's own bound). */
@@ -30,6 +31,8 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
   const runner = await verifyRunnerRequest(deps, CLAIM_PATH, req, { replay: "once" });
   const message = parseMessage(ClaimMessage, parseJsonBody(req));
   const leases = requireLeases(deps);
+  // D#6 RUNNER-WAKE R3a: read once per request. With no key the capability row is not even read, and nothing below changes.
+  const wakeKey = configuredWakeKey(deps.wakeKey);
 
   const gate = await asRunner(() =>
     withRunnerSession(deps.appUserPool, runner, async (client) => {
@@ -56,7 +59,14 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
         const held = await client.query<{ held: boolean }>("SELECT (paused_at IS NOT NULL OR draining) AS held FROM runner_settings WHERE runner_id = $1", [runner.runnerId]);
         heldByPerson = held.rows[0]?.held === true;
       }
-      return { waited, pausedFor, heldByPerson };
+      // D#6 RUNNER-WAKE R3a: whether this runner's latest hello listed `wake_v1` (runner_capabilities, rewritten on every hello). Only while a key is
+      // configured, and only for a claim that passed the throttle.
+      let capabilities: string[] | null = null;
+      if (waited <= 0 && wakeKey !== null) {
+        const caps = await client.query<{ capabilities: string[] }>("SELECT capabilities FROM runner_capabilities WHERE runner_id = $1", [runner.runnerId]);
+        capabilities = caps.rows[0]?.capabilities ?? null;
+      }
+      return { waited, pausedFor, heldByPerson, capabilities };
     }),
   );
   const wait = gate.waited;
@@ -66,8 +76,12 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
     return { status: 429, body, headers: { "retry-after": String(retryAfter) } };
   }
 
+  // Every 200 below carries the grant when there is one; the 429 above never does.
+  const wakeGrant = wakeGrantFor(wakeKey, runner, gate.capabilities, deps.now?.() ?? new Date());
+  const wake = wakeGrant ? { wake: wakeGrant } : {};
+
   if (message.sandbox_unavailable !== undefined) {
-    return { status: 200, body: ClaimReply.parse({ retry_after: CLAIM_IDLE_RETRY_AFTER_SECONDS }), headers: { "retry-after": String(CLAIM_IDLE_RETRY_AFTER_SECONDS) } };
+    return { status: 200, body: ClaimReply.parse({ retry_after: CLAIM_IDLE_RETRY_AFTER_SECONDS, ...wake }), headers: { "retry-after": String(CLAIM_IDLE_RETRY_AFTER_SECONDS) } };
   }
 
   // A runner whose plan has hit its usage limit is offered nothing until the reported reset: the answer is idle, and it tells the runner to ask again
@@ -75,14 +89,14 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
   // A runner a person paused or set to drain (D#605 FL-3) is told to ask again in 5 minutes; if a usage pause runs longer, that longer time stands.
   if (gate.pausedFor > 0 || gate.heldByPerson) {
     const retryAfter = Math.min(Math.max(gate.pausedFor, gate.heldByPerson ? PAUSED_RETRY_AFTER_SECONDS : 0), CLAIM_PAUSED_RETRY_AFTER_MAX_SECONDS);
-    return { status: 200, body: ClaimReply.parse({ retry_after: retryAfter }), headers: { "retry-after": String(retryAfter) } };
+    return { status: 200, body: ClaimReply.parse({ retry_after: retryAfter, ...wake }), headers: { "retry-after": String(retryAfter) } };
   }
 
   const result = await asRunner(() => leases.claimRunnerRun({ accountId: runner.accountId, runnerId: runner.runnerId, ...(message.capacity ? { capacity: message.capacity } : {}) }));
   const body =
     result.kind === "claimed"
-      ? ClaimReply.parse({ signed_job: result.signedJob, run_id: result.runId, lease_generation: result.leaseGeneration })
-      : ClaimReply.parse({ retry_after: result.retryAfter });
+      ? ClaimReply.parse({ signed_job: result.signedJob, run_id: result.runId, lease_generation: result.leaseGeneration, ...wake })
+      : ClaimReply.parse({ retry_after: result.retryAfter, ...wake });
   if (result.kind === "idle") return { status: 200, body, headers: { "retry-after": String(result.retryAfter) } };
   return { status: 200, body };
 }

@@ -96,6 +96,11 @@ export interface RunnerCloudDeps {
    * BEFORE it writes an attempt row or mints a token.
    */
   planePushIdentity?: (() => { name: string; email: string } | null) | null;
+  /**
+   * D#6 RUNNER-WAKE R3a: the HMAC key the wake token is minted with (apps/web reads FX_RUNNER_WAKE_KEY on each call, `readWakeKey`). Null, absent or
+   * throwing: no grant is minted and hello and claim answer exactly as before.
+   */
+  wakeKey?: (() => Buffer | null) | null;
   /** Where `done` writes its one-line JSON diagnostics for a pull request failure (default: `console.warn`). Tests inject a collector. */
   log?: (line: string) => void;
   /** The clock. Tests inject a fixed one. */
