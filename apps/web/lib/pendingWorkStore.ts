@@ -7,7 +7,7 @@ import { createErrorReporter } from "@fx/telemetry";
  * D#454 H3c: the production store behind the sweeps' "work pending" marker is Vercel Runtime Cache
  * (https://vercel.com/docs/runtime-cache). What the cron gate has to live with, from @vercel/functions' own client:
  *  - it is regional: an entry written in one region is not read in another, so a miss is normal and falls back to the
- *    30-minute backstop (packages/core pendingWork.ts);
+ *    next backstop slot, at most an hour on an idle deployment (packages/core pendingWork.ts);
  *  - it is ephemeral: a TTL or an eviction ends an entry, and an entry no longer "fresh" reads as a miss;
  *  - errors and the 500 ms client timeout do not throw: a failed read answers null (a miss) and a failed write is lost;
  *  - values are JSON (a number stays a number); keys are hashed under the namespace;

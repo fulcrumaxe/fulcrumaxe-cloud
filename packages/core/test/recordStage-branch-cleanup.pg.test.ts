@@ -58,6 +58,13 @@ describe('recordStage wakes the branch cleanup [pg]', () => {
     expect(pending()).toEqual(['pending:branch-cleanup']);
   });
 
+  it.each(['merged', 'closed_unmerged', 'closed'] as const)('a move to %s also marks the reconciler, for the end-of-item sandbox reap pass; a move to pr_opened does not', async (to) => {
+    await move(await item('needs_human'), 'pr_opened');
+    expect(markers.has('pending:reconcile')).toBe(false);
+    await move(await item(to === 'closed' ? 'needs_human' : 'pr_opened'), to);
+    expect(markers.has('pending:reconcile')).toBe(true);
+  });
+
   it('a move to a stage that is not final marks nothing, and a duplicate of a final move does not mark again', async () => {
     await move(await item('in_progress'), 'pr_opened');
     await move(await item('review_passed'), 'changes_requested');

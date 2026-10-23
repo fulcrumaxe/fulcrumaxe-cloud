@@ -1,8 +1,9 @@
 import { createHmac } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import type { AppCredentialsSource, GithubWebhookDbDeps, HandleWebhookResult } from "@fx/github";
 import { MAX_GITHUB_WEBHOOK_BODY_BYTES, defaultGithubWebhookDeps, githubWebhookHandler, type GithubWebhookHandlerDeps } from "./handler";
+import { setPendingHooks } from "@fx/core/src/pendingWork";
 import { setIntakeAllowlistForTests } from "../../../../lib/github/intakeTrust";
 
 /**
@@ -305,6 +306,39 @@ describe("installation deliveries record the installer (H17e)", () => {
     const { pool, queries } = recordingPool();
     await githubWebhookHandler(requestWithBody(created, { event: "issues" }), fakeDeps({ platformOpsPool: pool }), handle());
     expect(queries).toEqual([]);
+  });
+});
+
+// D#6 DB-IDLE R1: the reconciler runs on a slow slot grid unless marked, so a verified installation change marks it.
+describe("installation deliveries mark the reconciler pending", () => {
+  const created = JSON.stringify({ action: "created", installation: { id: 42 }, sender: { id: 7001 } });
+  const handle = () => vi.fn(async (): Promise<HandleWebhookResult> => ({ handled: false, reason: "inert_app_kind" }));
+  const pool = { connect: async () => ({ query: vi.fn(async () => ({ rows: [{ installer_gh_user_id: "7001" }], rowCount: 1 })), release: vi.fn() }) } as never;
+  afterEach(() => setPendingHooks(null));
+
+  function install() {
+    const written = new Map<string, number>();
+    const kept: Array<Promise<unknown>> = [];
+    setPendingHooks({
+      store: { get: async (k) => written.get(k) ?? null, set: async (k, v) => void written.set(k, v), delete: async (k) => void written.delete(k) },
+      keepAlive: (p) => void kept.push(p),
+    });
+    return { written, settled: () => Promise.all(kept) };
+  }
+
+  it("a verified installation delivery sets the reconcile marker", async () => {
+    const { written, settled } = install();
+    await githubWebhookHandler(requestWithBody(created, { event: "installation" }), fakeDeps({ platformOpsPool: pool }), handle());
+    await settled();
+    expect(written.has("pending:reconcile")).toBe(true);
+  });
+
+  it("a forged delivery and other events set nothing", async () => {
+    const { written, settled } = install();
+    await githubWebhookHandler(requestWithBody(created, { signature: sign(created, "wrong-secret"), event: "installation" }), fakeDeps({ platformOpsPool: pool }), neverCalled());
+    await githubWebhookHandler(requestWithBody(created, { event: "issues" }), fakeDeps({ platformOpsPool: pool }), handle());
+    await settled();
+    expect(written.size).toBe(0);
   });
 });
 

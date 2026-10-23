@@ -5,7 +5,11 @@
  * the staging Neon compute awake around the clock. Now a tick first reads a small marker from a no-DB store (Vercel
  * Runtime Cache in production, see apps/web/lib/pendingWorkStore.ts) and connects only when
  *   - the marker says work has been pending since a time that has passed ("marker"), or
- *   - no tick has connected for BACKSTOP_MS, or the store cannot say ("backstop").
+ *   - a wall-clock slot boundary has passed since this sweep last connected, or the store cannot say ("backstop").
+ *
+ * The backstop is aligned to the wall clock, not to each sweep's own last run: every sweep that is due connects in the
+ * first minutes of the same slot, so an idle deployment's database sees one short burst per slot and can sleep between
+ * bursts. Slots are 30 minutes while any account has shown work in the last 24 hours (the "activity:any" key), else 60.
  *
  * The store is a hint, never the truth. Runtime Cache is regional and ephemeral: a read can miss because the entry
  * expired, was evicted, was written in another region, or the call failed or timed out (the client swallows errors
@@ -22,8 +26,14 @@
 export const SWEEP_NAMES = ["api-sweep", "run-action-sweep", "compute-settle-sweep", "reconcile", "runner-sweeper", "invariant-sweep", "handoff-sweep", "stage-resume-sweep", "setup-request-check", "branch-cleanup", "proposal-verify-sweep"] as const;
 export type SweepName = (typeof SWEEP_NAMES)[number];
 
-/** The longest a tick may go without connecting, whatever the marker says. */
+/** The backstop slot length while there has been work in the last ACTIVITY_WINDOW_MS. */
 export const BACKSTOP_MS = 30 * 60_000;
+/** The backstop slot length on a deployment with no work for ACTIVITY_WINDOW_MS. */
+export const IDLE_BACKSTOP_MS = 60 * 60_000;
+/** How far back "any work" looks when picking the slot length. */
+export const ACTIVITY_WINDOW_MS = 24 * 60 * 60_000;
+/** A sweep with no marker of its own that runs on every Nth slot (the reconciler: it never sets a marker). */
+export const SLOW_SWEEP_SLOTS: Partial<Record<(typeof SWEEP_NAMES)[number], number>> = { reconcile: 4 };
 /** The same limit while staging is paused (FX_STAGING_PAUSED=1): real pending work still connects, an idle sweep waits this long. */
 export const PAUSED_BACKSTOP_MS = 12 * 60 * 60_000;
 
@@ -34,6 +44,16 @@ export function isStagingPaused(env: Record<string, string | undefined> = proces
 
 export function backstopMs(paused: boolean = isStagingPaused()): number {
   return paused ? PAUSED_BACKSTOP_MS : BACKSTOP_MS;
+}
+
+/** The wall-clock slot a time falls in. */
+export function slotOf(time: number, slotMs: number): number {
+  return Math.floor(time / slotMs);
+}
+
+/** The slot length for one sweep: the base slot times the sweep's own multiplier (1 for most). */
+function sweepSlotMs(name: SweepName, baseMs: number): number {
+  return baseMs * (SLOW_SWEEP_SLOTS[name] ?? 1);
 }
 /** A marker younger than this at the end of a tick is kept: its writer may not have committed before the tick read the rows. */
 export const MARKER_GRACE_MS = 60_000;
@@ -46,6 +66,16 @@ export const MARKER_TTL_SECONDS = 2 * (BACKSTOP_MS / 1000);
  */
 export function markerTtlSeconds(paused: boolean = isStagingPaused()): number {
   return 2 * (backstopMs(paused) / 1000);
+}
+
+/**
+ * The store lifetime for a last-connected time: it must outlive the longest slot a sweep can wait (the idle slot times the
+ * slowest multiplier), or an idle sweep would read a miss and connect early. Paused keeps its 12 hour figure.
+ */
+export function lastRunTtlSeconds(paused: boolean = isStagingPaused()): number {
+  if (paused) return markerTtlSeconds(true);
+  const longest = IDLE_BACKSTOP_MS * Math.max(1, ...Object.values(SLOW_SWEEP_SLOTS).map((n) => n ?? 1));
+  return 2 * (longest / 1000);
 }
 
 /** The slice of a key-value cache this module needs. `get` resolves null/undefined for a miss. */
@@ -97,6 +127,8 @@ export const CLOCK_SKEW_MS = 60_000;
 
 const markerKey = (name: SweepName): string => `pending:${name}`;
 const lastRunKey = (name: SweepName): string => `lastrun:${name}`;
+/** Epoch ms of the latest work any writer or tick saw; it picks the slot length. */
+export const ACTIVITY_KEY = "activity:any";
 
 function asTime(value: unknown): number | null {
   const n = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
@@ -120,6 +152,7 @@ export function markWorkPending(name: SweepName, opts: { since?: number; kick?: 
       if (current !== null && current <= since) return;
     }
     await bounded(Promise.resolve(hooks.store.set(markerKey(name), since, markerTtlSeconds())));
+    await recordActivity(hooks.store, now);
   })().catch((err: unknown) => {
     // The marker is a hint; the row just written is the durable signal and the backstop tick finds it. Worth seeing, though.
     hooks.reportError?.(err, "pending_work.write");
@@ -132,6 +165,11 @@ export function markWorkPending(name: SweepName, opts: { since?: number; kick?: 
     hooks.reportError?.(err, "pending_work.hook");
   }
   return write;
+}
+
+/** Notes that work exists (a writer just recorded some, or a tick found some): this keeps the slots at 30 minutes. */
+async function recordActivity(store: PendingStore, now: number): Promise<void> {
+  await bounded(Promise.resolve(store.set(ACTIVITY_KEY, now, ACTIVITY_WINDOW_MS / 1000)));
 }
 
 export type MarkerRead = "hit" | "miss" | "error";
@@ -147,6 +185,11 @@ export interface TickGate {
   lastRun: MarkerRead;
   /** FX_STAGING_PAUSED was "1" when the gate was read. */
   paused: boolean;
+  /**
+   * The backstop slot length that decided a backstop or none verdict. A tick that skipped inside its half-hour slot never read the
+   * activity key, so it reports the half-hour figure (the shortest slot that could apply); absent on a marker, kick or paused verdict.
+   */
+  slotMs?: number;
 }
 
 async function read(store: PendingStore, key: string): Promise<{ state: MarkerRead; value: number | null }> {
@@ -167,8 +210,19 @@ export async function readTickGate(name: SweepName, now: number = Date.now(), pa
   const base = { name, marker: marker.state, markerValue: marker.value, lastRun: last.state, paused };
   if (marker.value !== null && marker.value <= now) return { ...base, connect: true, reason: "marker" };
   // No usable "last connected" time (a cold region, an eviction, an error) counts as overdue: fail toward doing the work.
-  const overdue = last.value === null || last.value > now + CLOCK_SKEW_MS || now - last.value >= backstopMs(paused);
-  return overdue ? { ...base, connect: true, reason: "backstop" } : { ...base, connect: false, reason: "none" };
+  // It still connects in the slot window rather than at a random minute, because every due sweep connects at a slot start.
+  const activeMs = sweepSlotMs(name, BACKSTOP_MS);
+  if (last.value === null || last.value > now + CLOCK_SKEW_MS) return { ...base, connect: true, reason: "backstop", slotMs: activeMs };
+  // Paused keeps the plain elapsed-time rule (12 hours since this sweep's last connect): it is already rare, and slots add nothing.
+  if (paused) return now - last.value >= PAUSED_BACKSTOP_MS ? { ...base, connect: true, reason: "backstop" } : { ...base, connect: false, reason: "none" };
+  // Every 60-minute slot boundary is also a 30-minute one, so a sweep not yet due on 30-minute slots is not due on
+  // 60-minute slots either: the activity key is read only when it can change the answer.
+  if (slotOf(last.value, activeMs) >= slotOf(now, activeMs)) return { ...base, connect: false, reason: "none", slotMs: activeMs };
+  const activity = await read(hooks.store, ACTIVITY_KEY);
+  const recent = activity.value !== null && now - activity.value < ACTIVITY_WINDOW_MS;
+  // An unreadable activity key counts as busy (the shorter slot): fail toward doing the work.
+  const slotMs = recent || activity.state === "error" ? activeMs : sweepSlotMs(name, IDLE_BACKSTOP_MS);
+  return slotOf(last.value, slotMs) < slotOf(now, slotMs) ? { ...base, connect: true, reason: "backstop", slotMs } : { ...base, connect: false, reason: "none", slotMs };
 }
 
 /**
@@ -182,7 +236,7 @@ export async function finishTick(gate: TickGate, nextDueAt: number | null, now: 
   if (!hooks) return;
   const { store } = hooks;
   try {
-    await bounded(Promise.resolve(store.set(lastRunKey(gate.name), now, markerTtlSeconds(gate.paused))));
+    await bounded(Promise.resolve(store.set(lastRunKey(gate.name), now, lastRunTtlSeconds(gate.paused))));
     const current = await read(store, markerKey(gate.name));
     if (current.value !== gate.markerValue) return; // a writer got there first
     if (nextDueAt !== null) {
@@ -205,6 +259,7 @@ export interface GateLine {
   connected: boolean;
   /** Staging pause switch state; while true the backstop is `backstop_ms` = 12 hours. */
   paused: boolean;
+  /** The backstop slot length in force for this tick (see TickGate.slotMs); 12 hours while paused. */
   backstop_ms: number;
   /** Only when connected: whether the sweep found anything to do. */
   work_found?: boolean;
@@ -216,7 +271,7 @@ export interface GateLine {
  * missed (cold region, eviction, or a writer with no hook). `marker: "error"` counts store failures.
  */
 export function gateLine(gate: TickGate, workFound?: boolean): string {
-  const line: GateLine = { event: "cron.gate", sweep: gate.name, marker: gate.marker, last_run: gate.lastRun, reason: gate.reason, connected: gate.connect, paused: gate.paused, backstop_ms: backstopMs(gate.paused) };
+  const line: GateLine = { event: "cron.gate", sweep: gate.name, marker: gate.marker, last_run: gate.lastRun, reason: gate.reason, connected: gate.connect, paused: gate.paused, backstop_ms: gate.slotMs ?? backstopMs(gate.paused) };
   if (workFound !== undefined) line.work_found = workFound;
   return JSON.stringify(line);
 }
@@ -248,6 +303,8 @@ export async function runGatedTick<T>(
   }
   const outcome = await run();
   log(gateLine(gate, outcome.workFound));
+  const hooks = getPendingHooks();
+  if (outcome.workFound && hooks) await recordActivity(hooks.store, now()).catch((err: unknown) => hooks.reportError?.(err, "pending_work.finish"));
   await finishTick(gate, outcome.nextDueAt, now());
   return { result: outcome.result };
 }
