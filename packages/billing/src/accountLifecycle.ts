@@ -1,4 +1,5 @@
 import { reportError } from '@fx/telemetry';
+import { revokeRunnerWake } from '@fx/core/src/pendingWork.js';
 import type { PoolClient } from 'pg';
 import type Stripe from 'stripe';
 import { planFor, type PlanId } from '@fx/spend';
@@ -390,17 +391,22 @@ export async function closeAccount(ctx: BillingCtx, input: CloseAccountInput): P
     }
   }
 
-  return withPlatformOps(ctx.pool, async (client) => {
+  const closed = await withPlatformOps(ctx.pool, async (client): Promise<{ result: LifecycleResult; runnerIds: string[] }> => {
     const authFailure = await authorizeAccountWriteInTx(client, input.accountId, ctx.principal.userId);
-    if (authFailure) return authFailure;
+    if (authFailure) return { result: authFailure, runnerIds: [] };
 
     const { rowCount } = await client.query(
       'UPDATE accounts SET deleted_at = now(), updated_at = now() WHERE id = $1 AND deleted_at IS NULL',
       [input.accountId],
     );
-    if (!rowCount) return { ok: false, reason: 'account_not_found' };
-    return { ok: true };
+    if (!rowCount) return { result: { ok: false, reason: 'account_not_found' }, runnerIds: [] };
+    // D#6 RUNNER-WAKE R3b: every runner of the account, read in the same transaction, so their wake allow records can go after the commit.
+    const runners = await client.query<{ id: string }>('SELECT id FROM runners WHERE account_id = $1', [input.accountId]);
+    return { result: { ok: true }, runnerIds: runners.rows.map((r) => r.id) };
   });
+  // After the commit: the no-database wake check stops answering for the closed account's runners. Never throws.
+  if (closed.result.ok) await revokeRunnerWake(closed.runnerIds);
+  return closed.result;
 }
 
 export type BillingPortalResult = { ok: true; url: string } | { ok: false; reason: string };

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 /**
  * D#454 H3c: the "work pending" marker that lets a sweep cron tick end without opening a database connection.
  *
@@ -259,6 +261,99 @@ export async function readRunnerDue(accountId: string): Promise<number | null> {
     // fx-swallow-ok: a missed hint read; logged to stdout (not the database) and the caller treats it as "no stored value"
     logRunnerWorkFailure("runner_work.read", err);
     return null;
+  }
+}
+
+/**
+ * D#6 RUNNER-WAKE R3b: the wake check's ALLOW record, one per runner. The wake check answers only while this record exists AND names the
+ * token's key and account, so anything that loses the record (an eviction, its TTL, a write the client dropped, another region) refuses: the
+ * decision fails CLOSED. The runner then makes its ordinary claim, which re-checks everything in the database and writes the record again.
+ *
+ * It is written after a hello or claim that minted a grant (that request was just verified against the database), and DELETED after every
+ * database change that should stop the runner. Its TTL is one hour, refreshed by every claim that grants, and never past the moment the key
+ * reaches the 90-day age limit. Keyed on the runner id, never on the token text (which has more than one spelling).
+ *
+ * There are no deny keys: they would live in the same cache, which answers null for a miss and drops a failed write silently, so they could
+ * only ever fail open. A dropped delete is bounded by the one-hour TTL (and the second delete below).
+ */
+/** One hour: a wake runner claims at least once per 30-minute slot (plus up to 5 min), and every such claim rewrites the record. */
+export const WAKE_ALLOW_MAX_TTL_SECONDS = 60 * 60;
+
+/** The allow record's key. */
+export function wakeAllowKeyFor(runnerId: string): string {
+  return `wake-ok:rid:${runnerId}`;
+}
+
+/**
+ * The allow record's value: a 48-bit digest of the key and account the runner was last verified with (the store holds numbers). It only has to
+ * tell the runner's current key and account from others: the token reaching it is already MAC-checked and signed by the key it names.
+ */
+export function wakeAllowValue(jkt: string, accountId: string): number {
+  return createHash("sha256").update(`wake-ok:v1:${jkt}:${accountId}`, "utf8").digest().readUIntBE(0, 6);
+}
+
+/**
+ * Writes the allow record for a runner a hello or claim has just verified and given a grant. `keyValidUntil` is when its key reaches the age
+ * limit: the record never outlives it, and none is written once it has passed. Awaited by the caller (bounded by the store timeout), never throws:
+ * a lost write only means the next wake check answers 503 and the runner claims as usual.
+ */
+export async function allowRunnerWake(runner: { runnerId: string; jkt: string; accountId: string; keyValidUntil: Date }, now: number = Date.now()): Promise<void> {
+  const hooks = getPendingHooks();
+  if (!hooks || runner.runnerId === "") return;
+  const ttl = Math.min(WAKE_ALLOW_MAX_TTL_SECONDS, Math.floor((runner.keyValidUntil.getTime() - now) / 1000));
+  if (!(ttl > 0)) return;
+  const value = wakeAllowValue(runner.jkt, runner.accountId);
+  await runnerWorkWrite(hooks, async () => bounded(Promise.resolve(hooks.store.set(wakeAllowKeyFor(runner.runnerId), value, ttl))));
+}
+
+/** A claim that was already past its database check when a revoke committed can still write the record after it: the second delete, this long after, catches it. */
+export const WAKE_REVOKE_SECOND_DELETE_MS = 5_000;
+
+/**
+ * Deletes the allow records of these runners. Called right AFTER the database change that stops them has committed (a revoke, a removal, a
+ * revoke-all, a membership change, a key rotation, an account close), and awaited, so the next wake check already refuses. The deletes run again
+ * `WAKE_REVOKE_SECOND_DELETE_MS` later (kept alive past the response), for an in-flight claim that verified before the commit and writes the record
+ * after it. Never throws. The Runtime Cache client swallows a failed call, so a dropped delete may go unnoticed: the record then lives at most its
+ * one-hour TTL, in which the runner learns only whether its account has work; every claim is still refused by the database.
+ */
+export async function revokeRunnerWake(runnerIds: readonly string[]): Promise<void> {
+  const hooks = getPendingHooks();
+  if (!hooks) return;
+  const ids = [...new Set(runnerIds)].filter((id) => id !== "");
+  if (ids.length === 0) return;
+  const deletes = (): Promise<unknown> => Promise.all(ids.map((id) => runnerWorkWrite(hooks, async () => bounded(Promise.resolve(hooks.store.delete(wakeAllowKeyFor(id)))))));
+  await deletes();
+  if (!hooks.keepAlive) return;
+  try {
+    hooks.keepAlive(new Promise<void>((resolve) => setTimeout(resolve, WAKE_REVOKE_SECOND_DELETE_MS)).then(deletes));
+  } catch (err) {
+    // fx-swallow-ok: no request context for the second delete; the first one already ran. stdout only.
+    logRunnerWorkFailure("runner_wake.second_delete", err);
+  }
+}
+
+/** What the wake check reads for one verified token, all from the no-DB store. */
+export type RunnerWakeState =
+  | { ok: true; allowed: "match" | "missing" | "mismatch"; epoch: number | null; dueAt: number | null }
+  | { ok: false; reason: "no_store" | "store_error" };
+
+/**
+ * Reads, in one parallel round of three and with NO database access, the runner's allow record and the account's epoch and due time. Only `match`
+ * may be answered: `missing` (a miss, an eviction, a dropped write, another region) and `mismatch` (another key or account) refuse, and so does
+ * `store_error` (a store that throws, or our own timeout). Never throws; a failure is logged to stdout only.
+ */
+export async function readRunnerWakeState(ids: { runnerId: string; jkt: string; accountId: string }): Promise<RunnerWakeState> {
+  const hooks = getPendingHooks();
+  if (!hooks) return { ok: false, reason: "no_store" };
+  const get = (key: string): Promise<unknown> => bounded(Promise.resolve(hooks.store.get(key)));
+  try {
+    const [allow, epoch, due] = await Promise.all([get(wakeAllowKeyFor(ids.runnerId)), get(runnerWorkKeyFor(ids.accountId)), get(runnerWorkDueKeyFor(ids.accountId))]);
+    const allowed = allow === null || allow === undefined ? "missing" : allow === wakeAllowValue(ids.jkt, ids.accountId) ? "match" : "mismatch";
+    return { ok: true, allowed, epoch: asTime(epoch), dueAt: asTime(due) };
+  } catch (err) {
+    // fx-swallow-ok: answered as store_error, which the wake check refuses (fail closed); logged to stdout, never the database
+    logRunnerWorkFailure("runner_wake.read", err);
+    return { ok: false, reason: "store_error" };
   }
 }
 

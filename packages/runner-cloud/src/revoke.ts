@@ -1,6 +1,7 @@
 import { RevokeMessage } from "@fulcrumaxe/runner-protocol";
 import { reportError } from "@fx/telemetry";
 import { withTenant } from "@fx/db/src/withTenant.js";
+import { revokeRunnerWake } from "@fx/core/src/pendingWork.js";
 import { RunnerHttpError, parseJsonBody, parseMessage, pgCode, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
 
@@ -45,6 +46,8 @@ export async function selfRevokeRunner(deps: RunnerCloudDeps, req: RunnerHttpReq
     if (["42501", "P0002", "55000"].includes(pgCode(error) ?? "")) throw new RunnerHttpError(401, "unauthorized", "the request is not signed by a registered runner");
     throw error;
   }
+  // D#6 RUNNER-WAKE R3b: after the commit, the wake allow record is deleted, so the next wake check refuses (no database on that path).
+  await revokeRunnerWake([runner.runnerId]);
   return { status: 200, body: { revoked: true, runs_failed: await failLeases(deps, runner.accountId, [runner.runnerId]) } };
 }
 
@@ -75,6 +78,8 @@ export async function revokeRunner(deps: RunnerCloudDeps, principal: SessionPrin
     // fx-swallow-ok: 55000 is "already revoked", the retry path: the leases still get failed below
     alreadyRevoked = true;
   }
+  // D#6 RUNNER-WAKE R3b: the wake allow record is deleted on a repeat too (55000 is this account's own runner).
+  await revokeRunnerWake([runnerId]);
   const runsFailed = await failLeases(deps, principal.accountId, [runnerId]);
   return { status: 200, body: { revoked: true, already_revoked: alreadyRevoked, runs_failed: runsFailed } };
 }
@@ -110,6 +115,8 @@ export async function revokeAllRunners(deps: RunnerCloudDeps, principal: Session
     }
     return { revoked, concurrent };
   }).catch((error: unknown) => (error instanceof RunnerHttpError ? Promise.reject(error) : revokeError(error)));
+  // D#6 RUNNER-WAKE R3b: the wake allow record of every runner revoked here; a runner registered afterwards gets its own on its first claim.
+  await revokeRunnerWake([...outcome.revoked, ...outcome.concurrent]);
   const runsFailed = await failLeases(deps, principal.accountId, [...outcome.revoked, ...outcome.concurrent]);
   return { status: 200, body: { revoked: outcome.revoked.length, already_revoked: outcome.concurrent.length, runs_failed: runsFailed } };
 }

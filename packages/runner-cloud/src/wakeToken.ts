@@ -1,4 +1,5 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { BACKSTOP_MS } from "@fx/core/src/pendingWork.js";
 import {
   WAKE_CAPABILITY,
   WAKE_POLL_SECONDS_DEFAULT,
@@ -88,6 +89,22 @@ export function verifyWakeToken(key: Buffer, token: string, now: Date): WakeToke
   const parsed = WakeTokenPayload.safeParse(decoded);
   if (!parsed.success) return null;
   return parsed.data.exp > Math.floor(now.getTime() / 1000) ? parsed.data : null;
+}
+
+/** The spread, in seconds, added after a slot boundary so a fleet's safety claims do not all land in the same second. */
+export const WAKE_SAFETY_JITTER_SECONDS = 300;
+
+/**
+ * D#6 RUNNER-WAKE R3b: the `retry_after` of an idle claim answered to a runner that holds a wake grant. Such a runner learns of new work from the
+ * wake check, so its database claim is only a safety net: it is told to come back just after the next wall-clock slot boundary (the same 30-minute
+ * slots the cron backstops connect in, so the database wakes once per slot for all of them), plus a per-runner offset in [0, 300] s taken from a hash
+ * of its id (stable for a runner, spread across a fleet). At most 1800 + 300 s, inside the protocol's 3600 bound; at least 1.
+ */
+export function wakeSafetyRetryAfterSeconds(runnerId: string, now: Date, slotMs: number = BACKSTOP_MS): number {
+  const nowMs = now.getTime();
+  const untilBoundary = Math.ceil(((Math.floor(nowMs / slotMs) + 1) * slotMs - nowMs) / 1000);
+  const jitter = createHash("sha256").update(runnerId, "utf8").digest().readUInt32BE(0) % (WAKE_SAFETY_JITTER_SECONDS + 1);
+  return Math.max(1, untilBoundary + jitter);
 }
 
 /**

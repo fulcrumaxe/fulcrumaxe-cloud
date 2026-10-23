@@ -1,8 +1,9 @@
 import { CLAIM_IDLE_RETRY_AFTER_SECONDS, CLAIM_MIN_INTERVAL_SECONDS, ClaimMessage, ClaimReply, ClaimRateLimitedReply } from "@fulcrumaxe/runner-protocol";
 import { PAUSED_RETRY_AFTER_SECONDS } from "@fx/runner";
+import { allowRunnerWake } from "@fx/core/src/pendingWork.js";
 import { asRunner, parseJsonBody, parseMessage, requireLeases, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
-import { configuredWakeKey, wakeGrantFor } from "./wakeToken.js";
+import { configuredWakeKey, wakeGrantFor, wakeSafetyRetryAfterSeconds } from "./wakeToken.js";
 
 export const CLAIM_PATH = "/api/runner/claim";
 /** The longest `retry_after` an idle claim answer may carry (the protocol's own bound). */
@@ -79,6 +80,8 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
   // Every 200 below carries the grant when there is one; the 429 above never does.
   const wakeGrant = wakeGrantFor(wakeKey, runner, gate.capabilities, deps.now?.() ?? new Date());
   const wake = wakeGrant ? { wake: wakeGrant } : {};
+  // D#6 RUNNER-WAKE R3b: the allow record the wake check requires, written only for a runner this claim just verified in the database and granted.
+  if (wakeGrant) await allowRunnerWake(runner, (deps.now?.() ?? new Date()).getTime());
 
   if (message.sandbox_unavailable !== undefined) {
     return { status: 200, body: ClaimReply.parse({ retry_after: CLAIM_IDLE_RETRY_AFTER_SECONDS, ...wake }), headers: { "retry-after": String(CLAIM_IDLE_RETRY_AFTER_SECONDS) } };
@@ -93,10 +96,10 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
   }
 
   const result = await asRunner(() => leases.claimRunnerRun({ accountId: runner.accountId, runnerId: runner.runnerId, ...(message.capacity ? { capacity: message.capacity } : {}) }));
-  const body =
-    result.kind === "claimed"
-      ? ClaimReply.parse({ signed_job: result.signedJob, run_id: result.runId, lease_generation: result.leaseGeneration, ...wake })
-      : ClaimReply.parse({ retry_after: result.retryAfter, ...wake });
-  if (result.kind === "idle") return { status: 200, body, headers: { "retry-after": String(result.retryAfter) } };
-  return { status: 200, body };
+  if (result.kind === "claimed") return { status: 200, body: ClaimReply.parse({ signed_job: result.signedJob, run_id: result.runId, lease_generation: result.leaseGeneration, ...wake }) };
+  // D#6 RUNNER-WAKE R3b: a runner given a grant in THIS reply hears of new work from the wake check, so "nothing queued" sends it to the next
+  // slot boundary instead of 60 s. Work that is queued but cannot be taken yet (a shorter answer) keeps its short answer, and a runner without
+  // a grant (an older one, or no key configured) keeps 60 s.
+  const retryAfter = wakeGrant && result.retryAfter >= CLAIM_IDLE_RETRY_AFTER_SECONDS ? wakeSafetyRetryAfterSeconds(runner.runnerId, deps.now?.() ?? new Date()) : result.retryAfter;
+  return { status: 200, body: ClaimReply.parse({ retry_after: retryAfter, ...wake }), headers: { "retry-after": String(retryAfter) } };
 }

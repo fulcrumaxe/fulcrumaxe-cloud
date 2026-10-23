@@ -1,5 +1,5 @@
 import { isValidRunnerName } from "@fulcrumaxe/runner-protocol";
-import { markRunnerWork } from "@fx/core/src/pendingWork.js";
+import { markRunnerWork, revokeRunnerWake } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 import { refuseNonPrivateReposIn } from "./repoPrivacy.js";
@@ -146,6 +146,8 @@ export async function removeRunner(deps: RunnerCloudDeps, principal: SessionPrin
     // fx-swallow-ok: 55000 is "already removed", the retry path: the leases still get failed below, and the answer is the same 409
     already = true;
   }
+  // D#6 RUNNER-WAKE R3b: after the commit (and again on a repeat), the wake allow record is deleted: the next wake check refuses.
+  await revokeRunnerWake([runnerId]);
   const runsFailed = await failLeases(deps, principal.accountId, [runnerId]);
   if (already) throw new RunnerHttpError(409, "runner_revoked", "the runner has been removed", { runs_failed: runsFailed });
   return { status: 200, body: { runner_id: runnerId, removed: true, runs_failed: runsFailed }, headers: { "cache-control": "no-store" } };
