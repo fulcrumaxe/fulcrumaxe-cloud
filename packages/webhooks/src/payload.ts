@@ -15,10 +15,11 @@
 /**
  * The v1 webhook event catalogue (D#31 body, "The v1 contract" >
  * Webhooks), extended by correction C11 (discussioncomment-18508675):
- * `pr.ready_to_merge` and `merge_approval.decided` join the original five
- * plus `webhook_endpoint.disabled` (API-4a criterion 8). Additive only
- * (TA point 9) -- a later task appends to this array, never removes from
- * it. `webhook-endpoints.ts` validates a new endpoint's `event_types`
+ * `pr.ready_to_merge` joins the original five plus
+ * `webhook_endpoint.disabled` (API-4a criterion 8). Additive in general (TA
+ * point 9); the one removal is `merge_approval.decided`, which nothing ever
+ * emitted (migration 0892 strips it from stored subscriptions).
+ * `webhook-endpoints.ts` validates a new endpoint's `event_types`
  * against exactly this set.
  */
 export const WEBHOOK_EVENT_TYPES = [
@@ -29,7 +30,6 @@ export const WEBHOOK_EVENT_TYPES = [
   'endpoint.test',
   'webhook_endpoint.disabled',
   'pr.ready_to_merge',
-  'merge_approval.decided',
 ] as const;
 
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
@@ -64,7 +64,6 @@ const FIELD_RULES: Record<string, (value: unknown) => string | number | boolean 
   workItemId: (v) => (typeof v === 'string' && UUID_RE.test(v) ? v : null),
   runId: (v) => (typeof v === 'string' && UUID_RE.test(v) ? v : null),
   endpointId: (v) => (typeof v === 'string' && UUID_RE.test(v) ? v : null),
-  mergeApprovalId: (v) => (typeof v === 'string' && UUID_RE.test(v) ? v : null),
   // Enum-shaped fields (work_item.stage, run status, error/deny codes,
   // decision values, ...): bounded length, restricted charset, never
   // free text -- ENUM_LIKE_RE rejects spaces and punctuation a title or

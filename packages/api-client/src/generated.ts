@@ -783,7 +783,7 @@ export interface Operations {
       data: Array<{
         id: string;
         url: string;
-        event_types: Array<"pr.opened" | "work_item.needs_human" | "budget.exhausted" | "model_connection.broken" | "endpoint.test" | "webhook_endpoint.disabled" | "pr.ready_to_merge" | "merge_approval.decided">;
+        event_types: Array<"pr.opened" | "work_item.needs_human" | "budget.exhausted" | "model_connection.broken" | "endpoint.test" | "webhook_endpoint.disabled" | "pr.ready_to_merge">;
         status: "active" | "disabled";
         disabled_reason: string | null;
         created_at: string;
@@ -797,12 +797,12 @@ export interface Operations {
     query: undefined;
     body: {
       url: string;
-      event_types: Array<"pr.opened" | "work_item.needs_human" | "budget.exhausted" | "model_connection.broken" | "endpoint.test" | "webhook_endpoint.disabled" | "pr.ready_to_merge" | "merge_approval.decided">;
+      event_types: Array<"pr.opened" | "work_item.needs_human" | "budget.exhausted" | "model_connection.broken" | "endpoint.test" | "webhook_endpoint.disabled" | "pr.ready_to_merge">;
     };
     response: {
       id: string;
       url: string;
-      event_types: Array<"pr.opened" | "work_item.needs_human" | "budget.exhausted" | "model_connection.broken" | "endpoint.test" | "webhook_endpoint.disabled" | "pr.ready_to_merge" | "merge_approval.decided">;
+      event_types: Array<"pr.opened" | "work_item.needs_human" | "budget.exhausted" | "model_connection.broken" | "endpoint.test" | "webhook_endpoint.disabled" | "pr.ready_to_merge">;
       status: "active" | "disabled";
       disabled_reason: string | null;
       created_at: string;
@@ -819,7 +819,7 @@ export interface Operations {
     response: {
       id: string;
       url: string;
-      event_types: Array<"pr.opened" | "work_item.needs_human" | "budget.exhausted" | "model_connection.broken" | "endpoint.test" | "webhook_endpoint.disabled" | "pr.ready_to_merge" | "merge_approval.decided">;
+      event_types: Array<"pr.opened" | "work_item.needs_human" | "budget.exhausted" | "model_connection.broken" | "endpoint.test" | "webhook_endpoint.disabled" | "pr.ready_to_merge">;
       status: "active" | "disabled";
       disabled_reason: string | null;
       created_at: string;
@@ -841,13 +841,13 @@ export interface Operations {
     query: undefined;
     body: {
       url?: string;
-      event_types?: Array<"pr.opened" | "work_item.needs_human" | "budget.exhausted" | "model_connection.broken" | "endpoint.test" | "webhook_endpoint.disabled" | "pr.ready_to_merge" | "merge_approval.decided">;
+      event_types?: Array<"pr.opened" | "work_item.needs_human" | "budget.exhausted" | "model_connection.broken" | "endpoint.test" | "webhook_endpoint.disabled" | "pr.ready_to_merge">;
       status?: "active" | "disabled";
     };
     response: {
       id: string;
       url: string;
-      event_types: Array<"pr.opened" | "work_item.needs_human" | "budget.exhausted" | "model_connection.broken" | "endpoint.test" | "webhook_endpoint.disabled" | "pr.ready_to_merge" | "merge_approval.decided">;
+      event_types: Array<"pr.opened" | "work_item.needs_human" | "budget.exhausted" | "model_connection.broken" | "endpoint.test" | "webhook_endpoint.disabled" | "pr.ready_to_merge">;
       status: "active" | "disabled";
       disabled_reason: string | null;
       created_at: string;
