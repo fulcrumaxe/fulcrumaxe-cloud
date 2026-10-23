@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpRoot } from "./helpers/tmpRoot.js";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -41,7 +41,8 @@ let data: string;
 /** The machine as the view is built from it: a store, a daemon socket, a mirror, no certificate and no nix.conf. */
 const viewFs: NixViewFs = { exists: () => true, isDir: () => true, isFile: () => false, list: () => [] };
 beforeEach(() => {
-  dir = mkdtempSync(path.join(tmpdir(), "r7c-nix-"));
+  // tmpRoot, not tmpdir: a job's TMPDIR sits under the home directory, and the view test below asserts that no bind names the home directory.
+  dir = mkdtempSync(path.join(tmpRoot(), "r7c-nix-"));
   data = path.join(dir, "data");
   nixBin = path.join(dir, "nix");
   writeFileSync(

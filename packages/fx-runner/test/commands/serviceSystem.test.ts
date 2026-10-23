@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpRoot } from "../helpers/tmpRoot.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -15,7 +15,8 @@ const golden = (name: string): string => readFileSync(path.join(FIXTURES, name),
 let root: string;
 let home: string;
 beforeEach(() => {
-  root = mkdtempSync(path.join(tmpdir(), "fxr-sysservice-"));
+  // tmpRoot, not tmpdir: a job's TMPDIR sits under the home directory, which a system service cannot see, and that refusal comes before the one tested here.
+  root = mkdtempSync(path.join(tmpRoot(), "fxr-sysservice-"));
   home = path.join(root, "home");
   mkdirSync(home);
 });

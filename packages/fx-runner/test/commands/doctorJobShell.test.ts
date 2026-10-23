@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { doctorCommand, type DoctorHost } from "../../src/commands/doctor.js";
 import type { CommandContext } from "../../src/context.js";
 import { createClaudeKit } from "../../src/engines/claude/kit.js";
+import { MIN_CLAUDE_VERSION } from "../../src/engines/claude/pin.js";
 import { createSandboxHost } from "../../src/sandbox/probeHost.js";
 import type { SandboxHost } from "../../src/sandbox/probe.js";
 import { bwrapCanCreateNamespaces } from "../helpers/bwrapProbe.js";
@@ -21,7 +22,7 @@ const bash = findOnPath("bash", HOST_PATH);
 const realBwrap = findOnPath("bwrap", HOST_PATH);
 const realSocat = findOnPath("socat", HOST_PATH);
 
-// Each case starts several real processes (the CLI kit's version probe, the sandbox probe, two shells); a loaded machine needs more than the default 5 s.
+// Each case starts several real processes (the sandbox probe, two shells); a loaded machine needs more than the default 5 s.
 vi.setConfig({ testTimeout: 30_000 });
 
 let root: string;
@@ -84,10 +85,20 @@ function realHost(unwrap: boolean): SandboxHost & { calls: string[][] } {
   };
 }
 
+/**
+ * The CLI kit with its binary inspection answered here. These cases are about the Job shell lines; whether a Claude CLI is on the host's PATH (and which
+ * install) is not theirs to depend on. Inside the runner's check the home directory is hidden, so the first one found is a different install, one the
+ * model-call guard knows by name and refuses to start. A fixed, supported report keeps every case off the real CLI.
+ */
+function engineKit(): DoctorHost["engine"] {
+  const kit = createClaudeKit(spawn, { launch: testLaunch() });
+  return { locate: kit.locate, inspect: async () => ({ version: MIN_CLAUDE_VERSION, minimumVersion: MIN_CLAUDE_VERSION, versionSupported: true, missingFlags: [], login: "unknown" }) };
+}
+
 async function doctorLines(sandbox: SandboxHost, over: Partial<DoctorHost> = {}): Promise<string[]> {
   const lines: string[] = [];
   const ctx: CommandContext = { stateDir: path.join(root, "state"), uid: process.getuid?.(), out: (l) => lines.push(l), err: (l) => lines.push(l), now: () => new Date(), fetchFn: (async () => new Response("", { status: 200 })) as typeof fetch };
-  await doctorCommand(ctx, { platform: "linux", shellVars: [], engine: createClaudeKit(spawn, { launch: testLaunch() }), home, shell: bash, sandbox, ...over });
+  await doctorCommand(ctx, { platform: "linux", shellVars: [], engine: engineKit(), home, shell: bash, sandbox, ...over });
   return lines;
 }
 const shellLines = (lines: string[]): string[] => lines.filter((line) => line.includes("Job shell"));

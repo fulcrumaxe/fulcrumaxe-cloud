@@ -20,6 +20,11 @@ const bin = (name: string): string => {
   return found;
 };
 const hasPython = spawnSync("python3", ["-c", "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)"]).status === 0;
+/**
+ * Skipped inside the runner's check only: its seccomp filter refuses every Unix-domain socket but a connected pair (`checkSeccomp.ts`), so the agent cannot
+ * listen and no client can connect. The cases run everywhere else, CI included. Both must hold: the check's marker, and a socket that really cannot be made.
+ */
+const unixSocketsRefused = process.env["FX_RUNNER_CHECK"] === "1" && hasPython && spawnSync("python3", ["-I", "-c", "import socket; socket.socket(socket.AF_UNIX)"]).status !== 0;
 
 describe("the guest files", () => {
   it("the init is a bash script that parses and is executable, and sets up what the probes check", () => {
@@ -32,7 +37,7 @@ describe("the guest files", () => {
   });
 });
 
-describe.skipIf(!hasPython)("agent.py over a Unix socket", () => {
+describe.skipIf(!hasPython || unixSocketsRefused)("agent.py over a Unix socket", () => {
   let dir: string;
   let proc: ChildProcess;
   let client: AgentClient;
