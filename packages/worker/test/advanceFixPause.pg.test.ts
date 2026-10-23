@@ -198,8 +198,8 @@ describe("advance: fix rounds and reviewer runs under a spending limit [pg]", { 
       const sec = await runWithKey(a, w, `advance:${w}:review:${HEAD}:security-reviewer:s2`, "running", "security-reviewer");
       const out = await lookup(a, w, HEAD, 0);
       expect(out.sort((x, y) => x.role.localeCompare(y.role))).toEqual([
-        { role: "code-reviewer", runId: code },
-        { role: "security-reviewer", runId: sec },
+        { role: "code-reviewer", runId: code, attempt: 0 },
+        { role: "security-reviewer", runId: sec, attempt: 2 },
       ]);
     });
 
@@ -209,7 +209,7 @@ describe("advance: fix rounds and reviewer runs under a spending limit [pg]", { 
       await runWithKey(a, w, `advance:${w}:review:${OTHER}:code-reviewer`, "succeeded");
       const rr1 = await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer:rr1`, "succeeded");
       expect(await lookup(a, w, HEAD, 0)).toEqual([]);
-      expect(await lookup(a, w, HEAD, 1)).toEqual([{ role: "code-reviewer", runId: rr1 }]);
+      expect(await lookup(a, w, HEAD, 1)).toEqual([{ role: "code-reviewer", runId: rr1, attempt: 0 }]);
       expect(await lookup(a, w, HEAD, 2)).toEqual([]);
     });
 
@@ -217,7 +217,7 @@ describe("advance: fix rounds and reviewer runs under a spending limit [pg]", { 
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a, "pr_opened");
       const run = await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer:rr1:s3:p1`, "succeeded");
-      expect(await lookup(a, w, HEAD, 1)).toEqual([{ role: "code-reviewer", runId: run }]);
+      expect(await lookup(a, w, HEAD, 1)).toEqual([{ role: "code-reviewer", runId: run, attempt: 3 }]);
       expect(await lookup(a, w, HEAD, 0)).toEqual([]);
     });
 
@@ -226,7 +226,15 @@ describe("advance: fix rounds and reviewer runs under a spending limit [pg]", { 
       const w = await item(a, "pr_opened");
       await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer`, "succeeded", "code-reviewer", "2026-01-01T00:00:00Z");
       const later = await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer:s1`, "succeeded", "code-reviewer", "2026-01-02T00:00:00Z");
-      expect(await lookup(a, w, HEAD, 0)).toEqual([{ role: "code-reviewer", runId: later }]);
+      expect(await lookup(a, w, HEAD, 0)).toEqual([{ role: "code-reviewer", runId: later, attempt: 1 }]);
+    });
+
+    it("the attempt is the highest of ALL the role's keys, refused ones included, so a re-run after a run with no verdict never reuses a key", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a, "pr_opened");
+      const failed = await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer`, "failed", "code-reviewer", "2026-01-01T00:00:00Z");
+      await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer:s2`, "refused_spend", "code-reviewer", "2026-01-02T00:00:00Z");
+      expect(await lookup(a, w, HEAD, 0)).toEqual([{ role: "code-reviewer", runId: failed, attempt: 2 }]);
     });
 
     it("another item's runs and another account's runs are never returned, and malformed input answers nothing", async () => {

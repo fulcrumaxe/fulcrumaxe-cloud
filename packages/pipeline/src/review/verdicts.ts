@@ -38,6 +38,12 @@ export interface ReadVerdict {
    * That is a fact about the environment, not a judgment of the code. Only the JSON boolean `true` counts.
    */
   environmentFailure: boolean;
+  /**
+   * The run produced a verdict at all: it SUCCEEDED and its envelope carries a `verdict` key. A run that failed (an agent killed at its memory limit, a lost
+   * runner), timed out or was cancelled, and a succeeded run with no envelope or no `verdict` in it, said nothing about the code. Its `verdict` still reads
+   * `fail` (never a pass), but it must never be recorded or reused as one: the driver runs that reviewer again. A `verdict` key with a wrong word is a verdict (`fail`).
+   */
+  hasVerdict: boolean;
 }
 
 /** The exact words only. `Pass`, ` pass`, `PASS`, `passed`, `ok`, 1 and true are all `fail`. */
@@ -61,6 +67,7 @@ export function readVerdict(status: string, envelope: Record<string, unknown> | 
     summary: typeof summaryRaw === "string" ? summaryRaw.slice(0, MAX_SUMMARY_CHARS) : "",
     securityNeeded: flag === true,
     environmentFailure: envFlag === true,
+    hasVerdict: env !== null && Object.hasOwn(env, "verdict"),
   };
 }
 
@@ -75,6 +82,13 @@ export interface GatheredVerdict {
   verdict: ReviewVerdict;
   /** D#598 P7d: the reviewer could not run the tests. Absent is false. */
   environmentFailure?: boolean;
+  /**
+   * The reviewer's run ended without a verdict (see `ReadVerdict.hasVerdict`), and the driver's bounded re-runs of it on this head are used up. Such an entry is
+   * never recorded as a verdict; the round goes to a person (`reviewer_no_verdict`). Absent is false.
+   */
+  noVerdict?: boolean;
+  /** With `noVerdict`: how the last run ended, as a fixed code (`resource_limit`, `agent_failed`, `cancelled`, `wait_timeout`...). */
+  endCode?: string;
   /** The debater only: which reviewer it debated (its needs-fix is recorded as that reviewer's). */
   debatedRole?: "code-reviewer" | "security-reviewer";
 }
@@ -105,6 +119,8 @@ export async function recordVerdictsInOrder(pool: Pool, registry: ExecutionTarge
   const recorded: RecordedVerdict[] = [];
   for (const v of recordingOrder(input.verdicts)) {
     if (input.skipPasses === true && v.verdict === "pass") continue;
+    // A run that said nothing is never a verdict: recording its `fail` would move the item to Changes requested with nothing to fix.
+    if (v.noVerdict === true) continue;
     const out = await recordReviewVerdict(pool, registry, {
       accountId: input.accountId,
       workItemId: input.workItemId,
@@ -121,7 +137,7 @@ export async function recordVerdictsInOrder(pool: Pool, registry: ExecutionTarge
       workItemId: input.workItemId,
       kind: "review_verdicts",
       dedupeKey: `verdicts:${input.headSha}:${input.verdicts.map((v) => toCode(v.role)).sort().join('+')}`.slice(0, 200),
-      reasons: input.verdicts.map((v) => `${toCode(v.role)}_${toCode(v.verdict)}`).slice(0, 20),
+      reasons: input.verdicts.map((v) => `${toCode(v.role)}_${v.noVerdict === true ? "no_verdict" : toCode(v.verdict)}`).slice(0, 20),
       headSha: input.headSha,
       prNumber: input.prNumber,
       round: Math.min(Math.max(input.round, 0), 20),

@@ -10,6 +10,7 @@ import {
   assemblyMsSince,
   findRecordedPullRequest,
   isLocalGitHubHttp,
+  maxFixRounds,
   listChangedFiles,
   listChangedFilesLocal,
   pauseForDenial,
@@ -194,7 +195,26 @@ const REVIEW_ROLES: readonly string[] = ["code-reviewer", "acceptance-tester", "
  */
 export async function reviewRunsBody(worker: ReviewWorker | null, who: StepWho, headSha: string, rereview: number): Promise<Array<{ role: string; runId: string }>> {
   if (!worker || typeof worker.advanceReviewRuns !== "function") return [];
-  return worker.advanceReviewRuns(who, { headSha, rereview });
+  return (await worker.advanceReviewRuns(who, { headSha, rereview })).map((r) => ({ role: r.role, runId: r.runId }));
+}
+
+export interface RerunOut {
+  /** Start the reviewer again, under `attempt`. False: its runs on this head have ended without a verdict `bound` times (or no safe key is known). */
+  rerun: boolean;
+  attempt: number;
+  bound: number;
+}
+
+/**
+ * A reviewer's run on this head ended without a verdict (`ends` such ends so far in this review). It is started again, under the attempt after the highest one
+ * any of its keys on this head and round has (so the new key is never an existing run's), until it has ended that way as many times as an item gets fix rounds
+ * (`maxFixRounds()`, the escalation's own bound). Without the worker's run listing no safe key is known, and it is not started again.
+ */
+export async function reviewRerunBody(worker: ReviewWorker | null, who: StepWho, headSha: string, rereview: number, role: string, ends: number): Promise<RerunOut> {
+  const bound = maxFixRounds();
+  if (!worker || typeof worker.advanceReviewRuns !== "function" || !REVIEW_ROLES.includes(role) || ends >= bound) return { rerun: false, attempt: 0, bound };
+  const mine = (await worker.advanceReviewRuns(who, { headSha, rereview })).find((r) => r.role === role);
+  return { rerun: true, attempt: (mine?.attempt ?? 0) + 1, bound };
 }
 
 /**
@@ -264,7 +284,8 @@ export async function startReviewerBody(
     expectedExecutionMode: ctx.executionMode,
   }));
   if (!started.ok) return { role, runId: null, reason: started.reason };
-  await worker.advanceRecordEvent(who, { kind: "review_started", dedupeKey: `review:${pr.headSha}:${role}${rereview > 0 ? `:rr${rereview}` : ""}`, reasons: [toCode(role)], headSha: pr.headSha, prNumber: pr.number, runId: started.runId });
+  // A re-run of a reviewer whose run ended without a verdict is its own start on the activity (the attempt is in the key); a first start keeps the key it had.
+  await worker.advanceRecordEvent(who, { kind: "review_started", dedupeKey: `review:${pr.headSha}:${role}${rereview > 0 ? `:rr${rereview}` : ""}${attempt > 0 ? `:s${attempt}` : ""}`, reasons: [toCode(role)], headSha: pr.headSha, prNumber: pr.number, runId: started.runId });
   return { role, runId: started.runId, reason: null };
 }
 
@@ -281,16 +302,22 @@ export interface ReviewerOutcome {
   queuedOnRunner: boolean;
   /** The end of the follow-up chain that starts at the run asked about (D#6 R2b-3, C22 section 7): the id to cancel when the wait runs out. */
   tailRunId: string;
+  /** The run ended and said nothing about the code (it did not succeed, or left no `verdict`): its `fail` is not a verdict, and the reviewer is run again. */
+  noVerdict: boolean;
+  /** How a run with no verdict ended, as a fixed code: the runner's end reason when there is one (`resource_limit`, `agent_failed`, `runner_lost`), else the status. Null otherwise. */
+  endCode: string | null;
   /** D#599 PL-2: `placement_changed` when the run was cancelled because its item moved to the other side; the driver then starts the step again. Absent otherwise. */
   failureReason?: string | null;
 }
 
 /** How a reviewer run stands. The findings and the summary stay in the run: only the verdict word and the flag leave. */
 export async function reviewerOutcomeBody(worker: ReviewWorker | null, accountId: string, runId: string): Promise<ReviewerOutcome> {
-  if (!worker) return { status: "missing", done: true, verdict: "fail", securityNeeded: false, environmentFailure: false, queuedOnRunner: false, tailRunId: runId };
+  if (!worker) return { status: "missing", done: true, verdict: "fail", securityNeeded: false, environmentFailure: false, noVerdict: true, endCode: "missing", queuedOnRunner: false, tailRunId: runId };
   const out = await worker.advanceRunOutcome(accountId, runId);
   const v = readVerdict(out.status, out.envelope);
-  return { status: out.status, done: out.done, verdict: v.verdict, securityNeeded: v.securityNeeded, environmentFailure: v.environmentFailure, queuedOnRunner: isQueuedOnRunner(out), tailRunId: out.tailRunId ?? runId, ...(out.failureReason === "placement_changed" ? { failureReason: out.failureReason } : {}) };
+  const noVerdict = out.done && !v.hasVerdict;
+  const endCode = noVerdict ? toCode(typeof out.failureReason === "string" && /^[a-z][a-z0-9_]{0,39}$/.test(out.failureReason) ? out.failureReason : out.status).slice(0, 40) : null;
+  return { status: out.status, done: out.done, verdict: v.verdict, securityNeeded: v.securityNeeded, environmentFailure: v.environmentFailure, noVerdict, endCode, queuedOnRunner: isQueuedOnRunner(out), tailRunId: out.tailRunId ?? runId, ...(out.failureReason === "placement_changed" ? { failureReason: out.failureReason } : {}) };
 }
 
 export interface RoundOut {
@@ -307,6 +334,9 @@ export interface GatheredInput {
   runId: string;
   verdict: string;
   environmentFailure?: boolean;
+  /** The reviewer's runs ended without a verdict and its re-runs are used up (never recorded as a verdict). */
+  noVerdict?: boolean;
+  endCode?: string;
 }
 
 /** Every verdict of the head recorded in one step: passes first, non-passes last, then the decision. */

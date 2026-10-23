@@ -14,10 +14,17 @@ describe("normalizeVerdict: only the exact words", () => {
 
 describe("readVerdict", () => {
   it("reads the verdict, findings, summary and flag of a succeeded run", () => {
-    expect(readVerdict("succeeded", { verdict: "needs-fix", findings: ["a", "b"], summary: "s", security_review_needed: true })).toEqual({ verdict: "needs-fix", findings: ["a", "b"], fullFindings: ["a", "b"], summary: "s", securityNeeded: true, environmentFailure: false });
+    expect(readVerdict("succeeded", { verdict: "needs-fix", findings: ["a", "b"], summary: "s", security_review_needed: true })).toEqual({ verdict: "needs-fix", findings: ["a", "b"], fullFindings: ["a", "b"], summary: "s", securityNeeded: true, environmentFailure: false, hasVerdict: true });
   });
   it.each(["failed", "timed_out", "cancelled", "killed_spend", "refused_spend", "running", "pending", "missing", "weird"])("a run that is %s has no verdict: fail, and no flag", (status) => {
-    expect(readVerdict(status, { verdict: "pass", security_review_needed: true })).toEqual({ verdict: "fail", findings: [], fullFindings: [], summary: "", securityNeeded: false, environmentFailure: false });
+    expect(readVerdict(status, { verdict: "pass", security_review_needed: true })).toEqual({ verdict: "fail", findings: [], fullFindings: [], summary: "", securityNeeded: false, environmentFailure: false, hasVerdict: false });
+  });
+  it("only a succeeded run with a `verdict` key produced a verdict; a wrong word is still one (a fail), a missing key or envelope is none", () => {
+    expect(readVerdict("succeeded", { verdict: "pass" }).hasVerdict).toBe(true);
+    expect(readVerdict("succeeded", { verdict: "PASS" })).toMatchObject({ verdict: "fail", hasVerdict: true });
+    expect(readVerdict("succeeded", { summary: "ran out of memory" })).toMatchObject({ verdict: "fail", hasVerdict: false });
+    expect(readVerdict("succeeded", null).hasVerdict).toBe(false);
+    expect(readVerdict("succeeded", Object.create({ verdict: "pass" }) as Record<string, unknown>).hasVerdict).toBe(false);
   });
   it("a missing or non-object envelope is a fail", () => {
     for (const env of [null, [] as unknown as Record<string, unknown>, "pass" as unknown as Record<string, unknown>]) expect(readVerdict("succeeded", env).verdict).toBe("fail");
@@ -106,6 +113,18 @@ describe("decideRound", () => {
     // The same words without the flag keep their meaning: a needs-fix is a fix round, a fail is a reviewer fail.
     expect(e([["code-reviewer", "pass"], ["acceptance-tester", "needs-fix"]])).toBe("fix");
     expect(e([["code-reviewer", "pass"], ["acceptance-tester", "fail"]])).toBe("reviewer_fail");
+  });
+  it("a reviewer with no verdict is reviewer_no_verdict: never a reviewer_fail and never a fix round, whatever the others said", () => {
+    const n = (verdicts: Array<[string, string, boolean?]>, started = 0) =>
+      decideRound({ requiredRoles: REQ as never, verdicts: verdicts.map(([role, verdict, noVerdict]) => ({ role: role as never, verdict, ...(noVerdict ? { noVerdict } : {}) })), fixRoundsStarted: started });
+    expect(n([["code-reviewer", "pass"], ["acceptance-tester", "fail", true]])).toBe("reviewer_no_verdict");
+    expect(n([["code-reviewer", "fail"], ["acceptance-tester", "fail", true]])).toBe("reviewer_no_verdict");
+    expect(n([["code-reviewer", "needs-fix"], ["acceptance-tester", "fail", true]])).toBe("reviewer_no_verdict");
+    // Genuine verdicts keep their meaning.
+    expect(n([["code-reviewer", "fail"], ["acceptance-tester", "pass"]])).toBe("reviewer_fail");
+    expect(n([["code-reviewer", "needs-fix"], ["acceptance-tester", "pass"]])).toBe("fix");
+    // A role that is not required does not decide the round.
+    expect(n([["code-reviewer", "pass"], ["acceptance-tester", "pass"], ["security-reviewer", "fail", true]])).toBe("all_passed");
   });
   it("the debater, when required, must pass too", () => {
     const req = [...REQ, "debater"];

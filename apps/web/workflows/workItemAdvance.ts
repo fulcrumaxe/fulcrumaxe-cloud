@@ -18,6 +18,7 @@ import {
   recordRoundBody,
   reviewLoadBody,
   reviewPlanBody,
+  reviewRerunBody,
   reviewRunsBody,
   verifiedGateBody,
   reviewerOutcomeBody,
@@ -33,6 +34,7 @@ import {
   type PrFound,
   type ReviewPlanOut,
   type ReviewerOutcome,
+  type RerunOut,
   type RoundOut,
   type StartedReviewer,
   type VerifiedGateOut,
@@ -328,6 +330,12 @@ export async function advanceReviewRunsStep(accountId: string, userId: string, w
   return reviewRunsBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, headSha, rereview);
 }
 
+/** Whether a reviewer whose run ended without a verdict is started again, and under which attempt (bounded by the fix-round limit; see reviewRerunBody). */
+export async function advanceReviewRerunStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, headSha: string, rereview: number, role: string, ends: number): Promise<RerunOut> {
+  "use step";
+  return reviewRerunBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, headSha, rereview, role, ends);
+}
+
 export async function advanceReviewerOutcomeStep(accountId: string, runId: string): Promise<ReviewerOutcome> {
   "use step";
   return reviewerOutcomeBody(await getWorker(), accountId, runId);
@@ -338,7 +346,7 @@ export async function advanceRecordRoundStep(
   userId: string,
   workItemId: string,
   haltEpoch: number,
-  input: { headSha: string; prNumber: number; requiredRoles: string[]; verdicts: Array<{ role: string; runId: string; verdict: string; environmentFailure?: boolean }> },
+  input: { headSha: string; prNumber: number; requiredRoles: string[]; verdicts: Array<{ role: string; runId: string; verdict: string; environmentFailure?: boolean; noVerdict?: boolean; endCode?: string }> },
 ): Promise<RoundOut> {
   "use step";
   return recordRoundBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, input);
@@ -934,9 +942,12 @@ interface Verdict {
   verdict: string;
   securityNeeded: boolean;
   environmentFailure: boolean;
+  /** The run ended without a verdict (it failed, was cancelled, ran out of time, or left none): its `fail` is not a judgment. */
+  noVerdict: boolean;
+  endCode: string | null;
 }
 
-/** Waits for one reviewer run. A run still going when the wait ends is cancelled and counts as a fail (a review that could not finish is not a pass). */
+/** Waits for one reviewer run. A run still going when the wait ends is cancelled: it has no verdict (a review that could not finish is never a pass, and never a fail either). */
 async function waitForReviewer(accountId: string, userId: string, workItemId: string, role: string, firstRunId: string, restart: () => Promise<string | null>): Promise<Verdict> {
   let runId = firstRunId;
   let waited = 0;
@@ -965,9 +976,43 @@ async function waitForReviewer(accountId: string, userId: string, workItemId: st
   if (!out.done) {
     await advanceCancelStep(accountId, userId, workItemId, out.tailRunId);
     await advanceLogStep("advance.review_wait_timeout", { work_item_id: workItemId, run_id: runId, role });
-    return { role, runId, verdict: "fail", securityNeeded: false, environmentFailure: false };
+    return { role, runId, verdict: "fail", securityNeeded: false, environmentFailure: false, noVerdict: true, endCode: "wait_timeout" };
   }
-  return { role, runId, verdict: out.verdict, securityNeeded: out.securityNeeded, environmentFailure: out.environmentFailure };
+  return { role, runId, verdict: out.verdict, securityNeeded: out.securityNeeded, environmentFailure: out.environmentFailure, noVerdict: out.noVerdict === true, endCode: out.endCode ?? null };
+}
+
+/**
+ * One reviewer, waited for until it gives a verdict. A run that ends without one (killed at a memory limit, a lost runner, cancelled, out of time) is never
+ * used as a verdict: the reviewer is started again on the same head under a new attempt key, until its runs have ended that way as many times as the
+ * re-run step allows (the fix-round limit). Then the entry goes back marked `noVerdict` and the round hands the item to a person. A spending limit that
+ * denies a re-run is a pause, like any reviewer start's.
+ */
+async function reviewUntilVerdict(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; baseRef: string; branch: string }, role: string, firstRunId: string, prior: Array<{ role: string; runId: string }>, rereview: number, attemptOf: Map<string, number>): Promise<{ verdict: Verdict; pause: { pause: string; attempt: number } | null }> {
+  const { accountId, userId, workItemId } = args;
+  let runId = firstRunId;
+  for (let ends = 1; ; ends++) {
+    const v = await waitForReviewer(accountId, userId, workItemId, role, runId, async () => (await advanceStartReviewerStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, role, prior, rereview, (attemptOf.get(role) ?? 0) > 0 ? attemptOf.get(role) : undefined)).runId);
+    if (!v.noVerdict) return { verdict: v, pause: null };
+    const next = await advanceReviewRerunStep(accountId, userId, workItemId, args.haltEpoch, pr.headSha, rereview, role, ends);
+    if (!next.rerun) {
+      await advanceLogStep("advance.review_no_verdict", { work_item_id: workItemId, role, run_id: v.runId, reason: v.endCode, ends });
+      return { verdict: v, pause: null };
+    }
+    const again = await advanceStartReviewerStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, role, prior, rereview, next.attempt);
+    const pause = pauseOf(again.reason);
+    if (pause !== null) {
+      await waitOnHead(args, "review", pause, next.attempt, pr, rereview);
+      return { verdict: v, pause: { pause, attempt: next.attempt } };
+    }
+    // A start that did not give a NEW run cannot be waited for again: the round goes to a person with this reviewer's missing verdict.
+    if (again.runId === null || again.runId === runId) {
+      await advanceLogStep("advance.review_no_verdict", { work_item_id: workItemId, role, run_id: v.runId, reason: again.reason ?? v.endCode, ends });
+      return { verdict: v, pause: null };
+    }
+    await advanceLogStep("advance.review_rerun", { work_item_id: workItemId, role, from_run_id: runId, run_id: again.runId, reason: v.endCode, ends });
+    attemptOf.set(role, next.attempt);
+    runId = again.runId;
+  }
 }
 
 /**
@@ -1035,8 +1080,9 @@ async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number
   const verdicts: Verdict[] = [];
   for (const s of started) {
     if (s.runId !== null) {
-      const role = s.role;
-      verdicts.push(await waitForReviewer(accountId, userId, workItemId, role, s.runId, async () => (await advanceStartReviewerStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, role, prior, rereview, (attemptOf.get(role) ?? 0) > 0 ? attemptOf.get(role) : undefined)).runId));
+      const got = await reviewUntilVerdict(args, ctx, pr, s.role, s.runId, prior, rereview, attemptOf);
+      if (got.pause !== null) return { verdicts: [], refused: [], paused: got.pause };
+      verdicts.push(got.verdict);
     }
   }
   return { verdicts, refused: started.filter((s) => s.runId === null).map((s) => s.role), paused: null };
@@ -1294,7 +1340,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       // another reviewer must start a fix round, not stop as "incomplete" for want of a debater verdict. (The merge gate
       // still demands its pass: it reads the full plan.)
       requiredRoles: plan.roles.filter((r) => (r !== "debater" || debaterRan) && !carried.some((c) => c.role === r)),
-      verdicts: verdicts.map((v) => ({ role: v.role, runId: v.runId, verdict: v.verdict, ...(v.environmentFailure ? { environmentFailure: true } : {}) })),
+      verdicts: verdicts.map((v) => ({ role: v.role, runId: v.runId, verdict: v.verdict, ...(v.environmentFailure ? { environmentFailure: true } : {}), ...(v.noVerdict ? { noVerdict: true, endCode: v.endCode ?? "no_verdict" } : {}) })),
     });
     again = null;
     await advanceLogStep("advance.reviewed", { work_item_id: workItemId, round: attempt, rereview, pr: pr.number, head: pr.headSha.slice(0, 12), decision: round.decision, recorded: round.recorded.join(",") });
@@ -1318,6 +1364,12 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       // D#598 P7d: a reviewer could not run the tests. The worker recorded the fact; no verdict was recorded and no fix round starts.
       await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "review", reason: "reviewer_environment" });
       return { status: "needs_human", detail: "reviewer_environment" };
+    }
+    if (round.decision === "reviewer_no_verdict") {
+      // A reviewer kept ending without a verdict: the worker recorded the escalation (which reviewer, how it ended) and moved the item to Needs a person.
+      const missing = verdicts.filter((v) => v.noVerdict);
+      await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "review", reason: "reviewer_no_verdict", roles: missing.map((v) => v.role).join(","), ends: missing.map((v) => v.endCode ?? "none").join(",") });
+      return { status: "needs_human", detail: "reviewer_no_verdict" };
     }
     if (round.decision === "reviewer_fail") {
       await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "review", reason: "reviewer_fail" });

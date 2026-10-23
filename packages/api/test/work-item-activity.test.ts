@@ -217,6 +217,24 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'needs_human', reason: 'The executor run timed out without a pull request.' });
     });
 
+    it('needs_human after a reviewer kept ending without a verdict: names the reviewer and how it ended, never the executor summary or a change request', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const { itemId } = await seedItem(accountId, { stage: 'needs_human' });
+      await seedRun(accountId, itemId, { role: 'executor', status: 'succeeded', createdAt: '2026-10-03T09:00:00Z', envelope: { summary: 'Opened the pull request.' } });
+      const escalated = (reasons: string[], key: string) =>
+        admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, reasons, dedupe_key) VALUES ($1, $2, 'escalated', 'reviewer_no_verdict', $3::text[], $4)`, [accountId, itemId, reasons, key]);
+      await escalated(['code_reviewer', 'resource_limit'], 'k1');
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({
+        kind: 'needs_human',
+        reason: 'The code reviewer could not finish reviewing this pull request: it was stopped at its memory limit, every time it was tried. No verdict was recorded and no changes were requested. A person reviews the pull request and merges or closes it on GitHub.',
+      });
+      await escalated(['acceptance_tester', 'some_new_code'], 'k2');
+      expect((await noticeOf(accountId, userId, itemId))!.reason).toMatch(/^The acceptance tester could not finish reviewing this pull request: its run ended without a verdict,/);
+      // An escalation from before the item last reached Needs a person does not count.
+      await admin.query(`INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'changes_requested', 'needs_human', now(), 'control_plane', 'later')`, [accountId, itemId]);
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'needs_human', reason: 'Opened the pull request.' });
+    });
+
     it('build_slot_wait (D#483): a fresh slot-wait fact at spec_ready says so, and for the repository names the item that holds the slot; stale, halted or another stage says nothing', async () => {
       const { accountId, userId } = await seedAccountWithMember(admin);
       const { itemId, repoId } = await seedItem(accountId, { stage: 'spec_ready' });
