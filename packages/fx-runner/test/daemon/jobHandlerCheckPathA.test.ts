@@ -348,8 +348,9 @@ describe("a verified-mode job without a usable check behaves as on path B", () =
 
 describe("a verified-mode job whose check needs the dev shell (path A, D#6 R-CHK-2c)", () => {
   /**
-   * The check prints the first entry of the PATH it was started with: the dev shell's bin, which the launch puts in front. Only that entry, never the whole PATH:
-   * done keeps the last 4096 bytes of output, and a host PATH (under `nix develop` it runs to several KB) would push "base check ran" and the shell's entry out of it.
+   * The check prints the first entry of the PATH it was started with: the dev shell's bin, which this test's stand-in checkLaunch (defined below at line 216) puts in front.
+   * The real launch's PATH ordering differs: HostSandbox.checkLaunch appends dev shell entries after the host's PATH via cleanEnv, and that is verified by the HostSandbox tests (e.g., hostSandboxCheck.bwrap.test.ts).
+   * Only the first PATH entry is checked here, never the whole PATH: done keeps the last 4096 bytes of output, and a host PATH (under `nix develop` it runs to several KB) would push "base check ran" and the shell's entry out of it.
    */
   const SHELL_CHECK = 'echo "check PATH starts: ${PATH%%:*}"\nexit 0';
   const DEV_CHECK: Check = { ...CHECK, dev_shell: true };
