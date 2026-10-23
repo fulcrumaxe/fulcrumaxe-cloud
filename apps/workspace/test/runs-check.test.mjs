@@ -6,7 +6,9 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { CHECK_CHANGED, CHECK_COPY, checkView, readInsight, showArg } from "../apps/runs/runs-detail.js";
+import { CHECK_CHANGED, CHECK_COPY, CHECK_REASON_COPY, checkView, readInsight, showArg } from "../apps/runs/runs-detail.js";
+import { CHECK_NOT_RUN_LINES } from "../../../packages/runner-protocol/src/copy.ts";
+import { CHECK_NOT_RUN_REASONS } from "../../../packages/runner-protocol/src/messages.ts";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
 const fx = (name) => readInsight(JSON.parse(readFileSync(join(PACKAGES, "api", "fixtures", "v1", "getRunInsight", `200-check-${name}.json`), "utf8")));
@@ -84,5 +86,51 @@ describe("what is never guessed", () => {
       expect(copy).toMatch(/\.$/);
       expect(label + copy).not.toMatch(/null|undefined|NaN|_/);
     }
+  });
+});
+
+// D#6 R-CHK-3d: the "could not run safely" state is told from the runner's closed reason code, not from its words.
+describe("the reason code", () => {
+  const withReason = (name, reason, over = {}) => {
+    const body = fx(name);
+    return { ...body, check: { ...body.check, result: { ...body.check.result, reason, ...over } } };
+  };
+  it("the copy of every code is the runner protocol's sentence, so the page and the end line cannot word it differently", () => {
+    expect(CHECK_REASON_COPY).toEqual(CHECK_NOT_RUN_LINES);
+    expect(Object.keys(CHECK_REASON_COPY).sort()).toEqual([...CHECK_NOT_RUN_REASONS].sort());
+  });
+  it.each(CHECK_NOT_RUN_REASONS)("%s: could not run safely, with its own sentence, no exit status or duration, and the output still shown as text", (code) => {
+    const v = checkView(withReason("failed", code, { exit_code: null }));
+    expect(v.state).toBe("unsafe");
+    expect(v.label).toBe("Could not run safely");
+    expect(v.copy).toBe(CHECK_NOT_RUN_LINES[code] + " This run ended without a pull request.");
+    expect(v.facts.join(" ")).not.toMatch(/Exit status|Took|Skipped/);
+    expect(v.tail).toBe("FAIL src/a.test.ts\n  expected 1 to be 2 <b>x</b>");
+  });
+  it("a reason decides, whatever the summary says: words that look like a failing test do not make it a failed check, and an exit status of 0 does not make it a pass", () => {
+    expect(checkView(withReason("failed", "start_failed", { exit_code: null, summary: "FAIL src/a.test.ts" })).state).toBe("unsafe");
+    expect(checkView(withReason("passed", "protected_changed")).state).toBe("unsafe");
+    expect(checkView(withReason("timed-out", "sandbox_refused")).state).toBe("unsafe");
+  });
+  it("the words alone no longer decide: a result with no reason and the old refusal words is read by the legacy rule only for rows that predate the code, and a failing summary with a reason is not", () => {
+    expect(view("not-safe")).toMatchObject({ state: "unsafe", copy: CHECK_COPY.unsafe[1] });
+    expect(checkView(withReason("not-safe", null, { summary: "the check was not run: x", exit_code: 1 })).state).toBe("failed");
+  });
+  it("a code this page does not know, or a value that is not a code, reads as the generic sentence and is never drawn", () => {
+    for (const odd of ["a_newer_reason", "<b>x</b>", 7, {}, "constructor", "__proto__"]) {
+      const v = checkView(withReason("failed", odd, { exit_code: null }));
+      expect(v.state).toBe("unsafe");
+      expect(v.copy).toBe(CHECK_NOT_RUN_LINES.other + " This run ended without a pull request.");
+      expect(JSON.stringify(v.copy)).not.toContain("newer");
+    }
+  });
+  it("is the same on the bodies the real route produced for three of the codes", () => {
+    expect(view("unsafe-sandbox-refused").copy).toBe(CHECK_NOT_RUN_LINES.sandbox_refused + " This run ended without a pull request.");
+    expect(view("unsafe-pin-failed").copy).toBe(CHECK_NOT_RUN_LINES.pin_failed + " This run ended without a pull request.");
+    expect(view("unsafe-protected-changed")).toMatchObject({ state: "unsafe", copy: CHECK_NOT_RUN_LINES.protected_changed + " This run ended without a pull request." });
+  });
+  it("the run's end line on the route's body names the approved check", () => {
+    const line = fx("failed").lines.find((l) => /approved check/.test(l.text));
+    expect(line.text).toBe("The approved check (pnpm run check -- a  b) failed, so this run ended without a pull request.");
   });
 });

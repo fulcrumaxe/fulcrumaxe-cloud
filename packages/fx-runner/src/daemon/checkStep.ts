@@ -21,7 +21,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, constants, lstatSync, mkdirSync, openSync, readFileSync, rmdirSync, rmSync, unlinkSync, writeSync, type Stats } from "node:fs";
 import path from "node:path";
-import { CHECK_SUMMARY_MAX_BYTES, redactShapes, type Check, type DoneCheck } from "@fulcrumaxe/runner-protocol";
+import { CHECK_SUMMARY_MAX_BYTES, redactShapes, type Check, type CheckNotRunReason, type DoneCheck } from "@fulcrumaxe/runner-protocol";
 import type { InstallCapture } from "./engineKit.js";
 import { guardConfigEnv, type GitCapture } from "./git.js";
 import { gitEnv, type CleanEnvOptions } from "../job/cleanEnv.js";
@@ -326,10 +326,10 @@ export function createBaseFile(capture: GitCapture, envOptions: CleanEnvOptions)
 export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) => Promise<CheckOutcome> {
   return async (input) => {
     const started = deps.now().getTime();
-    const failed = (summary: string): CheckOutcome => ({ passed: false, body: { exit_code: null, duration_ms: Math.max(0, deps.now().getTime() - started), timed_out: false, skipped_tests: null, summary: lastBytes(summary, CHECK_SUMMARY_MAX_BYTES) } });
+    const failed = (reason: CheckNotRunReason, summary: string): CheckOutcome => ({ passed: false, body: { exit_code: null, duration_ms: Math.max(0, deps.now().getTime() - started), timed_out: false, skipped_tests: null, summary: lastBytes(summary, CHECK_SUMMARY_MAX_BYTES), reason } });
     const launch = input.launch(input.check.argv, input.check.dev_shell);
-    if (launch === undefined) return failed("the sandbox could not start the check");
-    if ("refused" in launch) return failed(launch.refused);
+    if (launch === undefined) return failed("sandbox_unavailable", "the sandbox could not start the check");
+    if ("refused" in launch) return failed("sandbox_refused", launch.refused);
     const held: Held[] = [];
     const changed: string[] = [];
     let problems: string[];
@@ -338,11 +338,11 @@ export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) =>
     } catch {
       // fx-swallow-ok: a checkout that cannot be pinned is not checked; the error text could hold a path
       const lost = giveBack(held);
-      return failed(`the check was not run: its files could not be pinned to the default branch${lost.length === 0 ? "" : `; not given back: ${lost.join(", ")}`}`);
+      return failed("pin_failed", `the check was not run: its files could not be pinned to the default branch${lost.length === 0 ? "" : `; not given back: ${lost.join(", ")}`}`);
     }
     if (problems.length > 0) {
       const lost = giveBack(held);
-      return failed(`the check was not run: these files could not be pinned (a link or a non-file on the path): ${problems.join(", ")}${lost.length === 0 ? "" : `; not given back: ${lost.join(", ")}`}`);
+      return failed("pin_failed", `the check was not run: these files could not be pinned (a link or a non-file on the path): ${problems.join(", ")}${lost.length === 0 ? "" : `; not given back: ${lost.join(", ")}`}`);
     }
     // The protected paths as they are now, to be compared after the check; one that cannot be read means the check is not run.
     const names = protectedRootNames(input.workspace);
@@ -352,7 +352,7 @@ export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) =>
     } catch {
       // fx-swallow-ok: a workspace whose protected state cannot be read is not checked; the failure is the returned outcome
       const lost = giveBack(held);
-      return failed(`the check was not run: the workspace's protected files could not be read${lost.length === 0 ? "" : `; not given back: ${lost.join(", ")}`}`);
+      return failed("protected_unreadable", `the check was not run: the workspace's protected files could not be read${lost.length === 0 ? "" : `; not given back: ${lost.join(", ")}`}`);
     }
     let out: Awaited<ReturnType<InstallCapture>>;
     try {
@@ -360,7 +360,7 @@ export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) =>
     } catch {
       // fx-swallow-ok: a check that could not be started did not pass; the error text could hold a path
       const lost = giveBack(held);
-      return failed(`the check could not be started${lost.length === 0 ? "" : `; not given back: ${lost.join(", ")}`}`);
+      return failed("start_failed", `the check could not be started${lost.length === 0 ? "" : `; not given back: ${lost.join(", ")}`}`);
     }
     let guard: { changed: string[]; unrestored: string[] };
     try {
@@ -384,7 +384,9 @@ export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) =>
       unpinned.length === 0 ? "" : `not pinned (a string with spaces is not a file name): ${unpinned.join(" | ")}\n`,
     ].join("");
     const summary = `${header}${lastBytes(shown, CHECK_SUMMARY_MAX_BYTES - Buffer.byteLength(header))}`;
-    const body: DoneCheck = { exit_code: out.timedOut || out.aborted ? null : out.code, duration_ms: Math.max(0, deps.now().getTime() - started), timed_out: out.timedOut, skipped_tests: skipped, summary: lastBytes(summary, CHECK_SUMMARY_MAX_BYTES).replace(/\u0000/g, "") };
+    // The check ran, but it touched protected paths or its files could not be given back: its result does not count, and the reason says so (a plain failing exit carries none).
+    const reason: CheckNotRunReason | undefined = guard.changed.length > 0 || guard.unrestored.length > 0 ? "protected_changed" : lost.length > 0 ? "not_restored" : undefined;
+    const body: DoneCheck = { exit_code: out.timedOut || out.aborted ? null : out.code, duration_ms: Math.max(0, deps.now().getTime() - started), timed_out: out.timedOut, skipped_tests: skipped, summary: lastBytes(summary, CHECK_SUMMARY_MAX_BYTES).replace(/\u0000/g, ""), ...(reason === undefined ? {} : { reason }) };
     return { passed: out.code === 0 && !out.timedOut && !out.aborted && lost.length === 0 && guard.changed.length === 0, body };
   };
 }

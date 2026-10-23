@@ -629,8 +629,23 @@ const SPACE = "␣"; // the open-box mark the Repos app shows in place of each s
 /** One argument as the person must see it: quoted, each space marked, so a leading, trailing or doubled space cannot pass for tidy. */
 export const showArg = (a) => '"' + String(a).replace(/ /g, SPACE) + '"';
 export const CHECK_CHANGED = "check files changed by this branch: ";
-// The runner's own words when it would not run the check (sandbox, pin): the check was refused, not decided.
-const NOT_SAFE = /^(the sandbox could not start the check|the check was not run:|the check could not be started)/;
+// D#6 R-CHK-3d: a check the runner could not run safely carries a closed reason code (the runner protocol's CHECK_NOT_RUN_REASONS); each code has one plain sentence here, kept equal to
+// the protocol's CHECK_NOT_RUN_LINES by test. A code this page does not know reads as `other`; the code itself is never drawn.
+export const CHECK_REASON_COPY = {
+  sandbox_unavailable: "The sandbox could not start the check on your runner, so it was not run.",
+  sandbox_refused: "Your runner's sandbox would not run the check with the same limits the agent had (for example a missing sandbox tool or filter), so it was not run.",
+  pin_failed: "The files the check names could not be pinned to the default branch's copy (a link, or something that is not a file, is on the path), so it was not run.",
+  protected_unreadable: "The runner could not read the protected files of the working folder before the check, so it was not run.",
+  protected_changed: "The check changed files it may not change, so its result does not count.",
+  not_restored: "The runner could not give the check's files back to the branch afterwards, so the result does not count.",
+  start_failed: "The runner could not start the check, so it was not run.",
+  not_set_up: "The check is not set up on this runner, so it was not run.",
+  base_missing: "The runner could not find the default branch's copy of the check's files, so it was not run.",
+  other: "The runner reported that the check could not run safely, so it was not run.",
+};
+const reasonCopy = (code) => (typeof code === "string" && Object.hasOwn(CHECK_REASON_COPY, code) ? CHECK_REASON_COPY[code] : CHECK_REASON_COPY.other);
+// Rows recorded before the code existed (and a runner that does not send one) have no reason: the runner's own refusal words in the summary still tell them apart, as before.
+const LEGACY_NOT_SAFE = /^(the sandbox could not start the check|the check was not run:|the check could not be started)/;
 export const CHECK_COPY = {
   not_set: ["Not set", "This repository has no approved check, so nothing was run after the agent finished."],
   not_run: ["Not run", "The run ended before the check ran."],
@@ -650,10 +665,11 @@ export function checkView(insight) {
   const c = isObj(insight.check) && Array.isArray(insight.check.argv) ? insight.check : null;
   const r = c && isObj(c.result) ? c.result : null;
   const summary = r && typeof r.summary === "string" ? r.summary : "";
+  const hasReason = r !== null && r.reason !== null && r.reason !== undefined;
   let state;
   if (!c) state = "not_set";
   else if (c.no_dev_shell === true) state = "no_dev_shell";
-  else if (r) state = r.timed_out === true ? "timed_out" : r.exit_code === 0 ? "passed" : r.exit_code === null && NOT_SAFE.test(summary) ? "unsafe" : "failed";
+  else if (r) state = hasReason ? "unsafe" : r.timed_out === true ? "timed_out" : r.exit_code === 0 ? "passed" : r.exit_code === null && LEGACY_NOT_SAFE.test(summary) ? "unsafe" : "failed";
   else if (isObj(insight.wait) && insight.wait.reason === "runner_too_old_for_check") state = "runner_too_old";
   else state = isLive(insight) ? "running" : "not_run";
   const [label, copy] = CHECK_COPY[state];
@@ -668,7 +684,8 @@ export function checkView(insight) {
     if (Number.isFinite(r.duration_ms)) facts.push("Took " + secsText(Math.round(r.duration_ms / 1000)));
     if (state !== "timed_out") facts.push("Skipped tests: " + (Number.isInteger(r.skipped_tests) ? r.skipped_tests : "Not recorded"));
   }
-  const text = state === "runner_too_old" && isObj(insight.wait) && typeof insight.wait.text === "string" && insight.wait.text !== "" ? insight.wait.text : copy;
+  let text = state === "runner_too_old" && isObj(insight.wait) && typeof insight.wait.text === "string" && insight.wait.text !== "" ? insight.wait.text : copy;
+  if (state === "unsafe" && hasReason) text = reasonCopy(r.reason) + " This run ended without a pull request.";
   const nl = summary.indexOf("\n");
   const first = nl === -1 ? summary : summary.slice(0, nl);
   const changed = first.startsWith(CHECK_CHANGED) ? first : null;

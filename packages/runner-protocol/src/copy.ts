@@ -203,3 +203,31 @@ export function waitText(reason: string, limitedBy: string | null, minProtocol: 
   if (reason === "waiting_for_runner_slot" && limitedBy !== null && Object.hasOwn(SLOT_CAUSE_LINES, limitedBy)) return SLOT_CAUSE_LINES[limitedBy as keyof typeof SLOT_CAUSE_LINES];
   return Object.hasOwn(WAIT_LINES, reason) ? WAIT_LINES[reason as keyof typeof WAIT_LINES] : WAIT_LINES.waiting_for_runner;
 }
+
+/**
+ * D#6 R-CHK-3d: the words for a check the runner could not run safely, one plain sentence for each closed code (`CHECK_NOT_RUN_REASONS`). The Runs detail and the run's end line
+ * use these and retype none; a code this build does not know reads as `other`, never as the code itself.
+ */
+export const CHECK_NOT_RUN_LINES = {
+  sandbox_unavailable: "The sandbox could not start the check on your runner, so it was not run.",
+  sandbox_refused: "Your runner's sandbox would not run the check with the same limits the agent had (for example a missing sandbox tool or filter), so it was not run.",
+  pin_failed: "The files the check names could not be pinned to the default branch's copy (a link, or something that is not a file, is on the path), so it was not run.",
+  protected_unreadable: "The runner could not read the protected files of the working folder before the check, so it was not run.",
+  protected_changed: "The check changed files it may not change, so its result does not count.",
+  not_restored: "The runner could not give the check's files back to the branch afterwards, so the result does not count.",
+  start_failed: "The runner could not start the check, so it was not run.",
+  not_set_up: "The check is not set up on this runner, so it was not run.",
+  base_missing: "The runner could not find the default branch's copy of the check's files, so it was not run.",
+  other: "The runner reported that the check could not run safely, so it was not run.",
+} as const;
+export function checkNotRunText(reason: unknown): string {
+  return typeof reason === "string" && Object.hasOwn(CHECK_NOT_RUN_LINES, reason) ? (CHECK_NOT_RUN_LINES as Readonly<Record<string, string>>)[reason]! : CHECK_NOT_RUN_LINES.other;
+}
+
+/** D#6 R-CHK-3d: the run's end line when its approved check did not pass. `command` is the job's own approved command when the caller has it. */
+export function checkFailedText(detail: string | null | undefined, notRun: boolean, command?: string): string {
+  const named = command === undefined || command === "" ? "The approved check" : `The approved check (${command})`;
+  if (detail === "check_no_dev_shell") return `${named} needs the repository's dev shell and none was built, so it was not run and this run ended without a pull request.`;
+  if (notRun) return `${named} could not run safely, so this run ended without a pull request.`;
+  return `${named} failed, so this run ended without a pull request.`;
+}

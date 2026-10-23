@@ -165,8 +165,8 @@ async function loadContext(client: TenantQueryable, i: { accountId: string; runI
 /** The change types that pass when the path is in scope (C23 section 3). A copy deletes nothing and a deletion reports its own path. */
 const PASSING_CHANGE_TYPES: ReadonlySet<string> = new Set(["ADDED", "MODIFIED", "CHANGED", "DELETED", "COPIED"]);
 
-/** D#6 R-CHK-3: a check passes only on exit 0 inside its cap. No exit status (never started) and a kill at the cap both fail. */
-export const checkPassed = (check: DoneCheck): boolean => check.exit_code === 0 && !check.timed_out;
+/** D#6 R-CHK-3: a check passes only on exit 0 inside its cap. No exit status (never started) and a kill at the cap both fail, and so does a result the runner gave a reason for (R-CHK-3d: it was not run safely). */
+export const checkPassed = (check: DoneCheck): boolean => check.exit_code === 0 && !check.timed_out && check.reason === undefined;
 
 async function decide(deps: RunnerCloudDeps, i: { accountId: string; runId: string; leaseGeneration: number }, runnerReported: DoneCheck | undefined): Promise<Decision> {
   const ctx = await withTenant(deps.appUserPool, i.accountId, (client) => loadContext(client, { accountId: i.accountId, runId: i.runId }));

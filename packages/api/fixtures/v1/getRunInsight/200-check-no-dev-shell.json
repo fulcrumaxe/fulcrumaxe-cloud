@@ -31,7 +31,7 @@
   "lines": [
     {
       "at": "2026-10-03T10:00:02.000Z",
-      "text": "The run ended (check failed)"
+      "text": "The approved check (pnpm run check -- a  b) needs the repository's dev shell and none was built, so it was not run and this run ended without a pull request."
     }
   ],
   "lines_truncated": false,
@@ -74,7 +74,8 @@
       "duration_ms": 0,
       "timed_out": false,
       "skipped_tests": null,
-      "summary": ""
+      "summary": "",
+      "reason": null
     }
   },
   "wait": null

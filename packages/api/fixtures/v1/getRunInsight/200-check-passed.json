@@ -69,7 +69,8 @@
       "duration_ms": 95400,
       "timed_out": false,
       "skipped_tests": 3,
-      "summary": "check files changed by this branch: scripts/check.sh\nTests  12 passed | 3 skipped (15)"
+      "summary": "check files changed by this branch: scripts/check.sh\nTests  12 passed | 3 skipped (15)",
+      "reason": null
     }
   },
   "wait": null

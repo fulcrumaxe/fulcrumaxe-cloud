@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "pg";
-import { ITEM_PR_BRANCH, MAX_ENVELOPE_INPUT_BYTES, redactText, NOT_RECORDED_MEASURE, RUNNER_LEASE_SECONDS, SESSION_ID_PATTERN, contextLedgerFromWire, redactDeep, type ContextLedgerBody, type ContextSection, type DoneCheck, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { ITEM_PR_BRANCH, MAX_ENVELOPE_INPUT_BYTES, redactText, NOT_RECORDED_MEASURE, RUNNER_LEASE_SECONDS, SESSION_ID_PATTERN, contextLedgerFromWire, redactDeep, type ContextLedgerBody, type ContextSection, type DoneCheck, type StopReason, checkNotRunReason } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RUNNER_RUN_BRANCH, insertRunEvent, noteRunnerActivityCap, readBoundItemBranch, recordContextLedger, writeRunStatusOn, type FailureReason } from "@fx/runner";
 import { normaliseCheck } from "@fx/runner-cloud";
@@ -189,8 +189,8 @@ async function recordRunnerCheck(client: PoolClient, input: FinishRunnerDoneInpu
   if (check === undefined || input.verdict.failureReason === "taken_over") return;
   const summary = redactText(check.summary, []).slice(0, 4096);
   await client.query(
-    `INSERT INTO run_checks (account_id, run_id, exit_code, duration_ms, timed_out, skipped_tests, summary) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [input.accountId, input.runId, check.exit_code, check.duration_ms, check.timed_out, check.skipped_tests, summary],
+    `INSERT INTO run_checks (account_id, run_id, exit_code, duration_ms, timed_out, skipped_tests, summary, reason) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [input.accountId, input.runId, check.exit_code, check.duration_ms, check.timed_out, check.skipped_tests, summary, check.reason === undefined ? null : checkNotRunReason(check.reason)],
   );
   await insertRunEvent(client, input.accountId, input.runId, CHECK_ENDED_EVENT, { exit_code: check.exit_code, timed_out: check.timed_out, duration_ms: check.duration_ms });
 }

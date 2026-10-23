@@ -28,7 +28,12 @@
       "source": null
     }
   },
-  "lines": [],
+  "lines": [
+    {
+      "at": "2026-10-03T10:00:02.000Z",
+      "text": "The approved check (pnpm run check -- a  b) failed, so this run ended without a pull request."
+    }
+  ],
   "lines_truncated": false,
   "limits": {
     "max_run_minutes": 60,
@@ -69,7 +74,8 @@
       "duration_ms": 61000,
       "timed_out": false,
       "skipped_tests": null,
-      "summary": "FAIL src/a.test.ts\n  expected 1 to be 2 <b>x</b>"
+      "summary": "FAIL src/a.test.ts\n  expected 1 to be 2 <b>x</b>",
+      "reason": null
     }
   },
   "wait": null

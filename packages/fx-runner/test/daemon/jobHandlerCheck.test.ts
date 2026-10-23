@@ -168,7 +168,7 @@ describe("a job with a check", () => {
     await r.handle(await r.claim(withCheck()));
     expect(r.order).not.toContain("hook");
     expect(runEnded().map((e) => e.reason)).toEqual(["check_failed"]);
-    expect(bodies("/done")[0]!.check).toMatchObject({ exit_code: null, timed_out: false, duration_ms: 0 });
+    expect(bodies("/done")[0]!.check).toMatchObject({ exit_code: null, timed_out: false, duration_ms: 0, reason: "not_set_up" });
   });
 
   it("pins to the merge-base with the default branch; with none, or no mirror, the check fails and is not run", async () => {
@@ -177,7 +177,7 @@ describe("a job with a check", () => {
     expect(none.order).not.toContain("check");
     expect(none.order).not.toContain("hook");
     expect(runEnded().map((e) => e.reason)).toEqual(["check_failed"]);
-    expect(bodies("/done")[0]!.check).toMatchObject({ exit_code: null, timed_out: false });
+    expect(bodies("/done")[0]!.check).toMatchObject({ exit_code: null, timed_out: false, reason: "base_missing" });
   });
 
   it("a job with a check whose hook never recorded an outcome is a failure, not a pass", async () => {
@@ -185,6 +185,8 @@ describe("a job with a check", () => {
     await r.handle(await r.claim(withCheck()));
     expect(r.order).not.toContain("hook");
     expect(runEnded().map((e) => e.reason)).toEqual(["check_failed"]);
+    // The fallback is the closed reason `other`, not a missing reason: the cloud words it as a check that could not run safely.
+    expect(bodies("/done")[0]!.check).toMatchObject({ exit_code: null, reason: "other" });
   });
 
   it("a job without a check is as it was: no check call, no note, done carries none", async () => {

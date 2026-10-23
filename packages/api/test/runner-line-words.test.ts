@@ -17,3 +17,30 @@ describe("run_ended handed_off in the run view", () => {
     expect(line!.text).not.toMatch(/The run ended/);
   });
 });
+
+/** D#6 R-CHK-3d: the run's end line for a check that did not pass names the approved check and, when the caller has it, the command. */
+describe("run_ended check_failed in the run view", () => {
+  const ended = { reason: "check_failed", detail: null, size_mb: null };
+  it("says the approved check failed, naming the command when it is known", () => {
+    expect(runEndedSentence(ended, { argv: ["pnpm", "run", "check"], result: { reason: null } })).toBe("The approved check (pnpm run check) failed, so this run ended without a pull request.");
+    expect(runEndedSentence(ended)).toBe("The approved check failed, so this run ended without a pull request.");
+  });
+  it("says it could not run safely when the recorded result has a reason, and that the dev shell was missing for that detail", () => {
+    expect(runEndedSentence(ended, { argv: ["pnpm", "run", "check"], result: { reason: "pin_failed" } })).toContain("could not run safely");
+    expect(runEndedSentence({ ...ended, detail: "check_no_dev_shell" }, { argv: ["make"] })).toContain("needs the repository's dev shell");
+    // The work item's activity has the reason but not the command: the sentence still reads "could not run safely", with no command named.
+    expect(runEndedSentence(ended, { result: { reason: "protected_changed" } })).toBe("The approved check could not run safely, so this run ended without a pull request.");
+    expect(runEndedSentence(ended, { result: { reason: null } })).toBe("The approved check failed, so this run ended without a pull request.");
+  });
+  it("shows the command as one plain line: control characters become spaces and a long command is cut", () => {
+    const text = runEndedSentence(ended, { argv: ["sh", "-c", "a\nb\u0000c", "x".repeat(200)] })!;
+    expect(text).not.toMatch(/[\u0000-\u001f]/);
+    expect(text).toContain("a b c");
+    expect(text).toContain("...");
+    expect(text.length).toBeLessThan(200);
+  });
+  it("replaces the plain line of the event in withRunnerWords, and never reads \"The run ended\"", () => {
+    const [line] = withRunnerWords([{ at: "2026-10-22T00:00:00.000Z", text: "The run ended", ended }], { argv: ["make", "check"] });
+    expect(line!.text).toBe("The approved check (make check) failed, so this run ended without a pull request.");
+  });
+});

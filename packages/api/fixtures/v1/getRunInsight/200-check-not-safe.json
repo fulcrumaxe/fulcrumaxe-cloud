@@ -69,7 +69,8 @@
       "duration_ms": 12,
       "timed_out": false,
       "skipped_tests": null,
-      "summary": "the check was not run: these files could not be pinned (a link or a non-file on the path): scripts/check.sh"
+      "summary": "the check was not run: these files could not be pinned (a link or a non-file on the path): scripts/check.sh",
+      "reason": null
     }
   },
   "wait": null

@@ -1,6 +1,6 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { DoneReply, DoneRetryReply, StopReply, sha256Text, signJob, type Check, type DoneCheck, type Job } from "@fulcrumaxe/runner-protocol";
+import { CHECK_NOT_RUN_REASONS, DoneReply, DoneRetryReply, StopReply, sha256Text, signJob, type Check, type DoneCheck, type Job } from "@fulcrumaxe/runner-protocol";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import {
   DISPATCH_BASE_KIND,
@@ -312,6 +312,38 @@ describe("done route [pg]", () => {
         expect((await s.call({ body: { run_id: s.runId, lease_generation: s.gen, check: bad } })).status).toBe(400);
       }
       expect(finished).toHaveLength(0);
+    });
+
+    // D#6 R-CHK-3d: the optional reason code. Fail closed: any reason means the check was not run safely, whatever the exit status said.
+    it.each(CHECK_NOT_RUN_REASONS)("a result with the reason %s never passes, even with exit status 0, and the code is handed on as it is", async (reason) => {
+      const s = await scene({ check: APPROVED });
+      const res = await s.call({ body: { run_id: s.runId, lease_generation: s.gen, check: report({ reason }) } });
+      expect(parsedDone(res)).toMatchObject({ outcome: "failed", failure_reason: "check_failed", pr_number: null });
+      expect(labels(s.fake)).toEqual([]);
+      expect(finished[0]!.check).toEqual(report({ reason }));
+    });
+
+    it("a reason word this build does not know is stored as the generic code, never as the word", async () => {
+      const s = await scene({ check: APPROVED });
+      const res = await s.call({ body: { run_id: s.runId, lease_generation: s.gen, check: report({ exit_code: null, summary: "", reason: "a_newer_reason" }) } });
+      expect(parsedDone(res)).toMatchObject({ outcome: "failed", failure_reason: "check_failed" });
+      expect((finished[0]!.check as DoneCheck).reason).toBe("other");
+    });
+
+    it("a reason that is not a short lowercase word (text, markup, a number) is refused with the body", async () => {
+      const s = await scene({ check: APPROVED });
+      for (const bad of ["Click here to fix", "<b>x</b>", "x".repeat(40), "", 5, null]) {
+        expect((await s.call({ body: { run_id: s.runId, lease_generation: s.gen, check: { ...report(), reason: bad } } })).status, JSON.stringify(bad)).toBe(400);
+      }
+      expect(finished).toHaveLength(0);
+    });
+
+    it("a runner that sends no reason is judged as before: a failing exit records no reason, a pass still passes", async () => {
+      const failing = await scene({ check: APPROVED });
+      await failing.call({ body: { run_id: failing.runId, lease_generation: failing.gen, check: report({ exit_code: 1 }) } });
+      expect(finished[0]!.check).not.toHaveProperty("reason");
+      const passing = await scene({ check: APPROVED });
+      expect(parsedDone(await passing.call({ body: { run_id: passing.runId, lease_generation: passing.gen, check: report() } }))).toMatchObject({ outcome: "succeeded" });
     });
   });
 

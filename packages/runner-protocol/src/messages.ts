@@ -483,6 +483,15 @@ export const CHECK_EXIT_CODE_MAX = 1_000_000;
 export const CHECK_DURATION_MS_MAX = 604_800_000;
 export const CHECK_SKIPPED_MAX = 100_000_000;
 // The bounds are the cloud's `run_checks` table's (migration 0888): a body this schema accepts must also be storable, or a crafted `done` could pass here and fail the finish.
+/**
+ * D#6 R-CHK-3d: why a check could not run safely (or was stopped from counting), as a closed code beside the summary. Optional, so a protocol 8 runner that omits it still works: the
+ * cloud then records no reason. On the wire it is only a short lowercase word (a newer runner may name a reason this build does not know); the cloud maps any word outside this set
+ * to `other` before it stores or shows anything, and a check that carries a reason never counts as passed. `other` is the generic code.
+ */
+export const CHECK_NOT_RUN_REASONS = ["sandbox_unavailable", "sandbox_refused", "pin_failed", "protected_unreadable", "protected_changed", "not_restored", "start_failed", "not_set_up", "base_missing", "other"] as const;
+export type CheckNotRunReason = (typeof CHECK_NOT_RUN_REASONS)[number];
+/** The closed code for a word off the wire or out of a row: a known code as it is, anything else `other`. */
+export const checkNotRunReason = (word: unknown): CheckNotRunReason => (typeof word === "string" && (CHECK_NOT_RUN_REASONS as readonly string[]).includes(word) ? (word as CheckNotRunReason) : "other");
 export const DoneCheck = z
   .object({
     exit_code: safeInt.min(-CHECK_EXIT_CODE_MAX).max(CHECK_EXIT_CODE_MAX).nullable(),
@@ -491,6 +500,7 @@ export const DoneCheck = z
     skipped_tests: safeInt.min(0).max(CHECK_SKIPPED_MAX).nullable(),
     // No NUL: the cloud's text column refuses it and the finish would abort.
     summary: z.string().max(CHECK_SUMMARY_MAX_BYTES).refine((text) => !text.includes("\u0000"), { message: "the summary holds no NUL" }),
+    reason: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/).optional(),
   })
   .strict()
   // A check stopped at its cap did not exit.
