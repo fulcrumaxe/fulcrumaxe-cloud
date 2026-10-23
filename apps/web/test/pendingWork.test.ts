@@ -7,7 +7,13 @@ import {
   STORE_TIMEOUT_MS,
   finishTick,
   gateLine,
+  markRunnerWork,
   markWorkPending,
+  RUNNER_WORK_TTL_SECONDS,
+  readRunnerDue,
+  remarkRunnerDue,
+  runnerWorkDueKeyFor,
+  runnerWorkKeyFor,
   readTickGate,
   runGatedTick,
   setPendingHooks,
@@ -491,5 +497,89 @@ describe("the hit-rate log line", () => {
     const missed = JSON.parse(gateLine({ name: "api-sweep", connect: true, reason: "backstop", marker: "miss", markerValue: null, lastRun: "miss", paused: false }, true));
     expect([hit.reason, hit.work_found]).toEqual(["marker", true]);
     expect([missed.reason, missed.work_found]).toEqual(["backstop", true]);
+  });
+});
+
+describe("markRunnerWork: the per-account runner-work hint", () => {
+  const ACCT = "11111111-1111-4111-8111-111111111111";
+  const OTHER = "22222222-2222-4222-8222-222222222222";
+  let stdout: string[];
+  beforeEach(() => {
+    stdout = [];
+    vi.spyOn(console, "log").mockImplementation((line: unknown) => void stdout.push(String(line)));
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("stores 'work since now' under the account's own key, as a number with a bounded life, and touches no other account", async () => {
+    const set = vi.fn(async () => {});
+    setPendingHooks({ store: { get: async () => null, set, delete: async () => {} } });
+    await markRunnerWork(ACCT, { now: clock.value });
+    expect(set).toHaveBeenCalledWith(runnerWorkKeyFor(ACCT), clock.value, RUNNER_WORK_TTL_SECONDS);
+    expect(runnerWorkKeyFor(ACCT)).not.toBe(runnerWorkKeyFor(OTHER));
+    expect(runnerWorkKeyFor(ACCT)).not.toBe("pending:api-sweep");
+  });
+
+  it("keeps the epoch as the latest bump and the due value as the minimum not-yet-passed due time", async () => {
+    const get = (k: string) => storeOf(region).get(k);
+    await markRunnerWork(ACCT, { now: clock.value });
+    await markRunnerWork(ACCT, { since: clock.value + 5 * MIN, now: clock.value });
+    await markRunnerWork(ACCT, { since: clock.value + 9 * MIN, now: clock.value }); // later: does not replace the earlier future due time
+    expect(await get(runnerWorkDueKeyFor(ACCT))).toBe(clock.value + 5 * MIN);
+    await markRunnerWork(ACCT, { since: clock.value + 2 * MIN, now: clock.value });
+    expect(await get(runnerWorkDueKeyFor(ACCT))).toBe(clock.value + 2 * MIN);
+    expect(await get(runnerWorkKeyFor(ACCT))).toBe(clock.value); // a future due time never touches the epoch
+    await markRunnerWork(ACCT, { now: clock.value + 3 * MIN });
+    expect(await get(runnerWorkKeyFor(ACCT))).toBe(clock.value + 3 * MIN);
+    // the earlier due time has now passed, so a new future one replaces it
+    await markRunnerWork(ACCT, { since: clock.value + 20 * MIN, now: clock.value + 3 * MIN });
+    expect(await get(runnerWorkDueKeyFor(ACCT))).toBe(clock.value + 20 * MIN);
+  });
+
+  it("the consumer re-derives: after the first due time is consumed, the later one is written back; an earlier future value did not drop it", async () => {
+    const get = (k: string) => storeOf(region).get(k);
+    const first = clock.value + 5 * MIN;
+    const second = clock.value + 9 * MIN;
+    await markRunnerWork(ACCT, { since: first, now: clock.value });
+    await markRunnerWork(ACCT, { since: second, now: clock.value });
+    expect(await get(runnerWorkDueKeyFor(ACCT))).toBe(first);
+    expect(await readRunnerDue(ACCT)).toBe(first);
+    await remarkRunnerDue(ACCT, second); // what the claim does with the next future claimable_after from the database
+    expect(await readRunnerDue(ACCT)).toBe(second);
+    await remarkRunnerDue(ACCT, null); // nothing left in the future: the stored value is deleted
+    expect(await readRunnerDue(ACCT)).toBeNull();
+    setPendingHooks({ store: { get: async () => null, set: async () => {}, delete: async () => { throw new Error("cache down"); } } });
+    await expect(remarkRunnerDue(ACCT, null)).resolves.toBeUndefined(); // a failed delete is swallowed, stdout only
+    expect(stdout.some((l) => l.includes("runner_work.mark_failed"))).toBe(true);
+    install(region);
+    expect(await readRunnerDue(OTHER)).toBeNull();
+  });
+
+  it("hands the write to keepAlive, and does nothing without a store or without an account", async () => {
+    const kept: Promise<unknown>[] = [];
+    install(region, { keepAlive: (p) => void kept.push(p) });
+    await markRunnerWork(ACCT);
+    expect(kept).toHaveLength(1);
+    await markRunnerWork("");
+    expect(kept).toHaveLength(1);
+    setPendingHooks(null);
+    await expect(markRunnerWork(ACCT)).resolves.toBeUndefined();
+  });
+
+  it("never throws or rejects when the store or keepAlive fails, and reports to stdout only (no hooks.reportError, which opens the database)", async () => {
+    const reportError = vi.fn();
+    const failing = { get: async () => { throw new Error("cache down"); }, set: async () => { throw new Error("cache down"); }, delete: async () => {} };
+    setPendingHooks({ store: failing, reportError, keepAlive: () => { throw new Error("no context"); } });
+    await expect(markRunnerWork(ACCT)).resolves.toBeUndefined();
+    await expect(markRunnerWork(ACCT, { since: clock.value + MIN, now: clock.value })).resolves.toBeUndefined();
+    expect(reportError).not.toHaveBeenCalled();
+    expect(stdout.filter((l) => l.includes("runner_work.mark_failed")).length).toBe(4);
+  });
+
+  it("a store that never answers is dropped after the bound", async () => {
+    const hang = <T>(): Promise<T> => new Promise<T>(() => {});
+    setPendingHooks({ store: { get: () => hang<unknown>(), set: () => hang<void>(), delete: () => hang<void>() } });
+    const started = Date.now();
+    await markRunnerWork(ACCT);
+    expect(Date.now() - started).toBeLessThan(STORE_TIMEOUT_MS * 4);
   });
 });

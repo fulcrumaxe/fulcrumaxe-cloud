@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { markRunnerWork } from "@fx/core/src/pendingWork.js";
 import { DIAL_DEFAULT_MARKER, getCurrentDialSetting, writeDialSetting } from "@fx/db/src/decisions.js";
 import { RUNNER_RUN_DECISION_TYPE, defaultDisposition, dispositionForPreset, isPresetName, readRunnerPlanDial, type RunnerPlanDial } from "@fx/db/src/runnerPlanDial.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
@@ -78,6 +79,8 @@ export async function setPlanApprovalDial(deps: RunnerCloudDeps, principal: Sess
       if (current === null || current.preset === DIAL_DEFAULT_MARKER) return getPlanApprovalDial(deps, principal, repoId);
     }
     await writeDialSetting({ pool: deps.appUserPool, principal: principal.userId }, { accountId: principal.accountId, repoId, decisionType: RUNNER_RUN_DECISION_TYPE, disposition, preset });
+    // The new dial version has committed: a repository moved off "ask" can have its waiting runs auto-approved.
+    if (disposition !== "ask") void markRunnerWork(principal.accountId);
   } catch (error) {
     if (error instanceof RunnerHttpError) throw error;
     switch (pgCode(error)) {

@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { NOT_RECORDED_MEASURE, PROPOSAL_VERIFIER_ROLE, RUNNER_ELIGIBLE_ROLES, REVIEW_JOB_ROLES } from "@fulcrumaxe/runner-protocol";
 import { DEFAULT_BACKEND } from "@fx/runtime/src/backends/types.js";
-import { markWorkPending } from "@fx/core/src/pendingWork.js";
+import { markRunnerWork, markWorkPending } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { reportError } from "@fx/telemetry";
 import { recordContextLedger } from "../contextLedgerWriter.js";
@@ -229,7 +229,7 @@ export class RunnerTarget implements ExecutionTarget {
       });
     } else await this.deps.issuer.issue({ run, ...this.modeInput });
     await this.recordSections(run);
-    this.markQueued();
+    this.markQueued(run.accountId);
     return { queued: true };
   }
 
@@ -241,7 +241,7 @@ export class RunnerTarget implements ExecutionTarget {
       continues: { parentRunId: run.parentRunId ?? null, sessionId, ...(run.continuesBranch === undefined ? {} : { branch: run.continuesBranch }), ...(run.continuesPrNumber === undefined ? {} : { prNumber: run.continuesPrNumber }) },
     });
     await this.recordSections(run);
-    this.markQueued();
+    this.markQueued(run.accountId);
     return { queued: true };
   }
 
@@ -267,7 +267,9 @@ export class RunnerTarget implements ExecutionTarget {
    * run anyway. An earlier marker is never pushed later. The marker is the earliest thing due for this run, the 15
    * minute notice; the sweep that connects then re-derives the rest (the 48 hour reminder and the end of the queue time).
    */
-  private markQueued(): void {
+  private markQueued(accountId: string): void {
+    // The job is written and committed, so a runner can claim it: tell the account's runners (a no-DB hint, never awaited).
+    void markRunnerWork(accountId);
     void markWorkPending("runner-sweeper", { since: Date.now() + RUNNER_WAITING_NOTICE_MS });
   }
 

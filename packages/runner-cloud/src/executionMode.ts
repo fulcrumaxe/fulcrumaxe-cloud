@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { COPY } from "@fulcrumaxe/runner-protocol";
 import { humanMergeOnly } from "@fx/db/src/humanMergeOnly.js";
+import { markRunnerWork } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { CLOUD_VERIFIED_COPY_SHA256, isRunnerMode, recordRunStatusMove, type FailureReason } from "@fx/runner";
 import { blockError, blockFor, readRepoVisibility } from "./repoPrivacy.js";
@@ -178,8 +179,7 @@ export async function setExecutionMode(deps: RunnerCloudDeps, principal: Session
       const block = blockFor(await readRepoVisibility(deps, principal.accountId, repoId));
       if (block !== null) throw blockError(block);
     }
-    return await respond(
-      await run(async (client) => {
+    const switched = await run(async (client) => {
         const repo = await loadRepo(client, repoId);
         confirmed(repo, parsed.confirmRepo);
         if (repo.execution_mode === parsed.mode) return { repo, autoMerge: repo.auto_merge, changed: false };
@@ -212,8 +212,10 @@ export async function setExecutionMode(deps: RunnerCloudDeps, principal: Session
         }
         await client.query("SELECT repo_execution_mode_switch_audit($1, $2, $3, $4, $5)", [repoId, repo.execution_mode, parsed.mode, autoMergeOff, cancelled]);
         return { repo: { ...repo, execution_mode: parsed.mode }, autoMerge: false, changed: true, cancelledRuns: cancelled };
-      }),
-    );
+      });
+    // The placement changed and has committed: a repository that now runs on a runner may have claimable work for the account's runners.
+    if (switched.changed && isRunnerMode(parsed.mode)) void markRunnerWork(principal.accountId);
+    return respond(switched);
   } catch (error) {
     if (error instanceof RunnerHttpError) throw error;
     switch (pgCode(error)) {

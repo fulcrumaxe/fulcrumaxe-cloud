@@ -1,6 +1,6 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { setPendingHooks } from "@fx/core/src/pendingWork.js";
 import { CURRENT_PROTOCOL_VERSION, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
@@ -722,7 +722,7 @@ describe("runner follow-up runs [pg]", () => {
     it("a first run (no parent) is not retried, and is failed at fifteen minutes too", async () => {
       const id = await run({ status: "pending", lease: clock });
       await admin.query("SET session_replication_role = replica");
-      await admin.query("UPDATE agent_runs SET job_signed = NULL, runner_id = NULL, lease_generation = 0, lease_expires_at = NULL, started_at = NULL WHERE id = $1", [id]);
+      await admin.query("UPDATE agent_runs SET job_signed = NULL, runner_id = NULL, lease_expires_at = NULL, started_at = NULL WHERE id = $1", [id]);
       await admin.query("SET session_replication_role = DEFAULT");
       const { rows } = await admin.query("SELECT extract(epoch FROM created_at) * 1000 AS ms FROM agent_runs WHERE id = $1", [id]);
       const made = Math.floor(Number(rows[0].ms));
@@ -738,7 +738,7 @@ describe("runner follow-up runs [pg]", () => {
     async function joblessChildOf(parent: string): Promise<{ id: string; made: number }> {
       const id = await run({ status: "pending", parent, lease: clock });
       await admin.query("SET session_replication_role = replica");
-      await admin.query("UPDATE agent_runs SET job_signed = NULL, runner_id = NULL, lease_generation = 0, lease_expires_at = NULL, started_at = NULL WHERE id = $1", [id]);
+      await admin.query("UPDATE agent_runs SET job_signed = NULL, runner_id = NULL, lease_expires_at = NULL, started_at = NULL WHERE id = $1", [id]);
       await admin.query("SET session_replication_role = DEFAULT");
       const { rows } = await admin.query("SELECT extract(epoch FROM created_at) * 1000 AS ms FROM agent_runs WHERE id = $1", [id]);
       return { id, made: Math.floor(Number(rows[0].ms)) };
@@ -863,6 +863,79 @@ describe("runner follow-up runs [pg]", () => {
       // Once the job is there, the same run is work a runner could take: the poll shortens.
       await setJob(id);
       expect(await f.claimRunnerRun({ accountId: A.accountId, runnerId: runnerA })).toEqual({ kind: "idle", retryAfter: 5 });
+    });
+
+    describe("tells the account's runners there is claimable work (the no-DB wake hint)", () => {
+      const marks = new Map<string, number>();
+      let failWrites = false;
+      const logs: string[] = [];
+      const wakeKey = () => `wake:acct:${A.accountId}`;
+      const dueKey = () => `wake-due:acct:${A.accountId}`;
+      const settleWrites = () => new Promise((resolve) => setTimeout(resolve, 50));
+      beforeEach(() => {
+        marks.clear();
+        logs.length = 0;
+        failWrites = false;
+        vi.spyOn(console, "log").mockImplementation((line: unknown) => void logs.push(String(line)));
+        setPendingHooks({
+          store: {
+            get: async (k) => marks.get(k),
+            set: async (k, v) => {
+              if (failWrites) throw new Error("cache down");
+              marks.set(k, v);
+            },
+            delete: async (k) => void marks.delete(k),
+          },
+        });
+      });
+      afterEach(() => {
+        setPendingHooks(null);
+        vi.restoreAllMocks();
+      });
+
+      it("a lease-expired reissue marks the account once the child's job is written", async () => {
+        const parent = await run({ lease: clock - 1 });
+        const before = Date.now();
+        await sweep();
+        await settleWrites();
+        expect(await child(parent)).toHaveLength(1);
+        expect(marks.get(wakeKey())).toBeGreaterThanOrEqual(before);
+      });
+
+      it("a usage-limit follow-up is marked for when it becomes claimable, not before", async () => {
+        const id = await run({ lease: clock + 60_000 });
+        const f = createRunnerClaimFacade(writerPool, { visibility: { visibility: async () => "private" }, now: () => clock, followUp: ports });
+        await f.ingestRunnerEvents({ accountId: A.accountId, runnerId: runnerA, runId: id, leaseGeneration: 1, events: [{ seq: 0, ts: new Date(clock).toISOString(), type: "usage_limit_reached" }] });
+        await settleWrites();
+        const [made] = await child(id);
+        const after = (made.claimable_after as Date).getTime();
+        expect(after).toBeGreaterThan(Date.now());
+        expect(marks.get(dueKey())).toBe(after);
+      });
+
+      it("a run that ends while another run waits marks the account; with nothing waiting it does not", async () => {
+        const ended = (id: string) => createRunnerClaimFacade(writerPool, { visibility: { visibility: async () => "private" }, now: () => clock, followUp: ports }).ingestRunnerEvents({ accountId: A.accountId, runnerId: runnerA, runId: id, leaseGeneration: 1, events: [{ seq: 0, ts: new Date(clock).toISOString(), type: "run_ended", reason: "agent_failed" } as never] });
+        const alone = await run({ lease: clock + 60_000 });
+        await admin.query("UPDATE agent_runs SET status = 'cancelled' WHERE account_id = $1 AND runtime = 'runner' AND status = 'pending'", [A.accountId]);
+        expect(await ended(alone)).toMatchObject({ outcome: "accepted", ended: expect.any(String) });
+        await settleWrites();
+        expect(marks.has(wakeKey())).toBe(false);
+        const running = await run({ lease: clock + 60_000 });
+        await run({ status: "pending" });
+        expect(await ended(running)).toMatchObject({ outcome: "accepted", ended: expect.any(String) });
+        await settleWrites();
+        expect(marks.get(wakeKey())).toBeGreaterThan(0);
+      });
+
+      it("a cache that fails never fails the sweep or the batch, and logs to stdout only", async () => {
+        failWrites = true;
+        const parent = await run({ lease: clock - 1 });
+        expect(await sweep()).toMatchObject({ lost: 1, followUpsCreated: 1, followUpsFailed: 0 });
+        await settleWrites();
+        expect(await child(parent)).toHaveLength(1);
+        expect(marks.size).toBe(0);
+        expect(logs.some((l) => l.includes("runner_work.mark_failed"))).toBe(true);
+      });
     });
 
     it("marks the sweeper due two minutes after a child is made, so the retry does not wait for the backstop tick", async () => {

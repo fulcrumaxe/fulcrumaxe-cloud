@@ -1,4 +1,5 @@
 import { isValidRunnerName } from "@fulcrumaxe/runner-protocol";
+import { markRunnerWork } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 import { refuseNonPrivateReposIn } from "./repoPrivacy.js";
@@ -96,6 +97,8 @@ export async function applyRunnerSetting(deps: RunnerCloudDeps, principal: Sessi
       return (await client.query<SettingsRow>("SELECT name, labels, rank, paused_at IS NOT NULL AS paused, draining FROM runner_settings WHERE runner_id = $1", [runnerId])).rows[0];
     });
     if (!row) throw new Error("runner_settings_apply wrote no row");
+    // Resume ends a pause and a drain: the runner may claim again, so tell the account's runners once the change has committed.
+    if (action === "resume") void markRunnerWork(principal.accountId);
     return { status: 200, body: { runner_id: runnerId, name: row.name, labels: row.labels, rank: row.rank, paused: row.paused, draining: row.draining }, headers: { "cache-control": "no-store" } };
   } catch (error) {
     throw refusal(error);
@@ -120,6 +123,8 @@ export async function setRunnerRepos(deps: RunnerCloudDeps, principal: SessionPr
       await client.query("SELECT runner_repos_set($1, $2::uuid[])", [runnerId, given]);
       return (await client.query<{ allowed_repo_ids: string[] }>("SELECT allowed_repo_ids FROM runners WHERE id = $1", [runnerId])).rows[0]?.allowed_repo_ids ?? [];
     });
+    // The runner's coverage changed and has committed: queued runs for a newly covered repository are claimable now.
+    void markRunnerWork(principal.accountId);
     return { status: 200, body: { runner_id: runnerId, repo_ids: repoIds }, headers: { "cache-control": "no-store" } };
   } catch (error) {
     throw refusal(error);
