@@ -6,6 +6,7 @@ import { EngineRefusal } from "../../../src/engines/claude/refusal.js";
 import { MIN_CLAUDE_VERSION, inspectBinary, versionSupported, type ClaudeBinary } from "../../../src/engines/claude/pin.js";
 import type { SpawnFn } from "../../../src/engines/claude/capture.js";
 import type { AgentClient } from "./agentClient.js";
+import { testLaunch } from "../../helpers/launch.js";
 
 /**
  * C19's checks against the guest's `claude`, through the engine's own `inspectBinary` and the `ClaudeBinary` it hands back. The
@@ -30,7 +31,7 @@ function spawnInGuest(agent: AgentClient): SpawnFn {
 export async function guestClaudeBinary(agent: AgentClient, storedPath = "/opt/fx/bin/claude"): Promise<ClaudeBinary> {
   const cacheDir = mkdtempSync(path.join(tmpdir(), "fx-vm-claude-"));
   try {
-    const report = await inspectBinary({ storedPath, cacheDir, spawn: spawnInGuest(agent), timeoutMs: 60_000 }, {});
+    const report = await inspectBinary({ launch: testLaunch(), storedPath, cacheDir, spawn: spawnInGuest(agent), timeoutMs: 60_000 }, {});
     if (report.version === undefined) throw new EngineRefusal("claude_version_unsupported", "the binary's version could not be read");
     if (!versionSupported(report.version)) throw new EngineRefusal("claude_version_unsupported", `version ${report.version} is older than ${MIN_CLAUDE_VERSION}`);
     if (report.missingFlags === undefined) throw new EngineRefusal("claude_flags_unsupported", "the binary's --help could not be read");

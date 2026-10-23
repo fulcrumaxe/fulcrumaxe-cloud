@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CHECK_NOT_RUN_REASONS } from "@fulcrumaxe/runner-protocol";
 import { createBaseFile, createCheckStep, createVcsState, normalised, skippedTests, type CheckStepInput } from "../../src/daemon/checkStep.js";
 import { runCapture, runInstall } from "../../src/engines/claude/capture.js";
+import { testLaunch } from "../helpers/launch.js";
 
 /**
  * D#6 R-CHK-2: the check step on real child processes (no fake spawn) and a real git repository for the base-commit pinning. The sandbox tool is not part of this
@@ -30,7 +31,7 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
-const vcsState = createVcsState((command, args, env, timeoutMs) => runCapture(spawn, command, args, env, timeoutMs, 1024 * 1024, 2048), {});
+const vcsState = createVcsState((command, args, env, timeoutMs) => runCapture(spawn, testLaunch(), command, args, env, timeoutMs, 1024 * 1024, 2048), {});
 const step = createCheckStep({ capture: (command, args, env, cwd, timeoutMs, tail, signal, feed) => runInstall(spawn, command, args, env, cwd, timeoutMs, tail, signal, feed), now: () => new Date(), vcsState });
 const baseFile: CheckStepInput["baseFile"] = async (dir, sha, relative) => {
   try {
@@ -252,7 +253,7 @@ describe("what the check may not change (the agent cannot either)", () => {
 });
 
 describe("reading a file at a commit (createBaseFile)", () => {
-  const read = createBaseFile((command, args, env, timeoutMs) => runCapture(spawn, command, args, env, timeoutMs, 1024 * 1024, 2048), {});
+  const read = createBaseFile((command, args, env, timeoutMs) => runCapture(spawn, testLaunch(), command, args, env, timeoutMs, 1024 * 1024, 2048), {});
   it("returns the exact bytes of a text file, null for a path that is not a file there, and refuses a blob that is not valid text", async () => {
     expect((await read(ws, base, "scripts/check.sh"))!.toString("utf8")).toBe("#!/bin/sh\necho base check\nexit 3\n");
     expect(await read(ws, base, "scripts/missing.sh")).toBeNull();

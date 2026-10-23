@@ -14,6 +14,7 @@ import { createGitPath, PUSHING_ROLES, type GitJob, type GitPathDeps } from "../
 import { mirrorKeepClear, mirrorsRootFor } from "../../src/daemon/mirror.js";
 import { pushPlan } from "../../src/daemon/push.js";
 import { runCapture } from "../../src/engines/claude/capture.js";
+import { testLaunch } from "../helpers/launch.js";
 
 // Cases here run real git several times; under a loaded host (Gate 1 beside other jobs) the 5 s default has been overrun by cases that take well under 1 s alone.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -44,7 +45,7 @@ const refsOf = (repo: string): string[] => sh("-C", repo, "for-each-ref", "--for
 
 const lease = { runId: "0b1b6c52-7a43-4d5e-8a77-0f0f0f0f0f0f", leaseGeneration: 1 };
 const jobFor = (over: Partial<GitJob> = {}): GitJob => ({ repo: { id: randomUUID(), owner: "acme", name: "widgets", private: true }, continues: null, branch_prefix: "fx/", role: "executor", ...over });
-const capture: GitCapture = (command, args, env, timeoutMs) => runCapture(spawn, command, args, env, timeoutMs);
+const capture: GitCapture = (command, args, env, timeoutMs) => runCapture(spawn, testLaunch(), command, args, env, timeoutMs);
 
 beforeEach(() => {
   root = mkdtempSync(path.join(tmpdir(), "fxr-mirrorloc-"));

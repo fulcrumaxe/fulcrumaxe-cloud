@@ -16,6 +16,7 @@ import { pushPlan } from "../../src/daemon/push.js";
 import { SNAPSHOT_MAX_BYTES, SNAPSHOT_MAX_ENTRIES, snapshotConfig, sweepSnapshots, takeSnapshot, type Race } from "../../src/daemon/snapshot.js";
 import { assertGitDirShape, assertWorkspaceGit } from "../../src/daemon/workspaceGit.js";
 import { runCapture } from "../../src/engines/claude/capture.js";
+import { testLaunch } from "../helpers/launch.js";
 
 // Cases here run real git several times; under a loaded host (Gate 1 beside other jobs) the 5 s default has been overrun by cases that take well under 1 s alone.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -56,7 +57,7 @@ const has = (repo: string, sha: string): boolean => {
 
 const lease = { runId: "0b1b6c52-7a43-4d5e-8a77-0f0f0f0f0f0f", leaseGeneration: 1 };
 const job: GitJob = { repo: { id: randomUUID(), owner: "acme", name: "widgets", private: true }, continues: null, branch_prefix: "fx/", role: "executor" };
-const real: GitCapture = (command, args, env, timeoutMs) => runCapture(spawn, command, args, env, timeoutMs);
+const real: GitCapture = (command, args, env, timeoutMs) => runCapture(spawn, testLaunch(), command, args, env, timeoutMs);
 const isFetch = (args: readonly string[]): boolean => args.includes("fetch") && args.some((arg) => arg.startsWith("HEAD:refs/fx-push/"));
 
 beforeEach(() => {

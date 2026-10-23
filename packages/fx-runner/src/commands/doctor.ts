@@ -25,6 +25,7 @@ import { probeMachine, type SandboxHost } from "../sandbox/probe.js";
 import { detectDistro, sandboxFixLines } from "../sandbox/sandboxFix.js";
 import { checkJobShell } from "../sandbox/jobShellProbe.js";
 import { toolchainReport } from "../sandbox/toolchain.js";
+import { findCliStubs } from "../daemon/cliStubs.js";
 import { updatesLine } from "./update.js";
 import { userUnitInstalled } from "./service.js";
 
@@ -41,6 +42,8 @@ export interface DoctorHost {
   engine: Pick<EngineKit, "locate" | "inspect">;
   /** The user's home directory, looked up by name by the caller. Without it the sandbox probe cannot be set up and says so. */
   home: string | undefined;
+  /** The directory `doctor` was started in, where the CLI placeholders check also looks (D#6 RUNNER-CWD-1). */
+  cwd?: string | undefined;
   xdgCacheHome?: string | undefined;
   /** The user's login shell (an absolute path, from the SHELL variable): what the agent CLI starts its Bash tool through. Without it the job-shell check says it was not run. */
   shell?: string | undefined;
@@ -129,6 +132,19 @@ async function lingerCheck(host: DoctorHost, line: (level: Level, label: string,
   if (linger === "no") line("WARN", "Service", `Stops when you log out: run loginctl enable-linger ${host.userName ?? "<user>"} or use service install --system`);
   else if (linger === "yes") line("PASS", "Service", "the user service keeps running after you log out (lingering is on)");
   else line("INFO", "Service", "a user service is installed; whether it survives a logout could not be checked (loginctl did not answer)");
+}
+
+/**
+ * D#6 RUNNER-CWD-1: the empty placeholder files and directories the Claude CLI makes when it starts (`cliStubs.ts`), where they sit in the home
+ * directory or in the directory `doctor` was started in. Older runners started the CLI there. Reported as a warning; nothing is deleted.
+ */
+function cliStubsCheck(host: DoctorHost, line: (level: Level, label: string, detail: string) => void): void {
+  const places: Array<[string, string | undefined, "home" | "cwd"]> = [["Your home directory", host.home, "home"], ["The directory doctor runs in", host.cwd, "cwd"]];
+  for (const [where, dir, kind] of places) {
+    if (dir === undefined || !dir.startsWith("/")) continue;
+    const names = findCliStubs(dir, kind);
+    if (names.length > 0) line("WARN", "CLI stubs", `${where} (${dir}) holds empty files the Claude CLI makes when it starts: ${names.join(", ")}. fx-runner did not delete them; remove the ones you did not make yourself.`);
+  }
 }
 
 /** The API key file (D#6 R5b-3): whether it is there and safe, never its value. A subscription runner does not use it. */
@@ -266,6 +282,7 @@ export async function doctorCommand(ctx: CommandContext, host: DoctorHost, optio
   }
 
   apiKeyCheck(ctx, mode, line);
+  cliStubsCheck(host, line);
 
   const sandboxOk = await sandboxCheck(ctx, host, binaryPath, line);
   await limitsCheck(host, line);

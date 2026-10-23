@@ -17,15 +17,28 @@ import { CODE_MAX_BYTES } from "../src/codeSource.js";
 import { CliError } from "../src/cliError.js";
 import { createClaudeKit } from "../src/engines/claude/kit.js";
 import { createSandboxHost } from "../src/sandbox/probeHost.js";
+import { cacheRootsFor } from "../src/daemon/mirror.js";
+import { openLaunchDir } from "../src/launchDir.js";
 import { vmBuildHost } from "../scripts/vm-host.mjs";
 
-const engine = createClaudeKit(spawn, { instructionCanary: true });
+// D#6 RUNNER-CWD-1: where every program the kit starts without a directory of its own is started (a fresh empty directory under it each time),
+// and the two places such a start may never be: the home directory and this process's working directory (read at each start). No home, no launches.
+const launchRoot = (() => {
+  try {
+    return cacheRootsFor({ home: process.env.HOME, platform: process.platform, xdgCacheHome: process.env.XDG_CACHE_HOME }).launchRoot;
+  } catch {
+    return undefined;
+  }
+})();
+const launch = { root: launchRoot, home: process.env.HOME, processCwd: () => process.cwd(), uid: process.getuid?.() };
+const engine = createClaudeKit(spawn, { instructionCanary: true, launch });
 const shellVars = [];
 if (process.env.ANTHROPIC_API_KEY) shellVars.push("ANTHROPIC_API_KEY");
 if (process.env.ANTHROPIC_AUTH_TOKEN) shellVars.push("ANTHROPIC_AUTH_TOKEN");
 
 // What self-update needs (D#6 R6-2b): the version, where this program really is, whether a service manager started it (the unit sets
-// FX_RUNNER_SERVICE=1), and a way to run a freshly installed program for its start check, in a clean environment and on a time limit.
+// FX_RUNNER_SERVICE=1), and a way to run a freshly installed program for its start check, in a clean environment and on a time limit, started in a
+// fresh launch directory of its own like every other short start (D#6 RUNNER-CWD-1); a launch directory that cannot be made fails the check.
 const execPath = realpathSync(process.execPath);
 const updateHost = {
   version: RUNNER_VERSION,
@@ -38,15 +51,26 @@ const updateHost = {
       let stdout = "";
       const env = { PATH: process.env.PATH, HOME: process.env.HOME, FX_RUNNER_HOME: process.env.FX_RUNNER_HOME, XDG_CACHE_HOME: process.env.XDG_CACHE_HOME };
       for (const key of Object.keys(env)) if (env[key] === undefined) delete env[key];
+      let place;
       try {
-        const child = spawn(file, args, { env, stdio: ["ignore", "pipe", "ignore"], timeout: timeoutMs, killSignal: "SIGKILL" });
+        place = openLaunchDir(launch);
+      } catch {
+        resolve({ code: null, stdout: "" });
+        return;
+      }
+      const done = (result) => {
+        place.remove();
+        resolve(result);
+      };
+      try {
+        const child = spawn(file, args, { cwd: place.dir, env, stdio: ["ignore", "pipe", "ignore"], timeout: timeoutMs, killSignal: "SIGKILL" });
         child.stdout.on("data", (chunk) => {
           if (stdout.length < 65536) stdout += chunk.toString("utf8");
         });
-        child.on("error", () => resolve({ code: null, stdout: "" }));
-        child.on("close", (exit) => resolve({ code: exit, stdout }));
+        child.on("error", () => done({ code: null, stdout: "" }));
+        child.on("close", (exit) => done({ code: exit, stdout }));
       } catch {
-        resolve({ code: null, stdout: "" });
+        done({ code: null, stdout: "" });
       }
     }),
 };
@@ -91,6 +115,8 @@ runCli({
     signals: process,
     pid: process.pid,
     kill: (pid, signal) => process.kill(pid, signal),
+    // `run` changes to its own empty directory under the launch root before it starts anything (D#6 RUNNER-CWD-1).
+    chdir: (dir) => process.chdir(dir),
     engine,
     sandbox: createSandboxHost(engine.captureWithStderr),
     // How a tmux pane starts this program again (the watch and take-over panes), the terminal type, and the one question take-over asks.
@@ -109,12 +135,13 @@ runCli({
       }
     },
   },
-  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, uid: process.getuid?.(), xdgRuntimeDir: process.env.XDG_RUNTIME_DIR, xdgConfigHome: process.env.XDG_CONFIG_HOME, userName: accountName(), sandbox: createSandboxHost(engine.captureWithStderr), update: { version: RUNNER_VERSION, execPath } },
+  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, cwd: process.cwd(), shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, uid: process.getuid?.(), xdgRuntimeDir: process.env.XDG_RUNTIME_DIR, xdgConfigHome: process.env.XDG_CONFIG_HOME, userName: accountName(), sandbox: createSandboxHost(engine.captureWithStderr), update: { version: RUNNER_VERSION, execPath } },
   vmHost: vmBuildHost,
   serviceHost: {
     home: process.env.HOME,
     platform: process.platform,
     xdgConfigHome: process.env.XDG_CONFIG_HOME,
+    xdgCacheHome: process.env.XDG_CACHE_HOME,
     command: sea ? [process.execPath, "run"] : [process.execPath, scriptPath(), "run"],
     path: process.env.PATH,
     execPath,

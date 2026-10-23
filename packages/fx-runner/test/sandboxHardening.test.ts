@@ -1,8 +1,11 @@
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { SandboxGrantRefused, assertEnabledSandbox, sandboxSettings } from "../src/sandbox/sandboxSettings.js";
+import { SandboxGrantRefused, assertEnabledSandbox, sandboxSettings, SHARED_TEMP_DIRS } from "../src/sandbox/sandboxSettings.js";
+
+/** D#6 RUNNER-CWD-1: the shared temp directories every job is denied, as the builder lists them (as written and where they really are). */
+const SHARED_TEMP = [...new Set(SHARED_TEMP_DIRS.flatMap((dir) => [dir, existsSync(dir) ? realpathSync(dir) : dir]))];
 
 const HOME = "/home/jane";
 const STATE = "/home/jane/.fx-runner";
@@ -19,7 +22,7 @@ describe("R4b1-4: the sandbox hardening the security review asked for", () => {
   });
 
   it("names the state directory and the binary directory in denyRead, not only the home directory", () => {
-    expect(block().filesystem.denyRead).toEqual([HOME, STATE, BIN, base.workspaceRoot, base.tempRoot]);
+    expect(block().filesystem.denyRead).toEqual([...new Set([HOME, STATE, BIN, base.workspaceRoot, base.tempRoot, ...SHARED_TEMP])]);
   });
 
   it("is an allowlist: a workspace, temp directory or extra path outside every runner-owned root is refused", () => {

@@ -67,9 +67,11 @@ export function createRunnerRig(input: RunnerRigInput): RunnerRig {
   process.env.GIT_CONFIG_NOSYSTEM = "1";
   delete process.env.XDG_CACHE_HOME;
 
-  const { mirrorsRoot, workspaceRoot, tempRoot } = cacheRootsFor({ home, platform: process.platform });
+  const { mirrorsRoot, workspaceRoot, tempRoot, launchRoot } = cacheRootsFor({ home, platform: process.platform });
   const binaryDir = path.dirname(input.binary);
-  const kit = createClaudeKit(modelNeutralSpawn);
+  // Where the kit starts a program that has no directory of its own, given as the program's entry point (bin/fx-runner.mjs) gives it.
+  const launch = { root: launchRoot, home, processCwd: () => process.cwd(), uid: process.getuid?.() };
+  const kit = createClaudeKit(modelNeutralSpawn, { launch });
   const credentials = { mode: "subscription" } as const;
   const envOptions = { extraPathDirs: [] as string[] };
   const keepClear = mirrorKeepClear({ home, stateDir, binaryDir, workspaceRoot, tempRoot });

@@ -12,6 +12,7 @@ import { createGitPath, type GitJob } from "../../src/daemon/gitPath.js";
 import { githubUrl } from "../../src/daemon/mirror.js";
 import { assertAllowedRefspec, publishBranch, pushPlan, runPush } from "../../src/daemon/push.js";
 import { runCapture } from "../../src/engines/claude/capture.js";
+import { testLaunch } from "../helpers/launch.js";
 import { filesUnder, PACKAGE_DIR } from "../helpers/srcFiles.js";
 
 let root: string;
@@ -68,7 +69,7 @@ function recordingCapture(): { capture: GitCapture; calls: Call[] } {
     calls,
     capture: (command, args, env, timeoutMs) => {
       calls.push({ command, args: [...args], env });
-      return runCapture(spawn, command, args, env, timeoutMs);
+      return runCapture(spawn, testLaunch(), command, args, env, timeoutMs);
     },
   };
 }
@@ -366,7 +367,7 @@ describe("nothing the agent or the machine's hooks can plant runs, and nothing i
     const unguarded: GitCapture = (command, args, env, timeoutMs) => {
       const plain: Record<string, string> = {};
       for (const key of Object.keys(env)) if (!key.startsWith("GIT_CONFIG_")) plain[key] = env[key]!;
-      return runCapture(spawn, command, args, plain, timeoutMs);
+      return runCapture(spawn, testLaunch(), command, args, plain, timeoutMs);
     };
     const { gitPath } = makeGitPath({ capture: unguarded });
     await gitPath.prepare(jobFor(), lease, newWorkspace());

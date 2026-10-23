@@ -14,6 +14,7 @@ import { createEventRelay, type Clock } from "../../src/daemon/lease.js";
 import { createFileLedger } from "../../src/daemon/ledger.js";
 import { createNixShell, type NixDetail, type NixSkip } from "../../src/daemon/nixShell.js";
 import { runCapture, runInstall } from "../../src/engines/claude/capture.js";
+import { testLaunch } from "../helpers/launch.js";
 import { NIX_FLAKE_CHANGED_NOTE } from "../../src/job/prompt.js";
 import { generateRunnerKey } from "../../src/keys.js";
 import { originHash } from "../../src/keyring.js";
@@ -163,8 +164,8 @@ async function rig(checkBody: string, over: { wired?: boolean; shell?: string; n
   const key = generateRunnerKey();
   cloud.trust(key.publicJwk);
   const client = createRunnerClient({ origin: cloud.origin, key, now: () => new Date(), fetchFn: fetch });
-  const capture: GitCapture = (command, args, env, timeoutMs) => runCapture(spawn, command, args, { ...env, GIT_SSL_CAINFO: caFile }, timeoutMs, undefined, 2048);
-  const captureLarge: GitCapture = (command, args, env, timeoutMs) => runCapture(spawn, command, args, env, timeoutMs, 8 * 1024 * 1024, 2048);
+  const capture: GitCapture = (command, args, env, timeoutMs) => runCapture(spawn, testLaunch(), command, args, { ...env, GIT_SSL_CAINFO: caFile }, timeoutMs, undefined, 2048);
+  const captureLarge: GitCapture = (command, args, env, timeoutMs) => runCapture(spawn, testLaunch(), command, args, env, timeoutMs, 8 * 1024 * 1024, 2048);
   const gitA = createGitPathA({
     capture, mirrorsRoot: path.join(root, "cache", "mirrors"), stateDir: path.join(root, "state"), cloudOrigin: CLOUD, platform: "linux",
     mintTicket: async (): Promise<GitTicketResult> => ({ kind: "ticket", ticket, expiresAt: new Date(Date.now() + 300_000).toISOString(), proxyOrigin: relay.origin }),
@@ -202,7 +203,7 @@ async function rig(checkBody: string, over: { wired?: boolean; shell?: string; n
     ...(over.nix === undefined ? {} : {
       nix: createNixShell({
         nixBin: over.nix === "not_installed" ? undefined : path.join(root, "nix"), bwrapBin: path.join(root, "bwrap"), viewFs: { exists: () => true, isDir: () => true, isFile: () => false, list: () => [] },
-        capture: (command, args, env, timeoutMs) => runCapture(spawn, command, args, env, timeoutMs, 1024 * 1024, 2048), dataDir: path.join(root, "nix-data"), storeExists: () => true,
+        capture: (command, args, env, timeoutMs) => runCapture(spawn, testLaunch(), command, args, env, timeoutMs, 1024 * 1024, 2048), dataDir: path.join(root, "nix-data"), storeExists: () => true,
         identity: async () => ({ user: "runner", groups: ["users"] }),
       }),
       onNixSkip: (skip: NixSkip) => skips.push(skip),

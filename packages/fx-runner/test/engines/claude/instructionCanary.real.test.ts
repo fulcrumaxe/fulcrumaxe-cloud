@@ -1,8 +1,11 @@
 import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { runInstructionCanary } from "../../../src/engines/claude/instructionCanary.js";
 import { resolveClaudePath } from "../../../src/engines/claude/pin.js";
 import { cleanEnv } from "../../../src/job/cleanEnv.js";
+import { tmpRoot } from "../../helpers/tmpRoot.js";
 
 /**
  * D#601 MEM-7 acceptance 1, against the REAL installed CLI (instruction-file loading cannot be faked faithfully). Opt-in, because it starts the
@@ -18,7 +21,12 @@ describe.skipIf(!ON)("the real installed CLI and a canary CLAUDE.md", () => {
   it("passes with `--setting-sources \"\"` and fails as instruction_file_loaded with `project`", { timeout: 240_000 }, async () => {
     const env = cleanEnv({ mode: "subscription" });
     const binaryPath = resolveClaudePath(env.PATH ?? "");
-    expect(await runInstructionCanary({ binaryPath, env, spawn })).toEqual({ ok: true });
-    expect(await runInstructionCanary({ binaryPath, env, spawn, settingSources: "project" })).toEqual({ ok: false, reason: "instruction_file_loaded" });
+    const tempRoot = mkdtempSync(path.join(tmpRoot(), "fxr-canary-real-"));
+    try {
+      expect(await runInstructionCanary({ binaryPath, env, spawn, tempRoot })).toEqual({ ok: true });
+      expect(await runInstructionCanary({ binaryPath, env, spawn, tempRoot, settingSources: "project" })).toEqual({ ok: false, reason: "instruction_file_loaded" });
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
   });
 });

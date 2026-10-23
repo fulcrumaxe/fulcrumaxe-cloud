@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runCapture } from "../src/engines/claude/capture.js";
+import { testLaunch } from "./helpers/launch.js";
 import { createNixShell, findTool, identityVia } from "../src/daemon/nixShell.js";
 import { createGitPath } from "../src/daemon/gitPath.js";
 import { bwrapCanCreateNamespaces } from "./helpers/bwrapProbe.js";
@@ -60,7 +61,7 @@ const canaryInStore = (): boolean => readdirSync("/nix/store").some((entry) => e
 let devStderr = "";
 const devArgv: string[] = [];
 const capture = async (command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number) => {
-  const out = await runCapture(spawn, command, args, env, timeoutMs, 8 * 1024 * 1024, 4096);
+  const out = await runCapture(spawn, testLaunch(), command, args, env, timeoutMs, 8 * 1024 * 1024, 4096);
   if (args.includes("print-dev-env")) {
     devStderr = out.stderr ?? "";
     devArgv.push(args.join(" "));

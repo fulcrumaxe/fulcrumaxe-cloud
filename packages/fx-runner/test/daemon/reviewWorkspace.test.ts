@@ -13,6 +13,7 @@ import { createGitPath, type GitJob } from "../../src/daemon/gitPath.js";
 import { pushPlan } from "../../src/daemon/push.js";
 import { endOfFailure } from "../../src/daemon/runEnded.js";
 import { runCapture } from "../../src/engines/claude/capture.js";
+import { testLaunch } from "../helpers/launch.js";
 
 let root: string;
 let home: string;
@@ -78,7 +79,7 @@ function makeGitPath() {
   const gitPath = createGitPath({
     capture: (command, args, env, timeoutMs) => {
       calls.push([...args]);
-      return runCapture(spawn, command, args, env, timeoutMs);
+      return runCapture(spawn, testLaunch(), command, args, env, timeoutMs);
     },
     mirrorsRoot: path.join(root, "cache", "fx-runner", "mirrors"),
     stateDir: path.join(root, "state"),

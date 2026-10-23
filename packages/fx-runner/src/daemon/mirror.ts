@@ -52,11 +52,12 @@ export function mirrorsRootFor(input: { home: string; platform: NodeJS.Platform;
  * The three runner directories under the cache directory that a job's sandbox can read or is made under: the mirrors, the workspaces
  * and the job temp directories. One function, used by `run`, the sandbox probe and the protection-bypass location check, so they agree.
  */
-export function cacheRootsFor(input: { home: string; platform: NodeJS.Platform; xdgCacheHome?: string | undefined }): { mirrorsRoot: string; workspaceRoot: string; tempRoot: string; spillRoot: string } {
+export function cacheRootsFor(input: { home: string; platform: NodeJS.Platform; xdgCacheHome?: string | undefined }): { mirrorsRoot: string; workspaceRoot: string; tempRoot: string; spillRoot: string; launchRoot: string } {
   const mirrorsRoot = mirrorsRootFor(input);
   const cacheDir = path.dirname(mirrorsRoot);
   // `spillRoot` (D#600 CX-4b): one directory per run holds the full text a cut prompt points at. It sits beside the workspaces, not in the state directory the agent may not read.
-  return { mirrorsRoot, workspaceRoot: path.join(cacheDir, "workspaces"), tempRoot: path.join(cacheDir, "tmp"), spillRoot: path.join(cacheDir, "spill") };
+  // `launchRoot` (D#6 RUNNER-CWD-1): the fresh empty directories a short CLI question starts in, and the daemon's own working directory (`launchDir.ts`).
+  return { mirrorsRoot, workspaceRoot: path.join(cacheDir, "workspaces"), tempRoot: path.join(cacheDir, "tmp"), spillRoot: path.join(cacheDir, "spill"), launchRoot: path.join(cacheDir, "launch") };
 }
 
 /** The runner roots and protected locations the mirrors directory must not overlap, as the sandbox builder lists them. */

@@ -10,6 +10,7 @@ import { createEventRelay, type Clock } from "../../src/daemon/lease.js";
 import { createFileLedger } from "../../src/daemon/ledger.js";
 import { createNixShell, type NixDetail, type NixSkip, type NixSource } from "../../src/daemon/nixShell.js";
 import { runCapture } from "../../src/engines/claude/capture.js";
+import { testLaunch } from "../helpers/launch.js";
 import { runJob, type RunJobDeps } from "../../src/job/runJob.js";
 import { createWorkspaceStore } from "../../src/job/workspace.js";
 import type { SandboxPort, StartDetachedOptions } from "../../src/sandbox/port.js";
@@ -68,7 +69,7 @@ afterEach(async () => {
 });
 
 const clock: Clock = { now: () => new Date(), sleep: (ms, signal) => new Promise<void>((resolve) => { if (signal.aborted) return resolve(); const t = setTimeout(resolve, Math.min(ms, 1)); signal.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true }); }) };
-const capture = (command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number) => runCapture(spawn, command, args, env, timeoutMs, 1024 * 1024, 2048);
+const capture = (command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number) => runCapture(spawn, testLaunch(), command, args, env, timeoutMs, 1024 * 1024, 2048);
 const nixCalls = (): string[] => (existsSync(path.join(root, "calls.log")) ? readFileSync(path.join(root, "calls.log"), "utf8").trim().split("\n") : []);
 
 function rig(over: { source?: NixSource | (() => never); skips?: NixSkip[]; details?: NixDetail[]; sources?: string[]; kept?: string } = {}) {

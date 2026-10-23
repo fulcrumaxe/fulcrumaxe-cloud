@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runCapture } from "../src/engines/claude/capture.js";
+import { testLaunch } from "./helpers/launch.js";
 import { createNixShell, findTool, identityVia, NIX_FIXED_ARGS } from "../src/daemon/nixShell.js";
 import { bwrapCanCreateNamespaces } from "./helpers/bwrapProbe.js";
 
@@ -69,7 +70,7 @@ describe.skipIf(!usable)("R7c: the host's nix.conf cannot re-enable what the ste
   let stderr = "";
 
   const withConf = async (command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number) => {
-    const out = await runCapture(spawn, command, args, env, timeoutMs, 8 * 1024 * 1024, 8192);
+    const out = await runCapture(spawn, testLaunch(), command, args, env, timeoutMs, 8 * 1024 * 1024, 8192);
     if (args.includes("print-dev-env")) stderr = out.stderr ?? "";
     return out;
   };

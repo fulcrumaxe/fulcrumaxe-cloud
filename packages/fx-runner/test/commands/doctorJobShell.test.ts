@@ -10,6 +10,7 @@ import type { SandboxHost } from "../../src/sandbox/probe.js";
 import { bwrapCanCreateNamespaces } from "../helpers/bwrapProbe.js";
 import { findOnPath } from "../helpers/findOnPath.js";
 import { tmpRoot } from "../helpers/tmpRoot.js";
+import { testLaunch } from "../helpers/launch.js";
 
 /**
  * D#6 C44-2: doctor's "Job shell" lines. Every shell here is the real bash -l, started with the clean environment in a throwaway HOME made with mkdtemp.
@@ -69,7 +70,7 @@ const EXEC_RC = 'PATH="$HOME/default-bin" exec "$BASH" --noprofile --norc -c "${
 
 /** A host whose process start is the real shell-less capture. With `unwrap`, the sandbox tool is skipped and the command after `--` runs directly (the rc files are then read from HOME as they are). */
 function realHost(unwrap: boolean): SandboxHost & { calls: string[][] } {
-  const inner = createSandboxHost(createClaudeKit(spawn).captureWithStderr);
+  const inner = createSandboxHost(createClaudeKit(spawn, { launch: testLaunch() }).captureWithStderr);
   const calls: string[][] = [];
   return {
     ...inner,
@@ -86,7 +87,7 @@ function realHost(unwrap: boolean): SandboxHost & { calls: string[][] } {
 async function doctorLines(sandbox: SandboxHost, over: Partial<DoctorHost> = {}): Promise<string[]> {
   const lines: string[] = [];
   const ctx: CommandContext = { stateDir: path.join(root, "state"), uid: process.getuid?.(), out: (l) => lines.push(l), err: (l) => lines.push(l), now: () => new Date(), fetchFn: (async () => new Response("", { status: 200 })) as typeof fetch };
-  await doctorCommand(ctx, { platform: "linux", shellVars: [], engine: createClaudeKit(spawn), home, shell: bash, sandbox, ...over });
+  await doctorCommand(ctx, { platform: "linux", shellVars: [], engine: createClaudeKit(spawn, { launch: testLaunch() }), home, shell: bash, sandbox, ...over });
   return lines;
 }
 const shellLines = (lines: string[]): string[] => lines.filter((line) => line.includes("Job shell"));

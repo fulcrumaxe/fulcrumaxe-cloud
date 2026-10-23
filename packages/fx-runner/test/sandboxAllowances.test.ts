@@ -170,6 +170,41 @@ describe("R7b: the sandbox builder applies the allowances, and keeps its own ref
     expect(() => sandboxSettings({ ...outside, allowanceReadPaths: ["/srv/fx/tmp"] })).toThrow(SandboxGrantRefused);
     expect(() => sandboxSettings({ ...outside, allowanceReadPaths: ["/srv/other"] })).not.toThrow();
   });
+
+  // D#6 RUNNER-CWD-1: the shared temp directories are denied for reading on every job, so no allowance may be one of them or hold one.
+  it.each(["/tmp", "/var/tmp", "/var/tmp/", "/var", "/dev/shm", "/dev"])("refuses a path allowance that is or contains a shared temp directory: %s", (value) => {
+    expect(() => block({ allowanceReadPaths: [value] })).toThrow(SandboxGrantRefused);
+    expect(() => block({ allowanceWritePaths: [value] })).toThrow(SandboxGrantRefused);
+  });
+
+  it("keeps a strict subdirectory of a shared temp directory grantable, and still denies the directory itself", () => {
+    const b = block({ allowanceReadPaths: ["/var/tmp/fx-cache", "/dev/shm/fx-x"], allowanceWritePaths: ["/tmp/fx-scratch"] });
+    expect(b.filesystem.allowRead).toEqual(expect.arrayContaining(["/var/tmp/fx-cache", "/dev/shm/fx-x", "/tmp/fx-scratch"]));
+    expect(b.filesystem.denyRead).toEqual(expect.arrayContaining(["/tmp", "/var/tmp", "/dev/shm"]));
+    expect(b.filesystem.allowRead).not.toContain("/var/tmp");
+  });
+
+  describe("a shared temp directory is found through a symlink too", () => {
+    let links: string | undefined;
+    afterEach(() => {
+      if (links !== undefined) rmSync(links, { recursive: true, force: true });
+      links = undefined;
+    });
+
+    it("refuses a link to a shared temp directory or to a parent of one, and keeps a link to a strict subdirectory", () => {
+      const dir = mkdtempSync(path.join(tmpRoot(), "fxr-shared-"));
+      links = dir;
+      const own = path.join(dir, "own");
+      mkdirSync(own);
+      const targets = [["to-var-tmp", "/var/tmp"], ["to-var", "/var"], ["to-tmp", "/tmp"], ["to-dev-shm", "/dev/shm"], ["to-own", own]] as const;
+      for (const [name, target] of targets) symlinkSync(target, path.join(dir, name));
+      for (const name of ["to-var-tmp", "to-var", "to-tmp", "to-dev-shm"]) {
+        expect(() => block({ allowanceReadPaths: [path.join(dir, name)] }), name).toThrow(/shared temp directory/);
+        expect(() => block({ allowanceWritePaths: [path.join(dir, name)] }), name).toThrow(/shared temp directory/);
+      }
+      expect(block({ allowanceReadPaths: [path.join(dir, "to-own")] }).filesystem.allowRead).toContain(path.join(dir, "to-own"));
+    });
+  });
 });
 
 describe("R7b: the host sandbox re-checks the floor and applies the set to that job only", () => {

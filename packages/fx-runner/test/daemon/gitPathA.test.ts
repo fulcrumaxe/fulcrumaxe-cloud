@@ -12,6 +12,7 @@ import { createGit } from "../../src/daemon/git.js";
 import { PUSH_BUDGET_BYTES, assertAllowedChunkRefspec, runPush } from "../../src/daemon/push.js";
 import { originHash, gitProxyPinned, gitProxyHashFor, PINNED_GIT_PROXIES } from "../../src/keyring.js";
 import { runCapture } from "../../src/engines/claude/capture.js";
+import { testLaunch } from "../helpers/launch.js";
 import { startRelay, type Relay } from "../helpers/relayFixture.js";
 
 // Cases here run real git several times; under a loaded host (Gate 1 beside other jobs) the 5 s default has been overrun by cases that take well under 1 s alone.
@@ -106,7 +107,7 @@ function makePathA(over: Partial<GitPathADeps> & { mint?: () => Promise<GitTicke
   const capture: GitCapture = (command, args, env, timeoutMs) => {
     calls.push({ args: [...args], env });
     // The real process start, with the relay's certificate as the only extra trust. Error output kept, as the engine kit keeps it.
-    return runCapture(spawn, command, args, { ...env, GIT_SSL_CAINFO: caFile }, timeoutMs, undefined, 2048);
+    return runCapture(spawn, testLaunch(), command, args, { ...env, GIT_SSL_CAINFO: caFile }, timeoutMs, undefined, 2048);
   };
   const mintTicket = vi.fn(async (): Promise<GitTicketResult> => {
     mints.push(calls.length);
@@ -455,7 +456,7 @@ describe("a chunk's refspec is the plan's branch and a commit between the run's 
     sh("-C", repo, "checkout", "-q", "--detach", base);
     const stray = commit("stray"); // a commit that is not on the run's line
     const calls: string[][] = [];
-    const git = createGit({ capture: (command, args, env, timeoutMs) => (calls.push([...args]), runCapture(spawn, command, args, { ...env, ...SETUP_ENV() }, timeoutMs)) });
+    const git = createGit({ capture: (command, args, env, timeoutMs) => (calls.push([...args]), runCapture(spawn, testLaunch(), command, args, { ...env, ...SETUP_ENV() }, timeoutMs)) });
     const bounds = { base, sha: top };
     const target = `refs/heads/${BRANCH}`;
     await assertAllowedChunkRefspec(git, repo, `${mid}:${target}`, lease, null, bounds);

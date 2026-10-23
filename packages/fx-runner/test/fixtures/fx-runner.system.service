@@ -8,6 +8,7 @@ Wants=network-online.target
 Type=simple
 User=fxrunner
 ExecStart=/opt/fx-runner/bin/node /opt/fx-runner/bin/fx-runner.mjs run
+WorkingDirectory=-/var/lib/fx-runner/.cache/fx-runner/launch/daemon
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/fx-runner/bin"
 Environment="FX_RUNNER_SERVICE=1"
 Environment="HOME=/var/lib/fx-runner"

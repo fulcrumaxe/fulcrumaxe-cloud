@@ -10,6 +10,7 @@ import { cleanEnv } from "../../../src/job/cleanEnv.js";
 import { storedBinarySource } from "../../../src/engines/claude/pin.js";
 import { FULL_HELP } from "./harness.js";
 import { CANARY_STATE_FILE, type InstructionCanaryResult, claimBlockReason, ensureInstructionCanary, readCanaryState } from "../../../src/instructionCanaryState.js";
+import { testLaunch } from "../../helpers/launch.js";
 
 /**
  * D#601 MEM-7. These tests use a stand-in program that behaves as the CLI is documented to (`--setting-sources` empty or `user`: a CLAUDE.md in
@@ -155,10 +156,10 @@ describe("the stored answer and the claim block (MEM-7)", () => {
 
 describe("the kit", () => {
   it("offers the check only when the program's entry point asks for it, so tests that count spawns see none", () => {
-    expect(createClaudeKit(spawn).instructionCanary).toBeUndefined();
-    expect(createClaudeKit(spawn, { instructionCanary: true }).instructionCanary).toBeTypeOf("function");
-    expect(createClaudeKit(spawn, { instructionCanary: true }).instructionCanaryKey!()).toBe(canaryArgvFingerprint());
-    expect(readFileSync(path.join(import.meta.dirname, "../../../bin/fx-runner.mjs"), "utf8")).toContain("createClaudeKit(spawn, { instructionCanary: true })");
+    expect(createClaudeKit(spawn, { launch: testLaunch() }).instructionCanary).toBeUndefined();
+    expect(createClaudeKit(spawn, { instructionCanary: true, launch: testLaunch() }).instructionCanary).toBeTypeOf("function");
+    expect(createClaudeKit(spawn, { instructionCanary: true, launch: testLaunch() }).instructionCanaryKey!()).toBe(canaryArgvFingerprint());
+    expect(readFileSync(path.join(import.meta.dirname, "../../../bin/fx-runner.mjs"), "utf8")).toContain("createClaudeKit(spawn, { instructionCanary: true, launch })");
   });
 });
 
@@ -190,7 +191,7 @@ echo '{"type":"result","subtype":"success","is_error":false}'
   const turns = (): number => (existsSync(path.join(dir, "turns")) ? readFileSync(path.join(dir, "turns"), "utf8").trim().split("\n").length : 0);
   const env = (): Record<string, string> => ({ PATH: process.env.PATH ?? "" });
   const source = () =>
-    canaryGuardedSource({ binaryPath: fakeBin, stateDir: dir }, storedBinarySource({ storedPath: fakeBin, cacheDir: dir, spawn }), () => runInstructionCanary({ binaryPath: fakeBin, env: cleanEnv({ mode: "subscription" }), spawn }));
+    canaryGuardedSource({ binaryPath: fakeBin, stateDir: dir }, storedBinarySource({ launch: testLaunch(), storedPath: fakeBin, cacheDir: dir, spawn }), () => runInstructionCanary({ binaryPath: fakeBin, env: cleanEnv({ mode: "subscription" }), spawn, tempRoot: dir }));
   const startup = (version: string) =>
     ensureInstructionCanary({ stateDir: dir, binaryPath: fakeBin, binaryVersion: version, argv: canaryArgvFingerprint(), now: () => new Date("2026-10-17T10:00:00Z"), check: async () => ({ ok: true }) });
 
