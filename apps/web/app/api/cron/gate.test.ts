@@ -181,11 +181,14 @@ describe("api-sweep kick", () => {
   });
 
   it.each([
-    ["no signature", null],
-    ["a wrong key", apiSweepKickHeader("another-key", Math.floor(Date.now() / 1000))],
-    ["a stale timestamp", apiSweepKickHeader(KICK_KEY, Math.floor(Date.now() / 1000) - 600)],
-    ["a malformed header", "t=1,sig=zz"],
-  ])("answers a bare 401 for %s and does nothing", async (_n, header) => {
+    ["no signature", () => null],
+    ["a wrong key", () => apiSweepKickHeader("another-key", nowSeconds())],
+    ["a stale timestamp", () => apiSweepKickHeader(KICK_KEY, nowSeconds() - 600)],
+    ["a malformed header", () => "t=1,sig=zz"],
+  ])("answers a bare 401 for %s and does nothing", async (_n, makeHeader) => {
+    // Built inside the test, against the fake clock: building them at collection used the real clock, which sits up to an hour from the fake one
+    // (CLOCK_START is the hour boundary), so "stale" fell inside the skew window for a few minutes of every hour.
+    const header = makeHeader();
     const { deps, scheduled } = kickDeps();
     const res = await apiSweepKickHandler(kickRequest(header), deps, sweep, nextDue);
     expect(res.status).toBe(401);

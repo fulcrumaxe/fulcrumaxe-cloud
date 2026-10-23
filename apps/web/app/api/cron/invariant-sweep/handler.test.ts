@@ -109,3 +109,35 @@ describe("GET /api/cron/invariant-sweep", () => {
     expect(config.crons.filter((c) => c.path === "/api/cron/invariant-sweep")).toEqual([{ path: "/api/cron/invariant-sweep", schedule: "* * * * *" }]);
   });
 });
+
+describe("GET /api/cron/invariant-sweep: ops alert (D#6)", () => {
+  const RAISED = { checked: 2, raised: { stage_not_moved: 2, usage_not_recorded: 0 }, failed: 0 };
+
+  it("new alerts raised by a pass send a notice with rule codes and counts only", async () => {
+    await markWorkPending("invariant-sweep", { now: clock.value });
+    const send = vi.fn(async (_n: { kind: string; text: string }) => undefined);
+    const s = setup({ alertSink: { send } });
+    s.sweepInvariants.mockResolvedValue(RAISED as never);
+    expect((await run(s)).status).toBe(200);
+    expect(send).toHaveBeenCalled();
+    const first = send.mock.calls[0]![0];
+    expect(first.kind).toBe("invariant");
+    expect(first.text).toContain("stage_not_moved x2");
+    expect(first.text).not.toContain("usage_not_recorded");
+  });
+
+  it("nothing raised sends nothing, and a throwing sink still answers 200 with a stdout line only", async () => {
+    const send = vi.fn(async () => {
+      throw new Error("down");
+    });
+    await markWorkPending("invariant-sweep", { now: clock.value });
+    const quiet = setup({ alertSink: { send } });
+    await run(quiet);
+    expect(send).not.toHaveBeenCalled();
+    await markWorkPending("invariant-sweep", { now: clock.value });
+    const loud = setup({ alertSink: { send } });
+    loud.sweepInvariants.mockResolvedValue(RAISED as never);
+    expect((await run(loud)).status).toBe(200);
+    expect(loud.log).toHaveBeenCalledWith("invariant sweep: ops alert not delivered");
+  });
+});
