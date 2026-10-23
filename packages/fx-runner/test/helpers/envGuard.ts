@@ -131,6 +131,14 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
  */
 export const EXACT_PROC_TOKEN_FILES: readonly string[] = ["src/sandbox/probe.ts", "src/sandbox/nixView.ts"];
 
+/**
+ * D#6 RUNNER-CWD-1: the one file that may name this process's descriptor table, and only as the whole name `/proc/self/fd` (not `fdinfo`, not
+ * anything after it but what the code builds at run time): the workspace cleanup reaches each entry through the descriptor of the directory it
+ * checked, so a parent swapped for a link cannot redirect a removal. Every other `/proc` path, the environment files included, stays banned there.
+ */
+export const PROC_FD_FILES: readonly string[] = ["src/daemon/workspaceStubs.ts"];
+const PROC_FD_NAME = /\/proc\/self\/fd(?![\w/.-])/g;
+
 const BUILTINS = new Set(builtinModules.flatMap((name) => [name, name.replace(/^node:/, "")]));
 const BANNED_EXEC_NAMES = new Set(["exec", "execSync", "execFile", "execFileSync", "fork", "spawnSync"]);
 
@@ -249,7 +257,9 @@ function spawnCallProblem(call: ts.CallExpression): boolean {
 }
 
 /** Every rule the text breaks, by name. Empty means the text reads the environment only by name, and only where that is allowed. */
-export function envAccessViolations(text: string, file: string = ENV_READER_FILE): string[] {
+export function envAccessViolations(source0: string, file: string = ENV_READER_FILE): string[] {
+  // The descriptor table's exact name, in the one file allowed it, is read as a neutral word; anything longer or different is still checked below.
+  const text = PROC_FD_FILES.includes(file) ? source0.replace(PROC_FD_NAME, "fd-table") : source0;
   const found = new Set<string>();
   const allowed = new Set(ALLOWED_BUILTINS[file] ?? []);
   const mayUseChildProcess = ENGINE_FILES.includes(file) && allowed.has("child_process");

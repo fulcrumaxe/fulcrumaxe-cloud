@@ -1233,3 +1233,41 @@ describe("a cross-side fix round on the item's pull request branch (D#599 PL-2b-
     expect(CONTEXT_WINDOW_JOB_MIN_PROTOCOL).toBe(7);
   });
 });
+
+describe("D#6 RUNNER-CWD-1: the CLI's placeholders made during the run are gone from the workspace before the publish", () => {
+  it("removes the empty files, the .git entries and the exclude block the run added, and keeps what the workspace held before", async () => {
+    let atPublish: string[] = [];
+    let excludeAtPublish = "";
+    const git = fakeGitPath({
+      async prepare(_job, _lease, workspace) {
+        // The checkout: a `.git` with an exclude file, and an empty `.npmrc` the repository ships.
+        mkdirSync(path.join(workspace, ".git", "info"), { recursive: true });
+        writeFileSync(path.join(workspace, ".git", "info", "exclude"), "# repo excludes\n");
+        writeFileSync(path.join(workspace, ".npmrc"), "");
+        return { base: "0".repeat(40) };
+      },
+      async publish(_job, _lease, workspace) {
+        atPublish = readdirSync(workspace).sort().concat(readdirSync(path.join(workspace, ".git")).sort().map((name) => `.git/${name}`));
+        excludeAtPublish = readFileSync(path.join(workspace, ".git", "info", "exclude"), "utf8");
+        return { pushed: false };
+      },
+    });
+    const rig = makeRig({ handler: { git } });
+    rig.port.port.startDetached = ((_h: SandboxHandle, opts: StartDetachedOptions) => {
+      // What the CLI does when it starts in the workspace with scrubbing on (see test/helpers/stubbingClaude.ts), plus one file of the agent's.
+      const ws = opts.workdir!;
+      for (const name of ["package.json", ".env", "pnpm-lock.yaml"]) writeFileSync(path.join(ws, name), "");
+      mkdirSync(path.join(ws, ".claude", "commands"), { recursive: true });
+      writeFileSync(path.join(ws, ".git", "commondir"), ".");
+      writeFileSync(path.join(ws, ".git", "config.worktree"), "");
+      mkdirSync(path.join(ws, ".git", "modules"));
+      writeFileSync(path.join(ws, ".git", "info", "exclude"), "\n# claude-code scrub-mode stubs\n/package.json\n/.env", { flag: "a" });
+      writeFileSync(path.join(ws, "agent.txt"), "work\n");
+      return { handle: { runId: "", sandboxName: "rn" }, hookFired: Promise.resolve(resultEvent(opts.runId)) };
+    }) as SandboxPort["startDetached"];
+    const claimed = await rig.claim();
+    expect((await rig.handle(claimed)).status).toBe("completed");
+    expect(atPublish).toEqual([".git", ".npmrc", "agent.txt", ".git/info"]);
+    expect(excludeAtPublish).toBe("# repo excludes\n");
+  });
+});
