@@ -99,7 +99,9 @@ export function createClaudeKit(spawnFn: SpawnFn, options: { instructionCanary?:
     // The first 2 K of error output is kept too: path A reads the proxy's HTTP status from it (never logged or sent).
     capture: (command, args, env, timeoutMs) => runCapture(starter.spawn, launch, command, args, env, timeoutMs, undefined, 2048),
     captureLarge: (command, args, env, timeoutMs) => runCapture(starter.spawn, launch, command, args, env, timeoutMs, 8 * 1024 * 1024, 2048),
-    installCapture: (command, args, env, cwd, timeoutMs, tailChars, signal) => runInstall(starter.spawn, command, args, env, cwd, timeoutMs, tailChars, signal),
+    // `feed` is the check's seccomp filter, written to the program's descriptor 3 for bubblewrap's `--seccomp 3`; dropping it here leaves bubblewrap with no
+    // descriptor 3 and every check fails before it starts (D#6 RUNNER-SECCOMP-FD-1). The real-bubblewrap suite `checkLaunchFeed.bwrap.test.ts` runs this exact wiring.
+    installCapture: (command, args, env, cwd, timeoutMs, tailChars, signal, feed) => runInstall(starter.spawn, command, args, env, cwd, timeoutMs, tailChars, signal, feed),
     foreground: (command, args, env) => runForegroundLaunched(starter.spawn, launch, command, args, env),
     takeOver(input) {
       const { argv, cwd } = takeoverCommand(input);
