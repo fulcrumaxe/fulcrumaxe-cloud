@@ -226,10 +226,15 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       await escalated(['code_reviewer', 'resource_limit'], 'k1');
       expect(await noticeOf(accountId, userId, itemId)).toEqual({
         kind: 'needs_human',
-        reason: 'The code reviewer could not finish reviewing this pull request: it was stopped at its memory limit, every time it was tried. No verdict was recorded and no changes were requested. A person reviews the pull request and merges or closes it on GitHub.',
+        reason: 'The code reviewer could not finish reviewing this pull request: it was stopped at its memory limit, every time it was tried. No verdict was recorded and no changes were requested. Press Approve to have the reviewers look at the pull request again, or review it yourself and merge or close it on GitHub.',
       });
       await escalated(['acceptance_tester', 'some_new_code'], 'k2');
       expect((await noticeOf(accountId, userId, itemId))!.reason).toMatch(/^The acceptance tester could not finish reviewing this pull request: its run ended without a verdict,/);
+      // A reviewer code that is a property of every object is not a reviewer: the notice falls back to the executor's summary, never an inherited value.
+      for (const [i, key] of ['constructor'].entries()) {
+        await escalated([key, 'agent_failed'], `proto${i}`);
+        expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'needs_human', reason: 'Opened the pull request.' });
+      }
       // An escalation from before the item last reached Needs a person does not count.
       await admin.query(`INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'changes_requested', 'needs_human', now(), 'control_plane', 'later')`, [accountId, itemId]);
       expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'needs_human', reason: 'Opened the pull request.' });

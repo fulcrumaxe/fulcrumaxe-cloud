@@ -460,7 +460,7 @@ export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promis
   const pinned = (read: number | null): number | null => (args.specVersion !== undefined ? args.specVersion : read);
   if (loaded.mode === "build") return buildPhase(args, pinned(loaded.specVersion));
   // Build again, for an item at Needs a person: a fresh build, unless a pull request is still open for the issue's branch.
-  if (loaded.mode === "rebuild") return rebuildPhase(args, pinned(loaded.specVersion), { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.number, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode });
+  if (loaded.mode === "rebuild") return rebuildPhase(args, pinned(loaded.specVersion), { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.number, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode }, loaded.reviewHold === true);
   if (loaded.mode === "review") return reviewPhase(args, pinned(loaded.specVersion));
   // An item left at In progress with nothing running: look for its pull request (found: the review; none: Needs human).
   if (loaded.mode === "check_build") return checkBuildPhase(args, pinned(loaded.specVersion), loaded.executorRunId);
@@ -700,8 +700,10 @@ async function respecPhase(args: AdvanceStartArgs): Promise<Result> {
  * but from `needs_human` (its own run key, so the failed run is never reused). A lookup that failed decides nothing: it stops
  * too, since a build must not start on a guess.
  */
-async function rebuildPhase(args: AdvanceStartArgs, pinned: number | null, repo: Pick<ReviewCtx, "repoId" | "owner" | "name" | "issue" | "executionMode" | "prExecutionMode" | "recordedPr">): Promise<Result> {
+async function rebuildPhase(args: AdvanceStartArgs, pinned: number | null, repo: Pick<ReviewCtx, "repoId" | "owner" | "name" | "issue" | "executionMode" | "prExecutionMode" | "recordedPr">, reviewHold = false): Promise<Result> {
   const found = await advanceFindPrStep(repo);
+  // A reviewer kept ending without a verdict and the pull request is still open: the person pressed Approve to review it again (the reviewers check its latest commit).
+  if (found.ok && reviewHold) return reviewPhase(args, pinned);
   if (found.ok) {
     await stopped(args, "rebuild_pr", "rebuild_pr_open", { pr: found.number });
     return { status: "stopped", detail: "rebuild_pr_open" };

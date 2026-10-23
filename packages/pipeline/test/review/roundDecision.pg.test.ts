@@ -201,6 +201,19 @@ describe("recordRound [pg]", () => {
     expect((await events(accountId, workItemId)).filter((e) => e.kind === "escalated")).toHaveLength(1);
   });
 
+  it("a person's Approve at Needs a person reviews again; a reviewer that gives up again records a new escalation without moving the stage (Needs a person has no edge to itself)", async () => {
+    const { accountId, workItemId, registry } = await seed();
+    const first = await endedRun(accountId, workItemId, "code-reviewer", "failed");
+    const round = (runId: string) =>
+      recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts: [{ role: "code-reviewer", runId, verdict: "fail", noVerdict: true, endCode: "resource_limit" }] }, SETTLED);
+    expect((await round(first)).decision).toBe("reviewer_no_verdict");
+    expect(await stageOf(accountId, workItemId)).toBe("needs_human");
+    const again = await endedRun(accountId, workItemId, "code-reviewer", "failed");
+    expect((await round(again)).decision).toBe("reviewer_no_verdict");
+    expect(await stageOf(accountId, workItemId)).toBe("needs_human");
+    expect((await events(accountId, workItemId)).filter((e) => e.kind === "escalated").map((e) => [e.code, e.run_id])).toEqual([["reviewer_no_verdict", first], ["reviewer_no_verdict", again]]);
+  });
+
   it("a missing verdict beside a genuine fail is still no reviewer_fail: the genuine fail is recorded, the item goes to a person for the missing one", async () => {
     const { accountId, workItemId, registry } = await seed();
     const fail = await reviewerRun(accountId, workItemId, "code-reviewer", "fail");

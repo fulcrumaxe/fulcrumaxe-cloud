@@ -209,11 +209,16 @@ export interface RerunOut {
  * A reviewer's run on this head ended without a verdict (`ends` such ends so far in this review). It is started again, under the attempt after the highest one
  * any of its keys on this head and round has (so the new key is never an existing run's), until it has ended that way as many times as an item gets fix rounds
  * (`maxFixRounds()`, the escalation's own bound). Without the worker's run listing no safe key is known, and it is not started again.
+ *
+ * The count is the larger of `ends` (this workflow's own) and the STORED ends the worker counts (`noVerdictEnds`: the role's runs on this head that ended with no
+ * verdict, since the item's last `reviewer_no_verdict` escalation). The stored count is what a workflow that restarted (a spending-limit pause resumed it, so `ends`
+ * began again at 1) cannot lose. It starts again only after a person's Approve at Needs a person: that is the one way past the escalation.
  */
 export async function reviewRerunBody(worker: ReviewWorker | null, who: StepWho, headSha: string, rereview: number, role: string, ends: number): Promise<RerunOut> {
   const bound = maxFixRounds();
   if (!worker || typeof worker.advanceReviewRuns !== "function" || !REVIEW_ROLES.includes(role) || ends >= bound) return { rerun: false, attempt: 0, bound };
   const mine = (await worker.advanceReviewRuns(who, { headSha, rereview })).find((r) => r.role === role);
+  if ((mine?.noVerdictEnds ?? 0) >= bound) return { rerun: false, attempt: 0, bound };
   return { rerun: true, attempt: (mine?.attempt ?? 0) + 1, bound };
 }
 

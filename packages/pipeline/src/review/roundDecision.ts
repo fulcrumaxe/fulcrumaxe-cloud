@@ -128,7 +128,10 @@ export async function recordRound(pool: Pool, registry: ExecutionTargetRegistry,
     // reasons: per reviewer its role, then how its last run ended (`code_reviewer`, `resource_limit`), so the activity can say which one and why.
     const reasons = missing.flatMap((v) => [toCode(v.role), toCode(v.endCode ?? "no_verdict")]).slice(0, 8);
     await withTenant(pool, input.accountId, async (client) => {
-      await escalate(client, input.accountId, input.workItemId, runId, new Date());
+      // A person's Approve at Needs a person reviews the pull request again; if the reviewer gives up again the item is already there, and Needs a person has
+      // no edge to itself. Only the escalation event is new (it also restarts the re-run bound's count, see advanceReviewRuns).
+      const at = await client.query<{ stage: string }>("SELECT stage FROM work_items WHERE id = $1 AND account_id = $2", [input.workItemId, input.accountId]);
+      if (at.rows[0]?.stage !== "needs_human") await escalate(client, input.accountId, input.workItemId, runId, new Date());
       await recordDriverEvent(client, input.accountId, { workItemId: input.workItemId, kind: "escalated", dedupeKey: `reviewer_no_verdict:${input.headSha}:${runId}`, code: "reviewer_no_verdict", reasons, headSha: input.headSha, prNumber: input.prNumber, round: Math.min(round, 20), runId });
     });
   } else if (decision === "reviewer_fail") {

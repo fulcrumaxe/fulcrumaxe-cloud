@@ -197,7 +197,7 @@ describe("advance: fix rounds and reviewer runs under a spending limit [pg]", { 
       await runWithKey(a, w, `advance:${w}:review:${HEAD}:acceptance-tester:s1`, "refused_spend", "acceptance-tester");
       const sec = await runWithKey(a, w, `advance:${w}:review:${HEAD}:security-reviewer:s2`, "running", "security-reviewer");
       const out = await lookup(a, w, HEAD, 0);
-      expect(out.sort((x, y) => x.role.localeCompare(y.role))).toEqual([
+      expect(out.sort((x, y) => x.role.localeCompare(y.role))).toMatchObject([
         { role: "code-reviewer", runId: code, attempt: 0 },
         { role: "security-reviewer", runId: sec, attempt: 2 },
       ]);
@@ -209,7 +209,7 @@ describe("advance: fix rounds and reviewer runs under a spending limit [pg]", { 
       await runWithKey(a, w, `advance:${w}:review:${OTHER}:code-reviewer`, "succeeded");
       const rr1 = await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer:rr1`, "succeeded");
       expect(await lookup(a, w, HEAD, 0)).toEqual([]);
-      expect(await lookup(a, w, HEAD, 1)).toEqual([{ role: "code-reviewer", runId: rr1, attempt: 0 }]);
+      expect(await lookup(a, w, HEAD, 1)).toMatchObject([{ role: "code-reviewer", runId: rr1, attempt: 0 }]);
       expect(await lookup(a, w, HEAD, 2)).toEqual([]);
     });
 
@@ -217,7 +217,7 @@ describe("advance: fix rounds and reviewer runs under a spending limit [pg]", { 
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a, "pr_opened");
       const run = await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer:rr1:s3:p1`, "succeeded");
-      expect(await lookup(a, w, HEAD, 1)).toEqual([{ role: "code-reviewer", runId: run, attempt: 3 }]);
+      expect(await lookup(a, w, HEAD, 1)).toMatchObject([{ role: "code-reviewer", runId: run, attempt: 3 }]);
       expect(await lookup(a, w, HEAD, 0)).toEqual([]);
     });
 
@@ -226,7 +226,7 @@ describe("advance: fix rounds and reviewer runs under a spending limit [pg]", { 
       const w = await item(a, "pr_opened");
       await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer`, "succeeded", "code-reviewer", "2026-01-01T00:00:00Z");
       const later = await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer:s1`, "succeeded", "code-reviewer", "2026-01-02T00:00:00Z");
-      expect(await lookup(a, w, HEAD, 0)).toEqual([{ role: "code-reviewer", runId: later, attempt: 1 }]);
+      expect(await lookup(a, w, HEAD, 0)).toMatchObject([{ role: "code-reviewer", runId: later, attempt: 1 }]);
     });
 
     it("the attempt is the highest of ALL the role's keys, refused ones included, so a re-run after a run with no verdict never reuses a key", async () => {
@@ -234,7 +234,7 @@ describe("advance: fix rounds and reviewer runs under a spending limit [pg]", { 
       const w = await item(a, "pr_opened");
       const failed = await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer`, "failed", "code-reviewer", "2026-01-01T00:00:00Z");
       await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer:s2`, "refused_spend", "code-reviewer", "2026-01-02T00:00:00Z");
-      expect(await lookup(a, w, HEAD, 0)).toEqual([{ role: "code-reviewer", runId: failed, attempt: 2 }]);
+      expect(await lookup(a, w, HEAD, 0)).toMatchObject([{ role: "code-reviewer", runId: failed, attempt: 2 }]);
     });
 
     it("another item's runs and another account's runs are never returned, and malformed input answers nothing", async () => {
@@ -250,6 +250,45 @@ describe("advance: fix rounds and reviewer runs under a spending limit [pg]", { 
       expect(await lookup(a, wb, HEAD, 0)).toEqual([]);
       for (const bad of ["", "zz", "A".repeat(40), `${HEAD}%`]) expect(await lookup(a, w, bad, 0)).toEqual([]);
       for (const bad of [-1, 1.5, 101]) expect(await lookup(a, w, HEAD, bad)).toEqual([]);
+    });
+
+    describe("noVerdictEnds (the re-run bound's count, from stored runs)", () => {
+      const ends = async (a: SeedRefs, w: string, role = "code-reviewer") => (await lookup(a, w, HEAD, 0)).find((r) => r.role === role)?.noVerdictEnds;
+      const escalate = (a: SeedRefs, w: string, key: string) =>
+        admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, reasons, dedupe_key) VALUES ($1, $2, 'escalated', 'reviewer_no_verdict', '{code_reviewer,agent_failed}'::text[], $3)", [a.accountId, w, key]);
+
+      it("counts the role's terminal runs that left no verdict (failed, cancelled, timed out, or succeeded without a verdict key) on the head, across re-review rounds, and not a verdict, a live run or a spending-limit refusal", async () => {
+        const a = await seedAccount(admin, randomUUID());
+        const w = await item(a, "pr_opened");
+        await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer`, "failed", "code-reviewer", "2026-01-01T00:00:00Z");
+        await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer:s1`, "cancelled", "code-reviewer", "2026-01-02T00:00:00Z");
+        await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer:rr1`, "timed_out", "code-reviewer", "2026-01-03T00:00:00Z");
+        await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer:s2`, "refused_spend", "code-reviewer", "2026-01-04T00:00:00Z");
+        const withVerdict = await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer:s3`, "succeeded", "code-reviewer", "2026-01-05T00:00:00Z");
+        await admin.query("UPDATE agent_runs SET envelope = $2::jsonb WHERE id = $1", [withVerdict, JSON.stringify({ verdict: "pass" })]);
+        await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer:s4`, "running", "code-reviewer", "2026-01-06T00:00:00Z");
+        await runWithKey(a, w, `advance:${w}:review:${OTHER}:code-reviewer`, "failed", "code-reviewer", "2026-01-01T00:00:00Z");
+        expect(await ends(a, w)).toBe(3);
+        await runWithKey(a, w, `advance:${w}:review:${HEAD}:acceptance-tester`, "failed", "acceptance-tester");
+        expect(await ends(a, w, "acceptance-tester")).toBe(1);
+        expect(await ends(a, w)).toBe(3);
+      });
+
+      it("counts only runs asked after the item's newest reviewer_no_verdict escalation: a person's Approve starts the count again, and a spend-pause resume (no escalation) does not", async () => {
+        const a = await seedAccount(admin, randomUUID());
+        const w = await item(a, "pr_opened");
+        await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer`, "failed", "code-reviewer", "2026-01-01T00:00:00Z");
+        await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer:s1`, "failed", "code-reviewer", "2026-01-02T00:00:00Z");
+        expect(await ends(a, w)).toBe(2);
+        await escalate(a, w, "e1");
+        // The escalation event is created now, after both runs: the count restarts from here.
+        expect(await ends(a, w)).toBe(0);
+        await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer:s2`, "failed", "code-reviewer");
+        expect(await ends(a, w)).toBe(1);
+        // Another cause of escalation does not move the boundary.
+        await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'escalated', 'reviewer_fail', 'e2')", [a.accountId, w]);
+        expect(await ends(a, w)).toBe(1);
+      });
     });
   });
 });

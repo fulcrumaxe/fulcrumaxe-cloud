@@ -4,6 +4,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { advanceActionFor, type AdvanceAction } from "@fx/core/src/work-items/advance.js";
 import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
+import { NO_VERDICT_ESCALATION_CODE, readReviewHold } from "@fx/core/src/work-items/reviewHold.js";
 import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError } from "@fx/core/src/work-items/stages.js";
 import { MAX_WAITING_ATTEMPT, assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
@@ -470,6 +471,8 @@ export interface AdvanceItem extends AdvancePrSource {
   hasSpec: boolean;
   /** The newest published Spec's version, or null. The build and the review pin it when the person approves. */
   specVersion: number | null;
+  /** At Needs a person because a reviewer kept ending without a verdict (see `readReviewHold`). Absent: no. */
+  reviewHold?: boolean;
   /** The item's newest executor run (any status), or null. A build that ended with no pull request is recorded against it. */
   executorRunId: string | null;
   /**
@@ -580,8 +583,12 @@ export interface AdvanceFacade {
    * uses these runs and asks only for the roles that have none, because the key of a denied ask finds its own refused run again and must never be replayed.
    * `attempt` is the highest attempt (`:s<n>`) among ALL of the role's keys on this head and round, refused ones included: a re-run of a reviewer whose run ended
    * without a verdict asks under the next one, so it can never land on an existing key.
+   * `noVerdictEnds` is how many of the role's runs on this head (every re-review round) STORED as ended without a verdict (a terminal run that is not a spending-limit
+   * refusal and left no `verdict`), counted from the first ask after the newest `reviewer_no_verdict` escalation of the item. That is the re-run bound's count: it comes from
+   * the stored runs, so a workflow that restarts (a spending-limit pause that resumed) cannot reset it. Only a person's Approve at Needs a person moves the boundary (the
+   * item reaches it only through that escalation), so Approve starts the count again.
    */
-  advanceReviewRuns(who: AdvanceStepWho, req: { headSha: string; rereview: number }): Promise<Array<{ role: string; runId: string; attempt: number }>>;
+  advanceReviewRuns(who: AdvanceStepWho, req: { headSha: string; rereview: number }): Promise<Array<{ role: string; runId: string; attempt: number; noVerdictEnds: number }>>;
   /** D#483 P3: the merge gate on the pull request's current head. */
   advanceMergeGate(who: AdvanceStepWho, prNumber: number): Promise<AdvanceMergeGateResult>;
   /**
@@ -631,7 +638,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         "SELECT owner_process FROM proposals WHERE account_id = $1 AND work_item_id = $2 LIMIT 1",
         [accountId, workItemId],
       );
-      return { role: role.rows[0]?.role, item: item.rows[0], live: Number(live.rows[0]?.n ?? 0), proposalOwner: owner.rows[0]?.owner_process ?? null };
+      const hold = item.rows[0]?.stage === "needs_human" ? await readReviewHold(client, workItemId) : false;
+      return { role: role.rows[0]?.role, item: item.rows[0] ? { ...item.rows[0], no_verdict_hold: hold } : undefined, live: Number(live.rows[0]?.n ?? 0), proposalOwner: owner.rows[0]?.owner_process ?? null };
     });
     if (read.role !== "owner" && read.role !== "admin") return refused("principal_not_authorised");
     const item = read.item;
@@ -821,8 +829,10 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         [workItemId, accountId],
       );
       const row = r.rows[0];
+      const reviewHold = row?.stage === "needs_human" ? await readReviewHold(client, workItemId) : false;
       return row
         ? {
+            reviewHold,
             stage: row.stage,
             provenance: row.provenance,
             repoId: row.repo_id,
@@ -1710,16 +1720,20 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return out;
   }
 
-  async function advanceReviewRuns(who: AdvanceStepWho, req: { headSha: string; rereview: number }): Promise<Array<{ role: string; runId: string; attempt: number }>> {
+  async function advanceReviewRuns(who: AdvanceStepWho, req: { headSha: string; rereview: number }): Promise<Array<{ role: string; runId: string; attempt: number; noVerdictEnds: number }>> {
     if (!UUID_RE.test(who.accountId) || !UUID_RE.test(who.workItemId) || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(req.headSha)) return [];
     if (!(Number.isInteger(req.rereview) && req.rereview >= 0 && req.rereview <= 100)) return [];
     const prefix = `advance:${who.workItemId}:review:${req.headSha}:`;
     const rows = await withTenant(runnerPool, who.accountId, async (client) => {
-      const r = await client.query<{ idempotency_key: string; run_id: string; refused: boolean }>(
-        `SELECT k.idempotency_key, k.run_id, (a.status = 'refused_spend') AS refused FROM agent_run_idempotency_keys k JOIN agent_runs a ON a.account_id = k.account_id AND a.id = k.run_id
+      const r = await client.query<{ idempotency_key: string; run_id: string; refused: boolean; ended_no_verdict: boolean; after_boundary: boolean }>(
+        `SELECT k.idempotency_key, k.run_id, (a.status = 'refused_spend') AS refused,
+                (a.status = ANY($4::text[]) AND a.status <> 'refused_spend'
+                  AND NOT (a.status = 'succeeded' AND jsonb_typeof(a.envelope) = 'object' AND a.envelope ? 'verdict')) AS ended_no_verdict,
+                (k.created_at > COALESCE((SELECT max(e.created_at) FROM work_item_driver_events e WHERE e.work_item_id = $2::uuid AND e.kind = 'escalated' AND e.code = $5), '-infinity'::timestamptz)) AS after_boundary
+           FROM agent_run_idempotency_keys k JOIN agent_runs a ON a.account_id = k.account_id AND a.id = k.run_id
           WHERE k.account_id = $1 AND a.work_item_id = $2 AND starts_with(k.idempotency_key, $3)
           ORDER BY k.created_at DESC, k.run_id DESC LIMIT 200`,
-        [who.accountId, who.workItemId, prefix],
+        [who.accountId, who.workItemId, prefix, [...ADVANCE_TERMINAL_STATUSES], NO_VERDICT_ESCALATION_CODE],
       );
       return r.rows;
     });
@@ -1727,13 +1741,17 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const tail = /^([a-z][a-z-]*)(?::rr(\d{1,3}))?(?::s(\d{1,6}))?(?::p\d{1,2})?(?::n[0-9a-f]{16})?$/;
     const newest = new Map<string, string>();
     const highest = new Map<string, number>();
+    const ends = new Map<string, number>();
     for (const row of rows) {
       const m = tail.exec(row.idempotency_key.slice(prefix.length));
-      if (!m || Number(m[2] ?? 0) !== req.rereview) continue;
+      if (!m) continue;
+      // The bound's count spans every re-review round of the head; the run listing below is for the asked round only.
+      if (row.ended_no_verdict && row.after_boundary) ends.set(m[1]!, (ends.get(m[1]!) ?? 0) + 1);
+      if (Number(m[2] ?? 0) !== req.rereview) continue;
       highest.set(m[1]!, Math.max(highest.get(m[1]!) ?? 0, Number(m[3] ?? 0)));
       if (!row.refused && !newest.has(m[1]!)) newest.set(m[1]!, row.run_id);
     }
-    return [...newest].map(([role, runId]) => ({ role, runId, attempt: highest.get(role) ?? 0 }));
+    return [...newest].map(([role, runId]) => ({ role, runId, attempt: highest.get(role) ?? 0, noVerdictEnds: ends.get(role) ?? 0 }));
   }
 
   async function advanceCancel(who: AdvanceStepWho, runId: string): Promise<void> {

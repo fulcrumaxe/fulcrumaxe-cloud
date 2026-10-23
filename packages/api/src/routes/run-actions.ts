@@ -7,6 +7,7 @@ import type { RouteContext, RouteEntry } from "../registry.js";
 import { SESSION_LIMITS } from "../ratelimit/session.js";
 import { maxFixRounds } from "@fx/spend";
 import { advanceActionFor } from "@fx/core/src/work-items/advance.js";
+import { readReviewHold } from "@fx/core/src/work-items/reviewHold.js";
 import {
   AlreadyRunningError,
   AuthorCheckUnavailableError,
@@ -237,7 +238,7 @@ async function approve(ctx: RouteContext, id: string) {
     if (item.provenance !== "internal") throw new ExternalRequiresHumanError();
     if (item.repo_id === null) throw new NoRepoError();
     if (item.gh_number === null) throw new NotApprovableError("work item has no GitHub issue");
-    const verdict = advanceActionFor(item);
+    const verdict = advanceActionFor({ ...item, no_verdict_hold: item.stage === "needs_human" && (await readReviewHold(client, id)) });
     if (!verdict.ok) throw new NotApprovableError(verdict.message);
     const live = await client.query<{ n: string }>("SELECT count(*) AS n FROM agent_runs WHERE work_item_id = $1 AND NOT (status = ANY($2::text[]))", [id, TERMINAL_RUN_STATUSES]);
     if (Number(live.rows[0]!.n) > 0) throw new AlreadyRunningError();
@@ -318,7 +319,7 @@ export const runActionRoutes: RouteEntry[] = [
     operationId: "approveWorkItem",
     summary: "Approve a work item into the pipeline",
     description:
-      "Session only, owner or admin; a token is refused. Takes no request body. `Idempotency-Key` is optional. Answers 202 `{ action_id, state }`: the pipeline starts working on the work item (at `triaged`: it is triaged, then a critical or feature item is discussed by the panel and given a Spec, and a small, bug or doc item gets a short Spec from the project manager and is built; a small, bug or doc item that was triaged earlier and has no Spec gets the short Spec again; at `discussing`: the panel and the Spec run again (a Spec that already exists is superseded by the new version); at `spec_ready`: the executor builds it and opens a pull request; at `needs_human` with a published Spec (\"Build again\"): a fresh build from the same Spec, unless a pull request is still open for the issue's branch, which stops it with nothing started; at `in_progress` with nothing running: the pipeline checks whether the build opened a pull request (found: the reviewers run on it; none: the item goes to `needs_human`); at `pr_opened`, `changes_requested` or `review_passed`: the reviewers check the pull request's latest commit, the executor fixes what they ask for, and the merge is checked), and the outcome of the request arrives through `GET /api/v1/run-actions/{id}`. " +
+      "Session only, owner or admin; a token is refused. Takes no request body. `Idempotency-Key` is optional. Answers 202 `{ action_id, state }`: the pipeline starts working on the work item (at `triaged`: it is triaged, then a critical or feature item is discussed by the panel and given a Spec, and a small, bug or doc item gets a short Spec from the project manager and is built; a small, bug or doc item that was triaged earlier and has no Spec gets the short Spec again; at `discussing`: the panel and the Spec run again (a Spec that already exists is superseded by the new version); at `spec_ready`: the executor builds it and opens a pull request; at `needs_human` with a published Spec (\"Build again\"): a fresh build from the same Spec, unless a pull request is still open for the issue's branch, which stops it with nothing started; at `needs_human` because a reviewer kept ending without a verdict (\"Approve\", the pull request is still open): the reviewers check the pull request's latest commit again, with a fresh set of tries for the reviewer that gave up (an Approve is a person's choice to try again), and an item with no open pull request is built again instead; at `in_progress` with nothing running: the pipeline checks whether the build opened a pull request (found: the reviewers run on it; none: the item goes to `needs_human`); at `pr_opened`, `changes_requested` or `review_passed`: the reviewers check the pull request's latest commit, the executor fixes what they ask for, and the merge is checked), and the outcome of the request arrives through `GET /api/v1/run-actions/{id}`. " +
       "Only an internal work item that has a repository and a GitHub issue behind it, has no live run (pending, running or paused) and either sits at `triaged` and has not been triaged by the pipeline yet (or was, is small, bug or doc and has no Spec), or sits at `discussing` with a panel kind (critical or feature), or sits at `needs_human` with a published Spec of a kind that is built, or sits at `spec_ready` with a published Spec of a kind that is built (not a question or a project), or sits at `in_progress` (with a published Spec), or sits at one of the three pull-request stages with a published Spec, can be approved. A second approval of the same work item while the first is still being processed returns the same `action_id`, and so does a repeat of a keyed request (with `Idempotent-Replayed: true`).",
     principals: ["session"],
     minRole: "admin",

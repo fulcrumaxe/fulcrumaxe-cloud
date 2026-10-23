@@ -44,6 +44,8 @@ interface World {
   files: PrFile[];
   /** The pull request lookups that answer nothing. */
   noPr?: boolean;
+  /** What the worker's run listing reports as STORED no-verdict ends, per role (the re-run bound's count; absent: none). */
+  storedNoVerdict?: Record<string, number>;
   /** GitHub answers the pull request lookup with a server error. */
   githubDown?: boolean;
   tier: string;
@@ -150,12 +152,12 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
     ...(w.listRuns
       ? {
           advanceReviewRuns: vi.fn(async (_who: unknown, req: { headSha: string; rereview: number }) => {
-            const newest = new Map<string, { role: string; runId: string; attempt: number }>();
+            const newest = new Map<string, { role: string; runId: string; attempt: number; noVerdictEnds: number }>();
             for (const k of [...keyed].reverse()) {
               const m = /^review:([0-9a-f]{40}):([a-z-]+)(?::rr(\d+))?(?::s(\d+))?$/.exec(k.step);
               if (!m || m[1] !== req.headSha || Number(m[3] ?? 0) !== req.rereview) continue;
               const prev = newest.get(m[2]!);
-              newest.set(m[2]!, { role: m[2]!, runId: prev?.runId ?? k.runId, attempt: Math.max(prev?.attempt ?? 0, Number(m[4] ?? 0)) });
+              newest.set(m[2]!, { role: m[2]!, runId: prev?.runId ?? k.runId, attempt: Math.max(prev?.attempt ?? 0, Number(m[4] ?? 0)), noVerdictEnds: w.storedNoVerdict?.[m[2]!] ?? 0 });
             }
             return [...newest.values()];
           }),
@@ -1454,5 +1456,48 @@ describe("reviewers that end without a verdict", () => {
     const out = await workItemAdvanceWorkflow(ARGS);
     expect(out.detail ?? "").toContain("account_budget_reached");
     expect(t.worker.advanceRecordRound).not.toHaveBeenCalled();
+  });
+});
+
+// Approve at Needs a person after a reviewer kept ending without a verdict: the open pull request is reviewed again (the table's `no_verdict_hold`).
+describe("Approve after a reviewer gave up (Needs a person, reviewer_no_verdict)", () => {
+  const HELD: AdvanceItem = { ...AT_PR, stage: "needs_human", reviewHold: true, executorRunId: "66666666-6666-4666-8666-666666666666" };
+  const PASS = { status: "succeeded", envelope: { verdict: "pass", findings: [], summary: "fine" } };
+  const OOM = { status: "failed", envelope: null, failureReason: "resource_limit" };
+  const reviewerSteps = (started: AdvanceRunRequest[], role: string) => started.filter((s) => s.role === role).map((s) => s.step);
+
+  it("the pull request is still open: the reviewers check its latest commit, nothing is built, and the item can merge", async () => {
+    const t = setup(fresh({ listRuns: true, realDecide: true, verdict: () => PASS }), HELD);
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged", detail: undefined });
+    expect(t.worker.advanceBuild).not.toHaveBeenCalled();
+    expect(reviewerSteps(t.started, "code-reviewer")).toEqual([reviewStep(H1, "code-reviewer")]);
+    expect(t.worker.advanceRecordEvent).not.toHaveBeenCalledWith(WHO, expect.objectContaining({ code: "rebuild_pr_open" }));
+  });
+
+  it("no pull request is open: the lookup falls back to Build again, as before", async () => {
+    const t = setup(fresh({ noPr: true }), HELD);
+    t.worker.advanceBuild.mockResolvedValue({ status: "started", runId: "77777777-7777-4777-8777-777777777777", branch: "fx/issue-7" });
+    await workItemAdvanceWorkflow(ARGS);
+    expect(t.worker.advanceBuild).toHaveBeenCalled();
+    expect(t.started).toEqual([]);
+  });
+
+  it("any other cause (no hold): an open pull request still stops the rebuild, nothing started", async () => {
+    const t = setup(fresh(), { ...HELD, reviewHold: false });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "stopped", detail: "rebuild_pr_open" });
+    expect(t.started).toEqual([]);
+    expect(t.worker.advanceBuild).not.toHaveBeenCalled();
+  });
+
+  it("a reviewer that gives up again goes back to a person, bounded by the STORED count: stored ends at the bound mean the one end in this workflow is not re-run (a workflow restarted by a spending-limit pause starts its own count at 1)", async () => {
+    const t = setup(fresh({ listRuns: true, realDecide: true, storedNoVerdict: { "code-reviewer": maxFixRounds() }, verdict: (role) => (role === "code-reviewer" ? OOM : PASS) }), HELD);
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "reviewer_no_verdict" });
+    expect(reviewerSteps(t.started, "code-reviewer")).toEqual([reviewStep(H1, "code-reviewer")]);
+  });
+
+  it("with fewer stored ends than the bound the reviewer is run again (the stored count is a floor under the workflow's own, never a replacement)", async () => {
+    const t = setup(fresh({ listRuns: true, realDecide: true, storedNoVerdict: { "code-reviewer": 1 }, verdict: (role, _h, step) => (role === "code-reviewer" && step === reviewStep(H1, "code-reviewer") ? OOM : PASS) }), HELD);
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged", detail: undefined });
+    expect(reviewerSteps(t.started, "code-reviewer")).toEqual([reviewStep(H1, "code-reviewer"), reviewStep(H1, "code-reviewer", 0, 1)]);
   });
 });
