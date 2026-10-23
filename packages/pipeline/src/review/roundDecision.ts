@@ -18,6 +18,10 @@ import { recordVerdictsInOrder, type GatheredVerdict, type RecordedVerdict, type
  *   incomplete   a required role has no verdict (it could not be started): nothing is decided, the driver stops.
  *   environment_failure  (D#598 P7d) a reviewer could not run the tests (its environment failed, not the code): NO verdict is recorded,
  *                no fix round starts, and the driver stops with the fact `reviewer_environment`. The same for every account.
+ *   reviewer_no_verdict  a required reviewer's runs on this head kept ending without a verdict (killed at a memory limit, a lost runner, cancelled,
+ *                out of time) and the driver's bounded re-runs are used up. Its `fail` is not a verdict: nothing is recorded for it, no fix round
+ *                starts, and the item goes to Needs a person (`escalated`, code `reviewer_no_verdict`, reasons: the role and how its last run ended).
+ *                Genuine non-passes of the other reviewers are still recorded (never their passes: the round is not complete).
  *   ci_pending   (D#598 P7b) the head's CI or a repo-wide guard is still running: NOTHING is recorded, not even a needs-fix.
  *                The driver waits and asks again with the same verdicts; the decision is made once CI has finished.
  *   head_moved   (D#598 P7b) the pull request's head is no longer the reviewed one: NOTHING is recorded. The driver reviews the new head.
@@ -27,7 +31,7 @@ import { recordVerdictsInOrder, type GatheredVerdict, type RecordedVerdict, type
  * count is therefore not used here (`recordReviewVerdict` runs in its `deferred` mode).
  */
 
-export type RoundDecision = "all_passed" | "fix" | "escalated" | "reviewer_fail" | "incomplete" | "ci_pending" | "head_moved" | "environment_failure";
+export type RoundDecision = "all_passed" | "fix" | "escalated" | "reviewer_fail" | "reviewer_no_verdict" | "incomplete" | "ci_pending" | "head_moved" | "environment_failure";
 
 export interface RoundInput {
   accountId: string;
@@ -61,9 +65,11 @@ export async function fixRoundsStarted(pool: Pool, accountId: string, workItemId
 }
 
 /** The decision for gathered verdicts, with no database. Pure. */
-export function decideRound(input: { requiredRoles: readonly VerdictRole[]; verdicts: readonly { role: VerdictRole; verdict: string; environmentFailure?: boolean }[]; fixRoundsStarted: number }): RoundDecision {
+export function decideRound(input: { requiredRoles: readonly VerdictRole[]; verdicts: readonly { role: VerdictRole; verdict: string; environmentFailure?: boolean; noVerdict?: boolean }[]; fixRoundsStarted: number }): RoundDecision {
   // A reviewer that could not run the tests has said nothing about the code: it is never a needs-fix (so never a fix round) and never a pass.
   if (input.verdicts.some((v) => v.environmentFailure === true)) return "environment_failure";
+  // Nor has a reviewer whose run ended without a verdict: its `fail` is not a judgment, so it is never a reviewer_fail and never a fix round.
+  if (input.verdicts.some((v) => v.noVerdict === true && input.requiredRoles.includes(v.role))) return "reviewer_no_verdict";
   const byRole = new Map(input.verdicts.map((v) => [v.role, v.verdict]));
   if (input.requiredRoles.some((r) => !byRole.has(r))) return "incomplete";
   const verdicts = input.requiredRoles.map((r) => byRole.get(r));
@@ -107,7 +113,7 @@ export async function recordRound(pool: Pool, registry: ExecutionTargetRegistry,
     prNumber: input.prNumber,
     round,
     verdicts: input.verdicts,
-    skipPasses: decision === "incomplete",
+    skipPasses: decision === "incomplete" || decision === "reviewer_no_verdict",
   });
 
   if (decision === "escalated") {
@@ -115,6 +121,15 @@ export async function recordRound(pool: Pool, registry: ExecutionTargetRegistry,
     await withTenant(pool, input.accountId, async (client) => {
       await escalate(client, input.accountId, input.workItemId, runId, new Date());
       await recordDriverEvent(client, input.accountId, { workItemId: input.workItemId, kind: "escalated", dedupeKey: `max_fix_rounds:${input.headSha}`, code: "max_fix_rounds", headSha: input.headSha, prNumber: input.prNumber, round: Math.min(round, 20), runId });
+    });
+  } else if (decision === "reviewer_no_verdict") {
+    const missing = input.verdicts.filter((v) => v.noVerdict === true && input.requiredRoles.includes(v.role));
+    const runId = missing[0]!.runId;
+    // reasons: per reviewer its role, then how its last run ended (`code_reviewer`, `resource_limit`), so the activity can say which one and why.
+    const reasons = missing.flatMap((v) => [toCode(v.role), toCode(v.endCode ?? "no_verdict")]).slice(0, 8);
+    await withTenant(pool, input.accountId, async (client) => {
+      await escalate(client, input.accountId, input.workItemId, runId, new Date());
+      await recordDriverEvent(client, input.accountId, { workItemId: input.workItemId, kind: "escalated", dedupeKey: `reviewer_no_verdict:${input.headSha}:${runId}`, code: "reviewer_no_verdict", reasons, headSha: input.headSha, prNumber: input.prNumber, round: Math.min(round, 20), runId });
     });
   } else if (decision === "reviewer_fail") {
     const runId = input.verdicts.find((v) => v.verdict === "fail")!.runId;

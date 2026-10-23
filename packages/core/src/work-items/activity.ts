@@ -210,6 +210,30 @@ export const REVIEW_STOP_COPY_KEY = Object.freeze({
   review_compute_cap: 'reviewComputeCap',
 } as const);
 
+/** The reviewers by the code a driver event carries for them, as the sentence names them. */
+const REVIEWER_NAMES: Readonly<Record<string, string>> = Object.freeze({ code_reviewer: 'code reviewer', acceptance_tester: 'acceptance tester', security_reviewer: 'security reviewer', debater: 'debater' });
+/** How a reviewer's last run ended, by its fixed code, as the sentence says it. A code not listed reads as the last entry's words. */
+const NO_VERDICT_ENDS: Readonly<Record<string, string>> = Object.freeze({
+  resource_limit: 'it was stopped at its memory limit',
+  wait_timeout: 'it ran out of time',
+  timed_out: 'it ran out of time',
+  wall_clock_limit: 'it ran out of time',
+  cancelled: 'its run was cancelled',
+  runner_lost: 'the runner lost contact with it',
+  agent_failed: 'its agent stopped before it finished',
+});
+
+/**
+ * The notice for an item a reviewer could not finish (`escalated` with code `reviewer_no_verdict`; reasons: role, end, per reviewer). It never says changes were
+ * requested: none were. Null when the reasons name no reviewer this sentence knows.
+ */
+export function reviewerNoVerdictSentence(reasons: readonly string[]): string | null {
+  const name = REVIEWER_NAMES[reasons[0] ?? ''];
+  if (name === undefined) return null;
+  const end = reasons[1] !== undefined && Object.hasOwn(NO_VERDICT_ENDS, reasons[1]) ? NO_VERDICT_ENDS[reasons[1]] : 'its run ended without a verdict';
+  return `The ${name} could not finish reviewing this pull request: ${end}, every time it was tried. No verdict was recorded and no changes were requested. A person reviews the pull request and merges or closes it on GitHub.`;
+}
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
 /** A shell command line as stored: printable, one line, no control characters. */
@@ -558,6 +582,19 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
         )
       ).rows[0];
       const rebuildSentence = rebuildStop?.code && Object.hasOwn(CHECK_FAILED_SENTENCES, rebuildStop.code) ? CHECK_FAILED_SENTENCES[rebuildStop.code] : undefined;
+      // A reviewer that kept ending without a verdict handed the item over: the notice names it and how it ended, never the executor's summary.
+      const noVerdict = rebuildSentence
+        ? undefined
+        : (
+            await client.query<{ reasons: string[] }>(
+              `SELECT e.reasons FROM work_item_driver_events e
+                WHERE e.work_item_id = $1::uuid AND e.kind = 'escalated' AND e.code = 'reviewer_no_verdict'
+                  AND e.created_at >= COALESCE((SELECT max(t.created_at) FROM work_item_transitions t WHERE t.work_item_id = $1::uuid AND t.to_stage = 'needs_human'), '-infinity'::timestamptz)
+                ORDER BY e.seq DESC LIMIT 1`,
+              [workItemId],
+            )
+          ).rows[0];
+      const noVerdictSentence = noVerdict ? reviewerNoVerdictSentence(noVerdict.reasons) : null;
       // The newest executor run's own summary says why the build ended without a pull request.
       const ex = (
         await client.query<{ summary: string | null; status: string }>(
@@ -569,7 +606,9 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       const summary = ex?.summary?.trim() ? safeModelText(ex.summary, ACTIVITY_LIMITS.maxNoticeChars) : null;
       notice = rebuildSentence
         ? { kind: 'check_failed', reason: rebuildSentence }
-        : {
+        : noVerdictSentence
+          ? { kind: 'needs_human', reason: noVerdictSentence }
+          : {
             kind: 'needs_human',
             reason: summary ?? (ex ? `The executor run ${ex.status.replace(/_/g, ' ')} without a pull request.` : 'The pipeline stopped and needs a person.'),
           };

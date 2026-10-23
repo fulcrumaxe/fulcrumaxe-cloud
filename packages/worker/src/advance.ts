@@ -282,6 +282,10 @@ export interface AdvanceVerdictInput {
   verdict: string;
   /** D#598 P7d: the reviewer could not run the tests. */
   environmentFailure?: boolean;
+  /** The reviewer's runs on this head ended without a verdict and its re-runs are used up: never recorded as a verdict. */
+  noVerdict?: boolean;
+  /** With `noVerdict`: how its last run ended (a fixed code). */
+  endCode?: string;
   /** The debater only. */
   debatedRole?: string;
 }
@@ -574,8 +578,10 @@ export interface AdvanceFacade {
   /**
    * D#483 S5-k1d: the reviewer runs of one head and re-review round that really started (every run but a `refused_spend` one), newest per role. A restarted review
    * uses these runs and asks only for the roles that have none, because the key of a denied ask finds its own refused run again and must never be replayed.
+   * `attempt` is the highest attempt (`:s<n>`) among ALL of the role's keys on this head and round, refused ones included: a re-run of a reviewer whose run ended
+   * without a verdict asks under the next one, so it can never land on an existing key.
    */
-  advanceReviewRuns(who: AdvanceStepWho, req: { headSha: string; rereview: number }): Promise<Array<{ role: string; runId: string }>>;
+  advanceReviewRuns(who: AdvanceStepWho, req: { headSha: string; rereview: number }): Promise<Array<{ role: string; runId: string; attempt: number }>>;
   /** D#483 P3: the merge gate on the pull request's current head. */
   advanceMergeGate(who: AdvanceStepWho, prNumber: number): Promise<AdvanceMergeGateResult>;
   /**
@@ -1282,6 +1288,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
   const SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
   const VERDICT_ROLES = ["code-reviewer", "acceptance-tester", "security-reviewer", "debater"];
   const VERDICT_WORDS = ["pass", "needs-fix", "fail"];
+  const END_CODE_RE = /^[a-z][a-z0-9_]{0,39}$/;
   const MAX_FIX_PROMPT_CHARS = 120_000;
 
   async function advanceLoadReview(who: AdvanceStepWho): Promise<AdvanceReviewLoad> {
@@ -1315,7 +1322,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       (input.round === undefined || (Number.isInteger(input.round) && input.round >= 0 && input.round <= 20)) &&
       input.requiredRoles.length > 0 && input.requiredRoles.length <= 4 && input.requiredRoles.every((r) => VERDICT_ROLES.includes(r)) &&
       input.verdicts.length <= 4 &&
-      input.verdicts.every((v) => VERDICT_ROLES.includes(v.role) && UUID_RE.test(v.runId) && VERDICT_WORDS.includes(v.verdict) && (v.environmentFailure === undefined || typeof v.environmentFailure === "boolean") && (v.debatedRole === undefined || v.debatedRole === "code-reviewer" || v.debatedRole === "security-reviewer"));
+      input.verdicts.every((v) => VERDICT_ROLES.includes(v.role) && UUID_RE.test(v.runId) && VERDICT_WORDS.includes(v.verdict) && (v.environmentFailure === undefined || typeof v.environmentFailure === "boolean") && (v.noVerdict === undefined || typeof v.noVerdict === "boolean") && (v.endCode === undefined || END_CODE_RE.test(v.endCode)) && (v.debatedRole === undefined || v.debatedRole === "code-reviewer" || v.debatedRole === "security-reviewer"));
     if (!sane) return { decision: "refused", reason: "invalid_input" };
     const bad = await guardStep(who);
     if (bad) return { decision: "refused", reason: bad.reason ?? "refused" };
@@ -1703,28 +1710,30 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return out;
   }
 
-  async function advanceReviewRuns(who: AdvanceStepWho, req: { headSha: string; rereview: number }): Promise<Array<{ role: string; runId: string }>> {
+  async function advanceReviewRuns(who: AdvanceStepWho, req: { headSha: string; rereview: number }): Promise<Array<{ role: string; runId: string; attempt: number }>> {
     if (!UUID_RE.test(who.accountId) || !UUID_RE.test(who.workItemId) || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(req.headSha)) return [];
     if (!(Number.isInteger(req.rereview) && req.rereview >= 0 && req.rereview <= 100)) return [];
     const prefix = `advance:${who.workItemId}:review:${req.headSha}:`;
     const rows = await withTenant(runnerPool, who.accountId, async (client) => {
-      const r = await client.query<{ idempotency_key: string; run_id: string }>(
-        `SELECT k.idempotency_key, k.run_id FROM agent_run_idempotency_keys k JOIN agent_runs a ON a.account_id = k.account_id AND a.id = k.run_id
-          WHERE k.account_id = $1 AND a.work_item_id = $2 AND starts_with(k.idempotency_key, $3) AND a.status <> 'refused_spend'
+      const r = await client.query<{ idempotency_key: string; run_id: string; refused: boolean }>(
+        `SELECT k.idempotency_key, k.run_id, (a.status = 'refused_spend') AS refused FROM agent_run_idempotency_keys k JOIN agent_runs a ON a.account_id = k.account_id AND a.id = k.run_id
+          WHERE k.account_id = $1 AND a.work_item_id = $2 AND starts_with(k.idempotency_key, $3)
           ORDER BY k.created_at DESC, k.run_id DESC LIMIT 200`,
         [who.accountId, who.workItemId, prefix],
       );
       return r.rows;
     });
     // What follows the head is `<role>[:rr<n>][:s<n>][:p<n>][:n<pin>]` (the role, the re-review round, the attempt, a placement generation, a note pin).
-    const tail = /^([a-z][a-z-]*)(?::rr(\d{1,3}))?(?::s\d{1,6})?(?::p\d{1,2})?(?::n[0-9a-f]{16})?$/;
+    const tail = /^([a-z][a-z-]*)(?::rr(\d{1,3}))?(?::s(\d{1,6}))?(?::p\d{1,2})?(?::n[0-9a-f]{16})?$/;
     const newest = new Map<string, string>();
+    const highest = new Map<string, number>();
     for (const row of rows) {
       const m = tail.exec(row.idempotency_key.slice(prefix.length));
       if (!m || Number(m[2] ?? 0) !== req.rereview) continue;
-      if (!newest.has(m[1]!)) newest.set(m[1]!, row.run_id);
+      highest.set(m[1]!, Math.max(highest.get(m[1]!) ?? 0, Number(m[3] ?? 0)));
+      if (!row.refused && !newest.has(m[1]!)) newest.set(m[1]!, row.run_id);
     }
-    return [...newest].map(([role, runId]) => ({ role, runId }));
+    return [...newest].map(([role, runId]) => ({ role, runId, attempt: highest.get(role) ?? 0 }));
   }
 
   async function advanceCancel(who: AdvanceStepWho, runId: string): Promise<void> {

@@ -169,6 +169,51 @@ describe("recordRound [pg]", () => {
     expect(esc[0]).toMatchObject({ code: "reviewer_fail" });
   });
 
+  /** A reviewer run that ended without a verdict, as the runner leaves one: failed (or cancelled), no envelope. */
+  async function endedRun(accountId: string, workItemId: string, role: string, status: "failed" | "cancelled"): Promise<string> {
+    const id = randomUUID();
+    await db.admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, envelope, head_sha) VALUES ($1, $2, $3, $4, 'production', $5, NULL, $6)`, [id, accountId, workItemId, role, status, HEAD]);
+    return id;
+  }
+
+  it("a reviewer whose runs kept ending without a verdict: nothing is recorded for it, no changes requested, and the item goes to Needs a person by name", async () => {
+    const { accountId, workItemId, registry } = await seed();
+    const pass = await reviewerRun(accountId, workItemId, "acceptance-tester", "pass");
+    const ended = await endedRun(accountId, workItemId, "code-reviewer", "failed");
+    const verdicts: GatheredVerdict[] = [
+      { role: "acceptance-tester", runId: pass, verdict: "pass" },
+      { role: "code-reviewer", runId: ended, verdict: "fail", noVerdict: true, endCode: "resource_limit" },
+    ];
+    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, SETTLED);
+    expect(out.decision).toBe("reviewer_no_verdict");
+    // Neither the missing verdict nor (the round being incomplete) the pass reaches the stage: never "changes requested", never "passed".
+    expect(out.recorded).toEqual([]);
+    expect(await transitions(workItemId)).toEqual([]);
+    expect(await stageOf(accountId, workItemId)).toBe("needs_human");
+    const ev = await events(accountId, workItemId);
+    expect(ev.filter((e) => e.kind === "fix_round_started")).toEqual([]);
+    expect(ev.filter((e) => e.kind === "escalated")).toEqual([expect.objectContaining({ code: "reviewer_no_verdict", reasons: ["code_reviewer", "resource_limit"], head_sha: HEAD, run_id: ended })]);
+    expect(ev.find((e) => e.kind === "review_verdicts")!.reasons).toEqual(["acceptance_tester_pass", "code_reviewer_no_verdict"]);
+    const domain = await db.admin.query("SELECT 1 FROM domain_events WHERE account_id = $1 AND subject_id = $2 AND type = 'work_item.needs_human'", [accountId, workItemId]);
+    expect(domain.rowCount).toBe(1);
+    // A replay writes nothing twice.
+    expect((await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, SETTLED)).decision).toBe("reviewer_no_verdict");
+    expect((await events(accountId, workItemId)).filter((e) => e.kind === "escalated")).toHaveLength(1);
+  });
+
+  it("a missing verdict beside a genuine fail is still no reviewer_fail: the genuine fail is recorded, the item goes to a person for the missing one", async () => {
+    const { accountId, workItemId, registry } = await seed();
+    const fail = await reviewerRun(accountId, workItemId, "code-reviewer", "fail");
+    const ended = await endedRun(accountId, workItemId, "acceptance-tester", "cancelled");
+    const out = await recordRound(db.runWriterPool, registry, {
+      accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED,
+      verdicts: [{ role: "code-reviewer", runId: fail, verdict: "fail" }, { role: "acceptance-tester", runId: ended, verdict: "fail", noVerdict: true, endCode: "cancelled" }],
+    }, SETTLED);
+    expect(out.decision).toBe("reviewer_no_verdict");
+    expect(out.recorded.map((r) => `${r.role}:${r.verdict}`)).toEqual(["code-reviewer:fail"]);
+    expect((await events(accountId, workItemId)).filter((e) => e.kind === "escalated").map((e) => e.code)).toEqual(["reviewer_no_verdict"]);
+  });
+
   it("an incomplete round (a required reviewer has no verdict) records no pass, so the card never says passed with a reviewer missing", async () => {
     const { accountId, workItemId, registry } = await seed();
     const verdicts = await gather(accountId, workItemId, [["code-reviewer", "pass"]]);

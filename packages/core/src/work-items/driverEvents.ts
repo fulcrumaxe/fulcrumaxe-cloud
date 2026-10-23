@@ -25,7 +25,8 @@ import type { PoolClient } from 'pg';
  *   fix_pushed_nothing    a fix run left the PR head unchanged. code: rereview (the reviewers that asked for the fix look again at the same head, once per head)
  *                         | fix_no_change_repeated (a second such fix on that head; the driver stopped, with an `escalated` event of the same code).
  *   fix_round_failed      the fix run ended without success. code: the run status.
- *   escalated             handed to a person. code: max_fix_rounds | reviewer_fail | fix_no_change_repeated.
+ *   escalated             handed to a person. code: max_fix_rounds | reviewer_fail | fix_no_change_repeated | reviewer_no_verdict (a reviewer's runs on the
+ *                         head kept ending without a verdict; reasons: per reviewer its role, then how its last run ended, e.g. code_reviewer, resource_limit).
  *   review_status         the `fulcrumaxe/review` commit status. code: posted | skipped | failed.
  *   merge_gate            the merge gate's outcome. code: its outcome; reasons: its block codes.
  *   merged_by_gate        the gate itself merged the pull request (a merge by a person has no such row).
