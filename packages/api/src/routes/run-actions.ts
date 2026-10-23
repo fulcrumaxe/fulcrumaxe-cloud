@@ -168,8 +168,9 @@ async function retry(ctx: RouteContext, id: string) {
     // RETRY-ONCE: a run that already has a live or started same-role child (a retry or a continuation) is retried on that child.
     if (await hasBlockingRetryChild(client, accountId, id)) throw new RunNotRetryableError("run already has a later run");
     const { rows: n } = await client.query<{ n: string }>(
-      // The KPI view's count of changes_requested stages is the fix-round count (the same number the fix loop escalates on).
-      "SELECT n_changes_requested AS n FROM v_kpi_work_items WHERE work_item_id = $1",
+      // The fix-round count the fix loop escalates on: reviewer verdicts plus a person's requests (a person round is a
+      // review round for the safety bound, though the KPI view keeps it out of n_changes_requested).
+      "SELECT (n_changes_requested + n_person_change_requests) AS n FROM v_kpi_work_items WHERE work_item_id = $1",
       [run.work_item_id],
     );
     if (Number(n[0]?.n ?? 0) >= maxFixRounds()) throw new EscalateError();

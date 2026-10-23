@@ -28,6 +28,7 @@ function mkItem(overrides: Partial<WorkItemKpiRow> = {}): WorkItemKpiRow {
     model_usd: 0,
     compute_usd: 0,
     tokens: 0,
+    n_person_change_requests: 0,
     ...overrides,
   };
 }

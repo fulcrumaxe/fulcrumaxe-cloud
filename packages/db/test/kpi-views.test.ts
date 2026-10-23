@@ -242,7 +242,7 @@ describe('KPI views (D#45 S2)', () => {
           't_discussing', 't_spec_ready', 't_in_progress', 't_pr_opened',
           't_first_verdict', 'first_verdict_stage', 't_needs_human', 't_merged',
           't_closed_unmerged', 't_closed', 'n_changes_requested', 'n_needs_human',
-          'model_usd', 'compute_usd', 'tokens',
+          'model_usd', 'compute_usd', 'tokens', 'n_person_change_requests',
         ]),
       );
     });

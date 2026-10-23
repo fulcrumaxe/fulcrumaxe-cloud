@@ -69,7 +69,10 @@ views, granted `SELECT` to `app_user` only -- every read goes through the
 querying tenant's own row-level security, the same as any other table.
 `v_kpi_work_items` carries each item's `t_*` stage stamps, its earliest
 verdict (`t_first_verdict`/`first_verdict_stage`), its `changes_requested`
-and `needs_human` counts, and its ledger (`model_usd`, `compute_usd`) and
+and `needs_human` counts (a person's "request changes" -- a transition whose
+`source_ref` starts `request_changes:` -- is not a review verdict: it is left
+out of the first verdict and of `n_changes_requested`, and counted in
+`n_person_change_requests`; the fix-round bound still counts it), and its ledger (`model_usd`, `compute_usd`) and
 token totals. `v_kpi_runs` carries one row per run with its role, runtime,
 status, timing and per-run ledger sums.
 
@@ -87,7 +90,7 @@ now }` window; "in window" means `from <= anchor < to`.
 | `spec_to_first_pr_minutes` | `T(pr_opened) - T(spec_ready)`, over items whose PR opened in the window (after their spec was ready) |
 | `queue_wait_minutes` | `T(in_progress) - T(spec_ready)`, over items that entered `in_progress` in the window |
 | `review_latency_minutes` | `T(first verdict) - T(pr_opened)`, over items whose first verdict landed in the window |
-| `fix_rounds` | count of an item's `changes_requested` rows, over items merged in the window |
+| `fix_rounds` | count of an item's reviewer `changes_requested` rows (a person's requests excluded), over items merged in the window |
 | `first_pass_review_rate` | of items merged in the window with >= 1 verdict, the share whose earliest verdict was `review_passed` |
 | `escalation_rate` | of items whose PR opened in the window, the share with >= 1 `needs_human` row |
 | `merged_count` | number of items merged in the window |

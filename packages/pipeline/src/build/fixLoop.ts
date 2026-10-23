@@ -82,6 +82,7 @@ export type RecordReviewVerdictResult =
   /** D#6 R4d-5c (C36): the fix round was not started: the build it continues has no Spec version (built before the pin). No run row, no job. */
   | { outcome: "refused"; labels: LabelDiff; reason: "no_spec_version" };
 
+/** Every changes_requested transition, a person's `request_changes:` ones included: a person round counts toward the fix-round bound (a safety limit). The KPI view keeps them out of review-verdict metrics only. */
 async function countChangesRequestedRounds(client: PoolClient, accountId: string, workItemId: string): Promise<number> {
   const { rows } = await client.query<{ count: string }>(
     `SELECT count(*)::text AS count FROM work_item_transitions
