@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { listSourceFiles } from "../../../test-guard/src/sourceFiles.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { SandboxTarget } from "../../src/targets/sandboxTarget.js";
 import { createInMemoryHookChannel } from "../../src/hookChannel.js";
@@ -22,6 +23,8 @@ import type { CreateSandboxOptions, SandboxHandle, SandboxPort, StartDetachedOpt
 import { seedAccount, seedRepo } from "../helpers/seed.js";
 import { createSandboxTargetHarness } from "../helpers/sandboxTargetFakes.js";
 import { pgHarness } from "../helpers/pgHarness.js";
+
+const SKIPPED_DIRS = new Set(["node_modules", ".next", "dist", "test", "tests"]);
 
 /**
  * D#2 H09b2-wf / H14c-3-3a-3: the post-dispatch watchdog as the `"use step"` functions `workflows/agentRun.ts`'s
@@ -208,16 +211,10 @@ describe("agentRunWorkflow (D#2 H09b2-wf, H09.7 watchdog) [pg]", () => {
 
   it("WORKFLOW-INPUT-IDS: agentRunWorkflow takes the full start input (prompt and role card included), so nothing may use it as a compiled workflow yet: no source outside this file mentions it", () => {
     const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
-    const hits: string[] = [];
-    const walk = (dir: string): void => {
-      for (const name of readdirSync(dir)) {
-        if (["node_modules", ".next", "dist", "test", "tests"].includes(name)) continue;
-        const full = path.join(dir, name);
-        if (statSync(full).isDirectory()) walk(full);
-        else if (/\.(ts|tsx|mjs|js)$/.test(name) && !/\.test\./.test(name) && readFileSync(full, "utf8").includes("agentRunWorkflow")) hits.push(path.relative(root, full));
-      }
-    };
-    for (const top of ["apps", "packages"]) walk(path.join(root, top));
+    // Git's file list, not a directory walk, so ignored build output (a web build's workflow bundles) never counts as a source.
+    const hits = listSourceFiles(root, ["apps", "packages"], SKIPPED_DIRS).filter(
+      (f) => /\.(ts|tsx|mjs|js)$/.test(f) && !/\.test\./.test(path.basename(f)) && readFileSync(path.join(root, f), "utf8").includes("agentRunWorkflow"),
+    );
     expect(hits).toEqual(["packages/runner/src/workflows/agentRun.ts"]);
   });
 });

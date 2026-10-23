@@ -1,7 +1,8 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { listSourcePaths } from '../../../test-guard/src/sourceFiles.js';
 import {
   RUN_EVENTS_REMINDER_START_DAYS,
   RUN_EVENTS_RETENTION_DAYS,
@@ -17,14 +18,9 @@ export function spellsRetentionAs90(line: string): boolean {
   return /retention/i.test(line) && /(?<![\w.])90(?![\w.])/.test(line);
 }
 
-function sourceFiles(dir: string, out: string[] = []): string[] {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (['node_modules', 'dist', '.next', 'test', 'tests', 'fixtures', 'migrations'].includes(entry.name)) continue;
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) sourceFiles(full, out);
-    else if (/\.(ts|tsx|mts|js|mjs)$/.test(entry.name)) out.push(full);
-  }
-  return out;
+/** Git's file list, not a directory walk: ignored build output (a web build's bundles inline this package's constants) is not source. */
+function sourceFiles(top: string): string[] {
+  return listSourcePaths(REPO_ROOT, [top], ['node_modules', 'dist', '.next', 'test', 'tests', 'fixtures', 'migrations']).filter((f) => /\.(ts|tsx|mts|js|mjs)$/.test(f));
 }
 
 describe('retention/runEvents (D#45 S8 criterion 1)', () => {
@@ -38,7 +34,7 @@ describe('retention/runEvents (D#45 S8 criterion 1)', () => {
   it('no other source file under packages/ or apps/ spells a retention window as 90', () => {
     const offenders: string[] = [];
     for (const root of ['packages', 'apps']) {
-      for (const file of sourceFiles(path.join(REPO_ROOT, root))) {
+      for (const file of sourceFiles(root)) {
         if (file === OWNER_FILE) continue;
         readFileSync(file, 'utf8')
           .split('\n')

@@ -33,6 +33,7 @@
   "devDependencies": {
     "@fx/runner": "workspace:*",
     "@fx/sitekit-checks": "workspace:*",
+    "@fx/test-guard": "workspace:*",
     "@types/node": "^24.19.0",
     "@types/pg": "^8.11.10",
     "ajv": "^8.17.1",

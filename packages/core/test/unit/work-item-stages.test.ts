@@ -1,7 +1,8 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { listSourcePaths } from '../../../test-guard/src/sourceFiles.js';
 import {
   WORK_ITEM_STAGES,
   WORK_ITEM_STAGE_TRANSITIONS,
@@ -178,33 +179,8 @@ describe('one writer: INSERT INTO work_item_transitions appears only in recordSt
     );
   }
 
-  function listFiles(dir: string): string[] {
-    let entries: string[];
-    try {
-      entries = readdirSync(dir);
-    } catch {
-      return [];
-    }
-    const out: string[] = [];
-    for (const entry of entries) {
-      const full = path.join(dir, entry);
-      let st;
-      try {
-        st = statSync(full);
-      } catch {
-        continue;
-      }
-      if (st.isDirectory()) {
-        if (SKIP_DIRS.has(entry)) continue;
-        out.push(...listFiles(full));
-      } else if (SCAN_EXTENSIONS.has(path.extname(entry))) {
-        out.push(full);
-      }
-    }
-    return out;
-  }
-
-  const files = SCAN_ROOTS.flatMap((root) => listFiles(path.join(REPO_ROOT, root)));
+  // Git's file list, not a directory walk: ignored build output (a web build's workflow bundles inline core source) is not a writer.
+  const files = listSourcePaths(REPO_ROOT, SCAN_ROOTS, SKIP_DIRS).filter((f) => SCAN_EXTENSIONS.has(path.extname(f)));
 
   it('scanned at least the files this test knows about (guards against an empty/miscounted scan)', () => {
     expect(files.length).toBeGreaterThan(50);

@@ -1,20 +1,17 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { listSourcePaths } from '../../../test-guard/src/sourceFiles.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..', '..', '..', '..');
 
-function walk(dir: string, out: string[] = []): string[] {
-  for (const name of readdirSync(dir)) {
-    if (name === 'node_modules' || name === '.next' || name === 'dist') continue;
-    const full = path.join(dir, name);
-    const st = statSync(full);
-    if (st.isDirectory()) walk(full, out);
-    else if (/\.(ts|tsx|mjs|js)$/.test(name) && !/\.test\.[tj]sx?$/.test(name)) out.push(full);
-  }
-  return out;
+/** Git's file list, not a directory walk: a web build's ignored workflow bundles under apps/web/app inline core source but answer no request themselves. */
+function walk(dir: string): string[] {
+  return listSourcePaths(ROOT, [path.relative(ROOT, dir).split(path.sep).join('/')], ['node_modules', '.next', 'dist']).filter(
+    (f) => /\.(ts|tsx|mjs|js)$/.test(f) && !/\.test\.[tj]sx?$/.test(path.basename(f)),
+  );
 }
 
 /**
