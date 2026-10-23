@@ -57,6 +57,19 @@ describe("browser seam guards", () => {
     expect((opts.args ?? []).join(" ")).not.toContain("no-sandbox");
   });
 
+  it("the Chromium sandbox stays on for anything but the exact check marker", () => {
+    for (const value of ["", "0", "true", "yes", "11"]) {
+      expect(launchOptions({ FX_RUNNER_CHECK: value }, "/tmp/home").chromiumSandbox).toBe(true);
+    }
+  });
+
+  it("the Chromium sandbox is off only under the runner's check marker, and the marker does not reach the browser", () => {
+    const opts = launchOptions({ FX_RUNNER_CHECK: "1", PATH: "/usr/bin" }, "/tmp/home");
+    expect(opts.chromiumSandbox).toBe(false);
+    expect(opts.env).toEqual({ HOME: "/tmp/home", PATH: "/usr/bin" });
+    expect((opts.args ?? []).join(" ")).not.toContain("no-sandbox");
+  });
+
   it("the child env is an allowlist with a fresh HOME", () => {
     const env = buildChildEnv(
       { PATH: "/bin", LANG: "C", HOME: "/root", GITHUB_TOKEN: "t", ANTHROPIC_API_KEY: "k", DATABASE_URL: "d", FX_KEK_TEST: "x" },

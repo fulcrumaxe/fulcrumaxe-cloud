@@ -722,6 +722,9 @@ importers:
       '@fx/runtime':
         specifier: workspace:*
         version: link:../runtime
+      '@fx/sitekit-checks':
+        specifier: workspace:*
+        version: link:../sitekit-checks
       '@tufjs/models':
         specifier: 5.0.0
         version: 5.0.0

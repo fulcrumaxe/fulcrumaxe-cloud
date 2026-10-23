@@ -19,9 +19,14 @@ export function buildChildEnv(src: NodeJS.ProcessEnv, home: string): Record<stri
 /** A SharedWorker's requests bypass `context.route`, so the browser must not run one. */
 const SAFE_ARGS = ["--disable-shared-workers"];
 
-/** Pipe transport (Playwright's default) and the Chromium sandbox left on. */
+/**
+ * Pipe transport (Playwright's default) and the Chromium sandbox left on, except inside the runner's check sandbox. That sandbox sets `FX_RUNNER_CHECK=1` and refuses user
+ * namespaces (which Chromium's own sandbox needs); it already gives the check no network, its own process table, a read-only view and a seccomp filter, so it is the outer
+ * boundary and Chromium runs without its inner one. The marker is read here and nowhere else; `--no-sandbox` is never passed.
+ */
 export function launchOptions(src: NodeJS.ProcessEnv, home: string): LaunchOptions {
-  return { headless: true, chromiumSandbox: true, env: buildChildEnv(src, home), args: SAFE_ARGS };
+  const insideCheckSandbox = src.FX_RUNNER_CHECK === "1";
+  return { headless: true, chromiumSandbox: !insideCheckSandbox, env: buildChildEnv(src, home), args: SAFE_ARGS };
 }
 
 function globToRegExp(glob: string): RegExp {

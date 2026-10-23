@@ -390,8 +390,11 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       const env = cleanEnv({ mode: "subscription" }, { ...config.envOptions, jobEnv });
       delete env[SUBSCRIPTION_TOKEN_VAR];
       delete env.CLAUDE_ENV_FILE;
+      // A fixed marker, set last so nothing in the job env can unset or change it. It only informs tools inside the check (a browser then skips its own sandbox, which
+      // needs user namespaces this filter refuses); it changes no confinement.
+      env.FX_RUNNER_CHECK = "1";
       // The agent's own shell sandbox is Claude Code's, started by the CLI on a model turn; the check is started by the runner, so it is built from the very same settings with
-      // the same effect: a read-only view with the denied directories hidden, no network, its own process table and a seccomp filter that refuses Unix-domain sockets.
+      // the same effect: a read-only view with the denied directories hidden, no network, its own process table and a seccomp filter that refuses Unix-domain sockets (a connected pair excepted: `checkSeccomp.ts`).
       // Where that cannot all be applied it is refused: a check never runs under weaker rules than the agent.
       if (platform !== "linux") return { refused: "the check was not run: its sandbox is not available on this platform yet, so it cannot run under the agent's rules" };
       const filter = unixSocketFilter();
