@@ -1,4 +1,5 @@
 import type { NextRequest, NextResponse } from "next/server";
+import { opsAlertSinkFromEnv } from "../../../../lib/opsAlertSink";
 import { getWorker } from "../../../../lib/worker";
 import { invariantSweepHandler } from "./handler";
 
@@ -11,5 +12,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     cronSecret: process.env.CRON_SECRET ?? "",
     getWorker,
     log: (line) => console.log(line),
+    alertSink: opsAlertSinkFromEnv(),
   });
 }

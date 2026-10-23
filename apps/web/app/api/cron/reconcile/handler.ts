@@ -3,7 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { isStagingPaused, runGatedTick } from "@fx/core/src/pendingWork";
 import { createPool } from "@fx/db/src/pool";
 import { queueDiscoveries } from "@fx/db/src/discoveryRuns";
-import { reportError } from "@fx/telemetry";
+import { createErrorReporter, reportError } from "@fx/telemetry";
+import { opsAlertSinkFromEnv } from "../../../../lib/opsAlertSink";
 import { githubInstallationsJobFromEnv } from "../../../../lib/github/installationReconcile";
 import { githubReposJobFromEnv } from "../../../../lib/github/repoReconcile";
 import { reconcileStripeClient, stripeKeyIsLive, stripeReconcileKeyFromEnv } from "@fx/billing";
@@ -11,6 +12,7 @@ import { applyFetchedSubscription } from "@fx/billing/subscriptionSync";
 import { envKekSource, fetchValidationHttpClient, healthCheck, revalidateCreditsExhausted } from "@fx/model-connection";
 import {
   buildReconcileJobs,
+  checkStalls,
   createModelCreditsRevalidateJob,
   createModelKeyHealthJob,
   createStripeSubscriptionsJob,
@@ -23,6 +25,7 @@ import {
   runTick,
   sandboxInventoryJob,
   sandboxReapJobs,
+  type OpsAlertSink,
   type ReconcileJob,
   type ReportError,
   type SandboxReapDbSetting,
@@ -104,6 +107,15 @@ export interface ReconcileHandlerDeps {
    * defaultReconcileDeps always supplies it, over the platform_ops pool.
    */
   readSandboxReapDbMode?(): Promise<SandboxReapDbSetting>;
+  /** The ops alert sink for a stalled job. Absent: built from the environment (null while not configured, which turns the alerts off). A test double passes its own or null. */
+  opsAlertSink?: OpsAlertSink | null;
+}
+
+const stdoutOnly = createErrorReporter({ service: "web" });
+
+/** A stall check or sink failure: one coded stdout line. Not the process-wide reporter, which would write error_events (same rule as the cron gate store). */
+function stallSinkError(err: unknown): void {
+  stdoutOnly.reportError(err, { stage: "reconcile.stall_alert", code: "internal_error" });
 }
 
 /**
@@ -292,6 +304,19 @@ export async function reconcileHandler(
       // Unknown means "maybe work": look again at the jobs' own cadence rather than letting the slow cadence sit on it.
       nextDueAt = Date.now() + FAST_JOB_RETRY_MS;
       deps.reportError(err, { stage: "reconcile.next_due", route: RECONCILE_ROUTE });
+    }
+    // D#6 STALL-ALERT-FAST: on this connection, announce a job that has work and has stopped passing (and its recovery). It never fails the tick,
+    // never writes error_events (a sink failure is one stdout line), and keeps the tick connecting while a notice is outstanding so recovery is noticed.
+    if (summary.enabled) {
+      try {
+        const stalls = await checkStalls({ pool: deps.platformOpsPool, sink: deps.opsAlertSink === undefined ? opsAlertSinkFromEnv() : deps.opsAlertSink, onSinkError: stallSinkError });
+        // The database is kept awake only for real work: a job stalled WITH work and no due time of its own gets the 15-minute look. A non-null due (including
+        // the credits job's hourly back-off) is never shortened, and a failed recovery post never schedules a tick; the next normal tick retries it.
+        if (stalls.stalled.length > 0 && nextDueAt === null) nextDueAt = Date.now() + FAST_JOB_RETRY_MS;
+      } catch (err) {
+        // fx-swallow-ok: reported to stdout by stallSinkError; the stall check must never fail the tick or write error_events
+        stallSinkError(err);
+      }
     }
     return summary;
   };

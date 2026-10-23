@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { finishTick, gateLine, isStagingPaused, readTickGate } from "@fx/core/src/pendingWork";
+import type { OpsAlertSink } from "@fx/reconcile";
 import type { InvariantSweepWorker } from "../../../../lib/worker";
 
 /**
@@ -29,6 +30,8 @@ export interface InvariantSweepHandlerDeps {
   sleep?(ms: number): Promise<void>;
   paused?(): boolean;
   now?(): number;
+  /** D#6 STALL-ALERT-FAST: the ops alert sink, or null/absent while not configured. A failed post is one stdout line; it never fails the pass and writes no error_events. */
+  alertSink?: OpsAlertSink | null;
 }
 
 function isAuthorized(authHeader: string | null, cronSecret: string): boolean {
@@ -66,8 +69,24 @@ export async function invariantSweepHandler(req: NextRequest, deps: InvariantSwe
     const result = await worker.sweepInvariants();
     passes.push(result);
     deps.log(gateLine(gate, Object.values(result.raised).some((n) => n > 0)));
+    await announceRaised(deps, result.raised);
     const completedAt = gate.markerValue;
     await finishTick(gate, gate.reason === "marker" && completedAt !== null && now() - completedAt < COVER_MS ? completedAt : null, now());
   }
   return NextResponse.json({ configured, passes }, { status: 200 });
+}
+
+/**
+ * A rule fires once per (rule, run), so a sweep that raised something raised something new: one comment naming the rules and counts (fixed codes and
+ * numbers, no run, item or account id). The run-writer pass has no platform_ops state to dedupe against and needs none.
+ */
+async function announceRaised(deps: InvariantSweepHandlerDeps, raised: Record<string, number>): Promise<void> {
+  const parts = Object.entries(raised).filter(([, n]) => n > 0).map(([code, n]) => `${code} x${n}`);
+  if (parts.length === 0 || !deps.alertSink) return;
+  try {
+    await deps.alertSink.send({ kind: "invariant", text: `Run stalled or inconsistent: the invariant sweep raised new alerts (${parts.join(", ")}). Details are in the platform alerts, not in this comment.` });
+  } catch {
+    // fx-swallow-ok: a failed alert post is one fixed stdout line; the sweep, the cron and error_events are untouched
+    deps.log("invariant sweep: ops alert not delivered");
+  }
 }
