@@ -30,7 +30,6 @@ const ENDPOINTS_URL = "/api/v1/webhook-endpoints";
 const EVENTS = [
   { id: "pr.opened", help: "A pull request was opened." },
   { id: "pr.ready_to_merge", help: "A pull request is ready to merge." },
-  { id: "merge_approval.decided", help: "A merge approval was decided." },
   { id: "work_item.needs_human", help: "A work item needs a person." },
   { id: "budget.exhausted", help: "A budget ran out." },
   { id: "model_connection.broken", help: "The model connection stopped working." },
@@ -52,6 +51,7 @@ const URL_REASONS = {
 
 const DISABLED_REASONS = {
   failing: "Switched off automatically: every recent delivery failed.",
+  event_removed: "Switched off: the only event it listened for was removed. Pick events to turn it back on.",
 };
 
 // A URL can carry bidi controls. In a DOM node it goes in a <bdi>; inside a

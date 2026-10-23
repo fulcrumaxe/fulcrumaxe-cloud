@@ -6487,8 +6487,7 @@
                                 "model_connection.broken",
                                 "endpoint.test",
                                 "webhook_endpoint.disabled",
-                                "pr.ready_to_merge",
-                                "merge_approval.decided"
+                                "pr.ready_to_merge"
                               ]
                             }
                           },
@@ -6642,8 +6641,7 @@
                         "model_connection.broken",
                         "endpoint.test",
                         "webhook_endpoint.disabled",
-                        "pr.ready_to_merge",
-                        "merge_approval.decided"
+                        "pr.ready_to_merge"
                       ]
                     }
                   }
@@ -6685,8 +6683,7 @@
                           "model_connection.broken",
                           "endpoint.test",
                           "webhook_endpoint.disabled",
-                          "pr.ready_to_merge",
-                          "merge_approval.decided"
+                          "pr.ready_to_merge"
                         ]
                       }
                     },
@@ -6852,8 +6849,7 @@
                           "model_connection.broken",
                           "endpoint.test",
                           "webhook_endpoint.disabled",
-                          "pr.ready_to_merge",
-                          "merge_approval.decided"
+                          "pr.ready_to_merge"
                         ]
                       }
                     },
@@ -7003,8 +6999,7 @@
                         "model_connection.broken",
                         "endpoint.test",
                         "webhook_endpoint.disabled",
-                        "pr.ready_to_merge",
-                        "merge_approval.decided"
+                        "pr.ready_to_merge"
                       ]
                     }
                   },
@@ -7049,8 +7044,7 @@
                           "model_connection.broken",
                           "endpoint.test",
                           "webhook_endpoint.disabled",
-                          "pr.ready_to_merge",
-                          "merge_approval.decided"
+                          "pr.ready_to_merge"
                         ]
                       }
                     },

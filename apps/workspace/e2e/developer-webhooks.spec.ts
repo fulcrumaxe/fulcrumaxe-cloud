@@ -483,6 +483,23 @@ test.describe("D#37 WS-F7b: Developer app, webhooks (mocked API)", () => {
     expect(w.appErrors).toEqual([]);
   });
 
+  test("an endpoint parked by the event removal explains why in plain words", async ({ page }) => {
+    const w = await watch(page);
+    await withCsp(page);
+    const mock = await mockApi(page);
+    // The shape migration 0892 leaves behind: only the test event, disabled, reason event_removed.
+    Object.assign(mock.endpoints[0], { status: "disabled", disabled_reason: "event_removed", event_types: ["endpoint.test"] });
+    await bootMocked(page);
+    await openDeveloper(page);
+    await openWebhooksTab(page);
+
+    const row = page.locator(`${DEV} [data-testid="dev-wh-table"] tbody tr`).first();
+    await expect(row.getByTestId("dev-wh-state")).toHaveText("Disabled");
+    await expect(row.getByTestId("dev-wh-reason")).toContainText("the only event it listened for was removed");
+    await expect(row.getByTestId("dev-wh-reason")).not.toContainText("event_removed");
+    expect(w.appErrors).toEqual([]);
+  });
+
   test("a disabled endpoint's detail view offers Re-enable and no test event", async ({ page }) => {
     await withCsp(page);
     await watch(page);

@@ -101,7 +101,7 @@ describe('payload: ids/enums-only allowlist', () => {
 });
 
 describe('payload: the v1 webhook event catalogue', () => {
-  it('includes the original five plus webhook_endpoint.disabled and C11\'s two additions', () => {
+  it('includes the original five plus webhook_endpoint.disabled and C11\'s pr.ready_to_merge', () => {
     expect(WEBHOOK_EVENT_TYPES).toEqual([
       'pr.opened',
       'work_item.needs_human',
@@ -110,7 +110,6 @@ describe('payload: the v1 webhook event catalogue', () => {
       'endpoint.test',
       'webhook_endpoint.disabled',
       'pr.ready_to_merge',
-      'merge_approval.decided',
     ]);
   });
 
@@ -118,6 +117,7 @@ describe('payload: the v1 webhook event catalogue', () => {
     for (const type of WEBHOOK_EVENT_TYPES) {
       expect(isKnownWebhookEventType(type)).toBe(true);
     }
+    expect(isKnownWebhookEventType('merge_approval.decided')).toBe(false);
     expect(isKnownWebhookEventType('run.status_changed')).toBe(false);
     expect(isKnownWebhookEventType('something.made.up')).toBe(false);
   });
