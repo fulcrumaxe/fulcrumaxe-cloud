@@ -260,6 +260,31 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       expect(started[0]).toMatchObject({ workItemId: w, specVersion: 1 });
     });
 
+    it("an item at needs_human after a reviewer kept ending without a verdict is advanced as a REVIEW (the reviewer's seat is asked, not the executor's), and the load says why; another newest escalation is Build again", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a, { stage: "needs_human" });
+      const escalated = (code: string, key: string) =>
+        admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'escalated', $3, $4)", [a.accountId, w, code, key]);
+      await escalated("reviewer_no_verdict", "h1");
+      const started: unknown[] = [];
+      const resolveRunSeat = vi.fn(async () => ({ ok: true as const }) as never);
+      const t = build({ startAdvance: async (args) => void started.push(args), resolveRunSeat });
+      expect(await t.module.performAdvanceWorkItem(await action(a, w))).toEqual({ result: "done", outcome: { work_item_id: w, advance: "started" } });
+      expect(resolveRunSeat).toHaveBeenCalledWith({ accountId: a.accountId, role: "code-reviewer", workItemId: w });
+      expect(started).toHaveLength(1);
+      expect(await t.module.advanceLoadItem(a.accountId, w)).toMatchObject({ stage: "needs_human", reviewHold: true });
+      // Another newest escalation (a reviewer's fail) is Build again: the executor's seat.
+      const b = await seedAccount(admin, randomUUID());
+      const w2 = await item(b, { stage: "needs_human" });
+      for (const [code, key] of [["reviewer_no_verdict", "h1"], ["reviewer_fail", "h2"]] as const) {
+        await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'escalated', $3, $4)", [b.accountId, w2, code, key]);
+      }
+      expect(await t.module.advanceLoadItem(b.accountId, w2)).toMatchObject({ stage: "needs_human", reviewHold: false });
+      resolveRunSeat.mockClear();
+      expect(await t.module.performAdvanceWorkItem(await action(b, w2))).toEqual({ result: "done", outcome: { work_item_id: w2, advance: "started" } });
+      expect(resolveRunSeat).toHaveBeenCalledWith({ accountId: b.accountId, role: "executor", workItemId: w2 });
+    });
+
     it.each([
       ["no published Spec", { spec: false }],
       ["a project", { kind: "project" }],

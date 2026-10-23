@@ -36,6 +36,11 @@ export interface AdvanceFacts {
   kind: string | null;
   /** A published (not erased) Spec exists. */
   has_spec: boolean;
+  /**
+   * The item's latest escalation (since it last reached Needs a person) was a reviewer that kept ending without a verdict (`reviewer_no_verdict`).
+   * Absent or false: any other cause. Read by `readReviewHold` (reviewHold.ts); a caller that does not read it gets today's Build again.
+   */
+  no_verdict_hold?: boolean;
 }
 
 interface StageRule {
@@ -90,7 +95,13 @@ const RULES: Readonly<Record<string, StageRule>> = Object.freeze({
   review_passed: reviewRule,
   // Stopped at Needs a person (the build ended without a pull request, or the review handed it over) and the Spec is
   // still published: "Build again" starts a fresh build from the same Spec, like a spec_ready build.
-  needs_human: { action: 'rebuild', unmet: buildUnmet },
+  // Except when a reviewer kept ending without a verdict: its pull request is still open and nothing is wrong with the build, so Approve
+  // re-enters the review (the reviewers check the pull request's latest commit), as at Changes requested. The workflow looks for the
+  // open pull request first and falls back to the build when there is none.
+  needs_human: {
+    action: (f) => (f.no_verdict_hold === true ? 'review' : 'rebuild'),
+    unmet: (f) => (f.no_verdict_hold === true ? reviewRule.unmet(f) : buildUnmet(f)),
+  },
 });
 
 /** The stages the driver can advance from, in pipeline order. Derived from the table, so there is no second list. */

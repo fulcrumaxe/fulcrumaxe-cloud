@@ -228,10 +228,11 @@ const NO_VERDICT_ENDS: Readonly<Record<string, string>> = Object.freeze({
  * requested: none were. Null when the reasons name no reviewer this sentence knows.
  */
 export function reviewerNoVerdictSentence(reasons: readonly string[]): string | null {
-  const name = REVIEWER_NAMES[reasons[0] ?? ''];
+  const key = reasons[0] ?? '';
+  const name = Object.hasOwn(REVIEWER_NAMES, key) ? REVIEWER_NAMES[key] : undefined;
   if (name === undefined) return null;
   const end = reasons[1] !== undefined && Object.hasOwn(NO_VERDICT_ENDS, reasons[1]) ? NO_VERDICT_ENDS[reasons[1]] : 'its run ended without a verdict';
-  return `The ${name} could not finish reviewing this pull request: ${end}, every time it was tried. No verdict was recorded and no changes were requested. A person reviews the pull request and merges or closes it on GitHub.`;
+  return `The ${name} could not finish reviewing this pull request: ${end}, every time it was tried. No verdict was recorded and no changes were requested. Press Approve to have the reviewers look at the pull request again, or review it yourself and merge or close it on GitHub.`;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
