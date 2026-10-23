@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CHECK_NOT_RUN_REASONS } from "@fulcrumaxe/runner-protocol";
 import { createBaseFile, createCheckStep, createVcsState, normalised, skippedTests, type CheckStepInput } from "../../src/daemon/checkStep.js";
 import { runCapture, runInstall } from "../../src/engines/claude/capture.js";
 
@@ -269,5 +270,88 @@ describe("reading a file at a commit (createBaseFile)", () => {
     expect(out.passed).toBe(false);
     expect(out.body.exit_code).toBeNull();
     expect(readFileSync(path.join(ws, "scripts", "data.bin"), "utf8")).toBe("changed");
+  });
+});
+
+/** D#6 R-CHK-3d: every way the step refuses to run the check, or stops its result from counting, names a closed reason code beside the words; an ordinary pass or failure names none. */
+describe("the reason code", () => {
+  const direct = (v: readonly string[]) => ({ tool: v[0]!, args: v.slice(1), env: { PATH: process.env.PATH ?? "" } });
+  const input = (): CheckStepInput => ({ check: { argv: ["true"], dev_shell: false, timeout_s: 60 }, workspace: ws, base, baseDir: ws, baseFile, launch: direct });
+
+  it("an ordinary pass and an ordinary failing exit carry none", async () => {
+    expect((await run([script("ok.sh", "exit 0")])).body).not.toHaveProperty("reason");
+    expect((await run([script("bad.sh", "exit 3")])).body).not.toHaveProperty("reason");
+    const slow = await run([script("slow.sh", "sleep 30")], 1);
+    expect(slow.body.timed_out).toBe(true);
+    expect(slow.body).not.toHaveProperty("reason");
+  });
+
+  it("a launch the sandbox cannot make is sandbox_unavailable; a refusal from the sandbox is sandbox_refused", async () => {
+    expect((await run(["true"], 60, { launch: () => undefined })).body.reason).toBe("sandbox_unavailable");
+    expect((await run(["true"], 60, { launch: () => ({ refused: "no seccomp filter on this platform" }) })).body.reason).toBe("sandbox_refused");
+  });
+
+  it("a link on a pinned path is pin_failed", async () => {
+    rmSync(path.join(ws, "scripts", "check.sh"));
+    symlinkSync(path.join(root, "elsewhere"), path.join(ws, "scripts", "check.sh"));
+    const out = await run(["sh", "scripts/check.sh"]);
+    expect(out.body.reason).toBe("pin_failed");
+    expect(out.passed).toBe(false);
+  });
+
+  it("a base file that cannot be read exactly is pin_failed", async () => {
+    const out = await run(["sh", "scripts/check.sh"], 60, {
+      baseFile: async () => {
+        throw new Error("not byte-exact");
+      },
+    });
+    expect(out.body.reason).toBe("pin_failed");
+  });
+
+  it("a check that changes protected paths is protected_changed, even though its own exit status was 0", async () => {
+    writeFileSync(path.join(ws, "pnpm-lock.yaml"), "lockfileVersion: 9\n");
+    const tip = commit("lock");
+    const out = await run([script("tamper.sh", `echo tampered > "${ws}/pnpm-lock.yaml"`)], 60, { base: tip });
+    expect(out.body.exit_code).toBe(0);
+    expect(out.body.reason).toBe("protected_changed");
+    expect(out.passed).toBe(false);
+  });
+
+  it("a give-back that is refused is named: the check's files were not given back to the branch", async () => {
+    const outside = path.join(root, "outside3");
+    mkdirSync(outside);
+    writeFileSync(path.join(ws, "scripts", "swap.sh"), `cd "${ws}" && mv scripts scripts.old && ln -s "${outside}" scripts\n`);
+    const pin = commit("swap");
+    writeFileSync(path.join(ws, "scripts", "swap.sh"), "echo edited by the branch\n");
+    const out = await run(["sh", "scripts/swap.sh"], 60, { base: pin });
+    expect(out.passed).toBe(false);
+    expect(out.body.reason).toBe("not_restored");
+  });
+
+  it("a workspace whose protected state cannot be read is protected_unreadable", async () => {
+    const broken = createCheckStep({
+      capture: (command, args, env, cwd, timeoutMs, tail, signal, feed) => runInstall(spawn, command, args, env, cwd, timeoutMs, tail, signal, feed),
+      now: () => new Date(),
+      vcsState: async () => {
+        throw new Error("no state");
+      },
+    });
+    expect((await broken(input())).body.reason).toBe("protected_unreadable");
+  });
+
+  it("a command the capture cannot start is start_failed", async () => {
+    const broken = createCheckStep({
+      capture: async () => {
+        throw new Error("spawn failed");
+      },
+      now: () => new Date(),
+      vcsState,
+    });
+    expect((await broken(input())).body.reason).toBe("start_failed");
+  });
+
+  it("every code the step names is in the closed set, so the cloud stores it as it is", async () => {
+    const outs = [await run(["true"], 60, { launch: () => undefined }), await run(["true"], 60, { launch: () => ({ refused: "x" }) })];
+    for (const out of outs) expect(CHECK_NOT_RUN_REASONS).toContain(out.body.reason);
   });
 });

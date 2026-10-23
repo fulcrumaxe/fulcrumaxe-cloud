@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { CHECK_JOB_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, DETAILS_OF_RUN_ENDED, DoneCheck, LocalOnlyEvent, RUNNER_MESSAGES } from "../src/messages.js";
+import { CHECK_JOB_MIN_PROTOCOL, CHECK_NOT_RUN_REASONS, CURRENT_PROTOCOL_VERSION, DETAILS_OF_RUN_ENDED, DoneCheck, LocalOnlyEvent, RUNNER_MESSAGES, checkNotRunReason } from "../src/messages.js";
+import { CHECK_NOT_RUN_LINES, checkFailedText, checkNotRunText } from "../src/copy.js";
 
 const RUN = "33333333-3333-4333-8333-333333333333";
 const CHECK = { exit_code: 0, duration_ms: 41_000, timed_out: false, skipped_tests: 14, summary: "Tests  120 passed | 14 skipped (134)" };
@@ -56,5 +57,43 @@ describe("D#6 R-CHK-2: the run ends check_failed", () => {
 
   it("the runner declares the version that first runs a check", () => {
     expect(CURRENT_PROTOCOL_VERSION).toBe(CHECK_JOB_MIN_PROTOCOL);
+  });
+});
+
+describe("D#6 R-CHK-3d: the optional reason", () => {
+  it("is optional: a protocol 8 runner that omits it is accepted, and the protocol version stays 8", () => {
+    expect(DoneCheck.safeParse(CHECK).success).toBe(true);
+    expect(done({ check: CHECK }).success).toBe(true);
+    expect(CHECK_JOB_MIN_PROTOCOL).toBe(8);
+    expect(CURRENT_PROTOCOL_VERSION).toBe(8);
+  });
+
+  it("takes every code of the closed set, and any other short lowercase word (a newer runner), but nothing that could be text or markup", () => {
+    for (const reason of [...CHECK_NOT_RUN_REASONS, "a_newer_reason"]) expect(DoneCheck.safeParse({ ...CHECK, exit_code: null, reason }).success, reason).toBe(true);
+    for (const bad of ["", "Not safe", "<b>x</b>", "9lives", "x".repeat(33), "with space", 7, null]) expect(DoneCheck.safeParse({ ...CHECK, reason: bad }).success, JSON.stringify(bad)).toBe(false);
+  });
+
+  it("maps a word outside the set to the generic code, never to itself", () => {
+    expect(checkNotRunReason("sandbox_refused")).toBe("sandbox_refused");
+    for (const word of ["a_newer_reason", "", "Sandbox_refused", undefined, null, 3, "constructor", "__proto__"]) expect(checkNotRunReason(word), String(word)).toBe("other");
+  });
+
+  it("has one plain sentence per code, ending in a full stop, with no code and no hole in it", () => {
+    for (const code of CHECK_NOT_RUN_REASONS) {
+      const text = checkNotRunText(code);
+      expect(text, code).toMatch(/^[A-Z].*\.$/);
+      expect(text).not.toMatch(/null|undefined|NaN|_/);
+    }
+    expect(Object.keys(CHECK_NOT_RUN_LINES).sort()).toEqual([...CHECK_NOT_RUN_REASONS].sort());
+    expect(checkNotRunText("a_newer_reason")).toBe(CHECK_NOT_RUN_LINES.other);
+    expect(checkNotRunText("constructor")).toBe(CHECK_NOT_RUN_LINES.other);
+  });
+
+  it("words the run's end line for a check that failed, did not run safely, or had no dev shell, naming the command when it is given", () => {
+    expect(checkFailedText(null, false, "pnpm run check")).toBe("The approved check (pnpm run check) failed, so this run ended without a pull request.");
+    expect(checkFailedText(null, true, "pnpm run check")).toBe("The approved check (pnpm run check) could not run safely, so this run ended without a pull request.");
+    expect(checkFailedText("check_no_dev_shell", false, "pnpm run check")).toContain("needs the repository's dev shell");
+    expect(checkFailedText(null, false)).toBe("The approved check failed, so this run ended without a pull request.");
+    expect(checkFailedText(null, false, "")).toBe("The approved check failed, so this run ended without a pull request.");
   });
 });

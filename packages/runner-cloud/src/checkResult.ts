@@ -1,4 +1,4 @@
-import { CHECK_DURATION_MS_MAX, CHECK_EXIT_CODE_MAX, CHECK_SKIPPED_MAX, CHECK_SUMMARY_MAX_BYTES, type DoneCheck } from "@fulcrumaxe/runner-protocol";
+import { checkNotRunReason, CHECK_DURATION_MS_MAX, CHECK_EXIT_CODE_MAX, CHECK_SKIPPED_MAX, CHECK_SUMMARY_MAX_BYTES, type DoneCheck } from "@fulcrumaxe/runner-protocol";
 
 /**
  * D#6 R-CHK-3: what a runner's check result may hold for the cloud to store it. The bounds are the ones `run_checks` (migration 0888) enforces. The protocol schema refuses most of
@@ -49,5 +49,7 @@ export function normaliseCheck(check: DoneCheck): { check: DoneCheck; outOfContr
     const note = `check result out of range: ${bad}`;
     summary = `${summary.slice(0, CHECK_BOUNDS.summaryChars - note.length - 1)}\n${note}`;
   }
-  return { check: { exit_code: exit, duration_ms: duration, timed_out: check.timed_out === true, skipped_tests: skipped, summary }, outOfContract: bad };
+  // D#6 R-CHK-3d: a reason is stored as one of the closed codes (any other word is `other`); free text never goes further. Absent stays absent (an older runner).
+  const reason = check.reason === undefined ? {} : { reason: checkNotRunReason(check.reason) };
+  return { check: { exit_code: exit, duration_ms: duration, timed_out: check.timed_out === true, skipped_tests: skipped, summary, ...reason }, outOfContract: bad };
 }

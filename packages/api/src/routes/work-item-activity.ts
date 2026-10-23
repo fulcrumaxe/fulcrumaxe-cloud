@@ -1,5 +1,7 @@
 import { z } from "zod";
-import { COPY } from "@fulcrumaxe/runner-protocol";
+import type { Pool } from "pg";
+import { COPY, checkNotRunReason } from "@fulcrumaxe/runner-protocol";
+import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { FILE_LIST_NOTICE_COPY_KEY, REVIEW_STOP_COPY_KEY, getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
 import { PUBLIC_CHANGE_STATES } from "@fx/core/src/repos/publicChangeCopy.js";
 import { OPERATOR_ACTIONS } from "@fx/core/src/work-items/operatorActions.js";
@@ -7,7 +9,7 @@ import { statusSentence } from "@fx/core/src/setup-requests/copy.js";
 import { setupRequestDeps } from "./setupRequests.js";
 import type { RouteEntry } from "../registry.js";
 import { runnerUsageSchema } from "./runs.js";
-import { withRunnerWords } from "./runnerLineWords.js";
+import { withRunnerWords, type RunEndedCheck } from "./runnerLineWords.js";
 import { readRunWait, runWaitSchema } from "./runnerWait.js";
 
 /**
@@ -88,6 +90,14 @@ export function buildWaitSentence(code: string, holder: { issue_number: number |
   return `Waiting for a build slot. ${who} is holding this repository's only build slot, and keeps it until its pull request is merged or closed. This build starts by itself after that.`;
 }
 
+/** The reason the runner gave for a check it could not run safely, as the run_checks row recorded it; a result with no reason (or no row yet) carries none. */
+export async function readCheckReason(pool: Pool, accountId: string, userId: string, runId: string): Promise<RunEndedCheck> {
+  const row = await withTenant(pool, accountId, userId, async (client) =>
+    (await client.query<{ reason: string | null }>("SELECT reason FROM run_checks WHERE run_id = $1::uuid", [runId])).rows[0],
+  );
+  return { result: { reason: row?.reason == null ? null : checkNotRunReason(row.reason) } };
+}
+
 export const workItemActivityRoutes: RouteEntry[] = [
   {
     method: "GET",
@@ -107,7 +117,9 @@ export const workItemActivityRoutes: RouteEntry[] = [
       // A runner run's end is worded here, from the protocol's copy, the same words the Runs detail shows.
       const runs = await Promise.all(read.runs.map(async (r) => {
         const wait = r.runtime === "runner" ? await readRunWait(ctx.pool, ctx.principal.accountId, r) : undefined;
-        return { ...r, lines: withRunnerWords(r.lines), ...(wait === undefined ? {} : { wait }) };
+        // A run that ended on its check: the check's recorded reason (not its command, which this read does not have) decides "failed" or "could not run safely".
+        const check = r.runtime === "runner" && r.lines.some((l) => l.ended?.reason === "check_failed") ? await readCheckReason(ctx.pool, ctx.principal.accountId, ctx.principal.userId, r.id) : undefined;
+        return { ...r, lines: withRunnerWords(r.lines, check), ...(wait === undefined ? {} : { wait }) };
       }));
       // The review section's line for a merge-only re-check is written once, in the runner protocol's copy.
       // The field is present only when there is a line to show, so every other answer keeps the shape it had.

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { getRunInsight } from "@fx/core/src/runs/insight.js";
 import { outsideMeterLabel, type EndReason } from "@fx/spend";
+import { CHECK_NOT_RUN_REASONS } from "@fulcrumaxe/runner-protocol";
 import type { RouteEntry } from "../registry.js";
 import { runnerUsageSchema } from "./runs.js";
 import { withRunnerWords } from "./runnerLineWords.js";
@@ -82,7 +83,7 @@ export const runInsightResponseSchema = z.object({
       timeout_s: z.number().int(),
       no_dev_shell: z.boolean(),
       result: z
-        .object({ exit_code: z.number().int().nullable(), duration_ms: z.number().int(), timed_out: z.boolean(), skipped_tests: z.number().int().nullable(), summary: z.string() })
+        .object({ exit_code: z.number().int().nullable(), duration_ms: z.number().int(), timed_out: z.boolean(), skipped_tests: z.number().int().nullable(), summary: z.string(), reason: z.enum(CHECK_NOT_RUN_REASONS).nullable() })
         .nullable(),
     })
     .optional(),
@@ -95,7 +96,7 @@ export const runInsightRoutes: RouteEntry[] = [
     operationId: "getRunInsight",
     summary: "What one agent run did, what it cost and who pays",
     description:
-      "Session only, member. The run's facts (model, head commit, limits now in effect for its role), its work item and PR, the agent's outcome read from its envelope (summary, verdict, findings, branch; null when it recorded none), model usage and sandbox compute shown separately with the source that pays each, the run's activity lines, and the runs it continues or that continue it. For a run on the person's runner whose job carried the repository's approved check: that check (the command as approved, a dev-shell flag, a time cap), its recorded result (exit status, duration, skipped tests, the last output as plain text) and whether the runner had no dev shell to run it in. Model text and check output are plain text: show them as text only.",
+      "Session only, member. The run's facts (model, head commit, limits now in effect for its role), its work item and PR, the agent's outcome read from its envelope (summary, verdict, findings, branch; null when it recorded none), model usage and sandbox compute shown separately with the source that pays each, the run's activity lines, and the runs it continues or that continue it. For a run on the person's runner whose job carried the repository's approved check: that check (the command as approved, a dev-shell flag, a time cap), its recorded result (exit status, duration, skipped tests, the last output as plain text) and a closed reason code when the runner could not run it safely (null when it sent none), and whether the runner had no dev shell to run it in. Model text and check output are plain text: show them as text only.",
     principals: ["session"],
     minRole: "member",
     idempotency: "never",
@@ -111,7 +112,7 @@ export const runInsightRoutes: RouteEntry[] = [
           : { state: om.state },
       );
       const wait = insight.run.runtime === "runner" ? await readRunWait(ctx.pool, ctx.principal.accountId, insight.run) : undefined;
-      return { ...insight, lines: withRunnerWords(insight.lines), outside_meter: { ...om, text }, ...(wait === undefined ? {} : { wait }) };
+      return { ...insight, lines: withRunnerWords(insight.lines, insight.check), outside_meter: { ...om, text }, ...(wait === undefined ? {} : { wait }) };
     },
   },
 ];

@@ -1,4 +1,5 @@
 import type { PoolClient } from 'pg';
+import { checkNotRunReason, type CheckNotRunReason } from '@fulcrumaxe/runner-protocol';
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { resolveRunLimits } from '../run-limits/resolve.js';
@@ -99,7 +100,8 @@ export interface RunCheck {
   dev_shell: boolean;
   timeout_s: number;
   no_dev_shell: boolean;
-  result: { exit_code: number | null; duration_ms: number; timed_out: boolean; skipped_tests: number | null; summary: string } | null;
+  /** `reason` is the runner's closed code for a check it could not run safely (D#6 R-CHK-3d); null when it sent none (an older runner, or an ordinary pass or failure). */
+  result: { exit_code: number | null; duration_ms: number; timed_out: boolean; skipped_tests: number | null; summary: string; reason: CheckNotRunReason | null } | null;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -163,8 +165,8 @@ async function readRunCheck(client: Pick<PoolClient, 'query'>, id: string, job: 
   const j = job !== null && typeof job === 'object' && !Array.isArray(job) ? (job as Record<string, unknown>) : null;
   if (j === null || !Array.isArray(j.argv) || !j.argv.every(isStr) || typeof j.dev_shell !== 'boolean' || !Number.isInteger(j.timeout_s)) return null;
   const row = (
-    await client.query<{ exit_code: number | null; duration_ms: string; timed_out: boolean; skipped_tests: number | null; summary: string }>(
-      `SELECT exit_code, duration_ms::text AS duration_ms, timed_out, skipped_tests, left(summary, ${CHECK_SUMMARY_CHARS}) AS summary FROM run_checks WHERE run_id = $1::uuid`,
+    await client.query<{ exit_code: number | null; duration_ms: string; timed_out: boolean; skipped_tests: number | null; summary: string; reason: string | null }>(
+      `SELECT exit_code, duration_ms::text AS duration_ms, timed_out, skipped_tests, left(summary, ${CHECK_SUMMARY_CHARS}) AS summary, reason FROM run_checks WHERE run_id = $1::uuid`,
       [id],
     )
   ).rows[0];
@@ -180,7 +182,7 @@ async function readRunCheck(client: Pick<PoolClient, 'query'>, id: string, job: 
     dev_shell: j.dev_shell,
     timeout_s: j.timeout_s as number,
     no_dev_shell: noDevShell,
-    result: row ? { exit_code: row.exit_code, duration_ms: Number(row.duration_ms), timed_out: row.timed_out, skipped_tests: row.skipped_tests, summary: row.summary } : null,
+    result: row ? { exit_code: row.exit_code, duration_ms: Number(row.duration_ms), timed_out: row.timed_out, skipped_tests: row.skipped_tests, summary: row.summary, reason: row.reason === null ? null : checkNotRunReason(row.reason) } : null,
   };
 }
 

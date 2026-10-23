@@ -17,7 +17,7 @@
  * checkpoint prompt (`checkpointTurn.ts`), the commit is pushed, and one `run_ended` `handed_off` (`pushed`, `push_failed` or `deadline`) goes out in place
  * of `done`. The note the agent writes stays on this machine.
  */
-import { DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, contextLedgerToWire, type ContextLedgerMeasure, type ContextSection, type DoneCheck, type HANDED_OFF_DETAILS, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, contextLedgerToWire, type ContextLedgerMeasure, type CheckNotRunReason, type ContextSection, type DoneCheck, type HANDED_OFF_DETAILS, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { CHECKPOINT_MAX_TURN_MS, runCheckpointTurn } from "./checkpointTurn.js";
 import type { CheckpointNote } from "../job/checkpoint.js";
 import type { NixDetail, NixFromDefault, NixResult, NixShellStep, NixSkip, NixSource } from "./nixShell.js";
@@ -230,7 +230,7 @@ const isGitStop = (code: string): boolean => code === "git_stopped" || code === 
 /** The runs that enter the public-push hook: a fresh executor run. A fix round updates a branch that already exists (a later change), and no other role pushes. */
 const enters = (job: Job): boolean => job.role === "executor" && job.continues === null && (job.review ?? null) === null;
 
-const closedCheck = (summary = "", extra: Partial<CheckOutcome> = {}): CheckOutcome => ({ passed: false, body: { exit_code: null, duration_ms: 0, timed_out: false, skipped_tests: null, summary }, ...extra });
+const closedCheck = (summary = "", reason?: CheckNotRunReason, extra: Partial<CheckOutcome> = {}): CheckOutcome => ({ passed: false, body: { exit_code: null, duration_ms: 0, timed_out: false, skipped_tests: null, summary, ...(reason === undefined ? {} : { reason }) }, ...extra });
 
 export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Promise<JobResult> {
   const run = deps.runJobFn ?? runJob;
@@ -465,26 +465,26 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             const closed = closedCheck;
             // A check that needs the dev shell is not run without one, and never passes by default.
             if (check.dev_shell && grant?.nixEnv === undefined) {
-              checkHeld.outcome = closed("", { noDevShell: true });
+              checkHeld.outcome = closed("", undefined, { noDevShell: true });
               return;
             }
             const { checkStep, checkLaunch, baseFile } = deps;
             if (checkStep === undefined || checkLaunch === undefined || baseFile === undefined || started.base === undefined) {
-              checkHeld.outcome = closed("the check was not run: it is not set up on this runner");
+              checkHeld.outcome = closed("the check was not run: it is not set up on this runner", "not_set_up");
               return;
             }
             // The files the check names are pinned to the merge-base of the branch tip with the default branch, read from the runner's mirror; without one the check fails.
             const mirror = git.mirrorDir?.(job);
             const pin = mirror === undefined ? null : await git.checkBase?.(job, started.base).catch(() => null);
             if (mirror === undefined || pin === null || pin === undefined) {
-              checkHeld.outcome = closed("the check was not run: the default branch's copy of its files could not be found");
+              checkHeld.outcome = closed("the check was not run: the default branch's copy of its files could not be found", "base_missing");
               return;
             }
             try {
               checkHeld.outcome = await checkStep({ check, workspace, base: pin, baseDir: mirror, launch: (argv, devShell) => checkLaunch(sandboxHandle, argv, devShell), baseFile, home: deps.checkHome, signal: stopRun });
             } catch {
               // fx-swallow-ok: a check step that threw did not pass; the error text could hold a path
-              checkHeld.outcome = closed("the check was not run: it is not set up on this runner");
+              checkHeld.outcome = closed("the check was not run: it is not set up on this runner", "not_set_up");
             }
           };
           result = await run(job, { ...deps.run, afterAgent, promptNotes: () => promptNotes, repoMap: () => repoMapHeld.map, ...(spillHeld === undefined ? {} : { taskPrompt: spillHeld.rewrite }), planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger });
@@ -549,7 +549,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       // A check that did not pass: the branch is on the run branch for the fix round (pushed above), the public-push hook is not entered, and the run ends `check_failed`.
       // `done` still goes, carrying the check result, so the cloud records what ran (the run is already ended by `run_ended`, which the cloud may answer with a stop).
       // A job with a check always has an outcome here; if the hook never recorded one, that is a failure, not a pass.
-      const checked = checkHeld.outcome ?? (job.check === undefined ? undefined : closedCheck("the check was not run"));
+      const checked = checkHeld.outcome ?? (job.check === undefined ? undefined : closedCheck("the check was not run", "other"));
       if (checked !== undefined && !checked.passed) {
         await lease.flush();
         const stoppedAtCheck = lease.ended();

@@ -32,6 +32,9 @@ const WANT: Record<string, { state: string; label: string; text: RegExp; output:
   "check-timed-out": { state: "timed_out", label: "Timed out", text: /Took 30m 00s/, output: true },
   "check-no-dev-shell": { state: "no_dev_shell", label: "No dev shell", text: /none was built/, output: false },
   "check-not-safe": { state: "unsafe", label: "Could not run safely", text: /would not run it with weaker rules/, output: true },
+  "check-unsafe-pin-failed": { state: "unsafe", label: "Could not run safely", text: /could not be pinned to the default branch's copy/, output: true },
+  "check-unsafe-protected-changed": { state: "unsafe", label: "Could not run safely", text: /The check changed files it may not change/, output: true },
+  "check-unsafe-sandbox-refused": { state: "unsafe", label: "Could not run safely", text: /would not run the check with the same limits the agent had/, output: true },
   "check-runner-too-old": { state: "runner_too_old", label: "Runner too old", text: /Update your runner to run this repository's check\./, output: false },
 };
 

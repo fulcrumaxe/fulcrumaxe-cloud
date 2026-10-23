@@ -571,6 +571,27 @@ describe("runner done [pg]", () => {
       await expect(admin.query("INSERT INTO run_checks (account_id, run_id, exit_code, duration_ms, timed_out, summary) VALUES ($1, $2, 1, 1, true, '')", [A.accountId, second])).rejects.toThrow();
       await expect(admin.query("INSERT INTO run_checks (account_id, run_id, exit_code, duration_ms, timed_out, summary) VALUES ($1, $2, 1, 1, false, $3)", [A.accountId, second, "z".repeat(4097)])).rejects.toThrow();
     });
+
+    // D#6 R-CHK-3d (migration 0891): the optional reason code.
+    const reasonOf = async (id: string) => (await admin.query("SELECT reason FROM run_checks WHERE account_id = $1 AND run_id = $2", [A.accountId, id])).rows[0]!.reason as string | null;
+
+    it("a reason is stored as the closed code it is; no reason is stored as null; a word outside the set is stored as the generic code", async () => {
+      for (const [sent, stored] of [["sandbox_refused", "sandbox_refused"], [undefined, null], ["a_newer_reason", "other"]] as Array<[string | undefined, string | null]>) {
+        const id = await pending();
+        const g = await claimed(id);
+        await facade.finishRunnerDone({ ...lease(id, g), verdict: failedVerdict(`fx/${id}-g${g}`), check: result({ exit_code: null, ...(sent === undefined ? {} : { reason: sent }) }) });
+        expect(await reasonOf(id), String(sent)).toBe(stored);
+      }
+    });
+
+    it("the table refuses a reason outside the closed set, and the runner login cannot change one", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      await facade.finishRunnerDone({ ...lease(id, g), verdict: failedVerdict(`fx/${id}-g${g}`), check: result({ exit_code: null, reason: "pin_failed" }) });
+      await expect(withTenant(writerPool, A.accountId, (c) => c.query("UPDATE run_checks SET reason = 'other' WHERE run_id = $1", [id]))).rejects.toThrow();
+      const second = await pending();
+      await expect(admin.query("INSERT INTO run_checks (account_id, run_id, exit_code, duration_ms, timed_out, summary, reason) VALUES ($1, $2, NULL, 1, false, '', 'click this link')", [A.accountId, second])).rejects.toThrow();
+    });
   });
 
   describe("the item's pull request branch is recorded only for the run bound to it (D#599 PL-2b-1)", () => {

@@ -29,6 +29,8 @@ interface Row {
   timed_out: boolean;
   skipped_tests: number | null;
   summary: string;
+  /** D#6 R-CHK-3d: the runner's closed reason code; absent for a runner that sent none. */
+  reason?: string;
 }
 interface Case {
   name: string;
@@ -37,6 +39,8 @@ interface Case {
   check?: typeof CHECK;
   row?: Row;
   noDevShell?: boolean;
+  /** The runner's run_ended check_failed event (no detail), whose line the route words with the check's command. */
+  ended?: boolean;
   /** The only runner covering the repo speaks this protocol: below the check's minimum, the run waits (pending). */
   oldRunner?: boolean;
 }
@@ -46,10 +50,14 @@ const CASES: Case[] = [
   { name: 'check-not-run', status: 'failed', check: CHECK },
   { name: 'check-running', status: 'running', check: CHECK },
   { name: 'check-passed', status: 'succeeded', check: CHECK, row: { exit_code: 0, duration_ms: 95_400, timed_out: false, skipped_tests: 3, summary: 'check files changed by this branch: scripts/check.sh\nTests  12 passed | 3 skipped (15)' } },
-  { name: 'check-failed', status: 'failed', check: CHECK, row: { exit_code: 1, duration_ms: 61_000, timed_out: false, skipped_tests: null, summary: 'FAIL src/a.test.ts\n  expected 1 to be 2 <b>x</b>' } },
+  { name: 'check-failed', status: 'failed', check: CHECK, ended: true, row: { exit_code: 1, duration_ms: 61_000, timed_out: false, skipped_tests: null, summary: 'FAIL src/a.test.ts\n  expected 1 to be 2 <b>x</b>' } },
   { name: 'check-timed-out', status: 'failed', check: CHECK, row: { exit_code: null, duration_ms: 1_800_000, timed_out: true, skipped_tests: null, summary: 'still running when it was stopped' } },
   { name: 'check-no-dev-shell', status: 'failed', check: CHECK, noDevShell: true, row: { exit_code: null, duration_ms: 0, timed_out: false, skipped_tests: null, summary: '' } },
   { name: 'check-not-safe', status: 'failed', check: CHECK, row: { exit_code: null, duration_ms: 12, timed_out: false, skipped_tests: null, summary: "the check was not run: these files could not be pinned (a link or a non-file on the path): scripts/check.sh" } },
+  // D#6 R-CHK-3d: a result with a reason code, one per way the check can be refused; the first has the runner's refusal words too, the last ran and was stopped from counting.
+  { name: 'check-unsafe-sandbox-refused', status: 'failed', check: CHECK, ended: true, row: { exit_code: null, duration_ms: 9, timed_out: false, skipped_tests: null, summary: 'no seccomp filter on this platform', reason: 'sandbox_refused' } },
+  { name: 'check-unsafe-pin-failed', status: 'failed', check: CHECK, ended: true, row: { exit_code: null, duration_ms: 12, timed_out: false, skipped_tests: null, summary: 'the check was not run: these files could not be pinned (a link or a non-file on the path): scripts/check.sh', reason: 'pin_failed' } },
+  { name: 'check-unsafe-protected-changed', status: 'failed', check: CHECK, ended: true, row: { exit_code: 0, duration_ms: 31_000, timed_out: false, skipped_tests: null, summary: 'the check changed paths it may not (put back where possible): pnpm-lock.yaml', reason: 'protected_changed' } },
   { name: 'check-runner-too-old', status: 'pending', check: CHECK, oldRunner: true },
 ];
 
@@ -96,11 +104,14 @@ describe('the run check through getRunInsight (D#6 R-CHK-3b)', { timeout: 120_00
        VALUES ($1, $2, 'executor', 'runner', 'runner_local', $3, $4, $4, $5, $6, $7, $8, $9::jsonb, $10)`,
       [runId, me.accountId, c.status, me.userId, repoId, at(0), c.status === 'pending' ? null : at(1), live || c.status === 'pending' ? null : at(60), c.check ? JSON.stringify({ job: { check: c.check } }) : JSON.stringify({ job: {} }), minProtocol],
     );
+    if (c.ended) {
+      await admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload, created_at) VALUES ($1, $2, 1, 'runner.event', $3::jsonb, $4)`, [me.accountId, runId, JSON.stringify({ type: 'run_ended', reason: 'check_failed' }), at(2)]);
+    }
     if (c.noDevShell) {
       await admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload, created_at) VALUES ($1, $2, 1, 'runner.event', $3::jsonb, $4)`, [me.accountId, runId, JSON.stringify({ type: 'run_ended', reason: 'check_failed', detail: 'check_no_dev_shell' }), at(2)]);
     }
     if (c.row) {
-      await admin.query(`INSERT INTO run_checks (account_id, run_id, exit_code, duration_ms, timed_out, skipped_tests, summary) VALUES ($1, $2, $3, $4, $5, $6, $7)`, [me.accountId, runId, c.row.exit_code, c.row.duration_ms, c.row.timed_out, c.row.skipped_tests, c.row.summary]);
+      await admin.query(`INSERT INTO run_checks (account_id, run_id, exit_code, duration_ms, timed_out, skipped_tests, summary, reason) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [me.accountId, runId, c.row.exit_code, c.row.duration_ms, c.row.timed_out, c.row.skipped_tests, c.row.summary, c.row.reason ?? null]);
     }
     return runId;
   }
@@ -143,6 +154,15 @@ describe('the run check through getRunInsight (D#6 R-CHK-3b)', { timeout: 120_00
     expect(check('check-passed')!.result).toMatchObject({ exit_code: 0, timed_out: false, skipped_tests: 3 });
     expect(check('check-timed-out')!.result).toMatchObject({ exit_code: null, timed_out: true });
     expect(check('check-no-dev-shell')!.no_dev_shell).toBe(true);
+    // D#6 R-CHK-3d: the reason code is on the result as the closed code, null when the runner sent none (a failing exit, a pass, a legacy row), and the end line names the check.
+    expect(check('check-unsafe-sandbox-refused')!.result).toMatchObject({ reason: 'sandbox_refused' });
+    expect(check('check-unsafe-pin-failed')!.result).toMatchObject({ reason: 'pin_failed' });
+    expect(check('check-unsafe-protected-changed')!.result).toMatchObject({ exit_code: 0, reason: 'protected_changed' });
+    for (const name of ['check-passed', 'check-failed', 'check-timed-out', 'check-not-safe']) expect(check(name)!.result, name).toMatchObject({ reason: null });
+    const endLine = (name: string): string | undefined => (bodies.get(name)!.lines as Array<{ text: string }>).find((l) => /approved check/.test(l.text))?.text;
+    expect(endLine('check-failed')).toBe('The approved check (pnpm run check -- a  b) failed, so this run ended without a pull request.');
+    for (const name of ['check-unsafe-sandbox-refused', 'check-unsafe-pin-failed', 'check-unsafe-protected-changed']) expect(endLine(name), name).toBe('The approved check (pnpm run check -- a  b) could not run safely, so this run ended without a pull request.');
+    expect(endLine('check-passed')).toBeUndefined();
     // The argument with two spaces reaches the screen exactly as approved.
     expect(check('check-failed')!.argv[4]).toBe('a  b');
     // The too-old runner is told by the wait, which the screen reads next to the check.

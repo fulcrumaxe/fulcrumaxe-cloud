@@ -132,6 +132,29 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
     expect(body).toMatchObject({ stage: 'triaged', halted: false, repo: null, pr_number: null, auto_merge: false, comments: [], spec: null, runs: [], steps: [], runs_truncated: false, comments_truncated: false, notice: null });
   });
 
+  // D#6 R-CHK-3d: a runner run that ended on its check reads "could not run safely" in the work item's activity when the runner recorded a reason, and "failed" when it did not.
+  it('a runner run that ended on its check: the recorded reason decides the end line, as on the run view', async () => {
+    const { accountId, userId } = await seedAccountWithMember(admin);
+    const { itemId } = await seedItem(accountId, { stage: 'in_progress' });
+    const endLines = async (reason: string | null | undefined): Promise<string[]> => {
+      const runId = randomUUID();
+      await admin.query(
+        `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, execution_mode, status, created_at, ended_at)
+         VALUES ($1, $2, $3, 'executor', 'runner', 'runner_local', 'failed', now(), now())`,
+        [runId, accountId, itemId],
+      );
+      await seedEvent(accountId, runId, 1, 'runner.event', { type: 'run_ended', reason: 'check_failed' });
+      if (reason !== undefined) {
+        await admin.query(`INSERT INTO run_checks (account_id, run_id, exit_code, duration_ms, timed_out, skipped_tests, summary, reason) VALUES ($1, $2, NULL, 5, false, NULL, 'x', $3)`, [accountId, runId, reason]);
+      }
+      const body = (await (await get(itemId, { accountId, userId })).json()) as Activity;
+      return body.runs.find((r) => r.id === runId)!.lines.map((l) => l.text).filter((t) => /approved check/.test(t));
+    };
+    expect(await endLines('pin_failed')).toEqual(['The approved check could not run safely, so this run ended without a pull request.']);
+    expect(await endLines(null)).toEqual(['The approved check failed, so this run ended without a pull request.']);
+    expect(await endLines(undefined)).toEqual(['The approved check failed, so this run ended without a pull request.']);
+  });
+
   it('halted is the marker, not the stage: true at triaged, discussing and spec_ready once halted, false again once the marker is cleared', async () => {
     const { accountId, userId } = await seedAccountWithMember(admin);
     for (const stage of ['triaged', 'discussing', 'spec_ready']) {
