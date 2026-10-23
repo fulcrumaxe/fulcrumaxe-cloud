@@ -15,8 +15,8 @@ export const tokenUrl = (id) => TOKENS_URL + "/" + encodeURIComponent(id);
 
 export const MODE_WORDS = { subscription: "Claude subscription", api_key: "API key" };
 // Each state is a mark and words, so no state is shown by colour alone. The mark is decoration (aria-hidden); the words carry the meaning.
-export const STATE_MARKS = { online_idle: "●", busy: "◐", paused: "❚❚", draining: "◔", offline: "○", outdated: "▲", revoked: "✕" };
-export const STATE_WORDS = { online_idle: "Online", busy: "Busy", paused: "Paused", draining: "Finishing current work", offline: "Offline", outdated: "Needs an update", revoked: "Revoked" };
+export const STATE_MARKS = { online_idle: "●", busy: "◐", paused: "❚❚", draining: "◔", not_responding: "◌", offline: "○", outdated: "▲", revoked: "✕" };
+export const STATE_WORDS = { online_idle: "Online", busy: "Busy", paused: "Paused", draining: "Finishing current work", not_responding: "Not responding", offline: "Offline", outdated: "Needs an update", revoked: "Revoked" };
 export const ONLY_ADMINS = "Only owners and admins can add a runner.";
 export const TTL_CHOICES = [
   { seconds: 3600, words: "1 hour" },
@@ -27,6 +27,9 @@ const LABEL = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const text = (v) => (typeof v === "string" ? v.trim() : "");
 const cancelled = (e) => e && e.name === "AbortError";
 const statusOf = (e) => (e && typeof e.status === "number" ? e.status : 0);
+// D#6 RUNNER-PING: while a "Check runner now" waits for its answer, the read is repeated this often (the cloud decides within 60 s).
+export const CHECK_POLL_MS = 5000;
+const CHECK_STATUSES = ["checking", "answered", "no_reply"];
 
 /** One runner of the read, or null when it is not usable. Every text field is a string. */
 export function readRunner(r) {
@@ -41,6 +44,7 @@ export function readRunner(r) {
     person,
     state: r.state,
     note: text(r.state_note),
+    check: r.check && CHECK_STATUSES.includes(r.check.status) ? r.check.status : "",
     revokedReason: r.revoked_reason === "registrant_left" ? "registrant_left" : "",
     mode: r.credential_mode,
     version: text(r.binary_version),
@@ -87,6 +91,9 @@ export function runnerLimitText(a) {
 /** The state as { mark, words }: "Paused · Resumes within 5 min", "Finishing current work", "Revoked: registrant left". */
 export function stateParts(r) {
   const mark = STATE_MARKS[r.state] || "";
+  // D#6 RUNNER-PING: a check in flight reads "Checking…" until the cloud has the answer ("Online · just now" or "Not responding — no reply in 60 s").
+  if (r.check === "checking" && (r.state === "online_idle" || r.state === "busy" || r.state === "offline")) return { mark, words: "Checking…" };
+  if (r.state === "not_responding") return { mark, words: ["Not responding", r.note].filter(Boolean).join(" — ") };
   // A wake-capable runner past the 2-minute window but inside its 35-minute slot reads "Online · Last heard 7 min ago" (the note comes from the cloud).
   if (r.state === "busy") return { mark, words: [r.loadLabel || "Busy", r.note].filter(Boolean).join(" · ") };
   if (r.state === "online_idle") return { mark, words: ["Online", r.note].filter(Boolean).join(" · ") };
@@ -108,6 +115,7 @@ export function controlList(r) {
   return [
     ...(held ? [{ action: "resume", label: "Resume" }] : [{ action: "pause", label: "Pause" }, { action: "drain", label: "Finish current work" }]),
     { action: "rename", label: "Rename" },
+    { action: "check", label: "Check runner now" },
     { action: "remove", label: "Remove" },
   ].map((c) => ({ ...c, allowed: r.controls[c.action] ? r.controls[c.action].allowed === true : false, reason: r.controls[c.action] && typeof r.controls[c.action].reason === "string" ? r.controls[c.action].reason : "" }));
 }
@@ -116,6 +124,7 @@ export const ACTION_SENTENCES = {
   403: "You can't do that to this runner.",
   404: "That runner isn't there any more.",
   409: "That runner was already removed.",
+  503: "The check couldn't be sent. Try again in a moment.",
   400: "That name isn't allowed. Use 1 to 64 printable characters.",
   other: "That change couldn't be saved. Try again.",
 };
@@ -125,10 +134,20 @@ const sentence = (table, e) => table[statusOf(e)] || table.other;
  * The fleet: one read, and the actions on a runner. A runner with an action in flight ignores every other click on it, so a double click is one request.
  * `act` resolves to "" on success (the read is repeated, so the row shows what is now true) or the sentence to show.
  */
-export function createFleet({ call = api, signal, onChange = () => {} } = {}) {
+export function createFleet({ call = api, signal, onChange = () => {}, schedule = (fn, ms) => setTimeout(fn, ms) } = {}) {
   let st = { status: "loading", fleet: null };
   const pending = new Set();
   let gen = 0;
+  let polling = false;
+  // One timer at a time, and only while some runner's check is still waiting: an idle page never polls.
+  function pollWhileChecking() {
+    if (polling || (signal && signal.aborted) || !st.fleet || !st.fleet.runners.some((r) => r.check === "checking")) return;
+    polling = true;
+    schedule(() => {
+      polling = false;
+      if (!(signal && signal.aborted)) load();
+    }, CHECK_POLL_MS);
+  }
   async function load() {
     const mine = ++gen;
     try {
@@ -140,6 +159,7 @@ export function createFleet({ call = api, signal, onChange = () => {} } = {}) {
       if (st.status !== "ready") st = { status: "error", fleet: null };
     }
     onChange();
+    pollWhileChecking();
   }
   async function act(id, action, body) {
     if (pending.has(id)) return "";

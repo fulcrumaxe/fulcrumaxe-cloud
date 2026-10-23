@@ -1,9 +1,10 @@
 import { isValidRunnerName } from "@fulcrumaxe/runner-protocol";
-import { markRunnerWork, revokeRunnerWake } from "@fx/core/src/pendingWork.js";
+import { markRunnerWork, readRunnerReplyHints, recordRunnerCheck, revokeRunnerWake } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 import { refuseNonPrivateReposIn } from "./repoPrivacy.js";
 import { failLeases } from "./revoke.js";
+import { RUNNER_CHECK_REPLY_MS } from "./runnerReply.js";
 
 /**
  * D#605 FL-8: the session routes that steer a runner (`/api/runners/:id/<action>`). Each one is a decision by a signed-in person: the person's id
@@ -151,4 +152,31 @@ export async function removeRunner(deps: RunnerCloudDeps, principal: SessionPrin
   const runsFailed = await failLeases(deps, principal.accountId, [runnerId]);
   if (already) throw new RunnerHttpError(409, "runner_revoked", "the runner has been removed", { runs_failed: runsFailed });
   return { status: 200, body: { runner_id: runnerId, removed: true, runs_failed: runsFailed }, headers: { "cache-control": "no-store" } };
+}
+
+/**
+ * D#6 RUNNER-PING: POST /api/runners/:id/check, "Check runner now". An owner or admin asks one runner to answer: the time is recorded for it (no-database
+ * store) and the account's wake epoch is bumped, so a live wake runner claims within one wake check and the fleet read shows the answer (runnerReply.ts).
+ * A repeat within 60 s of the last check answers that check's `sent_at` and writes nothing (no record, no wake). The body is `{}` or none. The database is read once, for the caller's role and the runner's row, and written never. Answers 200 `{ runner_id, sent_at }`,
+ * 400, 403 (not an owner or admin), 404, 409 `runner_revoked`, or 503 `check_unavailable` when the store could not take the record.
+ */
+export async function checkRunner(deps: RunnerCloudDeps, principal: SessionPrincipal, runnerId: string, input: unknown): Promise<RunnerHttpResponse> {
+  if (!UUID.test(runnerId)) throw new RunnerHttpError(404, "not_found", "no such runner");
+  argument(input, null);
+  const found = await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client) => {
+    const role = (await client.query<{ role: string | null }>("SELECT current_member_role() AS role")).rows[0]?.role;
+    if (role !== "owner" && role !== "admin") throw new RunnerHttpError(403, "forbidden", "only an owner or admin can check a runner");
+    return (await client.query<{ revoked: boolean }>("SELECT revoked_at IS NOT NULL AS revoked FROM runners WHERE id = $1 AND account_id = $2", [runnerId, principal.accountId])).rows[0];
+  });
+  if (!found) throw new RunnerHttpError(404, "not_found", "no such runner");
+  if (found.revoked) throw new RunnerHttpError(409, "runner_revoked", "the runner has been removed");
+  const sentAt = (deps.now ?? (() => new Date()))().getTime();
+  // A repeat inside the reply window is the same check: it answers the time already sent and writes nothing, so a held button cannot keep waking the account.
+  const earlier = (await readRunnerReplyHints(principal.accountId, [runnerId])).checks.get(runnerId);
+  if (earlier !== undefined && earlier <= sentAt && sentAt - earlier < RUNNER_CHECK_REPLY_MS) {
+    return { status: 200, body: { runner_id: runnerId, sent_at: new Date(earlier).toISOString() }, headers: { "cache-control": "no-store" } };
+  }
+  if (!(await recordRunnerCheck(runnerId, sentAt))) throw new RunnerHttpError(503, "check_unavailable", "the check could not be sent");
+  void markRunnerWork(principal.accountId, { now: sentAt });
+  return { status: 200, body: { runner_id: runnerId, sent_at: new Date(sentAt).toISOString() }, headers: { "cache-control": "no-store" } };
 }

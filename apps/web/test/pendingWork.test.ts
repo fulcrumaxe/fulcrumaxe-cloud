@@ -14,6 +14,11 @@ import {
   remarkRunnerDue,
   runnerWorkDueKeyFor,
   runnerWorkKeyFor,
+  runnerWorkFirstKeyFor,
+  runnerCheckKeyFor,
+  recordRunnerCheck,
+  readRunnerReplyHints,
+  RUNNER_WORK_CHAIN_GAP_MS,
   readTickGate,
   runGatedTick,
   setPendingHooks,
@@ -581,5 +586,43 @@ describe("markRunnerWork: the per-account runner-work hint", () => {
     const started = Date.now();
     await markRunnerWork(ACCT);
     expect(Date.now() - started).toBeLessThan(STORE_TIMEOUT_MS * 4);
+  });
+
+  // D#6 RUNNER-PING: the first bump of a run of bumps less than 90 s apart, so steady work cannot keep a dead runner hidden.
+  it("keeps the first bump of a run while bumps come less than 90 s apart, and starts a new run after a gap", async () => {
+    const first = () => storeOf(region).get(runnerWorkFirstKeyFor(ACCT));
+    for (const s of [0, 30, 60, 149]) await markRunnerWork(ACCT, { now: clock.value + s * 1000 });
+    expect(await first()).toBe(clock.value);
+    expect(await storeOf(region).get(runnerWorkKeyFor(ACCT))).toBe(clock.value + 149_000);
+    expect(RUNNER_WORK_CHAIN_GAP_MS).toBe(90_000);
+    await markRunnerWork(ACCT, { now: clock.value + 239_000 }); // exactly 90 s after the last: a new run
+    expect(await first()).toBe(clock.value + 239_000);
+    await markRunnerWork(ACCT, { since: clock.value + 999_000, now: clock.value + 240_000 }); // a future due time touches neither
+    expect(await first()).toBe(clock.value + 239_000);
+    expect(await storeOf(region).get(runnerWorkFirstKeyFor(OTHER))).toBeNull();
+  });
+
+  it("a failed read of the run starts a new one, and the epoch is still written", async () => {
+    const set = vi.fn(async () => {});
+    setPendingHooks({ store: { get: async () => { throw new Error("cache down"); }, set, delete: async () => {} } });
+    await markRunnerWork(ACCT, { now: clock.value });
+    expect(set).toHaveBeenCalledWith(runnerWorkKeyFor(ACCT), clock.value, RUNNER_WORK_TTL_SECONDS);
+    expect(set).toHaveBeenCalledWith(runnerWorkFirstKeyFor(ACCT), clock.value, RUNNER_WORK_TTL_SECONDS);
+  });
+
+  it("records a person's check per runner and reads the account's hints back in one round; a miss or a failure is no value", async () => {
+    const R1 = "33333333-3333-4333-8333-333333333333";
+    const R2 = "44444444-4444-4444-8444-444444444444";
+    expect(await readRunnerReplyHints(ACCT, [R1])).toEqual({ epoch: null, first: null, checks: new Map() });
+    expect(await recordRunnerCheck(R1, clock.value)).toBe(true);
+    await markRunnerWork(ACCT, { now: clock.value });
+    expect(await readRunnerReplyHints(ACCT, [R1, R2, R1])).toEqual({ epoch: clock.value, first: clock.value, checks: new Map([[R1, clock.value]]) });
+    expect(await storeOf(region).get(runnerCheckKeyFor(R1))).toBe(clock.value);
+    setPendingHooks({ store: { get: async () => { throw new Error("cache down"); }, set: async () => { throw new Error("cache down"); }, delete: async () => {} } });
+    expect(await recordRunnerCheck(R1, clock.value)).toBe(false);
+    expect(await readRunnerReplyHints(ACCT, [R1])).toEqual({ epoch: null, first: null, checks: new Map() });
+    setPendingHooks(null);
+    expect(await recordRunnerCheck(R1, clock.value)).toBe(false);
+    expect(await readRunnerReplyHints(ACCT, [R1])).toEqual({ epoch: null, first: null, checks: new Map() });
   });
 });

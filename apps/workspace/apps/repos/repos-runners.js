@@ -19,7 +19,7 @@ export const dialUrl = (repoId) => RUNNERS_URL + "/repos/" + encodeURIComponent(
 export const DISPOSITIONS = ["ask", "announce", "act"];
 const DIAL_KEYS = { ask: "dialRunnerRunsAsk", announce: "dialRunnerRunsAnnounce", act: "dialRunnerRunsAct" };
 const NEEDED_COPY = ["planConsentText", "dialRunnerRuns", ...Object.values(DIAL_KEYS)];
-export const STATE_WORDS = { online_idle: "Online", busy: "Busy", paused: "Paused", draining: "Draining", offline: "Offline", outdated: "Needs an update", revoked: "Revoked" };
+export const STATE_WORDS = { online_idle: "Online", busy: "Busy", paused: "Paused", draining: "Draining", not_responding: "Not responding", offline: "Offline", outdated: "Needs an update", revoked: "Revoked" };
 export const MODE_WORDS = { subscription: "Claude subscription", api_key: "API key" };
 export const SWITCH_LABEL = "Run work without asking each time";
 export const CONSENT_SENTENCES = {
