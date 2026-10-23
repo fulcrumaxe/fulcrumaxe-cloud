@@ -199,6 +199,63 @@ describe("the read model [pg]", () => {
       expect(rows.get(other)).toMatchObject({ state: "revoked", state_note: null, revoked_reason: null });
     });
 
+    it("D#6 RUNNER-WAKE: a wake-capable runner quiet for 10 min reads online, 'Last heard 10 min ago'; a cached wake check counts as contact", async () => {
+      const f = await fresh();
+      const g = await fresh();
+      const wake = await runner(f, { lastSeen: ago(600) });
+      const plain = await runner(f, { lastSeen: ago(600) });
+      const cached = await runner(f, { lastSeen: ago(1200) });
+      const gone = await runner(f, { lastSeen: ago(600), revoked: true });
+      const stale = await runner(f, { lastSeen: ago(2101) });
+      const elsewhere = await runner(g);
+      for (const id of [wake, cached, gone, stale]) await h.admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, ARRAY['wake_v1'])", [id, f.accountId]);
+      const asked: string[][] = [];
+      const runnerSeen = async (ids: readonly string[]) => {
+        asked.push([...ids]);
+        return new Map([[cached, ago(30)], [elsewhere, ago(1)]]);
+      };
+      const wakeKey = () => Buffer.alloc(32, 7);
+      const res = await respond(() => listRunners({ ...deps(), runnerSeen, wakeKey }, { accountId: f.accountId, userId: f.a1 }));
+      const rows = new Map((res.body as { runners: Array<{ id: string; state: string; state_note: string | null; last_seen_at: string | null }> }).runners.map((r) => [r.id, r]));
+      expect(rows.get(wake)).toMatchObject({ state: "online_idle", state_note: "Last heard 10 min ago", last_seen_at: ago(600).toISOString() });
+      expect(rows.get(plain)).toMatchObject({ state: "offline", state_note: null });
+      expect(rows.get(cached)).toMatchObject({ state: "online_idle", state_note: null, last_seen_at: ago(30).toISOString() });
+      expect(rows.get(stale)).toMatchObject({ state: "offline", state_note: null });
+      expect(rows.get(gone)).toMatchObject({ state: "revoked", state_note: null });
+      // Only this account's live runners are asked about; a reader that answers for another runner changes nothing here.
+      expect(asked).toHaveLength(1);
+      expect(asked[0]!.sort()).toEqual([wake, plain, cached, stale].sort());
+      expect(rows.has(elsewhere)).toBe(false);
+      // A reader that fails leaves the database stamps to decide.
+      const failing = async () => {
+        throw new Error("cache down");
+      };
+      const again = await respond(() => listRunners({ ...deps(), runnerSeen: failing, wakeKey }, { accountId: f.accountId, userId: f.a1 }));
+      const states = new Map((again.body as { runners: Array<{ id: string; state: string }> }).runners.map((r) => [r.id, r.state]));
+      expect(states.get(wake)).toBe("online_idle");
+      expect(states.get(cached)).toBe("online_idle"); // 20 min, wake-capable, from the database stamp alone
+      expect(states.get(plain)).toBe("offline");
+    });
+
+    it("D#6 RUNNER-WAKE: with no wake key configured no runner holds a grant, so one that listed wake_v1 is offline after the ordinary 120 s", async () => {
+      const f = await fresh();
+      const quiet = await runner(f, { lastSeen: ago(121) });
+      const fresh120 = await runner(f, { lastSeen: ago(120) });
+      for (const id of [quiet, fresh120]) await h.admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, ARRAY['wake_v1'])", [id, f.accountId]);
+      const read = async (over: Record<string, unknown>) => {
+        const res = await respond(() => listRunners({ ...deps(), ...over }, { accountId: f.accountId, userId: f.a1 }));
+        return new Map((res.body as { runners: Array<{ id: string; state: string; state_note: string | null }> }).runners.map((r) => [r.id, r]));
+      };
+      // No key (absent, null, too short, or unreadable): the wake window is off.
+      for (const over of [{}, { wakeKey: null }, { wakeKey: () => null }, { wakeKey: () => Buffer.alloc(16, 1) }, { wakeKey: () => { throw new Error("unreadable"); } }]) {
+        const rows = await read(over);
+        expect(rows.get(quiet)).toMatchObject({ state: "offline", state_note: null });
+        expect(rows.get(fresh120)).toMatchObject({ state: "online_idle", state_note: null });
+      }
+      // The key configured: the same runner holds a grant and reads online, last heard 2 min ago.
+      expect((await read({ wakeKey: () => Buffer.alloc(32, 7) })).get(quiet)).toMatchObject({ state: "online_idle", state_note: "Last heard 2 min ago" });
+    });
+
     it("one online window: a runner last seen 100 s ago is online in the state and for the covering test, 130 s ago offline in both", async () => {
       const f = await fresh();
       const id = await runner(f, { lastSeen: ago(100) });

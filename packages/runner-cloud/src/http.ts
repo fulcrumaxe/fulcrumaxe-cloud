@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 import { CURRENT_PROTOCOL_VERSION, MAX_CREATED_SKEW_SECONDS, MIN_SUPPORTED_PROTOCOL_VERSION, type ClaimCapacity, type ContextLedgerBody, type DoneCheck, type Job, type LocalOnlyEvent, type SignedJob, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { reportError } from "@fx/telemetry";
 import type { RunPullRequestPort } from "./runPullRequest.js";
+import type { RunnerSeenReader } from "./wakeSeen.js";
 
 /** The framework-free request and response the runner handlers speak. apps/web adapts `Request` and `NextResponse` to these. */
 export interface RunnerHttpRequest {
@@ -101,6 +102,11 @@ export interface RunnerCloudDeps {
    * throwing: no grant is minted and hello and claim answer exactly as before.
    */
   wakeKey?: (() => Buffer | null) | null;
+  /**
+   * D#6 RUNNER-WAKE: reads the cached `seen:<rid>` stamps the wake endpoint writes (wakeSeen.ts), so the fleet read can count a wake-capable
+   * runner's checks as contact. Absent: the database stamp alone decides, as before.
+   */
+  runnerSeen?: RunnerSeenReader | null;
   /** Where `done` writes its one-line JSON diagnostics for a pull request failure (default: `console.warn`). Tests inject a collector. */
   log?: (line: string) => void;
   /** The clock. Tests inject a fixed one. */

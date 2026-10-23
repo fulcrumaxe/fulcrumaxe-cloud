@@ -87,7 +87,9 @@ export function runnerLimitText(a) {
 /** The state as { mark, words }: "Paused · Resumes within 5 min", "Finishing current work", "Revoked: registrant left". */
 export function stateParts(r) {
   const mark = STATE_MARKS[r.state] || "";
-  if (r.state === "busy") return { mark, words: r.loadLabel || "Busy" };
+  // A wake-capable runner past the 2-minute window but inside its 35-minute slot reads "Online · Last heard 7 min ago" (the note comes from the cloud).
+  if (r.state === "busy") return { mark, words: [r.loadLabel || "Busy", r.note].filter(Boolean).join(" · ") };
+  if (r.state === "online_idle") return { mark, words: ["Online", r.note].filter(Boolean).join(" · ") };
   if (r.state === "paused") return { mark, words: ["Paused", r.note].filter(Boolean).join(" · ") };
   if (r.state === "revoked") return { mark, words: r.note || "Revoked" };
   return { mark, words: STATE_WORDS[r.state] || "Unknown" };

@@ -18,6 +18,7 @@ export const RUNNER_PROTOCOL_VERSION: number = CURRENT_PROTOCOL_VERSION;
 
 /**
  * D#483 S4-b2c: the capability-gated job kinds this build runs, sent on `hello` (`HelloMessage.capabilities`). The cloud offers the claim
- * verifier's job only to a runner whose latest hello listed `proposal_verifier`; the protocol version does not move for it.
+ * verifier's job only to a runner whose latest hello listed `proposal_verifier`; the protocol version does not move for it. D#6 RUNNER-WAKE:
+ * `wake_v1` asks for a wake grant on the hello and claim replies (daemon/wake.ts); an older cloud refuses it and the hello goes again without it.
  */
-export const RUNNER_BUILD_CAPABILITIES: Array<"proposal_verifier"> = ["proposal_verifier"];
+export const RUNNER_BUILD_CAPABILITIES: Array<"proposal_verifier" | "wake_v1"> = ["proposal_verifier", "wake_v1"];
