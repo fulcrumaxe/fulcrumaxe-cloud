@@ -1,6 +1,7 @@
 import { isValidRunnerName } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
+import { refuseNonPrivateRepos } from "./repoPrivacy.js";
 import { failLeases } from "./revoke.js";
 
 /**
@@ -103,13 +104,15 @@ export async function applyRunnerSetting(deps: RunnerCloudDeps, principal: Sessi
 
 /**
  * POST /api/runners/:id/repos with `{ repo_ids: [uuid, ...] }`: the full set of repositories the runner covers from the next claim. An owner or admin
- * may set any set of the account's repositories; the registrant may only narrow. Running work is not touched.
+ * may set any set of the account's repositories; the registrant may only narrow. Running work is not touched. A repo the request adds that is not
+ * private (or whose visibility cannot be read) is refused with 409 `public_repo` or `repo_visibility_unknown`, nothing written; narrowing reads nothing.
  */
 export async function setRunnerRepos(deps: RunnerCloudDeps, principal: SessionPrincipal, runnerId: string, input: unknown): Promise<RunnerHttpResponse> {
   if (!UUID.test(runnerId)) throw new RunnerHttpError(404, "not_found", "no such runner");
   const given = argument(input, "repo_ids");
   if (!Array.isArray(given) || given.length > 100 || !given.every((id) => typeof id === "string" && UUID.test(id))) return invalid();
   try {
+    await refuseNonPrivateRepos(deps, principal, given as string[], runnerId);
     const repoIds = await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client) => {
       await client.query("SELECT runner_repos_set($1, $2::uuid[])", [runnerId, given]);
       return (await client.query<{ allowed_repo_ids: string[] }>("SELECT allowed_repo_ids FROM runners WHERE id = $1", [runnerId])).rows[0]?.allowed_repo_ids ?? [];

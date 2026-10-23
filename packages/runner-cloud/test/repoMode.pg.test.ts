@@ -104,4 +104,65 @@ describe("GET /api/runners/repos/:id/execution-mode [pg]", () => {
     const id = await repo(f, "sandbox", null, null);
     expect(body(await get(f, f.o1, id)).full_name).toBeNull();
   });
+
+  describe("runner_blocked: a repo on a runner is re-read live, and one that is not private now shows as blocked", () => {
+    type Seen = "private" | "public" | "unknown" | "throw";
+    function reader(answer: () => Seen) {
+      const calls: Array<{ accountId: string; repoId: string }> = [];
+      const repoVisibility = async (accountId: string, repoId: string) => {
+        calls.push({ accountId, repoId });
+        const seen = answer();
+        if (seen === "throw") throw new Error("github down");
+        return seen;
+      };
+      return { calls, repoVisibility };
+    }
+    const getWith = (f: F2Fixture, repoId: string, repoVisibility: (a: string, r: string) => Promise<"private" | "public" | "unknown">) =>
+      respond(() => getRepoMode(h.deps({ repoVisibility }), { accountId: f.accountId, userId: f.m1 }, repoId));
+
+    it.each([
+      ["runner_local", "private", null],
+      ["runner_local", "public", "public_repo"],
+      ["runner_local", "unknown", "repo_visibility_unknown"],
+      ["runner_local", "throw", "repo_visibility_unknown"],
+      ["runner_verified", "private", null],
+      ["runner_verified", "public", "public_repo"],
+      ["runner_verified", "unknown", "repo_visibility_unknown"],
+    ] as const)("a %s repo the read sees as %s answers runner_blocked %s, from one read of this repo", async (mode, seen, blocked) => {
+      const f = await fresh();
+      const id = await repo(f, mode);
+      const r = reader(() => seen);
+      const res = await getWith(f, id, r.repoVisibility);
+      expect(res.status).toBe(200);
+      expect(body(res).runner_blocked).toBe(blocked);
+      expect(r.calls).toEqual([{ accountId: f.accountId, repoId: id }]);
+    });
+
+    it("a sandbox repo is never blocked and makes no visibility read, even when the repo is public", async () => {
+      const f = await fresh();
+      const id = await repo(f, "sandbox");
+      const r = reader(() => "public");
+      expect(body(await getWith(f, id, r.repoVisibility)).runner_blocked).toBeNull();
+      expect(r.calls).toHaveLength(0);
+    });
+
+    it("no visibility port wired reads as unknown: a runner repo shows as blocked (fails closed)", async () => {
+      const f = await fresh();
+      expect(body(await get(f, f.m1, await repo(f, "runner_local"))).runner_blocked).toBe("repo_visibility_unknown");
+    });
+
+    it("a repo set to local-only while private that turns public later shows as blocked on the next read, and clears when private again", async () => {
+      const f = await fresh();
+      const id = await repo(f, "runner_local");
+      let now: Seen = "private";
+      const r = reader(() => now);
+      expect(body(await getWith(f, id, r.repoVisibility)).runner_blocked).toBeNull();
+      now = "public";
+      const after = await getWith(f, id, r.repoVisibility);
+      expect(body(after)).toMatchObject({ execution_mode: "runner_local", runner_blocked: "public_repo" });
+      now = "private";
+      expect(body(await getWith(f, id, r.repoVisibility)).runner_blocked).toBeNull();
+      expect(r.calls).toHaveLength(3);
+    });
+  });
 });

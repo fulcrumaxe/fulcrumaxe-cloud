@@ -52,7 +52,7 @@ describe("fleet control routes [pg]", () => {
   const repoIds = async (id: string): Promise<string[]> => (await h.admin.query("SELECT allowed_repo_ids FROM runners WHERE id = $1", [id])).rows[0].allowed_repo_ids;
   const auditRows = async (f: F2Fixture, action: string) => (await h.admin.query("SELECT actor, payload FROM audit_log WHERE account_id = $1 AND action = $2 ORDER BY created_at", [f.accountId, action])).rows;
   const act = (f: F2Fixture, user: string, id: string, action: FleetSettingAction, body: unknown = null) => respond(() => applyRunnerSetting(h.deps(), { accountId: f.accountId, userId: user }, id, action, body));
-  const repos = (f: F2Fixture, user: string, id: string, ids: unknown) => respond(() => setRunnerRepos(h.deps(), { accountId: f.accountId, userId: user }, id, { repo_ids: ids }));
+  const repos = (f: F2Fixture, user: string, id: string, ids: unknown) => respond(() => setRunnerRepos(h.deps({ repoVisibility: async () => "private" }), { accountId: f.accountId, userId: user }, id, { repo_ids: ids }));
   const recorder = () => {
     const calls: Array<{ accountId: string; runnerId: string; reason: string }> = [];
     const fail: FailRunnerLeases = async (input) => {

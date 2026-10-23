@@ -116,6 +116,20 @@ test.describe("D#6 R5b-2b-iii: repo mode picker (mocked API)", () => {
     expect(appErrors).toEqual([]);
   });
 
+  test("a local-only repo that is public now shows as blocked, with the copy sentence", async ({ page }) => {
+    const { appErrors } = await setup(page, { view: view({ execution_mode: "runner_local", runner_blocked: "public_repo" }) });
+    await expect(tid(page, "repos-mode-blocked")).toHaveText(COPY.publicRepo);
+    await expect(tid(page, "repos-mode-runner_local")).toBeChecked();
+    expect(appErrors).toEqual([]);
+  });
+
+  test("a local-only repo with nothing blocking it has no blocked sentence", async ({ page }) => {
+    const { appErrors } = await setup(page, { view: view({ execution_mode: "runner_local", runner_blocked: null }) });
+    await expect(tid(page, "repos-mode-runner_local")).toBeChecked();
+    await expect(tid(page, "repos-mode-blocked")).toHaveCount(0);
+    expect(appErrors).toEqual([]);
+  });
+
   test("local-only: picking it opens the question; apply waits for the exact name; the POST has the mode and the name and no hash", async ({ page }) => {
     const { mock, appErrors } = await setup(page);
     await pick(page, "runner_local");

@@ -2,6 +2,7 @@ import { createHash, randomInt } from "node:crypto";
 import { CredentialMode } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
+import { refuseNonPrivateRepos } from "./repoPrivacy.js";
 
 /** Registration codes live 10 minutes and work once (criterion 1). */
 export const CODE_TTL_MINUTES = 10;
@@ -22,7 +23,8 @@ export function newRegistrationCode(): string {
 /**
  * POST /api/runners/registration-codes (a session route). Only an owner or admin may mint a code; the account and the
  * registrant are the session's, never the body's. The row is written by `runner_registration_code_create` (0724), which
- * checks the caller's role and the repos itself; app_user has no INSERT on the table.
+ * checks the caller's role and the repos itself; app_user has no INSERT on the table. A repo that is not private (or whose visibility
+ * cannot be read) is refused first, with 409 `public_repo` or `repo_visibility_unknown`: a runner is never bound to a public repo.
  */
 export async function mintRegistrationCode(deps: RunnerCloudDeps, principal: SessionPrincipal, input: unknown): Promise<RunnerHttpResponse> {
   const body = typeof input === "object" && input !== null && !Array.isArray(input) ? (input as Record<string, unknown>) : null;
@@ -35,6 +37,7 @@ export async function mintRegistrationCode(deps: RunnerCloudDeps, principal: Ses
     throw new RunnerHttpError(400, "invalid_message", "the body does not match");
   }
   const repoIds = [...new Set((repos as string[]).map((r) => r.toLowerCase()))];
+  await refuseNonPrivateRepos(deps, principal, repoIds);
 
   // One definer (0724) checks the role (owner or admin, from the session), the repos and the insert in one transaction.
   const code = newRegistrationCode();

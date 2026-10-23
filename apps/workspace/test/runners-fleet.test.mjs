@@ -7,7 +7,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { launchRunId } from "../apps/runs/runs-storage.js";
 import {
-  ACTION_SENTENCES, ADD_SENTENCES, ONLY_ADMINS, STATE_WORDS, accountText, actionUrl, capacityText, commandsFor, controlList, createAdder, createFleet, factsText, loadRepoChoices, parseLabels,
+  ACTION_SENTENCES, ADD_REPO_SENTENCES, ADD_SENTENCES, ONLY_ADMINS, STATE_WORDS, accountText, actionUrl, capacityText, commandsFor, controlList, createAdder, createFleet, factsText, loadRepoChoices, parseLabels,
   provText, readFleet, readRunner, runnerLimitText, stateParts, versionText,
 } from "../apps/runners/runners-fleet.js";
 
@@ -264,6 +264,22 @@ describe("Add a runner", () => {
       expect(a.state.error).not.toContain(SERVER_TEXT);
     }
     expect(ADD_SENTENCES[403]).toBe(ONLY_ADMINS);
+  });
+
+  it("a repo that isn't private is refused with its own sentence (409 public_repo / repo_visibility_unknown), for a code and a token", async () => {
+    for (const [path, url] of [["code", "/api/runners/registration-codes"], ["token", "/api/runners/provisioning-tokens"]]) {
+      for (const code of ["public_repo", "repo_visibility_unknown"]) {
+        const { call } = fakeCall(routes({ ["POST " + url]: fail(409, code) }));
+        const a = createAdder({ call, origin: "https://cloud.example" });
+        a.open();
+        a.edit({ path, repoIds: [REPO] });
+        await a.submit();
+        expect(a.state.phase).toBe("form");
+        expect(a.state.error).toBe(ADD_REPO_SENTENCES[code]);
+        expect(a.state.made).toBeNull();
+      }
+    }
+    expect(ADD_REPO_SENTENCES.public_repo).toMatch(/public repository can't run on a runner/);
   });
 
   it("names the token limit the list returned in the 409 sentence, not a fixed number", async () => {

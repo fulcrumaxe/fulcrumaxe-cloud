@@ -335,8 +335,10 @@ export function createDialControl({ call = api, signal, repoId, data, doc = docu
 // answer exists (loading, and a read that failed), when there is no copy to use. A refusal is shown as a sentence chosen by status and
 // code, never the server's message. Changing the mode asks for the repository's full name, typed back exactly (the server checks it
 // too). Cloud-verified also sends the hash of the wording the server shipped, so the server's 409 `copy_changed` applies, and it is off
-// while no usable model key is connected (`key_required`), with the reason wired to the radio by aria-describedby.
+// while no usable model key is connected (`key_required`), with the reason wired to the radio by aria-describedby. A repo on a runner that is
+// public now, or whose visibility can't be read (`runner_blocked`, read live by the server), shows the matching sentence: its runner jobs are refused.
 export const MODES = ["sandbox", "runner_local", "runner_verified"];
+const BLOCKS = ["public_repo", "repo_visibility_unknown"];
 const LABEL_KEY = { sandbox: "sandbox", runner_local: "localOnly", runner_verified: "cloudVerified" };
 const HELP_KEY = { sandbox: "sandboxHelp", runner_local: "localOnlyHelp", runner_verified: "cloudVerifiedHelp" };
 const NEEDED = ["title", "sandbox", "sandboxHelp", "localOnly", "localOnlyHelp", "cloudVerified", "cloudVerifiedHelp", "keyRequired", "keyRequiredWhy", "typeName", "apply", "cancel", "saving", "saved", "leaveCancels", "adminOnly", "saveFailed", "nameMismatch", "copyChanged", "keyGone", "publicRepo", "visibilityUnknown"];
@@ -349,7 +351,7 @@ export function readView(b) {
   const c = b && b.copy;
   if (!b || !MODES.includes(b.execution_mode) || typeof b.key_required !== "boolean" || typeof b.copy_sha256 !== "string" || !b.copy_sha256) return null;
   if (!c || typeof c !== "object" || !NEEDED.every((k) => typeof c[k] === "string" && c[k] !== "")) return null;
-  return { mode: b.execution_mode, fullName: typeof b.full_name === "string" ? b.full_name : null, keyRequired: b.key_required, hash: b.copy_sha256, canChange: b.can_change === true, copy: c };
+  return { mode: b.execution_mode, fullName: typeof b.full_name === "string" ? b.full_name : null, keyRequired: b.key_required, hash: b.copy_sha256, canChange: b.can_change === true, blocked: BLOCKS.includes(b.runner_blocked) ? b.runner_blocked : null, copy: c };
 }
 
 /** The sentence for a refused change, by status and code. `copy` is the picker's copy. */
@@ -387,6 +389,8 @@ export function pickerModel(st) {
       disabled: !v.canChange || busy || (m === "runner_verified" && v.keyRequired && v.mode !== m),
     })),
     keyReason: v.keyRequired && v.mode !== "runner_verified" ? [v.copy.keyRequired, v.copy.keyRequiredWhy] : null,
+    // A sandbox repo is never blocked: moving it there is the way out.
+    blocked: v.mode === "sandbox" || !v.blocked ? "" : v.blocked === "public_repo" ? v.copy.publicRepo : v.copy.visibilityUnknown,
     confirm: target ? { target, showWording: target === "runner_verified", leaveNote: target === "sandbox" && v.mode !== "sandbox" ? v.copy.leaveCancels : "", applyDisabled: !typedOk || busy } : null,
     saving: busy,
     saved: st.phase === "saved",
@@ -471,6 +475,7 @@ export function createModeControl({ call = api, signal, repoId, doc = document }
         h("span", null, h("strong", null, o.label), h("span", { class: "repos-muted", id: id("help-" + o.mode) }, o.help)))
     );
     const parts = [h("legend", { class: "repos-subtitle" }, v.copy.title), h("div", { role: "radiogroup", "aria-label": v.copy.title, "data-testid": "repos-mode-group" }, ...radios)];
+    if (m.blocked) parts.push(h("p", { class: "repos-error", role: "status", "data-testid": "repos-mode-blocked" }, m.blocked));
     if (m.keyReason) parts.push(h("p", { id: id("key-reason"), class: "repos-muted", "data-testid": "repos-mode-key-required" }, m.keyReason.join(" ")));
     if (m.locked) parts.push(h("p", { id: id("locked"), class: "repos-muted", "data-testid": "repos-mode-admin-only" }, v.copy.adminOnly));
     if (m.confirm) {
