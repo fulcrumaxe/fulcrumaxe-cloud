@@ -1,8 +1,13 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { MARKER_TTL_SECONDS, markWorkPending, runGatedTick, setPendingHooks } from "@fx/core/src/pendingWork";
-import { runtimeCacheStore } from "../lib/pendingWorkStore";
+import { MARKER_TTL_SECONDS, getPendingHooks, markWorkPending, runGatedTick, setPendingHooks } from "@fx/core/src/pendingWork";
+import { configureErrorReporter } from "@fx/telemetry";
+import { installPendingWork, runtimeCacheStore } from "../lib/pendingWorkStore";
+
+// A pool created anywhere fails the "zero connections" test below (same pattern as app/api/cron/gate.test.ts).
+const createPool = vi.hoisted(() => vi.fn(() => ({ fake: "pool" })));
+vi.mock("@fx/db/src/pool", () => ({ createPool }));
 
 /**
  * D#454 H3c: the production store, through the REAL @vercel/functions Runtime Cache client and Node's real HTTP path,
@@ -153,5 +158,34 @@ describe("runtimeCacheStore through the real client", () => {
     await markWorkPending("run-action-sweep", { now: t0 + 120_000 });
     await tick(t0 + 300_000);
     expect(run).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("gate error reporting stays off the database", () => {
+  afterEach(() => configureErrorReporter({ service: "app" }));
+
+  it("a forced cache failure writes one stdout code line, records no error class and opens 0 pool connections", async () => {
+    // The process-wide reporter as instrumentation.ts installs it when the app login is configured: a sink that would store a class.
+    const record = vi.fn();
+    configureErrorReporter({ service: "web", sink: { record } });
+    const lines: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      lines.push(String(chunk));
+      return true;
+    });
+
+    installPendingWork();
+    const hooks = getPendingHooks()!;
+    const boom = Object.assign(new Error("cache timed out"), { code: "ETIMEDOUT" });
+    setPendingHooks({ ...hooks, store: { get: () => Promise.reject(boom), set: () => Promise.reject(boom), delete: () => Promise.reject(boom) } });
+
+    const run = vi.fn(async () => ({ result: "swept", workFound: false, nextDueAt: null }));
+    await runGatedTick("api-sweep", run, () => {}, Date.now);
+
+    const reported = lines.map((l) => JSON.parse(l) as Record<string, unknown>).filter((l) => l.event === "error.reported");
+    expect(reported.length).toBeGreaterThan(0);
+    expect(reported[0]).toMatchObject({ level: "error", service: "web", stage: "pending_work.read", error_code: "internal_error" });
+    expect(record).not.toHaveBeenCalled();
+    expect(createPool).not.toHaveBeenCalled();
   });
 });
