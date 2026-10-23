@@ -33,9 +33,14 @@ function setup(over: Partial<BranchCleanupHandlerDeps> = {}, pool = countingPool
     const { rows } = (await pool.pool.query("SELECT account_id, work_item_id FROM branch_cleanup_list_due($1::integer)", [50])) as unknown as { rows: unknown[] };
     return { configured: true, listed: rows.length, deleted: 0, left: 0, recorded: 0, failed: rows.length, nextDueAt: rows.length > 0 ? clock.value + 15 * 60_000 : null };
   });
-  const getWorker = vi.fn(async () => ({ sweepBranchCleanups: sweepSpy }));
+  /** D#598: the stale pull-request sweep's stand-in: one statement for its list, as the real sweep's first one. */
+  const prSweepSpy = vi.fn(async (_input: { github: NonNullable<BranchCleanupHandlerDeps["prState"]> }) => {
+    const { rows } = (await pool.pool.query("SELECT account_id, work_item_id FROM pr_slot_reconcile_list_due($1::integer)", [50])) as unknown as { rows: unknown[] };
+    return { listed: rows.length, moved: 0, unchanged: 0, failed: 0 };
+  });
+  const getWorker = vi.fn(async () => ({ sweepBranchCleanups: sweepSpy, sweepPrSlotHolders: prSweepSpy }));
   const log = vi.fn();
-  return { ...pool, github, getWorker, log, deps: { cronSecret: SECRET, getWorker, github, log, now: () => clock.value, ...over } satisfies BranchCleanupHandlerDeps };
+  return { ...pool, github, getWorker, log, prSweepSpy, deps: { cronSecret: SECRET, getWorker, github, log, now: () => clock.value, ...over } satisfies BranchCleanupHandlerDeps };
 }
 const req = (authorization: string | null) => new NextRequest("https://example.test/api/cron/branch-cleanup", { method: "GET", headers: authorization === null ? {} : { authorization } });
 const marker = (): number | null => {
@@ -113,6 +118,36 @@ describe("GET /api/cron/branch-cleanup", () => {
     const before = s.statements.length;
     expect(await (await branchCleanupHandler(req(`Bearer ${SECRET}`), s.deps)).json()).toEqual({ skipped: true, reason: "no_pending_work" });
     expect(s.statements).toHaveLength(before);
+  });
+
+  it("D#598: a tick that connects also runs the stale pull-request sweep with the read-only opener, reports its counts, and leaves the marker to the cleanup", async () => {
+    await markWorkPending("branch-cleanup", { since: clock.value - 120_000 });
+    const prState = vi.fn(async () => {
+      throw new Error("no GitHub client in a test that must open none");
+    });
+    const s = setup({ prState });
+    const res = await branchCleanupHandler(req(`Bearer ${SECRET}`), s.deps);
+    expect(await res.json()).toEqual({ configured: true, listed: 0, deleted: 0, left: 0, recorded: 0, failed: 0, prSlots: { listed: 0, moved: 0, unchanged: 0, failed: 0 } });
+    expect(s.prSweepSpy).toHaveBeenCalledWith({ github: prState });
+    expect(s.statements.map((x) => x.match(/[a-z_]+_list_due/)?.[0])).toEqual(["branch_cleanup_list_due", "pr_slot_reconcile_list_due"]);
+    expect(marker()).toBeNull();
+    // A sweep that throws is a fixed line and a flag, never a failed cleanup tick.
+    await markWorkPending("branch-cleanup", { since: clock.value - 120_000 });
+    s.prSweepSpy.mockRejectedValueOnce(new Error("boom"));
+    const again = await branchCleanupHandler(req(`Bearer ${SECRET}`), s.deps);
+    expect(again.status).toBe(200);
+    expect(await again.json()).toMatchObject({ configured: true, prSlots: { failed: true } });
+    expect(s.log).toHaveBeenCalledWith("branch cleanup: stale pull-request sweep failed");
+  });
+
+  it("D#598: with no marker the stale pull-request sweep does not run either, and without the opener it is never asked for", async () => {
+    const s = setup({ prState: vi.fn() as never });
+    expect(await (await branchCleanupHandler(req(`Bearer ${SECRET}`), s.deps)).json()).toEqual({ skipped: true, reason: "no_pending_work" });
+    expect(s.prSweepSpy).not.toHaveBeenCalled();
+    await markWorkPending("branch-cleanup", { since: clock.value - 120_000 });
+    const t = setup();
+    await branchCleanupHandler(req(`Bearer ${SECRET}`), t.deps);
+    expect(t.prSweepSpy).not.toHaveBeenCalled();
   });
 
   it("an unconfigured worker is reported, not an error", async () => {

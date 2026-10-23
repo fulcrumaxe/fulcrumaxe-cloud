@@ -119,6 +119,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "sweepComputeSettle",
       "sweepInvariants",
       "sweepParkedStages",
+      "sweepPrSlotHolders",
       "sweepProposalVerification",
       "sweepRunHandoffs",
       "sweepRunnerLeases",
