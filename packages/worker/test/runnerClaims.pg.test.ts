@@ -54,6 +54,13 @@ describe("runner claim, heartbeat and events [pg]", () => {
     await admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[], allowed_roles = $3::text[] WHERE id = $1", [id, o.repos ?? [A.repoId], o.roles ?? ["executor", "code-reviewer"]]);
     return id;
   }
+  /** What a runner's hello stores (0893): the capability row, rewritten each time. */
+  async function capable(runnerId: string, capabilities: string[]): Promise<void> {
+    await admin.query(
+      "INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, $3::text[]) ON CONFLICT (runner_id) DO UPDATE SET capabilities = EXCLUDED.capabilities",
+      [runnerId, A.accountId, capabilities],
+    );
+  }
   async function user(): Promise<string> {
     const id = randomUUID();
     await admin.query("INSERT INTO users (id, email) VALUES ($1, $2)", [id, `${id}@example.test`]);
@@ -260,6 +267,8 @@ describe("runner claim, heartbeat and events [pg]", () => {
       it("an empty allowed_roles means every runner-eligible role: a fresh runner claims each of them", async () => {
         const fresh = await newRunner({ roles: [] });
         expect((await admin.query("SELECT allowed_roles FROM runners WHERE id = $1", [fresh])).rows[0].allowed_roles).toEqual([]);
+        // D#483 S4-b2c: the claim verifier also needs the capability on the runner's latest hello (its own tests are below).
+        await capable(fresh, ["proposal_verifier"]);
         for (const role of RUNNER_ELIGIBLE_ROLES) {
           const id = await pending({ role });
           const result = await claim(fresh);
@@ -267,6 +276,31 @@ describe("runner claim, heartbeat and events [pg]", () => {
           // The account's one slot is free again for the next role.
           await admin.query("UPDATE agent_runs SET status = 'succeeded' WHERE id = $1", [id]);
         }
+      });
+
+      // D#483 S4-b2c: the claim verifier is offered only to a runner whose latest hello advertised `proposal_verifier`.
+      it("a capability-gated role: a runner without the capability is not offered it, one with it is, and losing it on a later hello takes it away", async () => {
+        const plain = await newRunner({ roles: [] });
+        const id = await pending({ role: "proposal-verifier", mode: "runner_verified" });
+        await admin.query("UPDATE repos SET execution_mode = 'runner_verified' WHERE id = $1", [A.repoId]);
+        expect((await claim(plain)).kind).toBe("idle");
+        expect((await row(id)).status).toBe("pending");
+        // A runner of the same account that does advertise it takes the run.
+        const updated = await newRunner({ roles: [] });
+        await capable(updated, ["proposal_verifier"]);
+        expect(await claim(updated)).toMatchObject({ kind: "claimed", runId: id });
+        // A downgrade: a later hello with no capability rewrites the row, and the next verifier run is not offered to it.
+        await capable(updated, []);
+        await admin.query("UPDATE agent_runs SET status = 'succeeded' WHERE id = $1", [id]);
+        const next = await pending({ role: "proposal-verifier", mode: "runner_verified" });
+        expect((await claim(updated)).kind).toBe("idle");
+        expect((await row(next)).status).toBe("pending");
+      });
+
+      it("a capability-gated role: a runner without the capability still claims every other role", async () => {
+        const plain = await newRunner({ roles: [] });
+        const id = await pending({ role: "code-reviewer" });
+        expect(await claim(plain)).toMatchObject({ kind: "claimed", runId: id });
       });
 
       it("a non-empty allowed_roles narrows the set: { executor } claims no reviewer run", async () => {

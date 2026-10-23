@@ -18,7 +18,7 @@
  * nor use a tool its role was not given. The boundary that matters is still the sandbox VM, the egress firewall and the
  * gh-proxy's push and PR rules; these lists are least privilege on top of them, not a replacement.
  */
-import { CONTEXT_WARNING_CODE, CONTEXT_WARNING_TEXT, CONTEXT_WARN_PCT, excludeDenyRules } from "@fulcrumaxe/runner-protocol";
+import { CONTEXT_WARNING_CODE, CONTEXT_WARNING_TEXT, CONTEXT_WARN_PCT, PROPOSAL_VERIFIER_ROLE, PROPOSAL_VERIFIER_RUNNER_TOOLS, excludeDenyRules, verifierReadGuardHook } from "@fulcrumaxe/runner-protocol";
 // D#600 CX-5c: the exclude helpers live in the protocol package, so the local runner writes the very same rules. Re-exported here under the names this package always had.
 export { EXCLUDE_PROMPT_LINE, MAX_EXCLUDE_RULES, disabledToolsFor, escapeRulePath, excludeDenyRules } from "@fulcrumaxe/runner-protocol";
 
@@ -122,6 +122,15 @@ export function toolsForRole(role: string): readonly string[] {
 }
 
 /**
+ * D#483 S4-b2c: the tool list a runner job of this role is signed with (`role_tools_sha256`). The same as `toolsForRole`, except for the claim
+ * verifier: its sandbox list names the sandbox's checkout path, so a runner job carries the bare three (`PROPOSAL_VERIFIER_RUNNER_TOOLS`), which
+ * the runner confines to its own checkout. Fails closed like `toolsForRole`.
+ */
+export function runnerToolsForRole(role: string): readonly string[] {
+  return role === PROPOSAL_VERIFIER_ROLE ? PROPOSAL_VERIFIER_RUNNER_TOOLS : toolsForRole(role);
+}
+
+/**
  * D#483 S4-b2a: the claim verifier. Its prompt holds an outsider's text and its claims are stored and shown, so whatever it can read
  * it can leak. It gets Read, Glob and Grep and nothing else (no Bash, no LS, no network), confined three ways:
  *  - Read is allowed only under the checkout (`VERIFIER_WORKDIR`, where the run clones the repository), never bare;
@@ -138,7 +147,7 @@ export function toolsForRole(role: string): readonly string[] {
  * path whose directory does not resolve.
  * Underneath all of it, the sandbox holds no secret by construction (sandboxEnv.ts: credentials are brokered at the firewall).
  */
-export const PROPOSAL_VERIFIER_ROLE = "proposal-verifier";
+export { PROPOSAL_VERIFIER_ROLE };
 export const VERIFIER_WORKDIR = "/vercel/sandbox/repo";
 const VERIFIER_ALLOW: readonly string[] = Object.freeze([`Read(/${VERIFIER_WORKDIR}/**)`, "Glob", "Grep"]);
 export const VERIFIER_DENY: readonly string[] = Object.freeze([
@@ -147,67 +156,12 @@ export const VERIFIER_DENY: readonly string[] = Object.freeze([
   "Read(~/**)",
 ]);
 /**
- * The most hook input the guard looks at. Its `case` matches cost time that grows with the square of the input under bash, and the CLI
- * lets a tool call through when a hook runs past its timeout, so the input is bounded before any match: well under a second at this size.
+ * The guard's text, its input bound and its hook entry live in @fulcrumaxe/runner-protocol (verifierGuard.ts), so a local runner runs the very
+ * same script (S4-b2c). Re-exported here under the names this package always had. A PreToolUse command hook killed at its `timeout` does not
+ * block the call; the input bound keeps the script far inside the timeout instead.
  */
-export const VERIFIER_GUARD_MAX_INPUT = 32768;
-/**
- * The hook script (POSIX sh, builtins only). It holds no single quote, so it is passed whole to `sh -c '...'`. Its one argument (`$1`) is the
- * checkout, the directory it confines to and resolves relative paths from.
- */
-export const VERIFIER_READ_GUARD_SCRIPT = `exec 2>/dev/null
-W=$1
-[ -n "$W" ] || exit 2
-q=\\"
-j=; while IFS= read -r l || [ -n "$l" ]; do j="$j$l"; [ \${#j} -le ${VERIFIER_GUARD_MAX_INPUT} ] || exit 2; done
-[ \${#j} -le ${VERIFIER_GUARD_MAX_INPUT} ] || exit 2
-R=$(cd -P -- "$W" && pwd -P) || exit 2
-cd -- "$R" || exit 2
-n=; for x in Read Glob Grep; do case $j in *"$q"tool_name"$q":"$q$x$q"*) n=$x ;; esac; done
-[ -n "$n" ] || exit 2
-case $j in *"$q"tool_input"$q":{*) ;; *) exit 2 ;; esac
-t=\${j#*"$q"tool_input"$q":\\{}; t=\${t%%\\},"$q"tool_use_id"$q"*}
-k="file_path path glob"; [ "$n" = Glob ] && k="$k pattern"
-fp=; p=; g=
-for f in $k; do
-  case $t in *"$q$f$q":*) ;; *) continue ;; esac
-  v=\${t#*"$q$f$q":}
-  case $v in "$q"*) ;; *) exit 2 ;; esac
-  v=\${v#"$q"}; v=\${v%%"$q"*}
-  case $v in *..*|"~"*|*"\\\\"*|.git|.git/*|*/.git|*/.git/*|.env*|*/.env*) exit 2 ;; esac
-  case $v in /*) case $v in "$W"|"$W"/*) ;; *) exit 2 ;; esac ;; esac
-  case $f in file_path) fp=$v ;; path) p=$v ;; pattern) case $v in *"{"*|*,/*) exit 2 ;; esac; g=$v ;; esac
-done
-in_tree() {
-  x=$1; [ -n "$x" ] || x=.
-  case $x in "$W") x=$R ;; "$W"/*) x=$R/\${x#"$W"/} ;; esac
-  [ -L "$x" ] && exit 2
-  if [ -d "$x" ]; then d=$x; else case $x in */*) d=\${x%/*} ;; *) d=. ;; esac; fi
-  [ -n "$d" ] || exit 2
-  r=$(cd -P -- "$d" && pwd -P) || exit 2
-  case $r in "$R"|"$R"/*) ;; *) exit 2 ;; esac
-}
-case $n in
-  Read) in_tree "$fp" ;;
-  Grep) in_tree "$p" ;;
-  Glob)
-    in_tree "$p"
-    b=\${g%%[*?[]*}
-    if [ "$b" != "$g" ]; then case $b in */*) b=\${b%/*} ;; *) b= ;; esac; fi
-    if [ -n "$b" ]; then case $b in /*) in_tree "$b" ;; *) in_tree "\${p:-.}/$b" ;; esac; fi ;;
-esac
-exit 0
-`;
-const shQuote = (s: string): string => `'${s}'`;
-/**
- * A PreToolUse command hook killed at its `timeout` does not block the call. The CLI's per-hook `onFailure: "block"` (which would make a
- * timeout block) needs a newer CLI than the image pins (versions.lock.json), so it is not set here; the input bound above keeps the script
- * far inside the timeout instead.
- */
-export const VERIFIER_READ_GUARD = {
-  matcher: "Read|Glob|Grep",
-  hooks: [{ type: "command", command: `/bin/sh -c ${shQuote(VERIFIER_READ_GUARD_SCRIPT)} fx-read-guard ${VERIFIER_WORKDIR}`, timeout: 5 }],
-};
+export { VERIFIER_GUARD_MAX_INPUT, VERIFIER_READ_GUARD_SCRIPT } from "@fulcrumaxe/runner-protocol";
+export const VERIFIER_READ_GUARD = verifierReadGuardHook(VERIFIER_WORKDIR);
 
 /**
  * The settings file for one role: the runner's hook, the role's allow list and `defaultMode: "dontAsk"`. The same bytes
@@ -215,7 +169,6 @@ export const VERIFIER_READ_GUARD = {
  */
 export function agentSettingsFor(role: string, excludes: readonly string[] = []): Record<string, unknown> {
   if (role === PROPOSAL_VERIFIER_ROLE) {
-    if (VERIFIER_READ_GUARD_SCRIPT.includes("'")) throw new Error("agentSettingsFor: the read guard cannot be quoted");
     return {
       ...FX_AGENT_SETTINGS,
       hooks: { ...FX_AGENT_SETTINGS.hooks, PreToolUse: [VERIFIER_READ_GUARD] },

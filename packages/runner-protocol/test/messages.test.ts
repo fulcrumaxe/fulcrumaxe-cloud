@@ -85,7 +85,7 @@ describe("G1: no credential channel", () => {
 describe("hello", () => {
   it("carries model_auth_present as a boolean and has no email, organisation or account name", () => {
     const keys = Object.keys(RUNNER_MESSAGES.hello.shape).sort();
-    expect(keys).toEqual(["binary_version", "facts", "isolation", "model_auth_present", "protocol_version"]);
+    expect(keys).toEqual(["binary_version", "capabilities", "facts", "isolation", "model_auth_present", "protocol_version"]);
     expect(RUNNER_MESSAGES.hello.safeParse({ ...(VALID.hello as object), model_auth_present: "yes" }).success).toBe(false);
     for (const extra of ["email", "org", "organization", "account_name", "account"]) {
       expect(RUNNER_MESSAGES.hello.safeParse({ ...(VALID.hello as object), [extra]: "x" }).success, extra).toBe(false);

@@ -1,4 +1,4 @@
-import { RUNNER_ELIGIBLE_ROLES, canonicalJson, sha256Text } from "@fulcrumaxe/runner-protocol";
+import { PROPOSAL_VERIFIER_ROLE, PROPOSAL_VERIFIER_RUNNER_TOOLS, RUNNER_ELIGIBLE_ROLES, canonicalJson, sha256Text } from "@fulcrumaxe/runner-protocol";
 
 /**
  * The tools each runner-eligible role may use on a customer's machine.
@@ -13,6 +13,9 @@ import { RUNNER_ELIGIBLE_ROLES, canonicalJson, sha256Text } from "@fulcrumaxe/ru
  * `assertEnabledSandbox` still requires (enabled, no unsandboxed fallback, home denied, allowlisted network), plus the
  * protected-path deny rules. Reviewers still hold no Edit, MultiEdit, Write or NotebookEdit tool, and a reviewer's
  * changes are never published (`PUBLISHING_ROLES` in prompt.ts, `PUSHING_ROLES` in gitPath.ts).
+ *
+ * D#483 S4-b2c: the claim verifier holds Read, Glob and Grep only (`PROPOSAL_VERIFIER_RUNNER_TOOLS`, the list the cloud signs for its runner
+ * jobs). The settings file confines them to the checkout and adds the shared read guard (settingsFile.ts).
  */
 const READ_TOOLS = ["Read", "Glob", "Grep", "LS"] as const;
 const LOOK_HELPERS = ["Bash(ls:*)", "Bash(cat:*)", "Bash(grep:*)", "Bash(find:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(pwd)"] as const;
@@ -35,6 +38,7 @@ const ENTRY_FOR_ROLE: Readonly<Record<(typeof RUNNER_ELIGIBLE_ROLES)[number], re
   "security-reviewer": REVIEWER,
   "acceptance-tester": REVIEWER,
   debater: REVIEWER,
+  [PROPOSAL_VERIFIER_ROLE]: PROPOSAL_VERIFIER_RUNNER_TOOLS,
 };
 
 /** The role table. Its keys are exactly the runner-eligible roles; each entry is frozen. */

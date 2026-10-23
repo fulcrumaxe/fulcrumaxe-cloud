@@ -24,7 +24,7 @@ import { guarded, requireUuid, RunActionInputError, RunActionRefusedError } from
 import { runnerLimits, type RunnerLimitsSource } from "./runnerLimits.js";
 import { accountCeiling, hostedLimitsFromPlanData, type HostedLimitsSource } from "./runnerAccountCeiling.js";
 import { recordRunnerUsage } from "./runnerUsage.js";
-import { ROUTING_JOIN_SQL, ROUTING_WHERE_SQL, loadPollRouting, routingParams } from "./runnerRouting.js";
+import { ROUTING_JOIN_SQL, ROUTING_WHERE_SQL, loadPollRouting, rolesForCapabilities, routingParams } from "./runnerRouting.js";
 import { requestFollowUp, settleFollowUp, type FollowUpOutcome, type FollowUpPorts } from "./runnerFollowUp.js";
 
 /**
@@ -287,8 +287,8 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
 
   async function loadRunner(accountId: string, runnerId: string) {
     const runner = await withTenant(runnerPool, accountId, async (client) => {
-      const { rows } = await client.query<{ registered_by: string; credential_mode: string; allowed_repo_ids: string[]; allowed_roles: string[]; revoked_at: Date | null; protocol_version: number | null }>(
-        "SELECT registered_by, credential_mode, allowed_repo_ids, allowed_roles, revoked_at, protocol_version FROM runners WHERE id = $1 AND account_id = $2",
+      const { rows } = await client.query<{ registered_by: string; credential_mode: string; allowed_repo_ids: string[]; allowed_roles: string[]; revoked_at: Date | null; protocol_version: number | null; capabilities: string[] | null }>(
+        "SELECT r.registered_by, r.credential_mode, r.allowed_repo_ids, r.allowed_roles, r.revoked_at, r.protocol_version, cap.capabilities FROM runners r LEFT JOIN runner_capabilities cap ON cap.runner_id = r.id AND cap.account_id = r.account_id WHERE r.id = $1 AND r.account_id = $2",
         [runnerId, accountId],
       );
       return rows[0];
@@ -408,7 +408,9 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
         const runner = await loadRunner(accountId, runnerId);
         // An empty `allowed_roles` means every runner-eligible role; a non-empty one narrows the set, and the eligible set is always the hard limit (C21 section 3).
         const eligible: readonly string[] = RUNNER_ELIGIBLE_ROLES;
-        const roles = runner.allowed_roles.length === 0 ? [...eligible] : runner.allowed_roles.filter((role) => eligible.includes(role));
+        // D#483 S4-b2c: a capability-gated role (the claim verifier) only for a runner whose latest hello advertised it (`runner_capabilities`, rewritten on
+        // every hello). A runner built before it never sees such a job; its strict job parse would refuse the role anyway.
+        const roles = rolesForCapabilities(runner.allowed_roles.length === 0 ? [...eligible] : runner.allowed_roles.filter((role) => eligible.includes(role)), runner.capabilities);
         if (runner.allowed_repo_ids.length === 0 || roles.length === 0) return idle(accountId);
 
         const autoRepos = await autoApprovableRepos(accountId, runnerId, runner);

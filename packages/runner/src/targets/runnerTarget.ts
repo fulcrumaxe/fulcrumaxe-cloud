@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "pg";
-import { NOT_RECORDED_MEASURE, RUNNER_ELIGIBLE_ROLES, REVIEW_JOB_ROLES } from "@fulcrumaxe/runner-protocol";
+import { NOT_RECORDED_MEASURE, PROPOSAL_VERIFIER_ROLE, RUNNER_ELIGIBLE_ROLES, REVIEW_JOB_ROLES } from "@fulcrumaxe/runner-protocol";
 import { DEFAULT_BACKEND } from "@fx/runtime/src/backends/types.js";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
@@ -175,6 +175,9 @@ export class RunnerTarget implements ExecutionTarget {
     // D#6 R5b-1 (C38): in a cloud-verified repo the four reviewers run in our sandbox. `VerifiedTarget` (R5b-2a) routes them there, so none
     // reaches this target through the registry; a caller that built this target alone still gets the closed refusal, before anything is counted or written.
     if (this.mode === "runner_verified" && VERIFIED_SANDBOX_REVIEW_ROLES.has(run.role)) return "verified_review_not_wired";
+    // D#483 S4-b2c: the claim verifier is a runner job for a cloud-verified repo only. Its result is re-read by our cloud from the repository, which a
+    // Local-only repo's promise rules out, so a `runner_local` verifier run is refused before anything is counted or written.
+    if (this.mode === "runner_local" && run.role === PROPOSAL_VERIFIER_ROLE) return "role_not_runner_eligible";
     return null;
   }
 

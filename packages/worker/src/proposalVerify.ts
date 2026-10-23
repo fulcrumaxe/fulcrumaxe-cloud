@@ -4,7 +4,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { MAX_VERIFY_ATTEMPTS } from "@fx/core/src/plan/proposalVerification.js";
 import { proposalVerifyKey, verifyHold, verifySourceRefs } from "@fx/core/src/plan/proposalVerifyLimits.js";
 import { reportError } from "@fx/telemetry";
-import { PROPOSAL_VERIFIER_ROLE, VERIFIER_WORKDIR, type StartAgentRunInput } from "@fx/runner";
+import { PROPOSAL_VERIFIER_ROLE, VERIFIER_WORKDIR, readExecutionMode, type RepoVisibility, type RepoVisibilityPort, type StartAgentRunInput } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 
@@ -27,6 +27,16 @@ import type { SeatRequest, SeatResult } from "./seat.js";
  *       result is written by `proposal_record_verification`, the only writer. A run refused at admit, failed, timed out, killed at its cap or
  *       cancelled records `check_failed`, never a verdict; the definer counts the attempt, so the next attempt has a new key and the third
  *       failure is the last (MAX_VERIFY_ATTEMPTS).
+ *
+ * D#483 S4-b2c: where the run goes is the repository's effective mode, read when the run is started:
+ *  - `sandbox`: our sandbox, as above, through the sandbox-only starter.
+ *  - `runner_verified` (Cloud-verified): a light job on the person's runner, through the starter that leaves a queued runner run pending
+ *    (this sweep's wait is its next pass, which reads the run's status, so queued time is credited). The repository must read as private
+ *    from GitHub now (`visibility`); anything else (public, unknown, a failed read) starts nothing and uses no attempt. The job carries the
+ *    pinned commit (the runner checks it out, detached), and its result is recorded exactly as a sandbox run's: our cloud re-reads every cite
+ *    at the pinned sha, as it already reads such a repository for its reviews.
+ *  - `runner_local` (Local-only), or anything else: nothing. Our cloud never reads a Local-only repository's files, so its proposals wait for a
+ *    runner-side check (a later row). The lister (0889/0893) leaves them out; this is the second lock.
  * The pipeline decides everything here; the model's output is only parsed (R-597-1). Nothing here changes a proposal's state, approval or
  * work item (the definer refuses it).
  *
@@ -61,6 +71,10 @@ export interface ProposalVerifyDeps {
   resolveSeat: (request: SeatRequest) => Promise<SeatResult>;
   /** The production run starter, idempotent on the key; sandbox-only (`queued: "refuse"`). */
   starter: RunStarter;
+  /** S4-b2c: the starter for a `runner_verified` repository's run (`queued: "accept"`). Absent: such a proposal starts nothing. */
+  runnerStarter?: RunStarter;
+  /** S4-b2c: the repository visibility port (GitHub metadata). Absent, or anything but `private`: a runner run is not started. */
+  visibility?: RepoVisibilityPort;
   github: (target: { repoId: string; owner: string; name: string }) => VerifyRepoReader;
   /** plan-data's `discoverySettings` (fail closed). */
   settings: () => VerifySettings;
@@ -144,6 +158,15 @@ async function readRun(client: PoolClient, accountId: string, key: string): Prom
 export function createProposalVerifySweep(deps: ProposalVerifyDeps): () => Promise<ProposalVerifyCounts> {
   const now = deps.now ?? Date.now;
 
+  /** S4-b2c: the starter and mode a new run of this repository uses, or null when none may start (see the header). */
+  async function placementFor(accountId: string, repoId: string): Promise<{ mode: "sandbox" | "runner_verified"; starter: RunStarter } | null> {
+    const mode = await readExecutionMode(deps.pool, accountId, repoId);
+    if (mode === "sandbox") return { mode, starter: deps.starter };
+    if (mode !== "runner_verified" || deps.runnerStarter === undefined || deps.visibility === undefined) return null;
+    const seen: RepoVisibility = await deps.visibility.visibility({ accountId, repoId }).catch((): RepoVisibility => "unknown");
+    return seen === "private" ? { mode, starter: deps.runnerStarter } : null;
+  }
+
   /** Records the outcome of an ended run, if the proposal is still waiting on exactly that run. */
   async function settle(accountId: string, p: ProposalRow, run: RunRow): Promise<Outcome> {
     if (!ENDED.has(run.status)) return "waiting";
@@ -188,6 +211,9 @@ export function createProposalVerifySweep(deps: ProposalVerifyDeps): () => Promi
     if (hold === "daily_spend") return "daily_cap";
     if (!p.gh_owner || !p.gh_name) return "skipped";
 
+    const placement = await placementFor(accountId, p.repo_id);
+    if (placement === null) return "skipped";
+
     const repo = { repoId: p.repo_id, owner: p.gh_owner, name: p.gh_name };
     let sha: string;
     try {
@@ -209,7 +235,8 @@ export function createProposalVerifySweep(deps: ProposalVerifyDeps): () => Promi
       repoId: p.repo_id,
       role: PROPOSAL_VERIFIER_ROLE,
       product: "team",
-      expectedExecutionMode: "sandbox",
+      // The mode read above: a repository that moved since starts nothing (`ExecutionModeChangedError`), and the run is tried again next pass.
+      expectedExecutionMode: placement.mode,
       prompt: deps.prompt({ owner: p.gh_owner, name: p.gh_name, sha, title: p.title, summary: p.summary, sourceRefs: sourceRefs(p) }),
       workdir: VERIFIER_WORKDIR,
       // The pinned commit, not the default branch: the agent reads the tree its cites are re-read at, or the launch fails.
@@ -217,7 +244,7 @@ export function createProposalVerifySweep(deps: ProposalVerifyDeps): () => Promi
       headSha: sha,
       idempotency: { key, requestHash: requestHash(p) },
     };
-    await deps.starter.start(input);
+    await placement.starter.start(input);
     // A run refused at admit has already ended: record it now rather than on the next pass.
     const after = await withTenant(deps.pool, accountId, (client) => readRun(client, accountId, key));
     return after !== undefined && ENDED.has(after.status) ? settle(accountId, p, after) : "started";

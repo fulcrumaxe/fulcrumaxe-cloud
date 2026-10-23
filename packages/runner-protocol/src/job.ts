@@ -16,6 +16,7 @@ import { CONTEXT_WINDOW_MAX_TOKENS } from "./contextLevers.js";
 import { CONTEXT_SPILL_CODES, CONTEXT_SPILL_MAX_TOTAL_BYTES } from "./contextSpill.js";
 import { MAX_EXCLUDE_RULES, isRuleablePath } from "./excludeRules.js";
 import { CheckSchema, JobAllowancesSchema } from "./sandboxAllowances.js";
+import { PROPOSAL_VERIFIER_ROLE } from "./verifierGuard.js";
 
 /** Largest `spec.text`, in characters. It matches the cap on a request body. */
 export const MAX_SPEC_TEXT_CHARS = 256 * 1024;
@@ -32,11 +33,15 @@ export const MAX_JOB_MEMORY_BYTES = 8192;
  * The roles a runner may run: the executor and its fix loop, spec drafting, the panel seats, docs, the advisory
  * accessibility pass and, by the owner ruling of C12 section 1 (which supersedes R1b's exclusion of them), the four
  * reviewers whose verdict can gate a merge on a `runner_local` repo: code, security, acceptance and the debater.
+ *
+ * D#483 S4-b2c: and the claim verifier (`PROPOSAL_VERIFIER_ROLE`), a light read-only job. Adding it here is backwards compatible: a runner
+ * built before it refuses such a job at parse (this list is the job's closed `role` enum), and the cloud offers it only to a runner whose
+ * hello advertised `proposal_verifier` (`RUNNER_CAPABILITY_FOR_ROLE`), so the protocol version does not move.
  */
 export const RUNNER_ELIGIBLE_ROLES = [
   "executor", "project-manager", "technical-architect", "product-owner", "cost-analyst",
   "performance-expert", "security-expert", "docs-writer", "accessibility-reviewer",
-  "code-reviewer", "security-reviewer", "acceptance-tester", "debater",
+  "code-reviewer", "security-reviewer", "acceptance-tester", "debater", PROPOSAL_VERIFIER_ROLE,
 ] as const;
 export const RunnerRole = z.enum(RUNNER_ELIGIBLE_ROLES);
 
@@ -48,6 +53,23 @@ export const RunnerRole = z.enum(RUNNER_ELIGIBLE_ROLES);
 export const REVIEW_JOB_ROLES = ["code-reviewer", "security-reviewer", "acceptance-tester", "debater"] as const;
 export type ReviewJobRole = (typeof REVIEW_JOB_ROLES)[number];
 export const isReviewJobRole = (role: string): role is ReviewJobRole => (REVIEW_JOB_ROLES as readonly string[]).includes(role);
+
+/**
+ * D#483 S4-b2c: the roles whose job carries `review: { head_sha }`: the four reviewers, and the claim verifier, whose `head_sha` is the pinned
+ * commit its cites are re-read at. The verifier is not a review role (it gates no merge, gets no review prompt text and no sandbox route): it
+ * only shares the field, so the runner checks out exactly that commit, detached. A job of these roles without the field, or of any other role
+ * with it, is refused on both sides.
+ */
+export const PINNED_COMMIT_JOB_ROLES: readonly string[] = Object.freeze([...REVIEW_JOB_ROLES, PROPOSAL_VERIFIER_ROLE]);
+export const jobCarriesPinnedCommit = (role: string): boolean => PINNED_COMMIT_JOB_ROLES.includes(role);
+
+/**
+ * D#483 S4-b2c: a role a runner runs only when its hello said it can (`HelloMessage.capabilities`), keyed by role. The claim leaves such a
+ * role out for a runner that did not advertise the capability on its latest hello. A role not named here needs none.
+ */
+export const RUNNER_CAPABILITIES = ["proposal_verifier"] as const;
+export type RunnerCapability = (typeof RUNNER_CAPABILITIES)[number];
+export const RUNNER_CAPABILITY_FOR_ROLE: Readonly<Partial<Record<(typeof RUNNER_ELIGIBLE_ROLES)[number], RunnerCapability>>> = Object.freeze({ [PROPOSAL_VERIFIER_ROLE]: "proposal_verifier" });
 
 /**
  * D#6 C43-2a: the slot class of a job. The class comes from the job's signed role, so no new signed field exists. The runner and
@@ -69,6 +91,7 @@ export const JOB_CLASS_BY_ROLE: Readonly<Record<(typeof RUNNER_ELIGIBLE_ROLES)[n
   "code-reviewer": "light",
   "security-reviewer": "light",
   debater: "light",
+  [PROPOSAL_VERIFIER_ROLE]: "light",
 };
 /** The runner-eligible roles of the light class; any other role (an unknown one included) is heavy, so the cloud's SQL can say `role = ANY(...)` for light and `NOT` for heavy. */
 export const LIGHT_JOB_ROLES: readonly string[] = RUNNER_ELIGIBLE_ROLES.filter((role) => JOB_CLASS_BY_ROLE[role] === "light");

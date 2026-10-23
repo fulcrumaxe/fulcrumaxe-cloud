@@ -20,3 +20,4 @@ export * from "./contextLedger.js";
 export * from "./contextSpill.js";
 export * from "./contextLevers.js";
 export * from "./excludeRules.js";
+export * from "./verifierGuard.js";

@@ -862,6 +862,82 @@ describe("JobIssuer [pg]", () => {
       expect(row.min_protocol_version).toBeNull();
     });
   });
+
+  // D#483 S4-b2c: the claim verifier as a light runner job (cloud-verified repositories only).
+  describe("a claim verifier job", () => {
+    const VERIFIER = "proposal-verifier";
+    /** A verifier run as the sweep starts it: no work item, the pinned commit on the row and in the prompt, in a cloud-verified repository. */
+    async function verifierRun(w: Awaited<ReturnType<typeof world>>, over: { headSha?: string | null; prompt?: string } = {}): Promise<ExecutionRun> {
+      await db.admin.query("UPDATE repos SET execution_mode = 'runner_verified' WHERE id = $1", [w.repoId]);
+      const id = randomUUID();
+      const headSha = over.headSha !== undefined ? over.headSha : freshHead();
+      const prompt = over.prompt ?? `Check the proposal against acme/widgets at commit ${headSha}.\n`;
+      await insertAgentRun(db.runWriterPool, { id, accountId: w.accountId, workItemId: null, role: VERIFIER as never, runtime: "runner", executionMode: "runner_verified", dispatchRepoId: w.repoId, initiatedBy: w.userId, ...(headSha ? { headSha } : {}) });
+      return { id, accountId: w.accountId, workItemId: null, parentRunId: null, role: VERIFIER as never, product: "team", repoId: w.repoId, headSha, roleCard: CARD, prompt, model: NO_WINDOW_MODEL, capUsd: 0, spend: { plan: "starter", estimateComputeUsd: 0, trigger: "foreground" } };
+    }
+    const deps = (i: ReturnType<typeof issuer>) => ({ limits: createFakeRunnerLimits(), pool: db.runWriterPool, issuer: i.issuer, visibility: i.visibility });
+
+    it("carries the pinned commit as review.head_sha, is signed with the bare three-tool digest, says verified, and is not a review", async () => {
+      const w = await world();
+      const run = await verifierRun(w);
+      const i = issuer();
+      expect(await new RunnerTarget(deps(i), "runner_verified").dispatch(run)).toEqual({ queued: true });
+      const job = verifyJob(await stored(run.id), { "job-key-1": publicKey }, { now: NOW });
+      expect(job.role).toBe(VERIFIER);
+      expect(job.mode).toBe("verified");
+      expect(job.review).toEqual({ head_sha: run.headSha });
+      expect(job.task.kind).toBe("advise");
+      expect(job.continues).toBeNull();
+      expect(job.role_tools_sha256).toBe(sha256Text(canonicalJson(["Glob", "Grep", "Read"])));
+      // Not the sandbox's list (which names the sandbox checkout path): the runner holds the bare three and confines them itself.
+      expect(job.role_tools_sha256).not.toBe(sha256Text(canonicalJson([...toolsForRole(VERIFIER)].sort())));
+      expect((await db.admin.query("SELECT min_protocol_version AS v FROM agent_runs WHERE id = $1", [run.id])).rows[0].v).toBeNull();
+    });
+
+    it("carries no sandbox allowances and no check, even when the repository has an approved set with a check", async () => {
+      const w = await world();
+      await db.admin.query(
+        "INSERT INTO repo_runner_sandbox_allowances (account_id, repo_id, version, entries, command_timeout_s, set_sha256, set_aside, approved_by, check_argv, check_dev_shell, check_timeout_s) VALUES ($1, $2, 1, $3::jsonb, 900, $4, false, $5, $6, true, 5400)",
+        [w.accountId, w.repoId, JSON.stringify([{ kind: "domain", value: "registry.npmjs.org", access: "connect", reason: "pnpm install" }]), "d".repeat(64), w.userId, ["bash", "scripts/check.sh"]],
+      );
+      const run = await verifierRun(w);
+      await issuer().issuer.issue({ run, jobMode: "verified" });
+      const signed = await stored(run.id);
+      expect(canonicalJson(signed.job)).not.toContain("sandbox_allowances");
+      expect(canonicalJson(signed.job)).not.toContain('"check"');
+      // The control: an executor job of the same repository carries both.
+      const exec = await runnerRun(w, "executor", null, { executionMode: "runner_verified" });
+      await issuer().issuer.issue({ run: exec, jobMode: "verified" });
+      const execJob = verifyJob(await stored(exec.id), { "job-key-1": publicKey }, { now: NOW });
+      expect(execJob.sandbox_allowances).toBeDefined();
+      expect(execJob.check).toBeDefined();
+    });
+
+    it("without a pinned commit, or with a prompt that names another, is refused and nothing is recorded", async () => {
+      const w = await world();
+      const none = await verifierRun(w, { headSha: null });
+      expect(await codeOf(issuer().issuer.issue({ run: none, jobMode: "verified" }))).toBe("review_without_head");
+      expect(await stored(none.id)).toBeNull();
+      const other = await verifierRun(w, { prompt: `at commit ${"d".repeat(40)}\n` });
+      expect(await codeOf(issuer().issuer.issue({ run: other, jobMode: "verified" }))).toBe("review_sha_prompt_mismatch");
+      expect(await stored(other.id)).toBeNull();
+    });
+
+    it("a public repository is refused at issue (public_repo), and nothing is recorded", async () => {
+      const w = await world();
+      const run = await verifierRun(w);
+      expect(await codeOf(issuer({ visibility: "public" }).issuer.issue({ run, jobMode: "verified" }))).toBe("public_repo");
+      expect(await stored(run.id)).toBeNull();
+    });
+
+    it("a Local-only target refuses the role before anything is counted or written; the verified target takes it", async () => {
+      const w = await world();
+      const i = issuer();
+      const precheck = { accountId: w.accountId, repoId: w.repoId, role: VERIFIER };
+      expect(await new RunnerTarget(deps(i), "runner_local").precheck(precheck)).toEqual({ ok: false, reason: "role_not_runner_eligible" });
+      expect(await new RunnerTarget(deps(i), "runner_verified").precheck(precheck)).toEqual({ ok: true });
+    });
+  });
 });
 
 describe("roleToolsDigest and the signer", () => {

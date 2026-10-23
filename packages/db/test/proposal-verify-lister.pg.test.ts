@@ -107,6 +107,21 @@ describe(`migration 0889: ${ROLE} and proposal_verify_list_due [pg]`, () => {
     expect(row).toEqual({ account_id: B.accountId, proposal_id: b });
   });
 
+  // D#483 S4-b2c (0893): a Cloud-verified repository's verifier is a runner job, so its proposals are listed; a Local-only one's still are not.
+  it('lists a Cloud-verified repository, and still leaves out a Local-only one', async () => {
+    const repo = async (mode: string): Promise<string> => {
+      const id = randomUUID();
+      await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name, execution_mode) VALUES ($1, $2, $3, $4, 'team', 'o', $5, $6)`, [id, A.accountId, A.installationId, Math.floor(Math.random() * 1e9), `r${id.slice(0, 8)}`, mode]);
+      return id;
+    };
+    const verified = await proposal(A, { repoId: await repo('runner_verified') });
+    const local = await proposal(A, { repoId: await repo('runner_local') });
+    expect(await listed([verified, local])).toEqual([verified]);
+    const policy = await admin.query<{ qual: string }>(`SELECT qual FROM pg_policies WHERE tablename = 'repos' AND policyname = 'proposal_verify_lister_select'`);
+    expect(policy.rows[0]!.qual).toMatch(/sandbox.*runner_verified/);
+    expect(policy.rows[0]!.qual).not.toMatch(/runner_local/);
+  });
+
   it('leaves out a repository on the person own machine and a deleted account, and gives one account at most 10 places', async () => {
     const runnerRepo = randomUUID();
     await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name, execution_mode) VALUES ($1, $2, $3, $4, 'team', 'o', 'r', 'runner_local')`, [runnerRepo, A.accountId, A.installationId, Math.floor(Math.random() * 1e9)]);
