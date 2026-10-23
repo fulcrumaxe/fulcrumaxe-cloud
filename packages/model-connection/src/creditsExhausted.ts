@@ -50,7 +50,7 @@ export function isCreditsExhaustedAnswer(answer: ProviderAnswer): boolean {
 export async function markCreditsExhaustedWithClient(client: PoolClient, accountId: string): Promise<boolean> {
   const { rows } = await client.query<{ id: string }>(
     `UPDATE model_connections
-        SET status = 'broken', last_error_code = $2
+        SET status = 'broken', last_error_code = $2, broken_at = COALESCE(broken_at, now())
       WHERE account_id = $1 AND status <> 'broken'
       RETURNING id`,
     [accountId, CREDITS_EXHAUSTED_CODE],
