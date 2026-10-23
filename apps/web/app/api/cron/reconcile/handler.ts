@@ -15,9 +15,10 @@ import {
   createModelKeyHealthJob,
   createStripeSubscriptionsJob,
   effectiveSandboxReapMode,
+  CREDITS_BACKED_OFF_CADENCE_SECONDS,
   FAST_RECONCILE_JOBS,
-  hasBrokenCredits,
   parseSandboxReapMode,
+  readCreditsBreak,
   RECONCILE_ROUTE,
   runTick,
   sandboxInventoryJob,
@@ -39,7 +40,8 @@ const FAST_JOB_RETRY_MS = 15 * 60_000;
 /**
  * When the gate should next connect for the 15-minute jobs (FAST_RECONCILE_JOBS in @fx/reconcile: the reconcile gate lets an unmarked
  * reconciler connect on every fourth backstop slot, so they keep their cadence by events instead), or null when neither has anything left to do.
- *  - model_credits_revalidate has work while any connection is still broken for out-of-credit (the pass re-checks it; a top-up clears it);
+ *  - model_credits_revalidate has work while any connection is still broken for out-of-credit (the pass re-checks it; a top-up clears it). Every 15 minutes for
+ *    the first 2 hours after the latest break, then hourly until the connection changes, so an account that never tops up lets the database sleep between looks;
  *  - sandbox_reap_terminal has work left when its pass this tick stopped on a budget, or was skipped as not yet due (its last pass was under
  *    15 minutes ago, so the marker that woke us came too early to run it): either way the next look is at the job's own due time.
  * The due time is the job's `next_due_at`, never earlier than now. Reads two small rows with the pool the tick already holds.
@@ -48,14 +50,25 @@ export async function reconcileNextDueAt(pool: Pick<TickDeps["pool"], "query">, 
   const pending: string[] = [];
   const terminal = summary.results.find((r) => r.job === TERMINAL_JOB)?.result;
   if (terminal === "budget" || terminal === "not_due") pending.push(TERMINAL_JOB);
-  if (await hasBrokenCredits(pool)) pending.push(CREDITS_JOB);
+  const credits = await readCreditsBreak(pool);
+  if (credits.broken) pending.push(CREDITS_JOB);
   if (pending.length === 0) return null;
-  const { rows } = await pool.query<{ due: number }>(
-    "SELECT (EXTRACT(EPOCH FROM min(next_due_at)) * 1000)::float8 AS due FROM reconcile_jobs WHERE name = ANY($1::text[])",
+  const { rows } = await pool.query<{ name: string; due: number }>(
+    "SELECT name, (EXTRACT(EPOCH FROM next_due_at) * 1000)::float8 AS due FROM reconcile_jobs WHERE name = ANY($1::text[])",
     [pending],
   );
-  const due = rows[0]?.due;
-  return typeof due === "number" && Number.isFinite(due) ? Math.max(due, now) : now;
+  const dues = rows.filter((r) => typeof r.due === "number" && Number.isFinite(r.due));
+  // Credits that nobody has topped up for 2 hours are looked at hourly, not every 15 minutes: the job's own due time is the floor, and an hour from this look is the
+  // other. A top-up, a revalidate success or a fresh break moves broken_at (see readCreditsBreak), so the 15-minute cadence returns by itself.
+  const backedOffDue = now + CREDITS_BACKED_OFF_CADENCE_SECONDS * 1000;
+  let due: number | null = null;
+  for (const name of pending) {
+    const own = dues.find((r) => r.name === name)?.due;
+    let at = typeof own === "number" ? Math.max(own, now) : now;
+    if (name === CREDITS_JOB && credits.backedOff) at = Math.max(at, backedOffDue);
+    due = due === null ? at : Math.min(due, at);
+  }
+  return due;
 }
 
 /**

@@ -27,20 +27,63 @@ export const IDLE_RECONCILE_CADENCE_SECONDS = 4 * 60 * 60;
 export const FAST_RECONCILE_JOBS = ['sandbox_reap_terminal', 'model_credits_revalidate'] as const;
 const GATED_FAST_JOBS: ReadonlySet<string> = new Set(FAST_RECONCILE_JOBS);
 
+/** How long after a connection breaks for out-of-credit the credits job keeps its 15-minute cadence. */
+export const CREDITS_FAST_WINDOW_SECONDS = 2 * 60 * 60;
+/** After that window the credits job is looked at hourly until the connection changes. */
+export const CREDITS_BACKED_OFF_CADENCE_SECONDS = 60 * 60;
+
+/** What the credits job has to re-check: whether any connection is broken for out-of-credit, and how long ago the newest of those breaks happened. */
+export interface CreditsBreak {
+  broken: boolean;
+  /** Seconds (database time) since the most recent credits break, or null when nothing is broken for credits. */
+  ageSeconds: number | null;
+  /**
+   * True once every credits break is older than CREDITS_FAST_WINDOW_SECONDS: nobody has topped up for a while, so the 15-minute re-check
+   * (which keeps the database awake) drops to hourly. A new break, or a top-up that clears the row, changes this by itself, because it is
+   * derived from `model_connections.broken_at` and holds no stamp of its own.
+   */
+  backedOff: boolean;
+}
+
+/**
+ * The credits state in one read. The newest break decides the cadence, so a connection that breaks while an older one is still broken puts the
+ * job back on 15 minutes; a row broken before `broken_at` existed carries the migration's backfill time, and a null (never expected) counts as new.
+ */
+export async function readCreditsBreak(pool: Pick<Pool, 'query'>): Promise<CreditsBreak> {
+  const { rows } = await pool.query<{ broken: boolean; age: number | null }>(
+    `SELECT count(*) > 0 AS broken,
+            EXTRACT(EPOCH FROM (now() - max(COALESCE(broken_at, now()))))::float8 AS age
+       FROM model_connections
+      WHERE status = 'broken' AND last_error_code = 'credits_exhausted'`,
+  );
+  const broken = rows[0]?.broken === true;
+  const age = broken && typeof rows[0]?.age === 'number' ? rows[0].age : null;
+  return { broken, ageSeconds: age, backedOff: age !== null && age >= CREDITS_FAST_WINDOW_SECONDS };
+}
+
 /** True while any model connection is broken for out-of-credit: the credits job has something to re-check. */
 export async function hasBrokenCredits(pool: Pick<Pool, 'query'>): Promise<boolean> {
-  const { rows } = await pool.query<{ pending: boolean }>(
-    "SELECT EXISTS (SELECT 1 FROM model_connections WHERE status = 'broken' AND last_error_code = 'credits_exhausted') AS pending",
-  );
-  return rows[0]?.pending === true;
+  return (await readCreditsBreak(pool)).broken;
 }
 
 /**
  * The interval a job's lap is judged against: its seeded one, except for a gated 15-minute job with nothing to do, which is judged
- * against the idle reconcile cadence. `hasWork` is whether that job has work now (see jobsWithWork).
+ * against the idle reconcile cadence, and the credits job while its re-check is backed off to hourly, which is judged against that hour
+ * (so a stuck job still alerts at twice its effective cadence). `hasWork` is whether that job has work now (see jobsWithWork).
  */
-export function lapBasisSeconds(name: string, intervalSeconds: number, hasWork: boolean): number {
-  return GATED_FAST_JOBS.has(name) && !hasWork ? Math.max(intervalSeconds, IDLE_RECONCILE_CADENCE_SECONDS) : intervalSeconds;
+export function lapBasisSeconds(name: string, intervalSeconds: number, hasWork: boolean, creditsBackedOff: boolean = false): number {
+  if (!GATED_FAST_JOBS.has(name)) return intervalSeconds;
+  if (!hasWork) return Math.max(intervalSeconds, IDLE_RECONCILE_CADENCE_SECONDS);
+  return name === 'model_credits_revalidate' && creditsBackedOff ? Math.max(intervalSeconds, CREDITS_BACKED_OFF_CADENCE_SECONDS) : intervalSeconds;
+}
+
+async function workState(pool: Pick<Pool, 'query'>): Promise<{ working: ReadonlySet<string>; creditsBackedOff: boolean }> {
+  const out = new Set<string>();
+  const credits = await readCreditsBreak(pool);
+  if (credits.broken) out.add('model_credits_revalidate');
+  const { rows } = await pool.query<{ name: string }>("SELECT name FROM reconcile_jobs WHERE name = 'sandbox_reap_terminal' AND last_result_code = 'budget'");
+  if (rows.length > 0) out.add('sandbox_reap_terminal');
+  return { working: out, creditsBackedOff: credits.backedOff };
 }
 
 /**
@@ -49,11 +92,7 @@ export function lapBasisSeconds(name: string, intervalSeconds: number, hasWork: 
  * in no row this login can read, so it is not counted here; the reap job then runs on the reconcile tick that marker causes.
  */
 export async function jobsWithWork(pool: Pick<Pool, 'query'>): Promise<ReadonlySet<string>> {
-  const out = new Set<string>();
-  if (await hasBrokenCredits(pool)) out.add('model_credits_revalidate');
-  const { rows } = await pool.query<{ name: string }>("SELECT name FROM reconcile_jobs WHERE name = 'sandbox_reap_terminal' AND last_result_code = 'budget'");
-  if (rows.length > 0) out.add('sandbox_reap_terminal');
-  return out;
+  return (await workState(pool)).working;
 }
 
 /** The shape of `reportError` from `@fx/telemetry`; the tick takes it as a dependency so this package does no I/O of its own. */
@@ -305,7 +344,7 @@ export function isLapBreach(lapSeconds: number, intervalSeconds: number): boolea
 
 /** What the digest and the launch check read: every job's lap time, from database time. */
 export async function readLapTimes(pool: Pool): Promise<LapTime[]> {
-  const working = await jobsWithWork(pool);
+  const { working, creditsBackedOff } = await workState(pool);
   const { rows } = await pool.query<{
     name: string;
     interval_seconds: number;
@@ -324,7 +363,7 @@ export async function readLapTimes(pool: Pool): Promise<LapTime[]> {
     intervalSeconds: row.interval_seconds,
     lapSeconds: row.lap,
     neverCompleted: row.never,
-    breach: isLapBreach(row.lap, lapBasisSeconds(row.name, row.interval_seconds, working.has(row.name))),
+    breach: isLapBreach(row.lap, lapBasisSeconds(row.name, row.interval_seconds, working.has(row.name), creditsBackedOff)),
     lastResultCode: row.last_result_code,
     lastOkAt: row.last_ok_at,
   }));

@@ -112,7 +112,7 @@ async function writeOutcomeRows(
   if (outcome.kind === 'ok') {
     await client.query(
       `UPDATE model_connections
-         SET status = 'ok', last_validated_at = now(), last_error_code = NULL, health_strikes = 0
+         SET status = 'ok', last_validated_at = now(), last_error_code = NULL, health_strikes = 0, broken_at = NULL
        WHERE id = $1`,
       [connectionId],
     );
@@ -123,7 +123,7 @@ async function writeOutcomeRows(
   if (outcome.kind === 'rejected') {
     await client.query(
       `UPDATE model_connections
-         SET status = 'broken', last_error_code = $2
+         SET status = 'broken', last_error_code = $2, broken_at = COALESCE(broken_at, now())
        WHERE id = $1`,
       [connectionId, outcome.code],
     );

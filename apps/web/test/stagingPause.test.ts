@@ -197,15 +197,15 @@ describe("the reconcile cron keeps the 15-minute jobs on their cadence while the
   const SECRET = ["test", "cron", "secret", "y".repeat(32)].join("-");
   const NOW = 1_800_000_000_000 + 7 * MIN;
   /** A fake platform_ops pool over the two reads reconcileNextDueAt makes. */
-  function fakePool(opts: { creditsBroken: boolean; dueAt: Record<string, number> }) {
+  function fakePool(opts: { creditsBroken: boolean; creditsAgeSeconds?: number; dueAt: Record<string, number> }) {
     const queries: string[] = [];
     return {
       queries,
       query: vi.fn(async (sql: string, params?: unknown[]) => {
         queries.push(sql);
-        if (sql.includes("FROM model_connections")) return { rows: [{ pending: opts.creditsBroken }] };
+        if (sql.includes("FROM model_connections")) return { rows: [{ broken: opts.creditsBroken, age: opts.creditsBroken ? (opts.creditsAgeSeconds ?? 0) : null }] };
         const names = (params?.[0] ?? []) as string[];
-        return { rows: [{ due: Math.min(...names.map((n) => opts.dueAt[n]!)) }] };
+        return { rows: names.map((n) => ({ name: n, due: opts.dueAt[n]! })) };
       }),
     };
   }
@@ -214,6 +214,34 @@ describe("the reconcile cron keeps the 15-minute jobs on their cadence while the
   it("a connection still broken for credits makes the credits job's due time the next look", async () => {
     const pool = fakePool({ creditsBroken: true, dueAt: { model_credits_revalidate: NOW + 14 * MIN } });
     expect(await reconcileNextDueAt(pool as never, summaryWith("ok"), NOW)).toBe(NOW + 14 * MIN);
+  });
+
+  it("a break under 2 hours old keeps the 15-minute cadence (the job's own due time)", async () => {
+    const pool = fakePool({ creditsBroken: true, creditsAgeSeconds: 2 * 3600 - 1, dueAt: { model_credits_revalidate: NOW + 14 * MIN } });
+    expect(await reconcileNextDueAt(pool as never, summaryWith("ok"), NOW)).toBe(NOW + 14 * MIN);
+  });
+
+  it("a break 2 hours old or more is looked at hourly: an hour from this look, never earlier than the job's own due time", async () => {
+    for (const age of [2 * 3600, 30 * 3600]) {
+      const pool = fakePool({ creditsBroken: true, creditsAgeSeconds: age, dueAt: { model_credits_revalidate: NOW + 14 * MIN } });
+      expect(await reconcileNextDueAt(pool as never, summaryWith("ok"), NOW)).toBe(NOW + 60 * MIN);
+    }
+    const late = fakePool({ creditsBroken: true, creditsAgeSeconds: 3 * 3600, dueAt: { model_credits_revalidate: NOW + 90 * MIN } });
+    expect(await reconcileNextDueAt(late as never, summaryWith("ok"), NOW)).toBe(NOW + 90 * MIN);
+  });
+
+  it("a revalidate success or a new break resets: the state is derived, so the next look is 15 minutes again (cleared leaves no due time at all)", async () => {
+    const backedOff = fakePool({ creditsBroken: true, creditsAgeSeconds: 5 * 3600, dueAt: { model_credits_revalidate: NOW + 14 * MIN } });
+    expect(await reconcileNextDueAt(backedOff as never, summaryWith("ok"), NOW)).toBe(NOW + 60 * MIN);
+    const newBreak = fakePool({ creditsBroken: true, creditsAgeSeconds: 0, dueAt: { model_credits_revalidate: NOW + 14 * MIN } });
+    expect(await reconcileNextDueAt(newBreak as never, summaryWith("ok"), NOW)).toBe(NOW + 14 * MIN);
+    const cleared = fakePool({ creditsBroken: false, dueAt: {} });
+    expect(await reconcileNextDueAt(cleared as never, summaryWith("ok"), NOW)).toBeNull();
+  });
+
+  it("a backed-off credits job does not hold back a reap pass that is due sooner", async () => {
+    const pool = fakePool({ creditsBroken: true, creditsAgeSeconds: 5 * 3600, dueAt: { model_credits_revalidate: NOW + 14 * MIN, sandbox_reap_terminal: NOW + 5 * MIN } });
+    expect(await reconcileNextDueAt(pool as never, summaryWith("budget"), NOW)).toBe(NOW + 5 * MIN);
   });
 
   it("a reap pass that stopped on its budget, or was not yet due, is looked at again at its due time (never in the past)", async () => {
@@ -262,7 +290,7 @@ describe("the reconcile cron keeps the 15-minute jobs on their cadence while the
     try {
       let broken = true;
       const dueAt = () => clock.value + 14 * MIN; // the credits job was due 15 minutes (less its slack) after its last pass
-      const pool = { query: vi.fn(async (sql: string) => (sql.includes("FROM model_connections") ? { rows: [{ pending: broken }] } : { rows: [{ due: dueAt() }] })) };
+      const pool = { query: vi.fn(async (sql: string) => (sql.includes("FROM model_connections") ? { rows: [{ broken, age: broken ? 0 : null }] } : { rows: [{ name: "model_credits_revalidate", due: dueAt() }] })) };
       const runTickFn = vi.fn(async (): Promise<TickSummary> => ({ enabled: true, results: [{ job: "model_credits_revalidate", result: "ok" }] }));
       const call = () =>
         reconcileHandler(new NextRequest("https://example.test/api/cron/reconcile", { method: "GET", headers: { authorization: `Bearer ${SECRET}` } }), { cronSecret: SECRET, enabled: true, platformOpsPool: pool as never, reportError: () => undefined }, runTickFn);
