@@ -71,3 +71,32 @@ export function runnerSeenReader(store: RunnerSeenStore): RunnerSeenReader {
     return found;
   };
 }
+
+/** The writer's store: one `set`. The writer never reads the cache. */
+export interface RunnerSeenWriteStore {
+  set(key: string, value: number, ttlSeconds: number): Promise<void>;
+}
+
+/** Writes `seen:<rid>` = now for a fully verified wake check, or skips it. Resolves true when it wrote; a store failure rejects. */
+export type RunnerSeenWriter = (runnerId: string, now: Date) => Promise<boolean>;
+
+/** How many runners one writer remembers before it forgets them all (one process; a forgotten runner just gets one extra write). */
+export const RUNNER_SEEN_WRITER_MAX_ENTRIES = 10_000;
+
+/**
+ * D#6 RUNNER-WAKE R3b: the one writer of `seen:<rid>`, used by the wake check after the request is fully verified. It keeps, per process, when it
+ * last wrote each runner and writes again only `RUNNER_SEEN_REFRESH_MS` later, so it costs no cache read at all and at most one write a minute per
+ * runner per instance. A clock that went backwards writes again. The time is noted before the write, so a failing store is not retried every poll.
+ */
+export function runnerSeenWriter(store: RunnerSeenWriteStore, maxEntries: number = RUNNER_SEEN_WRITER_MAX_ENTRIES): RunnerSeenWriter {
+  const lastWrites = new Map<string, number>();
+  return async (runnerId, now) => {
+    const at = now.getTime();
+    const last = lastWrites.get(runnerId);
+    if (last !== undefined && last <= at && at - last < RUNNER_SEEN_REFRESH_MS) return false;
+    if (!lastWrites.has(runnerId) && lastWrites.size >= maxEntries) lastWrites.clear();
+    lastWrites.set(runnerId, at);
+    await store.set(runnerSeenKey(runnerId), at, RUNNER_SEEN_TTL_SECONDS);
+    return true;
+  };
+}

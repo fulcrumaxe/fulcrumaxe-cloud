@@ -1,4 +1,5 @@
 import { HelloMessage, HelloReply } from "@fulcrumaxe/runner-protocol";
+import { allowRunnerWake } from "@fx/core/src/pendingWork.js";
 import { configuredWakeKey, wakeGrantFor } from "./wakeToken.js";
 import { CURRENT_PROTOCOL_VERSION, MIN_SUPPORTED_PROTOCOL_VERSION, RunnerHttpError, parseJsonBody, parseMessage, pgCode, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
@@ -50,5 +51,7 @@ export async function runnerHello(deps: RunnerCloudDeps, req: RunnerHttpRequest)
   // D#6 RUNNER-WAKE R3a: a wake grant only for a runner that listed `wake_v1` on THIS hello, and only while a key is configured. Minted after the
   // hello committed, so a refused hello gets none.
   const wake = wakeGrantFor(configuredWakeKey(deps.wakeKey), runner, message.capabilities, deps.now?.() ?? new Date());
+  // D#6 RUNNER-WAKE R3b: the allow record the wake check requires (fail closed without it). Never throws.
+  if (wake) await allowRunnerWake(runner, (deps.now?.() ?? new Date()).getTime());
   return { status: 200, body: HelloReply.parse({ protocol_version: current, ...(wake ? { wake } : {}) }) };
 }

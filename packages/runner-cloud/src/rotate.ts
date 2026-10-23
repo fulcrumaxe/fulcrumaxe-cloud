@@ -1,4 +1,5 @@
 import { RotateMessage } from "@fulcrumaxe/runner-protocol";
+import { revokeRunnerWake } from "@fx/core/src/pendingWork.js";
 import { RunnerHttpError, parseJsonBody, parseMessage, pgCode, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { isUsableEd25519Key } from "./strictEd25519.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
@@ -21,6 +22,8 @@ export async function rotateRunnerKey(deps: RunnerCloudDeps, req: RunnerHttpRequ
       const { rows } = await client.query<{ jkt: string }>("SELECT runner_rotate_key($1, $2, $3::jsonb) AS jkt", [runner.runnerId, runner.jkt, JSON.stringify(message.public_key_jwk)]);
       return rows[0]!.jkt;
     });
+    // D#6 RUNNER-WAKE R3b: after the commit, the allow record naming the old key is deleted; the next claim, signed by the new key, writes one for it.
+    await revokeRunnerWake([runner.runnerId]);
     return { status: 200, body: { jkt }, headers: { "cache-control": "no-store" } };
   } catch (error) {
     switch (pgCode(error)) {

@@ -39,6 +39,7 @@ runner/revoke/route.ts
 runner/rotate/route.ts
 runner/runs/[id]/done/route.ts
 runner/runs/[id]/events/route.ts
+runner/wake/route.ts
 runners/[id]/drain/route.ts
 runners/[id]/labels/route.ts
 runners/[id]/pause/route.ts

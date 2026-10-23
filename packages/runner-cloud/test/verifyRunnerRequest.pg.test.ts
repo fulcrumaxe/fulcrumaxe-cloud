@@ -191,7 +191,7 @@ describe("verifyRunnerRequest [pg]", () => {
       after.release();
     }
     // An object that did not come from the verifier is refused, however well formed.
-    const forged = { runnerId: k.id, accountId: a.accountId, registeredBy: a.userId, credentialMode: "api_key", jkt: k.jkt, publicKeyX: "x".repeat(43) };
+    const forged = { runnerId: k.id, accountId: a.accountId, registeredBy: a.userId, credentialMode: "api_key", jkt: k.jkt, publicKeyX: "x".repeat(43), keyValidUntil: new Date() };
     await expect(withRunnerSession(h.appPool, forged, async () => 1)).rejects.toThrow("not a verified runner");
     await expect(withRunnerSession(h.appPool, { ...verified }, async () => 1)).rejects.toThrow("not a verified runner");
   });

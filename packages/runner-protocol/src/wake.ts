@@ -78,3 +78,18 @@ export type WakeGrant = z.infer<typeof WakeGrant>;
 export function effectiveWakeTransport(transport: string): WakeTransport {
   return (WAKE_TRANSPORTS as readonly string[]).includes(transport) ? (transport as WakeTransport) : "poll";
 }
+
+/** The wake check's path. One path for every transport: the reply's media type picks how it answers. */
+export const WAKE_PATH = "/api/runner/wake" as const;
+/** The only media type the wake check answers today. A request whose `Accept` does not list it gets 406, so a stream type can be added later on the same path. */
+export const WAKE_REPLY_MEDIA_TYPE = "application/json" as const;
+
+const epochMs = safeInt.min(0);
+
+/**
+ * The wake check's answer, and nothing else: no ids, counts or names. `epoch` is the time (ms) the account's work last became claimable, 0 when the
+ * cloud knows of none. `due_at` is the earliest time (ms) work already queued becomes claimable, or null. A runner claims when `epoch` is later than
+ * its own last claim, or when `due_at` has passed. The same shape is the frame payload of any later stream transport.
+ */
+export const WakeReply = z.object({ epoch: epochMs, due_at: epochMs.nullable() }).strict();
+export type WakeReply = z.infer<typeof WakeReply>;
