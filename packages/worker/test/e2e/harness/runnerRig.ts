@@ -77,7 +77,7 @@ export function createRunnerRig(input: RunnerRigInput): RunnerRig {
   const keepClear = mirrorKeepClear({ home, stateDir, binaryDir, workspaceRoot, tempRoot });
   const relay = createEventRelay();
   const client = createRunnerClient({ origin: input.cloudOrigin, key: input.key, now: () => new Date(), fetchFn: fetch });
-  const git = createGitPath({ capture: kit.capture, envOptions, mirrorsRoot, stateDir, keepClear, remoteUrl: input.remoteUrl });
+  const git = createGitPath({ platform: "linux", capture: kit.capture, envOptions, mirrorsRoot, stateDir, keepClear, remoteUrl: input.remoteUrl });
   const sandbox = createHostSandbox({
     credentials,
     envOptions,

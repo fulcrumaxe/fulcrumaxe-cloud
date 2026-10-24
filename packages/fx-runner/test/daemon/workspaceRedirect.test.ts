@@ -89,7 +89,7 @@ afterEach(() => {
 /** A prepared workspace with one agent commit, and the paths the checks look at. */
 async function rig(withCapture: GitCapture = capture) {
   const mirrorsRoot = path.join(root, "cache", "fx-runner", "mirrors");
-  const gitPath = createGitPath({ capture: withCapture,mirrorsRoot, stateDir: path.join(root, "state"), remoteUrl: () => pathToFileURL(remote).href });
+  const gitPath = createGitPath({ platform: "linux", capture: withCapture,mirrorsRoot, stateDir: path.join(root, "state"), remoteUrl: () => pathToFileURL(remote).href });
   const workspace = path.join(root, "work", "run-1");
   mkdirSync(workspace, { recursive: true, mode: 0o700 });
   const { base } = await gitPath.prepare(job, lease, workspace);

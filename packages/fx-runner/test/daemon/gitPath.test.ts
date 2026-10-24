@@ -81,7 +81,7 @@ const jobFor = (over: Partial<GitJob> = {}): GitJob => ({ repo: { id: randomUUID
 function makeGitPath(over: { remoteUrl?: string; capture?: GitCapture } = {}) {
   const recorded = recordingCapture();
   const cacheDir = path.join(root, "cache", "fx-runner");
-  const gitPath = createGitPath({ capture: over.capture ?? recorded.capture, mirrorsRoot: path.join(cacheDir, "mirrors"), stateDir: path.join(root, "state"), remoteUrl: () => over.remoteUrl ?? remoteUrl });
+  const gitPath = createGitPath({ platform: "linux", capture: over.capture ?? recorded.capture, mirrorsRoot: path.join(cacheDir, "mirrors"), stateDir: path.join(root, "state"), remoteUrl: () => over.remoteUrl ?? remoteUrl });
   return { gitPath, calls: recorded.calls, cacheDir };
 }
 
@@ -719,6 +719,45 @@ describe("a fix round pushes to the pull request's branch (D#6 R4a-3b, C25 secti
     // A branch that is gone is an error, not a fallback: there is nothing to start fresh on.
     sh("-C", remote, "branch", "-D", first.branch);
     await expect(gitPath.resume(fixJob, FIX_LEASE, first.workspace)).rejects.toMatchObject({ code: "continuation_branch_missing" });
+  });
+
+  it("a resumed workspace loses the first round's ignored build output, and a workspace that is not resumed is not touched", async () => {
+    const lines: string[] = [];
+    const recorded = recordingCapture();
+    const gitPath = createGitPath({ platform: "linux", capture: recorded.capture, mirrorsRoot: path.join(root, "cache", "fx-runner", "mirrors"), stateDir: path.join(root, "state"), remoteUrl: () => remoteUrl, log: (line) => lines.push(line) });
+    const job = jobFor();
+    const first = await firstRun(gitPath, job);
+    const fixJob = jobFor({ repo: job.repo, continues: continuesOn(first.branch) });
+    writeFileSync(path.join(first.workspace, ".git", "info", "exclude"), "dist/\n.next/\nnode_modules/\n", { flag: "a" });
+    for (const file of ["dist/a.js", "apps/web/.next/b.js", "node_modules/p/index.js"]) {
+      mkdirSync(path.dirname(path.join(first.workspace, file)), { recursive: true });
+      writeFileSync(path.join(first.workspace, file), "stale");
+    }
+    writeFileSync(path.join(first.workspace, "mine.txt"), "untracked, not ignored");
+    // Not at the tip: nothing is resumed and nothing is removed.
+    personPushes(first.branch);
+    expect(await gitPath.resume(fixJob, FIX_LEASE, first.workspace)).toBeNull();
+    expect(existsSync(path.join(first.workspace, "dist", "a.js"))).toBe(true);
+    // No continuation at all: not a resume.
+    expect(await gitPath.resume(job, lease, first.workspace)).toBeNull();
+    expect(existsSync(path.join(first.workspace, "dist", "a.js"))).toBe(true);
+    expect(lines).toEqual([]);
+    // A workspace at the tip is resumed clean.
+    const second = newWorkspace("second");
+    const prepared = await gitPath.prepare(fixJob, FIX_LEASE, second);
+    writeFileSync(path.join(second, ".git", "info", "exclude"), "dist/\n.next/\nnode_modules/\n", { flag: "a" });
+    for (const file of ["dist/a.js", "apps/web/.next/b.js", "node_modules/p/index.js"]) {
+      mkdirSync(path.dirname(path.join(second, file)), { recursive: true });
+      writeFileSync(path.join(second, file), "stale");
+    }
+    writeFileSync(path.join(second, "mine.txt"), "untracked, not ignored");
+    expect(await gitPath.resume(fixJob, FIX_LEASE, second)).toEqual({ base: prepared.base });
+    expect(existsSync(path.join(second, "dist"))).toBe(false);
+    expect(existsSync(path.join(second, "apps", "web", ".next"))).toBe(false);
+    expect(existsSync(path.join(second, "node_modules", "p", "index.js"))).toBe(true);
+    expect(existsSync(path.join(second, "mine.txt"))).toBe(true);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/removed 2 ignored files/);
   });
 
   it("the mirror shows the branch after the sync, and the workspace has the branch's history, not the default branch's", async () => {

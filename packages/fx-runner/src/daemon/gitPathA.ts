@@ -17,9 +17,11 @@ import { realpathSync, statfsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { GitTicketResult } from "./client.js";
-import { assertGitVersion, createGit, GitPathError, type Git, type GitDeps } from "./git.js";
+import { assertGitVersion, createGit, GitPathError, type Git, type GitCapture, type GitDeps } from "./git.js";
 import { mirrorCheckBase, mirrorNixSource, PUSHING_ROLES, type GitJob, type GitPath, type GitPathDeps } from "./gitPath.js";
 import { createMirrors, githubUrl, type Mirrors, type RepoRef } from "./mirror.js";
+import { LISTING_CAP } from "./repoMap.js";
+import { cleanResumedWorkspace } from "./resumeClean.js";
 import { publishBranch, pushPlan, workspaceHead, type PushLease } from "./push.js";
 import { gitProxyHashFor, gitProxyPinned, PINNED_GIT_PROXIES, type PinnedGitProxies } from "../keyring.js";
 
@@ -28,7 +30,7 @@ export const TICKET_REUSE_MS = 240_000;
 /** Linux `statfs` types of memory-backed file systems: tmpfs and ramfs. */
 export const MEMORY_FS_TYPES: ReadonlySet<number> = new Set([0x01021994, 0x858458f6]);
 
-export interface GitPathADeps extends Omit<GitDeps, "mapHttp">, Pick<GitPathDeps, "mirrorsRoot" | "stateDir" | "keepClear" | "signal"> {
+export interface GitPathADeps extends Omit<GitDeps, "mapHttp">, Pick<GitPathDeps, "mirrorsRoot" | "stateDir" | "keepClear" | "signal" | "log"> {
   /** The cloud address this runner is registered with (its pinned proxy is looked up by it). */
   cloudOrigin: string;
   /** Asks the cloud for a ticket for this run: the signed client's `gitTicket`. */
@@ -37,6 +39,8 @@ export interface GitPathADeps extends Omit<GitDeps, "mapHttp">, Pick<GitPathDeps
   pinned?: PinnedGitProxies;
   now?: () => number;
   platform: NodeJS.Platform;
+  /** Like `capture` with a large output limit, for listing a resumed workspace's ignored files. */
+  captureLarge?: GitCapture;
   /** Replaceable so a test can answer for tmpfs. */
   statfs?: (target: string) => { type: number };
   tmpDir?: string;
@@ -61,6 +65,8 @@ const under = (child: string, parent: string): boolean => child === parent || ch
 
 export function createGitPathA(deps: GitPathADeps): GitPath {
   const git = createGit({ ...deps, mapHttp: true });
+  // The same runner with the large capture, for the list of a resumed workspace's ignored files; the plain one when none is given.
+  const listingGit = deps.captureLarge === undefined ? git : createGit({ ...deps, capture: deps.captureLarge });
   const pinned = deps.pinned ?? PINNED_GIT_PROXIES;
   const now = deps.now ?? Date.now;
   const platform = deps.platform;
@@ -137,7 +143,10 @@ export function createGitPathA(deps: GitPathADeps): GitPath {
       await assertGitVersion(session.git);
       const { dir, tip } = await session.mirrors.continuationTip(job.repo, job.continues);
       try {
-        return (await workspaceHead(session.git, dir, workspace, snapshotsRoot)) === tip ? { base: tip } : null;
+        if ((await workspaceHead(session.git, dir, workspace, snapshotsRoot)) !== tip) return null;
+        // At the tip and about to be reused: drop the first round's ignored build output (D#6 RUNNER-RESUME-CLEAN). A local read, so the plain git, no ticket.
+        await cleanResumedWorkspace(listingGit, workspace, deps.log, deps.captureLarge === undefined ? 64 * 1024 : LISTING_CAP, platform);
+        return { base: tip };
       } catch (error) {
         if (error instanceof GitPathError && !["git_stopped", "git_revoked", "clone_limited", "git_proxy_unpinned", "git_ticket_refused"].includes(error.code)) return null;
         throw error;

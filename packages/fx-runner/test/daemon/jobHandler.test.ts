@@ -1189,7 +1189,7 @@ describe("a cross-side fix round on the item's pull request branch (D#599 PL-2b-
     sh("-C", seed, "commit", "-m", "first");
     sh("-C", seed, "push", remote, "main");
     sh("-C", remote, "branch", ITEM_BRANCH, "main");
-    const git = createGitPath({ capture: (command, args, e, timeoutMs) => runCapture(spawn, testLaunch(), command, args, e, timeoutMs), mirrorsRoot: path.join(root, "cache", "mirrors"), stateDir: path.join(root, "state"), remoteUrl: () => pathToFileURL(remote).href });
+    const git = createGitPath({ platform: "linux", capture: (command, args, e, timeoutMs) => runCapture(spawn, testLaunch(), command, args, e, timeoutMs), mirrorsRoot: path.join(root, "cache", "mirrors"), stateDir: path.join(root, "state"), remoteUrl: () => pathToFileURL(remote).href });
     const rig = makeRig({ handler: { git } });
     const planned: Array<ReturnType<typeof planSession>> = [];
     rig.deps.run.planSession = (continues) => (planned.push(planSession(continues, {})), planned.at(-1)!);

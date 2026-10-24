@@ -58,7 +58,7 @@ describe.skipIf(!gitUsable)("nixSource against a plain git repo", () => {
 
     const stateDir = path.join(root, "state");
     mkdirSync(stateDir, { recursive: true });
-    gitPath = createGitPath({ capture, mirrorsRoot: path.join(root, "mirrors"), stateDir, remoteUrl: () => origin });
+    gitPath = createGitPath({ platform: "linux", capture, mirrorsRoot: path.join(root, "mirrors"), stateDir, remoteUrl: () => origin });
     job = { repo: { id: "33333333-3333-4333-8333-333333333333", owner: "acme", name: "widgets" }, continues: null, branch_prefix: "fx/", role: "executor" } as unknown as typeof job;
     // the mirror is made by the real path's own prepare, so its HEAD follows the default branch exactly as in production
     const prepared = await gitPath.prepare(job, { runId: "11111111-1111-4111-8111-111111111111", leaseGeneration: 1 }, path.join(root, "workspace"));

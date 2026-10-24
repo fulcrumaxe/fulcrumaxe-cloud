@@ -1,5 +1,5 @@
 /**
- * Git path B, the snapshot (D#6 R4a-3, fix round 3): the daemon never lets git read the workspace's `.git`. The agent can write that
+ * Git path B, the snapshot (D#6 R4a-3, fix round 3): the daemon never lets git read the workspace's `.git` to fetch or push (the one local read of the workspace, the resume clean-up's `ls-files` listing in `resumeClean.ts` and the check's guarded `vcsState` read, fetch nothing and runs under the guard config). The agent can write that
  * directory, and anything git reads from it (its config, a promisor remote, a `.git/.git` entry, an alternates line, a link) can
  * send a fetch that runs outside the sandbox to another repository or to a command. Checking it first does not help: a process
  * that outlived the run can change it between the check and the fetch.

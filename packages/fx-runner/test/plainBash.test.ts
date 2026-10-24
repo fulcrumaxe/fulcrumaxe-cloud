@@ -188,7 +188,7 @@ describe("C44-5: a reviewer's work is never published", () => {
       sh("-C", seed, "commit", "-m", "first");
       sh("-C", seed, "push", remote, "main");
       const calls: Array<readonly string[]> = [];
-      const gitPath = createGitPath({
+      const gitPath = createGitPath({ platform: "linux",
         capture: (command, args, env, timeoutMs) => (calls.push(args), runCapture(spawn, testLaunch(), command, args, env, timeoutMs)),
         mirrorsRoot: path.join(dir, "cache", "mirrors"),
         stateDir: path.join(dir, "state"),

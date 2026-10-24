@@ -70,7 +70,7 @@ afterEach(() => {
 
 async function rig() {
   const mirrorsRoot = path.join(root, "cache", "fx-runner", "mirrors");
-  const gitPath = createGitPath({ capture, mirrorsRoot, stateDir: path.join(root, "state"), remoteUrl: () => pathToFileURL(remote).href });
+  const gitPath = createGitPath({ platform: "linux", capture, mirrorsRoot, stateDir: path.join(root, "state"), remoteUrl: () => pathToFileURL(remote).href });
   const workspace = path.join(root, "work", "run-1");
   mkdirSync(workspace, { recursive: true, mode: 0o700 });
   const { base } = await gitPath.prepare(job, lease, workspace);

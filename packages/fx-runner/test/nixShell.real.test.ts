@@ -109,7 +109,7 @@ describe.skipIf(!usable)("R7c with the real nix", () => {
   it("realises a real dev shell from a commit on the default branch of a real mirror, and skips a commit that is only on a run branch", async () => {
     const stateDir = path.join(root, "state");
     mkdirSync(stateDir, { recursive: true });
-    const gitPath = createGitPath({ capture, mirrorsRoot, stateDir, remoteUrl: () => path.join(root, "origin") });
+    const gitPath = createGitPath({ platform: "linux", capture, mirrorsRoot, stateDir, remoteUrl: () => path.join(root, "origin") });
     const job = { repo: { id: "22222222-2222-4222-8222-222222222222", owner: "acme", name: "widgets" }, continues: null, branch_prefix: "fx/", role: "executor" } as unknown as Parameters<typeof gitPath.prepare>[0];
     // the mirror is made by the real path's own prepare, so its HEAD follows the default branch exactly as in production
     const workspace = path.join(root, "workspace");
@@ -139,7 +139,7 @@ describe.skipIf(!usable)("R7c with the real nix", () => {
   it("a pull-request head whose flake has a side effect is never evaluated: the shell is built from the merge-base, and the side effect never happens", async () => {
     const stateDir = path.join(root, "state-canary");
     mkdirSync(stateDir, { recursive: true });
-    const gitPath = createGitPath({ capture, mirrorsRoot: path.join(root, "mirrors-canary"), stateDir, remoteUrl: () => path.join(root, "origin") });
+    const gitPath = createGitPath({ platform: "linux", capture, mirrorsRoot: path.join(root, "mirrors-canary"), stateDir, remoteUrl: () => path.join(root, "origin") });
     const job = { repo: { id: "44444444-4444-4444-8444-444444444444", owner: "acme", name: "widgets" }, continues: null, branch_prefix: "fx/", role: "code-reviewer" } as unknown as Parameters<typeof gitPath.prepare>[0];
     await gitPath.prepare(job, { runId: "11111111-1111-4111-8111-111111111111", leaseGeneration: 1 }, path.join(root, "workspace-canary"));
     const source = await gitPath.nixSource!(job, canaryTip);
