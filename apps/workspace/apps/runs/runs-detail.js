@@ -357,8 +357,8 @@ export function bytesText(n) {
 }
 /** A token count in words, or null. */
 const tokenText = (n) => (Number.isFinite(n) && n >= 0 ? n.toLocaleString("en-US") + (n === 1 ? " token" : " tokens") : null);
-/** The one place a figure becomes a sentence part: the words, or "Not recorded". */
-const figure = (text, estimated) => (text === null ? CONTEXT_WORDS.notRecorded : text + (estimated ? " (estimated)" : ""));
+/** The one place a figure becomes a sentence part: the words, or "Not recorded" or "Recorded when this run ends." for live runs. */
+const figure = (text, estimated, live = false) => (text === null ? (live ? CONTEXT_WORDS.live : CONTEXT_WORDS.notRecorded) : text + (estimated ? " (estimated)" : ""));
 /** A part's share of a whole as { value: 0-100, text: "40%" }; a whole of nothing has no share. */
 function share(part, whole) {
   if (!Number.isFinite(part) || !Number.isFinite(whole) || whole <= 0) return null;
@@ -422,6 +422,7 @@ export function contextModel(ctx) {
   }
   const runner = ctx.runtime === "runner";
   const est = ctx.basis === "partial";
+  const live = ctx.status === "pending" || ctx.status === "running";
   // D#600 CX-5b: two `pinned` entries are notes about the pins, not prompt text: how many pinned files could not be read, and how far the pins stand over the budget
   // (they are included in full either way). They carry a count or a size in `bytes`, so they are not rows with a share.
   const PIN_NOTE_REASONS = ["pin_missing", "pins_over_budget", "pin_too_large", "pin_excluded"];
@@ -454,11 +455,11 @@ export function contextModel(ctx) {
     pinNotes,
     tools: ctx.tool_output.map((x) => row("tool-" + x.tool, TOOL_NAMES[x.tool] || word(x.tool), x.bytes, toolTotal, 0)),
     // The ledger holds the cache's reads and writes and not the uncached input, so "from cache" is the reads out of all cache traffic.
-    cache: read !== null && write !== null ? figure(read.toLocaleString("en-US") + " of " + (read + write).toLocaleString("en-US") + " tokens from cache", est) : "Cache use: " + CONTEXT_WORDS.notRecorded,
+    cache: read !== null && write !== null ? figure(read.toLocaleString("en-US") + " of " + (read + write).toLocaleString("en-US") + " tokens from cache", est) : "Cache use: " + (live ? CONTEXT_WORDS.live : CONTEXT_WORDS.notRecorded),
     facts: [
-      ["First turn", figure(tokenText(ctx.first_turn_input_tokens), est)],
-      ["Largest context", figure(tokenText(ctx.peak_context_tokens), est)],
-      ["Compacted", comp === null ? CONTEXT_WORDS.notRecorded : comp === 0 ? "Not compacted" : comp === 1 ? "Once" : comp + " times"],
+      ["First turn", figure(tokenText(ctx.first_turn_input_tokens), est, live)],
+      ["Largest context", figure(tokenText(ctx.peak_context_tokens), est, live)],
+      ["Compacted", comp === null ? (live ? CONTEXT_WORDS.live : CONTEXT_WORDS.notRecorded) : comp === 0 ? "Not compacted" : comp === 1 ? "Once" : comp + " times"],
       // D#600 CX-5b: reads and searches refused because a path is kept out of context. Not recorded for a runner run and for a run from before the count; 0 is a measured "none".
       ["Calls refused (kept out of context)", ctx.denied_tool_calls === null ? CONTEXT_WORDS.notRecorded : ctx.denied_tool_calls === 0 ? "None" : ctx.denied_tool_calls === 1 ? "1 tool call" : ctx.denied_tool_calls + " tool calls"],
     ],
