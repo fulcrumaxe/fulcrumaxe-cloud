@@ -309,6 +309,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       // D#6 R-CHK-2: the job's approved check, run under the job's own sandbox rules; wired only where the engine offers the process-group capture and the large capture.
       ...(host.engine.installCapture === undefined || host.engine.captureLarge === undefined ? {} : { checkStep: createCheckStep({ capture: host.engine.installCapture, now: ctx.now, vcsState: createVcsState(host.engine.captureLarge, envOptions) }), baseFile: createBaseFile(host.engine.captureLarge, envOptions), checkLaunch: (target: Parameters<typeof sandbox.checkLaunch>[0], argv: readonly string[], devShell: boolean) => sandbox.checkLaunch(target, argv, devShell), checkHome: home }),
       onDepsDetail: (detail: string) => ctx.out(`fx-runner: dependencies for this job (${detail})`),
+      onStep: (line: string) => ctx.out(line),
       ...(nix === undefined ? {} : { nix, onNixSkip: (skip: string) => ctx.out(`fx-runner: no Nix dev shell for this job (${skip})`), onNixDetail: (detail: string) => ctx.out(`fx-runner: Nix dev shell for this job (${detail})`) }),
       // The interrupt serves a take-over (with a watch) and a handoff's checkpoint turn (always): both end the agent's turn with SIGINT.
       ...(watch === undefined ? {} : { watch }),

@@ -6,7 +6,9 @@
  *  - it is an argument vector, never a shell string: it is handed to the sandbox tool as separate arguments after `--` (no `sh -c`, no interpolation);
  *  - it runs under the job's own sandbox rules (the settings the agent got: filesystem, allowances, the Nix store view) plus no network and a seccomp filter that refuses
  *    Unix-domain sockets, as for the agent; a platform or machine where that cannot be applied fails the check (`launch` answers `refused`), it never runs weaker.
- *    The environment is built from the clean allowlist, minus every model credential and the agent CLI's env file;
+ *    The environment is built from the clean allowlist, minus every model credential and the agent CLI's env file. It also tells pnpm to work offline and to skip the
+ *    release-age lookup that needs registry metadata (`HostSandbox.checkLaunch`): a dependency install that needs the network then fails at once with a named error
+ *    instead of waiting on a connection that cannot be made. This loosens nothing: the network and every file access are as before;
  *  - the files the vector names inside the checkout (`scripts/check.sh`) are put back to their content at the merge-base of the job's branch tip with the repository's
  *    default branch (as the runner fetched it) for the run and given back to the branch afterwards (CWE-345). The merge-base, never the tip: a fix round's tip holds the
  *    previous round's edits, and no branch commit is in the default branch's history. Paths are normalised first (`./scripts/check.sh` is `scripts/check.sh`); `..`,
@@ -29,7 +31,9 @@ import { protectedRootNames, VCS_DIR } from "../sandbox/checkProtected.js";
 
 /** How much raw output is kept before redaction; the summary is cut to `CHECK_SUMMARY_MAX_BYTES` afterwards. */
 const RAW_TAIL_CHARS = 32 * 1024;
-const NAMED_FILE = /^[A-Za-z0-9_@+][A-Za-z0-9_./@+-]{0,255}$/;
+/** What a package manager or a program prints when it asked for the network and there is none (pnpm in offline mode, or a connection that cannot be made). */
+const NETWORK_REFUSED = /ERR_PNPM_NO_OFFLINE|ENETUNREACH|EADDRNOTAVAIL|EAI_AGAIN/;
+const NAMED_FILE =/^[A-Za-z0-9_@+][A-Za-z0-9_./@+-]{0,255}$/;
 
 /** `./scripts//check.sh` -> `scripts/check.sh`. Undefined for what is not a plain repo-relative file name: an option, an absolute path, `..`. */
 export function normalised(arg: string): string | undefined {
@@ -375,8 +379,11 @@ export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) =>
     shown = shown.split(input.workspace).join("<workspace>");
     if (input.home !== undefined && input.home !== "/") shown = shown.split(input.home).join("<home>");
     shown = shown.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001a\u001c-\u001f\u007f]/g, " ");
+    // A check that stopped on something it asked the network for (it has none) says so in a line of its own, so the cause is not buried in the output's tail.
+    const needsNetwork = out.code !== 0 && !out.timedOut && !out.aborted && NETWORK_REFUSED.test(out.tail);
     const unpinned = input.check.argv.filter((arg) => /\s/.test(arg)).map((arg) => (arg.length > 40 ? `${arg.slice(0, 40)}...` : arg));
     const header = [
+      needsNetwork ? "the check needed the network, which it does not have: a package it asked for is not in this repository's package store on the runner (the runner installs dependencies before the check)\n" : "",
       changed.length === 0 ? "" : `check files changed by this branch: ${changed.join(", ")}\n`,
       lost.length === 0 ? "" : `check files not given back to the branch: ${lost.join(", ")}\n`,
       guard.changed.length === 0 ? "" : `the check changed paths it may not (put back where possible): ${guard.changed.join(", ")}\n`,
