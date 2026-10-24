@@ -97,7 +97,7 @@ export async function loadPollRouting(client: PoolClient, input: { accountId: st
            FROM agent_runs a WHERE a.account_id = r.account_id AND a.runner_id = r.id AND a.runtime = 'runner' AND a.status = 'running'
        ) run ON true
       WHERE r.account_id = $1 AND r.id <> $2 AND r.revoked_at IS NULL
-        AND ${runnerLiveSql({ runner: "r", now: "$3", onlineSeconds: "$4::int", wakeEnabled: input.wakeEnabled === true })}
+        AND ${runnerLiveSql({ runner: "r", now: "$3", onlineSeconds: "$4::int", wakeEnabled: input.wakeEnabled === true, replyAware: true })}
         AND r.protocol_version >= $6::int
         AND s.paused_at IS NULL AND COALESCE(s.draining, false) = false`,
     [input.accountId, input.runnerId, new Date(input.nowMs), RUNNER_ONLINE_SECONDS, LIGHT_JOB_ROLES, RUNNER_HANDOFF_MIN_PROTOCOL_VERSION],

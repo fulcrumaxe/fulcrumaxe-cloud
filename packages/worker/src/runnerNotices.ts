@@ -120,7 +120,7 @@ export function createRunnerNoticeSweeper(pool: Pool, deps: RunnerNoticeDeps = {
                       EXISTS (SELECT 1 FROM run_events e WHERE e.run_id = a.id AND e.kind = 'runner.waiting') AS has_waiting,
                       EXISTS (SELECT 1 FROM run_events e WHERE e.run_id = a.id AND e.kind = 'runner.ttl_reminder') AS has_reminder,
                       EXISTS (SELECT 1 FROM runners r WHERE r.account_id = a.account_id AND r.revoked_at IS NULL
-                                 AND ${runnerLiveSql({ runner: "r", now: "$3", onlineSeconds: "$4", wakeEnabled: deps.wakeEnabled?.() === true })}
+                                 AND ${runnerLiveSql({ runner: "r", now: "$3", onlineSeconds: "$4", wakeEnabled: deps.wakeEnabled?.() === true, replyAware: true })}
                                  AND a.dispatch_repo_id = ANY(r.allowed_repo_ids)) AS runner_online
                  FROM agent_runs a WHERE a.id = $1 AND a.account_id = $2`,
               [row.run_id, row.account_id, new Date(now()), onlineWithinMs / 1000],
