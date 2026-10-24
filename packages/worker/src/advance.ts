@@ -12,7 +12,7 @@ import { setupHoldFor } from "@fx/core/src/setup-requests/store.js";
 import { markCorrectionApplied } from "@fx/core/src/corrections/index.js";
 import { ITEM_PR_BRANCH, JobMemorySchema, type JobMemory } from "@fulcrumaxe/runner-protocol";
 import { attachRunNotes, correctionReasonCode, listRunNoteIds, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
-import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readSandboxBoundPullRequest, recordSandboxContinuesBound, DispatchFailedError, JobIssueError, RUNNER_RUN_BRANCH, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readSandboxBoundPullRequest, recordSandboxContinuesBound, recordRunStage, DispatchFailedError, JobIssueError, RUNNER_RUN_BRANCH, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { reportError } from "@fx/telemetry";
 import { checkFixRound, envelopeRunUsd } from "@fx/spend";
 import { checkRoundHeadroom } from "./panelHeadroom.js";
@@ -26,6 +26,7 @@ import type { RunStarter } from "./preview.js";
 import { readVerifiedReviewGate, type VerifiedReviewGate } from "./verifiedReviewGate.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 import { startCheckFixRound } from "./checkFix.js";
+import { BRANCH_MOVED_STAGE, checkPrivateHead, checkPublicBranch, type FixRoundHeadPorts } from "./fixRoundHeads.js";
 import { RunActionInputError, type PerformResult } from "./runActions.js";
 
 /**
@@ -44,6 +45,8 @@ import { RunActionInputError, type PerformResult } from "./runActions.js";
  * sweep at once) finds the first one's run through the keys below, so it cannot start a second classify run.
  */
 
+/** The item's own pull request branch is this prefix and its issue number (runner-protocol `ITEM_PR_BRANCH`). */
+const ITEM_PR_PREFIX = "fx/issue-";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** An execution mode word (`sandbox`, `runner_local`): lower case and underscores only. */
 const MODE_RE = /^[a-z][a-z_]{0,31}$/;
@@ -229,6 +232,11 @@ export interface AdvanceModuleDeps {
   review?: AdvanceReviewDeps | null;
   /** D#6 R5b-2a: accounts that run on our own subscription (they need no model connection for a cloud-verified review). Absent: none. */
   isOperatorAccount?: (accountId: string) => boolean;
+  /**
+   * FIXROUND-REFRESH-HEAD: the GitHub reads every fix round makes before it starts (fixRoundHeads.ts). Absent: a paired item that already pushed is refused
+   * `public_head_unavailable` and a runner round `pr_head_unavailable` (never a round on a head nobody checked).
+   */
+  fixHeads?: FixRoundHeadPorts | null;
 }
 
 /** What the review stage needs from @fx/pipeline and the web app (this package can import neither). */
@@ -1422,7 +1430,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (!review || !deps.registry) return { ok: false, reason: "resume_unavailable" };
     const bad = await guardStep(who);
     if (bad) return { ok: false, reason: bad.reason ?? "refused" };
-    const out = await startCheckFixRound({ pool: runnerPool, registry: deps.registry, resume: review.resume, resolveRunSeat: deps.resolveRunSeat, starter: deps.starter }, who, failedRunId);
+    // FIXROUND-REFRESH-HEAD: a check fix round opens no pull request of its own, but on a paired item that already pushed it is held to the public branch too.
+    const beforeStart = () => checkPublicBranch(runnerPool, deps.fixHeads, who);
+    const out = await startCheckFixRound({ pool: runnerPool, registry: deps.registry, resume: review.resume, resolveRunSeat: deps.resolveRunSeat, starter: deps.starter, beforeStart }, who, failedRunId);
     console.info(JSON.stringify({ event: "advance.check_fix", work_item_id: who.workItemId, failed_run_id: failedRunId, started: out.ok, reason: out.ok ? null : out.reason }));
     return out;
   }
@@ -1500,6 +1510,38 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     // Only a pull request that is still under review gets a fix round (not one that merged, closed or went to a person).
     if (state.stage !== "pr_opened" && state.stage !== "changes_requested" && state.stage !== "review_passed") return refuse(`stage_${state.stage ?? "gone"}`.replace(/[^a-z0-9_]/g, "_"));
 
+    // FIXROUND-REFRESH-HEAD: the branches as GitHub has them now, before anything is started or moved. A public branch changed outside the cloud refuses the
+    // round; a private branch that moved is recorded and the round goes on from its latest commit (the issuer reads the tip at dispatch, and the runner resumes
+    // a kept workspace only when it is at that tip).
+    const publicRefusal = await checkPublicBranch(runnerPool, deps.fixHeads, who);
+    if (publicRefusal !== null) return refuse(publicRefusal);
+    const effective = await readExecutionMode(runnerPool, who.accountId, state.repoId, who.workItemId);
+    let headMoved = false;
+    if (isRunnerMode(effective)) {
+      const repoId = state.repoId;
+      const found = await withTenant(runnerPool, who.accountId, async (client) => {
+        const r = await client.query<{ gh_owner: string | null; gh_name: string | null; gh_number: string | null }>(
+          "SELECT r.gh_owner, r.gh_name, w.gh_number FROM work_items w JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id WHERE w.id = $1 AND w.account_id = $2",
+          [who.workItemId, who.accountId],
+        );
+        return { coords: r.rows[0], recorded: await readRecordedRunnerPullRequest(client, { accountId: who.accountId, workItemId: who.workItemId }), bound: await readSandboxBoundPullRequest(client, { accountId: who.accountId, workItemId: who.workItemId }) };
+      });
+      // The branch read is the item's own: a pair the item recorded, or (a round handed the pull request the other side opened) the item's own issue branch.
+      // A pair that is neither is not read here; the binding check below refuses it.
+      const same = (p: { number: number; branch: string } | null) => p !== null && req.pr !== undefined && p.number === req.pr.number && p.branch === req.pr.branch;
+      const pr =
+        req.pr === undefined
+          ? found.recorded
+          : same(found.recorded) || same(found.bound) || (found.coords?.gh_number != null && req.pr.branch === `${ITEM_PR_PREFIX}${found.coords.gh_number}`)
+            ? req.pr
+            : null;
+      if (pr !== null && found.coords?.gh_owner && found.coords.gh_name) {
+        const head = await checkPrivateHead(runnerPool, deps.fixHeads, who, { repo: { id: repoId, owner: found.coords.gh_owner, name: found.coords.gh_name }, pr, askedHead: req.headSha });
+        if (!head.ok) return refuse(head.reason);
+        headMoved = head.moved;
+      }
+    }
+
     const parent = await newestExecutorRun(who);
     if (parent === null) return refuse("no_session");
     const seat = await deps.resolveRunSeat({ accountId: who.accountId, role: "executor", workItemId: who.workItemId, ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}) });
@@ -1547,7 +1589,6 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     // D#599 PL-2: a round whose effective side is not the side the build's session ran on cannot continue that session: a session belongs to the
     // side that made it. It starts a fresh executor session instead, carrying the fix prompt, the pinned Spec version and the fenced notes above.
     // Same-side rounds are unchanged (R1b). Continuing the PR's branch from the other side is PL-2b (the push-branch rules are not touched here).
-    const effective = await readExecutionMode(runnerPool, who.accountId, state.repoId, who.workItemId);
     const parentRun = await withTenant(runnerPool, who.accountId, async (client) => {
       const r = await client.query<{ execution_mode: string | null; spec_version_id: string | null }>("SELECT execution_mode, spec_version_id FROM agent_runs WHERE id = $1 AND account_id = $2 AND work_item_id = $3", [parent, who.accountId, who.workItemId]);
       return r.rows[0];
@@ -1678,6 +1719,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     }
     console.info(JSON.stringify({ event: "advance.resumed", work_item_id: who.workItemId, run_id: out.id, status: out.status, round: req.round }));
     await attachRunNotes(runnerPool, who.accountId, who.workItemId, out.id, { ids: notes.map((n) => n.id) });
+    if (headMoved) await recordRunStage(runnerPool, { accountId: who.accountId, runId: out.id, stage: BRANCH_MOVED_STAGE });
     return started(out.id);
   }
 

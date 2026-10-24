@@ -29,7 +29,7 @@ export function createPlanePublishPorts(env: NodeJS.ProcessEnv = process.env): N
       return r.ok ? r.identity : null;
     },
     privateHead: ({ repo, branch }) => base.headOid({ repo, branch }),
-    hosted: { verifyPushed: (i) => hosted.verifyPushed(i), verifyPullRequest: (i) => hosted.verifyPullRequest(i), openPullRequest: (i) => hosted.openPullRequest(i) },
+    hosted: { verifyPushed: (i) => hosted.verifyPushed(i), verifyPullRequest: (i) => hosted.verifyPullRequest(i), openPullRequest: (i) => hosted.openPullRequest(i), branchHead: (i) => hosted.branchHead(i) },
     // D#598 P1f-5c: the private pull request is opened the way a runner run's `done` opens it (the same port and token kind), and a stacked item's goes against its parent's branch.
     pullRequests: createAppRunPullRequestPort(),
     stackBase: createStackBasePort({ open: (kind, r) => openInstallationHttp(kind, { repoId: r.repoId, owner: r.owner, name: r.name }) }),

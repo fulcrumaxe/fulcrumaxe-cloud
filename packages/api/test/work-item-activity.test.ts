@@ -7,6 +7,7 @@ import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
 import { ACTIVITY_LIMITS, readOutcomeCodes } from '@fx/core/src/work-items/activity.js';
 import { requestChanges } from '@fx/core/src/work-items/operatorMoves.js';
 import { maxFixRounds } from '@fx/spend';
+import { markBuildNeedsHuman } from '@fx/pipeline';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
 import { activityResponseSchema, workItemActivityRoutes } from '../src/routes/work-item-activity.js';
@@ -356,6 +357,19 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'check_failed', reason: COPY.reviewComputeCap });
       await admin.query(`UPDATE work_items SET stage = 'changes_requested' WHERE id = $1`, [itemId]);
       expect((await noticeOf(accountId, userId, itemId))!.kind).toBe('check_failed');
+    });
+
+    it('check_failed: a fix round refused because the paired public branch moved gives its fixed sentence at every pull-request stage, and none at In progress', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const { itemId } = await seedItem(accountId, { stage: 'pr_opened' });
+      await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'stopped', 'public_branch_moved', 'p')`, [accountId, itemId]);
+      const sentence = "The public pull request's branch was changed outside the cloud. Nothing was started. Close it or reset its branch, then press Build again.";
+      for (const stage of ['pr_opened', 'changes_requested', 'review_passed']) {
+        await admin.query(`UPDATE work_items SET stage = $2 WHERE id = $1`, [itemId, stage]);
+        expect(await noticeOf(accountId, userId, itemId), stage).toEqual({ kind: 'check_failed', reason: sentence });
+      }
+      await admin.query(`UPDATE work_items SET stage = 'in_progress' WHERE id = $1`, [itemId]);
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
     });
 
     // D#598 P7c (customer-visible): the review section's line after a merge from main. The sentence is the Spec's, written once in the runner protocol's copy.
@@ -835,6 +849,20 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       expect(notice!.kind).toBe('needs_human');
       expect(notice!.reason).toMatch(/could not confirm which branch to continue/);
       expect(notice!.reason).toMatch(/Build again/);
+    });
+
+    it.each([
+      ['public_branch_moved', "The public pull request's branch was changed outside the cloud. Nothing was started. Close it or reset its branch, then press Build again."],
+      ['public_head_unavailable', "Couldn't read the public pull request's branch on GitHub, so the fix round was not started. Nothing was changed. Press Build again in a moment."],
+    ])('FIXROUND-REFRESH-HEAD: a check fix round refused %s moves the item from In progress to Needs a person (the real markBuildNeedsHuman) and the card gives its sentence', async (code, sentence) => {
+      const { accountId, userId } = await seedAccountWithMember(admin, { role: 'owner' });
+      const { itemId } = await seedItem(accountId, { stage: 'in_progress' });
+      const noticeNow = async () => ((await (await get(itemId, { accountId, userId })).json()) as Activity).notice;
+      // What the workflow does with the refusal: the item is recorded at Needs a person under the code, then the stop is written (buildStopped).
+      expect(await markBuildNeedsHuman(appUserPool, accountId, itemId, null, code, `attempt-${code}`)).toEqual({ status: 'recorded', stage: 'needs_human' });
+      expect((await admin.query(`SELECT stage FROM work_items WHERE id = $1`, [itemId])).rows[0].stage).toBe('needs_human');
+      await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'stopped', $3, 'build:x')`, [accountId, itemId, code]);
+      expect(await noticeNow()).toEqual({ kind: 'needs_human', reason: sentence });
     });
 
     it("after Back to discussion only the new panel's comments are shown, so the old panel is not read as its challenge round", async () => {

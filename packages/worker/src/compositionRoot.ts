@@ -86,6 +86,7 @@ import { createProposalVerifySweep, type ProposalVerifyCounts, type ProposalVeri
 import { PREVIEW_ROLE, createPreviewModule, type PreviewFacade, type PreviewSeatSource } from "./preview.js";
 import { createRetryModule, type RetryFacade, type RetrySeatSource } from "./retry.js";
 import { createAdvanceModule, type AdvanceFacade, type AdvanceModuleDeps } from "./advance.js";
+import type { FixRoundHeadPorts } from "./fixRoundHeads.js";
 import { createResumeModule, reconcileResumes, type ResumeFacade } from "./resumeDecision.js";
 import { createEnvelopeAsk } from "./envelopeAsk.js";
 import { createDecisionIntake } from "./decisionIntake.js";
@@ -245,6 +246,19 @@ export interface BuildWorkerOptions extends CreateWorkerOptions {
 }
 
 /** The preview module's seat source over the root's own resolver: the PM's card, the repo, the preview purpose. The limits are copied into a plain record (the resolver types them as an interface); a refusal passes through. */
+/**
+ * FIXROUND-REFRESH-HEAD: the reads a fix round makes before it starts, from ports the worker already has: the private branch head through the continuation
+ * base read (the issuer's own port), and the paired public branch head through the hosted publish reads (a `plane_push` token minted and revoked per read).
+ */
+export function fixRoundHeadPorts(ports: Pick<WorkerPorts, "continuationBase" | "planePublish">): FixRoundHeadPorts {
+  const base = ports.continuationBase;
+  const hosted = ports.planePublish?.hosted;
+  return {
+    ...(base ? { privateHead: (input: { repo: { id: string; owner: string; name: string }; branch: string }) => base.headOid(input) } : {}),
+    ...(hosted?.branchHead ? { publicHead: hosted.branchHead.bind(hosted) } : {}),
+  };
+}
+
 export function previewSeatSourceOf(resolve: (request: SeatRequest) => Promise<SeatResult>): PreviewSeatSource {
   return {
     previewSeat: async (accountId, repoId) => {
@@ -355,7 +369,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     const advanceStarter = options.ports.follow ? createRunStarter({ pool: pools.runnerPool, registry, follow: options.ports.follow, queued: "accept" }) : null;
     const preview = createPreviewModule(pools.runnerPool, { seats: previewSeatSourceOf(resolveRunSeat), starter: previewStarter, promptFor: options.previewPrompt ?? null, isOperatorAccount: (accountId) => operatorMode(env, accountId).active });
     const retry = createRetryModule(pools.runnerPool, registry, { seats: options.retrySeats ?? retrySeatSourceOf(resolveRunSeat), authorCheck });
-    const advance = createAdvanceModule(pools.runnerPool, { starter: advanceStarter, resolveRunSeat, startAdvance: options.advance?.startAdvance ?? null, triage: options.advance?.triage ?? null, panel: options.advance?.panel ?? null, spec: options.advance?.spec ?? null, build: options.advance?.build ?? null, buildFailed: options.advance?.buildFailed ?? null, buildWaitReason: options.advance?.buildWaitReason ?? null, prState: options.advance?.prState ?? null, review: options.advance?.review ?? null, lightSpec: options.advance?.lightSpec ?? null, respec: options.advance?.respec ?? null, amendSpec: options.advance?.amendSpec ?? null, registry, isOperatorAccount: (accountId) => operatorMode(env, accountId).active, raiseEnvelopeAsk: createEnvelopeAsk(pools.receiptPool), decisionIntake: createDecisionIntake({ runnerPool: pools.runnerPool, receiptPool: pools.receiptPool }) });
+    const advance = createAdvanceModule(pools.runnerPool, { starter: advanceStarter, resolveRunSeat, startAdvance: options.advance?.startAdvance ?? null, triage: options.advance?.triage ?? null, panel: options.advance?.panel ?? null, spec: options.advance?.spec ?? null, build: options.advance?.build ?? null, buildFailed: options.advance?.buildFailed ?? null, buildWaitReason: options.advance?.buildWaitReason ?? null, prState: options.advance?.prState ?? null, review: options.advance?.review ?? null, lightSpec: options.advance?.lightSpec ?? null, respec: options.advance?.respec ?? null, amendSpec: options.advance?.amendSpec ?? null, registry, fixHeads: fixRoundHeadPorts(options.ports), isOperatorAccount: (accountId) => operatorMode(env, accountId).active, raiseEnvelopeAsk: createEnvelopeAsk(pools.receiptPool), decisionIntake: createDecisionIntake({ runnerPool: pools.runnerPool, receiptPool: pools.receiptPool }) });
     // D#7 DP11c: the performer of `resume_decision` starts one run through the advance module's keyed start and a workflow that follows it.
     const resume = createResumeModule(pools.runnerPool, { startRun: advance.advanceStartRun, startFix: advance.advanceStartFix, startAdvance: options.advance?.startAdvance ?? null });
     // D#483 S4-b2b: the claim verifier's sweep. A sandbox repository's run shares the preview's starter (it refuses a queued run). S4-b2c: a cloud-verified

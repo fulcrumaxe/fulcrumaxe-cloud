@@ -56,6 +56,8 @@ export interface PlanePublishDeps {
     verifyPullRequest(input: { codeRepo: string; branch: string; number: number }): Promise<{ url: string } | null>;
     /** D#598 P1f-5c: opens the pull request on the paired repo's already-pushed branch (base `main`), with a fresh token it revokes before it returns. No git. Throws an error with `code` `pr_failed` or `public_unavailable`. */
     openPullRequest(input: { codeRepo: string; branch: string; title: string; body: string }): Promise<{ number: number; url: string }>;
+    /** FIXROUND-REFRESH-HEAD: the public branch's head (null: no such branch), with a fresh token revoked before it returns. Absent: a fix round of a paired item that pushed is refused. */
+    branchHead?(input: { codeRepo: string; branch: string }): Promise<string | null>;
   };
   /** D#598 P1f-5c: the PRIVATE repo's pull request side, the same port a runner run's `done` opens its pull request with. Absent: the platform opens none. */
   pullRequests?: RunPullRequestPort;
