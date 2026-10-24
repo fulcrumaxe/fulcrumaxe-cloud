@@ -31,6 +31,7 @@ export {
 export { checkStalls, stallText, describeDuration, STALL_REPEAT_SECONDS, type OpsAlertSink, type StallCheckDeps, type StallCheckResult, type StallNotice, type StallNoticeKind } from './stallAlert.js';
 export { RECONCILE_JOBS, buildReconcileJobs } from './jobs.js';
 export { createErrorEventsPrune, errorEventsPrune, ERROR_EVENTS_RETENTION_DAYS } from './jobs/errorEventsPrune.js';
+export { createMemorySweep, memorySweep, MEMORY_SWEEP_JOB, MEMORY_SWEEPS, type MemorySweep } from './jobs/memorySweep.js';
 export {
   createStripeSubscriptionsJob,
   STRIPE_SUBSCRIPTIONS_JOB,

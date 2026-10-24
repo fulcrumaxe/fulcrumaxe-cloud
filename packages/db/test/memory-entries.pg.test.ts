@@ -408,7 +408,11 @@ describe('memory_entries (D#601 MEM-1)', () => {
     it('the table is row-secured and forced, with a tenant read for app_user and one policy per command for the definer', async () => {
       expect((await admin.query(`SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE oid = 'public.memory_entries'::regclass`)).rows[0]).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
       const { rows } = await admin.query<{ roles: string[]; cmd: string }>(`SELECT roles::text[] AS roles, cmd FROM pg_policies WHERE schemaname = 'public' AND tablename = 'memory_entries'`);
-      expect(rows.map((r) => `${r.cmd} ${r.roles.join(',')}`).sort()).toEqual([`INSERT ${ROLE}`, `SELECT ${ROLE}`, 'SELECT app_user', `UPDATE ${ROLE}`, 'SELECT memory_recall_definer', 'UPDATE memory_recall_definer'].sort());
+      // 0900 (D#601 MEM-4b1) adds the sweep role's three, pinned in memory-sweeps.pg.test.ts.
+      expect(rows.map((r) => `${r.cmd} ${r.roles.join(',')}`).sort()).toEqual(
+        [`INSERT ${ROLE}`, `SELECT ${ROLE}`, 'SELECT app_user', `UPDATE ${ROLE}`, 'SELECT memory_recall_definer', 'UPDATE memory_recall_definer',
+          'SELECT memory_sweep_definer', 'UPDATE memory_sweep_definer', 'DELETE memory_sweep_definer'].sort(),
+      );
     });
     it('the role may write audit_log only for the nine memory actions', async () => {
       const { rows } = await admin.query<{ with_check: string }>(`SELECT with_check FROM pg_policies WHERE tablename = 'audit_log' AND roles = ARRAY[$1]::name[]`, [ROLE]);
