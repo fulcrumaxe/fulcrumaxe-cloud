@@ -136,8 +136,8 @@ export class NoSpecVersionError extends Error {
   }
 }
 
-/** The roles whose runner runs push commits and so are held to a Spec's file list at done (the same two as `RUNNER_PUSHING_ROLES` in `@fx/gh-policy`, which this package does not depend on). */
-const SPEC_PINNED_RUNNER_ROLES: ReadonlySet<string> = new Set(["executor", "docs-writer"]);
+/** The roles whose runner runs push commits and so are held to a Spec's file list at done (the same two as `RUNNER_PUSHING_ROLES` in `@fx/gh-policy`, which this package does not depend on). The job issuer reads it too: only these roles can leave commits on a branch, so only their jobs carry the approved check. */
+export const SPEC_PINNED_RUNNER_ROLES: ReadonlySet<string> = new Set(["executor", "docs-writer"]);
 
 /**
  * D#6 R4d-5c (C36): the Spec version a new run is written with. Without a parent it is the caller's (the new-build pin of R4d-5a).
