@@ -32,9 +32,9 @@ interface Wait {
 }
 interface Ctx {
   /** A runner of the account, covering the repo. `online` is a poll just now. A declared capacity may name the cause that limits it. */
-  runner(o: { credential: 'api_key' | 'subscription'; online: boolean; protocol?: number; cap?: { light: number; heavy: number; limitedBy?: string } }): Promise<string>;
+  runner(o: { credential: 'api_key' | 'subscription'; online: boolean; wake?: boolean; protocol?: number; cap?: { light: number; heavy: number; limitedBy?: string } }): Promise<string>;
   /** A runner run of the account. Pass `item` to make it the case's run. */
-  run(o: { role: string; status: string; runnerId?: string; starter: boolean; item?: number; parent?: string; claimableAfterHours?: number; minProtocol?: number }): Promise<string>;
+  run(o: { role: string; status: string; runnerId?: string; starter: boolean; item?: number; parent?: string; claimableAfterHours?: number; minProtocol?: number; claimableSecondsAgo?: number }): Promise<string>;
   parentFailed(reason: string): Promise<string>;
 }
 interface Case {
@@ -111,6 +111,16 @@ const CASES: Case[] = [
       await c.run({ role: 'executor', status: 'pending', starter: true, item: 1, minProtocol: EXCLUDES_JOB_MIN_PROTOCOL });
     },
   },
+  // D#6 PING-CONSUMERS: the only covering runner is a wake runner heard from a while ago that has left work, claimable 3 minutes ago, unanswered (the wake gate is open for this file).
+  {
+    name: 'wait-runner-not-responding',
+    want: { reason: 'runner_not_responding', limited_by: null },
+    wantText: "Your runner isn't picking up work. Check that the machine is on and fx-runner is running.",
+    setup: async (c) => {
+      await c.runner({ credential: 'api_key', online: false, wake: true, cap: { light: 8, heavy: 4 } });
+      await c.run({ role: 'executor', status: 'pending', starter: true, item: 1, claimableSecondsAgo: 180 });
+    },
+  },
 ];
 
 /** D#6 C42-3b against real Postgres: why a queued runner run waits, on both screens' reads, one pinned fixture per state. */
@@ -126,9 +136,11 @@ describe('the wait of a queued runner run through getWorkItemActivity and getRun
     appUserPool = createPool(process.env.API_DATABASE_URL_APP_USER!);
     platformOpsPool = createPool(process.env.API_DATABASE_URL_PLATFORM_OPS!);
     process.env.FX_SESSION_SECRET = FX_SESSION_SECRET;
+    process.env.FX_RUNNER_WAKE_KEY = 'k'.repeat(32);
   });
   afterAll(async () => {
     delete process.env.FX_SESSION_SECRET;
+    delete process.env.FX_RUNNER_WAKE_KEY;
     admin.release();
     await adminPool.end();
     await appUserPool.end();
@@ -163,7 +175,8 @@ describe('the wait of a queued runner run through getWorkItemActivity and getRun
     const ctx: Ctx = {
       async runner(o) {
         const id = await insertRunner(admin, me.accountId, me.userId, { credentialMode: o.credential });
-        await admin.query(`UPDATE runners SET last_seen_at = ${o.online ? 'now()' : "now() - interval '1 day'"}, protocol_version = ${o.protocol ?? 3}, allowed_repo_ids = $2::uuid[] WHERE id = $1`, [id, [repoId]]);
+        await admin.query(`UPDATE runners SET last_seen_at = ${o.online ? 'now()' : o.wake === true ? "now() - interval '10 minutes'" : "now() - interval '1 day'"}, protocol_version = ${o.protocol ?? 3}, allowed_repo_ids = $2::uuid[] WHERE id = $1`, [id, [repoId]]);
+        if (o.wake === true) await admin.query(`INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, ARRAY['wake_v1'])`, [id, me.accountId]);
         if (o.cap) await admin.query(`INSERT INTO runner_capacity (runner_id, account_id, declared, light_limit, heavy_limit, limited_by) VALUES ($1, $2, true, $3, $4, $5)`, [id, me.accountId, o.cap.light, o.cap.heavy, o.cap.limitedBy ?? null]);
         return id;
       },
@@ -175,6 +188,7 @@ describe('the wait of a queued runner run through getWorkItemActivity and getRun
            VALUES ($1, $2, $3, $4, 'runner', 'runner_local', $5, $6, $6, $7, $8, ${running ? "now() + interval '60 seconds'" : 'NULL'}, $9, $10, ${o.claimableAfterHours === undefined ? 'NULL' : `now() + interval '${o.claimableAfterHours} hours'`}, $11, $12)`,
           [id, me.accountId, o.item === undefined ? null : itemId, o.role, o.status, o.starter ? me.userId : null, o.runnerId ?? null, running ? 1 : 0, repoId, o.parent ?? null, new Date(T0), o.minProtocol ?? null],
         );
+        if (o.claimableSecondsAgo !== undefined) await admin.query(`UPDATE agent_runs SET claimable_since = now() - make_interval(secs => $2) WHERE id = $1`, [id, o.claimableSecondsAgo]);
         return id;
       },
       async parentFailed(reason) {

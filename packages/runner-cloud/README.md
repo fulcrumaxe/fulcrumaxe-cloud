@@ -111,9 +111,11 @@ same transaction. The merge gate reads it through `createPgLocalReviewOptIn`.
   order of precedence. A runner revoked by its registrant leaving reads `state_note` "Revoked: registrant left". A paused or draining
   runner does not cover a waiting run in the read model. It selects
   no key, thumbprint, repo list or nonce. `getRunWaitReason(runId)` derives why a run waits (`waiting_for_runner`,
-  `waiting_for_approval`, `runner_lost_retrying`, `timed_out_waiting`, `paused_usage_limit`) from the rows. Nothing is stored.
+  `waiting_for_approval`, `runner_not_responding`, `runner_lost_retrying`, `timed_out_waiting`, `paused_usage_limit`) from the rows. Nothing is stored.
   `waiting_for_runner` means no live runner for the run's repo: live, and the repo in the runner's own `allowed_repo_ids` (an
   empty list takes no repo, as in the claim).
+  `runner_not_responding` means a covering wake runner is there but has left work claimable for 90 s or more unanswered; the fleet screen's
+  "Not responding" for work reads the same SQL rule (`runnerIgnoringWorkSql`), so the two cannot disagree.
   A follow-up run waits for a reason only when its parent is a failed runner run whose last move to failed recorded
   `runner_lost` or `usage_limit`; for a usage limit it is paused until its own `claimable_after`, then it waits like any run.
 - **Approvals.** `POST /api/runners/runs/:id/approve` lets the registrant of a live subscription runner approve a teammate's

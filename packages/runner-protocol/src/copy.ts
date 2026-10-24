@@ -177,6 +177,8 @@ export function runnerSetupText(detail: string, sizeMb?: number): string {
  */
 export const WAIT_LINES = {
   waiting_for_runner: "Waiting for your runner to come online",
+  // D#6 PING-CONSUMERS: a runner is there but has not picked up work that became claimable 90 s or more ago.
+  runner_not_responding: "Your runner isn't picking up work. Check that the machine is on and fx-runner is running.",
   waiting_for_account_cap: "Waiting: your account's runner job limit is reached",
   waiting_for_runner_slot: "Waiting for a free slot on your runner",
   waiting_for_approval: "Waiting for approval before it runs on a Claude plan",
