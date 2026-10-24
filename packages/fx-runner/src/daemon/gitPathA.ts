@@ -21,7 +21,7 @@ import { assertGitVersion, createGit, GitPathError, type Git, type GitCapture, t
 import { mirrorCheckBase, mirrorNixSource, PUSHING_ROLES, type GitJob, type GitPath, type GitPathDeps } from "./gitPath.js";
 import { createMirrors, githubUrl, type Mirrors, type RepoRef } from "./mirror.js";
 import { LISTING_CAP } from "./repoMap.js";
-import { cleanResumedWorkspace } from "./resumeClean.js";
+import { cleanResumedWorkspace, type SandboxedPurge } from "./resumeClean.js";
 import { publishBranch, pushPlan, workspaceHead, type PushLease } from "./push.js";
 import { gitProxyHashFor, gitProxyPinned, PINNED_GIT_PROXIES, type PinnedGitProxies } from "../keyring.js";
 
@@ -39,6 +39,8 @@ export interface GitPathADeps extends Omit<GitDeps, "mapHttp">, Pick<GitPathDeps
   pinned?: PinnedGitProxies;
   now?: () => number;
   platform: NodeJS.Platform;
+  /** macOS: the purge run in a child under `sandbox-exec` (D#6 RESUME-CLEAN-MAC); without it the clean-up of a resumed workspace is skipped there. */
+  sandboxedPurge?: SandboxedPurge;
   /** Like `capture` with a large output limit, for listing a resumed workspace's ignored files. */
   captureLarge?: GitCapture;
   /** Replaceable so a test can answer for tmpfs. */
@@ -145,7 +147,7 @@ export function createGitPathA(deps: GitPathADeps): GitPath {
       try {
         if ((await workspaceHead(session.git, dir, workspace, snapshotsRoot)) !== tip) return null;
         // At the tip and about to be reused: drop the first round's ignored build output (D#6 RUNNER-RESUME-CLEAN). A local read, so the plain git, no ticket.
-        await cleanResumedWorkspace(listingGit, workspace, deps.log, deps.captureLarge === undefined ? 64 * 1024 : LISTING_CAP, platform);
+        await cleanResumedWorkspace(listingGit, workspace, deps.log, deps.captureLarge === undefined ? 64 * 1024 : LISTING_CAP, platform, deps.sandboxedPurge);
         return { base: tip };
       } catch (error) {
         if (error instanceof GitPathError && !["git_stopped", "git_revoked", "clone_limited", "git_proxy_unpinned", "git_ticket_refused"].includes(error.code)) return null;

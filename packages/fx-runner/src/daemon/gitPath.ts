@@ -14,7 +14,7 @@ import { createMirrors, type Mirrors, type MirrorDeps } from "./mirror.js";
 import type { NixFromDefault, NixSource } from "./nixShell.js";
 import { LISTING_CAP, readRepoMap } from "./repoMap.js";
 import { sweepSnapshots } from "./snapshot.js";
-import { cleanResumedWorkspace } from "./resumeClean.js";
+import { cleanResumedWorkspace, type SandboxedPurge } from "./resumeClean.js";
 import { publishBranch, PUSH_BRANCH_PREFIX, pushPlan, workspaceHead, type PushLease, type Published } from "./push.js";
 
 export type GitJob = Pick<Job, "repo" | "continues" | "branch_prefix" | "role" | "review">;
@@ -68,8 +68,10 @@ export interface GitPathDeps extends GitDeps, Pick<MirrorDeps, "mirrorsRoot" | "
   captureLarge?: GitCapture;
   /** One line of counts when a resumed workspace's stale build output was removed. */
   log?: (line: string) => void;
-  /** The host platform: the clean-up of a resumed workspace is skipped on darwin. */
+  /** The host platform: on darwin the clean-up of a resumed workspace runs only through `sandboxedPurge`, and is skipped without it. */
   platform: NodeJS.Platform;
+  /** macOS: the purge run in a child under `sandbox-exec` (D#6 RESUME-CLEAN-MAC). */
+  sandboxedPurge?: SandboxedPurge;
 }
 
 /**
@@ -151,7 +153,7 @@ export function createGitPath(deps: GitPathDeps): GitPath {
       try {
         if ((await workspaceHead(git, dir, workspace, snapshotsRoot)) !== tip) return null;
         // At the tip and about to be reused: the first round's ignored build output must not reach this run's check (D#6 RUNNER-RESUME-CLEAN).
-        await cleanResumedWorkspace(listingGit, workspace, deps.log, deps.captureLarge === undefined ? SMALL_CAPTURE_CHARS : LISTING_CAP, deps.platform);
+        await cleanResumedWorkspace(listingGit, workspace, deps.log, deps.captureLarge === undefined ? SMALL_CAPTURE_CHARS : LISTING_CAP, deps.platform, deps.sandboxedPurge);
         return { base: tip };
       } catch (error) {
         // A kept workspace this path cannot read as a clone it made is not resumed. The mirror's own failures were thrown above.
