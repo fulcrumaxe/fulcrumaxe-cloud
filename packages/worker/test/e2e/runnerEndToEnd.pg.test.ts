@@ -18,7 +18,7 @@ import { createRunnerDoneFacade } from "../../src/runnerDone.js";
 import { createRunnerGitTicketFacade } from "../../src/runnerGitTicket.js";
 import { createSeatResolver } from "../../src/seat.js";
 import { createRunStarter } from "../../src/starter.js";
-import { startBuildForItem } from "../../../pipeline/src/advance/build.js";
+import { startBuildForItem } from "../../../pipeline/src/advance/buildTesting.js";
 import { buildLightSpecPrompt, publishLightSpec } from "../../../pipeline/src/advance/lightSpec.js";
 import type { AdvanceRunPorts } from "../../../pipeline/src/advance/runPorts.js";
 import { loadRunsOnSha, reviewerReasons } from "../../../pipeline/src/build/mergeGate.js";

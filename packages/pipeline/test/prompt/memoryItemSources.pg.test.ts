@@ -13,7 +13,7 @@ import { seedAccount, seedRepo, seedWorkItem } from "../build/helpers/seed.js";
 import { renderMemorySlot, type MemoryEntry } from "../../src/prompt/assemblePrompt.js";
 import { createMemoryPort, CUT_MARKER, type RecallSkip } from "../../src/prompt/memoryRecall.js";
 import { recordRunItemSources } from "../../src/prompt/runContextInputs.js";
-import { startBuildForItem } from "../../src/advance/build.js";
+import { startBuildForItem } from "../../src/advance/buildTesting.js";
 import type { AdvanceRunOutcome, AdvanceRunPorts, AdvanceRunRequest, AdvanceRunStart } from "../../src/advance/runPorts.js";
 
 /**
@@ -97,7 +97,7 @@ async function putHandoff(w: World, o: { summary: string; state?: string; from?:
 }
 
 const skips: RecallSkip[] = [];
-const port = () => createMemoryPort(h.runWriterPool, { onSkip: (s) => skips.push(s) });
+const port = () => createMemoryPort(h.runWriterPool, { onSkip: (s) => skips.push(s), liveSecrets: () => [] });
 const recall = (w: World, slot: "stable" | "item", runId?: string): Promise<readonly MemoryEntry[]> =>
   port().recall({ accountId: w.accountId, repoId: w.repoId, workItemId: w.itemId, role: "executor", slot, ...(runId ? { runId } : {}) });
 const sourcesOf = async (w: World, runId?: string) => (await recall(w, "item", runId)).filter((e) => e.source !== undefined);

@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { COMPUTE_NOTICE_SENTENCES, foregroundBudgetUsd, getUsage, reserve, type ReserveParams } from "@fx/spend";
 import { pgHarness } from "./helpers/pgHarness.js";
 import { seedAccount } from "./build/helpers/seed.js";
-import { startBuildForItem } from "../src/advance/build.js";
+import { startBuildForItem } from "../src/advance/buildTesting.js";
 import { RESERVATION_PAUSE_SENTENCES, readReservationPause } from "../src/advance/reservationPauses.js";
 import type { AdvanceRunPorts, AdvanceRunRequest } from "../src/advance/runPorts.js";
 

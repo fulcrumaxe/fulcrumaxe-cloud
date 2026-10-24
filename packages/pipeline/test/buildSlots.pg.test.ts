@@ -6,7 +6,7 @@ import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { createPool } from "@fx/db/src/pool.js";
 import { pgHarness } from "./helpers/pgHarness.js";
 import { seedAccount } from "./build/helpers/seed.js";
-import { startBuildForItem } from "../src/advance/build.js";
+import { startBuildForItem } from "../src/advance/buildTesting.js";
 import { BUILD_SLOT_STAGES, readBuildWaitReason, takeBuildSlot } from "../src/advance/buildSlots.js";
 import type { AdvanceRunPorts, AdvanceRunRequest } from "../src/advance/runPorts.js";
 

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Pool } from "pg";
-import { repoScopeRef } from "@fx/core/src/memory/index.js";
+import { repoScopeRef, storedTextHoldsSecret, type LiveSecretsSource } from "@fx/core/src/memory/index.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { MEMORY_SLOT_DEFAULT_BYTES, MEMORY_SLOT_MAX_BYTES, renderMemorySlot, type MemoryEntry, type MemoryPort, type RenderedMemory } from "./assemblePrompt.js";
 
@@ -214,7 +214,11 @@ interface ReceiptRow {
 /** An entry the port left out on purpose, and why. */
 export interface RecallSkip {
   id: string;
-  reason: "receipt_missing";
+  /**
+   * `secret_rescan`: the entry's stored text holds a credential shape or a token that is live now, so it was not recalled (one skip per entry, `id` is the entry's).
+   * `secrets_unavailable`: the live-secrets source failed, so this call recalled no memory at all (`id` is a fixed "-"). Neither carries any text.
+   */
+  reason: "receipt_missing" | "secret_rescan" | "secrets_unavailable";
 }
 
 /** The promoted-receipt rows that still have their receipt, as account-scope rows carrying the receipt's text cut for the prompt. A row whose receipt is gone is reported and left out. */
@@ -234,14 +238,36 @@ function receiptRows(rows: readonly ReceiptRow[], onSkip: (s: RecallSkip) => voi
  * The memory port over Postgres. One tenant transaction per call (no user in the session: this is the pipeline's own read), then the
  * returned entries get `last_recalled_at` through `memory_mark_recalled` (migration 0806). The item part also carries the item's own records
  * (D#601 MEM-8b): its applied run notes (at most 5, newest first) and its latest completed cloud handoff note, after the item's approved entries.
+ *
+ * D#601 MEM-RECALL-RESCAN: stored text is checked again here, with the check export applies (a credential shape, or a token that is live now), because a restore,
+ * a renewal and a restore from retired change status only, and a token can go live after an entry was written. A candidate that fails is left out and reported as a
+ * `secret_rescan` skip, once, by the slot that would have used it. `liveSecrets` is the same source export gets (this process's live installation tokens); when it
+ * throws, or is missing, nothing is recalled that call (`secrets_unavailable`), never unchecked text. The source is required: there is no default.
  */
-export function createMemoryPort(pool: Pool, options: { onSkip?: (s: RecallSkip) => void } = {}): MemoryPort {
+export function createMemoryPort(pool: Pool, options: { onSkip?: (s: RecallSkip) => void; liveSecrets: LiveSecretsSource }): MemoryPort {
   const onSkip = options.onSkip ?? ((): void => undefined);
+  /** True when none of the texts holds a secret. A failing candidate is reported only when this slot is the one that would have used it. */
+  const clean = (secrets: readonly string[], id: string, mine: boolean, ...texts: ReadonlyArray<string | null>): boolean => {
+    if (!texts.some((t) => t !== null && storedTextHoldsSecret(t, secrets))) return true;
+    if (mine) onSkip({ id, reason: "secret_rescan" });
+    return false;
+  };
   return {
     recall: async ({ accountId, repoId, workItemId, role, runId, slot }) => {
       if (slot !== "stable" && slot !== "item") return [];
       if (!UUID_RE.test(accountId) || !UUID_RE.test(repoId) || (workItemId !== undefined && !UUID_RE.test(workItemId)) || (runId !== undefined && !UUID_RE.test(runId))) return [];
       if (slot === "item" && workItemId === undefined) return [];
+      let secrets: readonly string[];
+      try {
+        // A source that is missing at run time (a caller that got past the type) is the same as one that failed: nothing is recalled.
+        if (typeof options.liveSecrets !== "function") throw new Error("no live-secrets source");
+        secrets = await options.liveSecrets();
+      } catch {
+        // fx-swallow-ok: a source that cannot answer recalls nothing this call, with a fixed note; the error text could carry a value and is not kept
+        onSkip({ id: "-", reason: "secrets_unavailable" });
+        return [];
+      }
+      const isItem = slot === "item";
       return withTenant(pool, accountId, async (client) => {
         const ctx = (
           await client.query<{ gh_node_id: string | null; gh_installation_id: string | null; memory_slot_bytes: number | null; item_id: string | null; title: string | null; stage: string | null; spec_body: string | null }>(
@@ -261,24 +287,54 @@ export function createMemoryPort(pool: Pool, options: { onSkip?: (s: RecallSkip)
           itemOpen ? workItemId : null,
           itemOpen ? rankingQueryOf(ctx.title, ctx.spec_body) : null,
         ]);
-        const receipts = receiptRows((await client.query<ReceiptRow>(RECEIPT_SQL, [accountId])).rows, onSkip);
+        const approved = rows.filter((r) => clean(secrets, r.id, (r.scope === "item") === isItem, r.body, r.why));
+        const receiptRaw = (await client.query<ReceiptRow>(RECEIPT_SQL, [accountId])).rows;
+        const receipts = receiptRows(receiptRaw.filter((r) => clean(secrets, r.id, !isItem, r.body, r.chosen)), onSkip);
         // The item's own records, only while the item is open (closing it stops them, reopening brings them back: nothing is stored about that).
         const sources: MemoryEntry[] = [];
         if (itemOpen) {
           const notes = (await client.query<{ id: string; author_kind: string; body: string }>(CORRECTION_SQL, [accountId, workItemId, runId ?? null])).rows;
-          for (const n of notes) sources.push(sourceEntry("correction", n.id, n.body, n.author_kind));
+          for (const n of notes) if (clean(secrets, n.id, isItem, n.body)) sources.push(sourceEntry("correction", n.id, n.body, n.author_kind));
           const handoff = (await client.query<{ id: string; body: string; exclude_run_id: string | null }>(HANDOFF_SQL, [accountId, workItemId])).rows[0];
-          if (handoff !== undefined && (runId === undefined || handoff.exclude_run_id !== runId)) sources.push(sourceEntry("handoff", handoff.id, handoff.body, "agent"));
+          if (handoff !== undefined && (runId === undefined || handoff.exclude_run_id !== runId) && clean(secrets, handoff.id, isItem, handoff.body)) sources.push(sourceEntry("handoff", handoff.id, handoff.body, "agent"));
         }
-        const itemChosen = selectWithinBudget([...rankedBy(rows.filter((r) => r.scope === "item")), ...sources], budget);
+        // The text the prompt would really hold (after the fence-lookalike escape and the cuts) is checked too, not only the stored columns.
+        const finalOk = (mine: boolean) => (e: MemoryEntry): boolean => clean(secrets, e.id, mine, e.text);
+        const itemChosen = selectWithinBudget([...rankedBy(approved.filter((r) => r.scope === "item")), ...sources].filter(finalOk(isItem)), budget);
         const chosen =
           slot === "item"
             ? itemChosen
-            : selectWithinBudget(rankedBy([...rows.filter((r) => r.scope !== "item"), ...receipts]), budget - (itemChosen.length === 0 ? 0 : bytesOf(renderMemorySlot(itemChosen, budget).text)));
+            : selectWithinBudget(rankedBy([...approved.filter((r) => r.scope !== "item"), ...receipts]).filter(finalOk(!isItem)), budget - (itemChosen.length === 0 ? 0 : bytesOf(renderMemorySlot(itemChosen, budget).text)));
         // Only real entries are stamped: the item's own records are not rows of memory_entries.
         const stamped = chosen.filter((e) => e.source === undefined).map((e) => e.id);
         if (stamped.length > 0) await client.query("SELECT memory_mark_recalled($1::uuid[])", [stamped]);
         return chosen;
+      });
+    },
+  };
+}
+
+/**
+ * D#601 MEM-RECALL-RESCAN: any other port (a test double, a future store) goes through the same check before its entries reach a prompt: each entry's final text is
+ * tested against the live secrets, and a source that is missing or fails recalls nothing. `createMemoryPort` does this itself; this is for a port handed in from outside.
+ */
+export function guardMemoryPort(inner: MemoryPort, options: { onSkip?: (s: RecallSkip) => void; liveSecrets: LiveSecretsSource }): MemoryPort {
+  const onSkip = options.onSkip ?? ((): void => undefined);
+  return {
+    recall: async (request) => {
+      let secrets: readonly string[];
+      try {
+        if (typeof options.liveSecrets !== "function") throw new Error("no live-secrets source");
+        secrets = await options.liveSecrets();
+      } catch {
+        // fx-swallow-ok: a source that cannot answer recalls nothing this call, with a fixed note; the error text could carry a value and is not kept
+        onSkip({ id: "-", reason: "secrets_unavailable" });
+        return [];
+      }
+      return (await inner.recall(request)).filter((e) => {
+        if (!storedTextHoldsSecret(e.text, secrets)) return true;
+        onSkip({ id: e.id, reason: "secret_rescan" });
+        return false;
       });
     },
   };

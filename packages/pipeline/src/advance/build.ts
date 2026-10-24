@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import type { LiveSecretsSource } from "@fx/core/src/memory/index.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
@@ -16,7 +17,7 @@ import { pauseForDenial } from "./reservationPauses.js";
 import { attemptKey } from "./attemptKeys.js";
 import { clampAssemblyMs } from "./assemblyClock.js";
 import { assemblePrompt, renderMemorySlot, MEMORY_MARKER_ROOM, type PinnedItem, type AssembledPrompt, type AssembleOptions, type MemoryPort, type NoteItem, type RenderedMemory } from "../prompt/assemblePrompt.js";
-import { createMemoryPort, memoryTokensOf } from "../prompt/memoryRecall.js";
+import { createMemoryPort, guardMemoryPort, memoryTokensOf, type RecallSkip } from "../prompt/memoryRecall.js";
 import { readMemorySlotBytes } from "../prompt/memorySlotSetting.js";
 import { effectiveContextBudget, readContextBudgetBytes } from "../prompt/contextBudget.js";
 import type { RepoMapPort } from "../prompt/repoMap.js";
@@ -344,6 +345,18 @@ async function isPaired(pool: Pool, accountId: string, repoId: string): Promise<
   return withTenant(pool, accountId, async (client) => (await client.query("SELECT 1 FROM repo_pairing WHERE repo_id = $1 AND account_id = $2", [repoId, accountId])).rows.length > 0);
 }
 
+/** D#601 MEM-RECALL-RESCAN: `liveSecrets` is required (no default), so a caller cannot start a build whose recalled memory was not checked against the live tokens. */
+export interface StartBuildOptions {
+  expectedVersion?: number;
+  memory?: MemoryPort;
+  liveSecrets: LiveSecretsSource;
+  repoMap?: RepoMapPort;
+  pins?: PinContentPort;
+  spendAttempt?: number;
+  stackBase?: StackBasePort;
+  planeBase?: PlaneBasePort;
+}
+
 /**
  * `approvalId` names the approval (the run action) that asked for the build. It is part of the run's key, so a replay of
  * the same approval finds its run, while a fresh approval after a refused start asks again.
@@ -355,7 +368,7 @@ export async function startBuildForItem(
   approvalId: string,
   ports: AdvanceRunPorts,
   /** The Spec version the person approved (read when the workflow started). A newer version appearing since refuses the build `spec_changed`: what is built is what was approved. */
-  options: { expectedVersion?: number; memory?: MemoryPort; repoMap?: RepoMapPort; pins?: PinContentPort; spendAttempt?: number; stackBase?: StackBasePort; planeBase?: PlaneBasePort } = {},
+  options: StartBuildOptions,
 ): Promise<BuildStartResult> {
   const facts = await readFacts(pool, accountId, workItemId);
   if (facts === null) return { status: "refused", reason: "not_found" };
@@ -388,7 +401,13 @@ export async function startBuildForItem(
   // A replay whose earlier run was cancelled (a failed record cancels the run it just started; a person may cancel one) must not move the item to in_progress
   // pointing at that cancelled run: it is refused, and a fresh approval starts a fresh run.
   if (prior && (facts.stage === "spec_ready" || facts.stage === "needs_human") && (await ports.outcome(prior.runId)).status === "cancelled") return { status: "refused", reason: "prior_run_cancelled" };
-  const memory = await recallMemory(pool, accountId, facts.repo_id, workItemId, options.memory ?? createMemoryPort(pool), prior?.runId);
+  // D#601 MEM-RECALL-RESCAN: what the recall's secret re-check left out, for the run's inputs record (counts only).
+  const rescan = { skipped: 0, unavailable: false };
+  const onSkip = (s: RecallSkip): void => {
+    if (s.reason === "secret_rescan") rescan.skipped += 1;
+    else if (s.reason === "secrets_unavailable") rescan.unavailable = true;
+  };
+  const memory = await recallMemory(pool, accountId, facts.repo_id, workItemId, (options.memory ? guardMemoryPort(options.memory, { onSkip, liveSecrets: options.liveSecrets }) : createMemoryPort(pool, { onSkip, liveSecrets: options.liveSecrets })), prior?.runId);
   const notes = prior ? [] : await withTenant(pool, accountId, (client) => readPendingRunNotes(client, workItemId));
   const step = prior ? prior.step : `${baseStep}${runNotesStepSuffix(notes.map((n) => n.id))}`;
   // D#600 CX-3a: the repository map, built on the cloud side at the repository's current head. A replay that finds its run does not build one; no map is not a reason to refuse.
@@ -476,7 +495,7 @@ export async function startBuildForItem(
         // D#600 CX-8b: which memory entries and which map this prompt carried, for the context panel. A replay of a started step keeps the first record
         // (it built no map this time and may have recalled something else). Fails closed: a failed insert rolls the start back (D#601 C2).
         if (!prior) {
-          await recordRunContextInputs(client, accountId, started.runId, { entries: recalledEntriesOf(memory?.stable, memory?.item), map: map ? { version: map.version, sha256: mapIdentityOf(map.text) } : null });
+          await recordRunContextInputs(client, accountId, started.runId, { entries: recalledEntriesOf(memory?.stable, memory?.item), map: map ? { version: map.version, sha256: mapIdentityOf(map.text) } : null, rescan });
           // D#601 MEM-8b: the item's own records the prompt carried (applied notes, a handoff note): ids, the hash of the text as rendered and whether it was cut. No text.
           await recordRunItemSources(client, accountId, started.runId, memory?.sources ?? []);
         }

@@ -103,7 +103,7 @@ describe('D#601 MEM-4b2: memory undo, history and export routes', () => {
     return plaintext;
   }
   const status = async (id: string) => (await admin.query<{ status: string }>(`SELECT status FROM memory_entries WHERE id = $1`, [id])).rows[0]?.status;
-  const recalled = async (): Promise<string[]> => (await createMemoryPort(appUserPool).recall({ accountId: a.accountId, repoId: a.repoId, workItemId: a.workItemId, role: 'executor', slot: 'stable' } as never)).map((e) => e.id);
+  const recalled = async (): Promise<string[]> => (await createMemoryPort(appUserPool, { liveSecrets: () => [] }).recall({ accountId: a.accountId, repoId: a.repoId, workItemId: a.workItemId, role: 'executor', slot: 'stable' } as never)).map((e) => e.id);
   const revert = (who: Identity, ids: string[], action: string) => call(who, 'POST', '/memory/revert', { ids, action });
 
   beforeAll(async () => {

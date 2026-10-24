@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { insertAgentRun, startAgentRun, WorkItemHaltedError, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
-import { startBuildForItem } from "@fx/pipeline";
+import { startBuildForItem } from "@fx/pipeline/testing/build";
 import { sendBackToDiscussion } from "@fx/core/src/work-items/operatorMoves.js";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { startBuildForItem } from "../src/advance/build.js";
+import { startBuildForItem } from "../src/advance/buildTesting.js";
 import type { StackBasePort, StackParentFacts } from "../src/advance/stackBase.js";
 import type { AdvanceRunOutcome, AdvanceRunPorts, AdvanceRunRequest, AdvanceRunStart } from "../src/advance/runPorts.js";
 import { pgHarness } from "./helpers/pgHarness.js";
