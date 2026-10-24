@@ -1,9 +1,11 @@
 export {
   runTick,
   readLapTimes,
+  readLapState,
   isLapBreach,
   lapBasisSeconds,
   jobsWithWork,
+  type WorkOptions,
   hasBrokenCredits,
   readCreditsBreak,
   CREDITS_FAST_WINDOW_SECONDS,
