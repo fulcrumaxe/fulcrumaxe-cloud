@@ -43,13 +43,13 @@ describe("claim caps from the runner's declared capacity [pg]", () => {
 
   async function newRunner(): Promise<string> {
     const id = await insertRunner(admin, A.accountId, A.userId, { credentialMode: "api_key" });
-    await admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[], allowed_roles = $3::text[] WHERE id = $1", [id, [A.repoId], ["executor", "code-reviewer"]]);
+    await admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[], allowed_roles = $3::text[] WHERE id = $1", [id, [A.repoId], ["executor", "security-reviewer"]]);
     return id;
   }
-  /** A pending runner run with a real signed job; `light` is a code-reviewer run, else an executor run. Older runs are handed out first. */
+  /** A pending runner run with a real signed job; `light` is a security-reviewer run, else an executor run. Older runs are handed out first. */
   async function pending(light: boolean): Promise<string> {
     const id = randomUUID();
-    const role = light ? "code-reviewer" : "executor";
+    const role = light ? "security-reviewer" : "executor";
     const job: Job = {
       schema_version: 1,
       job_id: randomUUID(),
@@ -95,12 +95,12 @@ describe("claim caps from the runner's declared capacity [pg]", () => {
     for (let i = 0; i < 4; i++) {
       const role = await claimedRole(await claim(runner, cap([3, light], [1, heavy])));
       roles.push(role);
-      if (role === "code-reviewer") light++;
+      if (role === "security-reviewer") light++;
       if (role === "executor") heavy++;
     }
-    expect(roles.filter((r) => r === "code-reviewer")).toHaveLength(3);
+    expect(roles.filter((r) => r === "security-reviewer")).toHaveLength(3);
     expect(roles.filter((r) => r === "executor")).toHaveLength(1);
-    expect(await held(runner)).toEqual(["code-reviewer", "code-reviewer", "code-reviewer", "executor"]);
+    expect(await held(runner)).toEqual(["executor", "security-reviewer", "security-reviewer", "security-reviewer"]);
     // A fifth claim: the runner is full in both classes, and the account is at its total.
     expect((await claim(runner, cap([3, 3], [1, 1]))).kind).toBe("idle");
     expect(await held(runner)).toHaveLength(4);
@@ -117,7 +117,7 @@ describe("claim caps from the runner's declared capacity [pg]", () => {
     // The older pending run is heavy and the account is at its heavy cap, so the claim passes it over and takes the light one.
     const next = await claim(second, roomy);
     expect(next).toMatchObject({ kind: "claimed", runId: lightRun });
-    expect(await held(second)).toEqual(["code-reviewer"]);
+    expect(await held(second)).toEqual(["security-reviewer"]);
   });
 
   it("a runner declaring heavy 0 is never given a heavy run, and one declaring light 0 never a light one", async () => {
@@ -189,7 +189,7 @@ describe("claim caps from the runner's declared capacity [pg]", () => {
     for (let i = 0; i < 8; i++) await pending(i < 5);
     await Promise.all(Array.from({ length: 8 }, () => claim(runner, cap([2, 0], [1, 0]), wide)));
     const roles = await held(runner);
-    expect(roles.filter((r) => r === "code-reviewer").length).toBeLessThanOrEqual(2);
+    expect(roles.filter((r) => r === "security-reviewer").length).toBeLessThanOrEqual(2);
     expect(roles.filter((r) => r === "executor").length).toBeLessThanOrEqual(1);
   });
 

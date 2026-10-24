@@ -89,7 +89,7 @@ function world(over: { reading?: Partial<ResourceReading>; settings?: Partial<Ru
 describe("claims up to capacity, in parallel", () => {
   it("three light runs offered at once are all in hand at once, and each claim reports the growing in-use count", async () => {
     const w = world();
-    for (let i = 0; i < 3; i++) w.enqueue("code-reviewer");
+    for (let i = 0; i < 3; i++) w.enqueue("security-reviewer");
     const loop = w.run();
     await until(() => w.inHand() === 3);
     expect(w.queue).toHaveLength(0);
@@ -103,7 +103,7 @@ describe("claims up to capacity, in parallel", () => {
 
   it("the ceiling holds: ten light runs queued, never more than eight in hand, and a finished job's slot is taken at once", async () => {
     const w = world();
-    for (let i = 0; i < 10; i++) w.enqueue("code-reviewer");
+    for (let i = 0; i < 10; i++) w.enqueue("security-reviewer");
     const loop = w.run();
     await until(() => w.inHand() === 8);
     await w.clock.advance(1000);
@@ -158,14 +158,14 @@ describe("resource-aware admission in the loop (fake probe)", () => {
 
   it("a reserve breach mid-run stops new claims and kills nothing; recovery resumes them", async () => {
     const w = world({ reading: { totalMemBytes: 16 * GIB, availMemBytes: 14 * GIB, cores: 16 } });
-    w.enqueue("code-reviewer");
-    w.enqueue("code-reviewer");
+    w.enqueue("security-reviewer");
+    w.enqueue("security-reviewer");
     const loop = w.run();
     await until(() => w.inHand() === 2);
     await w.clock.advance(120_000);
     // The person starts heavy work: 3 GB left, below the 4 GB reserve.
     w.reading.availMemBytes = 3 * GIB;
-    w.enqueue("code-reviewer");
+    w.enqueue("security-reviewer");
     await w.clock.advance(61_000);
     expect(w.handled).toHaveLength(2);
     expect(w.queue).toHaveLength(1);
@@ -199,7 +199,7 @@ describe("resource-aware admission in the loop (fake probe)", () => {
 describe("the progress floor in the loop", () => {
   it("tight memory with nothing in hand: exactly one light run is claimed, then no more until it ends", async () => {
     const w = world({ reading: { totalMemBytes: 16 * GIB, availMemBytes: 1 * GIB, cores: 16 } });
-    for (let i = 0; i < 3; i++) w.enqueue("code-reviewer");
+    for (let i = 0; i < 3; i++) w.enqueue("security-reviewer");
     w.enqueue("executor");
     const loop = w.run();
     await until(() => w.inHand() === 1);
@@ -211,7 +211,7 @@ describe("the progress floor in the loop", () => {
     // The job ends: nothing in hand again, so the floor lets the next light run in (the heavy one is not offered).
     w.jobs[0]!.finish();
     await until(() => w.handled.length === 2);
-    expect(w.jobs[1]!.role).toBe("code-reviewer");
+    expect(w.jobs[1]!.role).toBe("security-reviewer");
     w.controller.abort();
     w.jobs.forEach((j) => j.finish());
     await loop;
@@ -221,8 +221,8 @@ describe("the progress floor in the loop", () => {
 describe("the loop around the jobs", () => {
   it("one job failing costs a backoff and leaves the others running", async () => {
     const w = world();
-    w.enqueue("code-reviewer");
-    w.enqueue("code-reviewer");
+    w.enqueue("security-reviewer");
+    w.enqueue("security-reviewer");
     const loop = w.run();
     await until(() => w.inHand() === 2);
     w.jobs[0]!.fail();
@@ -237,7 +237,7 @@ describe("the loop around the jobs", () => {
 
   it("a stop signal returns only after every run in hand has ended", async () => {
     const w = world();
-    for (let i = 0; i < 3; i++) w.enqueue("code-reviewer");
+    for (let i = 0; i < 3; i++) w.enqueue("security-reviewer");
     const loop = w.run();
     await until(() => w.inHand() === 3);
     let returned = false;
@@ -256,8 +256,8 @@ describe("the loop around the jobs", () => {
   it("self-update's step runs only when no run is in hand: not while any one is, and again when the last ends", async () => {
     const w = world();
     let steps = 0;
-    w.enqueue("code-reviewer");
-    w.enqueue("code-reviewer");
+    w.enqueue("security-reviewer");
+    w.enqueue("security-reviewer");
     const loop = w.run({ betweenJobs: async () => (steps++, undefined) });
     await until(() => w.inHand() === 2);
     const atStart = steps;
@@ -301,7 +301,7 @@ describe("waits the cloud asked for (review round 1)", () => {
         return next;
       },
     };
-    const signed = signedJob({ role: "code-reviewer" as never });
+    const signed = signedJob({ role: "security-reviewer" as never });
     const job: ClaimResult = { kind: "claimed", signedJob: signed, runId: signed.job.run_id, leaseGeneration: 1 };
     return { clock, claimAt, release, jobDone, job, admission: withAdmission ? admission : undefined, client, controller };
   }

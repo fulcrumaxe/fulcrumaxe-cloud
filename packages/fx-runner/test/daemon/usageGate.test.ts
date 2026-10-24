@@ -112,7 +112,7 @@ describe("admission under the usage gate", () => {
     let state = { blocked: false, single: false };
     const admission = admissionWith(() => state);
     expect(admission.snapshot().free.light).toBeGreaterThan(0);
-    const end = admission.begin(claimedAs("code-reviewer"));
+    const end = admission.begin(claimedAs("security-reviewer"));
     state = { blocked: true, single: false };
     const snap = admission.snapshot();
     expect(snap.free).toEqual({ light: 0, heavy: 0 });
@@ -180,7 +180,7 @@ describe("the claim loop under a usage limit", () => {
 
   it("after one job reports the limit, nothing more is claimed until reset_at; the other job carries on; claiming resumes after", async () => {
     const w = world("subscription");
-    w.enqueue("code-reviewer");
+    w.enqueue("security-reviewer");
     w.enqueue("security-reviewer");
     await until(() => w.taken.length === 2);
     // The first job hits the limit: the daemon's event tap tells the gate. The reset is ten minutes away.
@@ -200,7 +200,7 @@ describe("the claim loop under a usage limit", () => {
 
   it("an api_key runner is not paused by the same report", async () => {
     const w = world("api_key");
-    w.enqueue("code-reviewer");
+    w.enqueue("security-reviewer");
     await until(() => w.taken.length === 1);
     w.gate.observe(limitEvent(T0 + 600_000));
     w.enqueue("debater");
@@ -214,8 +214,8 @@ describe("the claim loop under a usage limit", () => {
   it("near the limit the runner claims only with no job in hand, until the reported reset", async () => {
     const w = world("subscription");
     w.gate.warn({ resetsAtMs: T0 + 600_000 });
-    w.enqueue("code-reviewer");
-    w.enqueue("code-reviewer");
+    w.enqueue("security-reviewer");
+    w.enqueue("security-reviewer");
     await until(() => w.taken.length === 1);
     await w.clock.advance(120_000, 5000);
     expect(w.taken).toHaveLength(1);

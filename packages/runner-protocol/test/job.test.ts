@@ -5,7 +5,7 @@ import { CONTEXT_SPILL_CODES, CONTEXT_SPILL_MAX_TOTAL_BYTES } from "../src/conte
 import { MAX_EXCLUDE_RULES } from "../src/excludeRules.js";
 import { MAX_JOB_PINS } from "../src/pinRules.js";
 import { MAX_JOB_MEMORY_BYTES, SESSION_ID_PATTERN } from "../src/job.js";
-import { ITEM_PR_BRANCH, JOB_CLASS_BY_ROLE, JOB_MODES, REVIEW_JOB_ROLES, jobClassOfRole, JobSchema, MAX_ROLE_CARD_CHARS, RUNNER_ELIGIBLE_ROLES, SignedJobSchema, TASK_KINDS, jobDigestMismatches, sha256Text } from "../src/job.js";
+import { ITEM_PR_BRANCH, JOB_CLASS_BY_ROLE, JOB_MODES, LIGHT_JOB_ROLES, REVIEW_JOB_ROLES, jobClassOfRole, JobSchema, MAX_ROLE_CARD_CHARS, RUNNER_ELIGIBLE_ROLES, SignedJobSchema, TASK_KINDS, jobDigestMismatches, sha256Text } from "../src/job.js";
 import { sampleJob } from "./helpers/sampleJob.js";
 
 /** `continues` is an object with a refinement (D#599 PL-2b), so its keys sit one wrapper down. */
@@ -240,10 +240,13 @@ describe("job.review (D#6 R4d-4a, C33)", () => {
     expect(Object.keys(JOB_CLASS_BY_ROLE).sort()).toEqual([...RUNNER_ELIGIBLE_ROLES].sort());
   });
 
-  it("C43-2a: executor and acceptance-tester are heavy, the other twelve (the claim verifier included) are light, an unknown role is heavy", () => {
+  it("C43-2a: executor, acceptance-tester and code-reviewer are heavy, the other eleven (the claim verifier included) are light, an unknown role is heavy", () => {
     const heavy = RUNNER_ELIGIBLE_ROLES.filter((r) => jobClassOfRole(r) === "heavy");
-    expect([...heavy].sort()).toEqual(["acceptance-tester", "executor"]);
-    expect(RUNNER_ELIGIBLE_ROLES.filter((r) => jobClassOfRole(r) === "light")).toHaveLength(12);
+    expect([...heavy].sort()).toEqual(["acceptance-tester", "code-reviewer", "executor"]);
+    expect(RUNNER_ELIGIBLE_ROLES.filter((r) => jobClassOfRole(r) === "light")).toHaveLength(11);
+    // Live OOM 10-24: a code-reviewer run (it runs the affected test suites) was killed at the 2 GB light budget. It must stay heavy.
+    expect(jobClassOfRole("code-reviewer")).toBe("heavy");
+    expect(LIGHT_JOB_ROLES).not.toContain("code-reviewer");
     expect(jobClassOfRole("proposal-verifier")).toBe("light");
     for (const role of ["", "made-up", "toString", "__proto__", "constructor"]) expect(jobClassOfRole(role), role).toBe("heavy");
   });

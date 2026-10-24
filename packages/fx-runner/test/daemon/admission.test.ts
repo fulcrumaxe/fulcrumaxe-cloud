@@ -85,7 +85,7 @@ describe("admission by headroom (fake resource probe)", () => {
 
   it("a reserve breach mid-run stops new slots and touches no job in hand", () => {
     const r = rig();
-    const ends = [r.admission.begin(claimed("code-reviewer")), r.admission.begin(claimed("code-reviewer"))];
+    const ends = [r.admission.begin(claimed("security-reviewer")), r.admission.begin(claimed("security-reviewer"))];
     expect(r.admission.snapshot().free.light).toBeGreaterThan(0);
     r.clock.ms += 120_000;
     // The person starts heavy work: available memory falls below the reserve.
@@ -111,7 +111,7 @@ describe("admission by headroom (fake resource probe)", () => {
 
   it("CPU: a busy machine takes no job, and the cores of jobs still starting count", () => {
     const busy = rig({ load1: 13 });
-    busy.admission.begin(claimed("code-reviewer"));
+    busy.admission.begin(claimed("security-reviewer"));
     expect(busy.admission.snapshot()).toMatchObject({ free: { light: 0, heavy: 0 }, limitedBy: "cpu" });
     // 16 cores x 0.8 = 12.8; load 10.5 leaves 2.3 cores: one heavy job (2 cores), then none.
     const r = rig({ load1: 10.5 });
@@ -139,14 +139,14 @@ describe("admission by headroom (fake resource probe)", () => {
     r.admission.begin(claimed("executor"));
     // Heavy is at its ceiling but a light job still fits: nothing is "limited" yet.
     expect(r.admission.snapshot()).toMatchObject({ free: { light: 1, heavy: 0 }, limitedBy: null });
-    r.admission.begin(claimed("code-reviewer"));
+    r.admission.begin(claimed("security-reviewer"));
     expect(r.admission.snapshot()).toMatchObject({ free: { light: 0, heavy: 0 }, limitedBy: "ceiling" });
   });
 
   it("a ceiling lowered below what is in hand stops new slots and ends nothing", () => {
     const r = rig();
-    r.admission.begin(claimed("code-reviewer"));
-    r.admission.begin(claimed("code-reviewer"));
+    r.admission.begin(claimed("security-reviewer"));
+    r.admission.begin(claimed("security-reviewer"));
     r.settings = { ...DEFAULT_SETTINGS, ceilingTotal: 1, ceilingHeavy: 1 };
     const snap = r.admission.snapshot();
     expect(snap.free).toEqual({ light: 0, heavy: 0 });
@@ -155,7 +155,9 @@ describe("admission by headroom (fake resource probe)", () => {
 
   it("the class comes from the signed role; a role the table lacks is heavy", () => {
     const r = rig();
-    expect(r.admission.classOf(claimed("code-reviewer"))).toBe("light");
+    expect(r.admission.classOf(claimed("security-reviewer"))).toBe("light");
+    // Live OOM 10-24: the code reviewer runs test suites and was killed at the 2 GB light budget, so it takes the heavy slot.
+    expect(r.admission.classOf(claimed("code-reviewer"))).toBe("heavy");
     expect(r.admission.classOf(claimed("acceptance-tester"))).toBe("heavy");
     // A role the protocol does not know cannot be signed, so it is built by hand: only the class table is under test.
     expect(r.admission.classOf({ signedJob: { job: { role: "some-new-role" } } } as unknown as Claimed)).toBe("heavy");
@@ -172,7 +174,7 @@ describe("the progress floor", () => {
 
   it("tight memory and one job in hand: no slot, and memory is the reason", () => {
     const r = rig({ availMemBytes: 1 * GIB });
-    r.admission.begin(claimed("code-reviewer"));
+    r.admission.begin(claimed("security-reviewer"));
     expect(r.admission.snapshot()).toMatchObject({ free: { light: 0, heavy: 0 }, limitedBy: "memory" });
   });
 
@@ -206,7 +208,7 @@ describe("footprint learning", () => {
     expect(seen.at(-1)!).toBeLessThanOrEqual(5 * GIB);
     // Per repo and role: another repo and another role are untouched.
     expect(store.estimate("acme/other", "executor")).toEqual(DEFAULT_FOOTPRINT.heavy);
-    expect(store.estimate("acme/widgets", "code-reviewer")).toEqual(DEFAULT_FOOTPRINT.light);
+    expect(store.estimate("acme/widgets", "security-reviewer")).toEqual(DEFAULT_FOOTPRINT.light);
   });
 
   it("the estimate follows the p90, not the mean or the maximum", () => {

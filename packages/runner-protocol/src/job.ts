@@ -75,7 +75,7 @@ export const RUNNER_CAPABILITY_FOR_ROLE: Readonly<Partial<Record<(typeof RUNNER_
 
 /**
  * D#6 C43-2a: the slot class of a job. The class comes from the job's signed role, so no new signed field exists. The runner and
- * the cloud both read this one table. Heavy jobs build and run full test suites; every other runner-eligible role is light.
+ * the cloud both read this one table. Heavy jobs build and run test suites (the executor, the acceptance tester and the code reviewer); every other runner-eligible role is light.
  */
 export const JOB_CLASSES = ["light", "heavy"] as const;
 export type JobClass = (typeof JOB_CLASSES)[number];
@@ -90,7 +90,9 @@ export const JOB_CLASS_BY_ROLE: Readonly<Record<(typeof RUNNER_ELIGIBLE_ROLES)[n
   "security-expert": "light",
   "docs-writer": "light",
   "accessibility-reviewer": "light",
-  "code-reviewer": "light",
+  // Heavy: the code reviewer runs the changed packages' test suites (its role card makes that mandatory), like the acceptance tester.
+  // Live OOM 10-24: a code-reviewer run under the 2 GB light budget was killed at ~2 GB peak. The security reviewer only reads (635 MB peak), so it stays light.
+  "code-reviewer": "heavy",
   "security-reviewer": "light",
   debater: "light",
   [PROPOSAL_VERIFIER_ROLE]: "light",
