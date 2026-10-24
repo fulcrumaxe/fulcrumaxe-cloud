@@ -68,7 +68,7 @@ describe("advance: a round that carries on from a pull request the other side op
     return { id, status: "running" };
   }
 
-  function module(opts: { starterThrows?: unknown; leavePending?: boolean } = {}) {
+  function module(opts: { starterThrows?: unknown; leavePending?: boolean; fixHeads?: AdvanceModuleDeps["fixHeads"] } = {}) {
     const started: StartAgentRunInput[] = [];
     const resumed: StartAgentRunInput[] = [];
     // The fakes record the mode the real start would resolve for the item: its placement, else the repo's.
@@ -89,7 +89,7 @@ describe("advance: a round that carries on from a pull request the other side op
       registry,
       build: startBuildForItem,
       // FIXROUND-REFRESH-HEAD: the pull request's branch on GitHub is at the head each round is asked for (fixRoundHeads.pg.test.ts covers a moved one).
-      fixHeads: { privateHead: async () => HEAD, syncBase: async () => ({ kind: "up_to_date", baseSha: "c".repeat(40) }) },
+      fixHeads: opts.fixHeads ?? { privateHead: async () => HEAD, syncBase: async () => ({ kind: "up_to_date", baseSha: "c".repeat(40), baseRef: "main", stacked: false }) },
       review: {
         load: vi.fn(),
         recordRound: vi.fn(),
@@ -239,6 +239,21 @@ describe("advance: a round that carries on from a pull request the other side op
         await place(t, "runner");
         expect((await m.module.advanceStartFix(t.who, fixPr(t, { number: 41, branch: build.branch }))).ok).toBe(true);
         expect(m.started[0]!.continues).toEqual({ branch: build.branch });
+      });
+
+      it("carries the base the sync read when the item has an open public copy (FIXROUND-REPUBLISH R2-c0); a plain item keeps its continuation as it was", async () => {
+        const t = await setup("runner_local");
+        const m = module({ leavePending: true, fixHeads: { privateHead: async () => HEAD, publicHead: async () => "d".repeat(40), syncBase: async () => ({ kind: "up_to_date", baseSha: "c".repeat(40), baseRef: "main", stacked: false }) } });
+        const build = await runnerBuildWithPr(t);
+        await builtRun(t, "sandbox");
+        await place(t, "runner");
+        await admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, 'acme/widgets-public', $3)", [t.a.repoId, t.a.accountId, ["private/**"]]);
+        await admin.query(
+          `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state) VALUES ($1, $2, $3, 'acme/widgets-public', $4, $5, $6, 7, 'https://github.com/acme/widgets-public/pull/7', 'pr_opened')`,
+          [t.a.accountId, t.w, t.a.repoId, "f".repeat(64), "d".repeat(40), "e".repeat(40)],
+        );
+        expect((await m.module.advanceStartFix(t.who, fixPr(t, { number: 41, branch: build.branch }))).ok).toBe(true);
+        expect(m.started[0]!.continues).toEqual({ branch: build.branch, baseSha: "c".repeat(40) });
       });
 
       it("is refused pr_unbound, with nothing started, when the number or the branch is not the recorded one, or nothing was recorded", async () => {

@@ -272,6 +272,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   // Fix round base sync (FIXROUND-BASE-SYNC)
   "base_sync_conflict",
   "base_sync_unavailable",
+  "republish_base_missing",
+  "republish_stacked_unsupported",
   "base_synced",
   "pull_request_unreadable",
   "base_unreadable",

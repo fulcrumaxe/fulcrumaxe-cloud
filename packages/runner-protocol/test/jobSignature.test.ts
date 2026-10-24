@@ -355,4 +355,12 @@ describe("continues.base_sha and the signature (FIXROUND-BASE-SYNC R2-b)", () =>
     expect(canonicalJson(signJob(without, privateKey).job)).not.toContain("base_sha");
     expect(canonicalJson(signJob(withBase, privateKey).job)).toContain(`"base_sha":"${base}"`);
   });
+
+  it("on a run-branch continuation (R2-c0) it is signed the same way: verifies as issued, and any change or removal is a bad signature", () => {
+    const run = { parent_run_id: parent, session_id: "s-1", branch: "fx/0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5f-g1" };
+    const signed = signJob(sampleJob({ continues: { ...run, base_sha: base } }) as Job, privateKey);
+    expect(verifyJob(signed, keyring, { now: NOW }).continues).toEqual({ ...run, base_sha: base });
+    expect(codeOf(() => verifyJob(reContinues(signed, { ...run, base_sha: "b".repeat(40) }), keyring, { now: NOW }))).toBe("bad_signature");
+    expect(codeOf(() => verifyJob(reContinues(signed, run), keyring, { now: NOW }))).toBe("bad_signature");
+  });
 });

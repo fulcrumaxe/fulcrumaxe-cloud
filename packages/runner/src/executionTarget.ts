@@ -277,6 +277,11 @@ export interface ExecutionRun {
    */
   continuesBaseSha?: string;
   /**
+   * FIXROUND-REPUBLISH (R2-c0): the branch `continuesBaseSha` was brought up to date on. The issuer signs the base only when the branch it resolves for the continuation is this very one, so a base the
+   * cloud chose for one branch can never ride a job that continues another. Always set with `continuesBaseSha`.
+   */
+  continuesBaseBranch?: string;
+  /**
    * D#599 PL-2b-2: set on a run that starts a round on a branch another side opened (not a follow-up): `RunnerTarget.dispatch` then issues a continuation
    * with no session (a foreign session is never claimed). A follow-up of a lost round sets `continuesBranch` alone and goes through `resume`.
    */

@@ -83,7 +83,7 @@ describe("advance: fix rounds and reviewer runs under a spending limit [pg]", { 
       mergeGate: vi.fn(async () => ({ outcome: "merged", headSha: HEAD, reasons: [], status: "posted" })),
     };
     const starter: RunStarter = { async start() { return { runId: randomUUID() }; } };
-    const deps: AdvanceModuleDeps = { starter, resolveRunSeat: vi.fn(async () => SEAT), startAdvance: async () => undefined, triage: null, registry, review, fixHeads: { privateHead: async () => HEAD, syncBase: async () => ({ kind: "up_to_date", baseSha: "f".repeat(40) }) } };
+    const deps: AdvanceModuleDeps = { starter, resolveRunSeat: vi.fn(async () => SEAT), startAdvance: async () => undefined, triage: null, registry, review, fixHeads: { privateHead: async () => HEAD, syncBase: async () => ({ kind: "up_to_date", baseSha: "f".repeat(40), baseRef: "main", stacked: false }) } };
     return createAdvanceModule(writerPool, deps);
   }
 

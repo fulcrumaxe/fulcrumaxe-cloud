@@ -29,3 +29,15 @@ describe("buildExecutionRun: contextSections", () => {
     expect(buildExecutionRun("run-1", INPUT).contextSections).toBeUndefined();
   });
 });
+
+describe("buildExecutionRun: the diff base of a fix round (FIXROUND-REPUBLISH R2-c0)", () => {
+  const B = "b".repeat(40);
+  it("a fresh continuation's base belongs to the branch it continues; a same-side resume names its own branch; a start with neither carries none", () => {
+    const fresh = buildExecutionRun("run-1", { ...INPUT, continues: { branch: "fx/issue-12", prNumber: 7, baseSha: B } });
+    expect([fresh.continuesBaseSha, fresh.continuesBaseBranch]).toEqual([B, "fx/issue-12"]);
+    const resumed = buildExecutionRun("run-1", { ...INPUT, base: { sha: B, branch: "fx/run-branch" } });
+    expect([resumed.continuesBaseSha, resumed.continuesBaseBranch, resumed.continuesBranch]).toEqual([B, "fx/run-branch", undefined]);
+    const none = buildExecutionRun("run-1", { ...INPUT, continues: { branch: "fx/issue-12", prNumber: 7 } });
+    expect([none.continuesBaseSha, none.continuesBaseBranch]).toEqual([undefined, undefined]);
+  });
+});

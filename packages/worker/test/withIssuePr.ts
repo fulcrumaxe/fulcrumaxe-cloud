@@ -6,7 +6,7 @@ import type { FixRoundHeadPorts } from "../src/fixRoundHeads.js";
  * and its branch is synced with its base first. Tests that start such rounds without caring about the sync wrap their module with this: it adds that pull
  * request (the item's own issue branch) to a sandbox-mode round that has none, and `upToDateHeads` is the GitHub port that finds nothing to merge.
  */
-export const upToDateHeads = (head: string): FixRoundHeadPorts => ({ privateHead: async () => head, syncBase: async () => ({ kind: "up_to_date", baseSha: "f".repeat(40) }) });
+export const upToDateHeads = (head: string): FixRoundHeadPorts => ({ privateHead: async () => head, syncBase: async () => ({ kind: "up_to_date", baseSha: "f".repeat(40), baseRef: "main", stacked: false }) });
 
 type Who = { accountId: string; workItemId: string };
 type Req = { pr?: { number: number; branch: string } };

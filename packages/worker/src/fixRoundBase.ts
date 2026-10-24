@@ -6,7 +6,8 @@ import { recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
-import { BASE_SYNCED, BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE } from "@fx/core/src/work-items/baseSync.js";
+import { BASE_SYNCED, BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, REPUBLISH_BASE_MISSING, REPUBLISH_STACKED_UNSUPPORTED } from "@fx/core/src/work-items/baseSync.js";
+import { readPlanePush } from "@fx/core/src/repos/planePushRecord.js";
 import { checkPublicBranch, type FixRoundHeadPorts } from "./fixRoundHeads.js";
 
 /**
@@ -62,7 +63,7 @@ export async function syncRunBranch(
   pool: Pool,
   ports: FixRoundHeadPorts | null | undefined,
   who: Who,
-  input: { repo: Repo; pr: { number: number; branch: string }; liveHead: string | null; moveToNeedsPerson: boolean; attempt: string },
+  input: { repo: Repo; pr: { number: number; branch: string }; liveHead: string | null; moveToNeedsPerson: boolean; attempt: string; publicCopy?: boolean },
 ): Promise<BaseSyncResult> {
   const unavailable = async (liveHead: string | null): Promise<BaseSyncResult> => {
     await recordBaseSyncUnavailable(pool, who, input.attempt, liveHead, input.pr.number);
@@ -76,7 +77,7 @@ export async function syncRunBranch(
     // The check round has not read the branch yet; the merge's first parent is compared with this.
     live ??= privateHead ? await privateHead({ repo: input.repo, branch: input.pr.branch }) : null;
     if (live === null || !SHA.test(live)) throw new Error("no head");
-    outcome = await syncBase({ repo: input.repo, branch: input.pr.branch, prNumber: input.pr.number });
+    outcome = await syncBase({ repo: input.repo, branch: input.pr.branch, prNumber: input.pr.number, ...(input.publicCopy === true ? { publicCopy: true } : {}) });
   } catch {
     // fx-swallow-ok: the cause can carry a repository name or a token; only the fixed code survives
     console.warn(JSON.stringify({ event: "advance.base_sync_unavailable", work_item_id: who.workItemId }));
@@ -85,6 +86,7 @@ export async function syncRunBranch(
   if (live === null) return unavailable(null);
   const head: string = live;
   const o = outcome;
+  if (o.kind === "stacked") return { ok: false, reason: await refuseRepublish(pool, who, { code: REPUBLISH_STACKED_UNSUPPORTED, prNumber: input.pr.number, moveToNeedsPerson: input.moveToNeedsPerson, attempt: input.attempt }) };
   if (o.kind === "up_to_date") return SHA.test(o.baseSha) ? { ok: true, synced: false, baseSha: o.baseSha } : unavailable(live);
   if (o.kind === "conflict") {
     await withTenant(pool, who.accountId, async (client) => {
@@ -109,20 +111,63 @@ export async function syncRunBranch(
 }
 
 /**
- * A check fix round's `beforeStart`: the public branch check (#439), then, for a round that continues the item's own pull request branch, the base sync. A round
- * with no pull request (the first build's run branch, cut moments ago) has no base to catch up with. The conflict is left for the build's own failure record
+ * FIXROUND-REPUBLISH (R2-c0): whether the round must end by republishing the item's public pull request: the platform pushed a public branch for the item and a person has not taken it over (the same test
+ * `checkPublicBranch` makes). Read BEFORE the base sync, so that the sync can refuse a stacked change without merging.
+ */
+export async function hasPublicCopy(pool: Pool, who: Who): Promise<boolean> {
+  const row = await withTenant(pool, who.accountId, (client) => readPlanePush(client, who.accountId, who.workItemId));
+  return row !== null && row.headSha !== null && row.managedByPersonAt === null;
+}
+
+/**
+ * A round that must republish and cannot is refused before anything starts: `republish_base_missing` when no base was signed (no pull request to sync, or none this round continues; the checkout is never asked), and
+ * `republish_stacked_unsupported` for a change stacked on another pull request (its base is a branch, not public `main`). A refusal is recorded as `escalated`, and a review round also moves the item to Needs a
+ * person (a check round leaves that to the build's own failure record, the same word reaches it).
+ */
+export async function refuseRepublish(pool: Pool, who: Who, input: { code: string; prNumber: number | null; moveToNeedsPerson: boolean; attempt: string }): Promise<string> {
+  const { code } = input;
+  await withTenant(pool, who.accountId, async (client) => {
+    await recordDriverEvent(client, who.accountId, { workItemId: who.workItemId, kind: "escalated", dedupeKey: `${code}:${attemptWord(input.attempt)}`, code, ...(input.prNumber !== null ? { prNumber: input.prNumber } : {}) });
+    if (!input.moveToNeedsPerson) return;
+    try {
+      const moved = await recordStage(client, { workItemId: who.workItemId, toStage: "needs_human", at: new Date(), source: "control_plane", sourceRef: `${code}-${attemptWord(input.attempt)}` });
+      if (moved.recorded) await emitDomainEvent(client, { type: "work_item.needs_human", accountId: who.accountId, subjectId: who.workItemId, payload: { workItemId: who.workItemId, reason: code } });
+    } catch (err) {
+      // A halted item, or one that already left the review stages, stays where it is; the fact above is the record.
+      if (!(err instanceof WorkItemHaltedError) && !(err instanceof IllegalStageTransitionError)) throw err;
+    }
+  });
+  console.info(JSON.stringify({ event: "advance.republish_refused", work_item_id: who.workItemId, code }));
+  return code;
+}
+
+/** After the sync: a round that must republish with no signed base is refused `republish_base_missing`; null when it may go on. */
+export async function republishGate(pool: Pool, who: Who, input: { publicCopy: boolean; baseSha: string | null; prNumber: number | null; moveToNeedsPerson: boolean; attempt: string }): Promise<string | null> {
+  if (!input.publicCopy || input.baseSha !== null) return null;
+  return refuseRepublish(pool, who, { code: REPUBLISH_BASE_MISSING, prNumber: input.prNumber, moveToNeedsPerson: input.moveToNeedsPerson, attempt: input.attempt });
+}
+
+/**
+ * A check fix round's `beforeStart`: the public branch check (#439), then, for a round that continues a pull request's branch (the item's own branch, or the run branch the runner opened its pull request on), the base sync,
+ * then the republish gate. A round with no pull request (the first build's run branch, cut moments ago) has no base to catch up with. The conflict is left for the build's own failure record
  * to move the item (`moveToNeedsPerson: false`): the same word reaches it.
  */
 export function checkFixBeforeStart(pool: Pool, ports: FixRoundHeadPorts | null | undefined, who: Who) {
-  const state: { synced: boolean; baseSha: string | null } = { synced: false, baseSha: null };
-  const beforeStart = async (branch: { repo: Repo; pr: { number: number; branch: string }; attempt: string } | null): Promise<string | null> => {
+  const state: { synced: boolean; baseSha: string | null; needed: boolean } = { synced: false, baseSha: null, needed: false };
+  const beforeStart = async (branch: { repo: Repo; pr: { number: number; branch: string } } | null, attempt: string): Promise<string | null> => {
     const publicRefusal = await checkPublicBranch(pool, ports, who);
-    if (publicRefusal !== null || branch === null) return publicRefusal;
-    const sync = await syncRunBranch(pool, ports, who, { ...branch, liveHead: null, moveToNeedsPerson: false });
-    if (sync.ok) Object.assign(state, { synced: sync.synced, baseSha: sync.baseSha });
-    return sync.ok ? null : sync.reason;
+    if (publicRefusal !== null) return publicRefusal;
+    // Asked before the sync, which refuses a stacked change without merging when a public copy has to be republished.
+    const publicCopy = await hasPublicCopy(pool, who);
+    state.needed = publicCopy;
+    if (branch !== null) {
+      const sync = await syncRunBranch(pool, ports, who, { ...branch, liveHead: null, moveToNeedsPerson: false, attempt, publicCopy });
+      if (!sync.ok) return sync.reason;
+      Object.assign(state, { synced: sync.synced, baseSha: sync.baseSha });
+    }
+    return republishGate(pool, who, { publicCopy, baseSha: state.baseSha, prNumber: branch?.pr.number ?? null, moveToNeedsPerson: false, attempt });
   };
-  /** `state.synced`: a merge was made by this call, so the run it leads to carries the sync's progress line. `state.baseSha`: the base tip the round is signed with. */
+  /** `state.synced`: a merge was made by this call, so the run it leads to carries the sync's progress line. `state.baseSha`: the base tip the round is signed with. `state.needed`: the round republishes the public pull request. */
   return Object.assign(beforeStart, { state });
 }
 

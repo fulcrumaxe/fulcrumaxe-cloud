@@ -26,7 +26,7 @@ import type { RunStarter } from "./preview.js";
 import { readVerifiedReviewGate, type VerifiedReviewGate } from "./verifiedReviewGate.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 import { startCheckFixRound } from "./checkFix.js";
-import { BASE_SYNCED_PROMPT_LINE, BASE_SYNCED_STAGE, checkFixBeforeStart, recordBaseSyncUnavailable, syncRunBranch } from "./fixRoundBase.js";
+import { BASE_SYNCED_PROMPT_LINE, BASE_SYNCED_STAGE, checkFixBeforeStart, hasPublicCopy, recordBaseSyncUnavailable, republishGate, syncRunBranch } from "./fixRoundBase.js";
 import { BRANCH_MOVED_STAGE, checkPrivateHead, checkPublicBranch, type FixRoundHeadPorts } from "./fixRoundHeads.js";
 import { RunActionInputError, type PerformResult } from "./runActions.js";
 
@@ -1527,9 +1527,13 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     let headMoved = false;
     let baseSynced = false;
     let baseTip: string | null = null;
+    let syncedBranch: string | null = null;
+    let republishes = false;
     {
       // FIXROUND-BASE-SYNC-SANDBOX: the sync is the cloud's, so a sandbox round gets the same head check and sync (its prompt starts from the fetched branch tip).
       const runnerSide = isRunnerMode(effective);
+      // FIXROUND-REPUBLISH (R2-c0), runner rounds: asked before the sync, which refuses a stacked change with a public copy without merging. (A sandbox round's republish is a later step.)
+      const publicCopy = runnerSide && (await hasPublicCopy(runnerPool, who));
       const repoId = state.repoId;
       const found = await withTenant(runnerPool, who.accountId, async (client) => {
         const r = await client.query<{ gh_owner: string | null; gh_name: string | null; gh_number: string | null }>(
@@ -1554,17 +1558,22 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         if (!head.ok) return refuse(head.reason);
         headMoved = head.moved;
         // FIXROUND-BASE-SYNC: bring the branch up to date with its base before anything starts; a conflict goes to a person, any other failure refuses the round.
-        const sync = await syncRunBranch(runnerPool, deps.fixHeads, who, { repo: { id: repoId, owner: found.coords.gh_owner, name: found.coords.gh_name }, pr, liveHead: head.head, moveToNeedsPerson: true, attempt: attemptKey });
+        const sync = await syncRunBranch(runnerPool, deps.fixHeads, who, { repo: { id: repoId, owner: found.coords.gh_owner, name: found.coords.gh_name }, pr, liveHead: head.head, moveToNeedsPerson: true, attempt: attemptKey, publicCopy });
         if (!sync.ok) return refuse(sync.reason);
         baseSynced = sync.synced;
-        // Only a round that continues the very branch that was synced is signed with that base.
-        if (req.pr !== undefined && req.pr.branch === pr.branch) baseTip = sync.baseSha;
+        // The base is signed only for the branch that was synced: the issuer compares it with the branch it resolves for the job.
+        baseTip = sync.baseSha;
+        syncedBranch = pr.branch;
       } else if (!runnerSide && !(req.pr !== undefined && (await withTenant(runnerPool, who.accountId, async (client) => (await client.query<{ execution_mode: string | null }>("SELECT execution_mode FROM agent_runs WHERE id = $1 AND account_id = $2", [parent, who.accountId])).rows[0]?.execution_mode ?? null).then((m) => sideOfMode(m) !== sideOfMode(effective))))) {
         // A sandbox round always has a pull request (the review step found it on GitHub): without one it is refused, never started on a stale base.
         // A cross-side round with a pair that is not the item's is left to the binding check below, which refuses it `pr_unbound`.
         await recordBaseSyncUnavailable(runnerPool, who, attemptKey, null, null, true);
         return refuse("base_sync_unavailable");
       }
+      // An item whose public pull request is open is republished at the end of a runner round, so the round needs a signed base.
+      const gate = await republishGate(runnerPool, who, { publicCopy, baseSha: baseTip, prNumber: pr?.number ?? null, moveToNeedsPerson: true, attempt: attemptKey });
+      if (gate !== null) return refuse(gate);
+      republishes = publicCopy && baseTip !== null && syncedBranch !== null;
     }
 
     // The board says "Changes requested" the moment a fix round starts, whatever an earlier record said (a pass recorded
@@ -1647,7 +1656,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
               }));
               const matches = (p: { number: number; branch: string } | null) => p !== null && p.number === bound.number && p.branch === bound.branch;
               if (!matches(known.recorded) && !matches(known.bound)) return refuse("pr_unbound");
-              continues = { branch: bound.branch };
+              continues = { branch: bound.branch, ...(republishes && syncedBranch === bound.branch ? { baseSha: baseTip! } : {}) };
             }
             else return refuse("pr_branch_unsupported");
           } else {
@@ -1699,6 +1708,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
             pr: req.issue,
             parentRunId: parent,
             prompt,
+            ...(republishes ? { base: { sha: baseTip!, branch: syncedBranch! } } : {}),
             ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
             ...(sections ? { contextSections: sections } : {}),
             ...(assemblyOf(req.contextAssembly) ? { contextAssembly: assemblyOf(req.contextAssembly) } : {}),

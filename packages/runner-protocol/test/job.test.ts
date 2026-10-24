@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { BASE_SHA_JOB_MIN_PROTOCOL, CONTINUES_CROSS_SIDE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, EXCLUDES_JOB_MIN_PROTOCOL, HANDOFF_MIN_PROTOCOL_VERSION, MEMORY_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, CHECK_JOB_MIN_PROTOCOL, SPILL_JOB_MIN_PROTOCOL, CONTEXT_WINDOW_JOB_MIN_PROTOCOL } from "../src/messages.js";
+import { BASE_SHA_JOB_MIN_PROTOCOL, BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL, CONTINUES_CROSS_SIDE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, EXCLUDES_JOB_MIN_PROTOCOL, HANDOFF_MIN_PROTOCOL_VERSION, MEMORY_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, CHECK_JOB_MIN_PROTOCOL, SPILL_JOB_MIN_PROTOCOL, CONTEXT_WINDOW_JOB_MIN_PROTOCOL } from "../src/messages.js";
 import { CONTEXT_SPILL_CODES, CONTEXT_SPILL_MAX_TOTAL_BYTES } from "../src/contextSpill.js";
 import { MAX_EXCLUDE_RULES } from "../src/excludeRules.js";
 import { MAX_JOB_PINS } from "../src/pinRules.js";
@@ -161,7 +161,8 @@ describe("job schema", () => {
       ["the largest number", { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: 2 ** 31 - 1 }, true],
       ["a null number", { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: null }, false],
       ["a base sha on the item branch with its number", { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: 7, base_sha: "a".repeat(40) }, true],
-      ["a base sha on a run branch", { parent_run_id: parent, session_id: "s-1", branch: RUN_BRANCH, base_sha: "a".repeat(40) }, false],
+      ["a base sha on a run branch with a session", { parent_run_id: parent, session_id: "s-1", branch: RUN_BRANCH, base_sha: "a".repeat(40) }, true],
+      ["a base sha on a run branch with no session", { parent_run_id: parent, session_id: null, branch: RUN_BRANCH, base_sha: "a".repeat(40) }, true],
       ["a base sha with no number", { parent_run_id: parent, session_id: null, branch: "fx/issue-12", base_sha: "a".repeat(40) }, false],
       ["a short base sha", { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: 7, base_sha: "a".repeat(39) }, false],
       ["an upper-case base sha", { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: 7, base_sha: "A".repeat(40) }, false],
@@ -198,6 +199,16 @@ describe("job schema", () => {
       expect(previousJob.safeParse(sampleJob({ continues: { ...item, base_sha: "a".repeat(40) } })).success).toBe(false);
       expect(BASE_SHA_JOB_MIN_PROTOCOL).toBe(PINS_JOB_MIN_PROTOCOL + 1);
       expect(CURRENT_PROTOCOL_VERSION).toBeGreaterThanOrEqual(BASE_SHA_JOB_MIN_PROTOCOL);
+    });
+
+    it("is refused on a run branch by the parse of a runner of the previous version, and its floor is one above the item-branch floor", () => {
+      const run = { parent_run_id: parent, session_id: "s-1", branch: RUN_BRANCH, base_sha: "a".repeat(40) };
+      // A pinned copy of the previous version's rule: a base sha rode only with a pull request number.
+      const previous = z.object({ parent_run_id: z.string().uuid(), session_id: z.string().nullable(), branch: z.string(), pr_number: z.number().optional(), base_sha: z.string().optional() }).strict().refine((c) => c.base_sha === undefined || c.pr_number !== undefined).nullable();
+      expect(JobSchema.extend({ continues: previous }).safeParse(sampleJob({ continues: run })).success).toBe(false);
+      expect(JobSchema.safeParse(sampleJob({ continues: run })).success).toBe(true);
+      expect(BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL).toBe(BASE_SHA_JOB_MIN_PROTOCOL + 1);
+      expect(CURRENT_PROTOCOL_VERSION).toBeGreaterThanOrEqual(BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL);
     });
 
     it("sets the cross-side protocol floor one above the handoff version, and leaves the hello floor alone", () => {

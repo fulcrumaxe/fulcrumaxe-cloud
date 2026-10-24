@@ -76,7 +76,7 @@ describe("runner done [pg]", () => {
   }
 
   /** A pending runner run with a real signed job, ready to be claimed. */
-  async function pending(o: { role?: string; specVersion?: string | null; continues?: { branch: string; prNumber?: number }; check?: Check } = {}): Promise<string> {
+  async function pending(o: { role?: string; specVersion?: string | null; continues?: { branch: string; prNumber?: number; baseSha?: string }; check?: Check } = {}): Promise<string> {
     const id = randomUUID();
     const job: Job = {
       schema_version: 1,
@@ -89,7 +89,7 @@ describe("runner done [pg]", () => {
       task: { kind: "implement", prompt: "p", prompt_sha256: sha256Text("p") },
       role_card: { text: "c", sha256: sha256Text("c") },
       role_tools_sha256: "a".repeat(64),
-      continues: o.continues ? { parent_run_id: randomUUID(), ...(o.continues.prNumber === undefined ? { session_id: "sess-1" } : { session_id: null, pr_number: o.continues.prNumber }), branch: o.continues.branch } : null,
+      continues: o.continues ? { parent_run_id: randomUUID(), ...(o.continues.prNumber === undefined ? { session_id: "sess-1" } : { session_id: null, pr_number: o.continues.prNumber }), branch: o.continues.branch, ...(o.continues.baseSha === undefined ? {} : { base_sha: o.continues.baseSha }) } : null,
       branch_prefix: "fx/",
       model_hint: null,
       issued_at: new Date(T0 - 1000).toISOString(),
@@ -175,6 +175,20 @@ describe("runner done [pg]", () => {
       expect(JSON.stringify(r.envelope)).not.toContain(token);
       expect(r.envelope).toMatchObject({ verdict: "pass", nested: { items: [1, 2] } });
       expect(await statusEvents(id)).toEqual([{ from: "pending", to: "running" }, { from: "running", to: "succeeded", viaRunnerDone: true, prNumber: 5 }]);
+    });
+
+    it("a fix round's done that arrives while its item sits in Needs a person is recorded as any other, and the item stays where it is (FIXROUND-REPUBLISH R2-c0)", async () => {
+      // A signed-base continuation of a run branch: the round the cloud started before the item was handed to a person.
+      const id = await pending({ continues: { branch: `fx/${randomUUID()}-g1`, baseSha: "b".repeat(40) } });
+      const g = await claimed(id);
+      await admin.query("UPDATE work_items SET stage = 'needs_human' WHERE id = $1", [A.workItemId]);
+      await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'escalated', 'republish_base_missing', 'k')", [A.accountId, A.workItemId]);
+      expect(await facade.beginRunnerDone(lease(id, g))).toEqual({ kind: "proceed" });
+      expect(await facade.finishRunnerDone({ ...lease(id, g), verdict: ok })).toEqual({ kind: "recorded", verdict: ok });
+      expect((await row(id)).status).toBe("succeeded");
+      expect((await admin.query("SELECT stage FROM work_items WHERE id = $1", [A.workItemId])).rows[0].stage).toBe("needs_human");
+      // A replay gives the stored verdict back, as for every run.
+      expect(await facade.beginRunnerDone(lease(id, g))).toEqual({ kind: "replay", verdict: ok });
     });
 
     it("records the run branch next to the pull request number, and a replay gives it back (C25 section 1.2)", async () => {

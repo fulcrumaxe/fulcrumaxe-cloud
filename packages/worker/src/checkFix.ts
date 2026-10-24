@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { ITEM_PR_BRANCH } from "@fulcrumaxe/runner-protocol";
-import { DispatchFailedError, IdempotencyKeyTakenError, ExecutionModeChangedError, JobIssueError, PREVIEW_WORKDIR, acceptQueuedRunnerRun, readBoundItemBranch, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { DispatchFailedError, IdempotencyKeyTakenError, ExecutionModeChangedError, JobIssueError, PREVIEW_WORKDIR, acceptQueuedRunnerRun, readBoundItemBranch, readRecordedRunnerPullRequest, RUNNER_RUN_BRANCH, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { escapeFenceLookalikes } from "@fx/pipeline";
 import { checkFixRound } from "@fx/spend";
+import { REPUBLISH_BASE_MISSING } from "@fx/core/src/work-items/baseSync.js";
 import { BASE_SYNCED_PROMPT_LINE } from "./fixRoundBase.js";
 import type { RunStarter } from "./preview.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
@@ -38,8 +39,8 @@ export interface CheckFixDeps {
   starter?: RunStarter | null;
   /** FIXROUND-REFRESH-HEAD: asked once nothing else refuses and before anything starts; a code it answers is the refusal. Absent: nothing is asked. */
   /** FIXROUND-BASE-SYNC (R2-b): read after `beforeStart`, the base tip it brought the branch up to date with; the round is signed with it as its diff base. */
-  baseSync?: () => { baseSha: string | null; synced: boolean };
-  beforeStart?: (branch: { repo: { id: string; owner: string; name: string }; pr: { number: number; branch: string }; attempt: string } | null) => Promise<string | null>;
+  baseSync?: () => { baseSha: string | null; synced: boolean; needed?: boolean };
+  beforeStart?: (branch: { repo: { id: string; owner: string; name: string }; pr: { number: number; branch: string } } | null, attempt: string) => Promise<string | null>;
 }
 
 type Started = { ok: true; runId: string } | { ok: false; reason: string };
@@ -110,9 +111,15 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
   const seat = await deps.resolveRunSeat({ accountId: who.accountId, role: "executor", workItemId: who.workItemId, ...expectedExecutionMode });
   if (!seat.ok) return { ok: false, reason: seat.reason };
   // FIXROUND-BASE-SYNC: the item's own pull request branch, when the round continues it, so the check can bring it up to date with its base. After the cheap refusals (the seat), so a merge never lands for a round that is then refused.
-  const held = deps.beforeStart ? await deps.beforeStart(bound !== null && row.gh_owner && row.gh_name ? { repo: { id: row.repo_id, owner: row.gh_owner, name: row.gh_name }, pr: { number: bound.prNumber, branch: bound.branch }, attempt: failedRunId } : null) : null;
+  // FIXROUND-REPUBLISH (R2-c0): a round on a run branch syncs the pull request the runner opened on that branch, when the item has one and it is the branch the failed run continued.
+  let target: { repo: { id: string; owner: string; name: string }; pr: { number: number; branch: string } } | null = bound !== null && row.gh_owner && row.gh_name ? { repo: { id: row.repo_id, owner: row.gh_owner, name: row.gh_name }, pr: { number: bound.prNumber, branch: bound.branch } } : null;
+  if (target === null && bound === null && row.gh_owner && row.gh_name && typeof row.continues_branch === "string" && RUNNER_RUN_BRANCH.test(row.continues_branch)) {
+    const recorded = await withTenant(deps.pool, who.accountId, (c) => readRecordedRunnerPullRequest(c, { accountId: who.accountId, workItemId: who.workItemId }));
+    if (recorded !== null && recorded.branch === row.continues_branch) target = { repo: { id: row.repo_id, owner: row.gh_owner, name: row.gh_name }, pr: recorded };
+  }
+  const held = deps.beforeStart ? await deps.beforeStart(target, failedRunId) : null;
   if (held !== null) return { ok: false, reason: held };
-  const { baseSha, synced } = deps.baseSync?.() ?? { baseSha: null, synced: false };
+  const { baseSha, synced, needed } = deps.baseSync?.() ?? { baseSha: null, synced: false, needed: false };
   const prompt = checkFixPrompt({ round: facts.round, argv, exitCode: row.exit_code, timedOut: row.timed_out === true, summary: row.summary ?? "" }) + (synced ? `\n\n${BASE_SYNCED_PROMPT_LINE}` : "");
   const idempotency = { key, requestHash: createHash("sha256").update(`${key}:executor`).digest("hex") };
   try {
@@ -153,6 +160,8 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
         pr: ghNumber,
         parentRunId: failedRunId,
         prompt,
+        // The base of a round that republishes the public pull request: signed only for the branch it was synced on (the issuer compares).
+        ...(needed === true && baseSha !== null && target !== null ? { base: { sha: baseSha, branch: target.pr.branch } } : {}),
         workdir: PREVIEW_WORKDIR,
         idempotency,
       }),
@@ -168,6 +177,8 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
     if (err instanceof ExecutionModeChangedError) return { ok: false, reason: CHECK_FIX_BRANCH_UNKNOWN };
     const refusal = err instanceof DispatchFailedError ? err.originalError : err;
     if (refusal instanceof JobIssueError && refusal.code === "continues_without_branch") return { ok: false, reason: CHECK_FIX_BRANCH_UNKNOWN };
+    // The base the cloud signed belongs to another branch than the one the issuer resolved: the round could not be republished, so it says so by name.
+    if (refusal instanceof JobIssueError && refusal.code === "continues_base_invalid") return { ok: false, reason: REPUBLISH_BASE_MISSING };
     // fx-swallow-ok: only the error's name is logged; its message can carry text from the platform
     console.warn(JSON.stringify({ event: "advance.check_fix_failed", work_item_id: who.workItemId, name: err instanceof Error ? err.name.slice(0, 60) : null }));
     return { ok: false, reason: "resume_failed" };

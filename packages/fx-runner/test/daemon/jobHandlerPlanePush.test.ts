@@ -192,6 +192,18 @@ describe("the start commit is the daemon's record (P1f-3-d)", () => {
     expect(r.baseLedger.read(claimed.runId)).toBeUndefined();
   });
 
+  it("a fix round on a run branch records the signed base the same way, with a session or without one (FIXROUND-REPUBLISH R2-c0)", async () => {
+    const CHOSEN = "c".repeat(40);
+    for (const session_id of ["sess-1", null]) {
+      const run = { continues: { parent_run_id: "22222222-2222-4222-8222-222222222222", session_id, branch: "fx/33333333-3333-4333-8333-333333333333-g1", base_sha: CHOSEN } };
+      const r = rig({ onStart: () => { r.checkout.head = MOVED; } });
+      const claimed = await r.claim(jobFor(run));
+      await r.handle(claimed);
+      expect(r.seenBase).toEqual([CHOSEN]);
+      expect(r.baseLedger.read(claimed.runId)).toBeUndefined();
+    }
+  });
+
   it("a fix round with no signed base records nothing", async () => {
     const plain = { continues: { parent_run_id: "22222222-2222-4222-8222-222222222222", session_id: null, branch: "fx/issue-12", pr_number: 7 } };
     const r = rig();

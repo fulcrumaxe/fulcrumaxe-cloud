@@ -2,7 +2,7 @@ import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { setPendingHooks } from "@fx/core/src/pendingWork.js";
-import { BASE_SHA_JOB_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { BASE_SHA_JOB_MIN_PROTOCOL, BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
@@ -1119,6 +1119,16 @@ describe("runner follow-up runs [pg]", () => {
       await built(realRegistry(undefined, createFakeContinuationBinding({ pulls: [openPull] })).registry).dispatchChild({ accountId: A.accountId, runId: childId });
       expect((await jobOf(childId)).continues).toEqual({ parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: 41, base_sha: base });
       expect((await admin.query("SELECT min_protocol_version FROM agent_runs WHERE id = $1", [childId])).rows[0].min_protocol_version).toBe(BASE_SHA_JOB_MIN_PROTOCOL);
+    });
+
+    it("a follow-up of a round on a run branch carries its base_sha too, for that branch, gated at the run-branch floor (FIXROUND-REPUBLISH R2-c0)", async () => {
+      const base = "d".repeat(40);
+      for (const session_id of [null, "sess-1"]) {
+        const { parent, childId } = await childOf({ ...FIX_PARENT, continues: { parent_run_id: randomUUID(), session_id, branch: FIX_BRANCH, base_sha: base } });
+        await built(realRegistry().registry).dispatchChild({ accountId: A.accountId, runId: childId });
+        expect((await jobOf(childId)).continues).toEqual({ parent_run_id: parent, session_id, branch: FIX_BRANCH, base_sha: base });
+        expect((await admin.query("SELECT min_protocol_version FROM agent_runs WHERE id = $1", [childId])).rows[0].min_protocol_version).toBe(BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL);
+      }
     });
 
     it("a pull request that changed since the lost round refuses the child with the issuer's closed code: failed, no job, no binding event", async () => {

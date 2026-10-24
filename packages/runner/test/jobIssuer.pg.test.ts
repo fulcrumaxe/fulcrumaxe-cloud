@@ -1,6 +1,6 @@
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { CONTEXT_WINDOW_JOB_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, SPILL_JOB_MIN_PROTOCOL, trimmedMarker, REVIEW_JOB_ROLES, RUNNER_ELIGIBLE_ROLES, canonicalJson, jobDigestMismatches, sha256Text, verifyJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL, CONTEXT_WINDOW_JOB_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, SPILL_JOB_MIN_PROTOCOL, trimmedMarker, REVIEW_JOB_ROLES, RUNNER_ELIGIBLE_ROLES, canonicalJson, jobDigestMismatches, sha256Text, verifyJob, type Job } from "@fulcrumaxe/runner-protocol";
 import type { ExecutionRun } from "../src/executionTarget.js";
 import { toolsForRole } from "../src/agentConfig.js";
 import { JobIssueError, createJobIssuer, createJobSigner, createPgJobContext, roleToolsDigest, type ContinuationBasePort, type JobContextPort } from "../src/targets/jobIssuer.js";
@@ -551,6 +551,22 @@ describe("JobIssuer [pg]", () => {
       expect(asked).toEqual([{ repo: { id: w.repoId, owner: "acme", name: "widgets" }, branch: FIRST_BRANCH }]);
       expect(await baseEvents(run.id)).toEqual([{ head_oid: "d".repeat(40) }]);
       expect(await stored(run.id)).not.toBeNull();
+    });
+
+    it("FIXROUND-REPUBLISH (R2-c0): a same-side resume with no branch given resolves it from the parent's done record; a base synced on that branch is signed at floor 11, one synced on another is refused", async () => {
+      const w = await world();
+      const { parent, run } = await fixPair(w);
+      const baseSha = "b".repeat(40);
+      await issuer().issuer.issue({ run, continues: { parentRunId: parent.id, sessionId: "sess-1", baseSha, baseBranch: FIRST_BRANCH } });
+      const job = verifyJob(await stored(run.id), { "job-key-1": publicKey }, { now: NOW });
+      expect(job.continues).toEqual({ parent_run_id: parent.id, session_id: "sess-1", branch: FIRST_BRANCH, base_sha: baseSha });
+      expect((await db.admin.query("SELECT min_protocol_version FROM agent_runs WHERE id = $1", [run.id])).rows[0].min_protocol_version).toBe(BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL);
+      // Another branch and a missing branch are each refused, and nothing is recorded.
+      const other = await fixPair(w);
+      for (const c of [{ baseBranch: "fx/00000000-0000-4000-8000-000000000000-g1" }, {}]) {
+        await expect(issuer().issuer.issue({ run: other.run, continues: { parentRunId: other.parent.id, sessionId: "sess-1", baseSha, ...c } }), JSON.stringify(c)).rejects.toMatchObject({ code: "continues_base_invalid" });
+      }
+      expect(await stored(other.run.id)).toBeNull();
     });
 
     it("FIXROUND-BASE-SYNC: after the cloud merged the base into the branch, the head the issuer reads at dispatch (and records as the round's start) is the merge commit", async () => {
