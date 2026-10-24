@@ -233,7 +233,7 @@ describe('gh-proxy narrow login (0696)', () => {
       // Trigger functions cannot be called by hand, so they are left out.
       const others = await adminPool.query(
         `SELECT p.oid::regprocedure::text AS fn, p.prosecdef FROM pg_proc p
-          WHERE p.pronamespace = 'public'::regnamespace AND p.proname NOT IN ('resolve_sandbox_run', 'resolve_runner_git_request', 'runner_git_bytes_account', 'resolve_runner_bound_branch', 'resolve_plane_publish_target')
+          WHERE p.pronamespace = 'public'::regnamespace AND p.proname NOT IN ('resolve_sandbox_run', 'resolve_runner_git_request', 'runner_git_bytes_account', 'resolve_runner_bound_branch', 'resolve_plane_publish_target', 'plane_publish_installation_owned')
             AND p.prorettype <> 'trigger'::regtype
             AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
             AND has_function_privilege($1, p.oid, 'EXECUTE') ORDER BY 1`,
@@ -268,8 +268,8 @@ describe('gh-proxy narrow login (0696)', () => {
       const sql = readFileSync(path.join(__dirname, '../../db/migrations/0696_run_binding_resolver.sql'), 'utf8');
       const m = /DO \$\$\nDECLARE[\s\S]*?\n\$\$;/.exec(sql);
       if (!m) throw new Error('guard block not found in 0696');
-      // 0765, 0766, 0828 and 0834 add the other functions the login may run; the block as 0696 wrote it names only the first.
-      return m[0].replace("p.proname <> 'resolve_sandbox_run'", "p.proname NOT IN ('resolve_sandbox_run', 'resolve_runner_git_request', 'runner_git_bytes_account', 'resolve_runner_bound_branch', 'resolve_plane_publish_target')");
+      // 0765, 0766, 0828, 0834 and 0908 add the other functions the login may run; the block as 0696 wrote it names only the first.
+      return m[0].replace("p.proname <> 'resolve_sandbox_run'", "p.proname NOT IN ('resolve_sandbox_run', 'resolve_runner_git_request', 'runner_git_bytes_account', 'resolve_runner_bound_branch', 'resolve_plane_publish_target', 'plane_publish_installation_owned')");
     })();
 
     async function guardOutcome(setup: string | null): Promise<string | null> {

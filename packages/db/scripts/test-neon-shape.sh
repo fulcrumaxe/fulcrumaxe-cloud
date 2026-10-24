@@ -1923,6 +1923,32 @@ check_plan_remover_role_shape() {
   fi
 }
 
+# D#598 PUSH-OWNER-SANDBOX-DEFINER (0908): the SECURITY DEFINER function owned by plane_publish_owner_definer. Prints its oid when it is the one exact
+# signature (matched by regprocedure, not by name), pinned to search_path=pg_catalog, public, pg_temp, with an ACL that holds
+# run_binding_resolver and nobody else but the owner (no PUBLIC, no platform_ops, no app_user), with no grant option;
+# SHAPE_FAIL:<count> when it is not; nothing when the role owns none (the generic owner check then rejects anything else).
+check_plane_publish_owner_exception_shape() {
+  local dbname="$1" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.oid = 'public.plane_publish_installation_owned(text, bigint)'::regprocedure
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable)
+        AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0) = ARRAY['run_binding_resolver']
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0)) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'plane_publish_owner_definer') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check 'plane-publish-owner-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by plane_publish_owner_definer fail the exception shape (not its one exact signature, a loose search_path, EXECUTE for anyone but run_binding_resolver and the owner, or a grant option)"
+    return 0
+  fi
+  echo "$oids"
+}
+
 # D#598 P1f-4a (0834): the SECURITY DEFINER function owned by plane_publish_definer. Prints its oid when it is the one exact
 # signature (matched by regprocedure, not by name), pinned to search_path=pg_catalog, public, pg_temp, with an ACL that holds
 # run_binding_resolver and nobody else but the owner (no PUBLIC, no platform_ops, no app_user), with no grant option;
