@@ -120,7 +120,7 @@ export async function planePushTokenRun(deps: RunnerCloudDeps, req: RunnerHttpRe
   // can fail on the text, and a failure here finishes the attempt without a token ever existing.
   let pr: ReturnType<typeof buildPlanePushText>;
   try {
-    pr = buildPlanePushText({ itemTitle: grant.itemTitle, runId });
+    pr = buildPlanePushText({ itemTitle: grant.itemTitle, runId, prFooter: grant.prFooter, issueNumber: grant.issueNumber });
   } catch (error) {
     await asRunner(() => ops.planePushSettleGrant({ ...lease, attemptId: grant.attemptId, issued: false, code: "text_failed" }));
     throw error;

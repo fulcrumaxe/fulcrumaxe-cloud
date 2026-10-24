@@ -180,6 +180,53 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       expect(reply.pr.body).not.toMatch(/victim|evil|second/);
     });
 
+    describe("the pairing's pull request footer", () => {
+      const BASE_BODY = (id: string) => `This change was prepared by a fulcrumaxe run and checked against the paired repository's rules before it was sent.\n\nRun: ${id}\n`;
+      const setFooter = (footer: string | null) => admin.query("UPDATE repo_pairing SET pr_footer = $2 WHERE repo_id = $1", [A.repoId, footer]);
+      const setIssue = (n: number | null) => admin.query("UPDATE work_items SET gh_number = $2 WHERE id = $1", [A.workItemId, n]);
+      const events = async (runId: string) => (await admin.query("SELECT kind, payload FROM run_events WHERE run_id = $1 AND kind = 'plane.pr_footer_skipped'", [runId])).rows;
+
+      it("off by default: no footer set gives today's body and no notice", async () => {
+        const run = await ready();
+        const reply = PlanePushTokenReply.parse((await askToken(run)).body);
+        expect(reply.pr.body).toBe(BASE_BODY(run.id));
+        expect(await events(run.id)).toEqual([]);
+      });
+
+      it("renders a literal footer, {issue_number} and {run_id} into the token reply's body, after a blank line", async () => {
+        const run = await ready();
+        await setIssue(77);
+        await setFooter("Refs D#6 / issue {issue_number} / run {run_id}");
+        const reply = PlanePushTokenReply.parse((await askToken(run)).body);
+        expect(reply.pr.body).toBe(`${BASE_BODY(run.id)}\nRefs D#6 / issue 77 / run ${run.id}\n`);
+      });
+
+      it("a footer whose placeholder has no value (no issue number) is left off, the body is today's, and the run records a notice line", async () => {
+        const run = await ready();
+        await setIssue(null);
+        await setFooter("Refs D#{issue_number}");
+        const reply = PlanePushTokenReply.parse((await askToken(run)).body);
+        expect(reply.pr.body).toBe(BASE_BODY(run.id));
+        expect(await events(run.id)).toEqual([{ kind: "plane.pr_footer_skipped", payload: { reason: "no_issue_number" } }]);
+      });
+
+      it("editing the footer after the build started does not invalidate the build: the token is still granted, with the new footer", async () => {
+        const run = await ready();
+        await setFooter("Refs D#9");
+        const res = await askToken(run);
+        expect(res.status).toBe(200);
+        expect(PlanePushTokenReply.parse(res.body).pr.body).toBe(`${BASE_BODY(run.id)}\nRefs D#9\n`);
+      });
+
+      it("the pairing reply to the hook does not carry the footer", async () => {
+        const run = await ready();
+        await setFooter("Refs D#9");
+        const res = await askPairing(run);
+        expect(res.status).toBe(200);
+        expect(JSON.stringify(res.body)).not.toContain("Refs D#9");
+      });
+    });
+
     it("a missing identity setting is 503 not_configured BEFORE any attempt row: the row count is unchanged, GitHub is not asked, and after the setting is restored the same run still gets its one grant", async () => {
       const run = await ready();
       identity = null;

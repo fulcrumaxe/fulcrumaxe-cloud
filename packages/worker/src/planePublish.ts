@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { PLANE_REFUSAL_CODES, type PlaneRefusalCode } from "@fulcrumaxe/runner-protocol/planePush";
-import { buildPlanePushText } from "@fulcrumaxe/runner-protocol/planePushText";
+import { buildPlanePushText, prFooterSkipReason } from "@fulcrumaxe/runner-protocol/planePushText";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { PUBLISH_ATTEMPT_LIMIT, mayRetryPublish, pairingDigest, publicPullRequestUrlMatches, recordVerifiedOutcome, type PlanePushState, type RetryFacts, type VerifiedOutcome } from "@fx/core/src/repos/planePushRecord.js";
 
@@ -33,6 +33,8 @@ export const PUBLIC_UNAVAILABLE_NOTE = "The public repository could not be reach
 
 /** The `run_events` kind the executor run carries once its private pull request is open: the per-run marker, so a replay opens nothing. */
 const PRIVATE_PR_MARKER = "plane.private_pr";
+/** The notice an executor run carries when the pairing's PR footer was left off (the item has no issue number). */
+export const PR_FOOTER_SKIPPED = "plane.pr_footer_skipped";
 
 /** The worker's own refusal codes, next to the hook's (`PlaneRefusalCode`). They are stored as the item's code and the attempt's label. */
 export const PUBLISH_CODES = { retryLimit: "retry_limit", pairingOff: "pairing_off", hookCrashed: "hook_crashed", reportMismatch: "report_mismatch" } as const;
@@ -92,7 +94,7 @@ interface Facts {
   /** This executor run already opened (or reused) its private pull request: a replay opens nothing, and a pull request a person closed is never reopened. */
   privatePrDone: boolean;
   lastPushRuntime: RetryFacts["lastPushRuntime"];
-  pairing: { codeRepo: string; overlayGlobs: string[]; identifierRulesPath: string | null; planDataRulesPath: string | null } | null;
+  pairing: { codeRepo: string; overlayGlobs: string[]; identifierRulesPath: string | null; planDataRulesPath: string | null; prFooter: string | null } | null;
 }
 
 /**
@@ -114,8 +116,8 @@ async function readFacts(client: PoolClient, accountId: string, which: { runId: 
   );
   const r = rows[0];
   if (!r) return null;
-  const { rows: pairs } = await client.query<{ code_repo: string; overlay_globs: string[]; identifier_rules_path: string | null; plan_data_rules_path: string | null }>(
-    "SELECT code_repo, overlay_globs, identifier_rules_path, plan_data_rules_path FROM repo_pairing WHERE repo_id = $1 AND account_id = $2",
+  const { rows: pairs } = await client.query<{ code_repo: string; overlay_globs: string[]; identifier_rules_path: string | null; plan_data_rules_path: string | null; pr_footer: string | null }>(
+    "SELECT code_repo, overlay_globs, identifier_rules_path, plan_data_rules_path, pr_footer FROM repo_pairing WHERE repo_id = $1 AND account_id = $2",
     [r.dispatch_repo_id, accountId],
   );
   const p = pairs[0];
@@ -143,7 +145,7 @@ async function readFacts(client: PoolClient, accountId: string, which: { runId: 
     pushId: push.id, codeRepo: push.code_repo, branch: push.branch, stampedDigest: push.pairing_digest, state: push.state, managedByPerson: push.managed === true,
     // An item refused before any sandbox was started has no attempt yet; its executor ran in the sandbox, so a retry is a sandbox retry.
     pushAttempts: stats[0]?.n ?? 0, runPushAttempts: own[0]?.pushes ?? 0, privatePrDone: own[0]?.marked === true, lastPushRuntime: stats[0]?.last ?? (r.sandbox_side === true ? "sandbox" : null),
-    pairing: p ? { codeRepo: p.code_repo, overlayGlobs: p.overlay_globs, identifierRulesPath: p.identifier_rules_path, planDataRulesPath: p.plan_data_rules_path } : null,
+    pairing: p ? { codeRepo: p.code_repo, overlayGlobs: p.overlay_globs, identifierRulesPath: p.identifier_rules_path, planDataRulesPath: p.plan_data_rules_path, prFooter: p.pr_footer } : null,
   };
 }
 
@@ -250,7 +252,9 @@ async function attempt(deps: PlanePublishDeps, accountId: string, which: { runId
   }
 
   // From here the attempt is real: whatever happens, it ends terminal and the sandbox ends deleted (runPublishSandbox's finally).
-  const text = buildPlanePushText({ itemTitle: facts.title, runId: facts.runId });
+  const issueNumber = facts.issue === null || facts.issue === undefined ? null : Number(facts.issue);
+  const text = buildPlanePushText({ itemTitle: facts.title, runId: facts.runId, prFooter: pairing.prFooter, issueNumber });
+  await noteFooterSkipped(deps.pool, accountId, facts.runId, pairing.prFooter, issueNumber);
   const input: PlanePublishInput = {
     own: { owner: facts.repo.owner, name: facts.repo.name }, codeRepo: facts.codeRepo, privateBase: facts.baseSha, privateHead: head, branch: facts.branch, title: text.title, body: text.body,
     identity, commitTime: Math.floor(now() / 1000),
@@ -447,12 +451,19 @@ export type OpenPublicResult =
   | { kind: "skipped"; why: "not_retryable" }
   | { kind: "not_configured" };
 
+/** A footer that needs an issue number the item lacks is left off; the run records a notice line so the person can see why the body has no footer. */
+async function noteFooterSkipped(pool: Pool, accountId: string, runId: string, footer: string | null, issueNumber: number | null): Promise<void> {
+  if (prFooterSkipReason(footer, issueNumber) === null) return;
+  await withTenant(pool, accountId, (c) => insertRunEvent(c, accountId, runId, PR_FOOTER_SKIPPED, { reason: "no_issue_number" }));
+}
+
 async function openPublicPullRequest(deps: PlanePublishDeps, accountId: string, workItemId: string): Promise<OpenPublicResult> {
   const { rows } = await withTenant(deps.pool, accountId, (c) =>
-    c.query<{ id: string; code_repo: string; branch: string; state: PlanePushState; head_sha: string | null; tip_sha: string | null; managed: boolean; title: string; run_id: string | null; pairing_repo: string | null }>(
+    c.query<{ id: string; code_repo: string; branch: string; state: PlanePushState; head_sha: string | null; tip_sha: string | null; managed: boolean; title: string; run_id: string | null; pairing_repo: string | null; pr_footer: string | null; issue: string | null }>(
       `SELECT p.id, p.code_repo, p.branch, p.state, p.head_sha, p.tip_sha, p.managed_by_person_at IS NOT NULL AS managed, COALESCE(w.title, '') AS title,
               (SELECT r.id FROM agent_runs r WHERE r.account_id = p.account_id AND r.work_item_id = p.work_item_id AND r.role = 'executor' ORDER BY r.created_at DESC, r.id LIMIT 1) AS run_id,
-              (SELECT rp.code_repo FROM repo_pairing rp WHERE rp.account_id = p.account_id AND rp.repo_id = p.repo_id) AS pairing_repo
+              (SELECT rp.code_repo FROM repo_pairing rp WHERE rp.account_id = p.account_id AND rp.repo_id = p.repo_id) AS pairing_repo,
+              (SELECT rp.pr_footer FROM repo_pairing rp WHERE rp.account_id = p.account_id AND rp.repo_id = p.repo_id) AS pr_footer, w.gh_number::text AS issue
          FROM plane_pushes p JOIN work_items w ON w.account_id = p.account_id AND w.id = p.work_item_id
         WHERE p.account_id = $1 AND p.work_item_id = $2`,
       [accountId, workItemId],
@@ -484,7 +495,10 @@ async function openPublicPullRequest(deps: PlanePublishDeps, accountId: string, 
   try {
     // The branch must still hold exactly what was pushed, on the tip it was built on: nothing else is turned into a pull request.
     if (!(await deps.hosted.verifyPushed({ codeRepo: p.code_repo, branch: p.branch, headSha: p.head_sha, tipSha: p.tip_sha }))) return await stop(PUBLISH_CODES.reportMismatch);
-    const text = buildPlanePushText({ itemTitle: p.title, runId: p.run_id });
+    // The footer is validated when the pairing is written. This path pushes nothing and has no rule files to scan with; the push paths scan the body they send.
+    const issueNumber = p.issue === null ? null : Number(p.issue);
+    const text = buildPlanePushText({ itemTitle: p.title, runId: p.run_id, prFooter: p.pr_footer, issueNumber });
+    await noteFooterSkipped(deps.pool, accountId, p.run_id, p.pr_footer, issueNumber);
     const opened = await deps.hosted.openPullRequest({ codeRepo: p.code_repo, branch: p.branch, title: text.title, body: text.body });
     const pr = await deps.hosted.verifyPullRequest({ codeRepo: p.code_repo, branch: p.branch, number: opened.number });
     if (pr === null || !publicPullRequestUrlMatches(p.code_repo, opened.number, pr.url)) return await stop(PUBLISH_CODES.reportMismatch);

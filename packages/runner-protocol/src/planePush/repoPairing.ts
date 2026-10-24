@@ -11,4 +11,6 @@ export interface RepoPairing {
   /** A rule file committed in the private repo, or null (only the always-on refusals then run). */
   identifierRulesPath: string | null;
   planDataRulesPath: string | null;
+  /** The pull request body footer template, or null (none). Not part of the digest and not sent to the push hook; only the text builder reads it. */
+  prFooter?: string | null;
 }

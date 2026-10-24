@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isAllowedErrorCode } from "@fx/telemetry";
+import { buildPlanePushText } from "../../../runner-protocol/src/planePush/planePushText.js";
 import * as scanModule from "../../../runner-protocol/src/planePush/planePush.js";
 import { PLANE_REFUSAL_CODES, PlaneRouteError, type RepoPairing, routeAndPush, routeFor, type PlaneRouteDeps, type PlaneRouteInput, type PublicApi } from "../../../runner-protocol/src/planePush/planePushRoute.js";
 import { git, gitCommitSource } from "../../../runner-protocol/src/planePush/planePushGit.js";
@@ -265,6 +266,15 @@ describe("refusals push nothing (acceptance 3, 4, 5)", () => {
     expect(t.refusals).toEqual(expect.arrayContaining([expect.objectContaining({ path: "pull request title", rule: "identifier-rule#1" }), expect.objectContaining({ path: "commit object" })]));
     const b = await refused({ "src/d.ts": "export const d = 1;\n" }, { body: "line one\nthe price is $7391 per month\n", branch: "item-2" });
     expect(b.refusals).toEqual([expect.objectContaining({ kind: "plan_data_hit", path: "pull request body", line: 2 })]);
+  });
+
+  it("the pairing's footer rides in the body that is scanned: a footer that names a private identifier or a plan figure refuses the push, naming the place and not the value", async () => {
+    const run = "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e";
+    const ident = await refused({ "src/e.ts": "export const e = 1;\n" }, { body: buildPlanePushText({ itemTitle: "x", runId: run, prFooter: "Refs acme-internal-host", issueNumber: 1 }).body, branch: "item-3" });
+    expect(ident.refusals).toEqual([expect.objectContaining({ kind: "identifier_hit", path: "pull request body", rule: "identifier-rule#1" })]);
+    expect(JSON.stringify(ident.refusals)).not.toContain("acme-internal-host");
+    const plan = await refused({ "src/f.ts": "export const f = 1;\n" }, { body: buildPlanePushText({ itemTitle: "x", runId: run, prFooter: "costs $7391 for {issue_number}", issueNumber: 1 }).body, branch: "item-4" });
+    expect(plan.refusals).toEqual([expect.objectContaining({ kind: "plan_data_hit", path: "pull request body" })]);
   });
 
   it("a declared rule file missing at the item's commit refuses and names the file", async () => {

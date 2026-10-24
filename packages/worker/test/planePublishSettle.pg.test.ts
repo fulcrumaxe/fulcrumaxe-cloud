@@ -383,6 +383,23 @@ describe("settling a paired sandbox build, and opening the public pull request a
       expect((await admin.query("SELECT count(*)::int AS n FROM agent_runs WHERE account_id = $1", [A.accountId])).rows[0].n).toBe(runs);
     });
 
+    it("the pairing's footer is appended to the reopened pull request's body; with no issue number it is left off and the run records a notice", async () => {
+      await executorRun("succeeded", "runner");
+      await stuck();
+      await admin.query("UPDATE repo_pairing SET pr_footer = 'Refs D#{issue_number}' WHERE repo_id = $1", [A.repoId]);
+      await admin.query("UPDATE work_items SET gh_number = 42 WHERE id = $1", [A.workItemId]);
+      expect(await reopen()).toMatchObject({ kind: "opened" });
+      expect(gh.opened[0]!.body).toMatch(/\n\nRefs D#42\n$/);
+
+      await stuck();
+      gh.opened.length = 0;
+      await admin.query("UPDATE work_items SET gh_number = NULL WHERE id = $1", [A.workItemId]);
+      expect(await reopen()).toMatchObject({ kind: "opened" });
+      expect(gh.opened[0]!.body).not.toContain("Refs D#");
+      const notes = (await admin.query("SELECT payload FROM run_events WHERE account_id = $1 AND kind = 'plane.pr_footer_skipped'", [A.accountId])).rows;
+      expect(notes).toEqual([{ payload: { reason: "no_issue_number" } }]);
+    });
+
     it("runner-run row: the same, from a row a runner's report left behind (no sandbox attempt exists)", async () => {
       await executorRun("succeeded", "runner");
       await stuck();

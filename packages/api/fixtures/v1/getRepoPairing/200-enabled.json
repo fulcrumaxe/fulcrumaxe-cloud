@@ -1,7 +1,11 @@
 {
   "enabled": true,
   "code_repo": "acme/widgets-public",
-  "overlay_globs": ["docs/ops/", "rules/"],
+  "overlay_globs": [
+    "docs/ops/",
+    "rules/"
+  ],
   "identifier_rules_path": "rules/ids.txt",
-  "plan_data_rules_path": "rules/plan.json"
+  "plan_data_rules_path": "rules/plan.json",
+  "pr_footer": "Refs D#{issue_number}"
 }
