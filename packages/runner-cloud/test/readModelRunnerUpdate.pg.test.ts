@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { CHECK_JOB_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, waitText } from "@fulcrumaxe/runner-protocol";
+import { CHECK_JOB_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, waitText } from "@fulcrumaxe/runner-protocol";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { RUN_WAIT_REASONS, getRunWait, getRunWaitReason } from "../src/index.js";
@@ -143,6 +143,18 @@ describe("waiting_for_runner_update [pg]", () => {
     expect(waitText(wait.reason!, wait.limited_by, wait.min_protocol ?? null)).toBe(`Waiting for a runner update (version ${EXCLUDES_JOB_MIN_PROTOCOL} or later) before this run can start`);
     // Updating the runner clears it.
     await h.admin.query("UPDATE runners SET protocol_version = $2 WHERE id = $1", [memoryEra, EXCLUDES_JOB_MIN_PROTOCOL]);
+    expect(await reason(w, id)).toBeNull();
+  });
+
+  it("D#600 CX-5c2: a job with pins (gated at the pins floor) with a protocol-8 runner shows the update-your-runner state, and updating the runner clears it", async () => {
+    const w = await world();
+    const eight = await runner(w, { protocol: CHECK_JOB_MIN_PROTOCOL });
+    const id = await run(w, PINS_JOB_MIN_PROTOCOL);
+    expect(await reason(w, id)).toBe("waiting_for_runner_update");
+    const wait = await getRunWait(deps(), w.f.accountId, id);
+    expect(wait).toEqual({ reason: "waiting_for_runner_update", limited_by: null, min_protocol: PINS_JOB_MIN_PROTOCOL });
+    expect(waitText(wait.reason!, wait.limited_by, wait.min_protocol ?? null)).toBe(`Waiting for a runner update (version ${PINS_JOB_MIN_PROTOCOL} or later) before this run can start`);
+    await h.admin.query("UPDATE runners SET protocol_version = $2 WHERE id = $1", [eight, PINS_JOB_MIN_PROTOCOL]);
     expect(await reason(w, id)).toBeNull();
   });
 });

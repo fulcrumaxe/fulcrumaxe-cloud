@@ -5,6 +5,7 @@ import {
   CONTINUES_CROSS_SIDE_MIN_PROTOCOL,
   MEMORY_JOB_MIN_PROTOCOL,
   EXCLUDES_JOB_MIN_PROTOCOL,
+  PINS_JOB_MIN_PROTOCOL,
   SPILL_JOB_MIN_PROTOCOL,
   CHECK_JOB_MIN_PROTOCOL,
   CONTEXT_WINDOW_JOB_MIN_PROTOCOL,
@@ -23,6 +24,7 @@ import {
   type Job,
   type SignedJob,
 } from "@fulcrumaxe/runner-protocol";
+import { effectiveContextBudget, readContextBudgetBytes } from "@fx/core/src/context/contextBudget.js";
 import { readItemRules } from "@fx/core/src/context/contextRules.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { runnerToolsForRole } from "../agentConfig.js";
@@ -409,14 +411,28 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
       // D#600 CX-5c: the item's excludes as they stand now (its own rules over the repository's), read when the job is issued, so a fix round gets the rules of its own issue and not those of the
       // first start. Paths and globs only. A read that fails refuses the job (nothing is recorded): a job never goes out without the list it should have carried (fail closed).
       let excludes: string[] = [];
+      let pinPaths: string[] = [];
       if (run.workItemId !== undefined && run.workItemId !== null) {
         const workItemId = run.workItemId;
         try {
           const rules = await withTenant(deps.pool, run.accountId, (client) => readItemRules(client, run.accountId, workItemId));
           excludes = [...new Set(rules.filter((r) => r.kind === "exclude").map((r) => r.path))].sort();
+          // D#600 CX-5c2: the pins of an executor's first run (as on the sandbox path, a fix round or a review gets none). Paths only, all of them: the runner applies the exclude-wins rule itself, so it can count the
+          // pins an exclude covers (`pin_excluded`) and never opens them.
+          if (role === "executor" && input.continues === undefined) pinPaths = [...new Set(rules.filter((r) => r.kind === "pin").map((r) => r.path))].sort();
         } catch {
           // fx-swallow-ok: the cause can carry a name or a path; only the closed code survives
           throw new JobIssueError("excludes_unreadable");
+        }
+      }
+
+      let pinBudget: number | undefined;
+      // The repository's prompt budget now (its stored size, else the executor default), which the runner compares the pins with to record `pins_over_budget`. A read that fails leaves it out; a pin is never refused for it.
+      if (pinPaths.length > 0) {
+        try {
+          pinBudget = effectiveContextBudget("executor", await readContextBudgetBytes(deps.pool, run.accountId, run.repoId));
+        } catch {
+          // fx-swallow-ok: the budget only drives the overage note in the ledger; without it the job carries none
         }
       }
 
@@ -451,6 +467,8 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         ...(run.jobMemory && (run.jobMemory.person !== "" || run.jobMemory.fenced !== "") ? { memory: { person: run.jobMemory.person, fenced: run.jobMemory.fenced } } : {}),
         // D#600 CX-5c: omitted when the item has none (never null, never empty), so such a job's signed bytes are unchanged.
         ...(excludes.length > 0 ? { excludes } : {}),
+        // D#600 CX-5c2: omitted when the run has no pins (never null, never empty). Paths and one figure, never file text.
+        ...(pinPaths.length > 0 ? { pins: { paths: pinPaths, ...(pinBudget !== undefined ? { budget_bytes: pinBudget } : {}) } } : {}),
         // D#600 CX-4b: the full text the prompt cut, in the run's own spill files (closed codes and text, nothing else). Omitted when the prompt cut nothing. The prompt already carries the marker.
         ...(run.contextSpill && run.contextSpill.files.length > 0 ? { spill: run.contextSpill.files.map((f) => ({ code: f.code, text: f.text })) } : {}),
         // D#600 CX-6b: omitted when the model has no window figure (never null), so such a job's signed bytes are unchanged.
@@ -481,8 +499,8 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         accountId: run.accountId,
         runId: run.id,
         job: signed as unknown as Record<string, unknown>,
-        // A job that carries memory is also gated: an older runner's strict parse would refuse the `memory` key, so it waits for an updated runner instead. The same holds for excludes (CX-5c): a runner that ignored them would run the agent with nothing denied. And for a spill (CX-4b): a cut prompt is never sent uncut to an older runner, it waits for an updated one. And for a window figure (CX-6b): the same strict-parse reason.
-        minProtocolVersion: Math.max(crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : 0, candidate.memory ? MEMORY_JOB_MIN_PROTOCOL : 0, candidate.excludes ? EXCLUDES_JOB_MIN_PROTOCOL : 0, candidate.spill ? SPILL_JOB_MIN_PROTOCOL : 0, candidate.context_window !== undefined ? CONTEXT_WINDOW_JOB_MIN_PROTOCOL : 0, candidate.check ? CHECK_JOB_MIN_PROTOCOL : 0) || null,
+        // A job that carries memory is also gated: an older runner's strict parse would refuse the `memory` key, so it waits for an updated runner instead. The same holds for excludes (CX-5c): a runner that ignored them would run the agent with nothing denied. And for pins (CX-5c2): the strict parse again. And for a spill (CX-4b): a cut prompt is never sent uncut to an older runner, it waits for an updated one. And for a window figure (CX-6b): the same strict-parse reason.
+        minProtocolVersion: Math.max(crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : 0, candidate.memory ? MEMORY_JOB_MIN_PROTOCOL : 0, candidate.excludes ? EXCLUDES_JOB_MIN_PROTOCOL : 0, candidate.pins ? PINS_JOB_MIN_PROTOCOL : 0, candidate.spill ? SPILL_JOB_MIN_PROTOCOL : 0, candidate.context_window !== undefined ? CONTEXT_WINDOW_JOB_MIN_PROTOCOL : 0, candidate.check ? CHECK_JOB_MIN_PROTOCOL : 0) || null,
         ...(boundPullRequest ? { continuesBound: boundPullRequest } : {}),
       });
       if (!recorded) throw new JobIssueError("job_not_recorded");

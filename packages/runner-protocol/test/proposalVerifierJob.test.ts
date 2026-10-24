@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  CURRENT_PROTOCOL_VERSION,
+  CHECK_JOB_MIN_PROTOCOL,
   HelloMessage,
   JobSchema,
   LIGHT_JOB_ROLES,
@@ -26,8 +26,8 @@ const SHA = "a".repeat(40);
 
 /** D#483 S4-b2c: the claim verifier as a runner job, on the protocol side. */
 describe("the claim verifier role on the wire", () => {
-  it("is runner eligible and light, without moving the protocol version (still 8)", () => {
-    expect(CURRENT_PROTOCOL_VERSION).toBe(8);
+  it("is runner eligible and light, without raising the check floor (still 8)", () => {
+    expect(CHECK_JOB_MIN_PROTOCOL).toBe(8);
     expect(LIGHT_JOB_ROLES).toContain(PROPOSAL_VERIFIER_ROLE);
     expect(JobSchema.safeParse(sampleJob({ role: PROPOSAL_VERIFIER_ROLE, review: { head_sha: SHA } })).success).toBe(true);
   });

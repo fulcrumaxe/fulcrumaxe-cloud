@@ -15,6 +15,7 @@ import { z } from "zod";
 import { CONTEXT_WINDOW_MAX_TOKENS } from "./contextLevers.js";
 import { CONTEXT_SPILL_CODES, CONTEXT_SPILL_MAX_TOTAL_BYTES } from "./contextSpill.js";
 import { MAX_EXCLUDE_RULES, isRuleablePath } from "./excludeRules.js";
+import { MAX_JOB_PINS, isPinPath } from "./pinRules.js";
 import { CheckSchema, JobAllowancesSchema } from "./sandboxAllowances.js";
 import { PROPOSAL_VERIFIER_ROLE } from "./verifierGuard.js";
 
@@ -192,6 +193,23 @@ export const JobSpillSchema = z
   });
 export type JobSpill = z.infer<typeof JobSpillSchema>;
 
+/**
+ * D#600 CX-5c2: the files a person pinned for this run, as repository-relative PATHS only: never file text. `paths` is at least one, at most `MAX_JOB_PINS`, each a path
+ * `isPinPath` accepts (no `*` or `?`), none twice. `budget_bytes` is the repository's prompt budget now, a figure the runner compares the pins with to record
+ * `pins_over_budget`; pins are never cut by it. The runner reads each file from its own checkout at the run's start commit.
+ */
+export const JobPinsSchema = z
+  .object({
+    paths: z
+      .array(z.string().refine(isPinPath, { message: "a pinned path must be repository-relative and free of control characters, backslashes, . or .. segments, * and ?" }))
+      .min(1)
+      .max(MAX_JOB_PINS)
+      .refine((paths) => new Set(paths).size === paths.length, { message: "a pinned path appears once" }),
+    budget_bytes: z.number().int().min(1).max(2_097_152).optional(),
+  })
+  .strict();
+export type JobPins = z.infer<typeof JobPinsSchema>;
+
 export const JobSchema = z
   .object({
     schema_version: z.literal(1),
@@ -238,6 +256,10 @@ export const JobSchema = z
     // never empty) on every other job, so their canonical JSON and signature are unchanged; the signature covers it. The cloud signs it only for a runner of `EXCLUDES_JOB_MIN_PROTOCOL` or
     // later: an older runner's strict parse would refuse the key, and a runner that started without the list would run the agent with nothing denied. Pin content is never here.
     excludes: JobExcludesSchema.optional(),
+    // D#600 CX-5c2: the pinned paths of an executor's first run, read from the item's rules when the job is issued. Present only on a job that has pins and omitted (never null, never
+    // empty) on every other job, so their canonical JSON and signature are unchanged; the signature covers it. The cloud signs it only for a runner of `PINS_JOB_MIN_PROTOCOL` or later:
+    // an older runner's strict parse would refuse the key. Paths only: pin content never travels in a job.
+    pins: JobPinsSchema.optional(),
     // D#600 CX-4b: the full text of what this run's prompt cut, written by the runner under its own spill root before the agent starts. Present only on a job whose prompt carries a trimmed marker and omitted
     // (never null, never empty) on every other job, so their canonical JSON and signature are unchanged; the signature covers it. The cloud signs it only for a runner of `SPILL_JOB_MIN_PROTOCOL` or later. It is
     // text for the agent to read, never a path: the runner builds every path itself from the closed code.

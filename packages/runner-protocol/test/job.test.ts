@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, EXCLUDES_JOB_MIN_PROTOCOL, HANDOFF_MIN_PROTOCOL_VERSION, MEMORY_JOB_MIN_PROTOCOL, SPILL_JOB_MIN_PROTOCOL, CONTEXT_WINDOW_JOB_MIN_PROTOCOL } from "../src/messages.js";
+import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, EXCLUDES_JOB_MIN_PROTOCOL, HANDOFF_MIN_PROTOCOL_VERSION, MEMORY_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, CHECK_JOB_MIN_PROTOCOL, SPILL_JOB_MIN_PROTOCOL, CONTEXT_WINDOW_JOB_MIN_PROTOCOL } from "../src/messages.js";
 import { CONTEXT_SPILL_CODES, CONTEXT_SPILL_MAX_TOTAL_BYTES } from "../src/contextSpill.js";
 import { MAX_EXCLUDE_RULES } from "../src/excludeRules.js";
+import { MAX_JOB_PINS } from "../src/pinRules.js";
 import { MAX_JOB_MEMORY_BYTES, SESSION_ID_PATTERN } from "../src/job.js";
 import { ITEM_PR_BRANCH, JOB_CLASS_BY_ROLE, JOB_MODES, REVIEW_JOB_ROLES, jobClassOfRole, JobSchema, MAX_ROLE_CARD_CHARS, RUNNER_ELIGIBLE_ROLES, SignedJobSchema, TASK_KINDS, jobDigestMismatches, sha256Text } from "../src/job.js";
 import { sampleJob } from "./helpers/sampleJob.js";
@@ -17,7 +18,7 @@ describe("job schema", () => {
     expect(Object.keys(JobSchema.shape).sort()).toEqual(
       [
         "schema_version", "job_id", "run_id", "repo", "role", "mode", "spec", "task", "role_card", "role_tools_sha256", "continues",
-        "branch_prefix", "model_hint", "issued_at", "expires_at", "key_id", "review", "sandbox_allowances", "requires_engine", "memory", "excludes", "spill", "context_window", "check",
+        "branch_prefix", "model_hint", "issued_at", "expires_at", "key_id", "review", "sandbox_allowances", "requires_engine", "memory", "excludes", "pins", "spill", "context_window", "check",
       ].sort(),
     );
     expect(Object.keys(JobSchema.shape.repo.shape).sort()).toEqual(["id", "name", "owner", "private"]);
@@ -363,6 +364,50 @@ describe("excludes (D#600 CX-5c)", () => {
   it("is refused by the parse of a runner that predates the field (the reason the cloud gates the job)", () => {
     const before = JobSchema.omit({ excludes: true });
     expect(before.safeParse(sampleJob({ excludes: ["secret/a.txt"] })).success).toBe(false);
+    expect(before.safeParse(sampleJob()).success).toBe(true);
+  });
+});
+
+describe("pins (D#600 CX-5c2)", () => {
+  const ok = (pins: unknown): boolean => JobSchema.safeParse(sampleJob({ pins })).success;
+
+  it("accepts exact repository paths; [ ] { } ( ) are ordinary characters in a pin", () => {
+    expect(ok({ paths: ["README.md"] })).toBe(true);
+    expect(ok({ paths: ["app/[id]/page.tsx", "(group)/c.txt", "a{b}/d", "docs/guide.md"], budget_bytes: 35_840 })).toBe(true);
+  });
+
+  it("is omitted, never null and never empty, so a job without pins keeps its canonical JSON", () => {
+    expect("pins" in (JobSchema.parse(sampleJob()) as object)).toBe(false);
+    for (const bad of [null, {}, { paths: [] }, []]) expect(ok(bad), JSON.stringify(bad)).toBe(false);
+  });
+
+  it("refuses a glob character, and every path that cannot be a plain repository path", () => {
+    for (const bad of ["src/*.ts", "a?c", "**/x", "", "/abs/x", "~/x", "../x", "a/../b", "a/./b", "a//b", "a\\b", "a\u0000b", "a\nb", "a".repeat(513)]) expect(ok({ paths: [bad] }), JSON.stringify(bad)).toBe(false);
+    for (const bad of [1, null, {}, ["x"]]) expect(ok({ paths: [bad] }), JSON.stringify(bad)).toBe(false);
+  });
+
+  it("holds at most 500 distinct paths, refuses a repeat, and refuses a key it does not know (file text has no field to ride in)", () => {
+    expect(MAX_JOB_PINS).toBe(500);
+    expect(ok({ paths: Array.from({ length: 500 }, (_, i) => `p/${i}`) })).toBe(true);
+    expect(ok({ paths: Array.from({ length: 501 }, (_, i) => `p/${i}`) })).toBe(false);
+    expect(ok({ paths: ["a", "a"] })).toBe(false);
+    expect(ok({ paths: ["a"], text: "file text" })).toBe(false);
+    expect(ok({ paths: ["a"], items: [{ path: "a", text: "file text" }] })).toBe(false);
+  });
+
+  it("holds the budget as a positive integer within the repository budget's range, or not at all", () => {
+    for (const bad of [0, -1, 1.5, "100", null, 2_097_153]) expect(ok({ paths: ["a"], budget_bytes: bad }), String(bad)).toBe(false);
+    expect(ok({ paths: ["a"], budget_bytes: 2_097_152 })).toBe(true);
+  });
+
+  it("has a protocol floor above the check floor that the current version meets", () => {
+    expect(PINS_JOB_MIN_PROTOCOL).toBe(CHECK_JOB_MIN_PROTOCOL + 1);
+    expect(CURRENT_PROTOCOL_VERSION).toBeGreaterThanOrEqual(PINS_JOB_MIN_PROTOCOL);
+  });
+
+  it("is refused by the parse of a runner that predates the field (the reason the cloud gates the job)", () => {
+    const before = JobSchema.omit({ pins: true });
+    expect(before.safeParse(sampleJob({ pins: { paths: ["a.md"] } })).success).toBe(false);
     expect(before.safeParse(sampleJob()).success).toBe(true);
   });
 });

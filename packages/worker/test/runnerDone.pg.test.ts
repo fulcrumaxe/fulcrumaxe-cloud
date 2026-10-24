@@ -369,6 +369,15 @@ describe("runner done [pg]", () => {
           expect((await ledgerRows(id))[0].sections).toEqual(cloud);
         });
 
+        it("D#600 CX-5c2: the runner's pinned sections and reason notes are stored after the cloud's, once, and a repeat or another code adds nothing", async () => {
+          const id = await pending();
+          const g = await claimed(id);
+          await dispatched(id);
+          const pinned = [sec("pinned", 150, "1"), { ...sec("pinned", 3, "2"), trimmed_reason: "pin_missing" as const }, { ...sec("pinned", 7, "3"), trimmed_reason: "pins_over_budget" as const }];
+          await facade.finishRunnerDone({ ...lease(id, g), verdict: ok, contextLedger: { ...staging, sections: [sec("map", 800, "e"), ...pinned, sec("spec", 1, "f")] } });
+          expect((await ledgerRows(id))[0].sections).toEqual([...cloud, sec("map", 800, "e"), ...pinned]);
+        });
+
         it("a ledger the definer refuses leaves the dispatch row as it was", async () => {
           const id = await pending();
           const g = await claimed(id);
@@ -755,6 +764,22 @@ describe("runner done [pg]", () => {
       expect(fake.calls.length).toBe(calls);
       expect(await statusEvents(id)).toEqual(events);
       expect(await row(id)).toMatchObject({ cc_session_id: "7f0c1d2e-aaaa", envelope: { verdict: "pass" } });
+    });
+
+    // D#600 CX-5c2, end to end: the done route -> the facade -> the real definer. What a runner reports about its pinned files must be what the row holds.
+    it("a runner's pin sections and reasons, sent in `done` after the dispatch write, are in the stored ledger row", async () => {
+      const id = await pending({ specVersion: await spec(["src/**"]) });
+      const g = await claimRoute(id);
+      const sec = (code: string, bytes: number, sha: string) => ({ code: code as "spec", bytes, sha256: sha.repeat(64), trimmed_bytes: 0 });
+      const cloudSections = [sec("boundary", 60, "d"), sec("spec", 300, "d")];
+      await withTenant(writerPool, A.accountId, (client) => recordContextLedger(client, { accountId: A.accountId, runId: id, sections: cloudSections, measure: NOT_RECORDED_MEASURE }));
+      fake.pushBranch(fake.repos.get("acme/widgets")!, BRANCH(id, g), { files: [{ path: "src/footer.ts", changeType: "ADDED" }], aheadBy: 1 });
+      const pinned = [sec("pinned", 150, "1"), { ...sec("pinned", 2, "2"), trimmed_reason: "pin_too_large" }, { ...sec("pinned", 1, "3"), trimmed_reason: "pin_excluded" }];
+      const ledger = { basis: "measured", sections: pinned, first_turn_input: 100, peak_context: 200, tool_output_bytes: {}, compactions: 0 };
+      expect((await done(id, g, { context_ledger: ledger })).status).toBe(200);
+      const stored = (await admin.query("SELECT sections FROM run_context_ledger WHERE account_id = $1 AND run_id = $2", [A.accountId, id])).rows;
+      expect(stored).toHaveLength(1);
+      expect(stored[0].sections).toEqual([...cloudSections, ...pinned]);
     });
 
     // D#6 R-CHK-3 (C47). The runner sends run_ended(check_failed) FIRST and `done` with its `check` after it: the event ends nothing, the `done` is accepted (no stop), and the run ends

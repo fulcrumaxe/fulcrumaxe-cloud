@@ -5,7 +5,7 @@ import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
 import { IllegalStageTransitionError, WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { isBuildableKind } from "@fx/discussions";
-import { EXCLUDE_PROMPT_LINE, effectiveModeSql, isRunnerMode, runsInOurSandbox, type ContextSection } from "@fx/runner";
+import { EXCLUDE_PROMPT_LINE, effectiveModeSql, isRunnerMode, runsInOurSandbox } from "@fx/runner";
 import { attachRunNotes, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
 import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js";
 import { readItemRules } from "@fx/core/src/context/contextRules.js";
@@ -15,12 +15,13 @@ import { takeBuildSlot } from "./buildSlots.js";
 import { pauseForDenial } from "./reservationPauses.js";
 import { attemptKey } from "./attemptKeys.js";
 import { clampAssemblyMs } from "./assemblyClock.js";
-import { assemblePrompt, renderMemorySlot, sha256Of, MEMORY_MARKER_ROOM, type PinnedItem, type AssembledPrompt, type AssembleOptions, type MemoryPort, type NoteItem, type RenderedMemory } from "../prompt/assemblePrompt.js";
+import { assemblePrompt, renderMemorySlot, MEMORY_MARKER_ROOM, type PinnedItem, type AssembledPrompt, type AssembleOptions, type MemoryPort, type NoteItem, type RenderedMemory } from "../prompt/assemblePrompt.js";
 import { createMemoryPort, memoryTokensOf } from "../prompt/memoryRecall.js";
 import { readMemorySlotBytes } from "../prompt/memorySlotSetting.js";
 import { effectiveContextBudget, readContextBudgetBytes } from "../prompt/contextBudget.js";
 import type { RepoMapPort } from "../prompt/repoMap.js";
-import { excludeCovers, type PinContentPort } from "../prompt/pinContent.js";
+import { type PinContentPort } from "../prompt/pinContent.js";
+import { pinLedgerNotes, pinnedBody, pinnedLabel, splitPinsByExcludes } from "@fulcrumaxe/runner-protocol";
 import { mapIdentityOf, recalledEntriesOf, recordRunContextInputs, recordRunItemSources, type ItemSourceRecord } from "../prompt/runContextInputs.js";
 import type { AdvanceRunPorts } from "./runPorts.js";
 
@@ -299,23 +300,6 @@ async function readPins(port: PinContentPort | undefined, request: Parameters<Pi
 }
 
 /**
- * D#600 CX-5b: what the ledger says about the pins beyond their own sections: how many could not be read (`pin_missing`, in `bytes`), and how far the pins stand
- * over the repository's budget (`pins_over_budget`, in bytes). Pins are never cut, so an overage is a note, not a trim. Figures and fixed hashes only: no path.
- */
-function pinLedgerNotes(read: { items: ReadonlyArray<{ text: string }>; missing: number; tooLarge: number; excluded: number }, budgetBytes: number | undefined): ContextSection[] {
-  const notes: ContextSection[] = [];
-  const count = (n: number, reason: "pin_missing" | "pin_too_large" | "pin_excluded"): void => {
-    if (n > 0) notes.push({ code: "pinned", bytes: n, sha256: sha256Of(reason), trimmed_bytes: 0, trimmed_reason: reason });
-  };
-  count(read.missing, "pin_missing");
-  count(read.tooLarge, "pin_too_large");
-  count(read.excluded, "pin_excluded");
-  const total = read.items.reduce((n, p) => n + Buffer.byteLength(p.text, "utf8"), 0);
-  if (budgetBytes !== undefined && total > budgetBytes) notes.push({ code: "pinned", bytes: total - budgetBytes, sha256: sha256Of("pins_over_budget"), trimmed_bytes: 0, trimmed_reason: "pins_over_budget" });
-  return notes;
-}
-
-/**
  * D#598 P3b: where a stacked item's run starts. Fails closed at every step: a runner run (the platform checks the branch out and opens the
  * pull request itself, against the default branch) is refused, so is a parent with no recorded pull request, a start with no way to read
  * GitHub, and any read that throws. Only `decideStackStart`'s answer lets a run start, and only with a branch and a commit it verified equal.
@@ -450,8 +434,7 @@ export async function startBuildForItem(
   // An exclude wins over a pin (an admin's exclude is never bypassed by a member's pin): a pin under any exclude of the resolved set is never fetched.
   const excludePatterns = rules.filter((r) => r.kind === "exclude").map((r) => r.path);
   const allPins = rules.filter((r) => r.kind === "pin").map((r) => r.path);
-  const pinPaths = allPins.filter((path) => !excludePatterns.some((pattern) => excludeCovers(pattern, path)));
-  const excludedPins = allPins.length - pinPaths.length;
+  const { readable: pinPaths, excluded: excludedPins } = splitPinsByExcludes(allPins, excludePatterns);
   const fetched = pinPaths.length === 0 || facts.repo_id === null ? undefined : await readPins(options.pins, { accountId, repoId: facts.repo_id, owner: facts.gh_owner, name: facts.gh_name, paths: pinPaths, ...(stackBase ? { sha: stackBase.sha } : planeBase ? { sha: planeBase.sha } : {}) });
   const pinRead = allPins.length === 0 || facts.repo_id === null ? undefined : { ...(fetched ?? { items: [], missing: 0, tooLarge: 0 }), excluded: excludedPins };
   const assembleStarted = performance.now();
@@ -460,7 +443,7 @@ export async function startBuildForItem(
       owner: facts.gh_owner, name: facts.gh_name, number, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human", runtime: promptRuntimeOf(executionMode), runNotes: renderRunNotes(notes),
       ...(map ? { map } : {}), ...(memory ? { memory } : {}), ...(stackBase ? { stackBase } : {}), ...(planeBase ? { planeBase } : {}),
       ...(rules.some((r) => r.kind === "exclude") ? { excludeLine: true } : {}),
-      ...(pinRead && pinRead.items.length > 0 ? { pins: pinRead.items.map((p, i) => ({ label: `PINNED FILE ${i + 1} of ${pinRead.items.length}`, text: `path: ${p.path}\n${p.text}` })) } : {}),
+      ...(pinRead && pinRead.items.length > 0 ? { pins: pinRead.items.map((p, i) => ({ label: pinnedLabel(i, pinRead.items.length), text: pinnedBody(p) })) } : {}),
     },
     { spill: true, ...(budgetBytes === undefined ? {} : { budgetBytes }) },
   );

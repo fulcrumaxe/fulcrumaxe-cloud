@@ -1,0 +1,130 @@
+{
+  "comment": "D#600 CX-5c2: one table of pin cases that the cloud sandbox path (packages/pipeline/test/prompt/pinCasesShared.test.ts) and the local runner (packages/fx-runner/test/job/pinFilesShared.test.ts) both run. Same inputs, same files read, same ledger reasons. A file is a string, a {fill, count} object (`count` copies of one character) or a {bytes} object (the literal text, for a NUL). `generate: n` adds n files f000.. whose text is their path and pins them all; `readFirst: k` expects the first k of them.",
+  "cases": [
+    {
+      "name": "every pin is read in path order and nothing is noted",
+      "files": { "b.md": "bee", "a/a.md": "aye\nwith lines\n" },
+      "pins": ["b.md", "a/a.md", "b.md"],
+      "excludes": [],
+      "read": ["a/a.md", "b.md"],
+      "notes": []
+    },
+    {
+      "name": "a deleted file and a folder are pin_missing, counted",
+      "files": { "a.md": "A", "docs/x.md": "x" },
+      "pins": ["gone.md", "docs", "a.md"],
+      "excludes": [],
+      "read": ["a.md"],
+      "notes": [{ "reason": "pin_missing", "bytes": 2 }]
+    },
+    {
+      "name": "a bracketed folder is a literal path",
+      "files": { "app/[id]/page.tsx": "page", "app/i/page.tsx": "other" },
+      "pins": ["app/[id]/page.tsx"],
+      "excludes": [],
+      "read": ["app/[id]/page.tsx"],
+      "notes": []
+    },
+    {
+      "name": "a file at 190,000 characters is read whole; one character more is pin_too_large",
+      "files": { "at.md": { "fill": "a", "count": 190000 }, "over.md": { "fill": "b", "count": 190001 } },
+      "pins": ["at.md", "over.md"],
+      "excludes": [],
+      "read": ["at.md"],
+      "notes": [{ "reason": "pin_too_large", "bytes": 1 }]
+    },
+    {
+      "name": "a wide-character file is measured in characters, not bytes",
+      "files": { "wide.md": { "fill": "é", "count": 190000 } },
+      "pins": ["wide.md"],
+      "excludes": [],
+      "read": ["wide.md"],
+      "notes": []
+    },
+    {
+      "name": "a file over the 2 MiB fetch cap is pin_too_large and never read",
+      "files": { "huge.bin": { "fill": "z", "count": 2097153 }, "ok.md": "fine" },
+      "pins": ["huge.bin", "ok.md"],
+      "excludes": [],
+      "read": ["ok.md"],
+      "neverRead": ["huge.bin"],
+      "notes": [{ "reason": "pin_too_large", "bytes": 1 }]
+    },
+    {
+      "name": "a NUL byte makes a file pin_missing",
+      "files": { "nul.dat": { "bytes": "a\u0000b" }, "ok.md": "fine" },
+      "pins": ["nul.dat", "ok.md"],
+      "excludes": [],
+      "read": ["ok.md"],
+      "notes": [{ "reason": "pin_missing", "bytes": 1 }]
+    },
+    {
+      "name": "an exclude wins over a pin: the covered pin is pin_excluded and its file is never opened",
+      "files": { "secret/a.txt": "classified", "ok.md": "fine" },
+      "pins": ["secret/a.txt", "ok.md"],
+      "excludes": ["secret"],
+      "read": ["ok.md"],
+      "neverRead": ["secret/a.txt"],
+      "notes": [{ "reason": "pin_excluded", "bytes": 1 }]
+    },
+    {
+      "name": "an exclude glob and a differently cased folder both cover a pin",
+      "files": { "keys/server.pem": "key", "Vault/x.txt": "x", "keep.md": "k" },
+      "pins": ["keys/server.pem", "Vault/x.txt", "keep.md"],
+      "excludes": ["**/*.pem", "vault"],
+      "read": ["keep.md"],
+      "neverRead": ["keys/server.pem", "Vault/x.txt"],
+      "notes": [{ "reason": "pin_excluded", "bytes": 2 }]
+    },
+    {
+      "name": "an excluded pin for a file that does not exist is still pin_excluded, not pin_missing",
+      "files": { "ok.md": "fine" },
+      "pins": ["secret/gone.txt", "ok.md"],
+      "excludes": ["secret"],
+      "read": ["ok.md"],
+      "notes": [{ "reason": "pin_excluded", "bytes": 1 }]
+    },
+    {
+      "name": "pins over a lowered budget are read in full and pins_over_budget says by how much",
+      "files": { "a.md": { "fill": "a", "count": 300 }, "b.md": { "fill": "b", "count": 200 } },
+      "pins": ["a.md", "b.md"],
+      "excludes": [],
+      "budget": 400,
+      "read": ["a.md", "b.md"],
+      "notes": [{ "reason": "pins_over_budget", "bytes": 100 }]
+    },
+    {
+      "name": "pins exactly at the budget note nothing",
+      "files": { "a.md": { "fill": "a", "count": 400 } },
+      "pins": ["a.md"],
+      "excludes": [],
+      "budget": 400,
+      "read": ["a.md"],
+      "notes": []
+    },
+    {
+      "name": "every reason at once, in the fixed order",
+      "files": { "ok.md": { "fill": "o", "count": 500 }, "big.md": { "fill": "b", "count": 190001 }, "secret/s.txt": "s" },
+      "pins": ["ok.md", "big.md", "gone.md", "secret/s.txt"],
+      "excludes": ["secret/s.txt"],
+      "budget": 100,
+      "read": ["ok.md"],
+      "notes": [
+        { "reason": "pin_missing", "bytes": 1 },
+        { "reason": "pin_too_large", "bytes": 1 },
+        { "reason": "pin_excluded", "bytes": 1 },
+        { "reason": "pins_over_budget", "bytes": 400 }
+      ]
+    },
+    {
+      "name": "only the first 40 pins in path order are read; the rest are pin_missing",
+      "generate": 45,
+      "files": {},
+      "pins": [],
+      "excludes": [],
+      "read": [],
+      "readFirst": 40,
+      "notes": [{ "reason": "pin_missing", "bytes": 5 }]
+    }
+  ]
+}
