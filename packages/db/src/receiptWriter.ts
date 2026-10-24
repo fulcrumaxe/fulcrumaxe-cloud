@@ -163,3 +163,33 @@ export async function writeReceipt(client: PoolClient, input: WriteReceiptInput)
   );
   return { store: 'decision_receipts', id: rows[0]!.id };
 }
+
+export interface SubItemApprovalReceiptInput {
+  runId: string;
+  workItemId: string;
+  /** The sub-item's key: `fix-<round>` for a fix round, a planned PR's key otherwise. */
+  key: string;
+  /** The item's current Spec version: a re-spec makes this approval stop counting. */
+  specVersionId: string;
+  dialVersion: number;
+}
+
+const SUB_ITEM_KEY = /^[a-z0-9-]{1,32}$/;
+
+/**
+ * D#483 S5-b2a: the `launch_sub_item` receipt a PERSON's Approve leaves (migration 0906). The actor is the signed-in owner or admin of the
+ * `withTenant` session, never `policy`, and the row is keyed (work item, decision type, key, Spec version): the same key under the same Spec
+ * version answers the same receipt (`replayed`), another Spec version writes a new one. The definer refuses a token and a plain member.
+ */
+export async function writeSubItemApprovalReceipt(client: PoolClient, input: SubItemApprovalReceiptInput): Promise<{ id: string; replayed: boolean }> {
+  if (!isText(input.runId) || !isText(input.workItemId) || !isText(input.specVersionId)) throw new ReceiptWriteError('receipt_missing_run_id');
+  if (!SUB_ITEM_KEY.test(input.key)) throw new ReceiptWriteError('receipt_chosen_invalid');
+  if (!Number.isInteger(input.dialVersion) || input.dialVersion < DIAL_VERSION_CATALOGUE_DEFAULT || input.dialVersion > INT4_MAX) throw new ReceiptWriteError('receipt_invalid_dial_version');
+  const entry = CATALOGUE.find((e) => e.id === 'launch_sub_item');
+  if (!entry || entry.class !== 'human_over_the_loop') throw new ReceiptWriteError('receipt_unknown_decision_type');
+  const { rows } = await client.query<{ o_id: string; o_replayed: boolean }>(
+    'SELECT o_id, o_replayed FROM sub_item_approval_receipt_write($1::uuid, $2::text, $3::uuid, $4::uuid, $5::integer, $6::integer)',
+    [input.workItemId, input.key, input.specVersionId, input.runId, input.dialVersion, CATALOGUE_VERSION],
+  );
+  return { id: rows[0]!.o_id, replayed: rows[0]!.o_replayed };
+}

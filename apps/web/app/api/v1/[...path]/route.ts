@@ -7,6 +7,7 @@ import { memoryEditDeps } from "@fx/api/src/routes/memory.js";
 import { publicChangeDeps } from "@fx/api/src/routes/work-item-actions.js";
 import { setupRequestDeps } from "@fx/api/src/routes/setupRequests.js";
 import { decisionAskDeps } from "@fx/api/src/routes/decisionAsks.js";
+import { subItemApprovalDeps } from "@fx/api/src/routes/subItemApprovals.js";
 import { vercelConnectionDeps } from "@fx/api/src/routes/vercel-connection.js";
 import { createVercelTokenValidator } from "@fx/model-connection";
 import { createPinnedVercelFetch } from "../../../../lib/vercelPinnedFetch";
@@ -59,6 +60,11 @@ vercelConnectionDeps.getValidator = () => createVercelTokenValidator({ fetch: cr
 decisionAskDeps.getAnswerer = async () => {
   const worker = await getWorker();
   return worker === null ? null : (input) => worker.answerDecisionAsk(input);
+};
+// D#483 S5-b2a: a person's Approve on one sub-item runs on the worker too (the receipt login); null (a 503) until a worker can be built.
+subItemApprovalDeps.getApprover = async () => {
+  const worker = await getWorker();
+  return worker === null ? null : (input) => worker.approveSubItem(input);
 };
 vercelConnectionDeps.getNames = () => productionVercelNames;
 // D#601 MEM-4a2b: an edited memory is scanned against this process's live installation tokens, the same source the worker's intake uses.

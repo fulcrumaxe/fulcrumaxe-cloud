@@ -21,6 +21,7 @@ import { askSettingRoutes } from "./ask-settings.js";
 import { discoveryRoutes } from "./discovery.js";
 import { setupRequestRoutes } from "./setupRequests.js";
 import { decisionAskRoutes } from "./decisionAsks.js";
+import { subItemApprovalRoutes } from "./subItemApprovals.js";
 import { mergeReadyRoutes } from "./mergeReady.js";
 import { githubRoutes } from "./github.js";
 import { billingRoutes } from "./billing.js";
@@ -87,6 +88,7 @@ export const ROUTES: RouteEntry[] = [
   ...discoveryRoutes,
   ...setupRequestRoutes,
   ...decisionAskRoutes,
+  ...subItemApprovalRoutes,
   ...mergeReadyRoutes,
   ...actionRuleRoutes,
   ...githubRoutes,

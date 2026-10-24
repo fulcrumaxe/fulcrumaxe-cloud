@@ -60,6 +60,9 @@ export type SetupRequestCheckWorker = Pick<Worker, "sweepSetupRequestChecks">;
 /** What the decision-ask answer route asks of the worker (D#598 P8c-2a): the answer runs on the worker's receipt pool, which is never handed out. */
 export type DecisionAskAnswerWorker = Pick<Worker, "answerDecisionAsk">;
 
+/** What the sub-item approve route asks of the worker (D#483 S5-b2a): the approval runs on the worker's receipt pool, which is never handed out. */
+export type SubItemApprovalWorker = Pick<Worker, "approveSubItem">;
+
 /** What the branch cleanup cron asks of the worker (D#598 P1f-5d): one pass of the cleanup sweep, and (D#598) one pass of the stale pull-request sweep. */
 export type BranchCleanupWorker = Pick<Worker, "sweepBranchCleanups" | "sweepPrSlotHolders">;
 
@@ -67,7 +70,7 @@ export type BranchCleanupWorker = Pick<Worker, "sweepBranchCleanups" | "sweepPrS
 export type ProposalVerifySweepWorker = Pick<Worker, "sweepProposalVerification">;
 
 /** What the web app asks of the worker: the pipeline's run-action port, the compute-settle tick, the runner lease-fail method (D#6 R2a), the runner queue tick (R2b) and the sandbox reaper's two methods (SANDBOX-REAPER-1b; the reconcile cron calls them). */
-export type AppWorker = RunActionsWorker & ComputeSettleSweepWorker & AdvanceWorker & DecisionWorker & ReviewWorker & LightPublishWorker & RespecPublishWorker & RunnerLeaseFacade & RunnerClaimFacade & RunnerDoneFacade & RunnerGitTicketFacade & RunnerPlanePushFacade & RunnerSweepWorker & HandoffSweepWorker & Pick<RunHandoffs, "completeHandoffOnDone"> & InvariantSweepWorker & StageResumeSweepWorker & SetupRequestCheckWorker & BranchCleanupWorker & ProposalVerifySweepWorker & DecisionAskAnswerWorker & Pick<PlanePublish, "retryPublish" | "openPublicPullRequest"> & SandboxReapWorker;
+export type AppWorker = RunActionsWorker & ComputeSettleSweepWorker & AdvanceWorker & DecisionWorker & ReviewWorker & LightPublishWorker & RespecPublishWorker & RunnerLeaseFacade & RunnerClaimFacade & RunnerDoneFacade & RunnerGitTicketFacade & RunnerPlanePushFacade & RunnerSweepWorker & HandoffSweepWorker & Pick<RunHandoffs, "completeHandoffOnDone"> & InvariantSweepWorker & StageResumeSweepWorker & SetupRequestCheckWorker & BranchCleanupWorker & ProposalVerifySweepWorker & DecisionAskAnswerWorker & SubItemApprovalWorker & Pick<PlanePublish, "retryPublish" | "openPublicPullRequest"> & SandboxReapWorker;
 
 export type WorkerOptionsProvider = () => CreateWorkerOptions | null;
 

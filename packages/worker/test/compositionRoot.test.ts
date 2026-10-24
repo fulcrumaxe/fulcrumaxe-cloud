@@ -126,6 +126,24 @@ describe("buildWorker (C15 / C26 / C59 §5)", () => {
     expect(worker.targetDeps.githubForward).toBe(worker.githubForward);
   });
 
+  it("D#483 S5-b2a: approveSubItem connects on the receipt pool and no other, and a token principal is refused before any connection", async () => {
+    const connected: string[] = [];
+    const pools = fakePools();
+    for (const key of ["runnerPool", "platformOpsPool", "receiptPool"] as const) {
+      (pools[key] as unknown as { connect: () => Promise<never> }).connect = async () => {
+        connected.push(key);
+        throw new Error("stop here");
+      };
+    }
+    const worker = await buildWorker(options({ createPools: async () => pools }));
+    const principal = { accountId: "11111111-1111-4111-8111-111111111111", userId: "22222222-2222-4222-8222-222222222222" };
+    const workItemId = "33333333-3333-4333-8333-333333333333";
+    await expect(worker.approveSubItem({ principal, workItemId, key: "fix-1" })).rejects.toThrow("stop here");
+    expect(connected).toEqual(["receiptPool"]);
+    await expect(worker.approveSubItem({ principal: { ...principal, tokenId: "t1" }, workItemId, key: "fix-1" })).rejects.toMatchObject({ name: "SubItemApprovalError", status: 403, code: "session_required" });
+    expect(connected).toEqual(["receiptPool"]);
+  });
+
   it("D#598 P8c-2a: answerDecisionAsk connects on the receipt pool and no other, and a token principal is refused before any connection", async () => {
     const connected: string[] = [];
     const pools = fakePools();

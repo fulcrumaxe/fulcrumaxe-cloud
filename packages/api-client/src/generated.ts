@@ -1807,6 +1807,33 @@ export interface Operations {
       answered_option: string;
     };
   };
+  approveSubItem: {
+    path: {
+      id: string;
+      key: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      work_item_id: string;
+      key: string;
+      receipt_id: string;
+      spec_version_id: string;
+      withdrawn_asks: number;
+    };
+  };
+  reapproveWorkItem: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      work_item_id: string;
+      approval_id: string;
+      spec_version_id: string;
+    };
+  };
   listMergeReady: {
     path: undefined;
     query: undefined;
@@ -4883,6 +4910,28 @@ export const operations = {
     pathParams: ["id"],
     queryParams: [],
     hasBody: true,
+  },
+  approveSubItem: {
+    method: "POST",
+    path: "/api/v1/work-items/{id}/sub-items/{key}/approve",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "required",
+    pathParams: ["id","key"],
+    queryParams: [],
+    hasBody: false,
+  },
+  reapproveWorkItem: {
+    method: "POST",
+    path: "/api/v1/work-items/{id}/reapprove",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "required",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
   },
   listMergeReady: {
     method: "GET",

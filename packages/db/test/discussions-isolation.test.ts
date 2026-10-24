@@ -173,8 +173,12 @@ describe('discussions isolation (D#71 DS-1)', () => {
           expect(row.roles).not.toContain('platform_ops');
         }
 
+        // 0906 (D#483 S5-b2a): work_item_approval_definer reads a work item's current Spec version through one SELECT policy of its own.
+        // Like eraser_access it is for a NOLOGIN definer role only; the carve-out is that exact policy, by name and role.
+        const approvalRead = rows.filter((r) => table === 'spec_versions' && r.policyname === 'work_item_approval_definer_select');
+        for (const r of approvalRead) expect(r.roles).toEqual(['work_item_approval_definer']);
         if (ERASER_ACCESS_TABLES.has(table)) {
-          expect(rows).toHaveLength(2);
+          expect(rows).toHaveLength(2 + approvalRead.length);
           const eraser = rows.find((r) => r.policyname === 'eraser_access');
           expect(eraser?.roles).toEqual(['discussion_eraser']);
           expect(eraser?.qual).toBe('true');
