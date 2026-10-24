@@ -179,6 +179,8 @@ export const PlanePushTokenReply = z
     base: z.literal("main"),
     pr: PlanePushText,
     identity: PlanePushIdentity,
+    /** FIXROUND-REPUBLISH (R2-c1): present only for a fix round of an item whose public pull request is open: the branch head the platform last pushed (the stamp). The push replaces exactly that head or nothing. */
+    replaces_head: z.string().regex(/^[0-9a-f]{40}$/).optional(),
   })
   .strict();
 export type PlanePushTokenReply = z.infer<typeof PlanePushTokenReply>;

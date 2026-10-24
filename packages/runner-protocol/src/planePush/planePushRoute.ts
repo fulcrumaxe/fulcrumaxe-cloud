@@ -28,7 +28,9 @@ import { PUBLIC_BASE_BRANCH, branchNameOk, type PublicGitTransport } from "./pla
  *   7. push (never forced) and open the PR.
  *
  * Every doubt is a refusal and no refusal pushes anything. A refusal names a place (path, line) and a rule key, never matched text.
- * Not done here: a second push to a branch that already exists (a fix round on a paired PR) is refused as `branch_exists`.
+ * A second push to a branch that already exists is refused as `branch_exists`, unless the caller says it is an UPDATE of the head the platform last pushed (`updateOf`, from the cloud's own stamp): then the
+ * public branch must be at that head right now, and the new commit (built the same way, on the current public main) replaces it by a compare-and-swap push; anyone's commit in between makes it
+ * `public_branch_moved` and the branch keeps it. No pull request is opened; the open one follows the branch.
  */
 
 export type PlaneRefusalCode =
@@ -44,13 +46,15 @@ export type PlaneRefusalCode =
   | "app_not_installed"
   | "token_scope_mismatch"
   | "branch_exists"
+  | "public_branch_moved"
+  | "republish_base_missing"
   | "push_failed"
   | "unsafe_git_config"
   | "pr_failed";
 
 export const PLANE_REFUSAL_CODES: readonly PlaneRefusalCode[] = [
   "bad_input", "pairing_self", "pairing_changed", "base_diverged", "no_changes", "scan_refused", "scan_identity_mismatch", "public_unavailable",
-  "public_tip_moved", "app_not_installed", "token_scope_mismatch", "branch_exists", "push_failed", "pr_failed", "unsafe_git_config",
+  "public_tip_moved", "app_not_installed", "token_scope_mismatch", "branch_exists", "push_failed", "pr_failed", "unsafe_git_config", "public_branch_moved", "republish_base_missing",
 ];
 
 export class PlaneRouteError extends Error {
@@ -72,6 +76,8 @@ export interface PublicApi {
   /** A token for the paired repo alone with contents and pull_requests write alone; throws `{code: "app_not_installed" | "token_scope_mismatch"}`. */
   mintPushToken(codeRepo: string): Promise<string>;
   branchExists(input: { codeRepo: string; branch: string; token: string }): Promise<boolean>;
+  /** The branch's head, or null when it does not exist. Needed for an update only. */
+  branchHead?(input: { codeRepo: string; branch: string; token: string }): Promise<string | null>;
   openPullRequest(input: { codeRepo: string; branch: string; base: string; title: string; body: string; token: string }): Promise<{ number: number; url: string }>;
 }
 
@@ -104,6 +110,8 @@ export interface PlaneRouteInput {
   defaultBranch: string;
   /** The public branch to create. */
   branch: string;
+  /** An update of the branch, not a creation: the head the platform last pushed to it. Only the cloud's own stamp. */
+  updateOf?: string;
   /** Plain text, one line. Scanned with the commit. */
   title: string;
   body: string;
@@ -122,7 +130,8 @@ export interface PlaneRouteDeps {
 
 export type PlaneRouteResult =
   | { plane: "single"; repo: string; base: string }
-  | { plane: "paired"; repo: string; number: number; url: string; branch: string; commit: string; tip: string };
+  | { plane: "paired"; repo: string; number: number; url: string; branch: string; commit: string; tip: string }
+  | { plane: "updated"; repo: string; branch: string; commit: string; tip: string };
 
 const OBJECT_ID = /^[0-9a-f]{40}$/;
 const ZERO_ID = "0".repeat(40);
@@ -153,6 +162,7 @@ function validateInput(i: PlaneRouteInput): void {
   };
   if (!OBJECT_ID.test(i.privateBase) || !OBJECT_ID.test(i.privateHead)) bad("the private base and head must be full 40-hex commit ids");
   if (!branchNameOk(i.branch)) bad("the branch name is not usable on the public repo");
+  if (i.updateOf !== undefined && !OBJECT_ID.test(i.updateOf)) bad("the head to update must be a full 40-hex commit id");
   if (!GIT_SAFE_LINE.test(i.title) || i.title.trim() !== i.title) bad("the title must be one plain line of at most 256 characters");
   if (i.body.length === 0 || i.body.length > MAX_BODY || /\u0000/.test(i.body)) bad("the body must be non-empty text of at most 60000 characters");
   if (!IDENTITY.test(i.identity.name) || !EMAIL.test(i.identity.email)) bad("the platform identity is malformed");
@@ -338,6 +348,33 @@ export async function routeAndPush(input: PlaneRouteInput, deps: PlaneRouteDeps)
   if (freshTip !== tip) throw new PlaneRouteError("public_tip_moved", "the public repo's main moved while the item was being prepared; run it again");
   if (!scan.scanned || scan.scanned.commit !== commit || scan.scanned.base !== freshTip) {
     throw new PlaneRouteError("scan_identity_mismatch", "the scan did not cover exactly this commit on the public repo's current main; nothing is pushed");
+  }
+  if (input.updateOf !== undefined) {
+    const stamp = input.updateOf;
+    const headNow = async (): Promise<string | null> => {
+      if (!deps.api.branchHead) throw new PlaneRouteError("bad_input", "this caller cannot update a branch");
+      return deps.api.branchHead({ codeRepo, branch: input.branch, token });
+    };
+    const moved = new PlaneRouteError("public_branch_moved", "the public branch is not where the platform left it; nothing is pushed");
+    let live: string | null;
+    try {
+      live = await headNow();
+    } catch (err) {
+      throw failure(err, "public_unavailable", "the public branch could not be read before the update");
+    }
+    if (live !== stamp) throw moved;
+    try {
+      await deps.transport.push({ repoDir: input.repoDir, codeRepo, commit, branch: input.branch, token, expectedHead: stamp });
+    } catch (err) {
+      // A push the server refused because the branch moved in between is told apart by reading the branch again, never by the tool's text. A branch that is at OUR commit
+      // means the server applied the update and only the client failed: the update stands (the cloud reads GitHub again before it records it).
+      const after = await headNow().catch(() => undefined);
+      if (after !== commit) {
+        if (after !== undefined && after !== stamp) throw moved;
+        throw failure(err, "push_failed", "the update of the public branch failed");
+      }
+    }
+    return { plane: "updated", repo: codeRepo, branch: input.branch, commit, tip: freshTip };
   }
   try {
     if (await deps.api.branchExists({ codeRepo, branch: input.branch, token })) throw new PlaneRouteError("branch_exists", "that branch already exists on the public repo; nothing is pushed");
