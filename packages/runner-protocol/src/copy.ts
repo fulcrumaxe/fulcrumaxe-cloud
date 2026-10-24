@@ -73,6 +73,8 @@ export const COPY = {
   /** D#6 R4a-6 (C16 section 1.3): on the runner screen for a runner whose sandbox does not work. `{reason}` is the closed code it reported. */
   sandboxUnavailable: "Sandbox not working on this machine ({reason}). Run `fx-runner doctor` there to see the fix.",
   agentFailed: "The agent stopped without finishing. Retry, or open the run for details.",
+  /** D#6 RUNNER-AGENT-NO-FULLCHECK: a run whose agent the job's memory limit ended (run_ended `resource_limit`, failure reason `resource_limit`). */
+  resourceLimit: "This job hit its memory limit on your runner, so the agent was stopped before it finished. Retry, or give jobs more memory on that machine (`fx-runner config set budget.light.memory` or `budget.heavy.memory`).",
   runnerSetupFailed: "Your runner could not start the agent ({detail}). Check the runner's setup, then retry.",
   /** D#6 R4a-3b (C25 section 1.4): shown when a fix round's push was rejected. */
   pushRejected: "Your runner could not push to the pull request's branch, because the branch changed while the agent was working. Retry to run on the new head.",

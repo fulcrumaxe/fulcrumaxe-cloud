@@ -11,7 +11,7 @@ export interface FleetControl {
   allowed: boolean;
   reason: string | null;
 }
-export const FLEET_CONTROL_NAMES = ["pause", "drain", "resume", "rename", "remove"] as const;
+export const FLEET_CONTROL_NAMES = ["pause", "drain", "resume", "rename", "remove", "check"] as const;
 export type FleetControls = Record<(typeof FLEET_CONTROL_NAMES)[number], FleetControl>;
 
 export const NOT_YOUR_RUNNER_REASON = "Only the person who registered this runner, or an owner or admin, can do this.";
@@ -19,6 +19,9 @@ export const SET_BY_SOMEONE_ELSE_REASON = "Someone else set this. Only an owner 
 export const ALREADY_PAUSED_REASON = "Already paused.";
 export const ALREADY_FINISHING_REASON = "Already finishing current work.";
 export const NOT_HELD_REASON = "Not paused.";
+/** D#6 RUNNER-PING: "Check runner now" is for an owner or admin, and only means something for a runner that waits for a wake-up between claims. */
+export const CHECK_ADMINS_ONLY_REASON = "Only an owner or admin can check a runner.";
+export const CHECK_NOT_NEEDED_REASON = "This runner checks in every minute on its own.";
 
 /**
  * Pure. The registrant or an owner or admin may pause, drain, resume, rename and remove. A registrant who is not an admin may not take over, or
@@ -32,6 +35,8 @@ export function fleetControlsOf(input: {
   pausedBy: string | null;
   draining: boolean;
   drainedBy: string | null;
+  /** D#6 RUNNER-PING: it holds a wake grant. Absent reads as false. */
+  wakeCapable?: boolean;
 }): FleetControls {
   const admin = input.role === "owner" || input.role === "admin";
   const owns = admin || input.registeredBy === input.userId;
@@ -46,6 +51,7 @@ export function fleetControlsOf(input: {
     resume: gate(!input.paused && !input.draining ? no(NOT_HELD_REASON) : pauseMine && drainMine ? yes : no(SET_BY_SOMEONE_ELSE_REASON)),
     rename: gate(yes),
     remove: gate(yes),
+    check: !admin ? no(CHECK_ADMINS_ONLY_REASON) : input.wakeCapable === true ? yes : no(CHECK_NOT_NEEDED_REASON),
   };
 }
 

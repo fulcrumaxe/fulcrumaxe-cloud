@@ -146,7 +146,11 @@ export async function recordStage(
 
   // D#598 P1f-5d: an item that reaches a final stage may have branches to remove. This only wakes the cleanup cron (a hint: the stage is read again, and
   // the standard backstop looks now and then); nothing about the move is stamped.
-  if (toStage === 'merged' || toStage === 'closed_unmerged' || toStage === 'closed') void markWorkPending('branch-cleanup');
+  if (toStage === 'merged' || toStage === 'closed_unmerged' || toStage === 'closed') {
+    void markWorkPending('branch-cleanup');
+    // The end-of-item sandbox reap pass (a 15-minute reconcile job) is what looks at this item's sandbox; the reconciler is otherwise on a slow cadence.
+    void markWorkPending('reconcile');
+  }
 
   return { recorded: true, transitionId };
 }

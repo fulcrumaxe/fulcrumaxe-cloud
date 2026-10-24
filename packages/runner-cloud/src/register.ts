@@ -1,3 +1,4 @@
+import { markRunnerWork } from "@fx/core/src/pendingWork.js";
 import { isIP } from "node:net";
 import { RegisterMessage, RegisterResponse } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
@@ -65,6 +66,8 @@ export async function registerRunner(deps: RunnerCloudDeps, req: RunnerHttpReque
       // Parsed inside the transaction: a reply that does not fit the protocol rolls the registration back.
       return RegisterResponse.parse({ runner_id: id, account_id: accountId, credential_mode: row.rows[0]?.credential_mode });
     });
+    // The registration has committed: a new runner covering repositories with waiting runs may be able to take them.
+    void markRunnerWork(accountId);
     return { status: 201, body, headers: { "cache-control": "no-store" } };
   } catch (error) {
     switch (pgCode(error)) {

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Pool } from "pg";
 import type { ContextSection } from "@fulcrumaxe/runner-protocol";
 import { setPendingHooks } from "@fx/core/src/pendingWork.js";
@@ -335,6 +335,29 @@ describe("RunnerTarget [pg]", () => {
         await t.target.resume(await insertRun(w, { role: "executor" }), "session-1");
         await settle();
         expect(marks.get("pending:runner-sweeper")).toBeGreaterThanOrEqual(before + RUNNER_WAITING_NOTICE_MS);
+      });
+
+      it("dispatch and resume mark the account's runner-work key once the job is recorded, and a failing cache never fails them", async () => {
+        const w = await world();
+        const t = target(db.runWriterPool);
+        const key = `wake:acct:${w.accountId}`;
+        const before = Date.now();
+        await t.target.dispatch(await insertRun(w));
+        await settle();
+        expect(marks.get(key)).toBeGreaterThanOrEqual(before);
+        marks.clear();
+        await t.target.resume(await insertRun(w, { role: "executor" }), "session-1");
+        await settle();
+        expect(marks.get(key)).toBeGreaterThanOrEqual(before);
+        marks.clear();
+        const logs: string[] = [];
+        const spy = vi.spyOn(console, "log").mockImplementation((line: unknown) => void logs.push(String(line)));
+        setPendingHooks({ store: { get: async () => undefined, set: async () => { throw new Error("cache down"); }, delete: async () => undefined } });
+        expect(await t.target.dispatch(await insertRun(w))).toEqual({ queued: true });
+        await settle();
+        spy.mockRestore();
+        expect(marks.size).toBe(0);
+        expect(logs.some((l) => l.includes("runner_work.mark_failed"))).toBe(true);
       });
 
       it("a dispatch whose job could not be issued marks nothing", async () => {

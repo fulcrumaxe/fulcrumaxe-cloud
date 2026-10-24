@@ -1,8 +1,13 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { MARKER_TTL_SECONDS, markWorkPending, runGatedTick, setPendingHooks } from "@fx/core/src/pendingWork";
-import { runtimeCacheStore } from "../lib/pendingWorkStore";
+import { MARKER_TTL_SECONDS, getPendingHooks, markWorkPending, runGatedTick, setPendingHooks } from "@fx/core/src/pendingWork";
+import { configureErrorReporter } from "@fx/telemetry";
+import { installPendingWork, runtimeCacheStore } from "../lib/pendingWorkStore";
+
+// A pool created anywhere fails the "zero connections" test below (same pattern as app/api/cron/gate.test.ts).
+const createPool = vi.hoisted(() => vi.fn(() => ({ fake: "pool" })));
+vi.mock("@fx/db/src/pool", () => ({ createPool }));
 
 /**
  * D#454 H3c: the production store, through the REAL @vercel/functions Runtime Cache client and Node's real HTTP path,
@@ -20,6 +25,10 @@ let region = "iad1";
 let mode: "ok" | "error" | "hang" = "ok";
 const seen: Array<{ method: string; path: string; revalidate: string | undefined; auth: string | undefined; name: string | undefined }> = [];
 let server: Server;
+// The cron backstop is wall-clock slots (30 min). A tick clock taken from Date.now() can straddle a slot boundary, which
+// reads as "overdue" and connects. These ticks run on a fixed clock that starts exactly on a slot boundary (1.8e12 is a
+// multiple of 30 minutes); the cache server's own TTL clock stays real.
+const SLOT_START = 1_800_000_000_000;
 
 function table(): Map<string, Entry> {
   if (!regions.has(region)) regions.set(region, new Map());
@@ -128,7 +137,7 @@ describe("runtimeCacheStore through the real client", () => {
   it("a marker written in one region is not seen by a tick in another: that tick connects on the backstop and then skips", async () => {
     setPendingHooks({ store: runtimeCacheStore() });
     const run = vi.fn(async () => ({ result: "swept", workFound: true, nextDueAt: null }));
-    const tick = () => runGatedTick("api-sweep", run, () => {}, Date.now);
+    const tick = () => runGatedTick("api-sweep", run, () => {}, () => SLOT_START + 5 * 60_000);
 
     await tick(); // iad1 connects and records it
     await markWorkPending("api-sweep"); // a writer in iad1
@@ -144,7 +153,7 @@ describe("runtimeCacheStore through the real client", () => {
   it("a full tick over the real client: no marker, no connection; marker, connection", async () => {
     setPendingHooks({ store: runtimeCacheStore() });
     const run = vi.fn(async () => ({ result: "swept", workFound: true, nextDueAt: null }));
-    const t0 = Date.now();
+    const t0 = SLOT_START + 5 * 60_000; // inside one slot, so "no marker, same slot" can only answer none
     const tick = (at: number) => runGatedTick("run-action-sweep", run, () => {}, () => at);
     await tick(t0);
     run.mockClear();
@@ -153,5 +162,34 @@ describe("runtimeCacheStore through the real client", () => {
     await markWorkPending("run-action-sweep", { now: t0 + 120_000 });
     await tick(t0 + 300_000);
     expect(run).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("gate error reporting stays off the database", () => {
+  afterEach(() => configureErrorReporter({ service: "app" }));
+
+  it("a forced cache failure writes one stdout code line, records no error class and opens 0 pool connections", async () => {
+    // The process-wide reporter as instrumentation.ts installs it when the app login is configured: a sink that would store a class.
+    const record = vi.fn();
+    configureErrorReporter({ service: "web", sink: { record } });
+    const lines: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      lines.push(String(chunk));
+      return true;
+    });
+
+    installPendingWork();
+    const hooks = getPendingHooks()!;
+    const boom = Object.assign(new Error("cache timed out"), { code: "ETIMEDOUT" });
+    setPendingHooks({ ...hooks, store: { get: () => Promise.reject(boom), set: () => Promise.reject(boom), delete: () => Promise.reject(boom) } });
+
+    const run = vi.fn(async () => ({ result: "swept", workFound: false, nextDueAt: null }));
+    await runGatedTick("api-sweep", run, () => {}, Date.now);
+
+    const reported = lines.map((l) => JSON.parse(l) as Record<string, unknown>).filter((l) => l.event === "error.reported");
+    expect(reported.length).toBeGreaterThan(0);
+    expect(reported[0]).toMatchObject({ level: "error", service: "web", stage: "pending_work.read", error_code: "internal_error" });
+    expect(record).not.toHaveBeenCalled();
+    expect(createPool).not.toHaveBeenCalled();
   });
 });

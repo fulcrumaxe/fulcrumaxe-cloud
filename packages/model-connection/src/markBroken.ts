@@ -67,7 +67,7 @@ export async function markBrokenWithClient(
   code: BrokenConnectionCode,
 ): Promise<void> {
   await client.query(
-    `UPDATE model_connections SET status = 'broken', last_error_code = $2 WHERE account_id = $1`,
+    `UPDATE model_connections SET status = 'broken', last_error_code = $2, broken_at = COALESCE(broken_at, now()) WHERE account_id = $1`,
     [accountId, String(code)],
   );
   await client.query(

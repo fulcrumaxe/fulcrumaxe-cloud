@@ -1,21 +1,24 @@
 import type { PoolClient } from "pg";
 import { LIGHT_JOB_ROLES, LIMITED_BY, type LimitedBy, MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, MAX_TOTAL_CAPACITY, type SandboxUnavailableReason } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { RESUMES_WITHIN_NOTE, RUNNER_ONLINE_SECONDS } from "@fx/runner";
+import { RESUMES_WITHIN_NOTE, RUNNER_ONLINE_SECONDS, runnerIsLive, runnerLastHeardAt, runnerLiveSql } from "@fx/runner";
 import { UNNAMED_MEMBER } from "./memberRole.js";
 import { accountLineOf, fleetControlsOf, type AccountLine, type FleetControls } from "./fleetView.js";
 import { MIN_SUPPORTED_PROTOCOL_VERSION, RunnerHttpError, type RunnerCloudDeps } from "./http.js";
+import { readRunnerReplyHints } from "@fx/core/src/pendingWork.js";
+import { ANSWERED_NOTE, NO_REPLY_TO_CHECK_NOTE, NO_REPLY_TO_WORK_NOTE, runnerReplyOf, type RunnerReply } from "./runnerReply.js";
+import { configuredWakeKey } from "./wakeToken.js";
 
 /**
  * D#6 R2b criterion 13 (the read model) and criterion 16 (`GET /api/runners`, correction C6 section 2).
  *
  * Every state here is derived from rows at read time, never stored, so it cannot go stale and has no stamp to clear:
- *  - a runner is exactly one of `online_idle`, `busy`, `paused`, `draining`, `offline`, `outdated` or `revoked`;
+ *  - a runner is exactly one of `online_idle`, `busy`, `paused`, `draining`, `not_responding`, `offline`, `outdated` or `revoked`;
  *  - a run waiting on something is exactly one of five reasons, or none.
  * Both read through the caller's tenant context, so another account's runner or run does not exist here.
  */
 
-export const RUNNER_STATES = ["online_idle", "busy", "paused", "draining", "offline", "outdated", "revoked"] as const;
+export const RUNNER_STATES = ["online_idle", "busy", "paused", "draining", "not_responding", "offline", "outdated", "revoked"] as const;
 export type RunnerState = (typeof RUNNER_STATES)[number];
 
 export const RUN_WAIT_REASONS = ["waiting_for_runner", "waiting_for_account_cap", "waiting_for_runner_slot", "waiting_for_approval", "waiting_for_runner_update", "runner_too_old_for_check", "runner_lost_retrying", "timed_out_waiting", "paused_usage_limit"] as const;
@@ -36,6 +39,41 @@ export interface RunnerFacts {
   paused?: boolean;
   /** D#605 FL-3: `runner_settings.draining` is true. Absent reads as not draining. */
   draining?: boolean;
+  /** D#6 RUNNER-WAKE: the runner's last wake check, from the cache (wakeSeen.ts). Absent or null: only the database stamp counts. */
+  seenAt?: Date | null;
+  /**
+   * D#6 RUNNER-WAKE: it holds a wake grant, so it claims only on work or at its safety slot: its latest hello listed `wake_v1` AND the cloud's
+   * wake key is configured (no key, no grant). Absent reads as false.
+   */
+  wakeCapable?: boolean;
+  /** D#6 RUNNER-PING (runnerReply.ts): it left a person's check, or marked work, unanswered. Absent or null: it is not known to ignore anything. */
+  noReply?: "check" | "work" | null;
+}
+
+/** Pure. When the runner was last heard from: the later of the database stamp and the cached wake check (`runnerLastHeardAt`, the shared rule). */
+export function lastHeardAt(facts: Pick<RunnerFacts, "lastSeenAt" | "seenAt">): Date | null {
+  return runnerLastHeardAt(facts);
+}
+
+/**
+ * Pure. Whether the runner counts as heard from: within `RUNNER_ONLINE_SECONDS` (120) of its last request, or, for a wake-capable runner, within
+ * `RUNNER_WAKE_LIVENESS_SECONDS` (35 min: one safety slot plus grace). Both edges are inclusive.
+ */
+function heardRecently(facts: RunnerFacts, now: Date): boolean {
+  return runnerIsLive(facts, now);
+}
+
+/**
+ * Pure. "Last heard N min ago" (whole minutes, rounded down) for a runner that reads online or busy but is past the ordinary 120-second window,
+ * which only a wake-capable runner can be; null otherwise, so the screen shows no note.
+ */
+export function lastHeardNote(state: RunnerState, facts: Pick<RunnerFacts, "lastSeenAt" | "seenAt">, now: Date): string | null {
+  if (state !== "online_idle" && state !== "busy") return null;
+  const heard = lastHeardAt(facts);
+  if (heard === null) return null;
+  const quietMs = now.getTime() - heard.getTime();
+  if (quietMs <= RUNNER_ONLINE_SECONDS * 1000) return null;
+  return `Last heard ${Math.floor(quietMs / 60_000)} min ago`;
 }
 
 /** The light roles as an SQL array literal. The list is a constant of the protocol (role names), never input, and the pattern below keeps it so. */
@@ -86,8 +124,10 @@ export function loadLabel(state: RunnerState, running: RunnerRunning, capacity: 
  * The one state of a runner. Precedence, highest first: `revoked` (nothing else matters once the key is dead),
  * `outdated` (below the supported floor: it is refused at `hello`, and an upgrade is the only fix, so it says so even while it is quiet),
  * `paused` and `draining` (D#605 FL-3: set by a person, answered idle by the claim, and shown BEFORE the online test, because a runner told to
- * wait 5 minutes is quiet for longer than the online window and must not read `offline`), `offline` (no request for 120 seconds), `busy`, `online_idle`. A runner that has never said `hello` has no protocol
- * version and is not outdated: it is offline until it is heard from.
+ * wait 5 minutes is quiet for longer than the online window and must not read `offline`), `offline` (no request for 120 seconds; D#6 RUNNER-WAKE: for a
+ * wake-capable runner, nothing heard for 35 minutes, counting its cached wake checks), `busy`, `online_idle`. A runner that has never said `hello` has no protocol
+ * version and is not outdated: it is offline until it is heard from. `not_responding` (D#6 RUNNER-PING) comes after paused and draining: a runner
+ * that left a check unanswered reads it whatever its window says, and one that left marked work unanswered reads it instead of online.
  */
 export function classifyRunner(facts: RunnerFacts, now: Date, min: number = MIN_SUPPORTED_PROTOCOL_VERSION): RunnerState {
   if (facts.revokedAt !== null) return "revoked";
@@ -95,11 +135,14 @@ export function classifyRunner(facts: RunnerFacts, now: Date, min: number = MIN_
   if (facts.paused === true) return "paused";
   // D#605 FL-8: a drain lets running work finish, and when the last run ends the runner reads as paused (it still takes nothing new until resumed).
   if (facts.draining === true) return facts.busy ? "draining" : "paused";
-  if (facts.lastSeenAt === null || now.getTime() - facts.lastSeenAt.getTime() > RUNNER_ONLINE_SECONDS * 1000) return "offline";
+  // D#6 RUNNER-PING: an unanswered check stays until the runner is heard from, even past its window; ignored work only matters while it would read online.
+  if (facts.noReply === "check") return "not_responding";
+  if (!heardRecently(facts, now)) return "offline";
+  if (facts.noReply === "work") return "not_responding";
   return facts.busy ? "busy" : "online_idle";
 }
 
-type ReadDeps = Pick<RunnerCloudDeps, "appUserPool" | "now" | "minSupportedProtocolVersion" | "accountRunnerCaps" | "accountJobLimit" | "maxRunners">;
+type ReadDeps = Pick<RunnerCloudDeps, "appUserPool" | "now" | "minSupportedProtocolVersion" | "accountRunnerCaps" | "accountJobLimit" | "maxRunners" | "runnerSeen" | "wakeKey">;
 
 export interface RunnerRow {
   id: string;
@@ -158,6 +201,8 @@ export interface RunnerRow {
   controls: FleetControls | null;
   /** C-605-1: for a runner revoked because its registrant left, and only for an owner or admin: what "Register this machine again" pre-fills. Cloud-side data, no secret. */
   register_again: { name: string; labels: string[]; repo_ids: string[] } | null;
+  /** D#6 RUNNER-PING: the last "Check runner now" and where it stands; null when none was sent, or for an older runner (no wake grant). */
+  check: RunnerReply["check"];
 }
 
 interface RawRunnerRun {
@@ -179,6 +224,7 @@ interface RawRunner {
   revoked_reason: string | null;
   paused: boolean;
   draining: boolean;
+  wake_capable: boolean;
   sandbox_unavailable: SandboxUnavailableReason | null;
   consent_granted: boolean | null;
   consent_changed_at: Date | null;
@@ -186,6 +232,7 @@ interface RawRunner {
   busy: boolean;
   running_light: string;
   running_heavy: string;
+  lease_until: Date | null;
   cap_declared: boolean | null;
   cap_light_limit: number | null;
   cap_heavy_limit: number | null;
@@ -252,10 +299,11 @@ export async function readFleet(deps: ReadDeps, accountId: string, userId: strin
         `SELECT r.id, r.credential_mode, r.registered_by, COALESCE(NULLIF(u.name, ''), NULLIF(u.github_login, ''), $3) AS registered_by_name,
                 r.binary_version, r.protocol_version, r.last_seen_at, r.revoked_at, r.revoked_reason, s.reason AS sandbox_unavailable,
                 COALESCE(st.paused_at IS NOT NULL, false) AS paused, COALESCE(st.draining, false) AS draining,
+                COALESCE('wake_v1' = ANY(rc.capabilities), false) AS wake_capable,
                 pc.granted AS consent_granted, pc.created_at AS consent_changed_at, r.allowed_repo_ids,
                 EXISTS (SELECT 1 FROM agent_runs a
                          WHERE a.account_id = r.account_id AND a.runner_id = r.id AND a.status = 'running' AND a.lease_expires_at > $2) AS busy,
-                live.light AS running_light, live.heavy AS running_heavy,
+                live.light AS running_light, live.heavy AS running_heavy, live.lease_until,
                 cap.declared AS cap_declared, cap.light_limit AS cap_light_limit, cap.heavy_limit AS cap_heavy_limit, cap.limited_by AS cap_limited_by,
                 pt.created_by AS prov_minted_by, COALESCE(NULLIF(pu.name, ''), NULLIF(pu.github_login, ''), $3) AS prov_minted_by_name, host(pt.first_ip) AS prov_first_ip,
                 st.name AS set_name, st.labels AS set_labels, st.paused_by, st.drained_by
@@ -263,10 +311,12 @@ export async function readFleet(deps: ReadDeps, accountId: string, userId: strin
                 LEFT JOIN runner_provisioning_tokens pt ON pt.runner_id = r.id AND pt.account_id = r.account_id
                 LEFT JOIN users pu ON pu.id = pt.created_by
                 LEFT JOIN runner_capacity cap ON cap.runner_id = r.id AND cap.account_id = r.account_id
-                CROSS JOIN LATERAL (SELECT count(*) FILTER (WHERE a.role = ANY(${LIGHT_ROLES_SQL})) AS light, count(*) FILTER (WHERE NOT a.role = ANY(${LIGHT_ROLES_SQL})) AS heavy
+                CROSS JOIN LATERAL (SELECT count(*) FILTER (WHERE a.role = ANY(${LIGHT_ROLES_SQL})) AS light, count(*) FILTER (WHERE NOT a.role = ANY(${LIGHT_ROLES_SQL})) AS heavy,
+                                           max(a.lease_expires_at) AS lease_until
                                       FROM agent_runs a WHERE a.account_id = r.account_id AND a.runner_id = r.id AND a.status = 'running' AND a.lease_expires_at > $2) live
                 LEFT JOIN runner_sandbox_status s ON s.runner_id = r.id AND s.account_id = r.account_id
                 LEFT JOIN runner_settings st ON st.runner_id = r.id AND st.account_id = r.account_id
+                LEFT JOIN runner_capabilities rc ON rc.runner_id = r.id AND rc.account_id = r.account_id
                 LEFT JOIN LATERAL (SELECT c.granted, c.created_at FROM runner_plan_consents c
                                     WHERE c.account_id = r.account_id AND c.runner_id = r.id ORDER BY c.version DESC LIMIT 1) pc ON true
           WHERE r.account_id = $1
@@ -318,24 +368,47 @@ export async function readFleet(deps: ReadDeps, accountId: string, userId: strin
           seesAddress = role === "owner" || role === "admin";
           return read(client);
         });
+  // D#6 RUNNER-WAKE: the cached wake checks, asked only for this account's live runners (read above under its tenant context), after the
+  // transaction, so a slow cache never holds a connection. No reader, or a failing one, leaves the database stamps alone.
+  // The 35-minute window is for a runner that really holds a grant, so it claims only at its slot. Listing `wake_v1` is not enough: hello and
+  // claim mint a grant only while the cloud's wake key is configured (wakeToken.ts), and without one every runner claims each minute, so a
+  // silent runner must read offline after the ordinary 120 s.
+  const wakeOn = configuredWakeKey(deps.wakeKey) !== null;
+  let seen: ReadonlyMap<string, Date> = new Map();
+  const live = rows.filter((r) => r.revoked_at === null).map((r) => r.id);
+  if (deps.runnerSeen && live.length > 0) {
+    try {
+      seen = await deps.runnerSeen(live, now);
+    } catch {
+      // fx-swallow-ok: a cache failure means the database stamp alone decides, which is the behaviour before the wake path existed
+      seen = new Map();
+    }
+  }
+  // D#6 RUNNER-PING: the account's work bumps and the runners' checks, from the same no-database store, also after the transaction (runnerReply.ts).
+  const hints = live.length > 0 ? await readRunnerReplyHints(accountId, live) : { epoch: null, first: null, checks: new Map<string, number>() };
   const runsOf = new Map<string, Array<{ id: string; label: string }>>();
   for (const run of runs) runsOf.set(run.runner_id, [...(runsOf.get(run.runner_id) ?? []), { id: run.id, label: `fulcrumaxe ${run.role} · ${run.repo_name ?? "a repository"}` }]);
   const runners = rows.map((r): RunnerRow => {
     // A revoked runner takes no work, so it shows neither a load nor a capacity.
     const running = r.revoked_at === null ? { light: Number(r.running_light), heavy: Number(r.running_heavy) } : { light: 0, heavy: 0 };
     const capacity = r.revoked_at === null ? capacityOf(r.cap_declared === null ? null : { declared: r.cap_declared, light_limit: r.cap_light_limit, heavy_limit: r.cap_heavy_limit, limited_by: r.cap_limited_by }, running) : null;
-    const state = classifyRunner({ revokedAt: r.revoked_at, protocolVersion: r.protocol_version, lastSeenAt: r.last_seen_at, busy: r.busy, paused: r.paused, draining: r.draining }, now, min);
+    const wakeCapable = wakeOn && r.wake_capable;
+    const reply = r.revoked_at === null ? runnerReplyOf({ runnerId: r.id, wakeCapable, sandboxDown: r.sandbox_unavailable !== null, lastSeenAt: r.last_seen_at, leaseUntil: r.lease_until, hints, now }) : { check: null, noReply: null };
+    const facts: RunnerFacts = { revokedAt: r.revoked_at, protocolVersion: r.protocol_version, lastSeenAt: r.last_seen_at, busy: r.busy, paused: r.paused, draining: r.draining, seenAt: seen.get(r.id) ?? null, wakeCapable, noReply: reply.noReply };
+    const state = classifyRunner(facts, now, min);
+    const heard = r.revoked_at === null ? lastHeardAt(facts) : r.last_seen_at;
     const revokedReason = r.revoked_at !== null && r.revoked_reason === "member_demoted" ? ("registrant_left" as const) : null;
     return {
     id: r.id,
     credential_mode: r.credential_mode,
     registered_by: { id: r.registered_by, name: r.registered_by_name },
     binary_version: r.binary_version,
-    last_seen_at: r.last_seen_at === null ? null : r.last_seen_at.toISOString(),
+    last_seen_at: heard === null ? null : heard.toISOString(),
     // A revoked runner polls no more, so a stale reason is not shown for it.
     sandbox_unavailable: r.revoked_at === null ? r.sandbox_unavailable : null,
     state,
-    state_note: state === "paused" || state === "draining" ? RESUMES_WITHIN_NOTE : revokedReason === "registrant_left" && state === "revoked" ? REVOKED_REGISTRANT_LEFT_NOTE : null,
+    state_note: state === "paused" || state === "draining" ? RESUMES_WITHIN_NOTE : revokedReason === "registrant_left" && state === "revoked" ? REVOKED_REGISTRANT_LEFT_NOTE : state === "not_responding" ? (reply.noReply === "check" ? NO_REPLY_TO_CHECK_NOTE : NO_REPLY_TO_WORK_NOTE) : state === "online_idle" && reply.check?.status === "answered" && heard !== null && now.getTime() - heard.getTime() <= RUNNER_ONLINE_SECONDS * 1000 ? ANSWERED_NOTE : lastHeardNote(state, facts, now),
+    check: reply.check,
     revoked_reason: state === "revoked" ? revokedReason : null,
     running,
     capacity,
@@ -360,7 +433,7 @@ export async function readFleet(deps: ReadDeps, accountId: string, userId: strin
     controls:
       viewerSeen.role === null || userId === null || r.revoked_at !== null
         ? null
-        : fleetControlsOf({ role: viewerSeen.role, userId, registeredBy: r.registered_by, paused: r.paused, pausedBy: r.paused_by, draining: r.draining, drainedBy: r.drained_by }),
+        : fleetControlsOf({ role: viewerSeen.role, userId, registeredBy: r.registered_by, paused: r.paused, pausedBy: r.paused_by, draining: r.draining, drainedBy: r.drained_by, wakeCapable }),
     register_again:
       revokedReason === "registrant_left" && seesAddress
         ? { name: r.set_name ?? "", labels: r.set_labels ?? [], repo_ids: [...new Set(r.allowed_repo_ids)].filter((id) => repos.has(id)) }
@@ -419,12 +492,15 @@ export interface AccountRunnerCaps {
 
 /**
  * The facts of the runs a filter selects, in one query. `$1` is the account, `$2` the clock and `$3` the offline window in seconds;
- * the filter's own parameters start at `$4`.
+ * the filter's own parameters start at `$4`. A runner is live by `runnerLiveSql` (D#6 RUNNER-WAKE), the rule every runner-presence test shares;
+ * `wakeEnabled` is the deployment's wake gate.
  */
-const WAIT_FACTS = (filter: string, tail: string): string => `
+const WAIT_FACTS = (filter: string, tail: string, wakeEnabled: boolean): string => {
+  const live = runnerLiveSql({ runner: "r", now: "$2", onlineSeconds: "$3", wakeEnabled });
+  return `
   SELECT a.id, a.work_item_id, a.role, a.dispatch_repo_id, a.created_at, a.status, a.runtime, a.initiated_by, a.approved_by, a.claimable_after, a.min_protocol_version, (a.job_signed #> '{job,check}') IS NOT NULL AS job_has_check,
          -- D#599 PL-2b-2: the newest protocol any live, covering runner has said (at hello). A job that needs a higher one waits for an update; derived here, never stamped.
-         (SELECT max(r.protocol_version) FROM runners r WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND r.last_seen_at > $2::timestamptz - make_interval(secs => $3)
+         (SELECT max(r.protocol_version) FROM runners r WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND ${live}
              AND a.dispatch_repo_id = ANY(r.allowed_repo_ids) AND NOT EXISTS (SELECT 1 FROM runner_settings ps WHERE ps.runner_id = r.id AND ps.account_id = r.account_id AND (ps.paused_at IS NOT NULL OR ps.draining))) AS runner_max_protocol,
          (SELECT e.payload ->> 'failureReason' FROM run_events e WHERE e.run_id = a.id AND e.kind = 'run.status_changed' AND e.payload ->> 'to' = 'timed_out' ORDER BY e.seq DESC LIMIT 1) AS own_reason,
          -- The follow-up step test (C22 section 5): the parent counts only when it is a failed runner run whose last move to
@@ -443,7 +519,7 @@ const WAIT_FACTS = (filter: string, tail: string): string => `
                          OR (a.approved_by IS NULL AND r.credential_mode = 'subscription' AND runner_plan_auto_approvable(r.id, a.dispatch_repo_id)))) AS runnable_without_approval,
          EXISTS (SELECT 1 FROM runners r WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND a.dispatch_repo_id = ANY(r.allowed_repo_ids)
                     AND r.credential_mode = 'subscription') AS needs_approval_possible,
-         EXISTS (SELECT 1 FROM runners r WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND r.last_seen_at > $2::timestamptz - make_interval(secs => $3)
+         EXISTS (SELECT 1 FROM runners r WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND ${live}
                     AND a.dispatch_repo_id = ANY(r.allowed_repo_ids) AND NOT EXISTS (SELECT 1 FROM runner_settings ps WHERE ps.runner_id = r.id AND ps.account_id = r.account_id AND (ps.paused_at IS NOT NULL OR ps.draining))) AS runner_online,
          -- A covering live runner with room for this run's class. Mirrors the claim's own arithmetic (capacityFreeSlots in runner-protocol) on the
          -- rows: an older runner (declared nothing) holds one job in total; a declared one has its class limit and the total ceiling, less what it
@@ -452,20 +528,26 @@ const WAIT_FACTS = (filter: string, tail: string): string => `
                    LEFT JOIN runner_capacity c ON c.runner_id = r.id AND c.account_id = r.account_id
                    CROSS JOIN LATERAL (SELECT count(*) FILTER (WHERE x.role = ANY(${LIGHT_ROLES_SQL})) AS light, count(*) FILTER (WHERE NOT x.role = ANY(${LIGHT_ROLES_SQL})) AS heavy
                                          FROM agent_runs x WHERE x.account_id = r.account_id AND x.runner_id = r.id AND x.status = 'running') held
-                  WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND r.last_seen_at > $2::timestamptz - make_interval(secs => $3)
+                  WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND ${live}
                     AND a.dispatch_repo_id = ANY(r.allowed_repo_ids) AND NOT EXISTS (SELECT 1 FROM runner_settings ps WHERE ps.runner_id = r.id AND ps.account_id = r.account_id AND (ps.paused_at IS NOT NULL OR ps.draining))
                     AND (c.runner_id IS NULL
                          OR (NOT c.declared AND held.light + held.heavy < 1)
                          OR (c.declared AND ${MAX_TOTAL_CAPACITY} - held.light - held.heavy > 0
                              AND CASE WHEN a.role = ANY(${LIGHT_ROLES_SQL}) THEN LEAST(c.light_limit, ${MAX_LIGHT_CAPACITY}) - held.light ELSE LEAST(c.heavy_limit, ${MAX_HEAVY_CAPACITY}) - held.heavy END > 0))) AS runner_slot_free,
          (SELECT c.limited_by FROM runners r JOIN runner_capacity c ON c.runner_id = r.id AND c.account_id = r.account_id
-           WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND r.last_seen_at > $2::timestamptz - make_interval(secs => $3)
+           WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND ${live}
              AND a.dispatch_repo_id = ANY(r.allowed_repo_ids) AND c.limited_by IS NOT NULL AND NOT EXISTS (SELECT 1 FROM runner_settings ps WHERE ps.runner_id = r.id AND ps.account_id = r.account_id AND (ps.paused_at IS NOT NULL OR ps.draining))
            ORDER BY array_position(ARRAY['paused', 'usage_limit', 'memory', 'cpu', 'disk', 'ceiling'], c.limited_by), r.id LIMIT 1) AS slot_limited_by,
          -- What the claim counts under its account lock: runner runs 'running' in all (no lease test: the claim has none), and the heavy ones.
          (SELECT count(*) FROM agent_runs x WHERE x.account_id = a.account_id AND x.runtime = 'runner' AND x.status = 'running') AS account_running_total,
          (SELECT count(*) FROM agent_runs x WHERE x.account_id = a.account_id AND x.runtime = 'runner' AND x.status = 'running' AND NOT x.role = ANY(${LIGHT_ROLES_SQL})) AS account_running_heavy
     FROM agent_runs a WHERE a.account_id = $1 AND ${filter} ${tail}`;
+};
+
+/** Whether the deployment's wake gate is open (a usable wake key is configured, so a wake runner holds a grant and goes quiet between slots). */
+function wakeGateOpen(deps: ReadDeps): boolean {
+  return configuredWakeKey(deps.wakeKey) !== null;
+}
 
 /** Pure. Whether the account's own caps hold this run: the claim refuses it when the account is at its total, or (for a heavy run) at its heavy figure. */
 function heldByAccountCap(row: RawRun, caps: AccountRunnerCaps | null | undefined): boolean {
@@ -526,7 +608,7 @@ export function waitReasonOf(row: RawRun, now: Date, caps?: AccountRunnerCaps | 
  *    runner runs running in all have reached the plan's total, or this is a heavy run and its heavy runs have reached the heavy figure. A free slot
  *    on a runner does not help: the claim answers `at_limit` / `heavy_limit` before it looks at the runner. The caps come from `deps.accountRunnerCaps`
  *    (plan data); without them, or when they cannot be read, this reason is never given;
- *  - `waiting_for_runner`: pending and no live runner FOR THE RUN'S REPO: not revoked, not paused or draining (D#605 FL-3), heard from within 120 seconds, and with the
+ *  - `waiting_for_runner`: pending and no live runner FOR THE RUN'S REPO: not revoked, not paused or draining (D#605 FL-3), live by `runnerLiveSql` (heard from within 120 seconds, or the wake window for a wake runner while the wake gate is open), and with the
  *    run's repo in its `allowed_repo_ids`. A live runner whose list leaves the repo out can never claim the run (the claim returns
  *    idle for it), so it does not count; neither does one with an empty list, because the claim reads an empty repo list as
  *    "no repo" (only `allowed_roles` reads empty as "all"). The waiting notice in the worker uses the same test, so the two agree.
@@ -535,7 +617,7 @@ export function waitReasonOf(row: RawRun, now: Date, caps?: AccountRunnerCaps | 
 export async function getRunWaitReason(deps: ReadDeps, accountId: string, runId: string): Promise<RunWaitReason | null> {
   const now = (deps.now ?? (() => new Date()))();
   const row = await withTenant(deps.appUserPool, accountId, async (client) => {
-    const { rows } = await client.query<RawRun>(WAIT_FACTS("a.id = $4", ""), [accountId, now, RUNNER_ONLINE_SECONDS, runId]);
+    const { rows } = await client.query<RawRun>(WAIT_FACTS("a.id = $4", "", wakeGateOpen(deps)), [accountId, now, RUNNER_ONLINE_SECONDS, runId]);
     return rows[0];
   });
   return row ? waitReasonOf(row, now, capsOf(deps, accountId)) : null;
@@ -548,7 +630,7 @@ export async function getRunWaitReason(deps: ReadDeps, accountId: string, runId:
 export async function getRunWait(deps: ReadDeps, accountId: string, runId: string): Promise<{ reason: RunWaitReason | null; limited_by: LimitedBy | null; min_protocol?: number }> {
   const now = (deps.now ?? (() => new Date()))();
   const row = await withTenant(deps.appUserPool, accountId, async (client) => {
-    const { rows } = await client.query<RawRun>(WAIT_FACTS("a.id = $4", ""), [accountId, now, RUNNER_ONLINE_SECONDS, runId]);
+    const { rows } = await client.query<RawRun>(WAIT_FACTS("a.id = $4", "", wakeGateOpen(deps)), [accountId, now, RUNNER_ONLINE_SECONDS, runId]);
     return rows[0];
   });
   const reason = row ? waitReasonOf(row, now, capsOf(deps, accountId)) : null;
@@ -557,7 +639,7 @@ export async function getRunWait(deps: ReadDeps, accountId: string, runId: strin
 }
 
 /** The pending, unapproved runner runs of the account, newest first, with their facts. Run on a client already inside the caller's tenant. */
-export async function readUnapprovedRunFacts(client: PoolClient, accountId: string, now: Date, limit: number): Promise<RawRun[]> {
-  const { rows } = await client.query<RawRun>(WAIT_FACTS("a.status = 'pending' AND a.runtime = 'runner' AND a.approved_by IS NULL", "ORDER BY a.created_at DESC, a.id LIMIT $4"), [accountId, now, RUNNER_ONLINE_SECONDS, limit]);
+export async function readUnapprovedRunFacts(client: PoolClient, accountId: string, now: Date, limit: number, wakeEnabled = false): Promise<RawRun[]> {
+  const { rows } = await client.query<RawRun>(WAIT_FACTS("a.status = 'pending' AND a.runtime = 'runner' AND a.approved_by IS NULL", "ORDER BY a.created_at DESC, a.id LIMIT $4", wakeEnabled), [accountId, now, RUNNER_ONLINE_SECONDS, limit]);
   return rows;
 }

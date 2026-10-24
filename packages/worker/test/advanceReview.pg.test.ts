@@ -260,6 +260,31 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       expect(started[0]).toMatchObject({ workItemId: w, specVersion: 1 });
     });
 
+    it("an item at needs_human after a reviewer kept ending without a verdict is advanced as a REVIEW (the reviewer's seat is asked, not the executor's), and the load says why; another newest escalation is Build again", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a, { stage: "needs_human" });
+      const escalated = (code: string, key: string) =>
+        admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'escalated', $3, $4)", [a.accountId, w, code, key]);
+      await escalated("reviewer_no_verdict", "h1");
+      const started: unknown[] = [];
+      const resolveRunSeat = vi.fn(async () => ({ ok: true as const }) as never);
+      const t = build({ startAdvance: async (args) => void started.push(args), resolveRunSeat });
+      expect(await t.module.performAdvanceWorkItem(await action(a, w))).toEqual({ result: "done", outcome: { work_item_id: w, advance: "started" } });
+      expect(resolveRunSeat).toHaveBeenCalledWith({ accountId: a.accountId, role: "code-reviewer", workItemId: w });
+      expect(started).toHaveLength(1);
+      expect(await t.module.advanceLoadItem(a.accountId, w)).toMatchObject({ stage: "needs_human", reviewHold: true });
+      // Another newest escalation (a reviewer's fail) is Build again: the executor's seat.
+      const b = await seedAccount(admin, randomUUID());
+      const w2 = await item(b, { stage: "needs_human" });
+      for (const [code, key] of [["reviewer_no_verdict", "h1"], ["reviewer_fail", "h2"]] as const) {
+        await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'escalated', $3, $4)", [b.accountId, w2, code, key]);
+      }
+      expect(await t.module.advanceLoadItem(b.accountId, w2)).toMatchObject({ stage: "needs_human", reviewHold: false });
+      resolveRunSeat.mockClear();
+      expect(await t.module.performAdvanceWorkItem(await action(b, w2))).toEqual({ result: "done", outcome: { work_item_id: w2, advance: "started" } });
+      expect(resolveRunSeat).toHaveBeenCalledWith({ accountId: b.accountId, role: "executor", workItemId: w2 });
+    });
+
     it.each([
       ["no published Spec", { spec: false }],
       ["a project", { kind: "project" }],
@@ -929,6 +954,8 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       ["five verdicts", { verdicts: Array.from({ length: 5 }, () => ({ role: "code-reviewer", runId: run1, verdict: "pass" })) }],
       ["a round outside 0..20", { round: 21 }],
       ["an environment failure flag that is not a boolean", { verdicts: [{ role: "code-reviewer", runId: run1, verdict: "fail", environmentFailure: "true" }] }],
+      ["a no-verdict flag that is not a boolean", { verdicts: [{ role: "code-reviewer", runId: run1, verdict: "fail", noVerdict: "yes" }] }],
+      ["an end code that is not a plain code", { verdicts: [{ role: "code-reviewer", runId: run1, verdict: "fail", noVerdict: true, endCode: "Killed: OOM" }] }],
     ])("%s is refused before the pipeline is asked", async (_n, over) => {
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a);
@@ -943,6 +970,14 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const rd = review();
       await build({}, rd).module.advanceRecordRound(who(a, w), input({ verdicts: [{ role: "code-reviewer", runId: run1, verdict: "fail", environmentFailure: true }, { role: "acceptance-tester", runId: run2, verdict: "pass" }] }));
       expect((rd.recordRound as ReturnType<typeof vi.fn>).mock.calls[0]![2].verdicts[0]).toMatchObject({ environmentFailure: true });
+    });
+
+    it("a reviewer with no verdict is handed to the pipeline with its flag and end code", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a);
+      const rd = review();
+      await build({}, rd).module.advanceRecordRound(who(a, w), input({ verdicts: [{ role: "code-reviewer", runId: run1, verdict: "fail", noVerdict: true, endCode: "resource_limit" }, { role: "acceptance-tester", runId: run2, verdict: "pass" }] }));
+      expect((rd.recordRound as ReturnType<typeof vi.fn>).mock.calls[0]![2].verdicts[0]).toMatchObject({ noVerdict: true, endCode: "resource_limit" });
     });
 
     it("an external item is refused; without the dependencies it is unavailable", async () => {

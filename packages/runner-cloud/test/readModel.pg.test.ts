@@ -199,6 +199,63 @@ describe("the read model [pg]", () => {
       expect(rows.get(other)).toMatchObject({ state: "revoked", state_note: null, revoked_reason: null });
     });
 
+    it("D#6 RUNNER-WAKE: a wake-capable runner quiet for 10 min reads online, 'Last heard 10 min ago'; a cached wake check counts as contact", async () => {
+      const f = await fresh();
+      const g = await fresh();
+      const wake = await runner(f, { lastSeen: ago(600) });
+      const plain = await runner(f, { lastSeen: ago(600) });
+      const cached = await runner(f, { lastSeen: ago(1200) });
+      const gone = await runner(f, { lastSeen: ago(600), revoked: true });
+      const stale = await runner(f, { lastSeen: ago(2101) });
+      const elsewhere = await runner(g);
+      for (const id of [wake, cached, gone, stale]) await h.admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, ARRAY['wake_v1'])", [id, f.accountId]);
+      const asked: string[][] = [];
+      const runnerSeen = async (ids: readonly string[]) => {
+        asked.push([...ids]);
+        return new Map([[cached, ago(30)], [elsewhere, ago(1)]]);
+      };
+      const wakeKey = () => Buffer.alloc(32, 7);
+      const res = await respond(() => listRunners({ ...deps(), runnerSeen, wakeKey }, { accountId: f.accountId, userId: f.a1 }));
+      const rows = new Map((res.body as { runners: Array<{ id: string; state: string; state_note: string | null; last_seen_at: string | null }> }).runners.map((r) => [r.id, r]));
+      expect(rows.get(wake)).toMatchObject({ state: "online_idle", state_note: "Last heard 10 min ago", last_seen_at: ago(600).toISOString() });
+      expect(rows.get(plain)).toMatchObject({ state: "offline", state_note: null });
+      expect(rows.get(cached)).toMatchObject({ state: "online_idle", state_note: null, last_seen_at: ago(30).toISOString() });
+      expect(rows.get(stale)).toMatchObject({ state: "offline", state_note: null });
+      expect(rows.get(gone)).toMatchObject({ state: "revoked", state_note: null });
+      // Only this account's live runners are asked about; a reader that answers for another runner changes nothing here.
+      expect(asked).toHaveLength(1);
+      expect(asked[0]!.sort()).toEqual([wake, plain, cached, stale].sort());
+      expect(rows.has(elsewhere)).toBe(false);
+      // A reader that fails leaves the database stamps to decide.
+      const failing = async () => {
+        throw new Error("cache down");
+      };
+      const again = await respond(() => listRunners({ ...deps(), runnerSeen: failing, wakeKey }, { accountId: f.accountId, userId: f.a1 }));
+      const states = new Map((again.body as { runners: Array<{ id: string; state: string }> }).runners.map((r) => [r.id, r.state]));
+      expect(states.get(wake)).toBe("online_idle");
+      expect(states.get(cached)).toBe("online_idle"); // 20 min, wake-capable, from the database stamp alone
+      expect(states.get(plain)).toBe("offline");
+    });
+
+    it("D#6 RUNNER-WAKE: with no wake key configured no runner holds a grant, so one that listed wake_v1 is offline after the ordinary 120 s", async () => {
+      const f = await fresh();
+      const quiet = await runner(f, { lastSeen: ago(121) });
+      const fresh120 = await runner(f, { lastSeen: ago(120) });
+      for (const id of [quiet, fresh120]) await h.admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, ARRAY['wake_v1'])", [id, f.accountId]);
+      const read = async (over: Record<string, unknown>) => {
+        const res = await respond(() => listRunners({ ...deps(), ...over }, { accountId: f.accountId, userId: f.a1 }));
+        return new Map((res.body as { runners: Array<{ id: string; state: string; state_note: string | null }> }).runners.map((r) => [r.id, r]));
+      };
+      // No key (absent, null, too short, or unreadable): the wake window is off.
+      for (const over of [{}, { wakeKey: null }, { wakeKey: () => null }, { wakeKey: () => Buffer.alloc(16, 1) }, { wakeKey: () => { throw new Error("unreadable"); } }]) {
+        const rows = await read(over);
+        expect(rows.get(quiet)).toMatchObject({ state: "offline", state_note: null });
+        expect(rows.get(fresh120)).toMatchObject({ state: "online_idle", state_note: null });
+      }
+      // The key configured: the same runner holds a grant and reads online, last heard 2 min ago.
+      expect((await read({ wakeKey: () => Buffer.alloc(32, 7) })).get(quiet)).toMatchObject({ state: "online_idle", state_note: "Last heard 2 min ago" });
+    });
+
     it("one online window: a runner last seen 100 s ago is online in the state and for the covering test, 130 s ago offline in both", async () => {
       const f = await fresh();
       const id = await runner(f, { lastSeen: ago(100) });
@@ -208,6 +265,37 @@ describe("the read model [pg]", () => {
       await h.admin.query("UPDATE runners SET last_seen_at = $2 WHERE id = $1", [id, ago(130)]);
       expect(await stateOf(f, id)).toBe("offline");
       expect(await reason(f, pending)).toBe("waiting_for_runner");
+    });
+
+    it("D#6 RUNNER-WAKE: the wait reason shares the fleet's liveness rule: a wake runner 10 min quiet covers the run, a plain one or a dead wake runner does not", async () => {
+      const wakeKey = () => Buffer.alloc(32, 7);
+      const wakeReason = (f: F2Fixture, id: string, over: Record<string, unknown> = { wakeKey }) => getRunWaitReason({ ...deps(), ...over }, f.accountId, id);
+      const wakeCap = (f: F2Fixture, id: string) => h.admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, ARRAY['wake_v1'])", [id, f.accountId]);
+
+      // An idle wake runner between its safety claims: online on the list, and it covers the run.
+      const a = await fresh();
+      const idle = await runner(a, { lastSeen: ago(600) });
+      await wakeCap(a, idle);
+      const waitingA = await run(a, { initiatedBy: a.a1 });
+      expect(await wakeReason(a, waitingA)).toBeNull();
+      const listed = await respond(() => listRunners({ ...deps(), wakeKey }, { accountId: a.accountId, userId: a.a1 }));
+      expect((listed.body as { runners: Array<{ id: string; state: string }> }).runners.find((r) => r.id === idle)?.state).toBe("online_idle");
+      // No wake key configured: no grant, so the same runner is gone after 120 s, in the wait reason as on the list.
+      expect(await wakeReason(a, waitingA, {})).toBe("waiting_for_runner");
+
+      // A plain runner quiet for 10 min does not cover it.
+      const b = await fresh();
+      await runner(b, { lastSeen: ago(600) });
+      expect(await wakeReason(b, await run(b, { initiatedBy: b.a1 }))).toBe("waiting_for_runner");
+
+      // A dead wake runner (no claim for longer than the window) does not cover it.
+      const c = await fresh();
+      const dead = await runner(c, { lastSeen: ago(2101) });
+      await wakeCap(c, dead);
+      expect(await wakeReason(c, await run(c, { initiatedBy: c.a1 }))).toBe("waiting_for_runner");
+      // The window's edge is inclusive, as on the list.
+      await h.admin.query("UPDATE runners SET last_seen_at = $2 WHERE id = $1", [dead, ago(2100)]);
+      expect(await wakeReason(c, (await h.admin.query<{ id: string }>("SELECT id FROM agent_runs WHERE account_id = $1", [c.accountId])).rows[0]!.id)).toBeNull();
     });
 
     it("a paused or draining runner does not cover a run: the run reads waiting_for_runner until a runner that can take it is there", async () => {
@@ -429,6 +517,7 @@ describe("the read model [pg]", () => {
             draining: false,
             controls: expect.any(Object),
             register_again: null,
+            check: null,
           },
         ]);
         expect(body.copy).toEqual({
@@ -462,14 +551,14 @@ describe("the read model [pg]", () => {
       expect(((await list(f, f.m1)).body as Body).runners[0]).toMatchObject({ sandbox_unavailable: null, state: "revoked" });
     });
 
-    it("returns none of the excluded fields: the key-set of a runner is exactly the twenty-five, and no key, thumbprint, raw repo id list or nonce appears anywhere", async () => {
+    it("returns none of the excluded fields: the key-set of a runner is exactly the twenty-six, and no key, thumbprint, raw repo id list or nonce appears anywhere", async () => {
       const f = await fresh();
       const id = await runner(f);
       await h.admin.query("UPDATE runners SET allowed_repo_ids = ARRAY[$2::uuid] WHERE id = $1", [id, randomUUID()]);
       await h.admin.query("INSERT INTO runner_request_nonces (account_id, runner_id, nonce) VALUES ($1, $2, 'abcdefghijklmnopqrst')", [f.accountId, id]);
       const res = await list(f, f.m1);
       const body = res.body as Body;
-      expect(Object.keys(body.runners[0]!).sort()).toEqual(["binary_version", "can_change_plan_consent", "capacity", "controls", "credential_mode", "current_runs", "draining", "facts", "has_name", "id", "labels", "last_seen_at", "load_label", "name", "paused", "plan_consent", "provisioning", "register_again", "registered_by", "repos", "revoked_reason", "running", "sandbox_unavailable", "state", "state_note"]);
+      expect(Object.keys(body.runners[0]!).sort()).toEqual(["binary_version", "can_change_plan_consent", "capacity", "check", "controls", "credential_mode", "current_runs", "draining", "facts", "has_name", "id", "labels", "last_seen_at", "load_label", "name", "paused", "plan_consent", "provisioning", "register_again", "registered_by", "repos", "revoked_reason", "running", "sandbox_unavailable", "state", "state_note"]);
       const text = JSON.stringify(res.body);
       const row = (await h.admin.query("SELECT jkt, public_key_jwk, allowed_repo_ids FROM runners WHERE id = $1", [id])).rows[0];
       expect(text).not.toContain(row.jkt);

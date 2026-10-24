@@ -89,6 +89,23 @@ describe('advanceActionFor', () => {
     expect((v as { message: string }).message).not.toMatch(/undefined|null/);
   });
 
+  describe('needs_human after a reviewer kept ending without a verdict (no_verdict_hold)', () => {
+    it.each(['critical', 'feature', 'small', 'bug', 'doc'])('a published %s Spec re-enters the review, like Changes requested', (kind) => {
+      expect(advanceActionFor({ stage: 'needs_human', discussion_id: 'd', kind, has_spec: true, no_verdict_hold: true })).toEqual({ ok: true, action: 'review' });
+      expect(advanceActionFor({ stage: 'changes_requested', discussion_id: 'd', kind, has_spec: true })).toEqual({ ok: true, action: 'review' });
+    });
+
+    it('any other cause (hold false or absent) keeps Build again', () => {
+      expect(advanceActionFor({ stage: 'needs_human', discussion_id: 'd', kind: 'feature', has_spec: true, no_verdict_hold: false })).toEqual({ ok: true, action: 'rebuild' });
+      expect(advanceActionFor({ stage: 'needs_human', discussion_id: 'd', kind: 'feature', has_spec: true })).toEqual({ ok: true, action: 'rebuild' });
+    });
+
+    it('needs the Spec the reviewers check against; a hold on any other stage changes nothing', () => {
+      expect(advanceActionFor({ stage: 'needs_human', discussion_id: 'd', kind: 'feature', has_spec: false, no_verdict_hold: true })).toMatchObject({ ok: false, reason: 'state' });
+      expect(advanceActionFor({ stage: 'spec_ready', discussion_id: 'd', kind: 'feature', has_spec: true, no_verdict_hold: true })).toEqual({ ok: true, action: 'build' });
+    });
+  });
+
   it.each(['pr_opened', 'changes_requested', 'review_passed'])('%s with a Spec is reviewed; without one it is refused for its state', (stage) => {
     expect(advanceActionFor({ stage, discussion_id: 'd', kind: 'feature', has_spec: true })).toEqual({ ok: true, action: 'review' });
     expect(advanceActionFor({ stage, discussion_id: null, kind: null, has_spec: false })).toMatchObject({ ok: false, reason: 'state' });

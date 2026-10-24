@@ -54,7 +54,7 @@ describe('requestPreview marks the run-action sweep', () => {
     const sets = hooked();
     await requestPreview({ pool: fakePool({}), principal }, input, deps());
     await new Promise((r) => setTimeout(r, 0));
-    expect(sets).toEqual(['pending:run-action-sweep']);
+    expect(sets.filter((k) => k.startsWith('pending:'))).toEqual(['pending:run-action-sweep']);
   });
   it('a replayed preview sets no marker', async () => {
     const sets = hooked();

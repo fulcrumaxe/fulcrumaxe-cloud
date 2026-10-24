@@ -39,7 +39,7 @@ describe("the claim verifier's tools on a runner", () => {
   });
 
   it("this build advertises the capability on hello", () => {
-    expect(RUNNER_BUILD_CAPABILITIES).toEqual(["proposal_verifier"]);
+    expect(RUNNER_BUILD_CAPABILITIES).toContain("proposal_verifier");
   });
 });
 

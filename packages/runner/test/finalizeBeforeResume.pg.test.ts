@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { listSourceFiles } from "../../test-guard/src/sourceFiles.js";
 import { describe, expect, it, vi } from "vitest";
 import { SandboxTarget, type HookResumePort } from "../src/targets/sandboxTarget.js";
 import { startAgentRun, type StartAgentRunInput } from "../src/startAgentRun.js";
@@ -11,6 +12,8 @@ import { cancelRun } from "../src/cancelRun.js";
 import { seedAccount, seedMember, seedRepo } from "./helpers/seed.js";
 import { createSandboxTargetHarness } from "./helpers/sandboxTargetFakes.js";
 import { pgHarness } from "./helpers/pgHarness.js";
+
+const SKIPPED_DIRS = new Set(["node_modules", ".next", "dist", "test", "tests"]);
 
 /**
  * D#2 H14c-3-3a-3 (P2) [pg]: the target finalizes a finished run itself, then wakes the hook with { runId, status } only.
@@ -168,16 +171,10 @@ describe("the target finalizes before it resumes the hook [pg]", () => {
 
   it("nothing but the test harnesses ever turns the flag off: no non-test source under apps or packages mentions it outside the target", () => {
     const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-    const hits: string[] = [];
-    const walk = (dir: string): void => {
-      for (const name of readdirSync(dir)) {
-        if (["node_modules", ".next", "dist", "test", "tests"].includes(name)) continue;
-        const full = path.join(dir, name);
-        if (statSync(full).isDirectory()) walk(full);
-        else if (/\.(ts|tsx|mjs|js)$/.test(name) && !/\.test\./.test(name) && readFileSync(full, "utf8").includes("finalizeBeforeResume")) hits.push(path.relative(root, full));
-      }
-    };
-    for (const top of ["apps", "packages"]) walk(path.join(root, top));
+    // Git's file list, not a directory walk, so ignored build output (a web build's workflow bundles) never counts as a source.
+    const hits = listSourceFiles(root, ["apps", "packages"], SKIPPED_DIRS).filter(
+      (f) => /\.(ts|tsx|mjs|js)$/.test(f) && !/\.test\./.test(path.basename(f)) && readFileSync(path.join(root, f), "utf8").includes("finalizeBeforeResume"),
+    );
     expect(hits).toEqual(["packages/runner/src/targets/sandboxTarget.ts"]);
   });
 });

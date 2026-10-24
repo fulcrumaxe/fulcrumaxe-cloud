@@ -48,7 +48,8 @@ describe("the claim verifier role on the wire", () => {
   });
 
   it("is gated by the proposal_verifier capability, and no other role is", () => {
-    expect([...RUNNER_CAPABILITIES]).toEqual(["proposal_verifier"]);
+    // D#6 RUNNER-WAKE R3a: wake_v1 is a capability too, but it gates no role (below).
+    expect([...RUNNER_CAPABILITIES]).toEqual(["proposal_verifier", "wake_v1"]);
     expect(RUNNER_CAPABILITY_FOR_ROLE).toEqual({ [PROPOSAL_VERIFIER_ROLE]: "proposal_verifier" });
   });
 

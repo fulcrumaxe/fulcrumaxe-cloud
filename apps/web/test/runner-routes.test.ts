@@ -18,7 +18,7 @@ import { listApprovalsHandler } from "../app/api/runners/approvals/handler";
 import { planConsentHandler } from "../app/api/runners/[id]/plan-consent/handler";
 import { getPlanApprovalDialHandler, putPlanApprovalDialHandler } from "../app/api/runners/repos/[id]/plan-approval-dial/handler";
 import { getSandboxAllowancesHandler, putSandboxAllowancesHandler } from "../app/api/runners/repos/[id]/sandbox-allowances/handler";
-import { fleetRemoveHandler, fleetReposHandler, fleetSettingHandler } from "../app/api/runners/[id]/controls";
+import { fleetCheckHandler, fleetRemoveHandler, fleetReposHandler, fleetSettingHandler } from "../app/api/runners/[id]/controls";
 import { FLEET_SETTING_ACTIONS } from "@fx/runner-cloud";
 import { makeRegisterHandler } from "../app/api/runner/register/handler";
 import { REGISTER_LIMIT_PER_IP_PER_MINUTE } from "../lib/runnerRoutes";
@@ -83,7 +83,7 @@ describe("who may set app.runner_id, and who may use the runner door (D#6 R2a, C
   });
 
   it("only runner-cloud's own code opens a runner session or verifies a runner request", () => {
-    const allowed = ["packages/runner-cloud/src/claim.ts", "packages/runner-cloud/src/done.ts", "packages/runner-cloud/src/gitTicket.ts", "packages/runner-cloud/src/handoff.ts", "packages/runner-cloud/src/heartbeat.ts", "packages/runner-cloud/src/hello.ts", "packages/runner-cloud/src/index.ts", "packages/runner-cloud/src/ingestEvents.ts", "packages/runner-cloud/src/planePush.ts", "packages/runner-cloud/src/register.ts", "packages/runner-cloud/src/revoke.ts", "packages/runner-cloud/src/rotate.ts", "packages/runner-cloud/src/verifyRunnerRequest.ts", "packages/runner-protocol/src/httpSignature.ts"];
+    const allowed = ["packages/runner-cloud/src/claim.ts", "packages/runner-cloud/src/done.ts", "packages/runner-cloud/src/gitTicket.ts", "packages/runner-cloud/src/handoff.ts", "packages/runner-cloud/src/heartbeat.ts", "packages/runner-cloud/src/hello.ts", "packages/runner-cloud/src/index.ts", "packages/runner-cloud/src/ingestEvents.ts", "packages/runner-cloud/src/planePush.ts", "packages/runner-cloud/src/register.ts", "packages/runner-cloud/src/revoke.ts", "packages/runner-cloud/src/rotate.ts", "packages/runner-cloud/src/verifyRunnerRequest.ts", "packages/runner-cloud/src/wake.ts", "packages/runner-protocol/src/httpSignature.ts"];
     expect(filesWith(/withRunnerSession|verifyRunnerRequest|verifySelfSignedRequest/)).toEqual(allowed);
   });
 
@@ -166,6 +166,9 @@ describe("a runner-signed request is not a session (every route outside api/runn
       ...FLEET_SETTING_ACTIONS.map((action) => () => fleetSettingHandler(signedNext(`${ORIGIN}/api/runners/x/${action}`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e", action)),
       () => fleetReposHandler(signedNext(`${ORIGIN}/api/runners/x/repos`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
       () => fleetRemoveHandler(signedNext(`${ORIGIN}/api/runners/x/remove`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
+      // D#6 RUNNER-PING: "Check runner now" is a session route, and an API token is no session either.
+      () => fleetCheckHandler(signedNext(`${ORIGIN}/api/runners/x/check`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
+      () => fleetCheckHandler(signedNext(`${ORIGIN}/api/runners/x/check`, { authorization: "Bearer fxat_notarealtoken" }), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
     ];
     for (const call of calls) expect((await call()).status).toBe(401);
   });

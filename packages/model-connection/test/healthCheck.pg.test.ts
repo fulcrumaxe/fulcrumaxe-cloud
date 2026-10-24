@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Pool, type PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { withTenant } from '@fx/db/src/withTenant.js';
+import { markBroken } from '../src/markBroken.js';
 import { connect } from '../src/connect.js';
 import { seal } from '../src/crypto.js';
 import { buildAad } from '../src/types.js';
@@ -230,6 +231,40 @@ describe('healthCheck (D#454 H2e)', () => {
         expect((await row(live.accountId)).status).toBe('ok');
         expect(world.refused()).toEqual([]);
       });
+    });
+  });
+
+  describe('broken_at (D#6 DB-IDLE-R1b): when the connection broke', () => {
+    const connBrokenAt = async (accountId: string) => (await admin.query(`SELECT broken_at FROM model_connections WHERE account_id = $1`, [accountId])).rows[0].broken_at as Date | null;
+
+    it('is set by the second 401, kept by a later one, and cleared by a 200', async () => {
+      const a = await seedConnected();
+      await checkAll(a.accountId, R401);
+      expect(await connBrokenAt(a.accountId)).toBeNull(); // a strike alone is not a break
+      await checkAll(a.accountId, R401);
+      const first = await connBrokenAt(a.accountId);
+      expect(first).not.toBeNull();
+      await admin.query(`UPDATE model_connections SET broken_at = broken_at - interval '3 hours' WHERE account_id = $1`, [a.accountId]);
+      const aged = await connBrokenAt(a.accountId);
+      await markBroken(platformOpsPool, a.accountId, 403); // breaking an already broken row keeps the first time
+      expect(await connBrokenAt(a.accountId)).toEqual(aged);
+      await healthCheck(hctx(fakeHttpClient(OK)), a.accountId);
+      expect(await connBrokenAt(a.accountId)).toBeNull();
+    });
+
+    it('a rotation by the tenant clears it in the trigger, and the tenant cannot write it', async () => {
+      const a = await seedConnected();
+      await checkAll(a.accountId, R401, R401);
+      expect(await connBrokenAt(a.accountId)).not.toBeNull();
+      await withTenant(appUserPool, a.accountId, async (client) => {
+        await client.query(`UPDATE model_connections SET key_nonce = $1 WHERE account_id = $2`, [Buffer.alloc(12, 9), a.accountId]);
+      });
+      expect(await connBrokenAt(a.accountId)).toBeNull();
+      await expect(
+        withTenant(appUserPool, a.accountId, async (client) => {
+          await client.query(`UPDATE model_connections SET broken_at = now() WHERE account_id = $1`, [a.accountId]);
+        }),
+      ).rejects.toMatchObject({ code: '23514' });
     });
   });
 

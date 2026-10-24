@@ -104,8 +104,10 @@ same transaction. The merge gate reads it through `createPgLocalReviewOptIn`.
 - **The list.** `GET /api/runners` (session, any member) returns each runner's id, credential mode, who registered it,
   binary version, last-seen time and one derived state: `revoked`, `outdated` (protocol below the supported floor), `paused` or `draining` (a person set it in
   `runner_settings`; the claim answers it idle with `retry_after` 300, so it is shown before the online test and never reads `offline`;
-  `state_note` says "Resumes within 5 min"), `offline` (no request for `RUNNER_ONLINE_SECONDS` = 120 s, the one figure the covering
-  test of a waiting run and the waiting notice share), `busy` (holds a running run whose lease has not run out) or `online_idle`, in that
+  `state_note` says "Resumes within 5 min"), `offline` (not live by the one liveness rule, `runnerIsLive` / `runnerLiveSql` in `@fx/runner`:
+  nothing heard for `RUNNER_ONLINE_SECONDS` = 120 s, or, for a runner that listed `wake_v1` while the wake key is configured,
+  for `RUNNER_WAKE_LIVENESS_SECONDS` = 35 min, counting its cached wake checks; the covering test of a waiting run, the handoff's
+  covering test, the waiting notice and the claim's routing and account ceiling all use the same rule), `busy` (holds a running run whose lease has not run out) or `online_idle`, in that
   order of precedence. A runner revoked by its registrant leaving reads `state_note` "Revoked: registrant left". A paused or draining
   runner does not cover a waiting run in the read model. It selects
   no key, thumbprint, repo list or nonce. `getRunWaitReason(runId)` derives why a run waits (`waiting_for_runner`,
@@ -181,7 +183,7 @@ same transaction. The merge gate reads it through `createPgLocalReviewOptIn`.
   switch must show the number of queued runs that will be cancelled before the user confirms; that screen is a later change.
 - The sweeper also sends two notices per waiting run, once each, as `run_events` rows: `runner.waiting` at the first tick at
   or after 15 minutes from dispatch when no runner is online for the run's repo (a runner counts when it is not revoked, was
-  heard from within 120 s, and has the repo in its own `allowed_repo_ids`; an empty list takes no repo, as in the claim), and
+  live by the shared rule (120 s, or the wake window for a wake runner while the wake key is configured), and has the repo in its own `allowed_repo_ids`; an empty list takes no repo, as in the claim), and
   `runner.ttl_reminder` at the first tick at or after 48 hours. The wait reason in the read model uses the same test. The row
   is also the marker that it was sent. The tick reads the runs that still owe a notice, soonest due first
   (`agent_run_list_runner_runs_owing_notice`, owned by the NOLOGIN role `runner_notice_lister`), so runs that have both
@@ -224,3 +226,40 @@ Three signed routes serve a run-end hook that publishes an executor's change to 
 The package holds no clone or push code and runs no process; `test/planePushNoGit.test.ts` follows the import graph to keep it so. The GitHub side is `RunnerCloudDeps.planePush` (apps/web builds it from `@fx/github`); the database side is five optional methods on the lease ops. While either is missing the routes answer 503 `not_configured`. The identity reader is `RunnerCloudDeps.planePushIdentity`; two new settings (listed in the settings manifest).
 
 Bounded work per attempt: a `pushed`, `pr_failed` or `pr_opened` report on an attempt that has already finished answers 200 without any GitHub call, and a repeated `pushed` is free once one was verified, so a push costs at most two verified reports. A token that was minted but could not be handed out (the settle failed or matched no row) is revoked before the 5xx. Refusal codes off the fixed list (`PLANE_PUSH_REPORT_CODES`, kept equal to the push route's by a worker test) are stored as `push_failed`; a 64-character sha gets the fixed refusal `bad_input`. The verification reads still use the `plane_push` token (contents and pull requests write): no existing mint purpose gives a fresh, revocable, one-repository read token, and a new purpose would be a new scope.
+
+## The wake check (D#6 RUNNER-WAKE R3b)
+
+`GET /api/runner/wake` (`wake.ts`) lets a runner that holds a wake grant ask "is there work for my account" without a database connection. Its
+deps (`WakeDeps`) hold no pool, and apps/web builds them without `runnerDeps()`.
+
+- **Request.** `Accept: application/json` (anything else, including none or `*/*`, is 406), an empty body, the token in
+  `Authorization: Bearer`, and the usual RFC 9421 signature. The token is checked first (MAC, expiry, and an expiry no longer than a fresh
+  token's), then the signature against the public key the token carries (`verifyKeyBoundRequest`: key id must be the token's `jkt`, the
+  created time inside the skew window). A token without a signature, or signed by any other key, is 401. The nonce is not recorded, as for
+  `hello` and `heartbeat`: a replay inside the skew window gets the answer the runner already had.
+- **The allow record decides (fail closed).** `wake-ok:rid:<rid>` in the pending-work store holds a digest of the runner's current key and account.
+  A hello or claim that granted writes it (`allowRunnerWake`, after the database verified the runner); its TTL is one hour, never past the key's
+  90-day age limit, and every granted claim (at least once per 30-minute slot) rewrites it. The wake check answers only when it exists and matches
+  the token's `jkt` and `acct`. No record (never written, its TTL, an eviction, a write the client dropped, another region) is 503
+  `wake_unavailable`: the runner makes its ordinary claim and the database decides. A record for another key or account is 401.
+- **Revocation.** One helper, `revokeRunnerWake` (core `pendingWork.ts`), awaited after the commit, deletes the allow records (keyed on the runner
+  id, never on the token text). Callers: a member's revoke, a runner's own revoke, remove, revoke-all (per runner, so a runner registered later
+  still works), the membership trigger paths (`setMemberRole`, `removeMember`), rotate (the next claim with the new key writes a new record) and
+  account close (every runner of the account, read in the close transaction). The deletes run again 5 s later, for a claim that verified before
+  the commit and writes the record after it. There are no deny keys: in the same cache they could only fail open. The Runtime Cache client
+  swallows its own errors, so a dropped delete can go unnoticed; the record then ends with its one-hour TTL, and in that time the revoked runner
+  learns only whether its account has work. Every claim is still refused by the database.
+- **Single region.** Runtime Cache is regional. The app sets no `regions`, so every function runs in one region and finds the record its claims
+  wrote. With several regions a wake check in another region misses it and answers 503 (fail closed, the runner claims), so the check stays safe
+  but stops saving claims; the keys would then move to a shared store.
+- **Reply.** Exactly `{epoch, due_at}` (`WakeReply` in runner-protocol): ms times, `epoch` 0 when none is stored. The account comes only from
+  the verified token. A verified call refreshes `seen:<rid>` in the wake namespace through `runnerSeenWriter` (`wakeSeen.ts`): one per process,
+  it remembers its own last writes, so it never reads the cache and writes at most once a minute per runner per instance.
+- **Configuration.** No `FX_RUNNER_WAKE_KEY` is 503 `not_configured` (as with the other runner routes' missing settings; no grant can exist that this
+  cloud could check). Errors go to stdout only: the usual reporter writes `error_events`.
+- **Safety claim.** An idle claim answered with a grant ("nothing queued") carries `retry_after` up to just after the next 30-minute slot boundary,
+  plus a stable per-runner offset of up to 300 s (`wakeSafetyRetryAfterSeconds`). Queued-but-blocked answers, pauses and runners without a grant
+  keep their answers.
+- **Not rate limited here.** The existing runner limits are database rows. An unauthenticated call costs one HMAC; a signed one a signature check and
+  one parallel round of three cache reads (the allow record, the account's epoch and due time) and a write a minute. The WAF rule on
+  `/api/runner/*` is the outer layer.

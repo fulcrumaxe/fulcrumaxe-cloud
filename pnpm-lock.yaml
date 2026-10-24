@@ -132,6 +132,9 @@ importers:
       '@fx/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@fx/test-guard':
+        specifier: workspace:*
+        version: link:../../packages/test-guard
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
@@ -338,6 +341,9 @@ importers:
       '@fx/sitekit-checks':
         specifier: workspace:*
         version: link:../sitekit-checks
+      '@fx/test-guard':
+        specifier: workspace:*
+        version: link:../test-guard
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
@@ -460,6 +466,9 @@ importers:
         specifier: ^8.13.1
         version: 8.23.0
     devDependencies:
+      '@fx/test-guard':
+        specifier: workspace:*
+        version: link:../test-guard
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
@@ -842,6 +851,9 @@ importers:
       '@fx/runner':
         specifier: workspace:*
         version: link:../runner
+      '@fx/test-guard':
+        specifier: workspace:*
+        version: link:../test-guard
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
@@ -999,6 +1011,9 @@ importers:
       '@fx/runtime':
         specifier: workspace:*
         version: link:../runtime
+      '@fx/test-guard':
+        specifier: workspace:*
+        version: link:../test-guard
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
@@ -1137,6 +1152,9 @@ importers:
       '@fx/model-connection':
         specifier: workspace:*
         version: link:../model-connection
+      '@fx/test-guard':
+        specifier: workspace:*
+        version: link:../test-guard
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
@@ -1212,6 +1230,9 @@ importers:
         specifier: workspace:*
         version: link:../runner-protocol
     devDependencies:
+      '@fx/test-guard':
+        specifier: workspace:*
+        version: link:../test-guard
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
@@ -1501,6 +1522,9 @@ importers:
       '@fx/runner-cloud':
         specifier: workspace:*
         version: link:../runner-cloud
+      '@fx/test-guard':
+        specifier: workspace:*
+        version: link:../test-guard
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0

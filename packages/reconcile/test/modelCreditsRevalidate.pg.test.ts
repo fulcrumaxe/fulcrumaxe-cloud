@@ -6,7 +6,7 @@ import { connect, fetchValidationHttpClient, markBroken, markCreditsExhausted, r
 import { fakeKekSource } from '../../model-connection/test/helpers/fakeKek.js';
 import { seedAccountWithMember } from '../../model-connection/test/helpers/seed.js';
 import { startStrictProviders, type StrictProviders } from '../../model-connection/test/helpers/strictProviders.js';
-import { createModelCreditsRevalidateJob, runTick, type ReconcileJob, type ReportError, type RevalidateCredits } from '../src/index.js';
+import { createModelCreditsRevalidateJob, readCreditsBreak, runTick, type ReconcileJob, type ReportError, type RevalidateCredits } from '../src/index.js';
 
 /**
  * D#483 S5-k2 for the reconcile job, against real Postgres, the REAL revalidateCreditsExhausted and the real validation client over TLS to the strict gateway
@@ -124,6 +124,35 @@ describe('model credits re-validation job (D#483 S5-k2)', () => {
     await tick(job);
     expect(world.seen()).toEqual([]); // no longer broken for credits: not listed, not called
     expect(world.refused()).toEqual([]);
+  });
+
+  it('backs off after 2 hours and resets: broken_at is set on the credits break, kept by a failed re-check, and cleared by a success or a new break', async () => {
+    const brokenAt = async (accountId: string) => (await admin.query(`SELECT broken_at FROM model_connections WHERE account_id = $1`, [accountId])).rows[0].broken_at as Date | null;
+    const [a] = await seed(1, 'credits');
+    const job = createModelCreditsRevalidateJob({ revalidate: real, reportError: report });
+    const first = await brokenAt(a!.accountId);
+    expect(first).not.toBeNull();
+    expect(await readCreditsBreak(platformOps)).toMatchObject({ broken: true, backedOff: false }); // 0 to 2 hours: 15 minutes
+
+    await admin.query(`UPDATE model_connections SET broken_at = now() - interval '2 hours 1 minute' WHERE account_id = $1`, [a!.accountId]);
+    expect(await readCreditsBreak(platformOps)).toMatchObject({ broken: true, backedOff: true }); // past 2 hours: hourly
+    const aged = await brokenAt(a!.accountId);
+
+    world.ai_gateway.mode = { status: 402 }; // still empty: the re-check must not restart the clock
+    await tick(job);
+    expect(await brokenAt(a!.accountId)).toEqual(aged);
+    expect((await readCreditsBreak(platformOps)).backedOff).toBe(true);
+
+    world.ai_gateway.mode = null; // topped up: ok, so nothing is broken for credits and the stamp is gone
+    await makeDue();
+    await tick(job);
+    expect(await brokenAt(a!.accountId)).toBeNull();
+    expect(await readCreditsBreak(platformOps)).toEqual({ broken: false, ageSeconds: null, backedOff: false });
+
+    await markCreditsExhausted(platformOps, a!.accountId); // a new break starts a new 15-minute window
+    const again = await readCreditsBreak(platformOps);
+    expect(again.broken).toBe(true);
+    expect(again.backedOff).toBe(false);
   });
 
   it('a key the provider now rejects (401) ends broken for that reason, not retried as credits', async () => {

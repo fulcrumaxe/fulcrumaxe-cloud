@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import { activityLines, costRows, emptyActivityText, factRows, readInsight, runnerEventLine } from "../apps/runs/runs-detail.js";
 import { noActivityText, runView, runnerCost } from "../apps/pipeline/pipeline-insight.js";
 import { ownPlanLine } from "../apps/pipeline/pipeline-actions.js";
+import { COPY } from "../../../packages/runner-protocol/src/copy.ts";
 
 const V1 = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "api", "fixtures", "v1");
 const names = (op) => readdirSync(join(V1, op)).filter((f) => f.startsWith("200-runner-")).map((f) => f.slice("200-".length, -".json".length));
@@ -172,5 +173,19 @@ describe("the item's own-plan line (C42-5 states)", () => {
     expect(ownPlanLine({ own_plan_api_equivalent_usd: 2.5 })).toBe("On your own plan (API-equivalent): $2.50");
     expect(ownPlanLine(null)).toBeNull();
     expect(ownPlanLine({})).toBeNull();
+  });
+});
+
+describe("a live run_ended line uses the runner protocol's own words (no drift from copy.ts)", () => {
+  const ended = (reason, detail) => runnerEventLine({ type: "run_ended", reason, ...(detail === undefined ? {} : { detail }) });
+  it("each reason with a sentence in COPY reads exactly that sentence", () => {
+    expect(ended("resource_limit")).toBe(COPY.resourceLimit);
+    expect(ended("agent_failed")).toBe(COPY.agentFailed);
+    expect(ended("push_rejected")).toBe(COPY.pushRejected);
+    expect(ended("job_refused", "duplicate_job")).toBe(COPY.jobRefused.replace("{detail}", "duplicate_job"));
+  });
+  it("the memory-limit line is not the generic one, and is the line the insight read of the same state shows", () => {
+    expect(ended("resource_limit")).not.toMatch(/^The run ended/);
+    expect(read("getRunInsight", "runner-failed-resource-limit").lines.map((l) => l.text)).toContain(ended("resource_limit"));
   });
 });

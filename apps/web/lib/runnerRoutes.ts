@@ -1,7 +1,7 @@
 import type { NextRequest } from "next/server";
 import type { Pool } from "pg";
 import { NextResponse } from "next/server";
-import { MAX_BODY_BYTES, RunnerHttpError, errorResponse, toResponse } from "@fx/runner-cloud";
+import { MAX_BODY_BYTES, RunnerHttpError, errorResponse, readWakeKey, toResponse } from "@fx/runner-cloud";
 import type { FailRunnerLeases, PlanePushHostedPort, RunnerCloudDeps, RunnerLeaseOps, RunnerHttpRequest, RunnerHttpResponse, RunPullRequestPort, SessionPrincipal } from "@fx/runner-cloud";
 import { PgRateLimitStore, type RateLimitStore } from "@fx/api/src/ratelimit/store.js";
 import { bucketKeyForAnonIp, clientIpFromRequest } from "@fx/api/src/ratelimit/limits.js";
@@ -13,6 +13,7 @@ import { createAppRunPullRequestPort } from "./github/runnerPullRequest";
 import { readPlanePushIdentity } from "@fx/core/src/repos/planePushIdentity.js";
 import { createLivePlanePushPort } from "./github/planePushHosted";
 import { openPlanSource } from "./github/planSource";
+import { runnerSeenFromCache } from "./runnerSeenCache";
 import { applyRefreshedSessionCookie, resolveActiveSession } from "./shell/session-guard";
 
 /**
@@ -85,8 +86,11 @@ function planePushIdentity(): { name: string; email: string } | null {
 
 export function runnerDeps(): RunnerCloudDeps {
   const auth = defaultAuthDeps();
-  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, maxRunners: (plan) => runnerLimitsFor(plan).maxRunners, accountRunnerCaps: accountRunnerCaps, accountJobLimit, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }), pullRequests: (pullRequests ??= createAppRunPullRequestPort()), planePush: (planePush ??= createLivePlanePushPort()), readAllowanceFile, planePushIdentity };
+  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, maxRunners: (plan) => runnerLimitsFor(plan).maxRunners, accountRunnerCaps: accountRunnerCaps, accountJobLimit, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }), pullRequests: (pullRequests ??= createAppRunPullRequestPort()), planePush: (planePush ??= createLivePlanePushPort()), readAllowanceFile, planePushIdentity, wakeKey, runnerSeen: runnerSeenFromCache() };
 }
+
+/** D#6 RUNNER-WAKE R3a: the wake token's HMAC key, read on every call. Missing or shorter than 32 bytes: null, and no runner is sent a wake grant. */
+const wakeKey = (): Buffer | null => readWakeKey(process.env);
 
 /** Reads at most `max` bytes of the body, or returns null as soon as it is over. A declared length over the cap is refused unread. */
 export async function readCappedBody(req: Request, max: number): Promise<Uint8Array | null> {

@@ -12,6 +12,8 @@ import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   APPROVE_SENTENCES,
+  CHANGES_BLOCKED,
+  CHANGES_DIALOG,
   CLOSE_DIALOG,
   CLOSE_ON_GITHUB_NOTE,
   OPEN_PR_REFUSED,
@@ -23,6 +25,8 @@ import {
   SENDING,
   approvePath,
   approveSentenceFor,
+  changeRequestLines,
+  changesBlocked,
   closeOnHost,
   createOperator,
   operatorActions,
@@ -72,7 +76,7 @@ describe("one rule source: the app draws what the server lists, in a fixed order
   });
 
   it("the labels are exactly the words the owner approved", () => {
-    expect(OPERATOR_LABELS).toEqual({ build_again: "Build again", respec: "Re-spec", back_to_discussion: "Back to discussion", treat_as_feature: "Treat as a feature", close: "Close", reopen: "Reopen", retry_push: "Try the push again", open_pr: "Open the pull request again" });
+    expect(OPERATOR_LABELS).toEqual({ request_changes: "Request changes", build_again: "Build again", respec: "Re-spec", back_to_discussion: "Back to discussion", treat_as_feature: "Treat as a feature", close: "Close", reopen: "Reopen", retry_push: "Try the push again", open_pr: "Open the pull request again" });
   });
 
   it("Re-spec (D#6 R4d-5b): drawn only when the server lists it, labelled exactly Re-spec, after Build again, on its own route", () => {
@@ -364,5 +368,89 @@ describe("Try the push again and Open the pull request again (D#598 P1f-6b)", ()
     expect(refused.op.state).toMatchObject({ phase: "error", text: OPEN_PR_REFUSED });
     expect(refused.op.state.text).not.toContain("pr_failed");
     expect(refused.done).toEqual([]);
+  });
+});
+
+describe("Request changes", () => {
+  const PR_ITEM = { ...ITEM, stage: "review_passed" };
+  const path = "/api/v1/work-items/" + ID + "/request-changes";
+
+  it("is drawn only when the server lists it, first, on its own route", () => {
+    expect(operatorActions({ actions: ["close", "request_changes"] })).toEqual(["request_changes", "close"]);
+    expect(operatorActions({ actions: [] })).toEqual([]);
+    expect(OPERATOR_PATHS.request_changes(ID)).toBe(path);
+  });
+
+  it("pressing it sends nothing: it opens the dialog with a note box", async () => {
+    const call = fakeCall();
+    const { op } = make(call);
+    await op.press(PR_ITEM, "request_changes");
+    expect(op.state).toMatchObject({ confirm: true, action: "request_changes" });
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it("Send: one POST whose body is the note and nothing else, trimmed; the accepted request is followed and the fixed sentence shown; the dialog closes", async () => {
+    const call = fakeCall();
+    const { op, done } = make(call);
+    await op.press(PR_ITEM, "request_changes");
+    await op.confirmClose(PR_ITEM, '  Change "recieve" to "receive".  ');
+    expect(posts(call)).toEqual([["POST", path, { note: 'Change "recieve" to "receive".' }]]);
+    expect(gets(call).map((g) => g[1])).toEqual(["/api/v1/run-actions/a1"]);
+    expect(op.state).toMatchObject({ phase: "started", text: OPERATOR_STARTED.request_changes, confirm: false });
+    expect(done).toEqual([[ID, "request_changes"]]);
+  });
+
+  it("an empty or too-long note is never sent: the dialog stays with the fixed sentence", async () => {
+    const call = fakeCall();
+    const { op } = make(call);
+    await op.press(PR_ITEM, "request_changes");
+    for (const bad of ["", "   ", undefined, "x".repeat(2001)]) {
+      await op.confirmClose(PR_ITEM, bad);
+      expect(op.state).toMatchObject({ phase: "error", confirm: true, text: APPROVE_SENTENCES.invalid_note });
+    }
+    expect(call).not.toHaveBeenCalled();
+    await op.confirmClose(PR_ITEM, "é".repeat(2000));
+    expect(posts(call)).toHaveLength(1);
+  });
+
+  it("a refusal before anything was written (409 escalate) keeps the dialog with its sentence; one after acceptance closes it, so the note is not sent twice", async () => {
+    const early = make(fakeCall(fail(409, "escalate")));
+    await early.op.press(PR_ITEM, "request_changes");
+    await early.op.confirmClose(PR_ITEM, "rename it");
+    expect(early.op.state).toMatchObject({ phase: "error", confirm: true, text: APPROVE_SENTENCES.escalate });
+    expect(early.op.state.text).not.toContain("server text");
+    const late = make(fakeCall({ action_id: "a1", state: "accepted" }, { state: "refused", error_code: "no_model" }));
+    await late.op.press(PR_ITEM, "request_changes");
+    await late.op.confirmClose(PR_ITEM, "rename it");
+    expect(late.op.state).toMatchObject({ phase: "error", confirm: false });
+  });
+
+  it("the server's reason it is held back reads as the fixed sentence; anything else is no reason", () => {
+    expect(changesBlocked({ request_changes_blocked: "live" })).toBe("live");
+    expect(changesBlocked({ request_changes_blocked: "rounds" })).toBe("rounds");
+    for (const v of [null, undefined, "other", "__proto__", "constructor"]) expect(changesBlocked({ request_changes_blocked: v }), String(v)).toBeNull();
+    expect(CHANGES_BLOCKED.live).toMatch(/agents are working/);
+    expect(CHANGES_BLOCKED.rounds).toMatch(/used all its fix rounds/);
+  });
+
+  it("activity: 'You asked for changes: <note>' for the caller's own note, the asker's name otherwise, with where it stands", () => {
+    const lines = changeRequestLines({
+      change_requests: [
+        { mine: true, name: null, note: "Fix the typo.", at: "2026-10-23T10:00:00.000Z", state: "sent", run_id: OTHER },
+        { mine: false, name: "Ada", note: "Rename it.", at: "2026-10-23T11:00:00.000Z", state: "waiting", run_id: null },
+        { mine: false, name: null, note: "Old.", at: "2026-10-23T12:00:00.000Z", state: "dropped", run_id: null },
+        { mine: true, note: 7 },
+      ],
+    });
+    expect(lines.map((l) => [l.text, l.state])).toEqual([
+      ["You asked for changes: Fix the typo.", "Sent to the fix round."],
+      ["Ada asked for changes: Rename it.", "Waiting for the fix round to start."],
+      ["A former member asked for changes: Old.", "Withdrawn."],
+    ]);
+    for (const bad of [null, {}, { change_requests: "x" }]) expect(changeRequestLines(bad)).toEqual([]);
+  });
+
+  it("its words are plain text", () => {
+    for (const t of [CHANGES_DIALOG.title, CHANGES_DIALOG.label, CHANGES_DIALOG.confirm, CHANGES_DIALOG.dismiss, ...CHANGES_DIALOG.lines, ...Object.values(CHANGES_BLOCKED)]) expect(t, t).not.toMatch(/[<>]|undefined|null/);
   });
 });

@@ -149,6 +149,26 @@ describe("buildFixPrompt", () => {
     expect(p.trimEnd().endsWith(END)).toBe(true);
   });
 
+  it("a person's round (Request changes): says a person asked, points at their note, carries no findings slot when no reviewer asked, and never holds the note itself", () => {
+    const p = buildFixPrompt({ ...FIX, findings: [], person: true });
+    expect(p.startsWith("You are the executor. A person who owns this work asked for changes on pull request #41")).toBe(true);
+    expect(p).toContain("Make the changes the person asked for in their note (the notes after this prompt), fix every reviewer finding listed,");
+    expect(p).not.toContain("REVIEWER FINDINGS:");
+    expect(p).not.toContain("The reviewers asked for changes");
+    expect(p).toContain("what you changed for the person's note and for each finding");
+    // Only the Spec is fenced here: the note is added by the worker, in its own fence.
+    expect(p.split(UNTRUSTED_DELIMITER_START).length - 1).toBe(1);
+    expect(p.split(UNTRUSTED_DELIMITER_END).length - 1).toBe(1);
+    // With a reviewer's findings on the same head, they are listed (and fenced) as in any round.
+    const both = buildFixPrompt({ ...FIX, person: true });
+    expect(both).toContain("REVIEWER FINDINGS:");
+    expect(both).toContain("src/a.ts:3 - off by one");
+    // The other variants say a person asked too.
+    expect(buildFixPrompt({ ...FIX, findings: [], person: true, runtime: "runner" })).toContain("A person who owns this work asked for changes");
+    expect(buildFixPrompt({ ...FIX, findings: [], person: true, crossSide: true })).toContain("at the commit the person asked about");
+    expect(buildFixPrompt(FIX)).toContain("The reviewers asked for changes");
+  });
+
   it("fences each reviewer's findings on their own and defangs a forged envelope in them", () => {
     const p = buildFixPrompt({
       ...FIX,

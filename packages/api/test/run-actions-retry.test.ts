@@ -225,6 +225,33 @@ describe('D#31 API-6b-1: retry route', () => {
     expect(signal.sent).toEqual([]);
   });
 
+  it("a person's request_changes round counts toward the bound: reviewer rounds plus one person round reach it, one fewer does not", async () => {
+    const seedPersonRound = (accountId: string, workItemId: string) =>
+      admin.query(
+        `INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, reviewer, at, source, source_ref)
+         VALUES ($1, $2, 'pr_opened', 'changes_requested', 'acceptance', now(), 'control_plane', $3)`,
+        [accountId, workItemId, `request_changes:${randomUUID()}`],
+      );
+    const m = await member();
+    const under = await seedWorkItem(m.accountId);
+    await seedFixRounds(m.accountId, under, maxFixRounds() - 2);
+    await seedPersonRound(m.accountId, under);
+    const underRun = await seedRun(m.accountId, 'failed', under);
+    expect((await call(m, `/runs/${underRun}/retry`)).status).toBe(202);
+
+    const atBound = await seedWorkItem(m.accountId);
+    await seedFixRounds(m.accountId, atBound, maxFixRounds() - 1);
+    await seedPersonRound(m.accountId, atBound);
+    const blocked = await seedRun(m.accountId, 'failed', atBound);
+    const before = await rowCount(m.accountId);
+    signal.sent.length = 0;
+    const res = await call(m, `/runs/${blocked}/retry`);
+    expect(res.status).toBe(409);
+    expect(await code(res)).toBe('escalate');
+    expect(await rowCount(m.accountId)).toBe(before);
+    expect(signal.sent).toEqual([]);
+  });
+
   it('K7: a finished run with no work item is 409 run_not_retryable and writes nothing, and a keyed replay still beats it', async () => {
     const m = await member();
     const run = randomUUID();

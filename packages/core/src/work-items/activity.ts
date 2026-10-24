@@ -9,7 +9,7 @@ import { redactText } from '@fx/runtime/src/redact.js';
 import { setupPauseFor, type SetupHold, type SetupRequest } from '../setup-requests/store.js';
 import { parseAcceptanceScope } from '../specs/acceptanceScope.js';
 import { readPublicChange, type PublicChange } from '../repos/publicChange.js';
-import { BACK_TO_DISCUSSION_REF_PREFIX, closeOnGithub, operatorActionsFor, readOperatorFacts, type OperatorAction } from './operatorActions.js';
+import { BACK_TO_DISCUSSION_REF_PREFIX, REQUEST_CHANGES_NOTE_MAX, REQUEST_CHANGES_REF_PREFIX, closeOnGithub, operatorActionsFor, operatorVerdict, readOperatorFacts, type OperatorAction } from './operatorActions.js';
 
 /**
  * What the pipeline is doing for one work item, read for the Pipeline app's detail panel. Read only: every value here
@@ -182,7 +182,28 @@ export interface WorkItemActivity {
   actions: OperatorAction[];
   /** True when the caller could close this item but it has an open pull request: the app says to close the pull request on GitHub instead of offering Close. */
   close_on_github: boolean;
+  /**
+   * Why Request changes is not offered on an open pull request the caller could otherwise ask about: `live` (agents are working on it now) or `rounds` (its fix
+   * rounds are used up). Null when it is offered, or when it does not apply at all (no open pull request, a member, an external item).
+   */
+  request_changes_blocked: 'live' | 'rounds' | null;
+  /** The item's Request changes notes, newest last: who asked (`mine` when it was the caller), the note as written, and whether its fix round has taken it. */
+  change_requests: ActivityChangeRequest[];
 }
+
+/** One Request changes press. `state`: `waiting` (no fix run has taken the note yet), `sent` (the fix run `run_id` carried it), `dropped` (it was withdrawn). */
+export interface ActivityChangeRequest {
+  mine: boolean;
+  /** The asker's name, or null when it is the caller (`mine`) or the member left. */
+  name: string | null;
+  note: string;
+  at: string;
+  state: 'waiting' | 'sent' | 'dropped';
+  run_id: string | null;
+}
+
+/** At most this many Request changes notes are listed (the newest). */
+export const MAX_CHANGE_REQUESTS = 10;
 
 export interface ActivityCtx {
   pool: Pool;
@@ -209,6 +230,31 @@ export const REVIEW_STOP_COPY_KEY = Object.freeze({
   review_round_cap: 'reviewRoundCap',
   review_compute_cap: 'reviewComputeCap',
 } as const);
+
+/** The reviewers by the code a driver event carries for them, as the sentence names them. */
+const REVIEWER_NAMES: Readonly<Record<string, string>> = Object.freeze({ code_reviewer: 'code reviewer', acceptance_tester: 'acceptance tester', security_reviewer: 'security reviewer', debater: 'debater' });
+/** How a reviewer's last run ended, by its fixed code, as the sentence says it. A code not listed reads as the last entry's words. */
+const NO_VERDICT_ENDS: Readonly<Record<string, string>> = Object.freeze({
+  resource_limit: 'it was stopped at its memory limit',
+  wait_timeout: 'it ran out of time',
+  timed_out: 'it ran out of time',
+  wall_clock_limit: 'it ran out of time',
+  cancelled: 'its run was cancelled',
+  runner_lost: 'the runner lost contact with it',
+  agent_failed: 'its agent stopped before it finished',
+});
+
+/**
+ * The notice for an item a reviewer could not finish (`escalated` with code `reviewer_no_verdict`; reasons: role, end, per reviewer). It never says changes were
+ * requested: none were. Null when the reasons name no reviewer this sentence knows.
+ */
+export function reviewerNoVerdictSentence(reasons: readonly string[]): string | null {
+  const key = reasons[0] ?? '';
+  const name = Object.hasOwn(REVIEWER_NAMES, key) ? REVIEWER_NAMES[key] : undefined;
+  if (name === undefined) return null;
+  const end = reasons[1] !== undefined && Object.hasOwn(NO_VERDICT_ENDS, reasons[1]) ? NO_VERDICT_ENDS[reasons[1]] : 'its run ended without a verdict';
+  return `The ${name} could not finish reviewing this pull request: ${end}, every time it was tried. No verdict was recorded and no changes were requested. Press Approve to have the reviewers look at the pull request again, or review it yourself and merge or close it on GitHub.`;
+}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
@@ -558,6 +604,19 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
         )
       ).rows[0];
       const rebuildSentence = rebuildStop?.code && Object.hasOwn(CHECK_FAILED_SENTENCES, rebuildStop.code) ? CHECK_FAILED_SENTENCES[rebuildStop.code] : undefined;
+      // A reviewer that kept ending without a verdict handed the item over: the notice names it and how it ended, never the executor's summary.
+      const noVerdict = rebuildSentence
+        ? undefined
+        : (
+            await client.query<{ reasons: string[] }>(
+              `SELECT e.reasons FROM work_item_driver_events e
+                WHERE e.work_item_id = $1::uuid AND e.kind = 'escalated' AND e.code = 'reviewer_no_verdict'
+                  AND e.created_at >= COALESCE((SELECT max(t.created_at) FROM work_item_transitions t WHERE t.work_item_id = $1::uuid AND t.to_stage = 'needs_human'), '-infinity'::timestamptz)
+                ORDER BY e.seq DESC LIMIT 1`,
+              [workItemId],
+            )
+          ).rows[0];
+      const noVerdictSentence = noVerdict ? reviewerNoVerdictSentence(noVerdict.reasons) : null;
       // The newest executor run's own summary says why the build ended without a pull request.
       const ex = (
         await client.query<{ summary: string | null; status: string }>(
@@ -569,7 +628,9 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       const summary = ex?.summary?.trim() ? safeModelText(ex.summary, ACTIVITY_LIMITS.maxNoticeChars) : null;
       notice = rebuildSentence
         ? { kind: 'check_failed', reason: rebuildSentence }
-        : {
+        : noVerdictSentence
+          ? { kind: 'needs_human', reason: noVerdictSentence }
+          : {
             kind: 'needs_human',
             reason: summary ?? (ex ? `The executor run ${ex.status.replace(/_/g, ' ')} without a pull request.` : 'The pipeline stopped and needs a person.'),
           };
@@ -606,6 +667,20 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
 
     // What this caller may do now: the same table the action routes ask. A caller with no role gets none.
     const facts = ctx.principal.role ? await readOperatorFacts(client, workItemId, ctx.principal.role) : null;
+    const changeVerdict = facts ? operatorVerdict('request_changes', facts) : null;
+    const requestChangesBlocked = facts?.pr_open === true && changeVerdict !== null && !changeVerdict.ok && (changeVerdict.reason === 'live' || changeVerdict.reason === 'rounds') ? changeVerdict.reason : null;
+    // The notes a person sent with Request changes: the transitions it recorded name them. The text is the person's own, shown as plain text.
+    const changeRows = (
+      await client.query<{ body: string; status: string; decided_by: string | null; name: string | null; created_at: Date; applied_run_id: string | null }>(
+        `SELECT left(c.body, $3::int) AS body, c.status, c.decided_by, COALESCE(NULLIF(u.name, ''), NULLIF(u.github_login, '')) AS name, c.created_at, c.applied_run_id
+           FROM work_item_transitions t
+           JOIN work_item_corrections c ON c.work_item_id = t.work_item_id AND t.source_ref = $2::text || c.id::text AND c.kind = 'run_note'
+           LEFT JOIN users u ON u.id = c.decided_by
+          WHERE t.work_item_id = $1::uuid AND t.to_stage = 'changes_requested'
+          ORDER BY c.created_at DESC, c.id DESC LIMIT $4::int`,
+        [workItemId, REQUEST_CHANGES_REF_PREFIX, REQUEST_CHANGES_NOTE_MAX, MAX_CHANGE_REQUESTS],
+      )
+    ).rows;
 
     return {
       stage: item.stage,
@@ -649,6 +724,15 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       setup_pause: await setupPauseFor(client, workItemId),
       actions: facts ? operatorActionsFor(facts) : [],
       close_on_github: facts ? closeOnGithub(facts) : false,
+      request_changes_blocked: requestChangesBlocked,
+      change_requests: changeRows.reverse().map((c) => ({
+        mine: c.decided_by === userId,
+        name: c.decided_by === userId ? null : c.name,
+        note: safeModelText(c.body, REQUEST_CHANGES_NOTE_MAX),
+        at: c.created_at.toISOString(),
+        state: c.status === 'applied' ? ('sent' as const) : c.status === 'accepted' ? ('waiting' as const) : ('dropped' as const),
+        run_id: c.applied_run_id,
+      })),
     };
   });
 }

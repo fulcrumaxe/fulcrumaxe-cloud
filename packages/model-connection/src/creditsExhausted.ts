@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from 'pg';
 import { withPlatformOps } from '@fx/core/src/tenancy/withPlatformOps.js';
 import { emitDomainEvent } from '@fx/core/src/domain-events/emit.js';
+import { markWorkPending } from '@fx/core/src/pendingWork.js';
 
 /**
  * D#483 S5-k2: the out-of-credit signal.
@@ -49,7 +50,7 @@ export function isCreditsExhaustedAnswer(answer: ProviderAnswer): boolean {
 export async function markCreditsExhaustedWithClient(client: PoolClient, accountId: string): Promise<boolean> {
   const { rows } = await client.query<{ id: string }>(
     `UPDATE model_connections
-        SET status = 'broken', last_error_code = $2
+        SET status = 'broken', last_error_code = $2, broken_at = COALESCE(broken_at, now())
       WHERE account_id = $1 AND status <> 'broken'
       RETURNING id`,
     [accountId, CREDITS_EXHAUSTED_CODE],
@@ -57,6 +58,8 @@ export async function markCreditsExhaustedWithClient(client: PoolClient, account
   const id = rows[0]?.id;
   if (!id) return false;
   await emitDomainEvent(client, { type: 'model_connection.changed', accountId, subjectId: id, payload: { state: 'broken' } });
+  // The re-validation job runs inside the reconciler, which is otherwise on a slow slot cadence: wake it (a hint; the row is the truth).
+  void markWorkPending('reconcile');
   return true;
 }
 

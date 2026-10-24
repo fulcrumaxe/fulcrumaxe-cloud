@@ -75,7 +75,7 @@ export interface RunOutcome {
 }
 
 /** The start options this engine reads. `resumeSessionId` is set by the session planner when a workspace and session are both still there. */
-export type EngineStartOptions = StartOptions & { resumeSessionId?: string; /** D#600 CX-5c: paths and globs kept out of context; written as deny entries on every start and resume of the job. */ excludes?: readonly string[]; /** D#600 CX-4b: the run's spill directory; the file tools may read it. */ spillDir?: string; /** D#600 CX-6b: the model's context window in tokens, from the job. Absent: no context percentage is computed and no note is ever delivered. */ contextWindowTokens?: number };
+export type EngineStartOptions = StartOptions & { resumeSessionId?: string; /** D#600 CX-5c: paths and globs kept out of context; written as deny entries on every start and resume of the job. */ excludes?: readonly string[]; /** D#600 CX-4b: the run's spill directory; the file tools may read it. */ spillDir?: string; /** D#600 CX-6b: the model's context window in tokens, from the job. Absent: no context percentage is computed and no note is ever delivered. */ contextWindowTokens?: number; /** D#6 RUNNER-AGENT-NO-FULLCHECK: the job's approved check, denied to the agent's shell on every start and resume (the runner runs it itself). */ checkArgv?: readonly string[] };
 
 /** How a run ended: the promise every handle this engine returns carries. */
 export function outcomeOf(handle: AgentHandle): Promise<RunOutcome> {
@@ -142,7 +142,7 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
     if (!(await authPresent(config.credentials.mode, { binaryPath: binary.path, env, spawn: spawnFn, launch: config.launch })).present) throw new EngineRefusal("auth_missing");
 
     const excludes = (opts as EngineStartOptions).excludes;
-    const files = writeJobFiles(jobDir, workdir, opts.role, config.sandboxSettings, config.protectedPaths, excludes, (opts as EngineStartOptions).spillDir);
+    const files = writeJobFiles(jobDir, workdir, opts.role, config.sandboxSettings, config.protectedPaths, excludes, (opts as EngineStartOptions).spillDir, (opts as EngineStartOptions).checkArgv);
     const argv = claudeArgv({ cliModel: opts.model, roleTools, allowRules: [...confineFileTools(roleTools, path.resolve(workdir)), ...((opts as EngineStartOptions).spillDir === undefined ? [] : readRulesFor((opts as EngineStartOptions).spillDir!))], ...files, ...(resumeSessionId === undefined ? {} : { resumeSessionId }) });
     const secrets = [env.ANTHROPIC_API_KEY, env[SUBSCRIPTION_TOKEN_VAR]].filter((value): value is string => typeof value === "string");
     const log = createRunLog(config.logDir, opts.runId, secrets);

@@ -49,7 +49,9 @@ describe('model_connections schema', () => {
     expect(byName.get('credential_kind')).toBe('text');
     expect(byName.get('backend')).toBe('text');
     expect(byName.get('aad_version')).toBe('smallint');
-    expect(rows).toHaveLength(20);
+    // D#6 DB-IDLE-R1b: when the connection broke (nullable; platform_ops writes it)
+    expect(byName.get('broken_at')).toBe('timestamp with time zone');
+    expect(rows).toHaveLength(21);
 
     // The only columns permitted to be free-form text are provably NOT the
     // raw key: an enum-like status/provider, a one-way fingerprint, and an

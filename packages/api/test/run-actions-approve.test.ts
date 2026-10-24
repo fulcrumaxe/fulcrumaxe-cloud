@@ -385,6 +385,33 @@ describe('D#483 P1: approve route', () => {
       await expectNothingWritten(p.accountId);
     });
 
+    describe('Approve after a reviewer kept ending without a verdict', () => {
+      const escalated = (accountId: string, item: string, code: string, key: string) =>
+        admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'escalated', $3, $4)", [accountId, item, code, key]);
+
+      it('is accepted at needs_human whose newest escalation is reviewer_no_verdict', async () => {
+        const p = await person('owner');
+        const item = await seedSpecReady(p.accountId, { stage: 'needs_human', kind: 'feature' });
+        await escalated(p.accountId, item, 'reviewer_no_verdict', 'k1');
+        expect((await post(p, `/work-items/${item}/approve`)).status).toBe(202);
+      });
+
+      it('another cause keeps today\'s rules: a later reviewer_fail escalation, an escalation from before the item last reached Needs a person, and no Spec', async () => {
+        const p = await person('owner');
+        const later = await seedSpecReady(p.accountId, { stage: 'needs_human', kind: 'project' });
+        await escalated(p.accountId, later, 'reviewer_no_verdict', 'k1');
+        await escalated(p.accountId, later, 'reviewer_fail', 'k2');
+        expect(await code(await post(p, `/work-items/${later}/approve`))).toBe('not_approvable');
+        const stale = await seedSpecReady(p.accountId, { stage: 'needs_human', kind: 'question' });
+        await escalated(p.accountId, stale, 'reviewer_no_verdict', 'k3');
+        await admin.query("INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'changes_requested', 'needs_human', now() + interval '1 second', 'control_plane', 'later')", [p.accountId, stale]);
+        expect(await code(await post(p, `/work-items/${stale}/approve`))).toBe('not_approvable');
+        const noSpec = await seedSpecReady(p.accountId, { stage: 'needs_human', spec: false });
+        await escalated(p.accountId, noSpec, 'reviewer_no_verdict', 'k4');
+        expect(await code(await post(p, `/work-items/${noSpec}/approve`))).toBe('not_approvable');
+      });
+    });
+
     it('Build again by a plain member is 403, with an external item 403 external_requires_human, and while a run is live 409 already_running; none writes anything', async () => {
       const member = await person('member');
       expect(await code(await post(member, `/work-items/${await seedSpecReady(member.accountId, { stage: 'needs_human' })}/approve`))).toBe('insufficient_role');

@@ -25,6 +25,10 @@ export interface VerifiedRunner {
   readonly credentialMode: string;
   /** The thumbprint of the key the request was verified against. */
   readonly jkt: string;
+  /** The public `x` of that key (it is public). The wake token carries it so the wake endpoint can check a signature with no lookup. */
+  readonly publicKeyX: string;
+  /** When this key reaches the age limit (its registration or last rotation plus 90 days): the wake allow record never outlives it. */
+  readonly keyValidUntil: Date;
 }
 
 const minted = new WeakSet<object>();
@@ -64,7 +68,7 @@ export function signedUrl(origin: string | undefined, path: string): string {
 
 type KeyResolver = (keyid: string) => Ed25519Jwk | undefined | Promise<Ed25519Jwk | undefined>;
 
-async function checkSignature(deps: RunnerCloudDeps, path: string, req: RunnerHttpRequest, resolveKey: KeyResolver): Promise<VerifiedSignature> {
+async function checkSignature(deps: Pick<RunnerCloudDeps, "origin" | "now">, path: string, req: RunnerHttpRequest, resolveKey: KeyResolver): Promise<VerifiedSignature> {
   if (req.body.byteLength > MAX_BODY_BYTES) throw new RunnerHttpError(413, "body_too_large", "the request body is too large");
   const url = signedUrl(deps.origin, path);
   try {
@@ -115,7 +119,21 @@ export async function verifyRunnerRequest(
     }
     if (!fresh) throw new RunnerHttpError(409, "nonce_reused", "this request was already received");
   }
-  return mint({ runnerId: row.id, accountId: row.account_id, registeredBy: row.registered_by, credentialMode: row.credential_mode, jkt: row.jkt });
+  const keyValidUntil = new Date((row.key_rotated_at ?? row.created_at).getTime() + MAX_KEY_AGE_DAYS * 86_400_000);
+  return mint({ runnerId: row.id, accountId: row.account_id, registeredBy: row.registered_by, credentialMode: row.credential_mode, jkt: row.jkt, publicKeyX: row.public_key_jwk.x, keyValidUntil });
+}
+
+/**
+ * D#6 RUNNER-WAKE R3b: verifies a request signed by the one key a wake token names, with NO database read: the same RFC 9421 checks as every
+ * runner request (method, target URI against the configured origin, body digest, a nonce present, `created` inside the skew window, and the
+ * key id equal to the key's own thumbprint), but the key comes from the verified token instead of `runner_lookup_by_jkt`. Any other key id,
+ * and a small-order or malformed key, is 401. The nonce is not recorded (the same as hello and heartbeat): a replay inside the skew window
+ * gets the same answer the runner already had.
+ */
+export async function verifyKeyBoundRequest(deps: Pick<RunnerCloudDeps, "origin" | "now">, path: string, req: RunnerHttpRequest, key: { jkt: string; x: string }): Promise<VerifiedSignature> {
+  if (!isUsableEd25519Key(key.x)) throw UNAUTHORIZED();
+  const jwk: Ed25519Jwk = { kty: "OKP", crv: "Ed25519", x: key.x };
+  return checkSignature(deps, path, req, (keyid) => (keyid === key.jkt ? jwk : undefined));
 }
 
 /**

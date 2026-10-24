@@ -1,8 +1,9 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import ts from 'typescript';
+import { listSourcePaths } from '../../test-guard/src/sourceFiles.js';
 
 const REPO_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const FORBIDDEN_NAMES = new Set(['startAgentRun', 'cancelRun', 'runStatusWriter']);
@@ -91,15 +92,6 @@ export function violations(source: string, allowed: string[] = []): string[] {
   return out;
 }
 
-function walk(dir: string, out: string[]): string[] {
-  for (const name of readdirSync(dir)) {
-    if (['node_modules', '.next', 'dist', 'build', '.turbo'].includes(name)) continue;
-    const full = path.join(dir, name);
-    if (statSync(full).isDirectory()) walk(full, out);
-    else if (/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/.test(name)) out.push(full);
-  }
-  return out;
-}
 
 describe('D#2 C52 s5 criterion 5 / D#31 C33 s1: the request path does not reach the runner writers', () => {
   it('self-test: the checker sees what it should and ignores what it should', () => {
@@ -117,7 +109,10 @@ describe('D#2 C52 s5 criterion 5 / D#31 C33 s1: the request path does not reach 
     expect(violations('import { other } from "@fx/runner";', ['loadGithubForwardConfig'])).not.toEqual([]);
   });
 
-  const files = [...walk(path.join(REPO_ROOT, 'apps/web'), []), ...walk(path.join(REPO_ROOT, 'packages/api'), [])];
+  // Git's file list, not a directory walk: a web build's ignored workflow bundles inline runner source but are not the request path's own files.
+  const files = listSourcePaths(REPO_ROOT, ['apps/web', 'packages/api'], ['node_modules', '.next', 'dist', 'build', '.turbo']).filter((f) =>
+    /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/.test(f),
+  );
 
   it('walks a real set of files (not vacuous)', () => {
     expect(files.length).toBeGreaterThan(50);

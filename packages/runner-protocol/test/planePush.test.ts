@@ -137,9 +137,11 @@ describe("G1 stays closed in the runner-to-cloud direction", () => {
     expect(PlanePushReportMessage.innerType().shape.token_revoked.safeParse(["g", "hs", "abcdefghijklmnopqrstuvwxyz0123"].join("_")).success).toBe(false);
   });
 
-  it("only the token reply carries a field named token", () => {
-    const holders = Object.entries(RUNNER_REPLIES).filter(([, schema]) => fieldPaths(schema as z.ZodTypeAny).some((p) => p.split(".").pop() === "token"));
-    expect(holders.map(([name]) => name)).toEqual(["plane_push_token"]);
+  it("only the token reply carries a field named token, apart from the wake grant's token on hello and claim", () => {
+    const paths = (schema: z.ZodTypeAny): string[] => (schema instanceof z.ZodUnion ? (schema.options as z.ZodTypeAny[]).flatMap(paths) : fieldPaths(schema));
+    const holders = Object.entries(RUNNER_REPLIES).flatMap(([name, schema]) => [...new Set(paths(schema as z.ZodTypeAny).filter((p) => p.split(".").pop() === "token"))].map((p) => `${name}:${p}`));
+    // D#6 RUNNER-WAKE R3a: the wake token is minted by the cloud and bound to the runner's own key; it is the same field on every reply that has it.
+    expect(holders.sort()).toEqual(["claim:wake.token", "hello:wake.token", "plane_push_token:token"]);
   });
 });
 

@@ -3,7 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { isStagingPaused, runGatedTick } from "@fx/core/src/pendingWork";
 import { createPool } from "@fx/db/src/pool";
 import { queueDiscoveries } from "@fx/db/src/discoveryRuns";
-import { reportError } from "@fx/telemetry";
+import { createErrorReporter, reportError } from "@fx/telemetry";
+import { opsAlertSinkFromEnv } from "../../../../lib/opsAlertSink";
 import { githubInstallationsJobFromEnv } from "../../../../lib/github/installationReconcile";
 import { githubReposJobFromEnv } from "../../../../lib/github/repoReconcile";
 import { reconcileStripeClient, stripeKeyIsLive, stripeReconcileKeyFromEnv } from "@fx/billing";
@@ -11,15 +12,20 @@ import { applyFetchedSubscription } from "@fx/billing/subscriptionSync";
 import { envKekSource, fetchValidationHttpClient, healthCheck, revalidateCreditsExhausted } from "@fx/model-connection";
 import {
   buildReconcileJobs,
+  checkStalls,
   createModelCreditsRevalidateJob,
   createModelKeyHealthJob,
   createStripeSubscriptionsJob,
   effectiveSandboxReapMode,
+  CREDITS_BACKED_OFF_CADENCE_SECONDS,
+  FAST_RECONCILE_JOBS,
   parseSandboxReapMode,
+  readCreditsBreak,
   RECONCILE_ROUTE,
   runTick,
   sandboxInventoryJob,
   sandboxReapJobs,
+  type OpsAlertSink,
   type ReconcileJob,
   type ReportError,
   type SandboxReapDbSetting,
@@ -29,9 +35,50 @@ import {
 } from "@fx/reconcile";
 import { getWorker } from "../../../../lib/worker";
 
+const [TERMINAL_JOB, CREDITS_JOB] = FAST_RECONCILE_JOBS;
+
+/** How far ahead the gate looks again when the 15-minute jobs' state could not be read: their own cadence, so a read failure never lets work wait. */
+const FAST_JOB_RETRY_MS = 15 * 60_000;
+
+/**
+ * When the gate should next connect for the 15-minute jobs (FAST_RECONCILE_JOBS in @fx/reconcile: the reconcile gate lets an unmarked
+ * reconciler connect on every fourth backstop slot, so they keep their cadence by events instead), or null when neither has anything left to do.
+ *  - model_credits_revalidate has work while any connection is still broken for out-of-credit (the pass re-checks it; a top-up clears it). Every 15 minutes for
+ *    the first 2 hours after the latest break, then hourly until the connection changes, so an account that never tops up lets the database sleep between looks;
+ *  - sandbox_reap_terminal has work left when its pass this tick stopped on a budget, or was skipped as not yet due (its last pass was under
+ *    15 minutes ago, so the marker that woke us came too early to run it): either way the next look is at the job's own due time.
+ * The due time is the job's `next_due_at`, never earlier than now. Reads two small rows with the pool the tick already holds.
+ */
+export async function reconcileNextDueAt(pool: Pick<TickDeps["pool"], "query">, summary: TickSummary, now: number = Date.now()): Promise<number | null> {
+  const pending: string[] = [];
+  const terminal = summary.results.find((r) => r.job === TERMINAL_JOB)?.result;
+  if (terminal === "budget" || terminal === "not_due") pending.push(TERMINAL_JOB);
+  const credits = await readCreditsBreak(pool);
+  if (credits.broken) pending.push(CREDITS_JOB);
+  if (pending.length === 0) return null;
+  const { rows } = await pool.query<{ name: string; due: number }>(
+    "SELECT name, (EXTRACT(EPOCH FROM next_due_at) * 1000)::float8 AS due FROM reconcile_jobs WHERE name = ANY($1::text[])",
+    [pending],
+  );
+  const dues = rows.filter((r) => typeof r.due === "number" && Number.isFinite(r.due));
+  // Credits that nobody has topped up for 2 hours are looked at hourly, not every 15 minutes: the job's own due time is the floor, and an hour from this look is the
+  // other. A top-up, a revalidate success or a fresh break moves broken_at (see readCreditsBreak), so the 15-minute cadence returns by itself.
+  const backedOffDue = now + CREDITS_BACKED_OFF_CADENCE_SECONDS * 1000;
+  let due: number | null = null;
+  for (const name of pending) {
+    const own = dues.find((r) => r.name === name)?.due;
+    let at = typeof own === "number" ? Math.max(own, now) : now;
+    if (name === CREDITS_JOB && credits.backedOff) at = Math.max(at, backedOffDue);
+    due = due === null ? at : Math.min(due, at);
+  }
+  return due;
+}
+
 /**
  * The reconciler cron (every 15 minutes, at minutes 7, 22, 37 and 52; each job has its own seeded interval, so the slower jobs
- * still run on theirs). Same shape as the other cron handlers: route.ts stays thin, this
+ * still run on theirs). A tick first passes the no-database gate: unmarked it connects on every fourth backstop slot only, and it connects on
+ * the next cron tick after a marker (an installation change, a sandbox reaching a final state, a credits failure) or after a due time left by
+ * the 15-minute jobs. Same shape as the other cron handlers: route.ts stays thin, this
  * file holds the logic, and handler.test.ts is a fast route-layer test with no real Postgres. The lease, budget, cursor
  * and lap-time behaviour is @fx/reconcile's own real-Postgres suite.
  *
@@ -60,6 +107,15 @@ export interface ReconcileHandlerDeps {
    * defaultReconcileDeps always supplies it, over the platform_ops pool.
    */
   readSandboxReapDbMode?(): Promise<SandboxReapDbSetting>;
+  /** The ops alert sink for a stalled job. Absent: built from the environment (null while not configured, which turns the alerts off). A test double passes its own or null. */
+  opsAlertSink?: OpsAlertSink | null;
+}
+
+const stdoutOnly = createErrorReporter({ service: "web" });
+
+/** A stall check or sink failure: one coded stdout line. Not the process-wide reporter, which would write error_events (same rule as the cron gate store). */
+function stallSinkError(err: unknown): void {
+  stdoutOnly.reportError(err, { stage: "reconcile.stall_alert", code: "internal_error" });
 }
 
 /**
@@ -211,6 +267,7 @@ export async function reconcileHandler(
   if (!isAuthorized(req.headers.get("authorization"), cronSecret)) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
+  let nextDueAt: number | null = null;
   const run = async (): Promise<TickSummary> => {
     const deps = injected ?? defaultReconcileDeps();
     // The sandbox jobs reach the reaper only through the worker. Under either kill switch (FX_RECONCILE_ENABLED=0, or the mode off or
@@ -227,7 +284,7 @@ export async function reconcileHandler(
       reportError: deps.reportError,
       effectiveMode: async () => effectiveSandboxReapMode(deps.sandboxReapMode, (await deps.readSandboxReapDbMode?.()) ?? null),
     };
-    return runTickFn({
+    const summary = await runTickFn({
       pool: deps.platformOpsPool,
       jobs: buildReconcileJobs({
         githubInstallations: githubInstallationsJobFromEnv(deps.platformOpsPool, deps.reportError),
@@ -240,14 +297,35 @@ export async function reconcileHandler(
       enabled: deps.enabled,
       reportError: deps.reportError,
     });
+    // Work the 15-minute jobs left behind keeps the gate connecting at their cadence; a failed read falls back to the slow cadence (reported).
+    try {
+      nextDueAt = summary.enabled ? await reconcileNextDueAt(deps.platformOpsPool, summary) : null;
+    } catch (err) {
+      // Unknown means "maybe work": look again at the jobs' own cadence rather than letting the slow cadence sit on it.
+      nextDueAt = Date.now() + FAST_JOB_RETRY_MS;
+      deps.reportError(err, { stage: "reconcile.next_due", route: RECONCILE_ROUTE });
+    }
+    // D#6 STALL-ALERT-FAST: on this connection, announce a job that has work and has stopped passing (and its recovery). It never fails the tick,
+    // never writes error_events (a sink failure is one stdout line), and keeps the tick connecting while a notice is outstanding so recovery is noticed.
+    if (summary.enabled) {
+      try {
+        const stalls = await checkStalls({ pool: deps.platformOpsPool, sink: deps.opsAlertSink === undefined ? opsAlertSinkFromEnv() : deps.opsAlertSink, onSinkError: stallSinkError });
+        // The database is kept awake only for real work: a job stalled WITH work and no due time of its own gets the 15-minute look. A non-null due (including
+        // the credits job's hourly back-off) is never shortened, and a failed recovery post never schedules a tick; the next normal tick retries it.
+        if (stalls.stalled.length > 0 && nextDueAt === null) nextDueAt = Date.now() + FAST_JOB_RETRY_MS;
+      } catch (err) {
+        // fx-swallow-ok: reported to stdout by stallSinkError; the stall check must never fail the tick or write error_events
+        stallSinkError(err);
+      }
+    }
+    return summary;
   };
-  // Normally every tick runs (the reconciler has no pending-work marker). While staging is paused the same no-database
-  // gate used by the sweeps applies, so a tick connects only when 12 hours have passed since the last one; the
-  // deps (and so the pool) are built inside `run`, after the gate.
-  if (!isStagingPaused()) {
-    return NextResponse.json(await run(), { status: 200 });
-  }
-  const ran = await runGatedTick("reconcile", async () => ({ result: await run(), workFound: true, nextDueAt: null }));
-  if (ran === null) return NextResponse.json({ skipped: true, reason: "staging_paused" }, { status: 200 });
+  // Every tick goes through the gate (see the header above). What the jobs find must not keep the busy-deployment slots alive by itself,
+  // so the tick reports workFound false; only the due time left by the 15-minute jobs is carried forward.
+  const ran = await runGatedTick("reconcile", async () => {
+    const result = await run();
+    return { result, workFound: false, nextDueAt };
+  });
+  if (ran === null) return NextResponse.json({ skipped: true, reason: isStagingPaused() ? "staging_paused" : "not_due" }, { status: 200 });
   return NextResponse.json(ran.result, { status: 200 });
 }

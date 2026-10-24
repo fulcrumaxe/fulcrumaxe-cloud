@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { listSourcePaths } from '../../test-guard/src/sourceFiles.js';
 
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const walk = (dir: string): string[] =>
@@ -12,7 +13,9 @@ const read = (f: string) => readFileSync(join(ROOT, f), 'utf8');
 
 describe('S2b / import boundary lint', () => {
   it('only @fx/model-call imports @fx/model-connection/keyAccess, and index.ts does not re-export it', () => {
-    const importers = [...walk(join(ROOT, 'packages')), ...walk(join(ROOT, 'apps'))]
+    // Git's file list, not a directory walk: a web build's ignored workflow bundles inline other packages' source.
+    const importers = listSourcePaths(ROOT, ['packages', 'apps'], ['node_modules', 'dist', '.next', '.claude'])
+      .filter((f) => /\.(ts|tsx|mjs|js)$/.test(f))
       .filter((f) => /(from|import)\s*\(?\s*['"][^'"]*keyAccess(\.js)?['"]/.test(readFileSync(f, 'utf8')))
       .map((f) => relative(ROOT, f))
       .filter((f) => !f.startsWith('packages/model-call/'));

@@ -10,6 +10,7 @@ import {
   assemblyMsSince,
   findRecordedPullRequest,
   isLocalGitHubHttp,
+  maxFixRounds,
   listChangedFiles,
   listChangedFilesLocal,
   pauseForDenial,
@@ -75,7 +76,8 @@ export interface ReviewCtx extends AdvancePrSource {
   debaterEnabled: boolean;
 }
 
-export type ReviewLoaded = ({ ok: true } & ReviewCtx) | { ok: false; reason: string };
+/** `personRequestPending`: a person's Request changes waits for its fix round, which the driver starts before any review. Not kept in the context: it is spent by that round. */
+export type ReviewLoaded = ({ ok: true; personRequestPending: boolean } & ReviewCtx) | { ok: false; reason: string };
 
 /** The review context, and the Spec version the review is pinned to: the one the person approved (`pinned`). A newer version since refuses `spec_changed`. */
 export async function reviewLoadBody(worker: ReviewWorker | null, who: StepWho, pinned: number | null): Promise<ReviewLoaded> {
@@ -84,7 +86,7 @@ export async function reviewLoadBody(worker: ReviewWorker | null, who: StepWho, 
   if (!out.ok) return { ok: false, reason: out.reason };
   const c = out.ctx;
   if (pinned !== null && c.specVersion !== pinned) return { ok: false, reason: "spec_changed" };
-  return { ok: true, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, tier: c.tier, specVersion: c.specVersion, fixRoundsStarted: c.fixRoundsStarted ?? 0, debaterEnabled: c.debaterEnabled, executionMode: c.executionMode, recordedPr: c.recordedPr, prExecutionMode: c.prExecutionMode };
+  return { ok: true, personRequestPending: c.personRequestPending === true, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, tier: c.tier, specVersion: c.specVersion, fixRoundsStarted: c.fixRoundsStarted ?? 0, debaterEnabled: c.debaterEnabled, executionMode: c.executionMode, recordedPr: c.recordedPr, prExecutionMode: c.prExecutionMode };
 }
 
 export interface PrFound {
@@ -194,7 +196,31 @@ const REVIEW_ROLES: readonly string[] = ["code-reviewer", "acceptance-tester", "
  */
 export async function reviewRunsBody(worker: ReviewWorker | null, who: StepWho, headSha: string, rereview: number): Promise<Array<{ role: string; runId: string }>> {
   if (!worker || typeof worker.advanceReviewRuns !== "function") return [];
-  return worker.advanceReviewRuns(who, { headSha, rereview });
+  return (await worker.advanceReviewRuns(who, { headSha, rereview })).map((r) => ({ role: r.role, runId: r.runId }));
+}
+
+export interface RerunOut {
+  /** Start the reviewer again, under `attempt`. False: its runs on this head have ended without a verdict `bound` times (or no safe key is known). */
+  rerun: boolean;
+  attempt: number;
+  bound: number;
+}
+
+/**
+ * A reviewer's run on this head ended without a verdict (`ends` such ends so far in this review). It is started again, under the attempt after the highest one
+ * any of its keys on this head and round has (so the new key is never an existing run's), until it has ended that way as many times as an item gets fix rounds
+ * (`maxFixRounds()`, the escalation's own bound). Without the worker's run listing no safe key is known, and it is not started again.
+ *
+ * The count is the larger of `ends` (this workflow's own) and the STORED ends the worker counts (`noVerdictEnds`: the role's runs on this head that ended with no
+ * verdict, since the item's last `reviewer_no_verdict` escalation). The stored count is what a workflow that restarted (a spending-limit pause resumed it, so `ends`
+ * began again at 1) cannot lose. It starts again only after a person's Approve at Needs a person: that is the one way past the escalation.
+ */
+export async function reviewRerunBody(worker: ReviewWorker | null, who: StepWho, headSha: string, rereview: number, role: string, ends: number): Promise<RerunOut> {
+  const bound = maxFixRounds();
+  if (!worker || typeof worker.advanceReviewRuns !== "function" || !REVIEW_ROLES.includes(role) || ends >= bound) return { rerun: false, attempt: 0, bound };
+  const mine = (await worker.advanceReviewRuns(who, { headSha, rereview })).find((r) => r.role === role);
+  if ((mine?.noVerdictEnds ?? 0) >= bound) return { rerun: false, attempt: 0, bound };
+  return { rerun: true, attempt: (mine?.attempt ?? 0) + 1, bound };
 }
 
 /**
@@ -264,7 +290,8 @@ export async function startReviewerBody(
     expectedExecutionMode: ctx.executionMode,
   }));
   if (!started.ok) return { role, runId: null, reason: started.reason };
-  await worker.advanceRecordEvent(who, { kind: "review_started", dedupeKey: `review:${pr.headSha}:${role}${rereview > 0 ? `:rr${rereview}` : ""}`, reasons: [toCode(role)], headSha: pr.headSha, prNumber: pr.number, runId: started.runId });
+  // A re-run of a reviewer whose run ended without a verdict is its own start on the activity (the attempt is in the key); a first start keeps the key it had.
+  await worker.advanceRecordEvent(who, { kind: "review_started", dedupeKey: `review:${pr.headSha}:${role}${rereview > 0 ? `:rr${rereview}` : ""}${attempt > 0 ? `:s${attempt}` : ""}`, reasons: [toCode(role)], headSha: pr.headSha, prNumber: pr.number, runId: started.runId });
   return { role, runId: started.runId, reason: null };
 }
 
@@ -281,16 +308,22 @@ export interface ReviewerOutcome {
   queuedOnRunner: boolean;
   /** The end of the follow-up chain that starts at the run asked about (D#6 R2b-3, C22 section 7): the id to cancel when the wait runs out. */
   tailRunId: string;
+  /** The run ended and said nothing about the code (it did not succeed, or left no `verdict`): its `fail` is not a verdict, and the reviewer is run again. */
+  noVerdict: boolean;
+  /** How a run with no verdict ended, as a fixed code: the runner's end reason when there is one (`resource_limit`, `agent_failed`, `runner_lost`), else the status. Null otherwise. */
+  endCode: string | null;
   /** D#599 PL-2: `placement_changed` when the run was cancelled because its item moved to the other side; the driver then starts the step again. Absent otherwise. */
   failureReason?: string | null;
 }
 
 /** How a reviewer run stands. The findings and the summary stay in the run: only the verdict word and the flag leave. */
 export async function reviewerOutcomeBody(worker: ReviewWorker | null, accountId: string, runId: string): Promise<ReviewerOutcome> {
-  if (!worker) return { status: "missing", done: true, verdict: "fail", securityNeeded: false, environmentFailure: false, queuedOnRunner: false, tailRunId: runId };
+  if (!worker) return { status: "missing", done: true, verdict: "fail", securityNeeded: false, environmentFailure: false, noVerdict: true, endCode: "missing", queuedOnRunner: false, tailRunId: runId };
   const out = await worker.advanceRunOutcome(accountId, runId);
   const v = readVerdict(out.status, out.envelope);
-  return { status: out.status, done: out.done, verdict: v.verdict, securityNeeded: v.securityNeeded, environmentFailure: v.environmentFailure, queuedOnRunner: isQueuedOnRunner(out), tailRunId: out.tailRunId ?? runId, ...(out.failureReason === "placement_changed" ? { failureReason: out.failureReason } : {}) };
+  const noVerdict = out.done && !v.hasVerdict;
+  const endCode = noVerdict ? toCode(typeof out.failureReason === "string" && /^[a-z][a-z0-9_]{0,39}$/.test(out.failureReason) ? out.failureReason : out.status).slice(0, 40) : null;
+  return { status: out.status, done: out.done, verdict: v.verdict, securityNeeded: v.securityNeeded, environmentFailure: v.environmentFailure, noVerdict, endCode, queuedOnRunner: isQueuedOnRunner(out), tailRunId: out.tailRunId ?? runId, ...(out.failureReason === "placement_changed" ? { failureReason: out.failureReason } : {}) };
 }
 
 export interface RoundOut {
@@ -307,6 +340,9 @@ export interface GatheredInput {
   runId: string;
   verdict: string;
   environmentFailure?: boolean;
+  /** The reviewer's runs ended without a verdict and its re-runs are used up (never recorded as a verdict). */
+  noVerdict?: boolean;
+  endCode?: string;
 }
 
 /** Every verdict of the head recorded in one step: passes first, non-passes last, then the decision. */
@@ -358,10 +394,12 @@ export async function startFixBody(
   failing: ReadonlyArray<{ role: string; runId: string }>,
   retry = 0,
   spendAttempt = 0,
+  person = false,
 ): Promise<FixOut> {
   if (!worker) return { ok: false, runId: null, reason: "worker_unavailable" };
   const first = failing[0];
-  if (!first) return { ok: false, runId: null, reason: "invalid_input" };
+  // A person's round may have no reviewer finding: their note is the request (it reaches the run as a fenced run note).
+  if (!first && !person) return { ok: false, runId: null, reason: "invalid_input" };
   const spec = await worker.advanceLoadSpecText(who, ctx.specVersion);
   if (spec === null) return { ok: false, runId: null, reason: "spec_changed" };
   const findings: FixFinding[] = [];
@@ -382,7 +420,7 @@ export async function startFixBody(
     const runtime = promptRuntimeOf(ctx.executionMode);
     // D#600 CX-4a: the findings the caps cut are spilled and marked: a sandbox round reads /fx/context, a runner round the files its runner writes (CX-4b, from the signed job).
     const spillOptions = { spill: true };
-    const base = { owner: ctx.owner, name: ctx.name, issue: ctx.issue, pr: pr.number, headSha: pr.headSha, branch: pr.branch, version: spec.version, spec: spec.body, findings, runtime, ...(crossSide ? { crossSide } : {}) };
+    const base = { owner: ctx.owner, name: ctx.name, issue: ctx.issue, pr: pr.number, headSha: pr.headSha, branch: pr.branch, version: spec.version, spec: spec.body, findings, runtime, ...(crossSide ? { crossSide } : {}), ...(person ? { person } : {}) };
     // A sandbox fix round resumes the build's own session, so it sends only the unchanged line, and the worker checks that line against the Spec version pinned on
     // the run being continued before it goes out. A runner round may be a follow-up in a fresh session after a lost one, so it keeps the body.
     if (runtime === "sandbox" && spec.sha256 !== undefined) {
@@ -410,8 +448,9 @@ export async function startFixBody(
     ...(retry > 0 ? { retry } : {}),
     // D#483 S5-k1d: the number of the ask when an earlier ask of this round was denied by a spending limit (the first ask carries none).
     ...(spendAttempt > 0 ? { spendAttempt } : {}),
-    reviewer: REVIEWER_OF_ROLE[first.role] ?? "code",
-    failingRunId: first.runId,
+    reviewer: first ? (REVIEWER_OF_ROLE[first.role] ?? "code") : "acceptance",
+    ...(first ? { failingRunId: first.runId } : {}),
+    ...(person ? { person: true } : {}),
     expectedExecutionMode: ctx.executionMode,
     // The pull request the pipeline just found on GitHub: a cross-side round works on its branch. The worker checks it against the item's own record.
     ...(crossSide ? { pr: { number: pr.number, branch: pr.branch } } : {}),

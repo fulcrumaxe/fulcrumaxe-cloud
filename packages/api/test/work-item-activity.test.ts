@@ -5,6 +5,8 @@ import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
 import { ACTIVITY_LIMITS, readOutcomeCodes } from '@fx/core/src/work-items/activity.js';
+import { requestChanges } from '@fx/core/src/work-items/operatorMoves.js';
+import { maxFixRounds } from '@fx/spend';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
 import { activityResponseSchema, workItemActivityRoutes } from '../src/routes/work-item-activity.js';
@@ -27,6 +29,8 @@ interface Activity {
   notice: { kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed' | 'build_slot_wait' | 'resume_refused'; reason: string } | null;
   actions: string[];
   close_on_github: boolean;
+  request_changes_blocked: 'live' | 'rounds' | null;
+  change_requests: Array<{ mine: boolean; name: string | null; note: string; at: string; state: string; run_id: string | null }>;
 }
 
 /** D#483 P4: GET /api/v1/work-items/{id}/activity against real Postgres: what it reads, what it bounds, who may call it. */
@@ -215,6 +219,29 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'needs_human', reason: 'The pipeline stopped and needs a person.' });
       await seedRun(accountId, itemId, { role: 'executor', status: 'timed_out', createdAt: '2026-10-03T10:00:00Z' });
       expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'needs_human', reason: 'The executor run timed out without a pull request.' });
+    });
+
+    it('needs_human after a reviewer kept ending without a verdict: names the reviewer and how it ended, never the executor summary or a change request', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const { itemId } = await seedItem(accountId, { stage: 'needs_human' });
+      await seedRun(accountId, itemId, { role: 'executor', status: 'succeeded', createdAt: '2026-10-03T09:00:00Z', envelope: { summary: 'Opened the pull request.' } });
+      const escalated = (reasons: string[], key: string) =>
+        admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, reasons, dedupe_key) VALUES ($1, $2, 'escalated', 'reviewer_no_verdict', $3::text[], $4)`, [accountId, itemId, reasons, key]);
+      await escalated(['code_reviewer', 'resource_limit'], 'k1');
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({
+        kind: 'needs_human',
+        reason: 'The code reviewer could not finish reviewing this pull request: it was stopped at its memory limit, every time it was tried. No verdict was recorded and no changes were requested. Press Approve to have the reviewers look at the pull request again, or review it yourself and merge or close it on GitHub.',
+      });
+      await escalated(['acceptance_tester', 'some_new_code'], 'k2');
+      expect((await noticeOf(accountId, userId, itemId))!.reason).toMatch(/^The acceptance tester could not finish reviewing this pull request: its run ended without a verdict,/);
+      // A reviewer code that is a property of every object is not a reviewer: the notice falls back to the executor's summary, never an inherited value.
+      for (const [i, key] of ['constructor'].entries()) {
+        await escalated([key, 'agent_failed'], `proto${i}`);
+        expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'needs_human', reason: 'Opened the pull request.' });
+      }
+      // An escalation from before the item last reached Needs a person does not count.
+      await admin.query(`INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'changes_requested', 'needs_human', now(), 'control_plane', 'later')`, [accountId, itemId]);
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'needs_human', reason: 'Opened the pull request.' });
     });
 
     it('build_slot_wait (D#483): a fresh slot-wait fact at spec_ready says so, and for the repository names the item that holds the slot; stale, halted or another stage says nothing', async () => {
@@ -681,6 +708,79 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       }
       const { itemId: merged } = await seedItem(owner.accountId, { stage: 'merged' });
       expect(await actionsOf(owner.accountId, owner.userId, merged)).toEqual({ actions: [], onGithub: false });
+    });
+
+    it('Request changes: offered on an open pull request with a Spec; held back while a run is live (with the reason); the notes sent show who asked and whether the fix round took them', async () => {
+      const owner = await seedAccountWithMember(admin, { role: 'owner' });
+      const { itemId } = await seedItem(owner.accountId, { stage: 'review_passed' });
+      await seedDiscussion(owner.accountId, itemId);
+      await seedSpec(owner.accountId, itemId);
+      const read = async (who: { accountId: string; userId: string }) => {
+        const body = (await (await get(itemId, who)).json()) as Activity;
+        expect(activityResponseSchema.parse(body)).toEqual(body);
+        return body;
+      };
+      let a = await read(owner);
+      expect(a.actions).toEqual(['request_changes']);
+      expect(a.request_changes_blocked).toBeNull();
+      expect(a.change_requests).toEqual([]);
+
+      await requestChanges({ pool: appUserPool, principal: { accountId: owner.accountId, userId: owner.userId, role: 'owner' } }, itemId, 'Say "receive", not "recieve".');
+      a = await read(owner);
+      expect(a.stage).toBe('changes_requested');
+      expect(a.change_requests).toEqual([{ mine: true, name: null, note: 'Say "receive", not "recieve".', at: expect.any(String), state: 'waiting', run_id: null }]);
+
+      const run = await seedRun(owner.accountId, itemId, { role: 'executor', status: 'running' });
+      a = await read(owner);
+      expect(a.actions).toEqual([]);
+      expect(a.request_changes_blocked).toBe('live');
+      await admin.query(`UPDATE work_item_corrections SET status = 'applied', applied_run_id = $2, applied_at = now() WHERE work_item_id = $1`, [itemId, run]);
+      a = await read(owner);
+      expect(a.change_requests[0]).toMatchObject({ state: 'sent', run_id: run });
+
+      // Another admin of the account reads the asker's name, not "You".
+      const other = randomUUID();
+      await admin.query(`INSERT INTO users (id, email, name) VALUES ($1, $2, 'Second Admin')`, [other, `${other}@example.test`]);
+      await admin.query(`INSERT INTO account_members (account_id, user_id, role) VALUES ($1, $2, 'admin')`, [owner.accountId, other]);
+      const ownerName = (await admin.query<{ n: string | null }>(`SELECT COALESCE(NULLIF(name, ''), NULLIF(github_login, '')) AS n FROM users WHERE id = $1`, [owner.userId])).rows[0]!.n;
+      expect((await read({ accountId: owner.accountId, userId: other })).change_requests[0]).toMatchObject({ mine: false, name: ownerName });
+
+      // A member sees the notes too, but is offered nothing and told no reason.
+      await admin.query(`UPDATE agent_runs SET status = 'succeeded' WHERE id = $1`, [run]);
+      const member = randomUUID();
+      await admin.query(`INSERT INTO users (id, email) VALUES ($1, $2)`, [member, `${member}@example.test`]);
+      await admin.query(`INSERT INTO account_members (account_id, user_id, role) VALUES ($1, $2, 'member')`, [owner.accountId, member]);
+      const m = await read({ accountId: owner.accountId, userId: member });
+      expect(m.actions).toEqual([]);
+      expect(m.request_changes_blocked).toBeNull();
+      expect(m.change_requests).toHaveLength(1);
+    });
+
+    it('a credential-shaped string in a Request changes note comes back redacted, like every other text of the activity (the fixture is built at runtime)', async () => {
+      const owner = await seedAccountWithMember(admin, { role: 'owner' });
+      const { itemId } = await seedItem(owner.accountId, { stage: 'review_passed' });
+      await seedDiscussion(owner.accountId, itemId);
+      await seedSpec(owner.accountId, itemId);
+      const ghToken = 'gh' + 'p_' + 'Zz9Yy8Xx7Ww6Vv5Uu4Tt3Ss2Rr1Qq0Pp9Oo8';
+      await requestChanges({ pool: appUserPool, principal: { accountId: owner.accountId, userId: owner.userId, role: 'owner' } }, itemId, `Use the key ${ghToken} in the test.`);
+      const raw = await (await get(itemId, owner)).text();
+      expect(raw).not.toContain(ghToken);
+      const body = JSON.parse(raw) as Activity;
+      expect(body.change_requests[0]!.note).toContain('Use the key ');
+      expect(body.change_requests[0]!.note).not.toContain(ghToken);
+    });
+
+    it('Request changes is held back with `rounds` once the fix rounds are used', async () => {
+      const owner = await seedAccountWithMember(admin, { role: 'owner' });
+      const { itemId } = await seedItem(owner.accountId, { stage: 'changes_requested' });
+      await seedDiscussion(owner.accountId, itemId);
+      await seedSpec(owner.accountId, itemId);
+      for (let i = 0; i < maxFixRounds(); i++) {
+        await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key) VALUES ($1, $2, 'fix_round_started', $3)`, [owner.accountId, itemId, `r${i}`]);
+      }
+      const body = (await (await get(itemId, owner)).json()) as Activity;
+      expect(body.actions).toEqual([]);
+      expect(body.request_changes_blocked).toBe('rounds');
     });
 
     it('a live run hides every action; a finished one does not', async () => {

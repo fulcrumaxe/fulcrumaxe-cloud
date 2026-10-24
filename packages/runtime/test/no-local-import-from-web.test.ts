@@ -1,39 +1,19 @@
-import { readFile, readdir, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { listSourcePaths } from "../../test-guard/src/sourceFiles.js";
 import { FX_LOCAL_RUNNER_MARKER } from "../src/local/index.js";
 
 const PACKAGE_ROOT = new URL("..", import.meta.url).pathname;
-// apps/web does not exist yet in this task's file scope (H01 owns it) — this
-// walk is written to be correct once it does, and to trivially pass (zero
-// files scanned) until then. Spec H04 pass/fail 4.
-const APPS_WEB_DIR = path.join(PACKAGE_ROOT, "..", "..", "apps", "web");
+const REPO_ROOT = path.join(PACKAGE_ROOT, "..", "..");
 
 const FORBIDDEN_IMPORT_PATTERNS = [
   /packages\/runtime\/src\/local/,
   /@fx\/runtime\/local/,
 ];
 
-async function walkFiles(dir: string): Promise<string[]> {
-  let entries;
-  try {
-    entries = await readdir(dir);
-  } catch {
-    return [];
-  }
-  const files: string[] = [];
-  for (const entry of entries) {
-    if (entry === "node_modules" || entry === ".next") continue;
-    const full = path.join(dir, entry);
-    const info = await stat(full);
-    if (info.isDirectory()) {
-      files.push(...(await walkFiles(full)));
-    } else if (/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(entry)) {
-      files.push(full);
-    }
-  }
-  return files;
-}
+/** Git's file list under apps/web, not a directory walk: a web build's ignored output is not the app's source (Spec H04 pass/fail 4). */
+const webFiles = (): string[] => listSourcePaths(REPO_ROOT, ["apps/web"], ["node_modules", ".next"]).filter((f) => /\.(ts|tsx|js|jsx|mjs|cjs)$/.test(f));
 
 describe("local runner isolation (Spec H04 pass/fail 4)", () => {
   it("runner (a) source contains the FX_LOCAL_RUNNER_MARKER string", () => {
@@ -41,7 +21,8 @@ describe("local runner isolation (Spec H04 pass/fail 4)", () => {
   });
 
   it("no file under apps/web statically imports packages/runtime/src/local", async () => {
-    const files = await walkFiles(APPS_WEB_DIR);
+    const files = webFiles();
+    expect(files.length).toBeGreaterThan(0);
     const offenders: string[] = [];
     for (const file of files) {
       const contents = await readFile(file, "utf8");

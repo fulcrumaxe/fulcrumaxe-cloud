@@ -1437,6 +1437,9 @@ approveSay("Starting work isn't available right now. Try again later.", "run_act
 approveSay("Couldn't reach the server. Nothing was started.", "network", "offline", "timeout");
 approveSay("You're doing that too fast. Try again in a moment.", "rate_limited");
 approveSay("That request was already used. Close this and try again.", "idempotency_key_reused");
+// Request changes: the two refusals of its own.
+approveSay("This pull request has used all its fix rounds. Review it yourself, then merge or close it on GitHub.", "escalate");
+approveSay("Write what to change, in 2,000 characters or fewer. Nothing was sent.", "invalid_note", "validation_failed");
 const APPROVE_GENERIC = "That didn't work. Nothing was started.";
 export const approveSentenceFor = (code) => (Object.prototype.hasOwnProperty.call(APPROVE_SENTENCES, code) ? APPROVE_SENTENCES[code] : APPROVE_GENERIC);
 
@@ -1637,19 +1640,22 @@ export function approveView(item, approver, liveRun = false, waiting = null) {
 //   Back to discussion   -> POST /work-items/{id}/back-to-discussion (a new panel and a new Spec version)
 //   Treat as a feature   -> POST /work-items/{id}/treat-as-feature (a project has no panel; this runs one as a feature)
 //   Close                -> POST /work-items/{id}/close, after an in-app confirm dialog (never the browser's confirm())
+//   Request changes      -> POST /work-items/{id}/request-changes { note }, after a dialog with a note box (an open pull request only)
 //
-// Rules this file keeps (those of the approve button above): no request carries a body; every sentence a person reads is
+// Rules this file keeps (those of the approve button above): no request carries a body, except Request changes, whose body
+// is the person's note and nothing else; every sentence a person reads is
 // chosen here, never taken from a server code or message; one request at a time per card; an accepted request is followed
 // for a few moments so a refusal that costs nothing reaches the sentence. An open pull request has no Close: the server says
 // so (`close_on_github`), and the card tells the person to close the pull request on GitHub.
 
-export const OPERATOR_LABELS = { build_again: "Build again", respec: "Re-spec", back_to_discussion: "Back to discussion", treat_as_feature: "Treat as a feature", close: "Close", reopen: "Reopen", retry_push: "Try the push again", open_pr: "Open the pull request again" };
+export const OPERATOR_LABELS = { request_changes: "Request changes", build_again: "Build again", respec: "Re-spec", back_to_discussion: "Back to discussion", treat_as_feature: "Treat as a feature", close: "Close", reopen: "Reopen", retry_push: "Try the push again", open_pr: "Open the pull request again" };
 /** The order buttons are drawn in. An action the server lists that is not here is not drawn. */
-export const OPERATOR_ORDER = ["build_again", "respec", "back_to_discussion", "treat_as_feature", "close", "reopen", "retry_push", "open_pr"];
-const OPERATOR_TESTIDS = { build_again: "pl-op-build", respec: "pl-op-respec", back_to_discussion: "pl-op-back", treat_as_feature: "pl-op-feature", close: "pl-op-close", reopen: "pl-op-reopen", retry_push: "pl-op-retry-push", open_pr: "pl-op-open-pr" };
+export const OPERATOR_ORDER = ["request_changes", "build_again", "respec", "back_to_discussion", "treat_as_feature", "close", "reopen", "retry_push", "open_pr"];
+const OPERATOR_TESTIDS = { request_changes: "pl-op-changes", build_again: "pl-op-build", respec: "pl-op-respec", back_to_discussion: "pl-op-back", treat_as_feature: "pl-op-feature", close: "pl-op-close", reopen: "pl-op-reopen", retry_push: "pl-op-retry-push", open_pr: "pl-op-open-pr" };
 
 const itemPath = (id) => "/api/v1/work-items/" + encodeURIComponent(id);
 export const OPERATOR_PATHS = {
+  request_changes: (id) => itemPath(id) + "/request-changes",
   build_again: approvePath,
   respec: (id) => itemPath(id) + "/respec",
   back_to_discussion: (id) => itemPath(id) + "/back-to-discussion",
@@ -1662,6 +1668,7 @@ export const OPERATOR_PATHS = {
 
 /** Under the buttons, before the click: what each one does. */
 export const OPERATOR_NOTES = {
+  request_changes: "Request changes sends your note to the agent that built this. It fixes the same pull request, then the reviewers check it again. It uses one of the item's fix rounds.",
   build_again: "Build again starts a new build from the same Spec. An agent opens a fresh pull request, and the reviewers run on it.",
   respec: "Re-spec has the project manager read the repository and add the list of files this Spec allows. The Spec's text stays the same. Then Build again.",
   back_to_discussion: "Back to discussion asks the panel again and writes a new Spec. The new Spec replaces the old one.",
@@ -1675,6 +1682,7 @@ export const CLOSE_ON_GITHUB_NOTE = "To close this, close its pull request on Gi
 
 /** What a person reads once the server accepted the request. */
 export const OPERATOR_STARTED = {
+  request_changes: "Sent. An agent is making your changes on the same pull request, and the reviewers check it again when it is done.",
   build_again: "Started. An agent is building this again from the same Spec, and the card moves when it opens a pull request.",
   respec: "Started. The project manager is adding the file list. A new Spec version appears when it is done; then press Build again.",
   back_to_discussion: "Sent back to the panel. The agents are discussing it again, and a new Spec follows when they are done.",
@@ -1691,6 +1699,31 @@ export const CLOSE_DIALOG = { title: "Close this work item?", lines: ["The card 
 export const REOPEN_DIALOG = { title: "Reopen this work item?", lines: ["The card moves back to Triaged. Nothing starts until someone approves it."], confirm: "Yes, reopen it", dismiss: "Keep it closed" };
 /** The actions that ask first, in the app's own dialog, and answer at once (no agent is involved). */
 const CONFIRMED = { close: CLOSE_DIALOG, reopen: REOPEN_DIALOG };
+/** Request changes asks for a note first, in the same dialog with a note box; the stage driver then runs, so it is followed like the other run actions. */
+export const NOTE_MAX = 2000;
+export const CHANGES_DIALOG = {
+  title: "Request changes",
+  lines: ["Say what to change. The agent that built this reads your note, fixes the same pull request, and the reviewers check it again."],
+  label: "What to change",
+  confirm: "Send",
+  dismiss: "Cancel",
+};
+const DIALOGS = { ...CONFIRMED, request_changes: CHANGES_DIALOG };
+/** Why Request changes is not offered on an open pull request, as the server says it (`request_changes_blocked`). */
+export const CHANGES_BLOCKED = {
+  live: "Request changes is not available while agents are working on this item. Try again when they are done.",
+  rounds: "Request changes is not available: this pull request has used all its fix rounds. Review it yourself, then merge or close it on GitHub.",
+};
+/** One line per note sent with Request changes, for the activity. The note is the person's own text, shown as text. */
+export const CHANGE_STATE_WORDS = { waiting: "Waiting for the fix round to start.", sent: "Sent to the fix round.", dropped: "Withdrawn." };
+export function changeRequestLines(data) {
+  const list = data && Array.isArray(data.change_requests) ? data.change_requests : [];
+  return list
+    .filter((c) => c && typeof c.note === "string")
+    .map((c) => ({ text: (c.mine ? "You asked for changes: " : (typeof c.name === "string" && c.name ? c.name : "A former member") + " asked for changes: ") + c.note, state: CHANGE_STATE_WORDS[c.state] || "", at: typeof c.at === "string" ? c.at : null }));
+}
+/** The server's reason Request changes is held back, or null. */
+export const changesBlocked = (data) => (data && Object.prototype.hasOwnProperty.call(CHANGES_BLOCKED, data.request_changes_blocked) ? data.request_changes_blocked : null);
 
 /** The actions to draw: the server's list, filtered to the ones this file knows, in a fixed order. */
 export function operatorActions(data) {
@@ -1709,17 +1742,17 @@ export function createOperator({ call = api, onChange = () => {}, onDone = () =>
   };
   const busy = (id) => st.itemId === id && (st.phase === "sending" || st.phase === "started");
 
-  async function send(item, action) {
-    const keepDialog = action in CONFIRMED;
+  async function send(item, action, note) {
+    const keepDialog = action in DIALOGS;
     set({ itemId: item.id, phase: "sending", action, text: SENDING, confirm: keepDialog });
     try {
-      // No body: the third argument is undefined, so the request carries no JSON at all.
-      const accepted = await call("POST", OPERATOR_PATHS[action](item.id), undefined);
+      // No body (the third argument is undefined, so the request carries no JSON at all), except the note of Request changes.
+      const accepted = await call("POST", OPERATOR_PATHS[action](item.id), action === "request_changes" ? { note } : undefined);
       // Close answers at once (no agent is involved); every other action is a run action that is followed.
       const { refusal, waiting } = action in CONFIRMED ? { refusal: null, waiting: false } : await followAcceptedOutcome(call, sleep, accepted);
       if (st.itemId !== item.id) return;
       if (action === "open_pr" && accepted && accepted.result === "refused") return set({ itemId: item.id, phase: "error", action, text: OPEN_PR_REFUSED, confirm: false });
-      if (refusal !== null) return set({ itemId: item.id, phase: "error", action, text: approveSentenceFor(refusal), confirm: keepDialog });
+      if (refusal !== null) return set({ itemId: item.id, phase: "error", action, text: approveSentenceFor(refusal), confirm: keepDialog && action in CONFIRMED });
       set({ itemId: item.id, phase: "started", action, text: waiting ? APPROVE_SENTENCES.waiting_for_slot : OPERATOR_STARTED[action], confirm: false });
       onDone(item.id, action);
     } catch (e) {
@@ -1744,12 +1777,17 @@ export function createOperator({ call = api, onChange = () => {}, onDone = () =>
     /** A button was pressed. Close only opens the dialog; the rest send at once. */
     press(item, action) {
       if (!item || !OPERATOR_ORDER.includes(action) || busy(item.id)) return;
-      if (action in CONFIRMED) return set({ itemId: item.id, phase: "idle", action, text: "", confirm: true });
+      if (action in DIALOGS) return set({ itemId: item.id, phase: "idle", action, text: "", confirm: true });
       return send(item, action);
     },
-    /** "Yes, close it" / "Yes, reopen it". */
-    confirmClose(item) {
-      if (!item || st.itemId !== item.id || !st.confirm || st.phase === "sending" || !(st.action in CONFIRMED)) return;
+    /** "Yes, close it" / "Yes, reopen it" / "Send" (with the note box's text, checked here first: nothing is sent for an empty or long note). */
+    confirmClose(item, note) {
+      if (!item || st.itemId !== item.id || !st.confirm || st.phase === "sending" || !(st.action in DIALOGS)) return;
+      if (st.action === "request_changes") {
+        const text = typeof note === "string" ? note.trim() : "";
+        if (text === "" || Array.from(text).length > NOTE_MAX) return set({ ...st, phase: "error", text: approveSentenceFor("invalid_note") });
+        return send(item, st.action, text);
+      }
       return send(item, st.action);
     },
     /** "Keep it open", Escape, or a click outside. Refused while the request is out. */
@@ -1782,7 +1820,7 @@ export function createOperatorPanel({ call, onDone, sleep } = {}) {
     const open = !!item && st.itemId === item.id && st.confirm;
     if (!open) {
       if (!dlg) return;
-      const back = el.querySelector('[data-testid="' + OPERATOR_TESTIDS[st.action || "close"] + '"]') || el.querySelector('[data-testid="pl-op-close"], [data-testid="pl-op-reopen"]');
+      const back = el.querySelector('[data-testid="' + OPERATOR_TESTIDS[st.action || "close"] + '"]') || el.querySelector('[data-testid="pl-op-close"], [data-testid="pl-op-reopen"], [data-testid="pl-op-changes"]');
       dlg.close();
       dlg.remove();
       dlg = parts = null;
@@ -1790,10 +1828,12 @@ export function createOperatorPanel({ call, onDone, sleep } = {}) {
       return;
     }
     if (!dlg) {
-      const words = CONFIRMED[st.action] || CLOSE_DIALOG;
+      const words = DIALOGS[st.action] || CLOSE_DIALOG;
+      const withNote = st.action === "request_changes";
       parts = {
         err: h("p", { class: "pl-dialog-error", role: "alert", tabindex: "-1", "data-testid": "pl-op-dialog-error" }),
-        confirm: h("button", { type: "button", class: "pl-act", "data-testid": "pl-op-confirm", onClick: () => parts.confirm.getAttribute("aria-disabled") !== "true" && op.confirmClose(item) }, words.confirm),
+        note: withNote ? h("textarea", { id: "pl-op-note-box", class: "pl-note-box", rows: "5", maxlength: String(NOTE_MAX), "data-testid": "pl-op-note-box" }) : null,
+        confirm: h("button", { type: "button", class: "pl-act", "data-testid": "pl-op-confirm", onClick: () => parts.confirm.getAttribute("aria-disabled") !== "true" && op.confirmClose(item, parts.note ? parts.note.value : undefined) }, words.confirm),
         dismiss: h("button", { type: "button", class: "pl-act", "data-testid": "pl-op-keep", onClick: () => op.dismiss() }, words.dismiss),
       };
       dlg = h(
@@ -1804,19 +1844,21 @@ export function createOperatorPanel({ call, onDone, sleep } = {}) {
           { class: "pl-dialog-body" },
           h("h2", { class: "pl-dialog-title", id: "pl-op-dlg-h" }, words.title),
           h("div", { id: "pl-op-dlg-d" }, words.lines.map((t) => h("p", null, t))),
+          ...(parts.note ? [h("label", { for: "pl-op-note-box", class: "pl-muted" }, words.label), parts.note] : []),
           parts.err,
           h("div", { class: "pl-dialog-actions" }, parts.dismiss, parts.confirm)
         )
       );
       document.body.appendChild(dlg);
       dlg.showModal();
-      // The safe choice has the focus: Enter keeps the item open.
-      parts.dismiss.focus();
+      // The safe choice has the focus: Enter keeps the item open. With a note box, the box has it.
+      (parts.note || parts.dismiss).focus();
     }
     parts.err.textContent = st.phase === "error" ? st.text : "";
     // aria-disabled, not disabled: a disabled button drops keyboard focus while the request is out.
     parts.confirm.setAttribute("aria-disabled", st.phase === "sending" ? "true" : "false");
     parts.dismiss.setAttribute("aria-disabled", st.phase === "sending" ? "true" : "false");
+    if (parts.note) parts.note.readOnly = st.phase === "sending";
   }
 
   function draw() {
@@ -1824,12 +1866,14 @@ export function createOperatorPanel({ call, onDone, sleep } = {}) {
     const mine = !!item && st.itemId === item.id ? st : { phase: "idle", action: null, text: "", confirm: false };
     const actions = item ? operatorActions(data) : [];
     const onHost = item ? closeOnHost(data) : false;
-    const sig = JSON.stringify([item && item.id, actions, onHost, mine.phase, mine.text, mine.confirm]);
+    const blocked = item ? changesBlocked(data) : null;
+    const asked = item ? changeRequestLines(data) : [];
+    const sig = JSON.stringify([item && item.id, actions, onHost, blocked, asked, mine.phase, mine.text, mine.confirm]);
     if (sig !== signature) {
       signature = sig;
       const held = el.contains(document.activeElement) && document.activeElement.dataset ? document.activeElement.dataset.testid : null;
       const note = mine.text !== "" && !mine.confirm;
-      const visible = actions.length > 0 || onHost || note;
+      const visible = actions.length > 0 || onHost || note || blocked !== null || asked.length > 0;
       el.hidden = !visible;
       const disabled = mine.phase === "sending" || mine.phase === "started";
       el.replaceChildren(
@@ -1845,6 +1889,15 @@ export function createOperatorPanel({ call, onDone, sleep } = {}) {
                     ),
                     h("div", { class: "pl-op-notes", "data-testid": "pl-op-notes" }, actions.map((a) => h("p", { class: "pl-muted" }, OPERATOR_NOTES[a]))),
                   ]
+                : []),
+              ...(blocked !== null
+                ? [
+                    h("button", { type: "button", class: "pl-act", "data-testid": "pl-op-changes-off", "aria-disabled": "true", "aria-describedby": "pl-op-changes-why" }, OPERATOR_LABELS.request_changes),
+                    h("p", { class: "pl-muted", id: "pl-op-changes-why", "data-testid": "pl-op-changes-why" }, CHANGES_BLOCKED[blocked]),
+                  ]
+                : []),
+              ...(asked.length
+                ? [h("ul", { class: "pl-op-asked", "data-testid": "pl-op-asked" }, asked.map((a) => h("li", null, h("p", null, a.text), a.state ? h("p", { class: "pl-muted" }, a.state) : null)))]
                 : []),
               ...(onHost ? [h("p", { class: "pl-muted", "data-testid": "pl-op-host" }, CLOSE_ON_GITHUB_NOTE)] : []),
               ...(note ? [h("p", { class: "pl-muted", role: "status", "data-testid": "pl-op-note", "data-phase": mine.phase }, mine.text)] : []),

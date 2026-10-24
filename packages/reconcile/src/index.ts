@@ -2,6 +2,15 @@ export {
   runTick,
   readLapTimes,
   isLapBreach,
+  lapBasisSeconds,
+  jobsWithWork,
+  hasBrokenCredits,
+  readCreditsBreak,
+  CREDITS_FAST_WINDOW_SECONDS,
+  CREDITS_BACKED_OFF_CADENCE_SECONDS,
+  type CreditsBreak,
+  FAST_RECONCILE_JOBS,
+  IDLE_RECONCILE_CADENCE_SECONDS,
   JOB_BUDGET_MS,
   TICK_BUDGET_MS,
   LEASE_SECONDS,
@@ -19,6 +28,7 @@ export {
   type TickSummary,
   type Timer,
 } from './runner.js';
+export { checkStalls, stallText, describeDuration, STALL_REPEAT_SECONDS, type OpsAlertSink, type StallCheckDeps, type StallCheckResult, type StallNotice, type StallNoticeKind } from './stallAlert.js';
 export { RECONCILE_JOBS, buildReconcileJobs } from './jobs.js';
 export { createErrorEventsPrune, errorEventsPrune, ERROR_EVENTS_RETENTION_DAYS } from './jobs/errorEventsPrune.js';
 export {

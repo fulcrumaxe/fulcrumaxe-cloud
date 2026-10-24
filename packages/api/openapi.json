@@ -3436,7 +3436,7 @@
       "get": {
         "operationId": "getWorkItemActivity",
         "summary": "What the pipeline is doing for one work item",
-        "description": "Session only, member. The stage, `halted` (true while a customer halt stands: set by a halt at any stage, cleared only by a person's Approve, Build again, Back to discussion or Treat as a feature that came after it), `waiting_on_answer` (true while an agent's question about this item is open or overdue and was asked by the item's newest executor run: derived from that question, so it is false once the question is answered, withdrawn, or the item has a newer run), the panel's signed comments, the newest Spec, the item's newest agent runs (oldest first, each with its summary and activity lines) and the run actions aimed at it, plus `setup_pause` ({ state: open | withdrawn, sentence }, present only while a setup request holds the item: `sentence` is that request's status sentence, null when it has none, and the card then shows a generic pause line), plus the repo, the issue number, the pull request number when a reviewer or a run's own report names one, the repo's real auto-merge setting, and a `notice` ({ kind, reason }, or null) when the pipeline stopped and needs a person: `not_feasible` (the project manager's reason the request cannot be built as written) or `needs_human` (the executor's own account of a build that ended without a pull request) or `check_failed` (the Check the build button could not decide; a fixed sentence) or, for an item at `spec_ready` or `needs_human` whose newest Spec has no readable file list, `no_file_list` (a build was refused for it, or a run ended without a pull request for it: the fixed sentence says to Re-spec, then Build again) or `respec_failed` (the last Re-spec's file list could not be read, so nothing was changed; a fixed sentence) or `build_slot_wait` (not a stop: an item at `spec_ready` or `needs_human` whose build is waiting for a build slot; the fixed sentence says why and, for the repository's slot, which item holds it) or `resume_refused` (an item at `in_progress` or `changes_requested` whose answered question did not resume it, while nothing of it is running: `reason` is a fixed CODE such as `prompt_not_retained`, `work_item_not_resumable` or `resume_pause_expired`, not a sentence, and the app shows its own words for it). `actions` lists what the caller may do to the item right now, from the same table the action routes use (`build_again`, `respec`, `back_to_discussion`, `treat_as_feature`, `close`, `reopen`): empty for a member, an external item, an item with a live run, or a stage none applies to. `public_change` is present only for an item with a change to a paired public repository: its `state`, the stored refusal `code`, a fixed `sentence` (a code the app does not know reads \"Refused: the change was not sent\"), the public `repo`, `branch`, pull request and `head_sha`, and `actions` (empty for now). `close_on_github` is true when the caller could close the item but it has an open pull request, which is closed on GitHub instead. Credential-shaped text in a summary or a reason is redacted. Model text is plain text: show it as text only.",
+        "description": "Session only, member. The stage, `halted` (true while a customer halt stands: set by a halt at any stage, cleared only by a person's Approve, Build again, Back to discussion or Treat as a feature that came after it), `waiting_on_answer` (true while an agent's question about this item is open or overdue and was asked by the item's newest executor run: derived from that question, so it is false once the question is answered, withdrawn, or the item has a newer run), the panel's signed comments, the newest Spec, the item's newest agent runs (oldest first, each with its summary and activity lines) and the run actions aimed at it, plus `setup_pause` ({ state: open | withdrawn, sentence }, present only while a setup request holds the item: `sentence` is that request's status sentence, null when it has none, and the card then shows a generic pause line), plus the repo, the issue number, the pull request number when a reviewer or a run's own report names one, the repo's real auto-merge setting, and a `notice` ({ kind, reason }, or null) when the pipeline stopped and needs a person: `not_feasible` (the project manager's reason the request cannot be built as written) or `needs_human` (the executor's own account of a build that ended without a pull request) or `check_failed` (the Check the build button could not decide; a fixed sentence) or, for an item at `spec_ready` or `needs_human` whose newest Spec has no readable file list, `no_file_list` (a build was refused for it, or a run ended without a pull request for it: the fixed sentence says to Re-spec, then Build again) or `respec_failed` (the last Re-spec's file list could not be read, so nothing was changed; a fixed sentence) or `build_slot_wait` (not a stop: an item at `spec_ready` or `needs_human` whose build is waiting for a build slot; the fixed sentence says why and, for the repository's slot, which item holds it) or `resume_refused` (an item at `in_progress` or `changes_requested` whose answered question did not resume it, while nothing of it is running: `reason` is a fixed CODE such as `prompt_not_retained`, `work_item_not_resumable` or `resume_pause_expired`, not a sentence, and the app shows its own words for it). `actions` lists what the caller may do to the item right now, from the same table the action routes use (`build_again`, `respec`, `back_to_discussion`, `treat_as_feature`, `close`, `reopen`): empty for a member, an external item, an item with a live run, or a stage none applies to. `public_change` is present only for an item with a change to a paired public repository: its `state`, the stored refusal `code`, a fixed `sentence` (a code the app does not know reads \"Refused: the change was not sent\"), the public `repo`, `branch`, pull request and `head_sha`, and `actions` (empty for now). `close_on_github` is true when the caller could close the item but it has an open pull request, which is closed on GitHub instead. `request_changes_blocked` says why Request changes is not offered on an open pull request (`live`: agents are working on it; `rounds`: its fix rounds are used up), null otherwise. `change_requests` lists the notes owners and admins sent with Request changes (newest last, at most 10): `mine` when the caller sent it, the sender's `name` otherwise, the note as written (plain text: show it as text only), and `state` `waiting` (no fix run has taken it yet), `sent` (the fix run `run_id` carried it) or `dropped`. Credential-shaped text in a summary or a reason is redacted. Model text is plain text: show it as text only.",
         "security": [
           {
             "session": []
@@ -3988,6 +3988,7 @@
                       "items": {
                         "type": "string",
                         "enum": [
+                          "request_changes",
                           "build_again",
                           "respec",
                           "back_to_discussion",
@@ -4001,6 +4002,72 @@
                     },
                     "close_on_github": {
                       "type": "boolean"
+                    },
+                    "request_changes_blocked": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "live",
+                            "rounds"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "change_requests": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "mine": {
+                            "type": "boolean"
+                          },
+                          "name": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "note": {
+                            "type": "string"
+                          },
+                          "at": {
+                            "type": "string"
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "waiting",
+                              "sent",
+                              "dropped"
+                            ]
+                          },
+                          "run_id": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "mine",
+                          "name",
+                          "note",
+                          "at",
+                          "state",
+                          "run_id"
+                        ],
+                        "additionalProperties": false
+                      }
                     }
                   },
                   "required": [
@@ -4019,7 +4086,9 @@
                     "steps",
                     "notice",
                     "actions",
-                    "close_on_github"
+                    "close_on_github",
+                    "request_changes_blocked",
+                    "change_requests"
                   ],
                   "additionalProperties": false
                 }
@@ -4068,6 +4137,173 @@
           },
           "500": {
             "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/work-items/{id}/request-changes": {
+      "post": {
+        "operationId": "requestChangesWorkItem",
+        "summary": "Ask for changes on a work item's open pull request",
+        "description": "Session only, owner or admin; a token is refused. Body `{ note }`: what to change, 1 to 2000 characters. `Idempotency-Key` is optional. Records the note on the work item (as a run note the caller accepts, with its audit rows), moves the item to `changes_requested`, and asks the pipeline to start a fix round: the executor works on the same pull request branch with the note (passed to it as data inside the untrusted-content fence, alongside any reviewer findings on the current commit), then the reviewers check the new commit and the merge is checked as usual. Answers 202 `{ action_id, state }`; the outcome arrives through `GET /api/v1/run-actions/{id}`. The fix round counts toward the item's fix-round limit and waits on spending limits like any other. A fix that pushes nothing stops at `needs_human`. Allowed only for an internal work item with a repository, a GitHub issue and a published Spec, at `pr_opened`, `changes_requested` or `review_passed`, or at `needs_human` when it came there from one of those (its pull request was open), with no live run (pending, running or paused) and a fix round left. A keyed repeat with the same note writes nothing and answers with the first request's `action_id`; the same key with a different note is 422 `idempotency_key_reused`, as on every route, and nothing is written. GitHub reviews and pull request comments are not read for this.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "x-fx-idempotency": "optional",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "note": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "note"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Ask for changes on a work item's open pull request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "action_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "accepted",
+                        "claimed",
+                        "done",
+                        "refused",
+                        "failed"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "action_id",
+                    "state"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error `session_required` or `insufficient_role` (owner or admin only), or `external_requires_human` (only an internal work item can be moved from here; there is no override).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `action_not_available` (no open pull request, no Spec, or no GitHub issue), `no_repo` (no repository), `already_running` (agents are already working on it) or `escalate` (the item has used its fix rounds).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error `validation_failed` or `invalid_note` (the note is empty or longer than the limit), or `idempotency_key_reused` (the key was already used with a different note).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error `run_actions_unavailable`: no worker is registered to process run actions yet.",
             "content": {
               "application/json": {
                 "schema": {
@@ -21065,7 +21301,7 @@
       "post": {
         "operationId": "approveWorkItem",
         "summary": "Approve a work item into the pipeline",
-        "description": "Session only, owner or admin; a token is refused. Takes no request body. `Idempotency-Key` is optional. Answers 202 `{ action_id, state }`: the pipeline starts working on the work item (at `triaged`: it is triaged, then a critical or feature item is discussed by the panel and given a Spec, and a small, bug or doc item gets a short Spec from the project manager and is built; a small, bug or doc item that was triaged earlier and has no Spec gets the short Spec again; at `discussing`: the panel and the Spec run again (a Spec that already exists is superseded by the new version); at `spec_ready`: the executor builds it and opens a pull request; at `needs_human` with a published Spec (\"Build again\"): a fresh build from the same Spec, unless a pull request is still open for the issue's branch, which stops it with nothing started; at `in_progress` with nothing running: the pipeline checks whether the build opened a pull request (found: the reviewers run on it; none: the item goes to `needs_human`); at `pr_opened`, `changes_requested` or `review_passed`: the reviewers check the pull request's latest commit, the executor fixes what they ask for, and the merge is checked), and the outcome of the request arrives through `GET /api/v1/run-actions/{id}`. Only an internal work item that has a repository and a GitHub issue behind it, has no live run (pending, running or paused) and either sits at `triaged` and has not been triaged by the pipeline yet (or was, is small, bug or doc and has no Spec), or sits at `discussing` with a panel kind (critical or feature), or sits at `needs_human` with a published Spec of a kind that is built, or sits at `spec_ready` with a published Spec of a kind that is built (not a question or a project), or sits at `in_progress` (with a published Spec), or sits at one of the three pull-request stages with a published Spec, can be approved. A second approval of the same work item while the first is still being processed returns the same `action_id`, and so does a repeat of a keyed request (with `Idempotent-Replayed: true`).",
+        "description": "Session only, owner or admin; a token is refused. Takes no request body. `Idempotency-Key` is optional. Answers 202 `{ action_id, state }`: the pipeline starts working on the work item (at `triaged`: it is triaged, then a critical or feature item is discussed by the panel and given a Spec, and a small, bug or doc item gets a short Spec from the project manager and is built; a small, bug or doc item that was triaged earlier and has no Spec gets the short Spec again; at `discussing`: the panel and the Spec run again (a Spec that already exists is superseded by the new version); at `spec_ready`: the executor builds it and opens a pull request; at `needs_human` with a published Spec (\"Build again\"): a fresh build from the same Spec, unless a pull request is still open for the issue's branch, which stops it with nothing started; at `needs_human` because a reviewer kept ending without a verdict (\"Approve\", the pull request is still open): the reviewers check the pull request's latest commit again, with a fresh set of tries for the reviewer that gave up (an Approve is a person's choice to try again), and an item with no open pull request is built again instead; at `in_progress` with nothing running: the pipeline checks whether the build opened a pull request (found: the reviewers run on it; none: the item goes to `needs_human`); at `pr_opened`, `changes_requested` or `review_passed`: the reviewers check the pull request's latest commit, the executor fixes what they ask for, and the merge is checked), and the outcome of the request arrives through `GET /api/v1/run-actions/{id}`. Only an internal work item that has a repository and a GitHub issue behind it, has no live run (pending, running or paused) and either sits at `triaged` and has not been triaged by the pipeline yet (or was, is small, bug or doc and has no Spec), or sits at `discussing` with a panel kind (critical or feature), or sits at `needs_human` with a published Spec of a kind that is built, or sits at `spec_ready` with a published Spec of a kind that is built (not a question or a project), or sits at `in_progress` (with a published Spec), or sits at one of the three pull-request stages with a published Spec, can be approved. A second approval of the same work item while the first is still being processed returns the same `action_id`, and so does a repeat of a keyed request (with `Idempotent-Replayed: true`).",
         "security": [
           {
             "session": []

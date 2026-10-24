@@ -47,6 +47,8 @@ export interface StartDetachedOptions extends Omit<StartOptions, "onEvent" | "sa
   spillDir?: string;
   /** D#600 CX-6b: the model's context window in tokens, from the job. Absent: the runner computes no context percentage for the run and delivers no note. */
   contextWindowTokens?: number;
+  /** D#6 RUNNER-AGENT-NO-FULLCHECK: the job's approved check (the signed vector). It becomes `Bash` deny entries in the agent's settings, for a start and a resume alike: the runner runs it, the agent does not. Absent: no check. */
+  checkArgv?: readonly string[];
   limits?: Partial<{ maxTurns: number; maxModelCalls: number; maxRunMs: number; meteringSilenceMs: number }>;
   onEvent: (event: NormalizedEvent) => void | Promise<void>;
 }

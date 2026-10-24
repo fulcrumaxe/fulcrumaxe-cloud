@@ -2,8 +2,10 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
-import { effectiveSandboxReapMode, RECONCILE_JOBS, type JobContext, type SandboxReapDbSetting, type SandboxReapSweepInput, type SandboxReapWorker, type TickDeps, type TickSummary } from "@fx/reconcile";
+import { effectiveSandboxReapMode, RECONCILE_JOBS, type JobContext, type OpsAlertSink, type SandboxReapDbSetting, type SandboxReapSweepInput, type SandboxReapWorker, type TickDeps, type TickSummary } from "@fx/reconcile";
 import { reportError } from "@fx/telemetry";
+import { setPendingHooks } from "@fx/core/src/pendingWork";
+import { makeRegion, storeOf } from "../../../../test/support/runtimeCacheFake";
 import { defaultReconcileDeps, modelCreditsRevalidateJobFromEnv, modelKeyHealthJobFromEnv, readSandboxReapDbMode, reconcileHandler, stripeSubscriptionsJobFromEnv, type ReconcileHandlerDeps } from "./handler";
 import { maxDuration } from "./route";
 import { getWorker } from "../../../../lib/worker";
@@ -15,7 +17,7 @@ import { getWorker } from "../../../../lib/worker";
 const SECRET = "test-cron-secret-that-is-long-enough-0123";
 
 function fakeDeps(overrides: Partial<ReconcileHandlerDeps> = {}): ReconcileHandlerDeps {
-  return { cronSecret: SECRET, enabled: true, platformOpsPool: {} as never, reportError: () => undefined, ...overrides };
+  return { cronSecret: SECRET, enabled: true, platformOpsPool: { query: async () => ({ rows: [{ pending: false, due: null }] }) } as never, reportError: () => undefined, ...overrides };
 }
 
 function requestWithAuth(authorization: string | null): NextRequest {
@@ -465,5 +467,86 @@ describe("the reaper's kill switch also reads a database setting (C85)", () => {
     ])("%j reads as %s", async (rows, want) => {
       expect(await readSandboxReapDbMode(poolOf(rows as never))).toBe(want);
     });
+  });
+});
+
+describe("GET /api/cron/reconcile: stall alerts (D#6)", () => {
+  /** A pool where model_credits_revalidate has work and its lap is 75 minutes; nothing alerted yet. */
+  const stalledPool = () =>
+    ({
+      query: async (sql: string) => {
+        if (sql.includes("FROM model_connections")) return { rows: [{ broken: true, age: 0 }] };
+        if (sql.includes("last_result_code = 'budget'")) return { rows: [] };
+        if (sql.includes("stall_alerted_at IS NOT NULL")) return { rows: [] };
+        if (sql.includes("RETURNING name")) return { rows: [{ name: "model_credits_revalidate" }] };
+        if (sql.includes("FROM reconcile_jobs ORDER BY")) return { rows: [{ name: "model_credits_revalidate", interval_seconds: 900, lap: 4500, never: false, last_result_code: "ok", last_ok_at: null }] };
+        return { rows: [] };
+      },
+    }) as never;
+
+  it("a sink that throws neither fails the tick nor reaches reportError (which writes error_events)", async () => {
+    const reportErrorSpy = vi.fn();
+    const send = vi.fn(async () => {
+      throw new Error("sink down");
+    });
+    const res = await reconcileHandler(requestWithAuth(`Bearer ${SECRET}`), fakeDeps({ platformOpsPool: stalledPool(), reportError: reportErrorSpy, opsAlertSink: { send } }), vi.fn(async () => summary));
+    expect(res.status).toBe(200);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(reportErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it("a stalled job with a working sink sends one alert", async () => {
+    const send = vi.fn(async () => undefined);
+    const res = await reconcileHandler(requestWithAuth(`Bearer ${SECRET}`), fakeDeps({ platformOpsPool: stalledPool(), opsAlertSink: { send } }), vi.fn(async () => summary));
+    expect(res.status).toBe(200);
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ kind: "stalled" }));
+  });
+
+  /** The due time the tick left behind, read from the no-database store the gate uses (null: nothing pending). */
+  const clock = { value: Date.parse("2026-10-23T12:00:00Z") };
+  async function dueLeftBy(pool: never, sink: OpsAlertSink | null, summaryOver: TickSummary = summary): Promise<number | null> {
+    const region = makeRegion(clock);
+    setPendingHooks({ store: storeOf(region) });
+    try {
+      const res = await reconcileHandler(requestWithAuth(`Bearer ${SECRET}`), fakeDeps({ platformOpsPool: pool, opsAlertSink: sink }), vi.fn(async () => summaryOver));
+      expect(res.status).toBe(200);
+      const e = region.entries.get("pending:reconcile");
+      return e ? (JSON.parse(e.json) as number) : null;
+    } finally {
+      setPendingHooks(null);
+    }
+  }
+  const poolWith = (opts: { broken: boolean; backedOff?: boolean; alerted: boolean; lap: number }) =>
+    ({
+      query: async (sql: string) => {
+        if (sql.includes("FROM model_connections")) return { rows: [{ broken: opts.broken, age: opts.broken ? (opts.backedOff ? 3 * 3600 : 0) : null }] };
+        if (sql.includes("last_result_code = 'budget'")) return { rows: [] };
+        if (sql.includes("stall_alerted_at IS NOT NULL")) return { rows: opts.alerted ? [{ name: "model_credits_revalidate", age: 60, at: "t" }] : [] };
+        if (sql.includes("RETURNING name")) return { rows: [{ name: "model_credits_revalidate" }] };
+        if (sql.includes("FROM reconcile_jobs ORDER BY")) return { rows: [{ name: "model_credits_revalidate", interval_seconds: 900, lap: opts.lap, never: false, last_result_code: "ok", last_ok_at: null }] };
+        if (sql.includes("next_due_at")) return { rows: [{ name: "model_credits_revalidate", due: clock.value + 10 * 60_000 }] };
+        return { rows: [] };
+      },
+    }) as never;
+  const failing: OpsAlertSink = { send: async () => { throw new Error("401"); } };
+
+  it("a failing recovery post with no work left schedules nothing: the due time stays null", async () => {
+    expect(await dueLeftBy(poolWith({ broken: false, alerted: true, lap: 100 }), failing)).toBeNull();
+  });
+
+  it("a stall with work and no due time of its own gets the 15 minute look", async () => {
+    const due = await dueLeftBy(poolWith({ broken: true, alerted: false, lap: 4500 }), { send: async () => undefined });
+    expect(due).not.toBeNull();
+  });
+
+  it("a stalled credits job on its hourly back-off keeps the hourly due time (never shortened)", async () => {
+    const due = await dueLeftBy(poolWith({ broken: true, backedOff: true, alerted: true, lap: 4 * 3600 }), { send: async () => undefined });
+    expect(due).not.toBeNull();
+    expect(due! - clock.value).toBeGreaterThanOrEqual(55 * 60_000);
+  });
+
+  it("no sink configured: the tick answers as before", async () => {
+    const res = await reconcileHandler(requestWithAuth(`Bearer ${SECRET}`), fakeDeps({ opsAlertSink: null }), vi.fn(async () => summary));
+    expect(res.status).toBe(200);
   });
 });

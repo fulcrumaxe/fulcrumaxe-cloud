@@ -22,6 +22,7 @@
 import { z } from "zod";
 import { SignedJobSchema } from "./job.js";
 import { pairingDigest } from "./pairingDigest.js";
+import { WakeGrant } from "./wake.js";
 
 /** A lease lasts 90 seconds from the claim and from each heartbeat or accepted event batch. */
 export const RUNNER_LEASE_SECONDS = 90;
@@ -44,8 +45,15 @@ const retryAfter = (max: number) => safeInt.min(1).max(max);
 /** An ISO 8601 timestamp in UTC (`...Z`). */
 const utcTimestamp = z.string().datetime();
 
+/**
+ * D#6 RUNNER-WAKE R3a: the `wake` grant (wake.ts) rides on the 200 hello and claim replies, and only for a runner whose latest hello listed
+ * `wake_v1`. It is optional, so a reply without it parses as before; the schemas stay strict, so the cloud never sends it to a runner that
+ * did not ask (an older runner would refuse the reply). A cloud with no wake key configured sends none at all.
+ */
+const wake = WakeGrant.optional();
+
 /** Nothing for this runner to do right now. */
-export const ClaimIdleReply = z.object({ retry_after: retryAfter(3600) }).strict();
+export const ClaimIdleReply = z.object({ retry_after: retryAfter(3600), wake }).strict();
 export type ClaimIdleReply = z.infer<typeof ClaimIdleReply>;
 
 /**
@@ -53,13 +61,17 @@ export type ClaimIdleReply = z.infer<typeof ClaimIdleReply>;
  * later write with it. `run_id` repeats the signed job's own so a runner can key on it before it opens the job.
  */
 export const ClaimedReply = z
-  .object({ signed_job: SignedJobSchema, run_id: z.string().uuid(), lease_generation: safeInt.min(1) })
+  .object({ signed_job: SignedJobSchema, run_id: z.string().uuid(), lease_generation: safeInt.min(1), wake })
   .strict()
   .refine((reply) => reply.signed_job.job.run_id === reply.run_id, { message: "run_id must be the signed job's run" });
 export type ClaimedReply = z.infer<typeof ClaimedReply>;
 
 export const ClaimReply = z.union([ClaimedReply, ClaimIdleReply]);
 export type ClaimReply = z.infer<typeof ClaimReply>;
+
+/** 200 from hello: the protocol version this cloud speaks, and the wake grant for a runner that asked for one. */
+export const HelloReply = z.object({ protocol_version: safeInt.min(1), wake }).strict();
+export type HelloReply = z.infer<typeof HelloReply>;
 
 /** 429: a second claim inside `CLAIM_MIN_INTERVAL_SECONDS`. */
 export const ClaimRateLimitedReply = z.object({ retry_after: retryAfter(CLAIM_MIN_INTERVAL_SECONDS) }).strict();
@@ -205,6 +217,7 @@ export type PlanePushReportReply = z.infer<typeof PlanePushReportReply>;
 
 /** The complete set of runner-route replies. A test pins these keys. */
 export const RUNNER_REPLIES = {
+  hello: HelloReply,
   claim: ClaimReply,
   claim_rate_limited: ClaimRateLimitedReply,
   heartbeat: HeartbeatReply,

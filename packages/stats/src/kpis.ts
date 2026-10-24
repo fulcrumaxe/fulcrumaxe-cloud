@@ -24,11 +24,14 @@ export interface WorkItemKpiRow {
   t_merged: Date | null;
   t_closed_unmerged: Date | null;
   t_closed: Date | null;
+  /** Reviewer verdicts only: a person's "request changes" is counted in `n_person_change_requests` instead. */
   n_changes_requested: number;
   n_needs_human: number;
   model_usd: number;
   compute_usd: number;
   tokens: number;
+  /** A person's "request changes" transitions. Never a review verdict, so no KPI reads this; it is kept so nothing is lost. */
+  n_person_change_requests: number;
 }
 
 export interface RunKpiRow {

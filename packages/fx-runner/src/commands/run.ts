@@ -54,6 +54,7 @@ import { createFileLedger, LedgerLockedError, type FileLedger } from "../daemon/
 import { cacheRootsFor, mirrorKeepClear, type RepoRef } from "../daemon/mirror.js";
 import { LaunchRefused, prepareDaemonDir } from "../launchDir.js";
 import { abortOnSignals, pollLoop, type PollEvent } from "../daemon/pollLoop.js";
+import { WakeTracker } from "../daemon/wake.js";
 import { removeStaleLedgerTemp } from "../daemon/staleTemp.js";
 import { spillRootFor, sweepStaleSpill } from "../job/spillFiles.js";
 import { cleanEnv, type CredentialMode } from "../job/cleanEnv.js";
@@ -186,6 +187,9 @@ function describePoll(event: PollEvent): string | undefined {
   if (event.event === "sandbox_unavailable") return undefined;
   if (event.event === "error") return `cloud error ${event.status}${event.code === undefined ? "" : ` ${event.code}`}`;
   if (event.event === "refused") return `refused ${event.runId} (${event.reason})`;
+  // A wake check that says "claim" is routine; only the fallback is worth a line.
+  if (event.event === "wake_claim") return undefined;
+  if (event.event === "wake_fallback") return "the cloud's wake check failed 3 times; checking for work every minute until it answers again";
   return event.event === "claimed" || event.event === "discarded" ? `${event.event} ${event.runId}` : event.event;
 }
 
@@ -377,11 +381,14 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       // D#605 FL-2: say what this build and machine are, once per start, before the first claim. Best effort and no gate: a cloud that is older, a network
       // that is down or a 426 changes nothing here (the claim loop answers all of them in its own words), and no job decision reads the facts.
       const facts = readHostFacts();
-      await client
+      const hello = await client
         .hello({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: credentials.mode === "api_key", isolation: "host_sandbox", ...(facts === undefined ? {} : { facts }), capabilities: RUNNER_BUILD_CAPABILITIES })
         .catch(() => undefined);
+      // D#6 RUNNER-WAKE: the hello's grant, if the cloud sent one, seeds the wake state; every claim reply refreshes it.
+      const wake = new WakeTracker(hello?.kind === "ok" ? hello.wake : undefined);
       const end = await pollLoop({
         client,
+        wake,
         clock,
         gate,
         signal: stopped.signal,

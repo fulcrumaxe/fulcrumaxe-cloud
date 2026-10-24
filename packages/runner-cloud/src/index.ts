@@ -1,7 +1,7 @@
 /** @fx/runner-cloud: the cloud side of the local runner (private). R2a is runner identity; see README.md. */
 export * from "./http.js";
 export { isUsableEd25519Key } from "./strictEd25519.js";
-export { signedUrl, verifyRunnerRequest, verifySelfSignedRequest, withRunnerSession, type VerifiedRunner } from "./verifyRunnerRequest.js";
+export { signedUrl, verifyKeyBoundRequest, verifyRunnerRequest, verifySelfSignedRequest, withRunnerSession, type VerifiedRunner } from "./verifyRunnerRequest.js";
 export { CODE_TTL_MINUTES, hashRegistrationCode, mintRegistrationCode, newRegistrationCode } from "./registrationCodes.js";
 export {
   MAX_OUTSTANDING_PROVISIONING_TOKENS,
@@ -18,7 +18,8 @@ export {
 export { REGISTER_PATH, registerRunner } from "./register.js";
 export { ROTATE_PATH, rotateRunnerKey } from "./rotate.js";
 export { REVOKE_PATH, revokeAllRunners, revokeRunner, selfRevokeRunner } from "./revoke.js";
-export { FLEET_SETTING_ACTIONS, applyRunnerSetting, removeRunner, setRunnerRepos, type FleetSettingAction } from "./fleetControls.js";
+export { FLEET_SETTING_ACTIONS, applyRunnerSetting, checkRunner, removeRunner, setRunnerRepos, type FleetSettingAction } from "./fleetControls.js";
+export { RUNNER_CHECK_REPLY_MS, RUNNER_WORK_REPLY_MS, checkStatusOf, ignoredWork, runnerReplyOf, type RunnerCheckStatus, type RunnerReply } from "./runnerReply.js";
 export { CLAIM_PATH, claimRun } from "./claim.js";
 export { HEARTBEAT_PATH, heartbeatRun } from "./heartbeat.js";
 export { eventsPath, ingestEvents } from "./ingestEvents.js";
@@ -41,6 +42,25 @@ export {
   type LocalOnlyAllowlistEntry,
 } from "./localOnlyGithub.js";
 export { HELLO_PATH, protocolVersionSupported, runnerHello } from "./hello.js";
+export { WAKE_PATH, acceptsWakeJson, runnerWake, type WakeDeps } from "./wake.js";
+export {
+  RUNNER_SEEN_REFRESH_MS,
+  RUNNER_SEEN_TTL_SECONDS,
+  RUNNER_WAKE_CACHE_NAMESPACE,
+  RUNNER_WAKE_LIVENESS_SECONDS,
+  RUNNER_WAKE_SLOT_SECONDS,
+  RUNNER_SEEN_WRITER_MAX_ENTRIES,
+  runnerSeenKey,
+  runnerSeenReader,
+  seenValueOf,
+  type RunnerSeenReader,
+  type RunnerSeenStore,
+  runnerSeenWriter,
+  type RunnerSeenWriteStore,
+  type RunnerSeenWriter,
+} from "./wakeSeen.js";
+export { WAKE_SAFETY_JITTER_SECONDS, wakeSafetyRetryAfterSeconds } from "./wakeToken.js";
+export { WAKE_KEY_MIN_BYTES, configuredWakeKey, mintWakeToken, readWakeKey, verifyWakeToken, wakeGrantFor, type WakeRunner } from "./wakeToken.js";
 export { ALREADY_FINISHING_REASON, ALREADY_PAUSED_REASON, NOT_HELD_REASON, NOT_YOUR_RUNNER_REASON, SET_BY_SOMEONE_ELSE_REASON, accountLineOf, fleetControlsOf, type AccountLine, type FleetControl, type FleetControls } from "./fleetView.js";
 export { REVOKED_REGISTRANT_LEFT_NOTE, RUNNER_STATES, RUN_WAIT_REASONS, capacityOf, classifyRunner, getRunWait, getRunWaitReason, getRunnerStates, loadLabel, waitReasonOf, type AccountRunnerCaps, type RawRun, type RunWaitReason, type RunnerCapacity, type RunnerFacts, type RunnerRow, type RunnerRunning, type RunnerState } from "./readModel.js";
 export { listRunners } from "./fleetList.js";

@@ -21,7 +21,9 @@ import { runnerSweeperHandler } from "./runner-sweeper/handler";
 const SECRET = "test-cron-secret";
 const KICK_KEY = apiSweepKickKey(SECRET); // what the kick is signed with: derived from the cron secret, never the secret itself
 const MIN = 60_000;
-const clock = { value: Date.now() };
+// Aligned to an hour: the backstop is wall-clock slots now, so a test that counts minutes from a tick needs a known place in the slot.
+const CLOCK_START = Math.floor(Date.now() / (60 * MIN)) * 60 * MIN;
+const clock = { value: CLOCK_START };
 let region: FakeRegion;
 
 const EMPTY_SUMMARY: SweepSummary = { fanOut: { eventsProcessed: 0, deliveriesCreated: 0 }, sent: { claimed: 0, succeeded: 0, failed: 0, dead: 0 }, disabledEndpoints: [], purged: {} };
@@ -32,6 +34,7 @@ function cronRequest(name: string): NextRequest {
 }
 
 beforeEach(() => {
+  clock.value = CLOCK_START; // every test starts on the same slot boundary, whatever the earlier tests advanced the clock to
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(clock.value);
   vi.stubEnv("CRON_SECRET", SECRET);
@@ -91,9 +94,22 @@ describe("api-sweep", () => {
     expect(nextDue).toHaveBeenCalled();
   });
 
-  it("connects on the 30-minute backstop even with no marker", async () => {
+  it("connects on the next backstop slot even with no marker: the hour on an idle deployment", async () => {
     await apiSweepHandler(cronRequest("api-sweep"), defaultApiSweepDeps(), sweep, nextDue);
     advance(31 * MIN);
+    sweep.mockClear();
+    await apiSweepHandler(cronRequest("api-sweep"), defaultApiSweepDeps(), sweep, nextDue);
+    expect(sweep).not.toHaveBeenCalled(); // no work seen in 24 hours: the slot is an hour long
+    advance(30 * MIN);
+    await apiSweepHandler(cronRequest("api-sweep"), defaultApiSweepDeps(), sweep, nextDue);
+    expect(sweep).toHaveBeenCalledTimes(1);
+  });
+
+  it("connects on the next half-hour slot when work was seen in the last day", async () => {
+    await markWorkPending("api-sweep");
+    advance(2 * MIN);
+    await apiSweepHandler(cronRequest("api-sweep"), defaultApiSweepDeps(), sweep, nextDue); // the marker's tick
+    advance(29 * MIN); // 31 minutes in: the next slot
     sweep.mockClear();
     await apiSweepHandler(cronRequest("api-sweep"), defaultApiSweepDeps(), sweep, nextDue);
     expect(sweep).toHaveBeenCalledTimes(1);
@@ -165,11 +181,14 @@ describe("api-sweep kick", () => {
   });
 
   it.each([
-    ["no signature", null],
-    ["a wrong key", apiSweepKickHeader("another-key", Math.floor(Date.now() / 1000))],
-    ["a stale timestamp", apiSweepKickHeader(KICK_KEY, Math.floor(Date.now() / 1000) - 600)],
-    ["a malformed header", "t=1,sig=zz"],
-  ])("answers a bare 401 for %s and does nothing", async (_n, header) => {
+    ["no signature", () => null],
+    ["a wrong key", () => apiSweepKickHeader("another-key", nowSeconds())],
+    ["a stale timestamp", () => apiSweepKickHeader(KICK_KEY, nowSeconds() - 600)],
+    ["a malformed header", () => "t=1,sig=zz"],
+  ])("answers a bare 401 for %s and does nothing", async (_n, makeHeader) => {
+    // Built inside the test, against the fake clock: building them at collection used the real clock, which sits up to an hour from the fake one
+    // (CLOCK_START is the hour boundary), so "stale" fell inside the skew window for a few minutes of every hour.
+    const header = makeHeader();
     const { deps, scheduled } = kickDeps();
     const res = await apiSweepKickHandler(kickRequest(header), deps, sweep, nextDue);
     expect(res.status).toBe(401);
@@ -251,10 +270,10 @@ describe("run-action-sweep", () => {
     expect(getWorker).not.toHaveBeenCalled();
   });
 
-  it("connects on the backstop with no marker", async () => {
+  it("connects on the backstop slot with no marker", async () => {
     getWorker.mockResolvedValue(workerWith([]));
     await runActionSweepHandler(cronRequest("run-action-sweep"), deps());
-    advance(31 * MIN);
+    advance(61 * MIN); // an idle deployment: the slot is an hour
     getWorker.mockClear();
     await runActionSweepHandler(cronRequest("run-action-sweep"), deps());
     expect(getWorker).toHaveBeenCalledTimes(1);
@@ -319,7 +338,7 @@ describe("compute-settle-sweep", () => {
     // The tick that finds its sandbox gone settles it: no running run remains, so the marker clears...
     sweepComputeSettle.mockResolvedValueOnce({ ...none, lost: { listed: 0 } } as never);
     await computeSettleSweepHandler(cronRequest("compute-settle-sweep"), deps());
-    advance(10 * MIN);
+    advance(5 * MIN); // still inside the slot of that last connect, so only the marker (now cleared) could connect
     getWorker.mockClear();
     const res = await computeSettleSweepHandler(cronRequest("compute-settle-sweep"), deps());
     // ...and the tick after it is skipped again.
@@ -371,7 +390,7 @@ describe("runner-sweeper (D#6 R2b)", () => {
     advance(20 * MIN);
     const dueAt = clock.value + 72 * HOUR;
     await markWorkPending("runner-sweeper", { since: dueAt }); // what RunnerTarget.dispatch does
-    // The backstop tick (30 minutes since the last connection) looks, finds the run still waiting and keeps the marker at its due time.
+    // The backstop tick (the first of the next half-hour slot) looks, finds the run still waiting and keeps the marker at its due time.
     advance(15 * MIN);
     sweepRunnerQueue.mockResolvedValueOnce({ ...none, listed: 1, waiting: 1, nextDueAt: dueAt });
     await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
@@ -381,9 +400,9 @@ describe("runner-sweeper (D#6 R2b)", () => {
     getWorker.mockClear();
     expect(await (await runnerSweeperHandler(cronRequest("runner-sweeper"), deps())).json()).toEqual({ skipped: true, reason: "no_pending_work" });
     expect(getWorker).not.toHaveBeenCalled();
-    // Not before: a tick 29 minutes ahead connects only through the backstop and keeps the marker; a tick 1 ms before the due
-    // time is skipped, so nothing is looked at early.
-    clock.value = dueAt - 29 * MIN;
+    // Not before: the first tick of the hour slot that holds the due time connects only through the backstop and keeps the marker;
+    // a tick 1 ms before the due time (same slot) is skipped, so nothing is looked at early.
+    clock.value = Math.floor((dueAt - 1) / (60 * MIN)) * 60 * MIN;
     vi.setSystemTime(clock.value);
     sweepRunnerQueue.mockResolvedValueOnce({ ...none, listed: 1, waiting: 1, nextDueAt: dueAt });
     await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
@@ -399,9 +418,9 @@ describe("runner-sweeper (D#6 R2b)", () => {
     const due = await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
     expect(await due.json()).toEqual({ configured: true, listed: 1, expired: 1, cancelled: 0, waiting: 0, skipped: 0, failed: 0, leases: (({ nextDueAt: _n, ...rest }) => rest)(noLeases) });
     // A marker younger than a minute is kept, as its writer may not have committed; the next tick finds nothing and clears it.
-    advance(6 * MIN);
+    advance(3 * MIN);
     await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
-    advance(6 * MIN);
+    advance(3 * MIN);
     getWorker.mockClear();
     expect(await (await runnerSweeperHandler(cronRequest("runner-sweeper"), deps())).json()).toEqual({ skipped: true, reason: "no_pending_work" });
     expect(getWorker).not.toHaveBeenCalled();

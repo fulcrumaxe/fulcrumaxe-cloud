@@ -30,10 +30,11 @@ describe("C1: each git-path code is reported under its own detail", () => {
     expect(endOfFailure("something_new")).toEqual({ reason: "runner_setup", detail: "other" });
   });
 
-  it("the codes that were already mapped are unchanged", () => {
+  it("the codes that were already mapped are unchanged (resource_limit now has its own reason)", () => {
     expect(endOfFailure("push_rejected")).toEqual({ reason: "push_rejected" });
-    // A job stopped by its own memory budget (D#6 C43-5) is an agent failure on the wire: no new reason, and the cloud does not retry it.
-    expect(endOfFailure("resource_limit")).toEqual({ reason: "agent_failed" });
+    // A job stopped by its own memory budget (D#6 C43-5) has its own reason on the wire, never the bare agent_failed; the agent's own failures keep agent_failed.
+    expect(endOfFailure("resource_limit")).toEqual({ reason: "resource_limit" });
+    for (const code of ["agent_error", "no_result", "agent_exit"]) expect(endOfFailure(code), code).toEqual({ reason: "agent_failed" });
     expect(endOfFailure("push_too_large", 7)).toEqual({ reason: "runner_setup", detail: "push_too_large", sizeMb: 7 });
     expect(endOfFailure("continuation_branch_missing")).toEqual({ reason: "runner_setup", detail: "continuation_branch_missing" });
     expect(endOfFailure("credential_mismatch")).toBeNull();

@@ -268,6 +268,11 @@ describe("loadBody: an item at needs_human with its Spec is loaded for Build aga
   it("hands the rebuild the Spec version to pin and the repository facts for the open-pull-request look; reads no issue, even with no reader", async () => {
     expect(await loadBody(withItem({}), null, ACCOUNT, ITEM)).toEqual({ ok: true, mode: "rebuild", number: 7, specVersion: 4, repoId: REPO, owner: "acme", name: "widgets", executionMode: "sandbox", recordedPr: null });
   });
+  it("after a reviewer kept ending without a verdict (reviewHold) it loads the same lookup, flagged: the workflow reviews an open pull request instead of stopping at it", async () => {
+    expect(await loadBody(withItem({ reviewHold: true }), null, ACCOUNT, ITEM)).toEqual({ ok: true, mode: "rebuild", reviewHold: true, number: 7, specVersion: 4, repoId: REPO, owner: "acme", name: "widgets", executionMode: "sandbox", recordedPr: null });
+    expect(await loadBody(withItem({ reviewHold: true, hasSpec: false, specVersion: null }), null, ACCOUNT, ITEM)).toEqual({ ok: false, reason: "not_advanceable" });
+    expect(await loadBody(withItem({ reviewHold: false }), null, ACCOUNT, ITEM)).not.toHaveProperty("reviewHold");
+  });
   it.each(["critical", "feature", "small", "bug", "doc"])("a %s item is built again", async (kind) => {
     expect(await loadBody(withItem({ kind }), null, ACCOUNT, ITEM)).toMatchObject({ ok: true, mode: "rebuild" });
   });

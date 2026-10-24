@@ -120,6 +120,34 @@ describe("runner notices [pg]", () => {
     expect(await kinds(id)).toEqual(["runner.waiting"]);
   });
 
+  it("D#6 RUNNER-WAKE: an idle wake runner between its safety claims holds the notice back while the wake gate is open; a plain or dead wake runner does not", async () => {
+    const wakeSweep = (wakeEnabled: boolean) => createRunnerNoticeSweeper(writerPool, { now: () => clock, wakeEnabled: () => wakeEnabled }).sweepRunnerNotices();
+    const wakeCap = (id: string) => admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, ARRAY['wake_v1'])", [id, A.accountId]);
+    const id = await waiting(A.accountId);
+    clock = T0 + 30 * MIN;
+    // A plain runner quiet for 10 min does not count, gate open or not.
+    const plain = await runnerSeen(A.accountId, A.userId, 10 * MIN);
+    // A wake runner quiet for 10 min: present while the gate is open (it holds a grant and claims only at its slot).
+    const wake = await runnerSeen(A.accountId, A.userId, 10 * MIN);
+    await wakeCap(wake);
+    expect(await wakeSweep(true)).toMatchObject({ waitingEmitted: 0 });
+    expect(await kinds(id)).toEqual([]);
+    // Dead: no claim for longer than the window. Only the plain runner (10 min quiet) is left, and it holds nothing back.
+    await admin.query("UPDATE runners SET last_seen_at = to_timestamp($2 / 1000.0) WHERE id = $1", [wake, clock - 35 * MIN - 1000]);
+    expect(await wakeSweep(true)).toMatchObject({ waitingEmitted: 1 });
+    expect(await kinds(id)).toEqual(["runner.waiting"]);
+    expect((await admin.query("SELECT 1 FROM runners WHERE id = $1", [plain])).rows).toHaveLength(1);
+  });
+
+  it("D#6 RUNNER-WAKE: with the wake gate closed (no key, so no grant) a wake runner quiet past 120 s does not hold the notice back", async () => {
+    const id = await waiting(A.accountId);
+    clock = T0 + 30 * MIN;
+    const wake = await runnerSeen(A.accountId, A.userId, 10 * MIN);
+    await admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, ARRAY['wake_v1'])", [wake, A.accountId]);
+    expect(await sweep()).toMatchObject({ waitingEmitted: 1 });
+    expect(await kinds(id)).toEqual(["runner.waiting"]);
+  });
+
   // "No runner online" is for the run's repo, as the wait reason says: a live runner counts only if the run's repo is in its own list.
   // An empty list is not "every repo": the claim reads it as no repo (only allowed_roles reads empty as all), so such a runner can
   // never take the run and must not hold the notice back.

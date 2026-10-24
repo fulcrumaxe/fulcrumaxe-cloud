@@ -63,7 +63,7 @@ export type RunnerStage = z.infer<typeof RunnerStage>;
  * closed set, and the only thing a `run_ended` event says: no job content, no error text. Each reason has a closed `detail` set
  * where C24 gives one, and none otherwise (`DETAILS_OF_RUN_ENDED` maps a reason to its set; an empty set means "no detail").
  */
-export const RUN_ENDED_REASONS = ["job_refused", "repo_not_private", "agent_failed", "wall_clock", "runner_setup", "runner_shutdown", "push_rejected", "handed_off", "check_failed"] as const;
+export const RUN_ENDED_REASONS = ["job_refused", "repo_not_private", "agent_failed", "wall_clock", "runner_setup", "runner_shutdown", "push_rejected", "handed_off", "check_failed", "resource_limit"] as const;
 export const RunEndedReason = z.enum(RUN_ENDED_REASONS);
 export type RunEndedReason = z.infer<typeof RunEndedReason>;
 
@@ -137,6 +137,9 @@ export const DETAILS_OF_RUN_ENDED: Record<RunEndedReason, readonly RunEndedDetai
   // D#599 HO-1: the run stopped at a checkpoint so the other side can continue it. See `HANDED_OFF_DETAILS`.
   handed_off: HANDED_OFF_DETAILS,
   check_failed: CHECK_FAILED_DETAILS,
+  // D#6 RUNNER-AGENT-NO-FULLCHECK (additive under C8 section 6; the cloud deploys first): the job's own memory limit ended the agent (the kernel's OOM killer in the job's
+  // scope, C43-5). It used to be sent as `agent_failed`, which read as the agent giving up. No detail: the budget is the runner's own setting.
+  resource_limit: [],
 };
 
 const TAKEN_OVER_FORBIDDEN = ["tool_name", "file_path", "exit_code", "duration_ms", "engine_version", "usage", "reset_at", "reason", "detail", "size_mb", "activity", "stage"] as const;

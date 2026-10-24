@@ -1,7 +1,9 @@
 import { appUserPool } from "@fx/api/src/sse/pools.js";
 import { handoffRouteDeps } from "@fx/api/src/routes/run-handoff.js";
 import { createHandoffCloudTarget, runnerJobsConfigured } from "@fx/worker";
+import { readWakeKey } from "@fx/runner-cloud";
 import { createAppRepoVisibility } from "./github/repoVisibility";
+import { runnerSeenFromCache } from "./runnerSeenCache";
 
 let visibility: ReturnType<typeof createAppRepoVisibility> | undefined;
 
@@ -16,4 +18,7 @@ export function installHandoffDeps(): void {
   handoffRouteDeps.cloudTarget = { seat: (input) => (target ??= createHandoffCloudTarget({ pool: appUserPool(), env: process.env })).seat(input) };
   handoffRouteDeps.runnerJobsConfigured = () => runnerJobsConfigured(process.env);
   handoffRouteDeps.repoVisibility = (accountId, repoId) => (visibility ??= createAppRepoVisibility()).visibility({ accountId, repoId });
+  // D#6 RUNNER-WAKE: the covering test reads runners as the fleet does (cached wake checks, and the wake window only while a key is configured).
+  handoffRouteDeps.runnerSeen = runnerSeenFromCache();
+  handoffRouteDeps.wakeKey = () => readWakeKey(process.env);
 }

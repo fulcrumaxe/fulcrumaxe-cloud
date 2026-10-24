@@ -1,5 +1,5 @@
 import type { NextRequest } from "next/server";
-import { applyRunnerSetting, removeRunner, setRunnerRepos, type FleetSettingAction } from "@fx/runner-cloud";
+import { applyRunnerSetting, checkRunner, removeRunner, setRunnerRepos, type FleetSettingAction } from "@fx/runner-cloud";
 import { handleSessionRequest } from "../../../../lib/runnerRoutes";
 
 /**
@@ -14,6 +14,10 @@ export const fleetSettingHandler = (req: NextRequest, runnerId: string, action: 
 /** POST /api/runners/:id/repos with { repo_ids }. */
 export const fleetReposHandler = (req: NextRequest, runnerId: string) =>
   handleSessionRequest(req, (deps, principal, body) => setRunnerRepos(deps, principal, runnerId, body), { json: true });
+
+/** POST /api/runners/:id/check (D#6 RUNNER-PING): "Check runner now", owners and admins only. */
+export const fleetCheckHandler = (req: NextRequest, runnerId: string) =>
+  handleSessionRequest(req, (deps, principal, body) => checkRunner(deps, principal, runnerId, body), { json: true });
 
 /** POST /api/runners/:id/remove. */
 export const fleetRemoveHandler = (req: NextRequest, runnerId: string) => handleSessionRequest(req, (deps, principal) => removeRunner(deps, principal, runnerId));

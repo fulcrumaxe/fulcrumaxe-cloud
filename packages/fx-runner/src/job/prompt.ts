@@ -168,7 +168,19 @@ export function buildPrompt(job: PromptJob, notes: readonly string[] = [], repoM
   ].join("\n");
 }
 
-/** D#6 R-CHK-2: the one fixed line a job with an approved check gets. The command is the signed one, shown as the Repos app shows it; nothing comes from the agent. */
-export function checkNote(check: { argv: readonly string[]; dev_shell: boolean }): string {
-  return `After you finish, the runner runs this repository's check (\`${check.argv.join(" ")}\`)${check.dev_shell ? " with the repository's dev shell environment applied" : ""}; a failure starts a fix round.`;
+/**
+ * D#6 RUNNER-AGENT-NO-FULLCHECK: what an agent in a job with an approved check runs itself. The check is the repository's whole suite; run inside the agent's
+ * job it shares the job's memory limit with the agent, and an agent that ran it (often more than once, piped through `tail` or `grep`) was ended by the kernel's
+ * OOM killer. The runner runs it anyway, in its own step under its own limits. The settings deny the command verbatim too (`checkCommandDenyRules`).
+ */
+export const CHECK_NOT_YOURS =
+  "Do not run that command yourself, in any form (not piped through tail or grep, not in a subshell): the runner refuses it inside your job, and it can need more memory than your job is allowed, which ends your run. Run only the tests that cover the files this change touches, and say in your summary which tests you ran.";
+
+/**
+ * D#6 R-CHK-2: the one fixed line a job with an approved check gets. The command is the signed one, shown as the Repos app shows it; nothing comes from the agent.
+ * A review role is told the check runs on the commit under review after it; the job carries no result of an earlier run of the check, so none is claimed here.
+ */
+export function checkNote(check: { argv: readonly string[]; dev_shell: boolean }, role = "executor"): string {
+  const after = `After you finish, the runner runs this repository's approved check (\`${check.argv.join(" ")}\`) itself, in a separate step with its own limits${check.dev_shell ? ", with the repository's dev shell environment applied" : ""}`;
+  return `${after}${isReviewJobRole(role) ? "; its result is recorded with this run" : "; a failure starts a fix round"}. ${CHECK_NOT_YOURS}`;
 }

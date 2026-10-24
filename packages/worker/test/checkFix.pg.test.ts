@@ -116,6 +116,13 @@ describe("check fix round [pg]", () => {
     expect(checkFixPrompt({ ...base, exitCode: null, timedOut: false })).toContain("could not be started");
   });
 
+  it("the prompt tells the round not to run the check itself (the runner does), only the tests for what failed, and the line sits outside the untrusted fence", () => {
+    const prompt = checkFixPrompt({ round: 1, argv: ["bash", "scripts/check.sh"], exitCode: 1, timedOut: false, summary: "FAIL x" });
+    const line = "Do not run the check command yourself: the runner runs it again after you stop, in a step of its own. Run only the tests that cover what failed and the files you change.";
+    expect(prompt).toContain(line);
+    expect(prompt.indexOf(line)).toBeLessThan(prompt.indexOf("<<UNTRUSTED EXTERNAL CONTENT>>"));
+  });
+
   it("counts the check_failed runs in the chain: the last round the plan allows starts, the next is refused check_rounds_used and resumes nothing", async () => {
     const limit = maxFixRounds();
     const chain = async (length: number): Promise<string> => {

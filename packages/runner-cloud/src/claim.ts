@@ -1,7 +1,9 @@
 import { CLAIM_IDLE_RETRY_AFTER_SECONDS, CLAIM_MIN_INTERVAL_SECONDS, ClaimMessage, ClaimReply, ClaimRateLimitedReply } from "@fulcrumaxe/runner-protocol";
 import { PAUSED_RETRY_AFTER_SECONDS } from "@fx/runner";
+import { allowRunnerWake } from "@fx/core/src/pendingWork.js";
 import { asRunner, parseJsonBody, parseMessage, requireLeases, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
+import { configuredWakeKey, wakeGrantFor, wakeSafetyRetryAfterSeconds } from "./wakeToken.js";
 
 export const CLAIM_PATH = "/api/runner/claim";
 /** The longest `retry_after` an idle claim answer may carry (the protocol's own bound). */
@@ -30,6 +32,8 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
   const runner = await verifyRunnerRequest(deps, CLAIM_PATH, req, { replay: "once" });
   const message = parseMessage(ClaimMessage, parseJsonBody(req));
   const leases = requireLeases(deps);
+  // D#6 RUNNER-WAKE R3a: read once per request. With no key the capability row is not even read, and nothing below changes.
+  const wakeKey = configuredWakeKey(deps.wakeKey);
 
   const gate = await asRunner(() =>
     withRunnerSession(deps.appUserPool, runner, async (client) => {
@@ -56,7 +60,14 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
         const held = await client.query<{ held: boolean }>("SELECT (paused_at IS NOT NULL OR draining) AS held FROM runner_settings WHERE runner_id = $1", [runner.runnerId]);
         heldByPerson = held.rows[0]?.held === true;
       }
-      return { waited, pausedFor, heldByPerson };
+      // D#6 RUNNER-WAKE R3a: whether this runner's latest hello listed `wake_v1` (runner_capabilities, rewritten on every hello). Only while a key is
+      // configured, and only for a claim that passed the throttle.
+      let capabilities: string[] | null = null;
+      if (waited <= 0 && wakeKey !== null) {
+        const caps = await client.query<{ capabilities: string[] }>("SELECT capabilities FROM runner_capabilities WHERE runner_id = $1", [runner.runnerId]);
+        capabilities = caps.rows[0]?.capabilities ?? null;
+      }
+      return { waited, pausedFor, heldByPerson, capabilities };
     }),
   );
   const wait = gate.waited;
@@ -66,8 +77,14 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
     return { status: 429, body, headers: { "retry-after": String(retryAfter) } };
   }
 
+  // Every 200 below carries the grant when there is one; the 429 above never does.
+  const wakeGrant = wakeGrantFor(wakeKey, runner, gate.capabilities, deps.now?.() ?? new Date());
+  const wake = wakeGrant ? { wake: wakeGrant } : {};
+  // D#6 RUNNER-WAKE R3b: the allow record the wake check requires, written only for a runner this claim just verified in the database and granted.
+  if (wakeGrant) await allowRunnerWake(runner, (deps.now?.() ?? new Date()).getTime());
+
   if (message.sandbox_unavailable !== undefined) {
-    return { status: 200, body: ClaimReply.parse({ retry_after: CLAIM_IDLE_RETRY_AFTER_SECONDS }), headers: { "retry-after": String(CLAIM_IDLE_RETRY_AFTER_SECONDS) } };
+    return { status: 200, body: ClaimReply.parse({ retry_after: CLAIM_IDLE_RETRY_AFTER_SECONDS, ...wake }), headers: { "retry-after": String(CLAIM_IDLE_RETRY_AFTER_SECONDS) } };
   }
 
   // A runner whose plan has hit its usage limit is offered nothing until the reported reset: the answer is idle, and it tells the runner to ask again
@@ -75,14 +92,14 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
   // A runner a person paused or set to drain (D#605 FL-3) is told to ask again in 5 minutes; if a usage pause runs longer, that longer time stands.
   if (gate.pausedFor > 0 || gate.heldByPerson) {
     const retryAfter = Math.min(Math.max(gate.pausedFor, gate.heldByPerson ? PAUSED_RETRY_AFTER_SECONDS : 0), CLAIM_PAUSED_RETRY_AFTER_MAX_SECONDS);
-    return { status: 200, body: ClaimReply.parse({ retry_after: retryAfter }), headers: { "retry-after": String(retryAfter) } };
+    return { status: 200, body: ClaimReply.parse({ retry_after: retryAfter, ...wake }), headers: { "retry-after": String(retryAfter) } };
   }
 
   const result = await asRunner(() => leases.claimRunnerRun({ accountId: runner.accountId, runnerId: runner.runnerId, ...(message.capacity ? { capacity: message.capacity } : {}) }));
-  const body =
-    result.kind === "claimed"
-      ? ClaimReply.parse({ signed_job: result.signedJob, run_id: result.runId, lease_generation: result.leaseGeneration })
-      : ClaimReply.parse({ retry_after: result.retryAfter });
-  if (result.kind === "idle") return { status: 200, body, headers: { "retry-after": String(result.retryAfter) } };
-  return { status: 200, body };
+  if (result.kind === "claimed") return { status: 200, body: ClaimReply.parse({ signed_job: result.signedJob, run_id: result.runId, lease_generation: result.leaseGeneration, ...wake }) };
+  // D#6 RUNNER-WAKE R3b: a runner given a grant in THIS reply hears of new work from the wake check, so "nothing queued" sends it to the next
+  // slot boundary instead of 60 s. Work that is queued but cannot be taken yet (a shorter answer) keeps its short answer, and a runner without
+  // a grant (an older one, or no key configured) keeps 60 s.
+  const retryAfter = wakeGrant && result.retryAfter >= CLAIM_IDLE_RETRY_AFTER_SECONDS ? wakeSafetyRetryAfterSeconds(runner.runnerId, deps.now?.() ?? new Date()) : result.retryAfter;
+  return { status: 200, body: ClaimReply.parse({ retry_after: retryAfter, ...wake }), headers: { "retry-after": String(retryAfter) } };
 }

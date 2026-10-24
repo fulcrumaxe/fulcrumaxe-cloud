@@ -54,6 +54,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "invalid_filter",
   "invalid_input",
   "invalid_model_key",
+  "invalid_note",
   "invalid_plan",
   "invalid_request",
   "invalid_resurface_date",

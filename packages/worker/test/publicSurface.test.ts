@@ -4,6 +4,9 @@ import { createWorker } from "../src/index.js";
 import * as entry from "../src/index.js";
 import { forgetWorkerForTests } from "../src/compositionRoot.js";
 import { resetPlanDataCache } from "@fx/plan-data";
+import { listSourceFiles } from "../../test-guard/src/sourceFiles.js";
+
+const SKIPPED_DIRS = new Set(["node_modules", ".next", "dist", "test", "tests"]);
 
 const poolA = { tag: "runner-pool", query: async () => ({ rows: [] }), connect: async () => ({}) } as unknown as Pool;
 const poolB = { tag: "ops-pool", query: async () => ({ rows: [] }), connect: async () => ({}) } as unknown as Pool;
@@ -256,19 +259,13 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
 
 describe("H14c-3-3a-3: who may call followTimeoutBody (it writes timed_out and stops a sandbox)", () => {
   it("exactly three non-test sources mention it: the runner's definition and workflow, this package's re-export, and the follower workflow", async () => {
-    const { readdirSync, readFileSync, statSync } = await import("node:fs");
+    const { readFileSync } = await import("node:fs");
     const path = await import("node:path");
     const root = path.join(__dirname, "..", "..", "..");
-    const hits: string[] = [];
-    const walk = (dir: string): void => {
-      for (const name of readdirSync(dir)) {
-        if (["node_modules", ".next", "dist", "test", "tests"].includes(name)) continue;
-        const full = path.join(dir, name);
-        if (statSync(full).isDirectory()) walk(full);
-        else if (/\.(ts|tsx|mjs|js)$/.test(name) && !/\.test\./.test(name) && readFileSync(full, "utf8").includes("followTimeoutBody")) hits.push(path.relative(root, full));
-      }
-    };
-    for (const top of ["apps", "packages"]) walk(path.join(root, top));
+    // Git's file list, not a directory walk: a web build leaves an ignored workflow bundle under apps/web/app that inlines this name.
+    const hits = listSourceFiles(root, ["apps", "packages"], SKIPPED_DIRS).filter(
+      (f) => /\.(ts|tsx|mjs|js)$/.test(f) && !/\.test\./.test(path.basename(f)) && readFileSync(path.join(root, f), "utf8").includes("followTimeoutBody"),
+    );
     expect(hits.sort()).toEqual(["apps/web/workflows/agentRunFollow.ts", "packages/runner/src/workflows/agentRun.ts", "packages/worker/src/index.ts"]);
   });
 });

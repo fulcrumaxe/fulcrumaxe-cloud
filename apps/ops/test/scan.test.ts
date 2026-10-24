@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { listSourcePaths } from "../../../packages/test-guard/src/sourceFiles.js";
 
 /**
  * Static isolation scans (OPS-C2-7, -8, -11 and -13, with the owner-side rulings R-68-C2-2 and R-68-C2-4). They read the tree as
@@ -14,27 +15,15 @@ const OPS = path.join(ROOT, "apps", "ops");
 const SKIP_DIRS = new Set(["node_modules", ".next", ".git", ".swc", "dist", "build", ".turbo", "coverage", "public"]);
 const TEXT = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|json|sql|sh|yaml|yml|md)$/;
 
-function walk(dir: string, out: string[] = []): string[] {
-  let entries;
-  try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return out;
-  }
-  for (const e of entries) {
-    const full = path.join(dir, e.name);
-    if (e.isDirectory()) {
-      if (!SKIP_DIRS.has(e.name)) walk(full, out);
-    } else if (TEXT.test(e.name) && statSync(full).size < 2_000_000) out.push(full);
-  }
-  return out;
-}
-
 interface SourceFile {
   rel: string;
   text: string;
 }
-const load = (dirs: string[]): SourceFile[] => dirs.flatMap((d) => walk(path.join(ROOT, d))).map((f) => ({ rel: path.relative(ROOT, f), text: readFileSync(f, "utf8") }));
+/** Git's file list, not a directory walk: ignored build output is scanned by the built-output checks below, not as source. */
+const load = (dirs: string[]): SourceFile[] =>
+  listSourcePaths(ROOT, dirs, SKIP_DIRS)
+    .filter((f) => TEXT.test(f) && statSync(f).size < 2_000_000)
+    .map((f) => ({ rel: path.relative(ROOT, f), text: readFileSync(f, "utf8") }));
 
 // ----------------------------------------------------------------------------------------------- apps/ops contents
 

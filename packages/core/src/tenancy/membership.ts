@@ -3,6 +3,7 @@ import { withTenant } from './withTenant.js';
 import { requireOwner, requireOwnerOrAdmin, type MembershipRole } from './authorize.js';
 import { ForbiddenError, NotFoundError } from './errors.js';
 import { ROLE_RANK, revokeTokensForCreatorChange } from '../tokens/service.js';
+import { revokeRunnerWake } from '../pendingWork.js';
 
 /**
  * D#6 R2a (C11 section 4): a demotion or removal revokes the member's runners in its own transaction (migration 0712's
@@ -42,6 +43,8 @@ async function activeRunnerIds(client: PoolClient, accountId: string, userId: st
 /** Runs after the membership transaction has committed. Each runner is tried even if another fails. */
 async function failLeasesAfterCommit(accountId: string, runnerIds: string[], fail: RunnerLeaseFailer | null): Promise<void> {
   if (runnerIds.length === 0) return;
+  // D#6 RUNNER-WAKE R3b: the trigger revoked these runners in the committed transaction; their wake allow records go here. Never throws.
+  await revokeRunnerWake(runnerIds);
   const failed: string[] = [];
   for (const runnerId of runnerIds) {
     try {

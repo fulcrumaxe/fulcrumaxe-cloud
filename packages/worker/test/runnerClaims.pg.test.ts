@@ -1,6 +1,7 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { markRunnerWork, setPendingHooks } from "@fx/core/src/pendingWork.js";
 import { RUNNER_ELIGIBLE_ROLES, RUNNER_MAX_RUN_WALL_CLOCK_MS, RUNNER_SETUP_DETAILS, jobRefusedText, runnerSetupText, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
@@ -111,6 +112,79 @@ describe("runner claim, heartbeat and events [pg]", () => {
     return result.leaseGeneration;
   }
   const hb = (runId: string, leaseGeneration: number, runnerId = runner) => facade.heartbeatRunnerRun({ accountId: A.accountId, runnerId, runId, leaseGeneration });
+
+  describe("the runner-work hint: the claim re-derives the next due time", () => {
+    const marks = new Map<string, number>();
+    const due = () => marks.get(`wake-due:acct:${A.accountId}`);
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+    beforeEach(() => {
+      marks.clear();
+      setPendingHooks({ store: { get: async (k) => marks.get(k), set: async (k, v) => void marks.set(k, v), delete: async (k) => void marks.delete(k) } });
+    });
+    afterEach(() => setPendingHooks(null));
+    const waitsUntil = (id: string, ms: number) => admin.query("UPDATE agent_runs SET claimable_after = $2 WHERE id = $1", [id, new Date(ms)]);
+
+    it("two follow-ups with different resets: the earlier due time is kept, and once a claim has taken the first the later one is set again", async () => {
+      const T1 = T0 + 60_000;
+      const T2 = T0 + 120_000;
+      const first = await pending();
+      const second = await pending();
+      await waitsUntil(first, T1);
+      await waitsUntil(second, T2);
+      await markRunnerWork(A.accountId, { since: T2, now: T0 });
+      await markRunnerWork(A.accountId, { since: T1, now: T0 });
+      await markRunnerWork(A.accountId, { since: T2, now: T0 }); // the later one does not displace the earlier
+      await settle();
+      expect(due()).toBe(T1);
+      expect((await claim()).kind).toBe("idle"); // not due yet, and the stored time has not passed: nothing re-derived
+      await settle();
+      expect(due()).toBe(T1);
+      clock = T1 + 1;
+      expect(await claim()).toMatchObject({ kind: "claimed", runId: first });
+      await settle();
+      expect(due()).toBe(T2);
+    });
+
+    it("an idle claim whose stored due time has passed re-derives the next one from the rows", async () => {
+      const later = await pending();
+      await waitsUntil(later, T0 + 600_000);
+      marks.set(`wake-due:acct:${A.accountId}`, T0 - 1);
+      expect((await claim()).kind).toBe("idle");
+      await settle();
+      expect(due()).toBe(T0 + 600_000);
+    });
+
+    it("when nothing is left in the future the stored due time is deleted, and the next idle claim runs no claimable_after query", async () => {
+      marks.set(`wake-due:acct:${A.accountId}`, T0 - 1); // passed, and no run waits for a later time
+      let connects = 0;
+      const realConnect = writerPool.connect.bind(writerPool);
+      (writerPool as unknown as { connect: unknown }).connect = (...args: unknown[]) => {
+        connects++;
+        return (realConnect as (...a: unknown[]) => unknown)(...args);
+      };
+      try {
+        expect((await claim()).kind).toBe("idle");
+        await settle();
+        expect(due()).toBeUndefined();
+        const afterFirst = connects;
+        expect((await claim()).kind).toBe("idle");
+        const second = connects - afterFirst;
+        connects = 0;
+        marks.set(`wake-due:acct:${A.accountId}`, T0 - 1);
+        expect((await claim()).kind).toBe("idle");
+        // The first idle claim (stale due) did one more database round trip than an idle claim with no stored due time.
+        expect(connects).toBe(second + 1);
+      } finally {
+        (writerPool as unknown as { connect: unknown }).connect = realConnect;
+      }
+    });
+
+    it("a failing cache never changes the claim's answer", async () => {
+      setPendingHooks({ store: { get: async () => { throw new Error("down"); }, set: async () => { throw new Error("down"); }, delete: async () => undefined } });
+      const id = await pending();
+      expect(await claim()).toMatchObject({ kind: "claimed", runId: id });
+    });
+  });
 
   describe("claim", () => {
     // D#6 R5b-1 (C38): a run whose own mode is runner_verified is claimable while its repo is on either runner mode, and never on sandbox.
@@ -529,6 +603,8 @@ describe("runner claim, heartbeat and events [pg]", () => {
         ["job_refused", "review_wrong_role", "failed", "job_refused"],
         ["repo_not_private", undefined, "failed", "public_repo"],
         ["agent_failed", undefined, "failed", "agent_failed"],
+        // The job's own memory limit ended the agent: a reason of its own, not agent_failed.
+        ["resource_limit", undefined, "failed", "resource_limit"],
         ["wall_clock", undefined, "timed_out", "wall_clock_limit"],
         ["runner_setup", "claude_binary_missing", "failed", "runner_setup_failed"],
         ["runner_setup", "other", "failed", "runner_setup_failed"],

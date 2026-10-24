@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { loadPlanData } from '@fx/plan-data';
 import { WORK_ITEM_STAGES, WORK_ITEM_STAGE_TRANSITIONS, isLegalStageTransition } from '../src/work-items/stages.js';
 import { advanceActionFor } from '../src/work-items/advance.js';
 import {
@@ -215,5 +216,44 @@ describe('retry_push and open_pr (D#598 P1f-6b)', () => {
   it('they come last in the list, after the stuck-item actions', () => {
     expect(OPERATOR_ACTIONS.slice(-2)).toEqual(['retry_push', 'open_pr']);
     expect(operatorActionsFor(push())).toEqual(['build_again', 'back_to_discussion', 'close', 'retry_push']);
+  });
+});
+
+describe('Request changes', () => {
+  const max = loadPlanData().caps.maxFixRounds;
+  const pr = (over: Partial<OperatorFacts> = {}) => at({ stage: 'review_passed', pr_open: true, fix_rounds_started: 0, ...over });
+
+  it.each(['pr_opened', 'changes_requested', 'review_passed'])('is offered at %s with an open pull request, a Spec and a fix round left, first in the list', (stage) => {
+    expect(operatorVerdict('request_changes', pr({ stage }))).toEqual({ ok: true });
+    expect(operatorActionsFor(pr({ stage }))[0]).toBe('request_changes');
+  });
+
+  it('is offered at Needs a person only while its pull request is still open', () => {
+    expect(operatorVerdict('request_changes', pr({ stage: 'needs_human' }))).toEqual({ ok: true });
+    expect(operatorVerdict('request_changes', pr({ stage: 'needs_human', pr_open: false }))).toMatchObject({ ok: false, reason: 'stage' });
+  });
+
+  it.each(['triaged', 'discussing', 'spec_ready', 'in_progress', 'merged', 'closed_unmerged', 'closed'])('is never offered at %s', (stage) => {
+    expect(operatorVerdict('request_changes', pr({ stage }))).toMatchObject({ ok: false, reason: 'stage' });
+  });
+
+  it('fails closed when the open pull request or the round count is unknown', () => {
+    expect(operatorVerdict('request_changes', at({ stage: 'review_passed' }))).toMatchObject({ ok: false });
+    expect(operatorVerdict('request_changes', pr({ fix_rounds_started: undefined }))).toMatchObject({ ok: false, reason: 'rounds' });
+  });
+
+  it('respects the fix-round limit: the last round is allowed, one past it is not', () => {
+    expect(operatorVerdict('request_changes', pr({ fix_rounds_started: max - 1 }))).toEqual({ ok: true });
+    expect(operatorVerdict('request_changes', pr({ fix_rounds_started: max }))).toMatchObject({ ok: false, reason: 'rounds' });
+  });
+
+  it('owner or admin only, internal only, with a repository, an issue and a Spec, and no live run', () => {
+    expect(operatorVerdict('request_changes', pr({ role: 'owner' }))).toEqual({ ok: true });
+    expect(operatorVerdict('request_changes', pr({ role: 'member' }))).toMatchObject({ ok: false, reason: 'role' });
+    expect(operatorVerdict('request_changes', pr({ provenance: 'external' }))).toMatchObject({ ok: false, reason: 'external' });
+    expect(operatorVerdict('request_changes', pr({ repo_id: null }))).toMatchObject({ ok: false, reason: 'no_repo' });
+    expect(operatorVerdict('request_changes', pr({ gh_number: null }))).toMatchObject({ ok: false, reason: 'no_issue' });
+    expect(operatorVerdict('request_changes', pr({ has_spec: false }))).toMatchObject({ ok: false, reason: 'state' });
+    expect(operatorVerdict('request_changes', pr({ live_run: true }))).toMatchObject({ ok: false, reason: 'live' });
   });
 });

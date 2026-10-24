@@ -8,7 +8,7 @@ import { MODEL_HOST } from "../sandbox/sandboxSettings.js";
 import type { WorkspaceStore } from "./workspace.js";
 
 /** The job fields `runJob` reads. The daemon passes a job it has already verified (signature, expiry, repo visibility). */
-export type RunnableJob = HashCheckedJob & Pick<Job, "job_id" | "run_id" | "continues" | "model_hint"> & Partial<Pick<Job, "memory" | "excludes" | "context_window">> & { expires_at?: Job["expires_at"] };
+export type RunnableJob = HashCheckedJob & Pick<Job, "job_id" | "run_id" | "continues" | "model_hint"> & Partial<Pick<Job, "memory" | "excludes" | "context_window" | "check">> & { expires_at?: Job["expires_at"] };
 
 /** Resume a session this machine still holds, in its workspace, or start fresh in a new workspace on `branch`. */
 export type SessionPlan = { kind: "resume"; sessionId: string; workspace: string } | { kind: "fresh"; branch: string | null };
@@ -128,6 +128,8 @@ export async function runJob(job: RunnableJob, deps: RunJobDeps): Promise<RunJob
     ...(job.excludes === undefined || job.excludes.length === 0 ? {} : { excludes: job.excludes }),
     // D#600 CX-6b: the model's window, so the engine can tell how full the context is when the command ends and say so at the next turn it starts.
     ...(job.context_window === undefined ? {} : { contextWindowTokens: job.context_window }),
+    // D#6 RUNNER-AGENT-NO-FULLCHECK: the approved check is the runner's step after the agent; the engine denies it to the agent's shell.
+    ...(job.check === undefined ? {} : { checkArgv: job.check.argv }),
     capUsd: 0, // the runner settles no money
     networkPolicy: [{ host: MODEL_HOST, purpose: "model" }],
     env: cleanEnv(deps.credentials, deps.envOptions),

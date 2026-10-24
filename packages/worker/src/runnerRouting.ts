@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
 import { LIGHT_JOB_ROLES, MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, MAX_TOTAL_CAPACITY, RUNNER_CAPABILITY_FOR_ROLE, RUNNER_ELIGIBLE_ROLES } from "@fulcrumaxe/runner-protocol";
-import { RUNNER_HANDOFF_MIN_PROTOCOL_VERSION, RUNNER_ONLINE_SECONDS, PREFER_HOLD_MAX_SECONDS } from "@fx/runner";
+import { RUNNER_HANDOFF_MIN_PROTOCOL_VERSION, RUNNER_ONLINE_SECONDS, PREFER_HOLD_MAX_SECONDS, runnerLiveSql } from "@fx/runner";
 
 /**
  * D#605 FL-4: routing rules in the claim. A rule only NARROWS or REORDERS what the claim's existing filters (repo scope, roles, visibility, the subscription
@@ -18,7 +18,7 @@ import { RUNNER_HANDOFF_MIN_PROTOCOL_VERSION, RUNNER_ONLINE_SECONDS, PREFER_HOLD
  *   - the job's own `requires_engine` (signed by the cloud): same test as `engine`. No person can set or clear it.
  * Prefer (`prefer`, runner ids in order): a run whose list ranks other runners above the polling one is held (skipped, not failed) until every higher-ranked
  * runner is unavailable, or has polled since the run became claimable, or PREFER_HOLD_MAX_SECONDS have passed since then. A runner is unavailable when it is
- * offline (RUNNER_ONLINE_SECONDS), paused, draining, revoked, below the handoff protocol version, does not cover the run's repo or role, or has no free slot
+ * offline (`runnerLiveSql`: 120 s, or the wake window for a wake runner while the wake gate is open), paused, draining, revoked, below the handoff protocol version, does not cover the run's repo or role, or has no free slot
  * in the run's class; such a runner is simply left out of the loaded set, and so can never hold anything. A removed runner's stored id is ignored for the same reason.
  */
 
@@ -74,7 +74,7 @@ export function rolesForCapabilities(roles: readonly string[], capabilities: rea
 }
 
 /** Reads, in the caller's tenant transaction, what the candidate query needs about the polling runner and its available peers. */
-export async function loadPollRouting(client: PoolClient, input: { accountId: string; runnerId: string; nowMs: number }): Promise<PollRouting> {
+export async function loadPollRouting(client: PoolClient, input: { accountId: string; runnerId: string; nowMs: number; wakeEnabled?: boolean }): Promise<PollRouting> {
   const own = await client.query<{ os: string | null; arch: string | null; sandbox_engine: string | null; labels: string[] | null }>(
     `SELECT f.os, f.arch, f.sandbox_engine, s.labels
        FROM runners r
@@ -97,7 +97,7 @@ export async function loadPollRouting(client: PoolClient, input: { accountId: st
            FROM agent_runs a WHERE a.account_id = r.account_id AND a.runner_id = r.id AND a.runtime = 'runner' AND a.status = 'running'
        ) run ON true
       WHERE r.account_id = $1 AND r.id <> $2 AND r.revoked_at IS NULL
-        AND r.last_seen_at > $3::timestamptz - make_interval(secs => $4::int)
+        AND ${runnerLiveSql({ runner: "r", now: "$3", onlineSeconds: "$4::int", wakeEnabled: input.wakeEnabled === true })}
         AND r.protocol_version >= $6::int
         AND s.paused_at IS NULL AND COALESCE(s.draining, false) = false`,
     [input.accountId, input.runnerId, new Date(input.nowMs), RUNNER_ONLINE_SECONDS, LIGHT_JOB_ROLES, RUNNER_HANDOFF_MIN_PROTOCOL_VERSION],

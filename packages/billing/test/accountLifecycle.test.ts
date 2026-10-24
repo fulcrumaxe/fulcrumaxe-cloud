@@ -3,6 +3,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool, withTenant, reserve, planFor } from '@fx/spend';
 import { ForbiddenError } from '@fx/core/src/tenancy/errors.js';
+import { setPendingHooks, wakeAllowKeyFor } from '@fx/core/src/pendingWork.js';
+import { insertRunner } from '@fx/db/test/helpers/runnerFixtures.js';
 import { createPool as createBillingPool, withPlatformOps } from '../src/pg.js';
 import {
   applyCheckoutCompletedInTx,
@@ -729,6 +731,26 @@ describe('H10 account lifecycle (real Postgres)', () => {
       expect(ledger.rowCount).toBe(1);
       const auditLog = await admin.query('SELECT 1 FROM audit_log WHERE account_id = $1', [accountId]);
       expect(auditLog.rowCount).toBe(1);
+    });
+
+    it('D#6 RUNNER-WAKE R3b: a close deletes every runner wake allow record after it commits; a refused close touches none', async () => {
+      const writes: string[] = [];
+      const deletes: string[] = [];
+      setPendingHooks({ store: { get: async () => null, set: async (key) => void writes.push(key), delete: async (key) => void deletes.push(key) } });
+      try {
+        const { accountId, userId } = await seedAccountWithMember(admin, 'owner', { status: 'active', plan: 'starter' });
+        const runnerIds = [await insertRunner(admin, accountId, userId, { keepPlan: true }), await insertRunner(admin, accountId, userId, { keepPlan: true })];
+        expect(await closeAccount(ctxFor({ accountId, userId }), { accountId, stripe: fakeStripe() })).toEqual({ ok: true });
+        expect(writes).toEqual([]);
+        expect(deletes.sort()).toEqual(runnerIds.map(wakeAllowKeyFor).sort());
+        writes.length = 0;
+        deletes.length = 0;
+        expect(await closeAccount(ctxFor({ accountId, userId }), { accountId, stripe: fakeStripe() })).toEqual({ ok: false, reason: 'account_not_found' });
+        expect(writes).toEqual([]);
+        expect(deletes).toEqual([]);
+      } finally {
+        setPendingHooks(null);
+      }
     });
 
     it('closing an already-closed (or nonexistent) account is refused, not a silent no-op success elsewhere', async () => {

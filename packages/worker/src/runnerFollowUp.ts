@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { SignedJobSchema } from "@fulcrumaxe/runner-protocol";
-import { markWorkPending } from "@fx/core/src/pendingWork.js";
+import { markRunnerWork, markWorkPending } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { JobIssueError, isRunnerMode, resolveExecutionTarget, writeRunStatus, type ExecutionRun, type ExecutionTargetRegistry } from "@fx/runner";
 
@@ -28,7 +28,7 @@ import { JobIssueError, isRunnerMode, resolveExecutionTarget, writeRunStatus, ty
 export type FollowUpLimit = "runner_lost" | "usage_limit";
 
 export type FollowUpOutcome =
-  | { kind: "created"; childRunId: string; workItemId: string | null }
+  | { kind: "created"; childRunId: string; workItemId: string | null; /** When the child becomes claimable (a usage-limit follow-up waits for the reset), or null when at once. */ claimableAfter?: Date | null }
   /** The parent already has its child (a repeat call); nothing was made. */
   | { kind: "exists"; childRunId: string; workItemId: string | null }
   /** The chain used up an allowance: `runner_lost` twice, or `usage_limit` eight times. No child; the work item is to be failed. */
@@ -60,7 +60,11 @@ export async function requestFollowUp(client: PoolClient, parentRunId: string): 
   );
   const row = rows[0];
   if (!row) return { kind: "not_eligible" };
-  if ((row.outcome === "created" || row.outcome === "exists") && row.child_id) return { kind: row.outcome, childRunId: row.child_id, workItemId: row.item_id };
+  if (row.outcome === "created" && row.child_id) {
+    const after = await client.query<{ claimable_after: Date | null }>("SELECT claimable_after FROM agent_runs WHERE id = $1::uuid", [row.child_id]);
+    return { kind: "created", childRunId: row.child_id, workItemId: row.item_id, claimableAfter: after.rows[0]?.claimable_after ?? null };
+  }
+  if (row.outcome === "exists" && row.child_id) return { kind: "exists", childRunId: row.child_id, workItemId: row.item_id };
   // An exhausted answer that names no known allowance is not acted on: the stage driver still ends a work item whose tail run has no child.
   if (row.outcome === "exhausted" && (row.limit_reason === "runner_lost" || row.limit_reason === "usage_limit")) return { kind: "exhausted", workItemId: row.item_id, reason: row.limit_reason };
   if (row.outcome === "halted") return { kind: "halted" };
@@ -82,6 +86,9 @@ export async function settleFollowUp(ports: FollowUpPorts, accountId: string, pa
     // once this long has passed. Best effort: the backstop tick finds it either way.
     void markWorkPending("runner-sweeper", { since: Date.now() + JOBLESS_RETRY_AFTER_MS });
     await ports.dispatchChild({ accountId, runId: outcome.childRunId });
+    // The child's job is written and committed: tell the account's runners. A usage-limit child waits for its reset, so it is marked for then.
+    const after = outcome.claimableAfter?.getTime();
+    void markRunnerWork(accountId, after !== undefined && after > Date.now() ? { since: after } : {});
   } else if (outcome.kind === "exhausted" && outcome.workItemId) await ports.failWorkItem({ accountId, workItemId: outcome.workItemId, runId: parentRunId, reason: outcome.reason });
 }
 

@@ -228,6 +228,40 @@ describe("routing rules in the runner claim [pg]", () => {
       expect(await claim(laptop)).toMatchObject({ kind: "claimed", runId: id });
     });
 
+    it("D#6 RUNNER-WAKE: an idle wake Desktop between its safety claims is available and holds the run while the wake gate is open; a plain or dead one does not", async () => {
+      const gated = createRunnerClaimFacade(writerPool, { visibility: { visibility: async () => "private" }, now: () => clock, randomBetween: (min) => min, wakeEnabled: () => true });
+      const wakeCap = (id: string) => admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, ARRAY['wake_v1'])", [id, A.accountId]);
+      // Its last claim was 10 minutes ago, before the run became claimable.
+      const desktop = await runner({ seenAgo: 10 * 60_000, stamp: T0 - 10 * 60_000 });
+      await wakeCap(desktop);
+      const laptop = await runner();
+      await routeRepo({ prefer: [desktop] });
+      const id = await pending({ claimableSince: T0 - 1000 });
+      expect((await gated.claimRunnerRun({ accountId: A.accountId, runnerId: laptop })).kind).toBe("idle");
+      expect((await status(id)).status).toBe("pending");
+      // Gate closed: no grant, so the same Desktop is offline after 120 s and holds nothing.
+      expect(await claim(laptop)).toMatchObject({ kind: "claimed", runId: id });
+
+      // A plain Desktop quiet for 10 min holds nothing, gate open or not.
+      A = await seedAccount(admin, randomUUID());
+      await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [A.repoId]);
+      const plain = await runner({ seenAgo: 10 * 60_000 });
+      const laptop2 = await runner();
+      await routeRepo({ prefer: [plain] });
+      const id2 = await pending({ claimableSince: T0 - 1000 });
+      expect(await gated.claimRunnerRun({ accountId: A.accountId, runnerId: laptop2 })).toMatchObject({ kind: "claimed", runId: id2 });
+
+      // A dead wake Desktop (no claim for longer than the window) holds nothing either.
+      A = await seedAccount(admin, randomUUID());
+      await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [A.repoId]);
+      const dead = await runner({ seenAgo: 35 * 60_000 + 1000 });
+      await wakeCap(dead);
+      const laptop3 = await runner();
+      await routeRepo({ prefer: [dead] });
+      const id3 = await pending({ claimableSince: T0 - 1000 });
+      expect(await gated.claimRunnerRun({ accountId: A.accountId, runnerId: laptop3 })).toMatchObject({ kind: "claimed", runId: id3 });
+    });
+
     it("a stamp from before the run became claimable does not end the hold", async () => {
       const desktop = await runner({ seenAgo: 5000, stamp: T0 - 60_000 });
       const laptop = await runner();

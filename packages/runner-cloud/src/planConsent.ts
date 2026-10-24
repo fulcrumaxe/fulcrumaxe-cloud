@@ -1,3 +1,4 @@
+import { markRunnerWork } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 
@@ -24,6 +25,8 @@ export async function setPlanConsent(deps: RunnerCloudDeps, principal: SessionPr
       const { rows } = await client.query<{ changed: boolean; changed_at: Date | null }>("SELECT changed, changed_at FROM runner_plan_consent_set($1, $2)", [runnerId, granted]);
       return rows[0];
     });
+    // Consent turned on has committed: waiting runs on this runner's repositories may now be auto-approvable.
+    if (granted && row?.changed === true) void markRunnerWork(principal.accountId);
     return {
       status: 200,
       body: { plan_consent: { granted, changed_at: row?.changed_at ? row.changed_at.toISOString() : null }, changed: row?.changed === true },
