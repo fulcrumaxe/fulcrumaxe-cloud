@@ -20,10 +20,26 @@ export const REPUBLISH_BASE_MISSING = 'republish_base_missing';
 export const REPUBLISH_STACKED_UNSUPPORTED = 'republish_stacked_unsupported';
 export const REPUBLISH_BASE_MISSING_SENTENCE = "The cloud couldn't tell which commit of main this change builds on, so it can't update the public pull request safely. Nothing was started. Ask a person to look at the branch, then press Build again.";
 export const REPUBLISH_STACKED_UNSUPPORTED_SENTENCE = "This change is stacked on another pull request, and the cloud can't update the public copy of a stacked change yet. Nothing was started. Merge the pull request it is stacked on, then press Build again.";
+
+/**
+ * FIXROUND-REPUBLISH (R2-c1): the fix round finished and its change is on the private branch, but the public pull request could not be updated from it. Recorded as `escalated`; the item goes to a person.
+ * `republish_branch_moved`: the public branch was changed outside the cloud (the compare-and-swap refused). `republish_failed`: any other refusal of the update.
+ */
+export const REPUBLISH_BRANCH_MOVED = 'republish_branch_moved';
+export const REPUBLISH_FAILED = 'republish_failed';
+export const REPUBLISH_BRANCH_MOVED_SENTENCE = "The fix round finished, but the public pull request's branch was changed outside the cloud, so it was not updated. Close it or reset its branch, then press Build again.";
+export const REPUBLISH_FAILED_SENTENCE = "The fix round finished, but the cloud couldn't update the public pull request, so it still shows the earlier change. Nothing in the private repository was lost. Press Build again to try once more.";
+/** The fix round ended with nothing to publish (it added no commit, or its change is already in the public tip), so the public pull request is unchanged. Recorded as `escalated`. */
+export const REPUBLISH_NO_CHANGE = 'republish_no_change';
+export const REPUBLISH_NO_CHANGE_SENTENCE = "The fix round made no changes to publish, so the public pull request is unchanged. Look at the round, then press Build again.";
+
 /** Every code of this module that stops a fix round, with its fixed sentence (the item view reads this table). */
 export const FIX_ROUND_STOP_SENTENCE: Readonly<Record<string, string>> = {
   [BASE_SYNC_CONFLICT]: BASE_SYNC_CONFLICT_SENTENCE,
   [BASE_SYNC_UNAVAILABLE]: BASE_SYNC_UNAVAILABLE_SENTENCE,
   [REPUBLISH_BASE_MISSING]: REPUBLISH_BASE_MISSING_SENTENCE,
   [REPUBLISH_STACKED_UNSUPPORTED]: REPUBLISH_STACKED_UNSUPPORTED_SENTENCE,
+  [REPUBLISH_BRANCH_MOVED]: REPUBLISH_BRANCH_MOVED_SENTENCE,
+  [REPUBLISH_FAILED]: REPUBLISH_FAILED_SENTENCE,
+  [REPUBLISH_NO_CHANGE]: REPUBLISH_NO_CHANGE_SENTENCE,
 };
