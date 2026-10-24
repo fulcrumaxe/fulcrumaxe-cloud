@@ -238,6 +238,9 @@ importers:
         specifier: ^4.8.9
         version: 4.8.9(@nestjs/common@12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@10.2.2))(@nestjs/core@12.1.0(@nestjs/common@12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@10.2.2))(reflect-metadata@0.2.2)(rxjs@7.8.2))(@swc/cli@0.8.1(@swc/core@1.15.3)(chokidar@5.0.0)(supports-color@10.2.2))(@swc/core@1.15.3)(magicast@0.3.5)(next@15.5.26(@playwright/test@1.63.0)(@types/node@24.19.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0))(supports-color@10.2.2)(typescript@5.9.3)
     devDependencies:
+      '@fx/test-guard':
+        specifier: workspace:*
+        version: link:../../packages/test-guard
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0

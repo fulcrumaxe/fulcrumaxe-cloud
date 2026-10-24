@@ -309,7 +309,7 @@ export function createDepsInstaller(deps: DepsInstallerDeps): DepsInstaller {
         }
       }
       const args = manager === "pnpm" ? pnpmArgs({ registry, storeDir, cacheDir: pnpmCache }) : ["ci", "--ignore-scripts", `--registry=${registry}`, `--cache=${npmCache}`, `--userconfig=${empty}`, `--globalconfig=${empty}`, "--no-fund", "--no-audit", "--no-update-notifier"];
-      const out = await deps.capture(binary, args, env, workspace, timeoutMs, OUTPUT_KEPT_CHARS, signal);
+      const out = await deps.capture(binary, args, env, workspace, timeoutMs, OUTPUT_KEPT_CHARS, signal, undefined);
       clearScratch();
       if (out.code === 0 && !out.timedOut && !out.aborted) {
         if (manager === "pnpm") recordNoPnpmfiles(modules);
