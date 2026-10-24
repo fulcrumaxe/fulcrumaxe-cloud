@@ -6410,6 +6410,24 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "rescan_skipped": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "rescan_unavailable": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
                     }
                   },
                   "required": [
@@ -6429,7 +6447,9 @@
                     "denied_tool_calls",
                     "recalled_memory",
                     "item_sources",
-                    "repo_map_version"
+                    "repo_map_version",
+                    "rescan_skipped",
+                    "rescan_unavailable"
                   ],
                   "additionalProperties": false
                 }

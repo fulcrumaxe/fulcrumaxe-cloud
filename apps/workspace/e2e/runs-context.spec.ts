@@ -26,6 +26,8 @@ const CTX = {
   runner: readFixture("getRunContext", "200-runner.json"),
   none: readFixture("getRunContext", "200-not-recorded.json"),
   live: readFixture("getRunContext", "200-running-not-recorded.json"),
+  skipped: readFixture("getRunContext", "200-memory-rescan-skipped.json"),
+  unavailable: readFixture("getRunContext", "200-memory-rescan-unavailable.json"),
 };
 
 const ID = LIST.data[0].id as string;
@@ -153,6 +155,46 @@ test.describe("D#600 CX-8: the run's context panel (mocked API)", () => {
     await expect(page.locator(`${PANEL} [data-testid="runs-ctx-cache"]`)).toHaveText("Cache use: Not recorded");
     await expect(page.locator(PANEL)).not.toContainText(/null|undefined|NaN/);
     expect(await axeSeriousOrCritical(page)).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  test("D#601 MEM-4b3: entries left out by the secret check are counted in words; one entry reads in the singular", async ({ page }) => {
+    const { errors } = await setup(page, [{ status: 200, json: CTX.skipped }]);
+    await openFromDock(page);
+    await expect(page.locator(PANEL)).toHaveAttribute("data-state", "ready");
+    const note = page.locator(`${PANEL} [data-testid="runs-ctx-rescan"]`);
+    await expect(note).toHaveText("3 memory entries were left out because they now hold a secret.");
+    await expect(note).toHaveAttribute("role", "status");
+    await expect(page.locator(PANEL)).not.toContainText("Memory was not used");
+    await expectNoOverflow(page);
+    expect(await axeSeriousOrCritical(page)).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  test("D#601 MEM-4b3: a single skipped entry", async ({ page }) => {
+    const { errors } = await setup(page, [{ status: 200, json: { ...CTX.skipped, rescan_skipped: 1 } }]);
+    await openFromDock(page);
+    await expect(page.locator(`${PANEL} [data-testid="runs-ctx-rescan"]`)).toHaveText("1 memory entry was left out because it now holds a secret.");
+    expect(errors).toEqual([]);
+  });
+
+  test("D#601 MEM-4b3: when the secret check could not run, the panel says memory was not used", async ({ page }) => {
+    const { errors } = await setup(page, [{ status: 200, json: CTX.unavailable }]);
+    await openFromDock(page);
+    await expect(page.locator(PANEL)).toHaveAttribute("data-state", "ready");
+    await expect(page.locator(`${PANEL} [data-testid="runs-ctx-rescan"]`)).toHaveText("Memory was not used in this run because secrets couldn't be checked.");
+    await expect(page.locator(PANEL)).not.toContainText("left out");
+    await expectNoOverflow(page);
+    expect(await axeSeriousOrCritical(page)).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  test("D#601 MEM-4b3: a run with nothing held back (0 and false, or no record at all) shows no note", async ({ page }) => {
+    const { errors } = await setup(page, [{ status: 200, json: CTX.measured }]);
+    await openFromDock(page);
+    await expect(page.locator(PANEL)).toHaveAttribute("data-state", "ready");
+    await expect(page.locator(`${PANEL} [data-testid="runs-ctx-rescan"]`)).toHaveCount(0);
+    await expect(page.locator(PANEL)).not.toContainText(/left out|Memory was not used/);
     expect(errors).toEqual([]);
   });
 

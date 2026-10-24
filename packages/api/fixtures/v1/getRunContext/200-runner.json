@@ -24,5 +24,7 @@
   "denied_tool_calls": null,
   "recalled_memory": [],
   "item_sources": [],
-  "repo_map_version": null
+  "repo_map_version": null,
+  "rescan_skipped": null,
+  "rescan_unavailable": null
 }

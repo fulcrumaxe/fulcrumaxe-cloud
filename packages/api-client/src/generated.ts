@@ -774,6 +774,8 @@ export interface Operations {
         cut: boolean;
       }>;
       repo_map_version: (string) | (null);
+      rescan_skipped: (number) | (null);
+      rescan_unavailable: boolean | null;
     };
   };
   listContextRules: {

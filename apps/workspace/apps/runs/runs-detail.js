@@ -335,7 +335,18 @@ export const CONTEXT_WORDS = {
   runner: "Contents stayed on your machine",
   runnerHelp: "This run ran on your runner, so only sizes and counts reach the cloud.",
   partial: "Estimated: this run's usage was only partly measured, so the shares below are estimates.",
+  rescanUnavailable: "Memory was not used in this run because secrets couldn't be checked.",
 };
+
+/** D#601 MEM-4b3: why memory entries were held back from a run, from two counts and a flag: never an entry's text. Empty when nothing was held back. */
+export function rescanNotes(skipped, unavailable) {
+  const notes = [];
+  if (Number.isInteger(skipped) && skipped > 0) {
+    notes.push(skipped === 1 ? "1 memory entry was left out because it now holds a secret." : skipped.toLocaleString("en-US") + " memory entries were left out because they now hold a secret.");
+  }
+  if (unavailable === true) notes.push(CONTEXT_WORDS.rescanUnavailable);
+  return notes;
+}
 
 /** A byte count in words: "912 B", "5.2 KiB", "1.4 MiB". Null for anything that is not a count. */
 export function bytesText(n) {
@@ -393,6 +404,8 @@ export function readContext(raw) {
     recalled_memory: memory,
     item_sources: itemSources,
     repo_map_version: typeof b.repo_map_version === "string" && b.repo_map_version !== "" ? b.repo_map_version : null,
+    rescan_skipped: countOrNull(b.rescan_skipped),
+    rescan_unavailable: b.rescan_unavailable === true,
   };
 }
 
@@ -451,6 +464,7 @@ export function contextModel(ctx) {
     ],
     memory: { tokens: ctx.memory_tokens === null ? null : tokenText(ctx.memory_tokens), items: [...ctx.recalled_memory.map((m) => ({ name: m.name, ref: m.id.slice(0, 8) + "@" + m.version, title: m.id + "@" + m.version })), ...(ctx.item_sources ?? []).map((x) => ({ name: x.label + (x.cut === true ? " (cut)" : ""), ref: x.id.slice(0, 8), title: x.id }))] },
     mapVersion: runner ? null : ctx.repo_map_version,
+    rescanNotes: rescanNotes(ctx.rescan_skipped, ctx.rescan_unavailable),
   };
 }
 
@@ -494,6 +508,7 @@ export function contextSection(context, retry) {
           m.memory.items.length ? h("ul", { class: "runs-ctx-rows" }, m.memory.items.map((i) => h("li", { class: "runs-ctx-row" }, i.name, " ", h("code", { title: i.title }, i.ref)))) : null
         )
       : null,
+    ...m.rescanNotes.map((t) => h("p", { class: "runs-muted", role: "status", "data-testid": "runs-ctx-rescan" }, t)),
     m.mapVersion ? h("p", { class: "runs-muted", "data-testid": "runs-ctx-map" }, "Repo map version: ", h("code", null, m.mapVersion)) : null
   );
 }

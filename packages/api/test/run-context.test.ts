@@ -355,6 +355,54 @@ describe('GET /api/v1/runs/{id}/context (D#600 CX-8)', { timeout: 60_000 }, () =
     });
   });
 
+  describe('D#601 MEM-4b3: how many entries the secret check left out, and whether it could not run', () => {
+    const SECRET_TEXT = 'deploy with the key kept in the vault room';
+    async function withInputs(accountId: string, runId: string, extra: { skipped?: number; unavailable?: boolean } | null): Promise<void> {
+      if (extra === null) return;
+      await admin.query(`INSERT INTO run_context_inputs (account_id, run_id, rescan_skipped, rescan_unavailable) VALUES ($1, $2, $3, $4)`, [accountId, runId, extra.skipped ?? 0, extra.unavailable ?? false]);
+    }
+    async function read(extra: { skipped?: number; unavailable?: boolean } | null, run: { runtime?: string } = {}): Promise<RunContextPanel> {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const id = await seedRun(accountId, run);
+      await seedLedger(accountId, id, { basis: 'measured', first: 1, peak: 2 });
+      await withInputs(accountId, id, extra);
+      const res = await get(id, { accountId, userId });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as RunContextPanel;
+      expect(runContextResponseSchema.parse(body)).toEqual(body);
+      return body;
+    }
+
+    it('returns the stored count and flag for each state, hosted and runner runs alike', async () => {
+      expect(await read({ skipped: 3 })).toMatchObject({ rescan_skipped: 3, rescan_unavailable: false });
+      expect(await read({ unavailable: true })).toMatchObject({ rescan_skipped: 0, rescan_unavailable: true });
+      expect(await read({ skipped: 1, unavailable: true }, { runtime: 'runner' })).toMatchObject({ rescan_skipped: 1, rescan_unavailable: true });
+      expect(await read({})).toMatchObject({ rescan_skipped: 0, rescan_unavailable: false });
+    });
+
+    it('is null for a run with no inputs record (one from before it, or one that recalled nothing) and for a run with no ledger', async () => {
+      expect(await read(null)).toMatchObject({ rescan_skipped: null, rescan_unavailable: null });
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const bare = await seedRun(accountId, { status: 'running' });
+      await withInputs(accountId, bare, { skipped: 2 });
+      const body = (await (await get(bare, { accountId, userId })).json()) as RunContextPanel;
+      expect(body).toMatchObject({ recorded: false, rescan_skipped: null, rescan_unavailable: null });
+    });
+
+    it('returns a count and a flag only: the text of a skipped entry is not in the reply', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const id = await seedRun(accountId);
+      await seedLedger(accountId, id, { basis: 'measured', first: 1, peak: 2 });
+      await admin.query(
+        `INSERT INTO memory_entries (account_id, scope, scope_ref, kind, body, author_kind, status, version, content_sha256) VALUES ($1, 'account', NULL, 'command', $2, 'person', 'approved', 1, $3)`,
+        [accountId, SECRET_TEXT, createHash('sha256').update(SECRET_TEXT).digest('hex')],
+      );
+      await withInputs(accountId, id, { skipped: 1 });
+      const res = await get(id, { accountId, userId });
+      expect(await res.text()).not.toContain('vault room');
+    });
+  });
+
   it("answers 404 for an unknown id, a malformed id and another account's run (RLS forced on the ledger)", async () => {
     const a = await seedAccountWithMember(admin);
     const b = await seedAccountWithMember(admin);
