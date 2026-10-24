@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { recordDriverEvent, toCode } from "@fx/core/src/work-items/driverEvents.js";
+import { UNVERIFIABLE_ESCALATION_CODE } from "@fx/core/src/work-items/reviewHold.js";
 import { checkFixRound, maxFixRounds } from "@fx/spend";
 import type { ExecutionTargetRegistry } from "@fx/runner";
 import { escalate } from "../build/fixLoop.js";
@@ -18,6 +19,10 @@ import { recordVerdictsInOrder, type GatheredVerdict, type RecordedVerdict, type
  *   incomplete   a required role has no verdict (it could not be started): nothing is decided, the driver stops.
  *   environment_failure  (D#598 P7d) a reviewer could not run the tests (its environment failed, not the code): NO verdict is recorded,
  *                no fix round starts, and the driver stops with the fact `reviewer_environment`. The same for every account.
+ *   unverifiable  a required reviewer says it could not verify some criteria here (its test skipped or could not run in its environment): a fact about the
+ *                environment, not a judgment of the code. Its verdict is not recorded, no fix round starts, and the item goes to Needs a person (`escalated`, code
+ *                `reviewer_unverifiable`, reasons: the roles) with the criteria in the reviewer's run. Real problems the OTHER reviewers found still decide first
+ *                (a `fail` is reviewer_fail, a `needs-fix` is a fix round): a person is asked only when nothing else is wrong.
  *   reviewer_no_verdict  a required reviewer's runs on this head kept ending without a verdict (killed at a memory limit, a lost runner, cancelled,
  *                out of time) and the driver's bounded re-runs are used up. Its `fail` is not a verdict: nothing is recorded for it, no fix round
  *                starts, and the item goes to Needs a person (`escalated`, code `reviewer_no_verdict`, reasons: the role and how its last run ended).
@@ -31,7 +36,7 @@ import { recordVerdictsInOrder, type GatheredVerdict, type RecordedVerdict, type
  * count is therefore not used here (`recordReviewVerdict` runs in its `deferred` mode).
  */
 
-export type RoundDecision = "all_passed" | "fix" | "escalated" | "reviewer_fail" | "reviewer_no_verdict" | "incomplete" | "ci_pending" | "head_moved" | "environment_failure";
+export type RoundDecision = "all_passed" | "fix" | "escalated" | "reviewer_fail" | "reviewer_no_verdict" | "incomplete" | "ci_pending" | "head_moved" | "environment_failure" | "unverifiable";
 
 export interface RoundInput {
   accountId: string;
@@ -65,16 +70,19 @@ export async function fixRoundsStarted(pool: Pool, accountId: string, workItemId
 }
 
 /** The decision for gathered verdicts, with no database. Pure. */
-export function decideRound(input: { requiredRoles: readonly VerdictRole[]; verdicts: readonly { role: VerdictRole; verdict: string; environmentFailure?: boolean; noVerdict?: boolean }[]; fixRoundsStarted: number }): RoundDecision {
+export function decideRound(input: { requiredRoles: readonly VerdictRole[]; verdicts: readonly { role: VerdictRole; verdict: string; environmentFailure?: boolean; noVerdict?: boolean; unverifiable?: boolean }[]; fixRoundsStarted: number }): RoundDecision {
   // A reviewer that could not run the tests has said nothing about the code: it is never a needs-fix (so never a fix round) and never a pass.
   if (input.verdicts.some((v) => v.environmentFailure === true)) return "environment_failure";
   // Nor has a reviewer whose run ended without a verdict: its `fail` is not a judgment, so it is never a reviewer_fail and never a fix round.
   if (input.verdicts.some((v) => v.noVerdict === true && input.requiredRoles.includes(v.role))) return "reviewer_no_verdict";
   const byRole = new Map(input.verdicts.map((v) => [v.role, v.verdict]));
   if (input.requiredRoles.some((r) => !byRole.has(r))) return "incomplete";
-  const verdicts = input.requiredRoles.map((r) => byRole.get(r));
+  // A reviewer that could not verify here has said nothing about the code either. What the others found still decides; only when they have no complaint is a person asked.
+  const unverifiableRoles = new Set(input.verdicts.filter((v) => v.unverifiable === true).map((v) => v.role));
+  const verdicts = input.requiredRoles.filter((r) => !unverifiableRoles.has(r)).map((r) => byRole.get(r));
   if (verdicts.some((v) => v === "fail")) return "reviewer_fail";
   if (verdicts.some((v) => v !== "pass")) return checkFixRound(input.fixRoundsStarted + 1) === "escalate" ? "escalated" : "fix";
+  if (input.requiredRoles.some((r) => unverifiableRoles.has(r))) return "unverifiable";
   return "all_passed";
 }
 
@@ -113,11 +121,11 @@ export async function recordRound(pool: Pool, registry: ExecutionTargetRegistry,
     prNumber: input.prNumber,
     round,
     verdicts: input.verdicts,
-    skipPasses: decision === "incomplete" || decision === "reviewer_no_verdict",
+    skipPasses: decision === "incomplete" || decision === "reviewer_no_verdict" || decision === "unverifiable",
   });
 
   if (decision === "escalated") {
-    const runId = input.verdicts.find((v) => v.verdict !== "pass")!.runId;
+    const runId = (input.verdicts.find((v) => v.verdict !== "pass" && v.unverifiable !== true) ?? input.verdicts.find((v) => v.verdict !== "pass")!).runId;
     await withTenant(pool, input.accountId, async (client) => {
       await escalate(client, input.accountId, input.workItemId, runId, new Date());
       await recordDriverEvent(client, input.accountId, { workItemId: input.workItemId, kind: "escalated", dedupeKey: `max_fix_rounds:${input.headSha}`, code: "max_fix_rounds", headSha: input.headSha, prNumber: input.prNumber, round: Math.min(round, 20), runId });
@@ -134,8 +142,19 @@ export async function recordRound(pool: Pool, registry: ExecutionTargetRegistry,
       if (at.rows[0]?.stage !== "needs_human") await escalate(client, input.accountId, input.workItemId, runId, new Date());
       await recordDriverEvent(client, input.accountId, { workItemId: input.workItemId, kind: "escalated", dedupeKey: `reviewer_no_verdict:${input.headSha}:${runId}`, code: "reviewer_no_verdict", reasons, headSha: input.headSha, prNumber: input.prNumber, round: Math.min(round, 20), runId });
     });
+  } else if (decision === "unverifiable") {
+    const unverifiable = input.verdicts.filter((v) => v.unverifiable === true && input.requiredRoles.includes(v.role));
+    const runId = unverifiable[0]!.runId;
+    const reasons = [...new Set(unverifiable.map((v) => toCode(v.role)))].slice(0, 4);
+    await withTenant(pool, input.accountId, async (client) => {
+      // The same shape as reviewer_no_verdict: the move to Needs a person and the escalation fact are one transaction, and an item already there only gets the fact
+      // (Needs a person has no edge to itself). The criteria and the reasons stay in the reviewer's run; the card reads them from there by this fact's run id.
+      const at = await client.query<{ stage: string }>("SELECT stage FROM work_items WHERE id = $1 AND account_id = $2", [input.workItemId, input.accountId]);
+      if (at.rows[0]?.stage !== "needs_human") await escalate(client, input.accountId, input.workItemId, runId, new Date());
+      await recordDriverEvent(client, input.accountId, { workItemId: input.workItemId, kind: "escalated", dedupeKey: `reviewer_unverifiable:${input.headSha}:${runId}`, code: UNVERIFIABLE_ESCALATION_CODE, reasons, headSha: input.headSha, prNumber: input.prNumber, round: Math.min(round, 20), runId });
+    });
   } else if (decision === "reviewer_fail") {
-    const runId = input.verdicts.find((v) => v.verdict === "fail")!.runId;
+    const runId = input.verdicts.find((v) => v.verdict === "fail" && v.unverifiable !== true)!.runId;
     await withTenant(pool, input.accountId, (client) =>
       recordDriverEvent(client, input.accountId, { workItemId: input.workItemId, kind: "escalated", dedupeKey: `reviewer_fail:${input.headSha}`, code: "reviewer_fail", headSha: input.headSha, prNumber: input.prNumber, round: Math.min(round, 20), runId }),
     );

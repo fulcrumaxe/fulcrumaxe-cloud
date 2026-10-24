@@ -25,7 +25,7 @@ export const ROLE_CONTEXT_DEFAULTS: Readonly<Record<ContextBudgetRole, number>> 
   executor: 35_840,
   fix: 43_008,
   "code-reviewer": 26_624,
-  "acceptance-tester": 26_624,
+  "acceptance-tester": 27_648,
   "security-reviewer": 26_624,
   debater: 34_816,
 });

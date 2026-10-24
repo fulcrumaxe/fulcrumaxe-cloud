@@ -11,6 +11,8 @@ import { parseAcceptanceScope } from '../specs/acceptanceScope.js';
 import { readPublicChange, type PublicChange } from '../repos/publicChange.js';
 import { BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, BASE_SYNC_UNAVAILABLE_SENTENCE, FIX_ROUND_STOP_SENTENCE, REPUBLISH_BASE_MISSING, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE, REPUBLISH_STACKED_UNSUPPORTED } from './baseSync.js';
 import { PUBLIC_BRANCH_MOVED, PUBLIC_BRANCH_MOVED_SENTENCE, PUBLIC_HEAD_UNAVAILABLE, PUBLIC_HEAD_UNAVAILABLE_SENTENCE } from '../repos/planePushRecord.js';
+import { UNVERIFIABLE_ESCALATION_CODE } from './reviewHold.js';
+import { readUnverifiable } from './unverifiable.js';
 import { BACK_TO_DISCUSSION_REF_PREFIX, REQUEST_CHANGES_NOTE_MAX, REQUEST_CHANGES_REF_PREFIX, closeOnGithub, operatorActionsFor, operatorVerdict, readOperatorFacts, type OperatorAction } from './operatorActions.js';
 
 /**
@@ -264,6 +266,27 @@ export function reviewerNoVerdictSentence(reasons: readonly string[]): string | 
   if (name === undefined) return null;
   const end = reasons[1] !== undefined && Object.hasOwn(NO_VERDICT_ENDS, reasons[1]) ? NO_VERDICT_ENDS[reasons[1]] : 'its run ended without a verdict';
   return `The ${name} could not finish reviewing this pull request: ${end}, every time it was tried. No verdict was recorded and no changes were requested. Press Approve to have the reviewers look at the pull request again, or review it yourself and merge or close it on GitHub.`;
+}
+
+/**
+ * The notice for an item a reviewer could not verify here (`escalated` with code `reviewer_unverifiable`; reasons: the roles). It lists each criterion the reviewer
+ * could not check and why, from the reviewer's own stored envelope (model text: redacted, bounded, shown as text only), and says no changes were requested.
+ * Null when the reasons name no reviewer this sentence knows, or the run holds no usable list.
+ */
+export function reviewerUnverifiableSentence(reasons: readonly string[], stored: unknown): string | null {
+  const key = reasons[0] ?? '';
+  const name = Object.hasOwn(REVIEWER_NAMES, key) ? REVIEWER_NAMES[key] : undefined;
+  const items = readUnverifiable(stored);
+  if (name === undefined || items.length === 0) return null;
+  const lines = items.map((item, i) => {
+    const criterion = safeModelText(item.criterion, 300);
+    const reason = safeModelText(item.reason, 300);
+    return `${i + 1}. ${criterion}${reason === '' ? '' : ` (could not verify because: ${reason})`}`;
+  });
+  return capText([
+    `The ${name} could not verify ${items.length === 1 ? 'this criterion' : 'these criteria'} where it ran, so no changes were requested and nothing was sent back to the builder. A person needs to verify ${items.length === 1 ? 'it' : 'them'}, then merge or close the pull request on GitHub:`,
+    ...lines,
+  ].join('\n'), 3500);
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -630,6 +653,22 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
             )
           ).rows[0];
       const noVerdictSentence = noVerdict ? reviewerNoVerdictSentence(noVerdict.reasons) : null;
+      // A reviewer that could not verify some criteria where it ran handed the item over: the NEWEST escalation since it reached Needs a person decides, and the
+      // notice lists the criteria and why from that reviewer's own stored run, never the executor's summary.
+      const newestEscalation = rebuildSentence || branchStop
+        ? undefined
+        : (
+            await client.query<{ code: string | null; reasons: string[]; stored: unknown }>(
+              `SELECT e.code, e.reasons, r.envelope->'unverifiable' AS stored
+                 FROM work_item_driver_events e
+                 LEFT JOIN agent_runs r ON r.id = e.run_id AND r.work_item_id = e.work_item_id
+                WHERE e.work_item_id = $1::uuid AND e.kind = 'escalated'
+                  AND e.created_at >= COALESCE((SELECT max(t.created_at) FROM work_item_transitions t WHERE t.work_item_id = $1::uuid AND t.to_stage = 'needs_human'), '-infinity'::timestamptz)
+                ORDER BY e.seq DESC LIMIT 1`,
+              [workItemId],
+            )
+          ).rows[0];
+      const unverifiableSentence = newestEscalation?.code === UNVERIFIABLE_ESCALATION_CODE ? reviewerUnverifiableSentence(newestEscalation.reasons, newestEscalation.stored) : null;
       // The newest executor run's own summary says why the build ended without a pull request.
       const ex = (
         await client.query<{ summary: string | null; status: string }>(
@@ -643,6 +682,8 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
         ? { kind: 'check_failed', reason: rebuildSentence }
         : branchStop
           ? { kind: 'needs_human', reason: rebuildStop?.code && Object.hasOwn(FIX_ROUND_STOP_SENTENCE, rebuildStop.code) ? FIX_ROUND_STOP_SENTENCE[rebuildStop.code]! : rebuildStop?.code === PUBLIC_BRANCH_MOVED ? PUBLIC_BRANCH_MOVED_SENTENCE : rebuildStop?.code === PUBLIC_HEAD_UNAVAILABLE ? PUBLIC_HEAD_UNAVAILABLE_SENTENCE : CHECK_FIX_BRANCH_SENTENCE }
+          : unverifiableSentence
+          ? { kind: 'needs_human', reason: unverifiableSentence }
           : noVerdictSentence
           ? { kind: 'needs_human', reason: noVerdictSentence }
           : {

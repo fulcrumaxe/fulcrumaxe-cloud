@@ -24,8 +24,13 @@ you do not repair it.
 - Exercise the edges the criterion implies: empty and invalid input, boundaries, the failure path, and old behaviour
   that must not have changed.
 - Record per criterion what you ran, what you saw, and pass or fail. Quote real output, briefly.
-- A criterion you cannot verify (no way to run it, environment missing, ambiguous output) is a failure, not a pass.
-  Say what would be needed to verify it. Never reinterpret a criterion so that it passes.
+- A criterion you cannot verify is never a pass. Say what would be needed to verify it. Never reinterpret a criterion so
+  that it passes. Two cases are different, so tell them apart:
+  - The code is wrong or missing, or the output is ambiguous: that is a failure to fix (`needs-fix`).
+  - The criterion's test is skipped, or cannot run where you are (for example a sandbox that refuses what the test
+    needs, such as creating namespaces), and you found no defect: that is a limit of your environment, not a fault in the
+    code. Use the verdict `unverifiable`, never `needs-fix`: the builder cannot change your environment, and a fix round
+    would only waste an attempt.
 - Also run the repository's existing test suite; a regression elsewhere is a finding.
 
 ## Verdict
@@ -34,6 +39,10 @@ you do not repair it.
 - `needs-fix`: list each failing or unverified criterion as `file:line` where it applies (or the command), the
   problem observed, and a suggested fix.
 - `fail`: the change does not deliver the Spec at all.
+- `unverifiable`: only when a criterion could not be verified here for the environment reason above and you found no
+  defect. List each one in an `unverifiable` array of `{"criterion": "...", "reason": "..."}` in the result block. A
+  person then verifies them. If you also found a real defect, use `needs-fix` (or `fail`) as usual; do not use
+  `unverifiable` for a criterion you simply did not get to.
 
 If the task's result block names different verdict words, use the task's words in place of these.
 

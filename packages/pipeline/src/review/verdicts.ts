@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { recordDriverEvent, toCode } from "@fx/core/src/work-items/driverEvents.js";
+import { MAX_UNVERIFIABLE, MAX_UNVERIFIABLE_CHARS, UNVERIFIABLE_WORD, readUnverifiable, type UnverifiableItem } from "@fx/core/src/work-items/unverifiable.js";
 import type { ExecutionTargetRegistry } from "@fx/runner";
 import { recordReviewVerdict } from "../build/fixLoop.js";
 import type { ReviewVerdict, ReviewerAgentRole } from "../build/types.js";
@@ -11,7 +12,8 @@ import { MAX_FINDINGS, MAX_FINDING_CHARS } from "./findingCaps.js";
  *
  * Reading. A reviewer's verdict is the exact JSON string `pass`, `needs-fix` or `fail` in the envelope of a run that
  * SUCCEEDED. Anything else is `fail`: another word, another case, a number, a missing envelope, a run that failed or was
- * cancelled. The code reviewer's `security_review_needed` counts only as the JSON boolean `true`. Findings and summary are
+ * cancelled. The one exception is `unverifiable` (see @fx/core work-items/unverifiable.ts): with a usable list of criteria it reads as `fail` plus the flag
+ * `unverifiable`, so nothing that ignores the flag can mistake it for a pass or a needs-fix. The code reviewer's `security_review_needed` counts only as the JSON boolean `true`. Findings and summary are
  * model text: bounded here, shown only as text, and sanitized again when they go into a prompt.
  *
  * Recording. The item's stage is the LAST verdict recorded, so the order matters (live, a pass recorded after a needs-fix
@@ -22,7 +24,8 @@ import { MAX_FINDINGS, MAX_FINDING_CHARS } from "./findingCaps.js";
 
 export type VerdictRole = ReviewerAgentRole | "debater";
 
-export { MAX_FINDINGS, MAX_FINDING_CHARS };
+export { MAX_FINDINGS, MAX_FINDING_CHARS, UNVERIFIABLE_WORD, MAX_UNVERIFIABLE, MAX_UNVERIFIABLE_CHARS, readUnverifiable };
+export type { UnverifiableItem };
 export const MAX_SUMMARY_CHARS = 4000;
 
 export interface ReadVerdict {
@@ -38,6 +41,11 @@ export interface ReadVerdict {
    * That is a fact about the environment, not a judgment of the code. Only the JSON boolean `true` counts.
    */
   environmentFailure: boolean;
+  /**
+   * The reviewer says it could not verify some criteria here (`"verdict":"unverifiable"` with a usable `unverifiable` list, see `UNVERIFIABLE_WORD`). `verdict` is
+   * `fail` then, so a reader that knows nothing of this outcome treats it as it always treated a `fail`. The items stay in the run's stored envelope.
+   */
+  unverifiable?: true;
   /**
    * The run produced a verdict at all: it SUCCEEDED and its envelope carries a `verdict` key. A run that failed (an agent killed at its memory limit, a lost
    * runner), timed out or was cancelled, and a succeeded run with no envelope or no `verdict` in it, said nothing about the code. Its `verdict` still reads
@@ -59,6 +67,7 @@ export function readVerdict(status: string, envelope: Record<string, unknown> | 
   const summaryRaw = env && Object.hasOwn(env, "summary") ? env.summary : undefined;
   const flag = env && Object.hasOwn(env, "security_review_needed") ? env.security_review_needed : undefined;
   const envFlag = env && Object.hasOwn(env, "environment_failure") ? env.environment_failure : undefined;
+  const unverifiable = raw === UNVERIFIABLE_WORD && readUnverifiable(env && Object.hasOwn(env, "unverifiable") ? env.unverifiable : undefined).length > 0;
   const fullFindings = Array.isArray(findingsRaw) ? findingsRaw.filter((f): f is string => typeof f === "string").slice(0, MAX_FINDINGS) : [];
   return {
     verdict: normalizeVerdict(raw),
@@ -67,6 +76,8 @@ export function readVerdict(status: string, envelope: Record<string, unknown> | 
     summary: typeof summaryRaw === "string" ? summaryRaw.slice(0, MAX_SUMMARY_CHARS) : "",
     securityNeeded: flag === true,
     environmentFailure: envFlag === true,
+    // Present only when true, so every other verdict keeps exactly the shape it always had.
+    ...(unverifiable ? { unverifiable: true as const } : {}),
     hasVerdict: env !== null && Object.hasOwn(env, "verdict"),
   };
 }
@@ -82,6 +93,8 @@ export interface GatheredVerdict {
   verdict: ReviewVerdict;
   /** D#598 P7d: the reviewer could not run the tests. Absent is false. */
   environmentFailure?: boolean;
+  /** The reviewer could not verify some criteria here (see `ReadVerdict.unverifiable`). Never recorded as a verdict; the round goes to a person. Absent is false. */
+  unverifiable?: boolean;
   /**
    * The reviewer's run ended without a verdict (see `ReadVerdict.hasVerdict`), and the driver's bounded re-runs of it on this head are used up. Such an entry is
    * never recorded as a verdict; the round goes to a person (`reviewer_no_verdict`). Absent is false.
@@ -121,6 +134,8 @@ export async function recordVerdictsInOrder(pool: Pool, registry: ExecutionTarge
     if (input.skipPasses === true && v.verdict === "pass") continue;
     // A run that said nothing is never a verdict: recording its `fail` would move the item to Changes requested with nothing to fix.
     if (v.noVerdict === true) continue;
+    // Nor is "could not verify here": recording its `fail` would move the item to Changes requested with nothing to fix.
+    if (v.unverifiable === true) continue;
     const out = await recordReviewVerdict(pool, registry, {
       accountId: input.accountId,
       workItemId: input.workItemId,
@@ -137,7 +152,7 @@ export async function recordVerdictsInOrder(pool: Pool, registry: ExecutionTarge
       workItemId: input.workItemId,
       kind: "review_verdicts",
       dedupeKey: `verdicts:${input.headSha}:${input.verdicts.map((v) => toCode(v.role)).sort().join('+')}`.slice(0, 200),
-      reasons: input.verdicts.map((v) => `${toCode(v.role)}_${v.noVerdict === true ? "no_verdict" : toCode(v.verdict)}`).slice(0, 20),
+      reasons: input.verdicts.map((v) => `${toCode(v.role)}_${v.noVerdict === true ? "no_verdict" : v.unverifiable === true ? "unverifiable" : toCode(v.verdict)}`).slice(0, 20),
       headSha: input.headSha,
       prNumber: input.prNumber,
       round: Math.min(Math.max(input.round, 0), 20),

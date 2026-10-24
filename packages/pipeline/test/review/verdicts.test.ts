@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_FINDINGS, MAX_FINDING_CHARS, MAX_SUMMARY_CHARS, normalizeVerdict, readVerdict, recordingOrder } from "../../src/review/verdicts.js";
+import { MAX_FINDINGS, MAX_FINDING_CHARS, MAX_SUMMARY_CHARS, MAX_UNVERIFIABLE, MAX_UNVERIFIABLE_CHARS, normalizeVerdict, readUnverifiable, readVerdict, recordingOrder } from "../../src/review/verdicts.js";
 import { decideRound, maxFixRounds } from "../../src/review/roundDecision.js";
 
 /** D#483 P3: reading a reviewer's verdict (fail closed), the recording order, and the round decision. */
@@ -41,6 +41,29 @@ describe("readVerdict", () => {
     for (const flag of ["true", 1, "yes", {}, [], null, "TRUE", false]) expect(readVerdict("succeeded", { verdict: "fail", environment_failure: flag }).environmentFailure).toBe(false);
     expect(readVerdict("failed", { verdict: "fail", environment_failure: true }).environmentFailure).toBe(false);
     expect(readVerdict("succeeded", Object.create({ environment_failure: true }) as Record<string, unknown>).environmentFailure).toBe(false);
+  });
+  it("unverifiable: the word with a usable list reads as a fail plus the flag; every other shape is a plain fail with no flag", () => {
+    const list = [{ criterion: "AC4 bwrap test", reason: "namespaces cannot be created here" }, { criterion: "AC5", reason: "skipped" }];
+    expect(readVerdict("succeeded", { verdict: "unverifiable", unverifiable: list, summary: "s" })).toMatchObject({ verdict: "fail", unverifiable: true, hasVerdict: true, summary: "s" });
+    // Nothing usable to show: a claim without criteria is a fail like any other wrong word.
+    for (const bad of [undefined, [], "AC4", [{ reason: "x" }], [{ criterion: "" }], [{ criterion: 4 }], [null, 3, "x"], { criterion: "AC4" }]) {
+      const env: Record<string, unknown> = { verdict: "unverifiable", ...(bad === undefined ? {} : { unverifiable: bad }) };
+      expect(readVerdict("succeeded", env), JSON.stringify(bad)).toMatchObject({ verdict: "fail", hasVerdict: true });
+      expect(readVerdict("succeeded", env).unverifiable, JSON.stringify(bad)).toBeUndefined();
+    }
+    // A list under any other word does not turn it into the outcome, and the word needs a run that succeeded and its own keys.
+    expect(readVerdict("succeeded", { verdict: "needs-fix", unverifiable: list }).unverifiable).toBeUndefined();
+    expect(readVerdict("succeeded", { verdict: "pass", unverifiable: list })).toMatchObject({ verdict: "pass" });
+    expect(readVerdict("failed", { verdict: "unverifiable", unverifiable: list })).toMatchObject({ verdict: "fail", hasVerdict: false });
+    expect(readVerdict("failed", { verdict: "unverifiable", unverifiable: list }).unverifiable).toBeUndefined();
+    expect(readVerdict("succeeded", Object.create({ verdict: "unverifiable", unverifiable: list }) as Record<string, unknown>).unverifiable).toBeUndefined();
+    expect(readVerdict("succeeded", { verdict: "Unverifiable", unverifiable: list }).unverifiable).toBeUndefined();
+  });
+  it("unverifiable items: at most 10, objects with a criterion, each text cut to 400", () => {
+    const many = Array.from({ length: 15 }, (_, i) => ({ criterion: `c${i}`, reason: "r" }));
+    expect(readUnverifiable(many)).toHaveLength(MAX_UNVERIFIABLE);
+    expect(readUnverifiable([{ criterion: "x".repeat(900), reason: "y".repeat(900) }, { reason: "no criterion" }, 7])).toEqual([{ criterion: "x".repeat(MAX_UNVERIFIABLE_CHARS), reason: "y".repeat(MAX_UNVERIFIABLE_CHARS) }]);
+    expect(readUnverifiable([{ criterion: " AC1 ", reason: 3 }])).toEqual([{ criterion: "AC1", reason: "" }]);
   });
   it("findings: strings only, at most 20, each cut to 600 characters; a non-array is none", () => {
     const r = readVerdict("succeeded", { verdict: "needs-fix", findings: [...Array.from({ length: 30 }, () => "x".repeat(900)), 7, null, { a: 1 }] });
@@ -113,6 +136,25 @@ describe("decideRound", () => {
     // The same words without the flag keep their meaning: a needs-fix is a fix round, a fail is a reviewer fail.
     expect(e([["code-reviewer", "pass"], ["acceptance-tester", "needs-fix"]])).toBe("fix");
     expect(e([["code-reviewer", "pass"], ["acceptance-tester", "fail"]])).toBe("reviewer_fail");
+  });
+  it("a reviewer that could not verify here is `unverifiable`: never a fix round or a reviewer_fail on its own, but a real problem from another reviewer still decides first", () => {
+    const u = (verdicts: Array<[string, string, boolean?]>, started = 0) =>
+      decideRound({ requiredRoles: REQ as never, verdicts: verdicts.map(([role, verdict, unverifiable]) => ({ role: role as never, verdict, ...(unverifiable ? { unverifiable } : {}) })), fixRoundsStarted: started });
+    expect(u([["code-reviewer", "pass"], ["acceptance-tester", "fail", true]])).toBe("unverifiable");
+    expect(u([["code-reviewer", "pass"], ["acceptance-tester", "fail", true]], maxFixRounds())).toBe("unverifiable");
+    expect(u([["code-reviewer", "pass"], ["acceptance-tester", "fail", true]], 9)).toBe("unverifiable");
+    // The other reviewer found something: that is decided as it always was.
+    expect(u([["code-reviewer", "needs-fix"], ["acceptance-tester", "fail", true]])).toBe("fix");
+    expect(u([["code-reviewer", "needs-fix"], ["acceptance-tester", "fail", true]], maxFixRounds())).toBe("escalated");
+    expect(u([["code-reviewer", "fail"], ["acceptance-tester", "fail", true]])).toBe("reviewer_fail");
+    // Without the flag the same words keep their meaning.
+    expect(u([["code-reviewer", "pass"], ["acceptance-tester", "fail"]])).toBe("reviewer_fail");
+    // Environment failure and a missing verdict still come first; a missing required role is still incomplete.
+    expect(decideRound({ requiredRoles: REQ as never, verdicts: [{ role: "code-reviewer" as never, verdict: "pass", environmentFailure: true }, { role: "acceptance-tester" as never, verdict: "fail", unverifiable: true }], fixRoundsStarted: 0 })).toBe("environment_failure");
+    expect(decideRound({ requiredRoles: REQ as never, verdicts: [{ role: "code-reviewer" as never, verdict: "fail", noVerdict: true }, { role: "acceptance-tester" as never, verdict: "fail", unverifiable: true }], fixRoundsStarted: 0 })).toBe("reviewer_no_verdict");
+    expect(decideRound({ requiredRoles: REQ as never, verdicts: [{ role: "acceptance-tester" as never, verdict: "fail", unverifiable: true }], fixRoundsStarted: 0 })).toBe("incomplete");
+    // A flag on a role that is not required changes nothing.
+    expect(decideRound({ requiredRoles: ["code-reviewer"] as never, verdicts: [{ role: "code-reviewer" as never, verdict: "pass" }, { role: "acceptance-tester" as never, verdict: "fail", unverifiable: true }], fixRoundsStarted: 0 })).toBe("all_passed");
   });
   it("a reviewer with no verdict is reviewer_no_verdict: never a reviewer_fail and never a fix round, whatever the others said", () => {
     const n = (verdicts: Array<[string, string, boolean?]>, started = 0) =>
