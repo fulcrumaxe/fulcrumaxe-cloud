@@ -315,6 +315,16 @@ export interface DerivedPlanePush {
 }
 
 /**
+ * FIXROUND-REFRESH-HEAD: the code a fix round is refused with when the paired public branch is not at the head the platform pushed (someone changed it
+ * outside the cloud), and the fixed sentence the item's notice shows for it. The words are fixed text: nothing from GitHub or the branch is put in.
+ */
+export const PUBLIC_BRANCH_MOVED = 'public_branch_moved';
+/** The code (and the sentence) when the public branch could not be read on GitHub before a fix round: nothing was started. */
+export const PUBLIC_HEAD_UNAVAILABLE = 'public_head_unavailable';
+export const PUBLIC_HEAD_UNAVAILABLE_SENTENCE = "Couldn't read the public pull request's branch on GitHub, so the fix round was not started. Nothing was changed. Press Build again in a moment.";
+export const PUBLIC_BRANCH_MOVED_SENTENCE ="The public pull request's branch was changed outside the cloud. Nothing was started. Close it or reset its branch, then press Build again.";
+
+/**
  * The truth for a read: asks GitHub for the branch head and returns it next to the stamp. When they differ the result says `stale`
  * and carries GitHub's value; nothing is written. A caller that acts on a mismatch (a fix round, a state shown to a person) uses
  * `headSha`, and `recordVerifiedOutcome` is the only way the stamp moves. A port failure is the caller's to handle: this does not

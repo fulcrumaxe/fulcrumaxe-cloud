@@ -88,6 +88,8 @@ describe("advance: a round that carries on from a pull request the other side op
       triage: null,
       registry,
       build: startBuildForItem,
+      // FIXROUND-REFRESH-HEAD: the pull request's branch on GitHub is at the head each round is asked for (fixRoundHeads.pg.test.ts covers a moved one).
+      fixHeads: { privateHead: async () => HEAD },
       review: {
         load: vi.fn(),
         recordRound: vi.fn(),

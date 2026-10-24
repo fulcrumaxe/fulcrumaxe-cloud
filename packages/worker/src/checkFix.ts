@@ -35,6 +35,8 @@ export interface CheckFixDeps {
    * is never claimed on that branch, so the round cannot resume the failed run's. Absent, such a round is refused `starter_unavailable`.
    */
   starter?: RunStarter | null;
+  /** FIXROUND-REFRESH-HEAD: asked once nothing else refuses and before anything starts; a code it answers is the refusal. Absent: nothing is asked. */
+  beforeStart?: () => Promise<string | null>;
 }
 
 type Started = { ok: true; runId: string } | { ok: false; reason: string };
@@ -100,6 +102,8 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
   // A round on the item's branch is only meaningful on the side the failed run ran on: a sandbox run ignores `continues`. The start is told which side to expect and
   // refuses (before anything is written) if the item has moved since.
   const expectedExecutionMode = bound !== null && row.run_mode !== null ? { expectedExecutionMode: row.run_mode } : {};
+  const held = deps.beforeStart ? await deps.beforeStart() : null;
+  if (held !== null) return { ok: false, reason: held };
   const seat = await deps.resolveRunSeat({ accountId: who.accountId, role: "executor", workItemId: who.workItemId, ...expectedExecutionMode });
   if (!seat.ok) return { ok: false, reason: seat.reason };
   const prompt = checkFixPrompt({ round: facts.round, argv, exitCode: row.exit_code, timedOut: row.timed_out === true, summary: row.summary ?? "" });

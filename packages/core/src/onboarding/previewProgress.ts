@@ -137,6 +137,8 @@ export function lineFor(kind: string, f: EventFields): string | null {
     if (f.stage === 'deps_installed') return 'Dependencies installed';
     if (f.stage === 'deps_install_failed') return 'Dependencies did not install';
     if (f.stage === 'writing_result') return 'Writing up the result';
+    // FIXROUND-REFRESH-HEAD: a fix round found its pull request's branch ahead of the head the cloud had recorded.
+    if (f.stage === 'branch_moved') return "The pull request's branch had moved; the fix round started from its latest commit.";
     return null;
   }
   if (kind === STATUS_KIND) return f.to === 'running' ? 'The run started' : null;

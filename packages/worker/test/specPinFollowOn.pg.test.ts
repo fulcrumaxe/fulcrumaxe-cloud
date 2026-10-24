@@ -83,7 +83,8 @@ describe("a runner follow-on run keeps its parent's Spec version [pg]", { timeou
       throw new Error("unused");
     },
   });
-  const advanceModule = () => createAdvanceModule(writerPool, { starter, resolveRunSeat, startAdvance: async () => undefined, triage: null, registry, review: reviewDeps() });
+  // FIXROUND-REFRESH-HEAD: the pull request's branch on GitHub is at the head each fix round below is asked for.
+  const advanceModule = () => createAdvanceModule(writerPool, { starter, resolveRunSeat, startAdvance: async () => undefined, triage: null, registry, review: reviewDeps(), fixHeads: { privateHead: async () => "b".repeat(40) } });
 
   function ports(accountId: string, workItemId: string): AdvanceRunPorts {
     const m = advanceModule();

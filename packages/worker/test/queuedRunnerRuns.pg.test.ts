@@ -173,8 +173,9 @@ describe("queued runner runs [pg]", { timeout: 60_000 }, () => {
     await writeRunStatus(writerPool, { accountId: a.accountId, runId: parent, from: "running", to: "succeeded", result: { sessionId: "cc-session-1", envelope: { summary: "built" } }, runnerDone: { prNumber: 41, branch: BRANCH } });
 
     const review = { load: vi.fn(), recordRound: vi.fn(), mergeGate: vi.fn(), resume: resumeAgentRun } as never;
-    const m = advanceOver(registry, async () => undefined, { review });
     const HEAD = "b".repeat(40);
+    // FIXROUND-REFRESH-HEAD: the branch on GitHub is at the head the round is asked for.
+    const m = advanceOver(registry, async () => undefined, { review, fixHeads: { privateHead: async () => HEAD } });
     const out = await m.advanceStartFix({ accountId: a.accountId, userId: a.userId, workItemId, haltEpoch: 0 }, { issue, headSha: HEAD, prompt: "fix the failing test", round: 1, actionId: randomUUID(), reviewer: "code", failingRunId: randomUUID() });
     if (!out.ok) throw new Error(`fix refused: ${out.reason}`);
 

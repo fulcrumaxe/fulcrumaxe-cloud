@@ -9,6 +9,7 @@ import { redactText } from '@fx/runtime/src/redact.js';
 import { setupPauseFor, type SetupHold, type SetupRequest } from '../setup-requests/store.js';
 import { parseAcceptanceScope } from '../specs/acceptanceScope.js';
 import { readPublicChange, type PublicChange } from '../repos/publicChange.js';
+import { PUBLIC_BRANCH_MOVED, PUBLIC_BRANCH_MOVED_SENTENCE, PUBLIC_HEAD_UNAVAILABLE, PUBLIC_HEAD_UNAVAILABLE_SENTENCE } from '../repos/planePushRecord.js';
 import { BACK_TO_DISCUSSION_REF_PREFIX, REQUEST_CHANGES_NOTE_MAX, REQUEST_CHANGES_REF_PREFIX, closeOnGithub, operatorActionsFor, operatorVerdict, readOperatorFacts, type OperatorAction } from './operatorActions.js';
 
 /**
@@ -608,11 +609,11 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
             WHERE e.work_item_id = $1::uuid AND e.kind = 'stopped' AND e.code = ANY($2::text[])
               AND e.created_at > COALESCE((SELECT max(t.created_at) FROM work_item_transitions t WHERE t.work_item_id = $1::uuid AND t.to_stage = 'needs_human'), '-infinity'::timestamptz)
             ORDER BY e.seq DESC LIMIT 1`,
-          [workItemId, ['rebuild_pr_open', 'rebuild_check_unavailable', CHECK_FIX_BRANCH_STOP_CODE]],
+          [workItemId, ['rebuild_pr_open', 'rebuild_check_unavailable', CHECK_FIX_BRANCH_STOP_CODE, PUBLIC_BRANCH_MOVED, PUBLIC_HEAD_UNAVAILABLE]],
         )
       ).rows[0];
       const rebuildSentence = rebuildStop?.code && Object.hasOwn(CHECK_FAILED_SENTENCES, rebuildStop.code) ? CHECK_FAILED_SENTENCES[rebuildStop.code] : undefined;
-      const branchStop = rebuildStop?.code === CHECK_FIX_BRANCH_STOP_CODE;
+      const branchStop = rebuildStop?.code === CHECK_FIX_BRANCH_STOP_CODE || rebuildStop?.code === PUBLIC_BRANCH_MOVED || rebuildStop?.code === PUBLIC_HEAD_UNAVAILABLE;
       // A reviewer that kept ending without a verdict handed the item over: the notice names it and how it ended, never the executor's summary.
       const noVerdict = rebuildSentence || branchStop
         ? undefined
@@ -638,14 +639,14 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       notice = rebuildSentence
         ? { kind: 'check_failed', reason: rebuildSentence }
         : branchStop
-          ? { kind: 'needs_human', reason: CHECK_FIX_BRANCH_SENTENCE }
+          ? { kind: 'needs_human', reason: rebuildStop?.code === PUBLIC_BRANCH_MOVED ? PUBLIC_BRANCH_MOVED_SENTENCE : rebuildStop?.code === PUBLIC_HEAD_UNAVAILABLE ? PUBLIC_HEAD_UNAVAILABLE_SENTENCE : CHECK_FIX_BRANCH_SENTENCE }
           : noVerdictSentence
           ? { kind: 'needs_human', reason: noVerdictSentence }
           : {
             kind: 'needs_human',
             reason: summary ?? (ex ? `The executor run ${ex.status.replace(/_/g, ' ')} without a pull request.` : 'The pipeline stopped and needs a person.'),
           };
-    } else if (item.stage === 'in_progress' || item.stage === 'pr_opened' || item.stage === 'changes_requested') {
+    } else if (item.stage === 'in_progress' || item.stage === 'pr_opened' || item.stage === 'changes_requested' || item.stage === 'review_passed') {
       // "Check the build" could not decide: its newest recorded stop names why, by a fixed code.
       const stop = (
         await client.query<{ code: string | null }>(
@@ -660,10 +661,14 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
         )
       ).rows[0];
       // At a pull-request stage only the review stops speak: a stale "Check the build" stop must not show there.
-      const isReviewStop = stop?.code != null && Object.hasOwn(REVIEW_STOP_COPY_KEY, stop.code);
-      const sentence = isReviewStop
-        ? REVIEW_STOP_COPY_KEY[stop!.code as keyof typeof REVIEW_STOP_COPY_KEY]
-        : stop?.code && item.stage === 'in_progress' && Object.hasOwn(CHECK_FAILED_SENTENCES, stop.code) ? CHECK_FAILED_SENTENCES[stop.code] : undefined;
+      const isReviewStop = stop?.code != null && Object.hasOwn(REVIEW_STOP_COPY_KEY, stop.code) && item.stage !== 'review_passed';
+      // FIXROUND-REFRESH-HEAD: a fix round refused because the paired public branch was changed outside the cloud says so at any pull-request stage.
+      const publicMoved = stop?.code === PUBLIC_BRANCH_MOVED && item.stage !== 'in_progress';
+      const sentence = publicMoved
+        ? PUBLIC_BRANCH_MOVED_SENTENCE
+        : isReviewStop
+          ? REVIEW_STOP_COPY_KEY[stop!.code as keyof typeof REVIEW_STOP_COPY_KEY]
+          : stop?.code && item.stage === 'in_progress' && Object.hasOwn(CHECK_FAILED_SENTENCES, stop.code) ? CHECK_FAILED_SENTENCES[stop.code] : undefined;
       if (sentence) notice = { kind: 'check_failed', reason: sentence };
     }
 
