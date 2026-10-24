@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { IdempotencyKeyTakenError, PREVIEW_WORKDIR, acceptQueuedRunnerRun, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { ITEM_PR_BRANCH } from "@fulcrumaxe/runner-protocol";
+import { DispatchFailedError, IdempotencyKeyTakenError, ExecutionModeChangedError, JobIssueError, PREVIEW_WORKDIR, acceptQueuedRunnerRun, readBoundItemBranch, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { escapeFenceLookalikes } from "@fx/pipeline";
 import { checkFixRound } from "@fx/spend";
+import type { RunStarter } from "./preview.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 
 /**
@@ -16,11 +18,23 @@ import type { SeatRequest, SeatResult } from "./seat.js";
  */
 export const CHECK_ROUNDS_USED = "check_rounds_used";
 
+/**
+ * D#6 FU-CHECK-CROSS-SIDE-BRANCH: the round cannot tell which branch to continue. The failed run worked on the item's own pull request branch
+ * (`fx/issue-<n>`, a cross-side round) but the cloud's record of that binding does not agree with the run's signed job, or the issuer found no
+ * recorded branch to continue. A fixed word the driver turns into Needs human with a sentence of its own, never a generic failure.
+ */
+export const CHECK_FIX_BRANCH_UNKNOWN = "check_fix_branch_unknown";
+
 export interface CheckFixDeps {
   pool: Pool;
   registry: ExecutionTargetRegistry;
   resume: (pool: Pool, registry: ExecutionTargetRegistry, input: StartAgentRunInput) => Promise<{ id: string; status: string }>;
   resolveRunSeat: (request: SeatRequest) => Promise<SeatResult>;
+  /**
+   * Starts a fresh session that carries on from the item's own pull request branch. Needed only when the failed run was itself such a round: a session
+   * is never claimed on that branch, so the round cannot resume the failed run's. Absent, such a round is refused `starter_unavailable`.
+   */
+  starter?: RunStarter | null;
 }
 
 type Started = { ok: true; runId: string } | { ok: false; reason: string };
@@ -45,11 +59,12 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
   if (!UUID.test(who.accountId) || !UUID.test(who.workItemId) || !UUID.test(failedRunId)) return { ok: false, reason: "invalid_input" };
   const key = `advance:${who.workItemId}:checkfix:${failedRunId}`;
   const facts = await withTenant(deps.pool, who.accountId, async (client) => {
-    const run = await client.query<{ repo_id: string | null; argv: unknown; exit_code: number | null; timed_out: boolean | null; summary: string | null; gh_number: string | null; prior: string | null }>(
-      `SELECT w.repo_id, w.gh_number, ar.job_signed #> '{job,check,argv}' AS argv, c.exit_code, c.timed_out, c.summary,
+    const run = await client.query<{ repo_id: string | null; argv: unknown; exit_code: number | null; timed_out: boolean | null; summary: string | null; gh_number: string | null; prior: string | null; continues_branch: string | null; run_mode: string | null; spec_version_id: string | null; gh_owner: string | null; gh_name: string | null }>(
+      `SELECT w.repo_id, w.gh_number, ar.spec_version_id, ar.execution_mode AS run_mode, ar.job_signed #>> '{job,continues,branch}' AS continues_branch, rp.gh_owner, rp.gh_name, ar.job_signed #> '{job,check,argv}' AS argv, c.exit_code, c.timed_out, c.summary,
               (SELECT run_id FROM agent_run_idempotency_keys k WHERE k.account_id = $1 AND k.idempotency_key = $4) AS prior
          FROM agent_runs ar
          JOIN work_items w ON w.account_id = ar.account_id AND w.id = ar.work_item_id
+         LEFT JOIN repos rp ON rp.account_id = w.account_id AND rp.id = w.repo_id
          LEFT JOIN run_checks c ON c.account_id = ar.account_id AND c.run_id = ar.id
         WHERE ar.account_id = $1 AND ar.id = $2 AND ar.work_item_id = $3 AND ar.role = 'executor' AND ar.status = 'failed'
           AND EXISTS (SELECT 1 FROM run_events e WHERE e.account_id = ar.account_id AND e.run_id = ar.id AND e.kind = 'run.status_changed' AND e.payload->>'to' = 'failed' AND e.payload->>'failureReason' = 'check_failed')`,
@@ -77,9 +92,43 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
   const ghNumber = row.gh_number === null ? NaN : Number(row.gh_number);
   if (row.repo_id === null || !Number.isSafeInteger(ghNumber) || ghNumber < 1) return { ok: false, reason: "no_repo" };
   const argv = Array.isArray(row.argv) && row.argv.every((a): a is string => typeof a === "string") ? row.argv : [];
-  const seat = await deps.resolveRunSeat({ accountId: who.accountId, role: "executor", workItemId: who.workItemId });
+  // A failed run that worked on the item's own pull request branch (a cross-side round) recorded no branch of its own: the branch is the one its binding
+  // names. Read only when the run's event, its signed job and the item's issue number all agree (`readBoundItemBranch`); otherwise the round says so, by name.
+  const onItemBranch = typeof row.continues_branch === "string" && ITEM_PR_BRANCH.test(row.continues_branch);
+  const bound = onItemBranch ? await withTenant(deps.pool, who.accountId, (c) => readBoundItemBranch(c, { accountId: who.accountId, runId: failedRunId })) : null;
+  if (onItemBranch && bound === null) return { ok: false, reason: CHECK_FIX_BRANCH_UNKNOWN };
+  // A round on the item's branch is only meaningful on the side the failed run ran on: a sandbox run ignores `continues`. The start is told which side to expect and
+  // refuses (before anything is written) if the item has moved since.
+  const expectedExecutionMode = bound !== null && row.run_mode !== null ? { expectedExecutionMode: row.run_mode } : {};
+  const seat = await deps.resolveRunSeat({ accountId: who.accountId, role: "executor", workItemId: who.workItemId, ...expectedExecutionMode });
   if (!seat.ok) return { ok: false, reason: seat.reason };
+  const prompt = checkFixPrompt({ round: facts.round, argv, exitCode: row.exit_code, timedOut: row.timed_out === true, summary: row.summary ?? "" });
+  const idempotency = { key, requestHash: createHash("sha256").update(`${key}:executor`).digest("hex") };
   try {
+    if (bound !== null) {
+      if (!deps.starter) return { ok: false, reason: "starter_unavailable" };
+      if (!row.gh_owner || !row.gh_name) return { ok: false, reason: "no_repo" };
+      // Same shape as a review fix round that crosses sides: a fresh session on the pull request's branch, the bound pull request named, cloned into the workdir.
+      const fresh = await deps.starter.start({
+        ...seat.seat,
+        accountId: who.accountId,
+        repoId: row.repo_id,
+        workItemId: who.workItemId,
+        role: "executor",
+        product: "team",
+        pr: ghNumber,
+        parentRunId: failedRunId,
+        prompt,
+        ...expectedExecutionMode,
+        ...(row.spec_version_id === null ? {} : { specVersionId: row.spec_version_id }),
+        continues: { branch: bound.branch, prNumber: bound.prNumber },
+        workdir: PREVIEW_WORKDIR,
+        cloneRepo: { owner: row.gh_owner, name: row.gh_name },
+        idempotency,
+      });
+      if (fresh.refused) return { ok: false, reason: fresh.refused };
+      return { ok: true, runId: fresh.runId };
+    }
     const out = await acceptQueuedRunnerRun(
       deps.pool,
       who.accountId,
@@ -92,9 +141,9 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
         product: "team",
         pr: ghNumber,
         parentRunId: failedRunId,
-        prompt: checkFixPrompt({ round: facts.round, argv, exitCode: row.exit_code, timedOut: row.timed_out === true, summary: row.summary ?? "" }),
+        prompt,
         workdir: PREVIEW_WORKDIR,
-        idempotency: { key, requestHash: createHash("sha256").update(`${key}:executor`).digest("hex") },
+        idempotency,
       }),
     );
     return { ok: true, runId: out.id };
@@ -103,6 +152,11 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
       const won = await withTenant(deps.pool, who.accountId, (c) => c.query<{ run_id: string }>("SELECT run_id FROM agent_run_idempotency_keys WHERE account_id = $1 AND idempotency_key = $2", [who.accountId, key]));
       if (won.rows[0]) return { ok: true, runId: won.rows[0].run_id };
     }
+    // The issuer found no branch to continue: the same named reason, not a generic failure. Other refusals keep the generic word.
+    // The item moved to the other side since the failed run: the branch cannot be continued from here, so the same named reason.
+    if (err instanceof ExecutionModeChangedError) return { ok: false, reason: CHECK_FIX_BRANCH_UNKNOWN };
+    const refusal = err instanceof DispatchFailedError ? err.originalError : err;
+    if (refusal instanceof JobIssueError && refusal.code === "continues_without_branch") return { ok: false, reason: CHECK_FIX_BRANCH_UNKNOWN };
     // fx-swallow-ok: only the error's name is logged; its message can carry text from the platform
     console.warn(JSON.stringify({ event: "advance.check_fix_failed", work_item_id: who.workItemId, name: err instanceof Error ? err.name.slice(0, 60) : null }));
     return { ok: false, reason: "resume_failed" };

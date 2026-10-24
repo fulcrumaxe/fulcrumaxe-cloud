@@ -1,12 +1,12 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { ITEM_PR_BRANCH, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
-import { IdempotencyKeyTakenError, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { DispatchFailedError, ExecutionModeChangedError, IdempotencyKeyTakenError, JobIssueError, RUNNER_CONTINUES_BOUND_KIND, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { maxFixRounds } from "@fx/spend";
-import { CHECK_ROUNDS_USED, checkFixPrompt, startCheckFixRound, type CheckFixDeps } from "../src/checkFix.js";
+import { CHECK_FIX_BRANCH_UNKNOWN, CHECK_ROUNDS_USED, checkFixPrompt, startCheckFixRound, type CheckFixDeps } from "../src/checkFix.js";
 
 /**
  * [pg] D#6 R-CHK-3 (C47): the fix round that follows a run whose approved check failed. The ids and names in this file are its own (`chkfix-`): the runs are made here,
@@ -23,14 +23,37 @@ describe("check fix round [pg]", () => {
   const seen = new Set<string>();
   let seat: "ok" | "no_model" = "ok";
   let throwOnResume = false;
+  let throwIssuer: string | null = null;
+  const started: StartAgentRunInput[] = [];
   const never = {} as ExecutionTargetRegistry;
 
   const deps = (): CheckFixDeps => ({
     pool: writerPool,
     registry: never,
+    // A stand-in for the run starter that refuses what the real one and the job issuer refuse for a round on the item's own pull request branch: an executor with a parent run,
+    // a branch that is the item branch of THIS item's issue number (fx/issue-42), a positive pull request number, a clone target, and a key it has not seen.
+    starter: {
+      start: async (input) => {
+        if (input.role !== "executor" || !input.parentRunId || !input.workItemId || !Number.isSafeInteger(input.pr)) throw new Error("the real starter refuses this input");
+        const c = input.continues;
+        const issue = (await admin.query<{ gh_number: string }>("SELECT gh_number FROM work_items WHERE id = $1", [input.workItemId])).rows[0]!.gh_number;
+        // The real start refuses when the item's side is not the one the caller built for (a sandbox run would ignore `continues`).
+        if (input.expectedExecutionMode !== undefined && input.expectedExecutionMode !== (await admin.query<{ execution_mode: string }>("SELECT execution_mode FROM repos WHERE id = $1", [input.repoId])).rows[0]!.execution_mode) throw new ExecutionModeChangedError();
+        if (!c || !ITEM_PR_BRANCH.test(c.branch) || c.branch !== `fx/issue-${issue}` || !Number.isSafeInteger(c.prNumber) || c.prNumber! < 1) throw new Error("the real issuer refuses this continuation");
+        if (!input.cloneRepo || !input.workdir) throw new Error("a fresh session needs a clone target");
+        if (seen.has(input.idempotency!.key)) throw new IdempotencyKeyTakenError();
+        seen.add(input.idempotency!.key);
+        started.push(input);
+        const id = randomUUID();
+        await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id, parent_run_id) VALUES ($1, $2, $3, 'executor', 'runner', 'pending', 'runner_local', $4, $5)`, [id, A.accountId, A.workItemId, A.repoId, input.parentRunId]);
+        await admin.query("INSERT INTO agent_run_idempotency_keys (account_id, idempotency_key, run_id, request_hash) VALUES ($1, $2, $3, $4)", [A.accountId, input.idempotency!.key, id, input.idempotency!.requestHash]);
+        return { runId: id };
+      },
+    },
     resolveRunSeat: async () => (seat === "ok" ? ({ ok: true, seat: { repoId: A.repoId, product: "team", limits: {}, timeoutMs: 1, maxExtensions: 0 } } as never) : { ok: false, reason: "no_model" }),
     resume: async (_pool, _registry, input) => {
       if (throwOnResume) throw new Error("boom with a secret ghp_000");
+      if (throwIssuer !== null) throw new DispatchFailedError(randomUUID(), new JobIssueError(throwIssuer as never), "internal_error");
       if (input.role !== "executor" || !input.parentRunId || !input.workItemId || !Number.isSafeInteger(input.pr) || input.prompt === "" || input.prompt.length > 120_000) throw new Error("the real resume refuses this input");
       if (seen.has(input.idempotency!.key)) throw new IdempotencyKeyTakenError();
       seen.add(input.idempotency!.key);
@@ -53,6 +76,8 @@ describe("check fix round [pg]", () => {
   });
   beforeEach(async () => {
     resumed.length = 0;
+    started.length = 0;
+    throwIssuer = null;
     seen.clear();
     seat = "ok";
     throwOnResume = false;
@@ -64,11 +89,11 @@ describe("check fix round [pg]", () => {
   });
 
   /** A finished executor run: `reason` is its failure reason (null: succeeded). `parent` makes it a fix round of that run. */
-  async function ended(o: { reason: string | null; parent?: string | null; summary?: string; exit?: number | null; timedOut?: boolean; check?: boolean }): Promise<string> {
+  async function ended(o: { reason: string | null; parent?: string | null; summary?: string; exit?: number | null; timedOut?: boolean; check?: boolean; onItemBranch?: { pr: number; bound: boolean } }): Promise<string> {
     const id = randomUUID();
     const job: Job = {
       schema_version: 1, job_id: randomUUID(), run_id: id, repo: { id: A.repoId, owner: "acme", name: "widgets", private: true }, role: "executor", mode: "local", spec: null,
-      task: { kind: "implement", prompt: "p", prompt_sha256: sha256Text("p") }, role_card: { text: "c", sha256: sha256Text("c") }, role_tools_sha256: "a".repeat(64), continues: null,
+      task: { kind: "implement", prompt: "p", prompt_sha256: sha256Text("p") }, role_card: { text: "c", sha256: sha256Text("c") }, role_tools_sha256: "a".repeat(64), continues: o.onItemBranch ? { parent_run_id: randomUUID(), session_id: null, branch: "fx/issue-42", pr_number: o.onItemBranch.pr } : null,
       branch_prefix: "fx/", model_hint: null, issued_at: "2026-10-10T12:00:00.000Z", expires_at: "2026-10-13T12:00:00.000Z", key_id: "k1",
       check: { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 },
     };
@@ -78,6 +103,8 @@ describe("check fix round [pg]", () => {
       [id, A.accountId, A.workItemId, o.reason === null ? "succeeded" : "failed", A.repoId, o.parent ?? null, JSON.stringify(signJob(job, signing)), `sess-${id.slice(0, 8)}`],
     );
     await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.status_changed', $3::jsonb)", [A.accountId, id, JSON.stringify({ from: "running", to: o.reason === null ? "succeeded" : "failed", ...(o.reason ? { failureReason: o.reason } : {}) })]);
+    // The cloud's own record of the binding, written by the job issuer when it signed the job.
+    if (o.onItemBranch?.bound) await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 2, $3, $4::jsonb)", [A.accountId, id, RUNNER_CONTINUES_BOUND_KIND, JSON.stringify({ branch: "fx/issue-42", pr_number: o.onItemBranch.pr })]);
     if (o.check !== false && o.reason === "check_failed") {
       await admin.query("INSERT INTO run_checks (account_id, run_id, exit_code, duration_ms, timed_out, summary) VALUES ($1, $2, $3, 60000, $4, $5)", [A.accountId, id, o.exit === undefined ? 1 : o.exit, o.timedOut ?? false, o.summary ?? "FAIL src/a.test.ts"]);
     }
@@ -171,5 +198,73 @@ describe("check fix round [pg]", () => {
     await admin.query("UPDATE work_items SET gh_number = NULL WHERE id = $1", [A.workItemId]);
     expect(await startCheckFixRound(deps(), who(), failed)).toEqual({ ok: false, reason: "no_repo" });
     expect(resumed).toHaveLength(0);
+  });
+
+  it("a check failure on a round that continued the item's pull request branch is fixed on that same branch: the branch and pull request come from the run's binding, as a fresh session", async () => {
+    const failed = await ended({ reason: "check_failed", onItemBranch: { pr: 7, bound: true } });
+    const out = await startCheckFixRound(deps(), who(), failed);
+    expect(out.ok).toBe(true);
+    // Not resumed (a session is never claimed on the item's branch): started fresh, continuing the bound branch and pull request.
+    expect(resumed).toHaveLength(0);
+    expect(started).toHaveLength(1);
+    expect(started[0]).toMatchObject({ expectedExecutionMode: "runner_local", role: "executor", workItemId: A.workItemId, parentRunId: failed, pr: 42, continues: { branch: "fx/issue-42", prNumber: 7 }, cloneRepo: { owner: "acme", name: "widgets" } });
+    expect(started[0]!.prompt).toContain("Check command: bash scripts/check.sh");
+    const row = await admin.query("SELECT parent_run_id, status FROM agent_runs WHERE id = $1", [(out as { runId: string }).runId]);
+    expect(row.rows[0]).toEqual({ parent_run_id: failed, status: "pending" });
+    // A replay finds the run it started.
+    expect(await startCheckFixRound(deps(), who(), failed)).toEqual(out);
+    expect(started).toHaveLength(1);
+  });
+
+  it("a second failure on that branch counts as the next round of the same chain, and the round limit still applies", async () => {
+    const limit = maxFixRounds();
+    const chain = async (length: number): Promise<string> => {
+      let tail = await ended({ reason: "check_failed", onItemBranch: { pr: 7, bound: true } });
+      for (let n = 2; n <= length; n++) tail = await ended({ reason: "check_failed", parent: tail, onItemBranch: { pr: 7, bound: true } });
+      return tail;
+    };
+    expect((await startCheckFixRound(deps(), who(), await chain(limit))).ok).toBe(true);
+    expect(started[0]!.prompt).toContain(`fix round ${limit}`);
+    expect(await startCheckFixRound(deps(), who(), await chain(limit + 1))).toEqual({ ok: false, reason: CHECK_ROUNDS_USED });
+    expect(started).toHaveLength(1);
+  });
+
+  it("when the branch cannot be determined it is refused by name and nothing is started: no binding event, a binding for another pull request, a changed issue number, or no starter", async () => {
+    // The signed job names the item branch, but the cloud has no record that this run was bound to it.
+    const unbound = await ended({ reason: "check_failed", onItemBranch: { pr: 7, bound: false } });
+    expect(await startCheckFixRound(deps(), who(), unbound)).toEqual({ ok: false, reason: CHECK_FIX_BRANCH_UNKNOWN });
+    // A record for a different pull request number than the signed job names does not count either.
+    const mismatch = await ended({ reason: "check_failed", onItemBranch: { pr: 7, bound: true } });
+    await admin.query("UPDATE run_events SET payload = jsonb_set(payload, '{pr_number}', '8') WHERE run_id = $1 AND kind = $2", [mismatch, RUNNER_CONTINUES_BOUND_KIND]);
+    expect(await startCheckFixRound(deps(), who(), mismatch)).toEqual({ ok: false, reason: CHECK_FIX_BRANCH_UNKNOWN });
+    // The item's issue number changed since: the branch is no longer this item's.
+    const stale = await ended({ reason: "check_failed", onItemBranch: { pr: 7, bound: true } });
+    await admin.query("UPDATE work_items SET gh_number = 43 WHERE id = $1", [A.workItemId]);
+    expect(await startCheckFixRound(deps(), who(), stale)).toEqual({ ok: false, reason: CHECK_FIX_BRANCH_UNKNOWN });
+    await admin.query("UPDATE work_items SET gh_number = 42 WHERE id = $1", [A.workItemId]);
+    expect(started).toHaveLength(0);
+    expect(resumed).toHaveLength(0);
+    const noStarter = { ...deps(), starter: null };
+    const fine = await ended({ reason: "check_failed", onItemBranch: { pr: 9, bound: true } });
+    expect(await startCheckFixRound(noStarter, who(), fine)).toEqual({ ok: false, reason: "starter_unavailable" });
+  });
+
+  it("if the item has moved to the sandbox since the failed run, a round on the item's branch starts nothing and is refused by name", async () => {
+    const failed = await ended({ reason: "check_failed", onItemBranch: { pr: 7, bound: true } });
+    await admin.query("UPDATE agent_runs SET execution_mode = 'runner_local' WHERE id = $1", [failed]);
+    await admin.query("UPDATE repos SET execution_mode = 'sandbox' WHERE id = $1", [A.repoId]);
+    expect(await startCheckFixRound(deps(), who(), failed)).toEqual({ ok: false, reason: CHECK_FIX_BRANCH_UNKNOWN });
+    expect(started).toHaveLength(0);
+    expect(resumed).toHaveLength(0);
+    const rows = await admin.query("SELECT count(*)::int AS n FROM agent_runs WHERE account_id = $1 AND parent_run_id = $2", [A.accountId, failed]);
+    expect(rows.rows[0].n).toBe(0);
+  });
+
+  it("a plain round whose issuer finds no recorded branch to continue gets the same name instead of the generic resume failure; any other issuer refusal stays generic", async () => {
+    const failed = await ended({ reason: "check_failed" });
+    throwIssuer = "continues_without_branch";
+    expect(await startCheckFixRound(deps(), who(), failed)).toEqual({ ok: false, reason: CHECK_FIX_BRANCH_UNKNOWN });
+    throwIssuer = "continues_base_unavailable";
+    expect(await startCheckFixRound(deps(), who(), failed)).toEqual({ ok: false, reason: "resume_failed" });
   });
 });

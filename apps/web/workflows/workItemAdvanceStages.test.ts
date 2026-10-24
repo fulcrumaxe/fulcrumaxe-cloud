@@ -415,6 +415,16 @@ describe("the build for an item at Spec ready", () => {
       expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-b", "run_failed");
     });
 
+    it("a fix round that cannot tell which branch to continue ends in Needs human under its own code, with the stopped fact, not as a generic failed run", async () => {
+      const w = setup({ item: AT_SPEC, buildOutcomes: [checkFailed("run-b")], checkFix: [{ ok: false, reason: "check_fix_branch_unknown" }] });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_check_fix_branch_unknown" });
+      expect(w.advanceStartCheckFix).toHaveBeenCalledTimes(1);
+      expect(w.advanceBuildFailed).toHaveBeenCalledTimes(1);
+      expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-b", "check_fix_branch_unknown");
+      expect(w.advanceRecordEvent).toHaveBeenCalledWith(WHO, { kind: "stopped", dedupeKey: "build:run-b", code: "build_check_fix_branch_unknown", runId: "run-b" });
+      expect(logs.at(-1)).toMatchObject({ event: "advance.failed", at: "check_fix", reason: "check_fix_branch_unknown" });
+    });
+
     it("a run that failed another way gets no check fix round", async () => {
       const w = setup({ item: AT_SPEC, buildOutcomes: [{ status: "failed", done: true, envelope: null, runtime: "runner", tailRunId: "run-b", failureReason: "no_commit" }] });
       expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_failed" });
