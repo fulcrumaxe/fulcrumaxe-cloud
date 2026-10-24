@@ -150,6 +150,127 @@ describe("binding a runner to a repo that is not private [pg]", () => {
       expect(p.reads).toEqual([added]);
     });
 
+    describe.each([
+      ["honours the abort signal like the real client (rejects)", true],
+      ["ignores the abort signal (never settles)", false],
+    ] as const)("a visibility read that hangs and %s", (_label, honoursAbort) => {
+      /** A read that never answers on its own; with `honoursAbort` it rejects when its signal fires, as a real fetch does. */
+      const hanging = (seenSignals: AbortSignal[]): NonNullable<RunnerCloudDeps["repoVisibility"]> => (_accountId, _repoId, signal) =>
+        new Promise((_resolve, reject) => {
+          if (signal) seenSignals.push(signal);
+          if (honoursAbort) signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        });
+
+      it("fails closed within the timeout, and releases the connection and the lock", async () => {
+        const f = await fresh();
+        const [held, added] = [await newRepo(f), await newRepo(f)];
+        const id = await insertRunner(h.admin, f.accountId, f.m1);
+        await h.admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[] WHERE id = $1", [id, [held]]);
+        const signals: AbortSignal[] = [];
+        const deps = h.deps({ repoVisibility: hanging(signals), repoVisibilityTimeoutMs: 150 });
+        const started = Date.now();
+        const res = await set(deps, f, f.o1, id, [held, added]);
+        expect(Date.now() - started).toBeLessThan(3000);
+        expect(res.status).toBe(409);
+        expect(code(res)).toBe("repo_visibility_unknown");
+        expect(await repoIds(id)).toEqual([held]);
+        expect(signals).toHaveLength(1);
+        expect(signals[0]?.aborted).toBe(true);
+
+        // The transaction ended: every pooled connection is back, nobody waits, and the runner's advisory lock is free for the next writer.
+        const pool = deps.appUserPool;
+        expect(pool.waitingCount).toBe(0);
+        expect(pool.idleCount).toBe(pool.totalCount);
+        const p = port();
+        expect(await set(h.deps({ repoVisibility: p.repoVisibility }), f, f.o1, id, [held, added])).toMatchObject({ status: 200 });
+        expect(p.reads).toEqual([added]);
+      });
+
+      it("a normal read inside the timeout still passes", async () => {
+        const f = await fresh();
+        const added = await newRepo(f);
+        const id = await insertRunner(h.admin, f.accountId, f.m1);
+        const p = port();
+        expect(await set(h.deps({ repoVisibility: p.repoVisibility, repoVisibilityTimeoutMs: 5000 }), f, f.o1, id, [added])).toMatchObject({ status: 200 });
+        expect(await repoIds(id)).toEqual([added]);
+      });
+    });
+
+    it("many repos each answering just under the per-read deadline: refused within the total budget, pool idle, no reads while a transaction is open", async () => {
+      const f = await fresh();
+      const added: string[] = [];
+      for (let i = 0; i < 40; i++) added.push(await newRepo(f));
+      const id = await insertRunner(h.admin, f.accountId, f.m1);
+      const slow: NonNullable<RunnerCloudDeps["repoVisibility"]> = () => new Promise((resolve) => setTimeout(() => resolve("private"), 100));
+      const deps = h.deps({ repoVisibility: slow, repoVisibilityTimeoutMs: 150, repoVisibilityTotalTimeoutMs: 400 });
+      const started = Date.now();
+      const res = await set(deps, f, f.o1, id, added);
+      // Sequential would take 40 x 100 ms; eight at a time under a 400 ms budget leaves most unread (unknown).
+      expect(Date.now() - started).toBeLessThan(1500);
+      expect(res.status).toBe(409);
+      expect(code(res)).toBe("repo_visibility_unknown");
+      expect(await repoIds(id)).toEqual([]);
+      const pool = deps.appUserPool;
+      expect(pool.waitingCount).toBe(0);
+      expect(pool.idleCount).toBe(pool.totalCount);
+    });
+
+    it("no visibility read runs while a transaction is open, and a normal multi-repo request passes", async () => {
+      const f = await fresh();
+      const added: string[] = [];
+      for (let i = 0; i < 12; i++) added.push(await newRepo(f));
+      const id = await insertRunner(h.admin, f.accountId, f.m1);
+      const deps = h.deps();
+      let inFlight = 0;
+      let maxInFlight = 0;
+      let openDuringRead = 0;
+      deps.repoVisibility = async () => {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        // Any open transaction of the app pool shows as a checked-out client.
+        if (deps.appUserPool.totalCount - deps.appUserPool.idleCount > 0) openDuringRead++;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        inFlight--;
+        return "private";
+      };
+      expect(await set(deps, f, f.o1, id, added)).toMatchObject({ status: 200 });
+      expect([...(await repoIds(id))].sort()).toEqual([...added].sort());
+      expect(openDuringRead).toBe(0);
+      expect(maxInFlight).toBeLessThanOrEqual(8);
+      expect(maxInFlight).toBeGreaterThan(1);
+    });
+
+    it("a repo added to the set between the pre-read and the lock (not pre-read) is refused", async () => {
+      const f = await fresh();
+      const [held, late] = [await newRepo(f), await newRepo(f)];
+      const id = await insertRunner(h.admin, f.accountId, f.m1);
+      await h.admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[] WHERE id = $1", [id, [held, late]]);
+      // The request is [held, late]: both are held at pre-read time, so nothing is read. Then another writer removes `late` before the lock,
+      // so under the lock `late` would be an add that was never read: refused. (This is the remove + re-add race, with no read in the transaction.)
+      const deps = h.deps();
+      let reads = 0;
+      deps.repoVisibility = async () => {
+        reads++;
+        return "private";
+      };
+      let armed = true;
+      const origConnect = deps.appUserPool.connect.bind(deps.appUserPool) as (...a: unknown[]) => Promise<unknown>;
+      let connects = 0;
+      (deps.appUserPool as unknown as { connect: unknown }).connect = async (...a: unknown[]) => {
+        // The second connection is the binding transaction: narrow the set just before it starts.
+        if (++connects === 2 && armed) {
+          armed = false;
+          await h.admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[] WHERE id = $1", [id, [held]]);
+        }
+        return origConnect(...a);
+      };
+      const res = await set(deps, f, f.o1, id, [held, late]);
+      expect(res.status).toBe(409);
+      expect(code(res)).toBe("repo_visibility_unknown");
+      expect(reads).toBe(0);
+      expect(await repoIds(id)).toEqual([held]);
+    });
+
     it("a repo that was private when it was added and is public now cannot be added back after it was taken off", async () => {
       const f = await fresh();
       const repo = await newRepo(f);
@@ -163,38 +284,6 @@ describe("binding a runner to a repo that is not private [pg]", () => {
       expect(res.status).toBe(409);
       expect(code(res)).toBe("public_repo");
       expect(await repoIds(id)).toEqual([]);
-    });
-
-    it("a concurrent remove + re-add cannot re-bind a repo that turned public: the held set is read under the lock, so the re-add reads visibility again (CWE-367)", async () => {
-      const f = await fresh();
-      const [repo, other] = [await newRepo(f), await newRepo(f)];
-      const id = await insertRunner(h.admin, f.accountId, f.m1);
-      await h.admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[] WHERE id = $1", [id, [repo]]);
-
-      // Call A swaps repo for other. Its read of `other` is held open, so A holds the runner's lock while B starts.
-      let release!: () => void;
-      const gate = new Promise<void>((resolve) => (release = resolve));
-      let entered!: () => void;
-      const inGate = new Promise<void>((resolve) => (entered = resolve));
-      const gated: NonNullable<RunnerCloudDeps["repoVisibility"]> = async () => {
-        entered();
-        await gate;
-        return "private";
-      };
-      const a = set(h.deps({ repoVisibility: gated }), f, f.o1, id, [other]);
-      await inGate;
-      // Call B re-adds `repo`, which is public now. It started while A still listed `repo` as held.
-      const p = port({ [repo]: "public" });
-      const b = set(h.deps({ repoVisibility: p.repoVisibility }), f, f.o1, id, [repo]);
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      release();
-      const [ra, rb] = await Promise.all([a, b]);
-
-      expect(ra.status).toBe(200);
-      expect(rb.status).toBe(409);
-      expect(code(rb)).toBe("public_repo");
-      expect(p.reads).toEqual([repo]);
-      expect(await repoIds(id)).toEqual([other]);
     });
 
     it("another account's runner is the definer's 404, and GitHub is never asked", async () => {
