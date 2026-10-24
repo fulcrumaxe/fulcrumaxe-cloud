@@ -23,6 +23,14 @@ import { effectiveModeSql, isRunnerMode, readRecordedRunnerPullRequest, readSand
  * read-only installation client (`metadata: read`, `pull_requests: read`, GET only) the caller opens. Any open pull request on that branch means the item
  * is still in review and nothing changes; otherwise the newest one decides: `merged_at` set is merged, else closed unmerged.
  *
+ * Two-plane repositories. When the item's repository is paired with a public code repository and the platform recorded the public pull request it opened
+ * (`plane_pushes`: the paired repository, the public branch `fx/p-<id>`, the pull request number), THAT is the pull request in force and it is read where it lives:
+ * the paired repository, by the recorded number AND branch. The runner's own record names a private pull request (the run branch's), which can stay open for ever
+ * after the public one was closed or merged; reading it kept the slot held (the first live case). A paired item whose public pull request is not recorded yet
+ * reads nothing (`no_pull_request`), and a pull request of the same number on the private repository is never looked at: the list call is made on the paired
+ * repository only, the head repository must be that repository, and the number must be the recorded one. The pairing is read as it is now (a cleared pairing
+ * returns the item to the single-repository path). The read-only client is opened for the item's own repository (its installation), scoped to the paired one.
+ *
  * Only the pull request in force. The deciding pull request must have closed or merged AFTER the item entered its current pull-request stage (the latest
  * move into a pull-request stage from a stage outside them), so an older closed pull request on the item's branch cannot close an item whose current
  * pull request (one linked another way, on another branch) is still open. The locked re-read checks the same branch, number and entry time still hold.
@@ -53,6 +61,8 @@ export type PrStateOpen = (executionMode: string, target: { repoId: string; owne
 
 export type PrState = { ok: true; state: "open" } | { ok: true; state: "merged" | "closed_unmerged"; number: number; at: Date } | { ok: false; reason: "github_unavailable" | "malformed" | "no_pull_request" };
 
+/** The public branch the platform pushes for a paired item: `fx/p-<plane_pushes.id>` (the column is generated from the row id). */
+const PLANE_PUSH_BRANCH = /^fx\/p-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
 type Json = Record<string, unknown>;
@@ -64,7 +74,7 @@ const isTime = (v: unknown): v is string => typeof v === "string" && !Number.isN
  * number, a state word and two times. A title or body is never read.
  */
 export async function readPullRequestState(http: PrStateHttp, repo: { owner: string; name: string }, target: { branch: string; number: number | null }): Promise<PrState> {
-  if (!OWNER_RE.test(repo.owner) || !NAME_RE.test(repo.name) || !(ITEM_PR_BRANCH.test(target.branch) || RUNNER_RUN_BRANCH.test(target.branch))) return { ok: false, reason: "malformed" };
+  if (!OWNER_RE.test(repo.owner) || !NAME_RE.test(repo.name) || !(ITEM_PR_BRANCH.test(target.branch) || RUNNER_RUN_BRANCH.test(target.branch) || PLANE_PUSH_BRANCH.test(target.branch))) return { ok: false, reason: "malformed" };
   const res = await http.request({ method: "GET", path: `/repos/${repo.owner}/${repo.name}/pulls`, query: { state: "all", head: `${repo.owner}:${target.branch}`, per_page: 30 } });
   if (res.status !== 200) return { ok: false, reason: "github_unavailable" };
   if (!Array.isArray(res.body)) return { ok: false, reason: "malformed" };
@@ -93,7 +103,9 @@ export async function readPullRequestState(http: PrStateHttp, repo: { owner: str
 export type ReconcileOutcome = "merged" | "closed_unmerged" | "open" | "not_held" | "older_pull_request" | "no_pull_request" | "recently_checked" | "github_unavailable" | "malformed";
 
 interface Holder {
+  /** The item's own repository (its installation opens the client). */
   repoId: string;
+  /** The repository the pull request lives in: the item's own, or the paired public one. */
   owner: string;
   name: string;
   /** The side that built the pull request (the newest executor run's mode, else the item's effective mode). */
@@ -116,9 +128,28 @@ async function resolveHolder(client: PoolClient, accountId: string, workItemId: 
   if (!row || !PR_STAGES.includes(row.stage) || row.repo_id === null) return "not_held";
   if (!row.gh_owner || !row.gh_name) return "no_pull_request";
   const prMode = row.newest_mode ?? row.execution_mode ?? "sandbox";
-  const recorded = isRunnerMode(prMode) ? await readRecordedRunnerPullRequest(client, { accountId, workItemId }) : await readSandboxBoundPullRequest(client, { accountId, workItemId });
-  const issue = row.gh_number === null ? null : Number(row.gh_number);
-  const target = recorded !== null ? { branch: recorded.branch, number: recorded.number } : !isRunnerMode(prMode) && issue !== null && Number.isSafeInteger(issue) && issue > 0 ? { branch: `fx/issue-${issue}`, number: null } : null;
+  // A paired repository's pull request is the public one the platform recorded, read on the paired repository (see the header).
+  const plane = await client.query<{ code_repo: string; branch: string; pr_number: number | null }>(
+    `SELECT p.code_repo, p.branch, p.pr_number
+       FROM plane_pushes p JOIN repo_pairing rp ON rp.account_id = p.account_id AND rp.repo_id = p.repo_id AND lower(rp.code_repo) = lower(p.code_repo)
+      WHERE p.account_id = $1 AND p.work_item_id = $2 AND p.repo_id = $3 ORDER BY p.created_at DESC, p.id DESC LIMIT 1`,
+    [accountId, workItemId, row.repo_id],
+  );
+  const paired = plane.rows[0];
+  let owner = row.gh_owner;
+  let name = row.gh_name;
+  let target: { branch: string; number: number | null } | null;
+  if (paired) {
+    const [o, n, extra] = paired.code_repo.split("/");
+    if (paired.pr_number === null || !o || !n || extra !== undefined) return "no_pull_request";
+    owner = o;
+    name = n;
+    target = { branch: paired.branch, number: paired.pr_number };
+  } else {
+    const recorded = isRunnerMode(prMode) ? await readRecordedRunnerPullRequest(client, { accountId, workItemId }) : await readSandboxBoundPullRequest(client, { accountId, workItemId });
+    const issue = row.gh_number === null ? null : Number(row.gh_number);
+    target = recorded !== null ? { branch: recorded.branch, number: recorded.number } : !isRunnerMode(prMode) && issue !== null && Number.isSafeInteger(issue) && issue > 0 ? { branch: `fx/issue-${issue}`, number: null } : null;
+  }
   if (target === null) return "no_pull_request";
   // The latest move into a pull-request stage from outside them. No such move: the entry time is unknown, so no closed pull request can be shown to be the one in force.
   const entry = await client.query<{ at: Date | null }>(
@@ -128,7 +159,7 @@ async function resolveHolder(client: PoolClient, accountId: string, workItemId: 
   );
   const enteredAt = entry.rows[0]?.at ?? null;
   if (enteredAt === null) return "no_pull_request";
-  return { repoId: row.repo_id, owner: row.gh_owner, name: row.gh_name, prMode, target, enteredAt };
+  return { repoId: row.repo_id, owner, name, prMode, target, enteredAt };
 }
 
 /** The item's pull request target, read under its tenant, and the claim on this window's read. */
@@ -169,7 +200,7 @@ export async function reconcileHolder(pool: Pool, open: PrStateOpen, accountId: 
     // same entry into the pull-request stage, which the deciding pull request closed after.
     const now = await resolveHolder(client, accountId, workItemId, true);
     if (typeof now === "string") return now;
-    const same = now.target.branch === holder.target.branch && now.target.number === holder.target.number && (now.target.number === null || now.target.number === decidingNumber) && now.enteredAt.getTime() === holder.enteredAt.getTime();
+    const same = now.owner.toLowerCase() === holder.owner.toLowerCase() && now.name.toLowerCase() === holder.name.toLowerCase() && now.target.branch === holder.target.branch && now.target.number === holder.target.number && (now.target.number === null || now.target.number === decidingNumber) && now.enteredAt.getTime() === holder.enteredAt.getTime();
     if (!same) return "not_held";
     try {
       await recordStage(client, { workItemId, toStage, at, source: "webhook", sourceRef });
