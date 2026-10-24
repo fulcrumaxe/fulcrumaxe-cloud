@@ -47,6 +47,7 @@ function setup(panel: AdvanceStepResult[], spec: AdvanceStepResult[]) {
     advancePanel: vi.fn(async (): Promise<AdvanceStepResult> => (panelSeq.length > 1 ? panelSeq.shift()! : panelSeq[0]!)),
     advanceSpec: vi.fn(async (): Promise<AdvanceStepResult> => (specSeq.length > 1 ? specSeq.shift()! : specSeq[0]!)),
     advanceCancel: vi.fn(async () => undefined),
+    advanceCancelStepRuns: vi.fn(async () => undefined),
     advanceRecordEvent: vi.fn(async () => ({ recorded: true })),
   };
   setWorkerWiringForTests({ provider: () => ({}) as never, createWorker: async () => worker as unknown as Worker });

@@ -173,12 +173,15 @@ export interface ClassifyOutcome {
   category: string | null;
   /** The run is `pending` on a runner (a queued runner run): the workflow credits that wait to the pending ceiling, not to the work budget. */
   queuedOnRunner: boolean;
+  /** The end of the follow-up chain that starts at the run asked about (D#6 R2b-3): the id to cancel when the wait runs out. The id asked about when the run is gone. */
+  /** Optional: an outcome recorded by a workflow that started before this field existed has none, and the caller falls back to the run it started. */
+  tailRunId?: string;
 }
 
 export async function runOutcomeBody(worker: AdvanceWorker | null, accountId: string, runId: string): Promise<ClassifyOutcome> {
-  if (!worker) return { status: "missing", done: true, category: null, queuedOnRunner: false };
+  if (!worker) return { status: "missing", done: true, category: null, queuedOnRunner: false, tailRunId: runId };
   const out: AdvanceRunOutcome = await worker.advanceRunOutcome(accountId, runId);
-  return { status: out.status, done: out.done, category: categoryOf(out.envelope), queuedOnRunner: isQueuedOnRunner(out) };
+  return { status: out.status, done: out.done, category: categoryOf(out.envelope), queuedOnRunner: isQueuedOnRunner(out), tailRunId: out.tailRunId ?? runId };
 }
 
 export interface TriageStepInput {

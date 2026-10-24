@@ -65,6 +65,16 @@ describe("createFollowedRunner", () => {
     expect(q.cancel).toHaveBeenCalledWith("run-1");
   });
 
+  it("D#6 WAITCANCEL: a run that was lost and followed is stopped at its follow-up, the run still live, not at the head", async () => {
+    const c = new AbortController();
+    const p = ports([{ ...running, tailRunId: "run-1" }, { ...running, tailRunId: "run-child" }]);
+    const pending = createFollowedRunner(p, { pollMs: 5 }).panel.runSeat(seat, c.signal);
+    setTimeout(() => c.abort(), 30);
+    await expect(pending).rejects.toBeInstanceOf(PanelSeatAbortedError);
+    expect(p.cancel).toHaveBeenCalledTimes(1);
+    expect(p.cancel).toHaveBeenCalledWith("run-child");
+  });
+
   it("an abort at once after the start still cancels the run it just made", async () => {
     const c = new AbortController();
     const p = ports([running], {

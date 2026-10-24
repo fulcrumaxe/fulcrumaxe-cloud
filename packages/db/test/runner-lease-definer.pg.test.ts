@@ -21,6 +21,8 @@ const DEFINERS: Record<string, string[]> = {
   'agent_run_list_running_runner_runs(integer,bigint)': ['agent_run_writer'],
   'agent_run_list_jobless_runner_runs(integer)': ['agent_run_writer'],
   'runner_follow_up_run(uuid)': ['agent_run_writer'],
+  // 0907 (D#6 WAITCANCEL): has the item finished or given up on the run? One boolean.
+  'runner_follow_up_item_finished(uuid)': ['agent_run_writer'],
   'runner_claim_throttle(integer)': ['app_user'],
 };
 
@@ -36,6 +38,9 @@ const EXPECTED_PRIVILEGES = [
   'column runner_claim_stamps.last_claim_at UPDATE',
   ...['account_id', 'run_id', 'seq', 'kind', 'payload'].map((c) => `column run_events.${c} SELECT`),
   'column accounts.id SELECT', 'column accounts.deleted_at SELECT',
+  // 0907: the stage of the parent run's item and the time of its move to Needs a person, read by runner_follow_up_item_finished and nothing else.
+  ...['id', 'account_id', 'stage'].map((c) => `column work_items.${c} SELECT`),
+  ...['account_id', 'work_item_id', 'to_stage', 'created_at'].map((c) => `column work_item_transitions.${c} SELECT`),
   'schema public USAGE',
 ].sort();
 
@@ -67,7 +72,7 @@ describe(`migration 0754: ${ROLE}, the lease guard and the row policies (D#6 R2b
   }
 
   describe('the role', () => {
-    it('is NOLOGIN and unprivileged, has no member and is a member of nothing, and owns exactly its six functions', async () => {
+    it('is NOLOGIN and unprivileged, has no member and is a member of nothing, and owns exactly its seven functions', async () => {
       const { rows } = await admin.query(
         `SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls, rolinherit FROM pg_roles WHERE rolname = $1`,
         [ROLE],
@@ -112,6 +117,8 @@ describe(`migration 0754: ${ROLE}, the lease guard and the row policies (D#6 R2b
         'runner_claim_stamps UPDATE',
         'runners SELECT',
         'runners UPDATE',
+        'work_item_transitions SELECT',
+        'work_items SELECT',
       ]);
       const policies = await admin.query<{ roles: string[] }>(`SELECT roles::text[] AS roles FROM pg_policies WHERE schemaname = 'public' AND policyname LIKE 'runner_lease_definer%'`);
       for (const p of policies.rows) expect(p.roles).toEqual([ROLE]);
@@ -327,7 +334,7 @@ describe('migration 0754 gives platform_ops nothing', () => {
     // 0767 grants a role SELECT on agent_runs.claimable_after, a column 0754 adds, so it joins the second run too (it gives platform_ops nothing).
     // 0775 and 0805 replace agent_run_runner_claim and grant runner_lease_definer columns, so they need 0754's role and function first.
     // 0798 grants app_user a read of 0754's runner_claim_stamps (the routing hold reads the preferred runners' last poll), so it needs the table first.
-    const NEEDS_0754 = ['0762_sandbox_reap_settings.sql', '0767_runner_plan_consent.sql', '0771_runner_verified_repo_mode.sql', '0774_runner_verified_approvals.sql', '0775_runner_run_model.sql', '0798_runner_routing.sql', '0805_runner_job_min_protocol.sql'];
+    const NEEDS_0754 = ['0762_sandbox_reap_settings.sql', '0767_runner_plan_consent.sql', '0771_runner_verified_repo_mode.sql', '0774_runner_verified_approvals.sql', '0775_runner_run_model.sql', '0798_runner_routing.sql', '0805_runner_job_min_protocol.sql', '0907_follow_up_item_finished.sql'];
     for (const f of readdirSync(DEFAULT_MIGRATIONS_DIR).filter((name) => name.endsWith('.sql') && name !== MIGRATION && !NEEDS_0754.includes(name))) {
       copyFileSync(path.join(DEFAULT_MIGRATIONS_DIR, f), path.join(beforeDir, f));
     }

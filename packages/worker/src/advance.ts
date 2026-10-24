@@ -653,6 +653,11 @@ export interface AdvanceFacade {
   advanceRecordEvent(who: AdvanceStepWho, event: Omit<DriverEventInput, "workItemId">): Promise<{ recorded: boolean }>;
   /** D#483 P3: stops a live run of this item through the runner's own cancel, as the approver. */
   advanceCancel(who: AdvanceStepWho, runId: string): Promise<void>;
+  /**
+   * D#6 WAITCANCEL: stops every live run the panel or the Spec step started for this item (matched by the step's run-key prefix, queued and unclaimed ones
+   * included) and the tail of each one's follow-up chain. For the workflow's wait that ran out, when it holds no run id.
+   */
+  advanceCancelStepRuns(who: AdvanceStepWho, step: "panel" | "spec", actionId: string): Promise<void>;
 }
 
 /** Package-internal: `runnerPool` is the runner login's pool and is captured here, never exposed. */
@@ -1877,6 +1882,30 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     await cancelItemRun(who, runId);
   }
 
+  async function advanceCancelStepRuns(who: AdvanceStepWho, step: "panel" | "spec", actionId: string): Promise<void> {
+    if (step !== "panel" && step !== "spec") return;
+    if (!UUID_RE.test(who.accountId) || !UUID_RE.test(who.workItemId) || !UUID_RE.test(actionId)) return;
+    const prefix = `advance:${who.workItemId}:${step}:`;
+    // The Spec PM's key ends with the approval that asked for it: `advance:<item>:spec:<discussion>[:g<n>]:pm:<action>[:s<n>]`, so only the timed-out workflow's own PM run
+    // matches (another approval of the same item keeps its run). A panel seat's key (`advance:<item>:panel:<discussion>[:g<n>]:r<round>:<role>`) carries no approval: the
+    // seats are one set per discussion generation, followed by whichever workflow runs, so they are matched by the step alone.
+    const own = step === "spec" ? `:pm:${actionId}(:s[0-9]+)?$` : "";
+    const heads = await withTenant(runnerPool, who.accountId, async (client) => {
+      const r = await client.query<{ run_id: string }>(
+        "SELECT k.run_id FROM agent_run_idempotency_keys k JOIN agent_runs a ON a.account_id = k.account_id AND a.id = k.run_id WHERE k.account_id = $1 AND a.work_item_id = $2 AND starts_with(k.idempotency_key, $3) AND k.idempotency_key ~ $4",
+        [who.accountId, who.workItemId, prefix, own],
+      );
+      return r.rows.map((row) => row.run_id);
+    });
+    // The keys name each seat's first run; a run that was lost and followed has a later tail, and that is the one still live. Both are stopped (a finished run is left alone).
+    const ids = new Set<string>(heads);
+    for (const id of heads) {
+      const out = await advanceRunOutcome(who.accountId, id);
+      if (out.tailRunId !== undefined) ids.add(out.tailRunId);
+    }
+    for (const id of ids) await cancelItemRun(who, id);
+  }
+
   return {
     performAdvanceWorkItem,
     performRespecWorkItem,
@@ -1904,5 +1933,6 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     advanceVerifiedReviewGate,
     advanceRecordEvent,
     advanceCancel,
+    advanceCancelStepRuns,
   };
 }

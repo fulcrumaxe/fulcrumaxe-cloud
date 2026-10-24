@@ -72,6 +72,12 @@ export async function cancelRunBody(worker: Pick<AdvanceFacade, "advanceCancel">
   await worker.advanceCancel(who, runId);
 }
 
+/** Stops every live run the panel or the Spec step started for the item (the wait for them ran out and the workflow holds no run id). Safe when none is live. */
+export async function cancelStepRunsBody(worker: Pick<AdvanceFacade, "advanceCancelStepRuns"> | null, who: StepWho, step: "panel" | "spec", actionId: string): Promise<void> {
+  if (!worker) return;
+  await worker.advanceCancelStepRuns(who, step, actionId);
+}
+
 /** How the executor run stands: the status, and whether its envelope carries the plain-text summary the prompt required. The summary itself stays in the run. */
 export interface BuildRunOutcome {
   status: string;

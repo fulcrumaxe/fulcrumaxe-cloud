@@ -63,6 +63,8 @@ export interface AdvanceRunOutcome {
    * budget counts the time the run has really been working, not the time since this call began.
    */
   runningMs?: number | null;
+  /** D#6 R2b-3: the end of the follow-up chain that starts at the run asked about; the run to cancel when the wait is abandoned. Absent: the run asked about. */
+  tailRunId?: string;
 }
 
 export interface AdvanceRunPorts {

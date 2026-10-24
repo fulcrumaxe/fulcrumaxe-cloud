@@ -1310,6 +1310,52 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
     });
   });
 
+  describe("advanceCancelStepRuns (D#6 WAITCANCEL)", () => {
+    const keyed = async (a: SeedRefs, w: string, key: string, status: "running" | "succeeded" | "pending" = "running") => {
+      const id = randomUUID();
+      await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, execution_mode, status) VALUES ($1, $2, $3, 'project-manager', 'production', 'sandbox', $4)", [id, a.accountId, w, status]);
+      await admin.query("INSERT INTO agent_run_idempotency_keys (account_id, idempotency_key, run_id, request_hash) VALUES ($1, $2, $3, $4)", [a.accountId, key, id, "0".repeat(64)]);
+      return id;
+    };
+
+    it("stops every live run keyed to the step (a queued one too) and nothing else: not a finished run, another step, or another item", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a);
+      const w2 = await item(a);
+      const cancelled: string[] = [];
+      const reg = { sandbox: { cancel: async (run: ExecutionRun) => (cancelled.push(run.id), { settled_usd: 0, released_usd: 0 }) } } as unknown as ExecutionTargetRegistry;
+      const t = build({ registry: reg });
+      const seatA = await keyed(a, w, `advance:${w}:panel:d1:r1:product-owner`);
+      const seatB = await keyed(a, w, `advance:${w}:panel:d1:r1:technical-architect`, "pending");
+      const finished = await keyed(a, w, `advance:${w}:panel:d1:r1:security-expert`, "succeeded");
+      const action = randomUUID();
+      const otherAction = randomUUID();
+      const pm = await keyed(a, w, `advance:${w}:spec:d1:pm:${action}`);
+      const pmLater = await keyed(a, w, `advance:${w}:spec:d1:pm:${action}:s2`);
+      const pmOtherAction = await keyed(a, w, `advance:${w}:spec:d1:pm:${otherAction}`);
+      const pmOtherActionLater = await keyed(a, w, `advance:${w}:spec:d1:pm:${otherAction}:s1`);
+      const otherItem = await keyed(a, w2, `advance:${w2}:panel:d1:r1:product-owner`);
+      const statusOf = async (id: string) => (await admin.query<{ status: string }>("SELECT status FROM agent_runs WHERE id = $1", [id])).rows[0]!.status;
+      await t.module.advanceCancelStepRuns(who(a, w), "panel", action);
+      expect([await statusOf(seatA), await statusOf(seatB)]).toEqual(["cancelled", "cancelled"]);
+      expect(await statusOf(finished)).toBe("succeeded");
+      expect(await statusOf(pm)).toBe("running");
+      expect(await statusOf(otherItem)).toBe("running");
+      await t.module.advanceCancelStepRuns(who(a, w), "spec", action);
+      expect(await statusOf(pm)).toBe("cancelled");
+      expect(await statusOf(pmLater)).toBe("cancelled");
+      // another approval's PM run of the same item and step is left alone
+      expect(await statusOf(pmOtherAction)).toBe("running");
+      expect(await statusOf(pmOtherActionLater)).toBe("running");
+      expect(await statusOf(otherItem)).toBe("running");
+      // another account's call finds nothing of this item's
+      const b = await seedAccount(admin, randomUUID());
+      const live = await keyed(a, w, `advance:${w}:panel:d2:r1:product-owner`);
+      await t.module.advanceCancelStepRuns({ accountId: b.accountId, userId: b.userId, workItemId: w, haltEpoch: 0 }, "panel", action);
+      expect(await statusOf(live)).toBe("running");
+    });
+  });
+
   it("the Spec used in a prompt is hashed by the store: sanity check of the helper used above", () => {
     expect(createHash("sha256").update("spec").digest("hex")).toHaveLength(64);
   });

@@ -6,7 +6,7 @@ import { openInstallationHttp } from "../lib/github/installationHttp";
 import { publishLightSpecBody, startLightSpecBody, type LightPublished } from "../lib/advanceLightSteps";
 import { publishRespecBody, startRespecBody, type RespecPublished } from "../lib/advanceRespecSteps";
 import { loadBody, runOutcomeBody, startClassifyBody, triageBody, type ClassifyOutcome, type LoadedAdvance, type TriageLoaded } from "../lib/advanceSteps";
-import { buildBody, buildFailedBody, buildOutcomeBody, cancelRunBody, checkFixBody, type CheckFixOut, decisionBody, panelBody, specBody, stageBody, type BuildRunOutcome, type StepOutcome } from "../lib/advanceStageSteps";
+import { buildBody, buildFailedBody, buildOutcomeBody, cancelRunBody, cancelStepRunsBody, checkFixBody, type CheckFixOut, decisionBody, panelBody, specBody, stageBody, type BuildRunOutcome, type StepOutcome } from "../lib/advanceStageSteps";
 import {
   cancelBody,
   eventBody,
@@ -238,6 +238,12 @@ export async function advanceDecisionStep(accountId: string, userId: string, wor
 export async function advanceCancelStep(accountId: string, userId: string, workItemId: string, runId: string): Promise<void> {
   "use step";
   return cancelRunBody(await getWorker(), { accountId, userId, workItemId, haltEpoch: 0 }, runId);
+}
+
+/** Stops the live runs of the panel or Spec step (their wait ran out), queued and unclaimed ones included, and the tail of each follow-up chain. */
+export async function advanceCancelStepRunsStep(accountId: string, userId: string, workItemId: string, step: "panel" | "spec", actionId: string): Promise<void> {
+  "use step";
+  return cancelStepRunsBody(await getWorker(), { accountId, userId, workItemId, haltEpoch: 0 }, step, actionId);
 }
 
 /** One structured line: a fixed event code and ids/codes. Never text from the issue or from a model. */
@@ -496,8 +502,8 @@ export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promis
     }
     if (!outcome.done) {
       // The run is stopped, not left to a runner that keeps answering its heartbeat: only a cancelled run is fenced (409) at the next one, so the runner ends its work.
-      await advanceCancelStep(accountId, args.userId, workItemId, started.runId);
-      await advanceLogStep("advance.failed", { work_item_id: workItemId, run_id: started.runId, at: "classify_wait", reason: "wait_timeout" });
+      await advanceCancelStep(accountId, args.userId, workItemId, outcome.tailRunId ?? started.runId);
+      await advanceLogStep("advance.failed", { work_item_id: workItemId, run_id: outcome.tailRunId ?? started.runId, at: "classify_wait", reason: "wait_timeout" });
       return { status: "failed", detail: "classify_wait_timeout" };
     }
     const word = outcome.category;
@@ -575,6 +581,7 @@ async function specPhase(args: AdvanceStartArgs, rootId: string, firstAttempt: n
   });
   // A seat that did not post is not a failure here: the Spec records it as "DID NOT POST". Only a refusal ends the run.
   if (isHaltReason(panel.reason)) return haltedEnd(args, "panel");
+  if (panel.status === "waiting" && panel.reason === QUEUED_ON_RUNNER) await advanceCancelStepRunsStep(accountId, userId, rootId, "panel", actionId);
   if (panel.status !== "completed") return { status: "failed", detail: panel.status === "waiting" && panel.reason === QUEUED_ON_RUNNER ? "panel_wait_timeout" : `panel_${panel.status}:${panel.reason ?? "none"}` };
 
   // D#483 S5-k1c: the PM's start can be denied by a spending limit; the Spec step then answers the pause as its refusal and is asked again.
@@ -582,7 +589,10 @@ async function specPhase(args: AdvanceStartArgs, rootId: string, firstAttempt: n
   const spec = specAsk.answer;
   if (specAsk.pause !== null) return pausedEnd(rootId, "spec", specAsk.pause, specAsk.attempt);
   if (spec.status === "waiting" && spec.reason === QUEUED_ON_RUNNER) {
-    // Still queued when the ceiling was reached: the pipeline's own wait limit, like every other wait here.
+    // Still queued when the ceiling was reached: the pipeline's own wait limit, like every other wait here. The PM's run (and any panel run still live) is stopped, not left to a runner that claims it later.
+    // (The Spec step re-enters the panel, so a panel seat may be the live run.)
+    await advanceCancelStepRunsStep(accountId, userId, rootId, "spec", actionId);
+    await advanceCancelStepRunsStep(accountId, userId, rootId, "panel", actionId);
     await advanceLogStep("advance.failed", { work_item_id: rootId, at: "spec", reason: "wait_timeout" });
     return { status: "failed", detail: "spec_wait_timeout" };
   }

@@ -86,11 +86,14 @@ export function createFollowedRunner(ports: AdvanceRunPorts, options: FollowedRu
   async function follow(runId: string, signal: AbortSignal, clock?: WaitClock): Promise<PanelSeatResult> {
     let failures = 0;
     let credited = false;
+    // The run to stop when the wait is abandoned: the end of the follow-up chain, which moves when a lost run is followed.
+    let live = runId;
     for (;;) {
       let yieldNow = false;
       try {
         const out = await ports.outcome(runId);
         failures = 0;
+        live = out.tailRunId ?? runId;
         if (!out.done) {
           // Only a queued RUNNER run waits on a person's machine; a pending sandbox or production run is the platform's own
           // delay and counts against the budget like any other wait.
@@ -114,14 +117,14 @@ export function createFollowedRunner(ports: AdvanceRunPorts, options: FollowedRu
         if (err instanceof PanelSeatFailedError) throw err;
         if (++failures >= maxReadFailures) throw new PanelSeatFailedError("status_unreadable");
       }
-      if (signal.aborted) return stop(runId);
+      if (signal.aborted) return stop(live);
       if (yieldNow) throw new PanelYieldError();
       await pause(pollMs, signal);
       if (signal.aborted) {
         // One last look: a run that finished while we were being aborted keeps its result.
         const last = await ports.outcome(runId).catch(() => null);
         if (last?.done === true && last.status === "succeeded") return { agentRunId: runId, agentOutput: last.envelope };
-        return stop(runId);
+        return stop(last?.tailRunId ?? live);
       }
     }
   }
