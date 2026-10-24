@@ -52,12 +52,13 @@ async function setup(route: (req: GhRequest) => GhReply | undefined, requester?:
   return { api, server: s, minted, cache };
 }
 
+const own = { ownsInstallation: async (id: number) => id === 42 };
 const installed = (req: GhRequest): GhReply | undefined => (req.path === "/repos/acme/widgets/installation" ? json(200, { id: 42, app_slug: "fulcrumaxe" }) : undefined);
 
 describe("mintPushToken", () => {
   it("looks the installation up as the App, then mints for the one repository with contents and pull_requests write", async () => {
     const t = await setup(installed);
-    await expect(t.api.mintPushToken("acme/widgets")).resolves.toBe("ghs_planepush1");
+    await expect(t.api.mintPushToken("acme/widgets", own)).resolves.toBe("ghs_planepush1");
     const lookup = t.server.seen.find((s) => s.path === "/repos/acme/widgets/installation")!;
     expect(lookup.headers["authorization"]).toMatch(JWT);
     expect(lookup.headers["user-agent"]).toBe("fulcrumaxe-cloud");
@@ -67,7 +68,23 @@ describe("mintPushToken", () => {
 
   it("answers app_not_installed when the repository has no installation of the App", async () => {
     const t = await setup(() => undefined);
-    await expect(t.api.mintPushToken("acme/widgets")).rejects.toMatchObject({ code: "app_not_installed" });
+    await expect(t.api.mintPushToken("acme/widgets", own)).rejects.toMatchObject({ code: "app_not_installed" });
+    expect(t.minted).toEqual([]);
+  });
+
+  it("refuses with code_repo_installation_not_owned, and mints nothing, when the repository's installation is not the caller's", async () => {
+    const t = await setup(installed);
+    const asked: number[] = [];
+    await expect(t.api.mintPushToken("acme/widgets", { ownsInstallation: async (id) => (asked.push(id), false) })).rejects.toMatchObject({ code: "code_repo_installation_not_owned" });
+    expect(asked).toEqual([42]);
+    expect(t.minted).toEqual([]);
+  });
+
+  it("mints nothing when the ownership answer cannot be had (public_unavailable) or the caller supplied none", async () => {
+    const t = await setup(installed);
+    await expect(t.api.mintPushToken("acme/widgets", { ownsInstallation: async () => { throw new Error("db down"); } })).rejects.toMatchObject({ code: "public_unavailable" });
+    await expect(t.api.mintPushToken("acme/widgets", {} as never)).rejects.toMatchObject({ code: "code_repo_installation_not_owned" });
+    await expect(t.api.mintPushToken("acme/widgets", { ownsInstallation: (async () => "yes") as never })).rejects.toMatchObject({ code: "code_repo_installation_not_owned" });
     expect(t.minted).toEqual([]);
   });
 
@@ -75,14 +92,14 @@ describe("mintPushToken", () => {
     const t = await setup(installed, async () => {
       throw Object.assign(new Error("access_token_mint_failed"), { status, ghMessage: "Validation Failed" });
     });
-    await expect(t.api.mintPushToken("acme/widgets")).rejects.toMatchObject({ code: "app_not_installed" });
+    await expect(t.api.mintPushToken("acme/widgets", own)).rejects.toMatchObject({ code: "app_not_installed" });
   });
 
   it("answers public_unavailable for a server error or a transport failure, never app_not_installed", async () => {
     const t = await setup((r) => (r.path.endsWith("/installation") ? ghError(502, "Bad Gateway") : undefined));
-    await expect(t.api.mintPushToken("acme/widgets")).rejects.toMatchObject({ code: "public_unavailable" });
+    await expect(t.api.mintPushToken("acme/widgets", own)).rejects.toMatchObject({ code: "public_unavailable" });
     const down = createPlanePushApi({ appCredentials: () => ({ appId: "1", privateKeyPem, webhookSecret: "x" }), requester: vi.fn(), cache: new InstallationTokenCache(), fetchImpl: (async () => { throw new TypeError("fetch failed: https://api.github.com/secret-path"); }) as typeof fetch });
-    const err = await down.mintPushToken("acme/widgets").catch((e: unknown) => e);
+    const err = await down.mintPushToken("acme/widgets", own).catch((e: unknown) => e);
     expect(err).toMatchObject({ code: "public_unavailable" });
     expect(JSON.stringify([String(err), (err as Error).stack])).not.toContain("secret-path");
   });
@@ -94,12 +111,12 @@ describe("mintPushToken", () => {
   ])("refuses a token GitHub did not narrow as asked (%s)", async (_l, permissions, repositories) => {
     const greedy: AccessTokenRequester = async () => ({ token: "ghs_greedy", expiresAt: new Date(Date.now() + 3_600_000).toISOString(), permissions, ...(repositories ? { repositories } : {}) });
     const t = await setup(installed, greedy);
-    await expect(t.api.mintPushToken("acme/widgets")).rejects.toMatchObject({ code: "token_scope_mismatch" });
+    await expect(t.api.mintPushToken("acme/widgets", own)).rejects.toMatchObject({ code: "token_scope_mismatch" });
   });
 
   it.each(["acme", "acme/widgets/extra", "../widgets", "acme/..", "ac me/widgets", ""])("refuses the repository name %j before any request", async (name) => {
     const t = await setup(installed);
-    await expect(t.api.mintPushToken(name)).rejects.toBeInstanceOf(PlanePushApiError);
+    await expect(t.api.mintPushToken(name, own)).rejects.toBeInstanceOf(PlanePushApiError);
     expect(t.server.seen).toEqual([]);
   });
 });
@@ -184,8 +201,8 @@ describe("fresh mint and revoke", () => {
   it("two mints for one repository, with no option, make two mint requests and leave no plane_push entry in the cache", async () => {
     const n = { v: 0 };
     const t = await setup(installed, tokens(n));
-    await expect(t.api.mintPushToken("acme/widgets")).resolves.toBe("ghs_fresh1");
-    await expect(t.api.mintPushToken("acme/widgets")).resolves.toBe("ghs_fresh2");
+    await expect(t.api.mintPushToken("acme/widgets", own)).resolves.toBe("ghs_fresh1");
+    await expect(t.api.mintPushToken("acme/widgets", own)).resolves.toBe("ghs_fresh2");
     expect(n.v).toBe(2);
     expect(cacheEntry(t.cache)).toBeUndefined();
   });
@@ -203,18 +220,18 @@ describe("fresh mint and revoke", () => {
   it("a plane_push token is still checked for scope, and known to the live-token view until it is revoked", async () => {
     const n = { v: 0 };
     const t = await setup(revokingGithub(), tokens(n));
-    const token = await t.api.mintPushToken("acme/widgets");
+    const token = await t.api.mintPushToken("acme/widgets", own);
     expect(liveInstallationTokens()).toContain(token);
     await expect(t.api.revokeToken(token)).resolves.toBe(true);
     expect(liveInstallationTokens()).not.toContain(token);
     const greedy = await setup(installed, async () => ({ token: "ghs_greedy", expiresAt: new Date(Date.now() + 3_600_000).toISOString(), permissions: { metadata: "read", contents: "write", pull_requests: "write", workflows: "write" }, repositories: ["widgets"] }));
-    await expect(greedy.api.mintPushToken("acme/widgets")).rejects.toMatchObject({ code: "token_scope_mismatch" });
+    await expect(greedy.api.mintPushToken("acme/widgets", own)).rejects.toMatchObject({ code: "token_scope_mismatch" });
   });
 
   it("revokeToken sends DELETE /installation/token with the token as the bearer, and the token then answers 401", async () => {
     const n = { v: 0 };
     const t = await setup(revokingGithub(), tokens(n));
-    const token = await t.api.mintPushToken("acme/widgets");
+    const token = await t.api.mintPushToken("acme/widgets", own);
     await expect(t.api.branchHead({ codeRepo: "acme/widgets", branch: "taken", token })).resolves.toBe("a".repeat(40));
     await expect(t.api.revokeToken(token)).resolves.toBe(true);
     const del = t.server.seen.find((s) => s.method === "DELETE")!;

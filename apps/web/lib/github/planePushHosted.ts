@@ -1,5 +1,6 @@
 import { resolveChecked } from "@fx/net-guard";
-import { AppCredentialsError, InstallationTokenCache, createHostedPlanePush, createPlanePushApi, loadAppCredentials, type HostedPlanePush } from "@fx/github";
+import { platformOpsPool } from "@fx/api/src/sse/pools.js";
+import { AppCredentialsError, InstallationTokenCache, createHostedPlanePush, createPlanePushApi, createTeamInstallationOwnership, loadAppCredentials, type HostedPlanePush } from "@fx/github";
 import type { PlanePushHostedPort } from "@fx/runner-cloud";
 import { buildAccessTokenRequester, nodeHttpsPinnedRequester } from "../../app/api/gh-proxy/[...path]/handler";
 
@@ -16,7 +17,8 @@ export function createLivePlanePushPort(env: NodeJS.ProcessEnv = process.env): P
     // A `plane_push` token never enters a cache; the type wants one.
     cache: new InstallationTokenCache(),
   });
-  const hosted = createHostedPlanePush(api);
+  // The pool is taken on first use, so a missing platform_ops setting is a refused mint (fail closed), not a crash at wiring time.
+  const hosted = createHostedPlanePush(api, { ownsInstallation: (accountId, ghInstallationId) => createTeamInstallationOwnership(platformOpsPool())(accountId, ghInstallationId) });
   // An App that is not configured (or configured twice) is "not configured" to the route, not a crash: the message names no key.
   const guard = async <T>(run: () => Promise<T>): Promise<T> => {
     try {
@@ -27,7 +29,7 @@ export function createLivePlanePushPort(env: NodeJS.ProcessEnv = process.env): P
     }
   };
   return {
-    mintToken: (codeRepo) => guard(() => hosted.mintToken(codeRepo)),
+    mintToken: (codeRepo, accountId) => guard(() => hosted.mintToken(codeRepo, accountId)),
     verifyPushed: (input) => guard(() => hosted.verifyPushed(input)),
     verifyPullRequest: (input) => guard(() => hosted.verifyPullRequest(input)),
     revokeToken: (token) => hosted.revokeToken(token),

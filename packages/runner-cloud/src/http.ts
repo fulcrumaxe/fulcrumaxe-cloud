@@ -156,11 +156,11 @@ export interface RunnerCloudDeps {
  */
 export interface PlanePushHostedPort {
   /** A fresh, never-cached token for one repository, and the time the runner may rely on it until. */
-  mintToken(codeRepo: string): Promise<{ token: string; expiresAt: Date }>;
+  mintToken(codeRepo: string, accountId: string): Promise<{ token: string; expiresAt: Date }>;
   /** True only if the branch head is `headSha`, its single parent is `tipSha`, and `tipSha` is in public main's history. */
-  verifyPushed(input: { codeRepo: string; branch: string; headSha: string; tipSha: string }): Promise<boolean>;
+  verifyPushed(input: { accountId: string; codeRepo: string; branch: string; headSha: string; tipSha: string }): Promise<boolean>;
   /** The pull request's address if it is OPEN with head ref `branch` in `codeRepo` itself, base `main` and an address in `codeRepo`; otherwise null. */
-  verifyPullRequest(input: { codeRepo: string; branch: string; number: number }): Promise<{ url: string } | null>;
+  verifyPullRequest(input: { accountId: string; codeRepo: string; branch: string; number: number }): Promise<{ url: string } | null>;
   /** Revokes a token this side minted and could not hand out. True when it is gone (revoked, or already invalid); never throws. */
   revokeToken(token: string): Promise<boolean>;
 }

@@ -183,11 +183,11 @@ describe('plane push record (D#598 P1f-1)', () => {
   it('derive returns GitHub\'s head, says the stamp is stale when they differ, and never writes GitHub\'s value over the stamp', async () => {
     const row = (await stamp(a, await item(a)))!;
     await run(a, (c) => recordVerifiedOutcome(c, { accountId: a.accountId, id: row.id, outcome: { state: 'pushed', headSha: SHA1, tipSha: SHA2 } }));
-    const seen: Array<{ codeRepo: string; branch: string }> = [];
-    const port = (head: string | null) => ({ branchHead: async (i: { codeRepo: string; branch: string }) => (seen.push(i), head) });
+    const seen: Array<{ accountId: string; codeRepo: string; branch: string }> = [];
+    const port = (head: string | null) => ({ branchHead: async (i: { accountId: string; codeRepo: string; branch: string }) => (seen.push(i), head) });
     const same = (await run(a, (c) => derivePlanePush(c, { accountId: a.accountId, id: row.id }, port(SHA1))))!;
     expect(same).toMatchObject({ headSha: SHA1, stale: false });
-    expect(seen[0]).toEqual({ codeRepo: 'acme/pub', branch: row.branch });
+    expect(seen[0]).toEqual({ accountId: a.accountId, codeRepo: 'acme/pub', branch: row.branch });
     const moved = (await run(a, (c) => derivePlanePush(c, { accountId: a.accountId, id: row.id }, port(SHA2))))!;
     expect(moved).toMatchObject({ headSha: SHA2, stale: true });
     expect(moved.row.headSha).toBe(SHA1);

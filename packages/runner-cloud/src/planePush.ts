@@ -78,7 +78,7 @@ function requirePlanePushOps(deps: RunnerCloudDeps): PlanePushOps {
 /** The fixed code a GitHub-side failure carries (`PlanePushApiError.code`), or null for anything else. */
 function failureCode(error: unknown): string | null {
   const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
-  return code === "app_not_installed" || code === "token_scope_mismatch" || code === "public_unavailable" || code === "not_configured" ? code : null;
+  return code === "app_not_installed" || code === "code_repo_installation_not_owned" || code === "token_scope_mismatch" || code === "public_unavailable" || code === "not_configured" ? code : null;
 }
 
 export async function planePushTokenRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): Promise<RunnerHttpResponse> {
@@ -128,12 +128,13 @@ export async function planePushTokenRun(deps: RunnerCloudDeps, req: RunnerHttpRe
 
   let minted: { token: string; expiresAt: Date };
   try {
-    minted = await port.mintToken(grant.codeRepo);
+    minted = await port.mintToken(grant.codeRepo, runner.accountId);
   } catch (error) {
     const code = failureCode(error);
     // The grant is spent either way (no token existed, but one request is one grant); the attempt records why.
     await asRunner(() => ops.planePushSettleGrant({ ...lease, attemptId: grant.attemptId, issued: false, code: code ?? "mint_failed" }));
-    if (code === "app_not_installed") throw new RunnerHttpError(409, "app_not_installed", "the GitHub App is not installed on the public repository");
+    // The paired repo's installation belongs to another account: the person sees the same plain sentence as for a missing install; the attempt keeps the exact code.
+    if (code === "app_not_installed" || code === "code_repo_installation_not_owned") throw new RunnerHttpError(409, "app_not_installed", "the GitHub App is not installed on the public repository");
     if (code === "token_scope_mismatch") throw new RunnerHttpError(502, "token_scope_mismatch", "GitHub did not narrow the token as asked");
     if (code === "public_unavailable") throw new RunnerHttpError(503, "public_unavailable", "GitHub could not be asked");
     if (code === "not_configured") throw new RunnerHttpError(503, "not_configured", "the runner API has no GitHub App configured");
@@ -211,7 +212,7 @@ const bad = (): never => {
  * The report is a hint. For a phase that says something exists on GitHub, GitHub is asked (with the hosted side's own token) and the answer
  * decides; the runner's `branch` is compared with the record's and never used.
  */
-async function decide(m: PlanePushReportMessage, plane: { codeRepo: string; branch: string; pairingDigest: string }, attempt: { tokenIssued: boolean; finished: boolean; outcome: string | null } | null, port: PlanePushHostedPort): Promise<Decision> {
+async function decide(m: PlanePushReportMessage, plane: { codeRepo: string; branch: string; pairingDigest: string }, attempt: { tokenIssued: boolean; finished: boolean; outcome: string | null } | null, port: PlanePushHostedPort, accountId: string): Promise<Decision> {
   switch (m.phase) {
     case "building":
       // The build start already stamped `building`; a report must never move a later state back to it.
@@ -239,11 +240,11 @@ async function decide(m: PlanePushReportMessage, plane: { codeRepo: string; bran
       if (m.head_sha.length !== 40 || m.tip_sha.length !== 40) return { outcome: { state: "refused", code: "bad_input" }, terminal: true, label: "bad_input" };
       // A push needs the token this run was granted; a report of one without a grant cannot be true. The branch is the record's, whatever the runner says.
       if (!attempt?.tokenIssued || (m.branch !== undefined && m.branch !== plane.branch)) return MISMATCH;
-      const input = { codeRepo: plane.codeRepo, branch: plane.branch, headSha: m.head_sha, tipSha: m.tip_sha };
+      const input = { accountId, codeRepo: plane.codeRepo, branch: plane.branch, headSha: m.head_sha, tipSha: m.tip_sha };
       if (!(await port.verifyPushed(input))) return MISMATCH;
       if (m.phase === "pushed") return { outcome: { state: "pushed", headSha: m.head_sha, tipSha: m.tip_sha }, terminal: false, label: "pushed" };
       if (m.phase === "pr_failed") return { outcome: { state: "pushed_pr_not_opened", headSha: m.head_sha, tipSha: m.tip_sha }, terminal: true, label: "pr_failed" };
-      const pr = await port.verifyPullRequest({ codeRepo: plane.codeRepo, branch: plane.branch, number: m.pr_number! });
+      const pr = await port.verifyPullRequest({ accountId, codeRepo: plane.codeRepo, branch: plane.branch, number: m.pr_number! });
       // The address stored is the paired repository's pull request of the reported number, whatever the read returned.
       if (!pr || !publicPullRequestUrlMatches(plane.codeRepo, m.pr_number!, pr.url)) return MISMATCH;
       return { outcome: { state: "pr_opened", headSha: m.head_sha, tipSha: m.tip_sha, prNumber: m.pr_number!, prUrl: pr.url }, terminal: true, label: "pr_opened" };
@@ -264,7 +265,7 @@ export async function planePushReportRun(deps: RunnerCloudDeps, req: RunnerHttpR
 
   let decision: Decision;
   try {
-    decision = await decide(message, context.plane, context.attempt, port);
+    decision = await decide(message, context.plane, context.attempt, port, runner.accountId);
   } catch (error) {
     // GitHub could not be asked: nothing is recorded, and the hook sends the report again.
     if (failureCode(error) === "not_configured") throw new RunnerHttpError(503, "not_configured", "the runner API has no GitHub App configured");

@@ -21,7 +21,7 @@ export interface PlanePublishDeps {
   resolvePublishTarget?: PublishTargetResolver;
   /** The public repository's mint (`GET /repos/<o>/<n>/installation`, then a fresh `plane_push` mint) and its one-use revoke. */
   planePublishApi?: {
-    mintPushToken(codeRepo: string): Promise<string>;
+    mintPushToken(codeRepo: string, opts: { ownsInstallation: (ghInstallationId: number) => Promise<boolean> }): Promise<string>;
     revokeToken(token: string): Promise<boolean>;
   };
   appCredentials: AppCredentialsSource;
@@ -67,7 +67,8 @@ export async function decidePlanePublishRequest(ctx: PlanePublishContext, deps: 
   try {
     const installationToken =
       decision.side === "public"
-        ? await planePublishApi.mintPushToken(target.codeRepo)
+        ? // The public repo's installation must be the run's own: the team-App installation the resolver bound to this sandbox's account.
+          await planePublishApi.mintPushToken(target.codeRepo, { ownsInstallation: async (id) => ctx.run.appKind === "team" && id === ctx.run.installationId })
         : await getInstallationToken({
             installationId: ctx.run.installationId,
             appKind: ctx.run.appKind,

@@ -94,8 +94,8 @@ describe("plane-push routes [pg]", () => {
     },
   };
   const port: PlanePushHostedPort = {
-    mintToken: async (codeRepo) => {
-      calls.push({ method: "mint", input: { codeRepo } });
+    mintToken: async (codeRepo, accountId) => {
+      calls.push({ method: "mint", input: { codeRepo, accountId } });
       if (mintError) throw mintError;
       return { token: TOKEN, expiresAt: EXPIRES };
     },
@@ -177,7 +177,7 @@ describe("plane-push routes [pg]", () => {
       await askToken();
       expect(names()).toEqual(["grant", "mint", "settle"]);
       expect(calls[0]!.input).toEqual({ accountId: A.accountId, runnerId, runId: RUN, leaseGeneration: 2 });
-      expect(calls[1]!.input).toEqual({ codeRepo: "acme/widgets-public" });
+      expect(calls[1]!.input).toEqual({ codeRepo: "acme/widgets-public", accountId: A.accountId });
       expect(calls[2]!.input).toMatchObject({ accountId: A.accountId, runId: RUN, leaseGeneration: 2, issued: true });
     });
 
@@ -237,6 +237,16 @@ describe("plane-push routes [pg]", () => {
       expect(JSON.stringify(res.body)).not.toContain(TOKEN);
       expect(names()).toEqual(["grant", "mint", "settle"]);
       expect(calls[2]!.input).toMatchObject({ issued: false, code: code === "not_configured" ? "not_configured" : code });
+    });
+
+    it("a repository whose installation is another account's is the plain app_not_installed answer; the mint was asked for this runner's account and the attempt keeps the exact code", async () => {
+      mintError = Object.assign(new Error("refused"), { code: "code_repo_installation_not_owned" });
+      const res = await askToken();
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ error: { code: "app_not_installed" } });
+      expect(names()).toEqual(["grant", "mint", "settle"]);
+      expect(calls[1]!.input).toMatchObject({ accountId: A.accountId });
+      expect(calls[2]!.input).toMatchObject({ issued: false, code: "code_repo_installation_not_owned" });
     });
 
     it("a settle that throws, or matches no row, after a successful mint revokes the token before answering 500, and the answer carries no token", async () => {
@@ -408,14 +418,14 @@ describe("plane-push routes [pg]", () => {
       const res = await askReport({ phase: "pushed", head_sha: HEAD, tip_sha: TIP, branch: BRANCH, token_revoked: false });
       expect(res.status).toBe(200);
       expect(names()).toEqual(["context", "verifyPushed", "record"]);
-      expect(calls[1]!.input).toEqual({ codeRepo: "acme/widgets-public", branch: BRANCH, headSha: HEAD, tipSha: TIP });
+      expect(calls[1]!.input).toEqual({ accountId: A.accountId, codeRepo: "acme/widgets-public", branch: BRANCH, headSha: HEAD, tipSha: TIP });
       expect(record()).toMatchObject({ outcome: { state: "pushed", headSha: HEAD, tipSha: TIP }, terminal: false, label: "pushed", tokenRevoked: false });
     });
 
     it("pr_opened also asks about the pull request, and records the ADDRESS GitHub gave, not one the runner could name", async () => {
       await askReport({ phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
       expect(names()).toEqual(["context", "verifyPushed", "verifyPullRequest", "record"]);
-      expect(calls[2]!.input).toEqual({ codeRepo: "acme/widgets-public", branch: BRANCH, number: 9 });
+      expect(calls[2]!.input).toEqual({ accountId: A.accountId, codeRepo: "acme/widgets-public", branch: BRANCH, number: 9 });
       expect(record()).toMatchObject({ outcome: { state: "pr_opened", prNumber: 9, prUrl: "https://github.com/acme/widgets-public/pull/9" }, terminal: true, label: "pr_opened" });
     });
 
