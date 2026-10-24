@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { RUN_WRITER_TEST_LOGIN, createRunWriterTestLogin, runWriterUrlFrom } from '@fx/db/test/support/run-writer-login.js';
-import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
+import { nextGhInstallationId, seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
 import { createRecordingRunActionSignal } from '../src/runActions/index.js';
 import { PROGRESS_LIMITS, PreviewExistsError, getPreviewProgress, requestPreview } from '../src/onboarding/index.js';
 import { ForbiddenError, NotFoundError } from '../src/tenancy/errors.js';
@@ -42,7 +42,7 @@ describe('getPreviewProgress (pg)', () => {
   async function requested(r: SeedRefs = a): Promise<string> {
     const inst = randomUUID();
     const repoId = randomUUID();
-    const gh = randomInt(1, 2_000_000_000);
+    const gh = nextGhInstallationId();
     await admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team_readonly')`, [inst, r.accountId, gh]);
     await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, $3, 1, 'team', $4, 'widgets')`, [repoId, r.accountId, inst, `o${gh}`]);
     await admin.query(`INSERT INTO installation_installers (gh_installation_id, app_kind, installer_gh_user_id) VALUES ($1, 'team_readonly', $2)`, [gh, randomInt(1, 2_000_000_000)]);
@@ -167,7 +167,7 @@ describe('getPreviewProgress (pg)', () => {
   async function makeRepo(r: SeedRefs, owner: string): Promise<string> {
     const inst = randomUUID();
     const repoId = randomUUID();
-    const gh = randomInt(1, 2_000_000_000);
+    const gh = nextGhInstallationId();
     await admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team_readonly')`, [inst, r.accountId, gh]);
     await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, $3, 1, 'team', $4, 'widgets')`, [repoId, r.accountId, inst, owner]);
     await admin.query(`INSERT INTO installation_installers (gh_installation_id, app_kind, installer_gh_user_id) VALUES ($1, 'team_readonly', $2)`, [gh, randomInt(1, 2_000_000_000)]);

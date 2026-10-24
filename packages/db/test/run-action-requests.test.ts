@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '../src/pool.js';
 import { withTenant } from '../src/withTenant.js';
-import { seedAccount, type SeedRefs } from './helpers/seed.js';
+import { nextGhInstallationId, seedAccount, type SeedRefs } from './helpers/seed.js';
 import { PG_ERROR } from './helpers/pgErrors.js';
 
 /** D#31 API-6a-1 criteria 1 to 3: the run_action_requests table, its grants and the definers (0658). */
@@ -433,7 +433,7 @@ describe('run_action_requests (0658)', () => {
     async function seedPreview(r: SeedRefs, state = 'requested'): Promise<string> {
       const inst = randomUUID();
       const repo = randomUUID();
-      await admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, floor(random() * 2000000000)::bigint + 1, 'team_readonly')`, [inst, r.accountId]);
+      await admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team_readonly')`, [inst, r.accountId, nextGhInstallationId()]);
       await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product) VALUES ($1, $2, $3, 1, 'team')`, [repo, r.accountId, inst]);
       const cols = state === 'void' ? ', void_reason' : state === 'requested' ? '' : ', run_id, started_at';
       const vals = state === 'void' ? ", 'x'" : state === 'requested' ? '' : ', gen_random_uuid(), now()';

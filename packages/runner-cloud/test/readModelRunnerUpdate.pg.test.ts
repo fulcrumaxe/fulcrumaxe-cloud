@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CHECK_JOB_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, waitText } from "@fulcrumaxe/runner-protocol";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
+import { nextGhInstallationId } from "@fx/db/test/helpers/seed.js";
 import { RUN_WAIT_REASONS, getRunWait, getRunWaitReason } from "../src/index.js";
 import { harness, type Harness } from "./helpers.js";
 
@@ -25,7 +26,7 @@ describe("waiting_for_runner_update [pg]", () => {
   async function world() {
     const f: F2Fixture = await seedF2(h.admin);
     const installationId = randomUUID();
-    await h.admin.query("INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, floor(random() * 2000000000)::bigint + 1, 'team')", [installationId, f.accountId]);
+    await h.admin.query("INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team')", [installationId, f.accountId, nextGhInstallationId()]);
     const repoId = randomUUID();
     await h.admin.query("INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product) VALUES ($1, $2, $3, floor(random() * 2000000000)::bigint + 1, 'team')", [repoId, f.accountId, installationId]);
     return { f, repoId };

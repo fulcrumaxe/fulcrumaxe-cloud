@@ -7,6 +7,7 @@ import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { BACK_TO_DISCUSSION_REF_PREFIX } from "@fx/core/src/work-items/operatorActions.js";
 import { pgHarness } from "./helpers/pgHarness.js";
 import { seedAccount, seedRepo } from "./build/helpers/seed.js";
+import { nextGhInstallationId } from "@fx/db/test/helpers/seed.js";
 import { discussingItem, expectOneGenuineEnvelope } from "./plan/helpers/panelFixtures.js";
 import { publishRespec } from "../src/advance/respec.js";
 import { BUILD_FAILURE_CODES, buildExecutorPrompt, markBuildNeedsHuman } from "../src/advance/build.js";
@@ -509,7 +510,7 @@ describe("the build", () => {
     async function connect(workItemId: string): Promise<string> {
       const repo = (await h.admin.query<{ repo_id: string; account_id: string }>("SELECT repo_id, account_id FROM work_items WHERE id = $1", [workItemId])).rows[0]!;
       const inst = randomUUID();
-      await h.admin.query("INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, floor(random() * 2000000000)::bigint + 1, 'team')", [inst, repo.account_id]);
+      await h.admin.query("INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team')", [inst, repo.account_id, nextGhInstallationId()]);
       await h.admin.query("UPDATE repos SET installation_id = $2 WHERE id = $1", [repo.repo_id, inst]);
       return repo.repo_id;
     }
@@ -857,7 +858,7 @@ describe("the build", () => {
       const t = await atSpecReady();
       const repo = (await h.admin.query<{ repo_id: string }>("SELECT repo_id FROM work_items WHERE id = $1", [t.workItemId])).rows[0]!.repo_id;
       const install = randomUUID();
-      await h.admin.query("INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, floor(random() * 2000000000)::bigint + 1, 'team')", [install, t.accountId]);
+      await h.admin.query("INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team')", [install, t.accountId, nextGhInstallationId()]);
       const node = `R_kgDO${randomUUID().slice(0, 8)}`;
       const inst = (await h.admin.query<{ gh_installation_id: string }>("SELECT gh_installation_id FROM installations WHERE id = $1", [install])).rows[0]!.gh_installation_id;
       await h.admin.query("UPDATE repos SET installation_id = $2, gh_node_id = $3 WHERE id = $1", [repo, install, node]);

@@ -2,7 +2,7 @@ import { randomInt, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { getPreviewProgress, requestPreview } from "@fx/core/src/onboarding/index.js";
 import { createRecordingRunActionSignal } from "@fx/core/src/runActions/index.js";
-import { seedAccount as seedTenant, type SeedRefs } from "@fx/db/test/helpers/seed.js";
+import { nextGhInstallationId, seedAccount as seedTenant, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { normalizeMessage } from "@fx/runtime/src/streamJson.js";
 import { RunProgressRecorder, type ProgressClock } from "../src/runProgress.js";
 import { pgHarness } from "./helpers/pgHarness.js";
@@ -46,7 +46,7 @@ describe("runner events to progress lines [pg]", { timeout: 60_000 }, () => {
     await db.admin.query(`UPDATE model_connections SET status = 'ok' WHERE account_id = $1`, [tenant.accountId]);
     const inst = randomUUID();
     const repoId = randomUUID();
-    const gh = randomInt(1, 2_000_000_000);
+    const gh = nextGhInstallationId();
     await db.admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team_readonly')`, [inst, tenant.accountId, gh]);
     await db.admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, $3, 1, 'team', $4, 'widgets')`, [repoId, tenant.accountId, inst, `o${gh}`]);
     await db.admin.query(`INSERT INTO installation_installers (gh_installation_id, app_kind, installer_gh_user_id) VALUES ($1, 'team_readonly', $2)`, [gh, randomInt(1, 2_000_000_000)]);

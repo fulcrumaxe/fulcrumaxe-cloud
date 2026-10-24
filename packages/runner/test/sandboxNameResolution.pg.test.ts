@@ -1,7 +1,8 @@
-import { randomInt, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPool } from "@fx/db/src/pool.js";
+import { nextGhInstallationId } from "@fx/db/test/helpers/seed.js";
 import { startAgentRun, type StartAgentRunInput } from "../src/startAgentRun.js";
 import { SandboxTarget } from "../src/targets/sandboxTarget.js";
 import { sandboxNameFor } from "../src/sandboxNaming.js";
@@ -50,7 +51,7 @@ describe("the run's sandbox name: written by the runner, found by the gh-proxy's
     await seedMember(db.admin, accountId, randomUUID());
     await seedRepo(db.admin, accountId, repoId);
     const installationId = randomUUID();
-    await db.admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team')`, [installationId, accountId, randomInt(1, 2_000_000_000)]);
+    await db.admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team')`, [installationId, accountId, nextGhInstallationId()]);
     await db.admin.query(`UPDATE repos SET installation_id = $1, gh_owner = 'acme-corp', gh_name = 'widgets' WHERE id = $2`, [installationId, repoId]);
     await seedWorkItem(db.admin, accountId, workItemId, repoId, { ghNumber: 5 });
     const input: StartAgentRunInput = {

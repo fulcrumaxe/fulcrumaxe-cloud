@@ -2,7 +2,7 @@ import { randomInt, randomUUID } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
-import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
+import { nextGhInstallationId, seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
 import { insertApiToken, type Scope } from '@fx/core/src/tokens/service.js';
 import { createRecordingRunActionSignal } from '@fx/core/src/runActions/index.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
@@ -114,7 +114,7 @@ describe('D#31 API-9: onboarding routes', () => {
   async function repoOn(accountId: string, kind = 'team_readonly', ghOwner?: string): Promise<{ repoId: string; ghUserId: number }> {
     const inst = randomUUID();
     const repoId = randomUUID();
-    const gh = randomInt(1, 2_000_000_000);
+    const gh = nextGhInstallationId();
     const ghUserId = randomInt(1, 2_000_000_000);
     await admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, $4)`, [inst, accountId, gh, kind]);
     await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner) VALUES ($1, $2, $3, 1, 'team', $4)`, [repoId, accountId, inst, ghOwner ?? `o${gh}`]);
@@ -466,7 +466,7 @@ describe('D#31 API-9: onboarding routes', () => {
       await expectNothingWritten(who.accountId);
       // The same repo attached to a read-only installation again.
       const inst = randomUUID();
-      const gh = randomInt(1, 2_000_000_000);
+      const gh = nextGhInstallationId();
       await admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team_readonly')`, [inst, who.accountId, gh]);
       await admin.query(`INSERT INTO installation_installers (gh_installation_id, app_kind, installer_gh_user_id) VALUES ($1, 'team_readonly', $2)`, [gh, randomInt(1, 2_000_000_000)]);
       await admin.query(`UPDATE repos SET installation_id = $1 WHERE id = $2`, [inst, repoId]);

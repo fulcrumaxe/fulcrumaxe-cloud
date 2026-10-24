@@ -4,6 +4,7 @@ import { runnerWorkKeyFor, setPendingHooks } from "@fx/core/src/pendingWork.js";
 import { COPY } from "@fulcrumaxe/runner-protocol";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
+import { nextGhInstallationId } from "@fx/db/test/helpers/seed.js";
 import { APPROVALS_LIMIT, approveRun, getPlanApprovalDial, getRunWaitReason, listApprovals, listRunners, setPlanApprovalDial, setPlanConsent } from "../src/index.js";
 import { harness, respond, type Harness } from "./helpers.js";
 
@@ -27,7 +28,7 @@ describe("runner-run approval and the dial [pg]", () => {
     let installationId = installations.get(f.accountId);
     if (!installationId) {
       installationId = randomUUID();
-      await h.admin.query("INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, floor(random() * 2000000000)::bigint + 1, 'team')", [installationId, f.accountId]);
+      await h.admin.query("INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team')", [installationId, f.accountId, nextGhInstallationId()]);
       installations.set(f.accountId, installationId);
     }
     const id = randomUUID();
@@ -433,7 +434,7 @@ describe("the runner-work hint from the approval routes [pg]", () => {
   const fresh = (): Promise<F2Fixture> => seedF2(h.admin);
   async function newRepo(f: F2Fixture): Promise<string> {
     const installationId = randomUUID();
-    await h.admin.query("INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, floor(random() * 2000000000)::bigint + 1, 'team')", [installationId, f.accountId]);
+    await h.admin.query("INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team')", [installationId, f.accountId, nextGhInstallationId()]);
     const id = randomUUID();
     await h.admin.query("INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name, execution_mode) VALUES ($1, $2, $3, floor(random() * 2000000000)::bigint + 1, 'team', 'acme', $4, 'runner_local')", [id, f.accountId, installationId, `app-${id.slice(0, 8)}`]);
     return id;

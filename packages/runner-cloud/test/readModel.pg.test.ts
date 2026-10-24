@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { COPY } from "@fulcrumaxe/runner-protocol";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
+import { nextGhInstallationId } from "@fx/db/test/helpers/seed.js";
 import { RUNNER_ONLINE_SECONDS } from "@fx/runner";
 import { classifyRunner, getRunWaitReason, getRunnerStates, listRunners, type RunnerFacts } from "../src/index.js";
 import { harness, respond, type Harness } from "./helpers.js";
@@ -78,7 +79,7 @@ describe("the read model [pg]", () => {
     let installationId = installations.get(f.accountId);
     if (!installationId) {
       installationId = randomUUID();
-      await h.admin.query("INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, floor(random() * 2000000000)::bigint + 1, 'team')", [installationId, f.accountId]);
+      await h.admin.query("INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team')", [installationId, f.accountId, nextGhInstallationId()]);
       installations.set(f.accountId, installationId);
     }
     const id = randomUUID();
