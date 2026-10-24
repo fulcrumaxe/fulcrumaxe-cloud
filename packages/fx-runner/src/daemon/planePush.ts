@@ -77,6 +77,8 @@ export type PlanePushOutcome =
   | { kind: "no_change" }
   | { kind: "pr_opened"; number: number; seconds: number }
   | { kind: "pr_not_opened"; seconds: number }
+  /** A fix round replaced the head of the public branch the platform had pushed; the open pull request follows it. */
+  | { kind: "updated"; seconds: number }
   | { kind: "refused"; code: PlaneRefusalCode; seconds: number }
   /** The cloud has ended or fenced the run: nothing more is reported. */
   | { kind: "stopped"; reason: StopReason }
@@ -285,6 +287,7 @@ export function createPlanePushHook(deps: PlanePushHookDeps): (input: PlanePushR
     let commit: string | undefined;
     let tip: string | undefined;
     let routed: Extract<PlaneRouteResult, { plane: "paired" }> | undefined;
+    let updated: Extract<PlaneRouteResult, { plane: "updated" }> | undefined;
     let failure: unknown;
     let tokenRevoked = false;
     /** One live read of the pairing. A read has no side effect, so it is tried again on a network failure or a 5xx, and never on a reply that no schema describes. */
@@ -361,6 +364,7 @@ export function createPlanePushHook(deps: PlanePushHookDeps): (input: PlanePushR
           return token;
         },
         branchExists: (i) => deps.github.branchExists(i),
+        branchHead: (i) => deps.github.branchHead(i),
         openPullRequest: (i) => deps.github.openPullRequest(i),
       };
       let firstTip = true;
@@ -383,7 +387,8 @@ export function createPlanePushHook(deps: PlanePushHookDeps): (input: PlanePushR
         async push(i) {
           await deps.transport.push(i);
           commit = i.commit;
-          if (pairingDigest !== undefined && tip !== undefined) {
+          // An update reports once, at the end, as `updated`; `pushed` is the first push of a branch.
+          if (grant.replaces_head === undefined && pairingDigest !== undefined && tip !== undefined) {
             const told = await report({ phase: "pushed", branch: i.branch, head_sha: i.commit, tip_sha: tip, pairing_digest: pairingDigest });
             if (typeof told === "object") stopReason = told.stop;
           }
@@ -396,6 +401,7 @@ export function createPlanePushHook(deps: PlanePushHookDeps): (input: PlanePushR
         own: { owner: input.repo.owner, name: input.repo.name },
         defaultBranch,
         branch: grant.branch,
+        ...(grant.replaces_head === undefined ? {} : { updateOf: grant.replaces_head }),
         title: grant.pr.title,
         body: grant.pr.body,
         identity: grant.identity,
@@ -403,6 +409,7 @@ export function createPlanePushHook(deps: PlanePushHookDeps): (input: PlanePushR
       };
       const result = await routeAndPush(route, { loadPairing, loadOwn: async () => ({ owner: input.repo.owner, name: input.repo.name }), api, transport });
       if (result.plane === "paired") routed = result;
+      else if (result.plane === "updated") updated = result;
       else failure = coded("bad_input", "the pairing named no public repository");
     } catch (error) {
       // fx-swallow-ok: the failure is kept and becomes the terminal report's closed code and place below; its text is never sent
@@ -428,6 +435,9 @@ export function createPlanePushHook(deps: PlanePushHookDeps): (input: PlanePushR
     if (routed !== undefined && pairingDigest !== undefined) {
       told = await report({ phase: "pr_opened", branch: routed.branch, head_sha: routed.commit, tip_sha: routed.tip, pr_number: routed.number, pairing_digest: pairingDigest, token_revoked: tokenRevoked });
       outcome = { kind: "pr_opened", number: routed.number, seconds: seconds() };
+    } else if (updated !== undefined && pairingDigest !== undefined) {
+      told = await report({ phase: "updated", branch: updated.branch, head_sha: updated.commit, tip_sha: updated.tip, pairing_digest: pairingDigest, token_revoked: tokenRevoked });
+      outcome = { kind: "updated", seconds: seconds() };
     } else if (failure instanceof PlaneRouteError && failure.code === "no_changes") {
       told = await report({ phase: "no_change", token_revoked: tokenRevoked });
       outcome = { kind: "no_change" };

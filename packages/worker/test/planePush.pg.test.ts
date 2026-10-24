@@ -7,6 +7,8 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
+import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
+import { REPUBLISH_BRANCH_MOVED_SENTENCE, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
 import { planePushPairingRun, planePushReportRun, planePushTokenRun, toResponse, type PlanePushHostedPort, type RunnerCloudDeps, type RunnerLeaseOps } from "@fx/runner-cloud";
 import { createRunnerClaimFacade } from "../src/runnerClaims.js";
 import { createRunnerPlanePushFacade } from "../src/runnerPlanePush.js";
@@ -35,10 +37,11 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
   const TOKEN = ["g", "hs", "w".repeat(36)].join("_"); // gitleaks:allow
 
   // The recording stand-in for GitHub.
-  const github = { mints: [] as string[], mintError: null as unknown, pushed: true, pr: { url: "https://github.com/acme/widgets-public/pull/9" } as { url: string } | null, asked: [] as string[] };
+  const github = { mints: [] as string[], mintedFor: [] as string[], mintError: null as unknown, pushed: true, pr: { url: "https://github.com/acme/widgets-public/pull/9" } as { url: string } | null, asked: [] as string[] };
   const port: PlanePushHostedPort = {
-    mintToken: async (codeRepo) => {
+    mintToken: async (codeRepo, accountId) => {
       github.mints.push(codeRepo);
+      github.mintedFor.push(accountId);
       if (github.mintError) throw github.mintError;
       return { token: TOKEN, expiresAt: new Date(clock + 55 * 60_000) };
     },
@@ -83,6 +86,7 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
     clock = T0;
     identity = { name: "Fulcrumaxe Bot", email: "bot@example.com" };
     github.mints.length = 0;
+    github.mintedFor.length = 0;
     github.asked.length = 0;
     github.mintError = null;
     github.pushed = true;
@@ -107,7 +111,7 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
   const attempts = async () => (await admin.query("SELECT * FROM plane_push_attempts WHERE account_id = $1 ORDER BY attempt_no", [A.accountId])).rows;
 
   /** A pending executor runner run with a real signed job, claimed. */
-  async function claimedRun(o: { role?: string } = {}): Promise<{ id: string; generation: number }> {
+  async function claimedRun(o: { role?: string; continues?: { baseSha?: string } } = {}): Promise<{ id: string; generation: number }> {
     const id = randomUUID();
     const job: Job = {
       schema_version: 1,
@@ -120,7 +124,7 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       task: { kind: "implement", prompt: "p", prompt_sha256: sha256Text("p") },
       role_card: { text: "c", sha256: sha256Text("c") },
       role_tools_sha256: "a".repeat(64),
-      continues: null,
+      continues: o.continues ? { parent_run_id: randomUUID(), session_id: "sess-1", branch: `fx/${randomUUID()}-g1`, ...(o.continues.baseSha ? { base_sha: o.continues.baseSha } : {}) } : null,
       branch_prefix: "fx/",
       model_hint: null,
       issued_at: new Date(T0 - 1000).toISOString(),
@@ -676,6 +680,169 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       expect(await planeRow()).toMatchObject({ state: "pushed", head_sha: HEAD, tip_sha: TIP });
       expect((await report(run, { phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 })).status).toBe(200);
       expect(await planeRow()).toMatchObject({ state: "pr_opened", pr_number: 9 });
+    });
+  });
+
+  describe("a fix round updates the open public pull request (FIXROUND-REPUBLISH R2-c1)", () => {
+    const BASE = "c".repeat(40);
+    const NEW_HEAD = "d".repeat(40);
+    const NEW_TIP = "e".repeat(40);
+    /** A paired item whose first publication is done: its public pull request is open and the stamp is the head the platform pushed. */
+    async function open(): Promise<void> {
+      await pair();
+      await stamp();
+      await admin.query("UPDATE plane_pushes SET state = 'pr_opened', head_sha = $2, tip_sha = $3, pr_number = 9, pr_url = 'https://github.com/acme/widgets-public/pull/9' WHERE work_item_id = $1", [A.workItemId, HEAD, TIP]);
+      await admin.query("UPDATE work_items SET stage = 'changes_requested' WHERE id = $1", [A.workItemId]);
+    }
+    const stageOf = async () => (await admin.query("SELECT stage FROM work_items WHERE id = $1", [A.workItemId])).rows[0].stage as string;
+    const facts = async () => (await admin.query("SELECT kind, code FROM work_item_driver_events WHERE work_item_id = $1 ORDER BY seq", [A.workItemId])).rows;
+    const finish = (id: string) => admin.query("UPDATE agent_runs SET status = 'succeeded' WHERE id = $1", [id]);
+
+    it("a fix round signed with a base is granted a token that names the head the platform pushed, as an attempt of its own kind", async () => {
+      await open();
+      const run = await claimedRun({ continues: { baseSha: BASE } });
+      const res = await askToken(run);
+      expect(res.status).toBe(200);
+      expect(PlanePushTokenReply.parse(res.body).replaces_head).toBe(HEAD);
+      const [attempt, ...rest] = await attempts();
+      expect(rest).toEqual([]);
+      expect(attempt).toMatchObject({ run_id: run.id, kind: "fix_round", attempt_no: 1 });
+    });
+
+    it("every fix round has its attempt: the three of a first publish are not a limit on them, and they are numbered on their own", async () => {
+      await open();
+      for (let round = 1; round <= 5; round++) {
+        const run = await claimedRun({ continues: { baseSha: BASE } });
+        expect((await askToken(run)).status, `round ${round}`).toBe(200);
+        await finish(run.id);
+      }
+      expect((await attempts()).map((a) => [a.kind, a.attempt_no])).toEqual([1, 2, 3, 4, 5].map((n) => ["fix_round", n]));
+    });
+
+    it("a fix round with no signed base is refused republish_base_missing: no token is minted, no attempt is spent", async () => {
+      await open();
+      const run = await claimedRun({ continues: {} });
+      const res = await askToken(run);
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ error: { code: "republish_base_missing" } });
+      expect(github.mints).toEqual([]);
+      expect(await attempts()).toEqual([]);
+    });
+
+    it("a fix round on an item with no open public pull request, or one a person took over, is told it has nothing to push to", async () => {
+      await pair();
+      await stamp();
+      const early = await claimedRun({ continues: { baseSha: BASE } });
+      expect((await askToken(early)).status).toBe(403);
+      await finish(early.id);
+      await open();
+      await admin.query("UPDATE plane_pushes SET managed_by_person_at = now() WHERE work_item_id = $1", [A.workItemId]);
+      const managed = await claimedRun({ continues: { baseSha: BASE } });
+      expect((await askToken(managed)).status).toBe(403);
+      expect(github.mints).toEqual([]);
+    });
+
+    it("an update goes through the same mint as a first push, for the runner's own account: a pairing whose installation is another account's is refused app_not_installed, with nothing minted or issued", async () => {
+      await open();
+      const run = await claimedRun({ continues: { baseSha: BASE } });
+      github.mintError = Object.assign(new Error("refused"), { code: "code_repo_installation_not_owned" });
+      const res = await askToken(run);
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ error: { code: "app_not_installed" } });
+      expect(github.mintedFor).toEqual([A.accountId]);
+      const [attempt] = await attempts();
+      expect(attempt).toMatchObject({ kind: "fix_round", token_issued_at: null, outcome: "code_repo_installation_not_owned" });
+      expect(await planeRow()).toMatchObject({ head_sha: HEAD });
+    });
+
+    it("a fresh run (not a continuation) is granted as it always was: no head to replace, a push attempt", async () => {
+      await open();
+      const run = await claimedRun();
+      const reply = PlanePushTokenReply.parse((await askToken(run)).body);
+      expect(reply.replaces_head).toBeUndefined();
+      expect((await attempts())[0]).toMatchObject({ kind: "push", attempt_no: 1 });
+    });
+
+    it("the update report moves the stamp to the verified head and tip, keeps the pull request, and ends the attempt; GitHub is asked first", async () => {
+      await open();
+      const run = await claimedRun({ continues: { baseSha: BASE } });
+      await askToken(run);
+      expect((await report(run, { phase: "updated", head_sha: NEW_HEAD, tip_sha: NEW_TIP, branch: (await planeRow()).branch })).status).toBe(200);
+      expect(github.asked).toEqual(["pushed"]);
+      expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: NEW_HEAD, tip_sha: NEW_TIP, pr_number: 9 });
+      expect((await attempts())[0]).toMatchObject({ outcome: "updated" });
+      expect(await stageOf()).toBe("changes_requested");
+    });
+
+    it("an update GitHub does not confirm, or one reported for a pull request that is not open, changes no stamp: the item goes to a person with the fixed failure sentence", async () => {
+      await open();
+      const run = await claimedRun({ continues: { baseSha: BASE } });
+      await askToken(run);
+      github.pushed = false;
+      expect((await report(run, { phase: "updated", head_sha: NEW_HEAD, tip_sha: NEW_TIP })).status).toBe(200);
+      expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: HEAD, tip_sha: TIP });
+      expect(await facts()).toEqual([{ kind: "escalated", code: "republish_failed" }]);
+      expect(await stageOf()).toBe("needs_human");
+      expect((await getWorkItemActivity({ pool: adminPool, principal: { accountId: A.accountId, userId: A.userId } }, A.workItemId)).notice).toEqual({ kind: "needs_human", reason: REPUBLISH_FAILED_SENTENCE });
+    });
+
+    it("a refusal because the public branch moved is recorded as republish_branch_moved and puts the item in Needs a person; the stamp stays", async () => {
+      await open();
+      const run = await claimedRun({ continues: { baseSha: BASE } });
+      await askToken(run);
+      expect((await report(run, { phase: "refused", code: "public_branch_moved" })).status).toBe(200);
+      expect(await facts()).toEqual([{ kind: "escalated", code: "republish_branch_moved" }]);
+      expect(await stageOf()).toBe("needs_human");
+      expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: HEAD });
+      // The card says so in the fixed words, read the way a person reads it.
+      expect((await getWorkItemActivity({ pool: adminPool, principal: { accountId: A.accountId, userId: A.userId } }, A.workItemId)).notice).toEqual({ kind: "needs_human", reason: REPUBLISH_BRANCH_MOVED_SENTENCE });
+      // The same report again records nothing new (one fact per round).
+      await report(run, { phase: "refused", code: "public_branch_moved" });
+      expect(await facts()).toHaveLength(1);
+    });
+
+    it("only the run that was granted an update may move the stamp: an update report from a fresh run (a push attempt) records nothing", async () => {
+      await open();
+      const run = await claimedRun();
+      await askToken(run);
+      await report(run, { phase: "updated", head_sha: NEW_HEAD, tip_sha: NEW_TIP, branch: (await planeRow()).branch });
+      expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: HEAD, tip_sha: TIP });
+      // A continuation that never asked for a token has no grant either.
+      await finish(run.id);
+      const other = await claimedRun({ continues: { baseSha: BASE } });
+      await report(other, { phase: "updated", head_sha: NEW_HEAD, tip_sha: NEW_TIP, branch: (await planeRow()).branch });
+      expect(await planeRow()).toMatchObject({ head_sha: HEAD });
+    });
+
+    it("an update with nothing to publish is recorded and escalated with its own fixed sentence, so the public pull request does not go stale unseen", async () => {
+      await open();
+      const run = await claimedRun({ continues: { baseSha: BASE } });
+      await askToken(run);
+      expect((await report(run, { phase: "no_change" })).status).toBe(200);
+      expect(await facts()).toEqual([{ kind: "escalated", code: "republish_no_change" }]);
+      expect(await stageOf()).toBe("needs_human");
+      expect((await getWorkItemActivity({ pool: adminPool, principal: { accountId: A.accountId, userId: A.userId } }, A.workItemId)).notice).toEqual({ kind: "needs_human", reason: REPUBLISH_NO_CHANGE_SENTENCE });
+      expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: HEAD });
+    });
+
+    it("a first publication that changed nothing is unchanged: no escalation", async () => {
+      await pair();
+      await stamp();
+      const run = await claimedRun();
+      await askToken(run);
+      await report(run, { phase: "no_change" });
+      expect(await planeRow()).toMatchObject({ state: "no_public_change" });
+      expect(await facts()).toEqual([]);
+    });
+
+    it("a refusal of a first publication is unchanged: recorded on the row, no escalation", async () => {
+      await pair();
+      await stamp();
+      const run = await claimedRun();
+      await askToken(run);
+      await report(run, { phase: "refused", code: "scan_refused" });
+      expect(await planeRow()).toMatchObject({ state: "refused", code: "scan_refused" });
+      expect(await facts()).toEqual([]);
     });
   });
 });

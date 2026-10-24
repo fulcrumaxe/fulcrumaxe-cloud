@@ -301,6 +301,21 @@ export async function recordVerifiedOutcome(client: Queryable, input: { accountI
   return rows[0] ? toRow(rows[0]) : null;
 }
 
+/**
+ * FIXROUND-REPUBLISH (R2-c1): moves the stamp to the head a fix round's update pushed (verified against GitHub by the caller). Only an open, platform-owned pull request moves: a row a person took over, or one in
+ * any other state, is left alone and null comes back. The state stays `pr_opened`: the same pull request, a new head.
+ */
+export async function recordUpdatedHead(client: Queryable, input: { accountId: string; id: string; headSha: string; tipSha: string }): Promise<PlanePushRow | null> {
+  if (!SHA.test(input.headSha) || !SHA.test(input.tipSha)) throw new PlanePushRecordError('bad_outcome', 'plane push update: head and tip must be full shas');
+  const { rows } = await client.query<Row>(
+    `UPDATE plane_pushes SET head_sha = $3, tip_sha = $4
+      WHERE id = $1 AND account_id = $2 AND state = 'pr_opened' AND managed_by_person_at IS NULL
+      RETURNING ${COLUMNS}`,
+    [input.id, input.accountId, input.headSha, input.tipSha],
+  );
+  return rows[0] ? toRow(rows[0]) : null;
+}
+
 /** Reads a branch's head on the public repo: the 40-hex sha, or null when the branch does not exist. The caller supplies the adapter: `createPlanePushApi().branchHead` takes a token, so P1f-2 wraps it in one that mints a fresh token and revokes it around the read. */
 export interface BranchHeadPort {
   branchHead(input: { accountId: string; codeRepo: string; branch: string }): Promise<string | null>;

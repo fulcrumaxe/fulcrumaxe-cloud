@@ -2,6 +2,7 @@
  * D#598 P1f-3: the three GitHub API calls the run-end hook makes to the paired PUBLIC repository with its one restricted token, and nothing else:
  *
  *   branchExists     `GET /repos/<o>/<n>/git/ref/heads/<branch>`: a branch that exists is never pushed over.
+ *   branchHead       the same read, answering the head: an update of a branch the platform pushed checks it before and after.
  *   openPullRequest  `POST /repos/<o>/<n>/pulls`: the one call that makes the pushed branch a pull request.
  *   revokeToken      `DELETE /installation/token` with the token itself as the bearer: 204, and the token answers 401 afterwards.
  *
@@ -73,6 +74,8 @@ async function readCapped(res: Response): Promise<string> {
 export interface PlanePushGithub {
   branchExists(input: { codeRepo: string; branch: string; token: string }): Promise<boolean>;
   openPullRequest(input: { codeRepo: string; branch: string; base: string; title: string; body: string; token: string }): Promise<{ number: number; url: string }>;
+  /** The branch's head (a full commit id), or null when it does not exist. */
+  branchHead(input: { codeRepo: string; branch: string; token: string }): Promise<string | null>;
   /** True on GitHub's 204 and on a 401 (already gone). Anything else, or no answer, is false: the token then lapses at its own expiry. Never throws. */
   revokeToken(token: string): Promise<boolean>;
 }
@@ -121,6 +124,16 @@ export function createPlanePushGithub(deps: PlanePushGithubDeps = {}): PlanePush
       if (res.status === 200) return true;
       if (res.status === 404) return false;
       throw new PlanePushGithubError("public_unavailable");
+    },
+
+    async branchHead({ codeRepo, branch, token }) {
+      const { owner, name } = split(codeRepo);
+      if (!BRANCH.test(branch) || branch.includes("..")) throw new PlanePushGithubError("public_unavailable");
+      const res = await call("GET", `/repos/${owner}/${name}/git/ref/heads/${branch.split("/").map(encodeURIComponent).join("/")}`, token);
+      if (res.status === 404) return null;
+      const object = res.body !== null && typeof res.body === "object" ? (res.body as { object?: { sha?: unknown } }).object : undefined;
+      if (res.status !== 200 || typeof object?.sha !== "string" || !/^[0-9a-f]{40}$/.test(object.sha)) throw new PlanePushGithubError("public_unavailable");
+      return object.sha;
     },
 
     async openPullRequest({ codeRepo, branch, base, title, body, token }) {

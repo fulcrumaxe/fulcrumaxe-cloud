@@ -208,7 +208,8 @@ export interface RunnerLeaseOps {
     | { kind: "pairing_changed" }
     | { kind: "already_issued" }
     | { kind: "attempts_exhausted" }
-    | { kind: "granted"; attemptId: string; id: string; codeRepo: string; branch: string; itemTitle: string; prFooter: string | null; issueNumber: number | null }
+    | { kind: "refused"; code: string }
+    | { kind: "granted"; attemptId: string; id: string; codeRepo: string; branch: string; itemTitle: string; prFooter: string | null; issueNumber: number | null; updateOf: string | null }
   >;
   /** D#598 P1f-2b: the repository's live pairing, only while its digest equals the build-start stamp. Read-only; the hook calls it twice. */
   planePushPairing?(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }): Promise<
@@ -232,7 +233,7 @@ export interface RunnerLeaseOps {
     leaseGeneration: number;
     planePushId: string;
     outcome: {
-      state: "scanning" | "pushed" | "pr_opened" | "refused" | "pushed_pr_not_opened" | "no_public_change";
+      state: "scanning" | "pushed" | "pr_opened" | "refused" | "pushed_pr_not_opened" | "no_public_change" | "updated";
       code?: string;
       refusals?: ReadonlyArray<{ kind: string; place: string; rule_key: string }>;
       headSha?: string;

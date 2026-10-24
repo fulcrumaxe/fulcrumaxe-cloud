@@ -57,7 +57,7 @@ const NO_STORE = { "cache-control": "no-store" } as const;
  */
 export const PLANE_PUSH_REPORT_CODES: readonly string[] = [
   "bad_input", "pairing_self", "pairing_changed", "base_diverged", "no_changes", "scan_refused", "scan_identity_mismatch", "public_unavailable",
-  "public_tip_moved", "app_not_installed", "token_scope_mismatch", "branch_exists", "push_failed", "pr_failed", "unsafe_git_config",
+  "public_tip_moved", "app_not_installed", "token_scope_mismatch", "branch_exists", "push_failed", "pr_failed", "unsafe_git_config", "public_branch_moved", "republish_base_missing",
 ];
 
 function requirePlanePush(deps: RunnerCloudDeps): PlanePushHostedPort {
@@ -112,6 +112,9 @@ export async function planePushTokenRun(deps: RunnerCloudDeps, req: RunnerHttpRe
       throw new RunnerHttpError(409, "already_issued", "a token was already issued for this run");
     case "attempts_exhausted":
       throw new RunnerHttpError(409, "attempts_exhausted", "this change has used all its push attempts");
+    case "refused":
+      // FIXROUND-REPUBLISH (R2-c1): the only code the grant refuses with is a fix round without a signed base.
+      throw new RunnerHttpError(409, "republish_base_missing", "this fix round has no signed base to update the public pull request from");
     case "granted":
       break;
   }
@@ -146,7 +149,7 @@ export async function planePushTokenRun(deps: RunnerCloudDeps, req: RunnerHttpRe
     if (!settled) throw new RunnerHttpError(500, "internal", "internal error");
     return {
       status: 200,
-      body: PlanePushTokenReply.parse({ token: minted.token, expires_at: minted.expiresAt.toISOString(), code_repo: grant.codeRepo, branch: grant.branch, base: "main", pr, identity: { name: identity.name, email: identity.email } }),
+      body: PlanePushTokenReply.parse({ token: minted.token, expires_at: minted.expiresAt.toISOString(), code_repo: grant.codeRepo, branch: grant.branch, base: "main", pr, identity: { name: identity.name, email: identity.email }, ...(grant.updateOf === null ? {} : { replaces_head: grant.updateOf }) }),
       headers: NO_STORE,
     };
   } catch (error) {
@@ -212,7 +215,7 @@ const bad = (): never => {
  * The report is a hint. For a phase that says something exists on GitHub, GitHub is asked (with the hosted side's own token) and the answer
  * decides; the runner's `branch` is compared with the record's and never used.
  */
-async function decide(m: PlanePushReportMessage, plane: { codeRepo: string; branch: string; pairingDigest: string }, attempt: { tokenIssued: boolean; finished: boolean; outcome: string | null } | null, port: PlanePushHostedPort, accountId: string): Promise<Decision> {
+async function decide(m: PlanePushReportMessage, plane: { codeRepo: string; branch: string; pairingDigest: string; state: string }, attempt: { tokenIssued: boolean; finished: boolean; outcome: string | null } | null, port: PlanePushHostedPort, accountId: string): Promise<Decision> {
   switch (m.phase) {
     case "building":
       // The build start already stamped `building`; a report must never move a later state back to it.
@@ -228,6 +231,7 @@ async function decide(m: PlanePushReportMessage, plane: { codeRepo: string; bran
     }
     case "pushed":
     case "pr_failed":
+    case "updated":
     case "pr_opened": {
       if (m.head_sha === undefined || m.tip_sha === undefined) return bad();
       if (m.phase === "pr_opened" && m.pr_number === undefined) return bad();
@@ -241,7 +245,10 @@ async function decide(m: PlanePushReportMessage, plane: { codeRepo: string; bran
       // A push needs the token this run was granted; a report of one without a grant cannot be true. The branch is the record's, whatever the runner says.
       if (!attempt?.tokenIssued || (m.branch !== undefined && m.branch !== plane.branch)) return MISMATCH;
       const input = { accountId, codeRepo: plane.codeRepo, branch: plane.branch, headSha: m.head_sha, tipSha: m.tip_sha };
+      // An update is only ever of a pull request that is open (the grant gave the hook no token otherwise); the same read of GitHub as a first push decides it: head, its single parent, that parent in public main.
+      if (m.phase === "updated" && plane.state !== "pr_opened") return MISMATCH;
       if (!(await port.verifyPushed(input))) return MISMATCH;
+      if (m.phase === "updated") return { outcome: { state: "updated", headSha: m.head_sha, tipSha: m.tip_sha }, terminal: true, label: "updated" };
       if (m.phase === "pushed") return { outcome: { state: "pushed", headSha: m.head_sha, tipSha: m.tip_sha }, terminal: false, label: "pushed" };
       if (m.phase === "pr_failed") return { outcome: { state: "pushed_pr_not_opened", headSha: m.head_sha, tipSha: m.tip_sha }, terminal: true, label: "pr_failed" };
       const pr = await port.verifyPullRequest({ accountId, codeRepo: plane.codeRepo, branch: plane.branch, number: m.pr_number! });

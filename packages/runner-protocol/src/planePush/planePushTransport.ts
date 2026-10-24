@@ -8,16 +8,17 @@ import { git } from "./planePushGit.js";
  *   - Fetch is anonymous. The paired repo is public, and nothing is sent that could identify the private one.
  *   - Push carries the restricted installation token in an `Authorization` header that is scoped to the repo's own URL, set through
  *     the environment: the token is never in an argument list, a URL, a config file or an error message.
- *   - Push is never forced. A refspec is built here from a validated commit id and branch name, `+` is not possible, and a branch
- *     that already exists on the remote makes git refuse the update unless it is a fast-forward of what is there.
+ *   - Push is never forced, except for the one update of a branch the platform pushed: that push carries a lease on the exact head the platform last
+ *     pushed (`--force-with-lease=<ref>:<head>`), so the server replaces that head and no other. A refspec is built here from a validated commit id and
+ *     branch name, `+` is not possible, and a branch that already exists on the remote makes git refuse a plain push unless it is a fast-forward.
  *   - Redirects are off, prompts are off, no credential helper runs, and only the one scheme of the origin is allowed.
  */
 
 export interface PublicGitTransport {
   /** Fetches the public repo's main into `repoDir` and returns the 40-hex id of its tip, as the remote has it now. */
   fetchTip(repoDir: string, codeRepo: string): Promise<string>;
-  /** Pushes `commit` to `refs/heads/<branch>` of the public repo with `token`. Never forced. */
-  push(input: { repoDir: string; codeRepo: string; commit: string; branch: string; token: string }): Promise<void>;
+  /** Pushes `commit` to `refs/heads/<branch>` of the public repo with `token`. Not forced; with `expectedHead` (an update of a branch the platform pushed) a lease-checked forced push that replaces that head and no other: a compare-and-swap, refused by the server when the branch is anywhere else. */
+  push(input: { repoDir: string; codeRepo: string; commit: string; branch: string; token: string; expectedHead?: string }): Promise<void>;
 }
 
 export const PUBLIC_BASE_BRANCH = "main";
@@ -145,9 +146,10 @@ export function createGitTransport(opts: { origin?: string; caInfo?: string } = 
       if (!OBJECT_ID.test(tip)) throw new Error("the fetched tip is not a full commit id");
       return tip;
     },
-    async push({ repoDir, codeRepo, commit, branch, token }) {
+    async push({ repoDir, codeRepo, commit, branch, token, expectedHead }) {
       if (!OBJECT_ID.test(commit)) throw new Error("push: the commit must be a full 40-hex id");
       if (!branchNameOk(branch)) throw new Error("push: unusable branch name");
+      if (expectedHead !== undefined && !OBJECT_ID.test(expectedHead)) throw new Error("push: the expected head must be a full 40-hex id");
       await assertSafeLocalConfig(repoDir);
       const url = urlOf(codeRepo);
       const basic = Buffer.from(`x-access-token:${token}`, "utf8").toString("base64");
@@ -156,7 +158,7 @@ export function createGitTransport(opts: { origin?: string; caInfo?: string } = 
       const local = `refs/fx/plane-push/${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
       await git(repoDir, ["update-ref", local, commit]);
       try {
-        await git(repoDir, [...hardening, "push", "--quiet", "--no-verify", url, `${local}:refs/heads/${branch}`], undefined, {
+        await git(repoDir, [...hardening, "push", "--quiet", "--no-verify", ...(expectedHead === undefined ? [] : [`--force-with-lease=refs/heads/${branch}:${expectedHead}`]), url, `${local}:refs/heads/${branch}`], undefined, {
           ...NO_PROMPT,
           GIT_CONFIG_COUNT: "1",
           GIT_CONFIG_KEY_0: `http.${origin}/.extraHeader`,
