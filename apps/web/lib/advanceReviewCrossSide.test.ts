@@ -93,7 +93,8 @@ describe("startFixBody", () => {
     expect(out.ok).toBe(true);
     const sent = t.advanceStartFix.mock.calls[0]![1] as { pr?: unknown; prompt: string };
     expect(sent.pr).toEqual({ number: 41, branch: RUN_BRANCH });
-    expect(sent.prompt).toContain(`git checkout -B ${RUN_BRANCH} ${HEAD}`);
+    expect(sent.prompt).toContain(`git checkout -B ${RUN_BRANCH} origin/${RUN_BRANCH}`);
+    expect(sent.prompt).toContain(`git merge-base --is-ancestor ${HEAD} HEAD`);
     expect(sent.prompt).toMatch(/Never use --force/);
   });
 
@@ -105,12 +106,19 @@ describe("startFixBody", () => {
     expect(sent.prompt).toContain("Do not push");
   });
 
-  it("a same-side round sends no pull request and the unchanged prompt", async () => {
+  it("a same-side sandbox round sends the pull request GitHub just showed (for the base sync) and the unchanged prompt", async () => {
     const t = worker();
     await startFixBody(t.w, who, ctx({ executionMode: "sandbox", prExecutionMode: "sandbox" }), { ...pr, branch: "fx/issue-12" }, ACTION, 1, failing);
     const sent = t.advanceStartFix.mock.calls[0]![1] as { pr?: unknown; prompt: string };
-    expect("pr" in sent).toBe(false);
+    expect(sent.pr).toEqual({ number: 41, branch: "fx/issue-12" });
     expect(sent.prompt).toContain("This continues your earlier session");
+  });
+
+  it("a same-side runner round sends no pull request", async () => {
+    const t = worker();
+    await startFixBody(t.w, who, ctx({ executionMode: "runner_local", prExecutionMode: "runner_local" }), pr, ACTION, 1, failing);
+    const sent = t.advanceStartFix.mock.calls[0]![1] as { pr?: unknown };
+    expect("pr" in sent).toBe(false);
   });
 });
 

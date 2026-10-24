@@ -26,7 +26,7 @@ import type { RunStarter } from "./preview.js";
 import { readVerifiedReviewGate, type VerifiedReviewGate } from "./verifiedReviewGate.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 import { startCheckFixRound } from "./checkFix.js";
-import { BASE_SYNCED_PROMPT_LINE, BASE_SYNCED_STAGE, checkFixBeforeStart, syncRunBranch } from "./fixRoundBase.js";
+import { BASE_SYNCED_PROMPT_LINE, BASE_SYNCED_STAGE, checkFixBeforeStart, recordBaseSyncUnavailable, syncRunBranch } from "./fixRoundBase.js";
 import { BRANCH_MOVED_STAGE, checkPrivateHead, checkPublicBranch, type FixRoundHeadPorts } from "./fixRoundHeads.js";
 import { RunActionInputError, type PerformResult } from "./runActions.js";
 
@@ -1490,7 +1490,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     // and the event write would otherwise leave the run uncounted, and `fixRoundsStarted` would undercount.
     const started = async (runId: string): Promise<AdvanceRunStart> => {
       await recordCorrectionsApplied(who, runId);
-      await writeEvent(who, { kind: "fix_round_started", dedupeKey: `fix:${attemptKey}`, headSha: req.headSha, round: req.round, runId });
+      await writeEvent(who, { kind: "fix_round_started", dedupeKey: `fix:${attemptKey}`, headSha: req.headSha, round: req.round, runId, ...(req.pr && req.pr.branch === `${ITEM_PR_PREFIX}${req.issue}` ? { prNumber: req.pr.number } : {}) });
       return { ok: true, runId };
     };
     const prior = await claimed();
@@ -1527,7 +1527,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     let headMoved = false;
     let baseSynced = false;
     let baseTip: string | null = null;
-    if (isRunnerMode(effective)) {
+    {
+      // FIXROUND-BASE-SYNC-SANDBOX: the sync is the cloud's, so a sandbox round gets the same head check and sync (its prompt starts from the fetched branch tip).
+      const runnerSide = isRunnerMode(effective);
       const repoId = state.repoId;
       const found = await withTenant(runnerPool, who.accountId, async (client) => {
         const r = await client.query<{ gh_owner: string | null; gh_name: string | null; gh_number: string | null }>(
@@ -1541,7 +1543,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       const same = (p: { number: number; branch: string } | null) => p !== null && req.pr !== undefined && p.number === req.pr.number && p.branch === req.pr.branch;
       const pr =
         req.pr === undefined
-          ? found.recorded
+          ? runnerSide
+            ? found.recorded
+            : found.bound
           : same(found.recorded) || same(found.bound) || (found.coords?.gh_number != null && req.pr.branch === `${ITEM_PR_PREFIX}${found.coords.gh_number}`)
             ? req.pr
             : null;
@@ -1555,6 +1559,11 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         baseSynced = sync.synced;
         // Only a round that continues the very branch that was synced is signed with that base.
         if (req.pr !== undefined && req.pr.branch === pr.branch) baseTip = sync.baseSha;
+      } else if (!runnerSide && !(req.pr !== undefined && (await withTenant(runnerPool, who.accountId, async (client) => (await client.query<{ execution_mode: string | null }>("SELECT execution_mode FROM agent_runs WHERE id = $1 AND account_id = $2", [parent, who.accountId])).rows[0]?.execution_mode ?? null).then((m) => sideOfMode(m) !== sideOfMode(effective))))) {
+        // A sandbox round always has a pull request (the review step found it on GitHub): without one it is refused, never started on a stale base.
+        // A cross-side round with a pair that is not the item's is left to the binding check below, which refuses it `pr_unbound`.
+        await recordBaseSyncUnavailable(runnerPool, who, attemptKey, null, null, true);
+        return refuse("base_sync_unavailable");
       }
     }
 

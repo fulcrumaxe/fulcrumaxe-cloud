@@ -8,6 +8,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { createRunActionFacade } from "../src/runActions.js";
 import { createAdvanceModule, type AdvanceModuleDeps, type AdvanceReviewDeps, type AdvanceRoundInput } from "../src/advance.js";
+import { upToDateHeads, withIssuePr } from "./withIssuePr.js";
 import type { RunStarter } from "../src/preview.js";
 import type { SeatResult } from "../src/seat.js";
 
@@ -105,9 +106,10 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       triage: null,
       registry,
       review: reviewDeps,
+      fixHeads: upToDateHeads(HEAD),
       ...over,
     };
-    return { module: createAdvanceModule(writerPool, deps), inputs, deps };
+    return { module: withIssuePr(createAdvanceModule(writerPool, deps), admin), inputs, deps };
   }
 
   /** A work item at `stage` with a discussion (kind) and, for stages that need one, a Spec; its repo has an owner and a name. */

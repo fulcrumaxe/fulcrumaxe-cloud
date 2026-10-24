@@ -7,6 +7,7 @@ import { createPool } from "@fx/db/src/pool.js";
 import { answerAsk } from "@fx/core/src/decisions/answer.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { createAdvanceModule, type AdvanceModuleDeps, type AdvanceReviewDeps, type AdvanceStartArgs } from "../src/advance.js";
+import { upToDateHeads } from "./withIssuePr.js";
 import { buildDecisionSnapshot, writeDecisionSnapshot } from "../src/decisionSnapshot.js";
 import { createDecisionIntake } from "../src/decisionIntake.js";
 import type { RunStarter } from "../src/preview.js";
@@ -110,7 +111,7 @@ describe("a parked fix round resumes through the real fix start [pg]", { timeout
       mergeGate: vi.fn(async () => ({ outcome: "merged", headSha: HEAD, reasons: [], status: "posted" })),
     };
     const starter: RunStarter = { async start() { return { runId: randomUUID() }; } };
-    const deps: AdvanceModuleDeps = { starter, resolveRunSeat: vi.fn(async () => SEAT), startAdvance: async () => undefined, triage: null, registry, review };
+    const deps: AdvanceModuleDeps = { starter, resolveRunSeat: vi.fn(async () => SEAT), startAdvance: async () => undefined, triage: null, registry, review, fixHeads: upToDateHeads(HEAD) };
     return createAdvanceModule(runnerPool, deps);
   }
 
@@ -152,6 +153,7 @@ describe("a parked fix round resumes through the real fix start [pg]", { timeout
       reviewer: "security",
       failingRunId,
       expectedExecutionMode: "sandbox",
+      pr: { number: 41, branch: `fx/issue-${w.ghNumber}` },
     });
     if (!started.ok) throw new Error(`the first fix round was refused: ${started.reason}`);
     await writeRunStatus(runnerPool, {

@@ -9,6 +9,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { createRunActionFacade } from "../src/runActions.js";
 import { createAdvanceModule, type AdvanceModuleDeps, type AdvanceStartArgs, type AdvanceStepPorts } from "../src/advance.js";
+import { upToDateHeads, withIssuePr } from "./withIssuePr.js";
 import type { RunStarter } from "../src/preview.js";
 import type { SeatResult } from "../src/seat.js";
 
@@ -135,9 +136,10 @@ describe("halt marker [pg]", { timeout: 60_000 }, () => {
       spec: mustNotRun("spec"),
       build: mustNotRun("build"),
       review: {} as never,
+      fixHeads: upToDateHeads("a".repeat(40)),
       ...over,
     };
-    return { module: createAdvanceModule(pool, deps), args };
+    return { module: withIssuePr(createAdvanceModule(pool, deps), admin), args };
   }
   /** The pool with one change: the customer's halt commits just before the first statement containing `fragment` runs. */
   function haltedBefore(fragment: string, workItemId: string): Pool {

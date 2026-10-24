@@ -170,7 +170,7 @@ interface Facts {
   liveOther: boolean;
   approver: string | null;
   /** A parked fix round's own record: the head it fixed, its round, and the review that asked for it. Null when the item is not at a fix round or the record is missing. */
-  fix: { headSha: string; round: number; reviewer: string; failingRunId: string } | null;
+  fix: { headSha: string; round: number; reviewer: string; failingRunId: string; prNumber: number | null } | null;
 }
 
 const TERMINAL = ["succeeded", "failed", "timed_out", "killed_spend", "refused_spend", "cancelled"];
@@ -233,7 +233,7 @@ export function createResumeModule(runnerPool: Pool, deps: ResumeModuleDeps): Re
       const live = await client.query("SELECT 1 FROM agent_runs WHERE account_id = $1 AND work_item_id = $2 AND NOT (status = ANY($3::text[])) AND NOT (id = ANY($4::uuid[])) LIMIT 1", [accountId, ask.work_item_id, TERMINAL, ownIds]);
       let fix: Facts["fix"] = null;
       if (item?.stage === "changes_requested" && ask.run_id !== null) {
-        const round = (await client.query<{ head_sha: string | null; round: number | null }>("SELECT head_sha, round FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'fix_round_started' AND run_id = $3 ORDER BY seq DESC LIMIT 1", [accountId, ask.work_item_id, ask.run_id])).rows[0];
+        const round = (await client.query<{ head_sha: string | null; round: number | null; pr_number: number | null }>("SELECT head_sha, round, pr_number FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'fix_round_started' AND run_id = $3 ORDER BY seq DESC LIMIT 1", [accountId, ask.work_item_id, ask.run_id])).rows[0];
         const moved = (
           await client.query<{ reviewer: string | null; source_ref: string }>(
             "SELECT reviewer, source_ref FROM work_item_transitions WHERE account_id = $1 AND work_item_id = $2 AND to_stage = 'changes_requested' AND starts_with(source_ref, 'fix-round:') ORDER BY created_at DESC, id DESC LIMIT 1",
@@ -242,7 +242,7 @@ export function createResumeModule(runnerPool: Pool, deps: ResumeModuleDeps): Re
         ).rows[0];
         const failing = moved?.source_ref.slice("fix-round:".length) ?? "";
         if (round?.head_sha && SHA_RE.test(round.head_sha) && round.round !== null && round.round >= 1 && moved?.reviewer && REVIEWERS.includes(moved.reviewer) && UUID_RE.test(failing)) {
-          fix = { headSha: round.head_sha, round: round.round, reviewer: moved.reviewer, failingRunId: failing };
+          fix = { headSha: round.head_sha, round: round.round, reviewer: moved.reviewer, failingRunId: failing, prNumber: round.pr_number };
         }
       }
       const approver = (
@@ -379,6 +379,8 @@ export function createResumeModule(runnerPool: Pool, deps: ResumeModuleDeps): Re
           ...(spendAttempt > 0 ? { spendAttempt } : {}),
           reviewer: f.fix.reviewer as AdvanceFixRequest["reviewer"],
           failingRunId: f.fix.failingRunId,
+          // The pull request the round was first started with (the sandbox review step found it on GitHub), so a sandbox round that resumes is synced as it was.
+          ...(f.fix.prNumber !== null ? { pr: { number: f.fix.prNumber, branch: `fx/issue-${f.item.gh_number}` } } : {}),
           ...(f.parked.execution_mode !== null && /^[a-z][a-z_]{0,31}$/.test(f.parked.execution_mode) ? { expectedExecutionMode: f.parked.execution_mode } : {}),
         },
       );

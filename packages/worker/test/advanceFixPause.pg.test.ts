@@ -83,7 +83,7 @@ describe("advance: fix rounds and reviewer runs under a spending limit [pg]", { 
       mergeGate: vi.fn(async () => ({ outcome: "merged", headSha: HEAD, reasons: [], status: "posted" })),
     };
     const starter: RunStarter = { async start() { return { runId: randomUUID() }; } };
-    const deps: AdvanceModuleDeps = { starter, resolveRunSeat: vi.fn(async () => SEAT), startAdvance: async () => undefined, triage: null, registry, review };
+    const deps: AdvanceModuleDeps = { starter, resolveRunSeat: vi.fn(async () => SEAT), startAdvance: async () => undefined, triage: null, registry, review, fixHeads: { privateHead: async () => HEAD, syncBase: async () => ({ kind: "up_to_date", baseSha: "f".repeat(40) }) } };
     return createAdvanceModule(writerPool, deps);
   }
 
@@ -104,7 +104,7 @@ describe("advance: fix rounds and reviewer runs under a spending limit [pg]", { 
   const who = (a: SeedRefs, workItemId: string) => ({ accountId: a.accountId, userId: a.userId, workItemId, haltEpoch: 0 });
   const numberOf = async (id: string) => Number((await admin.query<{ gh_number: string }>("SELECT gh_number FROM work_items WHERE id = $1", [id])).rows[0]!.gh_number);
   const events = async (id: string) => (await admin.query<{ kind: string; code: string | null }>("SELECT kind, code FROM work_item_driver_events WHERE work_item_id = $1 ORDER BY seq", [id])).rows;
-  const fixRequest = async (w: string, over: Record<string, unknown> = {}) => ({ issue: await numberOf(w), headSha: HEAD, prompt: "fix it", round: 1, actionId: randomUUID(), reviewer: "code" as const, failingRunId: randomUUID(), ...over });
+  const fixRequest = async (w: string, over: Record<string, unknown> = {}) => { const issue = await numberOf(w); return { issue, headSha: HEAD, prompt: "fix it", round: 1, actionId: randomUUID(), reviewer: "code" as const, failingRunId: randomUUID(), pr: { number: 41, branch: `fx/issue-${issue}` }, ...over }; };
 
   describe("the fix round start", () => {
     it.each(Object.keys(RESERVATION_DENIAL_PAUSES))("S5k1d-1: a %s denial answers that denial (the web step names the pause), moves nothing and writes no refusal fact", async (denial) => {

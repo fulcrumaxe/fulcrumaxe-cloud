@@ -24,8 +24,11 @@ const FIX: FixPromptInput = {
 describe("the cross-side sandbox fix prompt", () => {
   const prompt = buildFixPrompt({ ...FIX, crossSide: true });
 
-  it("starts a local branch of the pull request's own name at the head the reviewers judged, and pushes it without force", () => {
-    expect(prompt).toContain(`git fetch origin ${RUN_BRANCH} && git checkout -B ${RUN_BRANCH} ${HEAD}`);
+  it("starts a local branch of the pull request's own name at the fetched branch tip (a base sync may have moved it), checks the reviewed commit is in it, and pushes it without force", () => {
+    expect(prompt).toContain(`git fetch origin "+refs/heads/${RUN_BRANCH}:refs/remotes/origin/${RUN_BRANCH}" && git checkout -B ${RUN_BRANCH} origin/${RUN_BRANCH}`);
+    expect(prompt).toContain(`git merge-base --is-ancestor ${HEAD} HEAD`);
+    expect(prompt).toContain("The branch no longer contains the commit that was reviewed.");
+    expect(prompt).not.toContain(`checkout -B ${RUN_BRANCH} ${HEAD}`);
     expect(prompt).toContain(`git push origin ${RUN_BRANCH}`);
     expect(prompt).toMatch(/Never use --force/);
     expect(prompt).toMatch(/never open a pull request/);

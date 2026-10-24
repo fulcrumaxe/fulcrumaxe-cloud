@@ -237,8 +237,9 @@ export function assembleFixPrompt(input: FixPromptInput, options?: AssembleOptio
     : input.crossSide === true
       ? [
           `You are the executor. The reviewers asked for changes on pull request #${input.pr} (${input.owner}/${input.name}, issue #${input.issue}).`,
-          "This is a new session: the pull request was opened by a run on another machine, so there is no earlier session of yours to continue. The repository is checked out in your working directory. Bring your checkout to the pull request's branch at the commit the reviewers judged:",
-          `  git fetch origin ${branch} && git checkout -B ${branch} ${input.headSha}`,
+          "This is a new session: the pull request was opened by a run on another machine, so there is no earlier session of yours to continue. The repository is checked out in your working directory. Bring your checkout to the pull request's branch at the commit the reviewers judged, or at its current tip when the platform has merged the base into it since (always start from the fetched tip):",
+          `  git fetch origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" && git checkout -B ${branch} origin/${branch}`,
+          `Then run: git merge-base --is-ancestor ${input.headSha} HEAD. If it fails, stop at once: change nothing, commit nothing, push nothing, and reply only "The branch no longer contains the commit that was reviewed."`,
           `You are fixing commit ${input.headSha}. Fix every finding below, keep the change small, update or add tests, and run the tests until they pass.`,
           `Commit as the bot (add new files first): git -c user.name="${BOT_NAME}" -c user.email="${BOT_EMAIL}" commit -am "<message>", then push the same branch: git push origin ${branch}`,
           `Never use --force or any flag that rewrites ${branch}, never push another branch name, and never open a pull request: pushing the branch updates the existing one. Authentication is handled for you; set no token.`,
@@ -247,7 +248,7 @@ export function assembleFixPrompt(input: FixPromptInput, options?: AssembleOptio
       : [
         `You are the executor. The reviewers asked for changes on pull request #${input.pr} (${input.owner}/${input.name}, issue #${input.issue}).`,
         "This continues your earlier session; the repository is checked out in your working directory. Do not clone it again. Bring your checkout to the branch first:",
-        `  git fetch origin ${branch} && git checkout ${branch} && git reset --hard origin/${branch}`,
+        `  git fetch origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" && git checkout ${branch} && git reset --hard origin/${branch}`,
         `You are fixing commit ${input.headSha}. Fix every finding below, keep the change small, update or add tests, and run the tests until they pass.`,
         `Commit as the bot (add new files first): git -c user.name="${BOT_NAME}" -c user.email="${BOT_EMAIL}" commit -am "<message>", then push: git push origin ${branch}`,
         "Do not open a new pull request: pushing to the branch updates the existing one. Authentication is handled for you; set no token.",
