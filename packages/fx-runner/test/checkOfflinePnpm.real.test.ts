@@ -1,11 +1,12 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { pnpmArgs } from "../src/daemon/depsInstall.js";
+import { prepareCheckHome } from "../src/sandbox/checkHome.js";
 import { CHECK_PNPM_ENV } from "../src/sandbox/hostSandbox.js";
 
 /**
@@ -136,5 +137,105 @@ describe.skipIf(major < 11)("the check's plain `pnpm install --frozen-lockfile` 
     expect(out.code).not.toBe(0);
     expect(out.out).toMatch(/ERR_PNPM_NO_OFFLINE/);
     expect(requests).toEqual([]);
+  });
+});
+
+/**
+ * The live failure of 10-24 (run 2d48118b): tests inside the check start `pnpm --filter ops build` and `pnpm exec next build` from a SHORT allowlist of environment names, which drops every
+ * `pnpm_config_*` setting `CHECK_PNPM_ENV` gives the check itself. pnpm 11 then checks the tree against the lockfile before it runs the script (and finds a different store than the install used, or has
+ * to verify the lockfile's release ages with the registry), starts a `pnpm install` that cannot run (no network; or a prompt to delete `node_modules` with no terminal), and reads the home directory's
+ * `.npmrc`, which the sandbox hides. The one name every such list keeps is `HOME`: `prepareCheckHome` gives the check a home that holds the settings. These tests run the real pnpm with exactly that.
+ */
+describe.skipIf(major < 11)("a pnpm command a test starts inside the check, from a filtered environment", () => {
+  /** What the repository's tests pass on to a package build: the names pnpm and node need, nothing named `pnpm_config_*` (apps/ops/test/scan.test.ts). */
+  const SCAN_FILTER = ["PATH", "HOME", "USER", "LANG", "TMPDIR", "XDG_CACHE_HOME", "XDG_DATA_HOME"];
+  /** Another repository test's list (apps/gh-proxy/test/strippedBuild.test.ts): it also keeps `CI` and the job's store settings, which do not turn off the lockfile check. */
+  const PROXY_FILTER = [...SCAN_FILTER, "CI", "pnpm_config_store_dir", "pnpm_config_verify_store_integrity"];
+  const filtered = (names: string[], all: Record<string, string>): Record<string, string> => Object.fromEntries(names.filter((name) => all[name] !== undefined).map((name) => [name, all[name]!]));
+
+  async function installedWorkspace(name: string): Promise<{ project: string; store: string; dirs: { home: string; cache: string }; tmp: string }> {
+    const project = path.join(root, name, "project");
+    const store = path.join(root, name, "store");
+    const tmp = path.join(root, name, "job-tmp");
+    const dirs = { home: path.join(root, name, "home"), cache: path.join(root, name, "xdg") };
+    for (const dir of [path.join(project, "apps", "web"), store, tmp, dirs.home, dirs.cache, path.join(root, name, "host-cache")]) mkdirSync(dir, { recursive: true });
+    // the registry is the repository's own setting (project level), as it is in the real repository, so a request anywhere shows in `requests`
+    writeFileSync(path.join(project, "pnpm-workspace.yaml"), `packages:\n  - "apps/*"\nregistry: ${origin}/\n`);
+    writeFileSync(path.join(project, "package.json"), JSON.stringify({ name: "root", version: "1.0.0", private: true }));
+    writeFileSync(
+      path.join(project, "apps", "web", "package.json"),
+      JSON.stringify({ name: "web", version: "1.0.0", private: true, scripts: { build: "node -e \"require('fx-offline-demo'); require('fs').writeFileSync('built.txt', 'ok')\"" }, dependencies: { [NAME]: VERSION } }),
+    );
+    const hostEnv = envFor(dirs, { pnpm_config_store_dir: store, pnpm_config_verify_store_integrity: "true" });
+    const lock = await pnpm(["install", "--lockfile-only", `--registry=${origin}/`], hostEnv, project);
+    expect(lock.code, lock.out).toBe(0);
+    const host = await pnpm(pnpmArgs({ registry: `${origin}/`, storeDir: store, cacheDir: path.join(root, name, "host-cache") }), hostEnv, project);
+    expect(host.code, host.out).toBe(0);
+    expect(readFileSync(path.join(project, "apps", "web", "node_modules", NAME, "index.js"), "utf8")).toContain("module.exports");
+    // the real home's own .npmrc cannot be read by the check, as in the sandbox (this test cannot show that as root, which reads anything)
+    writeFileSync(path.join(dirs.home, ".npmrc"), "registry=https://registry.example.invalid/\n", { mode: 0o000 });
+    return { project, store, dirs, tmp };
+  }
+  const tree = (project: string, store: string): string => `${readFileSync(path.join(project, "node_modules", ".modules.yaml"), "utf8")}|${String(readdirSync(path.join(store, "v11", "files"), { recursive: true }).length)}`;
+
+  it("control: with the real home, the nested build is sent to install, which cannot run (no terminal), and the script does not run", async () => {
+    const { project, dirs } = await installedWorkspace("nested-control");
+    requests = [];
+    const out = await pnpm(["--filter", "web", "build"], filtered(SCAN_FILTER, envFor({ home: dirs.home, cache: path.join(root, "nested-control", "check-cache") }, {})), project);
+    expect(out.code, out.out).not.toBe(0);
+    expect(out.out).toContain("ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY");
+    expect(existsSync(path.join(project, "apps", "web", "built.txt"))).toBe(false);
+  });
+
+  it("control: with the store settings kept and the real home, the nested command goes back to the registry to verify the lockfile (the request that waits forever with no network)", async () => {
+    const { project, store, dirs } = await installedWorkspace("nested-proxy-control");
+    requests = [];
+    const env = filtered(PROXY_FILTER, envFor({ home: dirs.home, cache: path.join(root, "nested-proxy-control", "check-cache") }, { pnpm_config_store_dir: store, pnpm_config_verify_store_integrity: "true", pnpm_config_fetch_retries: "0" }));
+    await pnpm(["exec", "node", "-e", "0"], env, project);
+    expect(requests.filter((line) => line.startsWith("GET"))).not.toEqual([]);
+  });
+
+  it("with the check's home, `pnpm --filter web build` exits 0, makes no registry request, changes nothing in node_modules or the store files, and reads no .npmrc of the host", async () => {
+    const { project, store, dirs, tmp } = await installedWorkspace("nested-fixed");
+    requests = [];
+    const home = prepareCheckHome(tmp, store);
+    // the home is the job's own: inside its temp directory, never the real home; the user config in it is empty
+    expect(home.startsWith(`${tmp}${path.sep}`)).toBe(true);
+    expect(home).not.toBe(dirs.home);
+    expect(readFileSync(path.join(home, ".npmrc"), "utf8")).toBe("");
+    expect(readFileSync(path.join(home, ".config", "pnpm", "config.yaml"), "utf8")).toContain("verifyDepsBeforeRun: false");
+    const before = tree(project, store);
+    const out = await pnpm(["--filter", "web", "build"], filtered(SCAN_FILTER, envFor({ home, cache: path.join(root, "nested-fixed", "check-cache") }, {})), project);
+    expect(out.code, out.out).toBe(0);
+    expect(readFileSync(path.join(project, "apps", "web", "built.txt"), "utf8")).toBe("ok");
+    expect(requests).toEqual([]);
+    expect(out.out).not.toMatch(/\.npmrc|EACCES|ERR_PNPM/);
+    expect(tree(project, store)).toBe(before);
+    expect(readFileSync(path.join(project, "apps", "web", "node_modules", NAME, "index.js"), "utf8")).toContain("module.exports");
+  });
+
+  it("the same holds for a test that keeps CI and the store settings in its list: `pnpm exec` makes no registry request and exits 0", async () => {
+    const { project, store, dirs, tmp } = await installedWorkspace("nested-proxy-fixed");
+    requests = [];
+    const home = prepareCheckHome(tmp, store);
+    const env = filtered(PROXY_FILTER, envFor({ home, cache: path.join(root, "nested-proxy-fixed", "check-cache") }, { pnpm_config_store_dir: store, pnpm_config_verify_store_integrity: "true" }));
+    expect(env.HOME).not.toBe(dirs.home);
+    const out = await pnpm(["exec", "node", "-e", "console.log(40 + 2)"], env, project);
+    expect(out.code, out.out).toBe(0);
+    expect(out.out).toContain("42");
+    expect(requests).toEqual([]);
+  });
+
+  it("a nested `pnpm install` is still not let through to delete node_modules: it stops, makes no request, and leaves the tree as it was", async () => {
+    const { project, store, dirs, tmp } = await installedWorkspace("nested-install");
+    requests = [];
+    const home = prepareCheckHome(tmp, store);
+    const before = tree(project, store);
+    const out = await pnpm(["install", "--frozen-lockfile", "--offline", "--store-dir", path.join(root, "nested-install", "elsewhere")], filtered(SCAN_FILTER, envFor({ home, cache: path.join(root, "nested-install", "check-cache") }, {})), project);
+    expect(out.code).not.toBe(0);
+    expect(requests).toEqual([]);
+    expect(tree(project, store)).toBe(before);
+    expect(readFileSync(path.join(project, "apps", "web", "node_modules", NAME, "index.js"), "utf8")).toContain("module.exports");
+    expect(dirs.home).not.toBe(home);
   });
 });

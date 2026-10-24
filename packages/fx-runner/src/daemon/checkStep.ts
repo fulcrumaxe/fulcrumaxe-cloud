@@ -8,7 +8,10 @@
  *    Unix-domain sockets, as for the agent; a platform or machine where that cannot be applied fails the check (`launch` answers `refused`), it never runs weaker.
  *    The environment is built from the clean allowlist, minus every model credential and the agent CLI's env file. It also tells pnpm to work offline and to skip the
  *    release-age lookup that needs registry metadata (`HostSandbox.checkLaunch`): a dependency install that needs the network then fails at once with a named error
- *    instead of waiting on a connection that cannot be made. This loosens nothing: the network and every file access are as before;
+ *    instead of waiting on a connection that cannot be made. This loosens nothing: the network and every file access are as before. Its `HOME` is a fresh empty directory
+ *    inside the job's own temp directory, holding the same pnpm settings as files (no dependency check before a script, the job's store) and an empty `.npmrc`, because the
+ *    pnpm commands a test starts get a filtered environment that keeps `HOME` and drops those settings (`checkHome.ts`); it never sets `CI` or turns off the purge prompt,
+ *    so a nested install still cannot delete `node_modules`;
  *  - the files the vector names inside the checkout (`scripts/check.sh`) are put back to their content at the merge-base of the job's branch tip with the repository's
  *    default branch (as the runner fetched it) for the run and given back to the branch afterwards (CWE-345). The merge-base, never the tip: a fix round's tip holds the
  *    previous round's edits, and no branch commit is in the default branch's history. Paths are normalised first (`./scripts/check.sh` is `scripts/check.sh`); `..`,
@@ -18,7 +21,9 @@
  *    without following a link; a path that fails either test is not written, the check fails and the path is named in the summary;
  *  - its own time cap ends the whole process group (SIGTERM, then SIGKILL); a stop from the cloud or a shutdown does the same;
  *  - what is reported is a closed shape: exit code, duration, timed-out flag, the skipped-test count, and the last 4096 bytes of output after credential-shape
- *    redaction, with the workspace and home paths replaced.
+ *    redaction, with the workspace and home paths replaced. When the check fails, one line ahead of that output names the test files the runner's output reported as failed
+ *    (vitest's `FAIL path`, pytest's `FAILED path::test`), picked out of the WHOLE output as it streams and not only its tail: a plain relative file name each, at most 40,
+ *    first-seen order, the rest counted, 1500 bytes at most, redacted like the rest.
  */
 import { createHash } from "node:crypto";
 import { closeSync, constants, lstatSync, mkdirSync, openSync, readFileSync, rmdirSync, rmSync, unlinkSync, writeSync, type Stats } from "node:fs";
@@ -81,6 +86,47 @@ export function skippedTests(output: string): number | null {
     if (match) found = Number(match[1]);
   }
   return found;
+}
+
+/** A test file that failed, as a test runner prints it: vitest's `FAIL  [|project| ]path > test name` (also behind a `pkg test:` prefix) and pytest's `FAILED path::test`. */
+const FAILED_FILE = /(?:^|[\s:])(?:FAIL {1,3}(?:\|[^|\s]+\|\s+)?|FAILED +)(\S+?\.(?:[cm]?[jt]sx?|py|sh|bats))(?:::|\s|$)/;
+/** How many failed test files, and how many bytes of their names, the summary names. */
+const FAILED_FILES_MAX = 40;
+const FAILED_FILES_BYTES = 1500;
+
+/**
+ * Picks the failed test files out of the whole output of a check, line by line as it arrives (the summary keeps only the end of the output, and a long run's failures
+ * are printed far above it). Closed shape: only a plain relative file name (`NAMED_FILE`, the workspace prefix removed first) is ever kept, first-seen order, at most
+ * `FAILED_FILES_MAX` of them; the rest are counted.
+ */
+export function createFailedFiles(workspace: string): { line: (text: string) => void; summary: () => string } {
+  const seen = new Set<string>();
+  let more = 0;
+  return {
+    line(text) {
+      const match = text.replace(/\u001b\[[0-9;]*m/g, "").match(FAILED_FILE);
+      if (match === null) return;
+      let file = match[1] ?? "";
+      if (file.startsWith(`${workspace}/`)) file = file.slice(workspace.length + 1);
+      if (!NAMED_FILE.test(file) || seen.has(file)) return;
+      if (seen.size < FAILED_FILES_MAX) seen.add(file);
+      else more += 1;
+    },
+    /** The line for the summary's header (with its newline), or "" when no failed test file was seen. */
+    summary() {
+      if (seen.size === 0) return "";
+      const shown: string[] = [];
+      let bytes = 0;
+      for (const file of seen) {
+        const name = redactShapes(file);
+        bytes += Buffer.byteLength(name) + 2;
+        if (bytes > FAILED_FILES_BYTES) break;
+        shown.push(name);
+      }
+      const left = seen.size + more - shown.length;
+      return `failed test files (${String(seen.size + more)}): ${shown.join(", ")}${left === 0 ? "" : ` (and ${String(left)} more)`}\n`;
+    },
+  };
 }
 
 /** The last `max` bytes of `text`, without a broken character at the start. */
@@ -359,8 +405,9 @@ export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) =>
       return failed("protected_unreadable", `the check was not run: the workspace's protected files could not be read${lost.length === 0 ? "" : `; not given back: ${lost.join(", ")}`}`);
     }
     let out: Awaited<ReturnType<InstallCapture>>;
+    const failedFiles = createFailedFiles(input.workspace);
     try {
-      out = await deps.capture(launch.tool, launch.args, launch.env, input.workspace, input.check.timeout_s * 1000, RAW_TAIL_CHARS, input.signal, launch.feed);
+      out = await deps.capture(launch.tool, launch.args, launch.env, input.workspace, input.check.timeout_s * 1000, RAW_TAIL_CHARS, input.signal, launch.feed, failedFiles.line);
     } catch {
       // fx-swallow-ok: a check that could not be started did not pass; the error text could hold a path
       const lost = giveBack(held);
@@ -383,6 +430,7 @@ export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) =>
     const needsNetwork = out.code !== 0 && !out.timedOut && !out.aborted && NETWORK_REFUSED.test(out.tail);
     const unpinned = input.check.argv.filter((arg) => /\s/.test(arg)).map((arg) => (arg.length > 40 ? `${arg.slice(0, 40)}...` : arg));
     const header = [
+      out.code !== 0 ? failedFiles.summary() : "",
       needsNetwork ? "the check needed the network, which it does not have: a package it asked for is not in this repository's package store on the runner (the runner installs dependencies before the check)\n" : "",
       changed.length === 0 ? "" : `check files changed by this branch: ${changed.join(", ")}\n`,
       lost.length === 0 ? "" : `check files not given back to the branch: ${lost.join(", ")}\n`,

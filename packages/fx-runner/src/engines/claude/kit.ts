@@ -101,7 +101,7 @@ export function createClaudeKit(spawnFn: SpawnFn, options: { instructionCanary?:
     captureLarge: (command, args, env, timeoutMs) => runCapture(starter.spawn, launch, command, args, env, timeoutMs, 8 * 1024 * 1024, 2048),
     // `feed` is the check's seccomp filter, written to the program's descriptor 3 for bubblewrap's `--seccomp 3`; dropping it here leaves bubblewrap with no
     // descriptor 3 and every check fails before it starts (D#6 RUNNER-SECCOMP-FD-1). The real-bubblewrap suite `checkLaunchFeed.bwrap.test.ts` runs this exact wiring.
-    installCapture: (command, args, env, cwd, timeoutMs, tailChars, signal, feed) => runInstall(starter.spawn, command, args, env, cwd, timeoutMs, tailChars, signal, feed),
+    installCapture: (command, args, env, cwd, timeoutMs, tailChars, signal, feed, onLine) => runInstall(starter.spawn, command, args, env, cwd, timeoutMs, tailChars, signal, feed, onLine),
     foreground: (command, args, env) => runForegroundLaunched(starter.spawn, launch, command, args, env),
     takeOver(input) {
       const { argv, cwd } = takeoverCommand(input);
