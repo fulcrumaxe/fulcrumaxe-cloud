@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 
 /**
@@ -42,6 +42,34 @@ function freshRefs(accountId: string): SeedRefs {
     workItemId: randomUUID(),
     runId: randomUUID(),
   };
+}
+
+/**
+ * `installations.gh_installation_id` is UNIQUE per `app_kind`, and every
+ * seeded installation in a suite lands in one shared database. A
+ * per-row `floor(random() * 2e9)` collides with birthday odds that grow with
+ * the row count (PR #447 CI hit installations_gh_installation_kind_key in
+ * recordStage-halt.pg.test.ts), so ids come from here instead.
+ *
+ * Each process draws one random base in [1, 2^50] and hands out
+ * base + counter, so ids never repeat within the process and two processes
+ * only clash if their 2^50-wide windows overlap. The value stays under 2^53
+ * so JS Number reads of it remain exact. A sequence in the database is not
+ * used: the app_user role cannot reach one, and the RLS write-rejection
+ * tests call this builder through app_user, where a permission error would
+ * replace the rejection those tests assert.
+ */
+const GH_INSTALLATION_SPAN = 2n ** 50n;
+let ghInstallationBase: bigint | undefined;
+let ghInstallationCounter = 0n;
+
+export function nextGhInstallationId(): string {
+  if (ghInstallationBase === undefined) {
+    ghInstallationBase = (randomBytes(8).readBigUInt64BE() % GH_INSTALLATION_SPAN) + 1n;
+  }
+  const id = ghInstallationBase + ghInstallationCounter;
+  ghInstallationCounter += 1n;
+  return id.toString();
 }
 
 type RowBuilder = (
@@ -103,8 +131,8 @@ const ROW_BUILDERS: Record<TenantTable, RowBuilder> = {
     params: [accountId, `invite-${randomUUID()}@example.test`, `hash-${randomUUID()}`, refs.userId],
   }),
   installations: (accountId, refs, ownIdentity = refs.installationId) => ({
-    sql: `INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, floor(random() * 2000000000)::bigint + 1, 'team')`,
-    params: [ownIdentity, accountId],
+    sql: `INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team')`,
+    params: [ownIdentity, accountId, nextGhInstallationId()],
   }),
   repos: (accountId, refs, ownIdentity = refs.repoId) => ({
     sql: `INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product)
