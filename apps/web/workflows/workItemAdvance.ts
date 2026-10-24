@@ -804,6 +804,13 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
       await advanceLogStep("advance.failed", { work_item_id: workItemId, run_id: runId, at: "check_fix", reason: "check_rounds_used", recorded: recorded.status });
       return { status: "failed", detail: "build_check_rounds_used" };
     }
+    // D#6 FU-CHECK-CROSS-SIDE-BRANCH: the round could not tell which branch to continue. Needs human under its own word (the card says why), not as a generic failed run.
+    if (fix.reason === "check_fix_branch_unknown") {
+      const recorded = await advanceBuildFailedStep(accountId, workItemId, outcome.tailRunId, "check_fix_branch_unknown");
+      await buildStopped(args, outcome.tailRunId, "build_check_fix_branch_unknown");
+      await advanceLogStep("advance.failed", { work_item_id: workItemId, run_id: runId, at: "check_fix", reason: "check_fix_branch_unknown", recorded: recorded.status });
+      return { status: "failed", detail: "build_check_fix_branch_unknown" };
+    }
     if (fix.runId === null) break;
     runId = fix.runId;
     await advanceLogStep("advance.check_fix_started", { work_item_id: workItemId, run_id: runId, round });

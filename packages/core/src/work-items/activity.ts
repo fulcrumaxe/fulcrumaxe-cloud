@@ -221,6 +221,14 @@ const CHECK_FAILED_SENTENCES: Readonly<Record<string, string>> = Object.freeze({
 });
 
 /**
+ * D#6 FU-CHECK-CROSS-SIDE-BRANCH: the driver stops (kind `stopped`) a check fix round could not start because the branch to continue is unknown, and the sentence the
+ * card shows at Needs a person. Fixed text: the stop carries a code, never a branch name or an error.
+ */
+export const CHECK_FIX_BRANCH_STOP_CODE = 'build_check_fix_branch_unknown';
+export const CHECK_FIX_BRANCH_SENTENCE =
+  "The build's check failed, and its fix round could not start because the cloud could not confirm which branch to continue. Nothing was changed. Close or fix the pull request on GitHub, then press Build again.";
+
+/**
  * The review stops of a cloud-verified pull request (D#6 R5b-2a, R5b-2b-i), shown while the item sits at a pull-request stage. Each carries the KEY of
  * its sentence out of @fx/core (as the file-list notices do); the words are written once, in the runner protocol's copy, and the api route fills them in.
  */
@@ -600,12 +608,13 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
             WHERE e.work_item_id = $1::uuid AND e.kind = 'stopped' AND e.code = ANY($2::text[])
               AND e.created_at > COALESCE((SELECT max(t.created_at) FROM work_item_transitions t WHERE t.work_item_id = $1::uuid AND t.to_stage = 'needs_human'), '-infinity'::timestamptz)
             ORDER BY e.seq DESC LIMIT 1`,
-          [workItemId, ['rebuild_pr_open', 'rebuild_check_unavailable']],
+          [workItemId, ['rebuild_pr_open', 'rebuild_check_unavailable', CHECK_FIX_BRANCH_STOP_CODE]],
         )
       ).rows[0];
       const rebuildSentence = rebuildStop?.code && Object.hasOwn(CHECK_FAILED_SENTENCES, rebuildStop.code) ? CHECK_FAILED_SENTENCES[rebuildStop.code] : undefined;
+      const branchStop = rebuildStop?.code === CHECK_FIX_BRANCH_STOP_CODE;
       // A reviewer that kept ending without a verdict handed the item over: the notice names it and how it ended, never the executor's summary.
-      const noVerdict = rebuildSentence
+      const noVerdict = rebuildSentence || branchStop
         ? undefined
         : (
             await client.query<{ reasons: string[] }>(
@@ -628,7 +637,9 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       const summary = ex?.summary?.trim() ? safeModelText(ex.summary, ACTIVITY_LIMITS.maxNoticeChars) : null;
       notice = rebuildSentence
         ? { kind: 'check_failed', reason: rebuildSentence }
-        : noVerdictSentence
+        : branchStop
+          ? { kind: 'needs_human', reason: CHECK_FIX_BRANCH_SENTENCE }
+          : noVerdictSentence
           ? { kind: 'needs_human', reason: noVerdictSentence }
           : {
             kind: 'needs_human',

@@ -1422,7 +1422,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (!review || !deps.registry) return { ok: false, reason: "resume_unavailable" };
     const bad = await guardStep(who);
     if (bad) return { ok: false, reason: bad.reason ?? "refused" };
-    const out = await startCheckFixRound({ pool: runnerPool, registry: deps.registry, resume: review.resume, resolveRunSeat: deps.resolveRunSeat }, who, failedRunId);
+    const out = await startCheckFixRound({ pool: runnerPool, registry: deps.registry, resume: review.resume, resolveRunSeat: deps.resolveRunSeat, starter: deps.starter }, who, failedRunId);
     console.info(JSON.stringify({ event: "advance.check_fix", work_item_id: who.workItemId, failed_run_id: failedRunId, started: out.ok, reason: out.ok ? null : out.reason }));
     return out;
   }

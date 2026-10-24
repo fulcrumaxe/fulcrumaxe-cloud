@@ -824,6 +824,19 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       expect((await noticeNow())!.reason).toMatch(/Couldn't check for an open pull request/);
     });
 
+    it('a check fix round that could not tell which branch to continue is named at Needs a person (its own sentence, kind needs_human), not the executor summary', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin, { role: 'owner' });
+      const { itemId } = await seedItem(accountId, { stage: 'needs_human' });
+      const noticeNow = async () => ((await (await get(itemId, { accountId, userId })).json()) as Activity).notice;
+      await admin.query(`INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'in_progress', 'needs_human', now(), 'control_plane', 'later')`, [accountId, itemId]);
+      expect((await noticeNow())!.reason).not.toMatch(/which branch to continue/);
+      await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'stopped', 'build_check_fix_branch_unknown', 'branch')`, [accountId, itemId]);
+      const notice = await noticeNow();
+      expect(notice!.kind).toBe('needs_human');
+      expect(notice!.reason).toMatch(/could not confirm which branch to continue/);
+      expect(notice!.reason).toMatch(/Build again/);
+    });
+
     it("after Back to discussion only the new panel's comments are shown, so the old panel is not read as its challenge round", async () => {
       const { accountId, userId } = await seedAccountWithMember(admin, { role: 'owner' });
       const { itemId } = await seedItem(accountId, { stage: 'discussing' });
