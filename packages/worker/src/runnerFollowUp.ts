@@ -54,6 +54,10 @@ export const JOBLESS_FAIL_AFTER_MS = 15 * 60_000;
 
 /** Inside the caller's tenant transaction, after the parent's move to `failed`. */
 export async function requestFollowUp(client: PoolClient, parentRunId: string): Promise<FollowUpOutcome> {
+  // A work item that already finished, or gave up on this run (moved to Needs a person after the run began), is owed no further run. Asked first, so the
+  // chain's own bookkeeping never runs for it; a parent that is not a failed runner run answers false here and is judged by the definer below.
+  const finished = await client.query<{ finished: boolean }>("SELECT runner_follow_up_item_finished($1::uuid) AS finished", [parentRunId]);
+  if (finished.rows[0]?.finished === true) return { kind: "not_eligible" };
   const { rows } = await client.query<{ outcome: string; child_id: string | null; item_id: string | null; limit_reason: string | null }>(
     "SELECT outcome, child_id, item_id, limit_reason FROM runner_follow_up_run($1::uuid)",
     [parentRunId],

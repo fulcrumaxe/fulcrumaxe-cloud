@@ -244,7 +244,7 @@ describe("triageBody and the small readers", () => {
   });
   it("D#6 C29: a classify run a runner finished through done (status succeeded, the runner's runtime, a category word in the stored envelope) reads as done with that word", async () => {
     const w = worker({ advanceRunOutcome: async () => ({ status: "succeeded", done: true, envelope: { category: "bug", summary: "a bug" }, runtime: "runner" }) });
-    expect(await runOutcomeBody(w, ACCOUNT, "r1")).toEqual({ status: "succeeded", done: true, category: "bug", queuedOnRunner: false });
+    expect(await runOutcomeBody(w, ACCOUNT, "r1")).toEqual({ status: "succeeded", done: true, category: "bug", queuedOnRunner: false, tailRunId: "r1" });
   });
   it("categoryOf reads a string and refuses everything else", () => {
     expect(categoryOf({ category: "bug" })).toBe("bug");
@@ -252,12 +252,12 @@ describe("triageBody and the small readers", () => {
   });
   it("runOutcomeBody reads through the worker and hands the workflow the category word, never the envelope; no worker is a finished 'missing' run", async () => {
     const w = worker({ advanceRunOutcome: async () => ({ status: "running", done: false, envelope: null }) });
-    expect(await runOutcomeBody(w, ACCOUNT, "r1")).toEqual({ status: "running", done: false, category: null, queuedOnRunner: false });
+    expect(await runOutcomeBody(w, ACCOUNT, "r1")).toEqual({ status: "running", done: false, category: null, queuedOnRunner: false, tailRunId: "r1" });
     const done = worker({ advanceRunOutcome: async () => ({ status: "succeeded", done: true, envelope: { category: "bug", summary: "model text that must not travel" } }) });
     const out = await runOutcomeBody(done, ACCOUNT, "r1");
-    expect(out).toEqual({ status: "succeeded", done: true, category: "bug", queuedOnRunner: false });
+    expect(out).toEqual({ status: "succeeded", done: true, category: "bug", queuedOnRunner: false, tailRunId: "r1" });
     expect(JSON.stringify(out)).not.toContain("model text");
-    expect(await runOutcomeBody(null, ACCOUNT, "r1")).toEqual({ status: "missing", done: true, category: null, queuedOnRunner: false });
+    expect(await runOutcomeBody(null, ACCOUNT, "r1")).toEqual({ status: "missing", done: true, category: null, queuedOnRunner: false, tailRunId: "r1" });
   });
 });
 

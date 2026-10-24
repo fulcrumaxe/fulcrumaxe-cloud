@@ -1307,4 +1307,67 @@ describe("runner follow-up runs [pg]", () => {
       await expect(refusing.failWorkItem({ accountId: A.accountId, workItemId: A.workItemId, runId: "r1", reason: "runner_lost" })).rejects.toThrow(/refused/);
     });
   });
+  describe("D#6 WAITCANCEL: an item that already finished or gave up on the run is owed no follow-up", () => {
+    const moveTo = async (stage: string, from = "in_progress") => {
+      await admin.query("UPDATE work_items SET stage = $2 WHERE id = $1", [A.workItemId, stage]);
+      await admin.query(`INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, $3, $4, now(), 'control_plane', $5)`, [A.accountId, A.workItemId, from, stage, `t:${randomUUID()}`]);
+    };
+
+    it("a run that was lost after the item was moved to Needs a person makes no child, and the sweep reports no follow-up", async () => {
+      const parent = await run({ lease: clock - 1 });
+      await moveTo("needs_human");
+      expect(await sweep()).toMatchObject({ lost: 1, followUpsCreated: 0, followUpsExhausted: 0, followUpsFailed: 0 });
+      expect(await child(parent)).toEqual([]);
+      expect(calls.dispatched).toEqual([]);
+      expect((await admin.query("SELECT status FROM agent_runs WHERE id = $1", [parent])).rows[0].status).toBe("failed");
+    });
+
+    it.each(["merged", "closed_unmerged", "closed"])("an item at %s is not followed", async (stage) => {
+      const parent = await failed({ reasons: ["runner_lost"] });
+      await moveTo(stage);
+      expect(await askFor(parent)).toEqual({ kind: "not_eligible" });
+      expect(await child(parent)).toEqual([]);
+    });
+
+    it("a usage-limit end of a run whose item gave up is not followed either", async () => {
+      const parent = await failed({ reasons: ["usage_limit"] });
+      await moveTo("needs_human");
+      expect(await askFor(parent)).toEqual({ kind: "not_eligible" });
+    });
+
+    it("Build again from Needs a person: a run made after the item was already at Needs a person is still followed", async () => {
+      await moveTo("needs_human");
+      // The run starts after the move, and the driver has not yet moved the item back to In progress.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const parent = await failed({ reasons: ["runner_lost"] });
+      expect(await askFor(parent)).toMatchObject({ kind: "created" });
+      expect(await child(parent)).toHaveLength(1);
+    });
+
+    it("an item at In progress is followed as before", async () => {
+      await moveTo("in_progress", "spec_ready");
+      const parent = await failed({ reasons: ["runner_lost"] });
+      expect(await askFor(parent)).toMatchObject({ kind: "created" });
+    });
+
+    it("the question is held to the caller's tenant: true for its own finished item, false for another tenant's run id, and refused with no tenant", async () => {
+      const parent = await failed({ reasons: ["runner_lost"] });
+      await moveTo("merged");
+      const ask = (account: SeedRefs) => withTenant(writerPool, account.accountId, async (client) => (await client.query<{ f: boolean }>("SELECT runner_follow_up_item_finished($1::uuid) AS f", [parent])).rows[0]!.f);
+      expect(await ask(A)).toBe(true);
+      expect(await ask(B)).toBe(false);
+      const bare = await writerPool.connect();
+      try {
+        await expect(bare.query("SELECT runner_follow_up_item_finished($1::uuid)", [parent])).rejects.toThrow(/no active tenant context/);
+      } finally {
+        bare.release();
+      }
+    });
+
+    it("another account's item is not read:the answer for a parent of another tenant is the definer's own refusal to find it", async () => {
+      const parent = await failed({ reasons: ["runner_lost"], account: B });
+      await admin.query("UPDATE work_items SET stage = 'merged' WHERE id = $1", [A.workItemId]);
+      expect(await askFor(parent, B)).toMatchObject({ kind: "created" });
+    });
+  });
 });
