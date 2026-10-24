@@ -74,6 +74,8 @@ const PARTIAL = fx("200-partial-gateway.json");
 const RUNNER = fx("200-runner.json");
 const NONE = fx("200-not-recorded.json");
 const LIVE = fx("200-running-not-recorded.json");
+const SKIPPED = fx("200-memory-rescan-skipped.json");
+const UNAVAILABLE = fx("200-memory-rescan-unavailable.json");
 
 const BAD = /null|undefined|NaN|\[object/;
 const drawn = (body, retry = () => {}) => contextSection(readContext(body), retry);
@@ -230,6 +232,36 @@ describe("the model, per state", () => {
       { name: "Handoff note from run 8f1e2d3c (cut)", ref: "c4d8e2f6", title: "c4d8e2f6-9a1b-4c3d-8e5f-7a6b5c4d3e21" },
     ]);
     expect(contextModel(readContext({ ...MEASURED, item_sources: undefined })).memory.items.every((i) => i.name !== "undefined")).toBe(true);
+  });
+});
+
+describe("D#601 MEM-4b3: memory held back by the secret check", () => {
+  const notes = (body) => drawn(body).byTestId("runs-ctx-rescan").map((n) => n.textContent);
+
+  it("skipped entries: a count in words, singular for one", () => {
+    expect(notes(SKIPPED)).toEqual(["3 memory entries were left out because they now hold a secret."]);
+    expect(notes({ ...SKIPPED, rescan_skipped: 1 })).toEqual(["1 memory entry was left out because it now holds a secret."]);
+    expect(notes({ ...SKIPPED, rescan_skipped: 1200 })).toEqual(["1,200 memory entries were left out because they now hold a secret."]);
+  });
+
+  it("the check unavailable: one sentence", () => {
+    expect(notes(UNAVAILABLE)).toEqual(["Memory was not used in this run because secrets couldn't be checked."]);
+  });
+
+  it("both at once show both; 0/false, null and a missing field show nothing", () => {
+    expect(notes({ ...SKIPPED, rescan_unavailable: true })).toHaveLength(2);
+    for (const body of [MEASURED, RUNNER, PARTIAL, { ...MEASURED, rescan_skipped: undefined, rescan_unavailable: undefined }, { ...MEASURED, rescan_skipped: -2, rescan_unavailable: "yes" }]) {
+      expect(notes(body)).toEqual([]);
+    }
+  });
+
+  it("the copy is the count and fixed words, whatever the body holds: no entry text reaches it", () => {
+    const body = { ...SKIPPED, recalled_memory: [{ id: "0d2a41c7-7a0e-4a63-8d6b-4f4c0a1b2c33", name: "kept entry", version: 1 }] };
+    for (const t of notes(body)) {
+      expect(t).not.toContain("kept entry");
+      expect(t).toMatch(/^\d[\d,]* memory entr(y was|ies were) left out because (it|they) now holds? a secret\.$/);
+    }
+    expect(panelText(drawn(UNAVAILABLE))).not.toMatch(BAD);
   });
 });
 

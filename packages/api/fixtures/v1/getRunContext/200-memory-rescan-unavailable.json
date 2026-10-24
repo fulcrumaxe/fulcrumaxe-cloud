@@ -1,0 +1,93 @@
+{
+  "run_id": "6f0f3c52-3f0a-4a3e-9d52-2d5a7c1b9e03",
+  "runtime": "production",
+  "status": "succeeded",
+  "recorded": true,
+  "basis": "measured",
+  "sections": [
+    {
+      "code": "boundary",
+      "bytes": 912,
+      "trimmed_bytes": 0
+    },
+    {
+      "code": "card",
+      "bytes": 5320,
+      "trimmed_bytes": 0
+    },
+    {
+      "code": "map",
+      "bytes": 8192,
+      "trimmed_bytes": 0
+    },
+    {
+      "code": "memory_stable",
+      "bytes": 3072,
+      "trimmed_bytes": 0
+    },
+    {
+      "code": "spec",
+      "bytes": 12480,
+      "trimmed_bytes": 0
+    },
+    {
+      "code": "memory_item",
+      "bytes": 640,
+      "trimmed_bytes": 512
+    },
+    {
+      "code": "note",
+      "bytes": 2048,
+      "trimmed_bytes": 0
+    },
+    {
+      "code": "findings",
+      "bytes": 1536,
+      "trimmed_bytes": 3200
+    },
+    {
+      "code": "output",
+      "bytes": 700,
+      "trimmed_bytes": 0
+    }
+  ],
+  "first_turn_input_tokens": 9800,
+  "peak_context_tokens": 148000,
+  "cache_read_tokens": 4200000,
+  "cache_write_tokens": 310000,
+  "memory_tokens": null,
+  "tool_output": [
+    {
+      "tool": "Read",
+      "bytes": 420000
+    },
+    {
+      "tool": "Bash",
+      "bytes": 96000
+    },
+    {
+      "tool": "Grep",
+      "bytes": 18000
+    }
+  ],
+  "compactions": 1,
+  "denied_tool_calls": 3,
+  "recalled_memory": [],
+  "item_sources": [
+    {
+      "kind": "correction",
+      "id": "5b3c7a10-2e4f-4d68-8a91-0c7e1f2a3b44",
+      "label": "Correction 5b3c7a10",
+      "cut": false
+    },
+    {
+      "kind": "handoff",
+      "id": "c4d8e2f6-9a1b-4c3d-8e5f-7a6b5c4d3e21",
+      "label": "Handoff note from run 8f1e2d3c",
+      "cut": true
+    }
+  ],
+  "repo_map_version": "v1 \u00b7 3f9a1c07b2d4",
+  "rescan_skipped": 0,
+  "rescan_unavailable": true
+}

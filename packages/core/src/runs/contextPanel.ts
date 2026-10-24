@@ -63,6 +63,13 @@ export interface RunContextPanel {
    * hash is the map's identity). Null when the run carried no map or predates the record, and always for a run on the person's machine.
    */
   repo_map_version: string | null;
+  /**
+   * D#601 MEM-4b3: what the pre-prompt secret check did to this run's memory (migration 0903): how many stored entries were left out because their text now
+   * holds a secret, and whether the check itself could not be made (so no memory was used). Counts and a flag only, never an entry's text. Null for a run with no
+   * inputs record (it predates the record, or recalled nothing) and for a run with no ledger.
+   */
+  rescan_skipped: number | null;
+  rescan_unavailable: boolean | null;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -86,6 +93,9 @@ interface Row {
   recalled_versions: number[] | null;
   map_version: string | null;
   map_sha256: string | null;
+  has_inputs: boolean;
+  rescan_skipped: number | null;
+  rescan_unavailable: boolean | null;
 }
 
 interface EntryRow {
@@ -122,7 +132,8 @@ export async function getRunContext(ctx: RunsReadCtx, id: string): Promise<RunCo
         `SELECT r.id, r.runtime, r.status, (l.run_id IS NOT NULL) AS has_ledger, l.basis, l.sections,
                 l.first_turn_input_tokens, l.peak_context_tokens, l.cache_read_tokens, l.cache_write_tokens, l.memory_tokens,
                 l.tool_output_bytes, l.compactions, l.denied_tool_calls,
-                i.recalled_entry_ids AS recalled_ids, i.recalled_entry_versions AS recalled_versions, i.map_version, i.map_sha256
+                i.recalled_entry_ids AS recalled_ids, i.recalled_entry_versions AS recalled_versions, i.map_version, i.map_sha256,
+                (i.run_id IS NOT NULL) AS has_inputs, i.rescan_skipped, i.rescan_unavailable
            FROM agent_runs r
            LEFT JOIN run_context_ledger l ON l.account_id = r.account_id AND l.run_id = r.id
            LEFT JOIN run_context_inputs i ON i.account_id = r.account_id AND i.run_id = r.id
@@ -150,6 +161,8 @@ export async function getRunContext(ctx: RunsReadCtx, id: string): Promise<RunCo
         recalled_memory: [],
         item_sources: [],
         repo_map_version: null,
+        rescan_skipped: null,
+        rescan_unavailable: null,
       };
     }
 
@@ -190,6 +203,8 @@ export async function getRunContext(ctx: RunsReadCtx, id: string): Promise<RunCo
       recalled_memory,
       item_sources,
       repo_map_version,
+      rescan_skipped: r.has_inputs ? count(r.rescan_skipped) : null,
+      rescan_unavailable: r.has_inputs ? r.rescan_unavailable === true : null,
     };
   });
 }
