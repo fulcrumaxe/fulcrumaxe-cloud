@@ -9,6 +9,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { createCorrection, decideCorrection, type CorrectionCtx } from "@fx/core/src/corrections/index.js";
 import { createAdvanceModule, type AdvanceModuleDeps } from "../src/advance.js";
+import { upToDateHeads, withIssuePr } from "./withIssuePr.js";
 import type { RunStarter } from "../src/preview.js";
 import type { SeatResult } from "../src/seat.js";
 
@@ -96,6 +97,7 @@ describe("advance: placement at run boundaries [pg]", { timeout: 60_000 }, () =>
       triage: null,
       registry,
       build: startBuildForItem,
+      fixHeads: upToDateHeads(HEAD),
       review: {
         load: vi.fn(),
         recordRound: vi.fn(),
@@ -106,7 +108,7 @@ describe("advance: placement at run boundaries [pg]", { timeout: 60_000 }, () =>
         mergeGate: vi.fn(),
       } as never,
     };
-    return { module: createAdvanceModule(writerPool, deps), started, resumed };
+    return { module: withIssuePr(createAdvanceModule(writerPool, deps), admin), started, resumed };
   }
 
   async function setup(repoMode = "sandbox") {
@@ -172,9 +174,12 @@ describe("advance: placement at run boundaries [pg]", { timeout: 60_000 }, () =>
   it("the other direction too: a runner build whose item now runs in the cloud gets a fresh sandbox session", async () => {
     const t = await setup("runner_local");
     const m = module();
-    await builtRun(t, "runner_local");
+    // The runner build recorded its pull request; the review step hands that pair to the cloud round, which syncs the branch and carries on from it.
+    const run = await builtRun(t, "runner_local");
+    await admin.query("UPDATE agent_runs SET status = 'running' WHERE id = $1", [run]);
+    await writeRunStatus(writerPool, { accountId: t.a.accountId, runId: run, from: "running", to: "succeeded", runnerDone: { prNumber: 41, branch: `fx/${run}-g1` } });
     await place(t, "cloud");
-    const fix = await m.module.advanceStartFix(t.who, fixReq(t));
+    const fix = await m.module.advanceStartFix(t.who, { ...fixReq(t), pr: { number: 41, branch: `fx/${run}-g1` } });
     expect(fix.ok).toBe(true);
     expect(m.resumed).toEqual([]);
     expect(m.started).toHaveLength(1);

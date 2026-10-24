@@ -453,7 +453,8 @@ export async function startFixBody(
     ...(person ? { person: true } : {}),
     expectedExecutionMode: ctx.executionMode,
     // The pull request the pipeline just found on GitHub: a cross-side round works on its branch. The worker checks it against the item's own record.
-    ...(crossSide ? { pr: { number: pr.number, branch: pr.branch } } : {}),
+    // A same-side sandbox round carries it too: the worker syncs that branch with its base before the round (and refuses a sandbox round that has none).
+    ...(crossSide || promptRuntimeOf(ctx.executionMode) === "sandbox" ? { pr: { number: pr.number, branch: pr.branch } } : {}),
   });
   // A spending-limit denial comes back as its named pause (the driver waits and asks again); every other refusal keeps the code it came with.
   return started.ok ? { ok: true, runId: started.runId, reason: null } : { ok: false, runId: null, reason: pauseForDenial(started.reason) ?? started.reason };

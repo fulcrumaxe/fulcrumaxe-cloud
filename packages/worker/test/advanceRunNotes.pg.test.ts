@@ -10,6 +10,7 @@ import { correctionReasonCode, renderRunNotes } from "@fx/core/src/corrections/d
 import { requestChanges } from "@fx/core/src/work-items/operatorMoves.js";
 import { maxFixRounds } from "@fx/spend";
 import { createAdvanceModule, type AdvanceModuleDeps } from "../src/advance.js";
+import { upToDateHeads, withIssuePr } from "./withIssuePr.js";
 import type { RunStarter } from "../src/preview.js";
 import type { SeatResult } from "../src/seat.js";
 
@@ -90,6 +91,7 @@ describe("advance: run notes at run boundaries [pg]", { timeout: 60_000 }, () =>
       triage: null,
       registry,
       build: startBuildForItem,
+      fixHeads: upToDateHeads(HEAD),
       review: {
         load: vi.fn(),
         recordRound: vi.fn(),
@@ -100,7 +102,7 @@ describe("advance: run notes at run boundaries [pg]", { timeout: 60_000 }, () =>
         mergeGate: vi.fn(),
       } as never,
     };
-    return { module: createAdvanceModule(writerPool, deps), prompts };
+    return { module: withIssuePr(createAdvanceModule(writerPool, deps), admin), prompts };
   }
 
   async function setup() {
@@ -240,8 +242,8 @@ describe("advance: run notes at run boundaries [pg]", { timeout: 60_000 }, () =>
     it("a spending limit gates it like any fix round: the denial is a pause (no refusal fact), and the note waits for the next ask", async () => {
       const { t, correctionId, req } = await pressed("rename it");
       const resume = vi.fn(async (_p: Pool, _r: ExecutionTargetRegistry, input: StartAgentRunInput) => ({ ...(await keyedRun(input, input.parentRunId ?? undefined)), status: "refused_spend", reason: "model_budget_exceeded" }));
-      const gated = createAdvanceModule(writerPool, { starter: { start: vi.fn() } as never, resolveRunSeat: vi.fn(async () => SEAT), startAdvance: async () => undefined, triage: null, registry, build: startBuildForItem, review: { load: vi.fn(), recordRound: vi.fn(), resume, mergeGate: vi.fn() } as never });
-      expect(await gated.advanceStartFix(t.who, req)).toEqual({ ok: false, reason: "model_budget_exceeded" });
+      const gated = createAdvanceModule(writerPool, { starter: { start: vi.fn() } as never, resolveRunSeat: vi.fn(async () => SEAT), startAdvance: async () => undefined, triage: null, registry, build: startBuildForItem, fixHeads: upToDateHeads(HEAD), review: { load: vi.fn(), recordRound: vi.fn(), resume, mergeGate: vi.fn() } as never });
+      expect(await withIssuePr(gated, admin).advanceStartFix(t.who, req)).toEqual({ ok: false, reason: "model_budget_exceeded" });
       expect((await admin.query("SELECT 1 FROM work_item_driver_events WHERE work_item_id = $1 AND kind IN ('fix_round_refused', 'fix_round_started')", [t.w])).rowCount).toBe(0);
       expect((await applied(t, correctionId)).status).toBe("accepted");
     });

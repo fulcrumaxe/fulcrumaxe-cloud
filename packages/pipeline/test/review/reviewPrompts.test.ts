@@ -138,7 +138,7 @@ describe("buildFixPrompt", () => {
   it("continues the session: no clone, the branch of the ISSUE, the commit being fixed, the bot identity, no new pull request", () => {
     const p = buildFixPrompt(FIX);
     expect(p).toContain("Do not clone it again");
-    expect(p).toContain("git fetch origin fx/issue-7 && git checkout fx/issue-7 && git reset --hard origin/fx/issue-7");
+    expect(p).toContain("git fetch origin \"+refs/heads/fx/issue-7:refs/remotes/origin/fx/issue-7\" && git checkout fx/issue-7 && git reset --hard origin/fx/issue-7");
     expect(p).toContain(`You are fixing commit ${HEAD}`);
     expect(p).toContain("git push origin fx/issue-7");
     expect(p).toContain("fulcrumaxe-bot");
@@ -215,7 +215,7 @@ describe("the recorded branch of a runner run (D#6 C25 section 1.2)", () => {
 
   it("the fix prompt checks out and pushes the recorded branch, not fx/issue-<n>", () => {
     const p = buildFixPrompt({ owner: "acme", name: "widgets", issue: 7, pr: 41, headSha: HEAD, branch: RUN_BRANCH, version: 3, spec: "S", findings: [{ role: "code-reviewer", verdict: "needs-fix", findings: ["a"], summary: "s" }] });
-    expect(p).toContain(`git fetch origin ${RUN_BRANCH} && git checkout ${RUN_BRANCH} && git reset --hard origin/${RUN_BRANCH}`);
+    expect(p).toContain(`git fetch origin "+refs/heads/${RUN_BRANCH}:refs/remotes/origin/${RUN_BRANCH}" && git checkout ${RUN_BRANCH} && git reset --hard origin/${RUN_BRANCH}`);
     expect(p).toContain(`git push origin ${RUN_BRANCH}`);
     expect(p).toContain(`"branch":"${RUN_BRANCH}"`);
     expect(p).not.toContain("fx/issue-7");

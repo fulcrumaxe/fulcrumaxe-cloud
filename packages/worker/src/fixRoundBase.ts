@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import type { BranchSyncOutcome } from "@fx/github";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
@@ -40,6 +40,24 @@ export const BASE_SYNCED_PROMPT_LINE = "Note: this branch was just brought up to
 /** `baseSha`: the base tip the branch now contains, read by the cloud in the same call; it becomes the signed diff base of the round (`continues.base_sha`). */
 export type BaseSyncResult = { ok: true; synced: boolean; baseSha: string } | { ok: false; reason: string };
 
+/** The fact of a round refused because its branch could not be brought up to date (one per attempt): `stopped`, or `escalated` with the move to Needs a person (an escalation shares the move's stamp, which the card's lookup counts). The card shows the fixed sentence. */
+export async function recordBaseSyncUnavailable(pool: Pool, who: Who, attempt: string, liveHead: string | null, prNumber: number | null, toNeedsPerson = false): Promise<void> {
+  await withTenant(pool, who.accountId, async (client) => {
+    await recordDriverEvent(client, who.accountId, { workItemId: who.workItemId, kind: toNeedsPerson ? "escalated" : "stopped", dedupeKey: `${BASE_SYNC_UNAVAILABLE}:${attemptWord(attempt)}`, code: BASE_SYNC_UNAVAILABLE, ...(liveHead !== null ? { headSha: liveHead } : {}), ...(prNumber !== null ? { prNumber } : {}) });
+    if (toNeedsPerson) await moveToNeedsPerson(client, who, attempt, BASE_SYNC_UNAVAILABLE);
+  });
+}
+
+async function moveToNeedsPerson(client: PoolClient, who: Who, attempt: string, reason: string): Promise<void> {
+  try {
+    const moved = await recordStage(client, { workItemId: who.workItemId, toStage: "needs_human", at: new Date(), source: "control_plane", sourceRef: `base-sync-${reason}-${attemptWord(attempt)}` });
+    if (moved.recorded) await emitDomainEvent(client, { type: "work_item.needs_human", accountId: who.accountId, subjectId: who.workItemId, payload: { workItemId: who.workItemId, reason } });
+  } catch (err) {
+    // A halted item, or one that already left the review stages, stays where it is; the fact is the record.
+    if (!(err instanceof WorkItemHaltedError) && !(err instanceof IllegalStageTransitionError)) throw err;
+  }
+}
+
 export async function syncRunBranch(
   pool: Pool,
   ports: FixRoundHeadPorts | null | undefined,
@@ -47,9 +65,7 @@ export async function syncRunBranch(
   input: { repo: Repo; pr: { number: number; branch: string }; liveHead: string | null; moveToNeedsPerson: boolean; attempt: string },
 ): Promise<BaseSyncResult> {
   const unavailable = async (liveHead: string | null): Promise<BaseSyncResult> => {
-    await withTenant(pool, who.accountId, (client) =>
-      recordDriverEvent(client, who.accountId, { workItemId: who.workItemId, kind: "stopped", dedupeKey: `${BASE_SYNC_UNAVAILABLE}:${attemptWord(input.attempt)}`, code: BASE_SYNC_UNAVAILABLE, ...(liveHead !== null ? { headSha: liveHead } : {}), prNumber: input.pr.number }),
-    );
+    await recordBaseSyncUnavailable(pool, who, input.attempt, liveHead, input.pr.number);
     return { ok: false, reason: BASE_SYNC_UNAVAILABLE };
   };
   const { syncBase, privateHead } = ports ?? {};
@@ -73,14 +89,7 @@ export async function syncRunBranch(
   if (o.kind === "conflict") {
     await withTenant(pool, who.accountId, async (client) => {
       await recordDriverEvent(client, who.accountId, { workItemId: who.workItemId, kind: "escalated", dedupeKey: `${BASE_SYNC_CONFLICT}:${attemptWord(input.attempt)}`, code: BASE_SYNC_CONFLICT, headSha: head, prNumber: input.pr.number });
-      if (!input.moveToNeedsPerson) return;
-      try {
-        const moved = await recordStage(client, { workItemId: who.workItemId, toStage: "needs_human", at: new Date(), source: "control_plane", sourceRef: `base-sync-conflict-${attemptWord(input.attempt)}` });
-        if (moved.recorded) await emitDomainEvent(client, { type: "work_item.needs_human", accountId: who.accountId, subjectId: who.workItemId, payload: { workItemId: who.workItemId, reason: BASE_SYNC_CONFLICT } });
-      } catch (err) {
-        // A halted item, or one that already left the review stages, stays where it is; the fact above is the record.
-        if (!(err instanceof WorkItemHaltedError) && !(err instanceof IllegalStageTransitionError)) throw err;
-      }
+      if (input.moveToNeedsPerson) await moveToNeedsPerson(client, who, input.attempt, BASE_SYNC_CONFLICT);
     });
     console.info(JSON.stringify({ event: "advance.base_sync_conflict", work_item_id: who.workItemId }));
     return { ok: false, reason: BASE_SYNC_CONFLICT };
@@ -116,3 +125,4 @@ export function checkFixBeforeStart(pool: Pool, ports: FixRoundHeadPorts | null 
   /** `state.synced`: a merge was made by this call, so the run it leads to carries the sync's progress line. `state.baseSha`: the base tip the round is signed with. */
   return Object.assign(beforeStart, { state });
 }
+

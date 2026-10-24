@@ -327,7 +327,7 @@ describe("a runner follow-on run keeps its parent's Spec version [pg]", { timeou
       expect(await pinOf(id)).toBeNull();
       return { a, workItemId, buildRunId: id, issue: nextNumber - 1 };
     }
-    const fixReq = (issue: number, mode: string) => ({ issue, headSha: "b".repeat(40), prompt: "fix", round: 1, actionId: randomUUID(), reviewer: "code" as const, failingRunId: randomUUID(), expectedExecutionMode: mode });
+    const fixReq = (issue: number, mode: string) => ({ issue, headSha: "b".repeat(40), prompt: "fix", round: 1, actionId: randomUUID(), reviewer: "code" as const, failingRunId: randomUUID(), expectedExecutionMode: mode, ...(mode === "sandbox" ? { pr: { number: 41, branch: `fx/issue-${issue}` } } : {}) });
 
     it("the advance fix round is refused no_spec_version: no new run row, no job; the stage write it already made is the only change", async () => {
       const u = await unpinnedWorld("runner_local");

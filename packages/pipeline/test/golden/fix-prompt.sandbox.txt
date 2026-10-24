@@ -1,6 +1,6 @@
 You are the executor. The reviewers asked for changes on pull request #41 (acme/widgets, issue #7).
 This continues your earlier session; the repository is checked out in your working directory. Do not clone it again. Bring your checkout to the branch first:
-  git fetch origin fx/issue-7 && git checkout fx/issue-7 && git reset --hard origin/fx/issue-7
+  git fetch origin "+refs/heads/fx/issue-7:refs/remotes/origin/fx/issue-7" && git checkout fx/issue-7 && git reset --hard origin/fx/issue-7
 You are fixing commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa. Fix every finding below, keep the change small, update or add tests, and run the tests until they pass.
 Commit as the bot (add new files first): git -c user.name="fulcrumaxe-bot" -c user.email="bot@fulcrumaxe.dev" commit -am "<message>", then push: git push origin fx/issue-7
 Do not open a new pull request: pushing to the branch updates the existing one. Authentication is handled for you; set no token.
