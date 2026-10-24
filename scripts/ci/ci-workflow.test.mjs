@@ -1271,6 +1271,8 @@ test("pr-gates: public pull requests only, no secrets, read-only token, body and
   assert.match(link.run, /GITHUB_EVENT_PATH/);
   assert.match(link.run, /PR body source: current body/);
   assert.match(link.run, /PR body source: event payload/);
+  assert.match(link.run, /PR_AUTHOR_LOGIN="\$\(jq -r '\.pull_request\.user\.login/);
+  assert.match(link.run, /PR_HEAD_REF="\$\(jq -r '\.pull_request\.head\.ref/);
   assert.match(link.run, /PR_BODY_FILE="\$body_file" bash scripts\/ci\/pr-link-policy\.sh/);
   assert.deepEqual(link.env, { GH_TOKEN: "${{ github.token }}", PR_NUMBER: "${{ github.event.pull_request.number }}" }, "only the token and PR number sit in env:, never the body (the runner prints that block into the log)");
   assert.deepEqual(prGates.permissions, { contents: "read", "pull-requests": "read" });
@@ -1291,15 +1293,43 @@ process.on("exit", () => {
   for (const d of fixtureTmp) rmSync(d, { recursive: true, force: true });
 });
 
-function runLinkPolicy(body) {
+function runLinkPolicy(body, extra = {}) {
   const dir = mkTmp();
   const file = path.join(dir, "body.txt");
   writeFileSync(file, body);
   return spawnSync("bash", [path.join(repoRoot, "scripts/ci/pr-link-policy.sh")], {
     encoding: "utf8",
-    env: { PATH: process.env.PATH, HOME: dir, PR_BODY_FILE: file, PR_LINK_POLICY_CODE_REPO: "example-org/public-plane", PR_LINK_POLICY_ALLOW_REPOS: "" },
+    env: { PATH: process.env.PATH, HOME: dir, PR_BODY_FILE: file, PR_LINK_POLICY_CODE_REPO: "example-org/public-plane", PR_LINK_POLICY_ALLOW_REPOS: "", ...extra },
   });
 }
+
+const RUN_UUID = "123e4567-e89b-42d3-a456-426614174000";
+const appPr = { PR_AUTHOR_LOGIN: "fulcrumaxe-staging[bot]", PR_AUTHOR_TYPE: "Bot", PR_HEAD_REF: `fx/p-${RUN_UUID}` };
+const runBody = `Prepared by a run.\n\nRun: ${RUN_UUID}\n`;
+
+test("pr-gates fixture: a Run line passes only for the paired App on an fx/p-<uuid> branch", () => {
+  assert.equal(runLinkPolicy(runBody, appPr).status, 0);
+  assert.equal(runLinkPolicy(runBody, { ...appPr, PR_AUTHOR_LOGIN: "app/fulcrumaxe-staging" }).status, 0);
+  // App PR with no Run line and no D# fails.
+  assert.equal(runLinkPolicy("Prepared by a run.\n", appPr).status, 1);
+  // Human PR with a Run line fails, even on an fx/p- branch.
+  const human = { PR_AUTHOR_LOGIN: "someone", PR_AUTHOR_TYPE: "User", PR_HEAD_REF: `fx/p-${RUN_UUID}` };
+  assert.equal(runLinkPolicy(runBody, human).status, 1);
+  assert.equal(runLinkPolicy(runBody, { ...appPr, PR_AUTHOR_LOGIN: "other-app[bot]" }).status, 1);
+  assert.equal(runLinkPolicy(runBody, { ...appPr, PR_AUTHOR_TYPE: "User" }).status, 1);
+  // No author variables at all (local run): old behaviour.
+  assert.equal(runLinkPolicy(runBody).status, 1);
+  // Wrong branch shapes fail.
+  for (const ref of ["main", `feature/p-${RUN_UUID}`, `fx/p-${RUN_UUID}-x`, "fx/p-not-a-uuid"]) {
+    assert.equal(runLinkPolicy(runBody, { ...appPr, PR_HEAD_REF: ref }).status, 1, ref);
+  }
+  // Malformed uuids in the Run line fail (too short, not version 4, not a uuid).
+  for (const bad of ["123e4567-e89b-42d3-a456-42661417400", "123e4567-e89b-12d3-a456-426614174000", "xyz"]) {
+    assert.equal(runLinkPolicy(`Run: ${bad}\n`, appPr).status, 1, bad);
+  }
+  // Every other rule still applies to an App PR.
+  assert.equal(runLinkPolicy(`${runBody}\nSee https://github.com/example-org/private-plane/discussions/1\n`, appPr).status, 1);
+});
 
 test("pr-gates fixture: a body with Refs D#123 passes the link policy", () => {
   const r = runLinkPolicy("Adds the thing.\n\nRefs D#123\n");
