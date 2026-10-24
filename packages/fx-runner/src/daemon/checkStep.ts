@@ -38,7 +38,7 @@ import { protectedRootNames, VCS_DIR } from "../sandbox/checkProtected.js";
 const RAW_TAIL_CHARS = 32 * 1024;
 /** What a package manager or a program prints when it asked for the network and there is none (pnpm in offline mode, or a connection that cannot be made). */
 const NETWORK_REFUSED = /ERR_PNPM_NO_OFFLINE|ENETUNREACH|EADDRNOTAVAIL|EAI_AGAIN/;
-const NAMED_FILE =/^[A-Za-z0-9_@+][A-Za-z0-9_./@+-]{0,255}$/;
+const NAMED_FILE = /^[A-Za-z0-9_@+][A-Za-z0-9_./@+-]{0,255}$/;
 
 /** `./scripts//check.sh` -> `scripts/check.sh`. Undefined for what is not a plain repo-relative file name: an option, an absolute path, `..`. */
 export function normalised(arg: string): string | undefined {
