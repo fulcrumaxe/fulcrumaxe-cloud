@@ -41,6 +41,19 @@
 # thing. The closing verbs keep their existing `(D#|#)` behaviour — unchanged,
 # relied on elsewhere (an Issue closed via `Closes #N`).
 #
+# RUN-ID PROVENANCE FOR CLOUD-BUILT PRs
+#
+# A PR opened by the paired fulcrumaxe App is built by a run, and the public
+# body must not name the private issue behind it. Its provenance is the run
+# id: a body line `Run: <uuid v4>`. That line satisfies rule 1 ONLY when all
+# of these hold, each read from the PR event and never from the body:
+#   - $PR_AUTHOR_LOGIN is one of FX_APP_LOGINS below (a short explicit list,
+#     not a pattern) and $PR_AUTHOR_TYPE is "Bot";
+#   - $PR_HEAD_REF is exactly `fx/p-<uuid v4>`.
+# A human PR with a `Run:` line still needs a D# reference. Unset author or
+# branch variables mean "not an App PR", so local runs and every other
+# caller keep the old behaviour.
+#
 # WHY PRE-MERGE IS ENOUGH HERE, AND ONLY HERE
 #
 # A PR body is not a published artifact: it can be edited afterwards with no
@@ -266,8 +279,23 @@ ADVANCES_RE='([Rr]efs|[Pp]art of|[Tt]owards) D#[0-9]+'
 # the host without needing lookbehind, which POSIX/bash regex doesn't have.
 GITHUB_HOST_TOKEN_RE='[A-Za-z0-9.-]*github\.com[A-Za-z0-9.-]*(/[^]/[:space:])>"]*(/[A-Za-z0-9._-]*)?)?'
 
+# The paired fulcrumaxe App's author logins: the event form and the gh CLI form.
+FX_APP_LOGINS=("fulcrumaxe-staging[bot]" "app/fulcrumaxe-staging")
+UUID4_RE='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}'
+
 has_closes_ref() { printf '%s' "$1" | grep -Eq "$CLOSES_RE"; }
 has_advances_ref() { printf '%s' "$1" | grep -Eq "$ADVANCES_RE"; }
+
+# Run-id provenance (see header). $1 body, $2 author login, $3 author type, $4 head ref.
+has_run_provenance() {
+  local body="$1" login="$2" type="$3" ref="$4" app ok=1
+  for app in "${FX_APP_LOGINS[@]}"; do
+    [[ "$login" == "$app" ]] && ok=0
+  done
+  [[ $ok -eq 0 && "$type" == "Bot" ]] || return 1
+  printf '%s' "$ref" | grep -Eqx "fx/p-$UUID4_RE" || return 1
+  printf '%s\n' "$body" | grep -Eq "^Run: ${UUID4_RE}[[:space:]]*\$"
+}
 
 # Extracts every hostname-token(/owner(/repo)?)? candidate touching
 # "github.com" and, for each one whose FULL token is exactly "github.com" or
@@ -349,6 +377,21 @@ self_test() {
     || { echo "SELF-TEST FAIL: rule 1 rejected an advancing-only body 'Refs D#2401'" >&2; bad=1; }
   { has_closes_ref "Refs #2401" || has_advances_ref "Refs #2401"; } \
     && { echo "SELF-TEST FAIL: rule 1 accepted bare 'Refs #2401' as a Discussion reference" >&2; bad=1; }
+
+  # Run-id provenance: App + Bot + fx/p-<uuid> branch + `Run: <uuid v4>` passes;
+  # each of the four missing or wrong fails.
+  local u="123e4567-e89b-42d3-a456-426614174000" app="${FX_APP_LOGINS[0]}"
+  has_run_provenance "x
+Run: $u" "$app" Bot "fx/p-$u" \
+    || { echo "SELF-TEST FAIL: run provenance rejected a valid App PR" >&2; bad=1; }
+  has_run_provenance "Run: $u" "somebody" Bot "fx/p-$u" \
+    && { echo "SELF-TEST FAIL: run provenance accepted a non-App author" >&2; bad=1; }
+  has_run_provenance "Run: $u" "$app" User "fx/p-$u" \
+    && { echo "SELF-TEST FAIL: run provenance accepted a non-Bot author type" >&2; bad=1; }
+  has_run_provenance "Run: $u" "$app" Bot "feature/x" \
+    && { echo "SELF-TEST FAIL: run provenance accepted a wrong branch shape" >&2; bad=1; }
+  has_run_provenance "Run: not-a-uuid" "$app" Bot "fx/p-$u" \
+    && { echo "SELF-TEST FAIL: run provenance accepted a malformed uuid" >&2; bad=1; }
 
   # Rule 2 (allowlist) must catch a github.com URL naming any owner other than
   # the resolved code-plane owner, case-insensitively on both the host and
@@ -444,7 +487,8 @@ echo "pr-link-policy: code repo '$CODE_REPO' resolved from $CODE_REPO_SOURCE, bo
 
 VIOLATIONS=0
 
-if ! has_closes_ref "$PR_BODY" && ! has_advances_ref "$PR_BODY"; then
+if ! has_closes_ref "$PR_BODY" && ! has_advances_ref "$PR_BODY" \
+  && ! has_run_provenance "$PR_BODY" "${PR_AUTHOR_LOGIN:-}" "${PR_AUTHOR_TYPE:-}" "${PR_HEAD_REF:-}"; then
   echo "FAIL: the PR body carries no Discussion reference in the D#NNNN form."
   echo "      Add a line reading: Closes D#<number> — if this PR finishes the"
   echo "      Discussion (Resolves/Fixes are accepted too) — or:"
@@ -453,6 +497,8 @@ if ! has_closes_ref "$PR_BODY" && ! has_advances_ref "$PR_BODY"; then
   echo "      A bare '#N' (no D) never satisfies this rule for either verb"
   echo "      class — that is a PR/Issue reference, not a Discussion one. A PR"
   echo "      that closes an Issue needs its own 'Closes #N' line in addition."
+  echo "      (A PR from the paired fulcrumaxe App on an fx/p-<uuid> branch may"
+  echo "      carry a 'Run: <uuid v4>' line instead.)"
   VIOLATIONS=$((VIOLATIONS + 1))
 fi
 

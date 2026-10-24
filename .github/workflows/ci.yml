@@ -144,6 +144,12 @@ jobs:
             echo "PR body source: event payload (API call failed; a re-run may see a stale body)"
             jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH" > "$body_file"
           fi
+          # Author and head branch never change after opening, so the payload is exact. jq output goes into
+          # variables, never into the command line.
+          PR_AUTHOR_LOGIN="$(jq -r '.pull_request.user.login // ""' "$GITHUB_EVENT_PATH")"
+          PR_AUTHOR_TYPE="$(jq -r '.pull_request.user.type // ""' "$GITHUB_EVENT_PATH")"
+          PR_HEAD_REF="$(jq -r '.pull_request.head.ref // ""' "$GITHUB_EVENT_PATH")"
+          export PR_AUTHOR_LOGIN PR_AUTHOR_TYPE PR_HEAD_REF
           PR_BODY_FILE="$body_file" bash scripts/ci/pr-link-policy.sh
 
       - name: Publish denylist
