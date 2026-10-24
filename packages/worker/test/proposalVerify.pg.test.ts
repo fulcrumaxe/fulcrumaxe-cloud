@@ -13,6 +13,7 @@ import { recordFromOutput } from "../../pipeline/src/discovery/verifierResult.js
 import { createFakeModelConnectionPort } from "../../runner/test/helpers/sandboxTargetFakes.js";
 import { buildWorker, type Worker } from "../src/compositionRoot.js";
 import { createProposalVerifySweep, externalVerifiesToday, type ProposalVerifyCounts, type VerifySettings } from "../src/proposalVerify.js";
+import { readProposalIntakeFacts } from "../src/advance.js";
 import { createRunStarter } from "../src/starter.js";
 import { seedPreviewTarget } from "./support/previewTarget.js";
 
@@ -347,6 +348,55 @@ describe("the proposal verifier sweep [pg]", { timeout: 120_000 }, () => {
     } finally {
       counted.release();
     }
+  });
+
+  it("a re-queue clears the earlier check's claims and evidence in the same transaction; the next check writes fresh ones", async () => {
+    const { a, repoId } = await target();
+    const id = await proposal(a, repoId);
+    envelope = GOOD;
+    await sweep();
+    await ended(id);
+    await sweep();
+    const counts = async (): Promise<{ claims: number; evidence: number; ids: string[] }> => {
+      const c = await admin.query("SELECT id FROM proposal_claims WHERE proposal_id = $1 ORDER BY id", [id]);
+      const e = await admin.query("SELECT count(*)::int AS n FROM proposal_evidence WHERE proposal_id = $1", [id]);
+      return { claims: c.rowCount ?? 0, evidence: e.rows[0].n, ids: c.rows.map((r: { id: string }) => r.id) };
+    };
+    const readFacts = async (): Promise<{ claims: string[]; evidence: unknown[] }> => {
+      await admin.query("BEGIN");
+      try {
+        return await readProposalIntakeFacts(admin, a.accountId, id);
+      } finally {
+        await admin.query("ROLLBACK");
+      }
+    };
+    const before = await counts();
+    expect(before.claims).toBeGreaterThan(0);
+    expect(before.evidence).toBeGreaterThan(0);
+    expect((await readFacts()).claims).toContain("add returns the sum");
+
+    await admin.query("BEGIN");
+    try {
+      await admin.query("SELECT set_config('app.account_id', $1, true)", [a.accountId]);
+      expect((await admin.query("SELECT proposal_requeue_verification($1::uuid) AS ok", [id])).rows[0].ok).toBe(true);
+      await admin.query("COMMIT");
+    } catch (err) {
+      await admin.query("ROLLBACK");
+      throw err;
+    }
+    // Nothing of the old check is visible to the reader the intake body is built from, nor to the verifier's own tables.
+    expect(await row(id)).toMatchObject({ verification: "pending", verify_attempts: 0 });
+    expect(await counts()).toEqual({ claims: 0, evidence: 0, ids: [] });
+    expect(await readFacts()).toEqual({ claims: [], evidence: [] });
+
+    // The next check writes its own rows: none of them is a row of the earlier check.
+    await sweep();
+    await ended(id);
+    await sweep();
+    const after = await counts();
+    expect(after.claims).toBeGreaterThan(0);
+    expect(after.ids.filter((x) => before.ids.includes(x))).toEqual([]);
+    expect((await readFacts()).claims).toContain("add returns the sum");
   });
 
   it("a pinned commit that cannot be fetched fails the launch and records check_failed, never a verdict from another tree", async () => {
