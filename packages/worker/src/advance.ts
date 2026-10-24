@@ -295,6 +295,8 @@ export interface AdvanceVerdictInput {
   verdict: string;
   /** D#598 P7d: the reviewer could not run the tests. */
   environmentFailure?: boolean;
+  /** The reviewer could not verify some criteria in its environment (never recorded as a verdict; the round goes to a person). */
+  unverifiable?: boolean;
   /** The reviewer's runs on this head ended without a verdict and its re-runs are used up: never recorded as a verdict. */
   noVerdict?: boolean;
   /** With `noVerdict`: how its last run ended (a fixed code). */
@@ -1389,7 +1391,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       (input.round === undefined || (Number.isInteger(input.round) && input.round >= 0 && input.round <= 20)) &&
       input.requiredRoles.length > 0 && input.requiredRoles.length <= 4 && input.requiredRoles.every((r) => VERDICT_ROLES.includes(r)) &&
       input.verdicts.length <= 4 &&
-      input.verdicts.every((v) => VERDICT_ROLES.includes(v.role) && UUID_RE.test(v.runId) && VERDICT_WORDS.includes(v.verdict) && (v.environmentFailure === undefined || typeof v.environmentFailure === "boolean") && (v.noVerdict === undefined || typeof v.noVerdict === "boolean") && (v.endCode === undefined || END_CODE_RE.test(v.endCode)) && (v.debatedRole === undefined || v.debatedRole === "code-reviewer" || v.debatedRole === "security-reviewer"));
+      input.verdicts.every((v) => VERDICT_ROLES.includes(v.role) && UUID_RE.test(v.runId) && VERDICT_WORDS.includes(v.verdict) && (v.environmentFailure === undefined || typeof v.environmentFailure === "boolean") && (v.unverifiable === undefined || typeof v.unverifiable === "boolean") && (v.noVerdict === undefined || typeof v.noVerdict === "boolean") && (v.endCode === undefined || END_CODE_RE.test(v.endCode)) && (v.debatedRole === undefined || v.debatedRole === "code-reviewer" || v.debatedRole === "security-reviewer"));
     if (!sane) return { decision: "refused", reason: "invalid_input" };
     const bad = await guardStep(who);
     if (bad) return { decision: "refused", reason: bad.reason ?? "refused" };

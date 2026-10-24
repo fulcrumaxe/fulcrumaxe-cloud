@@ -245,6 +245,44 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'needs_human', reason: 'Opened the pull request.' });
     });
 
+    it('needs_human after a reviewer could not verify criteria here: lists each criterion and why from the reviewer\'s own run, says no changes were requested, and only while that is the newest escalation', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const { itemId } = await seedItem(accountId, { stage: 'needs_human' });
+      await seedRun(accountId, itemId, { role: 'executor', status: 'succeeded', createdAt: '2026-10-03T09:00:00Z', envelope: { summary: 'Opened the pull request.' } });
+      const tester = await seedRun(accountId, itemId, {
+        role: 'acceptance-tester', status: 'succeeded', createdAt: '2026-10-03T10:00:00Z',
+        envelope: { verdict: 'unverifiable', findings: [], summary: 's', unverifiable: [{ criterion: 'AC4: the sandbox check refuses a missing binary', reason: 'nested bwrap cannot create namespaces here, so the test is skipped' }, { criterion: 'AC5: mounts pass through', reason: '' }, { reason: 'no criterion, dropped' }] },
+      });
+      const escalated = (code: string, reasons: string[], key: string, runId: string | null) =>
+        admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, reasons, run_id, dedupe_key) VALUES ($1, $2, 'escalated', $3, $4::text[], $5, $6)`, [accountId, itemId, code, reasons, runId, key]);
+      await escalated('reviewer_unverifiable', ['acceptance_tester'], 'u1', tester);
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({
+        kind: 'needs_human',
+        reason: [
+          'The acceptance tester could not verify these criteria where it ran, so no changes were requested and nothing was sent back to the builder. A person needs to verify them, then merge or close the pull request on GitHub:',
+          '1. AC4: the sandbox check refuses a missing binary (could not verify because: nested bwrap cannot create namespaces here, so the test is skipped)',
+          '2. AC5: mounts pass through',
+        ].join('\n'),
+      });
+      // Credential shapes in the model's text never leave the API.
+      const secret = ['sk', 'ant', 'api03', 'x'.repeat(40)].join('-');
+      const leaky = await seedRun(accountId, itemId, { role: 'acceptance-tester', status: 'succeeded', createdAt: '2026-10-03T11:00:00Z', envelope: { verdict: 'unverifiable', unverifiable: [{ criterion: 'AC1', reason: `needs ${secret}` }] } });
+      await escalated('reviewer_unverifiable', ['acceptance_tester'], 'u2', leaky);
+      const redacted = (await noticeOf(accountId, userId, itemId))!.reason;
+      expect(redacted).toContain('1. AC1 (could not verify because: needs ');
+      expect(redacted).not.toContain(secret);
+      // A run with no usable list is not shown as an unverifiable notice: the notice falls back to the executor's summary, as for any escalation it has no sentence for.
+      const empty = await seedRun(accountId, itemId, { role: 'acceptance-tester', status: 'succeeded', createdAt: '2026-10-03T12:00:00Z', envelope: { verdict: 'unverifiable', unverifiable: [] } });
+      await escalated('reviewer_unverifiable', ['acceptance_tester'], 'u3', empty);
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'needs_human', reason: 'Opened the pull request.' });
+      // A newer escalation for another cause replaces it.
+      await escalated('reviewer_no_verdict', ['code_reviewer', 'resource_limit'], 'n1', null);
+      expect((await noticeOf(accountId, userId, itemId))!.reason).toMatch(/^The code reviewer could not finish reviewing/);
+      // An escalation from before the item last reached Needs a person does not count.
+      await admin.query(`INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'changes_requested', 'needs_human', now(), 'control_plane', 'later')`, [accountId, itemId]);
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'needs_human', reason: 'Opened the pull request.' });
+    });
+
     it('build_slot_wait (D#483): a fresh slot-wait fact at spec_ready says so, and for the repository names the item that holds the slot; stale, halted or another stage says nothing', async () => {
       const { accountId, userId } = await seedAccountWithMember(admin);
       const { itemId, repoId } = await seedItem(accountId, { stage: 'spec_ready' });

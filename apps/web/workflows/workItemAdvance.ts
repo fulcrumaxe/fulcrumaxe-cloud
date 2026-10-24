@@ -352,7 +352,7 @@ export async function advanceRecordRoundStep(
   userId: string,
   workItemId: string,
   haltEpoch: number,
-  input: { headSha: string; prNumber: number; requiredRoles: string[]; verdicts: Array<{ role: string; runId: string; verdict: string; environmentFailure?: boolean; noVerdict?: boolean; endCode?: string }> },
+  input: { headSha: string; prNumber: number; requiredRoles: string[]; verdicts: Array<{ role: string; runId: string; verdict: string; environmentFailure?: boolean; unverifiable?: boolean; noVerdict?: boolean; endCode?: string }> },
 ): Promise<RoundOut> {
   "use step";
   return recordRoundBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, input);
@@ -967,6 +967,8 @@ interface Verdict {
   verdict: string;
   securityNeeded: boolean;
   environmentFailure: boolean;
+  /** The reviewer could not verify some criteria in its environment: its `fail` is not a judgment of the code, and no fix round comes of it. */
+  unverifiable: boolean;
   /** The run ended without a verdict (it failed, was cancelled, ran out of time, or left none): its `fail` is not a judgment. */
   noVerdict: boolean;
   endCode: string | null;
@@ -1001,9 +1003,9 @@ async function waitForReviewer(accountId: string, userId: string, workItemId: st
   if (!out.done) {
     await advanceCancelStep(accountId, userId, workItemId, out.tailRunId);
     await advanceLogStep("advance.review_wait_timeout", { work_item_id: workItemId, run_id: runId, role });
-    return { role, runId, verdict: "fail", securityNeeded: false, environmentFailure: false, noVerdict: true, endCode: "wait_timeout" };
+    return { role, runId, verdict: "fail", securityNeeded: false, environmentFailure: false, unverifiable: false, noVerdict: true, endCode: "wait_timeout" };
   }
-  return { role, runId, verdict: out.verdict, securityNeeded: out.securityNeeded, environmentFailure: out.environmentFailure, noVerdict: out.noVerdict === true, endCode: out.endCode ?? null };
+  return { role, runId, verdict: out.verdict, securityNeeded: out.securityNeeded, environmentFailure: out.environmentFailure, unverifiable: out.unverifiable === true, noVerdict: out.noVerdict === true, endCode: out.endCode ?? null };
 }
 
 /**
@@ -1319,7 +1321,7 @@ async function personFixRound(args: AdvanceStartArgs, ctx: ReviewCtx): Promise<{
   const failing: Array<{ role: string; runId: string }> = [];
   for (const r of await advanceReviewRunsStep(accountId, userId, workItemId, args.haltEpoch, pr.headSha, 0)) {
     const o = await advanceReviewerOutcomeStep(accountId, r.runId);
-    if (o.done && !o.noVerdict && !o.environmentFailure && o.verdict === "needs-fix") failing.push({ role: r.role, runId: r.runId });
+    if (o.done && !o.noVerdict && !o.environmentFailure && o.unverifiable !== true && o.verdict === "needs-fix") failing.push({ role: r.role, runId: r.runId });
   }
   const round = (ctx.fixRoundsStarted ?? 0) + 1;
   const ask = await askFixUntilAllowed(args, ctx, pr, round, failing, 0, true);
@@ -1467,7 +1469,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       // another reviewer must start a fix round, not stop as "incomplete" for want of a debater verdict. (The merge gate
       // still demands its pass: it reads the full plan.)
       requiredRoles: plan.roles.filter((r) => (r !== "debater" || debaterRan) && !carried.some((c) => c.role === r)),
-      verdicts: verdicts.map((v) => ({ role: v.role, runId: v.runId, verdict: v.verdict, ...(v.environmentFailure ? { environmentFailure: true } : {}), ...(v.noVerdict ? { noVerdict: true, endCode: v.endCode ?? "no_verdict" } : {}) })),
+      verdicts: verdicts.map((v) => ({ role: v.role, runId: v.runId, verdict: v.verdict, ...(v.environmentFailure ? { environmentFailure: true } : {}), ...(v.unverifiable ? { unverifiable: true } : {}), ...(v.noVerdict ? { noVerdict: true, endCode: v.endCode ?? "no_verdict" } : {}) })),
     });
     again = null;
     await advanceLogStep("advance.reviewed", { work_item_id: workItemId, round: attempt, rereview, pr: pr.number, head: pr.headSha.slice(0, 12), decision: round.decision, recorded: round.recorded.join(",") });
@@ -1492,6 +1494,12 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "review", reason: "reviewer_environment" });
       return { status: "needs_human", detail: "reviewer_environment" };
     }
+    if (round.decision === "unverifiable") {
+      // A reviewer could not verify some criteria in its environment. The worker recorded the escalation (the item is at Needs a person, the criteria stay in the
+      // reviewer's run) and no verdict; no fix round starts, because an executor cannot change the reviewer's environment.
+      await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "review", reason: "reviewer_unverifiable", roles: verdicts.filter((v) => v.unverifiable).map((v) => v.role).join(",") });
+      return { status: "needs_human", detail: "reviewer_unverifiable" };
+    }
     if (round.decision === "reviewer_no_verdict") {
       // A reviewer kept ending without a verdict: the worker recorded the escalation (which reviewer, how it ended) and moved the item to Needs a person.
       const missing = verdicts.filter((v) => v.noVerdict);
@@ -1509,7 +1517,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     }
 
     // A fix round: the executor RESUMES the build's sandbox and session with the findings, then the head is read again.
-    const failing = verdicts.filter((v) => v.verdict !== "pass").map((v) => ({ role: v.role, runId: v.runId }));
+    const failing = verdicts.filter((v) => v.verdict !== "pass" && !v.unverifiable).map((v) => ({ role: v.role, runId: v.runId }));
     const fixAsk = await askFixUntilAllowed(args, ctx, pr, round.nextRound ?? round.round + 1, failing, rereview);
     if (fixAsk.pause !== null) return pausedEnd(workItemId, "fix_round", fixAsk.pause, fixAsk.attempt);
     let fix: FixOut = fixAsk.fix;

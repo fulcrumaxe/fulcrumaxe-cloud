@@ -8,6 +8,13 @@ import type { PoolClient } from 'pg';
 
 export const NO_VERDICT_ESCALATION_CODE = 'reviewer_no_verdict';
 
+/**
+ * A reviewer said it could not verify some criteria in its environment (`escalated`, code `reviewer_unverifiable`; reasons: the roles; run_id: the reviewer's run,
+ * whose stored envelope holds the criteria and why). The item is at Needs a person and no fix round was started. It is NOT a review hold: pressing Approve would
+ * ask the same reviewer in the same environment, so the person verifies the criteria themselves and merges or closes on GitHub.
+ */
+export const UNVERIFIABLE_ESCALATION_CODE = 'reviewer_unverifiable';
+
 export async function readReviewHold(client: Pick<PoolClient, 'query'>, workItemId: string): Promise<boolean> {
   const { rows } = await client.query<{ code: string | null }>(
     `SELECT e.code FROM work_item_driver_events e

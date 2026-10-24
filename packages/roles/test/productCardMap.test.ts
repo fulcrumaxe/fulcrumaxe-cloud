@@ -53,6 +53,15 @@ describe("the product card map (D#483)", () => {
     expect(readFileSync(PRODUCT_MAP_PATH as string, "utf8")).toBe(renderCardMap(PRODUCT_CARDS_DIR) as string);
   });
 
+  it("the acceptance tester is told to answer `unverifiable`, never `needs-fix`, for a criterion its environment cannot run; no other card is", () => {
+    const card = MAP["acceptance-tester"] as string;
+    expect(card).toContain("Use the verdict `unverifiable`, never `needs-fix`");
+    expect(card).toContain('`{"criterion": "...", "reason": "..."}`');
+    // The old rule that made every unrun criterion a needs-fix is gone.
+    expect(card).not.toMatch(/cannot verify[^.]*is a failure, not a pass/);
+    for (const role of ["code-reviewer", "security-reviewer", "debater"]) expect(MAP[role] as string, role).not.toContain("unverifiable");
+  });
+
   it("holds exactly the expected roles, each with its file's own text", () => {
     expect(cardFiles().map((f) => f.slice(0, -3))).toEqual(ALL_CARDS);
     expect(Object.keys(MAP)).toEqual(ALL_CARDS);

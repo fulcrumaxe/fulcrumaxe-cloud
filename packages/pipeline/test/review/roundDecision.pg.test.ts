@@ -201,6 +201,63 @@ describe("recordRound [pg]", () => {
     expect((await events(accountId, workItemId)).filter((e) => e.kind === "escalated")).toHaveLength(1);
   });
 
+  /** An acceptance-tester run that says it could not verify two criteria here, as the live item #663 ended: a succeeded run, the word `unverifiable`, the list. */
+  async function unverifiableRun(accountId: string, workItemId: string): Promise<string> {
+    const id = randomUUID();
+    const envelope = { verdict: "unverifiable", findings: [], summary: "4 of 5 criteria verified", unverifiable: [{ criterion: "bwrap check refuses a missing binary", reason: "nested bwrap cannot create namespaces inside this sandbox, so the test is skipped" }, { criterion: "bwrap check passes the mounts through", reason: "same: skipped" }] };
+    await db.admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, envelope, head_sha) VALUES ($1, $2, $3, 'acceptance-tester', 'production', 'succeeded', $4::jsonb, $5)`, [id, accountId, workItemId, JSON.stringify(envelope), HEAD]);
+    return id;
+  }
+
+  it("a reviewer that could not verify here: no verdict recorded, NO fix round, no changes requested; the item goes to Needs a person by name", async () => {
+    const { accountId, workItemId, registry } = await seed();
+    const pass = await reviewerRun(accountId, workItemId, "code-reviewer", "pass");
+    const unverifiable = await unverifiableRun(accountId, workItemId);
+    const verdicts: GatheredVerdict[] = [
+      { role: "code-reviewer", runId: pass, verdict: "pass" },
+      { role: "acceptance-tester", runId: unverifiable, verdict: "fail", unverifiable: true },
+    ];
+    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, SETTLED);
+    expect(out.decision).toBe("unverifiable");
+    expect(out.nextRound).toBeUndefined();
+    // Neither its `fail` nor (the round being incomplete) the other reviewer's pass reaches the stage: never "changes requested", never "passed".
+    expect(out.recorded).toEqual([]);
+    expect(await transitions(workItemId)).toEqual([]);
+    expect(await stageOf(accountId, workItemId)).toBe("needs_human");
+    const ev = await events(accountId, workItemId);
+    expect(ev.filter((e) => e.kind === "fix_round_started")).toEqual([]);
+    expect(ev.filter((e) => e.kind === "escalated")).toEqual([expect.objectContaining({ code: "reviewer_unverifiable", reasons: ["acceptance_tester"], head_sha: HEAD, pr_number: 41, run_id: unverifiable })]);
+    expect(ev.find((e) => e.kind === "review_verdicts")!.reasons).toEqual(["code_reviewer_pass", "acceptance_tester_unverifiable"]);
+    expect(await fixRoundsStarted(db.runWriterPool, accountId, workItemId)).toBe(0);
+    const domain = await db.admin.query("SELECT 1 FROM domain_events WHERE account_id = $1 AND subject_id = $2 AND type = 'work_item.needs_human'", [accountId, workItemId]);
+    expect(domain.rowCount).toBe(1);
+    // A replay writes nothing twice.
+    expect((await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, SETTLED)).decision).toBe("unverifiable");
+    expect((await events(accountId, workItemId)).filter((e) => e.kind === "escalated")).toHaveLength(1);
+  });
+
+  it("an `unverifiable` reviewer beside a needs-fix from the other one: the real problem still gets its fix round, and the unverifiable run's `fail` is not recorded", async () => {
+    const { accountId, workItemId, registry } = await seed();
+    const needsFix = await reviewerRun(accountId, workItemId, "code-reviewer", "needs-fix");
+    const unverifiable = await unverifiableRun(accountId, workItemId);
+    const out = await recordRound(db.runWriterPool, registry, {
+      accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED,
+      verdicts: [{ role: "code-reviewer", runId: needsFix, verdict: "needs-fix" }, { role: "acceptance-tester", runId: unverifiable, verdict: "fail", unverifiable: true }],
+    }, SETTLED);
+    expect(out).toMatchObject({ decision: "fix", nextRound: 1 });
+    expect(out.recorded.map((r) => `${r.role}:${r.verdict}`)).toEqual(["code-reviewer:needs-fix"]);
+    expect(await stageOf(accountId, workItemId)).toBe("changes_requested");
+    expect((await events(accountId, workItemId)).filter((e) => e.kind === "escalated")).toEqual([]);
+  });
+
+  it("the same acceptance tester word without the flag (an old driver, or a list with nothing usable) is a plain fail, as it always was", async () => {
+    const { accountId, workItemId, registry } = await seed();
+    const verdicts = await gather(accountId, workItemId, [["code-reviewer", "pass"], ["acceptance-tester", "fail"]]);
+    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, SETTLED);
+    expect(out.decision).toBe("reviewer_fail");
+    expect((await events(accountId, workItemId)).filter((e) => e.kind === "escalated").map((e) => e.code)).toEqual(["reviewer_fail"]);
+  });
+
   it("a person's Approve at Needs a person reviews again; a reviewer that gives up again records a new escalation without moving the stage (Needs a person has no edge to itself)", async () => {
     const { accountId, workItemId, registry } = await seed();
     const first = await endedRun(accountId, workItemId, "code-reviewer", "failed");

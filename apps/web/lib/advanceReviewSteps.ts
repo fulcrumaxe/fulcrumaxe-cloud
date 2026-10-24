@@ -304,6 +304,8 @@ export interface ReviewerOutcome {
   securityNeeded: boolean;
   /** D#598 P7d: the reviewer says it could not run the tests (the JSON boolean true). */
   environmentFailure: boolean;
+  /** The reviewer could not verify some criteria in its environment (`"verdict":"unverifiable"` with a usable list). `verdict` is `fail` then. Absent is false (an outcome stored by an older step). */
+  unverifiable?: boolean;
   /** The run is `pending` on a runner (a queued runner run): the workflow credits that wait to the pending ceiling, not to the work budget. */
   queuedOnRunner: boolean;
   /** The end of the follow-up chain that starts at the run asked about (D#6 R2b-3, C22 section 7): the id to cancel when the wait runs out. */
@@ -323,7 +325,7 @@ export async function reviewerOutcomeBody(worker: ReviewWorker | null, accountId
   const v = readVerdict(out.status, out.envelope);
   const noVerdict = out.done && !v.hasVerdict;
   const endCode = noVerdict ? toCode(typeof out.failureReason === "string" && /^[a-z][a-z0-9_]{0,39}$/.test(out.failureReason) ? out.failureReason : out.status).slice(0, 40) : null;
-  return { status: out.status, done: out.done, verdict: v.verdict, securityNeeded: v.securityNeeded, environmentFailure: v.environmentFailure, noVerdict, endCode, queuedOnRunner: isQueuedOnRunner(out), tailRunId: out.tailRunId ?? runId, ...(out.failureReason === "placement_changed" ? { failureReason: out.failureReason } : {}) };
+  return { status: out.status, done: out.done, verdict: v.verdict, securityNeeded: v.securityNeeded, environmentFailure: v.environmentFailure, ...(v.unverifiable ? { unverifiable: true } : {}), noVerdict, endCode, queuedOnRunner: isQueuedOnRunner(out), tailRunId: out.tailRunId ?? runId, ...(out.failureReason === "placement_changed" ? { failureReason: out.failureReason } : {}) };
 }
 
 export interface RoundOut {
@@ -340,6 +342,8 @@ export interface GatheredInput {
   runId: string;
   verdict: string;
   environmentFailure?: boolean;
+  /** The reviewer could not verify some criteria in its environment (never recorded as a verdict). */
+  unverifiable?: boolean;
   /** The reviewer's runs ended without a verdict and its re-runs are used up (never recorded as a verdict). */
   noVerdict?: boolean;
   endCode?: string;

@@ -27,7 +27,9 @@ import type { PoolClient } from 'pg';
  *   fix_round_failed      the fix run ended without success. code: the run status.
  *   escalated             handed to a person. code: max_fix_rounds | reviewer_fail | fix_no_change_repeated | reviewer_no_verdict (a reviewer's runs on the
  *                         head kept ending without a verdict; reasons: per reviewer its role, then how its last run ended, e.g. code_reviewer, resource_limit).
- *   review_status         the `fulcrumaxe/review` commit status. code: posted | skipped | failed.
+ *                         | reviewer_unverifiable (a reviewer could not verify some criteria in its environment; reasons: its roles; run_id: its run, which holds the
+ *                         criteria and why. No fix round was started and nothing was recorded as its verdict).
+ *   review_status        the `fulcrumaxe/review` commit status. code: posted | skipped | failed.
  *   merge_gate            the merge gate's outcome. code: its outcome; reasons: its block codes.
  *   merged_by_gate        the gate itself merged the pull request (a merge by a person has no such row).
  *   stopped               the driver stopped for a reason that is none of the above. code: the reason (`reviewer_environment`: a reviewer could not run the tests; reasons: its roles; no verdict was recorded).

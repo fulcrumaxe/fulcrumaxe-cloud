@@ -48,6 +48,24 @@ describe("buildReviewPrompt by runtime", () => {
     expect(buildReviewPrompt({ ...BASE, role })).not.toContain("environment_failure");
   });
 
+  it.each(ROLES)("%s: only the acceptance tester is told about the `unverifiable` outcome, on both runtimes, and it is never told to ask for changes for what its environment cannot run", (role) => {
+    for (const runtime of [undefined, "runner"] as const) {
+      const p = buildReviewPrompt({ ...BASE, role, ...(runtime ? { runtime } : {}) });
+      if (role !== "acceptance-tester") {
+        expect(p).not.toContain("unverifiable");
+        continue;
+      }
+      expect(p).toContain('A fourth verdict word, "unverifiable"');
+      expect(p).toContain('{"verdict":"unverifiable","unverifiable":[{"criterion"');
+      expect(p).toContain("do not ask for changes, because the builder cannot change your environment");
+      // The old rule that made a skipped test a failure is gone; an unrun criterion is still never a pass.
+      expect(p).not.toContain("A criterion you could not verify is a failure");
+      expect(p).toContain("A criterion you could not verify is never a pass");
+      // Exactly one genuine block is still in the prompt, and it is the last thing.
+      expect(p.match(/<!-- AGENT_OUTPUT -->/g)).toHaveLength(1);
+    }
+  });
+
   it.each(ROLES)("RUNNER-AGENT-NO-FULLCHECK: the runner prompt for %s says to run only the affected tests, never the whole check; the sandbox prompt is unchanged", (role) => {
     const p = buildReviewPrompt({ ...BASE, role, runtime: "runner", ...(role === "debater" ? { prior: PRIOR } : {}) });
     expect(p).toContain(RUNNER_TESTS_LINE);

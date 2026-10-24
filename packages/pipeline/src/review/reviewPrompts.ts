@@ -13,6 +13,7 @@ import { BOT_EMAIL, BOT_NAME, RUNNER_TESTS_LINE, branchFor, type PromptRuntime }
  * driver reads those exact words and counts anything else as `fail`. The code reviewer's envelope also carries
  * `security_review_needed` (a boolean the driver reads only as the exact JSON `true`). Any reviewer may add `environment_failure: true` (D#598 P7d):
  * the tests could not be run, so there is no code verdict; the driver reads it only as the exact JSON `true`, records the fact and starts no fix round.
+ * The acceptance tester alone may also answer `unverifiable` (with its list of criteria) when a criterion's test could not run where it ran: the item goes to a person.
  */
 
 export type ReviewPromptRole = "code-reviewer" | "acceptance-tester" | "security-reviewer" | "debater";
@@ -75,7 +76,7 @@ const JOBS: Record<ReviewPromptRole, string> = {
   "code-reviewer":
     "You are the code reviewer. Review the change for correctness against the Spec, tests that really test it, readability and fit with the existing code. Run the tests. If the change touches authentication, secrets, cryptography, untrusted input, network calls, SQL, shell commands or file permissions, set security_review_needed to true.",
   "acceptance-tester":
-    "You are the acceptance tester. Check every acceptance criterion in the Spec against the change: run the code and the tests, and try each criterion yourself. A criterion you could not verify is a failure: do not pass it.",
+    "You are the acceptance tester. Check every acceptance criterion in the Spec against the change: run the code and the tests, and try each criterion yourself. A criterion you could not verify is never a pass. If the code is wrong, that is a defect to fix. If a criterion's test is skipped, or cannot run where you are (the environment refuses something it needs), and nothing else is wrong, that is a limit of your environment and not a fault in the code: do not ask for changes, because the builder cannot change your environment.",
   "security-reviewer":
     "You are the security reviewer. Review the change for security problems: injection, unsafe file or shell handling, secrets, authentication and session mistakes, unsafe defaults, unsafe dependencies. Run the tests. " + SECURITY_THREAT_MODEL,
   debater:
@@ -146,10 +147,18 @@ export function assembleReviewPrompt(input: ReviewPromptInput): AssembledPrompt 
     output: [
       'Your verdict is exactly one of these three words, in lower case: "pass" (ready to merge), "needs-fix" (fixable problems: list each one so the executor can fix it), "fail" (wrong approach, or you cannot review it).',
       "Put every problem in `findings`, one entry each, naming the file and line. `summary` is plain text.",
+      ...(role === "acceptance-tester" ? [UNVERIFIABLE_LINE] : []),
       ...agentOutputBlock(example),
     ].join("\n"),
   });
 }
+
+/**
+ * The acceptance tester's fourth outcome (see @fx/core work-items/unverifiable.ts). Only this role gets it: it is the one that runs each criterion, and so the one
+ * that can be unable to. An older agent that never uses the word behaves as before.
+ */
+const UNVERIFIABLE_LINE =
+  'A fourth verdict word, "unverifiable", is for one case only: a criterion\'s test was skipped or could not run in your environment, and you found no defect. Use it instead of "needs-fix" then, and list each such criterion in an `unverifiable` array of {"criterion": "<the criterion>", "reason": "<what could not run and why>"} next to the verdict, for example {"verdict":"unverifiable","unverifiable":[{"criterion":"<criterion>","reason":"<why it could not be checked here>"}],"findings":[],"summary":"<what you did verify>"}. If you found a real defect, use "needs-fix" (or "fail") as before, even when other criteria were unverifiable. A criterion you simply did not get to is not unverifiable.';
 
 export interface FixFinding {
   role: string;

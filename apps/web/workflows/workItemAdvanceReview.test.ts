@@ -317,6 +317,43 @@ describe("reviews on the pull request's exact head", () => {
     expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
   });
 
+  // A reviewer that could not verify criteria where it ran says so with its own verdict word and a list: the item stops for a person, no fix round starts.
+  const UNVERIFIABLE_LIST = [{ criterion: "AC4: the sandbox check refuses a missing binary", reason: "nested bwrap cannot create namespaces here, so the test is skipped" }];
+  it("a reviewer that could not verify criteria is sent as unverifiable, and the item stops for a person with NO fix round and no merge", async () => {
+    const w = fresh({
+      verdict: (role) => (role === "acceptance-tester" ? { status: "succeeded", envelope: { verdict: "unverifiable", findings: [], summary: "4 of 5 verified", unverifiable: UNVERIFIABLE_LIST } } : { status: "succeeded", envelope: { verdict: "pass", findings: [], summary: "" } }),
+      rounds: [{ decision: "unverifiable" }],
+    });
+    const t = setup(w);
+    const out = await workItemAdvanceWorkflow(ARGS);
+    const sent = t.worker.advanceRecordRound.mock.calls[0]![1].verdicts;
+    expect(sent.find((v) => v.role === "acceptance-tester")).toMatchObject({ verdict: "fail", unverifiable: true });
+    expect(sent.find((v) => v.role === "code-reviewer")!.unverifiable).toBeUndefined();
+    expect(out).toEqual({ status: "needs_human", detail: "reviewer_unverifiable" });
+    expect(t.worker.advanceStartFix).not.toHaveBeenCalled();
+    expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
+  });
+
+  it("an unverifiable acceptance tester beside a needs-fix: the fix round goes ahead and carries only the reviewer that asked for changes", async () => {
+    const w = fresh({
+      verdict: (role) => (role === "acceptance-tester" ? { status: "succeeded", envelope: { verdict: "unverifiable", findings: [], summary: "", unverifiable: UNVERIFIABLE_LIST } } : { status: "succeeded", envelope: { verdict: "needs-fix", findings: ["a.ts:1 - wrong"], summary: "" } }),
+      rounds: [{ decision: "fix", nextRound: 1 }],
+    });
+    const t = setup(w);
+    await workItemAdvanceWorkflow(ARGS);
+    expect(t.worker.advanceStartFix).toHaveBeenCalled();
+    const req = t.worker.advanceStartFix.mock.calls[0]![1];
+    expect(req.failingRunId).toMatch(/code-reviewer/);
+    expect(t.worker.advanceRecordRound.mock.calls[0]![1].verdicts.find((v) => v.role === "acceptance-tester")).toMatchObject({ unverifiable: true });
+  });
+
+  it.each([["the word without a list", { verdict: "unverifiable", findings: [], summary: "" }], ["a list under another word", { verdict: "needs-fix", findings: [], summary: "", unverifiable: UNVERIFIABLE_LIST }], ["a wrong-case word", { verdict: "Unverifiable", unverifiable: UNVERIFIABLE_LIST }]])("%s is not sent as unverifiable", async (_n, envelope) => {
+    const w = fresh({ verdict: () => ({ status: "succeeded", envelope }), rounds: [{ decision: "reviewer_fail" }] });
+    const t = setup(w);
+    await workItemAdvanceWorkflow(ARGS);
+    expect(t.worker.advanceRecordRound.mock.calls[0]![1].verdicts.every((v) => v.unverifiable === undefined)).toBe(true);
+  });
+
   it.each(["true", 1, "yes", { a: 1 }])("an environment_failure that is not the JSON boolean true (%j) is not sent", async (flag) => {
     const w = fresh({ verdict: () => ({ status: "succeeded", envelope: { verdict: "fail", findings: [], summary: "", environment_failure: flag } }), rounds: [{ decision: "reviewer_fail" }] });
     const t = setup(w);
