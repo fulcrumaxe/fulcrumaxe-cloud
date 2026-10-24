@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { loadPlanData } from '@fx/plan-data';
 import {
   effectiveModelId,
   modelIdForSeedTier,
@@ -25,15 +26,17 @@ describe('cost model seed data comes from the plan data', () => {
   });
 
   it('medianCostSeedUsd reads the per-model-tier seed figures', () => {
-    expect(medianCostSeedUsd('haiku')).toBe(3.5);
-    expect(medianCostSeedUsd('sonnet')).toBe(13);
-    expect(medianCostSeedUsd('opus')).toBe(31);
+    const seed = loadPlanData().medianCostPerRunSeedUsd;
+    for (const tier of ['haiku', 'sonnet', 'opus'] as const) {
+      expect(medianCostSeedUsd(tier)).toBe(seed[tier]);
+    }
   });
 
   it('tierMonthlyWorkload reads the tier workload figures', () => {
-    expect(tierMonthlyWorkload('starter')).toEqual({ features: 5, smalls: 12 });
-    expect(tierMonthlyWorkload('team')).toEqual({ features: 14, smalls: 38 });
-    expect(tierMonthlyWorkload('scale')).toEqual({ features: 42, smalls: 95 });
+    const { plans } = loadPlanData();
+    for (const tier of ['starter', 'team', 'scale'] as const) {
+      expect(tierMonthlyWorkload(tier)).toEqual(plans[tier].monthlyWorkload);
+    }
   });
 });
 
@@ -69,15 +72,18 @@ describe('runsPerMonthSeed (H12 criterion 2: "runs per month for the chosen mode
   });
 
   it('feature_critical uses the tier Features count only', () => {
-    expect(runsPerMonthSeed('feature_critical', 'starter')).toBe(5);
-    expect(runsPerMonthSeed('feature_critical', 'team')).toBe(14);
-    expect(runsPerMonthSeed('feature_critical', 'scale')).toBe(42);
+    const { plans } = loadPlanData();
+    for (const tier of ['starter', 'team', 'scale'] as const) {
+      expect(runsPerMonthSeed('feature_critical', tier)).toBe(plans[tier].monthlyWorkload.features);
+    }
   });
 
   it('always uses Features + Smalls for the tier', () => {
-    expect(runsPerMonthSeed('always', 'starter')).toBe(17);
-    expect(runsPerMonthSeed('always', 'team')).toBe(52);
-    expect(runsPerMonthSeed('always', 'scale')).toBe(137);
+    const { plans } = loadPlanData();
+    for (const tier of ['starter', 'team', 'scale'] as const) {
+      const { features, smalls } = plans[tier].monthlyWorkload;
+      expect(runsPerMonthSeed('always', tier)).toBe(features + smalls);
+    }
   });
 });
 

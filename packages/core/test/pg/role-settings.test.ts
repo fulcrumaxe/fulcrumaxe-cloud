@@ -4,12 +4,16 @@ import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
 import { ROLE_NAMES } from '@fx/roles';
+import { loadPlanData } from '@fx/plan-data';
 import { NotFoundError, ForbiddenError } from '../../src/tenancy/errors.js';
 import { listRoleSettings } from '../../src/role-settings/list.js';
 import { setRoleMode } from '../../src/role-settings/setMode.js';
 import { setRoleModel } from '../../src/role-settings/setModel.js';
 import { InvalidRoleSettingsInputError } from '../../src/role-settings/errors.js';
 import type { RoleSettingsCtx } from '../../src/role-settings/types.js';
+
+/** The plan data's per-model-tier seed median, the figures the cost line starts from. */
+const seedUsd = () => loadPlanData().medianCostPerRunSeedUsd;
 
 /**
  * D#2 H12 criteria 1, 2 and 3, plus sec-criteria A7. See the PR body for
@@ -94,8 +98,8 @@ describe('role-settings: listRoleSettings and setRoleMode', () => {
       const entries = await listRoleSettings(ctxFor(refsA), refsA.repoId);
       const codeReviewer = entries.find((e) => e.role === 'code-reviewer')!;
       expect(codeReviewer.costLine.medianSource).toBe('seed');
-      // code-reviewer's defaultModel is sonnet -> seed comes from the plan data (13 in the test data).
-      expect(codeReviewer.costLine.medianCostPerRunUsd).toBe(13);
+      // code-reviewer's defaultModel is sonnet -> seed comes from the plan data (the plan data's sonnet figure).
+      expect(codeReviewer.costLine.medianCostPerRunUsd).toBe(seedUsd().sonnet);
     });
 
     it('switches to the tenant\'s own ledger median once 10 of that role\'s runs exist', async () => {
@@ -167,8 +171,8 @@ describe('role-settings: listRoleSettings and setRoleMode', () => {
       const haiku = await lineOf(refs, 'code-reviewer');
       await upsert('opus-5');
       const opus = await lineOf(refs, 'code-reviewer');
-      expect([followed.medianCostPerRunUsd, haiku.medianCostPerRunUsd, opus.medianCostPerRunUsd]).toEqual([13, 3.5, 31]);
-      expect(haiku.monthlyUsd).toBeCloseTo(haiku.runsPerMonth * 3.5, 2);
+      expect([followed.medianCostPerRunUsd, haiku.medianCostPerRunUsd, opus.medianCostPerRunUsd]).toEqual([seedUsd().sonnet, seedUsd().haiku, seedUsd().opus]);
+      expect(haiku.monthlyUsd).toBeCloseTo(haiku.runsPerMonth * seedUsd().haiku, 2);
       expect(opus.monthlyUsd).toBeGreaterThan(followed.monthlyUsd);
       expect(followed.monthlyUsd).toBeGreaterThan(haiku.monthlyUsd);
       for (const line of [followed, haiku, opus]) expect(line.medianSource).toBe('seed');
@@ -177,7 +181,7 @@ describe('role-settings: listRoleSettings and setRoleMode', () => {
     it('with no override the model the live table gives the role is the one priced', async () => {
       const refs = await seedAccount(admin, randomUUID());
       const line = await lineOf(refs, 'code-reviewer', { routedModelFor: () => 'opus-5' as const });
-      expect(line.medianCostPerRunUsd).toBe(31);
+      expect(line.medianCostPerRunUsd).toBe(seedUsd().opus);
     });
 
     it('the floor holds: a model below it is priced at the floor', async () => {
@@ -188,7 +192,7 @@ describe('role-settings: listRoleSettings and setRoleMode', () => {
         [refs.accountId, refs.repoId],
       );
       const line = await lineOf(refs, 'executor', { routedModelFor: () => 'haiku-4.5' as const, floorFor });
-      expect(line.medianCostPerRunUsd).toBe(13);
+      expect(line.medianCostPerRunUsd).toBe(seedUsd().sonnet);
     });
 
     it('the ledger median counts only runs on the model in use; other models\' and unlabelled runs do not count', async () => {
@@ -205,7 +209,7 @@ describe('role-settings: listRoleSettings and setRoleMode', () => {
         [refs.accountId, refs.repoId],
       );
       const onOpus = await lineOf(refs, 'code-reviewer');
-      expect(onOpus).toMatchObject({ medianSource: 'seed', medianCostPerRunUsd: 31 });
+      expect(onOpus).toMatchObject({ medianSource: 'seed', medianCostPerRunUsd: seedUsd().opus });
       // Six more opus runs make ten, and then only those set the figure.
       await seedRuns(refs, 'code-reviewer', 'opus-5', 6, 20);
       expect(await lineOf(refs, 'code-reviewer')).toMatchObject({ medianSource: 'ledger', medianCostPerRunUsd: 20 });

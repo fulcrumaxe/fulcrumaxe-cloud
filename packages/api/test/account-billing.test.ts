@@ -4,7 +4,7 @@ import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { insertApiToken } from '@fx/core/src/tokens/service.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
-import { planFor } from '@fx/spend';
+import { backgroundBudgetUsd, foregroundBudgetUsd, planFor } from '@fx/spend';
 import { resetPlanDataCache } from '@fx/plan-data';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
@@ -15,6 +15,15 @@ import type { Scope } from '../src/registry.js';
 import { generateToken, displayHint } from '../src/tokens/format.js';
 import { hashToken } from '../src/tokens/resolve.js';
 import { seedAccountWithMember } from './helpers/seed.js';
+
+/** The compute budgets the plan data gives this account: foreground flat, background scaled by the account's repo count. */
+async function planComputeBudgets(admin: PoolClient, accountId: string, plan: 'starter' | 'team' | 'scale') {
+  const { rows } = await admin.query<{ n: string }>(`SELECT count(*)::text AS n FROM repos WHERE account_id = $1`, [accountId]);
+  return {
+    foreground: foregroundBudgetUsd(plan),
+    background: backgroundBudgetUsd(plan, Number(rows[0]!.n)),
+  };
+}
 
 /** D#31 API-7a: `GET /usage`, `GET /budgets`, and `partner_billed` on `GET /account`. */
 describe('D#31 API-7a: usage, budgets, account.partner_billed', () => {
@@ -65,7 +74,7 @@ describe('D#31 API-7a: usage, budgets, account.partner_billed', () => {
   it('GET /usage returns this month per budget for a session and a read token, never cached', async () => {
     const me = await seedAccountWithMember(admin, { plan: 'starter' });
     await admin.query(`UPDATE accounts SET model_budget_usd_month = 100 WHERE id = $1`, [me.accountId]);
-    // Starter (plan data under test): foreground 17, background 9. One settled model row of 1.5 now, one open reservation of 0.25.
+    // Compute limits come from the plan data. One settled model row of 1.5 now, one open reservation of 0.25.
     await admin.query(
       `INSERT INTO ledger (account_id, kind, source, usd, budget) VALUES ($1, 'model', 'customer_gateway', 1.5, 'model')`,
       [me.accountId],
@@ -74,10 +83,11 @@ describe('D#31 API-7a: usage, budgets, account.partner_billed', () => {
       `INSERT INTO spend_reservations (account_id, usd_reserved, state, budget) VALUES ($1, 0.25, 'open', 'model')`,
       [me.accountId],
     );
+    const compute = await planComputeBudgets(admin, me.accountId, 'starter');
     const expected = {
       model: { spent_usd: 1.5, reserved_usd: 0.25, limit_usd: 100 },
-      foreground_compute: { spent_usd: 0, reserved_usd: 0, limit_usd: 17 },
-      background_compute: { spent_usd: 0, reserved_usd: 0, limit_usd: 9 },
+      foreground_compute: { spent_usd: 0, reserved_usd: 0, limit_usd: compute.foreground },
+      background_compute: { spent_usd: 0, reserved_usd: 0, limit_usd: compute.background },
     };
 
     const bySession = await get('/api/v1/usage', { session: me });
@@ -118,10 +128,11 @@ describe('D#31 API-7a: usage, budgets, account.partner_billed', () => {
     const res = await get('/api/v1/budgets', { session: me });
     expect(res.status).toBe(200);
     expect(res.headers.get('cache-control')).toBe('private, no-store');
+    const compute = await planComputeBudgets(admin, me.accountId, 'team');
     expect(await res.json()).toEqual({
       model_usd_month: 0,
-      foreground_compute_usd_month: 44,
-      background_compute_usd_month: 41,
+      foreground_compute_usd_month: compute.foreground,
+      background_compute_usd_month: compute.background,
       compute_cap_usd_month: 67,
       plan: 'team',
     });
@@ -276,10 +287,11 @@ describe('D#31 API-7d: PATCH budgets and account settings', () => {
     const res = await patch('/api/v1/budgets', me, { model_usd_month: 250.5 });
     expect(res.status).toBe(200);
     expect(res.headers.get('cache-control')).toBe('private, no-store');
+    const compute = await planComputeBudgets(admin, me.accountId, 'team');
     expect(await res.json()).toEqual({
       model_usd_month: 250.5,
-      foreground_compute_usd_month: 44,
-      background_compute_usd_month: 41,
+      foreground_compute_usd_month: compute.foreground,
+      background_compute_usd_month: compute.background,
       compute_cap_usd_month: 0,
       plan: 'team',
     });

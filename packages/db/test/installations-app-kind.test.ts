@@ -8,6 +8,7 @@ import { INSTALLATION_APP_KINDS } from '../../core/src/repos/appKinds.js';
 import { createPool } from '../src/pool.js';
 import { DEFAULT_MIGRATIONS_DIR, runMigrations } from '../src/migrate.js';
 import { PG_ERROR } from './helpers/pgErrors.js';
+import { nextGhInstallationId } from './helpers/seed.js';
 import { throwawayDbs, type ThrowawayDbs } from './helpers/throwaway-db.js';
 
 const MIGRATION = '0647_installations_app_kind_team_readonly.sql';
@@ -41,7 +42,7 @@ describe('installations.app_kind CHECK (migration 0647)', () => {
   async function insertInstallation(pool: Pool, accountId: string, kind: string): Promise<void> {
     await pool.query(`INSERT INTO installations (account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3)`, [
       accountId,
-      Math.floor(Math.random() * 1e9),
+      nextGhInstallationId(),
       kind,
     ]);
   }

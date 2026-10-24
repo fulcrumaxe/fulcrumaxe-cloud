@@ -39,6 +39,7 @@ import {
 } from '../src/sse/leases.js';
 import { AccountPoller } from '../src/sse/poller.js';
 import { JSON_POLLS_PER_TOKEN_PER_MINUTE } from '../src/sse/json.js';
+import { loadPlanData } from '@fx/plan-data';
 import { seedAccountWithMember, seedUser } from './helpers/seed.js';
 import { ManualClock } from './helpers/manual-clock.js';
 import { countingPool, eventually, openSse, sleep, startServer, type SseConnection, type TestServer } from './helpers/sse.js';
@@ -544,8 +545,13 @@ describe('D#31 API-5: the v1 event streams (real HTTP, real Postgres)', () => {
       expect(sessionA.status).toBe(200);
     });
 
-    it('token caps follow the plan as data (the plan data under test: Starter 3, Team 6, Scale 9)', async () => {
-      expect([tokenStreamsPerTenant('starter'), tokenStreamsPerTenant('team'), tokenStreamsPerTenant('scale')]).toEqual([3, 6, 9]);
+    it('token caps follow the plan as data (each tier gets the plan data figure)', async () => {
+      const { plans } = loadPlanData();
+      expect([tokenStreamsPerTenant('starter'), tokenStreamsPerTenant('team'), tokenStreamsPerTenant('scale')]).toEqual([
+        plans.starter.tokenStreamsPerTenant,
+        plans.team.tokenStreamsPerTenant,
+        plans.scale.tokenStreamsPerTenant,
+      ]);
       const team = await seedAccountWithMember(admin, { plan: 'team' });
       const tokens = [];
       const cap = tokenStreamsPerTenant('team');
