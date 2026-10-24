@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { pgHarness } from "./helpers/pgHarness.js";
 import { seedAccount, seedRepo } from "./build/helpers/seed.js";
-import { startBuildForItem } from "../src/advance/build.js";
+import { startBuildForItem } from "../src/advance/buildTesting.js";
 import { branchNameOk } from "@fulcrumaxe/runner-protocol/planePush";
 import type { AdvanceRunOutcome, AdvanceRunPorts, AdvanceRunRequest, AdvanceRunStart } from "../src/advance/runPorts.js";
 

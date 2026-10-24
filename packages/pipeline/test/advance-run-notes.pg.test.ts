@@ -4,7 +4,8 @@ import { sanitize } from "@fx/trust";
 import { createCorrection, decideCorrection, getCorrection, type CorrectionCtx } from "@fx/core/src/corrections/index.js";
 import { pgHarness } from "./helpers/pgHarness.js";
 import { seedAccount, seedRepo } from "./build/helpers/seed.js";
-import { markBuildNeedsHuman, startBuildForItem } from "../src/advance/build.js";
+import { markBuildNeedsHuman } from "../src/advance/build.js";
+import { startBuildForItem } from "../src/advance/buildTesting.js";
 import type { AdvanceRunOutcome, AdvanceRunPorts, AdvanceRunRequest, AdvanceRunStart } from "../src/advance/runPorts.js";
 
 /**

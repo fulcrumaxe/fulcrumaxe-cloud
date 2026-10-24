@@ -75,7 +75,7 @@ async function put(w: World, o: PutOptions): Promise<string> {
   return id;
 }
 
-const port = () => createMemoryPort(h.runWriterPool);
+const port = () => createMemoryPort(h.runWriterPool, { liveSecrets: () => [] });
 const recall = (w: World, slot: "stable" | "item", extra: Record<string, unknown> = {}): Promise<readonly MemoryEntry[]> =>
   port().recall({ accountId: w.accountId, repoId: w.repoId, workItemId: w.itemId, role: "executor", slot, ...extra } as never);
 const setSlot = (w: World, bytes: number) =>

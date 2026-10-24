@@ -17,6 +17,8 @@ export const RUN_INPUTS_MAX_ENTRIES = 50;
 export interface RunContextInputs {
   entries: ReadonlyArray<{ id: string; version: number }>;
   map: { version: string; sha256: string } | null;
+  /** D#601 MEM-RECALL-RESCAN: how many candidates the recall's secret re-check left out, and whether the check could not be made (then nothing was recalled). Counts only. */
+  rescan?: { skipped: number; unavailable: boolean };
 }
 
 /** The raw map text's identity: the sha256 of its UTF-8 bytes (the same value `repo_context_maps.body_sha256` holds). */
@@ -43,11 +45,12 @@ export function recalledEntriesOf(...slots: ReadonlyArray<Pick<RenderedMemory, "
  * with a recall the panel and the "used in N runs" count cannot see.
  */
 export async function recordRunContextInputs(client: PoolClient, accountId: string, runId: string, inputs: RunContextInputs): Promise<boolean> {
-  if (inputs.entries.length === 0 && inputs.map === null) return false;
+  const rescan = inputs.rescan ?? { skipped: 0, unavailable: false };
+  if (inputs.entries.length === 0 && inputs.map === null && rescan.skipped === 0 && !rescan.unavailable) return false;
   await client.query(
-    `INSERT INTO run_context_inputs (account_id, run_id, recalled_entry_ids, recalled_entry_versions, map_version, map_sha256)
-     VALUES ($1::uuid, $2::uuid, $3::uuid[], $4::integer[], $5, $6) ON CONFLICT (account_id, run_id) DO NOTHING`,
-    [accountId, runId, inputs.entries.map((e) => e.id), inputs.entries.map((e) => e.version), inputs.map?.version ?? null, inputs.map?.sha256 ?? null],
+    `INSERT INTO run_context_inputs (account_id, run_id, recalled_entry_ids, recalled_entry_versions, map_version, map_sha256, rescan_skipped, rescan_unavailable)
+     VALUES ($1::uuid, $2::uuid, $3::uuid[], $4::integer[], $5, $6, $7::integer, $8::boolean) ON CONFLICT (account_id, run_id) DO NOTHING`,
+    [accountId, runId, inputs.entries.map((e) => e.id), inputs.entries.map((e) => e.version), inputs.map?.version ?? null, inputs.map?.sha256 ?? null, Math.min(rescan.skipped, 100000), rescan.unavailable],
   );
   return true;
 }

@@ -635,7 +635,7 @@ describe('github repo re-sync reconcile job', () => {
          VALUES ($1, $2, 'repo', $3, 'command', $4, 'person', 'approved', 1, $5)`,
         [entryId, s.accountId, `${nodeIdOf(repo)}@${s.gh}`, body, createHash('sha256').update(body).digest('hex')],
       );
-      const port = createMemoryPort(appUser);
+      const port = createMemoryPort(appUser, { liveSecrets: () => [] });
       const recall = () => port.recall({ accountId: s.accountId, repoId, role: 'executor', slot: 'stable' } as never);
       expect(await recall()).toEqual([]); // no node id: no repo key, nothing recalled
       await tick(); // the backfill
@@ -654,7 +654,7 @@ describe('github repo re-sync reconcile job', () => {
         [randomUUID(), s.accountId, `${nodeIdOf(repo)}@${s.gh + 1}`, body, createHash('sha256').update(body).digest('hex')],
       );
       await tick();
-      expect(await createMemoryPort(appUser).recall({ accountId: s.accountId, repoId, role: 'executor', slot: 'stable' } as never)).toEqual([]);
+      expect(await createMemoryPort(appUser, { liveSecrets: () => [] }).recall({ accountId: s.accountId, repoId, role: 'executor', slot: 'stable' } as never)).toEqual([]);
     });
   });
 });

@@ -188,6 +188,15 @@ export function base64Forms(secret: string): string[] {
 }
 
 /**
+ * D#601 MEM-RECALL-RESCAN: the check export and recall both apply to text that is already stored (the write path applies the same two tests before
+ * it stores). True when the text still has a credential shape or holds a token that is live now. A status-only change (restore, renew, restore_retired)
+ * re-scans nothing, and a token can become live after an entry was written, so stored text is checked again whenever it is about to leave the store.
+ */
+export function storedTextHoldsSecret(text: string, secrets: readonly (string | undefined)[]): boolean {
+  return redactShapes(text) !== text || holdsLiveSecret(text, secrets);
+}
+
+/**
  * Whether the text holds a live token value: as is, with every space, control and zero-width character removed (a value split across a line or
  * padded with invisible characters), or encoded as base64 (standard or URL-safe, padded or not, at any of the three alignments it can start
  * on inside other text; see `base64Forms`), URL-encoded, or percent-encoded byte by byte. One pass of `includes` per form per value, so the cost

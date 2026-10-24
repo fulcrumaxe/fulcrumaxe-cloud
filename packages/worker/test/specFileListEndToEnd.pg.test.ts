@@ -8,7 +8,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { CLAIM_PATH, claimRun, createRunPullRequestPort, donePath, doneRun, loadAcceptanceScope, toResponse, type RunnerCloudDeps } from "@fx/runner-cloud";
-import { startBuildForItem } from "../../pipeline/src/advance/build.js";
+import { startBuildForItem } from "../../pipeline/src/advance/buildTesting.js";
 import { publishLightSpec } from "../../pipeline/src/advance/lightSpec.js";
 import type { AdvanceRunPorts } from "../../pipeline/src/advance/runPorts.js";
 import { runSpecStep, type SpecStepDeps } from "../../pipeline/src/plan/spec.js";

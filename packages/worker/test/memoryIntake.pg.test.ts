@@ -123,7 +123,7 @@ describe("run memory intake in the worker [pg]", { timeout: 60_000 }, () => {
       const key = `${nodeId}@${await ghInstallation()}`;
       const stored = (await admin.query("SELECT id, scope_ref FROM memory_entries WHERE account_id = $1 AND provenance->>'source_run_id' = $2", [a.accountId, runId])).rows;
       expect(stored).toEqual([{ id: expect.any(String), scope_ref: key }]);
-      const port = createMemoryPort(writerPool);
+      const port = createMemoryPort(writerPool, { liveSecrets: () => [] });
       const recall = () => port.recall({ accountId: a.accountId, repoId: a.repoId, role: "executor", slot: "stable" } as never);
       expect(await recall()).toEqual([]); // proposed: never injected
       await admin.query("UPDATE memory_entries SET status = 'approved' WHERE id = $1", [stored[0].id]);

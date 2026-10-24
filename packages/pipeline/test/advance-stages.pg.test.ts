@@ -9,7 +9,8 @@ import { pgHarness } from "./helpers/pgHarness.js";
 import { seedAccount, seedRepo } from "./build/helpers/seed.js";
 import { discussingItem, expectOneGenuineEnvelope } from "./plan/helpers/panelFixtures.js";
 import { publishRespec } from "../src/advance/respec.js";
-import { BUILD_FAILURE_CODES, buildExecutorPrompt, markBuildNeedsHuman, startBuildForItem } from "../src/advance/build.js";
+import { BUILD_FAILURE_CODES, buildExecutorPrompt, markBuildNeedsHuman } from "../src/advance/build.js";
+import { startBuildForItem } from "../src/advance/buildTesting.js";
 import { JobMemorySchema, MAX_JOB_MEMORY_BYTES } from "@fulcrumaxe/runner-protocol";
 import { MEMORY_SLOT_MAX_BYTES } from "../src/prompt/assemblePrompt.js";
 import { createPgRepoMapCache, createRepoMapPort, type RepoMapSource } from "../src/prompt/repoMap.js";
@@ -452,6 +453,39 @@ describe("the build", () => {
     expect(req.memoryTokens).toBe(Math.ceil(memoryBytes / 4));
     const stamped = await h.admin.query("SELECT body FROM memory_entries WHERE account_id = $1 AND last_recalled_at IS NOT NULL ORDER BY body", [t.accountId]);
     expect(stamped.rows.map((r: { body: string }) => r.body)).toEqual(["keep the public name of the loader", "run pnpm test before you push"]);
+  });
+
+  it("D#601 MEM-RECALL-RESCAN: a build leaves out a stored entry that holds a live token, records how many it left out, and records a failing secrets source as unavailable", async () => {
+    const token = ["ghs", "LiveInstallationTokenValue0123456789abcdef"].join("_");
+    const seedRepoMemory = async (t: Awaited<ReturnType<typeof atSpecReady>>, node: string, install: number, bodies: string[]): Promise<void> => {
+      const repo = (await h.admin.query<{ repo_id: string }>("SELECT repo_id FROM work_items WHERE id = $1", [t.workItemId])).rows[0]!.repo_id;
+      const installId = randomUUID();
+      await h.admin.query("INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team')", [installId, t.accountId, install]);
+      await h.admin.query("UPDATE repos SET installation_id = $2, gh_node_id = $3 WHERE id = $1", [repo, installId, node]);
+      for (const body of bodies) {
+        await h.admin.query(
+          `INSERT INTO memory_entries (account_id, scope, scope_ref, kind, body, author_kind, status, version, content_sha256) VALUES ($1, 'repo', $2, 'command', $3, 'person', 'approved', 1, $4)`,
+          [t.accountId, `${node}@${install}`, body, createHash("sha256").update(body).digest("hex")],
+        );
+      }
+    };
+    const rescanRow = async (accountId: string) =>
+      (await h.admin.query<{ rescan_skipped: number; rescan_unavailable: boolean }>("SELECT rescan_skipped, rescan_unavailable FROM run_context_inputs WHERE account_id = $1", [accountId])).rows;
+
+    const t = await atSpecReady();
+    await seedRepoMemory(t, "R_kgDOBuildRescan", 8800124, ["run pnpm test before you push", `deploy with ${token} from CI`]);
+    const out = await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { liveSecrets: () => [token] });
+    expect(out).toMatchObject({ status: "started" });
+    expect(t.world.requests[0]!.prompt).toContain("run pnpm test before you push");
+    expect(t.world.requests[0]!.prompt).not.toContain(token);
+    expect(await rescanRow(t.accountId)).toEqual([{ rescan_skipped: 1, rescan_unavailable: false }]);
+
+    const u = await atSpecReady();
+    await seedRepoMemory(u, "R_kgDOBuildRescanU", 8800125, ["run pnpm test before you push"]);
+    const failed = await startBuildForItem(h.runWriterPool, u.accountId, u.workItemId, randomUUID(), u.world, { liveSecrets: () => Promise.reject(new Error("down")) });
+    expect(failed).toMatchObject({ status: "started" });
+    expect(u.world.requests[0]!.prompt).not.toContain("run pnpm test before you push");
+    expect(await rescanRow(u.accountId)).toEqual([{ rescan_skipped: 0, rescan_unavailable: true }]);
   });
 
   it("D#601 MEM-3: a build that recalled nothing starts with a memory figure of 0, not an absent one", async () => {

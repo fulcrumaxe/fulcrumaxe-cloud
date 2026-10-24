@@ -5,7 +5,7 @@ import { RunnerTarget, SandboxTarget, createJobIssuer, createJobSigner, createPg
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount } from "@fx/db/test/helpers/seed.js";
 import { loadProductCard } from "@fx/roles/cards";
-import { startBuildForItem } from "../../pipeline/src/advance/build.js";
+import { startBuildForItem } from "../../pipeline/src/advance/buildTesting.js";
 import type { AdvanceRunPorts } from "../../pipeline/src/advance/runPorts.js";
 import { createSandboxTargetHarness } from "../../runner/test/helpers/sandboxTargetFakes.js";
 import { createFakeRunnerLimits } from "../../runner/test/helpers/runnerTargetFakes.js";

@@ -15,6 +15,37 @@ const TEST_ONLY_IMPORT = /["'][^"']*(?:testing\/continuation|continuationTesting
 const allProduction = (): string[] =>
   listSourcePaths(REPO_ROOT, ["packages", "apps"], SKIP_DIRS).filter((f) => /\.(?:ts|tsx|mts|cts|js|mjs|cjs)$/.test(f) && !/\.(?:test|spec)\./.test(path.basename(f)));
 
+/** D#601 MEM-RECALL-RESCAN: `startBuildForItem` with an empty live-secrets default; a production import would skip the live-token half of the recall check. */
+const BUILD_TESTING_SELF = path.join("packages", "pipeline", "src", "advance", "buildTesting.ts");
+const BUILD_TESTING_IMPORT = /["'][^"']*(?:testing\/build|buildTesting)(?:\.js)?["']/;
+
+describe("build test-only entry point", () => {
+  it("the matcher catches each way of importing it", () => {
+    for (const line of [
+      'import { startBuildForItem } from "@fx/pipeline/testing/build";',
+      'import { startBuildForItem } from "../../pipeline/src/advance/buildTesting.js";',
+      'const m = await import("@fx/pipeline/testing/build");',
+    ]) {
+      expect(BUILD_TESTING_IMPORT.test(line), line).toBe(true);
+    }
+    expect(BUILD_TESTING_IMPORT.test('import { startBuildForItem } from "../advance/build.js";')).toBe(false);
+  });
+
+  it("scans a non-zero number of production files, including the entry file itself", () => {
+    const files = allProduction();
+    expect(files.length).toBeGreaterThan(100);
+    expect(files.some((f) => f.endsWith(BUILD_TESTING_SELF))).toBe(true);
+  });
+
+  it("no production file imports it", () => {
+    const offenders = allProduction()
+      .filter((f) => !f.endsWith(BUILD_TESTING_SELF))
+      .filter((f) => readFileSync(f, "utf8").split("\n").some((line) => BUILD_TESTING_IMPORT.test(line)))
+      .map((f) => path.relative(REPO_ROOT, f));
+    expect(offenders).toEqual([]);
+  });
+});
+
 describe("continuation test-only entry point", () => {
   it("the matcher catches each way of importing it", () => {
     for (const line of [

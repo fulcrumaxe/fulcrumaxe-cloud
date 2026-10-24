@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { RunPrecheckRefusedError, insertAgentRun, writeRunStatus, type CancelResult, type ExecutionRun, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
-import { startBuildForItem } from "@fx/pipeline";
+import { startBuildForItem } from "@fx/pipeline/testing/build";
 import { cancelPendingRunsOnLeftSide } from "@fx/runner-cloud";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
