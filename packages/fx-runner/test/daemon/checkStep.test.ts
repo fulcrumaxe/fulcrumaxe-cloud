@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CHECK_NOT_RUN_REASONS } from "@fulcrumaxe/runner-protocol";
-import { createBaseFile, createCheckStep, createFailedFiles, createVcsState, normalised, skippedTests, type CheckStepInput } from "../../src/daemon/checkStep.js";
+import { changedFilesLine, createBaseFile, createChangedFiles, createCheckStep, createFailedFiles, createVcsState, normalised, skippedTests, type CheckStepInput } from "../../src/daemon/checkStep.js";
 import { runCapture, runInstall } from "../../src/engines/claude/capture.js";
 import { testLaunch } from "../helpers/launch.js";
 
@@ -188,6 +188,78 @@ describe("the failed test files the summary names", () => {
     const passed = await run([script("many-pass.sh", `${body}\nexit 0`)]);
     expect(passed.passed).toBe(true);
     expect(passed.body.summary).not.toContain("failed test files");
+  });
+});
+
+describe("the files the branch changed, named in the summary's header of a failed check", () => {
+  const gitCapture = (command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number) => runCapture(spawn, testLaunch(), command, args, env, timeoutMs, 1024 * 1024, 2048);
+  const changedFiles = createChangedFiles(gitCapture, {});
+  const stepWithChanged = createCheckStep({ capture: (command, args, env, cwd, timeoutMs, tail, signal, feed, onLine) => runInstall(spawn, command, args, env, cwd, timeoutMs, tail, signal, feed, onLine), now: () => new Date(), vcsState, changedFiles });
+  const runChanged = (argv: string[]) =>
+    stepWithChanged({ check: { argv, dev_shell: false, timeout_s: 60 }, workspace: ws, base, baseDir: ws, baseFile, launch: (v) => ({ tool: v[0]!, args: v.slice(1), env: { PATH: process.env.PATH ?? "" } }) });
+  const put = (rel: string, text = "x\n"): void => {
+    mkdirSync(path.dirname(path.join(ws, rel)), { recursive: true });
+    writeFileSync(path.join(ws, rel), text);
+  };
+
+  it("changedFilesLine: sorted, counted, only plain names are shown, and a cut or an odd name is counted as `more` so a reader can tell the list is not whole", () => {
+    expect(changedFilesLine(["src/b.ts", "src/a.ts", "src/a.ts"])).toBe("changed files (2): src/a.ts, src/b.ts\n");
+    expect(changedFilesLine([])).toBe("");
+    expect(changedFilesLine(null)).toBe("");
+    // a name with a space is counted but not named
+    expect(changedFilesLine(["src/a.ts", "src/odd name.ts"])).toBe("changed files (2): src/a.ts (and 1 more)\n");
+    expect(changedFilesLine(["odd name.ts"])).toBe("changed files (1): (and 1 more)\n");
+    const many = Array.from({ length: 200 }, (_, i) => `packages/some-long-package-name/src/file-number-${String(i).padStart(3, "0")}.ts`);
+    const line = changedFilesLine(many);
+    expect(line).toMatch(/^changed files \(200\): packages\/some-long-package-name\/src\/file-number-000\.ts, /);
+    expect(line).toMatch(/\(and \d+ more\)\n$/);
+    expect(Buffer.byteLength(line)).toBeLessThan(1200);
+  });
+
+  it("createChangedFiles reads edits to tracked files, new committed files, untracked files and both sides of a rename, and not ignored files", async () => {
+    put(".gitignore", "ignored.log\n");
+    put("src/keep.ts");
+    const mid = commit("more");
+    put("src/keep.ts", "changed\n");
+    put("src/new.ts");
+    put("ignored.log");
+    git("mv", "src/keep.ts", "src/moved.ts");
+    put("src/untracked.ts");
+    expect((await changedFiles(ws, mid))?.sort()).toEqual(["src/keep.ts", "src/moved.ts", "src/untracked.ts", "src/new.ts"].sort());
+    expect((await changedFiles(ws, base))?.sort()).toEqual([".gitignore", "src/moved.ts", "src/untracked.ts", "src/new.ts"].sort());
+  });
+
+  it("createChangedFiles answers null when git cannot say (an unknown base), never an empty list", async () => {
+    expect(await changedFiles(ws, "f".repeat(40))).toBeNull();
+    expect(await changedFiles(path.join(root, "not-a-repo"), base)).toBeNull();
+  });
+
+  it("a failing check names the failed test files first and then the changed files; the output tail follows", async () => {
+    put("test/changed.test.ts");
+    commit("a change");
+    const out = await runChanged([script("fail.sh", "echo ' FAIL  test/changed.test.ts > a'\necho ' FAIL  test/other.test.ts > b'\necho the tail\nexit 1")]);
+    expect(out.passed).toBe(false);
+    const lines = out.body.summary.split("\n");
+    expect(lines[0]).toBe("failed test files (2): test/changed.test.ts, test/other.test.ts");
+    expect(lines[1]).toBe("changed files (1): test/changed.test.ts");
+    expect(out.body.summary).toContain("the tail");
+  });
+
+  it("a passing check, a check stopped at its limit and a daemon without the dependency name no changed files", async () => {
+    put("src/a.ts");
+    expect((await runChanged([script("pass.sh", "echo ok")])).body.summary).not.toContain("changed files");
+    const slow = await stepWithChanged({ check: { argv: [script("slow.sh", "sleep 30")], dev_shell: false, timeout_s: 1 }, workspace: ws, base, baseDir: ws, baseFile, launch: (v) => ({ tool: v[0]!, args: v.slice(1), env: { PATH: process.env.PATH ?? "" } }) });
+    expect(slow.body.timed_out).toBe(true);
+    expect(slow.body.summary).not.toContain("changed files");
+    expect((await run([script("fail2.sh", "exit 1")])).body.summary).not.toContain("changed files");
+  });
+
+  it("a git that fails leaves the line out and does not change the verdict of the check", async () => {
+    const broken = createCheckStep({ capture: (command, args, env, cwd, timeoutMs, tail, signal, feed, onLine) => runInstall(spawn, command, args, env, cwd, timeoutMs, tail, signal, feed, onLine), now: () => new Date(), vcsState, changedFiles: async () => { throw new Error("git is gone"); } });
+    const out = await broken({ check: { argv: [script("fail3.sh", "exit 4")], dev_shell: false, timeout_s: 60 }, workspace: ws, base, baseDir: ws, baseFile, launch: (v) => ({ tool: v[0]!, args: v.slice(1), env: { PATH: process.env.PATH ?? "" } }) });
+    expect(out.passed).toBe(false);
+    expect(out.body.exit_code).toBe(4);
+    expect(out.body.summary).not.toContain("changed files");
   });
 });
 

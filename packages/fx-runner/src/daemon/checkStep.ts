@@ -23,7 +23,10 @@
  *  - what is reported is a closed shape: exit code, duration, timed-out flag, the skipped-test count, and the last 4096 bytes of output after credential-shape
  *    redaction, with the workspace and home paths replaced. When the check fails, one line ahead of that output names the test files the runner's output reported as failed
  *    (vitest's `FAIL path`, pytest's `FAILED path::test`), picked out of the WHOLE output as it streams and not only its tail: a plain relative file name each, at most 40,
- *    first-seen order, the rest counted, 1500 bytes at most, redacted like the rest.
+ *    first-seen order, the rest counted, 1500 bytes at most, redacted like the rest. A second line, `changed files (N): ...`, names the paths the branch changed against the
+ *    default branch's merge-base (read with the same guarded git as the version-control digest, after the check), in the same closed shape: sorted, at most 40, 1000 bytes,
+ *    N counting every path so a reader can tell a cut list from a whole one. The cloud compares the two lines: a check that failed only in files the change did not touch
+ *    needs a person, not a fix round. Left out when the check passed or was stopped, or when git could not say.
  */
 import { createHash } from "node:crypto";
 import { closeSync, constants, lstatSync, mkdirSync, openSync, readFileSync, rmdirSync, rmSync, unlinkSync, writeSync, type Stats } from "node:fs";
@@ -73,6 +76,11 @@ export interface CheckStepDeps {
   now: () => Date;
   /** A digest of the workspace's version-control state that a commit, a branch move or a reset would change (HEAD and every ref). Throws when it cannot be read. */
   vcsState: (workspace: string) => Promise<string>;
+  /**
+   * The paths the workspace changes against `base` (tracked changes and new files), or null when git could not say. Read only after a check has failed, to name them in
+   * the summary's header. Optional: a daemon without it sends no such line, and the cloud then treats a failed check as it always did.
+   */
+  changedFiles?: (workspace: string, base: string) => Promise<string[] | null>;
 }
 
 export type CheckOutcome = { passed: boolean; body: DoneCheck; /** Set when the check was not run because the dev shell is missing. */ noDevShell?: true };
@@ -128,6 +136,49 @@ export function createFailedFiles(workspace: string): { line: (text: string) => 
     },
   };
 }
+
+/** How many changed files, and how many bytes of their names, the header names. A longer list is counted, and the cloud then does not rely on it. */
+const CHANGED_FILES_MAX = 40;
+const CHANGED_FILES_BYTES = 1000;
+
+/**
+ * The header line that names the files the branch changed (`changed files (N): a, b`), with the same closed shape as the failed-files line: only a plain relative file
+ * name (`NAMED_FILE`) is ever named, in sorted order, at most `CHANGED_FILES_MAX` of them and `CHANGED_FILES_BYTES` bytes; every other path (an odd name, or past a
+ * cap) is counted in `(and K more)`. N is the count of all of them, so a reader can tell a complete list from a cut one. "" when nothing changed or git could not say.
+ */
+export function changedFilesLine(files: readonly string[] | null): string {
+  if (files === null) return "";
+  const all = [...new Set(files)].sort();
+  if (all.length === 0) return "";
+  const shown: string[] = [];
+  let bytes = 0;
+  for (const file of all) {
+    if (!NAMED_FILE.test(file) || shown.length >= CHANGED_FILES_MAX) continue;
+    const name = redactShapes(file);
+    bytes += Buffer.byteLength(name) + 2;
+    if (bytes > CHANGED_FILES_BYTES) break;
+    shown.push(name);
+  }
+  const left = all.length - shown.length;
+  return `changed files (${String(all.length)}): ${shown.join(", ")}${left === 0 ? "" : `${shown.length === 0 ? "" : " "}(and ${String(left)} more)`}\n`;
+}
+
+/** The workspace's changed paths against `base`, read with the daemon's guarded git (the same guard as `createVcsState`). Null when a call fails or its listing was cut. */
+export function createChangedFiles(capture: GitCapture, envOptions: CleanEnvOptions): NonNullable<CheckStepDeps["changedFiles"]> {
+  const env = (): Record<string, string> => ({ ...gitEnv(envOptions), ...guardConfigEnv() });
+  return async (workspace, base) => {
+    // `--no-renames`: a rename names both paths. The untracked listing is the files the agent made and has not committed (ignored files are not changes).
+    const tracked = await capture("git", ["-C", workspace, "diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", base, "--"], env(), 30_000);
+    const fresh = await capture("git", ["-C", workspace, "ls-files", "-z", "--others", "--exclude-standard"], env(), 30_000);
+    if (tracked.code !== 0 || tracked.timedOut || fresh.code !== 0 || fresh.timedOut) return null;
+    // A listing as long as the capture keeps could have been cut: the list is then not complete, and not offered.
+    if (tracked.stdout.length >= LISTING_CAP_GUARD || fresh.stdout.length >= LISTING_CAP_GUARD) return null;
+    return [...tracked.stdout.split("\0"), ...fresh.stdout.split("\0")].filter((name) => name !== "");
+  };
+}
+
+/** A listing at least this long (the capture keeps 64 K) is treated as possibly cut. */
+const LISTING_CAP_GUARD = 60 * 1024;
 
 /** The last `max` bytes of `text`, without a broken character at the start. */
 function lastBytes(text: string, max: number): string {
@@ -429,8 +480,20 @@ export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) =>
     // A check that stopped on something it asked the network for (it has none) says so in a line of its own, so the cause is not buried in the output's tail.
     const needsNetwork = out.code !== 0 && !out.timedOut && !out.aborted && NETWORK_REFUSED.test(out.tail);
     const unpinned = input.check.argv.filter((arg) => /\s/.test(arg)).map((arg) => (arg.length > 40 ? `${arg.slice(0, 40)}...` : arg));
+    // The files the branch changed, for a failed check only (the cloud compares them with the failed test files). After the files are given back, so the workspace is the
+    // agent's own state; a read that fails or is not offered leaves the line out, and the cloud then keeps its fix round.
+    let changedLine = "";
+    if (out.code !== 0 && !out.timedOut && !out.aborted && deps.changedFiles !== undefined) {
+      try {
+        changedLine = changedFilesLine(await deps.changedFiles(input.workspace, input.base));
+      } catch {
+        // fx-swallow-ok: a changed-files read that failed leaves the header line out; the check's result does not depend on it
+        changedLine = "";
+      }
+    }
     const header = [
       out.code !== 0 ? failedFiles.summary() : "",
+      changedLine,
       needsNetwork ? "the check needed the network, which it does not have: a package it asked for is not in this repository's package store on the runner (the runner installs dependencies before the check)\n" : "",
       changed.length === 0 ? "" : `check files changed by this branch: ${changed.join(", ")}\n`,
       lost.length === 0 ? "" : `check files not given back to the branch: ${lost.join(", ")}\n`,

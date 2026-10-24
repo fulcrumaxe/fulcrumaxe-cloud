@@ -9,7 +9,7 @@ import { maxFixRounds } from "@fx/spend";
 import type { BranchSyncOutcome } from "@fx/github";
 import { BASE_SYNCED_PROMPT_LINE, checkFixBeforeStart } from "../src/fixRoundBase.js";
 const withSync = (beforeStart: ReturnType<typeof checkFixBeforeStart>) => ({ beforeStart, baseSync: () => beforeStart.state });
-import { CHECK_FIX_BRANCH_UNKNOWN, CHECK_ROUNDS_USED, checkFixPrompt, startCheckFixRound, type CheckFixDeps } from "../src/checkFix.js";
+import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_FIX_BRANCH_UNKNOWN, CHECK_ROUNDS_USED, checkFixPrompt, startCheckFixRound, type CheckFixDeps } from "../src/checkFix.js";
 
 /**
  * [pg] D#6 R-CHK-3 (C47): the fix round that follows a run whose approved check failed. The ids and names in this file are its own (`chkfix-`): the runs are made here,
@@ -130,6 +130,50 @@ describe("check fix round [pg]", () => {
     expect(input.prompt.indexOf("FAIL src/a.test.ts")).toBeGreaterThan(input.prompt.indexOf("<<UNTRUSTED EXTERNAL CONTENT>>"));
     const row = await admin.query("SELECT parent_run_id, status FROM agent_runs WHERE id = $1", [(out as { runId: string }).runId]);
     expect(row.rows[0]).toEqual({ parent_run_id: failed, status: "pending" });
+  });
+
+  describe("a check that failed only in files the change did not touch", () => {
+    const outside = "failed test files (1): apps/ops/test/other.test.ts\nchanged files (2): packages/a/src/a.ts, packages/a/test/a.test.ts\nFAIL apps/ops/test/other.test.ts";
+
+    it("starts no fix round and spends no attempt: it answers the fixed reason, resumes nothing, and writes no run", async () => {
+      const failed = await ended({ reason: "check_failed", summary: outside });
+      const out = await startCheckFixRound(deps(), who(), failed);
+      expect(out).toEqual({ ok: false, reason: CHECK_FAILED_OUTSIDE_CHANGE });
+      expect(resumed).toHaveLength(0);
+      expect(started).toHaveLength(0);
+      expect((await admin.query("SELECT count(*)::int AS n FROM agent_runs WHERE account_id = $1 AND parent_run_id = $2", [A.accountId, failed])).rows[0].n).toBe(0);
+      // asking again gives the same answer (the step may be replayed)
+      expect(await startCheckFixRound(deps(), who(), failed)).toEqual({ ok: false, reason: CHECK_FAILED_OUTSIDE_CHANGE });
+    });
+
+    it.each([
+      ["a failure in a package the change touched", "failed test files (1): packages/a/test/other.test.ts\nchanged files (1): packages/a/src/a.ts\nFAIL packages/a/test/other.test.ts"],
+      ["a summary from a runner that sends no changed-files line", "failed test files (1): apps/ops/test/other.test.ts\nFAIL apps/ops/test/other.test.ts"],
+      ["a changed list that was cut", "failed test files (1): apps/ops/test/other.test.ts\nchanged files (90): packages/a/src/a.ts (and 89 more)\nFAIL x"],
+      ["a failed list that was cut", "failed test files (50): apps/ops/test/other.test.ts (and 49 more)\nchanged files (1): packages/a/src/a.ts\nFAIL x"],
+      ["no failed test file named", "changed files (1): packages/a/src/a.ts\nError: boom"],
+    ])("%s keeps today's fix round", async (_name, summary) => {
+      const failed = await ended({ reason: "check_failed", summary });
+      expect((await startCheckFixRound(deps(), who(), failed)).ok).toBe(true);
+      expect(resumed).toHaveLength(1);
+    });
+
+    it("a check stopped at its time limit has only partial output and is never decided here", async () => {
+      const failed = await ended({ reason: "check_failed", summary: outside, exit: null, timedOut: true });
+      expect((await startCheckFixRound(deps(), who(), failed)).ok).toBe(true);
+    });
+
+    it("the lines are read at the top of the summary only: the same text in the output tail changes nothing", async () => {
+      const failed = await ended({ reason: "check_failed", summary: `FAIL src/a.test.ts\n${outside}` });
+      expect((await startCheckFixRound(deps(), who(), failed)).ok).toBe(true);
+    });
+
+    it("a fix round already started for this failed run is found first (a replay), whatever the summary says", async () => {
+      const failed = await ended({ reason: "check_failed", summary: "FAIL src/a.test.ts" });
+      const first = await startCheckFixRound(deps(), who(), failed);
+      await admin.query("UPDATE run_checks SET summary = $2 WHERE run_id = $1", [failed, outside]);
+      expect(await startCheckFixRound(deps(), who(), failed)).toEqual(first);
+    });
   });
 
   it("a replay of the step finds the run it started and starts nothing", async () => {
