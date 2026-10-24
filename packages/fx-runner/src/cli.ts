@@ -22,6 +22,7 @@ import { runCommand, type RunHost } from "./commands/run.js";
 import { serviceCommand, type ServiceHost } from "./commands/service.js";
 import { statusCommand } from "./commands/status.js";
 import { takeoverPaneCommand, watchCommand } from "./commands/watchPane.js";
+import { purgeChildCommand } from "./commands/purgeChild.js";
 import { configCommand, updateCommand } from "./commands/update.js";
 import type { UpdateHost } from "./update/updater.js";
 
@@ -107,6 +108,8 @@ const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: re
   // The two commands a tmux pane runs; not in --help.
   __watch: { flags: [], switches: [], positionals: 1 },
   __takeover: { flags: [], switches: [], positionals: 1 },
+  // The macOS resumed-workspace purge child (daemon/resumePurgeSandbox.ts); not in --help.
+  __purge: { flags: [], switches: [], positionals: 2 },
   doctor: { flags: [], switches: ["sandbox-only"] },
   logs: { flags: [], switches: [], positionals: 1 },
   service: { flags: ["user"], switches: ["system"], positionals: 1 },
@@ -197,6 +200,7 @@ export async function runCli(io: CliIo): Promise<number> {
       if (command === "attach") return await attachCommand(named, ctx, io.host);
       return command === "__watch" ? await watchCommand(named, ctx) : await takeoverPaneCommand(named, ctx, io.host);
     }
+    if (command === "__purge") return purgeChildCommand(positionals[0], positionals[1], ctx);
     if (command === "doctor") {
       if (io.doctorHost === undefined) throw new CliError("doctor is only available from the fx-runner program");
       return await doctorCommand(ctx, io.doctorHost, { sandboxOnly: flags.has("sandbox-only") });

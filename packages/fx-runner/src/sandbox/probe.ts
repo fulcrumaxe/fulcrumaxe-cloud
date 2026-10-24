@@ -115,7 +115,7 @@ export function bwrapArgs(settings: Record<string, unknown>, isDir: (target: str
   return args;
 }
 
-function quoted(value: string): string {
+export function quoted(value: string): string {
   return `"${value.replace(/[\\"]/g, "\\$&")}"`;
 }
 
