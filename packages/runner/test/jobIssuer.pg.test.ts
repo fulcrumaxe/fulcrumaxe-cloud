@@ -553,6 +553,18 @@ describe("JobIssuer [pg]", () => {
       expect(await stored(run.id)).not.toBeNull();
     });
 
+    it("FIXROUND-BASE-SYNC: after the cloud merged the base into the branch, the head the issuer reads at dispatch (and records as the round's start) is the merge commit", async () => {
+      const w = await world();
+      const { parent, run } = await fixPair(w);
+      // A faithful stand-in for the branch on GitHub: the sync's merge moves its head, and the issuer's port reads whatever it is now.
+      let branchHead = "a".repeat(40);
+      const merge = "9".repeat(40);
+      const syncMerge = async () => { branchHead = merge; };
+      await syncMerge();
+      await issuer({ base: { headOid: async () => branchHead } }).issuer.issue({ run, continues: { parentRunId: parent.id, sessionId: "sess-1" } });
+      expect(await baseEvents(run.id)).toEqual([{ head_oid: merge }]);
+    });
+
     it("a branch that does not exist yet is recorded as null: the record exists, the head does not", async () => {
       const w = await world();
       const { parent, run } = await fixPair(w);

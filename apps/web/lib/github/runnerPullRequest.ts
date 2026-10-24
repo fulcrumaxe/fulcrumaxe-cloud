@@ -1,6 +1,6 @@
 import { createRunPullRequestPort, type GithubRequest, type PullRequestRepo, type RunPullRequestPort } from "@fx/runner-cloud";
 import type { ContinuationBasePort } from "@fx/runner";
-import type { InstallationHttpRequest } from "@fx/github";
+import { createBranchSyncPort, type BranchSyncPort, type InstallationHttpRequest } from "@fx/github";
 import { openInstallationHttp, readRepoAppLogin } from "./installationHttp";
 
 /**
@@ -43,4 +43,9 @@ export function createAppContinuationBase(port: RunPullRequestPort = createAppRu
       return state.exists ? state.headOid : null;
     },
   };
+}
+
+/** FIXROUND-BASE-SYNC: the live port that brings an item pull request branch up to date with its base before a fix round (packages/github branchSync.ts), over the pinned branch-sync client. */
+export function createAppBranchSync(open: typeof openInstallationHttp = openInstallationHttp): BranchSyncPort {
+  return createBranchSyncPort(open);
 }

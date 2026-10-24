@@ -9,6 +9,7 @@ import { redactText } from '@fx/runtime/src/redact.js';
 import { setupPauseFor, type SetupHold, type SetupRequest } from '../setup-requests/store.js';
 import { parseAcceptanceScope } from '../specs/acceptanceScope.js';
 import { readPublicChange, type PublicChange } from '../repos/publicChange.js';
+import { BASE_SYNC_CONFLICT, BASE_SYNC_CONFLICT_SENTENCE, BASE_SYNC_UNAVAILABLE, BASE_SYNC_UNAVAILABLE_SENTENCE } from './baseSync.js';
 import { PUBLIC_BRANCH_MOVED, PUBLIC_BRANCH_MOVED_SENTENCE, PUBLIC_HEAD_UNAVAILABLE, PUBLIC_HEAD_UNAVAILABLE_SENTENCE } from '../repos/planePushRecord.js';
 import { BACK_TO_DISCUSSION_REF_PREFIX, REQUEST_CHANGES_NOTE_MAX, REQUEST_CHANGES_REF_PREFIX, closeOnGithub, operatorActionsFor, operatorVerdict, readOperatorFacts, type OperatorAction } from './operatorActions.js';
 
@@ -606,14 +607,16 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       const rebuildStop = (
         await client.query<{ code: string | null }>(
           `SELECT e.code FROM work_item_driver_events e
-            WHERE e.work_item_id = $1::uuid AND e.kind = 'stopped' AND e.code = ANY($2::text[])
-              AND e.created_at > COALESCE((SELECT max(t.created_at) FROM work_item_transitions t WHERE t.work_item_id = $1::uuid AND t.to_stage = 'needs_human'), '-infinity'::timestamptz)
+            WHERE e.work_item_id = $1::uuid AND e.kind IN ('stopped', 'escalated') AND e.code = ANY($2::text[])
+              -- An escalation is written in the same transaction as the move to Needs a person, so its stamp equals the move's: it counts with >=, as the reviewer_no_verdict lookup below does. A stop is written after the move.
+              AND CASE WHEN e.kind = 'escalated' THEN e.created_at >= COALESCE((SELECT max(t.created_at) FROM work_item_transitions t WHERE t.work_item_id = $1::uuid AND t.to_stage = 'needs_human'), '-infinity'::timestamptz)
+                       ELSE e.created_at > COALESCE((SELECT max(t.created_at) FROM work_item_transitions t WHERE t.work_item_id = $1::uuid AND t.to_stage = 'needs_human'), '-infinity'::timestamptz) END
             ORDER BY e.seq DESC LIMIT 1`,
-          [workItemId, ['rebuild_pr_open', 'rebuild_check_unavailable', CHECK_FIX_BRANCH_STOP_CODE, PUBLIC_BRANCH_MOVED, PUBLIC_HEAD_UNAVAILABLE]],
+          [workItemId, ['rebuild_pr_open', 'rebuild_check_unavailable', CHECK_FIX_BRANCH_STOP_CODE, PUBLIC_BRANCH_MOVED, PUBLIC_HEAD_UNAVAILABLE, BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE]],
         )
       ).rows[0];
       const rebuildSentence = rebuildStop?.code && Object.hasOwn(CHECK_FAILED_SENTENCES, rebuildStop.code) ? CHECK_FAILED_SENTENCES[rebuildStop.code] : undefined;
-      const branchStop = rebuildStop?.code === CHECK_FIX_BRANCH_STOP_CODE || rebuildStop?.code === PUBLIC_BRANCH_MOVED || rebuildStop?.code === PUBLIC_HEAD_UNAVAILABLE;
+      const branchStop = rebuildStop?.code === CHECK_FIX_BRANCH_STOP_CODE || rebuildStop?.code === PUBLIC_BRANCH_MOVED || rebuildStop?.code === PUBLIC_HEAD_UNAVAILABLE || rebuildStop?.code === BASE_SYNC_CONFLICT || rebuildStop?.code === BASE_SYNC_UNAVAILABLE;
       // A reviewer that kept ending without a verdict handed the item over: the notice names it and how it ended, never the executor's summary.
       const noVerdict = rebuildSentence || branchStop
         ? undefined
@@ -639,7 +642,7 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       notice = rebuildSentence
         ? { kind: 'check_failed', reason: rebuildSentence }
         : branchStop
-          ? { kind: 'needs_human', reason: rebuildStop?.code === PUBLIC_BRANCH_MOVED ? PUBLIC_BRANCH_MOVED_SENTENCE : rebuildStop?.code === PUBLIC_HEAD_UNAVAILABLE ? PUBLIC_HEAD_UNAVAILABLE_SENTENCE : CHECK_FIX_BRANCH_SENTENCE }
+          ? { kind: 'needs_human', reason: rebuildStop?.code === BASE_SYNC_CONFLICT ? BASE_SYNC_CONFLICT_SENTENCE : rebuildStop?.code === BASE_SYNC_UNAVAILABLE ? BASE_SYNC_UNAVAILABLE_SENTENCE : rebuildStop?.code === PUBLIC_BRANCH_MOVED ? PUBLIC_BRANCH_MOVED_SENTENCE : rebuildStop?.code === PUBLIC_HEAD_UNAVAILABLE ? PUBLIC_HEAD_UNAVAILABLE_SENTENCE : CHECK_FIX_BRANCH_SENTENCE }
           : noVerdictSentence
           ? { kind: 'needs_human', reason: noVerdictSentence }
           : {
@@ -666,7 +669,11 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       const publicMoved = stop?.code === PUBLIC_BRANCH_MOVED && item.stage !== 'in_progress';
       // The same at any pull-request stage when the branch could not be read on GitHub at all: the round was not started either.
       const publicUnreadable = stop?.code === PUBLIC_HEAD_UNAVAILABLE && item.stage !== 'in_progress';
-      const sentence = publicMoved
+      // FIXROUND-BASE-SYNC: the same when the branch could not be brought up to date with its base (a conflict moves the item to Needs a person instead).
+      const baseUnavailable = stop?.code === BASE_SYNC_UNAVAILABLE && item.stage !== 'in_progress';
+      const sentence = baseUnavailable
+        ? BASE_SYNC_UNAVAILABLE_SENTENCE
+        : publicMoved
         ? PUBLIC_BRANCH_MOVED_SENTENCE
         : publicUnreadable
           ? PUBLIC_HEAD_UNAVAILABLE_SENTENCE

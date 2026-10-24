@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import { applyMappedEvent, type ApplyEventCtx, type BranchSyncOutcome } from "@fx/github";
+import { withTenant } from "@fx/db/src/withTenant.js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { insertAgentRun, writeRunStatus, type CancelResult, type ExecutionRun, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { createPool } from "@fx/db/src/pool.js";
@@ -8,6 +10,11 @@ import { PUBLIC_BRANCH_MOVED } from "@fx/core/src/repos/planePushRecord.js";
 import { lineFor } from "@fx/core/src/onboarding/previewProgress.js";
 import { createAdvanceModule, type AdvanceModuleDeps, type AdvanceReviewDeps } from "../src/advance.js";
 import { startCheckFixRound } from "../src/checkFix.js";
+import { BASE_SYNC_CONFLICT_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
+import { BASE_SYNCED_STAGE, syncRunBranch } from "../src/fixRoundBase.js";
+import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
+import { generateKeyPairSync } from "node:crypto";
+import { InstallationTokenCache, createBranchSyncPort, createInstallationHttp, type AccessTokenRequester } from "@fx/github";
 import { BRANCH_MOVED_STAGE, checkPublicBranch, type FixRoundHeadPorts } from "../src/fixRoundHeads.js";
 import type { RunStarter } from "../src/preview.js";
 import type { SeatResult } from "../src/seat.js";
@@ -55,7 +62,10 @@ describe("fix round: the branch heads on GitHub before a round starts [pg]", { t
   let nextDiscussion = 960;
   const registry = { sandbox: { cancel: async (_run: ExecutionRun): Promise<CancelResult> => ({ settled_usd: 0, released_usd: 0 }) } } as unknown as ExecutionTargetRegistry;
 
-  function harness(heads: FixRoundHeadPorts | null) {
+  /** A round whose branch is already up to date with its base (204), so the rounds below that are not about the sync see no sync. */
+  const upToDate = async (): Promise<BranchSyncOutcome> => ({ kind: "up_to_date" });
+  function harness(given: FixRoundHeadPorts | null, seatResult: SeatResult | { ok: false; reason: string } = SEAT) {
+    const heads = given && given.privateHead && !("syncBase" in given) ? { ...given, syncBase: upToDate } : given;
     const resumed: StartAgentRunInput[] = [];
     const resume = vi.fn(async (_pool: Pool, _registry: ExecutionTargetRegistry, input: StartAgentRunInput) => {
       resumed.push(input);
@@ -76,7 +86,7 @@ describe("fix round: the branch heads on GitHub before a round starts [pg]", { t
     });
     const review: AdvanceReviewDeps = { load: vi.fn(), recordRound: vi.fn(), resume, mergeGate: vi.fn() } as never;
     const starter: RunStarter = { async start() { throw new Error("a same-side round never starts a fresh session"); } };
-    const deps: AdvanceModuleDeps = { starter, resolveRunSeat: vi.fn(async () => SEAT), startAdvance: async () => undefined, triage: null, registry, review, ...(heads ? { fixHeads: heads } : {}) };
+    const deps: AdvanceModuleDeps = { starter, resolveRunSeat: vi.fn(async () => seatResult as SeatResult), startAdvance: async () => undefined, triage: null, registry, review, ...(heads ? { fixHeads: heads } : {}) };
     return { module: createAdvanceModule(writerPool, deps), resume, resumed };
   }
 
@@ -227,6 +237,171 @@ describe("fix round: the branch heads on GitHub before a round starts [pg]", { t
       );
       expect(out).toEqual({ ok: false, reason: PUBLIC_BRANCH_MOVED });
       expect(resume).not.toHaveBeenCalled();
+    });
+  });
+
+  /** The card's notice for an item, read through the real activity read (not a hand-made fact). */
+  const noticeOf = async (t: { a: SeedRefs; w: string }) => (await getWorkItemActivity({ pool: adminPool, principal: { accountId: t.a.accountId, userId: t.a.userId } }, t.w)).notice;
+
+  describe("FIXROUND-BASE-SYNC: the base is merged into the private branch before a review fix round", () => {
+    const BASE = "f".repeat(40);
+    const MERGE = "9".repeat(40);
+    const merged = (over: Partial<Extract<BranchSyncOutcome, { kind: "merged" }>> = {}): BranchSyncOutcome => ({ kind: "merged", sha: MERGE, parents: [ASKED, BASE], baseSha: BASE, baseRef: "main", ...over });
+    const syncFacts = async (w: string) => (await facts(w)).filter((f) => f.kind !== "fix_round_refused" && (f.code === "base_synced" || f.code === "base_sync_conflict" || f.code === "base_sync_unavailable"));
+    const runs = async (w: string) => (await admin.query<{ n: number }>("SELECT count(*)::int AS n FROM agent_runs WHERE work_item_id = $1", [w])).rows[0]!.n;
+
+    it("main moved: one merge on the item's branch, one fact, and a replay writes no second one; the round starts from the merge", async () => {
+      const t = await runnerItem();
+      const syncBase = vi.fn(async () => merged());
+      const h = harness({ privateHead: async () => ASKED, syncBase });
+      const req = fixReq(t);
+      const out = await h.module.advanceStartFix(who(t), req);
+      expect(out.ok).toBe(true);
+      expect(syncBase).toHaveBeenCalledWith({ repo: { id: t.a.repoId, owner: "acme", name: "widgets" }, branch: t.branch, prNumber: PR });
+      expect(await syncFacts(t.w)).toEqual([{ kind: "pr_head_pushed", code: "base_synced", head_sha: MERGE, pr_number: PR }]);
+      expect(await stages((out as { runId: string }).runId)).toEqual([BASE_SYNCED_STAGE]);
+      expect(lineFor("run.stage", { stage: BASE_SYNCED_STAGE })).toBe("The branch was brought up to date with its base before this fix round.");
+      // The same ask again finds the run it started: GitHub is not asked, and no second fact is written.
+      expect(await h.module.advanceStartFix(who(t), req)).toEqual(out);
+      expect(syncBase).toHaveBeenCalledTimes(1);
+      expect(await syncFacts(t.w)).toHaveLength(1);
+    });
+
+    it("asks only the private-repository port: no public branch read or token is part of the sync", async () => {
+      const t = await runnerItem();
+      await paired(t);
+      const publicHead = vi.fn(async () => PUSHED);
+      const syncBase = vi.fn(async () => merged());
+      expect(await syncRunBranch(writerPool, { publicHead, syncBase }, { accountId: t.a.accountId, workItemId: t.w }, { repo: { id: t.a.repoId, owner: "acme", name: "widgets" }, pr: { number: PR, branch: t.branch }, liveHead: ASKED, moveToNeedsPerson: true, attempt: "a1" })).toEqual({ ok: true, synced: true });
+      expect(syncBase).toHaveBeenCalledTimes(1);
+      expect(publicHead).not.toHaveBeenCalled();
+    });
+
+    it("a push between the head check and the merge is recorded too, as the webhook would", async () => {
+      const t = await runnerItem();
+      const h = harness({ privateHead: async () => ASKED, syncBase: async () => merged({ parents: [LIVE, BASE] }) });
+      expect((await h.module.advanceStartFix(who(t), fixReq(t))).ok).toBe(true);
+      expect((await facts(t.w)).filter((f) => f.kind === "pr_head_pushed")).toEqual([
+        { kind: "pr_head_pushed", code: "observed", head_sha: LIVE, pr_number: PR },
+        { kind: "pr_head_pushed", code: "base_synced", head_sha: MERGE, pr_number: PR },
+      ]);
+    });
+
+    it("main did not move (204): no fact, no line, and the round starts from the checked head", async () => {
+      const t = await runnerItem();
+      const h = harness({ privateHead: async () => ASKED, syncBase: upToDate });
+      const out = await h.module.advanceStartFix(who(t), fixReq(t));
+      expect(out.ok).toBe(true);
+      expect(await syncFacts(t.w)).toEqual([]);
+      expect(await stages((out as { runId: string }).runId)).toEqual([]);
+    });
+
+    it("a conflict: no run, the item in Needs a person, the escalation recorded, and the branch untouched", async () => {
+      const t = await runnerItem();
+      const h = harness({ privateHead: async () => ASKED, syncBase: async () => ({ kind: "conflict", baseSha: BASE, baseRef: "main" }) });
+      const before = await runs(t.w);
+      expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "base_sync_conflict" });
+      expect(h.resume).not.toHaveBeenCalled();
+      expect(await runs(t.w)).toBe(before);
+      expect(await stageOf(t.w)).toBe("needs_human");
+      expect(await syncFacts(t.w)).toEqual([{ kind: "escalated", code: "base_sync_conflict", head_sha: ASKED, pr_number: PR }]);
+      expect(await liveRuns(t.w)).toBe(0);
+      // The card, read the way a person reads it: the fact and the move share a transaction (one stamp), and the sentence still shows.
+      expect(await noticeOf(t)).toEqual({ kind: "needs_human", reason: BASE_SYNC_CONFLICT_SENTENCE });
+    });
+
+    it("a repeated conflict at the same head, after the item left Needs a person, moves it back and shows the sentence again", async () => {
+      const t = await runnerItem();
+      const h = harness({ privateHead: async () => ASKED, syncBase: async () => ({ kind: "conflict", baseSha: BASE, baseRef: "main" }) });
+      expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "base_sync_conflict" });
+      expect(await stageOf(t.w)).toBe("needs_human");
+      // A person presses Approve: the item is back under review, and the branch and its base have not moved.
+      await admin.query("UPDATE work_items SET stage = 'pr_opened' WHERE id = $1", [t.w]);
+      expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "base_sync_conflict" });
+      expect(await stageOf(t.w)).toBe("needs_human");
+      expect((await syncFacts(t.w)).map((f) => f.code)).toEqual(["base_sync_conflict", "base_sync_conflict"]);
+      expect(await noticeOf(t)).toEqual({ kind: "needs_human", reason: BASE_SYNC_CONFLICT_SENTENCE });
+    });
+
+    it("the cheap refusals come first: a seat refusal means GitHub is never asked, so no merge lands for a refused round", async () => {
+      const t = await runnerItem();
+      const syncBase = vi.fn(async () => merged());
+      const h = harness({ privateHead: async () => ASKED, syncBase }, { ok: false, reason: "no_model" });
+      expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "no_model" });
+      expect(syncBase).not.toHaveBeenCalled();
+      expect(await syncFacts(t.w)).toEqual([]);
+    });
+
+    it("through the real port and client: exactly one branch_sync token, for the private repository, no public token, and the merge is the one asked for", async () => {
+      const t = await runnerItem();
+      const privateKeyPem = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey as unknown as string;
+      const mints: Array<Parameters<AccessTokenRequester>[0]> = [];
+      const calls: string[] = [];
+      const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+      const fetchImpl = (async (input: string | URL, init?: RequestInit) => {
+        const u = new URL(String(input));
+        calls.push(`${init?.method ?? "GET"} ${u.pathname}`);
+        if (u.pathname === `/repos/acme/widgets/pulls/${PR}`) return json(200, { state: "open", head: { ref: t.branch, repo: { id: 5 } }, base: { ref: "main", repo: { id: 5 } } });
+        if (u.pathname === "/repos/acme/widgets/git/ref/heads/main") return json(200, { object: { sha: BASE } });
+        if (u.pathname === "/repos/acme/widgets/merges") return json(201, { sha: MERGE, parents: [{ sha: ASKED }, { sha: BASE }] });
+        return new Response(null, { status: 204 });
+      }) as unknown as typeof fetch;
+      const open = createInstallationHttp({
+        resolveInstallation: async () => ({ installationId: 9, appKind: "team" }),
+        appCredentials: () => ({ appId: "app-1", privateKeyPem, webhookSecret: "unused" }),
+        requester: async (p) => (mints.push(p), { token: "fake-token", expiresAt: new Date(Date.now() + 3_600_000).toISOString(), permissions: { metadata: "read", contents: "write", pull_requests: "read" }, repositories: ["widgets"] }),
+        cache: new InstallationTokenCache(),
+        fetchImpl,
+      });
+      const publicHead = vi.fn(async () => PUSHED);
+      const sync = createBranchSyncPort(open);
+      const h = harness({ privateHead: async () => ASKED, publicHead, syncBase: (i) => sync.sync(i) });
+      expect((await h.module.advanceStartFix(who(t), fixReq(t))).ok).toBe(true);
+      expect(mints).toHaveLength(1);
+      expect(mints[0]).toMatchObject({ repositories: ["widgets"], permissions: { contents: "write", pull_requests: "read" } });
+      expect(publicHead).not.toHaveBeenCalled();
+      expect(calls).toEqual([`GET /repos/acme/widgets/pulls/${PR}`, "GET /repos/acme/widgets/git/ref/heads/main", "POST /repos/acme/widgets/merges", "DELETE /installation/token"]);
+      expect(await syncFacts(t.w)).toEqual([{ kind: "pr_head_pushed", code: "base_synced", head_sha: MERGE, pr_number: PR }]);
+    });
+
+    it("GitHub that cannot be asked, a bad reply or a missing port refuses the round: nothing starts and the item stays where it was", async () => {
+      const bad: Array<FixRoundHeadPorts["syncBase"]> = [
+        async () => { throw new Error("connect ECONNREFUSED token=ghs_x"); },
+        async () => merged({ parents: [ASKED, "e".repeat(40)] }),
+        async () => merged({ parents: [BASE, ASKED] }),
+        async () => merged({ sha: "main" }),
+        undefined,
+      ];
+      for (const syncBase of bad) {
+        const t = await runnerItem();
+        const h = harness({ privateHead: async () => ASKED, syncBase: syncBase as never });
+        const before = await runs(t.w);
+        expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "base_sync_unavailable" });
+        expect(h.resume).not.toHaveBeenCalled();
+        expect(await runs(t.w)).toBe(before);
+        expect(await stageOf(t.w)).toBe("pr_opened");
+        expect((await syncFacts(t.w)).map((f) => [f.kind, f.code])).toEqual([["stopped", "base_sync_unavailable"]]);
+      }
+    });
+
+    it("the sync's own synchronize webhook starts no second round and no review: it records a push and nothing else", async () => {
+      const t = await runnerItem();
+      const h = harness({ privateHead: async () => ASKED, syncBase: async () => merged() });
+      const out = await h.module.advanceStartFix(who(t), fixReq(t));
+      expect(out.ok).toBe(true);
+      const runsBefore = await runs(t.w);
+      const kindsBefore = (await facts(t.w)).map((f) => f.kind);
+      // GitHub tells us about the merge commit (the delivery the sync causes), while the round is running.
+      const ctx = { accountId: t.a.accountId, installationId: "unused", repoId: t.a.repoId, repo: { accountId: t.a.accountId, repoId: t.a.repoId, ghRepoId: 1, fullName: "acme/widgets" }, deliveryId: `d-${randomUUID()}` } as unknown as ApplyEventCtx;
+      const applied = await withTenant(writerPool, t.a.accountId, (client) => applyMappedEvent(client, ctx, { kind: "record_pr_push", prNumber: PR, headSha: MERGE, linkedIssueNumber: t.n, trust: "trusted", isFork: false } as never));
+      expect(applied).toMatchObject({ applied: "pr_push_recorded", workItemId: t.w, recorded: true });
+      // One new fact (the push); no run, no review, no stage change; the round the sync started is still the only live one.
+      expect(await runs(t.w)).toBe(runsBefore);
+      expect((await facts(t.w)).map((f) => f.kind)).toEqual([...kindsBefore, "pr_head_pushed"]);
+      expect(await liveRuns(t.w)).toBe(1);
+      expect(await stageOf(t.w)).toBe("changes_requested");
+      // And a second round asked for while the first runs is refused by the one-live-executor rule, whatever the webhook said.
+      expect(await h.module.advanceStartFix(who(t), { ...fixReq(t), headSha: MERGE })).toEqual({ ok: false, reason: "already_running" });
     });
   });
 });

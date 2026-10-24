@@ -1,3 +1,4 @@
+import type { BranchSyncPort } from "@fx/github";
 import { envKekSource, type KekSource } from "@fx/model-connection";
 import { contextWindowTokensFor, outsideMeterOn, runnerLimitsFor } from "@fx/spend";
 import type { HostLookup } from "@fx/net-guard";
@@ -130,6 +131,8 @@ export interface WorkerPorts {
   repoVisibility?: RepoVisibilityPort;
   /** D#6 R2b-3f: reads a continuation's branch head at dispatch (apps/web supplies the live GitHub read). Absent, a continuation (a fix round or a follow-up of one) cannot be issued. */
   continuationBase?: ContinuationBasePort;
+  /** FIXROUND-BASE-SYNC: merges a pull request's base branch into its private branch before a fix round. Absent: such a round is refused `base_sync_unavailable`. */
+  branchSync?: BranchSyncPort;
   /** D#599 PL-2b: reads the item's pull request, the default branch and a branch's protection to bind a continuation on `fx/issue-<n>`. Absent, such a continuation is refused (`continues_base_unavailable`) and nothing is recorded; a continuation on a run branch does not need it. */
   continuationBinding?: ContinuationBindingPort;
   /** D#6 R2b criterion 12: the runner tier's limits. Absent, they are read from the plan data (`runnerLimitsFor`), and unavailable plan data refuses every runner run. */
@@ -250,11 +253,12 @@ export interface BuildWorkerOptions extends CreateWorkerOptions {
  * FIXROUND-REFRESH-HEAD: the reads a fix round makes before it starts, from ports the worker already has: the private branch head through the continuation
  * base read (the issuer's own port), and the paired public branch head through the hosted publish reads (a `plane_push` token minted and revoked per read).
  */
-export function fixRoundHeadPorts(ports: Pick<WorkerPorts, "continuationBase" | "planePublish">): FixRoundHeadPorts {
+export function fixRoundHeadPorts(ports: Pick<WorkerPorts, "continuationBase" | "planePublish" | "branchSync">): FixRoundHeadPorts {
   const base = ports.continuationBase;
   const hosted = ports.planePublish?.hosted;
   return {
     ...(base ? { privateHead: (input: { repo: { id: string; owner: string; name: string }; branch: string }) => base.headOid(input) } : {}),
+    ...(ports.branchSync ? { syncBase: (input: Parameters<BranchSyncPort["sync"]>[0]) => ports.branchSync!.sync(input) } : {}),
     ...(hosted?.branchHead ? { publicHead: hosted.branchHead.bind(hosted) } : {}),
   };
 }

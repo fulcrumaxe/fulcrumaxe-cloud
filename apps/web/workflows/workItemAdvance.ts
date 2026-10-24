@@ -806,8 +806,8 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
     }
     // D#6 FU-CHECK-CROSS-SIDE-BRANCH: the round could not tell which branch to continue. Needs human under its own word (the card says why), not as a generic failed run.
     // FIXROUND-REFRESH-HEAD: the same for a paired public branch changed outside the cloud, or one GitHub could not read (nothing was started; the card gives
-    // the fixed sentence of each).
-    if (fix.reason === "check_fix_branch_unknown" || fix.reason === "public_branch_moved" || fix.reason === "public_head_unavailable") {
+    // the fixed sentence of each). FIXROUND-BASE-SYNC: and for a branch that conflicts with its base, or could not be brought up to date with it.
+    if (fix.reason === "check_fix_branch_unknown" || fix.reason === "public_branch_moved" || fix.reason === "public_head_unavailable" || fix.reason === "base_sync_conflict" || fix.reason === "base_sync_unavailable") {
       const stop = fix.reason === "check_fix_branch_unknown" ? "build_check_fix_branch_unknown" : fix.reason;
       const recorded = await advanceBuildFailedStep(accountId, workItemId, outcome.tailRunId, fix.reason);
       await buildStopped(args, outcome.tailRunId, stop);

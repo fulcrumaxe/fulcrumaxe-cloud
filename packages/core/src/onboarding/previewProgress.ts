@@ -139,6 +139,8 @@ export function lineFor(kind: string, f: EventFields): string | null {
     if (f.stage === 'writing_result') return 'Writing up the result';
     // FIXROUND-REFRESH-HEAD: a fix round found its pull request's branch ahead of the head the cloud had recorded.
     if (f.stage === 'branch_moved') return "The pull request's branch had moved; the fix round started from its latest commit.";
+    // FIXROUND-BASE-SYNC: the cloud merged the pull request's base into the branch before the round.
+    if (f.stage === 'base_synced') return 'The branch was brought up to date with its base before this fix round.';
     return null;
   }
   if (kind === STATUS_KIND) return f.to === 'running' ? 'The run started' : null;

@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
+import type { BranchSyncOutcome } from "@fx/github";
 import { PUBLIC_BRANCH_MOVED, PUBLIC_HEAD_UNAVAILABLE, readPlanePush, type BranchHeadPort } from "@fx/core/src/repos/planePushRecord.js";
 
 /**
@@ -26,6 +27,8 @@ export interface FixRoundHeadPorts {
   privateHead?: (input: { repo: { id: string; owner: string; name: string }; branch: string }) => Promise<string | null>;
   /** The paired public branch's head now, or null when the branch does not exist. A throw is "GitHub could not be asked". */
   publicHead?: BranchHeadPort["branchHead"];
+  /** FIXROUND-BASE-SYNC: merges the pull request's base branch into its private branch (fixRoundBase.ts). A throw is "GitHub could not be asked". */
+  syncBase?: (input: { repo: { id: string; owner: string; name: string }; branch: string; prNumber: number }) => Promise<BranchSyncOutcome>;
 }
 
 export const PR_HEAD_UNAVAILABLE = "pr_head_unavailable";
@@ -82,7 +85,7 @@ export async function checkPrivateHead(
   ports: FixRoundHeadPorts | null | undefined,
   who: Who,
   input: { repo: { id: string; owner: string; name: string }; pr: { number: number; branch: string }; askedHead: string },
-): Promise<{ ok: true; moved: boolean } | { ok: false; reason: string }> {
+): Promise<{ ok: true; moved: boolean; head: string } | { ok: false; reason: string }> {
   const privateHead = ports?.privateHead;
   if (!privateHead) return { ok: false, reason: PR_HEAD_UNAVAILABLE };
   let live: string | null;
@@ -95,11 +98,11 @@ export async function checkPrivateHead(
   }
   if (live === null) return { ok: false, reason: PR_BRANCH_MISSING };
   if (!SHA.test(live)) return { ok: false, reason: PR_HEAD_UNAVAILABLE };
-  if (live === input.askedHead) return { ok: true, moved: false };
+  if (live === input.askedHead) return { ok: true, moved: false, head: live };
   // The synchronize webhook's own fact, as the verified-review gate records a push it saw itself: keyed on the change, so A, B, A is two pushes.
   await withTenant(pool, who.accountId, (client) =>
     recordDriverEvent(client, who.accountId, { workItemId: who.workItemId, kind: "pr_head_pushed", dedupeKey: `observed:${input.askedHead}..${live}`, code: "observed", headSha: live, prNumber: input.pr.number }),
   );
   console.info(JSON.stringify({ event: "advance.pr_head_moved", work_item_id: who.workItemId }));
-  return { ok: true, moved: true };
+  return { ok: true, moved: true, head: live };
 }

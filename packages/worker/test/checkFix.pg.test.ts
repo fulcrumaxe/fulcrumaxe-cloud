@@ -1,11 +1,13 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ITEM_PR_BRANCH, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { DispatchFailedError, ExecutionModeChangedError, IdempotencyKeyTakenError, JobIssueError, RUNNER_CONTINUES_BOUND_KIND, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { maxFixRounds } from "@fx/spend";
+import type { BranchSyncOutcome } from "@fx/github";
+import { checkFixBeforeStart } from "../src/fixRoundBase.js";
 import { CHECK_FIX_BRANCH_UNKNOWN, CHECK_ROUNDS_USED, checkFixPrompt, startCheckFixRound, type CheckFixDeps } from "../src/checkFix.js";
 
 /**
@@ -275,5 +277,69 @@ describe("check fix round [pg]", () => {
     expect(await startCheckFixRound(deps(), who(), failed)).toEqual({ ok: false, reason: CHECK_FIX_BRANCH_UNKNOWN });
     throwIssuer = "continues_base_unavailable";
     expect(await startCheckFixRound(deps(), who(), failed)).toEqual({ ok: false, reason: "resume_failed" });
+  });
+
+  describe("FIXROUND-BASE-SYNC: the branch is brought up to date with its base before a check fix round", () => {
+    const L = "a".repeat(40);
+    const B = "b".repeat(40);
+    const M = "c".repeat(40);
+    const facts = async () => (await admin.query<{ kind: string; code: string | null; head_sha: string | null }>("SELECT kind, code, head_sha FROM work_item_driver_events WHERE work_item_id = $1 ORDER BY seq", [A.workItemId])).rows;
+    const roundWith = async (answer: () => Promise<BranchSyncOutcome>, failed?: string) => {
+      const syncBase = vi.fn(answer);
+      const run = failed ?? (await ended({ reason: "check_failed", onItemBranch: { pr: 7, bound: true } }));
+      const out = await startCheckFixRound({ ...deps(), beforeStart: checkFixBeforeStart(writerPool, { privateHead: async () => L, syncBase }, who()) }, who(), run);
+      return { out, syncBase, run };
+    };
+
+    it("main moved: the merge is made on the item's branch and recorded once, and the round starts", async () => {
+      const { out, syncBase, run } = await roundWith(async () => ({ kind: "merged", sha: M, parents: [L, B], baseSha: B, baseRef: "main" }));
+      expect(out.ok).toBe(true);
+      expect(syncBase).toHaveBeenCalledWith({ repo: { id: A.repoId, owner: "acme", name: "widgets" }, branch: "fx/issue-42", prNumber: 7 });
+      expect(started).toHaveLength(1);
+      expect(await facts()).toEqual([{ kind: "pr_head_pushed", code: "base_synced", head_sha: M }]);
+      // A replay finds the round it started: the sync is not asked again and no second fact is written.
+      expect(await startCheckFixRound({ ...deps(), beforeStart: checkFixBeforeStart(writerPool, { privateHead: async () => L, syncBase }, who()) }, who(), run)).toEqual(out);
+      expect(syncBase).toHaveBeenCalledTimes(1);
+      expect(await facts()).toHaveLength(1);
+    });
+
+    it("main did not move: nothing is written and the round starts", async () => {
+      const { out } = await roundWith(async () => ({ kind: "up_to_date" }));
+      expect(out.ok).toBe(true);
+      expect(await facts()).toEqual([]);
+    });
+
+    it("a conflict starts nothing, records the escalation, and leaves the stage to the build's own failure record", async () => {
+      const before = (await admin.query("SELECT stage FROM work_items WHERE id = $1", [A.workItemId])).rows[0].stage;
+      const { out } = await roundWith(async () => ({ kind: "conflict", baseSha: B, baseRef: "main" }));
+      expect(out).toEqual({ ok: false, reason: "base_sync_conflict" });
+      expect(started).toHaveLength(0);
+      expect(await facts()).toEqual([{ kind: "escalated", code: "base_sync_conflict", head_sha: L }]);
+      expect((await admin.query("SELECT stage FROM work_items WHERE id = $1", [A.workItemId])).rows[0].stage).toBe(before);
+    });
+
+    it("GitHub that cannot be asked, a reply whose parents are not the checked head and the base tip, or a missing port refuses the round and starts nothing", async () => {
+      for (const answer of [
+        async (): Promise<BranchSyncOutcome> => { throw new Error("connect ECONNREFUSED token=ghs_x"); },
+        async (): Promise<BranchSyncOutcome> => ({ kind: "merged", sha: M, parents: [L, "d".repeat(40)], baseSha: B, baseRef: "main" }),
+        async (): Promise<BranchSyncOutcome> => ({ kind: "merged", sha: M, parents: [B, L], baseSha: B, baseRef: "main" }),
+        async (): Promise<BranchSyncOutcome> => ({ kind: "merged", sha: M, parents: [L], baseSha: B, baseRef: "main" }),
+      ]) {
+        const { out } = await roundWith(answer, await ended({ reason: "check_failed", onItemBranch: { pr: 7, bound: true } }));
+        expect(out).toEqual({ ok: false, reason: "base_sync_unavailable" });
+      }
+      const failed = await ended({ reason: "check_failed", onItemBranch: { pr: 7, bound: true } });
+      expect(await startCheckFixRound({ ...deps(), beforeStart: checkFixBeforeStart(writerPool, { privateHead: async () => L }, who()) }, who(), failed)).toEqual({ ok: false, reason: "base_sync_unavailable" });
+      expect(started).toHaveLength(0);
+      expect((await facts()).every((f) => f.kind === "stopped" && f.code === "base_sync_unavailable")).toBe(true);
+    });
+
+    it("a round with no pull request branch (a plain resume of the run branch) has no base to catch up with: the sync is not asked", async () => {
+      const syncBase = vi.fn();
+      const failed = await ended({ reason: "check_failed" });
+      const out = await startCheckFixRound({ ...deps(), beforeStart: checkFixBeforeStart(writerPool, { privateHead: async () => L, syncBase }, who()) }, who(), failed);
+      expect(out.ok).toBe(true);
+      expect(syncBase).not.toHaveBeenCalled();
+    });
   });
 });

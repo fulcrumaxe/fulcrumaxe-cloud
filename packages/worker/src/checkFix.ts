@@ -36,7 +36,7 @@ export interface CheckFixDeps {
    */
   starter?: RunStarter | null;
   /** FIXROUND-REFRESH-HEAD: asked once nothing else refuses and before anything starts; a code it answers is the refusal. Absent: nothing is asked. */
-  beforeStart?: () => Promise<string | null>;
+  beforeStart?: (branch: { repo: { id: string; owner: string; name: string }; pr: { number: number; branch: string }; attempt: string } | null) => Promise<string | null>;
 }
 
 type Started = { ok: true; runId: string } | { ok: false; reason: string };
@@ -104,10 +104,11 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
   // A run with no recorded side cannot be pinned: fail closed with the same named reason rather than start an unpinned round on the item's branch.
   if (bound !== null && row.run_mode === null) return { ok: false, reason: CHECK_FIX_BRANCH_UNKNOWN };
   const expectedExecutionMode = bound !== null && row.run_mode !== null ? { expectedExecutionMode: row.run_mode } : {};
-  const held = deps.beforeStart ? await deps.beforeStart() : null;
-  if (held !== null) return { ok: false, reason: held };
   const seat = await deps.resolveRunSeat({ accountId: who.accountId, role: "executor", workItemId: who.workItemId, ...expectedExecutionMode });
   if (!seat.ok) return { ok: false, reason: seat.reason };
+  // FIXROUND-BASE-SYNC: the item's own pull request branch, when the round continues it, so the check can bring it up to date with its base. After the cheap refusals (the seat), so a merge never lands for a round that is then refused.
+  const held = deps.beforeStart ? await deps.beforeStart(bound !== null && row.gh_owner && row.gh_name ? { repo: { id: row.repo_id, owner: row.gh_owner, name: row.gh_name }, pr: { number: bound.prNumber, branch: bound.branch }, attempt: failedRunId } : null) : null;
+  if (held !== null) return { ok: false, reason: held };
   const prompt = checkFixPrompt({ round: facts.round, argv, exitCode: row.exit_code, timedOut: row.timed_out === true, summary: row.summary ?? "" });
   const idempotency = { key, requestHash: createHash("sha256").update(`${key}:executor`).digest("hex") };
   try {
