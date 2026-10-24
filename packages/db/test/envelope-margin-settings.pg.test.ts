@@ -190,10 +190,10 @@ describe('envelope margin settings and the weekly envelope index (0867)', () => 
       expect((await admin.query(`SELECT has_function_privilege('public', 'audit_write(text, jsonb)', 'EXECUTE') AS ok`)).rows[0].ok).toBe(false);
     });
 
-    it('envelope_definer gained nothing: it holds no privilege on the new table and still owns exactly its four functions (0865 and 0866)', async () => {
+    it('envelope_definer gained nothing: it holds no privilege on the new table and owns exactly its five functions (0865, 0866 and 0901)', async () => {
       expect((await admin.query(`SELECT has_table_privilege('envelope_definer', 'public.envelope_margin_settings', 'SELECT') AS ok`)).rows[0].ok).toBe(false);
       const { rows } = await admin.query<{ n: string }>(`SELECT count(*)::text AS n FROM pg_proc WHERE pg_get_userbyid(proowner) = 'envelope_definer'`);
-      expect(Number(rows[0]!.n)).toBe(4);
+      expect(Number(rows[0]!.n)).toBe(5);
     });
   });
 });

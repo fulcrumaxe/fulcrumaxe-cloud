@@ -2406,17 +2406,19 @@ check_runner_approval_definer_role_shape() {
 }
 
 # D#483 S5-e1 (0865): the SECURITY DEFINER functions owned by envelope_definer. Prints their oids, comma separated, when each is one of the
-# three exact signatures (matched by regprocedure, not by name), pinned to search_path=pg_catalog, public, pg_temp, with an ACL that holds
+# exact signatures (matched by regprocedure, not by name), pinned to search_path=pg_catalog, public, pg_temp, with an ACL that holds
 # app_user and nobody else but the owner (no PUBLIC, no platform_ops), with no grant option; SHAPE_FAIL:<count> when any is not; nothing
-# when the role owns none (the generic owner check then rejects anything else).
+# when the role owns none (the generic owner check then rejects anything else). D#483 S5-b1a-1 (0901): the fifth, the weekly envelope's
+# attach helper, is held to the same shape except that its one grantee is dial_start_definer (the dial's approval is its only caller).
 check_envelope_definer_exception_shape() {
   local dbname="$1" row rc=0 oids bad
   row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
     SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
-      SELECT p.oid, (p.oid IN ('public.work_item_set_envelope(uuid,uuid)'::regprocedure, 'public.envelope_charge_record(uuid,uuid,numeric)'::regprocedure, 'public.envelope_pause_ask_record(uuid,uuid,integer,uuid)'::regprocedure, 'public.envelope_pause_receipt_record(uuid,uuid,integer,uuid)'::regprocedure)
+      SELECT p.oid, (p.oid IN ('public.work_item_set_envelope(uuid,uuid)'::regprocedure, 'public.envelope_charge_record(uuid,uuid,numeric)'::regprocedure, 'public.envelope_pause_ask_record(uuid,uuid,integer,uuid)'::regprocedure, 'public.envelope_pause_receipt_record(uuid,uuid,integer,uuid)'::regprocedure, 'public.work_item_set_autostart_envelope(uuid)'::regprocedure)
         AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable)
-        AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0) = ARRAY['app_user']
+        AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0)
+            = CASE WHEN p.proname = 'work_item_set_autostart_envelope' THEN ARRAY['dial_start_definer'] ELSE ARRAY['app_user'] END
         AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0)) AS ok
       FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'envelope_definer') x;" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
@@ -2433,7 +2435,7 @@ check_envelope_definer_exception_shape() {
 
 # D#483 S5-e1 (0865): role shape of envelope_definer. A no-op when the role does not exist. Every problem is named: NOLOGIN and unprivileged,
 # no member but the migration role and no live membership for it, a member of no role, privileges exactly the 48 granted by 0865 and 0866 (column
-# grants only, USAGE on public; no table-wide grant), owning exactly its four functions and nothing else.
+# grants only, USAGE on public; no table-wide grant; 0901 adds none), owning exactly its five functions (0865, 0866, 0901) and nothing else.
 check_envelope_definer_role_shape() {
   local dbname="$1" out rc=0 problems
   local expected="'column accounts.id SELECT','column accounts.deleted_at SELECT','column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT','column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.work_item_id SELECT','column work_items.id SELECT','column work_items.account_id SELECT','column work_items.repo_id SELECT','column work_items.stage SELECT','column work_items.envelope_id SELECT','column work_items.envelope_id UPDATE','column approval_envelopes.id SELECT','column approval_envelopes.account_id SELECT','column approval_envelopes.version SELECT','column approval_envelopes.scope SELECT','column approval_envelopes.repo_id SELECT','column decision_asks.id SELECT','column decision_asks.account_id SELECT','column decision_asks.work_item_id SELECT','column decision_asks.decision_type SELECT','column envelope_run_charges.account_id SELECT','column envelope_run_charges.run_id SELECT','column envelope_run_charges.envelope_id SELECT','column envelope_run_charges.usd SELECT','column envelope_run_charges.account_id INSERT','column envelope_run_charges.run_id INSERT','column envelope_run_charges.envelope_id INSERT','column envelope_run_charges.usd INSERT','column envelope_run_charges.usd UPDATE','column envelope_pause_asks.account_id SELECT','column envelope_pause_asks.work_item_id SELECT','column envelope_pause_asks.envelope_id SELECT','column envelope_pause_asks.envelope_version SELECT','column envelope_pause_asks.account_id INSERT','column envelope_pause_asks.work_item_id INSERT','column envelope_pause_asks.envelope_id INSERT','column envelope_pause_asks.envelope_version INSERT','column envelope_pause_asks.ask_id INSERT','column envelope_pause_asks.receipt_id INSERT','column decision_receipts.id SELECT','column decision_receipts.account_id SELECT','column decision_receipts.work_item_id SELECT','column decision_receipts.decision_type SELECT','column decision_receipts.chosen SELECT','schema public USAGE'"
@@ -2452,10 +2454,10 @@ check_envelope_definer_role_shape() {
                 OR pg_has_role('fx_migrator', 'envelope_definer', 'USAGE') THEN 'fx_migrator holds a live membership' END,
       CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
       CASE WHEN (SELECT count(*) FROM held) <> 48 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 48 granted by 0865 and 0866' END,
-      CASE WHEN (SELECT count(*) FROM mine) <> 4
-              OR EXISTS (SELECT 1 FROM mine WHERE oid <> ALL (ARRAY['public.work_item_set_envelope(uuid,uuid)'::regprocedure, 'public.envelope_charge_record(uuid,uuid,numeric)'::regprocedure, 'public.envelope_pause_ask_record(uuid,uuid,integer,uuid)'::regprocedure, 'public.envelope_pause_receipt_record(uuid,uuid,integer,uuid)'::regprocedure]::oid[]))
+      CASE WHEN (SELECT count(*) FROM mine) <> 5
+              OR EXISTS (SELECT 1 FROM mine WHERE oid <> ALL (ARRAY['public.work_item_set_envelope(uuid,uuid)'::regprocedure, 'public.envelope_charge_record(uuid,uuid,numeric)'::regprocedure, 'public.envelope_pause_ask_record(uuid,uuid,integer,uuid)'::regprocedure, 'public.envelope_pause_receipt_record(uuid,uuid,integer,uuid)'::regprocedure, 'public.work_item_set_autostart_envelope(uuid)'::regprocedure]::oid[]))
               OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
-              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its four functions and nothing else' END,
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its five functions and nothing else' END,
       CASE WHEN has_schema_privilege('envelope_definer', 'public', 'CREATE') THEN 'still has CREATE on public' END)
     FROM r;" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then

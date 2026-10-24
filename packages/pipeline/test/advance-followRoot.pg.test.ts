@@ -357,7 +357,8 @@ describe("S4-e2: proposal_follow_root refuses what it must [pg]", () => {
       const ok = (await h.admin.query<{ ok: boolean }>(`SELECT has_column_privilege($1, 'proposals', 'work_item_id', 'UPDATE') AS ok`, [role])).rows[0]!.ok;
       if (ok) updaters.push(role);
     }
-    expect(updaters.sort()).toEqual(["platform_ops", "proposal_follower"]);
+    // dial_start_definer (0901) sets the link only inside approve_proposal_by_dial, under its same-transaction receipt checks.
+    expect(updaters.sort()).toEqual(["dial_start_definer", "platform_ops", "proposal_follower"]);
   });
 
   it("S4e2-7: through the definer's own role, state, provenance, owner_process and roadmap_position cannot be written at all", async () => {
