@@ -181,7 +181,7 @@ describe("fix round: the branch heads on GitHub before a round starts [pg]", { t
       const privateHead = vi.fn(async () => ASKED);
       const h = harness({ privateHead, publicHead });
       expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: PUBLIC_BRANCH_MOVED });
-      expect(publicHead).toHaveBeenCalledWith({ codeRepo: "acme/widgets-public", branch: expect.stringMatching(/^fx\/p-[0-9a-f-]{36}$/) });
+      expect(publicHead).toHaveBeenCalledWith({ accountId: t.a.accountId, codeRepo: "acme/widgets-public", branch: expect.stringMatching(/^fx\/p-[0-9a-f-]{36}$/) });
       expect(h.resume).not.toHaveBeenCalled();
       expect(privateHead).not.toHaveBeenCalled();
       const f = await facts(t.w);

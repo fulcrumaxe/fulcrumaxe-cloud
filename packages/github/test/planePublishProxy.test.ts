@@ -7,6 +7,7 @@ import {
   InstallationTokenCache,
   MintTimeoutError,
   PlanePushApiError,
+  createPlanePushApi,
   type AccessTokenRequester,
   type ProxyDecisionDeps,
   type ProxyDecisionInput,
@@ -226,8 +227,40 @@ describe("what a publish run is allowed, and which token each request gets (23)"
       expect(await decideProxyRequest(r, h.deps)).toMatchObject({ allow: true, installationToken: PUSH_TOKEN, revokeAfterUse: true });
     }
     expect(h.mintPushToken).toHaveBeenCalledTimes(reqs.length);
-    expect(h.mintPushToken).toHaveBeenCalledWith("acme-public/widgets-pub");
+    expect(h.mintPushToken).toHaveBeenCalledWith("acme-public/widgets-pub", { ownsInstallation: expect.any(Function) });
+    // The public repo's installation counts as owned only when it is the run's own team-App installation (99 in this harness).
+    const own = h.mintPushToken.mock.calls[0]![1] as { ownsInstallation: (id: number) => Promise<boolean> };
+    await expect(own.ownsInstallation(99)).resolves.toBe(true);
+    await expect(own.ownsInstallation(7)).resolves.toBe(false);
     expect(h.requester).not.toHaveBeenCalled();
+  });
+
+  describe("with the real planePushApi, whose installation lookup names an installation by id", () => {
+    // A GitHub that answers the lookup like the real one: an App JWT bearer and a User-Agent are required, the answer is the installation of the repository.
+    const lookupFetch = (installationId: number) =>
+      (async (url: string | URL | Request, init?: RequestInit) => {
+        const h = init?.headers as Record<string, string>;
+        if (!/^Bearer [\w-]+\.[\w-]+\.[\w-]+$/.test(h.authorization ?? "") || h["user-agent"] !== "fulcrumaxe-cloud") return new Response("{}", { status: 401 });
+        return new URL(String(url)).pathname === "/repos/acme-public/widgets-pub/installation" ? new Response(JSON.stringify({ id: installationId }), { status: 200 }) : new Response("{}", { status: 404 });
+      }) as typeof fetch;
+    const withRealApi = (installationId: number) => {
+      const h = harness(PRIVATE_RUN);
+      const api = createPlanePushApi({ appCredentials: h.deps.appCredentials, requester: h.requester, cache: new InstallationTokenCache(), fetchImpl: lookupFetch(installationId) });
+      return { h, deps: { ...h.deps, planePublishApi: { mintPushToken: api.mintPushToken, revokeToken: api.revokeToken } } };
+    };
+
+    it("an installation of another account on the public repo is refused and no token is minted", async () => {
+      const { h, deps } = withRealApi(7);
+      expect(await decideProxyRequest(discovery("acme-public/widgets-pub"), deps)).toEqual({ allow: false, status: 403, reason: "token_mint_failed" });
+      expect(h.requester).not.toHaveBeenCalled();
+    });
+
+    it("the run's own installation on the public repo mints", async () => {
+      const { h, deps } = withRealApi(99);
+      h.requester.mockImplementation(async (p) => ({ token: PUSH_TOKEN, expiresAt: new Date(NOW + 3_600_000).toISOString(), permissions: { metadata: "read", ...p.permissions }, repositories: p.repositories ?? [] }));
+      expect(await decideProxyRequest(discovery("acme-public/widgets-pub"), deps)).toMatchObject({ allow: true, installationToken: PUSH_TOKEN });
+      expect(h.requester).toHaveBeenCalledWith(expect.objectContaining({ installationId: 99, repositories: ["widgets-pub"] }));
+    });
   });
 
   it("the API requests go to api.github.com and the git requests to github.com", async () => {

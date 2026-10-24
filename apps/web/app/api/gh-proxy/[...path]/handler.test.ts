@@ -1176,7 +1176,8 @@ describe("D#598 P1f-4b: the publish run's per-request mint, use and revoke", () 
   async function githubFake() {
     const live = new Set<string>();
     const events: Event[] = [];
-    const state = { minted: 0, revokeStatus: 204 };
+    // publicInstallation: the id GitHub names for the public repo; 99 is the publish run's own installation.
+    const state = { minted: 0, revokeStatus: 204, publicInstallation: 99 };
     const tokenOf = (authorization: string | undefined): string | null => {
       const m = /^(bearer|basic) (\S+)$/i.exec(authorization ?? "");
       if (!m) return null;
@@ -1188,7 +1189,7 @@ describe("D#598 P1f-4b: the publish run's per-request mint, use and revoke", () 
       if (refusal) return refusal;
       const token = tokenOf(r.headers["authorization"]);
       const json = (status: number, value: unknown) => ({ status, headers: { "content-type": "application/json; charset=utf-8" }, body: JSON.stringify(value) });
-      if (r.method === "GET" && r.path === "/repos/acme-public/widgets-pub/installation") return token?.split(".").length === 3 ? json(200, { id: 55 }) : ghError(401, "Bad credentials");
+      if (r.method === "GET" && r.path === "/repos/acme-public/widgets-pub/installation") return token?.split(".").length === 3 ? json(200, { id: state.publicInstallation }) : ghError(401, "Bad credentials");
       const mint = /^\/app\/installations\/(\d+)\/access_tokens$/.exec(r.path);
       if (r.method === "POST" && mint) {
         const asked = JSON.parse(r.body) as { repositories: string[]; permissions: Record<string, string> };
@@ -1279,6 +1280,18 @@ describe("D#598 P1f-4b: the publish run's per-request mint, use and revoke", () 
     const mints = fake.events.filter((e) => e.type === "mint").map((e) => e.what);
     expect(mints[0]).toBe('widgets {"metadata":"read","contents":"read"}');
     expect(mints.slice(1)).toEqual(Array(3).fill('widgets-pub {"contents":"write","pull_requests":"write"}'));
+  });
+
+  it("a public repo whose installation is not the run's own is refused with a generic 403: no token is minted and the requester is never called", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    fake.state.publicInstallation = 55;
+    const base = publishDeps(fake);
+    const requester = vi.fn(base.accessTokenRequester);
+    const deps = { ...base, accessTokenRequester: requester, planePublishApi: createPlanePushApi({ appCredentials: base.appCredentials, requester, cache: new InstallationTokenCache(), fetchImpl: buildPinnedFetch({ resolveUpstream: async () => ["127.0.0.1"], forwardPinned: base.forwardPinned }) }) };
+    const res = await call(deps, "/acme-public/widgets-pub/info/refs?service=git-receive-pack");
+    expect(res.status).toBe(403);
+    expect(requester).not.toHaveBeenCalled();
+    expect(fake.events).toEqual([]);
   });
 
   it("a token is dead at GitHub once its request is answered", async () => {

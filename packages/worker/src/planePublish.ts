@@ -52,12 +52,12 @@ export interface PlanePublishDeps {
   privateHead: (input: { repo: { id: string; owner: string; name: string }; branch: string }) => Promise<string | null>;
   /** The hosted side's reads of the public repo, each with its own short-lived token. */
   hosted: {
-    verifyPushed(input: { codeRepo: string; branch: string; headSha: string; tipSha: string }): Promise<boolean>;
-    verifyPullRequest(input: { codeRepo: string; branch: string; number: number }): Promise<{ url: string } | null>;
+    verifyPushed(input: { accountId: string; codeRepo: string; branch: string; headSha: string; tipSha: string }): Promise<boolean>;
+    verifyPullRequest(input: { accountId: string; codeRepo: string; branch: string; number: number }): Promise<{ url: string } | null>;
     /** D#598 P1f-5c: opens the pull request on the paired repo's already-pushed branch (base `main`), with a fresh token it revokes before it returns. No git. Throws an error with `code` `pr_failed` or `public_unavailable`. */
-    openPullRequest(input: { codeRepo: string; branch: string; title: string; body: string }): Promise<{ number: number; url: string }>;
+    openPullRequest(input: { accountId: string; codeRepo: string; branch: string; title: string; body: string }): Promise<{ number: number; url: string }>;
     /** FIXROUND-REFRESH-HEAD: the public branch's head (null: no such branch), with a fresh token revoked before it returns. Absent: a fix round of a paired item that pushed is refused. */
-    branchHead?(input: { codeRepo: string; branch: string }): Promise<string | null>;
+    branchHead?(input: { accountId: string; codeRepo: string; branch: string }): Promise<string | null>;
   };
   /** D#598 P1f-5c: the PRIVATE repo's pull request side, the same port a runner run's `done` opens its pull request with. Absent: the platform opens none. */
   pullRequests?: RunPullRequestPort;
@@ -280,7 +280,7 @@ async function attempt(deps: PlanePublishDeps, accountId: string, which: { runId
     } else {
       // The pairing is hook INPUT, so the hook cannot see a later change: the worker re-reads its digest now and trusts nothing from the hook if it moved.
       const after = await withTenant(deps.pool, accountId, (c) => readFacts(c, accountId, { runId: facts.runId }));
-      ({ outcome, label } = after?.pairing && digestOf(after.pairing) === givenDigest ? await verify(deps, facts, run.terminal) : { outcome: { state: "refused", code: "pairing_changed" }, label: "pairing_changed" });
+      ({ outcome, label } = after?.pairing && digestOf(after.pairing) === givenDigest ? await verify(deps, accountId, facts, run.terminal) : { outcome: { state: "refused", code: "pairing_changed" }, label: "pairing_changed" });
     }
   } catch {
     // fx-swallow-ok: the sandbox, the write or GitHub failed in a way the hook's output cannot explain; the item shows the fixed crash refusal
@@ -377,7 +377,7 @@ export function createPublishSettler(deps: { pool: Pool; port: SandboxPort; now?
 const REFUSED = (code: string, refusals?: PlanePublishLine["refusals"]): { outcome: VerifiedOutcome; label: string } => ({ outcome: { state: "refused", code, ...(refusals ? { refusals } : {}) }, label: code });
 
 /** The hook's terminal line becomes an outcome only after GitHub confirms it (report verification, C4 point 1a). Anything doubtful is `report_mismatch`, storing nothing from the line. */
-async function verify(deps: PlanePublishDeps, facts: Facts, line: PlanePublishLine): Promise<{ outcome: VerifiedOutcome; label: string }> {
+async function verify(deps: PlanePublishDeps, accountId: string, facts: Facts, line: PlanePublishLine): Promise<{ outcome: VerifiedOutcome; label: string }> {
   const mismatch = REFUSED(PUBLISH_CODES.reportMismatch);
   switch (line.phase) {
     case "no_change":
@@ -390,9 +390,9 @@ async function verify(deps: PlanePublishDeps, facts: Facts, line: PlanePublishLi
       if (line.phase === "pr_opened" && line.pr_number === undefined) return mismatch;
       try {
         // The branch is the push row's, whatever the line says.
-        if (!(await deps.hosted.verifyPushed({ codeRepo: facts.codeRepo, branch: facts.branch, headSha: line.head_sha, tipSha: line.tip_sha }))) return mismatch;
+        if (!(await deps.hosted.verifyPushed({ accountId, codeRepo: facts.codeRepo, branch: facts.branch, headSha: line.head_sha, tipSha: line.tip_sha }))) return mismatch;
         if (line.phase === "pr_failed") return { outcome: { state: "pushed_pr_not_opened", headSha: line.head_sha, tipSha: line.tip_sha }, label: "pr_failed" };
-        const pr = await deps.hosted.verifyPullRequest({ codeRepo: facts.codeRepo, branch: facts.branch, number: line.pr_number! });
+        const pr = await deps.hosted.verifyPullRequest({ accountId, codeRepo: facts.codeRepo, branch: facts.branch, number: line.pr_number! });
         return pr === null || !publicPullRequestUrlMatches(facts.codeRepo, line.pr_number!, pr.url) ? mismatch : { outcome: { state: "pr_opened", headSha: line.head_sha, tipSha: line.tip_sha, prNumber: line.pr_number!, prUrl: pr.url }, label: "pr_opened" };
       } catch {
         // fx-swallow-ok: GitHub could not be asked; nothing is stored from the line and the item shows the fixed unavailable refusal
@@ -496,13 +496,13 @@ async function openPublicPullRequest(deps: PlanePublishDeps, accountId: string, 
   };
   try {
     // The branch must still hold exactly what was pushed, on the tip it was built on: nothing else is turned into a pull request.
-    if (!(await deps.hosted.verifyPushed({ codeRepo: p.code_repo, branch: p.branch, headSha: p.head_sha, tipSha: p.tip_sha }))) return await stop(PUBLISH_CODES.reportMismatch);
+    if (!(await deps.hosted.verifyPushed({ accountId, codeRepo: p.code_repo, branch: p.branch, headSha: p.head_sha, tipSha: p.tip_sha }))) return await stop(PUBLISH_CODES.reportMismatch);
     // The footer is validated when the pairing is written. This path pushes nothing and has no rule files to scan with; the push paths scan the body they send.
     const issueNumber = p.issue === null ? null : Number(p.issue);
     const text = buildPlanePushText({ itemTitle: p.title, runId: p.run_id, prFooter: p.pr_footer, issueNumber });
     await noteFooterSkipped(deps.pool, accountId, p.run_id, p.pr_footer, issueNumber);
-    const opened = await deps.hosted.openPullRequest({ codeRepo: p.code_repo, branch: p.branch, title: text.title, body: text.body });
-    const pr = await deps.hosted.verifyPullRequest({ codeRepo: p.code_repo, branch: p.branch, number: opened.number });
+    const opened = await deps.hosted.openPullRequest({ accountId, codeRepo: p.code_repo, branch: p.branch, title: text.title, body: text.body });
+    const pr = await deps.hosted.verifyPullRequest({ accountId, codeRepo: p.code_repo, branch: p.branch, number: opened.number });
     if (pr === null || !publicPullRequestUrlMatches(p.code_repo, opened.number, pr.url)) return await stop(PUBLISH_CODES.reportMismatch);
     await end("pr_opened", { state: "pr_opened", headSha: p.head_sha, tipSha: p.tip_sha, prNumber: opened.number, prUrl: pr.url });
     return { kind: "opened", prNumber: opened.number, attemptNo };

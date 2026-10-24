@@ -268,6 +268,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "public_unavailable",
   "public_tip_moved",
   "app_not_installed",
+  "code_repo_installation_not_owned",
   "token_scope_mismatch",
   // Fix round base sync (FIXROUND-BASE-SYNC)
   "base_sync_conflict",

@@ -7,7 +7,9 @@ import { InstallationTokenCache, InstallationTokenError, MintTimeoutError, forge
  *
  *   mintPushToken   finds the write App's installation on that repo (`GET /repos/<o>/<n>/installation`, as the App) and mints a token
  *                   with the `plane_push` purpose: this one repository, `contents` and `pull_requests` write, and a response from
- *                   GitHub that is checked to say exactly that. An App that is not installed there is `app_not_installed`.
+ *                   GitHub that is checked to say exactly that. An App that is not installed there is `app_not_installed`. The installation GitHub
+ *                   names must also be one the caller says belongs to the account the push is for (`ownsInstallation`, required): any other
+ *                   is `code_repo_installation_not_owned` and nothing is minted.
  *                   The token is minted anew on every call and never enters the cache (D#598 C4), so it can be revoked after one use.
  *   revokeToken     `DELETE /installation/token` with the token itself as the bearer: GitHub answers 204, and the token answers 401 afterwards.
  *   branchExists    `GET /git/ref/heads/<branch>`: a branch that exists is never pushed over.
@@ -19,7 +21,7 @@ import { InstallationTokenCache, InstallationTokenError, MintTimeoutError, forge
  * carries a token, a header, a request body or GitHub's text: failures carry a fixed `code` from the route's refusal list.
  */
 
-export type PlanePushApiFailure = "app_not_installed" | "token_scope_mismatch" | "public_unavailable" | "pr_failed";
+export type PlanePushApiFailure = "app_not_installed" | "code_repo_installation_not_owned" | "token_scope_mismatch" | "public_unavailable" | "pr_failed";
 
 export class PlanePushApiError extends Error {
   constructor(readonly code: PlanePushApiFailure) {
@@ -27,6 +29,9 @@ export class PlanePushApiError extends Error {
     this.name = "PlanePushApiError";
   }
 }
+
+/** True when the GitHub installation id is a live team-App installation of the account the push is for. Supplied by the caller, who knows the account. */
+export type PushInstallationOwnership = (ghInstallationId: number) => Promise<boolean>;
 
 export interface PlanePushApiDeps {
   appCredentials: AppCredentialsSource;
@@ -83,7 +88,9 @@ export function createPlanePushApi(deps: PlanePushApiDeps) {
   }
 
   return {
-    async mintPushToken(codeRepo: string, opts: { onExpiry?: (expiresAtMs: number) => void } = {}): Promise<string> {
+    async mintPushToken(codeRepo: string, opts: { ownsInstallation: PushInstallationOwnership; onExpiry?: (expiresAtMs: number) => void }): Promise<string> {
+      // Fail closed: a caller that cannot say whose installation this is gets no token.
+      if (typeof opts?.ownsInstallation !== "function") throw new PlanePushApiError("code_repo_installation_not_owned");
       const { owner, name } = split(codeRepo);
       const credentials = deps.appCredentials("team");
       const jwt = await mintAppJwt(credentials.appId, credentials.privateKeyPem, deps.now);
@@ -91,6 +98,14 @@ export function createPlanePushApi(deps: PlanePushApiDeps) {
       if (found.status === 404) throw new PlanePushApiError("app_not_installed");
       const id = found.status === 200 && found.body !== null && typeof found.body === "object" ? (found.body as { id?: unknown }).id : undefined;
       if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) throw new PlanePushApiError("public_unavailable");
+      let owned: boolean;
+      try {
+        owned = (await opts.ownsInstallation(id)) === true;
+      } catch {
+        // fx-swallow-ok: an ownership lookup that cannot be answered is a refusal to mint, never a mint
+        throw new PlanePushApiError("public_unavailable");
+      }
+      if (!owned) throw new PlanePushApiError("code_repo_installation_not_owned");
       try {
         return await getInstallationToken({
           installationId: id,
