@@ -351,6 +351,47 @@ describe('applyMappedEvent (D#2 H13a, C18 + C7 + C25)', () => {
       });
     });
 
+    describe('D#598: a pull request on the paired PUBLIC repository moves the item whose push record names it', () => {
+      /** An item of the private repo with the push record the platform keeps for the public repo this delivery comes from (refs.repoFullName). */
+      async function pushed(ghNumber: number, prNumber: number, codeRepo = refs.repoFullName): Promise<{ id: string; branch: string }> {
+        const privateRepo = randomUUID();
+        await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product) VALUES ($1, $2, $3, $4, 'team')`, [privateRepo, refs.accountId, refs.installationId, 9800 + ghNumber]);
+        const id = await seedWorkItem(admin, refs.accountId, privateRepo, { ghNumber, stage: 'changes_requested' });
+        const { rows } = await admin.query<{ branch: string }>(
+          `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, state, head_sha, tip_sha, pr_number, pr_url)
+           VALUES ($1, $2, $3, $4, $5, 'pr_opened', $6, $6, $7, $8) RETURNING branch`,
+          [refs.accountId, id, privateRepo, codeRepo, 'a'.repeat(64), 'b'.repeat(40), prNumber, `https://github.com/${codeRepo}/pull/${prNumber}`],
+        );
+        return { id, branch: rows[0]!.branch };
+      }
+      const publicPr = (prNumber: number, headRef: string | undefined, merged = false): GithubPullRequestPayload => {
+        const payload = loadFixture<GithubPullRequestPayload>(merged ? 'pull_request.closed.merged.json' : 'pull_request.closed.unmerged.json');
+        payload.pull_request = { ...payload.pull_request, number: prNumber, body: 'Refs D#1, no closing keyword', head: { ...payload.pull_request.head, ...(headRef ? { ref: headRef } : {}) } };
+        return payload;
+      };
+      const stage = async (id: string): Promise<string> => (await admin.query<{ stage: string }>('SELECT stage FROM work_items WHERE id = $1', [id])).rows[0]!.stage;
+
+      it('closed unmerged and merged', async () => {
+        const a = await pushed(6901, 6951);
+        const r = await apply(mapMappedFor(publicPr(6951, a.branch)));
+        expect(r).toMatchObject({ applied: 'transitioned', workItemId: a.id, recorded: true });
+        expect(await stage(a.id)).toBe('closed_unmerged');
+        const b = await pushed(6902, 6952);
+        await apply(mapMappedFor(publicPr(6952, b.branch, true)));
+        expect(await stage(b.id)).toBe('merged');
+      });
+
+      it('another number, another branch, no branch, or another repository finds nothing', async () => {
+        const a = await pushed(6903, 6953);
+        const elsewhere = await pushed(6904, 6954, 'someone/else-public');
+        expect((await apply(mapMappedFor(publicPr(6999, a.branch)))).applied).toBe('skipped');
+        expect((await apply(mapMappedFor(publicPr(6953, 'fx/p-00000000-0000-0000-0000-000000000000')))).applied).toBe('skipped');
+        expect((await apply(mapMappedFor(publicPr(6953, undefined)))).applied).toBe('skipped');
+        expect((await apply(mapMappedFor(publicPr(6954, elsewhere.branch)))).applied).toBe('skipped');
+        for (const id of [a.id, elsewhere.id]) expect(await stage(id)).toBe('changes_requested');
+      });
+    });
+
     it('an unlinked PR (no Closes/Fixes/Resolves match, or no matching work item) is a safe no-op -- never throws, never writes', async () => {
       const payload = loadFixture<GithubPullRequestPayload>('pull_request.opened.no-link.json');
       const result = await apply(mapEvent('pull_request', payload, { allowlist: [] }));

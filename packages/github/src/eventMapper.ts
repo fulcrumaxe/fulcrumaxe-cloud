@@ -153,6 +153,8 @@ export interface TransitionPrEvent {
   trust: AuthorTrust;
   /** CWE-863: true when pull_request.head.repo differs from base.repo (or is null) -- a fork or inaccessible head. */
   isFork: boolean;
+  /** The head branch name, or null when the payload carries none. Only the paired-repository lookup reads it (it must be the branch the platform pushed). */
+  headRef?: string | null;
 }
 
 /**
@@ -265,7 +267,7 @@ export interface GithubPullRequestPayload {
     user: Actor;
     author_association: string | null;
     /** CWE-863: null/differing id vs base.repo.id means a fork. */
-    head: { repo: { id: number } | null; sha?: string };
+    head: { repo: { id: number } | null; sha?: string; ref?: string };
     base: { repo: { id: number } };
   };
 }
@@ -412,13 +414,14 @@ export function mapEvent(
       const prNumber = p.pull_request.number;
       const headRepoId = p.pull_request.head.repo?.id ?? null;
       const isFork = headRepoId == null || headRepoId !== p.pull_request.base.repo.id;
+      const headRef = typeof p.pull_request.head.ref === 'string' ? p.pull_request.head.ref : null;
       if (p.action === 'opened') {
-        return { kind: 'transition_pr', toStage: 'pr_opened', at: new Date(p.pull_request.created_at), prNumber, linkedIssueNumber, trust, isFork };
+        return { kind: 'transition_pr', toStage: 'pr_opened', at: new Date(p.pull_request.created_at), prNumber, linkedIssueNumber, trust, isFork, headRef };
       }
       if (p.action === 'closed') {
         const closedAt = p.pull_request.merged_at ?? p.pull_request.created_at;
         const toStage = p.pull_request.merged ? 'merged' : 'closed_unmerged';
-        return { kind: 'transition_pr', toStage, at: new Date(closedAt), prNumber, linkedIssueNumber, trust, isFork };
+        return { kind: 'transition_pr', toStage, at: new Date(closedAt), prNumber, linkedIssueNumber, trust, isFork, headRef };
       }
       if (p.action === 'synchronize') {
         const headSha = p.pull_request.head.sha;
@@ -613,6 +616,25 @@ async function findRunnerOpenedPrItem(client: PoolClient, accountId: string, rep
   return rows[0]?.id ?? null;
 }
 
+/**
+ * D#598: the item whose PUBLIC pull request this is, for a repository paired with a public code repository. The platform recorded the pull request it
+ * opened on the paired repository (`plane_pushes`: the repository, the pull request number, the public branch `fx/p-<id>`); that record is the binding, as
+ * a runner's done is for its own. The pull request must be on exactly that repository (the delivery's own full name, compared without case), carry exactly that
+ * number, and come from exactly that branch, so a pull request of anyone else, a same-number pull request on another repository and a branch of the same
+ * name elsewhere find nothing. The pull request body takes no part. Newest item first when more than one carries the record (a re-opened item).
+ */
+async function findPublicPullRequestItem(client: PoolClient, accountId: string, repoFullName: string, prNumber: number, headRef: string | null): Promise<string | null> {
+  if (!Number.isSafeInteger(prNumber) || prNumber <= 0 || headRef === null || !REPO_FULL_NAME_RE.test(repoFullName)) return null;
+  const { rows } = await client.query<{ id: string }>(
+    `SELECT w.id
+       FROM plane_pushes p JOIN work_items w ON w.account_id = p.account_id AND w.id = p.work_item_id
+      WHERE p.account_id = $1 AND lower(p.code_repo) = lower($2) AND p.pr_number = $3 AND p.branch = $4
+      ORDER BY (w.stage = 'closed') ASC, w.created_at DESC, w.id DESC LIMIT 1`,
+    [accountId, repoFullName, prNumber, headRef],
+  );
+  return rows[0]?.id ?? null;
+}
+
 const unlinkedReason = (linkedIssueNumber: number | null): string =>
   linkedIssueNumber == null
     ? 'pull_request: no Closes/Fixes/Resolves #N reference in body, and no run recorded this pull request'
@@ -625,9 +647,12 @@ async function findPullRequestItem(
   repoId: string,
   prNumber: number,
   linkedIssueNumber: number | null,
+  publicPr?: { repoFullName: string; headRef: string | null },
 ): Promise<string | null> {
   const recorded = await findRunnerOpenedPrItem(client, accountId, repoId, prNumber);
   if (recorded) return recorded;
+  const onPaired = publicPr ? await findPublicPullRequestItem(client, accountId, publicPr.repoFullName, prNumber, publicPr.headRef) : null;
+  if (onPaired) return onPaired;
   return findBodyLinkedItem(client, accountId, repoId, linkedIssueNumber);
 }
 
@@ -681,7 +706,7 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
       }
       // D#483 P1: a close or merge also finds the item a runner run opened this pull request for (its body carries no "Closes #N"). An open or a push never does: those keep the body link.
       const closing = mapped.toStage === 'merged' || mapped.toStage === 'closed_unmerged';
-      const workItemId = closing ? await findPullRequestItem(client, ctx.accountId, ctx.repoId, mapped.prNumber, mapped.linkedIssueNumber) : await findBodyLinkedItem(client, ctx.accountId, ctx.repoId, mapped.linkedIssueNumber);
+      const workItemId = closing ? await findPullRequestItem(client, ctx.accountId, ctx.repoId, mapped.prNumber, mapped.linkedIssueNumber, { repoFullName: ctx.repo.fullName, headRef: mapped.headRef ?? null }) : await findBodyLinkedItem(client, ctx.accountId, ctx.repoId, mapped.linkedIssueNumber);
       if (!workItemId) return { applied: 'skipped', reason: unlinkedReason(mapped.linkedIssueNumber) };
 
       let result;

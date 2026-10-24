@@ -313,6 +313,87 @@ describe("stale pull-request slot reconcile [pg]", { timeout: 60_000 }, () => {
     expect(gh.calls).toEqual([`GET /repos/acme/widgets/pulls?state=all&head=acme%3A${encodeURIComponent(branch)}&per_page=30`]);
   });
 
+  describe("a repository paired with a public code repository", () => {
+    /** Pairs A's repo with acme/widgets-public and gives the item the push record the platform keeps (the public branch fx/p-<id>, the public pull request). */
+    async function paired(a: SeedRefs, itemId: string, prNumber: number | null): Promise<string> {
+      await admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, 'acme/widgets-public', ARRAY['.autonomous-team/**']) ON CONFLICT (repo_id) DO NOTHING", [a.repoId, a.accountId]);
+      const row = await admin.query<{ branch: string }>(
+        `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, state${prNumber === null ? "" : ", head_sha, tip_sha, pr_number, pr_url"})
+         VALUES ($1, $2, $3, 'acme/widgets-public', $4, ${prNumber === null ? "'building'" : "'pr_opened', $5, $5, $6, $7"}) RETURNING branch`,
+        prNumber === null ? [a.accountId, itemId, a.repoId, "a".repeat(64)] : [a.accountId, itemId, a.repoId, "a".repeat(64), "b".repeat(40), prNumber, `https://github.com/acme/widgets-public/pull/${prNumber}`],
+      );
+      return row.rows[0]!.branch;
+    }
+    /** The private pull request the runner's done recorded (it stays open for ever): the old read stopped here and answered open. */
+    async function runnerPrivate(a: SeedRefs, itemId: string, prNumber: number): Promise<string> {
+      await admin.query("UPDATE repos SET execution_mode = 'runner_verified' WHERE id = $1", [a.repoId]);
+      const runId = randomUUID();
+      const branch = `fx/${runId}-g1`;
+      await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id) VALUES ($1, $2, $3, 'executor', 'runner', 'succeeded', 'runner_verified', $4)", [runId, a.accountId, itemId, a.repoId]);
+      await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.status_changed', $3::jsonb)", [a.accountId, runId, JSON.stringify({ from: "running", to: "succeeded", viaRunnerDone: true, prNumber, branch })]);
+      return branch;
+    }
+    const publicCall = (branch: string) => `GET /repos/acme/widgets-public/pulls?state=all&head=acme%3A${encodeURIComponent(branch)}&per_page=30`;
+
+    it("a closed public pull request moves the item to closed_unmerged although the runner's private pull request is still open", async () => {
+      const holder = await item(A, "changes_requested");
+      const privateBranch = await runnerPrivate(A, holder.id, 658);
+      const branch = await paired(A, holder.id, 414);
+      gh.pulls.push({ repo: "acme/widgets", number: 658, branch: privateBranch, state: "open", merged_at: null, closed_at: null });
+      gh.pulls.push({ repo: "acme/widgets-public", number: 414, branch, state: "closed", merged_at: null, closed_at: "2026-10-24T13:23:41Z" });
+      expect(await reconcileHolder(writerPool, open, A.accountId, holder.id)).toBe("closed_unmerged");
+      expect(await stageOf(holder.id)).toBe("closed_unmerged");
+      expect(await movesOf(holder.id)).toEqual([{ from_stage: "changes_requested", to_stage: "closed_unmerged", source: "webhook", source_ref: "pr_reconcile:414", at: new Date("2026-10-24T13:23:41Z") }]);
+      // One read-only list call, on the paired repository, by the public branch; the private repository is never asked.
+      expect(gh.calls).toEqual([publicCall(branch)]);
+      expect(writes()).toEqual([]);
+    });
+
+    it("a merged public pull request moves the item to merged", async () => {
+      const holder = await item(A, "review_passed");
+      const branch = await paired(A, holder.id, 414);
+      gh.pulls.push({ repo: "acme/widgets-public", number: 414, branch, state: "closed", merged_at: "2026-10-24T14:00:00Z", closed_at: "2026-10-24T14:00:00Z" });
+      expect(await reconcileHolder(writerPool, open, A.accountId, holder.id)).toBe("merged");
+      expect(await stageOf(holder.id)).toBe("merged");
+    });
+
+    it("an open public pull request leaves the item where it is", async () => {
+      const holder = await item(A, "pr_opened");
+      const branch = await paired(A, holder.id, 414);
+      gh.pulls.push({ repo: "acme/widgets-public", number: 414, branch, state: "open", merged_at: null, closed_at: null });
+      expect(await reconcileHolder(writerPool, open, A.accountId, holder.id)).toBe("open");
+      expect(await stageOf(holder.id)).toBe("pr_opened");
+    });
+
+    it("a same-number merged pull request on the private repository is ignored", async () => {
+      const holder = await item(A, "changes_requested");
+      const branch = await paired(A, holder.id, 414);
+      // The private repository's own #414 is merged, even on a branch of the same name: it is on the wrong repository and is never read.
+      gh.pulls.push({ repo: "acme/widgets", number: 414, branch, state: "closed", merged_at: "2026-10-01T00:00:00Z", closed_at: "2026-10-01T00:00:00Z" });
+      gh.pulls.push({ repo: "acme/widgets-public", number: 414, branch, state: "open", merged_at: null, closed_at: null });
+      expect(await reconcileHolder(writerPool, open, A.accountId, holder.id)).toBe("open");
+      expect(await stageOf(holder.id)).toBe("changes_requested");
+      expect(gh.calls).toEqual([publicCall(branch)]);
+    });
+
+    it("a public pull request of another number on the recorded branch is not the one in force", async () => {
+      const holder = await item(A, "changes_requested");
+      const branch = await paired(A, holder.id, 414);
+      gh.pulls.push({ repo: "acme/widgets-public", number: 415, branch, state: "closed", merged_at: null, closed_at: "2026-10-24T13:23:41Z" });
+      expect(await reconcileHolder(writerPool, open, A.accountId, holder.id)).toBe("no_pull_request");
+      expect(await stageOf(holder.id)).toBe("changes_requested");
+    });
+
+    it("a paired item whose public pull request is not recorded reads nothing (the private pull request is not its pull request)", async () => {
+      const holder = await item(A, "changes_requested");
+      const privateBranch = await runnerPrivate(A, holder.id, 658);
+      await paired(A, holder.id, null);
+      gh.pulls.push({ repo: "acme/widgets", number: 658, branch: privateBranch, state: "open", merged_at: null, closed_at: null });
+      expect(await reconcileHolder(writerPool, open, A.accountId, holder.id)).toBe("no_pull_request");
+      expect(gh.calls).toEqual([]);
+    });
+  });
+
   it("the sweep's list is the 0894 definer: run-writer only, ids only, and its window is PR_RECONCILE_EVERY_SECONDS", async () => {
     await expect(appPool.query("SELECT * FROM pr_slot_reconcile_list_due(10)")).rejects.toMatchObject({ code: "42501" });
     const fields = (await writerPool.query("SELECT * FROM pr_slot_reconcile_list_due(10)")).fields.map((f) => f.name);
