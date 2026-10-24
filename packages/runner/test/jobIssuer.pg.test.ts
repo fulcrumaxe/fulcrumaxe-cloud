@@ -5,7 +5,7 @@ import type { ExecutionRun } from "../src/executionTarget.js";
 import { toolsForRole } from "../src/agentConfig.js";
 import { JobIssueError, createJobIssuer, createJobSigner, createPgJobContext, roleToolsDigest, type ContinuationBasePort, type JobContextPort } from "../src/targets/jobIssuer.js";
 import { RUNNER_QUEUE_TTL_MS, RunnerTarget } from "../src/targets/runnerTarget.js";
-import { RUNNER_DISPATCH_BASE_KIND, insertAgentRun } from "../src/runStatusWriter.js";
+import { RUNNER_DISPATCH_BASE_KIND, SPEC_PINNED_RUNNER_ROLES, insertAgentRun } from "../src/runStatusWriter.js";
 import { seedAccount, seedMember, seedRepo, seedWorkItem } from "./helpers/seed.js";
 import { createFakeRunnerLimits, createFakeVisibility } from "./helpers/runnerTargetFakes.js";
 import { pgHarness } from "./helpers/pgHarness.js";
@@ -861,8 +861,37 @@ describe("JobIssuer [pg]", () => {
         expect(job.sandbox_allowances).toEqual({ entries: [NPM], command_timeout_s: 900 });
         expect(job).toMatchObject({ run_id: run.id, repo: { id: w.repoId } });
         expect(await minProtocol(run.id)).toBe(8);
-        // A review job carries it too: the check is the repository's, not the role's.
-        expect((await issue(w, "code-reviewer")).job.check).toEqual(CHECK);
+      });
+
+      // A job whose agent cannot push has nothing for the check to look at: the runner would run the full suite after a turn that changes no code (classify waited out its 15 minutes on it).
+      it("a read-only job carries no check, and needs no protocol floor for it, though the repo has one approved", async () => {
+        const w = await world();
+        await approveCheck(w, 1, [NPM], 900, CHECK);
+        const readOnly = ["project-manager", "technical-architect", "product-owner", "cost-analyst", "performance-expert", "security-expert", "accessibility-reviewer", "code-reviewer", "security-reviewer", "acceptance-tester", "debater"];
+        for (const role of readOnly) {
+          const { run, job } = await issue(w, role);
+          expect("check" in job, role).toBe(false);
+          expect(canonicalJson((await stored(run.id)).job), role).not.toContain('"check"');
+          // The allowances still ride (the agent's own commands use them); only the check is left off, so the floor is the one a job without a check has.
+          expect(job.sandbox_allowances, role).toEqual({ entries: [NPM], command_timeout_s: 900 });
+          expect(await minProtocol(run.id), role).toBeNull();
+        }
+      });
+
+      it("a fix round (an executor that continues) still carries it, at protocol 8", async () => {
+        const w = await world();
+        await approveCheck(w, 1, [NPM], 900, CHECK);
+        const { parent, run } = await fixPair(w);
+        await issuer().issuer.issue({ run, continues: { parentRunId: parent.id, sessionId: "sess-1" } });
+        const job = verifyJob(await stored(run.id), { "job-key-1": publicKey }, { now: NOW });
+        expect(job.task.kind).toBe("fix");
+        expect(job.check).toEqual(CHECK);
+        expect(await minProtocol(run.id)).toBe(8);
+      });
+
+      it("the roles that carry it are exactly the roles the git policy lets push", async () => {
+        const { RUNNER_PUSHING_ROLES } = await import("@fx/gh-policy");
+        expect([...SPEC_PINNED_RUNNER_ROLES].sort()).toEqual([...RUNNER_PUSHING_ROLES].sort());
       });
 
       it("a check alone, with no entries, is signed on its own and still gates the job", async () => {

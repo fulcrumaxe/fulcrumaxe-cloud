@@ -30,7 +30,7 @@ import { effectiveContextBudget, readContextBudgetBytes } from "@fx/core/src/con
 import { readItemRules } from "@fx/core/src/context/contextRules.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { runnerToolsForRole } from "../agentConfig.js";
-import { RUNNER_RUN_BRANCH, readRecordedRunnerBranch, recordRunnerDispatchBase, writeRunnerJob } from "../runStatusWriter.js";
+import { RUNNER_RUN_BRANCH, SPEC_PINNED_RUNNER_ROLES, readRecordedRunnerBranch, recordRunnerDispatchBase, writeRunnerJob } from "../runStatusWriter.js";
 import type { ExecutionRun } from "../executionTarget.js";
 import { RUNNER_QUEUE_TTL_MS, type JobIssuer, type JobMode, type RepoVisibilityPort, type RunContinues } from "./runnerTarget.js";
 
@@ -420,7 +420,9 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         const set = parseAllowanceSet(context.sandboxAllowances);
         if (!set.ok) throw new JobIssueError("sandbox_allowances_invalid");
         if (set.set.entries.length > 0) sandboxAllowances = { entries: set.set.entries, command_timeout_s: set.set.command_timeout_s as number };
-        check = set.set.check;
+        // The check runs after the agent ends, on whatever it left in the work tree. A role that cannot push (classify, spec and panel seats, reviewers, advisers) leaves nothing to check, so its job
+        // carries none and the runner does not spend a full suite after a turn that changes no code. The pushing roles are the ones the git policy lets push (`SPEC_PINNED_RUNNER_ROLES`).
+        if (SPEC_PINNED_RUNNER_ROLES.has(role)) check = set.set.check;
       }
 
       // D#600 CX-5c: the item's excludes as they stand now (its own rules over the repository's), read when the job is issued, so a fix round gets the rules of its own issue and not those of the
