@@ -45,7 +45,8 @@ function invalid(message: string, field: string): never {
   throw new InvalidRoleSettingsInputError(message, field);
 }
 
-function validate(input: SetRepoPairingInput): void {
+/** The shape rules alone (no database, no GitHub); `setRepoPairing` runs them again, so a caller may check first and spend nothing on a bad input. */
+export function validatePairingInput(input: SetRepoPairingInput): void {
   if (typeof input.codeRepo !== 'string' || !CODE_REPO_RE.test(input.codeRepo) || ['.', '..'].includes(input.codeRepo.split('/')[1]!)) {
     invalid('the paired repo must be written owner/name', 'code_repo');
   }
@@ -133,10 +134,47 @@ export async function getRepoPairing(ctx: RepoPairingCtx, repoId: string): Promi
   });
 }
 
+/** How many of the account's other repositories the picker looks at. */
+export const MAX_PAIRING_CANDIDATES = 30;
+
+export interface PairingCandidate {
+  fullName: string;
+  /** The GitHub installation our own rows say serves this repo, and which App it belongs to: what a read of the repo may be made with. */
+  installationId: number;
+  appKind: 'team' | 'team_readonly';
+}
+
+/**
+ * Owner or admin. The account's OTHER repositories that have a write or read-only App installation, for the pairing picker (the screen then asks
+ * GitHub which of them are public, with the installation recorded here). Repos are the caller's own through RLS; the repo asked about must be one
+ * of them. A repo on both Apps is listed once, with the write App. Capped, and `truncated` says more existed.
+ */
+export async function listPairingCandidates(ctx: RepoPairingCtx, repoId: string): Promise<{ candidates: PairingCandidate[]; truncated: boolean }> {
+  assertRepoIdShape(repoId);
+  const { accountId, userId } = ctx.principal;
+  return withTenant(ctx.pool, accountId, userId, async (client) => {
+    await requireAdmin(client, accountId, userId);
+    const own = (await ownFullName(client, repoId))?.toLowerCase() ?? '';
+    const { rows } = await client.query<{ full_name: string; gh_installation_id: string; app_kind: 'team' | 'team_readonly' }>(
+      `SELECT DISTINCT ON (lower(r.gh_owner || '/' || r.gh_name)) r.gh_owner || '/' || r.gh_name AS full_name, i.gh_installation_id, i.app_kind
+         FROM repos r
+         JOIN installations i ON i.id = r.installation_id AND i.account_id = r.account_id
+        WHERE i.app_kind IN ('team', 'team_readonly') AND r.gh_owner IS NOT NULL AND r.gh_name IS NOT NULL AND lower(r.gh_owner || '/' || r.gh_name) <> $1
+        ORDER BY lower(r.gh_owner || '/' || r.gh_name), (i.app_kind = 'team') DESC
+        LIMIT $2`,
+      [own, MAX_PAIRING_CANDIDATES + 1],
+    );
+    return {
+      candidates: rows.slice(0, MAX_PAIRING_CANDIDATES).map((r) => ({ fullName: r.full_name, installationId: Number(r.gh_installation_id), appKind: r.app_kind })),
+      truncated: rows.length > MAX_PAIRING_CANDIDATES,
+    };
+  });
+}
+
 /** Owner or admin. Turns pairing on, or replaces the existing row; one audit row. Changing it affects only items started afterwards. */
 export async function setRepoPairing(ctx: RepoPairingCtx, repoId: string, input: SetRepoPairingInput): Promise<RepoPairing> {
   assertRepoIdShape(repoId);
-  validate(input);
+  validatePairingInput(input);
   const { accountId, userId } = ctx.principal;
   return withTenant(ctx.pool, accountId, userId, async (client) => {
     await requireAdmin(client, accountId, userId);

@@ -2,7 +2,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createPool } from '@fx/db/src/pool.js';
-import { createTeamInstallationOwnership } from '../src/installationOwnership.js';
+import { createTeamInstallationOwnership } from '@fx/core/src/tenancy/installationOwnership.js';
 import { InstallationTokenCache, type AccessTokenRequester } from '../src/installationToken.js';
 import { createPlanePushApi } from '../src/planePushApi.js';
 import { createHostedPlanePush } from '../src/planePushHosted.js';
@@ -11,12 +11,12 @@ import { httpsRoundTrip, startStrictGithubServer, type LocalTlsServer } from './
 import { seedAccountWithRepo } from './helpers/seed.js';
 
 /**
- * The ownership check in front of every public-repo token mint, against real Postgres, and through the hosted push (the layer the runner routes and the
+ * The ownership check (its own cases are in packages/core) in front of every public-repo token mint, through the hosted push (the layer the runner routes and the
  * worker's publish step both mint through) against the strict GitHub server. The server names, for acme/widgets, the installation id the test chooses; a
  * token is minted only when that id is a live team installation of the asking account. What cannot be faked: that GitHub names the installation of the
  * repository's real owner (the table here is the test's), and that the platform_ops login is the one the app runs with.
  */
-describe('team installation ownership', () => {
+describe('team installation ownership in front of the hosted push', () => {
   let adminPool: Pool;
   let admin: PoolClient;
   let opsPool: Pool;
@@ -53,26 +53,6 @@ describe('team installation ownership', () => {
     return { accountId: refs.accountId, gh };
   }
   const owns = createTeamInstallationOwnership;
-
-  it('is true for the account\'s own live team installation, and for no other account', async () => {
-    const a = await account();
-    const b = await account();
-    expect(await owns(opsPool)(a.accountId, a.gh)).toBe(true);
-    expect(await owns(opsPool)(b.accountId, a.gh)).toBe(false);
-    expect(await owns(opsPool)(a.accountId, b.gh)).toBe(false);
-  });
-
-  it.each(['deleted', 'suspended', 'none'] as const)('is false when the installer record is %s', async (installer) => {
-    const a = await account({ installer });
-    expect(await owns(opsPool)(a.accountId, a.gh)).toBe(false);
-  });
-
-  it('is false for an installation of another App kind, and for ids that are not installations', async () => {
-    const ro = await account({ kind: 'team_readonly' });
-    expect(await owns(opsPool)(ro.accountId, ro.gh)).toBe(false);
-    const a = await account();
-    for (const id of [0, -1, 1.5, Number.NaN, 2 ** 53]) expect(await owns(opsPool)(a.accountId, id)).toBe(false);
-  });
 
   describe('through the hosted push and a strict GitHub', () => {
     async function hostedFor(namedInstallation: number) {
