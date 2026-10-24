@@ -22,3 +22,4 @@ export * from "./contextLevers.js";
 export * from "./excludeRules.js";
 export * from "./verifierGuard.js";
 export * from "./wake.js";
+export * from "./pinRules.js";

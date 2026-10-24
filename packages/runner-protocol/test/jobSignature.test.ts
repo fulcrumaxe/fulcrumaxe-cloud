@@ -77,6 +77,40 @@ describe("job signature over excludes (D#600 CX-5c)", () => {
   });
 });
 
+describe("job signature over pins (D#600 CX-5c2)", () => {
+  const withPins = { ...job, pins: { paths: ["docs/a.md", "README.md"], budget_bytes: 35_840 } } as Job;
+
+  it("signs the pin paths and the budget: an added, removed, changed or reordered path, a changed budget, or a stripped field fails", () => {
+    const signed = signJob(withPins, privateKey);
+    expect(verifyJob(signed, keyring, { now: NOW })).toEqual(withPins);
+    const edit = (pins: unknown) => ({ ...signed, job: { ...signed.job, pins } });
+    const altered: unknown[] = [
+      { paths: ["docs/a.md", "README.md", "extra.md"], budget_bytes: 35_840 },
+      { paths: ["docs/a.md"], budget_bytes: 35_840 },
+      { paths: ["docs/b.md", "README.md"], budget_bytes: 35_840 },
+      { paths: ["README.md", "docs/a.md"], budget_bytes: 35_840 },
+      { paths: ["docs/a.md", "README.md"], budget_bytes: 1 },
+      { paths: ["docs/a.md", "README.md"] },
+    ];
+    for (const pins of altered) expect(codeOf(() => verifyJob(edit(pins), keyring, { now: NOW })), JSON.stringify(pins)).toBe("bad_signature");
+    const { pins: dropped, ...stripped } = signed.job as Job & { pins?: unknown };
+    void dropped;
+    expect(codeOf(() => verifyJob({ ...signed, job: stripped }, keyring, { now: NOW }))).toBe("bad_signature");
+  });
+
+  it("a job without pins signs to the same bytes as before the field existed, and adding the field after signing fails", () => {
+    expect(canonicalJson(job)).not.toContain("pins");
+    const signed = signJob(job, privateKey);
+    expect(codeOf(() => verifyJob({ ...signed, job: { ...signed.job, pins: { paths: ["README.md"] } } }, keyring, { now: NOW }))).toBe("bad_signature");
+  });
+
+  it("the signed bytes of a job with pins hold the paths and nothing of any file", () => {
+    const text = canonicalJson(withPins);
+    expect(text).toContain("docs/a.md");
+    expect(Object.keys((withPins.pins as object))).toEqual(["paths", "budget_bytes"]);
+  });
+});
+
 describe("job signature over spill (D#600 CX-4b)", () => {
   const withSpill = { ...job, spill: [{ code: "note", text: "the whole note" }, { code: "findings", text: "the whole findings" }] } as Job;
 

@@ -69,6 +69,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/daemon/gitPathA.ts": ["fs", "os", "path"], // cloud-verified path: realpath and statfs of the mirrors directory (must not be a temp directory or memory-backed), and the temp directory's location
   "src/daemon/gitPath.ts": ["path"], // the snapshots directory under the runner's state directory
   "src/daemon/snapshot.ts": ["fs", "fs/promises", "path"], // the daemon-owned copy of the workspace's git files: no-follow reads, one 0700 directory per push
+  "src/job/pinFiles.ts": ["fs", "fs/promises", "path"], // D#600 CX-5c2: a job's pinned files read from the checkout: lstat of every path component, an O_NOFOLLOW open, and realpath containment
   "src/daemon/staleTemp.ts": ["fs", "path"], // `fx-runner run` at start: lstat and unlink of exact-name regular files next to the ledger, nothing else
   "src/commands/logs.ts": ["fs", "path"], // `fx-runner logs`: a size check, then the log file <state dir>/logs/<run id>.jsonl through the private-file reader
   "src/commands/service.ts": ["crypto", "fs", "path"], // `fx-runner service`: lstat, an atomic write (random temp name) and an unlink of the one per-user unit file

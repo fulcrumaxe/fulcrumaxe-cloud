@@ -1,6 +1,6 @@
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { CONTEXT_WINDOW_JOB_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, SPILL_JOB_MIN_PROTOCOL, trimmedMarker, REVIEW_JOB_ROLES, RUNNER_ELIGIBLE_ROLES, canonicalJson, jobDigestMismatches, sha256Text, verifyJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { CONTEXT_WINDOW_JOB_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, SPILL_JOB_MIN_PROTOCOL, trimmedMarker, REVIEW_JOB_ROLES, RUNNER_ELIGIBLE_ROLES, canonicalJson, jobDigestMismatches, sha256Text, verifyJob, type Job } from "@fulcrumaxe/runner-protocol";
 import type { ExecutionRun } from "../src/executionTarget.js";
 import { toolsForRole } from "../src/agentConfig.js";
 import { JobIssueError, createJobIssuer, createJobSigner, createPgJobContext, roleToolsDigest, type ContinuationBasePort, type JobContextPort } from "../src/targets/jobIssuer.js";
@@ -211,19 +211,17 @@ describe("JobIssuer [pg]", () => {
     const rule = (w: { accountId: string; userId: string; repoId: string; workItemId: string }, scope: "repo" | "item", kind: "pin" | "exclude", path: string) =>
       db.admin.query(`INSERT INTO context_rules (account_id, scope, repo_id, work_item_id, kind, path, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7)`, [w.accountId, scope, scope === "repo" ? w.repoId : null, scope === "item" ? w.workItemId : null, kind, path, w.userId]);
 
-    it("signs the excludes (sorted, glob syntax kept) and gates the job to a runner that applies them; pins never appear", async () => {
+    it("signs the excludes (sorted, glob syntax kept) and gates the job to a runner that applies them", async () => {
       const w = await world();
       await rule(w, "repo", "exclude", "secret/**/[ab].ts");
       await rule(w, "item", "exclude", "keys");
-      await rule(w, "item", "pin", "docs/PIN-CONTENT-NEEDLE.md");
       const run = await runnerRun(w, "executor");
       await issuer().issuer.issue({ run });
       const row = await rowOf(run.id);
       const job = verifyJob(row.job_signed, { "job-key-1": publicKey }, { now: NOW });
       expect(job.excludes).toEqual(["keys", "secret/**/[ab].ts"]);
       expect(row.min_protocol_version).toBe(EXCLUDES_JOB_MIN_PROTOCOL);
-      // Paths and globs only: no pin path and no pin content anywhere in the stored job.
-      expect(JSON.stringify(row.job_signed)).not.toContain("PIN-CONTENT-NEEDLE");
+      expect("pins" in job).toBe(false);
     });
 
     it("an item rule on a path replaces the repository's for it, so an exclude the item turned into a pin is not sent", async () => {
@@ -236,18 +234,15 @@ describe("JobIssuer [pg]", () => {
       expect(verifyJob((await rowOf(run.id)).job_signed, { "job-key-1": publicKey }, { now: NOW }).excludes).toEqual(["b.txt"]);
     });
 
-    it("an item with no exclude (none saved, or only pins) gets a job with no excludes key and no protocol gate, exactly as before", async () => {
+    it("an item with no exclude (none saved, or only pins) gets a job with no excludes key and no exclude gate, exactly as before", async () => {
       const w = await world();
       const plain = await runnerRun(w, "executor");
       await issuer().issuer.issue({ run: plain });
       await rule(w, "repo", "pin", "docs/a.md");
       const pinned = await runnerRun(w, "executor");
       await issuer().issuer.issue({ run: pinned });
-      for (const run of [plain, pinned]) {
-        const row = await rowOf(run.id);
-        expect("excludes" in (row.job_signed as { job: object }).job).toBe(false);
-        expect(row.min_protocol_version).toBeNull();
-      }
+      for (const run of [plain, pinned]) expect("excludes" in ((await rowOf(run.id)).job_signed as { job: object }).job).toBe(false);
+      expect((await rowOf(plain.id)).min_protocol_version).toBeNull();
     });
 
     it("undo: a removed exclude is not in the next job, and a job already issued keeps its list", async () => {
@@ -310,6 +305,77 @@ describe("JobIssuer [pg]", () => {
     });
   });
 
+
+  describe("a job carries the run's pinned paths (D#600 CX-5c2)", () => {
+    const rowOf = async (id: string) => (await db.admin.query<{ job_signed: unknown; min_protocol_version: number | null }>("SELECT job_signed, min_protocol_version FROM agent_runs WHERE id = $1", [id])).rows[0]!;
+    const rule = (w: { accountId: string; userId: string; repoId: string; workItemId: string }, scope: "repo" | "item", kind: "pin" | "exclude", path: string) =>
+      db.admin.query(`INSERT INTO context_rules (account_id, scope, repo_id, work_item_id, kind, path, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7)`, [w.accountId, scope, scope === "repo" ? w.repoId : null, scope === "item" ? w.workItemId : null, kind, path, w.userId]);
+    const issued = async (w: Awaited<ReturnType<typeof world>>, role = "executor") => {
+      const run = await runnerRun(w, role);
+      await issuer().issuer.issue({ run });
+      const row = await rowOf(run.id);
+      return { run, row, job: verifyJob(row.job_signed, { "job-key-1": publicKey }, { now: NOW }) };
+    };
+
+    it("signs the pin paths (sorted, de-duplicated) and the repository's budget, gates the job at the pins floor, and holds no file text", async () => {
+      const w = await world();
+      await rule(w, "repo", "pin", "docs/b.md");
+      await rule(w, "item", "pin", "app/[id]/page.tsx");
+      await rule(w, "item", "exclude", "secret");
+      const { row, job } = await issued(w);
+      expect(job.pins).toEqual({ paths: ["app/[id]/page.tsx", "docs/b.md"], budget_bytes: 35_840 });
+      // Both lists ride: the runner applies the exclude-wins rule itself, so it can count a pin an exclude covers.
+      expect(job.excludes).toEqual(["secret"]);
+      expect(row.min_protocol_version).toBe(PINS_JOB_MIN_PROTOCOL);
+      expect(Object.keys((row.job_signed as { job: { pins: object } }).job.pins).sort()).toEqual(["budget_bytes", "paths"]);
+    });
+
+    it("the budget is the repository's stored size when it has one, derived now and not stamped", async () => {
+      const w = await world();
+      await rule(w, "repo", "pin", "docs/a.md");
+      await db.admin.query("INSERT INTO repo_context_settings (account_id, repo_id, memory_slot_bytes, context_budget_bytes, updated_by) VALUES ($1, $2, 4096, 8192, $3)", [w.accountId, w.repoId, w.userId]);
+      expect((await issued(w)).job.pins).toEqual({ paths: ["docs/a.md"], budget_bytes: 8192 });
+    });
+
+    it("an item with no pin gets a job with no pins key and no pins gate, exactly as before", async () => {
+      const w = await world();
+      await rule(w, "repo", "exclude", "keys");
+      const { row, job } = await issued(w);
+      expect("pins" in job).toBe(false);
+      expect(row.min_protocol_version).toBe(EXCLUDES_JOB_MIN_PROTOCOL);
+      const w2 = await world();
+      const plain = await issued(w2);
+      expect("pins" in plain.job).toBe(false);
+      expect(plain.row.min_protocol_version).toBeNull();
+    });
+
+    it("an item rule on a path replaces the repository's for it, so a pin the item turned into an exclude is not sent as a pin", async () => {
+      const w = await world();
+      await rule(w, "repo", "pin", "a.md");
+      await rule(w, "repo", "pin", "b.md");
+      await rule(w, "item", "exclude", "a.md");
+      const { job } = await issued(w);
+      expect(job.pins?.paths).toEqual(["b.md"]);
+      expect(job.excludes).toEqual(["a.md"]);
+    });
+
+    it("only an executor's first run is given pins: a reviewer's job carries none, as on the sandbox path", async () => {
+      const w = await world();
+      await rule(w, "repo", "pin", "docs/a.md");
+      const { job } = await issued(w, "code-reviewer");
+      expect("pins" in job).toBe(false);
+    });
+
+    it("another account's pins are never in the job (the rules are read under the run's own account)", async () => {
+      const mine = await world();
+      const theirs = await world();
+      await rule(theirs, "repo", "pin", "their/secret-plan.md");
+      await rule(mine, "repo", "pin", "mine.md");
+      const { row, job } = await issued(mine);
+      expect(job.pins?.paths).toEqual(["mine.md"]);
+      expect(JSON.stringify(row.job_signed)).not.toContain("secret-plan");
+    });
+  });
   describe("a job carries the text its prompt cut (D#600 CX-4b)", () => {
     const rowOf = async (id: string) => (await db.admin.query<{ job_signed: unknown; min_protocol_version: number | null }>("SELECT job_signed, min_protocol_version FROM agent_runs WHERE id = $1", [id])).rows[0]!;
     const WHOLE = "the whole finding, long ".repeat(50);

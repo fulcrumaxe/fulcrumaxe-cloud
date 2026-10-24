@@ -24,6 +24,7 @@ import type { NixDetail, NixFromDefault, NixResult, NixShellStep, NixSkip, NixSo
 import type { CheckLaunch, CheckOutcome, CheckRefused, CheckStepInput } from "./checkStep.js";
 import { depsDetail, registryHostOf, TEST_ROLES, type DepsDetail } from "../job/depsRegistry.js";
 import { repoMapDigest } from "../job/repoMap.js";
+import { pinLedgerSections, readJobPins, type JobPinsRead } from "../job/pinFiles.js";
 import { SpillRefused, prepareSpill, removeSpill, type SpillHandle } from "../job/spillFiles.js";
 import { checkNote, DEPS_FAILED_NOTE, DEPS_INSTALLED_NOTE, DEPS_REGISTRY_NOTE, NIX_FLAKE_CHANGED_NOTE } from "../job/prompt.js";
 import type { DepsInstaller } from "./depsInstall.js";
@@ -414,6 +415,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       if (job.check !== undefined) promptNotes.push(checkNote(job.check, job.role));
       const checkHeld: { outcome?: CheckOutcome } = {};
       const repoMapHeld: { map?: { version: string; text: string } } = {};
+      const pinsHeld: { read?: JobPinsRead } = {};
       // D#6 RUNNER-CWD-1: what the workspace held right before the agent started, so the CLI's placeholders made during the run can be cleared before the check and the publish.
       let stubsBefore: StubBaseline | undefined;
       const clearStubs = (workspace: string): void => {
@@ -458,6 +460,8 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             if (deps.planePush !== undefined && enters(job)) deps.planePush.baseLedger.record(claimed.runId, started.base);
             mark("cloned");
             await prepareMap(job, git, started.base, repoMapHeld);
+            // D#600 CX-5c2: the job's pins, read from the checkout just made (at the start commit) before the agent can touch it. Never a reason to refuse the run.
+            pinsHeld.read = await readJobPins(job, workspace);
             // D#6 R7c: the repo's Nix dev shell, only for a job with signed, approved allowances. A skip or a failure leaves the job without one.
             if (grant !== undefined) await prepareNix(job, git, grant, started.base, promptNotes);
             await prepareDeps(job, workspace, promptNotes, stopRun, mark);
@@ -497,7 +501,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
               checkHeld.outcome = closed("the check was not run: it is not set up on this runner", "not_set_up");
             }
           };
-          result = await run(job, { ...deps.run, afterAgent, promptNotes: () => promptNotes, repoMap: () => repoMapHeld.map, ...(spillHeld === undefined ? {} : { taskPrompt: spillHeld.rewrite }), planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger });
+          result = await run(job, { ...deps.run, afterAgent, promptNotes: () => promptNotes, repoMap: () => repoMapHeld.map, pinned: () => pinsHeld.read?.items, ...(spillHeld === undefined ? {} : { taskPrompt: spillHeld.rewrite }), planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger });
         }
       } catch (error) {
         // The workspace could not be made, or the job is not one this path pushes. Only the closed code is kept: an error text could hold a path or a remote.
@@ -560,13 +564,15 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       // A check that did not pass: the branch is on the run branch for the fix round (pushed above), the public-push hook is not entered, and the run ends `check_failed`.
       // `done` still goes, carrying the check result, so the cloud records what ran (the run is already ended by `run_ended`, which the cloud may answer with a stop).
       // A job with a check always has an outcome here; if the hook never recorded one, that is a failure, not a pass.
+      // What the runner knows about the context it loaded, for the ledger: the repository map's size and hash, and the pinned files' sections and reasons. The same on every way a run ends.
+      const ledgerSections = (): ContextSection[] => [...(repoMapHeld.map === undefined ? [] : [{ code: "map" as const, ...repoMapDigest(repoMapHeld.map.text), trimmed_bytes: 0 }]), ...(pinsHeld.read === undefined ? [] : pinLedgerSections(pinsHeld.read))];
       const checked = checkHeld.outcome ?? (job.check === undefined ? undefined : closedCheck("the check was not run", "other"));
       if (checked !== undefined && !checked.passed) {
         await lease.flush();
         const stoppedAtCheck = lease.ended();
         if (stoppedAtCheck !== undefined) return stoppedBy(stoppedAtCheck);
         await reportEnd(lease, { reason: "check_failed", ...(checked.noDevShell === true ? { detail: "check_no_dev_shell" as const } : {}) });
-        const sentFailed = await sendDone(claimed, result, lease, [], checked.body);
+        const sentFailed = await sendDone(claimed, result, lease, ledgerSections(), checked.body);
         if (sentFailed.status === "aborted") abandonSend = !(await reportShutdown(lease));
         return sentFailed;
       }
@@ -584,7 +590,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       // A stop reply (to anything sent so far, the flush included) ends the run: `done` is not sent for it.
       const stoppedAfterPush = lease.ended();
       if (stoppedAfterPush !== undefined) return stoppedBy(stoppedAfterPush);
-      const sent = await sendDone(claimed, result, lease, repoMapHeld.map === undefined ? [] : [{ code: "map", ...repoMapDigest(repoMapHeld.map.text), trimmed_bytes: 0 }], checked?.body);
+      const sent = await sendDone(claimed, result, lease, ledgerSections(), checked?.body);
       if (sent.status === "aborted") abandonSend = !(await reportShutdown(lease));
       return sent;
     } finally {

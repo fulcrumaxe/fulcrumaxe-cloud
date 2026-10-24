@@ -162,6 +162,25 @@ describe("run context ledger [pg] (D#600 CX-1a)", () => {
       expect(r[0].sections).toEqual([section("boundary", 40), mapSection(900), section("spec", 200)]);
     });
 
+    it("the runner's done adds its pinned sections and reason notes once (D#600 CX-5c2); a second call, a boundary or a spec cannot overwrite or add", async () => {
+      const A = await seed();
+      await dispatchWrite(A, [section("boundary", 40), section("spec", 200)]);
+      const pinned = [section("pinned", 120), { ...section("pinned", 2), trimmed_reason: "pin_missing" as const }, { ...section("pinned", 1), trimmed_reason: "pins_over_budget" as const }];
+      await record(A.accountId, A.runId, [mapSection(900), ...pinned, section("boundary", 1), section("spec", 999_999)], measureOf(usage("r1", 10, 0, 0)));
+      const { rows: r } = await rows(A.accountId, A.runId);
+      expect(r[0].sections).toEqual([section("boundary", 40), section("spec", 200), mapSection(900), ...pinned]);
+      // One shot: a repeat of the same call (a resume's second command) adds nothing, and a different pinned set does not replace the first.
+      await record(A.accountId, A.runId, [...pinned, section("pinned", 77)], measureOf(usage("r2", 10, 0, 0)));
+      expect((await rows(A.accountId, A.runId)).rows[0].sections).toEqual([section("boundary", 40), section("spec", 200), mapSection(900), ...pinned]);
+    });
+
+    it("pinned entries from the runner never push the row past 64 entries", async () => {
+      const A = await seed();
+      await dispatchWrite(A, Array.from({ length: 60 }, (_, i) => section("note", i + 1)));
+      await record(A.accountId, A.runId, Array.from({ length: 10 }, (_, i) => section("pinned", i + 1)), measureOf(usage("r1", 10, 0, 0)));
+      expect((await rows(A.accountId, A.runId)).rows[0].sections).toHaveLength(64);
+    });
+
     it("the runner cannot change the cloud's figures for any other code, and cannot add one", async () => {
       const A = await seed();
       await dispatchWrite(A, [section("boundary", 40), section("spec", 200)]);

@@ -9,15 +9,9 @@
  * Only the number of files read is bounded (`PINS_MAX_READ`), because each is a GitHub call; the rest are counted as missing.
  */
 
-/** The most a single pinned file may be fetched at (the top of the repository budget's range, migration 0870): above it the file is not even downloaded. */
-export const PIN_FILE_MAX_BYTES = 2_097_152;
-/**
- * The run-time cap on one pinned file, in characters. The prompt fence (`sanitize`) takes 200,000 characters of input and silently cuts the rest, and pins are
- * never cut, so a larger file is skipped and recorded as too large instead (D#600 CX-5b ruling). The room under 200,000 is for the "path:" line in front.
- */
-export const PIN_FILE_MAX_CHARS = 190_000;
-/** The most pinned files read for one run. Further pins are counted as missing (never silently dropped). */
-export const PINS_MAX_READ = 40;
+// The caps, the exclude match and the read loop are shared with the local runner (D#600 CX-5c2): one copy in the protocol package.
+import { readPinFiles } from "@fulcrumaxe/runner-protocol";
+export { PIN_FILE_MAX_BYTES, PIN_FILE_MAX_CHARS, PINS_MAX_READ, excludeCovers } from "@fulcrumaxe/runner-protocol";
 
 /** The GitHub reads the pins need (structurally the `RepoTreeSource` of @fx/github). */
 export interface PinSource {
@@ -46,49 +40,10 @@ export interface PinContent {
   tooLarge: number;
 }
 
-/**
- * Whether an exclude pattern (a path, a folder, or a glob; gitignore-style, as the CLI matches it) covers a repository-relative path. An exclude wins over a pin, so
- * this errs towards covering: the match ignores case (the CLI refused `Secret/a.txt` under the exclude `secret`), a pattern without a slash matches at any depth as well as from the root, and a folder pattern covers everything under it.
- * `*` and `?` do not cross a `/`, `**` does, `[...]` is a character class; `{ }` and `( )` are ordinary characters.
- */
-export function excludeCovers(pattern: string, path: string): boolean {
-  const trimmed = pattern.replace(/^\/+/, "").replace(/\/+$/, "");
-  if (trimmed === "") return false;
-  let re = "";
-  for (let i = 0; i < trimmed.length; i += 1) {
-    const c = trimmed[i]!;
-    if (c === "*") {
-      if (trimmed[i + 1] === "*") {
-        const slash = trimmed[i + 2] === "/";
-        re += slash ? "(?:.*/)?" : ".*";
-        i += slash ? 2 : 1;
-      } else re += "[^/]*";
-    } else if (c === "?") re += "[^/]";
-    else if (c === "[") {
-      const close = trimmed.indexOf("]", i + 2);
-      if (close === -1) re += "\\[";
-      else {
-        re += `[${trimmed.slice(i + 1, close).replace(/^!/, "^").replace(/\\/g, "\\\\")}]`;
-        i = close;
-      }
-    } else re += c.replace(/[.+^${}()|\\]/g, "\\$&");
-  }
-  try {
-    const anchored = new RegExp(`^${re}(?:/.*)?$`, "i");
-    if (anchored.test(path)) return true;
-    return !trimmed.includes("/") && new RegExp(`^(?:.*/)?${re}(?:/.*)?$`, "i").test(path);
-  } catch {
-    // fx-swallow-ok: a pattern that is not a valid expression covers the path, the safe side for an exclude
-    return true;
-  }
-}
-
 /** What the build step asks for. A port that is absent, or throws, leaves every pin missing; the run still starts. */
 export interface PinContentPort {
   forRun(request: PinRequest): Promise<PinContent>;
 }
-
-const bytesOf = (s: string): number => Buffer.byteLength(s, "utf8");
 
 export function createPinContentPort(deps: { open: (request: PinRequest) => Promise<PinSource>; log?: (reason: string) => void }): PinContentPort {
   return {
@@ -109,32 +64,7 @@ export function createPinContentPort(deps: { open: (request: PinRequest) => Prom
         if (tree.truncated) deps.log?.("tree_truncated");
         const blobs = new Map<string, { sha: string; size?: number }>();
         for (const e of tree.entries) if (e.type === "blob") blobs.set(e.path, { sha: e.sha, ...(e.size === undefined ? {} : { size: e.size }) });
-        const items: PinContent["items"] = [];
-        let missing = Math.max(0, paths.length - PINS_MAX_READ);
-        let tooLarge = 0;
-        if (missing > 0) deps.log?.("pins_over_count");
-        for (const path of paths.slice(0, PINS_MAX_READ)) {
-          const blob = blobs.get(path);
-          if (blob === undefined) {
-            missing += 1;
-            continue;
-          }
-          if (blob.size !== undefined && blob.size > PIN_FILE_MAX_BYTES) {
-            tooLarge += 1;
-            continue;
-          }
-          const text = await source.blob(blob.sha, PIN_FILE_MAX_BYTES);
-          if (text === null || text.includes("\0") || bytesOf(text) > PIN_FILE_MAX_BYTES) {
-            missing += 1;
-            continue;
-          }
-          if (text.length > PIN_FILE_MAX_CHARS) {
-            tooLarge += 1;
-            continue;
-          }
-          items.push({ path, text });
-        }
-        return { items, missing, tooLarge };
+        return await readPinFiles(paths, { stat: async (path) => blobs.get(path) ?? null, text: async (path, max) => source.blob(blobs.get(path)!.sha, max) }, deps.log);
       } catch {
         // fx-swallow-ok: pins that cannot be read are left out and counted as missing; the run starts and the reason is logged as a fixed word
         return none("unavailable");

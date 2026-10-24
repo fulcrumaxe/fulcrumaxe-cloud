@@ -55,17 +55,16 @@ describe("D#6 R-CHK-2: the run ends check_failed", () => {
     expect(LocalOnlyEvent.safeParse({ ...event, reason: "wall_clock", detail: "check_no_dev_shell" }).success).toBe(false);
   });
 
-  it("the runner declares the version that first runs a check", () => {
-    expect(CURRENT_PROTOCOL_VERSION).toBe(CHECK_JOB_MIN_PROTOCOL);
+  it("the runner declares a version that first runs a check or a later one", () => {
+    expect(CURRENT_PROTOCOL_VERSION).toBeGreaterThanOrEqual(CHECK_JOB_MIN_PROTOCOL);
   });
 });
 
 describe("D#6 R-CHK-3d: the optional reason", () => {
-  it("is optional: a protocol 8 runner that omits it is accepted, and the protocol version stays 8", () => {
+  it("is optional: a protocol 8 runner that omits it is accepted, and the check floor stays 8", () => {
     expect(DoneCheck.safeParse(CHECK).success).toBe(true);
     expect(done({ check: CHECK }).success).toBe(true);
     expect(CHECK_JOB_MIN_PROTOCOL).toBe(8);
-    expect(CURRENT_PROTOCOL_VERSION).toBe(8);
   });
 
   it("takes every code of the closed set, and any other short lowercase word (a newer runner), but nothing that could be text or markup", () => {

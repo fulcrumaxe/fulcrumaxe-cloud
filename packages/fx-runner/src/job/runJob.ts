@@ -59,6 +59,8 @@ export interface RunJobDeps {
   promptNotes?: () => readonly string[];
   /** D#600 CX-3b: the repository map the daemon built from its mirror for this job, if it did. Read after the workspace is filled, like `promptNotes`. */
   repoMap?: () => { version: string; text: string } | undefined;
+  /** D#600 CX-5c2: the pinned files the daemon read from the checkout for this job, each whole. Read after the workspace is filled, like `repoMap`. */
+  pinned?: () => readonly { path: string; text: string }[] | undefined;
   /** D#600 CX-4b: points the task prompt's trimmed markers at this run's spill files. Applied after the hashes were checked on the signed text. */
   taskPrompt?: (signed: string) => string;
   /**
@@ -121,7 +123,7 @@ export async function runJob(job: RunnableJob, deps: RunJobDeps): Promise<RunJob
     runId: job.run_id,
     role: job.role,
     roleCard: job.role_card.text,
-    prompt: buildPrompt(job, deps.promptNotes?.() ?? [], deps.repoMap?.(), deps.taskPrompt?.(job.task.prompt)),
+    prompt: buildPrompt(job, deps.promptNotes?.() ?? [], deps.repoMap?.(), deps.taskPrompt?.(job.task.prompt), deps.pinned?.()),
     model: cliModel,
     workdir: workspace,
     // D#600 CX-5c: the paths kept out of context. The engine writes them as deny entries before every agent command, so a resumed command has them too.
