@@ -306,7 +306,7 @@ describe("installation-wide token (WideScope)", () => {
 
 describe("no purpose ever requests repository administration (D#2 RC-1a, C64 section 3)", () => {
   // A Record keyed by MintPurpose: a new purpose fails typecheck until it is listed here.
-  const KIND: Record<MintPurpose, string> = { run: "team", preview_read: "team_readonly", sitekit_read: "sitekit", merge_gate: "team", plan_read: "team_readonly", runner_git: "team", plane_push: "team", plane_publish_read: "team", branch_delete: "team", branch_sync: "team" };
+  const KIND: Record<MintPurpose, string> = { run: "team", preview_read: "team_readonly", sitekit_read: "sitekit", merge_gate: "team", plan_read: "team_readonly", runner_git: "team", plane_push: "team", plane_publish_read: "team", branch_delete: "team", branch_sync: "team", pairing_read: "team_readonly" };
   const scopes = [
     { repositories: ["r"] as [string], permissions: { metadata: "write", contents: "write", issues: "write", pull_requests: "write", discussions: "write" } as const },
     { installationWide: true as const, permissions: { metadata: "read" } as const },
@@ -316,11 +316,13 @@ describe("no purpose ever requests repository administration (D#2 RC-1a, C64 sec
     for (const scope of scopes) {
       // runner_git takes only metadata and contents, so both generic scopes here are refused outright: runnerProxyDecision.test.ts covers it.
       if (purpose === "runner_git") continue;
-      if ((purpose === "merge_gate" || purpose === "plan_read" || purpose === "plane_push" || purpose === "plane_publish_read" || purpose === "branch_delete" || purpose === "branch_sync") && "installationWide" in scope) continue; // refused outright: see the merge_gate, plan_read, plane_push, plane_publish_read and branch_delete tests
+      if ((purpose === "merge_gate" || purpose === "plan_read" || purpose === "plane_push" || purpose === "plane_publish_read" || purpose === "branch_delete" || purpose === "branch_sync" || purpose === "pairing_read") && "installationWide" in scope) continue; // refused outright: see the merge_gate, plan_read, plane_push, plane_publish_read and branch_delete tests
       // A plan_read mint is refused unless GitHub's answer says the token is read-only, so the answer says so.
       const answer: { permissions: Record<string, string>; repositories?: string[] } =
         purpose === "plane_push"
           ? { permissions: { metadata: "read", contents: "write", pull_requests: "write" }, repositories: ["r"] }
+          : purpose === "pairing_read"
+            ? { permissions: { metadata: "read" }, repositories: ["r"] }
           : purpose === "plane_publish_read"
             ? { permissions: { metadata: "read", contents: "read" }, repositories: ["r"] }
             : purpose === "branch_delete"
@@ -344,6 +346,8 @@ describe("no purpose ever requests repository administration (D#2 RC-1a, C64 sec
       } else if (purpose === "branch_delete") {
         // D#598 P1f-5d: whatever the caller asked for, exactly contents write of the one repository.
         expect(granted).toEqual({ contents: "write" });
+      } else if (purpose === "pairing_read") {
+        expect(granted).toEqual({ metadata: "read" });
       } else if (purpose === "plane_publish_read") {
         // D#598 P1f-4b: whatever the caller asked for, exactly the contents read of the one repository.
         expect(granted).toEqual({ metadata: "read", contents: "read" });
@@ -644,5 +648,45 @@ describe("plane_publish_read (D#598 P1f-4b)", () => {
     await expect(mint(good, { appKind: "sitekit", appCredentials }).run()).rejects.toThrow("purpose_not_allowed");
     await expect(mint(good, { appKind: null, appCredentials }).run()).rejects.toThrow("purpose_not_allowed");
     expect(appCredentials).not.toHaveBeenCalled();
+  });
+});
+
+describe("pairing_read (D#598 PAIR-PICKER-API)", () => {
+  const good = { permissions: { metadata: "read" }, repositories: ["site"] };
+  const mint = (answer: Record<string, unknown>, over: Partial<Parameters<typeof getInstallationToken>[0]> = {}) => {
+    const requester = vi.fn(async () => ({ token: "ghs_pairingread", expiresAt: new Date(Date.now() + 3600_000).toISOString(), ...answer }));
+    const revoke = vi.fn(async () => undefined);
+    const cache = new InstallationTokenCache();
+    const run = () =>
+      getInstallationToken({ installationId: 7, appKind: "team", purpose: "pairing_read", role: "pairing_read", scope: { repositories: ["site"], permissions: { contents: "write", metadata: "read" } }, appCredentials: creds(privateKeyPem), requester, cache, revoke, ...over });
+    return { run, requester, revoke, cache };
+  };
+
+  it("asks for metadata read of the one repository whatever the scope says, on either App, and is never cached", async () => {
+    const m = mint(good);
+    await m.run();
+    await m.run();
+    expect(m.requester).toHaveBeenCalledTimes(2);
+    expect(m.requester).toHaveBeenCalledWith(expect.objectContaining({ repositories: ["site"], permissions: { metadata: "read" } }));
+    await expect(mint(good, { appKind: "team_readonly" }).run()).resolves.toBe("ghs_pairingread");
+  });
+
+  it.each([["sitekit"], [null]])("refuses the App kind %s and a wide scope before any credential is used", async (kind) => {
+    const m = mint(good, { appKind: kind });
+    await expect(m.run()).rejects.toThrow("purpose_not_allowed");
+    const w = mint(good, { scope: { installationWide: true, permissions: { metadata: "read" } } });
+    await expect(w.run()).rejects.toThrow("purpose_not_allowed");
+    expect(m.requester).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["an extra permission", { permissions: { metadata: "read", contents: "read" }, repositories: ["site"] }],
+    ["a write", { permissions: { metadata: "write" }, repositories: ["site"] }],
+    ["a wider repository list", { permissions: { metadata: "read" }, repositories: ["site", "other"] }],
+    ["no repository list", { permissions: { metadata: "read" } }],
+  ])("refuses a token GitHub did not narrow as asked (%s) and revokes it", async (_l, answer) => {
+    const m = mint(answer);
+    await expect(m.run()).rejects.toThrow("token_scope_mismatch");
+    expect(m.revoke).toHaveBeenCalledWith("ghs_pairingread");
   });
 });

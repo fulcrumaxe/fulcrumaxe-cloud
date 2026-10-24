@@ -1201,6 +1201,7 @@ export interface Operations {
       identifier_rules_path: string | null;
       plan_data_rules_path: string | null;
       pr_footer: string | null;
+      code_repo_app_installed: boolean | null;
     };
   };
   putRepoPairing: {
@@ -1222,6 +1223,7 @@ export interface Operations {
       identifier_rules_path: string | null;
       plan_data_rules_path: string | null;
       pr_footer: string | null;
+      code_repo_app_installed: boolean | null;
     };
   };
   deleteRepoPairing: {
@@ -1231,6 +1233,22 @@ export interface Operations {
     query: undefined;
     body: undefined;
     response: null;
+  };
+  listPairingCandidates: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      data: Array<{
+        full_name: string;
+        visibility: "public";
+        default_branch: string | null;
+        app_installed: boolean;
+      }>;
+      truncated: boolean;
+    };
   };
   listRoles: {
     path: {
@@ -4678,6 +4696,17 @@ export const operations = {
   deleteRepoPairing: {
     method: "DELETE",
     path: "/api/v1/repos/{id}/pairing",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  listPairingCandidates: {
+    method: "GET",
+    path: "/api/v1/repos/{id}/pairing/candidates",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,
