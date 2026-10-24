@@ -155,6 +155,26 @@ describe.skipIf(!usable)("R-CHK-2: the check under the job's own sandbox rules",
     expect(existsSync(path.join(vcs, "new"))).toBe(false);
   });
 
+  it("the check's HOME is a fresh directory of its own inside the job's temp directory, with the pnpm settings and an empty .npmrc; the job reads it, and the host's own .npmrc stays unreadable", () => {
+    writeFileSync(path.join(home, ".npmrc"), "registry=https://host.example.invalid/\n");
+    const out = sh(`echo "home=$HOME"; cat "$HOME/.config/pnpm/config.yaml"; wc -c < "$HOME/.npmrc"; test -w "$HOME" && echo home-writable; cat ${path.join(home, ".npmrc")} 2>&1 | head -1`, false);
+    const lines = out.stdout.split("\n");
+    const tempDir = out.env.TMPDIR!;
+    expect(out.env.HOME!.startsWith(`${tempDir}/fx-check-home-`)).toBe(true);
+    expect(out.env.HOME).not.toBe(home);
+    expect(lines).toContain(`home=${out.env.HOME!}`);
+    expect(lines).toContain("verifyDepsBeforeRun: false");
+    expect(lines).toContain("minimumReleaseAge: 0");
+    expect(out.env.pnpm_config_store_dir).toBeDefined();
+    expect(lines).toContain(`storeDir: ${JSON.stringify(out.env.pnpm_config_store_dir)}`);
+    expect(lines).toContain("0");
+    expect(lines).toContain("home-writable");
+    expect(out.stdout).not.toContain("host.example.invalid");
+    // the setting the check itself is given is still there, and a second launch makes a home of its own
+    expect(out.env).toMatchObject({ pnpm_config_offline: "true", pnpm_config_minimum_release_age: "0" });
+    expect(sh("true", false).env.HOME).not.toBe(out.env.HOME);
+  });
+
   it("does not see the user's runtime directory with its session bus", () => {
     expect(sh(`ls ${USER_RUNTIME} 2>&1 | wc -l`, false).stdout.trim()).toBe("0");
   });

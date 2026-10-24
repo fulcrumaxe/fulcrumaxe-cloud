@@ -7,6 +7,7 @@ import { claimScratch, releaseScratch, WriteScratchRefused, type ScratchDirs } f
 import { JobEnvFileRefused, makeJobEnvDir, writeJobEnvFile } from "./jobEnvFile.js";
 import { NotAPlainSegment, segmentUnder } from "../job/plainSegment.js";
 import { applyNixView } from "./nixView.js";
+import { prepareCheckHome } from "./checkHome.js";
 import { sandboxLaunch } from "./probe.js";
 import { unixSocketFilter } from "./checkSeccomp.js";
 import { checkProtected } from "./checkProtected.js";
@@ -389,8 +390,9 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
     },
     timeoutMsOf: (handle) => entryOf(handle)?.timeoutMs,
     checkLaunch(handle, argv, devShell) {
-      const launched = entryOf(handle)?.launched;
-      if (launched === undefined || argv.length === 0) return undefined;
+      const entry = entryOf(handle);
+      const launched = entry?.launched;
+      if (entry === undefined || launched === undefined || argv.length === 0) return undefined;
       const platform = config.platform ?? "linux";
       const jobEnv = { ...(devShell ? launched.nixEnv ?? {} : {}), ...launched.plainEnv };
       // Subscription mode on purpose: it never needs an API key, and the one token it may copy is removed below.
@@ -412,6 +414,14 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       if (platform !== "linux") return { refused: "the check was not run: its sandbox is not available on this platform yet, so it cannot run under the agent's rules" };
       const filter = unixSocketFilter();
       if (filter === undefined) return { refused: "the check was not run: the Unix-socket filter is not available for this machine's architecture" };
+      // A home of the check's own, with the same pnpm settings as files, for the pnpm commands a test starts inside the check from a filtered environment (`checkHome.ts`). `HOME` is set last, like
+      // the marker, so nothing in the job env can change it. A home that cannot be made fails the check closed.
+      try {
+        env.HOME = prepareCheckHome(entry.tempDir, launched.plainEnv.pnpm_config_store_dir);
+      } catch {
+        // fx-swallow-ok: the refusal below is the answer; the error text could hold a path
+        return { refused: "the check was not run: its home directory could not be prepared in the job's temp directory" };
+      }
       const input = { platform, home: config.home, stateDir: config.stateDir, binaryDir: config.binaryDir };
       const launch = sandboxLaunch(input, launched.sandbox, env.PATH ?? "", argv, fsHost, [], true);
       if (!launch.ok || launch.kind !== "bubblewrap") return undefined;

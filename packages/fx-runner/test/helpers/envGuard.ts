@@ -66,6 +66,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/daemon/depsInstall.ts": ["fs", "path"], // D#6 C44-4: the host-side install: lstat and a no-follow read of the lockfile and two settings files, removal of node_modules trees (no link followed), the 0700 scratch directories; the package manager runs through the injected install capture
   "src/daemon/checkStep.ts": ["crypto", "fs", "path"], // D#6 R-CHK-2: puts the files the check vector names back to the start commit for the run (lstat, no-follow unlink, exclusive create) and gives the branch's version back; the check itself runs through the injected capture
   "src/sandbox/checkProtected.ts": ["fs", "path"], // D#6 R-CHK-2: lists the workspace root for `.env*` names (a read of one directory) to know which protected files exist
+  "src/sandbox/checkHome.ts": ["fs", "path"], // D#6 chknested: makes the check's own home (a fresh mkdtemp directory with two exclusively created files) inside the job's temp directory; nothing is read
   "src/sandbox/checkSeccomp.ts": ["os"], // D#6 R-CHK-2: os.arch() picks the system call numbers of the seccomp filter the check runs under; nothing else
   "src/job/lockfileCheck.ts": ["path"], // D#6 C44-4: normalising a repo-relative link target
   "src/daemon/mirror.ts": ["fs", "path"], // the persistent mirrors: a 0700 directory of bare repositories, one per repo id

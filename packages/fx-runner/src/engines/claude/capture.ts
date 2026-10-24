@@ -100,6 +100,9 @@ export function runCaptureWithInput(spawnFn: SpawnFn, command: string, args: rea
   });
 }
 
+/** The longest line `runInstall` hands to `onLine`; the rest of a longer line is dropped. */
+const LINE_MAX_CHARS = 4096;
+
 export interface InstallCaptured {
   code: number | null;
   /** The last `tailChars` characters of the output (standard output and error together). Raw: the caller redacts it. */
@@ -111,9 +114,10 @@ export interface InstallCaptured {
 /**
  * D#6 C44-4: runs a dependency install in `cwd` with an explicit environment and no shell, as the leader of its own process group. When `timeoutMs`
  * passes or `signal` aborts, the whole group is ended (SIGTERM, then SIGKILL), and the group is cleared when the program exits too, so nothing the
- * install started outlives it. Only the end of the output is kept.
+ * install started outlives it. Only the end of the output is kept; `onLine`, when given, is also called with every complete line of the whole output as it arrives
+ * (a line is cut at `LINE_MAX_CHARS`), so a caller can pick facts out of output far longer than the tail it keeps.
  */
-export function runInstall(spawnFn: SpawnFn, command: string, args: readonly string[], env: Record<string, string>, cwd: string, timeoutMs: number, tailChars: number, signal?: AbortSignal, feed?: Buffer): Promise<InstallCaptured> {
+export function runInstall(spawnFn: SpawnFn, command: string, args: readonly string[], env: Record<string, string>, cwd: string, timeoutMs: number, tailChars: number, signal?: AbortSignal, feed?: Buffer, onLine?: (line: string) => void): Promise<InstallCaptured> {
   return new Promise((resolve) => {
     let tail = "";
     let timedOut = false;
@@ -147,8 +151,19 @@ export function runInstall(spawnFn: SpawnFn, command: string, args: readonly str
     const keep = (chunk: Buffer): void => {
       tail = (tail + chunk.toString("utf8")).slice(-tailChars);
     };
-    child.stdout?.on("data", keep);
-    child.stderr?.on("data", keep);
+    // One line splitter per stream, so a line cut across two chunks is whole when `onLine` sees it and the two streams cannot interleave inside one.
+    const splitter = (): ((chunk: Buffer) => void) => {
+      let partial = "";
+      return (chunk) => {
+        keep(chunk);
+        if (onLine === undefined) return;
+        const lines = (partial + chunk.toString("utf8")).split("\n");
+        partial = (lines.pop() ?? "").slice(0, LINE_MAX_CHARS);
+        for (const line of lines) onLine(line.slice(0, LINE_MAX_CHARS));
+      };
+    };
+    child.stdout?.on("data", splitter());
+    child.stderr?.on("data", splitter());
     child.on("error", () => finish(null));
     child.on("close", (code) => {
       void terminateGroup(child, 500).then(() => finish(code));

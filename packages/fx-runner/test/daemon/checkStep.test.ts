@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CHECK_NOT_RUN_REASONS } from "@fulcrumaxe/runner-protocol";
-import { createBaseFile, createCheckStep, createVcsState, normalised, skippedTests, type CheckStepInput } from "../../src/daemon/checkStep.js";
+import { createBaseFile, createCheckStep, createFailedFiles, createVcsState, normalised, skippedTests, type CheckStepInput } from "../../src/daemon/checkStep.js";
 import { runCapture, runInstall } from "../../src/engines/claude/capture.js";
 import { testLaunch } from "../helpers/launch.js";
 
@@ -32,7 +32,7 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 const vcsState = createVcsState((command, args, env, timeoutMs) => runCapture(spawn, testLaunch(), command, args, env, timeoutMs, 1024 * 1024, 2048), {});
-const step = createCheckStep({ capture: (command, args, env, cwd, timeoutMs, tail, signal, feed) => runInstall(spawn, command, args, env, cwd, timeoutMs, tail, signal, feed), now: () => new Date(), vcsState });
+const step = createCheckStep({ capture: (command, args, env, cwd, timeoutMs, tail, signal, feed, onLine) => runInstall(spawn, command, args, env, cwd, timeoutMs, tail, signal, feed, onLine), now: () => new Date(), vcsState });
 const baseFile: CheckStepInput["baseFile"] = async (dir, sha, relative) => {
   try {
     return execFileSync("git", ["-C", dir, "cat-file", "blob", `${sha}:${relative}`]);
@@ -143,6 +143,51 @@ describe("what leaves the machine", () => {
     expect(skippedTests("no summary here")).toBeNull();
     const out = await run([script("vitest.sh", `echo '      Tests  5 passed | 7 skipped (12)'`)]);
     expect(out.body.skipped_tests).toBe(7);
+  });
+});
+
+describe("the failed test files the summary names", () => {
+  it("picks vitest's and pytest's failed files out of a line, behind a project name, a package prefix or colour codes, and nothing else", () => {
+    const seen = (lines: string[]): string => {
+      const found = createFailedFiles("/w/space");
+      for (const line of lines) found.line(line);
+      return found.summary();
+    };
+    expect(seen([" FAIL  test/scan.test.ts > pnpm --filter ops build > exits 0"])).toBe("failed test files (1): test/scan.test.ts\n");
+    expect(seen([" FAIL  |ops| test/scan.test.ts > a", "apps/ops test:  FAIL  src/a.test.tsx [ src/a.test.tsx ]", "\u001b[41m FAIL \u001b[49m  lib/b.spec.mjs > c"])).toBe("failed test files (3): test/scan.test.ts, src/a.test.tsx, lib/b.spec.mjs\n");
+    expect(seen(["FAILED tests/test_x.py::test_a - assert 1 == 2"])).toBe("failed test files (1): tests/test_x.py\n");
+    // the workspace prefix goes; an absolute path elsewhere, a name with odd characters, prose and a duplicate do not make it in
+    expect(seen([" FAIL  /w/space/pkg/a.test.ts > x", " FAIL  /etc/passwd.ts > x", " FAIL  a$(b).test.ts > x", "FAIL something happened", "a test said FAIL then ended", " FAIL  pkg/a.test.ts > y"])).toBe("failed test files (1): pkg/a.test.ts\n");
+    expect(seen(["all passed"])).toBe("");
+  });
+
+  it("is capped: the first files are named and the rest are counted, within the byte budget", () => {
+    const found = createFailedFiles("/w");
+    for (let i = 0; i < 300; i += 1) found.line(` FAIL  packages/some-long-package-name/test/file-number-${String(i)}.test.ts > t`);
+    const line = found.summary();
+    expect(line).toContain("failed test files (300): packages/some-long-package-name/test/file-number-0.test.ts, ");
+    expect(line).toMatch(/\(and \d+ more\)\n$/);
+    expect(Buffer.byteLength(line)).toBeLessThan(1700);
+  });
+
+  it("the capture hands over whole lines: one cut across two chunks is joined, a last line without a newline is not, and each stream has its own cut", async () => {
+    const got: string[] = [];
+    const file = script("cut.sh", `printf 'first '; sleep 0.3; printf 'half\\nsecond\\n'; printf 'err ' >&2; sleep 0.3; printf 'half\\n' >&2; printf 'no newline'`);
+    await runInstall(spawn, file, [], { PATH: process.env.PATH ?? "" }, ws, 30_000, 1024, undefined, undefined, (line) => got.push(line));
+    expect(got.sort()).toEqual(["err half", "first half", "second"]);
+  });
+
+  it("a failing check names every failed file, even when the output that follows is far longer than the tail the summary keeps; a passing check names none", async () => {
+    const lines = [" FAIL  apps/ops/test/scan.test.ts > pnpm --filter ops build > exits 0", " FAIL  |web| packages/db/test/a.pg.test.ts > b", "FAIL  third/test/c.test.ts [ third/test/c.test.ts ]"];
+    const body = `${lines.map((line) => `echo '${line}'`).join("\n")}\ni=0; while [ $i -lt 3000 ]; do echo "a long stack frame line number $i that fills the tail well past its limit"; i=$((i+1)); done`;
+    const failed = await run([script("many-fail.sh", `${body}\nexit 1`)]);
+    expect(failed.passed).toBe(false);
+    expect(Buffer.byteLength(failed.body.summary)).toBeLessThanOrEqual(4096);
+    expect(failed.body.summary.startsWith("failed test files (3): apps/ops/test/scan.test.ts, packages/db/test/a.pg.test.ts, third/test/c.test.ts\n")).toBe(true);
+    expect(failed.body.summary).not.toContain(" FAIL  apps/ops/test/scan.test.ts");
+    const passed = await run([script("many-pass.sh", `${body}\nexit 0`)]);
+    expect(passed.passed).toBe(true);
+    expect(passed.body.summary).not.toContain("failed test files");
   });
 });
 
