@@ -92,11 +92,11 @@ describe("check fix round [pg]", () => {
   });
 
   /** A finished executor run: `reason` is its failure reason (null: succeeded). `parent` makes it a fix round of that run. */
-  async function ended(o: { reason: string | null; parent?: string | null; summary?: string; exit?: number | null; timedOut?: boolean; check?: boolean; onItemBranch?: { pr: number; bound: boolean }; noMode?: boolean }): Promise<string> {
+  async function ended(o: { reason: string | null; parent?: string | null; summary?: string; exit?: number | null; timedOut?: boolean; check?: boolean; onItemBranch?: { pr: number; bound: boolean }; runBranch?: string; noMode?: boolean }): Promise<string> {
     const id = randomUUID();
     const job: Job = {
       schema_version: 1, job_id: randomUUID(), run_id: id, repo: { id: A.repoId, owner: "acme", name: "widgets", private: true }, role: "executor", mode: "local", spec: null,
-      task: { kind: "implement", prompt: "p", prompt_sha256: sha256Text("p") }, role_card: { text: "c", sha256: sha256Text("c") }, role_tools_sha256: "a".repeat(64), continues: o.onItemBranch ? { parent_run_id: randomUUID(), session_id: null, branch: "fx/issue-42", pr_number: o.onItemBranch.pr } : null,
+      task: { kind: "implement", prompt: "p", prompt_sha256: sha256Text("p") }, role_card: { text: "c", sha256: sha256Text("c") }, role_tools_sha256: "a".repeat(64), continues: o.onItemBranch ? { parent_run_id: randomUUID(), session_id: null, branch: "fx/issue-42", pr_number: o.onItemBranch.pr } : o.runBranch ? { parent_run_id: randomUUID(), session_id: "s-1", branch: o.runBranch } : null,
       branch_prefix: "fx/", model_hint: null, issued_at: "2026-10-10T12:00:00.000Z", expires_at: "2026-10-13T12:00:00.000Z", key_id: "k1",
       check: { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 },
     };
@@ -280,6 +280,88 @@ describe("check fix round [pg]", () => {
     expect(await startCheckFixRound(deps(), who(), failed)).toEqual({ ok: false, reason: "resume_failed" });
   });
 
+  it("an issuer that refuses the signed base (it belongs to another branch than the one resolved) is the named republish_base_missing, not the generic failure", async () => {
+    const failed = await ended({ reason: "check_failed" });
+    throwIssuer = "continues_base_invalid";
+    expect(await startCheckFixRound(deps(), who(), failed)).toEqual({ ok: false, reason: "republish_base_missing" });
+    expect(resumed).toHaveLength(0);
+  });
+
+  describe("FIXROUND-REPUBLISH (R2-c0): a round on a run branch whose pull request has a public copy", () => {
+    const L = "a".repeat(40);
+    const B = "b".repeat(40);
+    const M = "c".repeat(40);
+    const RUN_BRANCH = `fx/${randomUUID()}-g1`;
+    const facts = async () => (await admin.query<{ kind: string; code: string | null }>("SELECT kind, code FROM work_item_driver_events WHERE work_item_id = $1 ORDER BY seq", [A.workItemId])).rows;
+    /** The item's pull request as a runner's `done` recorded it, on `RUN_BRANCH`. */
+    const recordPr = async () => {
+      const built = await ended({ reason: null });
+      await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 3, 'run.status_changed', $3::jsonb)", [A.accountId, built, JSON.stringify({ from: "running", to: "succeeded", viaRunnerDone: true, branch: RUN_BRANCH, prNumber: 7 })]);
+    };
+    const publicCopy = async () => {
+      await admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, 'acme/widgets-public', $3)", [A.repoId, A.accountId, ["private/**"]]);
+      await admin.query(
+        `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state) VALUES ($1, $2, $3, 'acme/widgets-public', $4, $5, $6, 7, 'https://github.com/acme/widgets-public/pull/7', 'pr_opened')`,
+        [A.accountId, A.workItemId, A.repoId, "f".repeat(64), "d".repeat(40), "e".repeat(40)],
+      );
+    };
+    const round = async (syncBase: (i?: { publicCopy?: boolean }) => Promise<BranchSyncOutcome>, failed: string) => {
+      const sync = vi.fn(syncBase);
+      const out = await startCheckFixRound({ ...deps(), ...withSync(checkFixBeforeStart(writerPool, { privateHead: async () => L, publicHead: async () => "d".repeat(40), syncBase: sync }, who())) }, who(), failed);
+      return { out, sync };
+    };
+    const upToDate = async (): Promise<BranchSyncOutcome> => ({ kind: "up_to_date", baseSha: B, baseRef: "main", stacked: false });
+
+    it("syncs the pull request on the run branch the failed run continued and signs the base for that branch only", async () => {
+      await recordPr();
+      await publicCopy();
+      const failed = await ended({ reason: "check_failed", runBranch: RUN_BRANCH });
+      const { out, sync } = await round(async () => ({ kind: "merged", sha: M, parents: [L, B], baseSha: B, baseRef: "main", stacked: false }), failed);
+      expect(out.ok).toBe(true);
+      expect(sync).toHaveBeenCalledWith({ repo: { id: A.repoId, owner: "acme", name: "widgets" }, branch: RUN_BRANCH, prNumber: 7, publicCopy: true });
+      expect(resumed).toHaveLength(1);
+      expect(resumed[0]!.base).toEqual({ sha: B, branch: RUN_BRANCH });
+      expect(resumed[0]!.prompt).toContain(BASE_SYNCED_PROMPT_LINE);
+    });
+
+    it("an item with no public copy is unchanged: the pull request is synced when there is one, and no base rides the resume", async () => {
+      await recordPr();
+      const failed = await ended({ reason: "check_failed", runBranch: RUN_BRANCH });
+      const { out } = await round(upToDate, failed);
+      expect(out.ok).toBe(true);
+      expect(resumed[0]!.base).toBeUndefined();
+    });
+
+    it("a stacked change is refused republish_stacked_unsupported BEFORE any merge (the port would have answered 201 without the flag), nothing starts, and it is recorded", async () => {
+      await recordPr();
+      await publicCopy();
+      const failed = await ended({ reason: "check_failed", runBranch: RUN_BRANCH });
+      const merges = vi.fn();
+      const { out, sync } = await round((async (i?: { publicCopy?: boolean }) => {
+        if (i?.publicCopy === true) return { kind: "stacked", baseRef: "fx/parent" };
+        merges();
+        return { kind: "merged", sha: M, parents: [L, B], baseSha: B, baseRef: "fx/parent", stacked: true };
+      }) as never, failed);
+      expect(out).toEqual({ ok: false, reason: "republish_stacked_unsupported" });
+      expect(sync).toHaveBeenCalledWith(expect.objectContaining({ publicCopy: true }));
+      expect(merges).not.toHaveBeenCalled();
+      expect(resumed).toHaveLength(0);
+      expect(await facts()).toEqual([{ kind: "escalated", code: "republish_stacked_unsupported" }]);
+    });
+
+    it("a round with no pull request to sync (the failed run continued another branch, or none) never republishes: refused republish_base_missing", async () => {
+      await recordPr();
+      await publicCopy();
+      for (const failed of [await ended({ reason: "check_failed" }), await ended({ reason: "check_failed", runBranch: `fx/${randomUUID()}-g2` })]) {
+        const { out, sync } = await round(upToDate, failed);
+        expect(out).toEqual({ ok: false, reason: "republish_base_missing" });
+        expect(sync).not.toHaveBeenCalled();
+      }
+      expect(resumed).toHaveLength(0);
+      expect((await facts()).map((f) => f.code)).toEqual(["republish_base_missing", "republish_base_missing"]);
+    });
+  });
+
   describe("FIXROUND-BASE-SYNC: the branch is brought up to date with its base before a check fix round", () => {
     const L = "a".repeat(40);
     const B = "b".repeat(40);
@@ -293,7 +375,7 @@ describe("check fix round [pg]", () => {
     };
 
     it("main moved: the merge is made on the item's branch and recorded once, and the round starts", async () => {
-      const { out, syncBase, run } = await roundWith(async () => ({ kind: "merged", sha: M, parents: [L, B], baseSha: B, baseRef: "main" }));
+      const { out, syncBase, run } = await roundWith(async () => ({ kind: "merged", sha: M, parents: [L, B], baseSha: B, baseRef: "main", stacked: false }));
       expect(out.ok).toBe(true);
       expect(syncBase).toHaveBeenCalledWith({ repo: { id: A.repoId, owner: "acme", name: "widgets" }, branch: "fx/issue-42", prNumber: 7 });
       expect(started).toHaveLength(1);
@@ -308,7 +390,7 @@ describe("check fix round [pg]", () => {
     });
 
     it("main did not move: nothing is written and the round starts", async () => {
-      const { out } = await roundWith(async () => ({ kind: "up_to_date", baseSha: "c".repeat(40) }));
+      const { out } = await roundWith(async () => ({ kind: "up_to_date", baseSha: "c".repeat(40), baseRef: "main", stacked: false }));
       expect(out.ok).toBe(true);
       // Still signed with the base tip the cloud read, and no sync line in the prompt.
       expect(started[0]!.continues).toEqual({ branch: "fx/issue-42", prNumber: 7, baseSha: "c".repeat(40) });
@@ -318,7 +400,7 @@ describe("check fix round [pg]", () => {
 
     it("a conflict starts nothing, records the escalation, and leaves the stage to the build's own failure record", async () => {
       const before = (await admin.query("SELECT stage FROM work_items WHERE id = $1", [A.workItemId])).rows[0].stage;
-      const { out } = await roundWith(async () => ({ kind: "conflict", baseSha: B, baseRef: "main" }));
+      const { out } = await roundWith(async () => ({ kind: "conflict", baseSha: B, baseRef: "main", stacked: false }));
       expect(out).toEqual({ ok: false, reason: "base_sync_conflict" });
       expect(started).toHaveLength(0);
       expect(await facts()).toEqual([{ kind: "escalated", code: "base_sync_conflict", head_sha: L }]);
@@ -328,9 +410,9 @@ describe("check fix round [pg]", () => {
     it("GitHub that cannot be asked, a reply whose parents are not the checked head and the base tip, or a missing port refuses the round and starts nothing", async () => {
       for (const answer of [
         async (): Promise<BranchSyncOutcome> => { throw new Error("connect ECONNREFUSED token=ghs_x"); },
-        async (): Promise<BranchSyncOutcome> => ({ kind: "merged", sha: M, parents: [L, "d".repeat(40)], baseSha: B, baseRef: "main" }),
-        async (): Promise<BranchSyncOutcome> => ({ kind: "merged", sha: M, parents: [B, L], baseSha: B, baseRef: "main" }),
-        async (): Promise<BranchSyncOutcome> => ({ kind: "merged", sha: M, parents: [L], baseSha: B, baseRef: "main" }),
+        async (): Promise<BranchSyncOutcome> => ({ kind: "merged", sha: M, parents: [L, "d".repeat(40)], baseSha: B, baseRef: "main", stacked: false }),
+        async (): Promise<BranchSyncOutcome> => ({ kind: "merged", sha: M, parents: [B, L], baseSha: B, baseRef: "main", stacked: false }),
+        async (): Promise<BranchSyncOutcome> => ({ kind: "merged", sha: M, parents: [L], baseSha: B, baseRef: "main", stacked: false }),
       ]) {
         const { out } = await roundWith(answer, await ended({ reason: "check_failed", onItemBranch: { pr: 7, bound: true } }));
         expect(out).toEqual({ ok: false, reason: "base_sync_unavailable" });

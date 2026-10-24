@@ -1,6 +1,6 @@
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { BASE_SHA_JOB_MIN_PROTOCOL, CONTINUES_CROSS_SIDE_MIN_PROTOCOL, verifyJob } from "@fulcrumaxe/runner-protocol";
+import { BASE_SHA_JOB_MIN_PROTOCOL, BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL, CONTINUES_CROSS_SIDE_MIN_PROTOCOL, verifyJob } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import type { ExecutionRun } from "../src/executionTarget.js";
 import { JobIssueError, createJobIssuer, createJobSigner, createPgJobContext, type ContinuationBasePort } from "../src/targets/jobIssuer.js";
@@ -105,11 +105,24 @@ describe("cross-side continuation: the issuer's binding [pg] (D#599 PL-2b-1)", (
       const { parent, run } = await pair(w);
       const binding = createFakeContinuationBinding({ pulls: [openPull()] });
       const baseSha = "b".repeat(40);
-      await issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH, prNumber: 41, baseSha } });
+      await issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH, prNumber: 41, baseSha, baseBranch: ITEM_BRANCH } });
       const stored = await row(run.id);
       const job = verifyJob(stored.job_signed, { "job-key-1": publicKey }, { now: NOW });
       expect(job.continues).toEqual({ parent_run_id: parent.id, session_id: null, branch: ITEM_BRANCH, pr_number: 41, base_sha: baseSha });
       expect(stored.min_protocol_version).toBe(BASE_SHA_JOB_MIN_PROTOCOL);
+    });
+
+    it("signs the base on a run-branch continuation too, same-side with a session and cross-side without, and gates the job at the run-branch floor (R2-c0)", async () => {
+      const w = await world();
+      const baseSha = "b".repeat(40);
+      for (const sessionId of ["s-1", null]) {
+        const { parent, run } = await pair(w);
+        await issuerWith(createFakeContinuationBinding({ pulls: [openPull()] })).issue({ run, continues: { parentRunId: parent.id, sessionId, branch: RUN_BRANCH, baseSha, baseBranch: RUN_BRANCH } });
+        const stored = await row(run.id);
+        const job = verifyJob(stored.job_signed, { "job-key-1": publicKey }, { now: NOW });
+        expect(job.continues).toEqual({ parent_run_id: parent.id, session_id: sessionId, branch: RUN_BRANCH, base_sha: baseSha });
+        expect(stored.min_protocol_version).toBe(BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL);
+      }
     });
 
     it("a continuation the caller gave no base for keeps its floor and its bytes: no base_sha key", async () => {
@@ -130,14 +143,19 @@ describe("cross-side continuation: the issuer's binding [pg] (D#599 PL-2b-1)", (
       expect(stored.min_protocol_version).toBeNull();
     });
 
-    it("refuses a base that is not a full lower-case commit id, or one offered with a run branch, and records nothing", async () => {
+    it("refuses a base that is not a full lower-case commit id, or that was synced on another branch than the one continued, and records nothing", async () => {
       const w = await world();
       const { parent, run } = await pair(w);
       const binding = createFakeContinuationBinding({ pulls: [openPull()] });
       for (const baseSha of ["main", "b".repeat(39), "B".repeat(40), `${"b".repeat(40)}\n`]) {
-        expect(await codeOf(issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH, prNumber: 41, baseSha } })), baseSha).toBe("continues_base_invalid");
+        expect(await codeOf(issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH, prNumber: 41, baseSha, baseBranch: ITEM_BRANCH } })), baseSha).toBe("continues_base_invalid");
       }
-      expect(await codeOf(issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: "s-1", branch: RUN_BRANCH, baseSha: "b".repeat(40) } }))).toBe("continues_pr_mismatch");
+      // A base with no branch named, or synced on another branch, is refused for either kind of continuation.
+      for (const other of [undefined, RUN_BRANCH, "fx/issue-99"]) {
+        expect(await codeOf(issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH, prNumber: 41, baseSha: "b".repeat(40), ...(other === undefined ? {} : { baseBranch: other }) } })), String(other)).toBe("continues_base_invalid");
+      }
+      expect(await codeOf(issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: "s-1", branch: RUN_BRANCH, baseSha: "b".repeat(40), baseBranch: ITEM_BRANCH } }))).toBe("continues_base_invalid");
+      expect(await codeOf(issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: "s-1", branch: RUN_BRANCH, baseSha: "b".repeat(40) } }))).toBe("continues_base_invalid");
       expect((await row(run.id)).job_signed).toBeNull();
       expect(await eventsOf(run.id, RUNNER_CONTINUES_BOUND_KIND)).toEqual([]);
     });

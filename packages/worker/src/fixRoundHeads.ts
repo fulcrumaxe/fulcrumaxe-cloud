@@ -28,7 +28,7 @@ export interface FixRoundHeadPorts {
   /** The paired public branch's head now, or null when the branch does not exist. A throw is "GitHub could not be asked". */
   publicHead?: BranchHeadPort["branchHead"];
   /** FIXROUND-BASE-SYNC: merges the pull request's base branch into its private branch (fixRoundBase.ts). A throw is "GitHub could not be asked". */
-  syncBase?: (input: { repo: { id: string; owner: string; name: string }; branch: string; prNumber: number }) => Promise<BranchSyncOutcome>;
+  syncBase?: (input: { repo: { id: string; owner: string; name: string }; branch: string; prNumber: number; publicCopy?: boolean }) => Promise<BranchSyncOutcome>;
 }
 
 export const PR_HEAD_UNAVAILABLE = "pr_head_unavailable";

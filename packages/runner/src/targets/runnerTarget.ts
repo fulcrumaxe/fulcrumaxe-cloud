@@ -78,6 +78,8 @@ export interface RunContinues {
   prNumber?: number;
   /** FIXROUND-BASE-SYNC (R2-b): the base tip the cloud chose as the diff base, with `prNumber` only; the issuer signs it as `continues.base_sha`. */
   baseSha?: string;
+  /** FIXROUND-REPUBLISH (R2-c0): the branch `baseSha` was synced on; the issuer refuses a base for a branch other than the one it continues. */
+  baseBranch?: string;
   /**
    * The branch of the pull request being fixed, carried unchanged by a follow-up of a fix round (C22 section 2). When it is not set, the issuer
    * reads the branch `done` recorded for `parentRunId` (C25 section 1.2); it never derives one from the issue. Either way the issuer checks it
@@ -227,7 +229,7 @@ export class RunnerTarget implements ExecutionTarget {
       await this.deps.issuer.issue({
         run,
         ...this.modeInput,
-        continues: { parentRunId: run.parentRunId ?? null, sessionId: null, branch: run.continuesBranch, ...(run.continuesPrNumber === undefined ? {} : { prNumber: run.continuesPrNumber }), ...(run.continuesBaseSha === undefined ? {} : { baseSha: run.continuesBaseSha }) },
+        continues: { parentRunId: run.parentRunId ?? null, sessionId: null, branch: run.continuesBranch, ...(run.continuesPrNumber === undefined ? {} : { prNumber: run.continuesPrNumber }), ...(run.continuesBaseSha === undefined ? {} : { baseSha: run.continuesBaseSha, baseBranch: run.continuesBaseBranch }) },
       });
     } else await this.deps.issuer.issue({ run, ...this.modeInput });
     await this.recordSections(run);
@@ -240,7 +242,7 @@ export class RunnerTarget implements ExecutionTarget {
     await this.deps.issuer.issue({
       run,
       ...this.modeInput,
-      continues: { parentRunId: run.parentRunId ?? null, sessionId, ...(run.continuesBranch === undefined ? {} : { branch: run.continuesBranch }), ...(run.continuesPrNumber === undefined ? {} : { prNumber: run.continuesPrNumber }), ...(run.continuesBaseSha === undefined ? {} : { baseSha: run.continuesBaseSha }) },
+      continues: { parentRunId: run.parentRunId ?? null, sessionId, ...(run.continuesBranch === undefined ? {} : { branch: run.continuesBranch }), ...(run.continuesPrNumber === undefined ? {} : { prNumber: run.continuesPrNumber }), ...(run.continuesBaseSha === undefined ? {} : { baseSha: run.continuesBaseSha, baseBranch: run.continuesBaseBranch }) },
     });
     await this.recordSections(run);
     this.markQueued(run.accountId);

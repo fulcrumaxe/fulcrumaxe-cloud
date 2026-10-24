@@ -25,7 +25,7 @@ interface World {
   /** commit -> parents */
   parents: Map<string, string[]>;
   refs: Map<string, string>;
-  pull: { state: string; headRef: string; baseRef: string; headRepo: number; baseRepo: number };
+  pull: { state: string; headRef: string; baseRef: string; headRepo: number; baseRepo: number; defaultBranch: string | null };
   /** Pairs "branchTip>head" that GitHub would find conflicting. */
   conflicts: Set<string>;
   /** Overrides what the merges endpoint answers, for the failure cases. */
@@ -35,7 +35,7 @@ interface World {
 function world(): World {
   const parents = new Map<string, string[]>([[hex("1"), []], [hex("2"), [hex("1")]], [hex("3"), [hex("1")]]]);
   // main moved on (3); the item's branch (2) was cut from 1.
-  return { parents, refs: new Map([["main", hex("3")], [BRANCH, hex("2")]]), pull: { state: "open", headRef: BRANCH, baseRef: "main", headRepo: 7, baseRepo: 7 }, conflicts: new Set() };
+  return { parents, refs: new Map([["main", hex("3")], [BRANCH, hex("2")]]), pull: { state: "open", headRef: BRANCH, baseRef: "main", headRepo: 7, baseRepo: 7, defaultBranch: "main" }, conflicts: new Set() };
 }
 const ancestors = (w: World, c: string): Set<string> => {
   const seen = new Set<string>();
@@ -64,7 +64,7 @@ function setup(w: World, mint: Partial<{ permissions: Record<string, string>; re
     }
     const root = "/repos/acme/widgets";
     if (method === "GET" && url.pathname === `${root}/pulls/12`) {
-      return json(200, { number: 12, state: w.pull.state, head: { ref: w.pull.headRef, repo: { id: w.pull.headRepo } }, base: { ref: w.pull.baseRef, repo: { id: w.pull.baseRepo } } });
+      return json(200, { number: 12, state: w.pull.state, head: { ref: w.pull.headRef, repo: { id: w.pull.headRepo } }, base: { ref: w.pull.baseRef, repo: { id: w.pull.baseRepo, ...(w.pull.defaultBranch === null ? {} : { default_branch: w.pull.defaultBranch }) } } });
     }
     const ref = /^\/repos\/acme\/widgets\/git\/ref\/heads\/(.+)$/.exec(url.pathname);
     if (method === "GET" && ref) {
@@ -103,12 +103,54 @@ function setup(w: World, mint: Partial<{ permissions: Record<string, string>; re
 }
 const ask = (port: ReturnType<typeof setup>["port"], branch = BRANCH) => port.sync({ repo: REPO, branch, prNumber: 12 });
 
+describe("branch sync: stacked pull requests (R2-c0)", () => {
+  const stack = (w: World) => {
+    w.parents.set(hex("4"), [hex("1")]);
+    w.refs.set("fx/parent", hex("4"));
+    w.pull.baseRef = "fx/parent";
+  };
+  const ask2 = (t: ReturnType<typeof setup>, publicCopy?: boolean) => t.port.sync({ repo: REPO, branch: BRANCH, prNumber: 12, ...(publicCopy === undefined ? {} : { publicCopy }) });
+
+  it("with a public copy to republish, a stacked change is answered before the base is read or anything is merged: no ref read, no POST /merges, the branch unchanged", async () => {
+    // Without the flag the same world would get a 201 and a merge commit of the parent branch on the private branch.
+    const w = world();
+    stack(w);
+    const t = setup(w);
+    expect(await ask2(t, true)).toEqual({ kind: "stacked", baseRef: "fx/parent" });
+    expect(t.log).toEqual([`GET /repos/acme/widgets/pulls/12`, `DELETE /installation/token`]);
+    expect(t.bodies).toEqual([]);
+    expect(w.refs.get(BRANCH)).toBe(hex("2"));
+    expect(t.revoked()).toBe(1);
+  });
+
+  it("with no public copy a stacked change syncs as ever, and says it is stacked on every outcome; GitHub not naming the default branch counts as stacked", async () => {
+    const merged = world();
+    stack(merged);
+    const t = setup(merged);
+    expect(await ask2(t, false)).toMatchObject({ kind: "merged", baseRef: "fx/parent", stacked: true });
+    expect(t.bodies).toHaveLength(1);
+    const upToDate = world();
+    stack(upToDate);
+    upToDate.refs.set(BRANCH, hex("4"));
+    expect(await ask2(setup(upToDate))).toMatchObject({ kind: "up_to_date", baseRef: "fx/parent", stacked: true });
+    const conflict = world();
+    stack(conflict);
+    conflict.conflicts.add(`${hex("2")}>${hex("4")}`);
+    expect(await ask2(setup(conflict))).toMatchObject({ kind: "conflict", stacked: true });
+    const unnamed = world();
+    unnamed.pull.defaultBranch = null;
+    expect(await ask2(setup(unnamed))).toMatchObject({ kind: "merged", baseRef: "main", stacked: true });
+    // A change on the default branch is never refused by the flag.
+    expect(await ask2(setup(world()), true)).toMatchObject({ kind: "merged", stacked: false });
+  });
+});
+
 describe("branch sync: the merges call and what comes back", () => {
   it("201: main moved, no conflict: one merge commit whose parents are the branch tip and the base tip; the branch moved to it", async () => {
     const w = world();
     const t = setup(w);
     const out = await ask(t.port);
-    expect(out).toMatchObject({ kind: "merged", baseSha: hex("3"), baseRef: "main", parents: [hex("2"), hex("3")] });
+    expect(out).toMatchObject({ kind: "merged", baseSha: hex("3"), baseRef: "main", stacked: false, parents: [hex("2"), hex("3")] });
     expect(w.refs.get(BRANCH)).toBe((out as { sha: string }).sha);
     // The merged commit is the exact commit read, not a branch name; the message is fixed text.
     expect(t.bodies).toEqual([{ base: BRANCH, head: hex("3"), commit_message: `Bring ${BRANCH} up to date with main` }]);
@@ -124,7 +166,7 @@ describe("branch sync: the merges call and what comes back", () => {
     const w = world();
     w.refs.set(BRANCH, hex("3"));
     const t = setup(w);
-    expect(await ask(t.port)).toEqual({ kind: "up_to_date", baseSha: hex("3") });
+    expect(await ask(t.port)).toEqual({ kind: "up_to_date", baseSha: hex("3"), baseRef: "main", stacked: false });
     expect(w.refs.get(BRANCH)).toBe(hex("3"));
   });
 
@@ -132,7 +174,7 @@ describe("branch sync: the merges call and what comes back", () => {
     const w = world();
     w.conflicts.add(`${hex("2")}>${hex("3")}`);
     const t = setup(w);
-    expect(await ask(t.port)).toEqual({ kind: "conflict", baseSha: hex("3"), baseRef: "main" });
+    expect(await ask(t.port)).toEqual({ kind: "conflict", baseSha: hex("3"), baseRef: "main", stacked: false });
     expect(w.refs.get(BRANCH)).toBe(hex("2"));
     expect(t.revoked()).toBe(1);
   });

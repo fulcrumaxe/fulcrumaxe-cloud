@@ -10,7 +10,7 @@ import { PUBLIC_BRANCH_MOVED } from "@fx/core/src/repos/planePushRecord.js";
 import { lineFor } from "@fx/core/src/onboarding/previewProgress.js";
 import { createAdvanceModule, type AdvanceModuleDeps, type AdvanceReviewDeps } from "../src/advance.js";
 import { startCheckFixRound } from "../src/checkFix.js";
-import { BASE_SYNC_CONFLICT_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
+import { BASE_SYNC_CONFLICT_SENTENCE, REPUBLISH_BASE_MISSING_SENTENCE, REPUBLISH_STACKED_UNSUPPORTED_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
 import { BASE_SYNCED_STAGE, syncRunBranch } from "../src/fixRoundBase.js";
 import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
 import { generateKeyPairSync } from "node:crypto";
@@ -63,7 +63,7 @@ describe("fix round: the branch heads on GitHub before a round starts [pg]", { t
   const registry = { sandbox: { cancel: async (_run: ExecutionRun): Promise<CancelResult> => ({ settled_usd: 0, released_usd: 0 }) } } as unknown as ExecutionTargetRegistry;
 
   /** A round whose branch is already up to date with its base (204), so the rounds below that are not about the sync see no sync. */
-  const upToDate = async (): Promise<BranchSyncOutcome> => ({ kind: "up_to_date", baseSha: "c".repeat(40) });
+  const upToDate = async (): Promise<BranchSyncOutcome> => ({ kind: "up_to_date", baseSha: "c".repeat(40), baseRef: "main", stacked: false });
   function harness(given: FixRoundHeadPorts | null, seatResult: SeatResult | { ok: false; reason: string } = SEAT) {
     const heads = given && given.privateHead && !("syncBase" in given) ? { ...given, syncBase: upToDate } : given;
     const resumed: StartAgentRunInput[] = [];
@@ -91,7 +91,7 @@ describe("fix round: the branch heads on GitHub before a round starts [pg]", { t
   }
 
   /** A runner_local item at `pr_opened` whose build ended through `done` with its pull request on a run branch, as a runner build does. */
-  async function runnerItem(): Promise<{ a: SeedRefs; w: string; n: number; branch: string }> {
+  async function runnerItem(o: { noPr?: boolean } = {}): Promise<{ a: SeedRefs; w: string; n: number; branch: string }> {
     const a = await seedAccount(admin, randomUUID());
     await admin.query("UPDATE repos SET gh_owner = 'acme', gh_name = 'widgets', execution_mode = 'runner_local' WHERE id = $1", [a.repoId]);
     await admin.query("UPDATE agent_runs SET status = 'cancelled' WHERE account_id = $1", [a.accountId]);
@@ -106,7 +106,7 @@ describe("fix round: the branch heads on GitHub before a round starts [pg]", { t
     const { id: build } = await insertAgentRun(writerPool, { id: randomUUID(), accountId: a.accountId, workItemId: w, specVersionId: spec, role: "executor", runtime: "runner", executionMode: "runner_local", dispatchRepoId: a.repoId, dispatchPrNumber: n });
     const branch = `fx/${build}-g1`;
     await writeRunStatus(writerPool, { accountId: a.accountId, runId: build, from: "pending", to: "running" });
-    await writeRunStatus(writerPool, { accountId: a.accountId, runId: build, from: "running", to: "succeeded", result: { sessionId: "cc-session-1", envelope: { summary: "built" } }, runnerDone: { prNumber: PR, branch } });
+    await writeRunStatus(writerPool, { accountId: a.accountId, runId: build, from: "running", to: "succeeded", result: { sessionId: "cc-session-1", envelope: { summary: "built" } }, ...(o.noPr ? {} : { runnerDone: { prNumber: PR, branch } }) });
     return { a, w, n, branch };
   }
   /** The item's pairing, and the record of what the platform pushed to the public repo for it. */
@@ -246,7 +246,7 @@ describe("fix round: the branch heads on GitHub before a round starts [pg]", { t
   describe("FIXROUND-BASE-SYNC: the base is merged into the private branch before a review fix round", () => {
     const BASE = "f".repeat(40);
     const MERGE = "9".repeat(40);
-    const merged = (over: Partial<Extract<BranchSyncOutcome, { kind: "merged" }>> = {}): BranchSyncOutcome => ({ kind: "merged", sha: MERGE, parents: [ASKED, BASE], baseSha: BASE, baseRef: "main", ...over });
+    const merged = (over: Partial<Extract<BranchSyncOutcome, { kind: "merged" }>> = {}): BranchSyncOutcome => ({ kind: "merged", sha: MERGE, parents: [ASKED, BASE], baseSha: BASE, baseRef: "main", stacked: false, ...over });
     const syncFacts = async (w: string) => (await facts(w)).filter((f) => f.kind !== "fix_round_refused" && (f.code === "base_synced" || f.code === "base_sync_conflict" || f.code === "base_sync_unavailable"));
     const runs = async (w: string) => (await admin.query<{ n: number }>("SELECT count(*)::int AS n FROM agent_runs WHERE work_item_id = $1", [w])).rows[0]!.n;
 
@@ -298,7 +298,7 @@ describe("fix round: the branch heads on GitHub before a round starts [pg]", { t
 
     it("a conflict: no run, the item in Needs a person, the escalation recorded, and the branch untouched", async () => {
       const t = await runnerItem();
-      const h = harness({ privateHead: async () => ASKED, syncBase: async () => ({ kind: "conflict", baseSha: BASE, baseRef: "main" }) });
+      const h = harness({ privateHead: async () => ASKED, syncBase: async () => ({ kind: "conflict", baseSha: BASE, baseRef: "main", stacked: false }) });
       const before = await runs(t.w);
       expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "base_sync_conflict" });
       expect(h.resume).not.toHaveBeenCalled();
@@ -312,7 +312,7 @@ describe("fix round: the branch heads on GitHub before a round starts [pg]", { t
 
     it("a repeated conflict at the same head, after the item left Needs a person, moves it back and shows the sentence again", async () => {
       const t = await runnerItem();
-      const h = harness({ privateHead: async () => ASKED, syncBase: async () => ({ kind: "conflict", baseSha: BASE, baseRef: "main" }) });
+      const h = harness({ privateHead: async () => ASKED, syncBase: async () => ({ kind: "conflict", baseSha: BASE, baseRef: "main", stacked: false }) });
       expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "base_sync_conflict" });
       expect(await stageOf(t.w)).toBe("needs_human");
       // A person presses Approve: the item is back under review, and the branch and its base have not moved.
@@ -402,6 +402,77 @@ describe("fix round: the branch heads on GitHub before a round starts [pg]", { t
       expect(await stageOf(t.w)).toBe("changes_requested");
       // And a second round asked for while the first runs is refused by the one-live-executor rule, whatever the webhook said.
       expect(await h.module.advanceStartFix(who(t), { ...fixReq(t), headSha: MERGE })).toEqual({ ok: false, reason: "already_running" });
+    });
+  });
+
+  describe("FIXROUND-REPUBLISH (R2-c0): a review fix round of an item whose public pull request is open", () => {
+    const BASE = "f".repeat(40);
+    const sync = (over: Partial<Extract<BranchSyncOutcome, { kind: "up_to_date" }>> = {}) => async (): Promise<BranchSyncOutcome> => ({ kind: "up_to_date", baseSha: BASE, baseRef: "main", stacked: false, ...over });
+    const codes = async (w: string) => (await facts(w)).filter((f) => f.kind !== "fix_round_refused" && f.code?.startsWith("republish_")).map((f) => [f.kind, f.code]);
+
+    it("signs the base the sync read for the branch it synced, on the resume the same-side round makes; an item with no public copy carries none", async () => {
+      const t = await runnerItem();
+      await paired(t);
+      const h = harness({ privateHead: async () => ASKED, publicHead: async () => PUSHED, syncBase: sync() });
+      expect((await h.module.advanceStartFix(who(t), fixReq(t))).ok).toBe(true);
+      expect(h.resumed[0]!.base).toEqual({ sha: BASE, branch: t.branch });
+      const bare = await runnerItem();
+      const b = harness({ privateHead: async () => ASKED, syncBase: sync() });
+      expect((await b.module.advanceStartFix(who(bare), fixReq(bare))).ok).toBe(true);
+      expect(b.resumed[0]!.base).toBeUndefined();
+      // A public copy a person took over is not ours to update: no gate, no base.
+      const managed = await runnerItem();
+      await paired(managed, { managed: true });
+      const m = harness({ privateHead: async () => ASKED, syncBase: sync() });
+      expect((await m.module.advanceStartFix(who(managed), fixReq(managed))).ok).toBe(true);
+      expect(m.resumed[0]!.base).toBeUndefined();
+    });
+
+    // The real port's contract: a stacked change is answered "stacked" (nothing merged) when the caller says a public copy exists; otherwise it would get a 201.
+    const stackedPort = (merge: () => void) => async (i: { publicCopy?: boolean }): Promise<BranchSyncOutcome> => {
+      if (i.publicCopy === true) return { kind: "stacked", baseRef: "fx/parent" };
+      merge();
+      return { kind: "merged", sha: "9".repeat(40), parents: [ASKED, BASE], baseSha: BASE, baseRef: "fx/parent", stacked: true };
+    };
+
+    it("a stacked change is refused republish_stacked_unsupported BEFORE any merge: nothing starts, no merge was made, the item is in Needs a person with the plain sentence", async () => {
+      const t = await runnerItem();
+      await paired(t);
+      const merges = vi.fn();
+      const syncBase = vi.fn(stackedPort(merges));
+      const h = harness({ privateHead: async () => ASKED, publicHead: async () => PUSHED, syncBase });
+      expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "republish_stacked_unsupported" });
+      expect(syncBase).toHaveBeenCalledWith(expect.objectContaining({ publicCopy: true }));
+      expect(merges).not.toHaveBeenCalled();
+      expect((await facts(t.w)).map((f) => f.code)).not.toContain("base_synced");
+      expect(h.resume).not.toHaveBeenCalled();
+      expect(await liveRuns(t.w)).toBe(0);
+      expect(await stageOf(t.w)).toBe("needs_human");
+      expect(await codes(t.w)).toEqual([["escalated", "republish_stacked_unsupported"]]);
+      expect(await noticeOf(t)).toEqual({ kind: "needs_human", reason: REPUBLISH_STACKED_UNSUPPORTED_SENTENCE });
+    });
+
+    it("a round that cannot be signed with a base (no pull request to sync) never republishes: republish_base_missing, in Needs a person, and the checkout is never asked", async () => {
+      const t = await runnerItem({ noPr: true });
+      await paired(t);
+      const syncBase = vi.fn(sync());
+      const h = harness({ privateHead: async () => ASKED, publicHead: async () => PUSHED, syncBase });
+      expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "republish_base_missing" });
+      expect(syncBase).not.toHaveBeenCalled();
+      expect(h.resume).not.toHaveBeenCalled();
+      expect(await stageOf(t.w)).toBe("needs_human");
+      expect(await codes(t.w)).toEqual([["escalated", "republish_base_missing"]]);
+      expect(await noticeOf(t)).toEqual({ kind: "needs_human", reason: REPUBLISH_BASE_MISSING_SENTENCE });
+    });
+
+    it("a stacked change whose public copy does not exist yet is not refused and is synced as ever: there is nothing to republish", async () => {
+      const t = await runnerItem();
+      const merges = vi.fn();
+      const syncBase = vi.fn(stackedPort(merges));
+      const h = harness({ privateHead: async () => ASKED, syncBase });
+      expect((await h.module.advanceStartFix(who(t), fixReq(t))).ok).toBe(true);
+      expect(syncBase).toHaveBeenCalledWith(expect.not.objectContaining({ publicCopy: true }));
+      expect(merges).toHaveBeenCalledTimes(1);
     });
   });
 });

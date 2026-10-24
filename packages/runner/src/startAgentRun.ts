@@ -117,6 +117,11 @@ export interface StartAgentRunInput {
    * continuation with no session); a sandbox target ignores it (its prompt names the branch). `prNumber` goes with an item branch (`fx/issue-<n>`) only.
    */
   continues?: { branch: string; prNumber?: number; baseSha?: string };
+  /**
+   * FIXROUND-REPUBLISH (R2-c0): the diff base of a same-side fix round, which resumes a session and carries no `continues`: the base tip the cloud brought `branch` up to date with. With `continues`, its own
+   * `baseSha` is the base of its `branch` and this is not used.
+   */
+  base?: { sha: string; branch: string };
   workdir?: string;
   /** D#2 PREVIEW-RUNNER-EVENTS: see `ExecutionRun.cloneRepo` (`sha`: the proposal verifier's pinned checkout). */
   cloneRepo?: { owner: string; name: string; sha?: string };
@@ -194,7 +199,7 @@ export function buildExecutionRun(id: string, input: StartAgentRunInput): Execut
     prompt: input.prompt,
     model: input.model,
     backend: input.backend,
-    ...(input.continues ? { continuesBranch: input.continues.branch, continuesFresh: true, ...(input.continues.prNumber === undefined ? {} : { continuesPrNumber: input.continues.prNumber }), ...(input.continues.baseSha === undefined ? {} : { continuesBaseSha: input.continues.baseSha }) } : {}),
+    ...(input.continues ? { continuesBranch: input.continues.branch, continuesFresh: true, ...(input.continues.prNumber === undefined ? {} : { continuesPrNumber: input.continues.prNumber }), ...(input.continues.baseSha === undefined ? {} : { continuesBaseSha: input.continues.baseSha, continuesBaseBranch: input.continues.branch }) } : input.base ? { continuesBaseSha: input.base.sha, continuesBaseBranch: input.base.branch } : {}),
     workdir: input.workdir,
     cloneRepo: input.cloneRepo,
     contextSections: input.contextSections,
