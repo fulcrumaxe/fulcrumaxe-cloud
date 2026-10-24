@@ -6,12 +6,18 @@ import {
   MEMORY_STATUSES,
   MemoryInputError,
   decideMemory,
+  deleteMemory,
   editMemory,
+  listMemoryVersions,
   type LiveSecretsSource,
   type MemoryEntry,
 } from "@fx/core/src/memory/index.js";
 import { MEMORY_BATCH_DECISIONS, MEMORY_BATCH_MAX, decideMemoryBatch, markMemoryOpened } from "@fx/core/src/memory/batch.js";
 import { memoryRunsOf } from "@fx/core/src/memory/runCounts.js";
+import { MEMORY_REVERT_ACTIONS, MEMORY_REVERT_MAX, restorePreviousMemory, revertMemory } from "@fx/core/src/memory/undo.js";
+import { MEMORY_EXPORT_FORMATS, buildMemoryExport } from "@fx/core/src/memory/export.js";
+import { memoryHistory } from "@fx/core/src/memory/history.js";
+import { formatMemoryHistoryActor, formatMemoryHistoryAction } from "@fx/core/src/memory/format.js";
 import { MEMORY_LIST_MAX, listMemory, memoryMoveRef, memoryPendingCounts, memoryQueue, type MemoryScopeFilter } from "@fx/core/src/memory/view.js";
 import { ApiError } from "../errors.js";
 import type { RouteContext, RouteEntry } from "../registry.js";
@@ -151,6 +157,33 @@ const editResponseSchema = z.object({ entry: entrySchema, previous_id: z.string(
 const countMap = z.record(z.string(), z.number().int().min(0));
 export const memoryPendingCountsResponseSchema = z.object({ repos: countMap, items: countMap });
 const batchResponseSchema = z.object({ decided: z.number().int().min(0), entries: z.array(entrySchema) });
+
+// D#601 MEM-4b2: undo, delete and restore, history, export.
+const revertBodySchema = z.object({ ids: z.array(uuid).min(1).max(MEMORY_REVERT_MAX), action: z.enum(MEMORY_REVERT_ACTIONS) }).strict();
+const revertResponseSchema = z.object({ changed: z.number().int().min(0), entries: z.array(entrySchema) });
+const deleteResponseSchema = z.object({ outcome: z.enum(["deleted", "already_deleted", "restored", "not_deleted"]), entry: entrySchema });
+const restorePreviousResponseSchema = z.object({ entry: entrySchema, previous_id: z.string().uuid() });
+const historyEventSchema = z.object({
+  at: z.string(),
+  action: z.string().min(1),
+  label: z.string().min(1),
+  entry_id: z.string().uuid(),
+  version: z.number().int().min(1).nullable(),
+  from_status: z.enum(MEMORY_STATUSES).nullable(),
+  to_status: z.enum(MEMORY_STATUSES).nullable(),
+  actor_kind: z.enum(["person", "system", "unknown"]),
+  actor_user_id: z.string().uuid().nullable(),
+  actor_label: z.string().min(1),
+});
+const historyResponseSchema = z.object({ events: z.array(historyEventSchema), versions: z.array(entrySchema) });
+const exportQuerySchema = z.object({ repo_id: uuid, format: z.enum(MEMORY_EXPORT_FORMATS) }).strict();
+const exportResponseSchema = z.object({
+  format: z.enum(MEMORY_EXPORT_FORMATS),
+  filename: z.string().min(1),
+  content: z.string().min(1),
+  entries: z.number().int().min(0),
+  omitted: z.number().int().min(0),
+});
 
 function entryDto(e: MemoryEntry): z.infer<typeof entrySchema> {
   return {
@@ -434,6 +467,154 @@ export const memoryRoutes: RouteEntry[] = [
       try {
         const r = await decideMemoryBatch(mctx(ctx), { ids: body.ids, to: body.to });
         return { decided: r.decided, entries: r.entries.map(entryDto) };
+      } catch (err) {
+        throw mapMemoryError(err);
+      }
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/v1/memory/revert",
+    operationId: "revertMemory",
+    summary: "Undo a memory decision: back to proposed, reconsider, renew, restore or retire",
+    description: `${DECIDE_NOTE} \`action\` names the step, and every entry must be where that step starts: \`undo_approve\` (approved to proposed), \`reconsider\` (rejected to proposed), \`renew\` (expired to proposed, with a new 14-day expiry), \`restore_retired\` (retired to approved) and \`retire\` (approved to retired). An entry that already moved on answers 422 \`invalid_transition\` and nothing changes, so a late Undo cannot move an entry a second time. Up to 20 ids in one transaction, so a batch has one Undo. A proposal that went back to proposed is never recalled by a run.`,
+    principals: ["session"],
+    minRole: "member",
+    idempotency: "optional",
+    rateClass: "write",
+    bodySchema: revertBodySchema,
+    responseSchema: revertResponseSchema,
+    async handler(ctx, input) {
+      const body = input.body as z.infer<typeof revertBodySchema>;
+      try {
+        const r = await revertMemory(mctx(ctx), { ids: body.ids, action: body.action });
+        return { changed: r.changed, entries: r.entries.map(entryDto) };
+      } catch (err) {
+        throw mapMemoryError(err);
+      }
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/v1/memory/{id}/delete",
+    operationId: "deleteMemory",
+    summary: "Delete a memory entry (kept 30 days, then removed)",
+    description: `${DECIDE_NOTE} A soft delete: the entry leaves every list and is never recalled, and can be restored for 30 days (\`restoreMemory\`); after that the reconcile sweep removes it for good. \`already_deleted\` when it already was. A replaced (\`superseded\`) version cannot be deleted: 422 \`invalid_transition\`. Read the Deleted tab with \`listMemory\` and \`status=deleted\`.`,
+    principals: ["session"],
+    minRole: "member",
+    idempotency: "optional",
+    rateClass: "write",
+    paramsSchema: idParamsSchema,
+    responseSchema: deleteResponseSchema,
+    async handler(ctx, input) {
+      try {
+        const r = await deleteMemory({ ...mctx(ctx), liveSecrets: () => [] }, { id: input.params.id! });
+        return { outcome: r.outcome as z.infer<typeof deleteResponseSchema>["outcome"], entry: entryDto(r.entry) };
+      } catch (err) {
+        throw mapMemoryError(err);
+      }
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/v1/memory/{id}/restore",
+    operationId: "restoreMemory",
+    summary: "Restore a deleted memory entry",
+    description: `${DECIDE_NOTE} Brings a deleted entry back to the status it had, within 30 days of the delete: after that 422 \`invalid_transition\`. An approved entry that would exceed its scope's limit is refused (422 \`memory_full\`). \`not_deleted\` when the entry was not deleted.`,
+    principals: ["session"],
+    minRole: "member",
+    idempotency: "optional",
+    rateClass: "write",
+    paramsSchema: idParamsSchema,
+    responseSchema: deleteResponseSchema,
+    async handler(ctx, input) {
+      try {
+        const r = await deleteMemory({ ...mctx(ctx), liveSecrets: () => [] }, { id: input.params.id!, restore: true });
+        return { outcome: r.outcome as z.infer<typeof deleteResponseSchema>["outcome"], entry: entryDto(r.entry) };
+      } catch (err) {
+        throw mapMemoryError(err);
+      }
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/v1/memory/{id}/restore-previous",
+    operationId: "restorePreviousMemory",
+    summary: "Make the version an edit replaced the current one again",
+    description:
+      "Session only, member. Records the previous version's text, reason, kind and place as a NEW version of the entry (the chain only grows; the answer carries `previous_id`, the version that was replaced). The text goes through the same cleaning and credential scan as any edit, so a previous text that is now a live token value is refused (422 `secret_detected`). Who wrote the text never changes. An entry that was never edited answers 422 `invalid_transition`; a version that was edited since answers 409 `conflict`. Same rights as `editMemory`; the database re-checks.",
+    principals: ["session"],
+    minRole: "member",
+    idempotency: "optional",
+    rateClass: "write",
+    paramsSchema: idParamsSchema,
+    responseSchema: restorePreviousResponseSchema,
+    extraResponses: { "409": "Error `conflict`: the entry was edited by someone else first. Nothing changed." },
+    async handler(ctx, input) {
+      try {
+        const r = await restorePreviousMemory({ ...mctx(ctx), liveSecrets: () => memoryEditDeps.liveSecrets() }, input.params.id!);
+        return { entry: entryDto(r.entry), previous_id: r.previousId };
+      } catch (err) {
+        throw mapMemoryError(err);
+      }
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/v1/memory/{id}/history",
+    operationId: "getMemoryHistory",
+    summary: "The permanent history of a memory entry",
+    description:
+      "Session only, member. What happened to the entry, oldest first: each event has a fixed `label`, the version it happened to, the status before and after, and who did it (a person's user id, or a system source: the pipeline or the memory sweep). It covers the whole version chain, so an edit does not start a new history, and it stays readable after the 30-day purge removed the entry. The history holds no text; `versions` is the chain of rows still stored (the asked version and every one it replaced), oldest first, so each earlier text can be read. An id that is not one of the caller's entries, another account's included, answers 404.",
+    principals: ["session"],
+    minRole: "member",
+    idempotency: "never",
+    rateClass: "read",
+    paramsSchema: idParamsSchema,
+    responseSchema: historyResponseSchema,
+    async handler(ctx, input) {
+      try {
+        const id = input.params.id!;
+        const events = await memoryHistory(mctx(ctx), id);
+        // After the 30-day purge the rows are gone and the chain reads empty, while the history above remains.
+        const versions = await listMemoryVersions({ ...mctx(ctx), liveSecrets: () => [] }, id);
+        return {
+          events: events.map((e) => ({
+            at: e.at.toISOString(),
+            action: e.action,
+            label: formatMemoryHistoryAction(e.action),
+            entry_id: e.entryId,
+            version: e.version,
+            from_status: e.fromStatus,
+            to_status: e.toStatus,
+            actor_kind: e.actor.kind,
+            actor_user_id: e.actor.kind === "person" ? e.actor.userId : null,
+            actor_label: formatMemoryHistoryActor(e.actor),
+          })),
+          versions: versions.map(entryDto),
+        };
+      } catch (err) {
+        throw mapMemoryError(err);
+      }
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/v1/memory/export",
+    operationId: "exportMemory",
+    summary: "Export a repo's approved memory as AGENTS.md or CLAUDE.md text",
+    description:
+      "Session only, member. The approved entries of one repo (its repo scope only, nothing from the account, an item or a role) as the text of an `AGENTS.md` or `CLAUDE.md` file, for the person to download. Nothing is written into a workspace or a repo. An entry a person did not type (an agent's, the assistant's, an import's, a runner's) starts its line with a visible label, e.g. `- (agent-proposed) `, its text is collapsed to one line, and its markup characters (backslash, backtick, angle brackets, square brackets, `!`, `|`, `*`, `_`, `~`, `&`) are backslash-escaped, so the line is a paragraph that begins with the label and the text cannot open a heading, list, quote, code block or span, raw HTML or a link. Text that looks like a credential, or holds one of the tenant's live token values, is left out and counted in `omitted`. Another account's repo answers 404.",
+    principals: ["session"],
+    minRole: "member",
+    idempotency: "never",
+    rateClass: "read",
+    querySchema: exportQuerySchema,
+    responseSchema: exportResponseSchema,
+    async handler(ctx, input) {
+      const q = input.query as z.infer<typeof exportQuerySchema>;
+      try {
+        return await buildMemoryExport({ ...mctx(ctx), liveSecrets: () => memoryEditDeps.liveSecrets() }, { repoId: q.repo_id, format: q.format });
       } catch (err) {
         throw mapMemoryError(err);
       }

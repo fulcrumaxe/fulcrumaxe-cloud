@@ -3933,6 +3933,158 @@ export interface Operations {
       }>;
     };
   };
+  revertMemory: {
+    path: undefined;
+    query: undefined;
+    body: {
+      ids: Array<string>;
+      action: "undo_approve" | "reconsider" | "renew" | "restore_retired" | "retire";
+    };
+    response: {
+      changed: number;
+      entries: Array<{
+        id: string;
+        scope: "account" | "repo" | "item" | "role";
+        kind: "convention" | "command" | "fact" | "gotcha" | "preference" | "decision";
+        body: string;
+        why: string | null;
+        author_kind: "person" | "agent" | "assistant" | "import" | "runner_agent";
+        status: "proposed" | "approved" | "rejected" | "expired" | "retired" | "deleted" | "archived" | "superseded";
+        version: number;
+        content_sha256: string;
+        created_at: string;
+        updated_at: string;
+        approved_at: string | null;
+        expires_at: string | null;
+      }>;
+    };
+  };
+  deleteMemory: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      outcome: "deleted" | "already_deleted" | "restored" | "not_deleted";
+      entry: {
+        id: string;
+        scope: "account" | "repo" | "item" | "role";
+        kind: "convention" | "command" | "fact" | "gotcha" | "preference" | "decision";
+        body: string;
+        why: string | null;
+        author_kind: "person" | "agent" | "assistant" | "import" | "runner_agent";
+        status: "proposed" | "approved" | "rejected" | "expired" | "retired" | "deleted" | "archived" | "superseded";
+        version: number;
+        content_sha256: string;
+        created_at: string;
+        updated_at: string;
+        approved_at: string | null;
+        expires_at: string | null;
+      };
+    };
+  };
+  restoreMemory: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      outcome: "deleted" | "already_deleted" | "restored" | "not_deleted";
+      entry: {
+        id: string;
+        scope: "account" | "repo" | "item" | "role";
+        kind: "convention" | "command" | "fact" | "gotcha" | "preference" | "decision";
+        body: string;
+        why: string | null;
+        author_kind: "person" | "agent" | "assistant" | "import" | "runner_agent";
+        status: "proposed" | "approved" | "rejected" | "expired" | "retired" | "deleted" | "archived" | "superseded";
+        version: number;
+        content_sha256: string;
+        created_at: string;
+        updated_at: string;
+        approved_at: string | null;
+        expires_at: string | null;
+      };
+    };
+  };
+  restorePreviousMemory: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      entry: {
+        id: string;
+        scope: "account" | "repo" | "item" | "role";
+        kind: "convention" | "command" | "fact" | "gotcha" | "preference" | "decision";
+        body: string;
+        why: string | null;
+        author_kind: "person" | "agent" | "assistant" | "import" | "runner_agent";
+        status: "proposed" | "approved" | "rejected" | "expired" | "retired" | "deleted" | "archived" | "superseded";
+        version: number;
+        content_sha256: string;
+        created_at: string;
+        updated_at: string;
+        approved_at: string | null;
+        expires_at: string | null;
+      };
+      previous_id: string;
+    };
+  };
+  getMemoryHistory: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      events: Array<{
+        at: string;
+        action: string;
+        label: string;
+        entry_id: string;
+        version: (number) | (null);
+        from_status: ("proposed" | "approved" | "rejected" | "expired" | "retired" | "deleted" | "archived" | "superseded") | (null);
+        to_status: ("proposed" | "approved" | "rejected" | "expired" | "retired" | "deleted" | "archived" | "superseded") | (null);
+        actor_kind: "person" | "system" | "unknown";
+        actor_user_id: (string) | (null);
+        actor_label: string;
+      }>;
+      versions: Array<{
+        id: string;
+        scope: "account" | "repo" | "item" | "role";
+        kind: "convention" | "command" | "fact" | "gotcha" | "preference" | "decision";
+        body: string;
+        why: string | null;
+        author_kind: "person" | "agent" | "assistant" | "import" | "runner_agent";
+        status: "proposed" | "approved" | "rejected" | "expired" | "retired" | "deleted" | "archived" | "superseded";
+        version: number;
+        content_sha256: string;
+        created_at: string;
+        updated_at: string;
+        approved_at: string | null;
+        expires_at: string | null;
+      }>;
+    };
+  };
+  exportMemory: {
+    path: undefined;
+    query: {
+      repo_id: string;
+      format: "agents" | "claude";
+    };
+    body: undefined;
+    response: {
+      format: "agents" | "claude";
+      filename: string;
+      content: string;
+      entries: number;
+      omitted: number;
+    };
+  };
 }
 
 /** Every operation by operationId. scope is the scope a token needs (null when it needs none or cannot be used). */
@@ -5674,6 +5826,72 @@ export const operations = {
     pathParams: [],
     queryParams: [],
     hasBody: true,
+  },
+  revertMemory: {
+    method: "POST",
+    path: "/api/v1/memory/revert",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
+  },
+  deleteMemory: {
+    method: "POST",
+    path: "/api/v1/memory/{id}/delete",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  restoreMemory: {
+    method: "POST",
+    path: "/api/v1/memory/{id}/restore",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  restorePreviousMemory: {
+    method: "POST",
+    path: "/api/v1/memory/{id}/restore-previous",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  getMemoryHistory: {
+    method: "GET",
+    path: "/api/v1/memory/{id}/history",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  exportMemory: {
+    method: "GET",
+    path: "/api/v1/memory/export",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: ["repo_id","format"],
+    hasBody: false,
   },
 } as const;
 

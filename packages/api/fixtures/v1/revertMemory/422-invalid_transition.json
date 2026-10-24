@@ -1,0 +1,13 @@
+{
+  "error": {
+    "code": "invalid_transition",
+    "message": "request failed validation",
+    "request_id": "55555555-5555-4555-8555-555555555555"
+  },
+  "details": [
+    {
+      "path": "body",
+      "code": "invalid"
+    }
+  ]
+}

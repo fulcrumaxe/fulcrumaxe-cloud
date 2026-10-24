@@ -114,7 +114,7 @@ const SCOPE_ORDER: Readonly<Record<MemoryScope, number>> = { repo: 0, item: 1, r
 const UUID_LIST_MAX = 200;
 
 /** A repo's memory key: its GitHub node id and its installation's GitHub id. Null when the repo has no node id yet (nothing is recalled for it either). */
-async function repoScopeRefOf(client: PoolClient, repoId: string): Promise<string | null> {
+export async function repoScopeRefOf(client: PoolClient, repoId: string): Promise<string | null> {
   assertUuid('repo', repoId);
   const { rows } = await client.query<{ gh_node_id: string | null; gh_installation_id: string | null }>(
     `SELECT r.gh_node_id, i.gh_installation_id::text AS gh_installation_id

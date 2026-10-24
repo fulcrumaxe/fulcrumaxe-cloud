@@ -137,3 +137,30 @@ export function formatItemGroup(number: unknown, title: unknown): string {
   if (num !== '') return `#${num}`;
   return t === '' ? 'Item' : t;
 }
+
+/** What the history shows for each audit action: a fixed phrase, never the raw action text. */
+const HISTORY_LABEL: Readonly<Record<string, string>> = {
+  'memory.proposed': 'Proposed',
+  'memory.written': 'Written by a member',
+  'memory.approved': 'Approved',
+  'memory.rejected': 'Rejected',
+  'memory.retired': 'Retired',
+  'memory.reverted': 'Moved back to proposed',
+  'memory.edited': 'Edited',
+  'memory.deleted': 'Deleted',
+  'memory.restored': 'Restored',
+  'memory.receipt_promoted': 'Added from a decision receipt',
+  'memory.expired': 'Expired',
+  'memory.purged': 'Removed after 30 days',
+};
+
+export function formatMemoryHistoryAction(action: unknown): string {
+  return typeof action === 'string' ? (HISTORY_LABEL[action] ?? 'Changed') : 'Changed';
+}
+
+/** Who did a history event, as words. A person is "A member" here; the screen swaps in the name it holds for the user id. */
+export function formatMemoryHistoryActor(actor: { kind: 'person' } | { kind: 'system'; source: string } | { kind: 'unknown' }): string {
+  if (actor.kind === 'person') return 'A member';
+  if (actor.kind === 'system') return actor.source === 'memory_sweep' ? 'Memory sweep' : 'The pipeline';
+  return 'Unknown';
+}

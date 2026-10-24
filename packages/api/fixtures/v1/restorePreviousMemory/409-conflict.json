@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "conflict",
+    "message": "that entry was changed by someone else; reload and try again",
+    "request_id": "55555555-5555-4555-8555-555555555555"
+  }
+}
