@@ -13,6 +13,27 @@ describe("D#483 S4-e proposalIntakeBody", () => {
     const body = proposalIntakeBody({ summary: "s", claims: ["a", "  ", "b"], evidence: [{ ref: "src/a.ts:1-3", excerpt: "code" }, { ref: "x", excerpt: " " }] });
     expect(body).toBe("SUMMARY:\ns\n\nCLAIMS:\n- a\n- b\n\nEVIDENCE:\n[src/a.ts:1-3]\ncode");
   });
+  it("an unterminated comment in claim 1 hides only that claim: later claims and the evidence stay", () => {
+    const body = proposalIntakeBody({ summary: "s", claims: ["first <!-- never closed", "second claim", "third claim"], evidence: [{ ref: "a.ts:1", excerpt: "kept excerpt" }] });
+    expect(body).toContain("- second claim");
+    expect(body).toContain("- third claim");
+    expect(body).toContain("[a.ts:1]\nkept excerpt");
+    expect(body).not.toContain("<!--");
+  });
+  it("an unterminated comment in the summary or an excerpt stays inside its own part", () => {
+    const body = proposalIntakeBody({ summary: "head <!-- open", claims: ["c1"], evidence: [{ ref: "r1", excerpt: "x <!-- open" }, { ref: "r2", excerpt: "second excerpt" }] });
+    expect(body).toContain("- c1");
+    expect(body).toContain("[r2]\nsecond excerpt");
+    expect(body).not.toContain("<!--");
+  });
+  it("a closed comment is still stripped, and the text around it kept", () => {
+    const body = proposalIntakeBody({ summary: "a <!-- hidden --> b", claims: ["x <!-- y --> z"] });
+    expect(body).not.toContain("hidden");
+    expect(body).not.toContain("<!--");
+    expect(body).toContain("a ");
+    expect(body).toContain(" b");
+    expect(body).toContain(" z");
+  });
   it("is capped", () => {
     expect(proposalIntakeBody({ summary: "x".repeat(PROPOSAL_INTAKE_MAX_CHARS * 2) }).length).toBe(PROPOSAL_INTAKE_MAX_CHARS);
   });

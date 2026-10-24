@@ -7,7 +7,13 @@
  * a proposal's summary may come from an outside author's issue, and a person's approval click made the ITEM internal, not
  * the text. D#483 S4-b3 fills the claims and evidence slots from S4-a's tables at the one call site (apps/web/lib/advanceSteps.ts `loadBody`).
  * The labelled blocks are built here and nowhere else (a guard test fails the build otherwise).
+ *
+ * Each piece of text (the summary, every claim, every evidence ref and excerpt) has its control tokens stripped on its own before the pieces
+ * are joined, so an unterminated comment opener in one claim can only erase that claim, never the claims and evidence after it. The prompt
+ * builders still apply `sanitize` (the fence) to the joined body afterwards.
  */
+import { stripControlTokens } from "@fx/trust";
+
 export interface ProposalIntakeInput {
   summary: string | null;
   /** The texts of the proposal's `supported` claims only (S4-a `proposal_claims`); refuted, unverifiable and pending claims are left out by the reader. */
@@ -19,12 +25,13 @@ export interface ProposalIntakeInput {
 export const PROPOSAL_INTAKE_MAX_CHARS = 8000;
 
 export function proposalIntakeBody(input: ProposalIntakeInput): string {
+  const clean = (t: string): string => stripControlTokens(t).trim();
   const parts: string[] = [];
-  const summary = (input.summary ?? "").trim();
+  const summary = clean(input.summary ?? "");
   if (summary) parts.push(`SUMMARY:\n${summary}`);
-  const claims = (input.claims ?? []).map((c) => c.trim()).filter((c) => c.length > 0);
+  const claims = (input.claims ?? []).map(clean).filter((c) => c.length > 0);
   if (claims.length > 0) parts.push(`CLAIMS:\n${claims.map((c) => `- ${c}`).join("\n")}`);
-  const evidence = (input.evidence ?? []).filter((e) => e.excerpt.trim().length > 0);
-  if (evidence.length > 0) parts.push(`EVIDENCE:\n${evidence.map((e) => `[${e.ref}]\n${e.excerpt.trim()}`).join("\n\n")}`);
+  const evidence = (input.evidence ?? []).map((e) => ({ ref: clean(e.ref), excerpt: clean(e.excerpt) })).filter((e) => e.excerpt.length > 0);
+  if (evidence.length > 0) parts.push(`EVIDENCE:\n${evidence.map((e) => `[${e.ref}]\n${e.excerpt}`).join("\n\n")}`);
   return parts.join("\n\n").slice(0, PROPOSAL_INTAKE_MAX_CHARS);
 }
