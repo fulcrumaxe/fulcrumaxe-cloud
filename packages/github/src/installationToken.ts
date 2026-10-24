@@ -224,7 +224,7 @@ export class InstallationTokenCache {
  * permission set no other purpose may ask for (see MERGE_GATE_PERMISSIONS). It exists so the check-run, status and
  * branch-protection reads, and the commit-status write, are NOT in the allowlist of every other purpose.
  */
-export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push", "plane_publish_read", "branch_delete", "branch_sync"] as const;
+export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push", "plane_publish_read", "branch_delete", "branch_sync", "pairing_read"] as const;
 export type MintPurpose = (typeof MINT_PURPOSES)[number];
 
 /**
@@ -278,6 +278,12 @@ export const BRANCH_SYNC_PERMISSIONS: Readonly<Record<string, "read" | "write">>
  * run's fetch of the item branch. Never a write, and never the issue, pull request or Discussion reads a `plan_read` token carries.
  */
 export const PLANE_PUBLISH_READ_PERMISSIONS: Readonly<Record<string, "read">> = Object.freeze({ metadata: "read", contents: "read" });
+
+/**
+ * D#598 PAIR-PICKER-API: the only permission a `pairing_read` token asks for: `metadata: read` of ONE repository, to read its public facts (visibility,
+ * default branch) with the account's own installation instead of the shared unauthenticated allowance. Minted per read and revoked by the caller.
+ */
+export const PAIRING_READ_PERMISSIONS: Readonly<Record<string, "read">> = Object.freeze({ metadata: "read" });
 
 /** The only permission keys a `runner_git` token may ask for. GitHub itself refuses a push that touches .github/workflows/** for want of `workflows`. */
 const RUNNER_GIT_PERMISSION_KEYS: readonly string[] = ["metadata", "contents"];
@@ -356,6 +362,16 @@ export function assertPlanePublishReadToken(minted: Pick<MintedAccessToken, "per
   if (perms === undefined || perms === null || typeof perms !== "object" || Array.isArray(perms)) throw new InstallationTokenError("token_scope_mismatch");
   const entries = Object.entries(perms);
   const readOnly = entries.every(([k, v]) => v === "read" && k in PLANE_PUBLISH_READ_PERMISSIONS) && perms.contents === "read";
+  const repos = minted.repositories;
+  const coversOnly = Array.isArray(repos) && repos.length === 1 && repos[0]!.toLowerCase() === repo.toLowerCase();
+  if (!readOnly || !coversOnly) throw new InstallationTokenError("token_scope_mismatch");
+}
+
+/** GitHub's answer to a `pairing_read` mint must say the token covers exactly the one repository asked for and holds `metadata: read` and nothing else. */
+export function assertPairingReadToken(minted: Pick<MintedAccessToken, "permissions" | "repositories">, repo: string): void {
+  const perms = minted.permissions;
+  if (perms === undefined || perms === null || typeof perms !== "object" || Array.isArray(perms)) throw new InstallationTokenError("token_scope_mismatch");
+  const readOnly = Object.entries(perms).every(([k, v]) => v === "read" && k in PAIRING_READ_PERMISSIONS);
   const repos = minted.repositories;
   const coversOnly = Array.isArray(repos) && repos.length === 1 && repos[0]!.toLowerCase() === repo.toLowerCase();
   if (!readOnly || !coversOnly) throw new InstallationTokenError("token_scope_mismatch");
@@ -448,6 +464,13 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     allowed = Object.keys(BRANCH_SYNC_PERMISSIONS);
     appKind = params.appKind;
     namespace = "branch_sync:";
+  } else if (params.purpose === "pairing_read" && (params.appKind === "team" || params.appKind === "team_readonly")) {
+    // D#598 PAIR-PICKER-API: one repository, metadata read. Minted per read, never cached.
+    if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
+    scope = { repositories: params.scope.repositories, permissions: PAIRING_READ_PERMISSIONS };
+    allowed = Object.keys(PAIRING_READ_PERMISSIONS);
+    appKind = params.appKind;
+    namespace = "pairing_read:";
   } else if (params.purpose === "plane_publish_read" && (params.appKind === "team" || params.appKind === "team_readonly")) {
     // D#598 P1f-4b: one private repository, contents read. Minted anew for every proxied request of a publish run and never cached.
     if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
@@ -476,7 +499,7 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     throw new InstallationTokenError("permission_not_allowed");
   }
 
-  const neverCached = params.purpose === "plane_push" || params.purpose === "plane_publish_read" || params.purpose === "branch_delete" || params.purpose === "branch_sync";
+  const neverCached = params.purpose === "plane_push" || params.purpose === "plane_publish_read" || params.purpose === "branch_delete" || params.purpose === "branch_sync" || params.purpose === "pairing_read";
   if (params.fresh === true && !neverCached) throw new InstallationTokenError("purpose_not_allowed");
   // D#598 C4: a plane_push token is never cached on any path, so it is fresh whatever the caller passes. Nothing is read from or written to the cache for it.
   // The same holds for a plane_publish_read token, which is minted and revoked for one proxied request.
@@ -513,6 +536,14 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
   if (params.purpose === "plan_read") assertTokenReadOnly(minted.permissions);
   if (params.purpose === "plane_push") assertPlanePushToken(minted, (scope as MergeGateScope).repositories[0]);
   if (params.purpose === "plane_publish_read") assertPlanePublishReadToken(minted, (scope as MergeGateScope).repositories[0]);
+  if (params.purpose === "pairing_read") {
+    try {
+      assertPairingReadToken(minted, (scope as MergeGateScope).repositories[0]);
+    } catch (error) {
+      await params.revoke?.(minted.token).catch(() => undefined);
+      throw error;
+    }
+  }
   if (params.purpose === "branch_delete") {
     try {
       assertBranchDeleteToken(minted, (scope as MergeGateScope).repositories[0]);

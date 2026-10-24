@@ -4,5 +4,6 @@
   "overlay_globs": [],
   "identifier_rules_path": null,
   "plan_data_rules_path": null,
-  "pr_footer": null
+  "pr_footer": null,
+  "code_repo_app_installed": null
 }

@@ -1,0 +1,16 @@
+{
+  "error": {
+    "code": "public_default_branch_not_main",
+    "message": "only a public repo whose default branch is main can be paired",
+    "request_id": "44444444-4444-4444-8444-444444444444"
+  },
+  "details": [
+    {
+      "path": "code_repo",
+      "code": "default_branch_not_main"
+    }
+  ],
+  "data": {
+    "branch": "master"
+  }
+}

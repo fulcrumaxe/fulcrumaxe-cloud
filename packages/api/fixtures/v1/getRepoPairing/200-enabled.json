@@ -7,5 +7,6 @@
   ],
   "identifier_rules_path": "rules/ids.txt",
   "plan_data_rules_path": "rules/plan.json",
-  "pr_footer": "Refs D#{issue_number}"
+  "pr_footer": "Refs D#{issue_number}",
+  "code_repo_app_installed": true
 }

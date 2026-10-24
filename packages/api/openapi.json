@@ -10581,6 +10581,12 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "code_repo_app_installed": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
                     }
                   },
                   "required": [
@@ -10589,7 +10595,8 @@
                     "overlay_globs",
                     "identifier_rules_path",
                     "plan_data_rules_path",
-                    "pr_footer"
+                    "pr_footer",
+                    "code_repo_app_installed"
                   ],
                   "additionalProperties": false
                 }
@@ -10637,7 +10644,7 @@
             }
           },
           "429": {
-            "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
             "content": {
               "application/json": {
                 "schema": {
@@ -10772,6 +10779,12 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "code_repo_app_installed": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
                     }
                   },
                   "required": [
@@ -10780,7 +10793,8 @@
                     "overlay_globs",
                     "identifier_rules_path",
                     "plan_data_rules_path",
-                    "pr_footer"
+                    "pr_footer",
+                    "code_repo_app_installed"
                   ],
                   "additionalProperties": false
                 }
@@ -10818,7 +10832,7 @@
             }
           },
           "422": {
-            "description": "Error",
+            "description": "`code_repo_not_public` (private or missing: the same answer for both), `code_repo_renamed` (use the repo's current name), or `public_default_branch_not_main` (`data.branch` is the branch name, null when it is not a plain branch name). Other 422s are `invalid_role_settings_input` with the field in `details`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -10848,6 +10862,16 @@
           },
           "500": {
             "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`github_unavailable` or `github_app_not_configured`: the public repo could not be checked, so nothing was saved.",
             "content": {
               "application/json": {
                 "schema": {
@@ -10949,6 +10973,160 @@
           },
           "500": {
             "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repos/{id}/pairing/candidates": {
+      "get": {
+        "operationId": "listPairingCandidates",
+        "summary": "The account's other installed repos that are public, with default branch and whether the App is installed, for the pairing picker",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The account's other installed repos that are public, with default branch and whether the App is installed, for the pairing picker",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "full_name": {
+                            "type": "string"
+                          },
+                          "visibility": {
+                            "type": "string",
+                            "const": "public"
+                          },
+                          "default_branch": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "app_installed": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "full_name",
+                          "visibility",
+                          "default_branch",
+                          "app_installed"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "truncated": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "truncated"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`github_unavailable` or `github_app_not_configured`: GitHub could not be asked, so no list is given.",
             "content": {
               "application/json": {
                 "schema": {

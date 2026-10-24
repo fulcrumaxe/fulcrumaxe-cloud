@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "github_unavailable",
+    "message": "GitHub could not be reached; try again",
+    "request_id": "44444444-4444-4444-8444-444444444444"
+  }
+}

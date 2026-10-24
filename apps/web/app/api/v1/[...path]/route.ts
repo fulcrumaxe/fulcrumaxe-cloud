@@ -6,6 +6,7 @@ import { onboardingDeps } from "@fx/api/src/routes/onboarding.js";
 import { memoryEditDeps } from "@fx/api/src/routes/memory.js";
 import { publicChangeDeps } from "@fx/api/src/routes/work-item-actions.js";
 import { setupRequestDeps } from "@fx/api/src/routes/setupRequests.js";
+import { repoPairingDeps } from "@fx/api/src/routes/repoPairing.js";
 import { decisionAskDeps } from "@fx/api/src/routes/decisionAsks.js";
 import { subItemApprovalDeps } from "@fx/api/src/routes/subItemApprovals.js";
 import { vercelConnectionDeps } from "@fx/api/src/routes/vercel-connection.js";
@@ -19,6 +20,7 @@ import { httpRunActionSignalFromEnv } from "@fx/api/src/runActions/httpSignal.js
 import { getWorker, previewEnabled, workerConfigured } from "../../../../lib/worker";
 import { createStartRetryPush, openPublicPullRequestViaWorker } from "../../../../lib/retryPush";
 import { getAuthorCheck } from "../../../../lib/github/authorCheck";
+import { getPairingInspector } from "../../../../lib/github/pairingInspector";
 
 /**
  * D#31 API-1b: the one catch-all every `/api/v1/*` request goes through
@@ -52,6 +54,8 @@ runActionDeps.getAuthorCheck = getAuthorCheck;
 // D#598 P1f-6b: Try the push again starts a durable job; Open the pull request again is one call to the worker. Both answer 503 until a worker can be built.
 publicChangeDeps.startRetryPush = (args) => (workerConfigured() ? createStartRetryPush()(args) : Promise.reject(new Error("worker not configured")));
 publicChangeDeps.openPublicPullRequest = openPublicPullRequestViaWorker;
+// D#598 PAIR-PICKER-API: the pairing routes ask GitHub (public, default branch, App installed) through this reader.
+repoPairingDeps.getInspector = () => getPairingInspector();
 // D#598 P8b-2: Mark done runs the request's own check at once, against the same credential source the once-a-minute sweep uses.
 setupRequestDeps.getEnvSource = () => productionVercelEnvSource;
 // D#598 P8d-2: connecting or replacing a Vercel token is checked with Vercel through the same net-guarded, address-pinned fetch.
