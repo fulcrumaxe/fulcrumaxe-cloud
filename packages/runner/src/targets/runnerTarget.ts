@@ -76,6 +76,8 @@ export interface RunContinues {
    * (`fx/issue-<n>`). The issuer reads GitHub and signs the number only if GitHub says the same; it never takes this on trust.
    */
   prNumber?: number;
+  /** FIXROUND-BASE-SYNC (R2-b): the base tip the cloud chose as the diff base, with `prNumber` only; the issuer signs it as `continues.base_sha`. */
+  baseSha?: string;
   /**
    * The branch of the pull request being fixed, carried unchanged by a follow-up of a fix round (C22 section 2). When it is not set, the issuer
    * reads the branch `done` recorded for `parentRunId` (C25 section 1.2); it never derives one from the issue. Either way the issuer checks it
@@ -225,7 +227,7 @@ export class RunnerTarget implements ExecutionTarget {
       await this.deps.issuer.issue({
         run,
         ...this.modeInput,
-        continues: { parentRunId: run.parentRunId ?? null, sessionId: null, branch: run.continuesBranch, ...(run.continuesPrNumber === undefined ? {} : { prNumber: run.continuesPrNumber }) },
+        continues: { parentRunId: run.parentRunId ?? null, sessionId: null, branch: run.continuesBranch, ...(run.continuesPrNumber === undefined ? {} : { prNumber: run.continuesPrNumber }), ...(run.continuesBaseSha === undefined ? {} : { baseSha: run.continuesBaseSha }) },
       });
     } else await this.deps.issuer.issue({ run, ...this.modeInput });
     await this.recordSections(run);
@@ -238,7 +240,7 @@ export class RunnerTarget implements ExecutionTarget {
     await this.deps.issuer.issue({
       run,
       ...this.modeInput,
-      continues: { parentRunId: run.parentRunId ?? null, sessionId, ...(run.continuesBranch === undefined ? {} : { branch: run.continuesBranch }), ...(run.continuesPrNumber === undefined ? {} : { prNumber: run.continuesPrNumber }) },
+      continues: { parentRunId: run.parentRunId ?? null, sessionId, ...(run.continuesBranch === undefined ? {} : { branch: run.continuesBranch }), ...(run.continuesPrNumber === undefined ? {} : { prNumber: run.continuesPrNumber }), ...(run.continuesBaseSha === undefined ? {} : { baseSha: run.continuesBaseSha }) },
     });
     await this.recordSections(run);
     this.markQueued(run.accountId);

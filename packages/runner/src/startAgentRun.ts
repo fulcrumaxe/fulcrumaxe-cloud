@@ -116,7 +116,7 @@ export interface StartAgentRunInput {
    * D#599 PL-2b-2: a round on the other side of a hand-over works on the branch the pull request already has. Only a runner target uses it (it issues a
    * continuation with no session); a sandbox target ignores it (its prompt names the branch). `prNumber` goes with an item branch (`fx/issue-<n>`) only.
    */
-  continues?: { branch: string; prNumber?: number };
+  continues?: { branch: string; prNumber?: number; baseSha?: string };
   workdir?: string;
   /** D#2 PREVIEW-RUNNER-EVENTS: see `ExecutionRun.cloneRepo` (`sha`: the proposal verifier's pinned checkout). */
   cloneRepo?: { owner: string; name: string; sha?: string };
@@ -194,7 +194,7 @@ export function buildExecutionRun(id: string, input: StartAgentRunInput): Execut
     prompt: input.prompt,
     model: input.model,
     backend: input.backend,
-    ...(input.continues ? { continuesBranch: input.continues.branch, continuesFresh: true, ...(input.continues.prNumber === undefined ? {} : { continuesPrNumber: input.continues.prNumber }) } : {}),
+    ...(input.continues ? { continuesBranch: input.continues.branch, continuesFresh: true, ...(input.continues.prNumber === undefined ? {} : { continuesPrNumber: input.continues.prNumber }), ...(input.continues.baseSha === undefined ? {} : { continuesBaseSha: input.continues.baseSha }) } : {}),
     workdir: input.workdir,
     cloneRepo: input.cloneRepo,
     contextSections: input.contextSections,

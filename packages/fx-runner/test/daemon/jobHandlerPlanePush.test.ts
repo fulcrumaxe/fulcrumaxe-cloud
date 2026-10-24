@@ -180,6 +180,25 @@ describe("the start commit is the daemon's record (P1f-3-d)", () => {
     expect(r.checkout.head).toBe(MOVED);
   });
 
+  it("a fix round on the item's branch records the base the cloud signed, not the commit its checkout starts at, before the agent starts (FIXROUND-BASE-SYNC R2-b)", async () => {
+    const CHOSEN = "c".repeat(40);
+    const item = { continues: { parent_run_id: "22222222-2222-4222-8222-222222222222", session_id: null, branch: "fx/issue-12", pr_number: 7, base_sha: CHOSEN } };
+    const r = rig({ onStart: () => { r.checkout.head = MOVED; } });
+    const claimed = await r.claim(jobFor(item));
+    await r.handle(claimed);
+    // The checkout began at BASE; the daemon's record is the signed value. The round does not enter the public-push hook yet (that is a later step), so the hook is not asked.
+    expect(r.seenBase).toEqual([CHOSEN]);
+    expect(r.asked).toEqual([]);
+    expect(r.baseLedger.read(claimed.runId)).toBeUndefined();
+  });
+
+  it("a fix round with no signed base records nothing", async () => {
+    const plain = { continues: { parent_run_id: "22222222-2222-4222-8222-222222222222", session_id: null, branch: "fx/issue-12", pr_number: 7 } };
+    const r = rig();
+    await r.handle(await r.claim(jobFor(plain)));
+    expect(r.seenBase).toEqual([undefined]);
+  });
+
   it("is forgotten when the run ends, whichever way", async () => {
     const r = rig();
     const claimed = await r.claim(jobFor());

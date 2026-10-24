@@ -5,6 +5,7 @@ import { ITEM_PR_BRANCH } from "@fulcrumaxe/runner-protocol";
 import { DispatchFailedError, IdempotencyKeyTakenError, ExecutionModeChangedError, JobIssueError, PREVIEW_WORKDIR, acceptQueuedRunnerRun, readBoundItemBranch, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { escapeFenceLookalikes } from "@fx/pipeline";
 import { checkFixRound } from "@fx/spend";
+import { BASE_SYNCED_PROMPT_LINE } from "./fixRoundBase.js";
 import type { RunStarter } from "./preview.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 
@@ -36,6 +37,8 @@ export interface CheckFixDeps {
    */
   starter?: RunStarter | null;
   /** FIXROUND-REFRESH-HEAD: asked once nothing else refuses and before anything starts; a code it answers is the refusal. Absent: nothing is asked. */
+  /** FIXROUND-BASE-SYNC (R2-b): read after `beforeStart`, the base tip it brought the branch up to date with; the round is signed with it as its diff base. */
+  baseSync?: () => { baseSha: string | null; synced: boolean };
   beforeStart?: (branch: { repo: { id: string; owner: string; name: string }; pr: { number: number; branch: string }; attempt: string } | null) => Promise<string | null>;
 }
 
@@ -109,7 +112,8 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
   // FIXROUND-BASE-SYNC: the item's own pull request branch, when the round continues it, so the check can bring it up to date with its base. After the cheap refusals (the seat), so a merge never lands for a round that is then refused.
   const held = deps.beforeStart ? await deps.beforeStart(bound !== null && row.gh_owner && row.gh_name ? { repo: { id: row.repo_id, owner: row.gh_owner, name: row.gh_name }, pr: { number: bound.prNumber, branch: bound.branch }, attempt: failedRunId } : null) : null;
   if (held !== null) return { ok: false, reason: held };
-  const prompt = checkFixPrompt({ round: facts.round, argv, exitCode: row.exit_code, timedOut: row.timed_out === true, summary: row.summary ?? "" });
+  const { baseSha, synced } = deps.baseSync?.() ?? { baseSha: null, synced: false };
+  const prompt = checkFixPrompt({ round: facts.round, argv, exitCode: row.exit_code, timedOut: row.timed_out === true, summary: row.summary ?? "" }) + (synced ? `\n\n${BASE_SYNCED_PROMPT_LINE}` : "");
   const idempotency = { key, requestHash: createHash("sha256").update(`${key}:executor`).digest("hex") };
   try {
     if (bound !== null) {
@@ -128,7 +132,7 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
         prompt,
         ...expectedExecutionMode,
         ...(row.spec_version_id === null ? {} : { specVersionId: row.spec_version_id }),
-        continues: { branch: bound.branch, prNumber: bound.prNumber },
+        continues: { branch: bound.branch, prNumber: bound.prNumber, ...(baseSha === null ? {} : { baseSha }) },
         workdir: PREVIEW_WORKDIR,
         cloneRepo: { owner: row.gh_owner, name: row.gh_name },
         idempotency,

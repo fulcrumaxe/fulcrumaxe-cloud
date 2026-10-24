@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, EXCLUDES_JOB_MIN_PROTOCOL, HANDOFF_MIN_PROTOCOL_VERSION, MEMORY_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, CHECK_JOB_MIN_PROTOCOL, SPILL_JOB_MIN_PROTOCOL, CONTEXT_WINDOW_JOB_MIN_PROTOCOL } from "../src/messages.js";
+import { BASE_SHA_JOB_MIN_PROTOCOL, CONTINUES_CROSS_SIDE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, EXCLUDES_JOB_MIN_PROTOCOL, HANDOFF_MIN_PROTOCOL_VERSION, MEMORY_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, CHECK_JOB_MIN_PROTOCOL, SPILL_JOB_MIN_PROTOCOL, CONTEXT_WINDOW_JOB_MIN_PROTOCOL } from "../src/messages.js";
 import { CONTEXT_SPILL_CODES, CONTEXT_SPILL_MAX_TOTAL_BYTES } from "../src/contextSpill.js";
 import { MAX_EXCLUDE_RULES } from "../src/excludeRules.js";
 import { MAX_JOB_PINS } from "../src/pinRules.js";
@@ -25,7 +25,7 @@ describe("job schema", () => {
     expect(Object.keys(JobSchema.shape.spec.unwrap().shape).sort()).toEqual(["discussion", "sha256", "text", "version"]);
     expect(Object.keys(JobSchema.shape.task.shape).sort()).toEqual(["kind", "prompt", "prompt_sha256"]);
     expect(Object.keys(JobSchema.shape.role_card.shape).sort()).toEqual(["sha256", "text"]);
-    expect(Object.keys(continuesObject().shape).sort()).toEqual(["branch", "parent_run_id", "pr_number", "session_id"]);
+    expect(Object.keys(continuesObject().shape).sort()).toEqual(["base_sha", "branch", "parent_run_id", "pr_number", "session_id"]);
   });
 
   it("accepts a well-formed job", () => {
@@ -160,6 +160,13 @@ describe("job schema", () => {
       ["a number above the integer range", { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: 2 ** 31 }, false],
       ["the largest number", { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: 2 ** 31 - 1 }, true],
       ["a null number", { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: null }, false],
+      ["a base sha on the item branch with its number", { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: 7, base_sha: "a".repeat(40) }, true],
+      ["a base sha on a run branch", { parent_run_id: parent, session_id: "s-1", branch: RUN_BRANCH, base_sha: "a".repeat(40) }, false],
+      ["a base sha with no number", { parent_run_id: parent, session_id: null, branch: "fx/issue-12", base_sha: "a".repeat(40) }, false],
+      ["a short base sha", { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: 7, base_sha: "a".repeat(39) }, false],
+      ["an upper-case base sha", { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: 7, base_sha: "A".repeat(40) }, false],
+      ["a ref name as the base sha", { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: 7, base_sha: "main" }, false],
+      ["a null base sha", { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: 7, base_sha: null }, false],
     ] as const)("%s", (_name, continues, expected) => {
       // The schema narrows the branch to a run branch or the item's pull request branch (ruling R-599-PL2b-1-a), with or without a number.
       expect(ok(continues)).toBe(expected);
@@ -181,6 +188,16 @@ describe("job schema", () => {
       expect(previousJob.safeParse(withNumber).success).toBe(false);
       expect(JobSchema.safeParse(nullSession).success).toBe(true);
       expect(JobSchema.safeParse(withNumber).success).toBe(true);
+    });
+
+    it("is refused by the parse of a runner that predates base_sha, and its floor is the version after the pins floor", () => {
+      const item = { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: 7 };
+      const before = z.object({ parent_run_id: z.string().uuid(), session_id: z.string().nullable(), branch: z.string(), pr_number: z.number().optional() }).strict().nullable();
+      const previousJob = JobSchema.extend({ continues: before });
+      expect(previousJob.safeParse(sampleJob({ continues: item })).success).toBe(true);
+      expect(previousJob.safeParse(sampleJob({ continues: { ...item, base_sha: "a".repeat(40) } })).success).toBe(false);
+      expect(BASE_SHA_JOB_MIN_PROTOCOL).toBe(PINS_JOB_MIN_PROTOCOL + 1);
+      expect(CURRENT_PROTOCOL_VERSION).toBeGreaterThanOrEqual(BASE_SHA_JOB_MIN_PROTOCOL);
     });
 
     it("sets the cross-side protocol floor one above the handoff version, and leaves the hello floor alone", () => {

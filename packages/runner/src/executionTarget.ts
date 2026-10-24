@@ -272,6 +272,11 @@ export interface ExecutionRun {
    */
   continuesPrNumber?: number;
   /**
+   * FIXROUND-BASE-SYNC (R2-b): the base-branch tip the cloud brought the item's pull request branch up to date with, set with `continuesPrNumber`. The issuer signs it as `continues.base_sha`,
+   * the diff base of the round's public publish. Never set for a run branch, and never taken from a runner.
+   */
+  continuesBaseSha?: string;
+  /**
    * D#599 PL-2b-2: set on a run that starts a round on a branch another side opened (not a follow-up): `RunnerTarget.dispatch` then issues a continuation
    * with no session (a foreign session is never claimed). A follow-up of a lost round sets `continuesBranch` alone and goes through `resume`.
    */

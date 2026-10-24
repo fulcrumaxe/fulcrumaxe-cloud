@@ -63,7 +63,7 @@ describe("fix round: the branch heads on GitHub before a round starts [pg]", { t
   const registry = { sandbox: { cancel: async (_run: ExecutionRun): Promise<CancelResult> => ({ settled_usd: 0, released_usd: 0 }) } } as unknown as ExecutionTargetRegistry;
 
   /** A round whose branch is already up to date with its base (204), so the rounds below that are not about the sync see no sync. */
-  const upToDate = async (): Promise<BranchSyncOutcome> => ({ kind: "up_to_date" });
+  const upToDate = async (): Promise<BranchSyncOutcome> => ({ kind: "up_to_date", baseSha: "c".repeat(40) });
   function harness(given: FixRoundHeadPorts | null, seatResult: SeatResult | { ok: false; reason: string } = SEAT) {
     const heads = given && given.privateHead && !("syncBase" in given) ? { ...given, syncBase: upToDate } : given;
     const resumed: StartAgentRunInput[] = [];
@@ -272,7 +272,7 @@ describe("fix round: the branch heads on GitHub before a round starts [pg]", { t
       await paired(t);
       const publicHead = vi.fn(async () => PUSHED);
       const syncBase = vi.fn(async () => merged());
-      expect(await syncRunBranch(writerPool, { publicHead, syncBase }, { accountId: t.a.accountId, workItemId: t.w }, { repo: { id: t.a.repoId, owner: "acme", name: "widgets" }, pr: { number: PR, branch: t.branch }, liveHead: ASKED, moveToNeedsPerson: true, attempt: "a1" })).toEqual({ ok: true, synced: true });
+      expect(await syncRunBranch(writerPool, { publicHead, syncBase }, { accountId: t.a.accountId, workItemId: t.w }, { repo: { id: t.a.repoId, owner: "acme", name: "widgets" }, pr: { number: PR, branch: t.branch }, liveHead: ASKED, moveToNeedsPerson: true, attempt: "a1" })).toEqual({ ok: true, synced: true, baseSha: BASE });
       expect(syncBase).toHaveBeenCalledTimes(1);
       expect(publicHead).not.toHaveBeenCalled();
     });

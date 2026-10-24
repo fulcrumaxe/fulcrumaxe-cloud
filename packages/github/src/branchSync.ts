@@ -12,7 +12,7 @@ import type { InstallationHttp, InstallationHttpKind, InstallationHttpTarget } f
  * caller never reads it as "up to date". No text from GitHub reaches the message.
  */
 export type BranchSyncOutcome =
-  | { kind: "up_to_date" }
+  | { kind: "up_to_date"; baseSha: string }
   | { kind: "merged"; sha: string; parents: readonly string[]; baseSha: string; baseRef: string }
   | { kind: "conflict"; baseSha: string; baseRef: string };
 
@@ -52,7 +52,7 @@ export function createBranchSyncPort(open: (kind: InstallationHttpKind, target: 
         const baseSha = dig(ref.body, "object", "sha");
         if (ref.status !== 200 || typeof baseSha !== "string" || !SHA.test(baseSha)) throw new BranchSyncError("base_unreadable");
         const merged = await http.request({ method: "POST", path: `${root}/merges`, body: { base: branch, head: baseSha, commit_message: message(branch, baseRef) } });
-        if (merged.status === 204) return { kind: "up_to_date" };
+        if (merged.status === 204) return { kind: "up_to_date", baseSha };
         if (merged.status === 409) return { kind: "conflict", baseSha, baseRef };
         const sha = dig(merged.body, "sha");
         const parents = dig(merged.body, "parents");

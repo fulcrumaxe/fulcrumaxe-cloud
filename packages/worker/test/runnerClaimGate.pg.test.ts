@@ -1,7 +1,7 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { BASE_SHA_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, CONTINUES_CROSS_SIDE_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
@@ -115,6 +115,17 @@ describe("the claim's protocol gate [pg]", () => {
     expect((await claim(before)).kind).toBe("idle");
     expect(await holder(job)).toEqual({ status: "pending", runner_id: null });
     const current = await runnerAt(8);
+    expect(await claim(current)).toMatchObject({ kind: "claimed", runId: job });
+  });
+
+  // FIXROUND-BASE-SYNC R2-b: a continuation that carries the cloud's chosen diff base is never claimed by a runner that predates the field.
+  it("a continuation with a signed base_sha is not given to a runner below the base-sha floor, and is claimed at it", async () => {
+    const continues = { parent_run_id: randomUUID(), session_id: null, branch: "fx/issue-12", pr_number: 7, base_sha: "a".repeat(40) };
+    const older = await runnerAt(PINS_JOB_MIN_PROTOCOL);
+    const job = await pending(BASE_SHA_JOB_MIN_PROTOCOL, { continues });
+    expect((await claim(older)).kind).toBe("idle");
+    expect(await holder(job)).toEqual({ status: "pending", runner_id: null });
+    const current = await runnerAt(BASE_SHA_JOB_MIN_PROTOCOL);
     expect(await claim(current)).toMatchObject({ kind: "claimed", runId: job });
   });
 
