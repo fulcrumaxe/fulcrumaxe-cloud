@@ -89,6 +89,21 @@ describe('terminal reap work is visible to the lap rule (real Postgres, platform
     expect(r.stalled).toContain(JOB);
   });
 
+  it('while the last pass is failing, a candidate older than the last full pass is work; after an ok pass the same candidate is not', async () => {
+    const name = await finishedItem('merged', { runAgeHours: 5 });
+    await admin.query(
+      `INSERT INTO sandbox_reaps (sandbox_name, account_id, run_id, reason, state, claimed_at, done_at)
+       SELECT sandbox_name, account_id, id, 'terminal', 'skipped', now() - interval '3 hours', now() - interval '3 hours' FROM agent_runs WHERE sandbox_name = $1`,
+      [name],
+    );
+    await lapOld(3 * 3600);
+    expect((await jobsWithWork(ops)).has(JOB)).toBe(false);
+    await admin.query(`UPDATE reconcile_jobs SET last_result_code = 'error' WHERE name = $1`, [JOB]);
+    expect((await jobsWithWork(ops)).has(JOB)).toBe(true);
+    await admin.query(`UPDATE reconcile_jobs SET last_result_code = 'ok' WHERE name = $1`, [JOB]);
+    expect((await jobsWithWork(ops)).has(JOB)).toBe(false);
+  });
+
   it('with no reap rows nothing changes: no work, and an old lap is not announced', async () => {
     await lapOld(30 * 3600);
     expect((await jobsWithWork(ops)).has(JOB)).toBe(false);

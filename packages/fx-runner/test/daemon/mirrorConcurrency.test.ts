@@ -24,6 +24,32 @@ let events: string[];
 let inFlight: Map<string, number>;
 let mostTogether: Map<string, number>;
 let mostAnywhere: number;
+/** When set, every fetch waits here until `need` fetches have arrived (or the bound runs out), so overlap is proven by the fetches themselves, not by a clock. */
+let barrier: { need: number; arrived: number; release: () => void; opened: Promise<void> } | null;
+const BARRIER_BOUND_MS = 15_000;
+
+function makeBarrier(need: number): NonNullable<typeof barrier> {
+  let release = (): void => {};
+  const opened = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { need, arrived: 0, release, opened };
+}
+
+/** Resolves when the barrier opens; after the bound it resolves anyway and the test's own assertion on overlap fails. */
+async function passBarrier(b: NonNullable<typeof barrier>): Promise<void> {
+  b.arrived += 1;
+  if (b.arrived >= b.need) b.release();
+  let timer: NodeJS.Timeout | undefined;
+  const bound = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, BARRIER_BOUND_MS);
+  });
+  try {
+    await Promise.race([b.opened, bound]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 const SETUP_ENV = (): Record<string, string> => ({
   PATH: process.env.PATH ?? "",
@@ -82,7 +108,8 @@ const capture: GitCapture = async (command, args, env, timeoutMs) => {
     mostTogether.set(mirror, Math.max(mostTogether.get(mirror) ?? 0, here));
     const all = [...inFlight.values()].reduce((sum, count) => sum + count, 0);
     mostAnywhere = Math.max(mostAnywhere, all);
-    await sleep(FETCH_PAUSE_MS);
+    if (barrier !== null) await passBarrier(barrier);
+    else await sleep(FETCH_PAUSE_MS);
   }
   try {
     return await runCapture(spawn, testLaunch(), command, args, { ...env, ...SETUP_ENV() }, timeoutMs);
@@ -114,6 +141,7 @@ beforeEach(() => {
   inFlight = new Map();
   mostTogether = new Map();
   mostAnywhere = 0;
+  barrier = null;
   remotes.clear();
   seeds.clear();
   makeRemote(repoA);
@@ -195,11 +223,13 @@ describe("two jobs on different repos", () => {
     await mirrors.sync(repoA);
     await mirrors.sync(repoB);
     events.length = 0;
-    const started = Date.now();
+    // Neither fetch can finish until both have started: if the mirrors made them take turns, the second would never arrive and the bound would expire with mostAnywhere at 1.
+    const gate = makeBarrier(2);
+    barrier = gate;
     await Promise.all([mirrors.prepareWorkspace(repoA, lease(1), workspace("a"), null, null), mirrors.prepareWorkspace(repoB, lease(2), workspace("b"), null, null)]);
+    expect(gate.arrived).toBe(2);
     expect(mostAnywhere).toBe(2);
     expect(events.slice(0, 2).every((line) => line.startsWith("start "))).toBe(true);
-    expect(Date.now() - started).toBeLessThan(10_000);
   });
 });
 

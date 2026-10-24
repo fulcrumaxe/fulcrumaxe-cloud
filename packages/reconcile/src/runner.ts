@@ -107,14 +107,15 @@ async function workState(pool: Pick<Pool, 'query'>, opts: WorkOptions = {}): Pro
   if (credits.broken) out.add('model_credits_revalidate');
   const { rows } = await pool.query<{ last_result_code: string | null; last_full_pass_at: Date | null }>("SELECT last_result_code, last_full_pass_at FROM reconcile_jobs WHERE name = 'sandbox_reap_terminal'");
   const job = rows[0];
-  if (job !== undefined && (job.last_result_code === 'budget' || (await terminalReapPending(pool, opts, job.last_full_pass_at)))) out.add('sandbox_reap_terminal');
+  if (job !== undefined && (job.last_result_code === 'budget' || (await terminalReapPending(pool, opts, job.last_result_code === 'ok' ? job.last_full_pass_at : null)))) out.add('sandbox_reap_terminal');
   return { working: out, creditsBackedOff: credits.backedOff };
 }
 
 /**
  * Which gated jobs have work, from what the platform_ops login can see. Credits: a connection broken for out-of-credit. Terminal reap: the job's
  * last pass stopped on its budget (`last_result_code = 'budget'`), or the database says a settled finished sandbox the last full pass has not yet seen
- * is waiting (the one-boolean probe `sandbox_reap_terminal_pending(last_full_pass_at)`: no budget stop needed, no row shown).
+ * is waiting (the one-boolean probe `sandbox_reap_terminal_pending(last_full_pass_at)`: no budget stop needed, no row shown). While the pass is failing
+ * (a last result that is neither `ok` nor `budget`) the time is NULL, so every pending candidate counts: a pass that keeps failing has not looked at any of them.
  */
 export async function jobsWithWork(pool: Pick<Pool, 'query'>, opts: WorkOptions = {}): Promise<ReadonlySet<string>> {
   return (await workState(pool, opts)).working;
