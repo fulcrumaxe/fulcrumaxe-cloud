@@ -1,0 +1,13 @@
+{
+  "error": {
+    "code": "code_repo_not_public",
+    "message": "the paired repo must be a public repo that exists",
+    "request_id": "44444444-4444-4444-8444-444444444444"
+  },
+  "details": [
+    {
+      "path": "code_repo",
+      "code": "not_public"
+    }
+  ]
+}

@@ -103,6 +103,10 @@ export const SESSION_LIMITS = {
   githubReturn: { name: "github-return", account: TEN_PER_MINUTE },
   /** Starting a plan import reads a repository through the code host (up to 400 requests): 20 an hour per account. The database holds the per-repository 6 an hour. */
   planImport: { name: "plan-import", account: [{ limit: 20, seconds: 3600 }] },
+  /** The pairing routes ask GitHub about a public repo on each call (the install state, and for the picker up to 30 repos): 60 a minute per account. */
+  pairingGithub: { name: "pairing-github", account: [{ limit: 60, seconds: 60 }] },
+  /** The picker asks GitHub about up to 30 repos per call: 6 a minute per account. */
+  pairingPicker: { name: "pairing-picker", account: [{ limit: 6, seconds: 60 }] },
   /** A signed-in browser's error report to `POST /api/rum`: 30 a minute per account (the report is a log line and one coalesced upsert). */
   rumClientError: { name: "rum-client-error", account: [{ limit: 30, seconds: 60 }] },
   /** Redeeming an invitation token: a guessing path, so capped per user as well as per account. */

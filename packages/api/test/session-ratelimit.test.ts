@@ -344,6 +344,9 @@ describe('session rate limits', () => {
         startPlanImport: 'plan-import',
         requestRunHandoff: 'run-handoff',
         cancelRunHandoff: 'run-handoff',
+        getRepoPairing: 'pairing-github',
+        putRepoPairing: 'pairing-github',
+        listPairingCandidates: 'pairing-picker',
       });
     });
   });

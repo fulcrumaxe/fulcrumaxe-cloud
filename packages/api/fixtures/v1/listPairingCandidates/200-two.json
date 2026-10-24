@@ -1,0 +1,17 @@
+{
+  "data": [
+    {
+      "full_name": "acme/site",
+      "visibility": "public",
+      "default_branch": "main",
+      "app_installed": true
+    },
+    {
+      "full_name": "acme/docs",
+      "visibility": "public",
+      "default_branch": "master",
+      "app_installed": false
+    }
+  ],
+  "truncated": false
+}
