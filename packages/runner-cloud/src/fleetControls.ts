@@ -2,7 +2,7 @@ import { isValidRunnerName } from "@fulcrumaxe/runner-protocol";
 import { markRunnerWork, readRunnerReplyHints, recordRunnerCheck, revokeRunnerWake } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
-import { refuseNonPrivateReposIn } from "./repoPrivacy.js";
+import { preReadAddedRepos, refuseUnlessPreRead } from "./repoPrivacy.js";
 import { failLeases } from "./revoke.js";
 import { RUNNER_CHECK_REPLY_MS } from "./runnerReply.js";
 
@@ -116,11 +116,13 @@ export async function setRunnerRepos(deps: RunnerCloudDeps, principal: SessionPr
   const given = argument(input, "repo_ids");
   if (!Array.isArray(given) || given.length > 100 || !given.every((id) => typeof id === "string" && UUID.test(id))) return invalid();
   try {
-    // One transaction for the held-set read, the visibility reads and the write. The advisory lock serialises writers of this runner's set,
-    // so a concurrent remove + re-add waits, then sees the committed set: a repo it re-adds is read again, never skipped as "already held".
+    // The visibility reads happen first, outside any transaction (bounded in total), so a slow GitHub pins no connection or lock. The transaction then
+    // takes the runner's advisory lock, recomputes the added set from the committed state and refuses any repo in it that was not read as private: a
+    // concurrent remove + re-add waits, sees the committed set, and its re-added repo is not in the pre-read set, so it is refused, never skipped.
+    const preRead = await preReadAddedRepos(deps, principal, given as string[], runnerId);
     const repoIds = await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client) => {
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`runner_repos:${runnerId.toLowerCase()}`]);
-      await refuseNonPrivateReposIn(client, deps, principal, given as string[], runnerId);
+      await refuseUnlessPreRead(client, given as string[], runnerId, preRead);
       await client.query("SELECT runner_repos_set($1, $2::uuid[])", [runnerId, given]);
       return (await client.query<{ allowed_repo_ids: string[] }>("SELECT allowed_repo_ids FROM runners WHERE id = $1", [runnerId])).rows[0]?.allowed_repo_ids ?? [];
     });

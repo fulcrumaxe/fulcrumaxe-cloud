@@ -136,7 +136,11 @@ export interface RunnerCloudDeps {
    * Whether a repository is private, asked of GitHub (apps/web supplies it). Anything but "private" keeps a repo off a
    * runner. Absent is "unknown".
    */
-  repoVisibility?: (accountId: string, repoId: string) => Promise<"private" | "public" | "unknown">;
+  repoVisibility?: (accountId: string, repoId: string, signal?: AbortSignal) => Promise<"private" | "public" | "unknown">;
+  /** Test seam: the deadline for one visibility read (default `REPO_VISIBILITY_READ_TIMEOUT_MS`). Past it the read is "unknown". */
+  repoVisibilityTimeoutMs?: number;
+  /** Test seam: the deadline for all of one request's visibility reads together (default `REPO_VISIBILITY_TOTAL_TIMEOUT_MS`). */
+  repoVisibilityTotalTimeoutMs?: number;
   /**
    * D#6 R-CHK-1: the text of `.fulcrumaxe/runner-sandbox.json` at the repository's default branch tip, or null when there is none (apps/web supplies it from the
    * read-only plan client). Read only to pre-fill the Repos form with a SUGGESTED check for an owner or admin; nothing it returns is ever used to run anything.
