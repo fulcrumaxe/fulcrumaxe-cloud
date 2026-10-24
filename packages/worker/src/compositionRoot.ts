@@ -80,6 +80,7 @@ import { sweepBranchCleanups as runBranchCleanupSweep, type BranchCleanupCounts,
 import { sweepPrSlotHolders as runPrSlotSweep, type PrSlotSweepCounts, type PrStateOpen } from "./prSlotReconcile.js";
 import type { VercelEnvSource } from "@fx/core/src/setup-requests/checks.js";
 import { answerAsk, type AskAnswerResult } from "@fx/core/src/decisions/answer.js";
+import { approveSubItem, type SubItemApprovalResult } from "@fx/core/src/decisions/approveSubItem.js";
 import type { RunActionSignal } from "@fx/core/src/runActions/index.js";
 import { createFollowUpPorts } from "./runnerFollowUp.js";
 import { discoverySettings } from "@fx/plan-data";
@@ -223,6 +224,11 @@ export interface Worker extends PlanePublish, RunActionFacade, RunnerLeaseFacade
    * `signal` kicks the resume request the answer files; without it the run-action sweep finds the request anyway.
    */
   answerDecisionAsk(input: { principal: { accountId: string; userId: string; tokenId?: string }; askId: string; choice: string; signal?: RunActionSignal }): Promise<AskAnswerResult>;
+  /**
+   * D#483 S5-b2a: a person's Approve on one sub-item of an approved parent. Like `answerDecisionAsk`, it runs on the RECEIPT pool, which is never
+   * handed out; a token principal is refused (`SubItemApprovalError`, 403 `session_required`) before any connection.
+   */
+  approveSubItem(input: { principal: { accountId: string; userId: string; tokenId?: string }; workItemId: string; key: string }): Promise<SubItemApprovalResult>;
   /** D#2 SANDBOX-REAPER-1b (C82): the per-account inventory, rebuilt from the provider's list and the run rows. Plain data in and out; for the cron only. */
   sandboxInventory(input: SandboxInventoryInput): Promise<SandboxInventoryResult>;
   close(): Promise<void>;
@@ -443,7 +449,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       return result;
     };
     const runSandboxInventory = (input: SandboxInventoryInput): Promise<SandboxInventoryResult> => sandboxInventory({ pool: pools.runnerPool, port: sandboxPort }, input);
-    return { ...planePublish, ...runActions, ...runnerLeases, ...runnerClaims, ...runnerDone, ...runnerGitTickets, ...runnerPlanePush, ...runnerLeaseSweep, sweepRunHandoffs: runHandoffs.sweepRunHandoffs, sweepParkedStages: stageResume.sweepParkedStages, sweepSetupRequestChecks: (input) => runSetupRequestCheckSweep({ pool: pools.runnerPool, envSource: input.envSource }), answerDecisionAsk: (input) => answerAsk({ pool: pools.receiptPool, principal: input.principal, ...(input.signal ? { signal: input.signal } : {}) }, { askId: input.askId, choice: input.choice }), sweepBranchCleanups: (input) => runBranchCleanupSweep({ pool: pools.runnerPool, signer: gitTicketSigner, github: input.github }), sweepPrSlotHolders: (input) => runPrSlotSweep({ pool: pools.runnerPool, openClient: input.github }), sweepProposalVerification: verifySweep, completeRunHandoff: runHandoffs.completeRunHandoff, completeHandoffOnDone: runHandoffs.completeHandoffOnDone, ...runnerQueue, ...runnerNotices, sweepInvariants: runInvariantTick, ...preview, ...retry, ...advance, ...resume, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, sandboxInventory: runSandboxInventory, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
+    return { ...planePublish, ...runActions, ...runnerLeases, ...runnerClaims, ...runnerDone, ...runnerGitTickets, ...runnerPlanePush, ...runnerLeaseSweep, sweepRunHandoffs: runHandoffs.sweepRunHandoffs, sweepParkedStages: stageResume.sweepParkedStages, sweepSetupRequestChecks: (input) => runSetupRequestCheckSweep({ pool: pools.runnerPool, envSource: input.envSource }), approveSubItem: (input) => approveSubItem({ pool: pools.receiptPool, principal: input.principal }, { workItemId: input.workItemId, key: input.key }), answerDecisionAsk: (input) => answerAsk({ pool: pools.receiptPool, principal: input.principal, ...(input.signal ? { signal: input.signal } : {}) }, { askId: input.askId, choice: input.choice }), sweepBranchCleanups: (input) => runBranchCleanupSweep({ pool: pools.runnerPool, signer: gitTicketSigner, github: input.github }), sweepPrSlotHolders: (input) => runPrSlotSweep({ pool: pools.runnerPool, openClient: input.github }), sweepProposalVerification: verifySweep, completeRunHandoff: runHandoffs.completeRunHandoff, completeHandoffOnDone: runHandoffs.completeHandoffOnDone, ...runnerQueue, ...runnerNotices, sweepInvariants: runInvariantTick, ...preview, ...retry, ...advance, ...resume, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, sandboxInventory: runSandboxInventory, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
   } catch (err) {
     await pools.close();
     throw err;
@@ -463,7 +469,7 @@ let instance: Promise<Worker> | undefined;
 export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
   if (instance) return instance;
   const mine: Promise<Worker> = buildWorker(options).then(
-    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, sandboxInventory: inventory, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, claimRunnerRun, heartbeatRunnerRun, ingestRunnerEvents, beginRunnerDone, finishRunnerDone, gitTicketContext, signGitTicket, planePushGrant, planePushPairing, planePushSettleGrant, planePushReportContext, planePushRecordReport, sweepRunnerLeases, sweepRunHandoffs, completeRunHandoff, completeHandoffOnDone, publishPairedChange, retryPublish, settlePairedBuild, openPublicPullRequest, sweepRunnerQueue, sweepRunnerNotices, sweepInvariants: runInvariants, sweepParkedStages, sweepSetupRequestChecks, answerDecisionAsk, sweepBranchCleanups, sweepPrSlotHolders, sweepProposalVerification, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, performRespecWorkItem, performAmendSpec, performResumeDecision, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advanceDecision, advancePrFound, advanceLightSpec, advanceRespec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceRecordMergeOnly, advanceStartFix, advanceStartCheckFix, advanceReviewRuns, advanceMergeGate, advanceVerifiedReviewGate, advanceRecordEvent, advanceCancel }) => {
+    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, sandboxInventory: inventory, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, claimRunnerRun, heartbeatRunnerRun, ingestRunnerEvents, beginRunnerDone, finishRunnerDone, gitTicketContext, signGitTicket, planePushGrant, planePushPairing, planePushSettleGrant, planePushReportContext, planePushRecordReport, sweepRunnerLeases, sweepRunHandoffs, completeRunHandoff, completeHandoffOnDone, publishPairedChange, retryPublish, settlePairedBuild, openPublicPullRequest, sweepRunnerQueue, sweepRunnerNotices, sweepInvariants: runInvariants, sweepParkedStages, sweepSetupRequestChecks, answerDecisionAsk, approveSubItem, sweepBranchCleanups, sweepPrSlotHolders, sweepProposalVerification, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, performRespecWorkItem, performAmendSpec, performResumeDecision, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advanceDecision, advancePrFound, advanceLightSpec, advanceRespec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceRecordMergeOnly, advanceStartFix, advanceStartCheckFix, advanceReviewRuns, advanceMergeGate, advanceVerifiedReviewGate, advanceRecordEvent, advanceCancel }) => {
       let closing: Promise<void> | undefined;
       return {
         registry,
@@ -505,6 +511,7 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
         sweepParkedStages,
         sweepSetupRequestChecks,
         answerDecisionAsk,
+        approveSubItem,
         sweepBranchCleanups,
         sweepPrSlotHolders,
         sweepProposalVerification,

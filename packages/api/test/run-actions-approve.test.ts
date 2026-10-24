@@ -501,6 +501,34 @@ describe('D#483 P1: approve route', () => {
     await expectNothingWritten(b.accountId);
   });
 
+  describe('D#483 S5-b2a: the click is a record of the person', () => {
+    const approvalsOf = async (workItemId: string) =>
+      (await admin.query('SELECT source, approved_by, spec_version_id FROM work_item_approvals WHERE work_item_id = $1 ORDER BY created_at, id', [workItemId])).rows;
+
+    it('a successful approval writes one work_item_approve row naming the signed-in person, and a repeat writes no second row', async () => {
+      const p = await person('admin');
+      const item = await seedIssueItem(p.accountId);
+      expect((await post(p, `/work-items/${item}/approve`)).status).toBe(202);
+      expect(await approvalsOf(item)).toEqual([{ source: 'work_item_approve', approved_by: p.userId, spec_version_id: null }]);
+      expect((await post(p, `/work-items/${item}/approve`)).status).toBe(202);
+      expect(await approvalsOf(item)).toHaveLength(1);
+    });
+
+    it('every refusal writes no row', async () => {
+      const member = await person('member');
+      const owner = await person('owner');
+      const memberItem = await seedIssueItem(member.accountId);
+      const closed = await seedIssueItem(owner.accountId, { stage: 'closed' });
+      const external = await seedIssueItem(owner.accountId, { provenance: 'external' });
+      const noRepo = await seedIssueItem(owner.accountId, { repo: false });
+      const running = await seedIssueItem(owner.accountId, { stage: 'spec_ready' });
+      await seedRun(owner.accountId, running, 'running');
+      expect((await post(member, `/work-items/${memberItem}/approve`)).status).toBe(403);
+      for (const item of [closed, external, noRepo, running]) expect((await post(owner, `/work-items/${item}/approve`)).status).toBeGreaterThanOrEqual(400);
+      for (const item of [memberItem, closed, external, noRepo, running]) expect(await approvalsOf(item)).toEqual([]);
+    });
+  });
+
   it('a second approval while the first is still live returns the same action_id and writes nothing new', async () => {
     const p = await person('owner');
     const item = await seedIssueItem(p.accountId);

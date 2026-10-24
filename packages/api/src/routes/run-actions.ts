@@ -243,6 +243,9 @@ async function approve(ctx: RouteContext, id: string) {
     if (!verdict.ok) throw new NotApprovableError(verdict.message);
     const live = await client.query<{ n: string }>("SELECT count(*) AS n FROM agent_runs WHERE work_item_id = $1 AND NOT (status = ANY($2::text[]))", [id, TERMINAL_RUN_STATUSES]);
     if (Number(live.rows[0]!.n) > 0) throw new AlreadyRunningError();
+    // D#483 S5-b2a: the person's click is a record (migration 0906). Written after every refusal above and before the request, so an item whose
+    // run starts always has the row; a repeat of an unchanged approval writes nothing.
+    await client.query("SELECT 1 FROM work_item_approval_record($1::uuid, 'work_item_approve')", [id]);
   });
 
   const requestHash = createHash("sha256").update(`advance_work_item:${id.toLowerCase()}`).digest("hex");

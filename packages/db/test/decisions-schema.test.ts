@@ -106,6 +106,8 @@ describe('decision_settings / decision_receipts schema (DP2 items 1, 3, 7)', () 
         'rule_id',
         'rule_set_version',
         'run_id',
+        'spec_version_id',
+        'sub_item_key',
         'work_item_id',
       ].sort(),
     );

@@ -437,3 +437,13 @@ export async function timeOutAskIn(
     throw err;
   }
 }
+
+/**
+ * D#483 S5-b2a: closes ONE `launch_sub_item` ask of the session's tenant with the reason `superseded` (migration 0906), because a person's
+ * Approve on the card decided the same question. The ask must carry the same sub-item key. True when it moved; false when it was already closed or is not such an ask. A token, a
+ * plain member and a non-session caller are refused by the definer.
+ */
+export async function withdrawSubItemAsk(client: PoolClient, askId: string, key: string): Promise<boolean> {
+  const { rows } = await client.query<{ moved: boolean }>('SELECT decision_ask_withdraw_by_id($1::uuid, $2::text) AS moved', [askId, key]);
+  return rows[0]!.moved;
+}

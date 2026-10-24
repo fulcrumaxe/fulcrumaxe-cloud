@@ -5,6 +5,7 @@ import { advanceActionFor, type AdvanceAction } from "@fx/core/src/work-items/ad
 import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { NO_VERDICT_ESCALATION_CODE, readReviewHold } from "@fx/core/src/work-items/reviewHold.js";
+import { VERDICT_ROLES } from "@fx/core/src/work-items/verdictRoles.js";
 import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError } from "@fx/core/src/work-items/stages.js";
 import { MAX_WAITING_ATTEMPT, assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
@@ -1348,7 +1349,6 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
   // ---- D#483 P3: the review stage -------------------------------------------------------------------------------
 
   const SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-  const VERDICT_ROLES = ["code-reviewer", "acceptance-tester", "security-reviewer", "debater"];
   const VERDICT_WORDS = ["pass", "needs-fix", "fail"];
   const END_CODE_RE = /^[a-z][a-z0-9_]{0,39}$/;
   const MAX_FIX_PROMPT_CHARS = 120_000;
