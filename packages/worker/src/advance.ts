@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { advanceActionFor, type AdvanceAction } from "@fx/core/src/work-items/advance.js";
 import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
@@ -483,10 +483,45 @@ export interface AdvanceItem extends AdvancePrSource {
   /** The item's newest executor run (any status), or null. A build that ended with no pull request is recorded against it. */
   executorRunId: string | null;
   /**
-   * D#483 S4-e: the proposal this item was approved from, when there is one (title and summary only; third-party text, to be fenced by the
-   * prompt that reads it). Absent or null for an item with no proposal.
+   * D#483 S4-e: the proposal this item was approved from, when there is one (third-party text, to be fenced by the prompt that reads it).
+   * Absent or null for an item with no proposal. S4-b3: `claims` and `evidence` are read with it (see `AdvanceProposal`).
    */
-  proposal?: { id: string; title: string; summary: string | null } | null;
+  proposal?: AdvanceProposal | null;
+}
+
+/**
+ * D#483 S4-b3: what the triage reads of an item's proposal. `claims` holds the texts of the claims whose verdict is `supported` and nothing else, so
+ * a claim the system could not confirm never reaches a prompt as a fact. `evidence` holds every evidence row as `{ ref, excerpt }`: the excerpt is
+ * the one the system read at the cited commit and stored, never text a model returned. Both are read when the driver loads the item (not when the
+ * person approved), so a verification that ended after the approval is picked up. Optional for callers that build one by hand; the loader always sets them.
+ */
+export interface AdvanceProposal {
+  id: string;
+  title: string;
+  summary: string | null;
+  claims?: string[];
+  evidence?: Array<{ ref: string; excerpt: string }>;
+}
+
+/**
+ * D#483 S4-b3: the supported claims and the evidence of one proposal, in the caller's tenant transaction (the stage driver's runner login, which reads
+ * both tables through `app_user`'s SELECT grant and its tenant policy; it can write neither). The explicit account filter repeats what the policy
+ * enforces. Ordered so the same rows always give the same intake body: claims by text then id, evidence by when it was stored then id.
+ */
+export async function readProposalIntakeFacts(
+  client: Pick<PoolClient, "query">,
+  accountId: string,
+  proposalId: string,
+): Promise<{ claims: string[]; evidence: Array<{ ref: string; excerpt: string }> }> {
+  const claims = await client.query<{ text: string }>(
+    "SELECT c.text FROM proposal_claims c WHERE c.account_id = $1 AND c.proposal_id = $2 AND c.verdict = 'supported' ORDER BY c.text, c.id",
+    [accountId, proposalId],
+  );
+  const evidence = await client.query<{ ref: string; excerpt: string }>(
+    "SELECT e.ref, e.excerpt FROM proposal_evidence e WHERE e.account_id = $1 AND e.proposal_id = $2 ORDER BY e.created_at, e.id",
+    [accountId, proposalId],
+  );
+  return { claims: claims.rows.map((c) => c.text), evidence: evidence.rows.map((e) => ({ ref: e.ref, excerpt: e.excerpt })) };
 }
 
 interface PrincipalRow {
@@ -837,6 +872,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       );
       const row = r.rows[0];
       const reviewHold = row?.stage === "needs_human" ? await readReviewHold(client, workItemId) : false;
+      const facts = row && row.p_id !== null ? await readProposalIntakeFacts(client, accountId, row.p_id) : null;
       return row
         ? {
             reviewHold,
@@ -851,7 +887,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
             hasSpec: row.has_spec,
             specVersion: row.spec_version === null ? null : Number(row.spec_version),
             executorRunId: row.executor_run_id,
-            proposal: row.p_id === null ? null : { id: row.p_id, title: row.p_title ?? "", summary: row.p_summary },
+            proposal: row.p_id === null || facts === null ? null : { id: row.p_id, title: row.p_title ?? "", summary: row.p_summary, claims: facts.claims, evidence: facts.evidence },
           }
         : null;
     });
