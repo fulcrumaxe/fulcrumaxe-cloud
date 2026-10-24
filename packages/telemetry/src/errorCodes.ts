@@ -291,6 +291,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "republish_branch_moved",
   "republish_failed",
   "republish_no_change",
+  // A check that failed only in test files the change did not touch (no fix round is started).
+  "check_failed_outside_change",
   "public_branch_moved",
   "base_synced",
   "pull_request_unreadable",

@@ -897,6 +897,7 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       ['public_head_unavailable', "Couldn't read the public pull request's branch on GitHub, so the fix round was not started. Nothing was changed. Press Build again in a moment."],
       ['base_sync_unavailable', "Couldn't bring the branch up to date on GitHub, so the fix round was not started. Nothing was changed. Press Build again in a moment."],
       ['base_sync_conflict', "Main has changed in the same places as this change, so the cloud couldn't bring the branch up to date. Nothing was started. Update the branch on GitHub (fix the conflict there), then press Build again."],
+      ['check_failed_outside_change', "The check failed in parts of the repo this change didn't touch, so a fix round would not help: the failure comes from the environment or from code that is already on the base branch. Nothing was started. Look at the check's output in the run, then press Build again if it was a one-off, or fix the base branch."],
     ])('FIXROUND-REFRESH-HEAD: a check fix round refused %s moves the item from In progress to Needs a person (the real markBuildNeedsHuman) and the card gives its sentence', async (code, sentence) => {
       const { accountId, userId } = await seedAccountWithMember(admin, { role: 'owner' });
       const { itemId } = await seedItem(accountId, { stage: 'in_progress' });

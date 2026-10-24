@@ -6,6 +6,7 @@ import { DispatchFailedError, IdempotencyKeyTakenError, ExecutionModeChangedErro
 import { escapeFenceLookalikes } from "@fx/pipeline";
 import { checkFixRound } from "@fx/spend";
 import { REPUBLISH_BASE_MISSING } from "@fx/core/src/work-items/baseSync.js";
+import { CHECK_FAILED_OUTSIDE_CHANGE, failedOutsideChange } from "@fx/core/src/work-items/checkFailure.js";
 import { BASE_SYNCED_PROMPT_LINE } from "./fixRoundBase.js";
 import type { RunStarter } from "./preview.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
@@ -26,6 +27,8 @@ export const CHECK_ROUNDS_USED = "check_rounds_used";
  * recorded branch to continue. A fixed word the driver turns into Needs human with a sentence of its own, never a generic failure.
  */
 export const CHECK_FIX_BRANCH_UNKNOWN = "check_fix_branch_unknown";
+
+export { CHECK_FAILED_OUTSIDE_CHANGE };
 
 export interface CheckFixDeps {
   pool: Pool;
@@ -92,6 +95,10 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
   });
   if (facts === null) return { ok: false, reason: "not_check_failed" };
   if (facts.row.prior !== null) return { ok: true, runId: facts.row.prior };
+  // A check that failed only in test files the change did not touch is not something a fix round can repair (the environment, or code already on the base branch):
+  // the item goes to a person and no attempt is spent. A check stopped at its time limit has only partial output, so it is never decided here. Anything the summary
+  // does not prove keeps the fix round (see failedOutsideChange).
+  if (facts.row.timed_out !== true && failedOutsideChange(facts.row.summary)) return { ok: false, reason: CHECK_FAILED_OUTSIDE_CHANGE };
   if (checkFixRound(facts.round) === "escalate") return { ok: false, reason: CHECK_ROUNDS_USED };
   if (facts.live) return { ok: false, reason: "already_running" };
   const { row } = facts;
