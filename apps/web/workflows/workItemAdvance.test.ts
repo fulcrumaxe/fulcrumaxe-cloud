@@ -60,6 +60,7 @@ function setup(o: SetupOptions = {}) {
       return loads > 1 && o.stages ? { ...item, stage: (o.stages.length > 1 ? (o.stages.shift() as string) : o.stages[0]) as string } : item;
     }),
     advanceStartRun: vi.fn(async (_req: AdvanceRunRequest) => o.start ?? { ok: true as const, runId: "run-1" }),
+    advanceCancel: vi.fn(async () => undefined),
     advanceRunOutcome: vi.fn(async (_a: string, runId: string) => {
       const list = runId === "run-b" ? buildOutcomes : outcomes;
       return list.length > 1 ? list.shift()! : list[0]!;
@@ -163,6 +164,9 @@ describe("workItemAdvanceWorkflow: classify then triage", () => {
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "classify_wait_timeout" });
     expect(world.sleeps).toBe(45); // 15 minutes of 20 second polls
     expect(w.advanceTriage).not.toHaveBeenCalled();
+    // The run is cancelled, so a runner still working on it is fenced at its next heartbeat (live 10-24: a classify run kept running on a runner after the wait failed).
+    expect(w.advanceCancel).toHaveBeenCalledTimes(1);
+    expect(w.advanceCancel).toHaveBeenCalledWith(expect.objectContaining({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ITEM }), "run-1");
   });
 
   describe("D#6 C12 A3: time spent pending (a queued runner run) does not count against the wait", () => {

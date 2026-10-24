@@ -51,7 +51,7 @@ afterEach(async () => {
 const clock: Clock = { now: () => new Date(), sleep: (ms, signal) => new Promise<void>((resolve) => { if (signal.aborted) return resolve(); const t = setTimeout(resolve, Math.min(ms, 1)); signal.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true }); }) };
 const withShell: NixShellStep = { prepare: async () => ({ ok: true, env: { PATH: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-node/bin" } }) } as unknown as NixShellStep;
 
-function rig(over: { outcome?: CheckOutcome; shell?: boolean; wired?: boolean; onCheck?: () => void; pin?: string | null; skipHook?: boolean } = {}) {
+function rig(over: { outcome?: CheckOutcome; shell?: boolean; wired?: boolean; onCheck?: () => void; pin?: string | null; skipHook?: boolean; steps?: string[]; hangUntilStopped?: { onStart: () => void; seen: { aborted?: boolean } }; heartbeatMs?: number } = {}) {
   const key = generateRunnerKey();
   cloud.trust(key.publicJwk);
   const client = createRunnerClient({ origin: cloud.origin, key, now: () => new Date(), fetchFn: fetch });
@@ -76,7 +76,8 @@ function rig(over: { outcome?: CheckOutcome; shell?: boolean; wired?: boolean; o
   git.checkBase = async () => (over.pin === undefined ? PIN : over.pin);
   const deps: JobHandlerDeps = {
     client, keyring: KEYRING, clock, run, sandbox: port, ledger: createFileLedger(path.join(root, `jobs-${++rigs}.json`), ledgerOptions()), git, events: createEventRelay(),
-    recordSession: (id, workspace) => recordSession(path.join(root, "sessions.json"), id, workspace), heartbeatMs: 1e9, flushMs: 1e9, runJobFn: runJob,
+    recordSession: (id, workspace) => recordSession(path.join(root, "sessions.json"), id, workspace), heartbeatMs: over.heartbeatMs ?? 1e9, flushMs: 1e9, runJobFn: runJob,
+    ...(over.steps === undefined ? {} : { onStep: (line: string) => over.steps!.push(line) }),
     ...(over.shell === false ? {} : { nix: withShell }),
     ...(over.skipHook === true ? { runJobFn: (async (job: never, d: RunJobDeps) => { const done = await runJob(job, { ...d, afterAgent: undefined }); return done; }) as typeof runJob } : {}),
     planePush: { baseLedger: createPlaneBaseLedger(), run: async () => (order.push("hook"), { kind: "pr_opened" as const, number: 9, seconds: 1 }) },
@@ -87,6 +88,13 @@ function rig(over: { outcome?: CheckOutcome; shell?: boolean; wired?: boolean; o
         checkInputs.push({ base: input.base, baseDir: input.baseDir, argv: input.check.argv, devShell: input.check.dev_shell });
         input.launch(input.check.argv, input.check.dev_shell);
         over.onCheck?.();
+        if (over.hangUntilStopped !== undefined) {
+          // A check that waits on something that never comes (as the live one waited on the network): it ends only when the run is stopped, as the real step ends its process group.
+          over.hangUntilStopped.onStart();
+          await new Promise<void>((resolve) => (input.signal?.aborted === true ? resolve() : input.signal?.addEventListener("abort", () => resolve(), { once: true })));
+          over.hangUntilStopped.seen.aborted = true;
+          return { passed: false, body: { exit_code: null, duration_ms: 7, timed_out: false, skipped_tests: null, summary: "" } };
+        }
         return over.outcome ?? { passed: true, body: PASSED };
       },
       checkLaunch: () => ({ tool: "x", args: [], env: {} }),
@@ -225,5 +233,75 @@ describe("a job with a check", () => {
     expect(duringCheck).toBe(1);
     expect(peak).toBe(1);
     expect(inHand).toBe(0);
+  });
+});
+
+describe("a check that is blocked, and a run the cloud has stopped", () => {
+  it("the next heartbeat's stop reaches the check through the run's signal, the check ends, and the run ends stopped with no done and no push", async () => {
+    const seen: { aborted?: boolean } = {};
+    const steps: string[] = [];
+    let runId = "";
+    const r = rig({ steps, heartbeatMs: 20, hangUntilStopped: { seen, onStart: () => cloud.stopRun(runId, "run_terminal") } });
+    const job = withCheck();
+    runId = job.run_id;
+    const result = await r.handle(await r.claim(job));
+    expect(seen.aborted).toBe(true);
+    expect(result).toEqual({ status: "stopped", reason: "run_terminal" });
+    expect(r.order).toEqual(["agent", "check", "sandbox_deleted"]);
+    expect(bodies("/done")).toEqual([]);
+    expect(steps.some((line) => line.includes("heartbeat answered stop (run_terminal, http 409)"))).toBe(true);
+    expect(steps.some((line) => /check ended \(exit none, 7 ms, timed_out false, stopped\)/.test(line))).toBe(true);
+  });
+});
+
+describe("the journal line per step", () => {
+  it("a run with a check says: agent turn started and ended, check started and ended with exit code, duration and timed_out, and done posted with the status", async () => {
+    const steps: string[] = [];
+    const r = rig({ steps, outcome: { passed: true, body: { ...PASSED, duration_ms: 1234 } } });
+    const job = withCheck();
+    await r.handle(await r.claim(job));
+    const p = `fx-runner: run ${job.run_id}: `;
+    expect(steps).toEqual([
+      `${p}agent turn started`,
+      `${p}agent turn ended (result)`,
+      `${p}check started (time limit 5400 s)`,
+      `${p}check ended (exit 0, 1234 ms, timed_out false)`,
+      `${p}done posted (http 200)`,
+    ]);
+  });
+
+  it("a timed-out check says timed_out true, and the run_ended of the failure says what the cloud answered", async () => {
+    const timedOut: DoneCheck = { exit_code: null, duration_ms: 5_400_000, timed_out: true, skipped_tests: null, summary: "" };
+    const steps: string[] = [];
+    const r = rig({ steps, outcome: { passed: false, body: timedOut } });
+    const job = withCheck();
+    await r.handle(await r.claim(job));
+    const p = `fx-runner: run ${job.run_id}: `;
+    expect(steps).toContain(`${p}check ended (exit none, 5400000 ms, timed_out true)`);
+    expect(steps).toContain(`${p}run_ended check_failed posted (http 200)`);
+    expect(steps).toContain(`${p}done posted (http 200)`);
+  });
+
+  it("a check that was not run says why, in a closed word", async () => {
+    const steps: string[] = [];
+    const r = rig({ steps, shell: false });
+    const job = withCheck();
+    await r.handle(await r.claim(job));
+    expect(steps).toContain(`fx-runner: run ${job.run_id}: check not run (check_no_dev_shell)`);
+    expect(steps.some((line) => line.includes("check started"))).toBe(false);
+  });
+
+  it("no line holds the check's output or its arguments: only the run id, fixed words, numbers and closed codes", async () => {
+    const steps: string[] = [];
+    const r = rig({ steps, outcome: { passed: false, body: { ...FAILED, summary: "PRIVATE-OUTPUT-MARKER" } } });
+    await r.handle(await r.claim(withCheck()));
+    expect(steps.length).toBeGreaterThan(0);
+    expect(steps.join("\n")).not.toMatch(/PRIVATE-OUTPUT-MARKER|scripts\/check\.sh/);
+  });
+
+  it("without onStep nothing is written and the run is as before", async () => {
+    const r = rig();
+    const result = await r.handle(await r.claim(withCheck()));
+    expect(result.status).toBe("completed");
   });
 });

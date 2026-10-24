@@ -42,6 +42,7 @@ import { clearCliStubs, stubBaseline, type StubBaseline } from "./workspaceStubs
 import { startLease, type Clock, type Lease, type LeaseEnd, type EventRelay } from "./lease.js";
 import { endOfFailure, endOfRefusal, RUN_ENDED_RETRY_MS, RUN_ENDED_TRIES, runEndedEvent, sendRunEndedAlone, SHUTDOWN_REPORT_MS, type RunEnd } from "./runEnded.js";
 import { verifyJob, type JobRefusal } from "./verifyJob.js";
+import { closedWord, observedClient, type StepSink } from "./stepLog.js";
 import type { JobWatch, WatchedJob } from "./watch.js";
 
 /** How many times `done` is sent when the cloud cannot reach GitHub or the call fails. */
@@ -126,6 +127,11 @@ export interface JobHandlerDeps {
   checkLaunch?: (handle: SandboxHandle, argv: readonly string[], devShell: boolean) => CheckLaunch | CheckRefused | undefined;
   baseFile?: CheckStepInput["baseFile"];
   checkHome?: string;
+  /**
+   * One journal line per step of a run (`stepLog.ts`): the agent's turn starting and ending, the check starting and ending, and what the cloud answered to the run's end. Fixed words, the run id,
+   * numbers and closed codes only. Absent: no lines.
+   */
+  onStep?: StepSink;
   /** The tmux watch and take-over (R4a-7). Absent: no watch. */
   watch?: JobWatch;
   /** Sends the agent in a sandbox SIGINT, which ends its turn cleanly. Required for a take-over to stop the agent. */
@@ -215,6 +221,26 @@ function stopOnAbort(port: SandboxPort, signal: AbortSignal, held: HeldSandbox):
   };
 }
 
+/**
+ * A port that says, on `step`, when the agent's turn starts and when it ends (with the kind of its last event, a closed word). It changes nothing the agent or the run sees:
+ * the start's own return value is passed on as it was.
+ */
+function narrated(port: SandboxPort, step: StepSink): SandboxPort {
+  const watch = <T extends { hookFired: Promise<{ type: string } | undefined> }>(started: T, what: string): T => {
+    step(`agent turn ${what}`);
+    started.hookFired.then(
+      (event) => step(`agent turn ended (${event === undefined ? "no_result" : closedWord(event.type)})`),
+      () => step("agent turn ended (error)"),
+    );
+    return started;
+  };
+  return {
+    ...port,
+    startDetached: (handle, opts) => watch(port.startDetached(handle, opts), "started"),
+    resume: (handle, sessionId, prompt, opts) => watch(port.resume(handle, sessionId, prompt, opts), "resumed"),
+  };
+}
+
 /** Stands in for path A on a build with no pinned relay: the first step refuses, so no git runs. */
 const UNPINNED_PATH: GitPath = {
   check: () => {
@@ -248,6 +274,19 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
   const attempts = deps.doneAttempts ?? MAX_DONE_ATTEMPTS;
 
   const never = new AbortController().signal;
+
+  /** The client as one run uses it: with a journal line for each answer to the run's end (`stepLog.ts`). Without `onStep` it is the client itself. */
+  const observed = new Map<string, Pick<RunnerClient, "heartbeat" | "events" | "done">>();
+  const clientOf = (runId: string): Pick<RunnerClient, "heartbeat" | "events" | "done"> => {
+    const step = deps.onStep;
+    if (step === undefined) return deps.client;
+    let seen = observed.get(runId);
+    if (seen === undefined) {
+      seen = observedClient(deps.client, (line) => step(`fx-runner: run ${runId}: ${line}`));
+      observed.set(runId, seen);
+    }
+    return seen;
+  };
 
   /**
    * Builds the repo's dev shell outside the sandbox and hands its filtered environment to the job's grant (D#6 R7c). Called only for a job that carries
@@ -328,7 +367,8 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
 
   /** A refusal made before anything is held: the one event is the only thing this run sends. */
   async function refuse(claimed: Claimed, reason: JobRefusal): Promise<JobResult> {
-    await sendRunEndedAlone(deps.client, deps.clock, claimed, endOfRefusal(reason), deps.shutdown ?? never);
+    await sendRunEndedAlone(clientOf(claimed.runId), deps.clock, claimed, endOfRefusal(reason), deps.shutdown ?? never);
+    observed.delete(claimed.runId);
     return { status: "refused", reason };
   }
 
@@ -374,7 +414,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       if (!takeoverOpen || tookOver || handoff !== undefined) return;
       handoff = { deadline };
       void interruptAgent();
-    }, client: deps.client, clock: deps.clock, runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, ...(deps.heartbeatMs === undefined ? {} : { heartbeatMs: deps.heartbeatMs }), ...(deps.flushMs === undefined ? {} : { flushMs: deps.flushMs }), ...(deps.activityFlushMs === undefined ? {} : { activityFlushMs: deps.activityFlushMs }) });
+    }, client: clientOf(claimed.runId), clock: deps.clock, runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, ...(deps.heartbeatMs === undefined ? {} : { heartbeatMs: deps.heartbeatMs }), ...(deps.flushMs === undefined ? {} : { flushMs: deps.flushMs }), ...(deps.activityFlushMs === undefined ? {} : { activityFlushMs: deps.activityFlushMs }) });
     const stopRun = deps.shutdown === undefined ? lease.signal : AbortSignal.any([lease.signal, deps.shutdown]);
     // One run, one `seq` line: the engine numbers its events from 0 on each start and the stage marks below are made here, so every event is
     // renumbered as it is queued (a stage mark sent before the engine starts would otherwise share its numbers).
@@ -383,6 +423,8 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     const mark = (stage: "workspace_ready" | "cloned" | "deps_installed" | "deps_install_failed"): void => lease.push({ seq: next(), ts: deps.clock.now().toISOString(), type: "stage", stage });
     let abandonSend = false;
     let usedPort: SandboxPort = deps.sandbox;
+    /** One journal line for this run (`stepLog.ts`). */
+    const step: StepSink = (text) => deps.onStep?.(`fx-runner: run ${claimed.runId}: ${text}`);
     const watched = await deps.watch?.begin({ runId: claimed.runId, role: job.role, repo: `${job.repo.owner}/${job.repo.name}`, started: deps.clock.now() });
     watched?.onTakeOver(() => {
       if (!takeoverOpen) return;
@@ -481,7 +523,8 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
           };
           const granted = withReadGrants(deps.sandbox, git.readGrants(job));
           const withGrants = grant === undefined ? granted : withAllowances(granted, grant);
-          const allowed = withSpillDir(withExcludes(withGrants, job.excludes), spillHeld?.dir);
+          const spilled = withSpillDir(withExcludes(withGrants, job.excludes), spillHeld?.dir);
+          const allowed = deps.onStep === undefined ? spilled : narrated(spilled, step);
           usedPort = allowed;
           const afterAgent = async (sandboxHandle: SandboxHandle, workspace: string): Promise<void> => {
             // Before the check's before-and-after comparison of the protected files, so a placeholder is neither checked nor reported as a change.
@@ -491,26 +534,30 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             const closed = closedCheck;
             // A check that needs the dev shell is not run without one, and never passes by default.
             if (check.dev_shell && grant?.nixEnv === undefined) {
-              checkHeld.outcome = closed("", undefined, { noDevShell: true });
+              checkHeld.outcome = closed("", undefined, { noDevShell: true }); step("check not run (check_no_dev_shell)");
               return;
             }
             const { checkStep, checkLaunch, baseFile } = deps;
             if (checkStep === undefined || checkLaunch === undefined || baseFile === undefined || started.base === undefined) {
-              checkHeld.outcome = closed("the check was not run: it is not set up on this runner", "not_set_up");
+              checkHeld.outcome = closed("the check was not run: it is not set up on this runner", "not_set_up"); step("check not run (not_set_up)");
               return;
             }
             // The files the check names are pinned to the merge-base of the branch tip with the default branch, read from the runner's mirror; without one the check fails.
             const mirror = git.mirrorDir?.(job);
             const pin = mirror === undefined ? null : await git.checkBase?.(job, started.base).catch(() => null);
             if (mirror === undefined || pin === null || pin === undefined) {
-              checkHeld.outcome = closed("the check was not run: the default branch's copy of its files could not be found", "base_missing");
+              checkHeld.outcome = closed("the check was not run: the default branch's copy of its files could not be found", "base_missing"); step("check not run (base_missing)");
               return;
             }
+            step(`check started (time limit ${String(check.timeout_s)} s)`);
             try {
               checkHeld.outcome = await checkStep({ check, workspace, base: pin, baseDir: mirror, launch: (argv, devShell) => checkLaunch(sandboxHandle, argv, devShell), baseFile, home: deps.checkHome, signal: stopRun });
+              const body = checkHeld.outcome.body;
+              step(`check ended (exit ${body.exit_code === null ? "none" : String(body.exit_code)}, ${String(body.duration_ms)} ms, timed_out ${String(body.timed_out)}${stopRun.aborted ? ", stopped" : ""}${body.reason === undefined ? "" : `, ${closedWord(body.reason)}`})`);
             } catch {
               // fx-swallow-ok: a check step that threw did not pass; the error text could hold a path
               checkHeld.outcome = closed("the check was not run: it is not set up on this runner", "not_set_up");
+              step("check ended (not run: it is not set up on this runner)");
             }
           };
           result = await run(job, { ...deps.run, afterAgent, promptNotes: () => promptNotes, repoMap: () => repoMapHeld.map, pinned: () => pinsHeld.read?.items, ...(spillHeld === undefined ? {} : { taskPrompt: spillHeld.rewrite }), planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger });
@@ -607,6 +654,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       return sent;
     } finally {
       ran.abort();
+      observed.delete(claimed.runId);
       detach();
       // The run's spill files go with the run, on every way out; a directory that is not the one made is left alone.
       if (spillHeld !== undefined) try { removeSpill(spillHeld); } catch { /* fx-swallow-ok: a refused or failed removal leaves the daemon's own directory, cleared the next time this run id is seen */ }
@@ -676,7 +724,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     // text's sha256, never a path or any of the text. The other sections are the cloud's, which sent the prompt.
     const contextLedger = result.contextLedger === undefined ? undefined : contextLedgerToWire(result.contextLedger, sections);
     for (let attempt = 1; attempt <= attempts; attempt++) {
-      const reply = await deps.client.done({ runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, sessionId: result.sessionId, agentOutput: result.agentOutput, contextLedger, check });
+      const reply = await clientOf(claimed.runId).done({ runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, sessionId: result.sessionId, agentOutput: result.agentOutput, contextLedger, check });
       if (reply.kind === "done") {
         if (result.sessionId !== undefined && result.workspace !== undefined) {
           await deps.recordSession(result.sessionId, result.workspace).catch(() => undefined);

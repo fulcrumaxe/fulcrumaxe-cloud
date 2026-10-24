@@ -13,6 +13,12 @@ import { checkProtected } from "./checkProtected.js";
 
 /** Where a Linux session keeps per-user sockets (the session bus among them). */
 const USER_RUNTIME_ROOT = ["", "run", "user"].join("/");
+
+/**
+ * The pnpm settings the check is given on top of the clean environment (see `checkLaunch`): offline, and no release-age lookup. Exported so the test that runs the real pnpm
+ * uses these very values.
+ */
+export const CHECK_PNPM_ENV: Readonly<Record<string, string>> = Object.freeze({ pnpm_config_offline: "true", pnpm_config_minimum_release_age: "0" });
 import { createSandboxHost } from "./probeHost.js";
 import { SUBSCRIPTION_TOKEN_VAR } from "../job/cleanEnv.js";
 import {
@@ -394,6 +400,12 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       // A fixed marker, set last so nothing in the job env can unset or change it. It only informs tools inside the check (a browser then skips its own sandbox, which
       // needs user namespaces this filter refuses); it changes no confinement.
       env.FX_RUNNER_CHECK = "1";
+      // The check has no network, so a package manager that asks the registry for anything waits on a connection that cannot be made. pnpm 11 does exactly that on a plain
+      // `pnpm install --frozen-lockfile` over a tree the runner already installed: it checks the lockfile against the supply-chain policies (minimum release age, trust), which
+      // needs the registry's metadata, and the check's cache holds none. Offline mode makes any lookup that would need the network fail at once with a named error instead of
+      // retrying for minutes; a zero minimum release age skips the metadata lookup the policy check starts with. The packages themselves were checked by those policies when
+      // the runner installed them with network, on the host and before any repository code ran, so nothing is let in here that was not already. Set last, like the marker.
+      Object.assign(env, CHECK_PNPM_ENV);
       // The agent's own shell sandbox is Claude Code's, started by the CLI on a model turn; the check is started by the runner, so it is built from the very same settings with
       // the same effect: a read-only view with the denied directories hidden, no network, its own process table and a seccomp filter that refuses Unix-domain sockets (a connected pair excepted: `checkSeccomp.ts`).
       // Where that cannot all be applied it is refused: a check never runs under weaker rules than the agent.

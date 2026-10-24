@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -38,11 +38,11 @@ function launchOf(argv: readonly string[], devShell: boolean) {
   return launch;
 }
 
-function runCheck(argv: string[]) {
+function runCheck(argv: string[], over: { timeout_s?: number; signal?: AbortSignal } = {}) {
   const installCapture = kit.installCapture;
   if (installCapture === undefined) throw new Error("the kit has no install capture");
   const step = createCheckStep({ capture: installCapture, now: () => new Date(), vcsState: createVcsState(captureLarge, {}) });
-  const input: CheckStepInput = { check: { argv, dev_shell: false, timeout_s: 30 }, workspace, base, baseDir: workspace, baseFile: createBaseFile(captureLarge, {}), launch: (vector, devShell) => host.checkLaunch(handle, vector, devShell) };
+  const input: CheckStepInput = { check: { argv, dev_shell: false, timeout_s: over.timeout_s ?? 30 }, workspace, base, baseDir: workspace, baseFile: createBaseFile(captureLarge, {}), launch: (vector, devShell) => host.checkLaunch(handle, vector, devShell), ...(over.signal === undefined ? {} : { signal: over.signal }) };
   return step(input);
 }
 
@@ -94,6 +94,52 @@ describe.skipIf(!usable)("RUNNER-SECCOMP-FD-1: the check under real bubblewrap t
     expect(out.passed).toBe(true);
     expect(out.body.exit_code).toBe(0);
     expect(out.body.summary).toContain("check-ran");
+  });
+
+  /** Processes on this host whose command line holds `marker`: the check's own tree is visible from outside its process namespace. */
+  const alive = (marker: string): number => {
+    const found = spawnSync("pgrep", ["-f", marker], { encoding: "utf8" });
+    return found.status === 0 ? found.stdout.split("\n").filter((line) => line.trim() !== "").length : 0;
+  };
+  /** A program that does what pnpm did in the live stall: it waits on a retry timer for a network that is not there, and keeps a child waiting too. */
+  const waiting = (marker: string): string[] => ["sh", "-c", `sleep 3000 # ${marker} &\n${JSON.stringify(process.execPath)} -e 'setInterval(() => {}, 1000) /* ${marker} */'`];
+
+  it("a check blocked waiting for the network is ended by its own time cap, with everything it started, and is reported as timed out", async () => {
+    const marker = `fx-chk-cap-${Math.random().toString(36).slice(2)}`;
+    let runningBefore = 0;
+    setTimeout(() => {
+      runningBefore = alive(marker);
+    }, 1000);
+    const started = Date.now();
+    const out = await runCheck(waiting(marker), { timeout_s: 2 });
+    expect(runningBefore).toBeGreaterThan(0);
+    expect(Date.now() - started).toBeLessThan(20_000);
+    expect(out.passed).toBe(false);
+    expect(out.body).toMatchObject({ exit_code: null, timed_out: true });
+    expect(alive(marker)).toBe(0);
+  });
+
+  it("a check blocked waiting for the network is ended when the run is stopped (the cloud's stop reaches it through the signal), and is not reported as timed out", async () => {
+    const marker = `fx-chk-stop-${Math.random().toString(36).slice(2)}`;
+    const stop = new AbortController();
+    let runningBefore = 0;
+    setTimeout(() => {
+      runningBefore = alive(marker);
+      stop.abort();
+    }, 1500);
+    const started = Date.now();
+    const out = await runCheck(waiting(marker), { timeout_s: 600, signal: stop.signal });
+    // Control: the processes really were up when the stop came, so "none left" below is the stop's doing.
+    expect(runningBefore).toBeGreaterThan(0);
+    expect(Date.now() - started).toBeLessThan(20_000);
+    expect(out.passed).toBe(false);
+    expect(out.body).toMatchObject({ exit_code: null, timed_out: false });
+    expect(alive(marker)).toBe(0);
+  });
+
+  it("the check's pnpm is told to work offline and not to look up release ages (set after the job's own environment, which has no such name in its allowlist)", () => {
+    const launch = launchOf(["true"], false);
+    expect(launch.env).toMatchObject({ pnpm_config_offline: "true", pnpm_config_minimum_release_age: "0" });
   });
 
   it("the filter is applied: a Unix-domain socket is refused in the check, though the same program connects without the filter", async () => {

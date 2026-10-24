@@ -63,6 +63,18 @@ describe("the result of a real run", () => {
     expect(out.body).toMatchObject({ exit_code: 3, timed_out: false });
   });
 
+  it("a check that failed on something it asked the network for says so in a line of its own, ahead of the output; one that passed, or failed for another reason, does not", async () => {
+    const asked = await run([script("net.sh", "echo '[ERR_PNPM_NO_OFFLINE_META] Failed to resolve x in package mirror'; exit 1")]);
+    expect(asked.passed).toBe(false);
+    expect(asked.body.summary.startsWith("the check needed the network, which it does not have")).toBe(true);
+    expect(asked.body.summary).toContain("ERR_PNPM_NO_OFFLINE_META");
+    const passed = await run([script("net-ok.sh", "echo 'a test printed ERR_PNPM_NO_OFFLINE_META on purpose'")]);
+    expect(passed.passed).toBe(true);
+    expect(passed.body.summary).not.toContain("needed the network");
+    const other = await run([script("other.sh", "echo 'plain failure'; exit 2")]);
+    expect(other.body.summary).not.toContain("needed the network");
+  });
+
   it("a command that outlasts its own cap is killed with everything it started and reports timed_out", async () => {
     const marker = path.join(root, "child-alive");
     const long = script("long.sh", `sh -c 'sleep 30; echo late > "${marker}"' &\nsleep 30`);

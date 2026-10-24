@@ -495,6 +495,8 @@ export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promis
       outcome = await advanceRunOutcomeStep(accountId, started.runId);
     }
     if (!outcome.done) {
+      // The run is stopped, not left to a runner that keeps answering its heartbeat: only a cancelled run is fenced (409) at the next one, so the runner ends its work.
+      await advanceCancelStep(accountId, args.userId, workItemId, started.runId);
       await advanceLogStep("advance.failed", { work_item_id: workItemId, run_id: started.runId, at: "classify_wait", reason: "wait_timeout" });
       return { status: "failed", detail: "classify_wait_timeout" };
     }
