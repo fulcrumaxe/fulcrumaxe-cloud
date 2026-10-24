@@ -34,7 +34,7 @@ export const WORK_ITEM_KPI_SELECT = `
          t_discussing, t_spec_ready, t_in_progress, t_pr_opened,
          t_first_verdict, first_verdict_stage, t_needs_human, t_merged,
          t_closed_unmerged, t_closed, n_changes_requested, n_needs_human,
-         model_usd, compute_usd, tokens
+         model_usd, compute_usd, tokens, n_person_change_requests
     FROM v_kpi_work_items
 `;
 
@@ -69,6 +69,7 @@ export function toWorkItemKpiRow(row: Record<string, unknown>): WorkItemKpiRow {
     model_usd: Number(row.model_usd),
     compute_usd: Number(row.compute_usd),
     tokens: Number(row.tokens),
+    n_person_change_requests: Number(row.n_person_change_requests),
   };
 }
 
