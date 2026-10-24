@@ -42,6 +42,7 @@
     "workflow": "^4.8.9"
   },
   "devDependencies": {
+    "@fx/test-guard": "workspace:*",
     "@types/node": "^24.19.0",
     "@types/pg": "^8.11.10",
     "@types/react": "^19.0.1",

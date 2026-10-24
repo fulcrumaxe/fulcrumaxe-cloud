@@ -290,6 +290,17 @@ Claude Code is not part of this release. You install it yourself from Anthropic,
 checks that it is there. The executable embeds the Node runtime (an official nodejs.org release, checked against its published
 SHA-256) and bundles this package's own dependencies. The licence notices for third-party code are in `THIRD-PARTY-NOTICES` at the root of the source repository; they are not among the release files, and the build strips legal comments from the bundle.
 
+## Browsers and other sandboxed tools inside a check
+
+The approved check runs inside the runner's own check sandbox: a read-only view of the workspace, no network, its own process table, and a seccomp filter that refuses creating new user namespaces. That sandbox is the outer security boundary. A browser started inside it must therefore not turn on its own sandbox (Chromium's sandbox needs user namespaces, so it fails with "sandboxing failed"). Launch it with its sandbox disabled, for example Playwright's `chromiumSandbox: false`, only when the marker below says you are inside the check.
+
+The runner sets two marker variables that a tool can read to tell where it is running:
+
+- `FX_RUNNER_CHECK=1` is set for the approved check. The runner sets it last, so nothing in the job environment can change or unset it. It only informs tools; it does not change what the sandbox allows.
+- `FX_RUNNER_JOB=1` is set for the agent's own job (the model's turns), not for the check.
+
+Do not disable a browser sandbox unconditionally. Outside a check (on your own machine or in other CI) keep the browser's sandbox on, and switch it off only when `FX_RUNNER_CHECK` is `1`.
+
 ## Boundaries
 
 No `@anthropic-ai/*` package is a dependency or an import. `test/` checks that, that no host-side tool is defined, that

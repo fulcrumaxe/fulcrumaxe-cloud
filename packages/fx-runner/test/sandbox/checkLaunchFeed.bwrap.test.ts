@@ -109,7 +109,7 @@ describe.skipIf(!usable)("RUNNER-SECCOMP-FD-1: the check under real bubblewrap t
       const argv = [process.execPath, "-e", program];
       // Control: the same launch with the filter left out (and nothing fed), through the same kit, connects.
       const launch = launchOf(argv, false);
-      const unfiltered = await kit.installCapture!(launch.tool, launch.args.slice(2), launch.env, workspace, 20_000, 4096);
+      const unfiltered = await kit.installCapture!(launch.tool, launch.args.slice(2), launch.env, workspace, 20_000, 4096, undefined, undefined);
       expect(unfiltered.tail).toContain("connected");
       const filtered = await runCheck(argv);
       expect(filtered.passed).toBe(false);

@@ -56,7 +56,7 @@ async function filtered(argv: readonly string[]) {
 async function unfiltered(argv: readonly string[]) {
   const launch = launchOf(argv);
   expect(launch.args.slice(0, 2)).toEqual(["--seccomp", "3"]);
-  return kit.installCapture!(launch.tool, launch.args.slice(2), launch.env, workspace, 20_000, 4096);
+  return kit.installCapture!(launch.tool, launch.args.slice(2), launch.env, workspace, 20_000, 4096, undefined, undefined);
 }
 
 function runCheck(argv: string[]) {

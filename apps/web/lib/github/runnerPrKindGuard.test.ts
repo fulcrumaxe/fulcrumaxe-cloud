@@ -1,6 +1,7 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { listSourcePaths } from "../../../../packages/test-guard/src/sourceFiles.js";
 
 /**
  * D#6 R2b-3e: the `runner_pr` installation-client kind holds contents:read, so the only thing that may open it is the pull request
@@ -16,20 +17,14 @@ const ALLOWED = ["apps/web/lib/github/runnerPullRequest.ts", "packages/github/sr
 /** The kind as a whole token: `"runner_pr"`, `'runner_pr'` or a bare word. A longer identifier such as `runner_product_denied` does not count. */
 const KIND = /\brunner_pr\b/;
 
-function sources(dir: string, out: string[] = []): string[] {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.isDirectory()) {
-      if (!SKIP_DIRS.has(entry.name)) sources(path.join(dir, entry.name), out);
-    } else if (SOURCE.test(entry.name) && !TEST_FILE.test(entry.name)) {
-      out.push(path.join(dir, entry.name));
-    }
-  }
-  return out;
+/** The files the repository lists under apps/ and packages/ (build output on disk never counts), minus test code. */
+function sources(): string[] {
+  return listSourcePaths(ROOT, ["apps", "packages"], SKIP_DIRS).filter((file) => SOURCE.test(file) && !TEST_FILE.test(path.basename(file)));
 }
 
 describe("the runner_pr installation-client kind", () => {
   it("is named in non-test source only by its definition and by the pull request port's wiring", () => {
-    const named = [...sources(path.join(ROOT, "apps")), ...sources(path.join(ROOT, "packages"))]
+    const named = sources()
       .filter((file) => KIND.test(readFileSync(file, "utf8")))
       .map((file) => path.relative(ROOT, file).split(path.sep).join("/"))
       .sort();

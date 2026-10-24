@@ -8,7 +8,7 @@ import type { InstructionCanaryResult } from "../instructionCanaryState.js";
 import type { GitCapture } from "./git.js";
 
 /** Runs a program in `cwd` with exactly this environment and no shell; ends its whole process group on the time limit or the signal; keeps the last `tailChars` of its output. */
-export type InstallCapture = (command: string, args: readonly string[], env: Record<string, string>, cwd: string, timeoutMs: number, tailChars: number, signal?: AbortSignal, feed?: Buffer) => Promise<{ code: number | null; tail: string; timedOut: boolean; aborted: boolean }>;
+export type InstallCapture = (command: string, args: readonly string[], env: Record<string, string>, cwd: string, timeoutMs: number, tailChars: number, signal: AbortSignal | undefined, feed: Buffer | undefined) => Promise<{ code: number | null; tail: string; timedOut: boolean; aborted: boolean }>;
 
 /** What `doctor` shows of the agent CLI: its version against the minimum, the flags it lacks, and whether a login of the right kind exists. */
 export interface EngineReport {
