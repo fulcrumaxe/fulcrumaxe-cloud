@@ -56,6 +56,15 @@ export const COPY = Object.freeze({
   forbidden: "Only an owner or admin can do that for this memory.",
   gone: "That memory entry is no longer there. The list was refreshed.",
   countUnavailable: "Count unavailable",
+  // D#601 MEM-4b3
+  transition: "That entry has already changed, so this can't be done now. The list was refreshed.",
+  full: "That place already holds as much memory as it can. Retire or delete something there first.",
+  changedSince: "This entry was changed since you opened this page, so nothing was changed. The list was refreshed.",
+  noRights: "Only an owner or admin can change repo, account and role memory.",
+  noEarlier: "This entry was never edited, so there is no earlier version.",
+  checkingAccess: "Checking your access…",
+  accessFailed: "Your access couldn't be checked, so changes are turned off. Reload to try again.",
+  tooOld: "Deleted more than 30 days ago, so it can't be restored.",
 });
 
 /** The one formatter: a string, or the fallback. null, undefined, NaN and the strings "null" and "undefined" never reach a screen. */
@@ -100,6 +109,8 @@ export function failureWords(e) {
   if (!e) return COPY.failed;
   if (e.code === "must_open_first" || e.code === "mixed_sources" || e.code === "conflict") return text(e.message, COPY.failed);
   if (e.code === "secret_detected") return COPY.secret;
+  if (e.code === "invalid_transition") return COPY.transition;
+  if (e.code === "memory_full") return COPY.full;
   if (e.status === 403) return COPY.forbidden;
   if (e.status === 404) return COPY.gone;
   if (e.status === 0 || e.kind === "server_error") return text(e.message, COPY.failed);
@@ -171,6 +182,81 @@ export function editEntry(id, { body, why, kind }, get = api) {
   const payload = { body: String(body).trim(), why: String(why).trim() === "" ? null : String(why).trim() };
   if (kind) payload.kind = kind;
   return get("POST", "/api/v1/memory/" + encodeURIComponent(id) + "/edit", payload);
+}
+
+// ── D#601 MEM-4b3: undo, delete and restore, history, export ──
+export const UNDO_MS = 30000;
+export const DELETE_KEEP_DAYS = 30;
+const DAY_MS = 86400000;
+const id1 = (id) => "/api/v1/memory/" + encodeURIComponent(id);
+export const revertEntries = (ids, action, get = api) => get("POST", "/api/v1/memory/revert", { ids, action });
+export const deleteEntry = (id, get = api) => get("POST", id1(id) + "/delete");
+export const restoreEntry = (id, get = api) => get("POST", id1(id) + "/restore");
+export const restorePrevious = (id, get = api) => get("POST", id1(id) + "/restore-previous");
+
+/** The history of one entry: fixed labels, who did it, and the stored versions (empty once the entry was purged; the events stay). */
+export async function loadHistory(id, get = api, signal) {
+  const body = await get("GET", id1(id) + "/history", undefined, signal);
+  return {
+    events: arr(body && body.events).filter((e) => e && typeof e.at === "string").map((e) => ({
+      at: e.at, label: text(e.label, "Changed"), version: Number.isInteger(e.version) ? e.version : null, actor: text(e.actor_label, "Unknown"), toStatus: e.to_status,
+    })),
+    versions: arr(body && body.versions).filter((v) => v && isUuid(v.id)),
+  };
+}
+
+/** Whole days left to restore an entry deleted at `deletedAt` (ISO). null when there is no usable time; 0 when the 30 days are over. */
+export function daysLeft(deletedAt, now = Date.now()) {
+  const at = typeof deletedAt === "string" ? Date.parse(deletedAt) : NaN;
+  return Number.isFinite(at) ? Math.max(0, Math.ceil((at + DELETE_KEEP_DAYS * DAY_MS - now) / DAY_MS)) : null;
+}
+
+/**
+ * What a row offers. Each action: { key, label, enabled, reason }. A disabled action always carries its reason, and every action is disabled with
+ * the rights sentence when the person may not change this entry (repo, account and role memory need an owner or admin; item memory is the server's call).
+ * access: "checking" or "failed" (what /auth/me said) turns every action off with its own sentence. A deleted row's days left come from its deleted_at.
+ */
+export function rowActions(row, { isAdmin = false, access = "ok", now = Date.now() } = {}) {
+  const allowed = access === "ok" && (isAdmin || row.scope === "item");
+  const why = access === "checking" ? COPY.checkingAccess : access === "failed" ? COPY.accessFailed : COPY.noRights;
+  const out = [];
+  const add = (key, label, ok = true, reason = "") => out.push({ key, label, enabled: allowed && ok, reason: !allowed ? why : ok ? "" : reason });
+  switch (row.status) {
+    case "approved":
+      add("retire", "Retire");
+      add("restore_previous", "Restore previous version", Number.isInteger(row.version) && row.version > 1, COPY.noEarlier);
+      add("delete", "Delete");
+      break;
+    case "rejected": add("reconsider", "Reconsider"); add("delete", "Delete"); break;
+    case "expired": add("renew", "Renew"); add("delete", "Delete"); break;
+    case "retired": add("restore_retired", "Restore"); add("delete", "Delete"); break;
+    case "proposed": add("delete", "Delete"); break;
+    case "deleted":
+      const days = daysLeft(row.deleted_at, now);
+      if (days === 0) add("restore", "Restore", false, COPY.tooOld);
+      else add("restore", days === null ? "Restore" : "Restore (" + days + (days === 1 ? " day" : " days") + " left)");
+      break;
+    default: break;
+  }
+  return out;
+}
+
+/** The export for one repo as { filename, content, entries, omitted }. */
+export async function buildExport(repoId, format, get = api, signal) {
+  const b = await get("GET", "/api/v1/memory/export?repo_id=" + encodeURIComponent(repoId) + "&format=" + encodeURIComponent(format), undefined, signal);
+  const n = (v) => (Number.isInteger(v) && v >= 0 ? v : 0);
+  return { filename: text(b && b.filename, format === "claude" ? "CLAUDE.md" : "AGENTS.md"), content: typeof (b && b.content) === "string" ? b.content : "", entries: n(b && b.entries), omitted: n(b && b.omitted) };
+}
+
+/** "2 entries were left out because they look like they hold a secret." */
+export function omittedWords(n) {
+  return n === 1 ? "1 entry was left out because it looks like it holds a secret." : n + " entries were left out because they look like they hold a secret.";
+}
+
+/** The words of an Undo toast for a decision on these ids. */
+export function decidedWords(to, n) {
+  const what = n === 1 ? "1 card" : n + " cards";
+  return to === "approved" ? "Approved " + what + "." : "Rejected " + what + ".";
 }
 
 // ── the queue ──

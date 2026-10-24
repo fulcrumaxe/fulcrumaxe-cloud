@@ -204,7 +204,7 @@ describe("the built output: the app shipped from a scratch build, read back", ()
   })();
   const shipped = (rel) => readFileSync(shippedPath(result, rel), "utf8");
 
-  it("ships the app's three files, the tag in index.html, and no more than the per-app boot ceiling", () => {
+  it("ships the app's files, the tag in index.html, and no more than the per-app boot ceiling", () => {
     const files = result.copiedFiles.filter((f) => f.startsWith("apps/memory/")).sort();
     expect(files).toEqual(["apps/memory/memory-app.css", "apps/memory/memory-app.js", "apps/memory/memory-queue.js", "apps/memory/memory-storage.js"]);
     expect(result.bootFiles.filter((f) => f.startsWith("apps/memory/")).length).toBeLessThanOrEqual(5);

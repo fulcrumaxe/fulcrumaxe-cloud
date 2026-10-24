@@ -69,6 +69,8 @@ export interface MemoryListRow {
   source: string;
   version: number;
   createdAt: Date;
+  /** When it was deleted: set only while the status is `deleted` (the 30 days to restore it count from here), else null. */
+  deletedAt: Date | null;
   age: string;
   /** Runs whose recorded inputs list this entry's lineage. A number, 0 when none, never null. */
   runs: number;
@@ -102,6 +104,7 @@ interface ListRow {
   status: MemoryStatus;
   version: number;
   created_at: Date;
+  deleted_at?: Date | null;
   repo_id: string | null;
   gh_owner: string | null;
   gh_name: string | null;
@@ -206,7 +209,7 @@ export async function listMemory(ctx: ReadCtx, filter: MemoryScopeFilter = {}, n
     params.push(limit + 1);
     return (
       await client.query<ListRow>(
-        `SELECT m.id, m.scope, m.scope_ref, m.kind, m.body, m.author_kind, m.provenance, m.status, m.version, m.created_at, ${LABEL_COLUMNS}
+        `SELECT m.id, m.scope, m.scope_ref, m.kind, m.body, m.author_kind, m.provenance, m.status, m.version, m.created_at, m.deleted_at, ${LABEL_COLUMNS}
            FROM memory_entries m ${LABEL_JOINS}
           WHERE ${where.map((w) => `(${w})`).join(' AND ')}
           ORDER BY m.scope, m.scope_ref NULLS FIRST, m.created_at DESC, m.id
@@ -240,6 +243,7 @@ export async function listMemory(ctx: ReadCtx, filter: MemoryScopeFilter = {}, n
       source: formatMemorySource(r.author_kind, r.provenance),
       version: Number(r.version),
       createdAt: r.created_at,
+      deletedAt: r.deleted_at ?? null,
       age: formatMemoryAge(r.created_at, now),
       runs,
       runsLabel: formatMemoryRuns(runs),

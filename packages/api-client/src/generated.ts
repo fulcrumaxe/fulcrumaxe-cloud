@@ -3760,6 +3760,7 @@ export interface Operations {
           source: string;
           version: number;
           created_at: string;
+          deleted_at: string | null;
           age: string;
           runs: number;
           runs_label: string;

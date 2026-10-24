@@ -143,7 +143,7 @@ describe('D#601 MEM-4a2: memory routes', () => {
       expect(body.groups.find((g) => g.scope === 'item')!.label).toBe('#42 Add the thing');
       expect(body.groups.flatMap((g) => g.entries).some((e) => e.id === itemEntry)).toBe(true);
       expect(JSON.stringify(body)).not.toMatch(/"(?:null|undefined)"/);
-      for (const e of body.groups.flatMap((g) => g.entries)) for (const [k, v] of Object.entries(e)) expect(v, `${k} of ${e.id}`).not.toBeNull();
+      for (const e of body.groups.flatMap((g) => g.entries)) for (const [k, v] of Object.entries(e)) if (k !== 'deleted_at') expect(v, `${k} of ${e.id}`).not.toBeNull();
     });
 
     it('filters by repo, kind and status; an unknown name, an unknown key and a malformed id are 422', async () => {
