@@ -27,10 +27,10 @@ describe("the token request", () => {
 describe("the report", () => {
   const base = { run_id: RUN, lease_generation: 2, phase: "pushed", branch: "fx/p-0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e", head_sha: SHA_A, tip_sha: SHA_B, pairing_digest: DIGEST };
 
-  it("is strict, on the constant path, and takes the seven phases", () => {
+  it("is strict, on the constant path, and takes the eight phases", () => {
     expect(PLANE_PUSH_REPORT_PATH).toBe("/api/runner/plane-push-report");
     expect(RUNNER_MESSAGES.plane_push_report).toBe(PlanePushReportMessage);
-    expect([...PLANE_PUSH_PHASES]).toEqual(["building", "scanning", "pushed", "pr_opened", "refused", "pr_failed", "no_change"]);
+    expect([...PLANE_PUSH_PHASES]).toEqual(["building", "scanning", "pushed", "pr_opened", "refused", "pr_failed", "no_change", "updated"]);
     for (const phase of PLANE_PUSH_PHASES) expect(PlanePushReportMessage.safeParse({ ...base, phase }).success, phase).toBe(true);
     expect(PlanePushReportMessage.safeParse({ ...base, phase: "merged" }).success).toBe(false);
     expect(nonStrictObjects(PlanePushReportMessage)).toEqual([]);

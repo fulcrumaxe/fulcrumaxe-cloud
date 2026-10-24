@@ -236,6 +236,9 @@ const enters = (job: Job): boolean => job.role === "executor" && job.continues =
  * The commit the run's public publish diffs from, recorded in the daemon's own memory before the agent can run. A fresh executor run: the commit it starts from. A fix round that carries
  * a signed `continues.base_sha`: that commit, which the cloud chose when it brought the branch up to date with its base. The checkout and the agent never pick it. Nothing else records one.
  */
+/** FIXROUND-REPUBLISH (R2-c1): a fix round that carries the cloud's signed base also enters the hook, to replace the head of the public branch; the cloud tells the hook whether there is one (no token otherwise). */
+const republishes = (job: Job): boolean => job.role === "executor" && job.continues !== null && job.continues.base_sha !== undefined && (job.review ?? null) === null;
+
 const planeBaseOf = (job: Job, startedAt: string): string | undefined => (enters(job) ? startedAt : job.continues?.base_sha);
 
 const closedCheck = (summary = "", reason?: CheckNotRunReason, extra: Partial<CheckOutcome> = {}): CheckOutcome => ({ passed: false, body: { exit_code: null, duration_ms: 0, timed_out: false, skipped_tests: null, summary, ...(reason === undefined ? {} : { reason }) }, ...extra });
@@ -587,7 +590,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       }
       // The run-end hook for a paired repository (D#598 P1f-3). Its calls need the live lease, so it runs before `done`. It never fails the run: an
       // unexpected error is the closed outcome `failed`, and a cloud that ended the run ends this one too.
-      const mirrorDir = deps.planePush !== undefined && enters(job) ? git.mirrorDir?.(job) : undefined;
+      const mirrorDir = deps.planePush !== undefined && (enters(job) || republishes(job)) ? git.mirrorDir?.(job) : undefined;
       // A run the cloud has already ended, or a daemon that is shutting down, asks for nothing: the hook's first call would be a token request.
       if (deps.planePush !== undefined && mirrorDir !== undefined && lease.ended() === undefined && !stopRun.aborted) {
         const outcome = await deps.planePush

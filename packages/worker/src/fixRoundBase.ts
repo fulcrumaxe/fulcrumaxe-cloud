@@ -125,20 +125,23 @@ export async function hasPublicCopy(pool: Pool, who: Who): Promise<boolean> {
  * person (a check round leaves that to the build's own failure record, the same word reaches it).
  */
 export async function refuseRepublish(pool: Pool, who: Who, input: { code: string; prNumber: number | null; moveToNeedsPerson: boolean; attempt: string }): Promise<string> {
+  await withTenant(pool, who.accountId, (client) => recordRepublishRefusal(client, who, input));
+  console.info(JSON.stringify({ event: "advance.republish_refused", work_item_id: who.workItemId, code: input.code }));
+  return input.code;
+}
+
+/** The record of a refusal, inside the caller's tenant transaction (the runner's report writes it in the same one as the run's own state). */
+export async function recordRepublishRefusal(client: PoolClient, who: Who, input: { code: string; prNumber: number | null; moveToNeedsPerson: boolean; attempt: string }): Promise<void> {
   const { code } = input;
-  await withTenant(pool, who.accountId, async (client) => {
-    await recordDriverEvent(client, who.accountId, { workItemId: who.workItemId, kind: "escalated", dedupeKey: `${code}:${attemptWord(input.attempt)}`, code, ...(input.prNumber !== null ? { prNumber: input.prNumber } : {}) });
-    if (!input.moveToNeedsPerson) return;
-    try {
-      const moved = await recordStage(client, { workItemId: who.workItemId, toStage: "needs_human", at: new Date(), source: "control_plane", sourceRef: `${code}-${attemptWord(input.attempt)}` });
-      if (moved.recorded) await emitDomainEvent(client, { type: "work_item.needs_human", accountId: who.accountId, subjectId: who.workItemId, payload: { workItemId: who.workItemId, reason: code } });
-    } catch (err) {
-      // A halted item, or one that already left the review stages, stays where it is; the fact above is the record.
-      if (!(err instanceof WorkItemHaltedError) && !(err instanceof IllegalStageTransitionError)) throw err;
-    }
-  });
-  console.info(JSON.stringify({ event: "advance.republish_refused", work_item_id: who.workItemId, code }));
-  return code;
+  await recordDriverEvent(client, who.accountId, { workItemId: who.workItemId, kind: "escalated", dedupeKey: `${code}:${attemptWord(input.attempt)}`, code, ...(input.prNumber !== null ? { prNumber: input.prNumber } : {}) });
+  if (!input.moveToNeedsPerson) return;
+  try {
+    const moved = await recordStage(client, { workItemId: who.workItemId, toStage: "needs_human", at: new Date(), source: "control_plane", sourceRef: `${code}-${attemptWord(input.attempt)}` });
+    if (moved.recorded) await emitDomainEvent(client, { type: "work_item.needs_human", accountId: who.accountId, subjectId: who.workItemId, payload: { workItemId: who.workItemId, reason: code } });
+  } catch (err) {
+    // A halted item, or one that already left the review stages, stays where it is; the fact above is the record.
+    if (!(err instanceof WorkItemHaltedError) && !(err instanceof IllegalStageTransitionError)) throw err;
+  }
 }
 
 /** After the sync: a round that must republish with no signed base is refused `republish_base_missing`; null when it may go on. */

@@ -705,3 +705,154 @@ describe("the refusals as the report carries them", () => {
     expect(reportRefusals(Array.from({ length: 150 }, () => hostile[1]!))).toHaveLength(100);
   });
 });
+
+describe("a fix round updates the open public pull request (FIXROUND-REPUBLISH R2-c1)", () => {
+  const FIRST = { "src/a.ts": "export const a = 1;\nexport const a2 = 3;\n", "src/new/c.ts": "export const c = 4;\n" };
+
+  /** The first publication: the item's work, one commit on the public tip, on the platform's branch. */
+  async function published(): Promise<{ stamp: string; head1: string }> {
+    const head1 = runWith(FIRST);
+    expect(await harness().run(head1)).toMatchObject({ kind: "pr_opened" });
+    return { stamp: sh(world.bare, "rev-parse", BRANCH), head1 };
+  }
+
+  /**
+   * Main moves on both sides (a public file changes in both, and an overlay file changes in the private one only), then the cloud merges the private
+   * main into the item's branch (a private merge commit) and the round adds a fix. The mirror is brought up to date, as the daemon's is before a round.
+   * Returns the cloud's signed base (the private main tip it merged), the new public tip and the round's head.
+   */
+  function fixRound(opts: { dropBase?: boolean } = {}): { base2: string; tip2: string; head2: string } {
+    sh(world.priv, "checkout", "-q", "-B", "main2", world.base);
+    put(world.priv, { "src/b.ts": "export const b = 22;\n", "docs/ops/plan.md": "private plan, changed on main\n" });
+    const base2 = commitAll(world.priv, "main moved (private)");
+    put(world.pubWork, { "src/b.ts": "export const b = 22;\n" });
+    const tip2 = commitAll(world.pubWork, "main moved (public)");
+    sh(world.pubWork, "push", "-q", world.bare, "main");
+    sh(world.priv, "checkout", "-q", "fx/run");
+    if (opts.dropBase) {
+      // The branch was force-pushed after the sync: its new history never contained the base.
+      sh(world.priv, "checkout", "-q", "-B", "fx/run", world.base);
+      put(world.priv, { ...FIRST, "src/new/d.ts": "export const d = 5;\n" });
+    } else {
+      sh(world.priv, "merge", "-q", "--no-edit", base2);
+      put(world.priv, { "src/new/d.ts": "export const d = 5;\n" });
+    }
+    const head2 = commitAll(world.priv, "fix round");
+    sh(world.priv, "push", "-q", "-f", world.mirror, "HEAD:refs/heads/fx/run", "main2:refs/heads/main");
+    sh(world.mirror, "update-ref", "-d", "refs/heads/fx/run");
+    return { base2, tip2, head2 };
+  }
+  // A new token for the round, as the cloud mints one per grant (the first was revoked after the first publication).
+  const TOKEN2 = ["ghs", "p13bhooktokenvalue000002"].join("_");
+  const withStamp = (stamp: string) => {
+    world.tokens.set(TOKEN2, ["acme/widgets"]);
+    return { token: () => tokenResult({ replaces_head: stamp, token: TOKEN2 }) };
+  };
+
+  it("replaces the branch with ONE commit whose only parent is the new public tip: no private commit goes along, the diff is the item's paths, and an overlay change that came in with the sync is not in it", async () => {
+    const { stamp } = await published();
+    const callsBefore = world.api.seen.length;
+    const { base2, tip2, head2 } = fixRound();
+    const h = harness(withStamp(stamp), { base: base2 });
+    const outcome = await h.run(head2);
+    expect(outcome).toMatchObject({ kind: "updated" });
+    const commit = sh(world.bare, "rev-parse", BRANCH);
+    expect(commit).not.toBe(stamp);
+    expect(sh(world.bare, "rev-list", "--parents", "-n1", BRANCH)).toBe(`${commit} ${tip2}`);
+    expect(sh(world.bare, "rev-list", "--count", `${tip2}..${BRANCH}`)).toBe("1");
+    // Neither the round's head, the private merge commit nor the signed base was sent.
+    for (const private_ of [head2, base2, sh(world.priv, "rev-parse", `${head2}^`)]) expect(() => sh(world.bare, "cat-file", "-e", private_)).toThrow();
+    // The item's paths, all of them, and nothing the sync brought in: not the public file main changed (it is already in the tip), not the private overlay file.
+    expect(sh(world.bare, "diff", "--name-only", tip2, commit).split("\n").sort()).toEqual(["src/a.ts", "src/new/c.ts", "src/new/d.ts"]);
+    expect(() => sh(world.bare, "cat-file", "-e", `${commit}:docs/ops/plan.md`)).toThrow();
+    expect(sh(world.bare, "show", `${commit}:src/b.ts`)).toBe("export const b = 22;");
+    // One update report with the new head, no `pushed`, no second pull request, and the token revoked.
+    expect(h.reports.map((r) => r.phase)).toEqual(["scanning", "updated"]);
+    expect(last(h.reports)).toMatchObject({ phase: "updated", branch: BRANCH, head_sha: commit, tip_sha: tip2, pairing_digest: pairingDigest(PAIRING), token_revoked: true });
+    expect(world.api.pulls).toHaveLength(1);
+    expect(world.api.seen.slice(callsBefore).map((s) => `${s.method} ${s.path}`)).toEqual([`GET /repos/acme/widgets/git/ref/heads/${BRANCH}`, "DELETE /installation/token"]);
+  });
+
+  it("is a compare-and-swap: a commit someone pushes to the branch between the check and the push is kept, and the update is refused public_branch_moved", async () => {
+    const { stamp } = await published();
+    const { base2, head2 } = fixRound();
+    let person = "";
+    const h = harness(withStamp(stamp), {
+      base: base2,
+      transport: (real) => ({
+        fetchTip: (d, r) => real.fetchTip(d, r),
+        async push(i) {
+          // The race: a person's commit lands after the cloud's own read of the branch and before our push.
+          put(world.pubWork, { "src/person.ts": "export const p = 1;\n" });
+          person = commitAll(world.pubWork, "a person's commit");
+          sh(world.pubWork, "push", "-q", "-f", world.bare, `${person}:refs/heads/${BRANCH}`);
+          await real.push(i);
+        },
+      }),
+    });
+    expect(await h.run(head2)).toMatchObject({ kind: "refused", code: "public_branch_moved" });
+    expect(sh(world.bare, "rev-parse", BRANCH)).toBe(person);
+    expect(last(h.reports)).toMatchObject({ phase: "refused", code: "public_branch_moved" });
+  });
+
+  it("a push the server applied but the client reported as failed is an update that stands: the branch is at our commit, not a person's, and the report says updated", async () => {
+    const { stamp } = await published();
+    const { base2, tip2, head2 } = fixRound();
+    const h = harness(withStamp(stamp), {
+      base: base2,
+      transport: (real) => ({
+        fetchTip: (d, r) => real.fetchTip(d, r),
+        async push(i) {
+          await real.push(i);
+          throw new Error("connection reset after receive-pack");
+        },
+      }),
+    });
+    expect(await h.run(head2)).toMatchObject({ kind: "updated" });
+    const commit = sh(world.bare, "rev-parse", BRANCH);
+    expect(commit).not.toBe(stamp);
+    expect(last(h.reports)).toMatchObject({ phase: "updated", head_sha: commit, tip_sha: tip2 });
+  });
+
+  it("a failed push that left the branch at the stamp is push_failed, not a moved branch", async () => {
+    const { stamp } = await published();
+    const { base2, head2 } = fixRound();
+    const h = harness(withStamp(stamp), {
+      base: base2,
+      transport: (real) => ({ fetchTip: (d, r) => real.fetchTip(d, r), push: async () => { throw new Error("network down"); } }),
+    });
+    expect(await h.run(head2)).toMatchObject({ kind: "refused", code: "push_failed" });
+    expect(sh(world.bare, "rev-parse", BRANCH)).toBe(stamp);
+  });
+
+  it("a branch already moved before the update is refused the same way without a push", async () => {
+    const { stamp } = await published();
+    const { base2, head2 } = fixRound();
+    put(world.pubWork, { "src/person.ts": "export const p = 1;\n" });
+    const person = commitAll(world.pubWork, "a person's commit");
+    sh(world.pubWork, "push", "-q", "-f", world.bare, `${person}:refs/heads/${BRANCH}`);
+    const h = harness(withStamp(stamp), { base: base2 });
+    expect(await h.run(head2)).toMatchObject({ kind: "refused", code: "public_branch_moved" });
+    expect(h.events).not.toContain("push");
+    expect(sh(world.bare, "rev-parse", BRANCH)).toBe(person);
+  });
+
+  it("a private branch force-pushed after the sync (the signed base is no longer in its history) refuses at push time and leaves the public branch alone", async () => {
+    const { stamp } = await published();
+    const { base2, head2 } = fixRound({ dropBase: true });
+    const h = harness(withStamp(stamp), { base: base2 });
+    expect(await h.run(head2)).toMatchObject({ kind: "refused", code: "bad_input" });
+    expect(h.events).not.toContain("push");
+    expect(sh(world.bare, "rev-parse", BRANCH)).toBe(stamp);
+  });
+
+  it("a signed base that is not on the default branch (a stacked change) is refused at push time too", async () => {
+    const { stamp } = await published();
+    const { base2, head2 } = fixRound();
+    // The mirror's default branch does not hold the base: it is some other branch's tip.
+    sh(world.mirror, "update-ref", "refs/heads/main", world.base);
+    const h = harness(withStamp(stamp), { base: base2 });
+    expect(await h.run(head2)).toMatchObject({ kind: "refused", code: "bad_input" });
+    expect(sh(world.bare, "rev-parse", BRANCH)).toBe(stamp);
+  });
+});

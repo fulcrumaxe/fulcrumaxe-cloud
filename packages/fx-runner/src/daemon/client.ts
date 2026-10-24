@@ -64,7 +64,7 @@ export type PlanePushTokenResult =
 export type PlanePushReportResult = { kind: "recorded" } | { kind: "not_paired" } | { kind: "stop"; reason: StopReason } | CallError;
 
 /** The closed codes a token request can be refused with; any other 4xx or 5xx word is a plain `CallError`. */
-const TOKEN_REFUSALS: ReadonlySet<string> = new Set(["pairing_changed", "already_issued", "attempts_exhausted", "app_not_installed", "token_scope_mismatch", "public_unavailable", "not_configured"]);
+const TOKEN_REFUSALS: ReadonlySet<string> = new Set(["pairing_changed", "already_issued", "attempts_exhausted", "app_not_installed", "token_scope_mismatch", "public_unavailable", "not_configured", "republish_base_missing"]);
 
 export interface DoneInput {
   runId: string;

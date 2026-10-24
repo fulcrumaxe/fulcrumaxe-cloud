@@ -407,7 +407,7 @@ export const PlanePushPairingMessage = z.object({ run_id: uuid, lease_generation
 export const PLANE_PUSH_PAIRING_PATH = "/api/runner/plane-push-pairing";
 
 /** The phases a run-end hook reports, in the order they happen. */
-export const PLANE_PUSH_PHASES = ["building", "scanning", "pushed", "pr_opened", "refused", "pr_failed", "no_change"] as const;
+export const PLANE_PUSH_PHASES = ["building", "scanning", "pushed", "pr_opened", "refused", "pr_failed", "no_change", "updated"] as const;
 export const PlanePushPhase = z.enum(PLANE_PUSH_PHASES);
 export type PlanePushPhase = z.infer<typeof PlanePushPhase>;
 
@@ -440,7 +440,7 @@ export const PlanePushReportMessage = z
   .superRefine((m, ctx) => {
     // The digest the hook read from the pairing route, echoed so the cloud can see which pairing the push was scanned against. Required for the
     // phases that say something exists on GitHub; the cloud compares it with its own stamp and never uses the value.
-    if ((m.phase === "pushed" || m.phase === "pr_failed" || m.phase === "pr_opened") && m.pairing_digest === undefined) {
+    if ((m.phase === "pushed" || m.phase === "pr_failed" || m.phase === "pr_opened" || m.phase === "updated") && m.pairing_digest === undefined) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["pairing_digest"], message: "pairing_digest is required for this phase" });
     }
   });

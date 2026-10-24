@@ -186,9 +186,9 @@ describe("the start commit is the daemon's record (P1f-3-d)", () => {
     const r = rig({ onStart: () => { r.checkout.head = MOVED; } });
     const claimed = await r.claim(jobFor(item));
     await r.handle(claimed);
-    // The checkout began at BASE; the daemon's record is the signed value. The round does not enter the public-push hook yet (that is a later step), so the hook is not asked.
-    expect(r.seenBase).toEqual([CHOSEN]);
-    expect(r.asked).toEqual([]);
+    // The checkout began at BASE; the daemon's record is the signed value, and the hook (which republishes the round) reads that same record.
+    expect(r.seenBase).toEqual([CHOSEN, CHOSEN]);
+    expect(r.asked).toHaveLength(1);
     expect(r.baseLedger.read(claimed.runId)).toBeUndefined();
   });
 
@@ -199,7 +199,8 @@ describe("the start commit is the daemon's record (P1f-3-d)", () => {
       const r = rig({ onStart: () => { r.checkout.head = MOVED; } });
       const claimed = await r.claim(jobFor(run));
       await r.handle(claimed);
-      expect(r.seenBase).toEqual([CHOSEN]);
+      expect(r.seenBase).toEqual([CHOSEN, CHOSEN]);
+      expect(r.asked).toHaveLength(1);
       expect(r.baseLedger.read(claimed.runId)).toBeUndefined();
     }
   });
@@ -209,6 +210,7 @@ describe("the start commit is the daemon's record (P1f-3-d)", () => {
     const r = rig();
     await r.handle(await r.claim(jobFor(plain)));
     expect(r.seenBase).toEqual([undefined]);
+    expect(r.asked).toEqual([]);
   });
 
   it("is forgotten when the run ends, whichever way", async () => {

@@ -1,9 +1,11 @@
 import type { Pool, PoolClient } from "pg";
 import type { StopReason } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { pairingDigest, readPlanePush, recordVerifiedOutcome, type PlaneRefusalEntry, type PlanePushOutcomeState, type PlanePushRow } from "@fx/core/src/repos/planePushRecord.js";
+import { pairingDigest, readPlanePush, recordUpdatedHead, recordVerifiedOutcome, type PlaneRefusalEntry, type PlanePushOutcomeState, type PlanePushRow } from "@fx/core/src/repos/planePushRecord.js";
 import { insertRunEvent } from "@fx/runner";
 import { prFooterSkipReason } from "@fulcrumaxe/runner-protocol/planePushText";
+import { REPUBLISH_BASE_MISSING, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE } from "@fx/core/src/work-items/baseSync.js";
+import { recordRepublishRefusal } from "./fixRoundBase.js";
 import { guarded } from "./runActions.js";
 import { leaseVerdict, requireLease, stopReasonFor, type HeartbeatRunnerRunInput } from "./runnerClaims.js";
 import { runnerLimits, type RunnerLimitsSource } from "./runnerLimits.js";
@@ -59,10 +61,12 @@ export type PlanePushGrantResult =
   /** The pairing was removed, or its digest no longer matches the one stamped at build start. */
   | { kind: "pairing_changed" }
   | { kind: "already_issued" }
+  /** FIXROUND-REPUBLISH (R2-c1): a fix round that must update the public pull request has no signed base to rebuild it from. Named; the hook reports it and the item goes to a person. */
+  | { kind: "refused"; code: string }
   /** The row already has the three push attempts the schema allows. */
   | { kind: "attempts_exhausted" }
   /** `itemTitle` is the work item's title as stored: untrusted text that only `buildPlanePushText` may turn into public text. */
-  | ({ kind: "granted"; attemptId: string; itemTitle: string; /** The pairing's PR footer template and the item's issue number: inputs to the text builder only. */ prFooter: string | null; issueNumber: number | null } & PlanePushFacts);
+  | ({ kind: "granted"; attemptId: string; itemTitle: string; /** The pairing's PR footer template and the item's issue number: inputs to the text builder only. */ prFooter: string | null; issueNumber: number | null; /** The head the platform last pushed, for a fix round that updates the open public pull request; null for a first push. */ updateOf: string | null } & PlanePushFacts);
 
 export type PlanePushReportContextResult =
   | { kind: "fenced"; reason: StopReason }
@@ -74,7 +78,7 @@ export interface PlanePushRecordInput extends PlanePushLeaseInput {
   planePushId: string;
   /** Null records nothing on the item (a `building` report): the attempt is still updated. */
   outcome: {
-    state: PlanePushOutcomeState;
+    state: PlanePushOutcomeState | 'updated';
     code?: string;
     refusals?: readonly PlaneRefusalEntry[];
     headSha?: string;
@@ -109,16 +113,22 @@ const LABEL = /^[a-z][a-z0-9_]{0,63}$/;
 
 interface RunFacts {
   row: PlanePushRow;
+  /** The run continues a branch (a fix round), and the base the cloud signed for it, if any. */
+  continues: boolean;
+  baseSha: string | null;
 }
 
 /** The run's own facts and its item's `plane_pushes` row, or null when the run is not an executor run on a runner with a record for its own repository. */
 async function runFacts(client: PoolClient, input: PlanePushLeaseInput): Promise<RunFacts | null> {
-  const { rows } = await client.query<{ role: string; runtime: string; work_item_id: string | null; dispatch_repo_id: string | null }>("SELECT role, runtime, work_item_id, dispatch_repo_id FROM agent_runs WHERE account_id = $1 AND id = $2", [input.accountId, input.runId]);
+  const { rows } = await client.query<{ role: string; runtime: string; work_item_id: string | null; dispatch_repo_id: string | null; continues: boolean; base_sha: string | null }>(
+    "SELECT role, runtime, work_item_id, dispatch_repo_id, (job_signed #> '{job,continues}') IS NOT NULL AND jsonb_typeof(job_signed #> '{job,continues}') = 'object' AS continues, job_signed #>> '{job,continues,base_sha}' AS base_sha FROM agent_runs WHERE account_id = $1 AND id = $2",
+    [input.accountId, input.runId],
+  );
   const run = rows[0];
   if (!run || run.role !== "executor" || run.runtime !== "runner" || !run.work_item_id || !run.dispatch_repo_id) return null;
   const row = await readPlanePush(client, input.accountId, run.work_item_id);
   if (!row || row.repoId !== run.dispatch_repo_id) return null;
-  return { row };
+  return { row, continues: run.continues === true, baseSha: run.base_sha };
 }
 
 interface PairingRow {
@@ -159,21 +169,31 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           const found = await runFacts(client, input);
           if (!found) return { kind: "not_paired" };
           const { row } = found;
+          // FIXROUND-REPUBLISH (R2-c1): a fix round (a continuation) updates the open public pull request or publishes nothing. No open one, or one a person took over: nothing to do. Open, and the round was
+          // not signed with a base (the round start refuses that, this asks again): named, and no token.
+          const update = found.continues;
+          if (update && (row.state !== "pr_opened" || row.headSha === null || row.managedByPersonAt !== null)) return { kind: "not_paired" };
+          if (update && found.baseSha === null) return { kind: "refused", code: REPUBLISH_BASE_MISSING };
 
           // The pairing as it is NOW, against the digest stamped at build start. A pairing that was removed or edited is `pairing_changed`.
           if (!(await livePairing(client, input.accountId, row))) return { kind: "pairing_changed" };
 
           // Serialise the attempts of one record, then look for this lease's grant before making one.
           await client.query("SELECT 1 FROM plane_pushes WHERE id = $1 AND account_id = $2 FOR UPDATE", [row.id, input.accountId]);
+          // The row as it is under the lock: a person may have taken the branch over, or the state moved, since the read above.
+          const locked = await readPlanePush(client, input.accountId, row.workItemId);
+          if (update && (locked === null || locked.id !== row.id || locked.state !== "pr_opened" || locked.headSha === null || locked.managedByPersonAt !== null)) return { kind: "not_paired" };
           const { rows: existing } = await client.query("SELECT 1 FROM plane_push_attempts WHERE run_id = $1 AND lease_generation = $2 AND runtime = 'runner' AND account_id = $3", [input.runId, input.leaseGeneration, input.accountId]);
           if (existing.length > 0) return { kind: "already_issued" };
-          const { rows: next } = await client.query<{ n: number }>("SELECT COALESCE(MAX(attempt_no), 0) + 1 AS n FROM plane_push_attempts WHERE plane_push_id = $1 AND account_id = $2 AND kind = 'push'", [row.id, input.accountId]);
+          // An update is its own kind of attempt, numbered on its own and not held to the three pushes of a first publish (each fix round has one).
+          const kind = update ? "fix_round" : "push";
+          const { rows: next } = await client.query<{ n: number }>("SELECT COALESCE(MAX(attempt_no), 0) + 1 AS n FROM plane_push_attempts WHERE plane_push_id = $1 AND account_id = $2 AND kind = $3", [row.id, input.accountId, kind]);
           const attemptNo = Number(next[0]!.n);
-          if (attemptNo > 3) return { kind: "attempts_exhausted" };
+          if (!update && attemptNo > 3) return { kind: "attempts_exhausted" };
           const { rows: made } = await client.query<{ id: string }>(
             `INSERT INTO plane_push_attempts (account_id, plane_push_id, run_id, lease_generation, runtime, kind, attempt_no)
-             VALUES ($1, $2, $3, $4, 'runner', 'push', $5) RETURNING id`,
-            [input.accountId, row.id, input.runId, input.leaseGeneration, attemptNo],
+             VALUES ($1, $2, $3, $4, 'runner', $6, $5) RETURNING id`,
+            [input.accountId, row.id, input.runId, input.leaseGeneration, attemptNo, kind],
           );
           // The item's title for the public pull request text. A missing row cannot happen under the run's own foreign key; it reads as an empty
           // title, which the text builder turns into its fixed run-id title.
@@ -183,7 +203,7 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           const issueNumber = titles[0]?.gh_number == null ? null : Number(titles[0].gh_number);
           // A footer that needs an issue number this item lacks is left off the body; the run says so.
           if (prFooterSkipReason(prFooter, issueNumber) !== null) await insertRunEvent(client, input.accountId, input.runId, "plane.pr_footer_skipped", { reason: "no_issue_number" });
-          return { kind: "granted", attemptId: made[0]!.id, itemTitle: titles[0]?.title ?? "", prFooter, issueNumber, ...facts(row) };
+          return { kind: "granted", attemptId: made[0]!.id, itemTitle: titles[0]?.title ?? "", prFooter, issueNumber, updateOf: update ? locked!.headSha : null, ...facts(row) };
         });
       }),
 
@@ -251,13 +271,24 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           const found = await runFacts(client, input);
           if (!found || found.row.id !== input.planePushId) return { kind: "not_paired" };
           let recorded = false;
-          if (input.outcome) {
+          // Only the run that was granted an update (a continuation, with an attempt of kind fix_round) may move the stamp.
+          const granted = found.continues && (await client.query("SELECT 1 FROM plane_push_attempts WHERE account_id = $1 AND run_id = $2 AND lease_generation = $3 AND runtime = 'runner' AND kind = 'fix_round'", [input.accountId, input.runId, input.leaseGeneration])).rows.length > 0;
+          if (input.outcome?.state === "updated") {
+            // Verified against GitHub by the route. The stamp moves; an update the row no longer accepts (a person took the branch over meanwhile) records nothing.
+            const row = !granted ? null : await recordUpdatedHead(client, { accountId: input.accountId, id: found.row.id, headSha: input.outcome.headSha ?? "", tipSha: input.outcome.tipSha ?? "" });
+            recorded = row !== null;
+          } else if ((input.outcome?.state === "refused" || input.outcome?.state === "no_public_change") && found.continues && found.row.state === "pr_opened") {
+            // The update of the open public pull request was refused: the round's change is on the private branch only. A person decides (nothing is shown as published that is not).
+            const code = input.outcome.state === "no_public_change" ? REPUBLISH_NO_CHANGE : input.outcome.code === "public_branch_moved" ? REPUBLISH_BRANCH_MOVED : input.outcome.code === REPUBLISH_BASE_MISSING ? REPUBLISH_BASE_MISSING : REPUBLISH_FAILED;
+            await recordRepublishRefusal(client, { accountId: input.accountId, workItemId: found.row.workItemId }, { code, prNumber: null, moveToNeedsPerson: true, attempt: input.runId });
+            recorded = true;
+          } else if (input.outcome) {
             const o = input.outcome;
             const row = await recordVerifiedOutcome(client, {
               accountId: input.accountId,
               id: found.row.id,
               outcome: {
-                state: o.state,
+                state: o.state as PlanePushOutcomeState,
                 ...(o.code !== undefined ? { code: o.code } : {}),
                 ...(o.refusals ? { refusals: o.refusals } : {}),
                 ...(o.headSha !== undefined ? { headSha: o.headSha } : {}),
