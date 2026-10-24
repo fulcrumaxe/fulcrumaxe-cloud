@@ -18,7 +18,7 @@ function makeWorld() {
   const pool = {
     query: async (sql: string, args?: unknown[]) => {
       if (sql.includes('FROM model_connections')) return { rows: [{ broken: world.creditsBroken, age: world.creditsBroken ? 0 : null }] };
-      if (sql.includes("last_result_code = 'budget'")) return { rows: world.terminalBudget ? [{ name: 'sandbox_reap_terminal' }] : [] };
+      if (sql.includes("FROM reconcile_jobs WHERE name = 'sandbox_reap_terminal'")) return { rows: [{ last_result_code: world.terminalBudget ? 'budget' : 'ok', last_full_pass_at: null }] };
       if (sql.includes('stall_alerted_at IS NOT NULL')) return { rows: [...world.alerted].map(([name, age]) => ({ name, age, at: `T-${name}` })) };
       if (sql.includes('RETURNING name')) {
         const name = String(args?.[0]);

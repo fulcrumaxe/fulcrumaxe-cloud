@@ -25,7 +25,7 @@ function fakePool(opts: { creditsBroken: boolean; creditsAgeSeconds?: number; te
   return {
     query: async (sql: string) => {
       if (sql.includes('FROM model_connections')) return { rows: [{ broken: opts.creditsBroken, age: opts.creditsBroken ? (opts.creditsAgeSeconds ?? 0) : null }] };
-      if (sql.includes("last_result_code = 'budget'")) return { rows: opts.terminalBudget ? [{ name: 'sandbox_reap_terminal' }] : [] };
+      if (sql.includes("FROM reconcile_jobs WHERE name = 'sandbox_reap_terminal'")) return { rows: [{ last_result_code: opts.terminalBudget ? 'budget' : 'ok', last_full_pass_at: null }] };
       return { rows: opts.laps.map((l) => ({ ...l, never: false, last_result_code: 'ok', last_ok_at: null })) };
     },
   } as unknown as Pool;

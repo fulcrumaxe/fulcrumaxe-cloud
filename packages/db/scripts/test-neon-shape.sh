@@ -1016,7 +1016,8 @@ check_sandbox_reaper_exception_shape() {
         AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
         AND EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 'agent_run_writer'::regrole)
         AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND (a.grantee <> 'agent_run_writer'::regrole OR a.is_grantable))) AS ok
-      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'sandbox_reaper') x;" 2>&1)" || rc=$?
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'sandbox_reaper'
+         AND p.proname <> 'sandbox_reap_terminal_pending') x;" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
     echo "SHAPE_FAIL:psql failed for check 'sandbox-reaper-function-shape' on $dbname (exit $rc): $row"
     return 0
@@ -1050,9 +1051,9 @@ check_sandbox_reaper_role_shape() {
       CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
       CASE WHEN (SELECT count(*) FROM held) <> 25 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 25 granted by 0731' END,
       CASE WHEN EXISTS (SELECT 1 FROM pg_proc p WHERE p.proowner = r.oid AND NOT (p.pronamespace = 'public'::regnamespace AND p.proname IN
-              ('sandbox_reap_terminal_stages', 'sandbox_reap_ex_state', 'sandbox_reap_candidates_terminal', 'sandbox_reap_claim', 'sandbox_reap_done', 'sandbox_reap_unknown_names')))
+              ('sandbox_reap_terminal_stages', 'sandbox_reap_ex_state', 'sandbox_reap_candidates_terminal', 'sandbox_reap_claim', 'sandbox_reap_done', 'sandbox_reap_unknown_names', 'sandbox_reap_terminal_pending')))
               OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
-              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'owns an object beyond its six functions' END,
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'owns an object beyond its seven functions' END,
       CASE WHEN has_schema_privilege('sandbox_reaper', 'public', 'CREATE') THEN 'still has CREATE on public' END)
     FROM r;" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then

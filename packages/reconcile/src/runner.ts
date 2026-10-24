@@ -77,22 +77,47 @@ export function lapBasisSeconds(name: string, intervalSeconds: number, hasWork: 
   return name === 'model_credits_revalidate' && creditsBackedOff ? Math.max(intervalSeconds, CREDITS_BACKED_OFF_CADENCE_SECONDS) : intervalSeconds;
 }
 
-async function workState(pool: Pick<Pool, 'query'>): Promise<{ working: ReadonlySet<string>; creditsBackedOff: boolean }> {
+/** What the work reads may assume about the environment. */
+export interface WorkOptions {
+  /**
+   * Whether a terminal reap pass would delete what it finds (the sandbox reaper's effective mode is `on`). Under `off` or `dry_run` the pass leaves
+   * every candidate in place, so pending candidates are not work the job can finish and must not make it look stuck. The database setting
+   * (`sandbox_reap_settings.mode`) is read here and can only turn this off. Absent means the environment allows it.
+   */
+  reapDeletes?: boolean;
+}
+
+/** True when the reaper's terminal pass has settled sandboxes it could delete and is not stopped by the database setting. A failed read counts as no work (never a false alarm). */
+async function terminalReapPending(pool: Pick<Pool, 'query'>, opts: WorkOptions, since: Date | null): Promise<boolean> {
+  if (opts.reapDeletes === false) return false;
+  try {
+    const mode = await pool.query<{ mode: string | null }>('SELECT mode FROM sandbox_reap_settings');
+    if (mode.rows.length !== 1 || mode.rows[0]?.mode === 'off' || mode.rows[0]?.mode === 'dry_run') return false;
+    const { rows } = await pool.query<{ pending: boolean }>('SELECT sandbox_reap_terminal_pending($1::timestamptz) AS pending', [since]);
+    return rows[0]?.pending === true;
+  } catch {
+    // fx-swallow-ok: an unreadable probe means "no extra work known"; the budget rule above still applies and a stall alert is never raised from a failed read
+    return false;
+  }
+}
+
+async function workState(pool: Pick<Pool, 'query'>, opts: WorkOptions = {}): Promise<{ working: ReadonlySet<string>; creditsBackedOff: boolean }> {
   const out = new Set<string>();
   const credits = await readCreditsBreak(pool);
   if (credits.broken) out.add('model_credits_revalidate');
-  const { rows } = await pool.query<{ name: string }>("SELECT name FROM reconcile_jobs WHERE name = 'sandbox_reap_terminal' AND last_result_code = 'budget'");
-  if (rows.length > 0) out.add('sandbox_reap_terminal');
+  const { rows } = await pool.query<{ last_result_code: string | null; last_full_pass_at: Date | null }>("SELECT last_result_code, last_full_pass_at FROM reconcile_jobs WHERE name = 'sandbox_reap_terminal'");
+  const job = rows[0];
+  if (job !== undefined && (job.last_result_code === 'budget' || (await terminalReapPending(pool, opts, job.last_full_pass_at)))) out.add('sandbox_reap_terminal');
   return { working: out, creditsBackedOff: credits.backedOff };
 }
 
 /**
  * Which gated jobs have work, from what the platform_ops login can see. Credits: a connection broken for out-of-credit. Terminal reap: the job's
- * last pass stopped on its budget (`last_result_code = 'budget'`). Work only a writer's marker knows about (an item just reached a final stage) is
- * in no row this login can read, so it is not counted here; the reap job then runs on the reconcile tick that marker causes.
+ * last pass stopped on its budget (`last_result_code = 'budget'`), or the database says a settled finished sandbox the last full pass has not yet seen
+ * is waiting (the one-boolean probe `sandbox_reap_terminal_pending(last_full_pass_at)`: no budget stop needed, no row shown).
  */
-export async function jobsWithWork(pool: Pick<Pool, 'query'>): Promise<ReadonlySet<string>> {
-  return (await workState(pool)).working;
+export async function jobsWithWork(pool: Pick<Pool, 'query'>, opts: WorkOptions = {}): Promise<ReadonlySet<string>> {
+  return (await workState(pool, opts)).working;
 }
 
 /** The shape of `reportError` from `@fx/telemetry`; the tick takes it as a dependency so this package does no I/O of its own. */
@@ -343,8 +368,13 @@ export function isLapBreach(lapSeconds: number, intervalSeconds: number): boolea
 }
 
 /** What the digest and the launch check read: every job's lap time, from database time. */
-export async function readLapTimes(pool: Pool): Promise<LapTime[]> {
-  const { working, creditsBackedOff } = await workState(pool);
+export async function readLapTimes(pool: Pool, opts: WorkOptions = {}): Promise<LapTime[]> {
+  return (await readLapState(pool, opts)).laps;
+}
+
+/** The laps and the set of jobs with work from one read of the work state (the probe and the settings read run once). */
+export async function readLapState(pool: Pool, opts: WorkOptions = {}): Promise<{ laps: LapTime[]; working: ReadonlySet<string> }> {
+  const { working, creditsBackedOff } = await workState(pool, opts);
   const { rows } = await pool.query<{
     name: string;
     interval_seconds: number;
@@ -358,7 +388,7 @@ export async function readLapTimes(pool: Pool): Promise<LapTime[]> {
             EXTRACT(EPOCH FROM (now() - COALESCE(last_full_pass_at, created_at)))::float8 AS lap
        FROM reconcile_jobs ORDER BY name`,
   );
-  return rows.map((row) => ({
+  const laps = rows.map((row) => ({
     name: row.name,
     intervalSeconds: row.interval_seconds,
     lapSeconds: row.lap,
@@ -367,4 +397,5 @@ export async function readLapTimes(pool: Pool): Promise<LapTime[]> {
     lastResultCode: row.last_result_code,
     lastOkAt: row.last_ok_at,
   }));
+  return { laps, working };
 }

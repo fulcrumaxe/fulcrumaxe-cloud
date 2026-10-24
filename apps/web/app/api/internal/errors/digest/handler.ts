@@ -4,7 +4,7 @@ import { clientIpFromRequest, enforceFailedAuthRateLimit } from "@fx/api/src/rat
 import { PgRateLimitStore } from "@fx/api/src/ratelimit/store.js";
 import { appUserPool, platformOpsPool } from "@fx/api/src/sse/pools.js";
 import { DIGEST_CALLS_PER_HOUR, readErrorEvents, takeDigestSlot, type DigestSlot, type ErrorEventsRead } from "@fx/db/src/errorDigest.js";
-import { readLapTimes } from "@fx/reconcile";
+import { parseSandboxReapMode, readLapTimes } from "@fx/reconcile";
 import { buildDigest, DIGEST_DEFAULT_WINDOW_HOURS, DIGEST_MAX_WINDOW_HOURS, reportError, type DigestLap } from "@fx/telemetry";
 
 /**
@@ -72,7 +72,7 @@ export function digestDepsFromEnv(env: Record<string, string | undefined> = proc
     failedAuth: (ip) => enforceFailedAuthRateLimit((cachedStore ??= new PgRateLimitStore(appUserPool())), ip),
     takeSlot: () => takeDigestSlot(platformOpsPool(), DIGEST_CALLS_PER_HOUR),
     read: async (windowHours) => {
-      const [events, laps] = await Promise.all([readErrorEvents(platformOpsPool(), windowHours), readLapTimes(platformOpsPool())]);
+      const [events, laps] = await Promise.all([readErrorEvents(platformOpsPool(), windowHours), readLapTimes(platformOpsPool(), { reapDeletes: parseSandboxReapMode(env.FX_SANDBOX_REAP_MODE).mode === "on" })]);
       return {
         ...events,
         laps: laps.map((l) => ({ name: l.name, intervalSeconds: l.intervalSeconds, lapSeconds: l.lapSeconds, neverCompleted: l.neverCompleted, breach: l.breach })),

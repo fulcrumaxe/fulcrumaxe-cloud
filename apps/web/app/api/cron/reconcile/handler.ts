@@ -309,7 +309,7 @@ export async function reconcileHandler(
     // never writes error_events (a sink failure is one stdout line), and keeps the tick connecting while a notice is outstanding so recovery is noticed.
     if (summary.enabled) {
       try {
-        const stalls = await checkStalls({ pool: deps.platformOpsPool, sink: deps.opsAlertSink === undefined ? opsAlertSinkFromEnv() : deps.opsAlertSink, onSinkError: stallSinkError });
+        const stalls = await checkStalls({ pool: deps.platformOpsPool, sink: deps.opsAlertSink === undefined ? opsAlertSinkFromEnv() : deps.opsAlertSink, onSinkError: stallSinkError, work: { reapDeletes: sandbox.mode === "on" } });
         // The database is kept awake only for real work: a job stalled WITH work and no due time of its own gets the 15-minute look. A non-null due (including
         // the credits job's hourly back-off) is never shortened, and a failed recovery post never schedules a tick; the next normal tick retries it.
         if (stalls.stalled.length > 0 && nextDueAt === null) nextDueAt = Date.now() + FAST_JOB_RETRY_MS;

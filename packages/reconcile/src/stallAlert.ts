@@ -1,5 +1,5 @@
 import type { Pool } from 'pg';
-import { jobsWithWork, readLapTimes, type LapTime } from './runner.js';
+import { readLapState, type LapTime, type WorkOptions } from './runner.js';
 
 /**
  * A fast path for a stuck reconcile job (D#6 STALL-ALERT-FAST). The once-a-day errors digest is too slow to notice a job that has work waiting
@@ -58,6 +58,7 @@ export interface StallCheckDeps {
   /** Called with the sink's error; the caller keeps it off the database (stdout only). Never throws into the tick. */
   onSinkError(err: unknown): void;
   repeatSeconds?: number;
+  work?: WorkOptions;
 }
 
 export interface StallCheckResult {
@@ -80,8 +81,7 @@ export async function checkStalls(deps: StallCheckDeps): Promise<StallCheckResul
   const sink = deps.sink;
   if (sink === null) return result;
   const repeat = deps.repeatSeconds ?? STALL_REPEAT_SECONDS;
-  const working = await jobsWithWork(deps.pool);
-  const laps = await readLapTimes(deps.pool);
+  const { laps, working } = await readLapState(deps.pool, deps.work);
   const { rows } = await deps.pool.query<{ name: string; age: number; at: string }>(
     'SELECT name, EXTRACT(EPOCH FROM (now() - stall_alerted_at))::float8 AS age, stall_alerted_at::text AS at FROM reconcile_jobs WHERE stall_alerted_at IS NOT NULL',
   );
