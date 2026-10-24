@@ -102,7 +102,7 @@ describe.skipIf(!usable)("RUNNER-SECCOMP-FD-1: the check under real bubblewrap t
     return found.status === 0 ? found.stdout.split("\n").filter((line) => line.trim() !== "").length : 0;
   };
   /** A program that does what pnpm did in the live stall: it waits on a retry timer for a network that is not there, and keeps a child waiting too. */
-  const waiting = (marker: string): string[] => ["sh", "-c", `sleep 3000 # ${marker} &\n${JSON.stringify(process.execPath)} -e 'setInterval(() => {}, 1000) /* ${marker} */'`];
+  const waiting = (marker: string): string[] => ["sh", "-c", `sleep 3000 & # ${marker}\n${JSON.stringify(process.execPath)} -e 'setInterval(() => {}, 1000) /* ${marker} */'`];
 
   it("a check blocked waiting for the network is ended by its own time cap, with everything it started, and is reported as timed out", async () => {
     const marker = `fx-chk-cap-${Math.random().toString(36).slice(2)}`;
