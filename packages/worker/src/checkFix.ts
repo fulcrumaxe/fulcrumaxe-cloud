@@ -101,6 +101,8 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
   if (onItemBranch && bound === null) return { ok: false, reason: CHECK_FIX_BRANCH_UNKNOWN };
   // A round on the item's branch is only meaningful on the side the failed run ran on: a sandbox run ignores `continues`. The start is told which side to expect and
   // refuses (before anything is written) if the item has moved since.
+  // A run with no recorded side cannot be pinned: fail closed with the same named reason rather than start an unpinned round on the item's branch.
+  if (bound !== null && row.run_mode === null) return { ok: false, reason: CHECK_FIX_BRANCH_UNKNOWN };
   const expectedExecutionMode = bound !== null && row.run_mode !== null ? { expectedExecutionMode: row.run_mode } : {};
   const held = deps.beforeStart ? await deps.beforeStart() : null;
   if (held !== null) return { ok: false, reason: held };

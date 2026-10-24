@@ -15,7 +15,8 @@ export const WAITING_STAGE_POSITIONS: Readonly<Record<WaitingStage, readonly str
   classify: Object.freeze(["triaged"]),
   spec: Object.freeze(["triaged", "discussing"]),
   respec: Object.freeze(["spec_ready", "needs_human"]),
-  review: Object.freeze(["pr_opened", "changes_requested", "review_passed"]),
+  // needs_human: a review re-entered from Needs a person (a reviewer that kept ending without a verdict) waits there; the sweep checks the review hold itself.
+  review: Object.freeze(["pr_opened", "changes_requested", "review_passed", "needs_human"]),
   fix_round: Object.freeze(["pr_opened", "changes_requested"]),
   panel: Object.freeze(["discussing"]),
 });

@@ -29,6 +29,8 @@ const cancelled = (e) => e && e.name === "AbortError";
 const statusOf = (e) => (e && typeof e.status === "number" ? e.status : 0);
 // D#6 RUNNER-PING: while a "Check runner now" waits for its answer, the read is repeated this often (the cloud decides within 60 s).
 export const CHECK_POLL_MS = 5000;
+// D#6 RUNNER-PING: shown on a runner whose check was sent but whose answer could not be read; the re-reads have stopped and the button works again.
+export const CHECK_READ_FAILED = "Couldn't check the runner. Try again.";
 const CHECK_STATUSES = ["checking", "answered", "no_reply"];
 
 /** One runner of the read, or null when it is not usable. Every text field is a string. */
@@ -92,7 +94,8 @@ export function runnerLimitText(a) {
 export function stateParts(r) {
   const mark = STATE_MARKS[r.state] || "";
   // D#6 RUNNER-PING: a check in flight reads "Checking…" until the cloud has the answer ("Online · just now" or "Not responding — no reply in 60 s").
-  if (r.check === "checking" && (r.state === "online_idle" || r.state === "busy" || r.state === "offline")) return { mark, words: "Checking…" };
+  // A runner that already reads Not responding says Checking… too while a new check waits, then gives its answer again, so the press visibly did something.
+  if (r.check === "checking" && (r.state === "online_idle" || r.state === "busy" || r.state === "offline" || r.state === "not_responding")) return { mark, words: "Checking…" };
   if (r.state === "not_responding") return { mark, words: ["Not responding", r.note].filter(Boolean).join(" — ") };
   // A wake-capable runner past the 2-minute window but inside its 35-minute slot reads "Online · Last heard 7 min ago" (the note comes from the cloud).
   if (r.state === "busy") return { mark, words: [r.loadLabel || "Busy", r.note].filter(Boolean).join(" · ") };
@@ -139,6 +142,8 @@ export function createFleet({ call = api, signal, onChange = () => {}, schedule 
   const pending = new Set();
   let gen = 0;
   let polling = false;
+  // Runners whose check was waiting when a read failed: the re-reads stop and the row says so until the next press or the next good read.
+  const readFailedFor = new Set();
   // One timer at a time, and only while some runner's check is still waiting: an idle page never polls.
   function pollWhileChecking() {
     if (polling || (signal && signal.aborted) || !st.fleet || !st.fleet.runners.some((r) => r.check === "checking")) return;
@@ -154,15 +159,29 @@ export function createFleet({ call = api, signal, onChange = () => {}, schedule 
       const fleet = readFleet(await call("GET", RUNNERS_URL, undefined, signal));
       if (mine !== gen) return;
       st = fleet ? { status: "ready", fleet } : { status: st.fleet ? "ready" : "error", fleet: st.fleet };
+      if (fleet) readFailedFor.clear();
+      else stopWaitingChecks();
     } catch (e) {
       if (mine !== gen || cancelled(e)) return;
       if (st.status !== "ready") st = { status: "error", fleet: null };
+      stopWaitingChecks();
     }
     onChange();
     pollWhileChecking();
   }
+  // A failed read must not leave "Checking…" on the row for good, nor read again every 5 s: the waiting checks are dropped from the last good read.
+  function stopWaitingChecks() {
+    if (!st.fleet) return;
+    const runners = st.fleet.runners.map((r) => {
+      if (r.check !== "checking") return r;
+      readFailedFor.add(r.id);
+      return { ...r, check: "" };
+    });
+    st = { ...st, fleet: { ...st.fleet, runners } };
+  }
   async function act(id, action, body) {
     if (pending.has(id)) return "";
+    readFailedFor.delete(id);
     pending.add(id);
     onChange();
     let result = "";
@@ -179,7 +198,7 @@ export function createFleet({ call = api, signal, onChange = () => {}, schedule 
     await load();
     return result;
   }
-  return { load, act, isPending: (id) => pending.has(id), get state() { return st; } };
+  return { load, act, isPending: (id) => pending.has(id), readFailed: (id) => readFailedFor.has(id), get state() { return st; } };
 }
 
 // ── Add a runner ────────────────────────────────────────────────────────

@@ -7,7 +7,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { launchRunId } from "../apps/runs/runs-storage.js";
 import {
-  ACTION_SENTENCES, ADD_REPO_SENTENCES, ADD_SENTENCES, CHECK_POLL_MS, ONLY_ADMINS, STATE_WORDS, accountText, actionUrl, capacityText, commandsFor, controlList, createAdder, createFleet, factsText, loadRepoChoices, parseLabels,
+  ACTION_SENTENCES, ADD_REPO_SENTENCES, CHECK_READ_FAILED, ADD_SENTENCES, CHECK_POLL_MS, ONLY_ADMINS, STATE_WORDS, accountText, actionUrl, capacityText, commandsFor, controlList, createAdder, createFleet, factsText, loadRepoChoices, parseLabels,
   provText, readFleet, readRunner, runnerLimitText, stateParts, versionText,
 } from "../apps/runners/runners-fleet.js";
 
@@ -438,6 +438,68 @@ describe("Check runner now", () => {
     await flush();
     expect(stateParts(fleet.state.fleet.runners[0]).words).toBe("Not responding — no reply in 60 s");
     expect(timers).toHaveLength(0);
+  });
+
+  it("PING-UX (a): a runner that already reads Not responding says Checking… while the new check waits, then gives the same answer again", async () => {
+    const stuck = { state: "not_responding", state_note: "no reply in 60 s" };
+    const answers = ["checking", "no_reply"];
+    let sent = false;
+    const { call } = fakeCall({
+      "GET /api/runners": () => {
+        if (!sent) return body([wire({ ...stuck, check: { status: "no_reply" } })]);
+        const status = answers.shift() ?? "no_reply";
+        return body([wire({ ...stuck, check: { status } })]);
+      },
+      ["POST " + actionUrl(R1, "check")]: () => ((sent = true), { runner_id: R1, sent_at: "2026-10-15T12:00:00.000Z" }),
+    });
+    const timers = [];
+    const fleet = createFleet({ call, schedule: (fn, ms) => timers.push({ fn, ms }) });
+    await fleet.load();
+    expect(stateParts(fleet.state.fleet.runners[0]).words).toBe("Not responding — no reply in 60 s");
+    expect(await fleet.act(R1, "check")).toBe("");
+    expect(stateParts(fleet.state.fleet.runners[0]).words).toBe("Checking…");
+    expect(timers).toHaveLength(1);
+    timers.shift().fn();
+    await flush();
+    expect(stateParts(fleet.state.fleet.runners[0]).words).toBe("Not responding — no reply in 60 s");
+    expect(timers).toHaveLength(0); // answered: nothing left to read
+    expect(fleet.isPending(R1)).toBe(false);
+  });
+
+  it("PING-UX (b): after a failed read the 5 s re-reads stop, Checking… is dropped, the row can say it could not check, and the next press works", async () => {
+    let reads = 0;
+    let sent = false;
+    let down = false;
+    const { call, log } = fakeCall({
+      "GET /api/runners": () => {
+        reads++;
+        if (down) throw fail(503, "unavailable");
+        return body([wire(sent ? { check: { status: "checking" } } : {})]);
+      },
+      ["POST " + actionUrl(R1, "check")]: () => ((sent = true), { runner_id: R1, sent_at: "2026-10-15T12:00:00.000Z" }),
+    });
+    const timers = [];
+    const fleet = createFleet({ call, schedule: (fn, ms) => timers.push({ fn, ms }) });
+    await fleet.load();
+    expect(await fleet.act(R1, "check")).toBe("");
+    expect(timers).toHaveLength(1);
+    down = true;
+    timers.shift().fn();
+    await flush();
+    // The read failed: no new timer, no reads after this one, and the row no longer claims to be checking.
+    expect(timers).toHaveLength(0);
+    const readsAfterFailure = reads;
+    expect(stateParts(fleet.state.fleet.runners[0]).words).toBe("Online");
+    expect(fleet.readFailed(R1)).toBe(true);
+    expect(CHECK_READ_FAILED).toBe("Couldn't check the runner. Try again.");
+    expect(fleet.isPending(R1)).toBe(false); // the button is usable again
+    expect(reads).toBe(readsAfterFailure);
+    // Pressing again posts again and clears the message at once.
+    down = false;
+    expect(await fleet.act(R1, "check")).toBe("");
+    expect(fleet.readFailed(R1)).toBe(false);
+    expect(stateParts(fleet.state.fleet.runners[0]).words).toBe("Checking…");
+    expect(log.filter(([m]) => m === "POST")).toHaveLength(2);
   });
 
   it("stops polling once the page is closed, and says so plainly when the check could not be sent", async () => {

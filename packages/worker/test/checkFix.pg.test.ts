@@ -89,7 +89,7 @@ describe("check fix round [pg]", () => {
   });
 
   /** A finished executor run: `reason` is its failure reason (null: succeeded). `parent` makes it a fix round of that run. */
-  async function ended(o: { reason: string | null; parent?: string | null; summary?: string; exit?: number | null; timedOut?: boolean; check?: boolean; onItemBranch?: { pr: number; bound: boolean } }): Promise<string> {
+  async function ended(o: { reason: string | null; parent?: string | null; summary?: string; exit?: number | null; timedOut?: boolean; check?: boolean; onItemBranch?: { pr: number; bound: boolean }; noMode?: boolean }): Promise<string> {
     const id = randomUUID();
     const job: Job = {
       schema_version: 1, job_id: randomUUID(), run_id: id, repo: { id: A.repoId, owner: "acme", name: "widgets", private: true }, role: "executor", mode: "local", spec: null,
@@ -99,8 +99,8 @@ describe("check fix round [pg]", () => {
     };
     await admin.query(
       `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id, parent_run_id, job_signed, cc_session_id)
-       VALUES ($1, $2, $3, 'executor', 'runner', $4, 'runner_local', $5, $6, $7::jsonb, $8)`,
-      [id, A.accountId, A.workItemId, o.reason === null ? "succeeded" : "failed", A.repoId, o.parent ?? null, JSON.stringify(signJob(job, signing)), `sess-${id.slice(0, 8)}`],
+       VALUES ($1, $2, $3, 'executor', 'runner', $4, CASE WHEN $9::boolean THEN NULL ELSE 'runner_local' END, $5, $6, $7::jsonb, $8)`,
+      [id, A.accountId, A.workItemId, o.reason === null ? "succeeded" : "failed", A.repoId, o.parent ?? null, JSON.stringify(signJob(job, signing)), `sess-${id.slice(0, 8)}`, o.noMode === true],
     );
     await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.status_changed', $3::jsonb)", [A.accountId, id, JSON.stringify({ from: "running", to: o.reason === null ? "succeeded" : "failed", ...(o.reason ? { failureReason: o.reason } : {}) })]);
     // The cloud's own record of the binding, written by the job issuer when it signed the job.
@@ -258,6 +258,15 @@ describe("check fix round [pg]", () => {
     expect(resumed).toHaveLength(0);
     const rows = await admin.query("SELECT count(*)::int AS n FROM agent_runs WHERE account_id = $1 AND parent_run_id = $2", [A.accountId, failed]);
     expect(rows.rows[0].n).toBe(0);
+  });
+
+  it("a round on the item's branch whose failed run recorded no side cannot be pinned: it is refused by name and starts nothing", async () => {
+    const failed = await ended({ reason: "check_failed", onItemBranch: { pr: 7, bound: true }, noMode: true });
+    expect((await admin.query("SELECT execution_mode FROM agent_runs WHERE id = $1", [failed])).rows[0].execution_mode).toBeNull();
+    expect(await startCheckFixRound(deps(), who(), failed)).toEqual({ ok: false, reason: CHECK_FIX_BRANCH_UNKNOWN });
+    expect(started).toHaveLength(0);
+    expect(resumed).toHaveLength(0);
+    expect((await admin.query("SELECT count(*)::int AS n FROM agent_runs WHERE account_id = $1 AND parent_run_id = $2", [A.accountId, failed])).rows[0].n).toBe(0);
   });
 
   it("a plain round whose issuer finds no recorded branch to continue gets the same name instead of the generic resume failure; any other issuer refusal stays generic", async () => {

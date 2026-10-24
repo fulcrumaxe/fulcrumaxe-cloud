@@ -49,6 +49,11 @@ interface Mock {
   mintDelay: number;
   runFetches: string[];
   isAdmin: boolean;
+  /** PING-UX: how many times the fleet was read, and whether the next reads fail. */
+  gets: number;
+  getFails: boolean;
+  /** PING-UX: what the runner reads after a Check runner now press (and after each later read). */
+  checkReplies: Array<Record<string, unknown>>;
 }
 const json = (route: Route, status: number, body: unknown) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
@@ -58,7 +63,7 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
   page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
   await page.addInitScript(() => document.addEventListener("securitypolicyviolation", (e) => console.error(`CSP ${e.violatedDirective}`)));
   const mock: Mock = {
-    runners: [runner()], role: "admin", account: { limit: 16, capacity: 8, running: 1, runner_count: 1, runner_limit: 5 }, tokens: [], posts: [], deletes: [], mintStatus: 201, mintDelay: 0, runFetches: [], isAdmin: true, ...tweak,
+    runners: [runner()], role: "admin", account: { limit: 16, capacity: 8, running: 1, runner_count: 1, runner_limit: 5 }, tokens: [], posts: [], deletes: [], mintStatus: 201, mintDelay: 0, runFetches: [], isAdmin: true, gets: 0, getFails: false, checkReplies: [], ...tweak,
   };
   await page.route((u) => u.pathname === "/", async (route) => {
     const res = await route.fetch();
@@ -75,6 +80,13 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
     if ((req.headers()["accept"] ?? "").includes("text/event-stream")) return route.fulfill({ status: 200, contentType: "text/event-stream", body: "event: idle\ndata: {}\n\n" });
     if (p.startsWith("/api/v1/runs/")) mock.runFetches.push(p.split("/")[4]!);
     if (p === "/api/v1/repos") return json(route, 200, REPOS);
+    if (p === "/api/runners") {
+      mock.gets++;
+      if (mock.getFails) return json(route, 503, { error: { code: "unavailable", message: SERVER_TEXT, request_id: "r" } });
+      // A press of Check runner now queued replies: each read after it takes the next one (the last one stays).
+      const reply = mock.checkReplies.length > 1 ? mock.checkReplies.shift() : mock.checkReplies[0];
+      if (reply) mock.runners = mock.runners.map((r) => ({ ...(r as object), ...reply }));
+    }
     if (p === "/api/runners") return json(route, 200, { runners: mock.runners, viewer: { role: mock.role }, account: mock.account, copy: {} });
     if (p === "/api/runners/provisioning-tokens") {
       if (req.method() === "GET") return json(route, 200, { tokens: mock.tokens, limit: 5 });
@@ -94,6 +106,10 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
       mock.deletes.push(del[1]!);
       mock.tokens = mock.tokens.filter((t) => t.id !== del[1]);
       return json(route, 200, { id: del[1], revoked: true });
+    }
+    if (/^\/api\/runners\/[^/]+\/check$/.test(p) && req.method() === "POST") {
+      mock.posts.push({ path: p, body: JSON.parse(req.postData() ?? "{}") });
+      return json(route, 200, { runner_id: p.split("/")[3], sent_at: "2026-10-15T12:00:00.000Z" });
     }
     const act = p.match(/^\/api\/runners\/([^/]+)\/(pause|drain|resume|rename|remove)$/);
     if (act && req.method() === "POST") {
@@ -192,6 +208,46 @@ test.describe("D#605 FL-9: the fleet page", () => {
     expect(mock.posts.filter((p) => p.path.endsWith("/pause"))).toHaveLength(1);
     await expect(t(page, "runners-resume")).toBeVisible();
     await clean(page, errors);
+  });
+
+  // PING-UX (D#6 RUNNER-PING follow-up): real clicks on "Check runner now".
+  const NOT_RESPONDING = { state: "not_responding", state_note: "no reply in 60 s", check: { status: "no_reply", sent_at: "2026-10-15T12:00:00.000Z" }, controls: { ...OWN, check: ok } };
+
+  test("PING-UX (a): Check runner now on a runner that already reads Not responding shows Checking… and then the same answer, with the button usable throughout", async ({ page }) => {
+    const { mock, errors } = await setup(page, { runners: [runner(NOT_RESPONDING)] });
+    await open(page);
+    await expect(t(page, "runners-state")).toHaveText(/Not responding — no reply in 60 s/);
+    // The press queues a check; the next read shows it waiting, the one after answers (no reply again).
+    mock.checkReplies = [{ ...NOT_RESPONDING, check: { status: "checking", sent_at: "2026-10-15T12:00:30.000Z" } }, NOT_RESPONDING];
+    await press(t(page, "runners-check"));
+    await expect(t(page, "runners-state")).toHaveText(/Checking…/);
+    expect(mock.posts.filter((p) => p.path.endsWith("/check"))).toHaveLength(1);
+    await expect(t(page, "runners-state")).toHaveText(/Not responding — no reply in 60 s/);
+    await expect(t(page, "runners-check")).toHaveAttribute("aria-disabled", "false");
+    await clean(page, errors);
+  });
+
+  test("PING-UX (b): when the fleet cannot be read while a check waits, the re-reads stop, the row says it could not check, and pressing again works", async ({ page }) => {
+    const { mock, errors } = await setup(page, { runners: [runner({ controls: { ...OWN, check: ok } })] });
+    await open(page);
+    mock.checkReplies = [{ check: { status: "checking", sent_at: "2026-10-15T12:00:00.000Z" } }];
+    await press(t(page, "runners-check"));
+    await expect(t(page, "runners-state")).toHaveText(/Checking…/);
+    mock.getFails = true;
+    await expect(t(page, "runners-row-error")).toHaveText("Couldn't check the runner. Try again.");
+    await expect(t(page, "runners-state")).not.toHaveText(/Checking…/);
+    // No more reads after the failed one: wait past two poll intervals and count.
+    const reads = mock.gets;
+    await page.waitForTimeout(11_000);
+    expect(mock.gets).toBe(reads);
+    await expect(t(page, "runners-check")).toHaveAttribute("aria-disabled", "false");
+    // Pressing again sends a new check; the fleet reads again and the message is gone.
+    mock.getFails = false;
+    await press(t(page, "runners-check"));
+    await expect(t(page, "runners-state")).toHaveText(/Checking…/);
+    await expect(t(page, "runners-row-error")).toHaveCount(0);
+    expect(mock.posts.filter((p) => p.path.endsWith("/check"))).toHaveLength(2);
+    expect(errors.filter((e) => !/503|Failed to load/.test(e))).toEqual([]);
   });
 
   test("a draining runner reads Finishing current work, and a member sees every control disabled with its reason", async ({ page }) => {

@@ -7,7 +7,7 @@
 import { h, timeNode } from "../_lib/dom.js";
 import { onRefresh } from "../../core/cloud-live.js";
 import {
-  MODE_WORDS, ONLY_ADMINS, TTL_CHOICES, accountText, capacityText, controlList, createAdder, createFleet, factsText, loadRepoChoices, provText, runnerLimitText, stateParts, versionText,
+  CHECK_READ_FAILED, MODE_WORDS, ONLY_ADMINS, TTL_CHOICES, accountText, capacityText, controlList, createAdder, createFleet, factsText, loadRepoChoices, provText, runnerLimitText, stateParts, versionText,
 } from "./runners-fleet.js";
 
 const FULC = window.FULC;
@@ -223,7 +223,7 @@ function mountApp(contentEl) {
         }, c.label),
         !c.allowed && c.reason ? h("span", { class: "runners-reason runners-muted", id: id + "-why", "data-testid": "runners-reason" }, c.reason) : null);
     });
-    const said = rowErrors.get(r.id);
+    const said = rowErrors.get(r.id) || (fleet.readFailed(r.id) ? CHECK_READ_FAILED : "");
     return h("li", { class: "runners-row", "data-testid": "runners-row", "data-state": r.state, "aria-busy": pending ? "true" : "false" },
       h("h3", { class: "runners-name", "data-testid": "runners-name" }, h("bdi", null, r.name)),
       h("p", { class: "runners-muted" }, "Registered by ", h("bdi", null, r.person)),

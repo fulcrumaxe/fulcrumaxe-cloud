@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { recordDriverEvent, type WaitingStage } from "@fx/core/src/work-items/driverEvents.js";
 import { checkHeadroom } from "@fx/spend";
+import { readReviewHold } from "@fx/core/src/work-items/reviewHold.js";
 import { reportError } from "@fx/telemetry";
 import type { SeatRequest, SeatResult } from "./seat.js";
 import type { AdvanceStartArgs } from "./advance.js";
@@ -110,6 +111,9 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
       if (!item) return { skip: "item_gone" };
       if (item.halted) return { skip: "halted" };
       if (item.provenance !== "internal" || !entry.itemStages.includes(item.stage)) return { skip: "not_parked_here" };
+      // A review re-entered from Needs a person parks there. Only an item still held for a missing verdict is that review: any other cause of Needs a person is a build to
+      // run again, and the workflow would start that instead of the review the old waiting fact was for.
+      if (entry.stage === "review" && item.stage === "needs_human" && !(await readReviewHold(client, workItemId))) return { skip: "not_parked_here" };
       if (entry.needsSpec && (item.version === null || item.spec_at === null)) return { skip: "no_spec" };
 
       // The cards an approval of this stage may sit on: the item itself and, where the entry says so, the card this one replaced (retired with `superseded:<this item>`).

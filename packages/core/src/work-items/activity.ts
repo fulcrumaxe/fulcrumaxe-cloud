@@ -664,9 +664,13 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       const isReviewStop = stop?.code != null && Object.hasOwn(REVIEW_STOP_COPY_KEY, stop.code) && item.stage !== 'review_passed';
       // FIXROUND-REFRESH-HEAD: a fix round refused because the paired public branch was changed outside the cloud says so at any pull-request stage.
       const publicMoved = stop?.code === PUBLIC_BRANCH_MOVED && item.stage !== 'in_progress';
+      // The same at any pull-request stage when the branch could not be read on GitHub at all: the round was not started either.
+      const publicUnreadable = stop?.code === PUBLIC_HEAD_UNAVAILABLE && item.stage !== 'in_progress';
       const sentence = publicMoved
         ? PUBLIC_BRANCH_MOVED_SENTENCE
-        : isReviewStop
+        : publicUnreadable
+          ? PUBLIC_HEAD_UNAVAILABLE_SENTENCE
+          : isReviewStop
           ? REVIEW_STOP_COPY_KEY[stop!.code as keyof typeof REVIEW_STOP_COPY_KEY]
           : stop?.code && item.stage === 'in_progress' && Object.hasOwn(CHECK_FAILED_SENTENCES, stop.code) ? CHECK_FAILED_SENTENCES[stop.code] : undefined;
       if (sentence) notice = { kind: 'check_failed', reason: sentence };
