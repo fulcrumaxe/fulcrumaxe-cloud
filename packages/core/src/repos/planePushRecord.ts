@@ -322,7 +322,7 @@ export const PUBLIC_BRANCH_MOVED = 'public_branch_moved';
 /** The code (and the sentence) when the public branch could not be read on GitHub before a fix round: nothing was started. */
 export const PUBLIC_HEAD_UNAVAILABLE = 'public_head_unavailable';
 export const PUBLIC_HEAD_UNAVAILABLE_SENTENCE = "Couldn't read the public pull request's branch on GitHub, so the fix round was not started. Nothing was changed. Press Build again in a moment.";
-export const PUBLIC_BRANCH_MOVED_SENTENCE ="The public pull request's branch was changed outside the cloud. Nothing was started. Close it or reset its branch, then press Build again.";
+export const PUBLIC_BRANCH_MOVED_SENTENCE = "The public pull request's branch was changed outside the cloud. Nothing was started. Close it or reset its branch, then press Build again.";
 
 /**
  * The truth for a read: asks GitHub for the branch head and returns it next to the stamp. When they differ the result says `stale`

@@ -359,11 +359,13 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       expect((await noticeOf(accountId, userId, itemId))!.kind).toBe('check_failed');
     });
 
-    it('check_failed: a fix round refused because the paired public branch moved gives its fixed sentence at every pull-request stage, and none at In progress', async () => {
+    it.each([
+      ['public_branch_moved', "The public pull request's branch was changed outside the cloud. Nothing was started. Close it or reset its branch, then press Build again."],
+      ['public_head_unavailable', "Couldn't read the public pull request's branch on GitHub, so the fix round was not started. Nothing was changed. Press Build again in a moment."],
+    ])('check_failed: a fix round refused %s gives its fixed sentence at every pull-request stage, and none at In progress', async (code, sentence) => {
       const { accountId, userId } = await seedAccountWithMember(admin);
       const { itemId } = await seedItem(accountId, { stage: 'pr_opened' });
-      await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'stopped', 'public_branch_moved', 'p')`, [accountId, itemId]);
-      const sentence = "The public pull request's branch was changed outside the cloud. Nothing was started. Close it or reset its branch, then press Build again.";
+      await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'stopped', $3, 'p')`, [accountId, itemId, code]);
       for (const stage of ['pr_opened', 'changes_requested', 'review_passed']) {
         await admin.query(`UPDATE work_items SET stage = $2 WHERE id = $1`, [itemId, stage]);
         expect(await noticeOf(accountId, userId, itemId), stage).toEqual({ kind: 'check_failed', reason: sentence });

@@ -60,6 +60,8 @@ describe("the parked-stage sweep for the reviewers and the fix round [pg]", { ti
     provenance?: string;
     /** A push of this head recorded before the wait began. */
     pushedBefore?: string;
+    /** Rows written after the item exists and before its waiting fact (a hold must predate the wait: a later escalation would read as the stage moving on). */
+    beforeWait?: (a: SeedRefs, w: string) => Promise<void>;
   }
 
   /** An item parked at `stage` on `HEAD`: its person-given approval, a published Spec older than it, and a waiting fact on the head `ageSeconds` old. */
@@ -77,6 +79,7 @@ describe("the parked-stage sweep for the reviewers and the fix round [pg]", { ti
     );
     if (o.specAfterApproval) await admin.query("INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind) VALUES ($1, $2, 2, 'spec 2', encode(sha256(convert_to('spec 2', 'UTF8')), 'hex'), 'system')", [a.accountId, w]);
     if (o.pushedBefore) await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, head_sha, dedupe_key) VALUES ($1, $2, 'pr_head_pushed', $3, $4)", [a.accountId, w, o.pushedBefore, randomUUID()]);
+    if (o.beforeWait) await o.beforeWait(a, w);
     await waitingFact(a.accountId, w, stage, { pause: o.pause, head: o.head === undefined ? HEAD : o.head, round: o.round });
     await admin.query("UPDATE work_item_driver_events SET created_at = now() - make_interval(secs => $2::int) WHERE work_item_id = $1", [w, o.ageSeconds ?? 5 * 3600]);
     if (o.halted) await admin.query("UPDATE work_items SET halted_at = now(), halt_action_id = $2 WHERE id = $1", [w, randomUUID()]);
@@ -291,6 +294,51 @@ describe("the parked-stage sweep for the reviewers and the fix round [pg]", { ti
       await earlierRun(p, fixKey(p), "succeeded", "executor");
       const started: AdvanceStartArgs[] = [];
       await sweeper(limits(600), started, { t: Date.now() }).sweepParkedStages([entryOf("fix_round")]);
+      expect(mine(started, p.w)).toEqual([]);
+    });
+  });
+  describe("the review re-entered from Needs a person", () => {
+    /** At Needs a person because a reviewer kept ending without a verdict: the transition into it, then the escalation (what `readReviewHold` reads). */
+    const held = async (a: SeedRefs, w: string): Promise<void> => {
+      await admin.query("INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'pr_opened', 'needs_human', now(), 'control_plane', $3)", [a.accountId, w, `escalated:${randomUUID()}`]);
+      // The test ages every event of the item afterwards; the transition is aged too, so it still predates the escalation.
+      await admin.query("UPDATE work_item_transitions SET created_at = now() - interval '2 days', at = now() - interval '2 days' WHERE work_item_id = $1 AND to_stage = 'needs_human'", [w]);
+      await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'escalated', 'reviewer_no_verdict', $3)", [a.accountId, w, randomUUID()]);
+    };
+
+    it("REVIEW-NH-SPEND-SWEEP: spend-paused at Needs a person, it stays parked while the limit holds and resumes exactly once when the limit lifts, as a first-entry review does", async () => {
+      const p = await parked("review", { stage: "needs_human", round: 1, beforeWait: held });
+      const l = limits(1);
+      const started: AdvanceStartArgs[] = [];
+      const clock = { t: Date.now() };
+      for (let pass = 0; pass < 2; pass += 1) {
+        clock.t += 15 * 60_000;
+        await stale(p.w);
+        const before = (await counts(p.a.accountId)).facts;
+        await sweeper(l, started, clock).sweepParkedStages([entryOf("review")]);
+        // Still denied: the wait is refreshed on the same head, and nothing starts.
+        expect((await counts(p.a.accountId)).facts).toBe(before + 1);
+      }
+      expect(mine(started, p.w)).toEqual([]);
+      expect(await itemOf(p.w)).toEqual({ stage: "needs_human", halted_at: null });
+
+      l.current = 600;
+      clock.t += 15 * 60_000;
+      await stale(p.w);
+      await sweeper(l, started, clock).sweepParkedStages([entryOf("review")]);
+      expect(mine(started, p.w)).toHaveLength(1);
+      // The same pass again (a retried cron) finds the claim and starts nothing more.
+      await stale(p.w);
+      await sweeper(l, started, clock).sweepParkedStages([entryOf("review")]);
+      const calls = mine(started, p.w);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ accountId: p.a.accountId, workItemId: p.w, actionId: p.approval, startRereview: 1, specVersion: 1 });
+    });
+
+    it("an item at Needs a person for another cause (no missing-verdict hold) is not resumed as a review", async () => {
+      const p = await parked("review", { stage: "needs_human" });
+      const started: AdvanceStartArgs[] = [];
+      await sweeper(limits(600), started, { t: Date.now() }).sweepParkedStages([entryOf("review")]);
       expect(mine(started, p.w)).toEqual([]);
     });
   });

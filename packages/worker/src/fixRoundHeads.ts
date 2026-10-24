@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
-import { PUBLIC_BRANCH_MOVED, readPlanePush, type BranchHeadPort } from "@fx/core/src/repos/planePushRecord.js";
+import { PUBLIC_BRANCH_MOVED, PUBLIC_HEAD_UNAVAILABLE, readPlanePush, type BranchHeadPort } from "@fx/core/src/repos/planePushRecord.js";
 
 /**
  * FIXROUND-REFRESH-HEAD: what a fix round checks on GitHub before it starts anything.
@@ -30,7 +30,6 @@ export interface FixRoundHeadPorts {
 
 export const PR_HEAD_UNAVAILABLE = "pr_head_unavailable";
 export const PR_BRANCH_MISSING = "pr_branch_missing";
-export const PUBLIC_HEAD_UNAVAILABLE = "public_head_unavailable";
 /** The run line a round that found its branch moved carries (`run.stage`, see @fx/core previewProgress `lineFor`). */
 export const BRANCH_MOVED_STAGE = "branch_moved";
 
