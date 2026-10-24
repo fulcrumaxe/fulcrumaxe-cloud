@@ -87,7 +87,9 @@ export async function loadBody(worker: AdvanceWorker | null, reader: IssueReader
     // The proposal's own title and summary, read from the database in the item's tenant transaction: no GitHub call, no label rule. The text is third-party
     // (it can come from an outside author's issue), so it goes to every prompt through `sanitize` like an issue body does; the approval made the item
     // internal, not the text trusted. The body is built by `proposalIntakeBody` and nowhere else, for the triage and for the short Spec alike.
-    const intake = proposalIntakeBody({ summary: fromProposal.summary });
+    // S4-b3: the supported claims and the system-read evidence excerpts go in its slots (the load read them in the same tenant transaction). They are
+    // as untrusted as the summary and reach the prompt through the same fence. With neither, the body is the summary-only body, byte for byte.
+    const intake = proposalIntakeBody({ summary: fromProposal.summary, claims: fromProposal.claims ?? [], evidence: fromProposal.evidence ?? [] });
     // The root of a small, bug or doc item (S4-e4): the short Spec reads the same proposal text the triage did, as it reads NOW (an edited proposal is what a re-approval wants).
     if (verdict.action === "light_spec") return { ok: true, mode: "light", category: item.kind ?? "", title: fromProposal.title, body: intake };
     if (verdict.action !== "triage") return { ok: false, reason: "no_issue_link" };

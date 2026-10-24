@@ -5,13 +5,14 @@
  * short Spec) passes the discussion's title and body through `sanitize`, the one fence, when it builds its prompt, so the
  * fence is applied where the text reaches a prompt and nowhere else. This module therefore never wraps and never trusts:
  * a proposal's summary may come from an outside author's issue, and a person's approval click made the ITEM internal, not
- * the text. Claims and evidence excerpts have a slot so the row that wires S4-a's tables in changes this call site only.
+ * the text. D#483 S4-b3 fills the claims and evidence slots from S4-a's tables at the one call site (apps/web/lib/advanceSteps.ts `loadBody`).
+ * The labelled blocks are built here and nowhere else (a guard test fails the build otherwise).
  */
 export interface ProposalIntakeInput {
   summary: string | null;
-  /** Claim texts (S4-a). Not read anywhere yet; the slot is tested. */
+  /** The texts of the proposal's `supported` claims only (S4-a `proposal_claims`); refuted, unverifiable and pending claims are left out by the reader. */
   claims?: readonly string[];
-  /** Evidence excerpts with their refs (S4-a). Not read anywhere yet; the slot is tested. */
+  /** Every evidence row of the proposal, with the excerpt the system read and stored at the cited commit (S4-a `proposal_evidence`). */
   evidence?: ReadonlyArray<{ ref: string; excerpt: string }>;
 }
 
