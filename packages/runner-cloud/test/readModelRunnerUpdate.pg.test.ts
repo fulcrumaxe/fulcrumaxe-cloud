@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { CHECK_JOB_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, waitText } from "@fulcrumaxe/runner-protocol";
+import { BASE_SHA_JOB_MIN_PROTOCOL, CHECK_JOB_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, waitText } from "@fulcrumaxe/runner-protocol";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { nextGhInstallationId } from "@fx/db/test/helpers/seed.js";
@@ -156,6 +156,18 @@ describe("waiting_for_runner_update [pg]", () => {
     expect(wait).toEqual({ reason: "waiting_for_runner_update", limited_by: null, min_protocol: PINS_JOB_MIN_PROTOCOL });
     expect(waitText(wait.reason!, wait.limited_by, wait.min_protocol ?? null)).toBe(`Waiting for a runner update (version ${PINS_JOB_MIN_PROTOCOL} or later) before this run can start`);
     await h.admin.query("UPDATE runners SET protocol_version = $2 WHERE id = $1", [eight, PINS_JOB_MIN_PROTOCOL]);
+    expect(await reason(w, id)).toBeNull();
+  });
+
+  it("FIXROUND-BASE-SYNC R2-b: a continuation with a signed base_sha (gated at its floor) with a pins-era runner shows the update-your-runner state, and updating the runner clears it", async () => {
+    const w = await world();
+    const nine = await runner(w, { protocol: PINS_JOB_MIN_PROTOCOL });
+    const id = await run(w, BASE_SHA_JOB_MIN_PROTOCOL);
+    expect(await reason(w, id)).toBe("waiting_for_runner_update");
+    const wait = await getRunWait(deps(), w.f.accountId, id);
+    expect(wait).toEqual({ reason: "waiting_for_runner_update", limited_by: null, min_protocol: BASE_SHA_JOB_MIN_PROTOCOL });
+    expect(waitText(wait.reason!, wait.limited_by, wait.min_protocol ?? null)).toBe(`Waiting for a runner update (version ${BASE_SHA_JOB_MIN_PROTOCOL} or later) before this run can start`);
+    await h.admin.query("UPDATE runners SET protocol_version = $2 WHERE id = $1", [nine, BASE_SHA_JOB_MIN_PROTOCOL]);
     expect(await reason(w, id)).toBeNull();
   });
 });

@@ -141,6 +141,8 @@ const PR_NUMBER_MAX = 2_147_483_647;
  *  - `session_id` is null when no session is claimed: a round on the other side of a hand-over never claims to continue a session it did not run.
  *  - `pr_number` is present if and only if `branch` is an item pull request branch (`ITEM_PR_BRANCH`); the cloud binds it to the item's open pull
  *    request at issue time. An item pull request branch with a session id is refused.
+ *  - `base_sha` (FIXROUND-BASE-SYNC R2-b) is the commit the cloud chose as the diff base of the round's public publish: the tip of the pull request's base it brought the branch up to date with.
+ *    The runner never picks its own. Only with an item pull request branch, and the cloud signs it only for a runner of `BASE_SHA_JOB_MIN_PROTOCOL` or later; omitted on every other job, so their canonical JSON and signature are unchanged.
  */
 const ContinuesSchema = z
   .object({
@@ -148,9 +150,11 @@ const ContinuesSchema = z
     session_id: z.string().regex(SESSION_ID_PATTERN).nullable(),
     branch: branchName,
     pr_number: z.number().int().min(1).max(PR_NUMBER_MAX).optional(),
+    base_sha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
+    if (value.base_sha !== undefined && value.pr_number === undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "base_sha rides only with an item pull request branch", path: ["base_sha"] });
     // The branch is one of exactly two shapes, whether or not a pull request number is present: a run branch or the item's pull request branch.
     if (!RUNNER_RUN_BRANCH.test(value.branch) && !ITEM_PR_BRANCH.test(value.branch)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a continuation branch is a run branch or an item pull request branch", path: ["branch"] });
     const itemBranch = ITEM_PR_BRANCH.test(value.branch);

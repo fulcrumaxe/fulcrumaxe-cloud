@@ -6,6 +6,7 @@ import {
   MEMORY_JOB_MIN_PROTOCOL,
   EXCLUDES_JOB_MIN_PROTOCOL,
   PINS_JOB_MIN_PROTOCOL,
+  BASE_SHA_JOB_MIN_PROTOCOL,
   SPILL_JOB_MIN_PROTOCOL,
   CHECK_JOB_MIN_PROTOCOL,
   CONTEXT_WINDOW_JOB_MIN_PROTOCOL,
@@ -62,6 +63,7 @@ export type JobIssueErrorCode =
   | "continues_without_branch"
   | "continues_branch_mismatch"
   | "continues_base_unavailable"
+  | "continues_base_invalid"
   | "continues_pr_not_open"
   | "continues_pr_mismatch"
   | "continues_branch_protected"
@@ -380,9 +382,12 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
           const repoRef: BindingRepo = { id: run.repoId, owner: context.repo.owner, name: context.repo.name, local: input.jobMode !== "verified" };
           const prNumber = await bindItemPullRequest(deps.continuationBinding, repoRef, branch, input.continues.prNumber);
           boundPullRequest = { prNumber, branch };
-          continues = { parent_run_id: input.continues.parentRunId, session_id: null, branch, pr_number: prNumber };
+          // FIXROUND-BASE-SYNC (R2-b): the diff base is the base tip the cloud brought the branch up to date with, handed down by the code that did it. A value that is not a full commit id is refused, never trimmed or guessed.
+          const baseSha = input.continues.baseSha;
+          if (baseSha !== undefined && !/^[0-9a-f]{40}$/.test(baseSha)) throw new JobIssueError("continues_base_invalid");
+          continues = { parent_run_id: input.continues.parentRunId, session_id: null, branch, pr_number: prNumber, ...(baseSha === undefined ? {} : { base_sha: baseSha }) };
         } else {
-          if (input.continues.prNumber !== undefined) throw new JobIssueError("continues_pr_mismatch");
+          if (input.continues.prNumber !== undefined || input.continues.baseSha !== undefined) throw new JobIssueError("continues_pr_mismatch");
           continues = { parent_run_id: input.continues.parentRunId, session_id: sessionId, branch };
         }
         // The branch head NOW, at this run's own dispatch: never the parent's recorded value (a lost parent may have pushed since).
@@ -499,8 +504,8 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         accountId: run.accountId,
         runId: run.id,
         job: signed as unknown as Record<string, unknown>,
-        // A job that carries memory is also gated: an older runner's strict parse would refuse the `memory` key, so it waits for an updated runner instead. The same holds for excludes (CX-5c): a runner that ignored them would run the agent with nothing denied. And for pins (CX-5c2): the strict parse again. And for a spill (CX-4b): a cut prompt is never sent uncut to an older runner, it waits for an updated one. And for a window figure (CX-6b): the same strict-parse reason.
-        minProtocolVersion: Math.max(crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : 0, candidate.memory ? MEMORY_JOB_MIN_PROTOCOL : 0, candidate.excludes ? EXCLUDES_JOB_MIN_PROTOCOL : 0, candidate.pins ? PINS_JOB_MIN_PROTOCOL : 0, candidate.spill ? SPILL_JOB_MIN_PROTOCOL : 0, candidate.context_window !== undefined ? CONTEXT_WINDOW_JOB_MIN_PROTOCOL : 0, candidate.check ? CHECK_JOB_MIN_PROTOCOL : 0) || null,
+        // A job that carries memory is also gated: an older runner's strict parse would refuse the `memory` key, so it waits for an updated runner instead. The same holds for excludes (CX-5c): a runner that ignored them would run the agent with nothing denied. And for pins (CX-5c2): the strict parse again. And for a spill (CX-4b): a cut prompt is never sent uncut to an older runner, it waits for an updated one. And for a window figure (CX-6b): the same strict-parse reason. And for a continuation's `base_sha` (R2-b): the strict parse again, and a runner that ignored it would pick its own diff base.
+        minProtocolVersion: Math.max(crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : 0, candidate.memory ? MEMORY_JOB_MIN_PROTOCOL : 0, candidate.excludes ? EXCLUDES_JOB_MIN_PROTOCOL : 0, candidate.pins ? PINS_JOB_MIN_PROTOCOL : 0, candidate.spill ? SPILL_JOB_MIN_PROTOCOL : 0, candidate.context_window !== undefined ? CONTEXT_WINDOW_JOB_MIN_PROTOCOL : 0, candidate.check ? CHECK_JOB_MIN_PROTOCOL : 0, continues?.base_sha !== undefined ? BASE_SHA_JOB_MIN_PROTOCOL : 0) || null,
         ...(boundPullRequest ? { continuesBound: boundPullRequest } : {}),
       });
       if (!recorded) throw new JobIssueError("job_not_recorded");

@@ -124,7 +124,7 @@ describe("branch sync: the merges call and what comes back", () => {
     const w = world();
     w.refs.set(BRANCH, hex("3"));
     const t = setup(w);
-    expect(await ask(t.port)).toEqual({ kind: "up_to_date" });
+    expect(await ask(t.port)).toEqual({ kind: "up_to_date", baseSha: hex("3") });
     expect(w.refs.get(BRANCH)).toBe(hex("3"));
   });
 

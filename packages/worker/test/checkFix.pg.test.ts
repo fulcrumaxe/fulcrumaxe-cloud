@@ -7,7 +7,8 @@ import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { DispatchFailedError, ExecutionModeChangedError, IdempotencyKeyTakenError, JobIssueError, RUNNER_CONTINUES_BOUND_KIND, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { maxFixRounds } from "@fx/spend";
 import type { BranchSyncOutcome } from "@fx/github";
-import { checkFixBeforeStart } from "../src/fixRoundBase.js";
+import { BASE_SYNCED_PROMPT_LINE, checkFixBeforeStart } from "../src/fixRoundBase.js";
+const withSync = (beforeStart: ReturnType<typeof checkFixBeforeStart>) => ({ beforeStart, baseSync: () => beforeStart.state });
 import { CHECK_FIX_BRANCH_UNKNOWN, CHECK_ROUNDS_USED, checkFixPrompt, startCheckFixRound, type CheckFixDeps } from "../src/checkFix.js";
 
 /**
@@ -287,7 +288,7 @@ describe("check fix round [pg]", () => {
     const roundWith = async (answer: () => Promise<BranchSyncOutcome>, failed?: string) => {
       const syncBase = vi.fn(answer);
       const run = failed ?? (await ended({ reason: "check_failed", onItemBranch: { pr: 7, bound: true } }));
-      const out = await startCheckFixRound({ ...deps(), beforeStart: checkFixBeforeStart(writerPool, { privateHead: async () => L, syncBase }, who()) }, who(), run);
+      const out = await startCheckFixRound({ ...deps(), ...withSync(checkFixBeforeStart(writerPool, { privateHead: async () => L, syncBase }, who())) }, who(), run);
       return { out, syncBase, run };
     };
 
@@ -297,15 +298,21 @@ describe("check fix round [pg]", () => {
       expect(syncBase).toHaveBeenCalledWith({ repo: { id: A.repoId, owner: "acme", name: "widgets" }, branch: "fx/issue-42", prNumber: 7 });
       expect(started).toHaveLength(1);
       expect(await facts()).toEqual([{ kind: "pr_head_pushed", code: "base_synced", head_sha: M }]);
+      // The round is signed with the base tip the merge brought in, and its prompt says the branch was brought up to date.
+      expect(started[0]!.continues).toEqual({ branch: "fx/issue-42", prNumber: 7, baseSha: B });
+      expect(started[0]!.prompt).toContain(BASE_SYNCED_PROMPT_LINE);
       // A replay finds the round it started: the sync is not asked again and no second fact is written.
-      expect(await startCheckFixRound({ ...deps(), beforeStart: checkFixBeforeStart(writerPool, { privateHead: async () => L, syncBase }, who()) }, who(), run)).toEqual(out);
+      expect(await startCheckFixRound({ ...deps(), ...withSync(checkFixBeforeStart(writerPool, { privateHead: async () => L, syncBase }, who())) }, who(), run)).toEqual(out);
       expect(syncBase).toHaveBeenCalledTimes(1);
       expect(await facts()).toHaveLength(1);
     });
 
     it("main did not move: nothing is written and the round starts", async () => {
-      const { out } = await roundWith(async () => ({ kind: "up_to_date" }));
+      const { out } = await roundWith(async () => ({ kind: "up_to_date", baseSha: "c".repeat(40) }));
       expect(out.ok).toBe(true);
+      // Still signed with the base tip the cloud read, and no sync line in the prompt.
+      expect(started[0]!.continues).toEqual({ branch: "fx/issue-42", prNumber: 7, baseSha: "c".repeat(40) });
+      expect(started[0]!.prompt).not.toContain(BASE_SYNCED_PROMPT_LINE);
       expect(await facts()).toEqual([]);
     });
 
@@ -329,7 +336,7 @@ describe("check fix round [pg]", () => {
         expect(out).toEqual({ ok: false, reason: "base_sync_unavailable" });
       }
       const failed = await ended({ reason: "check_failed", onItemBranch: { pr: 7, bound: true } });
-      expect(await startCheckFixRound({ ...deps(), beforeStart: checkFixBeforeStart(writerPool, { privateHead: async () => L }, who()) }, who(), failed)).toEqual({ ok: false, reason: "base_sync_unavailable" });
+      expect(await startCheckFixRound({ ...deps(), ...withSync(checkFixBeforeStart(writerPool, { privateHead: async () => L }, who())) }, who(), failed)).toEqual({ ok: false, reason: "base_sync_unavailable" });
       expect(started).toHaveLength(0);
       expect((await facts()).every((f) => f.kind === "stopped" && f.code === "base_sync_unavailable")).toBe(true);
     });
@@ -337,7 +344,7 @@ describe("check fix round [pg]", () => {
     it("a round with no pull request branch (a plain resume of the run branch) has no base to catch up with: the sync is not asked", async () => {
       const syncBase = vi.fn();
       const failed = await ended({ reason: "check_failed" });
-      const out = await startCheckFixRound({ ...deps(), beforeStart: checkFixBeforeStart(writerPool, { privateHead: async () => L, syncBase }, who()) }, who(), failed);
+      const out = await startCheckFixRound({ ...deps(), ...withSync(checkFixBeforeStart(writerPool, { privateHead: async () => L, syncBase }, who())) }, who(), failed);
       expect(out.ok).toBe(true);
       expect(syncBase).not.toHaveBeenCalled();
     });

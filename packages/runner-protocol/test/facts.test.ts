@@ -105,7 +105,7 @@ describe("the register name (criteria 2 and 3)", () => {
 
 describe("one protocol version", () => {
   it("is a single constant in the protocol package, which the cloud re-exports and the runner sends on hello", async () => {
-    expect(CURRENT_PROTOCOL_VERSION).toBe(9);
+    expect(CURRENT_PROTOCOL_VERSION).toBe(10);
     const { readFileSync: read } = await import("node:fs");
     const cloud = read(new URL("../../runner-cloud/src/http.ts", import.meta.url), "utf8");
     const runner = read(new URL("../../fx-runner/src/version.ts", import.meta.url), "utf8");

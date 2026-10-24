@@ -170,6 +170,8 @@ export function createFollowUpPorts(deps: FollowUpPortsDeps): FollowUpPorts {
           ...(job.continues ? { continuesBranch: job.continues.branch } : {}),
           // D#599 PL-2b-2: the lost round was on the item's pull request branch; the issuer binds the pull request again, now, and signs the number only if GitHub agrees.
           ...(job.continues?.pr_number === undefined ? {} : { continuesPrNumber: job.continues.pr_number }),
+          // FIXROUND-BASE-SYNC (R2-b): the child works on the same branch against the same diff base the cloud chose for its parent.
+          ...(job.continues?.base_sha === undefined ? {} : { continuesBaseSha: job.continues.base_sha }),
         };
         const target = resolveExecutionTarget(isRunnerMode(child.execution_mode) ? child.execution_mode : "runner_local", deps.registry);
         if (job.continues) {

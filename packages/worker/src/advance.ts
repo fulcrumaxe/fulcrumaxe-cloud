@@ -26,7 +26,7 @@ import type { RunStarter } from "./preview.js";
 import { readVerifiedReviewGate, type VerifiedReviewGate } from "./verifiedReviewGate.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 import { startCheckFixRound } from "./checkFix.js";
-import { BASE_SYNCED_STAGE, checkFixBeforeStart, syncRunBranch } from "./fixRoundBase.js";
+import { BASE_SYNCED_PROMPT_LINE, BASE_SYNCED_STAGE, checkFixBeforeStart, syncRunBranch } from "./fixRoundBase.js";
 import { BRANCH_MOVED_STAGE, checkPrivateHead, checkPublicBranch, type FixRoundHeadPorts } from "./fixRoundHeads.js";
 import { RunActionInputError, type PerformResult } from "./runActions.js";
 
@@ -1433,7 +1433,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (bad) return { ok: false, reason: bad.reason ?? "refused" };
     // FIXROUND-REFRESH-HEAD: a check fix round opens no pull request of its own, but on a paired item that already pushed it is held to the public branch too.
     const beforeStart = checkFixBeforeStart(runnerPool, deps.fixHeads, who);
-    const out = await startCheckFixRound({ pool: runnerPool, registry: deps.registry, resume: review.resume, resolveRunSeat: deps.resolveRunSeat, starter: deps.starter, beforeStart }, who, failedRunId);
+    const out = await startCheckFixRound({ pool: runnerPool, registry: deps.registry, resume: review.resume, resolveRunSeat: deps.resolveRunSeat, starter: deps.starter, beforeStart, baseSync: () => beforeStart.state }, who, failedRunId);
     // FIXROUND-BASE-SYNC: the run a sync led to says so (a replay finds its run and merged nothing, so it adds no second line).
     if (out.ok && beforeStart.state.synced) await recordRunStage(runnerPool, { accountId: who.accountId, runId: out.runId, stage: BASE_SYNCED_STAGE });
     console.info(JSON.stringify({ event: "advance.check_fix", work_item_id: who.workItemId, failed_run_id: failedRunId, started: out.ok, reason: out.ok ? null : out.reason }));
@@ -1526,6 +1526,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const effective = await readExecutionMode(runnerPool, who.accountId, state.repoId, who.workItemId);
     let headMoved = false;
     let baseSynced = false;
+    let baseTip: string | null = null;
     if (isRunnerMode(effective)) {
       const repoId = state.repoId;
       const found = await withTenant(runnerPool, who.accountId, async (client) => {
@@ -1552,6 +1553,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         const sync = await syncRunBranch(runnerPool, deps.fixHeads, who, { repo: { id: repoId, owner: found.coords.gh_owner, name: found.coords.gh_name }, pr, liveHead: head.head, moveToNeedsPerson: true, attempt: attemptKey });
         if (!sync.ok) return refuse(sync.reason);
         baseSynced = sync.synced;
+        // Only a round that continues the very branch that was synced is signed with that base.
+        if (req.pr !== undefined && req.pr.branch === pr.branch) baseTip = sync.baseSha;
       }
     }
 
@@ -1574,7 +1577,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const notes = await withTenant(runnerPool, who.accountId, (client) => readPendingRunNotes(client, who.workItemId));
     const key = `advance:${who.workItemId}:${keyBase}${runNotesStepSuffix(notes.map((n) => n.id))}`;
     const noteText = renderRunNotes(notes);
-    const withNotes = (text: string): string => (noteText ? `${text}\n\n${noteText}` : text);
+    const withNotes = (text: string): string => [text, ...(baseSynced ? [BASE_SYNCED_PROMPT_LINE] : []), ...(noteText ? [noteText] : [])].join("\n\n");
     // A prompt that says "Spec unchanged" is sent only when the run this round continues is pinned to exactly that version and hash. The pin is the one the
     // session was built from, not the latest Spec: a mismatch (or no pin) sends the body.
     let useFallback = false;
@@ -1621,12 +1624,12 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         if (!coords?.gh_owner || !coords.gh_name) return refuse("no_repo");
         // D#599 PL-2b-2: the round carries on from the pull request the other side opened. A runner round continues its branch with no session (the issuer
         // reads GitHub and binds the pull request); a sandbox round is bound to the pull request the item recorded, in its own create transaction.
-        let continues: { branch: string; prNumber?: number } | undefined;
+        let continues: { branch: string; prNumber?: number; baseSha?: string } | undefined;
         let inCreateTransaction: StartAgentRunInput["inCreateTransaction"];
         if (req.pr !== undefined) {
           const bound = req.pr;
           if (isRunnerMode(effective)) {
-            if (ITEM_PR_BRANCH.test(bound.branch)) continues = { branch: bound.branch, prNumber: bound.number };
+            if (ITEM_PR_BRANCH.test(bound.branch)) continues = { branch: bound.branch, prNumber: bound.number, ...(baseTip === null ? {} : { baseSha: baseTip }) };
             else if (RUNNER_RUN_BRANCH.test(bound.branch)) {
               // Defence in depth: a run branch is trusted only as the pair the item itself recorded (a runner's done, or a sandbox round bound to it).
               const known = await withTenant(runnerPool, who.accountId, async (client) => ({

@@ -34,7 +34,11 @@ const attemptWord = (attempt: string): string => createHash("sha256").update(att
 /** The run line (`run.stage`) a round that followed a base sync carries (@fx/core previewProgress `lineFor`). */
 export const BASE_SYNCED_STAGE = "base_synced";
 
-export type BaseSyncResult = { ok: true; synced: boolean } | { ok: false; reason: string };
+/** The one fixed line a round that followed a merge adds to its prompt (no item content): the checkout already holds the base's changes. */
+export const BASE_SYNCED_PROMPT_LINE = "Note: this branch was just brought up to date with its base branch, so the checkout already holds the base's latest changes. Do not merge or rebase it yourself.";
+
+/** `baseSha`: the base tip the branch now contains, read by the cloud in the same call; it becomes the signed diff base of the round (`continues.base_sha`). */
+export type BaseSyncResult = { ok: true; synced: boolean; baseSha: string } | { ok: false; reason: string };
 
 export async function syncRunBranch(
   pool: Pool,
@@ -65,7 +69,7 @@ export async function syncRunBranch(
   if (live === null) return unavailable(null);
   const head: string = live;
   const o = outcome;
-  if (o.kind === "up_to_date") return { ok: true, synced: false };
+  if (o.kind === "up_to_date") return SHA.test(o.baseSha) ? { ok: true, synced: false, baseSha: o.baseSha } : unavailable(live);
   if (o.kind === "conflict") {
     await withTenant(pool, who.accountId, async (client) => {
       await recordDriverEvent(client, who.accountId, { workItemId: who.workItemId, kind: "escalated", dedupeKey: `${BASE_SYNC_CONFLICT}:${attemptWord(input.attempt)}`, code: BASE_SYNC_CONFLICT, headSha: head, prNumber: input.pr.number });
@@ -92,7 +96,7 @@ export async function syncRunBranch(
     await recordDriverEvent(client, who.accountId, { workItemId: who.workItemId, kind: "pr_head_pushed", dedupeKey: `${BASE_SYNCED}:${first}..${o.sha}`, code: BASE_SYNCED, headSha: o.sha, prNumber: input.pr.number });
   });
   console.info(JSON.stringify({ event: "advance.base_synced", work_item_id: who.workItemId }));
-  return { ok: true, synced: true };
+  return { ok: true, synced: true, baseSha: o.baseSha };
 }
 
 /**
@@ -101,14 +105,14 @@ export async function syncRunBranch(
  * to move the item (`moveToNeedsPerson: false`): the same word reaches it.
  */
 export function checkFixBeforeStart(pool: Pool, ports: FixRoundHeadPorts | null | undefined, who: Who) {
-  const state = { synced: false };
+  const state: { synced: boolean; baseSha: string | null } = { synced: false, baseSha: null };
   const beforeStart = async (branch: { repo: Repo; pr: { number: number; branch: string }; attempt: string } | null): Promise<string | null> => {
     const publicRefusal = await checkPublicBranch(pool, ports, who);
     if (publicRefusal !== null || branch === null) return publicRefusal;
     const sync = await syncRunBranch(pool, ports, who, { ...branch, liveHead: null, moveToNeedsPerson: false });
-    if (sync.ok) state.synced = sync.synced;
+    if (sync.ok) Object.assign(state, { synced: sync.synced, baseSha: sync.baseSha });
     return sync.ok ? null : sync.reason;
   };
-  /** `state.synced`: a merge was made by this call, so the run it leads to carries the sync's progress line. */
+  /** `state.synced`: a merge was made by this call, so the run it leads to carries the sync's progress line. `state.baseSha`: the base tip the round is signed with. */
   return Object.assign(beforeStart, { state });
 }

@@ -89,7 +89,7 @@ describe("advance: a round that carries on from a pull request the other side op
       registry,
       build: startBuildForItem,
       // FIXROUND-REFRESH-HEAD: the pull request's branch on GitHub is at the head each round is asked for (fixRoundHeads.pg.test.ts covers a moved one).
-      fixHeads: { privateHead: async () => HEAD, syncBase: async () => ({ kind: "up_to_date" }) },
+      fixHeads: { privateHead: async () => HEAD, syncBase: async () => ({ kind: "up_to_date", baseSha: "c".repeat(40) }) },
       review: {
         load: vi.fn(),
         recordRound: vi.fn(),
@@ -208,7 +208,7 @@ describe("advance: a round that carries on from a pull request the other side op
       const fix = await m.module.advanceStartFix(t.who, fixPr(t, { number: 41, branch: `fx/issue-${t.n}` }));
       expect(fix.ok).toBe(true);
       expect(m.started).toHaveLength(1);
-      expect(m.started[0]!.continues).toEqual({ branch: `fx/issue-${t.n}`, prNumber: 41 });
+      expect(m.started[0]!.continues).toEqual({ branch: `fx/issue-${t.n}`, prNumber: 41, baseSha: "c".repeat(40) });
       expect(m.started[0]!.parentRunId).toBe(build);
       expect(m.started[0]!.inCreateTransaction).toBeUndefined();
       expect(await boundEvents((fix as { runId: string }).runId)).toEqual([]);

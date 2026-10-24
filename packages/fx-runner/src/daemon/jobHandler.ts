@@ -232,6 +232,12 @@ const isGitStop = (code: string): boolean => code === "git_stopped" || code === 
 /** The runs that enter the public-push hook: a fresh executor run. A fix round updates a branch that already exists (a later change), and no other role pushes. */
 const enters = (job: Job): boolean => job.role === "executor" && job.continues === null && (job.review ?? null) === null;
 
+/**
+ * The commit the run's public publish diffs from, recorded in the daemon's own memory before the agent can run. A fresh executor run: the commit it starts from. A fix round that carries
+ * a signed `continues.base_sha`: that commit, which the cloud chose when it brought the branch up to date with its base. The checkout and the agent never pick it. Nothing else records one.
+ */
+const planeBaseOf = (job: Job, startedAt: string): string | undefined => (enters(job) ? startedAt : job.continues?.base_sha);
+
 const closedCheck = (summary = "", reason?: CheckNotRunReason, extra: Partial<CheckOutcome> = {}): CheckOutcome => ({ passed: false, body: { exit_code: null, duration_ms: 0, timed_out: false, skipped_tests: null, summary, ...(reason === undefined ? {} : { reason }) }, ...extra });
 
 export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Promise<JobResult> {
@@ -440,6 +446,8 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             const resumed = await git.resume(job, claimed, wanted.workspace);
             if (resumed !== null) {
               started.base = resumed.base;
+              const resumedBase = planeBaseOf(job, resumed.base);
+              if (deps.planePush !== undefined && resumedBase !== undefined) deps.planePush.baseLedger.record(claimed.runId, resumedBase);
               mark("workspace_ready");
               mark("cloned");
               // The resumed session gets the same dev shell a fresh start would (same step, same skips), built at the resumed head.
@@ -457,7 +465,8 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             mark("workspace_ready");
             started.base = (await git.prepare(job, claimed, workspace)).base;
             // The start commit is recorded here, in the daemon's own memory, before the agent can run: the run-end hook reads this and never the checkout.
-            if (deps.planePush !== undefined && enters(job)) deps.planePush.baseLedger.record(claimed.runId, started.base);
+            const planeBase = planeBaseOf(job, started.base);
+            if (deps.planePush !== undefined && planeBase !== undefined) deps.planePush.baseLedger.record(claimed.runId, planeBase);
             mark("cloned");
             await prepareMap(job, git, started.base, repoMapHeld);
             // D#600 CX-5c2: the job's pins, read from the checkout just made (at the start commit) before the agent can touch it. Never a reason to refuse the run.

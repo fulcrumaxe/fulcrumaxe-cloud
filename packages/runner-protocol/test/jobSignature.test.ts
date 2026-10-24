@@ -326,3 +326,33 @@ describe("a job's approved check (D#6 R-CHK-1)", () => {
     expect(JobSchema.safeParse(sampleJob({ check: null })).success).toBe(false);
   });
 });
+
+describe("continues.base_sha and the signature (FIXROUND-BASE-SYNC R2-b)", () => {
+  const parent = "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5f";
+  const item = { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: 7 };
+  const base = "a".repeat(40);
+  const withBase = sampleJob({ continues: { ...item, base_sha: base } }) as Job;
+  const without = sampleJob({ continues: item }) as Job;
+  const reContinues = (signed: ReturnType<typeof signJob>, continues: Record<string, unknown> | null) => ({ ...signed, job: { ...signed.job, continues } });
+
+  it("is signed: it verifies as issued, and a different base is a bad signature", () => {
+    const signed = signJob(withBase, privateKey);
+    expect(verifyJob(signed, keyring, { now: NOW }).continues).toEqual({ ...item, base_sha: base });
+    for (const other of ["b".repeat(40), "a".repeat(39) + "b"]) expect(codeOf(() => verifyJob(reContinues(signed, { ...item, base_sha: other }), keyring, { now: NOW })), other).toBe("bad_signature");
+  });
+
+  it("removing it after signing is a bad signature", () => {
+    const signed = signJob(withBase, privateKey);
+    expect(codeOf(() => verifyJob(reContinues(signed, item), keyring, { now: NOW }))).toBe("bad_signature");
+  });
+
+  it("adding it after signing is a bad signature", () => {
+    const signed = signJob(without, privateKey);
+    expect(codeOf(() => verifyJob(reContinues(signed, { ...item, base_sha: base }), keyring, { now: NOW }))).toBe("bad_signature");
+  });
+
+  it("a continuation without one has the bytes it always had: no base_sha key at all", () => {
+    expect(canonicalJson(signJob(without, privateKey).job)).not.toContain("base_sha");
+    expect(canonicalJson(signJob(withBase, privateKey).job)).toContain(`"base_sha":"${base}"`);
+  });
+});

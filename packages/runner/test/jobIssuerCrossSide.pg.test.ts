@@ -1,6 +1,6 @@
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, verifyJob } from "@fulcrumaxe/runner-protocol";
+import { BASE_SHA_JOB_MIN_PROTOCOL, CONTINUES_CROSS_SIDE_MIN_PROTOCOL, verifyJob } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import type { ExecutionRun } from "../src/executionTarget.js";
 import { JobIssueError, createJobIssuer, createJobSigner, createPgJobContext, type ContinuationBasePort } from "../src/targets/jobIssuer.js";
@@ -98,6 +98,48 @@ describe("cross-side continuation: the issuer's binding [pg] (D#599 PL-2b-1)", (
       expect(binding.calls).toEqual([`list ${OWNER}:${ITEM_BRANCH}`, "default_branch", `protection ${ITEM_BRANCH}`]);
       // The branch head is read at this run's own dispatch, as for every continuation.
       expect(await eventsOf(run.id, RUNNER_DISPATCH_BASE_KIND)).toEqual([{ head_oid: "a".repeat(40) }]);
+    });
+
+    it("signs the diff base the caller chose as continues.base_sha, and gates the job at the base-sha floor (FIXROUND-BASE-SYNC R2-b)", async () => {
+      const w = await world();
+      const { parent, run } = await pair(w);
+      const binding = createFakeContinuationBinding({ pulls: [openPull()] });
+      const baseSha = "b".repeat(40);
+      await issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH, prNumber: 41, baseSha } });
+      const stored = await row(run.id);
+      const job = verifyJob(stored.job_signed, { "job-key-1": publicKey }, { now: NOW });
+      expect(job.continues).toEqual({ parent_run_id: parent.id, session_id: null, branch: ITEM_BRANCH, pr_number: 41, base_sha: baseSha });
+      expect(stored.min_protocol_version).toBe(BASE_SHA_JOB_MIN_PROTOCOL);
+    });
+
+    it("a continuation the caller gave no base for keeps its floor and its bytes: no base_sha key", async () => {
+      const w = await world();
+      const { parent, run } = await pair(w);
+      await issuerWith(createFakeContinuationBinding({ pulls: [openPull()] })).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH, prNumber: 41 } });
+      const stored = await row(run.id);
+      expect(JSON.stringify(stored.job_signed)).not.toContain("base_sha");
+      expect(stored.min_protocol_version).toBe(CONTINUES_CROSS_SIDE_MIN_PROTOCOL);
+    });
+
+    it("sets no base_sha on a job that continues nothing: a fresh run never carries one", async () => {
+      const w = await world();
+      const run = await executor(w);
+      await issuerWith(createFakeContinuationBinding({ pulls: [openPull()] })).issue({ run });
+      const stored = await row(run.id);
+      expect(JSON.stringify(stored.job_signed)).not.toContain("base_sha");
+      expect(stored.min_protocol_version).toBeNull();
+    });
+
+    it("refuses a base that is not a full lower-case commit id, or one offered with a run branch, and records nothing", async () => {
+      const w = await world();
+      const { parent, run } = await pair(w);
+      const binding = createFakeContinuationBinding({ pulls: [openPull()] });
+      for (const baseSha of ["main", "b".repeat(39), "B".repeat(40), `${"b".repeat(40)}\n`]) {
+        expect(await codeOf(issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH, prNumber: 41, baseSha } })), baseSha).toBe("continues_base_invalid");
+      }
+      expect(await codeOf(issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: "s-1", branch: RUN_BRANCH, baseSha: "b".repeat(40) } }))).toBe("continues_pr_mismatch");
+      expect((await row(run.id)).job_signed).toBeNull();
+      expect(await eventsOf(run.id, RUNNER_CONTINUES_BOUND_KIND)).toEqual([]);
     });
 
     it("refuses a continuation that names no pull request number, before GitHub is asked and with nothing recorded (R-599-PL2b-1-c)", async () => {
