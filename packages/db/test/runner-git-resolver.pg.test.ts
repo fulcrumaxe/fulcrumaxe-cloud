@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createPool } from '../src/pool.js';
 import { DEFAULT_MIGRATIONS_DIR, runMigrations } from '../src/migrate.js';
 import { insertRunner } from './helpers/runnerFixtures.js';
-import { seedAccount, type SeedRefs } from './helpers/seed.js';
+import { nextGhInstallationId, seedAccount, type SeedRefs } from './helpers/seed.js';
 import { PG_ERROR } from './helpers/pgErrors.js';
 import { provisionEphemeralPostgres, type EphemeralPostgres } from './support/ephemeral-pg.js';
 import { guardPoolTeardown, type PoolTeardownGuard } from './support/pool-teardown.js';
@@ -72,7 +72,7 @@ describe(`migration 0765: ${ROLE}, resolve_runner_git_request and the clone coun
     run: string;
     owner: string;
     name: string;
-    ghInstallationId: number;
+    ghInstallationId: string;
   }
 
   /** An account with a repo that has a GitHub name and an installation, a runner, and a live 'runner_verified' run leased to it. */
@@ -80,7 +80,7 @@ describe(`migration 0765: ${ROLE}, resolve_runner_git_request and the clone coun
     const refs = await seedAccount(admin, randomUUID());
     const owner = `acme-${randomUUID().slice(0, 8)}`;
     const name = `widgets-${randomUUID().slice(0, 8)}`;
-    const ghInstallationId = 1_000_000 + Math.floor(Math.random() * 900_000_000);
+    const ghInstallationId = nextGhInstallationId();
     await admin.query(`UPDATE repos SET gh_owner = $2, gh_name = $3 WHERE id = $1`, [refs.repoId, owner, name]);
     await admin.query(`UPDATE installations SET gh_installation_id = $2, app_kind = 'team' WHERE id = $1`, [refs.installationId, ghInstallationId]);
     const runner = await insertRunner(admin, refs.accountId, refs.userId);

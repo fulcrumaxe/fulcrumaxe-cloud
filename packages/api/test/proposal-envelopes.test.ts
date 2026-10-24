@@ -9,6 +9,7 @@ import { createRecordingRunActionSignal } from '@fx/core/src/runActions/index.js
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
 import { estimateItem } from '@fx/pipeline/estimate';
 import { foregroundBudgetUsd } from '@fx/spend';
+import { loadPlanData, resetPlanDataCache } from '@fx/plan-data';
 import { generateToken } from '../src/tokens/format.js';
 import { hashToken } from '../src/tokens/resolve.js';
 import { handleApiRequest } from '../src/handler.js';
@@ -68,8 +69,17 @@ describe('proposal envelopes (D#483 S5-e1)', () => {
   let appUserPool: Pool;
   let platformOpsPool: Pool;
   const signal = createRecordingRunActionSignal();
+  /**
+   * The default margin this file runs under. Whether the plan data under test carries an envelope margin at all depends on which data is
+   * loaded (private data may leave it out, which means a bare-estimate pre-fill), so the file sets its own on top of whatever data is
+   * loaded: every other figure still comes from there.
+   */
+  const MARGIN_PCT = 20;
+  const savedPlanData = process.env.FX_PLAN_DATA;
 
   beforeAll(async () => {
+    process.env.FX_PLAN_DATA = JSON.stringify({ ...loadPlanData(), envelope: { defaultMarginPct: MARGIN_PCT } });
+    resetPlanDataCache();
     adminPool = createPool(process.env.API_DATABASE_URL!);
     admin = await adminPool.connect();
     appUserPool = createPool(process.env.API_DATABASE_URL_APP_USER!);
@@ -77,6 +87,9 @@ describe('proposal envelopes (D#483 S5-e1)', () => {
     process.env.FX_SESSION_SECRET = 's'.repeat(32);
   });
   afterAll(async () => {
+    if (savedPlanData === undefined) delete process.env.FX_PLAN_DATA;
+    else process.env.FX_PLAN_DATA = savedPlanData;
+    resetPlanDataCache();
     delete process.env.FX_SESSION_SECRET;
     admin.release();
     await Promise.all([adminPool.end(), platformOpsPool.end(), appUserPool.end()]);
@@ -189,8 +202,8 @@ describe('proposal envelopes (D#483 S5-e1)', () => {
       expect(out.proposals.map((p) => p.proposal_id)).toEqual([a, b]);
       expect(out.proposals.every((p) => p.basis === 'seed' && p.total_usd! > 0 && p.slot_phase_usd! > 0 && p.reason === null)).toBe(true);
       expect(out.total_usd).toBeCloseTo(expectedTotal, 3);
-      expect(out.margin_pct).toBe(20);
-      expect(out.prefill_usd).toBeCloseTo(round4(expectedTotal * 1.2), 3);
+      expect(out.margin_pct).toBe(MARGIN_PCT);
+      expect(out.prefill_usd).toBeCloseTo(round4(expectedTotal * (1 + MARGIN_PCT / 100)), 3);
       expect(out.capped).toBe(false);
       expect(out.needs_amount).toBe(false);
       expect(out.remaining_budget_usd).toBeCloseTo(MONTHLY_BUDGET + foregroundBudgetUsd('starter'), 3);
@@ -204,7 +217,7 @@ describe('proposal envelopes (D#483 S5-e1)', () => {
       const repo = await repoFor(who);
       const a = await proposalFor(who, repo, { title: 'Add dark mode', category_hint: 'feature' });
       const out = await body<EstimateBody>(await estimate(who, repo, [a]));
-      expect(out.total_usd! * 1.2).toBeGreaterThan(out.remaining_budget_usd);
+      expect(out.total_usd! * (1 + MARGIN_PCT / 100)).toBeGreaterThan(out.remaining_budget_usd);
       expect(out.prefill_usd).toBeCloseTo(out.remaining_budget_usd, 3);
       expect(out.capped).toBe(true);
     });
@@ -270,7 +283,7 @@ describe('proposal envelopes (D#483 S5-e1)', () => {
       const res = await approve(who, id);
       expect(res.status).toBe(200);
       const out = await body<ApproveBody>(res);
-      expect(out.envelope).toMatchObject({ scope: 'item', version: 1, margin_pct: 20 });
+      expect(out.envelope).toMatchObject({ scope: 'item', version: 1, margin_pct: MARGIN_PCT });
       expect(out.envelope!.amount_usd).toBeCloseTo(est.prefill_usd!, 3);
       expect(out.envelope!.estimate_usd).toBeCloseTo(est.total_usd!, 3);
       expect(await itemEnvelope(out.work_item_id)).toBe(out.envelope!.envelope_id);
@@ -443,7 +456,7 @@ describe('proposal envelopes (D#483 S5-e1)', () => {
       const res = await batch(who, repo, [a, b]);
       expect(res.status).toBe(200);
       const out = await body<BatchBody>(res);
-      expect(out.envelope).toMatchObject({ scope: 'batch', version: 1, margin_pct: 20 });
+      expect(out.envelope).toMatchObject({ scope: 'batch', version: 1, margin_pct: MARGIN_PCT });
       expect(out.envelope.amount_usd).toBeCloseTo(est.prefill_usd!, 3);
       expect(out.items.map((i) => i.proposal.id)).toEqual([a, b]);
       expect(out.items.every((i) => i.started)).toBe(true);

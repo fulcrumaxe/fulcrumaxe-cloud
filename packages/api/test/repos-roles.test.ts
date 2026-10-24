@@ -5,12 +5,17 @@ import { createPool } from '@fx/db/src/pool.js';
 import { insertApiToken } from '@fx/core/src/tokens/service.js';
 import { InvalidRoleSettingsInputError } from '@fx/core/src/role-settings/errors.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
+import { loadPlanData } from '@fx/plan-data';
+import { nextGhInstallationId } from '@fx/db/test/helpers/seed.js';
 import { generateToken } from '../src/tokens/format.js';
 import { hashToken } from '../src/tokens/resolve.js';
 import { handleApiRequest } from '../src/handler.js';
 import { mapError } from '../src/errors.js';
 import { ROUTES } from '../src/routes/index.js';
 import { seedAccountWithMember, seedUser } from './helpers/seed.js';
+
+/** The plan data's per-model-tier seed median: the figure a role's cost line starts from. */
+const seedUsd = () => loadPlanData().medianCostPerRunSeedUsd;
 
 interface Identity {
   accountId: string;
@@ -107,13 +112,13 @@ describe('D#31 API-8a: repos, settings and roles', () => {
     if (kind) {
       const { rows } = await admin.query<{ id: string }>(
         `INSERT INTO installations (account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3) RETURNING id`,
-        [accountId, Math.floor(Math.random() * 1e9), kind],
+        [accountId, nextGhInstallationId(), kind],
       );
       installationId = rows[0]!.id;
     }
     const { rows } = await admin.query<{ id: string }>(
       `INSERT INTO repos (account_id, installation_id, gh_repo_id, product, created_at, gh_owner, gh_name) VALUES ($1, $2, $3, 'web', $4, $5, $6) RETURNING id`,
-      [accountId, installationId, Math.floor(Math.random() * 1e9), createdAt, names.owner, names.name],
+      [accountId, installationId, nextGhInstallationId(), createdAt, names.owner, names.name],
     );
     return { repoId: rows[0]!.id, installationId };
   }
@@ -432,7 +437,7 @@ describe('D#31 API-8a: repos, settings and roles', () => {
 
       // Follows the live table (code-reviewer: sonnet-5) with no override.
       const followed = await patch({ model: null });
-      expect(followed).toMatchObject({ median_cost_per_run_usd: 13, median_source: 'seed' });
+      expect(followed).toMatchObject({ median_cost_per_run_usd: seedUsd().sonnet, median_source: 'seed' });
       const perModel: Record<string, number> = {};
       for (const model of ['haiku-4.5', 'sonnet-5', 'opus-5']) {
         const spend = await patch({ model });
@@ -442,7 +447,7 @@ describe('D#31 API-8a: repos, settings and roles', () => {
         expect(spend.text).toBe(`expected spend on your model bill: $${spend.monthly_usd.toFixed(2)}/month`);
         expect(spend.text).not.toMatch(/null|undefined|NaN/);
       }
-      expect(perModel).toEqual({ 'haiku-4.5': 3.5, 'sonnet-5': 13, 'opus-5': 31 });
+      expect(perModel).toEqual({ 'haiku-4.5': seedUsd().haiku, 'sonnet-5': seedUsd().sonnet, 'opus-5': seedUsd().opus });
 
       // A mode change moves runs per month and so the monthly figure; the model figure stays.
       const modeUrl = `/repos/${repoId}/roles/security-reviewer`;
@@ -466,12 +471,12 @@ describe('D#31 API-8a: repos, settings and roles', () => {
       const { repoId } = await seedRepo(owner.accountId, 'team');
       const url = `/repos/${repoId}/roles/security-reviewer`;
       const before = (await roles(owner, repoId)).find((r) => r.role === 'security-reviewer')!;
-      expect(before.expected_spend.median_cost_per_run_usd).toBe(31);
+      expect(before.expected_spend.median_cost_per_run_usd).toBe(seedUsd().opus);
       const res = await call(owner, 'PATCH', url, { model: 'sonnet-5' });
-      expect(((await res.json()) as Role).expected_spend.median_cost_per_run_usd).toBe(13);
+      expect(((await res.json()) as Role).expected_spend.median_cost_per_run_usd).toBe(seedUsd().sonnet);
       // Below the floor is refused, and the figure stays where it was.
       expect((await call(owner, 'PATCH', url, { model: 'haiku-4.5' })).status).toBe(422);
-      expect((await roles(owner, repoId)).find((r) => r.role === 'security-reviewer')!.expected_spend.median_cost_per_run_usd).toBe(13);
+      expect((await roles(owner, repoId)).find((r) => r.role === 'security-reviewer')!.expected_spend.median_cost_per_run_usd).toBe(seedUsd().sonnet);
     });
 
     it('a change to the live routing table reaches GET and PATCH: a role with no override is priced on its new table model', async () => {
@@ -484,21 +489,21 @@ describe('D#31 API-8a: repos, settings and roles', () => {
         );
       const per = (list: Role[], role: string) => list.find((r) => r.role === role)!.expected_spend.median_cost_per_run_usd;
       const before = await roles(owner, repoId);
-      expect([per(before, 'code-reviewer'), per(before, 'security-reviewer')]).toEqual([13, 31]);
+      expect([per(before, 'code-reviewer'), per(before, 'security-reviewer')]).toEqual([seedUsd().sonnet, seedUsd().opus]);
       try {
         // code-reviewer: sonnet-5 -> opus-5. security-reviewer (floored): opus-5 -> sonnet-5, still at its floor.
         await setRow('code-reviewer', 'opus-5');
         await setRow('security-reviewer', 'sonnet-5');
         const read = await roles(owner, repoId);
-        expect([per(read, 'code-reviewer'), per(read, 'security-reviewer')]).toEqual([31, 13]);
+        expect([per(read, 'code-reviewer'), per(read, 'security-reviewer')]).toEqual([seedUsd().opus, seedUsd().sonnet]);
         // PATCH answers price the table model too: a mode change leaves the model alone.
         const res = await call(owner, 'PATCH', `/repos/${repoId}/roles/code-reviewer`, { mode: 'always' });
-        expect(((await res.json()) as Role).expected_spend.median_cost_per_run_usd).toBe(31);
+        expect(((await res.json()) as Role).expected_spend.median_cost_per_run_usd).toBe(seedUsd().opus);
         const res2 = await call(owner, 'PATCH', `/repos/${repoId}/roles/security-reviewer`, { mode: 'always' });
-        expect(((await res2.json()) as Role).expected_spend.median_cost_per_run_usd).toBe(13);
+        expect(((await res2.json()) as Role).expected_spend.median_cost_per_run_usd).toBe(seedUsd().sonnet);
         // An override still wins over the table.
         const res3 = await call(owner, 'PATCH', `/repos/${repoId}/roles/code-reviewer`, { model: 'haiku-4.5' });
-        expect(((await res3.json()) as Role).expected_spend.median_cost_per_run_usd).toBe(3.5);
+        expect(((await res3.json()) as Role).expected_spend.median_cost_per_run_usd).toBe(seedUsd().haiku);
       } finally {
         await setRow('code-reviewer', 'sonnet-5');
         await setRow('security-reviewer', 'opus-5');

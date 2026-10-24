@@ -9,6 +9,7 @@ import { hashToken } from '../src/tokens/resolve.js';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
 import { mintInstallState, verifyInstallState } from '../src/github/installUrl.js';
+import { nextGhInstallationId } from '@fx/db/test/helpers/seed.js';
 import { seedAccountWithMember } from './helpers/seed.js';
 
 const SECRET = 'install-state-secret-'.padEnd(40, 'x');
@@ -224,7 +225,7 @@ describe('D#31 API-8c: GitHub App install URL', () => {
     const owner = await seedAccountWithMember(admin, { role: 'owner' });
     const { rows } = await admin.query<{ id: string }>(
       `INSERT INTO installations (account_id, gh_installation_id, app_kind) VALUES ($1, $2, 'team_readonly') RETURNING id`,
-      [owner.accountId, Math.floor(Math.random() * 1e9)],
+      [owner.accountId, nextGhInstallationId()],
     );
     await admin.query(`INSERT INTO repos (account_id, installation_id, gh_repo_id, product) VALUES ($1, $2, $3, 'web')`, [
       owner.accountId,

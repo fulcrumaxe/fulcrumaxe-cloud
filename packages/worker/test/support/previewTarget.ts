@@ -1,6 +1,6 @@
 import { randomInt, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
-import type { SeedRefs } from "@fx/db/test/helpers/seed.js";
+import { nextGhInstallationId, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 
 /** D#2 H17c-2b: a seeded preview target (a repo on a live installation, with its installer record). */
 export interface SeededTarget {
@@ -13,7 +13,7 @@ export interface SeededTarget {
 export async function seedPreviewTarget(admin: PoolClient, account: SeedRefs, kind: "team_readonly" | "team" | "sitekit" = "team_readonly", ghOwner?: string): Promise<SeededTarget> {
   const installationId = randomUUID();
   const repoId = randomUUID();
-  const ghInstallationId = randomInt(1, 2_000_000_000);
+  const ghInstallationId = Number(nextGhInstallationId());
   const ghUserId = randomInt(1, 2_000_000_000);
   await admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, $4)`, [installationId, account.accountId, ghInstallationId, kind]);
   await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, $3, $4, $5, $6, 'widgets')`, [
