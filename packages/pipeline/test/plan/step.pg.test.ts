@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PoolClient } from "pg";
+import { listSourcePaths } from "../../../test-guard/src/sourceFiles.js";
 import { pgHarness } from "../helpers/pgHarness.js";
 import { seedAccount } from "../build/helpers/seed.js";
 import { listParked, runTriageStep, type TriageStepInput } from "../../src/plan/step.js";
@@ -315,12 +316,12 @@ describe("C39 (c2) H15b-TRUST 3: the step is the only production caller of triag
   const repoRoot = join(import.meta.dirname, "../../../..");
   const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   const SKIP_DIRS = new Set(["node_modules", ".next", "dist", ".git", ".claude", ".autonomous-team", "archive", ".turbo"]);
-  /** Every non-test TypeScript/JavaScript source in the whole workspace (packages, apps, sites, ...). */
+  /**
+   * Every non-test TypeScript/JavaScript source in the whole workspace (packages, apps, sites, ...), from git's file list rather than a
+   * directory walk, so ignored build output (a web build's workflow bundles inline pipeline source) never counts as a caller.
+   */
   const workspaceSources = (dir: string): string[] =>
-    readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
-      if (e.isDirectory()) return SKIP_DIRS.has(e.name) || e.name === "test" || e.name === "tests" ? [] : workspaceSources(join(dir, e.name));
-      return /\.(m?[tj]sx?)$/.test(e.name) && !/\.(test|spec)\./.test(e.name) ? [join(dir, e.name)] : [];
-    });
+    listSourcePaths(dir, ["."], [...SKIP_DIRS, "test", "tests"]).filter((f) => /\.(m?[tj]sx?)$/.test(f) && !/\.(test|spec)\./.test(f.slice(f.lastIndexOf("/") + 1)));
 
   it("no source file in the WHOLE workspace other than plan/triage.ts (the definition) and plan/step.ts names triageIntake, and step.ts never takes `trusted` from its input", () => {
     const users = workspaceSources(repoRoot)

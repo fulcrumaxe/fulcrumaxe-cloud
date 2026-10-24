@@ -1,10 +1,11 @@
 import { createRequire } from "node:module";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { listSourcePaths } from "../../test-guard/src/sourceFiles.js";
 
 const PACKAGE_ROOT = new URL("..", import.meta.url).pathname;
-const APPS_WEB_DIR = path.join(PACKAGE_ROOT, "..", "..", "apps", "web");
+const REPO_ROOT = path.join(PACKAGE_ROOT, "..", "..");
 
 // The package name is assembled at run time: a literal import specifier in this file would count as a dependency of
 // @fx/runtime for the declared-imports check, and this test exists to keep the name out of the web app.
@@ -19,27 +20,13 @@ const FORBIDDEN = [
   /"@fulcrumaxe\/fx-runner"\s*:/,
 ];
 
-async function walkFiles(dir: string): Promise<string[]> {
-  let entries;
-  try {
-    entries = await readdir(dir);
-  } catch {
-    return [];
-  }
-  const files: string[] = [];
-  for (const entry of entries) {
-    if (entry === "node_modules" || entry === ".next") continue;
-    const full = path.join(dir, entry);
-    if ((await stat(full)).isDirectory()) files.push(...(await walkFiles(full)));
-    else if (/\.(ts|tsx|js|jsx|mjs|cjs|json)$/.test(entry)) files.push(full);
-  }
-  return files;
-}
+/** Git's file list under apps/web, not a directory walk: a web build's ignored output (bundles, their debug maps) is not the app's source. */
+const webFiles = (): string[] => listSourcePaths(REPO_ROOT, ["apps/web"], ["node_modules", ".next"]).filter((f) => /\.(ts|tsx|js|jsx|mjs|cjs|json)$/.test(f));
 
 describe("the web app never imports fx-runner (D#6)", () => {
   it("no file under apps/web, its package.json included, names the package or its path", async () => {
     const offenders: string[] = [];
-    for (const file of await walkFiles(APPS_WEB_DIR)) {
+    for (const file of webFiles()) {
       const contents = await readFile(file, "utf8");
       if (FORBIDDEN.some((pattern) => pattern.test(contents))) offenders.push(file);
     }
