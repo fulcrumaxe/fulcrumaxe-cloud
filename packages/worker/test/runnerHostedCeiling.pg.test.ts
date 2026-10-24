@@ -52,14 +52,14 @@ describe("the account ceiling by plan [pg]", () => {
   /** A runner of this account that has declared a capacity of 8 (4 light, 4 heavy) and was heard from at T0, unless told otherwise. */
   async function newRunner(over: { declared?: [number, number]; seenMsAgo?: number | null; pausedUntilMs?: number } = {}): Promise<string> {
     const id = await insertRunner(admin, A.accountId, A.userId, { credentialMode: "api_key", keepPlan: true });
-    await admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[], allowed_roles = $3::text[], last_seen_at = $4 WHERE id = $1", [id, repos, ["executor", "code-reviewer"], over.seenMsAgo === null ? null : new Date(T0 - (over.seenMsAgo ?? 0))]);
+    await admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[], allowed_roles = $3::text[], last_seen_at = $4 WHERE id = $1", [id, repos, ["executor", "security-reviewer"], over.seenMsAgo === null ? null : new Date(T0 - (over.seenMsAgo ?? 0))]);
     const [light, heavy] = over.declared ?? [4, 4];
     await admin.query("INSERT INTO runner_capacity (runner_id, account_id, declared, light_limit, heavy_limit, claim_paused_until) VALUES ($1, $2, true, $3, $4, $5)", [id, A.accountId, light, heavy, over.pausedUntilMs === undefined ? null : new Date(over.pausedUntilMs)]);
     return id;
   }
   async function pending(repoId: string, light: boolean): Promise<string> {
     const id = randomUUID();
-    const role = light ? "code-reviewer" : "executor";
+    const role = light ? "security-reviewer" : "executor";
     const job: Job = {
       schema_version: 1, job_id: randomUUID(), run_id: id, repo: { id: repoId, owner: "acme", name: "app", private: true }, role, mode: "local", spec: null,
       task: { kind: "implement", prompt: "p", prompt_sha256: sha256Text("p") }, role_card: { text: "c", sha256: sha256Text("c") }, role_tools_sha256: "a".repeat(64),
@@ -148,7 +148,7 @@ describe("the account ceiling by plan [pg]", () => {
       const gone = await newRunner();
       await admin.query("UPDATE runners SET revoked_at = now() WHERE id = $1", [gone]);
       const undeclared = await insertRunner(admin, A.accountId, A.userId, { credentialMode: "api_key", keepPlan: true });
-      await admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[], allowed_roles = $3::text[], last_seen_at = $4 WHERE id = $1", [undeclared, repos, ["executor", "code-reviewer"], new Date(T0)]);
+      await admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[], allowed_roles = $3::text[], last_seen_at = $4 WHERE id = $1", [undeclared, repos, ["executor", "security-reviewer"], new Date(T0)]);
       await fill(6);
       // 8 from the live runner plus 1 for the undeclared one.
       expect((await drain(make(), [live, undeclared])).running).toBe(9);

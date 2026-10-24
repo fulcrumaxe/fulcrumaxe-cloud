@@ -46,7 +46,7 @@ describe("waitReasonOf with a full runner (pure)", () => {
     expect(waitReasonOf(row({ account_running_total: 2, account_running_heavy: 0 }), NOW, caps)).toBeNull();
     expect(waitReasonOf(row({ account_running_total: "3", account_running_heavy: 0 }), NOW, caps)).toBe("waiting_for_account_cap");
     expect(waitReasonOf(row({ account_running_total: 1, account_running_heavy: 1 }), NOW, caps)).toBe("waiting_for_account_cap");
-    expect(waitReasonOf(row({ role: "code-reviewer", account_running_total: 1, account_running_heavy: 1 }), NOW, caps)).toBeNull();
+    expect(waitReasonOf(row({ role: "security-reviewer", account_running_total: 1, account_running_heavy: 1 }), NOW, caps)).toBeNull();
     // The claim looks at the account before the runner, so a cap outranks a full runner; no runner online outranks both.
     expect(waitReasonOf(row({ account_running_total: 3, runner_slot_free: false }), NOW, caps)).toBe("waiting_for_account_cap");
     expect(waitReasonOf(row({ account_running_total: 3, runner_online: false }), NOW, caps)).toBe("waiting_for_runner");
@@ -106,10 +106,10 @@ describe("the runner list and wait reason with capacity [pg]", () => {
     const f = await seedF2(h.admin);
     const r = await repo(f);
     const id = await runner(f, r, { light: 3, heavy: 1 });
-    await run(f, r, { role: "code-reviewer", runnerId: id });
+    await run(f, r, { role: "security-reviewer", runnerId: id });
     await run(f, r, { role: "executor", runnerId: id });
     await run(f, r, { role: "executor", runnerId: id, lease: ago(1) }); // its lease ran out: neither busy nor in use
-    await run(f, r, { role: "code-reviewer", runnerId: id, status: "succeeded" });
+    await run(f, r, { role: "security-reviewer", runnerId: id, status: "succeeded" });
     const row = (await mine(f)).get(id)!;
     expect(row.state).toBe("busy");
     expect(row.running).toEqual({ light: 1, heavy: 1 });
@@ -154,7 +154,7 @@ describe("the runner list and wait reason with capacity [pg]", () => {
       const id = await runner(f, r, { light: 3, heavy: 1 });
       await run(f, r, { role: "executor", runnerId: id });
       const heavy = await run(f, r, { role: "executor", status: "pending", runnerId: null, lease: null });
-      const light = await run(f, r, { role: "code-reviewer", status: "pending", runnerId: null, lease: null });
+      const light = await run(f, r, { role: "security-reviewer", status: "pending", runnerId: null, lease: null });
       expect(await reason(f, heavy)).toBe("waiting_for_runner_slot");
       expect(await reason(f, light)).toBeNull();
     });
@@ -163,7 +163,7 @@ describe("the runner list and wait reason with capacity [pg]", () => {
       const f = await seedF2(h.admin);
       const r = await repo(f);
       const id = await runner(f, r, { light: 8, heavy: 4 });
-      for (let i = 0; i < 8; i++) await run(f, r, { role: "code-reviewer", runnerId: id });
+      for (let i = 0; i < 8; i++) await run(f, r, { role: "security-reviewer", runnerId: id });
       expect(await reason(f, await run(f, r, { role: "executor", status: "pending", runnerId: null, lease: null }))).toBe("waiting_for_runner_slot");
     });
 
@@ -171,8 +171,8 @@ describe("the runner list and wait reason with capacity [pg]", () => {
       const f = await seedF2(h.admin);
       const r = await repo(f);
       const id = await runner(f, r, "legacy");
-      await run(f, r, { role: "code-reviewer", runnerId: id });
-      expect(await reason(f, await run(f, r, { role: "code-reviewer", status: "pending", runnerId: null, lease: null }))).toBe("waiting_for_runner_slot");
+      await run(f, r, { role: "security-reviewer", runnerId: id });
+      expect(await reason(f, await run(f, r, { role: "security-reviewer", status: "pending", runnerId: null, lease: null }))).toBe("waiting_for_runner_slot");
     });
 
     it("another runner with room for the class ends the wait, and so does one that has not claimed yet", async () => {
@@ -238,9 +238,9 @@ describe("the runner list and wait reason with capacity [pg]", () => {
       const a = await runner(f, r, { light: 4, heavy: 2 });
       const b = await runner(f, r, { light: 4, heavy: 2 });
       await run(f, r, { role: "executor", runnerId: a });
-      await run(f, r, { role: "code-reviewer", runnerId: b });
+      await run(f, r, { role: "security-reviewer", runnerId: b });
       const heavy = await run(f, r, { role: "executor", status: "pending", runnerId: null, lease: null });
-      const light = await run(f, r, { role: "code-reviewer", status: "pending", runnerId: null, lease: null });
+      const light = await run(f, r, { role: "security-reviewer", status: "pending", runnerId: null, lease: null });
       // Total 2: both held. Both pending runs wait for the account.
       expect(await getRunWait(withCaps({ total: 2, heavy: 2 }), f.accountId, heavy)).toEqual({ reason: "waiting_for_account_cap", limited_by: null });
       expect((await getRunWait(withCaps({ total: 2, heavy: 2 }), f.accountId, light)).reason).toBe("waiting_for_account_cap");

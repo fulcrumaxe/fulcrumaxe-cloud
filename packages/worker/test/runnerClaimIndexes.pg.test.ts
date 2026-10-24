@@ -104,8 +104,8 @@ describe("the claim reads through its two partial indexes [pg] (D#605 FL-3)", ()
       ids.push(id);
       await admin.query(
         `INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id, job_signed, initiated_by, created_at)
-         VALUES ($1, $2, 'code-reviewer', 'runner', 'pending', 'runner_local', $3, $4::jsonb, $5, to_timestamp($6 / 1000.0))`,
-        [id, A.accountId, A.repoId, JSON.stringify(signJob(job(id, "code-reviewer"), key)), A.userId, T0 - 500_000 + i],
+         VALUES ($1, $2, 'security-reviewer', 'runner', 'pending', 'runner_local', $3, $4::jsonb, $5, to_timestamp($6 / 1000.0))`,
+        [id, A.accountId, A.repoId, JSON.stringify(signJob(job(id, "security-reviewer"), key)), A.userId, T0 - 500_000 + i],
       );
     }
     return ids;
@@ -119,14 +119,14 @@ describe("the claim reads through its two partial indexes [pg] (D#605 FL-3)", ()
     await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [A.repoId]);
     for (let i = 0; i < RUNNERS; i++) {
       const id = await insertRunner(admin, A.accountId, A.userId, { credentialMode: "api_key" });
-      await admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[], allowed_roles = $3::text[] WHERE id = $1", [id, [A.repoId], ["executor", "code-reviewer"]]);
+      await admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[], allowed_roles = $3::text[] WHERE id = $1", [id, [A.repoId], ["executor", "security-reviewer"]]);
       runners.push(id);
     }
     // 50k finished runs, spread over the 10 runners, the way an account that has used runners for a long while looks: every one of them has a
     // runner_id, so an index over "runs that ever had a runner" is as big as the history.
     await admin.query(
       `INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id, runner_id, created_at)
-       SELECT gen_random_uuid(), $1, CASE WHEN g % 3 = 0 THEN 'executor' ELSE 'code-reviewer' END, 'runner', 'succeeded', 'runner_local', $2, ($3::uuid[])[1 + g % $4], to_timestamp($5 / 1000.0) - make_interval(secs => g)
+       SELECT gen_random_uuid(), $1, CASE WHEN g % 3 = 0 THEN 'executor' ELSE 'security-reviewer' END, 'runner', 'succeeded', 'runner_local', $2, ($3::uuid[])[1 + g % $4], to_timestamp($5 / 1000.0) - make_interval(secs => g)
          FROM generate_series(1, $6) g`,
       [A.accountId, A.repoId, runners, RUNNERS, T0 - 1_000_000, HISTORY],
     );
@@ -135,7 +135,7 @@ describe("the claim reads through its two partial indexes [pg] (D#605 FL-3)", ()
       for (let i = 0; i < 2; i++) {
         await admin.query(
           `INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id, runner_id, created_at)
-           VALUES (gen_random_uuid(), $1, 'code-reviewer', 'runner', 'running', 'runner_local', $2, $3, to_timestamp($4 / 1000.0))`,
+           VALUES (gen_random_uuid(), $1, 'security-reviewer', 'runner', 'running', 'runner_local', $2, $3, to_timestamp($4 / 1000.0))`,
           [A.accountId, A.repoId, runner, T0 - 10_000],
         );
       }

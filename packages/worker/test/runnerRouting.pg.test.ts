@@ -55,7 +55,7 @@ describe("routing rules in the runner claim [pg]", () => {
   async function runner(o: RunnerOpts = {}): Promise<string> {
     const id = await insertRunner(admin, A.accountId, o.registeredBy ?? A.userId, { credentialMode: o.mode ?? "api_key" });
     await admin.query(
-      "UPDATE runners SET allowed_repo_ids = $2::uuid[], allowed_roles = ARRAY['executor','code-reviewer'], last_seen_at = $3::timestamptz, protocol_version = $4 WHERE id = $1",
+      "UPDATE runners SET allowed_repo_ids = $2::uuid[], allowed_roles = ARRAY['executor','security-reviewer'], last_seen_at = $3::timestamptz, protocol_version = $4 WHERE id = $1",
       [id, o.repos ?? [A.repoId], iso(T0 - (o.seenAgo ?? 0)), o.protocol ?? RUNNER_HANDOFF_MIN_PROTOCOL_VERSION],
     );
     if (o.facts) {
@@ -152,7 +152,7 @@ describe("routing rules in the runner claim [pg]", () => {
       expect((await claim(plain)).kind).toBe("idle");
       expect((await status(heavy)).status).toBe("pending");
       await admin.query("UPDATE agent_runs SET status = 'cancelled' WHERE id = $1", [heavy]);
-      const light = await pending({ role: "code-reviewer" });
+      const light = await pending({ role: "security-reviewer" });
       expect(await claim(plain)).toMatchObject({ kind: "claimed", runId: light });
     });
 
