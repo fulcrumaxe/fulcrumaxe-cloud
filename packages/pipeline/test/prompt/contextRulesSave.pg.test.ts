@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ContextRuleError, listContextRules, removeContextRule } from "@fx/core/src/context/contextRules.js";
 import { pgHarness } from "../helpers/pgHarness.js";
 import { seedAccount, seedRepo, seedWorkItem } from "../build/helpers/seed.js";
+import { nextGhInstallationId } from "@fx/db/test/helpers/seed.js";
 import { CONTEXT_RULES_LOCK_CLASS_SQL, saveContextRule, type PinTreeSource } from "../../src/prompt/contextRulesSave.js";
 import { ROLE_CONTEXT_DEFAULTS } from "../../src/prompt/contextBudget.js";
 
@@ -41,7 +42,7 @@ describe("saveContextRule [pg]", () => {
     await seedRepo(h.admin, accountId, repoId);
     const inst = randomUUID();
     if (opts.installed !== false) {
-      await h.admin.query("INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, floor(random() * 2000000000)::bigint + 1, 'team')", [inst, accountId]);
+      await h.admin.query("INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team')", [inst, accountId, nextGhInstallationId()]);
       await h.admin.query("UPDATE repos SET installation_id = $1 WHERE id = $2", [inst, repoId]);
     }
     await h.admin.query("UPDATE repos SET gh_owner = 'acme', gh_name = 'widgets' WHERE id = $1", [repoId]);

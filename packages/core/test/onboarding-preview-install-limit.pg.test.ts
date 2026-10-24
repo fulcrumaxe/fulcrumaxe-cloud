@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { withTenant } from '@fx/db/src/withTenant.js';
-import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
+import { nextGhInstallationId, seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
 import { createRecordingRunActionSignal } from '../src/runActions/index.js';
 import {
   PREVIEW_INSTALL_LIMIT,
@@ -41,7 +41,7 @@ describe('onboarding preview install limit (pg)', () => {
     return r;
   }
   /** A repo of `ghOwner` (as stored; null leaves it unset) on its own read-only installation with an installer record. */
-  async function repo(r: SeedRefs, ghOwner: string | null, ghInstallationId = randomInt(1, 2_000_000_000)) {
+  async function repo(r: SeedRefs, ghOwner: string | null, ghInstallationId = nextGhInstallationId()) {
     const installationId = randomUUID();
     const repoId = randomUUID();
     await admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team_readonly')`, [installationId, r.accountId, ghInstallationId]);
@@ -50,7 +50,7 @@ describe('onboarding preview install limit (pg)', () => {
     return { repoId, installationId, ghInstallationId };
   }
   /** A committed preview row of `r` that records GitHub installation `x` (a copy, not a foreign key), one day old, with an unrelated owner. */
-  async function plant(r: SeedRefs, x: number, state: 'requested' | 'void') {
+  async function plant(r: SeedRefs, x: string, state: 'requested' | 'void') {
     const t = await repo(r, newOwner());
     await admin.query(
       `INSERT INTO onboarding_previews (account_id, installation_id, repo_id, gh_user_id, gh_installation_id, gh_owner, run_action_id, state, void_reason, created_at)
@@ -108,7 +108,7 @@ describe('onboarding preview install limit (pg)', () => {
 
   it('per installation, across accounts: a preview of GitHub installation X (stored on another account\'s row) refuses a request on X', async () => {
     const [a, b] = [await account(), await account()];
-    const x = randomInt(1, 2_000_000_000);
+    const x = nextGhInstallationId();
     // 0655 keeps a GitHub installation in one account at a time; the row's gh_installation_id is a copy, so A's row
     // is written with X while A's own installation has another id. This models "the installation moved accounts".
     await plant(a, x, 'requested');
@@ -148,7 +148,7 @@ describe('onboarding preview install limit (pg)', () => {
     await expect(ask(c, (await repo(c, login)).repoId)).rejects.toBeInstanceOf(PreviewInstallLimitError);
     // The same for an installation: a void row recording X does not refuse a request on X.
     const [d, e] = [await account(), await account()];
-    const x = randomInt(1, 2_000_000_000);
+    const x = nextGhInstallationId();
     await plant(d, x, 'void');
     await expect(ask(e, (await repo(e, newOwner(), x)).repoId)).resolves.toMatchObject({ replayed: false });
   });

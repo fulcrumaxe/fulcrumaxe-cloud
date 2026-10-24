@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
+import { nextGhInstallationId } from '@fx/db/test/helpers/seed.js';
 import { insertApiToken, type Scope } from '@fx/core/src/tokens/service.js';
 import { createRecordingRunActionSignal } from '@fx/core/src/runActions/index.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
@@ -106,7 +107,7 @@ describe('proposal routes (D#483 S3-L2a)', () => {
     let inst: string | null = null;
     if (kind) {
       inst = randomUUID();
-      await admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, floor(random() * 2000000000)::bigint + 1, $3)`, [inst, who.accountId, kind]);
+      await admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, $4)`, [inst, who.accountId, nextGhInstallationId(), kind]);
     }
     const id = randomUUID();
     await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, $3, $4, 'team', 'acme', 'widgets')`, [id, who.accountId, inst, Math.floor(Math.random() * 1e9) + 5]);

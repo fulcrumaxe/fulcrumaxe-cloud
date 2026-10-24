@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
+import { nextGhInstallationId } from "@fx/db/test/helpers/seed.js";
 import { REVOKED_REGISTRANT_LEFT_NOTE, listRunners, type AccountLine, type RunnerRow } from "../src/index.js";
 import { NOT_YOUR_RUNNER_REASON, SET_BY_SOMEONE_ELSE_REASON } from "../src/fleetView.js";
 import { harness, respond, type Harness } from "./helpers.js";
@@ -34,7 +35,7 @@ describe("the fleet page read [pg]", () => {
     let installationId = installations.get(f.accountId);
     if (!installationId) {
       installationId = randomUUID();
-      await h.admin.query("INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, floor(random() * 2000000000)::bigint + 1, 'team')", [installationId, f.accountId]);
+      await h.admin.query("INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team')", [installationId, f.accountId, nextGhInstallationId()]);
       installations.set(f.accountId, installationId);
     }
     const id = randomUUID();

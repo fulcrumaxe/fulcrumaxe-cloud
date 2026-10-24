@@ -2,7 +2,7 @@ import { randomInt, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
-import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
+import { nextGhInstallationId, seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
 import { createRecordingRunActionSignal } from '../src/runActions/index.js';
 import {
   PreviewCapacityError,
@@ -42,7 +42,7 @@ describe('onboarding preview services (pg)', () => {
   async function target(r: SeedRefs, kind = 'team_readonly'): Promise<{ repoId: string; ghUserId: number }> {
     const inst = randomUUID();
     const repoId = randomUUID();
-    const gh = randomInt(1, 2_000_000_000);
+    const gh = nextGhInstallationId();
     const ghUserId = randomInt(1, 2_000_000_000);
     await admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, $4)`, [inst, r.accountId, gh, kind]);
     await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner) VALUES ($1, $2, $3, 1, 'team', $4)`, [repoId, r.accountId, inst, `o${gh}`]);

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
+import { nextGhInstallationId } from '@fx/db/test/helpers/seed.js';
 import { insertApiToken, type Scope } from '@fx/core/src/tokens/service.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
 import type { PlanSource } from '@fx/core/src/plan/index.js';
@@ -106,7 +107,7 @@ describe('plan routes (D#483 S3)', () => {
   const person = (role: 'owner' | 'admin' | 'member') => seedAccountWithMember(admin, { role });
   async function repoFor(who: Identity, o: { connected?: boolean } = {}): Promise<string> {
     const inst = randomUUID();
-    await admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, floor(random() * 2000000000)::bigint + 1, 'team_readonly')`, [inst, who.accountId]);
+    await admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team_readonly')`, [inst, who.accountId, nextGhInstallationId()]);
     const id = randomUUID();
     await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, $3, $4, 'team', 'acme', 'widgets')`, [id, who.accountId, o.connected === false ? null : inst, Math.floor(Math.random() * 1e9) + 5]);
     return id;

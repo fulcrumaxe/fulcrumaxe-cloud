@@ -2,6 +2,7 @@ import { randomInt, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
+import { nextGhInstallationId } from '@fx/db/test/helpers/seed.js';
 import { ONBOARDING_STEPS, getOnboarding } from '../src/onboarding/index.js';
 
 /** D#2 H17d: getOnboarding against the real schema (0692 marks, getPreview, the stats first-PR rule). */
@@ -42,7 +43,7 @@ describe('getOnboarding (pg)', () => {
   /** A claimed installation: the row plus its (live) installer record, as a real claim leaves them. */
   async function install(r: Acct, kind: string, createdAt: string): Promise<string> {
     const id = randomUUID();
-    const gh = randomInt(1, 2_000_000_000);
+    const gh = nextGhInstallationId();
     await admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind, created_at) VALUES ($1, $2, $3, $4, $5)`, [id, r.accountId, gh, kind, createdAt]);
     await admin.query(`INSERT INTO installation_installers (gh_installation_id, app_kind, installer_gh_user_id) VALUES ($1, $2, 1)`, [gh, kind]);
     return id;
@@ -223,7 +224,7 @@ describe('getOnboarding (pg)', () => {
     it('readonly_app: an installation with no installer record is not live, and a write install never stands in for the read-only one', async () => {
       const a = await bare();
       const id = randomUUID();
-      await admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind, created_at) VALUES ($1, $2, $3, 'team_readonly', $4)`, [id, a.accountId, randomInt(1, 2_000_000_000), at(1)]);
+      await admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind, created_at) VALUES ($1, $2, $3, 'team_readonly', $4)`, [id, a.accountId, nextGhInstallationId(), at(1)]);
       expect(await steps(a)).toEqual(NONE);
       const team = await install(a, 'team', at(3));
       expect(await steps(a)).toEqual({ ...NONE, write_app: iso(3) });
