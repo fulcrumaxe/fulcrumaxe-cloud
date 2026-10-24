@@ -47,7 +47,7 @@ afterEach(() => {
 
 const capture = (max?: number): GitCapture => (command, args, env, timeoutMs) => runCapture(spawn, testLaunch(), command, args, env, timeoutMs, max, 2048);
 const makeGitPath = (large: boolean) =>
-  createGitPath({ capture: capture(), ...(large ? { captureLarge: capture(8 * 1024 * 1024) } : {}), mirrorsRoot: path.join(root, "cache", "mirrors"), stateDir: path.join(root, "state"), remoteUrl: () => remoteUrl });
+  createGitPath({ platform: "linux", capture: capture(), ...(large ? { captureLarge: capture(8 * 1024 * 1024) } : {}), mirrorsRoot: path.join(root, "cache", "mirrors"), stateDir: path.join(root, "state"), remoteUrl: () => remoteUrl });
 
 describe("GitPath.repoMap over a real mirror (D#600 CX-3b)", () => {
   it("is the map of the commit the workspace starts from, with the test command and the manifest, read from the mirror", async () => {

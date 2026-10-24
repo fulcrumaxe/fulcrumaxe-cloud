@@ -211,6 +211,51 @@ describe("path A against the real git and a strict relay", () => {
   });
 });
 
+describe("a resumed workspace on path A loses the first round's ignored build output (D#6 RUNNER-RESUME-CLEAN)", () => {
+  it("clears stale ignored output through the large capture at the tip, and touches nothing when the workspace is not resumed", async () => {
+    const lines: string[] = [];
+    const large: string[] = [];
+    const captureLarge: GitCapture = (command, args, env, timeoutMs) => {
+      large.push(args.join(" "));
+      return runCapture(spawn, testLaunch(), command, args, env, timeoutMs, 8 * 1024 * 1024);
+    };
+    const { gitPath } = makePathA({ log: (line) => lines.push(line), captureLarge });
+    const job = jobFor();
+    const first = newWorkspace("first");
+    const { base } = await gitPath.prepare(job, lease, first);
+    const commit = agentCommit(first, "agent.txt", 100);
+    await gitPath.publish(job, lease, first, base);
+    const fix = jobFor({ repo: job.repo, continues: { parent_run_id: "7c7c7c7c-7a43-4d5e-8a77-0f0f0f0f0f0f", session_id: null, branch: BRANCH } as never });
+    writeFileSync(path.join(first, ".git", "info", "exclude"), "dist/\n.next/\nnode_modules/\n", { flag: "a" });
+    for (const file of ["dist/a.js", "apps/web/.next/b.js", "node_modules/p/index.js"]) {
+      mkdirSync(path.dirname(path.join(first, file)), { recursive: true });
+      writeFileSync(path.join(first, file), "stale");
+    }
+    writeFileSync(path.join(first, "mine.txt"), "untracked, not ignored");
+    // No continuation: not a resume, nothing removed.
+    expect(await gitPath.resume(job, lease, first)).toBeNull();
+    expect(existsSync(path.join(first, "dist", "a.js"))).toBe(true);
+    expect(large).toEqual([]);
+    // At the tip: resumed, and the stale output is gone.
+    expect(await gitPath.resume(fix, lease, first)).toEqual({ base: commit });
+    expect(existsSync(path.join(first, "dist"))).toBe(false);
+    expect(existsSync(path.join(first, "apps", "web", ".next"))).toBe(false);
+    expect(existsSync(path.join(first, "node_modules", "p", "index.js"))).toBe(true);
+    expect(existsSync(path.join(first, "mine.txt"))).toBe(true);
+    expect(large.some((args) => args.includes("ls-files"))).toBe(true);
+    expect(lines).toHaveLength(1);
+    // Not at the tip (someone pushed): not resumed, and what is left stays.
+    const other = path.join(root, "other");
+    sh("clone", "--branch", BRANCH, upstream, other);
+    agentCommit(other, "theirs.txt", 10);
+    sh("-C", other, "push", "origin", BRANCH);
+    mkdirSync(path.join(first, "dist"), { recursive: true });
+    writeFileSync(path.join(first, "dist", "again.js"), "stale");
+    expect(await gitPath.resume(fix, lease, first)).toBeNull();
+    expect(existsSync(path.join(first, "dist", "again.js"))).toBe(true);
+  });
+});
+
 describe("the proxy must be the pinned one, before any git runs", () => {
   const cases: Array<[string, () => Promise<GitTicketResult>]> = [
     ["another https origin", async () => ({ kind: "ticket", ticket: makeTicket(), expiresAt: "2026-10-08T12:05:00.000Z", proxyOrigin: "https://elsewhere.example.test" })],

@@ -70,7 +70,7 @@ afterEach(() => {
 const stateDir = (): string => path.join(root, "state");
 const mirrorsRoot = (): string => path.join(root, "cache", "fx-runner", "mirrors");
 function makeGitPath(over: Partial<GitPathDeps> = {}) {
-  return createGitPath({ capture, mirrorsRoot: mirrorsRoot(), stateDir: stateDir(), remoteUrl: () => pathToFileURL(remote).href, ...over });
+  return createGitPath({ platform: "linux", capture, mirrorsRoot: mirrorsRoot(), stateDir: stateDir(), remoteUrl: () => pathToFileURL(remote).href, ...over });
 }
 function newWorkspace(name = "run-1"): string {
   const dir = path.join(root, "work", name);

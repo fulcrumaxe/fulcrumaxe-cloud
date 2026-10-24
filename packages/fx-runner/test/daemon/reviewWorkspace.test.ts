@@ -76,7 +76,7 @@ const executorJob = (): GitJob => ({ repo, continues: null, branch_prefix: "fx/"
 const calls: string[][] = [];
 function makeGitPath() {
   calls.length = 0;
-  const gitPath = createGitPath({
+  const gitPath = createGitPath({ platform: "linux",
     capture: (command, args, env, timeoutMs) => {
       calls.push([...args]);
       return runCapture(spawn, testLaunch(), command, args, env, timeoutMs);

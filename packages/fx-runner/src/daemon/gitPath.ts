@@ -14,6 +14,7 @@ import { createMirrors, type Mirrors, type MirrorDeps } from "./mirror.js";
 import type { NixFromDefault, NixSource } from "./nixShell.js";
 import { LISTING_CAP, readRepoMap } from "./repoMap.js";
 import { sweepSnapshots } from "./snapshot.js";
+import { cleanResumedWorkspace } from "./resumeClean.js";
 import { publishBranch, PUSH_BRANCH_PREFIX, pushPlan, workspaceHead, type PushLease, type Published } from "./push.js";
 
 export type GitJob = Pick<Job, "repo" | "continues" | "branch_prefix" | "role" | "review">;
@@ -65,6 +66,10 @@ export interface GitPath {
 export interface GitPathDeps extends GitDeps, Pick<MirrorDeps, "mirrorsRoot" | "stateDir" | "keepClear" | "remoteUrl" | "signal"> {
   /** Like `capture` with a large output limit (8 MB), for the tree listing behind the repository map. Absent: the map is read through `capture` and a big tree is cut. */
   captureLarge?: GitCapture;
+  /** One line of counts when a resumed workspace's stale build output was removed. */
+  log?: (line: string) => void;
+  /** The host platform: the clean-up of a resumed workspace is skipped on darwin. */
+  platform: NodeJS.Platform;
 }
 
 /**
@@ -144,7 +149,10 @@ export function createGitPath(deps: GitPathDeps): GitPath {
       await assertGitVersion(git);
       const { dir, tip } = await mirrors.continuationTip(job.repo, job.continues);
       try {
-        return (await workspaceHead(git, dir, workspace, snapshotsRoot)) === tip ? { base: tip } : null;
+        if ((await workspaceHead(git, dir, workspace, snapshotsRoot)) !== tip) return null;
+        // At the tip and about to be reused: the first round's ignored build output must not reach this run's check (D#6 RUNNER-RESUME-CLEAN).
+        await cleanResumedWorkspace(listingGit, workspace, deps.log, deps.captureLarge === undefined ? SMALL_CAPTURE_CHARS : LISTING_CAP, deps.platform);
+        return { base: tip };
       } catch (error) {
         // A kept workspace this path cannot read as a clone it made is not resumed. The mirror's own failures were thrown above.
         if (error instanceof GitPathError) return null;

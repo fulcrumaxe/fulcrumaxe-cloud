@@ -93,7 +93,7 @@ const leftovers = (): string[] => (existsSync(snapshotsRoot()) ? readdirSync(sna
 
 async function rig(withCapture: GitCapture = real) {
   const mirrorsRoot = path.join(root, "cache", "fx-runner", "mirrors");
-  const gitPath = createGitPath({ capture: withCapture, mirrorsRoot, stateDir: stateDir(), remoteUrl: () => pathToFileURL(remote).href });
+  const gitPath = createGitPath({ platform: "linux", capture: withCapture, mirrorsRoot, stateDir: stateDir(), remoteUrl: () => pathToFileURL(remote).href });
   const workspace = path.join(root, "work", "run-1");
   mkdirSync(workspace, { recursive: true, mode: 0o700 });
   const { base } = await gitPath.prepare(job, lease, workspace);
@@ -254,11 +254,11 @@ describe("the fetch reads a snapshot, never the workspace's .git", () => {
   it("the snapshot is deleted when the fetch fails, and when the push fails", async () => {
     const r = await rig();
     const failing: GitCapture = (command, args, env, timeoutMs) => (isFetch(args) ? Promise.resolve<GitCaptured>({ code: 1, stdout: "", timedOut: false }) : real(command, args, env, timeoutMs));
-    const broken = createGitPath({ capture: failing, mirrorsRoot: path.join(root, "cache", "fx-runner", "mirrors"), stateDir: stateDir(), remoteUrl: () => pathToFileURL(remote).href });
+    const broken = createGitPath({ platform: "linux", capture: failing, mirrorsRoot: path.join(root, "cache", "fx-runner", "mirrors"), stateDir: stateDir(), remoteUrl: () => pathToFileURL(remote).href });
     await expect(broken.publish(job, lease, r.workspace, r.base)).rejects.toMatchObject({ code: "push_failed" });
     expect(leftovers()).toEqual([]);
     const noPush: GitCapture = (command, args, env, timeoutMs) => (args.includes("push") ? Promise.resolve<GitCaptured>({ code: 1, stdout: "", timedOut: false }) : real(command, args, env, timeoutMs));
-    const refusedPush = createGitPath({ capture: noPush, mirrorsRoot: path.join(root, "cache", "fx-runner", "mirrors"), stateDir: stateDir(), remoteUrl: () => pathToFileURL(remote).href });
+    const refusedPush = createGitPath({ platform: "linux", capture: noPush, mirrorsRoot: path.join(root, "cache", "fx-runner", "mirrors"), stateDir: stateDir(), remoteUrl: () => pathToFileURL(remote).href });
     await expect(refusedPush.publish(job, lease, r.workspace, r.base)).rejects.toMatchObject({ code: "push_failed" });
     expect(leftovers()).toEqual([]);
   });
@@ -267,7 +267,7 @@ describe("the fetch reads a snapshot, never the workspace's .git", () => {
     mkdirSync(path.join(snapshotsRoot(), "snap-old", "git"), { recursive: true });
     writeFileSync(path.join(snapshotsRoot(), "snap-old", "git", "HEAD"), "x");
     writeFileSync(path.join(snapshotsRoot(), "keep.txt"), "x");
-    createGitPath({ capture: real, mirrorsRoot: path.join(root, "cache", "fx-runner", "mirrors"), stateDir: stateDir() });
+    createGitPath({ platform: "linux", capture: real, mirrorsRoot: path.join(root, "cache", "fx-runner", "mirrors"), stateDir: stateDir() });
     expect(leftovers()).toEqual(["keep.txt"]);
     sweepSnapshots(path.join(root, "missing")); // no directory yet: nothing to do
   });
@@ -402,7 +402,7 @@ describe("the git version gate", () => {
   it("publish on a stubbed old git is refused before the workspace is read: nothing is pushed and no snapshot is made", async () => {
     const r = await rig();
     const calls: string[][] = [];
-    const old = createGitPath({ capture: withVersion("git version 2.39.3\n", calls), mirrorsRoot: path.join(root, "cache", "fx-runner", "mirrors"), stateDir: stateDir(), remoteUrl: () => pathToFileURL(remote).href });
+    const old = createGitPath({ platform: "linux", capture: withVersion("git version 2.39.3\n", calls), mirrorsRoot: path.join(root, "cache", "fx-runner", "mirrors"), stateDir: stateDir(), remoteUrl: () => pathToFileURL(remote).href });
     await expect(old.publish(job, lease, r.workspace, r.base)).rejects.toMatchObject({ code: "git_version_unsupported" });
     expect(calls).toEqual([["--version"]]);
     nothingReached(r);
@@ -411,7 +411,7 @@ describe("the git version gate", () => {
 
   it("setup on a stubbed old git is refused before a mirror or workspace is made", async () => {
     const calls: string[][] = [];
-    const old = createGitPath({ capture: withVersion("git version 2.40.1\n", calls), mirrorsRoot: path.join(root, "cache", "fx-runner", "mirrors"), stateDir: stateDir(), remoteUrl: () => pathToFileURL(remote).href });
+    const old = createGitPath({ platform: "linux", capture: withVersion("git version 2.40.1\n", calls), mirrorsRoot: path.join(root, "cache", "fx-runner", "mirrors"), stateDir: stateDir(), remoteUrl: () => pathToFileURL(remote).href });
     const workspace = path.join(root, "work", "run-9");
     mkdirSync(workspace, { recursive: true, mode: 0o700 });
     await expect(old.prepare(job, lease, workspace)).rejects.toMatchObject({ code: "git_version_unsupported" });
