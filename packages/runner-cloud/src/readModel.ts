@@ -1,7 +1,7 @@
 import type { PoolClient } from "pg";
 import { LIGHT_JOB_ROLES, LIMITED_BY, type LimitedBy, MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, MAX_TOTAL_CAPACITY, type SandboxUnavailableReason } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { RESUMES_WITHIN_NOTE, RUNNER_ONLINE_SECONDS, runnerIsLive, runnerLastHeardAt, runnerLiveSql } from "@fx/runner";
+import { RESUMES_WITHIN_NOTE, RUNNER_ONLINE_SECONDS, runnerIgnoringWorkSql, runnerIsLive, runnerLastHeardAt, runnerLiveSql } from "@fx/runner";
 import { UNNAMED_MEMBER } from "./memberRole.js";
 import { accountLineOf, fleetControlsOf, type AccountLine, type FleetControls } from "./fleetView.js";
 import { MIN_SUPPORTED_PROTOCOL_VERSION, RunnerHttpError, type RunnerCloudDeps } from "./http.js";
@@ -21,7 +21,7 @@ import { configuredWakeKey } from "./wakeToken.js";
 export const RUNNER_STATES = ["online_idle", "busy", "paused", "draining", "not_responding", "offline", "outdated", "revoked"] as const;
 export type RunnerState = (typeof RUNNER_STATES)[number];
 
-export const RUN_WAIT_REASONS = ["waiting_for_runner", "waiting_for_account_cap", "waiting_for_runner_slot", "waiting_for_approval", "waiting_for_runner_update", "runner_too_old_for_check", "runner_lost_retrying", "timed_out_waiting", "paused_usage_limit"] as const;
+export const RUN_WAIT_REASONS = ["waiting_for_runner", "runner_not_responding", "waiting_for_account_cap", "waiting_for_runner_slot", "waiting_for_approval", "waiting_for_runner_update", "runner_too_old_for_check", "runner_lost_retrying", "timed_out_waiting", "paused_usage_limit"] as const;
 export type RunWaitReason = (typeof RUN_WAIT_REASONS)[number];
 
 /** A runner that has made no request for `RUNNER_ONLINE_SECONDS` (120) is `offline` (criterion 13; D#605 FL-3: one figure for every online test). */
@@ -225,6 +225,8 @@ interface RawRunner {
   paused: boolean;
   draining: boolean;
   wake_capable: boolean;
+  /** `runnerIgnoringWorkSql`: claimable work has gone unanswered by this wake runner for 90 s (the one rule the claim, the notice and the wait reason share). */
+  ignoring_work: boolean;
   sandbox_unavailable: SandboxUnavailableReason | null;
   consent_granted: boolean | null;
   consent_changed_at: Date | null;
@@ -300,6 +302,7 @@ export async function readFleet(deps: ReadDeps, accountId: string, userId: strin
                 r.binary_version, r.protocol_version, r.last_seen_at, r.revoked_at, r.revoked_reason, s.reason AS sandbox_unavailable,
                 COALESCE(st.paused_at IS NOT NULL, false) AS paused, COALESCE(st.draining, false) AS draining,
                 COALESCE('wake_v1' = ANY(rc.capabilities), false) AS wake_capable,
+                ${runnerIgnoringWorkSql({ runner: "r", now: "$2" })} AS ignoring_work,
                 pc.granted AS consent_granted, pc.created_at AS consent_changed_at, r.allowed_repo_ids,
                 EXISTS (SELECT 1 FROM agent_runs a
                          WHERE a.account_id = r.account_id AND a.runner_id = r.id AND a.status = 'running' AND a.lease_expires_at > $2) AS busy,
@@ -384,8 +387,8 @@ export async function readFleet(deps: ReadDeps, accountId: string, userId: strin
       seen = new Map();
     }
   }
-  // D#6 RUNNER-PING: the account's work bumps and the runners' checks, from the same no-database store, also after the transaction (runnerReply.ts).
-  const hints = live.length > 0 ? await readRunnerReplyHints(accountId, live) : { epoch: null, first: null, checks: new Map<string, number>() };
+  // D#6 RUNNER-PING: the runners' checks, from the same no-database store, also after the transaction (runnerReply.ts). Ignored work comes from the rows (`ignoring_work`).
+  const hints = live.length > 0 ? await readRunnerReplyHints(accountId, live) : { checks: new Map<string, number>() };
   const runsOf = new Map<string, Array<{ id: string; label: string }>>();
   for (const run of runs) runsOf.set(run.runner_id, [...(runsOf.get(run.runner_id) ?? []), { id: run.id, label: `fulcrumaxe ${run.role} · ${run.repo_name ?? "a repository"}` }]);
   const runners = rows.map((r): RunnerRow => {
@@ -393,7 +396,7 @@ export async function readFleet(deps: ReadDeps, accountId: string, userId: strin
     const running = r.revoked_at === null ? { light: Number(r.running_light), heavy: Number(r.running_heavy) } : { light: 0, heavy: 0 };
     const capacity = r.revoked_at === null ? capacityOf(r.cap_declared === null ? null : { declared: r.cap_declared, light_limit: r.cap_light_limit, heavy_limit: r.cap_heavy_limit, limited_by: r.cap_limited_by }, running) : null;
     const wakeCapable = wakeOn && r.wake_capable;
-    const reply = r.revoked_at === null ? runnerReplyOf({ runnerId: r.id, wakeCapable, sandboxDown: r.sandbox_unavailable !== null, lastSeenAt: r.last_seen_at, leaseUntil: r.lease_until, hints, now }) : { check: null, noReply: null };
+    const reply = r.revoked_at === null ? runnerReplyOf({ runnerId: r.id, wakeCapable, ignoringWork: wakeOn && r.ignoring_work, lastSeenAt: r.last_seen_at, leaseUntil: r.lease_until, hints, now }) : { check: null, noReply: null };
     const facts: RunnerFacts = { revokedAt: r.revoked_at, protocolVersion: r.protocol_version, lastSeenAt: r.last_seen_at, busy: r.busy, paused: r.paused, draining: r.draining, seenAt: seen.get(r.id) ?? null, wakeCapable, noReply: reply.noReply };
     const state = classifyRunner(facts, now, min);
     const heard = r.revoked_at === null ? lastHeardAt(facts) : r.last_seen_at;
@@ -469,6 +472,8 @@ export interface RawRun {
   runnable_without_approval: boolean;
   needs_approval_possible: boolean;
   runner_online: boolean;
+  /** D#6 PING-CONSUMERS: a covering runner is there by the plain rule but is not answering claimable work (`runnerIgnoringWorkSql`), so `runner_online` (reply-aware) is false. Absent reads as false. */
+  runner_present_unanswering?: boolean;
   /** D#6 C43-2b: some live runner covering the run's repo has a free slot in the run's class, or has not declared a capacity yet (so it cannot be called full). */
   runner_slot_free: boolean;
   /** The cause a covering live runner gave for its low limit (paused before memory, cpu, disk, ceiling), or null when none gave one. Only read when no runner has a free slot. */
@@ -496,7 +501,10 @@ export interface AccountRunnerCaps {
  * `wakeEnabled` is the deployment's wake gate.
  */
 const WAIT_FACTS = (filter: string, tail: string, wakeEnabled: boolean): string => {
-  const live = runnerLiveSql({ runner: "r", now: "$2", onlineSeconds: "$3", wakeEnabled });
+  // Reply-aware (D#6 PING-CONSUMERS): a wake runner that left claimable work unanswered for 90 s no longer counts as there. `present` is the plain rule, for the one
+  // question that tells "nobody is there" from "somebody is there and not answering".
+  const live = runnerLiveSql({ runner: "r", now: "$2", onlineSeconds: "$3", wakeEnabled, replyAware: true });
+  const present = runnerLiveSql({ runner: "r", now: "$2", onlineSeconds: "$3", wakeEnabled });
   return `
   SELECT a.id, a.work_item_id, a.role, a.dispatch_repo_id, a.created_at, a.status, a.runtime, a.initiated_by, a.approved_by, a.claimable_after, a.min_protocol_version, (a.job_signed #> '{job,check}') IS NOT NULL AS job_has_check,
          -- D#599 PL-2b-2: the newest protocol any live, covering runner has said (at hello). A job that needs a higher one waits for an update; derived here, never stamped.
@@ -521,6 +529,8 @@ const WAIT_FACTS = (filter: string, tail: string, wakeEnabled: boolean): string 
                     AND r.credential_mode = 'subscription') AS needs_approval_possible,
          EXISTS (SELECT 1 FROM runners r WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND ${live}
                     AND a.dispatch_repo_id = ANY(r.allowed_repo_ids) AND NOT EXISTS (SELECT 1 FROM runner_settings ps WHERE ps.runner_id = r.id AND ps.account_id = r.account_id AND (ps.paused_at IS NOT NULL OR ps.draining))) AS runner_online,
+         EXISTS (SELECT 1 FROM runners r WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND ${present}
+                    AND a.dispatch_repo_id = ANY(r.allowed_repo_ids) AND NOT EXISTS (SELECT 1 FROM runner_settings ps WHERE ps.runner_id = r.id AND ps.account_id = r.account_id AND (ps.paused_at IS NOT NULL OR ps.draining))) AS runner_present_unanswering,
          -- A covering live runner with room for this run's class. Mirrors the claim's own arithmetic (capacityFreeSlots in runner-protocol) on the
          -- rows: an older runner (declared nothing) holds one job in total; a declared one has its class limit and the total ceiling, less what it
          -- holds. A runner with no row has not claimed yet, so nothing says it is full.
@@ -576,7 +586,8 @@ export function waitReasonOf(row: RawRun, now: Date, caps?: AccountRunnerCaps | 
   if (row.parent_reason === "usage_limit" && row.claimable_after !== null && row.claimable_after.getTime() > now.getTime()) return "paused_usage_limit";
   if (row.parent_reason === "runner_lost") return "runner_lost_retrying";
   if (row.approved_by === null && !row.runnable_without_approval && row.needs_approval_possible) return "waiting_for_approval";
-  if (!row.runner_online) return "waiting_for_runner";
+  // Nobody counts as there. When a covering runner is there by the plain rule but is not answering claimable work, say that instead of "come online".
+  if (!row.runner_online) return row.runner_present_unanswering === true ? "runner_not_responding" : "waiting_for_runner";
   // D#599 PL-2b-2: a job in the cross-side shape is never offered to a runner whose stored protocol is below the job's minimum (the claim definer's gate). When every live
   // covering runner is below it, no free slot or cap changes anything: the run waits for an update. Re-derived on each read, so an updated runner's hello clears it.
   // A job that carries the repo's check is told apart: the person needs to hear that it is the check an old runner cannot run (D#6 R-CHK-1).
@@ -608,6 +619,9 @@ export function waitReasonOf(row: RawRun, now: Date, caps?: AccountRunnerCaps | 
  *    runner runs running in all have reached the plan's total, or this is a heavy run and its heavy runs have reached the heavy figure. A free slot
  *    on a runner does not help: the claim answers `at_limit` / `heavy_limit` before it looks at the runner. The caps come from `deps.accountRunnerCaps`
  *    (plan data); without them, or when they cannot be read, this reason is never given;
+ *  - `runner_not_responding` (D#6 PING-CONSUMERS): pending, and the only covering runners that are there by the plain rule are wake runners that have left
+ *    claimable work unanswered for 90 s (`runnerIgnoringWorkSql`, the fleet screen's "Not responding" and the waiting notice's rule). The same rows say it, so
+ *    the fleet and this reason cannot disagree;
  *  - `waiting_for_runner`: pending and no live runner FOR THE RUN'S REPO: not revoked, not paused or draining (D#605 FL-3), live by `runnerLiveSql` (heard from within 120 seconds, or the wake window for a wake runner while the wake gate is open), and with the
  *    run's repo in its `allowed_repo_ids`. A live runner whose list leaves the repo out can never claim the run (the claim returns
  *    idle for it), so it does not count; neither does one with an empty list, because the claim reads an empty repo list as

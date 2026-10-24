@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
-import { markRunnerWork, setPendingHooks, type PendingStore } from "@fx/core/src/pendingWork.js";
+import { setPendingHooks, type PendingStore } from "@fx/core/src/pendingWork.js";
 import { checkRunner, listRunners } from "../src/index.js";
 import { harness, respond, type Harness } from "./helpers.js";
 
@@ -49,6 +49,12 @@ describe("runner reply: check now and ignored work [pg]", () => {
     const id = await insertRunner(h.admin, f.accountId, f.a1);
     await h.admin.query("UPDATE runners SET last_seen_at = $2, protocol_version = 3 WHERE id = $1", [id, o.seen]);
     if (o.wake !== false) await h.admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, ARRAY['wake_v1'])", [id, f.accountId]);
+    return id;
+  }
+  /** A pending runner run that became claimable at `since` seconds from T0: ignored work is read from these rows (runnerIgnoringWorkSql), not from the cache. */
+  async function pending(f: F2Fixture, since: number): Promise<string> {
+    const id = randomUUID();
+    await h.admin.query("INSERT INTO agent_runs (id, account_id, role, runtime, status, claimable_since) VALUES ($1, $2, 'executor', 'runner', 'pending', $3)", [id, f.accountId, at(since)]);
     return id;
   }
   const claims = (id: string, when: Date) => h.admin.query("UPDATE runners SET last_seen_at = $2 WHERE id = $1", [id, when]);
@@ -134,20 +140,20 @@ describe("runner reply: check now and ignored work [pg]", () => {
     const f = await fresh();
     const old = await runner(f, { seen: at(-5), wake: false });
     expect((await check(f, f.o1, old)).status).toBe(200);
-    await markRunnerWork(f.accountId, { now: at(0).getTime() });
+    await pending(f, 0);
     const row = (await read(f, 100)).get(old)!;
     expect(row).toMatchObject({ state: "online_idle", check: null });
     expect(row.controls!.check).toEqual({ allowed: false, reason: "This runner checks in every minute on its own." });
     expect((await read(f, 130)).get(old)).toMatchObject({ state: "offline", check: null });
   });
 
-  it("idle: with no work marked, a quiet wake runner is never Not responding inside its window", async () => {
+  it("idle: with no pending work, a quiet wake runner is never Not responding inside its window", async () => {
     const f = await fresh();
     const quiet = await runner(f, { seen: at(-1700) });
     for (const s of [0, 90, 300]) expect((await read(f, s)).get(quiet)).toMatchObject({ state: "online_idle" });
   });
 
-  it("work marked: a dead wake runner flips at 90 s, a live one claims and stays online, a busy one heartbeating is heard", async () => {
+  it("work pending: a dead wake runner flips at 90 s, a live one claims and stays online, a busy one heartbeating is heard", async () => {
     const f = await fresh();
     const dead = await runner(f, { seen: at(-600) });
     const live = await runner(f, { seen: at(-600) });
@@ -157,7 +163,7 @@ describe("runner reply: check now and ignored work [pg]", () => {
       "INSERT INTO agent_runs (id, account_id, role, runtime, status, runner_id, lease_expires_at) VALUES ($1, $2, 'executor', 'runner', 'running', $3, $4)",
       [randomUUID(), f.accountId, busy, at(80 + 90)],
     );
-    await markRunnerWork(f.accountId, { now: at(0).getTime() });
+    await pending(f, 0);
     await claims(live, at(20));
     const before = await read(f, 89);
     expect(before.get(dead)).toMatchObject({ state: "online_idle" });
@@ -170,16 +176,28 @@ describe("runner reply: check now and ignored work [pg]", () => {
     expect((await read(f, 401)).get(dead)).toMatchObject({ state: "online_idle" });
   });
 
-  it("work marked every 30 s cannot hide a dead runner: the first bump of the run counts", async () => {
+  it("newer work cannot hide a dead runner: the run is judged by its own moment, not by the latest bump", async () => {
     const f = await fresh();
     const dead = await runner(f, { seen: at(-600) });
     const live = await runner(f, { seen: at(-600) });
     for (const s of [0, 30, 60, 90]) {
-      await markRunnerWork(f.accountId, { now: at(s).getTime() });
+      await pending(f, s);
       await claims(live, at(s + 15));
     }
     const rows = await read(f, 106);
     expect(rows.get(dead)).toMatchObject({ state: "not_responding" });
     expect(rows.get(live)).toMatchObject({ state: "online_idle" });
+  });
+
+  it("a sandbox that is down, and a usage-limit or paused runner, are quiet on purpose: never Not responding for work", async () => {
+    const f = await fresh();
+    const down = await runner(f, { seen: at(-600) });
+    const limited = await runner(f, { seen: at(-600) });
+    await h.admin.query("INSERT INTO runner_sandbox_status (runner_id, account_id, reason) VALUES ($1, $2, 'bwrap_missing')", [down, f.accountId]);
+    await h.admin.query("INSERT INTO runner_capacity (runner_id, account_id, declared, light_limit, heavy_limit, limited_by) VALUES ($1, $2, true, 1, 1, 'usage_limit')", [limited, f.accountId]);
+    await pending(f, 0);
+    const rows = await read(f, 200);
+    expect(rows.get(limited)).toMatchObject({ state: "online_idle" });
+    expect(rows.get(down)!.state).not.toBe("not_responding");
   });
 });
