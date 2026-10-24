@@ -28,6 +28,11 @@ import { getInstallationToken, type AccessTokenRequester, type InstallationToken
  *                  allows exactly: `GET` the repository, `GET` that branch's ref, and `DELETE` that branch's ref ONCE. A push, a second
  *                  branch, a second delete and every other path are refused before a token is used.
  *
+ *   - `branch_sync` FIXROUND-BASE-SYNC: brings ONE private pull request branch up to date with its base. Token: the `branch_sync` purpose (`contents: write`,
+ *                  `pull_requests: read`, one repository, minted fresh and revoked by `close()`). The client is pinned to the branch (one of the two shapes the
+ *                  platform pushes) and the pull request number it was opened for, and allows exactly: `GET` the repository, `GET` that pull request, `GET` a
+ *                  branch ref, and `POST /merges` ONCE, whose body is exactly `base` = the pinned branch, `head` = a commit id and `commit_message`.
+ *
  * What it keeps, so a bug in a caller cannot widen it:
  *   - the host is api.github.com and the path must start with `/repos/<owner>/<name>/` for the repository the client was
  *     opened for: any other path throws before a token is used;
@@ -37,7 +42,7 @@ import { getInstallationToken, type AccessTokenRequester, type InstallationToken
  *     GitHub's own `message` cut short. It never hears a token, a header or a request body.
  */
 
-export type InstallationHttpKind = "read" | "merge_gate" | "runner_pr" | "repo_map" | "branch_delete";
+export type InstallationHttpKind = "read" | "merge_gate" | "runner_pr" | "repo_map" | "branch_delete" | "branch_sync";
 
 export interface InstallationHttpRequest {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -85,6 +90,8 @@ export interface InstallationHttpTarget {
   allowGraphql?: boolean;
   /** `branch_delete` only: the one branch the client may read and delete. Required for that kind, refused for every other. */
   branch?: string;
+  /** `branch_sync` only: the one pull request the client may read. Required for that kind, refused for every other. */
+  prNumber?: number;
 }
 
 /** The branches the platform pushes to a private repository: the item's pull request branch, or a runner run's branch. Nothing else is ever deleted. */
@@ -95,6 +102,8 @@ const RUNNER_PR_PERMISSIONS = Object.freeze({ metadata: "read", contents: "read"
 const REPO_MAP_PERMISSIONS = Object.freeze({ metadata: "read", contents: "read" } as const);
 const GRAPHQL_PATH = "/graphql";
 const PATH_RE = /^\/repos\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.~%:/@+=-]*$/;
+/** A branch ref read for `branch_sync`: `git/ref/heads/<name>`, the name made of the characters a branch the platform follows can hold. */
+const BRANCH_REF_PATH = /^git\/ref\/heads\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+){0,5}$/;
 const MESSAGE_RE = /[^\x20-\x7e]/g;
 
 export class InstallationHttpError extends Error {
@@ -141,19 +150,20 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
 
   return async (kind, target) => {
     if (!GH_OWNER_LOGIN_RE.test(target.owner) || !GH_REPO_NAME_RE.test(target.name)) throw new InstallationHttpError("invalid_coordinates");
-    if ((kind === "branch_delete") !== (target.branch !== undefined) || (target.branch !== undefined && !DELETABLE_BRANCH.test(target.branch))) throw new InstallationHttpError("invalid_coordinates");
+    if ((kind === "branch_sync") !== (target.prNumber !== undefined) || (target.prNumber !== undefined && !(Number.isSafeInteger(target.prNumber) && target.prNumber >= 1))) throw new InstallationHttpError("invalid_coordinates");
+    if ((kind === "branch_delete" || kind === "branch_sync") !== (target.branch !== undefined) || (target.branch !== undefined && !DELETABLE_BRANCH.test(target.branch))) throw new InstallationHttpError("invalid_coordinates");
     const installation = await deps.resolveInstallation(target.repoId);
     if (!installation) throw new InstallationHttpError("no_installation");
     const token = await getInstallationToken({
       installationId: installation.installationId,
       appKind: installation.appKind,
-      purpose: kind === "merge_gate" ? "merge_gate" : kind === "branch_delete" ? "branch_delete" : "run",
-      role: kind === "merge_gate" ? "merge_gate" : kind === "branch_delete" ? "branch_delete" : kind === "runner_pr" ? "runner_pr" : kind === "repo_map" ? "repo_map" : "pr_read",
+      purpose: kind === "merge_gate" ? "merge_gate" : kind === "branch_delete" ? "branch_delete" : kind === "branch_sync" ? "branch_sync" : "run",
+      role: kind === "merge_gate" ? "merge_gate" : kind === "branch_delete" ? "branch_delete" : kind === "branch_sync" ? "branch_sync" : kind === "runner_pr" ? "runner_pr" : kind === "repo_map" ? "repo_map" : "pr_read",
       scope: { repositories: [target.name], permissions: kind === "merge_gate" ? {} : kind === "runner_pr" ? RUNNER_PR_PERMISSIONS : kind === "repo_map" ? REPO_MAP_PERMISSIONS : { metadata: "read", pull_requests: "read" } },
       appCredentials: deps.appCredentials,
       requester: deps.requester,
       cache: deps.cache,
-      ...(kind === "branch_delete" ? { revoke: revokeInstallationToken } : {}),
+      ...(kind === "branch_delete" || kind === "branch_sync" ? { revoke: revokeInstallationToken } : {}),
     });
     const prefix = `/repos/${target.owner}/${target.name}/`;
     // The repository itself (`GET /repos/<owner>/<name>`, no trailing slash) is also allowed, for GET only: D#6 R3b reads its `private` flag.
@@ -162,7 +172,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
 
     return {
       async close() {
-        if (kind === "branch_delete") await revokeInstallationToken(token);
+        if (kind === "branch_delete" || kind === "branch_sync") await revokeInstallationToken(token);
       },
       async request(req) {
         const graphql = (kind === "runner_pr" || target.allowGraphql === true) && req.method === "POST" && req.path === GRAPHQL_PATH;
@@ -180,6 +190,17 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
           if (!read && !remove) throw new InstallationHttpError("path_refused");
           if (remove && deleted) throw new InstallationHttpError("already_used");
           if (remove) deleted = true;
+        }
+        // `branch_sync` holds contents:write, so it gets an exact list too: the pull request, a branch ref, and one merge into the pinned branch.
+        if (kind === "branch_sync") {
+          const read = req.method === "GET" && req.query === undefined && (req.path === repoRoot || req.path === `${prefix}pulls/${target.prNumber}` || BRANCH_REF_PATH.test(req.path.slice(prefix.length)));
+          const b = req.body as Record<string, unknown> | undefined;
+          const merge =
+            req.method === "POST" && req.path === `${prefix}merges` && req.query === undefined && typeof b === "object" && b !== null && Object.keys(b).sort().join() === "base,commit_message,head" &&
+            b["base"] === target.branch && typeof b["head"] === "string" && /^[0-9a-f]{40}$/.test(b["head"]) && typeof b["commit_message"] === "string";
+          if (!read && !merge) throw new InstallationHttpError("path_refused");
+          if (merge && deleted) throw new InstallationHttpError("already_used");
+          if (merge) deleted = true;
         }
         if (kind === "read" && req.method !== "GET" && !graphql) throw new InstallationHttpError("method_refused");
         // PATCH is for `runner_pr` alone (closing a pull request); the other kinds never needed it and never get it.

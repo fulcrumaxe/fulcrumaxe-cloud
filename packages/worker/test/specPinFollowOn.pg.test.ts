@@ -85,7 +85,7 @@ describe("a runner follow-on run keeps its parent's Spec version [pg]", { timeou
     },
   });
   // FIXROUND-REFRESH-HEAD: the pull request's branch on GitHub is at the head each fix round below is asked for.
-  const advanceModule = () => createAdvanceModule(writerPool, { starter, resolveRunSeat, startAdvance: async () => undefined, triage: null, registry, review: reviewDeps(), fixHeads: { privateHead: async () => "b".repeat(40) } });
+  const advanceModule = () => createAdvanceModule(writerPool, { starter, resolveRunSeat, startAdvance: async () => undefined, triage: null, registry, review: reviewDeps(), fixHeads: { privateHead: async () => "b".repeat(40), syncBase: async () => ({ kind: "up_to_date" }) } });
 
   function ports(accountId: string, workItemId: string): AdvanceRunPorts {
     const m = advanceModule();

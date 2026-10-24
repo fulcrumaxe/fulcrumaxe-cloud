@@ -269,6 +269,13 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "public_tip_moved",
   "app_not_installed",
   "token_scope_mismatch",
+  // Fix round base sync (FIXROUND-BASE-SYNC)
+  "base_sync_conflict",
+  "base_sync_unavailable",
+  "base_synced",
+  "pull_request_unreadable",
+  "base_unreadable",
+  "merge_refused",
   "branch_exists",
   "pr_failed",
   "unsafe_git_config",

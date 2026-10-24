@@ -26,6 +26,7 @@ import type { RunStarter } from "./preview.js";
 import { readVerifiedReviewGate, type VerifiedReviewGate } from "./verifiedReviewGate.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 import { startCheckFixRound } from "./checkFix.js";
+import { BASE_SYNCED_STAGE, checkFixBeforeStart, syncRunBranch } from "./fixRoundBase.js";
 import { BRANCH_MOVED_STAGE, checkPrivateHead, checkPublicBranch, type FixRoundHeadPorts } from "./fixRoundHeads.js";
 import { RunActionInputError, type PerformResult } from "./runActions.js";
 
@@ -1431,8 +1432,10 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const bad = await guardStep(who);
     if (bad) return { ok: false, reason: bad.reason ?? "refused" };
     // FIXROUND-REFRESH-HEAD: a check fix round opens no pull request of its own, but on a paired item that already pushed it is held to the public branch too.
-    const beforeStart = () => checkPublicBranch(runnerPool, deps.fixHeads, who);
+    const beforeStart = checkFixBeforeStart(runnerPool, deps.fixHeads, who);
     const out = await startCheckFixRound({ pool: runnerPool, registry: deps.registry, resume: review.resume, resolveRunSeat: deps.resolveRunSeat, starter: deps.starter, beforeStart }, who, failedRunId);
+    // FIXROUND-BASE-SYNC: the run a sync led to says so (a replay finds its run and merged nothing, so it adds no second line).
+    if (out.ok && beforeStart.state.synced) await recordRunStage(runnerPool, { accountId: who.accountId, runId: out.runId, stage: BASE_SYNCED_STAGE });
     console.info(JSON.stringify({ event: "advance.check_fix", work_item_id: who.workItemId, failed_run_id: failedRunId, started: out.ok, reason: out.ok ? null : out.reason }));
     return out;
   }
@@ -1515,8 +1518,14 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     // a kept workspace only when it is at that tip).
     const publicRefusal = await checkPublicBranch(runnerPool, deps.fixHeads, who);
     if (publicRefusal !== null) return refuse(publicRefusal);
+    // The cheap refusals come before anything is written on GitHub: a base-sync merge must never land for a round that is then refused.
+    const parent = await newestExecutorRun(who);
+    if (parent === null) return refuse("no_session");
+    const seat = await deps.resolveRunSeat({ accountId: who.accountId, role: "executor", workItemId: who.workItemId, ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}) });
+    if (!seat.ok) return refuse(seat.reason);
     const effective = await readExecutionMode(runnerPool, who.accountId, state.repoId, who.workItemId);
     let headMoved = false;
+    let baseSynced = false;
     if (isRunnerMode(effective)) {
       const repoId = state.repoId;
       const found = await withTenant(runnerPool, who.accountId, async (client) => {
@@ -1539,13 +1548,12 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         const head = await checkPrivateHead(runnerPool, deps.fixHeads, who, { repo: { id: repoId, owner: found.coords.gh_owner, name: found.coords.gh_name }, pr, askedHead: req.headSha });
         if (!head.ok) return refuse(head.reason);
         headMoved = head.moved;
+        // FIXROUND-BASE-SYNC: bring the branch up to date with its base before anything starts; a conflict goes to a person, any other failure refuses the round.
+        const sync = await syncRunBranch(runnerPool, deps.fixHeads, who, { repo: { id: repoId, owner: found.coords.gh_owner, name: found.coords.gh_name }, pr, liveHead: head.head, moveToNeedsPerson: true, attempt: attemptKey });
+        if (!sync.ok) return refuse(sync.reason);
+        baseSynced = sync.synced;
       }
     }
-
-    const parent = await newestExecutorRun(who);
-    if (parent === null) return refuse("no_session");
-    const seat = await deps.resolveRunSeat({ accountId: who.accountId, role: "executor", workItemId: who.workItemId, ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}) });
-    if (!seat.ok) return refuse(seat.reason);
 
     // The board says "Changes requested" the moment a fix round starts, whatever an earlier record said (a pass recorded
     // after a needs-fix used to leave the card at "ready to merge").
@@ -1720,6 +1728,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     console.info(JSON.stringify({ event: "advance.resumed", work_item_id: who.workItemId, run_id: out.id, status: out.status, round: req.round }));
     await attachRunNotes(runnerPool, who.accountId, who.workItemId, out.id, { ids: notes.map((n) => n.id) });
     if (headMoved) await recordRunStage(runnerPool, { accountId: who.accountId, runId: out.id, stage: BRANCH_MOVED_STAGE });
+    if (baseSynced) await recordRunStage(runnerPool, { accountId: who.accountId, runId: out.id, stage: BASE_SYNCED_STAGE });
     return started(out.id);
   }
 
