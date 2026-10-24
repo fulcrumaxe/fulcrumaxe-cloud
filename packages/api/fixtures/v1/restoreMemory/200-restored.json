@@ -1,0 +1,18 @@
+{
+  "outcome": "restored",
+  "entry": {
+    "id": "1a8b2e3f-4c5d-4e6f-9071-82930415b6c7",
+    "scope": "repo",
+    "kind": "command",
+    "body": "Run the unit tests with pnpm test --filter api",
+    "why": null,
+    "author_kind": "person",
+    "status": "approved",
+    "version": 1,
+    "content_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "created_at": "2026-10-15T08:00:00.000Z",
+    "updated_at": "2026-10-16T09:05:00.000Z",
+    "approved_at": "2026-10-16T09:05:00.000Z",
+    "expires_at": null
+  }
+}

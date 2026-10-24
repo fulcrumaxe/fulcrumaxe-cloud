@@ -1,0 +1,7 @@
+{
+  "format": "agents",
+  "filename": "AGENTS.md",
+  "content": "# AGENTS.md\n\nApproved memory for acme/widgets, exported 2026-10-23.\n\n## Commands\n\n- Run the unit tests with pnpm test --filter api\n",
+  "entries": 1,
+  "omitted": 0
+}
