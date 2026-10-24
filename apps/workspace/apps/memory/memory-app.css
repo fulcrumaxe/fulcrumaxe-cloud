@@ -83,3 +83,18 @@ textarea.mem-input { width: 100%; min-height: 6em; resize: vertical; }
   .mem-main { padding: 10px; }
   .mem-actions .mem-btn, .mem-batch .mem-btn { flex: 1 1 100%; }
 }
+
+/* D#601 MEM-4b3: row actions, history, export, toasts */
+.mem-row-actions { flex: 1 1 100%; }
+.mem-row-actions .mem-actions { margin: 4px 0 0; }
+.mem-row-actions .mem-muted { margin: 4px 0; }
+.mem-events, .mem-versions { margin: 6px 0; padding-left: 18px; }
+.mem-versions li { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mem-app { position: relative; }
+.mem-toasts { position: absolute; z-index: 5; left: 14px; right: 14px; bottom: 14px; display: flex; flex-direction: column; gap: 6px; pointer-events: none; }
+.mem-toast { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 6px 10px; background: var(--bg-surface, #0a0a0a); border: 1px solid var(--accent, #1aff80); pointer-events: auto; }
+@container (max-width: 640px) {
+  .mem-toasts { left: 10px; right: 10px; bottom: 10px; }
+  .mem-toast .mem-btn { flex: 1 1 100%; }
+  .mem-row-actions .mem-btn { flex: 1 1 100%; }
+}

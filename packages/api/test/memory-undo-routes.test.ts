@@ -256,6 +256,33 @@ describe('D#601 MEM-4b2: memory undo, history and export routes', () => {
       expect(await status(young)).toBe('approved');
     });
 
+    it('the list carries deleted_at (null unless deleted); a restore clears it and a second delete starts a fresh 30 days', async () => {
+      type Row = { id: string; status: string; deleted_at: string | null };
+      const rows = async (status?: string) => (await ok<{ groups: Array<{ entries: Row[] }> }>(await call(aAdmin, 'GET', `/memory?repo_id=${a.repoId}${status ? `&status=${status}` : ''}`), 'listMemory')).groups.flatMap((g) => g.entries);
+      const id = await approved();
+      expect((await rows()).find((e) => e.id === id)!.deleted_at).toBeNull();
+      await call(aAdmin, 'POST', `/memory/${id}/delete`);
+      await admin.query(`UPDATE memory_entries SET deleted_at = now() - interval '20 days' WHERE id = $1`, [id]);
+      const old = (await rows('deleted')).find((e) => e.id === id)!;
+      expect(Date.now() - Date.parse(old.deleted_at!)).toBeGreaterThan(19 * 86400000);
+      await call(aAdmin, 'POST', `/memory/${id}/restore`);
+      expect((await rows()).find((e) => e.id === id)!.deleted_at).toBeNull();
+      await call(aAdmin, 'POST', `/memory/${id}/delete`);
+      const fresh = (await rows('deleted')).find((e) => e.id === id)!;
+      expect(Date.now() - Date.parse(fresh.deleted_at!)).toBeLessThan(60000);
+    });
+
+    it('more than 50 deleted entries all carry their deleted_at in one list answer', async () => {
+      const ids: string[] = [];
+      for (let i = 0; i < 55; i++) ids.push(await approved());
+      // The write rate limit stops 55 route deletes in a row, so the rows are deleted as the definer does (the route's own delete is tested above).
+      await admin.query(`UPDATE memory_entries SET prior_status = status, status = 'deleted', deleted_at = now() - interval '3 days' WHERE id = ANY($1::uuid[])`, [ids]);
+      const tab = await ok<{ groups: Array<{ entries: Array<{ id: string; deleted_at: string | null }> }> }>(await call(aAdmin, 'GET', `/memory?repo_id=${a.repoId}&status=deleted`), 'listMemory');
+      const mine = tab.groups.flatMap((g) => g.entries).filter((e) => ids.includes(e.id));
+      expect(mine).toHaveLength(55);
+      for (const e of mine) expect(Number.isNaN(Date.parse(e.deleted_at!))).toBe(false);
+    });
+
     it('a member is 403 on a repo entry; another account is 404; a replaced version cannot be deleted; a malformed id is 404', async () => {
       const id = await approved();
       expect((await call(aMember, 'POST', `/memory/${id}/delete`)).status).toBe(403);

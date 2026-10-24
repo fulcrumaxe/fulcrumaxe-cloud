@@ -7,7 +7,7 @@
 import { h } from "../_lib/dom.js";
 import {
   COPY, batchButtonWords, batchesOf, byteLength, checkEdit, decideBatch, decideOne, editEntry, failureWords, isGated, isOpened, openCard, scopesOfCards, text, waitingWords, KINDS,
-  MEMORY_BODY_MAX_BYTES, MEMORY_WHY_MAX_BYTES,
+  MEMORY_BODY_MAX_BYTES, MEMORY_WHY_MAX_BYTES, UNDO_MS,
 } from "./memory-storage.js";
 
 const isField = (el) => !!el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT" || el.tagName === "SELECT");
@@ -15,8 +15,9 @@ const isField = (el) => !!el && (el.tagName === "TEXTAREA" || el.tagName === "IN
 /**
  * host: the element the queue lives in. places: label -> { kind, id } for the badge lookup. countFor(place|null, cards) -> number|null.
  * reload(focusId): re-read everything, then focus that card (or the queue heading when it is gone). get: the fetch helper (the shared api by default).
+ * onDecided({ ids, to }): a decision went through (for the Undo toast; a batch is one call).
  */
-export function mountQueue({ host, countFor, reload, get }) {
+export function mountQueue({ host, countFor, reload, get, onDecided }) {
   let cards = [];
   let phase = "loading"; // loading | ready | error
   let truncated = false;
@@ -47,9 +48,10 @@ export function mountQueue({ host, countFor, reload, get }) {
     const next = nextIdAfter(id);
     paint();
     try {
-      await fn();
+      const done = await fn();
       busy.delete(id);
       editing = null;
+      if (done && onDecided) onDecided(done);
       await reload(next);
     } catch (e) {
       busy.delete(id);
@@ -63,9 +65,10 @@ export function mountQueue({ host, countFor, reload, get }) {
     }
   }
 
-  const approve = (card) => act(card, () => decideOne(card.entry.id, "approved", get));
-  const reject = (card) => act(card, () => decideOne(card.entry.id, "rejected", get));
-  const open = (card) => act(card, () => openCard(card.entry.id, get));
+  const decide = (card, to) => act(card, async () => (await decideOne(card.entry.id, to, get), { ids: [card.entry.id], to }));
+  const approve = (card) => decide(card, "approved");
+  const reject = (card) => decide(card, "rejected");
+  const open = (card) => act(card, async () => void (await openCard(card.entry.id, get))); // opening is not a decision: no Undo toast
 
   function startEdit(card) {
     // Callers only offer edit on a card that is open (a shut gated card shows Open instead), so no branch here.
@@ -94,7 +97,9 @@ export function mountQueue({ host, countFor, reload, get }) {
       }
       act(card, async () => {
         const saved = await editEntry(e.id, { body: area.value, why: why.value, kind: kind.value }, get);
-        if (approveAfter) await decideOne(saved.entry.id, "approved", get);
+        if (!approveAfter) return undefined;
+        await decideOne(saved.entry.id, "approved", get);
+        return { ids: [saved.entry.id], to: "approved" };
       });
     };
     const btn = (label, testid, onClick, secondary) => h("button", { type: "button", class: "mem-btn" + (secondary ? " mem-btn-quiet" : ""), "data-testid": testid, onClick }, label);
@@ -197,6 +202,7 @@ export function mountQueue({ host, countFor, reload, get }) {
         return;
       }
       closeDialog();
+      if (onDecided) onDecided({ ids: batch.cards.map((c) => c.entry.id), to });
       await reload(nextIdAfterBatch(batch, first));
     });
     const dlg = h(
@@ -278,6 +284,70 @@ export function mountQueue({ host, countFor, reload, get }) {
         dialog = null;
       }
       host.replaceChildren();
+    },
+  };
+}
+
+// ── the Undo toasts (here, not in a file of their own: each app file costs a boot request, and the whole boot is at its budget). A decision or a delete
+// says what happened and, for 30 seconds, offers one Undo (a batch has one). When the time is up the Undo is removed from the page, so a late click cannot
+// happen; the route refuses a stale one as well, and its words are shown if it does. Clicking Undo stops that timer, so a slow Undo keeps its toast until
+// the answer (or its error) is shown. A toast whose Undo is still live is never pushed out: the cap of 3 only removes finished notes. host is the one
+// persistent live region (aria-live polite) that every toast's text is added to. ──
+const NOTE_MS = 8000;
+const TOAST_CAP = 3;
+const REAL_CLOCK = { now: () => Date.now(), set: (f, t) => setTimeout(f, t), clear: (t) => clearTimeout(t) };
+
+/** show({ message, onUndo, undoLabel }): onUndo() resolves to { ok, message }; it never throws. clock: { now, set, clear } so a test can drive time. */
+export function mountToasts(host, { ms = UNDO_MS, clock = REAL_CLOCK } = {}) {
+  const all = new Set();
+  function drop(t) {
+    clock.clear(t.timer);
+    all.delete(t);
+    t.el.remove();
+  }
+  return {
+    show({ message, onUndo, undoLabel = "Undo" }) {
+      // Make room by removing the oldest FINISHED note; a toast that can still be undone (or is being undone) stays, so the stack may pass the cap.
+      while (all.size >= TOAST_CAP) {
+        const old = [...all].find((x) => !x.hold);
+        if (!old) break;
+        drop(old);
+      }
+      const t = { el: null, timer: 0, hold: !!onUndo };
+      const text = h("span", { "data-testid": "mem-toast-text" }, message);
+      const deadline = clock.now() + ms;
+      const undo = onUndo
+        ? h(
+            "button",
+            {
+              type: "button",
+              class: "mem-btn",
+              "data-testid": "mem-undo",
+              onClick: async () => {
+                if (undo.getAttribute("aria-disabled") === "true") return;
+                if (clock.now() > deadline) return drop(t); // the timer ran late (a hidden tab): the answer is the same as if it had fired
+                undo.setAttribute("aria-disabled", "true");
+                clock.clear(t.timer); // a slow Undo must not lose its toast before its answer is shown
+                const r = await onUndo();
+                text.textContent = r.message;
+                undo.remove();
+                t.hold = false;
+                t.timer = clock.set(() => drop(t), NOTE_MS);
+              },
+            },
+            undoLabel
+          )
+        : null;
+      t.el = h("div", { class: "mem-toast", "data-testid": "mem-toast" }, text, undo);
+      t.timer = clock.set(() => {
+        t.hold = false;
+        drop(t);
+      }, onUndo ? ms : NOTE_MS);
+      all.add(t);
+      host.appendChild(t.el);
+    },
+    destroy() {
+      for (const t of [...all]) drop(t);
     },
   };
 }

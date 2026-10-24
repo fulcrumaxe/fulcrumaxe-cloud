@@ -33120,6 +33120,12 @@
                                 "created_at": {
                                   "type": "string"
                                 },
+                                "deleted_at": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ]
+                                },
                                 "age": {
                                   "type": "string",
                                   "minLength": 1
@@ -33147,6 +33153,7 @@
                                 "source",
                                 "version",
                                 "created_at",
+                                "deleted_at",
                                 "age",
                                 "runs",
                                 "runs_label"
