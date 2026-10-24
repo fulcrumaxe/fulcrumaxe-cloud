@@ -52,7 +52,7 @@ export async function checkPublicBranch(pool: Pool, ports: FixRoundHeadPorts | n
   // `derivePlanePush` makes: GitHub's head against the stamp, and the stamp is never written over.
   let live: string | null;
   try {
-    live = await publicHead({ codeRepo: row.codeRepo, branch: row.branch });
+    live = await publicHead({ accountId: who.accountId, codeRepo: row.codeRepo, branch: row.branch });
   } catch {
     // fx-swallow-ok: the cause can carry a repository name or a token; only the fixed code survives
     console.warn(JSON.stringify({ event: "advance.public_head_unavailable", work_item_id: who.workItemId }));

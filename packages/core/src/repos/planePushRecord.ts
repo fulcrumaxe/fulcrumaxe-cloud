@@ -303,7 +303,7 @@ export async function recordVerifiedOutcome(client: Queryable, input: { accountI
 
 /** Reads a branch's head on the public repo: the 40-hex sha, or null when the branch does not exist. The caller supplies the adapter: `createPlanePushApi().branchHead` takes a token, so P1f-2 wraps it in one that mints a fresh token and revokes it around the read. */
 export interface BranchHeadPort {
-  branchHead(input: { codeRepo: string; branch: string }): Promise<string | null>;
+  branchHead(input: { accountId: string; codeRepo: string; branch: string }): Promise<string | null>;
 }
 
 export interface DerivedPlanePush {
@@ -334,7 +334,7 @@ export async function derivePlanePush(client: Queryable, input: { accountId: str
   const { rows } = await client.query<Row>(`SELECT ${COLUMNS} FROM plane_pushes WHERE id = $1 AND account_id = $2`, [input.id, input.accountId]);
   if (!rows[0]) return null;
   const row = toRow(rows[0]);
-  const headSha = await port.branchHead({ codeRepo: row.codeRepo, branch: row.branch });
+  const headSha = await port.branchHead({ accountId: input.accountId, codeRepo: row.codeRepo, branch: row.branch });
   return { row, headSha, stale: headSha !== row.headSha };
 }
 

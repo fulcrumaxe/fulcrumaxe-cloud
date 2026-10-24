@@ -37,6 +37,7 @@ export * from './issueReader.js';
 export * from './installationHttp.js';
 export * from './repoTreeSource.js';
 export * from './repoInstallationResolver.js';
+export * from './installationOwnership.js';
 export * from './discoveryReaders.js';
 export * from './planQueries.js';
 export * from './planReadClient.js';

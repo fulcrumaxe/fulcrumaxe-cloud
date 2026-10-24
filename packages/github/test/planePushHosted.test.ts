@@ -19,6 +19,9 @@ beforeAll(() => {
 });
 
 const json = (status: number, body: unknown): GhReply => ({ status, headers: { "content-type": "application/json; charset=utf-8" }, body: JSON.stringify(body) });
+const ACCOUNT = "11111111-1111-4111-8111-111111111111";
+// Account ACCOUNT owns installation 42, the one the strict server names for acme/widgets.
+const OWNS = async (account: string, id: number) => account === ACCOUNT && id === 42;
 const HEAD = "a".repeat(40);
 const TIP = "b".repeat(40);
 const BRANCH = "fx/p-0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e";
@@ -85,7 +88,7 @@ async function setup(world: World, expiresInMs = 3_600_000, now?: () => number) 
     return { token, expiresAt: new Date(Date.now() + expiresInMs).toISOString(), permissions: { metadata: "read", ...p.permissions }, repositories: (p.repositories ?? []).map((x) => x) };
   };
   const api = createPlanePushApi({ appCredentials: () => ({ appId: "12345", privateKeyPem, webhookSecret: "unused" }), requester, cache: new InstallationTokenCache(), fetchImpl });
-  const hosted = createHostedPlanePush(api, now ? { now } : {});
+  const hosted = createHostedPlanePush(api, { ...(now ? { now } : {}), ownsInstallation: OWNS });
   /** The order of calls that carried one of the minted tokens, plus the revokes. */
   const trail = () => s.seen.filter((x) => x.path !== "/repos/acme/widgets/installation").map((x) => `${x.method} ${x.path} ${x.headers["authorization"]?.replace("Bearer ", "")}`);
   return { hosted, server: s, mintedTokens, trail, revoked };
@@ -102,7 +105,7 @@ const pr = (over: Record<string, unknown> = {}) => ({
 });
 
 describe("verifyPushed", () => {
-  const ask = (t: Awaited<ReturnType<typeof setup>>, over: Partial<{ headSha: string; tipSha: string }> = {}) => t.hosted.verifyPushed({ codeRepo: "acme/widgets", branch: BRANCH, headSha: HEAD, tipSha: TIP, ...over });
+  const ask = (t: Awaited<ReturnType<typeof setup>>, over: Partial<{ headSha: string; tipSha: string }> = {}) => t.hosted.verifyPushed({ accountId: ACCOUNT, codeRepo: "acme/widgets", branch: BRANCH, headSha: HEAD, tipSha: TIP, ...over });
 
   it("is true when the head is the reported one, has one parent which is the tip, and the tip is in main's history", async () => {
     const t = await setup({ branchHead: HEAD });
@@ -150,7 +153,7 @@ describe("verifyPushed", () => {
 });
 
 describe("verifyPullRequest", () => {
-  const ask = (t: Awaited<ReturnType<typeof setup>>) => t.hosted.verifyPullRequest({ codeRepo: "acme/widgets", branch: BRANCH, number: 9 });
+  const ask = (t: Awaited<ReturnType<typeof setup>>) => t.hosted.verifyPullRequest({ accountId: ACCOUNT, codeRepo: "acme/widgets", branch: BRANCH, number: 9 });
 
   it("answers the address when the head ref and repository and the base match, and revokes its token", async () => {
     const t = await setup({ pr: pr() });
@@ -188,17 +191,17 @@ describe("verifyPullRequest", () => {
 describe("branchHead (the record module's port)", () => {
   it("reads through a fresh token that is revoked after, and answers null for no branch", async () => {
     const t = await setup({ branchHead: HEAD });
-    await expect(t.hosted.branchHead({ codeRepo: "acme/widgets", branch: BRANCH })).resolves.toBe(HEAD);
+    await expect(t.hosted.branchHead({ accountId: ACCOUNT, codeRepo: "acme/widgets", branch: BRANCH })).resolves.toBe(HEAD);
     expect(t.trail().at(-1)).toBe("DELETE /installation/token ghs_hosted1");
     const none = await setup({ branchHead: null });
-    await expect(none.hosted.branchHead({ codeRepo: "acme/widgets", branch: BRANCH })).resolves.toBeNull();
+    await expect(none.hosted.branchHead({ accountId: ACCOUNT, codeRepo: "acme/widgets", branch: BRANCH })).resolves.toBeNull();
   });
 });
 
 describe("revokeToken", () => {
   it("revokes a token mintToken handed out: GitHub then answers 401 for it", async () => {
     const t = await setup({}, 3_600_000, () => Date.now());
-    const minted = await t.hosted.mintToken("acme/widgets");
+    const minted = await t.hosted.mintToken("acme/widgets", ACCOUNT);
     await expect(t.hosted.revokeToken(minted.token)).resolves.toBe(true);
     expect(t.revoked.has(minted.token)).toBe(true);
     expect(t.trail().at(-1)).toBe(`DELETE /installation/token ${minted.token}`);
@@ -210,18 +213,18 @@ describe("mintToken", () => {
 
   it("hands out a token and does NOT revoke it (the runner holds it); no delete reaches GitHub", async () => {
     const t = await setup({}, 3_600_000, () => T0);
-    const minted = await t.hosted.mintToken("acme/widgets");
+    const minted = await t.hosted.mintToken("acme/widgets", ACCOUNT);
     expect(minted.token).toBe("ghs_hosted1");
     expect(t.server.seen.some((s) => s.method === "DELETE")).toBe(false);
   });
 
   it("expires at the smaller of GitHub's expiry minus 5 minutes and 55 minutes from now", async () => {
     const full = await setup({}, 3_600_000, () => Date.now());
-    const a = await full.hosted.mintToken("acme/widgets");
+    const a = await full.hosted.mintToken("acme/widgets", ACCOUNT);
     expect(Math.abs(a.expiresAt.getTime() - (Date.now() + PLANE_PUSH_TOKEN_MAX_LIFETIME_MS))).toBeLessThan(5_000);
     await server?.close();
     const short = await setup({}, 20 * 60_000, () => Date.now());
-    const b = await short.hosted.mintToken("acme/widgets");
+    const b = await short.hosted.mintToken("acme/widgets", ACCOUNT);
     expect(Math.abs(b.expiresAt.getTime() - (Date.now() + 15 * 60_000))).toBeLessThan(5_000);
   });
 
@@ -234,12 +237,33 @@ describe("mintToken", () => {
       return new Response(r.body, { status: r.status, headers: r.headers });
     }) as typeof fetch;
     const api = createPlanePushApi({ appCredentials: () => ({ appId: "1", privateKeyPem, webhookSecret: "x" }), requester: async () => { throw new Error("unused"); }, cache: new InstallationTokenCache(), fetchImpl });
-    await expect(createHostedPlanePush(api).mintToken("acme/widgets")).rejects.toMatchObject({ code: "app_not_installed" });
+    await expect(createHostedPlanePush(api, { ownsInstallation: OWNS }).mintToken("acme/widgets", ACCOUNT)).rejects.toMatchObject({ code: "app_not_installed" });
+  });
+});
+
+describe("installation ownership", () => {
+  const OTHER = "22222222-2222-4222-8222-222222222222";
+
+  it("mints nothing for an account that does not own the repository's installation, on every path that mints", async () => {
+    const t = await setup({ branchHead: HEAD });
+    await expect(t.hosted.mintToken("acme/widgets", OTHER)).rejects.toMatchObject({ code: "code_repo_installation_not_owned" });
+    await expect(t.hosted.branchHead({ accountId: OTHER, codeRepo: "acme/widgets", branch: BRANCH })).rejects.toMatchObject({ code: "code_repo_installation_not_owned" });
+    await expect(t.hosted.verifyPushed({ accountId: OTHER, codeRepo: "acme/widgets", branch: BRANCH, headSha: HEAD, tipSha: TIP })).rejects.toMatchObject({ code: "code_repo_installation_not_owned" });
+    await expect(t.hosted.verifyPullRequest({ accountId: OTHER, codeRepo: "acme/widgets", branch: BRANCH, number: 9 })).rejects.toMatchObject({ code: "code_repo_installation_not_owned" });
+    await expect(t.hosted.openPullRequest({ accountId: OTHER, codeRepo: "acme/widgets", branch: BRANCH, title: "t", body: "b" })).rejects.toMatchObject({ code: "code_repo_installation_not_owned" });
+    expect(t.mintedTokens).toEqual([]);
+    expect(t.server.seen.every((s) => s.path === "/repos/acme/widgets/installation")).toBe(true);
+  });
+
+  it("works for the owning account", async () => {
+    const t = await setup({ branchHead: HEAD });
+    await expect(t.hosted.branchHead({ accountId: ACCOUNT, codeRepo: "acme/widgets", branch: BRANCH })).resolves.toBe(HEAD);
+    expect(t.mintedTokens).toHaveLength(1);
   });
 });
 
 describe("openPullRequest (D#598 P1f-5c)", () => {
-  const open = (t: Awaited<ReturnType<typeof setup>>) => t.hosted.openPullRequest({ codeRepo: "acme/widgets", branch: BRANCH, title: "Add a thing", body: "Body text" });
+  const open = (t: Awaited<ReturnType<typeof setup>>) => t.hosted.openPullRequest({ accountId: ACCOUNT, codeRepo: "acme/widgets", branch: BRANCH, title: "Add a thing", body: "Body text" });
 
   it("opens the pull request on the pushed branch against main with one fresh token, then revokes it; nothing is pushed", async () => {
     const t = await setup({});
