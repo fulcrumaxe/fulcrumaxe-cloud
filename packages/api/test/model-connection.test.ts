@@ -162,14 +162,25 @@ describe('D#31 API-2: model-connection routes', () => {
     return { accountId, userId };
   }
 
-  /** Every table's rows rendered as text: does `needle` appear in any of them? Returns the tables that hold it. */
-  async function tablesContaining(needle: string): Promise<string[]> {
-    const { rows: tables } = await admin.query<{ table_name: string }>(
-      `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`,
+  /**
+   * Which tables hold `needle`? Scans every table and every account, so a leak anywhere is caught. Pass
+   * `accountId` only when a check is about this account's own writes: then tables with an account_id column
+   * are filtered to it. The needle must be unique to the test (a per-run random value), or other tests' rows
+   * can match it.
+   */
+  async function tablesContaining(needle: string, accountId?: string): Promise<string[]> {
+    const { rows: tables } = await admin.query<{ table_name: string; scoped: boolean }>(
+      `SELECT t.table_name,
+              EXISTS (SELECT 1 FROM information_schema.columns c
+                       WHERE c.table_schema = 'public' AND c.table_name = t.table_name AND c.column_name = 'account_id') AS scoped
+         FROM information_schema.tables t
+        WHERE t.table_schema = 'public' AND t.table_type = 'BASE TABLE'`,
     );
     const hits: string[] = [];
-    for (const { table_name } of tables) {
-      const { rows } = await admin.query<{ n: string }>(`SELECT count(*) AS n FROM "${table_name}" t WHERE t::text LIKE $1`, [`%${needle}%`]);
+    for (const { table_name, scoped } of tables) {
+      const { rows } = scoped && accountId !== undefined
+        ? await admin.query<{ n: string }>(`SELECT count(*) AS n FROM "${table_name}" t WHERE t.account_id = $2 AND t::text LIKE $1`, [`%${needle}%`, accountId])
+        : await admin.query<{ n: string }>(`SELECT count(*) AS n FROM "${table_name}" t WHERE t::text LIKE $1`, [`%${needle}%`]);
       if (Number(rows[0]!.n) > 0) hits.push(table_name);
     }
     return hits;
@@ -307,12 +318,13 @@ describe('D#31 API-2: model-connection routes', () => {
   it('criterion 4: PUT with an Idempotency-Key is 400 idempotency_not_supported, and nothing is stored', async () => {
     const owner = await seedAccountWithMember(admin, { role: 'owner' });
     const key = freshKey();
-    const res = await call(owner, 'PUT', '', { provider: 'ai_gateway', key }, { 'idempotency-key': 'abc-123' });
+    const idemKey = `idem-${randomBytes(12).toString('hex')}`;
+    const res = await call(owner, 'PUT', '', { provider: 'ai_gateway', key }, { 'idempotency-key': idemKey });
     expect(res.status).toBe(400);
     expect(((await res.json()) as ErrorBody).error.code).toBe('idempotency_not_supported');
     const { rows } = await admin.query(`SELECT 1 FROM model_connections WHERE account_id = $1`, [owner.accountId]);
     expect(rows).toHaveLength(0);
-    expect(await tablesContaining('abc-123')).toEqual([]);
+    expect(await tablesContaining(idemKey, owner.accountId)).toEqual([]);
   });
 
   it('criterion 5: the three writes are session-only; a token is refused, and GET is the only token route', async () => {
