@@ -54,9 +54,12 @@ beforeEach(() => {
   vi.mocked(ghPolicy.decide).mockClear();
 });
 
+const ACCOUNT_INSTALLATIONS = new Set([99, 55]);
+
 interface Harness {
   deps: ProxyDecisionDeps;
   resolvePublishTarget: ReturnType<typeof vi.fn>;
+  ownsPublishInstallation: ReturnType<typeof vi.fn>;
   mintPushToken: ReturnType<typeof vi.fn>;
   revokeToken: ReturnType<typeof vi.fn>;
   requester: ReturnType<typeof vi.fn>;
@@ -64,6 +67,8 @@ interface Harness {
 
 function harness(run: ResolvedSandboxRun | null, target: PublishTarget | null = TARGET): Harness {
   const resolvePublishTarget = vi.fn(async () => target);
+  // The database's answer, modelled: the run's account has two live team installations (99, the run's own, and 55); 7 belongs to another account.
+  const ownsPublishInstallation = vi.fn(async (_sandboxName: string, id: number) => ACCOUNT_INSTALLATIONS.has(id));
   const mintPushToken = vi.fn(async () => PUSH_TOKEN);
   const revokeToken = vi.fn(async () => true);
   const requester = vi.fn<AccessTokenRequester>(async (p) => ({
@@ -74,12 +79,14 @@ function harness(run: ResolvedSandboxRun | null, target: PublishTarget | null = 
   }));
   return {
     resolvePublishTarget,
+    ownsPublishInstallation,
     mintPushToken,
     revokeToken,
     requester,
     deps: {
       resolveSandboxRun: vi.fn(async () => run),
       resolvePublishTarget,
+      ownsPublishInstallation,
       planePublishApi: { mintPushToken, revokeToken },
       appCredentials: () => ({ appId: "app-1", privateKeyPem, webhookSecret: "unused" }),
       tokenCache: new InstallationTokenCache(),
@@ -157,6 +164,8 @@ describe("a publish run with no resolved target is denied before any mint (24a)"
     const h = harness(PRIVATE_RUN);
     const noResolver: ProxyDecisionDeps = { ...h.deps, resolvePublishTarget: undefined };
     expect(await decideProxyRequest(discovery("acme/widgets"), noResolver)).toEqual({ allow: false, status: 403, reason: "publish_not_configured" });
+    const noOwnership: ProxyDecisionDeps = { ...h.deps, ownsPublishInstallation: undefined };
+    expect(await decideProxyRequest(discovery("acme-public/widgets-pub"), noOwnership)).toEqual({ allow: false, status: 403, reason: "publish_not_configured" });
     const noApi: ProxyDecisionDeps = { ...h.deps, planePublishApi: undefined };
     expect(await decideProxyRequest(discovery("acme/widgets"), noApi)).toEqual({ allow: false, status: 403, reason: "publish_not_configured" });
     expect(mints(h)).toBe(0);
@@ -228,10 +237,13 @@ describe("what a publish run is allowed, and which token each request gets (23)"
     }
     expect(h.mintPushToken).toHaveBeenCalledTimes(reqs.length);
     expect(h.mintPushToken).toHaveBeenCalledWith("acme-public/widgets-pub", { ownsInstallation: expect.any(Function) });
-    // The public repo's installation counts as owned only when it is the run's own team-App installation (99 in this harness).
+    // The public repo's installation counts as owned when the database says it is a live installation of the run's account: the run's own (99) or another of that account (55), never another account's (7).
     const own = h.mintPushToken.mock.calls[0]![1] as { ownsInstallation: (id: number) => Promise<boolean> };
     await expect(own.ownsInstallation(99)).resolves.toBe(true);
+    await expect(own.ownsInstallation(55)).resolves.toBe(true);
     await expect(own.ownsInstallation(7)).resolves.toBe(false);
+    // The question carries the sandbox name from the verified claim and the installation id, and no account.
+    expect(h.ownsPublishInstallation.mock.calls.every((c) => c.length === 2 && c[0] === SANDBOX)).toBe(true);
     expect(h.requester).not.toHaveBeenCalled();
   });
 
@@ -252,6 +264,21 @@ describe("what a publish run is allowed, and which token each request gets (23)"
     it("an installation of another account on the public repo is refused and no token is minted", async () => {
       const { h, deps } = withRealApi(7);
       expect(await decideProxyRequest(discovery("acme-public/widgets-pub"), deps)).toEqual({ allow: false, status: 403, reason: "token_mint_failed" });
+      expect(h.requester).not.toHaveBeenCalled();
+    });
+
+    it("another live installation of the run's own account on the public repo mints, with that installation", async () => {
+      const { h, deps } = withRealApi(55);
+      h.requester.mockImplementation(async (p) => ({ token: PUSH_TOKEN, expiresAt: new Date(NOW + 3_600_000).toISOString(), permissions: { metadata: "read", ...p.permissions }, repositories: p.repositories ?? [] }));
+      expect(await decideProxyRequest(discovery("acme-public/widgets-pub"), deps)).toMatchObject({ allow: true, installationToken: PUSH_TOKEN });
+      expect(h.requester).toHaveBeenCalledWith(expect.objectContaining({ installationId: 55, repositories: ["widgets-pub"] }));
+      expect(h.ownsPublishInstallation).toHaveBeenCalledWith(SANDBOX, 55);
+    });
+
+    it("an ownership answer that cannot be had is an unavailable answer (502), with no mint", async () => {
+      const { h, deps } = withRealApi(99);
+      h.ownsPublishInstallation.mockRejectedValue(new Error("db down"));
+      expect(await decideProxyRequest(discovery("acme-public/widgets-pub"), deps)).toEqual({ allow: false, status: 502, reason: "upstream_unavailable" });
       expect(h.requester).not.toHaveBeenCalled();
     });
 

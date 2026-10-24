@@ -3,6 +3,7 @@ import { reportError } from "@fx/telemetry";
 import type { AppCredentialsSource } from "./appCredentials.js";
 import { getInstallationToken, InstallationTokenError, MintTimeoutError, type AccessTokenRequester, type InstallationTokenCache } from "./installationToken.js";
 import { PlanePushApiError } from "./planePushApi.js";
+import type { PublishInstallationOwnership } from "./publishInstallationOwnership.js";
 import type { PublishTarget, PublishTargetResolver } from "./publishTargetResolver.js";
 
 /**
@@ -19,6 +20,8 @@ import type { PublishTarget, PublishTargetResolver } from "./publishTargetResolv
 /** What the publish rule set needs from the proxy's dependencies. Both are optional on the proxy; a run that needs one it lacks is denied. */
 export interface PlanePublishDeps {
   resolvePublishTarget?: PublishTargetResolver;
+  /** Whether the installation GitHub names for the public repository is a live team installation of the account this sandbox's run belongs to (the database decides; see publishInstallationOwnership.ts). */
+  ownsPublishInstallation?: PublishInstallationOwnership;
   /** The public repository's mint (`GET /repos/<o>/<n>/installation`, then a fresh `plane_push` mint) and its one-use revoke. */
   planePublishApi?: {
     mintPushToken(codeRepo: string, opts: { ownsInstallation: (ghInstallationId: number) => Promise<boolean> }): Promise<string>;
@@ -47,8 +50,8 @@ export type PlanePublishOutcome =
 const deny = (status: 403 | 502, reason: string): PlanePublishOutcome => ({ allow: false, status, reason });
 
 export async function decidePlanePublishRequest(ctx: PlanePublishContext, deps: PlanePublishDeps): Promise<PlanePublishOutcome> {
-  const { resolvePublishTarget, planePublishApi } = deps;
-  if (!resolvePublishTarget || !planePublishApi) return deny(403, "publish_not_configured");
+  const { resolvePublishTarget, planePublishApi, ownsPublishInstallation } = deps;
+  if (!resolvePublishTarget || !planePublishApi || !ownsPublishInstallation) return deny(403, "publish_not_configured");
 
   const target: PublishTarget | null = await resolvePublishTarget(ctx.sandboxName);
   if (!target) return deny(403, "publish_target_not_resolved");
@@ -67,8 +70,8 @@ export async function decidePlanePublishRequest(ctx: PlanePublishContext, deps: 
   try {
     const installationToken =
       decision.side === "public"
-        ? // The public repo's installation must be the run's own: the team-App installation the resolver bound to this sandbox's account.
-          await planePublishApi.mintPushToken(target.codeRepo, { ownsInstallation: async (id) => ctx.run.appKind === "team" && id === ctx.run.installationId })
+        ? // The public repo's installation may be any live team installation of the account this run belongs to; the database resolves the account from the sandbox's run.
+          await planePublishApi.mintPushToken(target.codeRepo, { ownsInstallation: (id) => ownsPublishInstallation(ctx.sandboxName, id) })
         : await getInstallationToken({
             installationId: ctx.run.installationId,
             appKind: ctx.run.appKind,

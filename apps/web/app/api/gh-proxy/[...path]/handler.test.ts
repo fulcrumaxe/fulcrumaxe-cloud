@@ -1169,6 +1169,7 @@ describe("H1c: what the proxy reports when something fails, and what it leaves a
  */
 describe("D#598 P1f-4b: the publish run's per-request mint, use and revoke", () => {
   const BRANCH = "fx/p-0b1c2d3e-0000-4000-8000-000000000001";
+  const PUBLISH_ACCOUNT_INSTALLATIONS = new Set([99, 55]);
   const PUBLISH_RUN = { role: "plane_publish", product: "team" as const, installationId: 99, appKind: "team", owner: "acme", repo: "widgets" };
   const TARGET = { codeRepo: "acme-public/widgets-pub", branch: BRANCH };
   type Event = { type: "mint" | "use" | "revoke"; token: string; what: string };
@@ -1176,8 +1177,8 @@ describe("D#598 P1f-4b: the publish run's per-request mint, use and revoke", () 
   async function githubFake() {
     const live = new Set<string>();
     const events: Event[] = [];
-    // publicInstallation: the id GitHub names for the public repo; 99 is the publish run's own installation.
-    const state = { minted: 0, revokeStatus: 204, publicInstallation: 99 };
+    // publicInstallation: the id GitHub names for the public repo. 55 is a live installation of the publish run's account other than the run's own (99): the case the sandbox path accepts.
+    const state = { minted: 0, revokeStatus: 204, publicInstallation: 55 };
     const tokenOf = (authorization: string | undefined): string | null => {
       const m = /^(bearer|basic) (\S+)$/i.exec(authorization ?? "");
       if (!m) return null;
@@ -1239,6 +1240,8 @@ describe("D#598 P1f-4b: the publish run's per-request mint, use and revoke", () 
       tokenCache,
       resolveSandboxRun: async () => run,
       resolvePublishTarget: async () => TARGET,
+      // The database's answer, modelled: the run's account has two live team installations (99 and 55); 7 belongs to another account.
+      ownsPublishInstallation: async (_sandboxName: string, id: number) => PUBLISH_ACCOUNT_INSTALLATIONS.has(id),
       planePublishApi: createPlanePushApi({ appCredentials, requester: accessTokenRequester, cache: tokenCache, fetchImpl: buildPinnedFetch({ resolveUpstream, forwardPinned }) }),
       ...over,
     });
@@ -1282,9 +1285,9 @@ describe("D#598 P1f-4b: the publish run's per-request mint, use and revoke", () 
     expect(mints.slice(1)).toEqual(Array(3).fill('widgets-pub {"contents":"write","pull_requests":"write"}'));
   });
 
-  it("a public repo whose installation is not the run's own is refused with a generic 403: no token is minted and the requester is never called", async () => {
+  it("a public repo under an installation of another account is refused with a generic 403: no token is minted and the requester is never called", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
-    fake.state.publicInstallation = 55;
+    fake.state.publicInstallation = 7;
     const base = publishDeps(fake);
     const requester = vi.fn(base.accessTokenRequester);
     const deps = { ...base, accessTokenRequester: requester, planePublishApi: createPlanePushApi({ appCredentials: base.appCredentials, requester, cache: new InstallationTokenCache(), fetchImpl: buildPinnedFetch({ resolveUpstream: async () => ["127.0.0.1"], forwardPinned: base.forwardPinned }) }) };
@@ -1292,6 +1295,15 @@ describe("D#598 P1f-4b: the publish run's per-request mint, use and revoke", () 
     expect(res.status).toBe(403);
     expect(requester).not.toHaveBeenCalled();
     expect(fake.events).toEqual([]);
+  });
+
+  it("a public repo under another live installation of the run's own account is served, with a token minted for THAT installation and revoked after the request", async () => {
+    const res = await call(publishDeps(fake), "/acme-public/widgets-pub/info/refs?service=git-receive-pack");
+    expect(res.status).toBe(200);
+    const publicMints = fake.events.filter((e) => e.type === "mint" && e.what.startsWith("widgets-pub"));
+    expect(publicMints).toHaveLength(1);
+    expect(publicMints[0]!.token).toMatch(/^ghs_55_/);
+    expect(fake.live.size).toBe(0);
   });
 
   it("a token is dead at GitHub once its request is answered", async () => {

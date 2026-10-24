@@ -124,7 +124,7 @@ export function normalizeQuery(query: ProxyDecisionQuery): Record<string, string
   return out;
 }
 
-export interface ProxyDecisionDeps extends Pick<PlanePublishDeps, "resolvePublishTarget" | "planePublishApi"> {
+export interface ProxyDecisionDeps extends Pick<PlanePublishDeps, "resolvePublishTarget" | "ownsPublishInstallation" | "planePublishApi"> {
   resolveSandboxRun: SandboxRunResolver;
   appCredentials: AppCredentialsSource;
   tokenCache: InstallationTokenCache;
