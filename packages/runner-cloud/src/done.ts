@@ -38,7 +38,8 @@ export const DISPATCH_BASE_KIND = "runner.dispatch_base";
  *  2. a reviewer (or any role that is neither the executor nor the docs-writer) makes no commit: its run ends `succeeded`.
  *  3. an executor or a docs-writer is judged, in this order (C21 section 5.4, C25 section 3.1): a continuation with no recorded dispatch head
  *     -> `failed internal_error` (the cloud cannot judge it, C25 section 4); no commit on its branch (or `aheadBy` null, or a continuation whose
- *     head did not move) -> `failed no_commit` for the executor, `succeeded` with no pull request for the docs-writer (finding nothing to update
+ *     head did not move; except an executor's `fix` round whose passing check came in this same `done`, which is judged on its unchanged head like a build that committed)
+ *     -> `failed no_commit` for the executor, `succeeded` with no pull request for the docs-writer (finding nothing to update
  *     is a valid outcome for it); a scope that cannot be read -> `failed scope_unknown`, no pull request; then
  *     the pull request is opened as a DRAFT (or reused, if our App opened it), its changed paths are read (paths and change types only),
  *     and: an incomplete listing -> close it, `failed scope_violation`; any rename or unknown change type -> close it, `failed
@@ -198,7 +199,10 @@ async function decide(deps: RunnerCloudDeps, i: { accountId: string; runId: stri
     }
     reported = norm.check;
   }
-  const judged = await judgeRun(port, ctx, ctx.repo, ctx.job, i, deps.log ?? ((line) => console.warn(line)));
+  // FIXROUND-NOCOMMIT-CHECK-PASSED: reaching this line with a check in the job means the check passed (a failing or out-of-contract result returned above), so `reported` is a
+  // passing result the cloud stores in this same `done` (run_checks and run.check_ended) and the job it signed asked for.
+  const checkPassedOnHead = ctx.job.check !== undefined && reported !== undefined;
+  const judged = await judgeRun(port, ctx, ctx.repo, ctx.job, i, deps.log ?? ((line) => console.warn(line)), checkPassedOnHead);
   // A check that passed is recorded beside whatever the commit and scope tests decided.
   return judged.kind === "verdict" && ctx.job.check !== undefined && reported !== undefined ? { ...judged, check: reported } : judged;
 }
@@ -210,8 +214,8 @@ export const branchOf = (job: Job, i: { runId: string; leaseGeneration: number }
 const headOf = (s: { headOid: string | null } | null): { headOid?: string } => (s !== null && s.headOid !== null && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(s.headOid) ? { headOid: s.headOid } : {});
 
 /** Records the judged branch next to the pull request number, and only there: a verdict with no pull request names no branch. */
-async function judgeRun(port: RunPullRequestPort, ctx: DoneContext, repo: PullRequestRepo, job: Job, i: { runId: string; leaseGeneration: number }, write: (line: string) => void): Promise<Decision> {
-  const decision = await judgeCommit(port, ctx, repo, job, i, write);
+async function judgeRun(port: RunPullRequestPort, ctx: DoneContext, repo: PullRequestRepo, job: Job, i: { runId: string; leaseGeneration: number }, write: (line: string) => void, checkPassedOnHead: boolean): Promise<Decision> {
+  const decision = await judgeCommit(port, ctx, repo, job, i, write, checkPassedOnHead);
   if (decision.kind !== "verdict" || decision.verdict.prNumber === null) return decision;
   return verdictOf({ ...decision.verdict, branch: branchOf(job, i) });
 }
@@ -252,6 +256,7 @@ async function judgeCommit(
   job: Job,
   i: { runId: string; leaseGeneration: number },
   write: (line: string) => void,
+  checkPassedOnHead: boolean,
 ): Promise<Decision> {
   // A fresh run's branch is `<prefix><run>-g<generation>`: a stale generation's branch is never looked at. A continuation works on exactly
   // the branch our issuer put in its signed job (the one recorded for the pull request it fixes).
@@ -284,7 +289,12 @@ async function judgeCommit(
     // The first test: no commit. A missing ref, no comparison (`aheadBy` null: the port never turns it into a number), zero commits ahead, or a
     // continuation whose head is the one recorded at its dispatch. It comes BEFORE the scope test, so a run with no commit never reports a scope
     // problem. A docs-writer that made no commit succeeded with nothing to show: no pull request, no branch (C25 section 3.1).
-    const noCommit = !state.exists || state.aheadBy === null || state.aheadBy === 0 || (continuation && state.headOid === ctx.dispatchBase?.oid);
+    // FIXROUND-NOCOMMIT-CHECK-PASSED: the one exception to "a continuation must move the head" is an executor's check-fix round (task kind `fix`) whose repository check
+    // passed on the branch head: the earlier commit was right and the failure was unrelated, so the round correctly added nothing. The branch must still exist and be ahead of the
+    // base; the pull request is opened (or reused) and the scope test runs on its files exactly as for a build that committed.
+    const headUnmoved = continuation && state.headOid === ctx.dispatchBase?.oid;
+    const unchangedButChecked = headUnmoved && checkPassedOnHead && ctx.role === "executor" && job.task.kind === "fix";
+    const noCommit = !state.exists || state.aheadBy === null || state.aheadBy === 0 || (headUnmoved && !unchangedButChecked);
     if (noCommit) {
       if (ctx.role !== "docs-writer") return failed("no_commit");
       // A docs-writer that cannot be shown to have made no commit (the comparison could not be read) is not told it succeeded.

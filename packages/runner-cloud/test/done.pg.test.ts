@@ -90,6 +90,8 @@ describe("done route [pg]", () => {
     /** The Spec's `acceptance_files`; `false` attaches no spec version at all. */
     scope?: unknown;
     continues?: { branch: string } | null;
+    /** The job's task kind; a continuation is `fix` unless this says otherwise. */
+    taskKind?: Job["task"]["kind"];
     /** The head recorded at dispatch: a hash, null (branch absent then), or "unrecorded" (no row). */
     dispatchBase?: string | null | "unrecorded";
     branchOid?: string;
@@ -127,7 +129,7 @@ describe("done route [pg]", () => {
       role: (o.role ?? "executor") as Job["role"],
       mode: "local",
       spec: null,
-      task: { kind: o.continues ? "fix" : "implement", prompt: "p", prompt_sha256: sha256Text("p") },
+      task: { kind: o.taskKind ?? (o.continues ? "fix" : "implement"), prompt: "p", prompt_sha256: sha256Text("p") },
       role_card: { text: "c", sha256: sha256Text("c") },
       role_tools_sha256: "a".repeat(64),
       continues: o.continues ? { parent_run_id: randomUUID(), session_id: "sess-1", branch: o.continues.branch } : null,
@@ -434,6 +436,57 @@ describe("done route [pg]", () => {
       const s = await scene({ continues: { branch: BRANCH }, dispatchBase: "c".repeat(40), branchOid: "e".repeat(40) });
       await h.admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 2, $3, $4::jsonb)", [A.accountId, s.runId, DISPATCH_BASE_KIND, JSON.stringify({ head_oid: "e".repeat(40) })]);
       expect(parsedDone(await s.call()).failure_reason).toBe("no_commit");
+    });
+  });
+
+  // FIXROUND-NOCOMMIT-CHECK-PASSED: a check-fix round that rightly changed nothing, because the earlier commit was right and the failure was unrelated.
+  describe("a fix round with no new commit whose check passed", () => {
+    const BRANCH = "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1";
+    const CHK: Check = { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 };
+    const ok: DoneCheck = { exit_code: 0, duration_ms: 1000, timed_out: false, skipped_tests: 0, summary: "ok" };
+    const unmoved = { continues: { branch: BRANCH }, dispatchBase: "c".repeat(40), branchOid: "c".repeat(40), aheadBy: 1, check: CHK } as const;
+    const withCheck = (s: Scene, check: DoneCheck) => ({ body: { run_id: s.runId, lease_generation: s.gen, check } });
+
+    it("opens the pull request for the existing head and succeeds, recording the branch and head and the passing check", async () => {
+      const s = await scene(unmoved);
+      expect(parsedDone(await s.call(withCheck(s, ok)))).toEqual({ continue: false, outcome: "succeeded", failure_reason: null, pr_number: 1 });
+      expect(s.repo.pulls[0]!.head).toBe(BRANCH);
+      expect(verdictOf()).toEqual({ outcome: "succeeded", failureReason: null, prNumber: 1, branch: BRANCH, headOid: "c".repeat(40) });
+      expect(finished[0]!.check).toEqual(ok);
+    });
+
+    it("reuses the pull request our App already opened on that branch", async () => {
+      const s = await scene(unmoved);
+      await s.call(withCheck(s, ok));
+      expect(s.repo.pulls).toHaveLength(1);
+    });
+
+    it("still runs the scope test on the pull request's files: an out-of-scope file ends scope_violation and closes it", async () => {
+      const s = await scene({ ...unmoved, files: [file("outside/x.ts", "ADDED")] });
+      expect(parsedDone(await s.call(withCheck(s, ok)))).toEqual({ continue: false, outcome: "failed", failure_reason: "scope_violation", pr_number: 1 });
+    });
+
+    it("a failed check is check_failed as before, never a pull request", async () => {
+      const s = await scene(unmoved);
+      expect(parsedDone(await s.call(withCheck(s, { ...ok, exit_code: 1 }))).failure_reason).toBe("check_failed");
+      expect(s.repo.pulls).toHaveLength(0);
+    });
+
+    it("a continuation whose job carried no check stays no_commit", async () => {
+      const s = await scene({ ...unmoved, check: undefined });
+      expect(parsedDone(await s.call(withCheck(s, ok))).failure_reason).toBe("no_commit");
+      expect(s.repo.pulls).toHaveLength(0);
+    });
+
+    it("a continuation that is not a fix round stays no_commit even with a passing check", async () => {
+      const s = await scene({ ...unmoved, taskKind: "implement" });
+      expect(parsedDone(await s.call(withCheck(s, ok))).failure_reason).toBe("no_commit");
+      expect(s.repo.pulls).toHaveLength(0);
+    });
+
+    it("a branch that is not ahead of the base stays no_commit", async () => {
+      const s = await scene({ ...unmoved, aheadBy: 0 });
+      expect(parsedDone(await s.call(withCheck(s, ok))).failure_reason).toBe("no_commit");
     });
   });
 
