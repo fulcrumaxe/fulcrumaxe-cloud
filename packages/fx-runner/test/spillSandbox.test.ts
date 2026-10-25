@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { outcomeOf } from "../src/engines/claude/engine.js";
-import { denyRules } from "../src/engines/claude/filePermissions.js";
+import { denyRules, workspaceProtectedEditRules } from "../src/engines/claude/filePermissions.js";
 import { settingsFor } from "../src/engines/claude/settingsFile.js";
 import { SandboxGrantRefused, sandboxSettings } from "../src/sandbox/sandboxSettings.js";
 import { cacheRootsFor } from "../src/daemon/mirror.js";
@@ -91,7 +91,7 @@ describe("the file tools' rule for a run's spill directory", () => {
     const s = settings(DIR);
     expect(s.permissions.allow).toEqual(expect.arrayContaining([`Read(/${DIR})`, `Read(/${DIR}/**)`]));
     expect(s.permissions.allow.filter((rule) => rule.includes(DIR) && !rule.startsWith("Read("))).toEqual([]);
-    expect(s.permissions.deny).toEqual(denyRules(protectedList));
+    expect(s.permissions.deny).toEqual([...denyRules(protectedList), ...workspaceProtectedEditRules(base.workspace)]);
   });
 
   it("the state directory stays denied, and no allow rule reaches it", () => {

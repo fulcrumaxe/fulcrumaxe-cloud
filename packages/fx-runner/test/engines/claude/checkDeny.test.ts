@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { outcomeOf } from "../../../src/engines/claude/engine.js";
-import { checkCommandDenyRules, denyRules } from "../../../src/engines/claude/filePermissions.js";
+import { checkCommandDenyRules, denyRules, workspaceProtectedEditRules } from "../../../src/engines/claude/filePermissions.js";
 import { settingsFor } from "../../../src/engines/claude/settingsFile.js";
 import { CHECK_NOT_YOURS, checkNote } from "../../../src/job/prompt.js";
 import { RUN_ID, engineFor, makeRig, type Rig } from "./rig.js";
@@ -46,7 +46,7 @@ describe("the settings file carries the check's deny rules", () => {
     const rig = makeRig();
     const { handle } = await engineFor(rig).start({ ...rig.startOptions(), checkArgv: CHECK_ARGV } as ReturnType<Rig["startOptions"]>);
     expect((await outcomeOf(handle)).status).toBe("ok");
-    expect(denyOf(rig)).toEqual([...denyRules(rig.config.protectedPaths), ...checkCommandDenyRules(CHECK_ARGV)]);
+    expect(denyOf(rig)).toEqual([...denyRules(rig.config.protectedPaths), ...workspaceProtectedEditRules(rig.workdir), ...checkCommandDenyRules(CHECK_ARGV)]);
     const file = JSON.parse(readFileSync(settingsFile(rig), "utf8")) as { permissions: Record<string, unknown> } & Record<string, unknown>;
     const plain = settingsFor("executor", rig.config.sandboxSettings, rig.workdir, rig.config.protectedPaths) as typeof file;
     expect({ ...file, permissions: { ...file.permissions, deny: [] } }).toEqual({ ...plain, permissions: { ...plain.permissions, deny: [] } });
@@ -72,7 +72,7 @@ describe("the settings file carries the check's deny rules", () => {
   it("the review roles get the same rules", () => {
     for (const role of ["code-reviewer", "acceptance-tester", "security-reviewer", "debater"]) {
       const deny = (settingsFor(role, { enabled: true }, "/w/job", { noAccess: [], noEdit: [] }, [], undefined, CHECK_ARGV) as { permissions: { deny: string[] } }).permissions.deny;
-      expect(deny, role).toEqual(checkCommandDenyRules(CHECK_ARGV));
+      expect(deny, role).toEqual([...workspaceProtectedEditRules("/w/job"), ...checkCommandDenyRules(CHECK_ARGV)]);
     }
   });
 });

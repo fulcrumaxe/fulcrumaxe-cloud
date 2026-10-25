@@ -5,7 +5,7 @@ import { EngineRefusal } from "../../../src/engines/claude/refusal.js";
 import { mcpConfigFor, settingsFor, writeJobFiles } from "../../../src/engines/claude/settingsFile.js";
 import { roleToolsFor } from "../../../src/job/roleTools.js";
 import { protectedPaths } from "../../../src/sandbox/sandboxSettings.js";
-import { confineFileTools, denyRules } from "../../../src/engines/claude/filePermissions.js";
+import { confineFileTools, denyRules, workspaceProtectedEditRules } from "../../../src/engines/claude/filePermissions.js";
 import { makeWorkspace } from "./harness.js";
 
 const SANDBOX = { enabled: true, filesystem: { denyRead: ["~"] } };
@@ -17,7 +17,7 @@ describe("settings and MCP files", () => {
     const file = settingsFor("code-reviewer", SANDBOX, WS, PROTECTED);
     expect(file).toEqual({
       disableAllHooks: true,
-      permissions: { defaultMode: "dontAsk", allow: confineFileTools(roleToolsFor("code-reviewer"), WS), deny: denyRules(PROTECTED), blockReadsOutsideWorkingDirectories: true },
+      permissions: { defaultMode: "dontAsk", allow: confineFileTools(roleToolsFor("code-reviewer"), WS), deny: [...denyRules(PROTECTED), ...workspaceProtectedEditRules(WS)], blockReadsOutsideWorkingDirectories: true },
       sandbox: SANDBOX,
     });
     const permissions = (file as { permissions: Record<string, unknown> }).permissions;

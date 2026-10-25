@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { EngineRefusal } from "../src/engines/claude/refusal.js";
-import { confineFileTools, denyRules } from "../src/engines/claude/filePermissions.js";
+import { SANDBOX_PROTECTED_FILES } from "../src/daemon/sandboxStubs.js";
+import { settingsFor } from "../src/engines/claude/settingsFile.js";
+import { confineFileTools, denyRules, workspaceProtectedEditRules } from "../src/engines/claude/filePermissions.js";
 import { ROLE_TOOLS, roleToolsDigest, roleToolsFor } from "../src/job/roleTools.js";
 import { CREDENTIAL_FLOOR, PERSISTENCE_TARGETS, protectedPaths, type ProtectedPaths } from "../src/sandbox/sandboxSettings.js";
 
@@ -93,5 +95,45 @@ describe("the rules, as the CLI would apply them", () => {
     for (const p of LIST.noAccess) expect(deny).toContain(`Read(/${p}/**)`);
     expect(LIST.noEdit.length).toBe(PERSISTENCE_TARGETS.length);
     for (const target of [".bashrc", ".profile", ".zshrc", ".config/systemd/user", "Library/LaunchAgents", ".config/autostart", ".gitconfig", ".config/git"]) expect(PERSISTENCE_TARGETS).toContain(target);
+  });
+});
+
+describe("workspaceProtectedEditRules: the file tools honour the sandbox's protected list", () => {
+  /** gitignore-style matching for the rule shapes used here: exact, `*` inside a name, `**` for directories. */
+  function globMatch(rule: string, file: string): boolean {
+    const m = /^Edit\(\/(\/.*)\)$/.exec(rule);
+    if (m === null) return false;
+    const pat = m[1]!;
+    let re = "";
+    for (let i = 0; i < pat.length; i++) {
+      if (pat.startsWith("/**/", i)) {
+        re += "/(?:.*/)?";
+        i += 3;
+      } else if (pat.startsWith("/**", i) && i + 3 === pat.length) {
+        re += "(?:/.*)?";
+        i += 2;
+      } else if (pat[i] === "*") re += "[^/]*";
+      else re += pat[i]!.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+    return new RegExp(`^${re}$`).test(file);
+  }
+  const deny = workspaceProtectedEditRules(WS);
+  const denied = (file: string): boolean => deny.some((rule) => globMatch(rule, file));
+
+  it("has a rule for every name of the shared list, the .env files and .git", () => {
+    for (const name of SANDBOX_PROTECTED_FILES) expect(deny).toContain(`Edit(//home/jane/work/run-1/${name})`);
+    expect(deny).toContain("Edit(//home/jane/work/run-1/.git/**)");
+    expect(deny).toContain("Edit(//home/jane/work/run-1/.env.*)");
+  });
+
+  it("denies the lock file, .npmrc, .env, a nested .env and .git/config, and allows src/foo.ts", () => {
+    for (const f of ["pnpm-lock.yaml", ".npmrc", ".gitmodules", ".env", ".env.local", "apps/web/.env", ".git/config", ".git/hooks/pre-commit", ".git"]) expect(denied(`${WS}/${f}`), f).toBe(true);
+    for (const f of ["src/foo.ts", "package.json", "apps/web/pnpm-lock.yaml.md", "environment.ts", "src/.github/x.yml"]) expect(denied(`${WS}/${f}`), f).toBe(false);
+    expect(confineFileTools(roleToolsFor("executor"), WS)).toContain("Edit(//home/jane/work/run-1/**)");
+  });
+
+  it("is in the settings the CLI is given for a build role", () => {
+    const settings = settingsFor("executor", {}, WS, LIST) as { permissions: { deny: string[] } };
+    for (const rule of deny) expect(settings.permissions.deny).toContain(rule);
   });
 });
