@@ -7,7 +7,7 @@ import { CliError } from "./cliError.js";
 import { stateDirFor } from "./config.js";
 import type { CommandContext, Flags } from "./context.js";
 import { attachCommand } from "./commands/attach.js";
-import { claimingCommand, runnerSettingCommand, runnerUnsetCommand } from "./commands/claiming.js";
+import { claimingCommand, runnerResetFootprintsCommand, runnerSettingCommand, runnerUnsetCommand } from "./commands/claiming.js";
 import { SETTING_KEYS } from "./runnerSettings.js";
 import { registerCommand } from "./commands/register.js";
 import { loadBypass, requireUsable } from "./protectionBypass.js";
@@ -95,6 +95,8 @@ Commands:
                      Return a setting to its automatic default.
                      Lower the most jobs held at once, or set the memory kept free for your own work. A change applies from the next claim; running jobs are never stopped.
                      The budget is the hard limit one job runs under (memory and processes); a job past it is stopped on its own, others go on.
+  config reset footprints
+                     Forget the memory each kind of job was learned to need; the estimates start from the defaults again.
   pause | resume     Stop claiming new jobs (running ones finish), or start again. The runner stays registered and keeps its place.
 `;
 
@@ -206,6 +208,7 @@ export async function runCli(io: CliIo): Promise<number> {
       return await doctorCommand(ctx, io.doctorHost, { sandboxOnly: flags.has("sandbox-only") });
     }
     if (command === "pause" || command === "resume") return claimingCommand(command, ctx);
+    if (command === "config" && positionals[0] === "reset" && positionals[1] === "footprints") return runnerResetFootprintsCommand(ctx);
     if (command === "config" && positionals[0] === "unset" && positionals[1] !== undefined && SETTING_KEYS.includes(positionals[1])) return runnerUnsetCommand(positionals[1], ctx);
     if (command === "config" && positionals[0] === "set" && positionals[1] !== undefined && SETTING_KEYS.includes(positionals[1])) return runnerSettingCommand(positionals[1], positionals[2], ctx);
     if (command === "update" || command === "config") {

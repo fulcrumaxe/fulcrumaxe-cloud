@@ -57,6 +57,14 @@ export interface JobLimits {
   wrap(job: { runId: string; role: string }, command: string, args: readonly string[], env: Record<string, string>): { command: string; args: string[]; env: Record<string, string> };
   /** After the agent ended: whether the kernel killed the job for its memory budget. Clears the unit's record either way. */
   exceeded(runId: string): Promise<boolean>;
+  /**
+   * The highest memory this job's own scope has used so far (bytes), read from the scope's cgroup (`memory.peak`, else `memory.max_usage_in_bytes`);
+   * undefined while the scope's cgroup cannot be found or read. It counts the agent only: the check step runs in the service's cgroup, not in the scope.
+   * The cgroup disappears with the job, so the last figure read is kept and returned after that. Never blocks: early calls start finding the cgroup.
+   */
+  peak?(runId: string): number | undefined;
+  /** Forgets the job's peak record. */
+  release?(runId: string): void;
 }
 
 export interface ScopeTools {
@@ -112,13 +120,29 @@ export interface ScopeLimitsConfig {
   budgets: () => Budgets;
   capture: GitCapture;
   sleep?: (ms: number) => Promise<void>;
+  /** Reads a small cgroup file; absent: `peak` always answers undefined. */
+  readText?: ((target: string) => string | undefined) | undefined;
+  /** Where the cgroup v2 tree is mounted (default: the usual mount under /sys). */
+  cgroupRoot?: string;
 }
+
+interface PeakRecord {
+  unit: string;
+  /** The scope's cgroup path below the mount, once `systemctl show` has said it. */
+  cgroup?: string;
+  resolving: boolean;
+  last?: number;
+}
+
+const CGROUP_PATH = /^\/[A-Za-z0-9_@.:\\-]+(?:\/[A-Za-z0-9_@.:\\-]+)*$/;
+const PEAK_FILES = ["memory.peak", "memory.max_usage_in_bytes"];
+const DEFAULT_CGROUP_ROOT = ["", "sys", "fs", "cgroup"].join("/");
 
 /** The limits for this machine: the scope limits where scopes work (and then they are enforced), else none and the reason. */
 export async function setUpJobLimits(deps: SupportDeps, budgets: () => Budgets): Promise<{ enforced: boolean; limits?: JobLimits; reason?: string }> {
   const support = await detectScopeSupport(deps);
   if (!support.ok) return { enforced: false, reason: support.reason };
-  return { enforced: true, limits: createScopeLimits({ tools: support.tools, runtimeDir: support.runtimeDir, budgets, capture: deps.capture }) };
+  return { enforced: true, limits: createScopeLimits({ tools: support.tools, runtimeDir: support.runtimeDir, budgets, capture: deps.capture, readText: deps.readText }) };
 }
 
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -127,6 +151,8 @@ const SETTLE_MS = 100;
 
 export function createScopeLimits(config: ScopeLimitsConfig): JobLimits {
   const units = new Map<string, string>();
+  const peaks = new Map<string, PeakRecord>();
+  const cgroupRoot = config.cgroupRoot ?? DEFAULT_CGROUP_ROOT;
   const sleep = config.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   let counter = 0;
   // A tag of this runner process in every unit name: a failed scope left by an earlier runner process can never take a name this one wants.
@@ -139,6 +165,7 @@ export function createScopeLimits(config: ScopeLimitsConfig): JobLimits {
       const budget = config.budgets()[jobClassOfRole(job.role)];
       const unit = `fxr-${job.runId}-${tag}${++counter}`;
       units.set(job.runId, unit);
+      peaks.set(job.runId, { unit, resolving: false });
       return {
         command: config.tools.systemdRun,
         args: [
@@ -148,6 +175,38 @@ export function createScopeLimits(config: ScopeLimitsConfig): JobLimits {
         ],
         env: { ...env, ...busEnv },
       };
+    },
+    peak(runId) {
+      const record = peaks.get(runId);
+      if (record === undefined || config.readText === undefined) return undefined;
+      if (record.cgroup === undefined) {
+        // The scope exists a moment after the start, so each call tries again until the manager knows it.
+        if (!record.resolving) {
+          record.resolving = true;
+          void config
+            .capture(config.tools.systemctl, ["--user", "show", `${record.unit}.scope`, "-p", "ControlGroup"], busEnv, 5_000)
+            .then((shown) => {
+              const found = shown.code === 0 ? shown.stdout.match(/^ControlGroup=(\S+)/m)?.[1] : undefined;
+              if (found !== undefined && CGROUP_PATH.test(found) && !found.split("/").includes("..")) record.cgroup = found;
+            })
+            .catch(() => undefined)
+            .finally(() => {
+              record.resolving = false;
+            });
+        }
+        return record.last;
+      }
+      for (const file of PEAK_FILES) {
+        const value = Number.parseInt(config.readText(`${cgroupRoot}${record.cgroup}/${file}`)?.trim() ?? "", 10);
+        if (Number.isFinite(value) && value >= 0) {
+          record.last = Math.max(record.last ?? 0, value);
+          break;
+        }
+      }
+      return record.last;
+    },
+    release(runId) {
+      peaks.delete(runId);
     },
     async exceeded(runId) {
       const unit = units.get(runId);

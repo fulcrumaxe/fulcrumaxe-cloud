@@ -9,7 +9,7 @@
  * Progress floor: with no job in hand (and not paused, disk fine) one light job is always admitted, so a busy machine cannot starve the runner.
  * Jobs that started only moments ago have not yet grown into their footprint, so their footprint is held back from the headroom until they
  * have (the ramp) or have used it. Nothing here stops a job: when the headroom shrinks the runner only stops asking for more.
- * A finished job's measured peak feeds the footprint store.
+ * A finished job's measured peak (its own scope's, else the machine-wide drop) feeds the footprint store.
  */
 import { MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, jobClassOfRole, type LimitedBy, type ClaimCapacity, type JobClass } from "@fulcrumaxe/runner-protocol";
 import type { Claimed } from "./client.js";
@@ -61,9 +61,15 @@ interface InHand {
   startedAt: number;
   footprint: Footprint;
   baseline: number;
-  /** Largest memory drop attributed to this job so far. */
-  peak: number;
+  runId: string;
+  /** Largest machine-wide memory drop attributed to this job so far: the fallback for a job with no readable scope. */
+  drop: number;
+  /** The job's own scope peak, once the scope has been read at all (then the drop is never used). */
+  scopePeak: number | undefined;
 }
+
+/** What the job has needed: its own scope's peak where there is one, else the shared machine drop. */
+const peakOf = (job: InHand): number => job.scopePeak ?? job.drop;
 
 export interface AdmissionDeps {
   probe: ResourceProbe;
@@ -74,6 +80,10 @@ export interface AdmissionDeps {
   heavyBudgetBytes?: () => number;
   /** The plan's usage limit (D#6 C43-6): blocked claims nothing; single claims only with no job in hand. Absent: neither (an `api_key` runner). */
   usage?: () => UsageState;
+  /** The job's own peak memory from its cgroup scope (D#6 RUNNER-FOOTPRINT-POLLUTION); undefined: not readable (no scope, macOS), and the shared machine drop is used for that job. */
+  scopePeak?: (runId: string) => number | undefined;
+  /** Called once the job's peak has been recorded. */
+  releaseScope?: (runId: string) => void;
   now: () => number;
   /** Starts a repeating call and returns how to stop it. Default: an unref'd interval. */
   every?: (fn: () => void, ms: number) => () => void;
@@ -103,8 +113,13 @@ export function createAdmission(deps: AdmissionDeps): Admission {
     if (inHand.size === 0) return;
     const share = inHand.size;
     const avail = deps.probe.read().availMemBytes;
-    // The machine does not say which job used the memory, so the drop since each job started is shared by the jobs in hand. The per-job limits of C43-5 will give exact figures.
-    for (const job of inHand) job.peak = Math.max(job.peak, (job.baseline - avail) / share);
+    // A job in its own scope is measured by that scope. Only a job without one falls back to the machine-wide drop since it started, shared by the jobs in
+    // hand: that cannot tell the job from its neighbours or from outside work (builds, CI), so it overstates.
+    for (const job of inHand) {
+      const own = deps.scopePeak?.(job.runId);
+      if (own !== undefined) job.scopePeak = Math.max(job.scopePeak ?? 0, own);
+      else job.drop = Math.max(job.drop, (job.baseline - avail) / share);
+    }
   };
 
   function snapshot(): Snapshot {
@@ -117,7 +132,7 @@ export function createAdmission(deps: AdmissionDeps): Admission {
     for (const job of inHand) {
       used[job.cls] += 1;
       if (now - job.startedAt < config.rampMs) {
-        heldMem += Math.max(0, job.footprint.memBytes - Math.max(0, job.peak));
+        heldMem += Math.max(0, job.footprint.memBytes - Math.max(0, peakOf(job)));
         heldCores += job.footprint.cores;
       }
     }
@@ -183,7 +198,7 @@ export function createAdmission(deps: AdmissionDeps): Admission {
     begin(claimed) {
       const job = claimed.signedJob.job;
       const repo = `${job.repo.owner}/${job.repo.name}`;
-      const entry: InHand = { cls: jobClassOfRole(job.role), repo, role: job.role, startedAt: deps.now(), footprint: deps.footprints.estimate(repo, job.role), baseline: deps.probe.read().availMemBytes, peak: 0 };
+      const entry: InHand = { cls: jobClassOfRole(job.role), repo, role: job.role, startedAt: deps.now(), footprint: deps.footprints.estimate(repo, job.role), baseline: deps.probe.read().availMemBytes, runId: claimed.runId, drop: 0, scopePeak: undefined };
       inHand.add(entry);
       stopTimer ??= every(sample, config.sampleMs);
       return () => {
@@ -194,7 +209,8 @@ export function createAdmission(deps: AdmissionDeps): Admission {
           stopTimer?.();
           stopTimer = undefined;
         }
-        deps.footprints.record(entry.repo, entry.role, entry.peak);
+        deps.footprints.record(entry.repo, entry.role, peakOf(entry));
+        deps.releaseScope?.(entry.runId);
       };
     },
   };

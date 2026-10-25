@@ -421,6 +421,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         admission: createAdmission({
           probe: hooks.probe ?? realResourceProbe({ platform: host.platform, diskPaths: [workspaceRoot, path.dirname(mirrorsRoot)], vmStatText: () => vmStat }),
           footprints,
+          ...(limits?.peak === undefined ? {} : { scopePeak: (runId: string) => limits.peak?.(runId), releaseScope: (runId: string) => limits.release?.(runId) }),
           settings: () => capUnenforced(loadSettings(stateDir), enforced),
           heavyBudgetBytes: () => budgets().heavy.memoryBytes,
           paused: () => isPaused(stateDir) || claimBlockReason(stateDir) !== undefined,

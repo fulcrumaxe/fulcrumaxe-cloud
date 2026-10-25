@@ -4,6 +4,7 @@
  */
 import { CliError } from "../cliError.js";
 import type { CommandContext } from "../context.js";
+import { createFootprintStore } from "../daemon/footprints.js";
 import { isPaused, setPaused, setSetting, unsetSetting } from "../runnerSettings.js";
 
 export function claimingCommand(verb: "pause" | "resume", ctx: CommandContext): number {
@@ -25,5 +26,12 @@ export function runnerUnsetCommand(key: string, ctx: CommandContext): number {
 export function runnerSettingCommand(key: string, value: string | undefined, ctx: CommandContext): number {
   if (value === undefined) throw new CliError(`usage: fx-runner config set ${key} <number>`, 2);
   ctx.out(setSetting(ctx.stateDir, key, value));
+  return 0;
+}
+
+/** `config reset footprints`: forgets the learned memory estimates; the next jobs start from the defaults and learn again. */
+export function runnerResetFootprintsCommand(ctx: CommandContext): number {
+  createFootprintStore(ctx.stateDir).reset();
+  ctx.out("Learned job memory estimates cleared; they start from the defaults and are learned again from the next jobs.");
   return 0;
 }
