@@ -7,6 +7,7 @@ import { withTenant } from '../tenancy/withTenant.js';
 import { assertRepoIdShape } from './read.js';
 import { redactEventText } from '../events/redact.js';
 import { checkPrFooter } from '@fulcrumaxe/runner-protocol/planePushText';
+import { uncoveredRuleFiles } from '@fulcrumaxe/runner-protocol/repoPairing';
 
 /**
  * A repository's optional pairing with a public code repo. NO ROW MEANS OFF: the state is derived from the current row, never
@@ -62,6 +63,12 @@ export function validatePairingInput(input: SetRepoPairingInput): void {
     if (value !== undefined && value !== null && (!pathOk(value) || GLOB_CHARS_RE.test(value))) {
       invalid('a rule file must be one plain path inside the private repo', field);
     }
+  }
+  // A rule file decides what may be published, so it must itself be a private path (matched as the push scan matches them). The push route
+  // refuses the same for a pairing stored before this check.
+  const uncovered = uncoveredRuleFiles({ overlayGlobs: globs, identifierRulesPath: input.identifierRulesPath ?? null, planDataRulesPath: input.planDataRulesPath ?? null });
+  if (uncovered.length > 0) {
+    invalid('rule files must be private paths: list the file, or a folder that holds it, under private paths', uncovered[0] === 'identifierRulesPath' ? 'identifier_rules_path' : 'plan_data_rules_path');
   }
   const footer = footerOrNull(input.prFooter);
   if (footer !== null) {

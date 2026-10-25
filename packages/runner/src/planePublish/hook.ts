@@ -157,7 +157,7 @@ export async function runPlanePublish(input: PlanePublishInput, deps: PlanePubli
     try {
       await planePushGit(
         work,
-        [...HARDENING(deps.gitOrigin), "fetch", "--no-tags", "--quiet", "--no-write-fetch-head", `${deps.gitOrigin}/${input.own.owner}/${input.own.name}.git`, `${input.privateHead}:refs/fx/head`, `${input.privateBase}:refs/fx/base`],
+        [...HARDENING(deps.gitOrigin), "fetch", "--no-tags", "--quiet", "--no-write-fetch-head", `${deps.gitOrigin}/${input.own.owner}/${input.own.name}.git`, `${input.privateHead}:refs/fx/head`, `${input.privateBase}:refs/fx/base`, `${input.privateDefaultTip}:refs/fx/default`],
         undefined,
         NO_PROMPT,
       );
@@ -167,7 +167,7 @@ export async function runPlanePublish(input: PlanePublishInput, deps: PlanePubli
       throw new PlaneRouteError("bad_input", "the run's commits could not be read from the private repository");
     }
     const result = await routeAndPush(
-      { repoDir: work, privateBase: input.privateBase, privateHead: input.privateHead, own: input.own, defaultBranch: "main", branch: input.branch, title: input.title, body: input.body, identity: input.identity, commitTime: input.commitTime },
+      { repoDir: work, privateBase: input.privateBase, privateHead: input.privateHead, privateDefaultTip: input.privateDefaultTip, own: input.own, defaultBranch: "main", branch: input.branch, title: input.title, body: input.body, identity: input.identity, commitTime: input.commitTime },
       { loadPairing: async () => pairing, loadOwn: async () => input.own, api: createProxyPublicApi(input.codeRepo, deps.apiOrigin, deps.fetchFn), transport },
     );
     final = result.plane === "paired" ? { phase: "pr_opened", branch: result.branch, head_sha: result.commit, tip_sha: result.tip, pr_number: result.number } : { phase: "refused", code: "bad_input" };

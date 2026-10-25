@@ -27,6 +27,7 @@ const INPUT: PlanePublishInput = {
   codeRepo: "acme/widgets",
   privateBase: "a".repeat(40),
   privateHead: "b".repeat(40),
+  privateDefaultTip: "a".repeat(40),
   branch: "fx/p-1",
   title: "Change from a run",
   body: "Opened by a run.",

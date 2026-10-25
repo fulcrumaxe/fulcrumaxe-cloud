@@ -27,6 +27,8 @@ export interface PlanePublishInput {
   codeRepo: string;
   privateBase: string;
   privateHead: string;
+  /** The private default branch's tip as the worker read it from GitHub: the publish rules are read there. */
+  privateDefaultTip: string;
   /** The public branch, the PR text and the commit identity: the platform's own text, never the agent's. */
   branch: string;
   title: string;
@@ -49,11 +51,12 @@ export function parsePlanePublishInput(raw: string): PlanePublishInput | undefin
     // fx-swallow-ok: a file that is not JSON is the same closed answer as any other bad input
     return undefined;
   }
-  if (!isObject(v) || !strictKeys(v, ["own", "codeRepo", "privateBase", "privateHead", "branch", "title", "body", "identity", "commitTime", "pairing"])) return undefined;
+  if (!isObject(v) || !strictKeys(v, ["own", "codeRepo", "privateBase", "privateHead", "privateDefaultTip", "branch", "title", "body", "identity", "commitTime", "pairing"])) return undefined;
   const { own, identity, pairing } = v;
   if (!isObject(own) || !strictKeys(own, ["owner", "name"]) || typeof own.owner !== "string" || !OWNER.test(own.owner) || typeof own.name !== "string" || !NAME.test(own.name)) return undefined;
   if (typeof v.codeRepo !== "string" || !CODE_REPO.test(v.codeRepo)) return undefined;
   if (typeof v.privateBase !== "string" || !OBJECT_ID.test(v.privateBase) || typeof v.privateHead !== "string" || !OBJECT_ID.test(v.privateHead)) return undefined;
+  if (typeof v.privateDefaultTip !== "string" || !OBJECT_ID.test(v.privateDefaultTip)) return undefined;
   if (!text(v.branch, 400) || !text(v.title, 300) || !text(v.body, 60_000) || typeof v.commitTime !== "number") return undefined;
   if (!isObject(identity) || !strictKeys(identity, ["name", "email"]) || !text(identity.name, 200) || !text(identity.email, 200)) return undefined;
   if (!isObject(pairing) || !strictKeys(pairing, ["overlayGlobs", "identifierRulesPath", "planDataRulesPath"])) return undefined;

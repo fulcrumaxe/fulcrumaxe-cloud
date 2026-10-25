@@ -26,6 +26,8 @@ describe("the paired publish step [pg]", () => {
   let A: SeedRefs;
   let executorRunId: string;
   const BASE = "a".repeat(40);
+  /** The private default branch's head as GitHub says: the input carries it for the rules' merge base. */
+  const DEFAULT_HEAD = "9".repeat(40);
   const PRIVATE_HEAD = "b".repeat(40);
   const HEAD = "c".repeat(40);
   const TIP = "d".repeat(40);
@@ -39,7 +41,7 @@ describe("the paired publish step [pg]", () => {
   /** Runs after the facts are read and before the locked attempt: the window a person or another writer can use. */
   let onHead: (() => Promise<void>) | undefined;
   let clock = 0;
-  const github = { pushed: true, pr: { url: "https://github.com/acme/widgets-public/pull/9" } as { url: string } | null, asked: [] as string[], head: PRIVATE_HEAD as string | null, headError: false };
+  const github = { pushed: true, pr: { url: "https://github.com/acme/widgets-public/pull/9" } as { url: string } | null, asked: [] as string[], head: PRIVATE_HEAD as string | null, headError: false, defaultHead: DEFAULT_HEAD as string | null, defaultError: false };
   let identity: { name: string; email: string } | null;
   let policyError = false;
 
@@ -73,6 +75,10 @@ describe("the paired publish step [pg]", () => {
         if (onHead) await onHead();
         if (github.headError) throw new Error("github down");
         return github.head;
+      },
+      privateDefaultHead: async () => {
+        if (github.defaultError) throw new Error("github down");
+        return github.defaultHead;
       },
       hosted: {
         verifyPushed: async () => (github.asked.push("pushed"), github.pushed),
@@ -116,6 +122,8 @@ describe("the paired publish step [pg]", () => {
     github.asked.length = 0;
     github.head = PRIVATE_HEAD;
     github.headError = false;
+    github.defaultHead = DEFAULT_HEAD;
+    github.defaultError = false;
     identity = { name: "Fulcrumaxe Bot", email: "bot@example.com" };
     policyError = false;
     A = await seedAccount(admin, randomUUID());
@@ -157,7 +165,7 @@ describe("the paired publish step [pg]", () => {
 
       const input = JSON.parse(fake.state.writtenFiles.find((f) => f.path.endsWith("input.json"))!.content);
       const row = await planeRow();
-      expect(input).toMatchObject({ own: { owner: "acme", name: "widgets" }, codeRepo: "acme/widgets-public", privateBase: BASE, privateHead: PRIVATE_HEAD, branch: row.branch });
+      expect(input).toMatchObject({ own: { owner: "acme", name: "widgets" }, codeRepo: "acme/widgets-public", privateBase: BASE, privateHead: PRIVATE_HEAD, privateDefaultTip: DEFAULT_HEAD, branch: row.branch });
       expect(row).toMatchObject({ state: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9, pr_url: "https://github.com/acme/widgets-public/pull/9", code: null });
       expect(github.asked).toEqual(["pushed", "pr"]);
     });
@@ -269,7 +277,7 @@ describe("the paired publish step [pg]", () => {
       expect(github.asked).toEqual([]);
     });
 
-    it("a pairing that moved before the hook, an unusable proxy, a missing identity, a missing private branch and an unreadable GitHub each start no sandbox", async () => {
+    it("a pairing that moved before the hook, an unusable proxy, a missing identity, a missing private branch or default branch and an unreadable GitHub each start no sandbox", async () => {
       await pair(["docs/ops/", "moved/"]);
       expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId })).toEqual({ kind: "refused", code: "pairing_changed", attemptNo: null });
       expect(fake.state.created).toEqual([]);
@@ -278,6 +286,9 @@ describe("the paired publish step [pg]", () => {
         [() => ((policyError = false), (identity = null)), "bad_input"],
         [() => ((identity = { name: "B", email: "b@example.com" }), (github.head = null)), "bad_input"],
         [() => ((github.head = PRIVATE_HEAD), (github.headError = true)), "public_unavailable"],
+        [() => ((github.headError = false), (github.defaultHead = null)), "bad_input"],
+        [() => (github.defaultHead = "main"), "bad_input"],
+        [() => ((github.defaultHead = DEFAULT_HEAD), (github.defaultError = true)), "public_unavailable"],
       ] as const) {
         arrange();
         expect(await publish().retryPublish({ accountId: A.accountId, workItemId: A.workItemId })).toEqual({ kind: "refused", code, attemptNo: null });
@@ -550,6 +561,7 @@ describe("through the Worker surface [pg]", () => {
       hook: () => "x",
       identity: () => ({ name: "B", email: "b@example.com" }),
       privateHead: async () => (asked++, null),
+      privateDefaultHead: async () => (asked++, null),
       hosted: { verifyPushed: async () => (asked++, false), verifyPullRequest: async () => (asked++, null), openPullRequest: async () => (asked++, Promise.reject(new Error("unused"))) },
     });
     const a = await seedAccount(admin, randomUUID());

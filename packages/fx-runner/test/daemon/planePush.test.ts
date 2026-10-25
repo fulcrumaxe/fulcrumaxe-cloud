@@ -431,7 +431,40 @@ describe("the pairing is the cloud's alone (P1f-3-a, P1f-3-b; P1f-2b acceptance 
     const h = harness();
     const outcome = await h.run(weakened);
     expect(outcome).toMatchObject({ kind: "refused", code: "scan_refused" });
-    expect(last(h.reports)).toMatchObject({ phase: "refused", code: "scan_refused", refusals: [{ kind: "rule_file_invalid", place: "rules/ids.txt", rule_key: "rule_file_invalid" }] });
+    expect(last(h.reports)).toMatchObject({ phase: "refused", code: "scan_refused", refusals: [{ kind: "rule_file_changed", place: "rules/ids.txt", rule_key: "rule_file_changed" }] });
+    expect(branches()).toBe(before);
+  });
+
+  it("the same for the plan-data file: a run that edited it is refused, and nothing reaches the public repo", async () => {
+    const before = branches();
+    const edited = runWith({ "rules/plan.json": JSON.stringify({ priceUsdPerMonth: 918273645 }), "src/price.ts": "export const price = 7391;\n" });
+    const h = harness();
+    expect(await h.run(edited)).toMatchObject({ kind: "refused", code: "scan_refused" });
+    expect(last(h.reports)).toMatchObject({ phase: "refused", code: "scan_refused", refusals: [{ kind: "rule_file_changed", place: "rules/plan.json", rule_key: "rule_file_changed" }] });
+    expect(branches()).toBe(before);
+  });
+
+  it("rules updated on the default branch after the run started apply to the run: a value newly listed there is refused", async () => {
+    const before = branches();
+    const head = runWith({ "src/vault.ts": "export const host = 'acme-staging-vault';\n" });
+    // The default branch moves on after the run's start commit: its identifier rules gain a value.
+    const defaultRef = sh(world.mirror, "symbolic-ref", "HEAD");
+    sh(world.priv, "checkout", "-q", "--detach", world.base);
+    put(world.priv, { "rules/ids.txt": IDS.replace("acme-internal-host\n", "acme-internal-host\nacme-staging-vault\n") });
+    commitAll(world.priv, "rule update");
+    sh(world.priv, "push", "-q", world.mirror, `HEAD:${defaultRef}`);
+    const h = harness();
+    expect(await h.run(head)).toMatchObject({ kind: "refused", code: "scan_refused" });
+    expect(last(h.reports)).toMatchObject({ phase: "refused", code: "scan_refused", refusals: [{ kind: "identifier_hit", place: "src/vault.ts:1" }] });
+    expect(branches()).toBe(before);
+  });
+
+  it("a stored pairing whose rule files are not private paths is refused on the runner path too, before anything is pushed", async () => {
+    const before = branches();
+    const legacy = { ...PAIRING, overlayGlobs: ["docs/ops/"] };
+    const h = harness({ pairing: () => pairingResult(legacy) });
+    expect(await h.run(runWith(ITEM))).toMatchObject({ kind: "refused", code: "rule_files_not_private" });
+    expect(last(h.reports)).toMatchObject({ phase: "refused", code: "rule_files_not_private", refusals: [{ kind: "rule_file_not_private", place: "rules/ids.txt" }, { kind: "rule_file_not_private", place: "rules/plan.json" }] });
     expect(branches()).toBe(before);
   });
 

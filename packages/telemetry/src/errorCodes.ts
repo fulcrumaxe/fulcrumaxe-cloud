@@ -278,6 +278,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "no_changes",
   "scan_refused",
   "scan_identity_mismatch",
+  "rule_files_not_private",
   "public_unavailable",
   "public_tip_moved",
   "app_not_installed",

@@ -32,6 +32,7 @@ const input = (over: Partial<PlaneRouteInput>): PlaneRouteInput => ({
   repoDir: "/nonexistent",
   privateBase: "a".repeat(40),
   privateHead: "b".repeat(40),
+  privateDefaultTip: "a".repeat(40),
   own: { owner: "acme", name: "widgets-private" },
   defaultBranch: "main",
   branch: "fx/p-0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e",

@@ -79,6 +79,8 @@ export type RefusalKind =
   | "file_too_large"
   | "rule_file_missing"
   | "rule_file_invalid"
+  | "rule_file_changed"
+  | "rule_file_not_private"
   | "identifier_hit"
   | "plan_data_hit"
   | "bad_identity"

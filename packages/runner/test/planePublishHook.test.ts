@@ -17,6 +17,9 @@ import { startPublishProxy, type PublishProxyFake } from "./helpers/publishProxy
  */
 const IDS = "=== FORBIDDEN_PATTERNS_START ===\nacme-internal-host\n=== FORBIDDEN_PATTERNS_END ===\n";
 const PLAN = JSON.stringify({ priceUsdPerMonth: 7391 });
+/** Edited rule files: a pattern that matches nothing here, and a figure nothing states. */
+const EDITED_IDS = "=== FORBIDDEN_PATTERNS_START ===\n^zz[0-9]{50}$\n=== FORBIDDEN_PATTERNS_END ===\n";
+const EDITED_PLAN = JSON.stringify({ priceUsdPerMonth: 918273645 });
 const PUBLIC_FILES: Record<string, string> = { "README.md": "# widgets\n", "src/a.ts": "export const a = 1;\n", "src/b.ts": "export const b = 2;\n" };
 const OVERLAY_FILES: Record<string, string> = { "docs/ops/plan.md": "private plan\n", "rules/ids.txt": IDS, "rules/plan.json": PLAN };
 const BRANCH = "fx/p-11111111-2222-4333-8444-555555555555";
@@ -86,12 +89,12 @@ afterEach(async () => {
   rmSync(world.root, { recursive: true, force: true });
 });
 
-/** The item's work: a commit on a private run branch, pushed to the private server. Returns its id. */
-function runWith(files: Record<string, string | Buffer>): string {
-  sh(world.priv, "checkout", "-q", "-B", "fx/run", world.base);
+/** The item's work: a commit on a private run branch (on `from`, default the base), pushed to the private server. Returns its id. */
+function runWith(files: Record<string, string | Buffer>, from = world.base, branch = "fx/run"): string {
+  sh(world.priv, "checkout", "-q", "-B", branch, from);
   put(world.priv, files);
   const head = commitAll(world.priv, "item work by a private author");
-  sh(world.priv, "push", "-q", "-f", world.privBare, "fx/run");
+  sh(world.priv, "push", "-q", "-f", world.privBare, branch);
   return head;
 }
 const branches = (): string => sh(world.pubBare, "for-each-ref", "--sort=refname", "--format=%(refname) %(objectname)", "refs/heads");
@@ -100,6 +103,7 @@ const inputFor = (head: string, over: Partial<PlanePublishInput> = {}): PlanePub
   codeRepo: "acme/widgets",
   privateBase: world.base,
   privateHead: head,
+  privateDefaultTip: world.base,
   branch: BRANCH,
   title: "Change from fulcrumaxe run 0b1b6c52",
   body: "Opened by a fulcrumaxe run, id 0b1b6c52-7a43-4d5e-8a77-0f0f0f0f0f0f.",
@@ -199,6 +203,35 @@ describe("a publish run end to end (item 25, the proxy half)", () => {
   }, 60_000);
 });
 
+describe("a stacked item: its recorded base is the parent's unmerged head, and the rules come from the default branch", () => {
+  it("a parent that edited a declared rule file refuses the child's first push (rule_file_changed): nothing is pushed and no PR opened", async () => {
+    const parent = runWith({ "rules/ids.txt": EDITED_IDS }, world.base, "fx/parent");
+    const head = runWith({ "src/host.ts": "export const host = 'acme-internal-host';\n" }, parent);
+    const before = branches();
+    const { raw, lines } = await runHook(inputFor(head, { privateBase: parent }));
+    expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "scan_refused", refusals: [{ kind: "rule_file_changed", place: "rules/ids.txt", rule_key: "rule_file_changed" }] });
+    expect(branches()).toBe(before);
+    expect(world.proxy.pulls).toEqual([]);
+    for (const v of MATCHED) expect(raw.join("\n"), v).not.toContain(v);
+  }, 60_000);
+
+  it("a parent that left the rules alone: the child opens its PR with only its own change", async () => {
+    const parent = runWith({ "src/p.ts": "export const p = 1;\n" }, world.base, "fx/parent");
+    const head = runWith({ "src/c.ts": "export const c = 3;\n" }, parent);
+    const { lines } = await runHook(inputFor(head, { privateBase: parent }));
+    expect(terminalLine(lines)).toMatchObject({ phase: "pr_opened" });
+    expect(sh(world.pubBare, "diff", "--name-only", world.publicTip, BRANCH)).toBe("src/c.ts");
+  }, 60_000);
+
+  it("a default tip that is not in the private repository is refused before anything is built", async () => {
+    const head = runWith({ "src/c.ts": "export const c = 3;\n" });
+    const before = branches();
+    const { lines } = await runHook(inputFor(head, { privateDefaultTip: "e".repeat(40) }));
+    expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "bad_input" });
+    expect(branches()).toBe(before);
+  }, 60_000);
+});
+
 describe("every refusal leaves the public branches as they were (item 27)", () => {
   interface Case {
     name: string;
@@ -219,7 +252,34 @@ describe("every refusal leaves the public branches as they were (item 27)", () =
       files: { "src/c.ts": "export const c = 1;\n" },
       code: "scan_refused",
       refusal: { kind: "rule_file_missing", place: "rules/gone.txt" },
-      input: { pairing: { overlayGlobs: ["docs/ops/"], identifierRulesPath: "rules/gone.txt", planDataRulesPath: null } },
+      input: { pairing: { overlayGlobs: ["docs/ops/", "rules/"], identifierRulesPath: "rules/gone.txt", planDataRulesPath: null } },
+    },
+    // The rules a first push is scanned by are the run's recorded base: a run that rewrites a rule file is refused before anything is built.
+    {
+      name: "an edited identifier-rules file at the run's head, with a change the base's rules refuse",
+      files: { "rules/ids.txt": EDITED_IDS, "src/host.ts": "export const host = 'acme-internal-host';\n" },
+      code: "scan_refused",
+      refusal: { kind: "rule_file_changed", place: "rules/ids.txt" },
+    },
+    {
+      name: "an edited plan-data file at the run's head, with a figure the base's rules refuse",
+      files: { "rules/plan.json": EDITED_PLAN, "src/price.ts": "export const price = 7391;\n" },
+      code: "scan_refused",
+      refusal: { kind: "rule_file_changed", place: "rules/plan.json" },
+    },
+    {
+      name: "a stored pairing whose rule files are not private paths",
+      files: { "src/c.ts": "export const c = 1;\n" },
+      code: "rule_files_not_private",
+      refusal: { kind: "rule_file_not_private", place: "rules/ids.txt" },
+      input: { pairing: { overlayGlobs: ["docs/ops/"], identifierRulesPath: "rules/ids.txt", planDataRulesPath: "rules/plan.json" } },
+    },
+    {
+      name: "the same stored pairing, with an edited rule file and a change the base's rules refuse",
+      files: { "rules/ids.txt": EDITED_IDS, "src/host.ts": "export const host = 'acme-internal-host';\n" },
+      code: "rule_files_not_private",
+      refusal: { kind: "rule_file_not_private", place: "rules/ids.txt" },
+      input: { pairing: { overlayGlobs: ["docs/ops/"], identifierRulesPath: "rules/ids.txt", planDataRulesPath: "rules/plan.json" } },
     },
     // The proxy mints for the sandbox, so an uninstalled App and a failed mint reach the hook as the proxy's refusal of the public repository.
     { name: "the App not installed (the proxy refuses the public repo)", files: { "src/c.ts": "export const c = 1;\n" }, code: "public_unavailable", proxy: (p) => p.failPublic(404) },

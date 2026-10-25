@@ -88,6 +88,7 @@ describe("settling a paired sandbox build, and opening the public pull request a
       networkPolicy: async () => POLICY,
       identity: () => (identityMissing ? null : { name: "Fulcrumaxe Bot", email: "bot@example.com" }),
       privateHead: async () => PRIVATE_HEAD,
+      privateDefaultHead: async () => BASE,
       hosted: {
         verifyPushed: async () => (gh.calls.push("pushed"), gh.pushed),
         verifyPullRequest: async () => (gh.calls.push("pr"), gh.pr),
@@ -524,6 +525,7 @@ describe("through the Worker surface [pg] (D#598 P1f-5c)", () => {
           hook: () => "x",
           identity: () => ({ name: "B", email: "b@example.com" }),
           privateHead: async () => null,
+          privateDefaultHead: async () => null,
           hosted: { verifyPushed: async () => false, verifyPullRequest: async () => null, openPullRequest: async () => Promise.reject(new Error("unused")) },
         },
       },
