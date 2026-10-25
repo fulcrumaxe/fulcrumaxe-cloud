@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import type { PublicPullRequestLookup } from "./publicPullRequest.js";
 import type { CiSnapshot } from "../build/mergeGate.js";
 import { SHA_PATTERN } from "../build/mergeGate.js";
 import type { GitHubHttp } from "../build/githubMergePort.js";
@@ -75,11 +76,28 @@ export interface CiGate {
   read(input: { accountId: string; workItemId: string; prNumber: number; headSha: string }): Promise<CiWaitReading>;
 }
 
+
 /**
  * The real gate: the head's CI read from GitHub through the review stage's own port (the local-only fence for a `runner_local`
  * repo). `openHttp` hands the transport for the item's repository, with a token whose purpose may read checks.
+ *
+ * Two planes. A paired item has two pull requests for one change: the private run branch's, which is reviewed, and the public one the platform opened
+ * on the code repository, which is the one that merges and the one whose CI runs. Waiting on the private copy's CI held a round for hours while the
+ * public one was green. When `openPublicHttp` is given and the item has a public pull request (found by the injected `publicPullRequest` lookup), the wait reads THAT
+ * pull request's live head and checks instead. The reviewed private head is not compared with it: the two are different commits by construction.
+ * What stands in for that comparison is the platform's stamp: a public head that is not the one the platform pushed (a push or a fix-round
+ * republish not recorded yet, or a branch changed by someone else) is `wrong_head`, a wait. A `runner_local` repo keeps its own path whole (its
+ * reads go through the local-only fence, which cannot reach the code repository). Single-plane items, and paired items whose public pull request is
+ * not open yet, are read exactly as before. A failed read throws and nothing is recorded, as for the private read.
  */
-export function createCiGate(deps: { pool: Pool; openHttp: (ctx: { repoId: string; owner: string; name: string; executionMode: string }) => Promise<GitHubHttp> }): CiGate {
+export function createCiGate(deps: {
+  pool: Pool;
+  openHttp: (ctx: { repoId: string; owner: string; name: string; executionMode: string }) => Promise<GitHubHttp>;
+  /** Opens the same kind of transport for the PAIRED code repository (`owner`/`name` are the code repository's; `repoId` is the item's own repository, whose installation serves it). */
+  openPublicHttp?: (ctx: { repoId: string; owner: string; name: string; executionMode: string }) => Promise<GitHubHttp>;
+  /** Finds the item's public pull request (see publicPullRequest.ts). Both this and `openPublicHttp` must be given for the public read. */
+  publicPullRequest?: PublicPullRequestLookup;
+}): CiGate {
   return {
     async read(input) {
       if (!SHA_PATTERN.test(input.headSha)) throw new Error("ci wait: malformed head sha");
@@ -87,6 +105,17 @@ export function createCiGate(deps: { pool: Pool; openHttp: (ctx: { repoId: strin
       // Without a context there is no repository to read, and no verdict is recorded for it either: the caller's step fails and retries.
       if (!loaded.ok) throw new Error(`ci wait: ${loaded.reason}`);
       const ctx = loaded.ctx;
+      const publicPr = deps.openPublicHttp !== undefined && deps.publicPullRequest !== undefined && ctx.executionMode !== "runner_local" ? await deps.publicPullRequest(input.accountId, input.workItemId) : null;
+      if (publicPr !== null && deps.openPublicHttp !== undefined) {
+        const http = await deps.openPublicHttp({ repoId: ctx.repoId, owner: publicPr.owner, name: publicPr.name, executionMode: ctx.executionMode });
+        const port = createReviewGitHubPort({ pool: deps.pool, http }, { ...ctx, owner: publicPr.owner, name: publicPr.name }, { accountId: input.accountId, workItemId: input.workItemId, prNumber: publicPr.number });
+        const ref = { repoId: ctx.repoId, prNumber: publicPr.number };
+        const live = (await port.getPullRequest(ref)).headSha;
+        if (!SHA_PATTERN.test(live)) throw new Error("ci wait: malformed public head sha");
+        const reading = readCiWait(await port.getCiSnapshot(ref, live), live);
+        if (reading.state === "settled" && !publicPr.managedByPerson && publicPr.stampedHead !== null && publicPr.stampedHead !== live) return { state: "pending", reasons: ["wrong_head"] };
+        return reading;
+      }
       const http = await deps.openHttp({ repoId: ctx.repoId, owner: ctx.owner, name: ctx.name, executionMode: ctx.executionMode });
       const port = createReviewGitHubPort({ pool: deps.pool, http }, ctx, { accountId: input.accountId, workItemId: input.workItemId, prNumber: input.prNumber });
       return readCiWait(await port.getCiSnapshot({ repoId: ctx.repoId, prNumber: input.prNumber }, input.headSha), input.headSha, { followsPullRequest: ctx.executionMode === "runner_local" });
