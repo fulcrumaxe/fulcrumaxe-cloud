@@ -223,7 +223,7 @@ describe("a job with a check", () => {
     const stop = new AbortController();
     let served = false;
     const admission = {
-      snapshot: () => ({ capacity: { light: 1, heavy: 1 }, free: { light: 1, heavy: 1 }, limitedBy: null }),
+      snapshot: () => ({ capacity: { light: 1, heavy: 1 }, free: { light: 1, heavy: 1 }, limitedBy: null, limits: { light: null, heavy: null } }),
       classOf: () => "heavy" as const,
       begin: () => (inHand += 1, (peak = Math.max(peak, inHand)), () => { inHand -= 1; }),
       sample: () => undefined,

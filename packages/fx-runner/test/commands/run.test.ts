@@ -666,7 +666,7 @@ describe("6. the claim gate in the composed daemon (D#6 R4a-6, C16 section 1.3)"
     const tight: ResourceProbe = { read: () => ({ ...ROOMY.read(), availMemBytes: 3 * GB }) };
     const run = start({ hooks: { probe: tight } });
     await until(() => run.out.some((line) => line.includes(`refused ${job.job.run_id}`)), 20_000);
-    expect(claimBodies()[0]).toEqual({ capacity: { light: { limit: 1, in_use: 0 }, heavy: { limit: 0, in_use: 0 }, limited_by: null } });
+    expect(claimBodies()[0]).toEqual({ capacity: { light: { limit: 1, in_use: 0 }, heavy: { limit: 0, in_use: 0 }, limited_by: "memory" } });
     // The agent never started and the run was never held: no heartbeat, no events.
     expect(existsSync(path.join(fake.dir, "argv.txt"))).toBe(false);
     expect(cloud.seen.some((s) => s.path.endsWith("/heartbeat") || s.path.endsWith("/events"))).toBe(false);

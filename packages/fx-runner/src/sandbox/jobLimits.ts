@@ -16,7 +16,7 @@ import { jobClassOfRole, type JobClass } from "@fulcrumaxe/runner-protocol";
 import type { GitCapture } from "../daemon/git.js";
 import { findTool } from "../daemon/nixShell.js";
 import { GIB } from "../daemon/footprints.js";
-import type { RunnerSettings } from "../runnerSettings.js";
+import { BUDGET_MEMORY_GB, HEAVY_AUTO_FLOOR_GB, type RunnerSettings } from "../runnerSettings.js";
 
 /** Without hard limits the runner takes at most this many jobs, and this many heavy ones. */
 export const UNENFORCED_TOTAL = 2;
@@ -29,8 +29,20 @@ export interface Budget {
 }
 export type Budgets = Record<JobClass, Budget>;
 
-export function budgetsOf(settings: Pick<RunnerSettings, "budget">): Budgets {
-  const of = (cls: JobClass): Budget => ({ memoryBytes: settings.budget[cls].memoryGb * GIB, tasks: settings.budget[cls].tasks });
+/**
+ * The per-class budgets. The heavy memory budget is the person's own figure when they set one; otherwise it is derived from what heavy jobs
+ * have measured (`learnedHeavyBytes`, the footprint store's class estimate): 1.5 times that, rounded up to whole GB, never below
+ * `HEAVY_AUTO_FLOOR_GB` and never above the settable maximum or half the RAM. With nothing learned the estimate is the default footprint, so a fresh runner starts at 5 GB.
+ */
+export function budgetsOf(settings: Pick<RunnerSettings, "budget" | "heavyMemorySet">, learnedHeavyBytes?: number, totalMemBytes?: number): Budgets {
+  // A derived budget is also held to half the machine's RAM (at least 2 GB, so the floor wins only where RAM allows it): one noisy learned sample
+  // must not push the heavy memory gate beyond what the machine can ever show free. A person-set figure is never touched.
+  const halfRamGb = totalMemBytes === undefined ? Infinity : Math.max(2, Math.floor(totalMemBytes / 2 / GIB));
+  const heavyGb =
+    settings.heavyMemorySet === true || learnedHeavyBytes === undefined
+      ? settings.budget.heavy.memoryGb
+      : Math.min(BUDGET_MEMORY_GB.heavy[1], halfRamGb, Math.max(HEAVY_AUTO_FLOOR_GB, Math.ceil((learnedHeavyBytes * 1.5) / GIB)));
+  const of = (cls: JobClass): Budget => ({ memoryBytes: (cls === "heavy" ? heavyGb : settings.budget[cls].memoryGb) * GIB, tasks: settings.budget[cls].tasks });
   return { light: of("light"), heavy: of("heavy") };
 }
 

@@ -6,7 +6,7 @@ import { jobClassOfRole, type ClaimCapacity } from "@fulcrumaxe/runner-protocol"
 import { createAdmission } from "../../src/daemon/admission.js";
 import type { ClaimResult, Claimed } from "../../src/daemon/client.js";
 import { GIB, createFootprintStore } from "../../src/daemon/footprints.js";
-import { pollLoop, type PollEvent } from "../../src/daemon/pollLoop.js";
+import { HEADROOM_CHECK_MS, pollLoop, type PollEvent } from "../../src/daemon/pollLoop.js";
 import type { ResourceReading } from "../../src/daemon/resources.js";
 import { DEFAULT_SETTINGS, type RunnerSettings } from "../../src/runnerSettings.js";
 import { manualClock, until } from "../helpers/manualClock.js";
@@ -114,7 +114,8 @@ describe("claims up to capacity, in parallel", () => {
     w.jobs[0]!.finish();
     // No clock advance: the end of a job wakes the loop, which claims again without waiting out the 60 seconds.
     await until(() => w.handled.length === 9);
-    expect(w.clock.slept.filter((ms) => ms === 60_000).length).toBeGreaterThan(0);
+    // The idle wait is slept in slices of HEADROOM_CHECK_MS (the machine is looked at between them), cut short here by the job ending.
+    expect(w.clock.slept.filter((ms) => ms === HEADROOM_CHECK_MS).length).toBeGreaterThan(0);
     w.controller.abort();
     w.jobs.forEach((j) => j.finish());
     await loop;
@@ -206,7 +207,7 @@ describe("the progress floor in the loop", () => {
     await w.clock.advance(1000);
     expect(w.inHand()).toBe(1);
     expect(w.queue).toHaveLength(3);
-    expect(w.declared[0]).toMatchObject({ light: { limit: 1, in_use: 0 }, heavy: { limit: 0, in_use: 0 }, limited_by: null });
+    expect(w.declared[0]).toMatchObject({ light: { limit: 1, in_use: 0 }, heavy: { limit: 0, in_use: 0 }, limited_by: "memory" });
     expect(w.declared.at(-1)).toMatchObject({ light: { limit: 1, in_use: 1 }, limited_by: "memory" });
     // The job ends: nothing in hand again, so the floor lets the next light run in (the heavy one is not offered).
     w.jobs[0]!.finish();
@@ -334,7 +335,7 @@ describe("waits the cloud asked for (review round 1)", () => {
     r.release();
     await until(() => n >= 3);
     // No time passed on the fake clock: the claim after the idle answer came because the job ended.
-    expect(r.clock.slept).toContain(300_000);
+    expect(r.clock.slept).toContain(HEADROOM_CHECK_MS);
     await loop;
   });
 
