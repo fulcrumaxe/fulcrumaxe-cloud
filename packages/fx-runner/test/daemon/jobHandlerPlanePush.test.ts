@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -52,6 +52,10 @@ interface RigOptions {
   onStart?: (runId: string) => void;
   withHook?: boolean;
   shutdown?: AbortSignal;
+  /** The mirror's merge-base of a branch tip with the default branch; absent, the path cannot compute one. */
+  mergeBase?: string | null;
+  /** A kept workspace the fix round resumes in, instead of a fresh checkout. */
+  kept?: string;
 }
 
 function rig(over: RigOptions = {}) {
@@ -71,19 +75,26 @@ function rig(over: RigOptions = {}) {
       const event = over.end ? over.end(opts.runId) : ({ runId: opts.runId, role: opts.role, seq: 1, type: "result", ts: "2026-10-08T12:00:00.000Z", sessionId: "s1", agentOutput: { verdict: "done" } } as NormalizedEvent);
       return { handle, hookFired: Promise.resolve(event) };
     },
-    resume: () => { throw new Error("not used"); },
+    resume: (handle, _sessionId, _prompt, opts) => {
+      order.push("agent");
+      over.onStart?.(opts.runId);
+      seenBase.push(baseLedger.read(opts.runId));
+      return { handle, hookFired: Promise.resolve({ runId: opts.runId, role: opts.role, seq: 1, type: "result", ts: "2026-10-08T12:00:00.000Z", sessionId: "s1", agentOutput: { verdict: "done" } } as NormalizedEvent) };
+    },
     async extendTimeout() {}, async stop() {}, async deleteSandbox() {}, async measure() { return []; }, async readCounters() { return undefined; }, async writeFiles() {}, async runCommand(): Promise<never> { throw new Error("not used"); }, async sandboxExists() { return true; },
   };
-  const run: Omit<RunJobDeps, "sandbox" | "ledger"> = { workspaces: createWorkspaceStore(path.join(root, "work")), credentials: { mode: "subscription" }, planSession: () => ({ kind: "fresh", branch: null }), defaultModel: "sonnet" };
+  const run: Omit<RunJobDeps, "sandbox" | "ledger"> = { workspaces: createWorkspaceStore(path.join(root, "work")), credentials: { mode: "subscription" }, planSession: () => (over.kept === undefined ? { kind: "fresh", branch: null } : { kind: "resume", sessionId: "s1", workspace: over.kept }), defaultModel: "sonnet" };
   // The agent's checkout, as the fake path sees it: it starts at BASE and a test may move it. The handler must not ask it.
   const checkout = { head: BASE };
   const git = fakeGitPath({
     prepare: async () => ({ base: checkout.head }),
+    resume: async () => ({ base: checkout.head }),
     publish: async () => {
       order.push("publish");
       return over.published ?? { pushed: true, branch: BRANCH, sha: HEAD };
     },
   });
+  if (over.mergeBase !== undefined) git.checkBase = async () => over.mergeBase ?? null;
   if (over.mirror !== false) git.mirrorDir = (job) => `/mirrors/${job.repo.id}.git`;
   const deps: JobHandlerDeps = {
     client, keyring: KEYRING, clock, run, sandbox: port, ledger: createFileLedger(path.join(root, `jobs-${++rigs}.json`), ledgerOptions()), git, events: createEventRelay(),
@@ -211,6 +222,47 @@ describe("the start commit is the daemon's record (P1f-3-d)", () => {
     await r.handle(await r.claim(jobFor(plain)));
     expect(r.seenBase).toEqual([undefined]);
     expect(r.asked).toEqual([]);
+  });
+
+  it("a fix round with no signed base, on an item whose first round never published, records the merge-base of its tip with the default branch and enters the hook with the tip when it added nothing", async () => {
+    const MERGE_BASE = "e".repeat(40);
+    const plain = { continues: { parent_run_id: "22222222-2222-4222-8222-222222222222", session_id: null, branch: "fx/33333333-3333-4333-8333-333333333333-g1" } };
+    const r = rig({ mergeBase: MERGE_BASE, published: { pushed: false }, onStart: () => { r.checkout.head = MOVED; } });
+    await r.handle(await r.claim(jobFor(plain)));
+    // The record was made before the agent started, from the tip the round began at; the cloud decides whether a token exists.
+    expect(r.seenBase).toEqual([MERGE_BASE, MERGE_BASE]);
+    expect(r.asked.map((a) => a.privateHead)).toEqual([BASE]);
+  });
+
+  it("the same round passes the commit it pushed, and is not entered when the mirror cannot give a merge-base", async () => {
+    const plain = { continues: { parent_run_id: "22222222-2222-4222-8222-222222222222", session_id: "s1", branch: "fx/33333333-3333-4333-8333-333333333333-g1" } };
+    const pushed = rig({ mergeBase: "e".repeat(40) });
+    await pushed.handle(await pushed.claim(jobFor(plain)));
+    expect(pushed.asked.map((a) => a.privateHead)).toEqual([HEAD]);
+    for (const mergeBase of [null, undefined]) {
+      const none = rig(mergeBase === undefined ? {} : { mergeBase });
+      await none.handle(await none.claim(jobFor(plain)));
+      expect(none.asked).toEqual([]);
+    }
+  });
+
+  it("a fix round that resumes its kept workspace records the merge-base of the tip it resumed at, before the agent runs", async () => {
+    const MERGE_BASE = "e".repeat(40);
+    const kept = path.join(root, "work", "kept");
+    mkdirSync(kept, { recursive: true });
+    const plain = { continues: { parent_run_id: "22222222-2222-4222-8222-222222222222", session_id: "s1", branch: "fx/33333333-3333-4333-8333-333333333333-g1" } };
+    const r = rig({ mergeBase: MERGE_BASE, kept });
+    await r.handle(await r.claim(jobFor(plain)));
+    expect(r.seenBase).toEqual([MERGE_BASE, MERGE_BASE]);
+    expect(r.asked.map((a) => a.privateHead)).toEqual([HEAD]);
+  });
+
+  it("a review of a commit never takes a merge-base, whatever the path can compute", async () => {
+    const reviewer = { role: "code-reviewer" as const, role_tools_sha256: roleToolsDigest("code-reviewer"), review: { head_sha: HEAD } };
+    const r = rig({ mergeBase: "e".repeat(40) });
+    await r.handle(await r.claim(jobFor(reviewer)));
+    expect(r.asked).toEqual([]);
+    expect(r.seenBase).toEqual([undefined]);
   });
 
   it("is forgotten when the run ends, whichever way", async () => {

@@ -38,7 +38,7 @@ export type PlanePushOutcomeState = 'scanning' | 'pushed' | 'pr_opened' | 'refus
 /** The states a P1f outcome never overwrites: a pull request exists, or someone has taken the branch over. */
 const SETTLED: readonly PlanePushState[] = ['pr_opened', 'updating', 'updated', 'waiting_person_pushed', 'managed_by_person', 'pr_closed', 'pr_merged'];
 /** The states a new build may re-stamp (a fresh attempt at the same item). */
-const RESTAMPABLE: readonly PlanePushState[] = ['building', 'scanning', 'refused', 'no_public_change'];
+export const RESTAMPABLE: readonly PlanePushState[] = ['building', 'scanning', 'refused', 'no_public_change'];
 
 /** A push has at most this many attempts per row (the schema checks the same number). */
 export const PUBLISH_ATTEMPT_LIMIT = 3;

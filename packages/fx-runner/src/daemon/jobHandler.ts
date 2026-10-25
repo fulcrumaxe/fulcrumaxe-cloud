@@ -271,7 +271,17 @@ const enters = (job: Job): boolean => job.role === "executor" && job.continues =
 /** FIXROUND-REPUBLISH (R2-c1): a fix round that carries the cloud's signed base also enters the hook, to replace the head of the public branch; the cloud tells the hook whether there is one (no token otherwise). */
 const republishes = (job: Job): boolean => job.role === "executor" && job.continues !== null && job.continues.base_sha !== undefined && (job.review ?? null) === null;
 
+/**
+ * A fix round with no signed base: the cloud signs one only to update a public pull request that exists. When the item's first round never published (its check failed), this round is
+ * the first that can, so it enters the hook too and the cloud decides (no token when it should not publish). Its diff base is read in the daemon, from the mirror, before the agent runs: the
+ * merge-base of the branch tip with the default branch, a commit of the private default branch (not itself public) that no commit of the branch can be. What keeps private content out of the public change is the route's single commit on the public tip and its scans, not this base.
+ */
+const firstPublishes = (job: Job): boolean => job.role === "executor" && job.continues !== null && job.continues.base_sha === undefined && (job.review ?? null) === null;
+
 const planeBaseOf = (job: Job, startedAt: string): string | undefined => (enters(job) ? startedAt : job.continues?.base_sha);
+
+/** The merge-base of a branch tip with the default branch, from the daemon's mirror; undefined when it cannot be computed (the run then has no recorded base and the hook is not entered). */
+const mergeBaseOf = async (git: GitPath, job: Job, tip: string): Promise<string | undefined> => (await git.checkBase?.(job, tip).catch(() => null)) ?? undefined;
 
 const closedCheck = (summary = "", reason?: CheckNotRunReason, extra: Partial<CheckOutcome> = {}): CheckOutcome => ({ passed: false, body: { exit_code: null, duration_ms: 0, timed_out: false, skipped_tests: null, summary, ...(reason === undefined ? {} : { reason }) }, ...extra });
 
@@ -497,7 +507,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             const resumed = await git.resume(job, claimed, wanted.workspace);
             if (resumed !== null) {
               started.base = resumed.base;
-              const resumedBase = planeBaseOf(job, resumed.base);
+              const resumedBase = planeBaseOf(job, resumed.base) ?? (firstPublishes(job) ? await mergeBaseOf(git, job, resumed.base) : undefined);
               if (deps.planePush !== undefined && resumedBase !== undefined) deps.planePush.baseLedger.record(claimed.runId, resumedBase);
               mark("workspace_ready");
               mark("cloned");
@@ -516,7 +526,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             mark("workspace_ready");
             started.base = (await git.prepare(job, claimed, workspace)).base;
             // The start commit is recorded here, in the daemon's own memory, before the agent can run: the run-end hook reads this and never the checkout.
-            const planeBase = planeBaseOf(job, started.base);
+            const planeBase = planeBaseOf(job, started.base) ?? (firstPublishes(job) ? await mergeBaseOf(git, job, started.base) : undefined);
             if (deps.planePush !== undefined && planeBase !== undefined) deps.planePush.baseLedger.record(claimed.runId, planeBase);
             mark("cloned");
             await prepareMap(job, git, started.base, repoMapHeld);
@@ -659,11 +669,11 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       }
       // The run-end hook for a paired repository (D#598 P1f-3). Its calls need the live lease, so it runs before `done`. It never fails the run: an
       // unexpected error is the closed outcome `failed`, and a cloud that ended the run ends this one too.
-      const mirrorDir = deps.planePush !== undefined && (enters(job) || republishes(job)) ? git.mirrorDir?.(job) : undefined;
+      const mirrorDir = deps.planePush !== undefined && (enters(job) || republishes(job) || (firstPublishes(job) && deps.planePush.baseLedger.read(claimed.runId) !== undefined)) ? git.mirrorDir?.(job) : undefined;
       // A run the cloud has already ended, or a daemon that is shutting down, asks for nothing: the hook's first call would be a token request.
       if (deps.planePush !== undefined && mirrorDir !== undefined && lease.ended() === undefined && !stopRun.aborted) {
         const outcome = await deps.planePush
-          .run({ runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, repo: { owner: job.repo.owner, name: job.repo.name }, mirrorDir, privateHead: published.pushed ? published.sha : undefined, signal: stopRun })
+          .run({ runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, repo: { owner: job.repo.owner, name: job.repo.name }, mirrorDir, privateHead: published.pushed ? published.sha : firstPublishes(job) ? started.base : undefined, signal: stopRun })
           .catch((): PlanePushOutcome => ({ kind: "failed" }));
         if (outcome.kind === "stopped") return { status: "stopped", reason: outcome.reason };
       }

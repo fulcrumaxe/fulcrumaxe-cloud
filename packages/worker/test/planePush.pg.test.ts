@@ -729,16 +729,25 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       expect(await attempts()).toEqual([]);
     });
 
-    it("a fix round on an item with no open public pull request, or one a person took over, is told it has nothing to push to", async () => {
-      await pair();
-      await stamp();
-      const early = await claimedRun({ continues: { baseSha: BASE } });
-      expect((await askToken(early)).status).toBe(403);
-      await finish(early.id);
+    it("an unsigned fix round on an open pull request is refused at the token, and its refusal report puts the item in Needs a person", async () => {
+      await open();
+      const run = await claimedRun({ continues: {} });
+      expect((await askToken(run)).status).toBe(409);
+      expect((await report(run, { phase: "refused", code: "republish_base_missing" })).status).toBe(200);
+      expect(await facts()).toEqual([{ kind: "escalated", code: "republish_base_missing" }]);
+      expect(await stageOf()).toBe("needs_human");
+      expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: HEAD });
+    });
+
+    it("a fix round on an item whose pull request a person took over, or whose branch is pushed without a pull request, is told it has nothing to push to", async () => {
       await open();
       await admin.query("UPDATE plane_pushes SET managed_by_person_at = now() WHERE work_item_id = $1", [A.workItemId]);
       const managed = await claimedRun({ continues: { baseSha: BASE } });
       expect((await askToken(managed)).status).toBe(403);
+      await finish(managed.id);
+      await admin.query("UPDATE plane_pushes SET managed_by_person_at = NULL, state = 'pushed', pr_number = NULL, pr_url = NULL WHERE work_item_id = $1", [A.workItemId]);
+      const pushed = await claimedRun({ continues: {} });
+      expect((await askToken(pushed)).status).toBe(403);
       expect(github.mints).toEqual([]);
     });
 
@@ -844,6 +853,81 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       await report(run, { phase: "refused", code: "scan_refused" });
       expect(await planeRow()).toMatchObject({ state: "refused", code: "scan_refused" });
       expect(await facts()).toEqual([]);
+    });
+  });
+
+  describe("a fix round of an item whose first round never published creates the public pull request", () => {
+    const BASE = "c".repeat(40);
+    const finish = (id: string) => admin.query("UPDATE agent_runs SET status = 'succeeded' WHERE id = $1", [id]);
+
+    it.each([["no signed base", {}], ["a signed base", { baseSha: BASE }]])("a continuation with %s is granted a push, as a first publish: no head to replace, a push attempt", async (_label, continues) => {
+      await pair();
+      await stamp();
+      const run = await claimedRun({ continues });
+      const res = await askToken(run);
+      expect(res.status).toBe(200);
+      expect(PlanePushTokenReply.parse(res.body).replaces_head).toBeUndefined();
+      expect((await attempts())[0]).toMatchObject({ run_id: run.id, kind: "push", attempt_no: 1 });
+      expect(github.mints).toEqual(["acme/widgets-public"]);
+    });
+
+    it.each(["building", "refused", "scanning", "no_public_change"])("a record in the %s state that a person has taken over gets no first publish, with or without a base", async (state) => {
+      await pair();
+      await stamp();
+      await admin.query("UPDATE plane_pushes SET state = $2, code = CASE WHEN $2 = 'refused' THEN 'scan_refused' END, managed_by_person_at = now() WHERE work_item_id = $1", [A.workItemId, state]);
+      for (const continues of [{}, { baseSha: BASE }]) {
+        const run = await claimedRun({ continues });
+        expect((await askToken(run)).status).toBe(403);
+        await finish(run.id);
+      }
+      expect(github.mints).toEqual([]);
+      expect(await attempts()).toEqual([]);
+    });
+
+    it("its reports create the pull request exactly as a first round's do, and the item's record ends open (a stuck item recovers this way)", async () => {
+      await pair();
+      await stamp();
+      const run = await claimedRun({ continues: {} });
+      await askToken(run);
+      expect((await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP })).status).toBe(200);
+      expect(await planeRow()).toMatchObject({ state: "pushed", head_sha: HEAD });
+      expect((await report(run, { phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 })).status).toBe(200);
+      expect(await planeRow()).toMatchObject({ state: "pr_opened", pr_number: 9, head_sha: HEAD });
+      // The next fix round of the now-published item updates it, as today.
+      await finish(run.id);
+      const next = await claimedRun({ continues: { baseSha: BASE } });
+      expect(PlanePushTokenReply.parse((await askToken(next)).body).replaces_head).toBe(HEAD);
+      expect((await attempts()).map((a) => a.kind)).toEqual(["push", "fix_round"]);
+    });
+
+    it("a refused earlier attempt may be tried again by a later fix round, and the three push attempts of a record are still the limit", async () => {
+      await pair();
+      await stamp();
+      for (let n = 1; n <= 3; n++) {
+        const run = await claimedRun({ continues: {} });
+        expect((await askToken(run)).status, `attempt ${n}`).toBe(200);
+        await report(run, { phase: "refused", code: "scan_refused" });
+        expect((await planeRow()).state).toBe("refused");
+        await finish(run.id);
+      }
+      const fourth = await claimedRun({ continues: {} });
+      const res = await askToken(fourth);
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ error: { code: "attempts_exhausted" } });
+    });
+
+    it("a pairing edited since the build started still stops it, and a continuation that already has a grant is not granted twice", async () => {
+      await pair();
+      await stamp();
+      const run = await claimedRun({ continues: {} });
+      expect((await askToken(run)).status).toBe(200);
+      expect((await askToken(run)).status).toBe(409);
+      await finish(run.id);
+      await pair(["docs/ops/", "later/"]);
+      const next = await claimedRun({ continues: {} });
+      const res = await askToken(next);
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ error: { code: "pairing_changed" } });
     });
   });
 });

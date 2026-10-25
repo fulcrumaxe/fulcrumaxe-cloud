@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import type { StopReason } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { pairingDigest, readPlanePush, recordUpdatedHead, recordVerifiedOutcome, type PlaneRefusalEntry, type PlanePushOutcomeState, type PlanePushRow } from "@fx/core/src/repos/planePushRecord.js";
+import { RESTAMPABLE, pairingDigest, readPlanePush, recordUpdatedHead, recordVerifiedOutcome, type PlaneRefusalEntry, type PlanePushOutcomeState, type PlanePushRow } from "@fx/core/src/repos/planePushRecord.js";
 import { insertRunEvent } from "@fx/runner";
 import { prFooterSkipReason } from "@fulcrumaxe/runner-protocol/planePushText";
 import { REPUBLISH_BASE_MISSING, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE } from "@fx/core/src/work-items/baseSync.js";
@@ -151,6 +151,11 @@ async function livePairing(client: PoolClient, accountId: string, row: PlanePush
   return { codeRepo: pair.code_repo, overlayGlobs: pair.overlay_globs, identifierRulesPath: pair.identifier_rules_path, planDataRulesPath: pair.plan_data_rules_path, pairingDigest: row.pairingDigest };
 }
 
+/** The public pull request exists and no person has taken the branch over: a fix round updates it. */
+const hasOpenPublicPr = (r: PlanePushRow): boolean => r.state === "pr_opened" && r.headSha !== null && r.managedByPersonAt === null;
+/** Nothing was published yet (the row is in a state a new attempt may replace) and no person has the branch: a fix round publishes it for the first time. */
+const mayFirstPublish = (r: PlanePushRow): boolean => r.managedByPersonAt === null && RESTAMPABLE.includes(r.state);
+
 const facts = (row: PlanePushRow): PlanePushFacts => ({ id: row.id, codeRepo: row.codeRepo, branch: row.branch });
 
 /** Package-internal: `runnerPool` is the runner login's pool and is captured here, never exposed. */
@@ -171,8 +176,9 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           const { row } = found;
           // FIXROUND-REPUBLISH (R2-c1): a fix round (a continuation) updates the open public pull request or publishes nothing. No open one, or one a person took over: nothing to do. Open, and the round was
           // not signed with a base (the round start refuses that, this asks again): named, and no token.
-          const update = found.continues;
-          if (update && (row.state !== "pr_opened" || row.headSha === null || row.managedByPersonAt !== null)) return { kind: "not_paired" };
+          // A fix round of an item whose first round never published (its check failed) has no public pull request to update: it publishes one, like a first round (RESTAMPABLE states, no person on the branch).
+          const update = found.continues && hasOpenPublicPr(row);
+          if (found.continues && !update && !mayFirstPublish(row)) return { kind: "not_paired" };
           if (update && found.baseSha === null) return { kind: "refused", code: REPUBLISH_BASE_MISSING };
 
           // The pairing as it is NOW, against the digest stamped at build start. A pairing that was removed or edited is `pairing_changed`.
@@ -182,7 +188,7 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           await client.query("SELECT 1 FROM plane_pushes WHERE id = $1 AND account_id = $2 FOR UPDATE", [row.id, input.accountId]);
           // The row as it is under the lock: a person may have taken the branch over, or the state moved, since the read above.
           const locked = await readPlanePush(client, input.accountId, row.workItemId);
-          if (update && (locked === null || locked.id !== row.id || locked.state !== "pr_opened" || locked.headSha === null || locked.managedByPersonAt !== null)) return { kind: "not_paired" };
+          if (found.continues && (locked === null || locked.id !== row.id || (update ? !hasOpenPublicPr(locked) : !mayFirstPublish(locked)))) return { kind: "not_paired" };
           const { rows: existing } = await client.query("SELECT 1 FROM plane_push_attempts WHERE run_id = $1 AND lease_generation = $2 AND runtime = 'runner' AND account_id = $3", [input.runId, input.leaseGeneration, input.accountId]);
           if (existing.length > 0) return { kind: "already_issued" };
           // An update is its own kind of attempt, numbered on its own and not held to the three pushes of a first publish (each fix round has one).
