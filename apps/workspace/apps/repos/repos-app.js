@@ -11,7 +11,7 @@ import { api, ApiFailure, createRetryGate, isRateLimited, retryWords, waitSecond
 import { on, onRefresh } from "../../core/cloud-live.js";
 import { autoMergeDisabled, lockNote } from "./repos-lock.js";
 import { createAllowancePanel } from "./repos-allowances.js";
-import { createDialControl, createModeControl, createRunnersSection } from "./repos-runners.js";
+import { createAutoMergeControl, createDialControl, createModeControl, createRunnersSection } from "./repos-runners.js";
 
 const REPOS_URL = "/api/v1/repos";
 const allowancesUrl = (id) => "/api/runners/repos/" + encodeURIComponent(id) + "/sandbox-allowances";
@@ -102,13 +102,16 @@ function mountRepos(host, installNote) {
   // D#6 R2b-4b: the Runners section below the repos, and the runner-run setting in the open repo's settings (it reads the same runners answer).
   let dial = null;
   let mode = null; // D#6 R5b-2b-iii: the mode picker of the open repo
+  let autoMerge = null; // D#6 R2b: the local-review auto-merge control of the open repo
   const runners = createRunnersSection({ signal: abort.signal, onData: () => (dial && dial.repaint(), allowances.repaint()) });
   // dom-insert-ok: runners.el is the section element createRunnersSection built with h()
   root.append(runners.el);
   const makeDial = () => {
     dial = st.openId ? createDialControl({ signal: abort.signal, repoId: st.openId, data: runners.data }) : null;
     if (dial) dial.load();
-    mode = st.openId ? createModeControl({ signal: abort.signal, repoId: st.openId }) : null;
+    autoMerge = st.openId ? createAutoMergeControl({ signal: abort.signal, repoId: st.openId }) : null;
+    if (autoMerge) autoMerge.load();
+    mode = st.openId ? createModeControl({ signal: abort.signal, repoId: st.openId, onApplied: () => autoMerge && autoMerge.reload() }) : null;
     if (mode) mode.load();
   };
 
@@ -222,6 +225,8 @@ function mountRepos(host, installNote) {
       ...(dial ? [dial.el] : []),
       // dom-insert-ok: mode.el is the fieldset createModeControl built with h()
       ...(mode ? [mode.el] : []),
+      // dom-insert-ok: autoMerge.el is the fieldset createAutoMergeControl built with h(); it is hidden unless the repo is local-only
+      ...(autoMerge ? [autoMerge.el] : []),
       ...(st.isAdmin ? [] : [h("p", { id: "repos-admin-only-detail", class: "repos-muted", "data-testid": "repos-settings-admin-only" }, ADMIN_ONLY)]),
       ...(st.saveError ? [line(st.saveError, "repos-save-error", "repos-error", "alert")] : [])
     );
@@ -259,7 +264,7 @@ function mountRepos(host, installNote) {
       st.loadFailed = true;
     }
     st.loading = false;
-    if (st.openId && !openRepo()) { st.openId = null; dial = null; mode = null; }
+    if (st.openId && !openRepo()) { st.openId = null; dial = null; mode = null; autoMerge = null; }
     render();
   }
 

@@ -1,6 +1,6 @@
 import { COPY } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { CLOUD_VERIFIED_COPY_SHA256, hasUsableKey } from "./executionMode.js";
+import { CLOUD_VERIFIED_COPY_SHA256, LOCAL_AUTO_MERGE_COPY_SHA256, hasUsableKey } from "./executionMode.js";
 import { RunnerHttpError, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 import { requireMemberRole } from "./memberRole.js";
 import { blockFor, readRepoVisibility } from "./repoPrivacy.js";
@@ -31,13 +31,25 @@ const PICKER_COPY = {
   keyGone: COPY.modeKeyGone,
   publicRepo: COPY.modePublicRepo,
   visibilityUnknown: COPY.modeVisibilityUnknown,
+  // The local-review auto-merge control (opt-in). `autoMergeWording` is the exact text whose hash is `auto_merge_copy_sha256`.
+  autoMergeWording: COPY.localAutoMerge,
+  autoMergeTitle: COPY.autoMergeTitle,
+  autoMergeIsOn: COPY.autoMergeIsOn,
+  autoMergeIsOff: COPY.autoMergeIsOff,
+  autoMergeTurnOn: COPY.autoMergeTurnOn,
+  autoMergeTurnOff: COPY.autoMergeTurnOff,
+  autoMergeSavedOn: COPY.autoMergeSavedOn,
+  autoMergeSavedOff: COPY.autoMergeSavedOff,
+  autoMergeHumanOnly: COPY.autoMergeHumanOnly,
+  autoMergeNotLocal: COPY.autoMergeNotLocal,
 } as const;
 
 /**
  * GET /api/runners/repos/:id/execution-mode (a session route, any member of the account; a non-member gets 403, another account's repo 404).
  * What the repo mode picker needs: the repo's current mode, its full name (the picker checks the typed name against it; the server still
  * checks it on the write), whether a usable model key is connected (`key_required` is true when not: a boolean, never key material), the
- * sha256 of the cloud-verified wording this server ships (sent back on the opt-in as `copy_sha256`), whether the caller may change the
+ * sha256 of the cloud-verified wording this server ships (sent back on the opt-in as `copy_sha256`), whether local-review auto-merge is on
+ * (`auto_merge`) and the hash of its wording (`auto_merge_copy_sha256`, sent back when turning it on), whether the caller may change the
  * mode, and the picker's words.
  *
  * `runner_blocked` (D#6 runner public guard): on a repo that is on a runner (local-only or cloud-verified), the visibility is read live
@@ -47,11 +59,12 @@ const PICKER_COPY = {
  */
 export async function getRepoMode(deps: RunnerCloudDeps, principal: SessionPrincipal, repoId: string): Promise<RunnerHttpResponse> {
   if (!UUID.test(repoId)) throw new RunnerHttpError(404, "not_found", "no such repository");
-  const { repo, role, usableKey } = await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client) => {
+  const { repo, role, usableKey, autoMerge } = await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client) => {
     const role = await requireMemberRole(client);
     const repo = (await client.query<{ execution_mode: string; gh_owner: string | null; gh_name: string | null }>("SELECT execution_mode, gh_owner, gh_name FROM repos WHERE id = $1", [repoId])).rows[0];
     if (!repo) throw new RunnerHttpError(404, "not_found", "no such repository");
-    return { repo, role, usableKey: await hasUsableKey(client, principal.accountId) };
+    const optIn = (await client.query<{ on: boolean }>("SELECT EXISTS (SELECT 1 FROM repo_local_review_optins o WHERE o.repo_id = $1) AS on", [repoId])).rows[0];
+    return { repo, role, usableKey: await hasUsableKey(client, principal.accountId), autoMerge: optIn?.on === true };
   });
   // Read after the tenant transaction: the visibility read goes to GitHub.
   const onRunner = repo.execution_mode === "runner_local" || repo.execution_mode === "runner_verified";
@@ -64,6 +77,8 @@ export async function getRepoMode(deps: RunnerCloudDeps, principal: SessionPrinc
       full_name: repo.gh_owner && repo.gh_name ? `${repo.gh_owner}/${repo.gh_name}` : null,
       key_required: !usableKey,
       copy_sha256: CLOUD_VERIFIED_COPY_SHA256,
+      auto_merge: autoMerge,
+      auto_merge_copy_sha256: LOCAL_AUTO_MERGE_COPY_SHA256,
       can_change: role === "owner" || role === "admin",
       runner_blocked: runnerBlocked,
       copy: PICKER_COPY,
