@@ -141,7 +141,7 @@ describe("G1 stays closed in the runner-to-cloud direction", () => {
     const paths = (schema: z.ZodTypeAny): string[] => (schema instanceof z.ZodUnion ? (schema.options as z.ZodTypeAny[]).flatMap(paths) : fieldPaths(schema));
     const holders = Object.entries(RUNNER_REPLIES).flatMap(([name, schema]) => [...new Set(paths(schema as z.ZodTypeAny).filter((p) => p.split(".").pop() === "token"))].map((p) => `${name}:${p}`));
     // D#6 RUNNER-WAKE R3a: the wake token is minted by the cloud and bound to the runner's own key; it is the same field on every reply that has it.
-    expect(holders.sort()).toEqual(["claim:wake.token", "hello:wake.token", "plane_push_token:token"]);
+    expect(holders.sort()).toEqual(["claim:wake.token", "hello:wake.token", "plane_merge_claim:read.token", "plane_merge_verify:token", "plane_push_token:token"]);
   });
 });
 
