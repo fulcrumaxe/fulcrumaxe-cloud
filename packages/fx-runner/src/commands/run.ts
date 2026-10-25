@@ -47,6 +47,7 @@ import type { LimitedBy } from "@fulcrumaxe/runner-protocol";
 import { createGitTransport } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
+import { createLockfileSync, type LockfileSync } from "../daemon/lockfileSync.js";
 import { createBaseFile, createChangedFiles, createCheckStep, createVcsState } from "../daemon/checkStep.js";
 import { createJobWatch } from "../daemon/watch.js";
 import { createEventRelay, realClock, type Clock } from "../daemon/lease.js";
@@ -59,7 +60,7 @@ import { abortOnSignals, pollLoop, type PollEvent } from "../daemon/pollLoop.js"
 import { WakeTracker } from "../daemon/wake.js";
 import { removeStaleLedgerTemp } from "../daemon/staleTemp.js";
 import { spillRootFor, sweepStaleSpill } from "../job/spillFiles.js";
-import { cleanEnv, type CredentialMode } from "../job/cleanEnv.js";
+import { cleanEnv, type CleanEnvOptions, type CredentialMode } from "../job/cleanEnv.js";
 import { createWorkspaceStore } from "../job/workspace.js";
 import { loadRunnerKey } from "../keys.js";
 import { gitProxyHashFor, keyringFor, type PinnedGitProxies, type PinnedKeyrings } from "../keyring.js";
@@ -214,6 +215,15 @@ function describePoll(event: PollEvent): string | undefined {
 }
 
 /** The exit code that asks a service manager to start the program again, on the version the stable link now names (`EX_TEMPFAIL`). */
+/**
+ * D#6 BUILD-LOCKFILE-ON-DEP-ADD: the job handler's `lockfileSync` entry, wired only where the engine offers the process-group capture and the large capture (for the guarded git
+ * listing); `{}` otherwise, so a machine without them runs jobs as before.
+ */
+export function lockfileSyncFor(engine: Pick<EngineKit, "installCapture" | "captureLarge">, envOptions: CleanEnvOptions, say: (line: string) => void, scratchRoot: string): { lockfileSync?: LockfileSync } {
+  if (engine.installCapture === undefined || engine.captureLarge === undefined) return {};
+  return { lockfileSync: createLockfileSync({ capture: engine.installCapture, envOptions, say, scratchRoot, changedFiles: createChangedFiles(engine.captureLarge, envOptions) }) };
+}
+
 export const EXIT_RESTART_FOR_UPDATE = 75;
 
 export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunHooks = {}, updateHost?: UpdateHost): Promise<number> {
@@ -327,6 +337,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const handle = createJobHandler({
       planePush,
       ...(depsInstall === undefined ? {} : { depsInstall, packageStoreRoot }),
+      // D#6 BUILD-LOCKFILE-ON-DEP-ADD: the offline lockfile update after the agent's turn; needs the process-group capture and the guarded git listing.
+      ...lockfileSyncFor(host.engine, envOptions, (line) => ctx.out(line), path.join(ctx.stateDir, "lock-sync")),
       // D#6 R-CHK-2: the job's approved check, run under the job's own sandbox rules; wired only where the engine offers the process-group capture and the large capture.
       ...(host.engine.installCapture === undefined || host.engine.captureLarge === undefined ? {} : { checkStep: createCheckStep({ capture: host.engine.installCapture, now: ctx.now, vcsState: createVcsState(host.engine.captureLarge, envOptions), changedFiles: createChangedFiles(host.engine.captureLarge, envOptions) }), baseFile: createBaseFile(host.engine.captureLarge, envOptions), checkLaunch: (target: Parameters<typeof sandbox.checkLaunch>[0], argv: readonly string[], devShell: boolean) => sandbox.checkLaunch(target, argv, devShell), checkHome: home }),
       onDepsDetail: (detail: string) => ctx.out(`fx-runner: dependencies for this job (${detail})`),

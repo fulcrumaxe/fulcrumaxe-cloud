@@ -28,6 +28,7 @@ import { pinLedgerSections, readJobPins, type JobPinsRead } from "../job/pinFile
 import { SpillRefused, prepareSpill, removeSpill, type SpillHandle } from "../job/spillFiles.js";
 import { checkNote, DEPS_FAILED_NOTE, DEPS_INSTALLED_NOTE, DEPS_REGISTRY_NOTE, NIX_FLAKE_CHANGED_NOTE } from "../job/prompt.js";
 import type { DepsInstaller } from "./depsInstall.js";
+import type { LockfileSync } from "./lockfileSync.js";
 import { NotAPlainSegment, segmentUnder } from "../job/plainSegment.js";
 import { cliModelFor, runJob, type JobLedger, type RunJobDeps, type RunJobResult } from "../job/runJob.js";
 import { storeKeyOf, type JobAllowanceGrant } from "../sandbox/allowances.js";
@@ -105,6 +106,11 @@ export interface JobHandlerDeps {
   onRepoMapSkip?: (reason: "no_mirror" | "unavailable") => void;
   /** D#6 C44-4 (G-C44-7): the host-side dependency install, run before the agent's sandbox starts for a test-running role with an allowed npm registry. Absent: no install is done. */
   depsInstall?: DepsInstaller;
+  /**
+   * D#6 BUILD-LOCKFILE-ON-DEP-ADD: brings `pnpm-lock.yaml` up to date, offline, after the agent's turn and before the check, when the change touched a package manifest
+   * (the agent's sandbox keeps the lockfile read-only, so it cannot). Never fails the run: its closed outcome goes on a step line and the check judges the result. Absent: no update.
+   */
+  lockfileSync?: LockfileSync;
   /** The directory of the per-repo package stores (the host sandbox's `packageStoreRoot`); the install uses the job's own store in it. Absent: no install is done. */
   packageStoreRoot?: string;
   /**
@@ -529,6 +535,22 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
           const afterAgent = async (sandboxHandle: SandboxHandle, workspace: string): Promise<void> => {
             // Before the check's before-and-after comparison of the protected files, so a placeholder is neither checked nor reported as a change.
             clearStubs(workspace);
+            // The agent could not touch the lockfile; the runner does it, so the check's frozen install and the published change both see a lockfile that matches the manifests.
+            if (deps.lockfileSync !== undefined && started.base !== undefined) {
+              // The agent's process tree must be gone before the runner reads or writes the workspace on the host: its hook fires on the result event, and a tool call's background
+              // process may still be running (CWE-367). `stop` ends the whole group and waits; the sandbox itself stays, so the check below still launches under its rules.
+              const ended = await allowed.stop(sandboxHandle).then(() => true, () => false);
+              if (!ended) {
+                step("lockfile update ended (not run: the agent could not be stopped)");
+              } else {
+                // A process of the stopped tree may have made a placeholder after the first clear.
+                clearStubs(workspace);
+                const domains = (job.sandbox_allowances?.entries ?? []).filter((entry) => entry.kind === "domain").map((entry) => entry.value);
+                const synced = await deps.lockfileSync.run({ workspace, base: started.base, registryHost: registryHostOf(domains), signal: stopRun }).catch(() => undefined);
+                if (synced === undefined) step("lockfile update ended (lockfile_sync_failed)");
+                else if (synced.kind !== "none") step(`lockfile update ended (${synced.kind}${synced.kind === "failed" ? `: ${synced.why}` : synced.kind === "refused" ? `: ${synced.reason}` : ""})`);
+              }
+            }
             const check = job.check;
             if (check === undefined) return;
             const closed = closedCheck;

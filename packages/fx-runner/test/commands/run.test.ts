@@ -683,6 +683,17 @@ describe("6. the claim gate in the composed daemon (D#6 R4a-6, C16 section 1.3)"
   });
 });
 
+describe("the lockfile update wiring (BUILD-LOCKFILE-ON-DEP-ADD)", () => {
+  it("the daemon hands the job handler a lockfile update built on the process-group capture and the guarded git listing, run after the placeholders are cleared and before the check", () => {
+    const text = readFileSync(path.join(PACKAGE_DIR, "src", "commands", "run.ts"), "utf8");
+    expect(text).toContain("...lockfileSyncFor(host.engine, envOptions,");
+    const handler = readFileSync(path.join(PACKAGE_DIR, "src", "daemon", "jobHandler.ts"), "utf8");
+    expect(handler.indexOf("clearStubs(workspace);")).toBeGreaterThan(-1);
+    expect(handler.indexOf("deps.lockfileSync.run(")).toBeGreaterThan(handler.indexOf("clearStubs(workspace);"));
+    expect(handler.indexOf("const check = job.check;")).toBeGreaterThan(handler.indexOf("deps.lockfileSync.run("));
+  });
+});
+
 describe("the command line wiring", () => {
   const run = async (host: RunHost | undefined) => {
     let err = "";
