@@ -1185,6 +1185,9 @@ importers:
       '@fx/db':
         specifier: workspace:*
         version: link:../db
+      '@fx/gh-policy':
+        specifier: workspace:*
+        version: link:../gh-policy
       '@fx/runner':
         specifier: workspace:*
         version: link:../runner

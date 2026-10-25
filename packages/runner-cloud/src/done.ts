@@ -1,6 +1,7 @@
 import { DONE_RETRY_AFTER_SECONDS, DoneMessage, DoneReply, DoneRetryReply, SignedJobSchema, type DoneCheck, type Job } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RUNNER_RUN_BRANCH, isRunnerMode } from "@fx/runner";
+import { RUNNER_PUSHING_ROLES } from "@fx/gh-policy";
 import {
   RunnerHttpError,
   MAX_BODY_BYTES,
@@ -178,7 +179,7 @@ async function decide(deps: RunnerCloudDeps, i: { accountId: string; runId: stri
   if (ctx.takenOver) return failed("taken_over");
   // Only the executor and the docs-writer push (C25 section 3.2). Every other role (the reviewers, the panel seats, the advisory roles) ends
   // `succeeded` on its done; its envelope is stored after redaction (C21 section 5.2).
-  if (ctx.role !== "executor" && ctx.role !== "docs-writer") return verdictOf({ outcome: "succeeded", failureReason: null, prNumber: null });
+  if (!RUNNER_PUSHING_ROLES.has(ctx.role)) return verdictOf({ outcome: "succeeded", failureReason: null, prNumber: null });
 
   // The local-only rules are keyed on the run's own mode. A run that is not a runner run (either runner mode) has no business here.
   if (ctx.runtime !== "runner" || !isRunnerMode(ctx.executionMode) || !ctx.repo || !ctx.job) return failed("internal_error");
