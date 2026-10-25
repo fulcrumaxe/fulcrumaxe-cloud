@@ -449,6 +449,60 @@ export type PlanePushReportMessage = z.infer<typeof PlanePushReportMessage>;
 /** The signed route a runner reports a phase of its public push on. */
 export const PLANE_PUSH_REPORT_PATH = "/api/runner/plane-push-report";
 
+/**
+ * D#6 PUBLIC-MERGE PR2a: the three messages of a merge order on the local runner (design: the cloud decides, the runner checks content and merges,
+ * GitHub enforces the sha). Nothing a runner sends names a repository, branch, pull request or sha that is then USED: every such value is compared with
+ * the order's own row. There is no field that can hold file content, a diff, a patch or a token (test/planeMerge.test.ts walks the schemas).
+ */
+export const PLANE_MERGE_CLAIM_PATH = "/api/runner/plane-merge-claim";
+export const PLANE_MERGE_VERIFY_PATH = "/api/runner/plane-merge-verify";
+export const PLANE_MERGE_REPORT_PATH = "/api/runner/plane-merge-report";
+/** The paths of a verify: at most this many; a longer change set is sent cut short with `incomplete` true. */
+export const MAX_PLANE_MERGE_PATHS = 3000;
+/** Why the runner stopped before it called merge, a closed set. */
+export const PLANE_MERGE_ABORT_CODES = ["head_moved", "base_retargeted", "pr_not_open", "pr_draft", "read_failed", "internal"] as const;
+export const PlaneMergeAbortCode = z.enum(PLANE_MERGE_ABORT_CODES);
+export type PlaneMergeAbortCode = z.infer<typeof PlaneMergeAbortCode>;
+
+/** A claim carries nothing: the signature names the runner, and the cloud picks the oldest order this runner may take. */
+export const PlaneMergeClaimMessage = z.object({}).strict();
+
+const repoPath = z.string().min(1).max(4096).regex(/^[^\u0000-\u001f\u007f-\u009f\u2028\u2029]+$/);
+
+/**
+ * The runner's content check, bound to both shas. `same` is the result of the shared change-set comparison (planePush/changeSet.ts); `incomplete`
+ * means the runner could not know (a fetch failed, a tree was malformed, no merge base): it implies `same` false. `paths` are the public change set.
+ */
+export const PlaneMergeVerifyMessage = z
+  .object({
+    order_id: uuid,
+    lease_generation: z.number().int().safe().min(1),
+    reviewed_head: gitSha,
+    public_head: gitSha,
+    same: z.boolean(),
+    incomplete: z.boolean(),
+    paths: z.array(repoPath).max(MAX_PLANE_MERGE_PATHS),
+    pairing_digest: z.string().regex(/^[0-9a-f]{64}$/),
+    token_revoked: z.boolean(),
+  })
+  .strict()
+  .refine((m) => !(m.same && m.incomplete), { message: "an incomplete check cannot be the same", path: ["same"] });
+export type PlaneMergeVerifyMessage = z.infer<typeof PlaneMergeVerifyMessage>;
+
+/** What the runner did with the merge, as a HINT: the cloud reads GitHub itself before it records anything. */
+export const PlaneMergeReportMessage = z
+  .object({
+    order_id: uuid,
+    lease_generation: z.number().int().safe().min(1),
+    result: z.enum(["merged", "refused", "aborted"]),
+    http_status: z.number().int().min(100).max(599).optional(),
+    abort_code: PlaneMergeAbortCode.optional(),
+    token_revoked: z.boolean(),
+  })
+  .strict()
+  .refine((m) => (m.result === "aborted") === (m.abort_code !== undefined), { message: "abort_code goes with result aborted, and only with it", path: ["abort_code"] });
+export type PlaneMergeReportMessage = z.infer<typeof PlaneMergeReportMessage>;
+
 export const EventsMessage = z.object({ run_id: uuid, lease_generation: leaseGeneration, events: z.array(LocalOnlyEvent).min(1).max(MAX_EVENTS_PER_BATCH) }).strict();
 
 /** The deepest nesting `agentOutput` may have. Real envelopes are a few levels deep. */
@@ -598,6 +652,9 @@ export const RUNNER_MESSAGES = {
   plane_push_token: PlanePushTokenMessage,
   plane_push_pairing: PlanePushPairingMessage,
   plane_push_report: PlanePushReportMessage,
+  plane_merge_claim: PlaneMergeClaimMessage,
+  plane_merge_verify: PlaneMergeVerifyMessage,
+  plane_merge_report: PlaneMergeReportMessage,
   events: EventsMessage,
   done: DoneMessage,
   register: RegisterMessage,

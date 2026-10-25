@@ -17,6 +17,9 @@ const VALID: Record<RunnerMessageName, unknown> = {
   plane_push_token: { run_id: UUID, lease_generation: 3 },
   plane_push_pairing: { run_id: UUID, lease_generation: 3 },
   plane_push_report: { run_id: UUID, lease_generation: 3, phase: "scanning" },
+  plane_merge_claim: {},
+  plane_merge_verify: { order_id: UUID, lease_generation: 1, reviewed_head: "a".repeat(40), public_head: "b".repeat(40), same: true, incomplete: false, paths: ["src/a.ts"], pairing_digest: "c".repeat(64), token_revoked: true },
+  plane_merge_report: { order_id: UUID, lease_generation: 1, result: "merged", token_revoked: true },
   events: { run_id: UUID, lease_generation: 3, events: [EVENT] },
   done: { run_id: UUID, lease_generation: 3, agentOutput: { verdict: "pass" } },
   register: { code: `fxrr_${"A1".repeat(16)}`, public_key_jwk: JWK },
@@ -25,8 +28,8 @@ const VALID: Record<RunnerMessageName, unknown> = {
 };
 
 describe("the runner-to-cloud messages", () => {
-  it("are exactly hello, claim, heartbeat, git_ticket, plane_push_token, plane_push_pairing, plane_push_report, events, done, register, rotate and revoke", () => {
-    expect(Object.keys(RUNNER_MESSAGES).sort()).toEqual(["claim", "done", "events", "git_ticket", "heartbeat", "hello", "plane_push_pairing", "plane_push_report", "plane_push_token", "register", "revoke", "rotate"]);
+  it("are exactly hello, claim, heartbeat, git_ticket, plane_push_token, plane_push_pairing, plane_push_report, the three plane_merge messages, events, done, register, rotate and revoke", () => {
+    expect(Object.keys(RUNNER_MESSAGES).sort()).toEqual(["claim", "done", "events", "git_ticket", "heartbeat", "hello", "plane_merge_claim", "plane_merge_report", "plane_merge_verify", "plane_push_pairing", "plane_push_report", "plane_push_token", "register", "revoke", "rotate"]);
   });
 
   it("accept a valid message of each kind", () => {
@@ -206,7 +209,7 @@ describe("LocalOnlyEvent", () => {
 
   it("has no message that starts, attaches to or types into a session: the cloud cannot drive a runner's agent or its tmux", () => {
     const names = Object.keys(RUNNER_MESSAGES);
-    expect(names.sort()).toEqual(["claim", "done", "events", "git_ticket", "heartbeat", "hello", "plane_push_pairing", "plane_push_report", "plane_push_token", "register", "revoke", "rotate"]);
+    expect(names.sort()).toEqual(["claim", "done", "events", "git_ticket", "heartbeat", "hello", "plane_merge_claim", "plane_merge_report", "plane_merge_verify", "plane_push_pairing", "plane_push_report", "plane_push_token", "register", "revoke", "rotate"]);
     expect(names.filter((n) => /attach|session|tmux|terminal|input|keys|takeover|take_over|start|exec|command/i.test(n))).toEqual([]);
     // And no message has a field that could carry something to type or run.
     const fields = Object.values(RUNNER_MESSAGES).flatMap((schema) => Object.keys((schema as unknown as { shape?: Record<string, unknown> }).shape ?? {}));

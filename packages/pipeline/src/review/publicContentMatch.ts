@@ -1,4 +1,4 @@
-import { compileOverlay } from "@fulcrumaxe/runner-protocol/planePush";
+import { compileOverlay, diffTreeEntries, sameChangeKeys, treeFromEntries, type TreeEntry } from "@fulcrumaxe/runner-protocol/planePush";
 import type { GitHubHttp } from "../build/githubMergePort.js";
 import { SHA_PATTERN } from "../build/mergeGate.js";
 import { isSafeRef } from "./reviewPrompts.js";
@@ -30,16 +30,6 @@ import type { ChangedFile } from "./securityTrigger.js";
 type Json = Record<string, unknown>;
 const isObj = (v: unknown): v is Json => v !== null && typeof v === "object" && !Array.isArray(v);
 
-const MODES = new Set(["100644", "100755", "120000", "160000"]);
-const ABSENT = "ABSENT";
-
-interface Entry {
-  mode: string;
-  type: string;
-  sha: string;
-}
-const show = (e: Entry | undefined): string => (e === undefined ? ABSENT : `${e.mode}:${e.type}:${e.sha}`);
-
 type Repo = { owner: string; name: string };
 
 async function defaultBranchOf(http: GitHubHttp, repo: Repo): Promise<string | null> {
@@ -48,17 +38,10 @@ async function defaultBranchOf(http: GitHubHttp, repo: Repo): Promise<string | n
   return isSafeRef(res.body.default_branch) ? res.body.default_branch : null;
 }
 
-async function readTree(http: GitHubHttp, repo: Repo, commit: string): Promise<Map<string, Entry> | null> {
+async function readTree(http: GitHubHttp, repo: Repo, commit: string): Promise<Map<string, TreeEntry> | null> {
   const res = await http.request({ method: "GET", path: `/repos/${repo.owner}/${repo.name}/git/trees/${commit}`, query: { recursive: "1" } });
   if (res.status !== 200 || !isObj(res.body) || res.body.truncated !== false || !Array.isArray(res.body.tree)) return null;
-  const out = new Map<string, Entry>();
-  for (const e of res.body.tree) {
-    if (!isObj(e) || typeof e.path !== "string" || typeof e.mode !== "string" || typeof e.type !== "string" || typeof e.sha !== "string") return null;
-    if (e.type === "tree") continue;
-    if (!MODES.has(e.mode) || !SHA_PATTERN.test(e.sha) || out.has(e.path)) return null;
-    out.set(e.path, { mode: e.mode, type: e.type, sha: e.sha });
-  }
-  return out;
+  return treeFromEntries(res.body.tree);
 }
 
 const refPath = (ref: string): string => ref.split("/").map(encodeURIComponent).join("/");
@@ -95,18 +78,8 @@ async function changeSet(http: GitHubHttp, repo: Repo, prBaseRef: string, head: 
   if (headTree === null) return null;
   const baseTree = await readTree(http, repo, base);
   if (baseTree === null) return null;
-  const keys: string[] = [];
-  const paths: string[] = [];
-  const consider = (path: string) => {
-    const was = baseTree.get(path);
-    const now = headTree.get(path);
-    if (show(was) === show(now) || !keep(path)) return;
-    keys.push(`${path}\u0000${show(was)}\u0000${show(now)}`);
-    paths.push(path);
-  };
-  for (const path of headTree.keys()) consider(path);
-  for (const path of baseTree.keys()) if (!headTree.has(path)) consider(path);
-  return { keys: keys.sort(), paths, mergeBase: base };
+  const diff = diffTreeEntries(baseTree, headTree, keep);
+  return { keys: diff.keys, paths: diff.paths, mergeBase: base };
 }
 
 /** GitHub lists at most this many files in a compare and does not page them (its paging is of commits). A list this long may be cut short. */
@@ -166,6 +139,6 @@ export async function checkPublicContent(input: ContentMatchInput): Promise<Cont
   if (patches === null) return { same: false, files, incomplete: true };
   const priv = await changeSet(input.privateHttp, input.privateRepo, input.privateBaseRef, input.reviewedHead, (p) => !overlay.match(p), false);
   if (priv === null) return { same: false, files, incomplete: false };
-  const same = priv.keys.length === pub.keys.length && priv.keys.every((k, i) => k === pub.keys[i]);
+  const same = sameChangeKeys(priv.keys, pub.keys);
   return { same, files, incomplete: false };
 }

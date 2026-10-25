@@ -53,7 +53,10 @@ const utcTimestamp = z.string().datetime();
 const wake = WakeGrant.optional();
 
 /** Nothing for this runner to do right now. */
-export const ClaimIdleReply = z.object({ retry_after: retryAfter(3600), wake }).strict();
+/** D#6 PUBLIC-MERGE PR2a: `merge_order` is only ever true: a merge order waits for this runner. Sent only to a runner whose latest hello listed `plane_merge_v1` (the same gating as `wake`). */
+const mergeOrder = z.literal(true).optional();
+
+export const ClaimIdleReply = z.object({ retry_after: retryAfter(3600), wake, merge_order: mergeOrder }).strict();
 export type ClaimIdleReply = z.infer<typeof ClaimIdleReply>;
 
 /**
@@ -61,7 +64,7 @@ export type ClaimIdleReply = z.infer<typeof ClaimIdleReply>;
  * later write with it. `run_id` repeats the signed job's own so a runner can key on it before it opens the job.
  */
 export const ClaimedReply = z
-  .object({ signed_job: SignedJobSchema, run_id: z.string().uuid(), lease_generation: safeInt.min(1), wake })
+  .object({ signed_job: SignedJobSchema, run_id: z.string().uuid(), lease_generation: safeInt.min(1), wake, merge_order: mergeOrder })
   .strict()
   .refine((reply) => reply.signed_job.job.run_id === reply.run_id, { message: "run_id must be the signed job's run" });
 export type ClaimedReply = z.infer<typeof ClaimedReply>;
@@ -217,6 +220,54 @@ export type PlanePushPairingReply = z.infer<typeof PlanePushPairingReply>;
 export const PlanePushReportReply = z.object({ recorded: z.literal(true) }).strict();
 export type PlanePushReportReply = z.infer<typeof PlanePushReportReply>;
 
+/** D#6 PUBLIC-MERGE PR2a: an order lasts at most this long from its placement; a runner holds a claim for at most the lease. */
+export const PLANE_MERGE_ORDER_DEADLINE_MINUTES = 60;
+export const PLANE_MERGE_LEASE_SECONDS = 600;
+export const PLANE_MERGE_MAX_ATTEMPTS = 3;
+
+const gitSha = z.string().regex(/^([0-9a-f]{40}|[0-9a-f]{64})$/);
+const mergeReason = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/);
+/** A short-lived credential the cloud minted for the code repository alone; its kind is the cloud's business, the runner only presents it. */
+const MergeCredential = z.object({ token: z.string().min(20).max(512).regex(/^[A-Za-z0-9_.-]+$/), expires_at: utcTimestamp }).strict();
+
+/**
+ * 200 from plane-merge-claim: an order and the bound facts, all from the cloud's rows, with the READ credential (the code repository, contents read,
+ * at most one per order and lease generation). Or `{ retry_after }` when nothing is waiting for this runner.
+ */
+export const PlaneMergeClaimedReply = z
+  .object({
+    order_id: z.string().uuid(),
+    lease_generation: safeInt.min(1),
+    code_repo: CODE_REPO,
+    pr_number: safeInt.min(1).max(2_147_483_647),
+    public_branch: z.string().max(80).regex(/^fx\/p-[0-9a-f-]{36}$/),
+    expected_public_head: gitSha,
+    reviewed_head: gitSha,
+    private_repo: z.object({ id: z.string().uuid(), owner: z.string().regex(/^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/), name: z.string().regex(/^[A-Za-z0-9._-]{1,100}$/) }).strict(),
+    overlay_globs: z.array(pairingPath).min(1).max(MAX_PLANE_PUSH_GLOBS),
+    pairing_digest: z.string().regex(/^[0-9a-f]{64}$/),
+    read: MergeCredential,
+  })
+  .strict();
+export const PlaneMergeClaimReply = z.union([PlaneMergeClaimedReply, z.object({ retry_after: retryAfter(3600) }).strict()]);
+export type PlaneMergeClaimReply = z.infer<typeof PlaneMergeClaimReply>;
+
+/**
+ * 200 from plane-merge-verify, after the cloud ran the whole gate again from fresh reads: go with the ONE write credential of this order (never
+ * issued twice) and the sha the merge must name, or no go with closed reason codes, or no go because a head moved (the workflow re-reviews).
+ */
+export const PlaneMergeVerifyReply = z.union([
+  MergeCredential.extend({ go: z.literal(true), sha: gitSha }).strict(),
+  z.object({ go: z.literal(false), reasons: z.array(mergeReason).min(1).max(40) }).strict(),
+  z.object({ go: z.literal(false), head_moved: z.literal(true) }).strict(),
+]);
+export type PlaneMergeVerifyReply = z.infer<typeof PlaneMergeVerifyReply>;
+
+/** 200 from plane-merge-report: understood. What the cloud recorded is read from the item. */
+export const PlaneMergeReportReply = z.object({ recorded: z.literal(true) }).strict();
+/** 503 from plane-merge-report: GitHub could not be asked, nothing was recorded, send the report again. */
+export const PlaneMergeRetryReply = z.object({ retry_after: retryAfter(3600) }).strict();
+
 /** The complete set of runner-route replies. A test pins these keys. */
 export const RUNNER_REPLIES = {
   hello: HelloReply,
@@ -227,6 +278,10 @@ export const RUNNER_REPLIES = {
   plane_push_token: PlanePushTokenReply,
   plane_push_pairing: PlanePushPairingReply,
   plane_push_report: PlanePushReportReply,
+  plane_merge_claim: PlaneMergeClaimReply,
+  plane_merge_verify: PlaneMergeVerifyReply,
+  plane_merge_report: PlaneMergeReportReply,
+  plane_merge_retry: PlaneMergeRetryReply,
   events: EventsReply,
   stop: StopReply,
   seq_not_increasing: SeqNotIncreasingReply,
