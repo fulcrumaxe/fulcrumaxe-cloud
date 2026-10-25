@@ -4,7 +4,7 @@
  * directory: written through a temporary file and a rename (never through a link), read only when it is a plain file, and a damaged or odd file is
  * the same as no file.
  */
-import { lstatSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { jobClassOfRole, type JobClass } from "@fulcrumaxe/runner-protocol";
 import { writePrivateFile } from "../config.js";
@@ -13,6 +13,11 @@ export const GIB = 1024 ** 3;
 export const FOOTPRINT_FILE = "footprints.json";
 /** Defaults before anything is learned: light 1 GB and half a core, heavy 3 GB and two cores. */
 export const DEFAULT_FOOTPRINT: Readonly<Record<JobClass, { memBytes: number; cores: number }>> = { light: { memBytes: 1 * GIB, cores: 0.5 }, heavy: { memBytes: 3 * GIB, cores: 2 } };
+/**
+ * Version 2: a sample is one job's own peak (its scope's cgroup). Version 1 samples were the machine-wide memory drop shared among the jobs in hand,
+ * which concurrent builds and CI inflated, so they are dropped on load and the estimate relearns from the default.
+ */
+export const FOOTPRINT_VERSION = 2;
 const SAMPLES_KEPT = 20;
 const KEYS_KEPT = 200;
 const MIN_ESTIMATE = GIB / 4;
@@ -31,6 +36,8 @@ export interface FootprintStore {
   classEstimate(cls: JobClass): Footprint;
   /** Adds a finished job's measured peak (bytes) and saves. */
   record(repo: string, role: string, peakBytes: number): void;
+  /** Forgets everything learned: the estimates go back to the defaults. */
+  reset(): void;
 }
 
 function load(file: string): Map<string, number[]> {
@@ -38,7 +45,8 @@ function load(file: string): Map<string, number[]> {
   try {
     const info = lstatSync(file);
     if (!info.isFile() || info.size > MAX_FILE_BYTES) return entries;
-    const parsed = JSON.parse(readFileSync(file, "utf8")) as { entries?: Record<string, unknown> };
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as { version?: unknown; entries?: Record<string, unknown> };
+    if (parsed.version !== FOOTPRINT_VERSION) return entries;
     for (const [key, value] of Object.entries(parsed.entries ?? {})) {
       if (Array.isArray(value)) entries.set(key, value.filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0).slice(-SAMPLES_KEPT));
     }
@@ -77,6 +85,13 @@ export function createFootprintStore(stateDir: string): FootprintStore {
       }
       return largest;
     },
+    reset() {
+      try {
+        if (lstatSync(file).isFile()) unlinkSync(file);
+      } catch {
+        // fx-swallow-ok: no file (or one that cannot be removed) leaves nothing learned that this call could clear
+      }
+    },
     record(repo, role, peakBytes) {
       if (!Number.isFinite(peakBytes) || peakBytes <= 0) return;
       const entries = load(file);
@@ -86,7 +101,7 @@ export function createFootprintStore(stateDir: string): FootprintStore {
       entries.set(name, samples);
       const kept = [...entries].slice(-KEYS_KEPT);
       try {
-        writePrivateFile(stateDir, FOOTPRINT_FILE, `${JSON.stringify({ version: 1, entries: Object.fromEntries(kept) })}\n`);
+        writePrivateFile(stateDir, FOOTPRINT_FILE, `${JSON.stringify({ version: FOOTPRINT_VERSION, entries: Object.fromEntries(kept) })}\n`);
       } catch {
         // fx-swallow-ok: learning is best effort; a failed save leaves the estimate where it was and never touches the job
       }
