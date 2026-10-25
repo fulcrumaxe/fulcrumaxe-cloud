@@ -86,8 +86,8 @@ export interface CiGate {
  * public one was green. When `openPublicHttp` is given and the item has a public pull request (found by the injected `publicPullRequest` lookup), the wait reads THAT
  * pull request's live head and checks instead. The reviewed private head is not compared with it: the two are different commits by construction.
  * What stands in for that comparison is the platform's stamp: a public head that is not the one the platform pushed (a push or a fix-round
- * republish not recorded yet, or a branch changed by someone else) is `wrong_head`, a wait. A `runner_local` repo keeps its own path whole (its
- * reads go through the local-only fence, which cannot reach the code repository). Single-plane items, and paired items whose public pull request is
+ * republish not recorded yet, or a branch changed by someone else) is `wrong_head`, a wait. A `runner_local` repo does the same through the local-only fence: the code repository's
+ * pull request is listed by the branch our own push record names, and its checks come from the fixed CommitChecks document. Single-plane items, and paired items whose public pull request is
  * not open yet, are read exactly as before. A failed read throws and nothing is recorded, as for the private read.
  */
 export function createCiGate(deps: {
@@ -105,10 +105,11 @@ export function createCiGate(deps: {
       // Without a context there is no repository to read, and no verdict is recorded for it either: the caller's step fails and retries.
       if (!loaded.ok) throw new Error(`ci wait: ${loaded.reason}`);
       const ctx = loaded.ctx;
-      const publicPr = deps.openPublicHttp !== undefined && deps.publicPullRequest !== undefined && ctx.executionMode !== "runner_local" ? await deps.publicPullRequest(input.accountId, input.workItemId) : null;
+      // `pr` is null for a paired item whose public pull request is not open: the wait reads the private copy then, and the merge gate stops with `public_pr_not_open`.
+      const publicPr = deps.openPublicHttp !== undefined && deps.publicPullRequest !== undefined ? ((await deps.publicPullRequest(input.accountId, input.workItemId))?.pr ?? null) : null;
       if (publicPr !== null && deps.openPublicHttp !== undefined) {
         const http = await deps.openPublicHttp({ repoId: ctx.repoId, owner: publicPr.owner, name: publicPr.name, executionMode: ctx.executionMode });
-        const port = createReviewGitHubPort({ pool: deps.pool, http }, { ...ctx, owner: publicPr.owner, name: publicPr.name }, { accountId: input.accountId, workItemId: input.workItemId, prNumber: publicPr.number });
+        const port = createReviewGitHubPort({ pool: deps.pool, http }, { ...ctx, owner: publicPr.owner, name: publicPr.name }, { accountId: input.accountId, workItemId: input.workItemId, prNumber: publicPr.number, recordedBranch: publicPr.branch });
         const ref = { repoId: ctx.repoId, prNumber: publicPr.number };
         const live = (await port.getPullRequest(ref)).headSha;
         if (!SHA_PATTERN.test(live)) throw new Error("ci wait: malformed public head sha");

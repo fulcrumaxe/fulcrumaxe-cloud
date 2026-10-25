@@ -49,7 +49,7 @@ export interface LocalFake {
   answers: unknown[];
 }
 
-export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }): LocalFake {
+export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts: { exclude?: readonly string[] } = {}): LocalFake {
   const base = `/repos/${s.owner}/${s.name}`;
   const branch = s.runBranch ?? "fx/run-g1";
   const calls: LocalFake["calls"] = [];
@@ -175,6 +175,11 @@ export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }): Loca
       if (method === "POST" && path === "/graphql") {
         const g = graphql(req.body);
         ({ label, op, reply } = g);
+      } else if (method === "GET" && path === base) {
+        // A2: the repository itself. Only the fields the gate reads are served (id, names, default branch); never contents.
+        if (Object.keys(query).length > 0 || req.body !== undefined) deny("A2 query or body");
+        label = "A2";
+        reply = () => json(200, { id: s.ghId ?? 7001, full_name: full, default_branch: s.defaultBranch ?? "main", private: false });
       } else if (method === "GET" && path === `${base}/pulls`) {
         if (req.body !== undefined) deny("body on GET");
         label = "A3";
@@ -201,7 +206,7 @@ export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }): Loca
     },
   };
 
-  const fenced = localOnlyGithub(inner);
+  const fenced = localOnlyGithub(inner, opts.exclude === undefined ? {} : { exclude: opts.exclude });
   const note = (e: unknown): never => {
     if (e instanceof LocalOnlyGithubError) refused.push(e.rule);
     throw e;

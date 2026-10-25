@@ -587,3 +587,44 @@ describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 sect
     expect(localOnlyViolation({ method: "GET", path: R, headers: { accept: "application/vnd.github.diff" } })).toBe("accept");
   });
 });
+
+describe("exclude: a client built without an entry (the paired code repository's client leaves out A10)", () => {
+  const squash: GithubRequest = { method: "PUT", path: `${R}/pulls/12/merge`, body: { sha: "c".repeat(40), merge_method: "squash" } };
+
+  it("refuses the call before the inner client is reached, while the default client still sends it", async () => {
+    const without = recorder();
+    await expect(localOnlyGithub(without.client, { exclude: ["A10"] }).request(squash)).rejects.toMatchObject({ rule: NOT });
+    expect(without.seen).toEqual([]);
+    const plain = recorder();
+    await localOnlyGithub(plain.client).request(squash);
+    expect(plain.seen).toHaveLength(1);
+  });
+
+  it("refuses every spelling of the path the entry would have taken", async () => {
+    for (const path of [`${R}/pulls/12/merge`, `${R.toUpperCase()}/pulls/12/merge`, `${R}//pulls/12/merge`, `${R}/pulls/%31%32/merge`]) {
+      const { client, seen } = recorder();
+      await expect(localOnlyGithub(client, { exclude: ["A10"] }).request({ ...squash, path })).rejects.toBeInstanceOf(LocalOnlyGithubError);
+      expect(seen).toEqual([]);
+    }
+  });
+
+  it("takes out only the named entry: the review path's other calls still pass", async () => {
+    const { client, seen } = recorder();
+    const fenced = localOnlyGithub(client, { exclude: ["A10"] });
+    await fenced.request({ method: "GET", path: R });
+    await fenced.request({ method: "GET", path: `${R}/pulls`, query: { state: "all", per_page: 100 } });
+    await fenced.request({ method: "GET", path: `${R}/branches/main/protection` });
+    await fenced.request({ method: "POST", path: `${R}/statuses/${"c".repeat(40)}`, body: { state: "success", context: "fulcrumaxe/review", description: "d" } });
+    await fenced.graphql("CommitChecks", { owner: "acme", name: "app", number: 12 });
+    expect(seen).toHaveLength(5);
+  });
+
+  it("is per client: a second wrapper built without it is unaffected", async () => {
+    const a = recorder();
+    const b = recorder();
+    await expect(localOnlyGithub(a.client, { exclude: ["A10"] }).request(squash)).rejects.toBeInstanceOf(LocalOnlyGithubError);
+    await localOnlyGithub(b.client).request(squash);
+    expect(a.seen).toEqual([]);
+    expect(b.seen).toHaveLength(1);
+  });
+});

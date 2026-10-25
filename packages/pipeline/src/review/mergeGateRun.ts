@@ -5,12 +5,12 @@ import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js"
 import { humanMergeOnly } from "@fx/db/src/humanMergeOnly.js";
 import { autoMergeAllowed } from "@fx/trust";
 import { readRecordedRunnerPullRequest } from "@fx/runner";
-import { createGitHubMergeGatePort, isLocalGitHubHttp, type GitHubHttp } from "../build/githubMergePort.js";
+import { createGitHubMergeGatePort, isLocalGitHubHttp, type GitHubHttp, type LocalGitHubHttp } from "../build/githubMergePort.js";
 import { carriedRunsHead, gateReviewerReasons, loadRunsOnSha, runMergeGate, RUNNER_ADMIN_OK_SQL, SHA_PATTERN, type MergeBlockReason, type ReviewMode } from "../build/mergeGate.js";
-import { listChangedFiles, listChangedFilesLocal, postReviewStatus } from "./githubReads.js";
+import { listChangedFiles, listChangedFilesLocal, postReviewStatus, type ListFilesResult } from "./githubReads.js";
 import { checkPublicContent, type ContentCheck } from "./publicContentMatch.js";
 import { loadReviewContext, type ReviewContext } from "./context.js";
-import type { PublicPullRequestLookup } from "./publicPullRequest.js";
+import type { PublicPullRequest, PublicPullRequestLookup } from "./publicPullRequest.js";
 import { reviewPlanFor } from "./reviewPlan.js";
 import { securityTriggers } from "./securityTrigger.js";
 
@@ -86,7 +86,7 @@ export async function reviewerFlaggedSecurity(pool: Pool, accountId: string, wor
  * `runner_local` repo it is built on the local-only client and the run's recorded branch (D#6 R3c), and a transport that is not the local-only
  * one is refused before a call. The merge gate and the CI wait (ciWait.ts) both use it, so they read the same way.
  */
-export function createReviewGitHubPort(deps: { pool: Pool; http: GitHubHttp }, ctx: ReviewContext, ids: MergeGateRunInput) {
+export function createReviewGitHubPort(deps: { pool: Pool; http: GitHubHttp }, ctx: ReviewContext, ids: MergeGateRunInput & { recordedBranch?: string }) {
   const { pool, http } = deps;
   const { accountId, workItemId, prNumber } = ids;
   const localHttp = ctx.executionMode === "runner_local" ? http : null;
@@ -99,6 +99,8 @@ export function createReviewGitHubPort(deps: { pool: Pool; http: GitHubHttp }, c
             http: localHttp,
             // The branch the run recorded with its `done`. The pull request the workflow found must be that one.
             recordedBranch: async () => {
+              // A paired item's PUBLIC pull request: its branch is the one our own push record names (`plane_pushes.branch`), not a run's.
+              if (ids.recordedBranch !== undefined) return ids.recordedBranch;
               const recorded = await withTenant(pool, accountId, (client) => readRecordedRunnerPullRequest(client, { accountId, workItemId }));
               if (recorded === null || recorded.number !== prNumber) throw new Error("merge gate: the pull request is not the run's recorded one");
               return recorded.branch;
@@ -120,7 +122,13 @@ export function createReviewGitHubPort(deps: { pool: Pool; http: GitHubHttp }, c
  * is the commit they saw; the two heads are different commits by construction. What binds the public head to the platform's own push is its stamp
  * (`plane_pushes.head_sha`): a live head that is not the stamped one (and no person took the branch over) adds `public_head_unrecorded`, so nothing
  * merges. The auto-merge opt-in, the operator's human-merge lock and every ruleset refusal apply unchanged, and a refused merge stays a human merge.
- * The private copy is not merged here. A `runner_local` repo, and a paired item whose public pull request is not open yet, take the path below as before.
+ * The private copy is not merged here. A paired item whose public pull request is not open (not opened yet, closed, merged) stops with `public_pr_not_open`:
+ * the private copy never merges in its place, in either runtime.
+ *
+ * A `runner_local` repo is judged the same way, on the public pull request, but through the local-only fence (paths and states, never contents), and the
+ * cloud never merges it: the fence for the code repository leaves out the merge call, and the gate stops with `runner_merge_unavailable` when every other
+ * condition is met. What the fence cannot read (the trees that prove the public head holds what was reviewed) is not checked here; the changed paths of both
+ * pull requests stand in for the security trigger and the tier, and a person merges.
  */
 export type OpenPublicHttp = (ctx: { repoId: string; owner: string; name: string; executionMode: string }) => Promise<GitHubHttp>;
 
@@ -146,13 +154,17 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
 
   const pr = { repoId: ctx.repoId, prNumber };
   // D#6 R3c: a runner_local repo's whole review and merge path goes through the local-only client. Anything else refuses before a call.
-  const localHttp = ctx.executionMode === "runner_local" ? http : null;
+  const runnerLocal = ctx.executionMode === "runner_local";
+  const localHttp = runnerLocal ? http : null;
   const port = createReviewGitHubPort({ pool, http }, ctx, { accountId, workItemId, prNumber });
 
   // 1. The head the reviewers judged (the item's own pull request), and, for a paired item, the public pull request that merges.
   const head = await port.getPullRequest(pr);
   const headSha = head.headSha;
-  const publicPr = deps.publicPlane !== undefined && localHttp === null ? await deps.publicPlane.read(accountId, workItemId) : null;
+  const lookup = deps.publicPlane !== undefined ? await deps.publicPlane.read(accountId, workItemId) : null;
+  const publicPr: PublicPullRequest | null = lookup?.pr ?? null;
+  // Paired: the repository has a pairing, whether or not its public pull request is open.
+  const paired = lookup !== null;
   let mergeHttp = http;
   let mergeTarget = { owner: ctx.owner, name: ctx.name, prNumber };
   let mergePort = port;
@@ -161,10 +173,17 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
   let mergeOpen = head.state === "open" && !head.merged;
   let mergeBaseRef = head.baseRef;
   const extraBlockReasons: MergeBlockReason[] = [];
+  let humanLocked = humanMergeOnly(ctx.ghRepoId);
+  // A paired item merges its public pull request or nothing: the private copy is never the fallback.
+  if (paired && publicPr === null) extraBlockReasons.push("public_pr_not_open");
   if (publicPr !== null && deps.publicPlane !== undefined) {
     mergeHttp = await deps.publicPlane.open({ repoId: ctx.repoId, owner: publicPr.owner, name: publicPr.name, executionMode: ctx.executionMode });
     mergeTarget = { owner: publicPr.owner, name: publicPr.name, prNumber: publicPr.number };
-    mergePort = createReviewGitHubPort({ pool, http: mergeHttp }, { ...ctx, owner: publicPr.owner, name: publicPr.name }, { accountId, workItemId, prNumber: publicPr.number });
+    mergePort = createReviewGitHubPort({ pool, http: mergeHttp }, { ...ctx, owner: publicPr.owner, name: publicPr.name }, { accountId, workItemId, prNumber: publicPr.number, recordedBranch: publicPr.branch });
+    // The operator's lock names a repository by its GitHub id: either half of the pairing listed means a person merges.
+    if (!humanLocked) humanLocked = humanMergeOnly(await readRepoGhId(mergeHttp, publicPr.owner, publicPr.name));
+    // Defence in depth for `runner_local`: even a client that allowed it could not make the cloud merge this pull request.
+    if (runnerLocal) mergePort = { ...mergePort, mergePullRequest: async () => { throw new Error("merge gate: the cloud does not merge a runner_local repository's pull request"); } };
     mergeRef = { repoId: ctx.repoId, prNumber: publicPr.number };
     const live = await mergePort.getPullRequest(mergeRef);
     mergeHead = live.headSha;
@@ -187,7 +206,8 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
     // A paired item reads NO live file list: its changed files (for the security trigger and the tier) are the public change set at the bound commits, which the
     // content check below computes. When it could not (or a stop is already known), the list is incomplete, which fires the security trigger.
     let content: ContentCheck | null = null;
-    if (publicPr !== null) {
+    // A runner_local repo is read through the paths-only fence: the trees and patches the content check needs are not reachable, and the cloud must not receive them.
+    if (publicPr !== null && !runnerLocal) {
       content = extraBlockReasons.length > 0
         ? { same: false, files: [], incomplete: false }
         : await checkPublicContent({
@@ -205,7 +225,11 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
     }
     const files = content !== null
       ? ({ ok: true, files: content.files, truncated: content.incomplete } as const)
-      : localHttp !== null && isLocalGitHubHttp(localHttp)
+      : publicPr !== null && localHttp !== null && isLocalGitHubHttp(localHttp) && isLocalGitHubHttp(mergeHttp)
+        ? extraBlockReasons.length > 0
+          ? ({ ok: true, files: [], truncated: false } as const)
+          : await provisionalLocalFiles(localHttp, mergeHttp, { owner: ctx.owner, name: ctx.name, pr: prNumber }, { owner: publicPr.owner, name: publicPr.name, pr: publicPr.number })
+        : localHttp !== null && isLocalGitHubHttp(localHttp)
         ? await listChangedFilesLocal(localHttp, { owner: ctx.owner, name: ctx.name, pr: prNumber })
         : await listChangedFiles(http, { owner: ctx.owner, name: ctx.name, pr: prNumber });
     if (!files.ok) throw new Error(`merge gate: files ${files.reason}`);
@@ -245,7 +269,20 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
     },
     // D#6 M1G-a: read from the environment now, on this request. A malformed setting locks every repo; an unknown repo id
     // counts as locked while any id is listed.
-    { accountId, workItemId, pr: mergeRef, ...(publicPr !== null ? { reviewedHeadSha: headSha, expectedHeadSha: mergeHead, extraBlockReasons } : {}), tier: ctx.tier, securityDiffTriggerFired: gateSecurityTrigger, debaterEnabled, reviewMode, humanMergeOnly: humanMergeOnly(ctx.ghRepoId) },
+    {
+      accountId,
+      workItemId,
+      pr: mergeRef,
+      ...(publicPr !== null ? { reviewedHeadSha: headSha, expectedHeadSha: mergeHead } : {}),
+      extraBlockReasons,
+      // A paired runner_local item is merged by its runner or a person, never by the cloud (the runner side is not built yet: a person).
+      ...(paired && runnerLocal ? { mergeUnavailableReason: "runner_merge_unavailable" as const } : {}),
+      tier: ctx.tier,
+      securityDiffTriggerFired: gateSecurityTrigger,
+      debaterEnabled,
+      reviewMode,
+      humanMergeOnly: humanLocked,
+    },
   );
 
   // 5. The outcome, as facts.
@@ -269,4 +306,25 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
     }
   });
   return { outcome: out.outcome, headSha: outHead, reasons, status };
+}
+
+/** The GitHub id of a repository (`GET /repos/{owner}/{repo}`, allowlisted as A2 for a runner_local repo). Null when the answer carries no usable id: the lock then counts it as listed. */
+async function readRepoGhId(http: GitHubHttp, owner: string, name: string): Promise<number | null> {
+  const res = await http.request({ method: "GET", path: `/repos/${owner}/${name}` });
+  if (res.status !== 200) throw new Error(`merge gate: repository read answered ${res.status}`);
+  const id = typeof res.body === "object" && res.body !== null ? (res.body as { id?: unknown }).id : undefined;
+  return typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+/**
+ * The changed paths of a paired runner_local item's two pull requests (paths only, through the fence): the private one the reviewers judged and the public
+ * one. They decide the security trigger and the tier, never a merge (the cloud does not merge this item). Either list cut short makes the whole list so.
+ */
+async function provisionalLocalFiles(priv: LocalGitHubHttp, pub: LocalGitHubHttp, a: { owner: string; name: string; pr: number }, b: { owner: string; name: string; pr: number }): Promise<ListFilesResult> {
+  const first = await listChangedFilesLocal(priv, a);
+  if (!first.ok) return first;
+  const second = await listChangedFilesLocal(pub, b);
+  if (!second.ok) return second;
+  const seen = new Set(first.files.map((f) => f.path));
+  return { ok: true, files: [...first.files, ...second.files.filter((f) => !seen.has(f.path))], truncated: first.truncated || second.truncated };
 }
