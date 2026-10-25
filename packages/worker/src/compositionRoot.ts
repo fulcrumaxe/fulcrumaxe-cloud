@@ -139,7 +139,7 @@ export interface WorkerPorts {
   /** D#6 R2b criterion 12: the runner tier's limits. Absent, they are read from the plan data (`runnerLimitsFor`), and unavailable plan data refuses every runner run. */
   runnerLimits?: RunnerLimitsPort;
   /** D#598 P1f-5b: what the paired-publish step needs from outside the worker (the built hook, the commit identity, the GitHub reads). Absent, the step answers `not_configured` and starts nothing. */
-  planePublish?: Pick<PlanePublishDeps, "hook" | "identity" | "privateHead" | "hosted" | "pullRequests" | "stackBase">;
+  planePublish?: Pick<PlanePublishDeps, "hook" | "identity" | "privateHead" | "privateDefaultHead" | "hosted" | "pullRequests" | "stackBase">;
 }
 
 export interface CreateWorkerOptions {

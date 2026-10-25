@@ -50,6 +50,8 @@ export interface PlanePublishDeps {
   identity: () => { name: string; email: string } | null;
   /** The head of the private branch as GitHub says now, or null when there is no such branch. A throw means GitHub could not be asked. */
   privateHead: (input: { repo: { id: string; owner: string; name: string }; branch: string }) => Promise<string | null>;
+  /** The head of the private repository's default branch as GitHub says now, or null when there is none. A throw means GitHub could not be asked. The publish rules are read at it. */
+  privateDefaultHead: (input: { repo: { id: string; owner: string; name: string } }) => Promise<string | null>;
   /** The hosted side's reads of the public repo, each with its own short-lived token. */
   hosted: {
     verifyPushed(input: { accountId: string; codeRepo: string; branch: string; headSha: string; tipSha: string }): Promise<boolean>;
@@ -200,14 +202,16 @@ async function attempt(deps: PlanePublishDeps, accountId: string, which: { runId
   if (identity === null || facts.baseSha === null || !/^[0-9a-f]{40}$/.test(facts.baseSha) || facts.issue === null) return refuse("bad_input");
   let policy: NetworkPolicyRule[];
   let head: string | null;
+  let defaultTip: string | null;
   try {
     policy = await deps.networkPolicy();
     head = await deps.privateHead({ repo: facts.repo, branch: `fx/issue-${facts.issue}` });
+    defaultTip = await deps.privateDefaultHead({ repo: facts.repo });
   } catch {
     // fx-swallow-ok: the proxy host or GitHub could not be used; nothing was started, the item shows the fixed unavailable refusal
     return refuse("public_unavailable");
   }
-  if (head === null) return refuse("bad_input");
+  if (head === null || defaultTip === null || !/^[0-9a-f]{40}$/.test(defaultTip)) return refuse("bad_input");
 
   // The attempt row and the run row commit TOGETHER, and BEFORE any sandbox exists. The name is `pp-` plus exactly this attempt's id.
   const attemptId = randomUUID();
@@ -258,7 +262,7 @@ async function attempt(deps: PlanePublishDeps, accountId: string, which: { runId
   const text = buildPlanePushText({ itemTitle: facts.title, runId: facts.runId, prFooter: pairing.prFooter, issueNumber });
   await noteFooterSkipped(deps.pool, accountId, facts.runId, pairing.prFooter, issueNumber);
   const input: PlanePublishInput = {
-    own: { owner: facts.repo.owner, name: facts.repo.name }, codeRepo: facts.codeRepo, privateBase: facts.baseSha, privateHead: head, branch: facts.branch, title: text.title, body: text.body,
+    own: { owner: facts.repo.owner, name: facts.repo.name }, codeRepo: facts.codeRepo, privateBase: facts.baseSha, privateHead: head, privateDefaultTip: defaultTip, branch: facts.branch, title: text.title, body: text.body,
     identity, commitTime: Math.floor(now() / 1000),
     pairing: { overlayGlobs: pairing.overlayGlobs, identifierRulesPath: pairing.identifierRulesPath, planDataRulesPath: pairing.planDataRulesPath },
   };

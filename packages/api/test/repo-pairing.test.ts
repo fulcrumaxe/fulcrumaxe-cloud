@@ -26,7 +26,7 @@ interface Pairing {
   code_repo_app_installed: boolean | null;
 }
 interface ErrorBody {
-  error: { code: string };
+  error: { code: string; message?: string };
   details?: { path: string; code: string }[];
   data?: { branch: string | null };
 }
@@ -174,7 +174,8 @@ describe('repo pairing API', () => {
   it('replaces a pairing wholesale (rule files included) and audits the change; a changed pairing is not stamped anywhere else', async () => {
     const owner = await seedAccountWithMember(admin, { role: 'owner' });
     const repoId = await seedRepo(owner.accountId);
-    await call(owner, 'PUT', `/repos/${repoId}/pairing`, { ...GOOD, identifier_rules_path: 'rules/identifiers.txt', plan_data_rules_path: 'rules/plan-data.json' });
+    const first = { ...GOOD, overlay_globs: [...GOOD.overlay_globs, 'rules/'], identifier_rules_path: 'rules/identifiers.txt', plan_data_rules_path: 'rules/plan-data.json' };
+    expect((await call(owner, 'PUT', `/repos/${repoId}/pairing`, first)).status).toBe(200);
     const second = { code_repo: 'acme/other-public', overlay_globs: ['private/**'] };
     const res = await call(owner, 'PUT', `/repos/${repoId}/pairing`, second);
     expect(res.status).toBe(200);
@@ -211,6 +212,9 @@ describe('repo pairing API', () => {
       ['a glob in a rule file path', { ...GOOD, identifier_rules_path: 'rules/*.txt' }, 'identifier_rules_path'],
       ['an absolute rule file path', { ...GOOD, plan_data_rules_path: '/rules.json' }, 'plan_data_rules_path'],
       ['an empty rule file path', { ...GOOD, plan_data_rules_path: '' }, 'plan_data_rules_path'],
+      ['an identifier rule file outside the private paths', { ...GOOD, identifier_rules_path: 'rules/identifiers.txt' }, 'identifier_rules_path'],
+      ['a plan-data rule file outside the private paths', { ...GOOD, plan_data_rules_path: 'docs/ops/plan.json' }, 'plan_data_rules_path'],
+      ['a rule file beside a private path but not under it', { ...GOOD, overlay_globs: ['rules/private/'], identifier_rules_path: 'rules/identifiers.txt' }, 'identifier_rules_path'],
       ['an unknown footer placeholder', { ...GOOD, pr_footer: 'Refs D#{discussion}' }, 'pr_footer'],
       ['a footer over 200 characters', { ...GOOD, pr_footer: 'x'.repeat(201) }, 'pr_footer'],
       ['a two-line footer', { ...GOOD, pr_footer: 'a\nb' }, 'pr_footer'],
@@ -226,6 +230,7 @@ describe('repo pairing API', () => {
       const err = (await res.json()) as ErrorBody;
       expect(err.error.code, label).toBe('invalid_role_settings_input');
       expect(err.details, label).toEqual([{ path: field, code: 'invalid' }]);
+      if (label.includes('outside the private paths')) expect(err.error.message, label).toMatch(/^rule files must be private paths/);
     }
     // Shape errors (body validation): unknown key, wrong types, too many paths, no body.
     const tooMany = Array.from({ length: 101 }, (_, i) => `p${i}/**`);

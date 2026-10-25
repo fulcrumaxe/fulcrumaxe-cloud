@@ -27,6 +27,7 @@ export const PUBLIC_CHANGE_REFUSAL_REASON: Readonly<Record<string, string>> = {
   no_changes: 'there was nothing to send',
   scan_refused: 'the scan found something that must not be public',
   scan_identity_mismatch: 'the scan did not check the change that was built',
+  rule_files_not_private: 'the rule files are not private paths; add them to the private paths in the pairing',
   public_unavailable: 'the public repository could not be reached',
   public_tip_moved: 'the public repository moved on while the change was being prepared',
   app_not_installed: 'the GitHub App is not installed on the public repository',

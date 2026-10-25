@@ -84,7 +84,7 @@ function fakeApi(over: Partial<PublicApi> = {}): PublicApi & { minted: number; o
 }
 
 const input = (over: Partial<PlaneRouteInput> = {}): PlaneRouteInput => ({
-  repoDir: priv, privateBase, privateHead: sh(priv, "rev-parse", "HEAD"), own, defaultBranch: "trunk", branch: "item-1", title: "Add the thing", body: "Adds the thing.",
+  repoDir: priv, privateBase, privateHead: sh(priv, "rev-parse", "HEAD"), privateDefaultTip: privateBase, own, defaultBranch: "trunk", branch: "item-1", title: "Add the thing", body: "Adds the thing.",
   identity: { name: "Fulcrumaxe Bot", email: "bot@example.test" }, commitTime: 1_700_000_000, ...over,
 });
 let transport: PublicGitTransport;

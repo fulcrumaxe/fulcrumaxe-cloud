@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { RepoPairing } from "./repoPairing.js";
+import { uncoveredRuleFiles, type RepoPairing } from "./repoPairing.js";
 import { PLANE_IDENTITY_EMAIL, PLANE_IDENTITY_NAME } from "./planePushIdentity.js";
 import { PLANE_TITLE_LINE } from "./planePushText.js";
 
@@ -17,11 +17,15 @@ import { PUBLIC_BASE_BRANCH, branchNameOk, type PublicGitTransport } from "./pla
  * With no pairing the answer is `single`: the repo and base the item uses today, and nothing here runs. With a pairing, the item's
  * change goes out as ONE commit whose only parent is the public repo's main tip, never as private history:
  *
- *   1. read the public tip; take the item's changed paths between its private base and head;
+ *   1. read the public tip; refuse a pairing whose rule files are not private paths, and an item that changes, adds or removes a declared rule
+ *      file; take the item's changed paths between its private base and head;
  *   2. refuse a path the public tip has moved on since the item's base (applying our blob would silently revert someone else's edit);
  *   3. build the commit from git plumbing in a temporary index (public tip's tree plus those paths), with a fixed platform identity;
  *   4. scan it on its git objects (`scanPlanePush`), and scan the WHOLE raw commit object, the PR title and the PR body with the same
- *      rules (`scanText`): the scan reads changed files, not the commit's own message, author or committer lines;
+ *      rules (`scanText`): the scan reads changed files, not the commit's own message, author or committer lines. The rule files are read
+ *      at the private default branch's tip as the platform read it, so the current rules always apply (an item that started before a rule
+ *      update is scanned by the updated rules). A rule-file change anywhere between the RULE BASE (the merge base of the item's recorded
+ *      base and that tip) and the item's head is refused: neither the item's commits nor a stacked parent's unmerged ones may touch one;
  *   5. mint a token for the paired repo alone, with contents and pull_requests write alone;
  *   6. at push time, check again: the pairing is unchanged and does not point at this repo, the public tip is still the one the commit
  *      was built and scanned on, the scan reported exactly this commit and this base, and the branch does not exist yet;
@@ -50,11 +54,13 @@ export type PlaneRefusalCode =
   | "republish_base_missing"
   | "push_failed"
   | "unsafe_git_config"
+  | "rule_files_not_private"
   | "pr_failed";
 
 export const PLANE_REFUSAL_CODES: readonly PlaneRefusalCode[] = [
   "bad_input", "pairing_self", "pairing_changed", "base_diverged", "no_changes", "scan_refused", "scan_identity_mismatch", "public_unavailable",
   "public_tip_moved", "app_not_installed", "token_scope_mismatch", "branch_exists", "push_failed", "pr_failed", "unsafe_git_config", "public_branch_moved", "republish_base_missing",
+  "rule_files_not_private",
 ];
 
 export class PlaneRouteError extends Error {
@@ -106,6 +112,11 @@ export interface PlaneRouteInput {
   /** The private commit the item started from, and its work: full 40-hex ids. */
   privateBase: string;
   privateHead: string;
+  /**
+   * The private default branch's tip as the PLATFORM read it (never a value the item's run supplied), present in `repoDir`. The rules are read
+   * here; the rule-file change check runs from its merge base with `privateBase` to the head.
+   */
+  privateDefaultTip: string;
   own: OwnRepo;
   defaultBranch: string;
   /** The public branch to create. */
@@ -160,7 +171,7 @@ function validateInput(i: PlaneRouteInput): void {
   const bad = (why: string): never => {
     throw new PlaneRouteError("bad_input", why);
   };
-  if (!OBJECT_ID.test(i.privateBase) || !OBJECT_ID.test(i.privateHead)) bad("the private base and head must be full 40-hex commit ids");
+  if (!OBJECT_ID.test(i.privateBase) || !OBJECT_ID.test(i.privateHead) || !OBJECT_ID.test(i.privateDefaultTip)) bad("the private base, head and default tip must be full 40-hex commit ids");
   if (!branchNameOk(i.branch)) bad("the branch name is not usable on the public repo");
   if (i.updateOf !== undefined && !OBJECT_ID.test(i.updateOf)) bad("the head to update must be a full 40-hex commit id");
   if (!GIT_SAFE_LINE.test(i.title) || i.title.trim() !== i.title) bad("the title must be one plain line of at most 256 characters");
@@ -240,13 +251,66 @@ async function buildCommit(i: PlaneRouteInput, changes: readonly Change[], tip: 
   }
 }
 
-async function readRuleFile(repoDir: string, head: string, path: string): Promise<Uint8Array | null> {
+/** Reads a declared rule file at `rev`. The route passes the default branch's tip only: no commit of the item (or of a parent it is stacked on) chooses the rules it is scanned by. */
+async function readRuleFile(repoDir: string, rev: string, path: string): Promise<Uint8Array | null> {
   try {
-    return await git(repoDir, ["cat-file", "blob", `${head}:${path}`]);
+    return await git(repoDir, ["cat-file", "blob", `${rev}:${path}`]);
   } catch {
     // fx-swallow-ok: null is the answer here; the caller refuses a declared rule file that is not there
     return null; // missing, or unreadable: either way a declared rule file that is not there refuses the push
   }
+}
+
+/**
+ * Refuses an item that changes, adds or removes a declared rule file between its private base and head (`scan_refused`, `rule_file_changed`).
+ * Compared by the object each commit holds at that path; a path that is absent (or unreadable) at a commit is the empty answer. Runs before
+ * anything is built or scanned, for every caller of the route.
+ */
+export async function assertRuleFilesUnchanged(repoDir: string, base: string, head: string, pairing: Pick<RepoPairing, "identifierRulesPath" | "planDataRulesPath">): Promise<void> {
+  for (const rulePath of [pairing.identifierRulesPath, pairing.planDataRulesPath]) {
+    if (!rulePath) continue;
+    const objectAt = async (rev: string): Promise<string> => {
+      try {
+        return (await git(repoDir, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${rev}:${rulePath}`])).toString("utf8").trim();
+      } catch {
+        // fx-swallow-ok: no such path at that commit is the empty answer
+        return "";
+      }
+    };
+    if ((await objectAt(base)) !== (await objectAt(head))) {
+      throw new PlaneRouteError("scan_refused", "a declared rule file was changed by this item; nothing is pushed", [
+        { kind: "rule_file_changed", path: rulePath, message: `the declared rule file ${rulePath} was changed by this item` },
+      ]);
+    }
+  }
+}
+
+/**
+ * Where the rule-file change check starts: the merge base of the item's recorded base and the platform's read of the private default branch.
+ * For an item that started on the default branch that is its base; for a stacked item it is where the stack left the default branch. No
+ * merge base, or a commit that is not in the repository, refuses (`bad_input`).
+ */
+async function ruleBaseOf(repoDir: string, privateBase: string, defaultTip: string): Promise<string> {
+  let out = "";
+  try {
+    out = (await git(repoDir, ["merge-base", privateBase, defaultTip])).toString("utf8").trim();
+  } catch {
+    // fx-swallow-ok: replaced by the closed refusal below
+  }
+  if (!OBJECT_ID.test(out)) throw new PlaneRouteError("bad_input", "the item's base and the private default branch share no commit; nothing is pushed");
+  return out;
+}
+
+/** Refuses a pairing whose declared rule files are not private paths (`rule_files_not_private`): one stored before the pairing check refused it. */
+function assertRuleFilesPrivate(pairing: RepoPairing): void {
+  const fields = uncoveredRuleFiles(pairing);
+  if (fields.length === 0) return;
+  const paths = fields.map((f) => pairing[f] as string);
+  throw new PlaneRouteError(
+    "rule_files_not_private",
+    "rule files must be private paths; add a private path that covers each rule file to the pairing. Nothing is pushed",
+    paths.map((path) => ({ kind: "rule_file_not_private", path, message: `the declared rule file ${path} is not under a private path` })),
+  );
 }
 
 function failure(err: unknown, fallback: PlaneRefusalCode, message: string): PlaneRouteError {
@@ -281,6 +345,11 @@ export async function routeAndPush(input: PlaneRouteInput, deps: PlaneRouteDeps)
   }
   const overlay = compileOverlay(overlayGlobs);
   if ("error" in overlay) throw new PlaneRouteError("scan_refused", overlay.error, [{ kind: "overlay_list_invalid", message: overlay.error }]);
+  // The rules come from the default branch's tip. A rule file must be private, and nothing between the rule base and the item's head may
+  // touch one (the item's own commits, or a stacked parent's unmerged ones): both before anything is built.
+  assertRuleFilesPrivate(decision.pairing);
+  const ruleBase = await ruleBaseOf(input.repoDir, input.privateBase, input.privateDefaultTip);
+  await assertRuleFilesUnchanged(input.repoDir, ruleBase, input.privateHead, decision.pairing);
 
   const changes = await itemChanges(input.repoDir, input.privateBase, input.privateHead);
   if (changes.length === 0) throw new PlaneRouteError("no_changes", "the item changes no files");
@@ -295,15 +364,15 @@ export async function routeAndPush(input: PlaneRouteInput, deps: PlaneRouteDeps)
   const scan = await scanPlanePush({
     overlay: overlayGlobs,
     ruleFiles,
-    readRuleFile: (p) => readRuleFile(input.repoDir, input.privateHead, p),
+    readRuleFile: (p) => readRuleFile(input.repoDir, input.privateDefaultTip, p),
     source: gitCommitSource({ repoDir: input.repoDir, commit, base: tip }),
   });
   const refusals: Refusal[] = [...scan.refusals];
   if (scan.ok) {
     let identifierRules: IdentifierRuleSet | undefined;
     let planData: PlanData | undefined;
-    const idBytes = ruleFiles.identifierRules ? await readRuleFile(input.repoDir, input.privateHead, ruleFiles.identifierRules) : null;
-    const pdBytes = ruleFiles.planData ? await readRuleFile(input.repoDir, input.privateHead, ruleFiles.planData) : null;
+    const idBytes = ruleFiles.identifierRules ? await readRuleFile(input.repoDir, input.privateDefaultTip, ruleFiles.identifierRules) : null;
+    const pdBytes = ruleFiles.planData ? await readRuleFile(input.repoDir, input.privateDefaultTip, ruleFiles.planData) : null;
     const idParsed = idBytes ? parseIdentifierRules(decoder.decode(idBytes)) : undefined;
     const pdParsed = pdBytes ? parsePlanData(decoder.decode(pdBytes)) : undefined;
     if (idParsed && !("error" in idParsed)) identifierRules = idParsed;

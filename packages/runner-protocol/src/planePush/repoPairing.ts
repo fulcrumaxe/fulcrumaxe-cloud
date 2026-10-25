@@ -1,3 +1,5 @@
+import { compileOverlay } from "./planePush.js";
+
 /**
  * A repo's pairing with a public code repo, as the push route reads it. The one definition: the cloud's core pairing module re-exports this type
  * (it keeps the storage and validation), and the push route in this directory takes it as input.
@@ -8,9 +10,28 @@ export interface RepoPairing {
   codeRepo: string | null;
   /** The paths that stay private; empty when off. */
   overlayGlobs: string[];
-  /** A rule file committed in the private repo, or null (only the always-on refusals then run). */
+  /** A rule file committed in the private repo, or null (only the always-on refusals then run). It must sit under a private path. */
   identifierRulesPath: string | null;
   planDataRulesPath: string | null;
   /** The pull request body footer template, or null (none). Not part of the digest and not sent to the push hook; only the text builder reads it. */
   prFooter?: string | null;
+}
+
+export type RuleFileField = "identifierRulesPath" | "planDataRulesPath";
+
+/**
+ * The declared rule files that no private path covers, in field order. A rule file is configuration of the private repo: it must be one of the
+ * paths that never reach the public repo, matched exactly as the push scan matches them. An overlay list that does not compile covers nothing.
+ * Used by the pairing validation (when a pairing is saved) and by the push route (for a pairing stored before that check existed).
+ */
+export function uncoveredRuleFiles(pairing: Pick<RepoPairing, "overlayGlobs" | RuleFileField>): RuleFileField[] {
+  const overlay = compileOverlay(pairing.overlayGlobs);
+  const out: RuleFileField[] = [];
+  for (const field of ["identifierRulesPath", "planDataRulesPath"] as const) {
+    const path = pairing[field];
+    // Empty is "none declared", as the route reads it.
+    if (!path) continue;
+    if ("error" in overlay || !overlay.match(path)) out.push(field);
+  }
+  return out;
 }

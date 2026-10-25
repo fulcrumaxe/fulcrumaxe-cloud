@@ -58,6 +58,7 @@ const NO_STORE = { "cache-control": "no-store" } as const;
 export const PLANE_PUSH_REPORT_CODES: readonly string[] = [
   "bad_input", "pairing_self", "pairing_changed", "base_diverged", "no_changes", "scan_refused", "scan_identity_mismatch", "public_unavailable",
   "public_tip_moved", "app_not_installed", "token_scope_mismatch", "branch_exists", "push_failed", "pr_failed", "unsafe_git_config", "public_branch_moved", "republish_base_missing",
+  "rule_files_not_private",
 ];
 
 function requirePlanePush(deps: RunnerCloudDeps): PlanePushHostedPort {

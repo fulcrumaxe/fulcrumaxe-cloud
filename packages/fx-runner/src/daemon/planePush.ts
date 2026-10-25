@@ -24,8 +24,9 @@
  * (no repository is built, nothing runs, nothing is reported). A run that changed nothing reports `no_change` without asking for a token, so it
  * spends none of the three attempts.
  *
- * Added to the route's own refusals, because the route reads a rule file at the run's HEAD (the agent's commit): a run that changed either
- * declared rule file is refused (`scan_refused`, `rule_file_invalid`), so the scanner a run is checked by is the one it started with.
+ * The route reads the declared rule files at the mirror's default branch (the current rules, also when they changed after the run started) and
+ * refuses a run that changed either one (`scan_refused`, `rule_file_changed`). The hook also runs that same shared check up front, before the
+ * route's first step.
  *
  * Every refusal leaves the public repository's branches as they were, and reports a code with place-plus-rule-key entries, never a matched value.
  */
@@ -34,6 +35,7 @@ import path from "node:path";
 import {
   PLANE_REFUSAL_CODES,
   PlaneRouteError,
+  assertRuleFilesUnchanged,
   planePushGit,
   routeAndPush,
   type PlaneRefusalCode,
@@ -198,27 +200,6 @@ export function reportRefusals(refusals: readonly Refusal[]): NonNullable<PlaneP
 
 const sameRepo = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 const coded = (code: PlaneRefusalCode, message: string): PlaneRouteError => new PlaneRouteError(code, message);
-
-/**
- * The route reads each declared rule file at the run's HEAD, which is the agent's commit. A run that changed one would be scanned by the rules it
- * wrote, so a changed (or added, or removed) rule file refuses the push. Compared by the blob each commit holds at that path.
- */
-async function assertRuleFilesUnchanged(repoDir: string, base: string, head: string, pairing: RepoPairing): Promise<void> {
-  for (const rulePath of [pairing.identifierRulesPath, pairing.planDataRulesPath]) {
-    if (rulePath === null) continue;
-    const blobAt = async (rev: string): Promise<string> => {
-      try {
-        return (await planePushGit(repoDir, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${rev}:${rulePath}`])).toString("utf8").trim();
-      } catch {
-        // fx-swallow-ok: no such file at that commit is the empty answer
-        return "";
-      }
-    };
-    if ((await blobAt(base)) !== (await blobAt(head))) {
-      throw new PlaneRouteError("scan_refused", "a declared rule file was changed by this run; nothing is pushed", [{ kind: "rule_file_invalid", path: rulePath, message: `the declared rule file ${rulePath} was changed by this run` }]);
-    }
-  }
-}
 
 export function createPlanePushHook(deps: PlanePushHookDeps): (input: PlanePushRunEnd) => Promise<PlanePushOutcome> {
   const now = deps.now ?? ((): Date => new Date());
@@ -394,10 +375,18 @@ export function createPlanePushHook(deps: PlanePushHookDeps): (input: PlanePushR
           }
         },
       };
+      let defaultTip: string;
+      try {
+        defaultTip = (await planePushGit(repoDir, ["rev-parse", "--verify", "--quiet", "refs/fx/default^{commit}"])).toString("utf8").trim();
+      } catch {
+        // fx-swallow-ok: replaced by the closed refusal
+        throw coded("bad_input", "the mirror's default branch could not be read");
+      }
       const route: PlaneRouteInput = {
         repoDir,
         privateBase: base,
         privateHead: head,
+        privateDefaultTip: defaultTip,
         own: { owner: input.repo.owner, name: input.repo.name },
         defaultBranch,
         branch: grant.branch,
