@@ -1,6 +1,7 @@
 import { LocalOnlyGithubError, localOnlyGithub } from "@fx/runner-cloud";
 import type { InstallationHttp, InstallationHttpKind, InstallationHttpTarget } from "@fx/github";
 import type { LocalGitHubHttp } from "@fx/pipeline";
+import type { PrCloseHttp } from "@fx/worker";
 
 /**
  * D#6 R3c (body criterion 9, C35 section 3.3): the review driver's and the merge gate's GitHub client for a `runner_local` repo.
@@ -31,6 +32,28 @@ export function fenceInstallationHttp(http: InstallationHttp, options: { exclude
 }
 
 type Open = (kind: InstallationHttpKind, target: InstallationHttpTarget) => Promise<InstallationHttp>;
+
+/**
+ * Puts the pull-request client that lists and closes a paired item's private pull request behind the local-only fence, so only the allowlist's A3 and
+ * A5 can be sent (that client's token reads contents, which is why the fence matters). Applied for every mode: the sweep needs nothing else. The client
+ * itself is opened in runnerPullRequest.ts, the one file allowed to, which returns only this fenced form.
+ */
+export function fenceForPrClose(http: InstallationHttp): PrCloseHttp {
+  const fenced = localOnlyGithub({
+    request: (req) => http.request({ method: req.method as "GET" | "PATCH", path: req.path, query: req.query, body: req.body }),
+  });
+  return {
+    // The fence's list also holds the merge (A10) and the others; this client may only list pull requests (A3) and close one (A5).
+    request: (req) =>
+      (isListOrClose(req) ? fenced.request(req) : Promise.reject(new LocalOnlyGithubError("not_allowlisted"))).catch((err: unknown) => {
+        if (err instanceof LocalOnlyGithubError) console.warn(JSON.stringify({ event: "advance.local_only_refused", rule: err.rule }));
+        throw err;
+      }),
+  };
+}
+
+const isListOrClose = (req: { method: string; path: string }): boolean =>
+  (req.method === "GET" && /^\/repos\/[^/?#]+\/[^/?#]+\/pulls$/.test(req.path)) || (req.method === "PATCH" && /^\/repos\/[^/?#]+\/[^/?#]+\/pulls\/[0-9]{1,10}$/.test(req.path));
 
 /**
  * Opens the `read` or `merge_gate` client for a repository, as the plain client for a sandbox repo and the fenced one for a `runner_local` repo.

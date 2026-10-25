@@ -32,3 +32,4 @@ export type { ParkedStageEntryInput, StageResumeCounts } from "./stageResume.js"
 export type { DecisionStepCode } from "./decisionIntake.js";
 export type { AdvanceFacade, AdvanceStartArgs, AdvanceTriageInput, AdvanceTriageResult, AdvanceRunRequest, AdvanceRunStart, AdvanceRunOutcome, AdvanceItem, AdvanceProposal, AdvancePrSource, AdvanceStepPorts, AdvanceStepResult, AdvanceStepWho, AdvanceReviewContext, AdvanceReviewLoad, AdvanceReviewDeps, AdvanceRoundInput, AdvanceRoundResult, AdvanceMergeOnlyInput, AdvanceMergeOnlyResult, AdvanceVerdictInput, AdvanceFixRequest, AdvanceMergeGateResult } from "./advance.js";
 export type { PrStateOpen, PrStateHttp, PrSlotSweepCounts } from "./prSlotReconcile.js";
+export type { PrCloseOpen, PrCloseHttp } from "./privatePrClose.js";

@@ -5,6 +5,8 @@ import type { BranchCleanupWorker } from "../../../../lib/worker";
 
 /** The GitHub client opener the worker's sweep takes (the worker keeps the type; this app only passes the function through). */
 type BranchCleanupGithub = Parameters<BranchCleanupWorker["sweepBranchCleanups"]>[0]["github"];
+/** The opener for the private-copy close step. */
+type ClosePrOpen = NonNullable<Parameters<BranchCleanupWorker["sweepBranchCleanups"]>[0]["closePr"]>;
 /** The read-only pull-request client opener the stale pull-request sweep takes. */
 type PrStateGithub = Parameters<BranchCleanupWorker["sweepPrSlotHolders"]>[0]["github"];
 
@@ -30,6 +32,8 @@ export interface BranchCleanupHandlerDeps {
   getWorker(): Promise<BranchCleanupWorker | null>;
   /** The GitHub client opener (production: lib/github/installationHttp.ts). */
   github: BranchCleanupGithub;
+  /** Closes a paired item's private pull request once its public one is done (production: lib/github/prClose.ts). Absent: that step does not run. */
+  closePr?: ClosePrOpen;
   /** D#598: the read-only pull-request client opener (production: lib/github/prState.ts). Absent: the stale pull-request sweep does not run. */
   prState?: PrStateGithub;
   log(line: string): void;
@@ -56,7 +60,7 @@ export async function branchCleanupHandler(req: NextRequest, deps: BranchCleanup
         deps.log("branch cleanup: worker not configured");
         return { result: { configured: false }, workFound: false, nextDueAt: null };
       }
-      const { nextDueAt, ...counts } = await worker.sweepBranchCleanups({ github: deps.github });
+      const { nextDueAt, ...counts } = await worker.sweepBranchCleanups({ github: deps.github, ...(deps.closePr ? { closePr: deps.closePr } : {}) });
       let prSlots: Awaited<ReturnType<BranchCleanupWorker["sweepPrSlotHolders"]>> | { failed: true } | undefined;
       if (deps.prState) {
         try {

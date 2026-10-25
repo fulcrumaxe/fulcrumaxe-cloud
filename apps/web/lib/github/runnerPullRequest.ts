@@ -1,3 +1,5 @@
+import type { PrCloseHttp } from "@fx/worker";
+import { fenceForPrClose } from "./localOnlyHttp";
 import { createRunPullRequestPort, type GithubRequest, type PullRequestRepo, type RunPullRequestPort } from "@fx/runner-cloud";
 import type { ContinuationBasePort } from "@fx/runner";
 import { createBranchSyncPort, type BranchSyncPort, type InstallationHttpRequest } from "@fx/github";
@@ -12,13 +14,27 @@ import { openInstallationHttp, readRepoAppLogin } from "./installationHttp";
  */
 const METHODS = new Set<string>(["GET", "POST", "PATCH"]);
 
+/** The raw pull-request installation client. Private to this file on purpose: it can send any GraphQL and its token reads contents, so no caller outside gets it unfenced. */
+function openRunnerPrHttp(open: typeof openInstallationHttp, repo: { repoId: string; owner: string; name: string }) {
+  return open("runner_pr", { repoId: repo.repoId, owner: repo.owner, name: repo.name });
+}
+
+/**
+ * The branch cleanup sweep's client for a paired item's private pull request (lib/github/prClose.ts): the pull-request installation client already
+ * behind the local-only fence, for every mode, so only the allowlist's A3 (list by head) and A5 (close) can be sent and GraphQL, contents and anything
+ * else are refused before a request. The raw client is never returned.
+ */
+export async function openFencedPrCloseClient(open: typeof openInstallationHttp, repo: { repoId: string; owner: string; name: string }): Promise<PrCloseHttp> {
+  return fenceForPrClose(await openRunnerPrHttp(open, repo));
+}
+
 export function createAppRunPullRequestPort(deps: { open?: typeof openInstallationHttp; appLogin?: (repo: PullRequestRepo) => Promise<string> } = {}): RunPullRequestPort {
   const open = deps.open ?? openInstallationHttp;
   const appLogin = deps.appLogin ?? ((repo: PullRequestRepo) => readRepoAppLogin(repo.id));
   return createRunPullRequestPort({
     appLogin,
     async open(repo) {
-      const http = await open("runner_pr", { repoId: repo.id, owner: repo.owner, name: repo.name });
+      const http = await openRunnerPrHttp(open, { repoId: repo.id, owner: repo.owner, name: repo.name });
       return {
         request(req: GithubRequest) {
           if (!METHODS.has(req.method)) return Promise.reject(new Error("method_refused"));

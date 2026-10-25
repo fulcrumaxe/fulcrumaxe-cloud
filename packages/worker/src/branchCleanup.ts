@@ -3,6 +3,7 @@ import { listDueBranchCleanups, BRANCH_CLEANUP_LIST_LIMIT } from "@fx/db/src/bra
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { deleteBranchWithToken, mintBranchDeleteToken, BranchDeleteTokenError, DELETABLE_BRANCH, InstallationHttpError, type BranchDeleteDeps, type BranchDeleteOutcome, type BranchDeleteGrant, type RunnerGitTicketSigner } from "@fx/github";
 import { PLANE_PUBLISH_ROLE } from "@fx/runner";
+import { closePrivateCopy, PrCloseError, PublicPrStillOpen, type PrCloseOpen, type PrCloseOutcome, type PublicPrState } from "./privatePrClose.js";
 
 /**
  * D#598 P1f-5d: the branch cleanup sweep, the cron's body. When a paired item reaches `merged`, `closed_unmerged` or `closed`, the private branches the
@@ -22,6 +23,11 @@ import { PLANE_PUBLISH_ROLE } from "@fx/runner";
  * reopened, pushes again and closes again has a new close and is listed again. A repository whose installation or repository is gone is a final outcome
  * (`no_installation`, `repo_gone`). When GitHub cannot be asked the row keeps the outcomes already reached and backs off (15, 30, 60, 120 minutes); the fifth
  * failed attempt is final with `gave_up`, so an item that keeps failing stops being listed and cannot hold up the items beside it.
+ *
+ * Before a branch is removed, the private pull request the run opened for it (the number the run recorded at `done`) is closed when the item's public pull
+ * request has merged or closed (privatePrClose.ts): only while it is open at exactly the recorded head, never while the public one is open, never for an
+ * item whose public branch a person took over. Its outcome is recorded under `pr:<number>` next to the branches, so a replay closes nothing twice. This
+ * step runs only when the caller gave a pull-request client (`closePr`); without one the sweep is what it was.
  *
  * With no signing key the pass does nothing and records nothing (the health check names it); the pending-work marker keeps an idle platform from calling.
  */
@@ -43,6 +49,8 @@ export interface BranchCleanupCounts {
   deleted: number;
   /** Branches left for a stated reason (head moved, protected, default branch) or already gone. */
   left: number;
+  /** Private pull requests closed. */
+  prsClosed: number;
   /** Items that got their row. */
   recorded: number;
   /** Items not finished (GitHub or the database could not answer); listed again later. */
@@ -58,6 +66,8 @@ export interface BranchCleanupDeps {
   signer: RunnerGitTicketSigner | null;
   /** The GitHub client opener (apps/web binds `openInstallationHttp`). */
   github: BranchCleanupGithub;
+  /** Opens the client that lists and closes the private copy's pull request (apps/web binds it; fenced for a `runner_local` repository). Absent: the step does not run. */
+  closePr?: PrCloseOpen;
   now?: () => number;
   log?: (line: string) => void;
 }
@@ -65,9 +75,16 @@ export interface BranchCleanupDeps {
 interface Candidate {
   grant: BranchDeleteGrant;
   at: Date;
+  /** The branch already has its outcome from an earlier pass of this close. */
+  branchDone: boolean;
+  /** The pull request the run recorded for this branch, if any, and whether an earlier pass of this close already settled it. */
+  pr: number | null;
+  prDone: boolean;
+  /** The side that built the pull request (it decides the fence). */
+  mode: string;
 }
 
-type Outcome = { branch: string; outcome: BranchDeleteOutcome | "no_installation" | "gave_up" };
+type Outcome = { branch: string; outcome: BranchDeleteOutcome | PrCloseOutcome | "no_installation" | "gave_up" };
 
 /** What a pass starts from: the close it covers, the branches recorded for the item, and what an earlier failed pass already reached for this close. */
 interface ItemState {
@@ -75,6 +92,7 @@ interface ItemState {
   candidates: Candidate[];
   priorAttempts: number;
   prior: Outcome[];
+  publicState: PublicPrState;
 }
 
 const TERMINAL = ["merged", "closed_unmerged", "closed"];
@@ -90,12 +108,12 @@ async function readState(client: PoolClient, accountId: string, workItemId: stri
   );
   if (gate.length === 0) return null;
   const issue = gate[0]!.issue;
-  const { rows } = await client.query<{ run_id: string; repo_id: string; owner: string; name: string; branch: string; sha: string; at: Date }>(
-    `SELECT r.id AS run_id, rp.id AS repo_id, rp.gh_owner AS owner, rp.gh_name AS name, 'fx/issue-' || $3::text AS branch, r.envelope->'publish'->>'private_head' AS sha, r.created_at AS at
+  const { rows } = await client.query<{ run_id: string; repo_id: string; owner: string; name: string; branch: string; sha: string; at: Date; pr: string | null; mode: string }>(
+    `SELECT r.id AS run_id, rp.id AS repo_id, rp.gh_owner AS owner, rp.gh_name AS name, 'fx/issue-' || $3::text AS branch, r.envelope->'publish'->>'private_head' AS sha, r.created_at AS at, NULL::text AS pr, r.execution_mode AS mode
        FROM agent_runs r JOIN repos rp ON rp.account_id = r.account_id AND rp.id = r.dispatch_repo_id
       WHERE r.account_id = $1 AND r.work_item_id = $2 AND r.role = $4 AND r.status = 'succeeded' AND r.envelope->'publish'->>'private_head' IS NOT NULL
      UNION ALL
-     SELECT r.id, rp.id, rp.gh_owner, rp.gh_name, e.payload->>'branch', e.payload->>'headOid', e.created_at
+     SELECT r.id, rp.id, rp.gh_owner, rp.gh_name, e.payload->>'branch', e.payload->>'headOid', e.created_at, e.payload->>'prNumber', r.execution_mode
        FROM run_events e JOIN agent_runs r ON r.account_id = e.account_id AND r.id = e.run_id JOIN repos rp ON rp.account_id = r.account_id AND rp.id = r.dispatch_repo_id
       WHERE e.account_id = $1 AND r.work_item_id = $2 AND e.kind = 'run.status_changed' AND e.payload->>'viaRunnerDone' = 'true' AND e.payload->>'headOid' IS NOT NULL
       ORDER BY 7 DESC, 1 LIMIT 200`,
@@ -114,18 +132,28 @@ async function readState(client: PoolClient, accountId: string, workItemId: stri
   if (earlier[0]?.state === "final") return null;
   const prior = earlier[0]?.outcomes ?? [];
   const done = new Set(prior.map((o) => o.branch));
+  // The public pull request, from the push record. A person's takeover wins over a merge or close; anything not yet merged or closed counts as open.
+  const { rows: pub } = await client.query<{ state: string; managed: boolean }>(
+    `SELECT p.state, (p.managed_by_person_at IS NOT NULL OR p.state = 'managed_by_person') AS managed
+       FROM plane_pushes p WHERE p.account_id = $1 AND p.work_item_id = $2 ORDER BY p.created_at DESC, p.id DESC LIMIT 1`,
+    [accountId, workItemId],
+  );
+  const publicState: PublicPrState = pub[0]?.managed ? "person_managed" : pub[0] && (pub[0].state === "pr_merged" || pub[0].state === "pr_closed") ? "done" : "open";
   const seen = new Set<string>();
   const out: Candidate[] = [];
   for (const r of rows) {
     const key = `${r.repo_id}/${r.branch}`;
     // Only the two shapes, and a run branch only for the run that recorded it; the item branch only for this item's own number.
     const ok = typeof r.branch === "string" && DELETABLE_BRANCH.test(r.branch) && SHA.test(String(r.sha)) && (r.branch === `fx/issue-${issue}` || r.branch.startsWith(`fx/${r.run_id}-g`));
-    if (!ok || seen.has(key) || done.has(r.branch)) continue;
+    const pr = ok && typeof r.pr === "string" && /^[1-9][0-9]{0,9}$/.test(r.pr) && Number.isSafeInteger(Number(r.pr)) ? Number(r.pr) : null;
+    const branchDone = done.has(r.branch);
+    const prDone = pr === null || done.has(`pr:${pr}`);
+    if (!ok || seen.has(key) || (branchDone && prDone)) continue;
     seen.add(key);
-    out.push({ at: r.at, grant: { accountId, workItemId, repo: { id: r.repo_id, owner: r.owner, name: r.name }, branch: r.branch, sha: r.sha } });
+    out.push({ at: r.at, branchDone, pr, prDone, mode: r.mode ?? "sandbox", grant: { accountId, workItemId, repo: { id: r.repo_id, owner: r.owner, name: r.name }, branch: r.branch, sha: r.sha } });
     if (out.length === MAX_BRANCHES) break;
   }
-  return { transitionId, candidates: out, priorAttempts: earlier[0]?.attempts ?? 0, prior };
+  return { transitionId, candidates: out, priorAttempts: earlier[0]?.attempts ?? 0, prior, publicState };
 }
 
 /** Writes the cleanup of this close: final, or retrying with its backoff (the fifth failed attempt is final with `gave_up`). */
@@ -147,7 +175,7 @@ async function record(client: PoolClient, item: { accountId: string; workItemId:
 export async function sweepBranchCleanups(deps: BranchCleanupDeps): Promise<BranchCleanupCounts> {
   const now = deps.now ?? Date.now;
   const log = deps.log ?? ((line: string) => console.info(line));
-  const counts: BranchCleanupCounts = { configured: deps.signer !== null, listed: 0, deleted: 0, left: 0, recorded: 0, failed: 0, nextDueAt: null };
+  const counts: BranchCleanupCounts = { configured: deps.signer !== null, listed: 0, deleted: 0, left: 0, prsClosed: 0, recorded: 0, failed: 0, nextDueAt: null };
   // A missing signing key reads no row and writes none: the items stay listed for when it is set (the backstop looks again).
   if (deps.signer === null) return counts;
   const startedAt = now();
@@ -173,6 +201,19 @@ export async function sweepBranchCleanups(deps: BranchCleanupDeps): Promise<Bran
       const outcomes: Outcome[] = [...state.prior];
       const unfinished: string[] = [];
       for (const c of state.candidates) {
+        if (deps.closePr && c.pr !== null && !c.prDone) {
+          const key = `pr:${c.pr}`;
+          try {
+            const outcome = await closePrivateCopy(deps.closePr, state.publicState, { repo: c.grant.repo, number: c.pr, branch: c.grant.branch, sha: c.grant.sha, executionMode: c.mode });
+            outcomes.push({ branch: key, outcome });
+            if (outcome === "private_pr_closed") counts.prsClosed += 1;
+          } catch (error) {
+            // fx-swallow-ok: a public pull request still open is not a failure (the item is looked at again after the backoff); anything else is logged by item id and a fixed code
+            unfinished.push(key);
+            if (!(error instanceof PublicPrStillOpen)) log(JSON.stringify({ event: "branch_cleanup.pr_close_failed", work_item_id: item.workItemId, code: error instanceof PrCloseError ? error.code : ((error as { reason?: string } | null)?.reason ?? "error") }));
+          }
+        }
+        if (c.branchDone) continue;
         try {
           const token = await mintBranchDeleteToken(c.grant, deps.signer, new Date(now()));
           const outcome = await deleteBranchWithToken(token, { signer: deps.signer, open: deps.github, now: () => new Date(now()) });
