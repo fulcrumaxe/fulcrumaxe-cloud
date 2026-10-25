@@ -1,6 +1,7 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { CHECK_NOT_RUN_REASONS, DoneReply, DoneRetryReply, StopReply, sha256Text, signJob, type Check, type DoneCheck, type Job } from "@fulcrumaxe/runner-protocol";
+import { RUNNER_PUSHING_ROLES } from "@fx/gh-policy";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import {
   DISPATCH_BASE_KIND,
@@ -969,6 +970,26 @@ describe("done route [pg]", () => {
       it("needs a configured GitHub port, like the executor", async () => {
         const s = await scene({ role: "docs-writer", port: "none" });
         expect((await s.call()).status).toBe(503);
+      });
+    });
+
+    describe("RUNNER_PUSHING_ROLES determines which roles push commits", () => {
+      for (const role of Array.from(RUNNER_PUSHING_ROLES)) {
+        it(`${role} is in RUNNER_PUSHING_ROLES and reaches the commit/scope/pull-request logic`, async () => {
+          const s = await scene({ role });
+          const res = await s.call();
+          expect(parsedDone(res)).toMatchObject({ outcome: "succeeded", pr_number: 1 });
+          expect(labels(s.fake)).toContain("A1 RunBranchState");
+          expect(s.repo.pulls).toHaveLength(1);
+        });
+      }
+
+      it("a role outside RUNNER_PUSHING_ROLES (e.g., code-reviewer) ends with the no-push shortcut: succeeded with no pull request and no GitHub call", async () => {
+        const s = await scene({ role: "code-reviewer", port: "none", pushed: false });
+        const res = await s.call();
+        expect(parsedDone(res)).toEqual({ continue: false, outcome: "succeeded", failure_reason: null, pr_number: null });
+        expect(s.fake.calls).toEqual([]);
+        expect(s.repo.pulls).toHaveLength(0);
       });
     });
 
