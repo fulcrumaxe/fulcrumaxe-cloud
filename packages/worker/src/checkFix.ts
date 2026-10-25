@@ -1,13 +1,14 @@
 import { createHash } from "node:crypto";
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { ITEM_PR_BRANCH } from "@fulcrumaxe/runner-protocol";
-import { DispatchFailedError, IdempotencyKeyTakenError, ExecutionModeChangedError, JobIssueError, PREVIEW_WORKDIR, acceptQueuedRunnerRun, readBoundItemBranch, readRecordedRunnerPullRequest, RUNNER_RUN_BRANCH, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { DispatchFailedError, IdempotencyKeyTakenError, ExecutionModeChangedError, JobIssueError, PREVIEW_WORKDIR, acceptQueuedRunnerRun, insertRunEvent, readBoundItemBranch, readRecordedRunnerPullRequest, RUNNER_RUN_BRANCH, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { escapeFenceLookalikes } from "@fx/pipeline";
 import { checkFixRound } from "@fx/spend";
 import { REPUBLISH_BASE_MISSING } from "@fx/core/src/work-items/baseSync.js";
 import { CHECK_FAILED_OUTSIDE_CHANGE, failedOutsideChange } from "@fx/core/src/work-items/checkFailure.js";
-import { BASE_SYNCED_PROMPT_LINE } from "./fixRoundBase.js";
+import { BASE_SYNCED_PROMPT_LINE, FIX_BASE_EVENT, hasPublicCopy } from "./fixRoundBase.js";
+import { PRIVATE_PR_MARKER } from "./planePublish.js";
 import type { RunStarter } from "./preview.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 
@@ -124,6 +125,19 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
     const recorded = await withTenant(deps.pool, who.accountId, (c) => readRecordedRunnerPullRequest(c, { accountId: who.accountId, workItemId: who.workItemId }));
     if (recorded !== null && recorded.branch === row.continues_branch) target = { repo: { id: row.repo_id, owner: row.gh_owner, name: row.gh_name }, pr: recorded };
   }
+  // FIXROUND-REPUBLISH (R2-c2): a sandbox round on an item whose public pull request is open syncs and republishes the item's private pull request (the number the platform
+  // recorded when it opened it, on the item's issue branch), so it needs the same base a review fix round has. Without a recorded pair it is refused republish_base_missing by the gate.
+  if (target === null && bound === null && row.run_mode === "sandbox" && row.gh_owner && row.gh_name && (await hasPublicCopy(deps.pool, who))) {
+    const marked = await withTenant(deps.pool, who.accountId, (c) =>
+      c.query<{ pr: number | string | null }>(
+        `SELECT e.payload->>'pr' AS pr FROM run_events e JOIN agent_runs a ON a.account_id = e.account_id AND a.id = e.run_id
+          WHERE e.account_id = $1 AND a.work_item_id = $2 AND e.kind = $3 ORDER BY a.created_at DESC, e.seq DESC LIMIT 1`,
+        [who.accountId, who.workItemId, PRIVATE_PR_MARKER],
+      ),
+    );
+    const number = Number(marked.rows[0]?.pr);
+    if (Number.isSafeInteger(number) && number > 0) target = { repo: { id: row.repo_id, owner: row.gh_owner, name: row.gh_name }, pr: { number, branch: `fx/issue-${ghNumber}` } };
+  }
   const held = deps.beforeStart ? await deps.beforeStart(target, failedRunId) : null;
   if (held !== null) return { ok: false, reason: held };
   const { baseSha, synced, needed } = deps.baseSync?.() ?? { baseSha: null, synced: false, needed: false };
@@ -169,6 +183,10 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
         prompt,
         // The base of a round that republishes the public pull request: signed only for the branch it was synced on (the issuer compares).
         ...(needed === true && baseSha !== null && target !== null ? { base: { sha: baseSha, branch: target.pr.branch } } : {}),
+        // A sandbox round has no signed job to carry the base: the cloud records it in the run's create transaction, as for a review fix round.
+        ...(needed === true && baseSha !== null && target !== null && row.run_mode === "sandbox"
+          ? { inCreateTransaction: (client: PoolClient, runId: string) => insertRunEvent(client, who.accountId, runId, FIX_BASE_EVENT, { base_sha: baseSha, branch: target!.pr.branch }) }
+          : {}),
         workdir: PREVIEW_WORKDIR,
         idempotency,
       }),

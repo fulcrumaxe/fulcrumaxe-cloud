@@ -92,6 +92,15 @@ export function createProxyPublicApi(codeRepo: string, apiOrigin: string, fetchF
       if (res.status === 404) return false;
       throw new ApiError("public_unavailable");
     },
+    async branchHead({ codeRepo: repo, branch }) {
+      if (repo !== codeRepo || !BRANCH.test(branch) || branch.includes("..")) throw new ApiError("public_unavailable");
+      const res = await call("GET", `/repos/${owner}/${name}/git/ref/heads/${branch.split("/").map(encodeURIComponent).join("/")}`);
+      if (res.status === 404) return null;
+      const object = res.json.object;
+      const sha = typeof object === "object" && object !== null ? (object as { sha?: unknown }).sha : undefined;
+      if (res.status !== 200 || typeof sha !== "string" || !/^[0-9a-f]{40}$/.test(sha)) throw new ApiError("public_unavailable");
+      return sha;
+    },
     async openPullRequest({ codeRepo: repo, branch, base, title, body }) {
       if (repo !== codeRepo) throw new ApiError("public_unavailable");
       const res = await call("POST", `/repos/${owner}/${name}/pulls`, { title, head: branch, base, body, maintainer_can_modify: false });
@@ -144,7 +153,8 @@ export async function runPlanePublish(input: PlanePublishInput, deps: PlanePubli
     async push(i) {
       await inner.push(i);
       commit = i.commit;
-      if (tip !== undefined) say({ phase: "pushed", branch: i.branch, head_sha: i.commit, tip_sha: tip });
+      // An update reports once, at the end, as `updated`; `pushed` is the first push of a branch.
+      if (tip !== undefined && i.expectedHead === undefined) say({ phase: "pushed", branch: i.branch, head_sha: i.commit, tip_sha: tip });
     },
   };
   const pairing = { enabled: true as const, codeRepo: input.codeRepo, overlayGlobs: input.pairing.overlayGlobs, identifierRulesPath: input.pairing.identifierRulesPath, planDataRulesPath: input.pairing.planDataRulesPath };
@@ -167,10 +177,15 @@ export async function runPlanePublish(input: PlanePublishInput, deps: PlanePubli
       throw new PlaneRouteError("bad_input", "the run's commits could not be read from the private repository");
     }
     const result = await routeAndPush(
-      { repoDir: work, privateBase: input.privateBase, privateHead: input.privateHead, privateDefaultTip: input.privateDefaultTip, own: input.own, defaultBranch: "main", branch: input.branch, title: input.title, body: input.body, identity: input.identity, commitTime: input.commitTime },
+      { repoDir: work, privateBase: input.privateBase, privateHead: input.privateHead, privateDefaultTip: input.privateDefaultTip, own: input.own, defaultBranch: "main", branch: input.branch, ...(input.updateOf === undefined ? {} : { updateOf: input.updateOf }), title: input.title, body: input.body, identity: input.identity, commitTime: input.commitTime },
       { loadPairing: async () => pairing, loadOwn: async () => input.own, api: createProxyPublicApi(input.codeRepo, deps.apiOrigin, deps.fetchFn), transport },
     );
-    final = result.plane === "paired" ? { phase: "pr_opened", branch: result.branch, head_sha: result.commit, tip_sha: result.tip, pr_number: result.number } : { phase: "refused", code: "bad_input" };
+    final =
+      result.plane === "paired"
+        ? { phase: "pr_opened", branch: result.branch, head_sha: result.commit, tip_sha: result.tip, pr_number: result.number }
+        : result.plane === "updated"
+          ? { phase: "updated", branch: result.branch, head_sha: result.commit, tip_sha: result.tip }
+          : { phase: "refused", code: "bad_input" };
   } catch (error) {
     // fx-swallow-ok: the failure becomes the terminal line's closed code and place; its text is never sent
     if (error instanceof PlaneRouteError && error.code === "no_changes") final = { phase: "no_change" };

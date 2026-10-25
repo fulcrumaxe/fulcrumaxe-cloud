@@ -13,7 +13,7 @@ import { setupHoldFor } from "@fx/core/src/setup-requests/store.js";
 import { markCorrectionApplied } from "@fx/core/src/corrections/index.js";
 import { ITEM_PR_BRANCH, JobMemorySchema, type JobMemory } from "@fulcrumaxe/runner-protocol";
 import { attachRunNotes, correctionReasonCode, listRunNoteIds, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
-import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readSandboxBoundPullRequest, recordSandboxContinuesBound, recordRunStage, DispatchFailedError, JobIssueError, RUNNER_RUN_BRANCH, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readSandboxBoundPullRequest, recordSandboxContinuesBound, recordRunStage, insertRunEvent, DispatchFailedError, JobIssueError, RUNNER_RUN_BRANCH, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { reportError } from "@fx/telemetry";
 import { checkFixRound, envelopeRunUsd } from "@fx/spend";
 import { checkRoundHeadroom } from "./panelHeadroom.js";
@@ -27,7 +27,7 @@ import type { RunStarter } from "./preview.js";
 import { readVerifiedReviewGate, type VerifiedReviewGate } from "./verifiedReviewGate.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 import { startCheckFixRound } from "./checkFix.js";
-import { BASE_SYNCED_PROMPT_LINE, BASE_SYNCED_STAGE, checkFixBeforeStart, hasPublicCopy, recordBaseSyncUnavailable, republishGate, syncRunBranch } from "./fixRoundBase.js";
+import { BASE_SYNCED_PROMPT_LINE, BASE_SYNCED_STAGE, FIX_BASE_EVENT, checkFixBeforeStart, hasPublicCopy, recordBaseSyncUnavailable, republishGate, syncRunBranch } from "./fixRoundBase.js";
 import { BRANCH_MOVED_STAGE, checkPrivateHead, checkPublicBranch, type FixRoundHeadPorts } from "./fixRoundHeads.js";
 import { RunActionInputError, type PerformResult } from "./runActions.js";
 
@@ -1536,11 +1536,13 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     let baseTip: string | null = null;
     let syncedBranch: string | null = null;
     let republishes = false;
+    /** A sandbox round that must end by updating the public pull request: the base it was brought up to date with is recorded in the run's create transaction (the sandbox has no signed job to carry it). */
+    let sandboxRepublish = false;
     {
       // FIXROUND-BASE-SYNC-SANDBOX: the sync is the cloud's, so a sandbox round gets the same head check and sync (its prompt starts from the fetched branch tip).
       const runnerSide = isRunnerMode(effective);
-      // FIXROUND-REPUBLISH (R2-c0), runner rounds: asked before the sync, which refuses a stacked change with a public copy without merging. (A sandbox round's republish is a later step.)
-      const publicCopy = runnerSide && (await hasPublicCopy(runnerPool, who));
+      // FIXROUND-REPUBLISH (R2-c0, c2): asked before the sync, on either side, which refuses a stacked change with a public copy without merging.
+      const publicCopy = await hasPublicCopy(runnerPool, who);
       const repoId = state.repoId;
       const found = await withTenant(runnerPool, who.accountId, async (client) => {
         const r = await client.query<{ gh_owner: string | null; gh_name: string | null; gh_number: string | null }>(
@@ -1581,6 +1583,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       const gate = await republishGate(runnerPool, who, { publicCopy, baseSha: baseTip, prNumber: pr?.number ?? null, moveToNeedsPerson: true, attempt: attemptKey });
       if (gate !== null) return refuse(gate);
       republishes = publicCopy && baseTip !== null && syncedBranch !== null;
+      sandboxRepublish = republishes && !runnerSide;
     }
 
     // The board says "Changes requested" the moment a fix round starts, whatever an earlier record said (a pass recorded
@@ -1669,7 +1672,11 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           } else {
             const recorded = await withTenant(runnerPool, who.accountId, (client) => readRecordedRunnerPullRequest(client, { accountId: who.accountId, workItemId: who.workItemId }));
             if (recorded === null || recorded.number !== bound.number || recorded.branch !== bound.branch) return refuse("pr_unbound");
-            inCreateTransaction = (client, runId) => recordSandboxContinuesBound(client, { accountId: who.accountId, runId, prNumber: bound.number, branch: bound.branch });
+            inCreateTransaction = async (client, runId) => {
+              await recordSandboxContinuesBound(client, { accountId: who.accountId, runId, prNumber: bound.number, branch: bound.branch });
+              // The branch recorded is the one the sync was made on (`bound` is that same pair); a round that republishes never starts without its base.
+              if (sandboxRepublish) await insertRunEvent(client, who.accountId, runId, FIX_BASE_EVENT, { base_sha: baseTip!, branch: syncedBranch! });
+            };
           }
         }
         const fresh = await deps.starter.start({
@@ -1716,6 +1723,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
             parentRunId: parent,
             prompt,
             ...(republishes ? { base: { sha: baseTip!, branch: syncedBranch! } } : {}),
+            ...(sandboxRepublish ? { inCreateTransaction: (client: PoolClient, runId: string) => insertRunEvent(client, who.accountId, runId, FIX_BASE_EVENT, { base_sha: baseTip!, branch: syncedBranch! }) } : {}),
             ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
             ...(sections ? { contextSections: sections } : {}),
             ...(assemblyOf(req.contextAssembly) ? { contextAssembly: assemblyOf(req.contextAssembly) } : {}),
