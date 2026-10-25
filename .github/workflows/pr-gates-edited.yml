@@ -1,0 +1,66 @@
+name: PR gates on edit
+
+# Re-evaluates the pull request gates (the PR link policy and the publish denylist) when only the pull
+# request's body or title was edited. ci.yml listens to opened, synchronize and reopened; an edit starts
+# nothing there, and re-running the old run replays the old merge commit, so a body-only fix would leave
+# `pr-gates` red. Adding `edited` to ci.yml is not the answer: it would start the whole of CI (check, e2e) on
+# every edit, and CI's concurrency group (cancel-in-progress) would cancel a full run that is mid-flight.
+#
+# So this is a small separate workflow whose one job is named `pr-gates` and runs the same two steps as the
+# job of that name in ci.yml, so the check is reported under the same name on the head commit and the newer
+# result replaces the old one. The steps are copies of ci.yml's; scripts/ci/ci-workflow.test.mjs fails if the
+# two ever differ. Its group is per pull request and is never CI's group, so it cannot cancel a CI run.
+on:
+  pull_request:
+    types: [edited]
+
+concurrency:
+  group: pr-gates-edited-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Only when the body or the title changed (an edit can also change just the base branch, which a new CI run
+  # covers), on public pull requests only, and standing down with CI.
+  pr-gates:
+    if: vars.CI_DISABLED != 'true' && github.event_name == 'pull_request' && github.event.repository.private == false && (github.event.changes.body || github.event.changes.title)
+    runs-on: ${{ github.event.repository.private && (vars.CI_RUNS_ON || 'self-hosted') || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      pull-requests: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The denylist diffs origin/<base>...HEAD, which needs the merge base.
+          fetch-depth: 0
+
+      # The body is fetched from the API at run time, as in ci.yml; the payload is only the fallback.
+      - name: PR link policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          body_file="$RUNNER_TEMP/pr-body.txt"
+          if gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.body // ""' > "$body_file"; then
+            echo "PR body source: current body fetched from the API"
+          else
+            echo "PR body source: event payload (API call failed; a re-run may see a stale body)"
+            jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH" > "$body_file"
+          fi
+          # Author and head branch never change after opening, so the payload is exact. jq output goes into
+          # variables, never into the command line.
+          PR_AUTHOR_LOGIN="$(jq -r '.pull_request.user.login // ""' "$GITHUB_EVENT_PATH")"
+          PR_AUTHOR_TYPE="$(jq -r '.pull_request.user.type // ""' "$GITHUB_EVENT_PATH")"
+          PR_HEAD_REF="$(jq -r '.pull_request.head.ref // ""' "$GITHUB_EVENT_PATH")"
+          export PR_AUTHOR_LOGIN PR_AUTHOR_TYPE PR_HEAD_REF
+          PR_BODY_FILE="$body_file" bash scripts/ci/pr-link-policy.sh
+
+      - name: Publish denylist
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: bash scripts/ci/publish-denylist.sh "origin/${BASE_REF}"

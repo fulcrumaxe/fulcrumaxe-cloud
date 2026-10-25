@@ -142,6 +142,53 @@ test("label workflow: its concurrency group never matches CI's, and never joins 
   assert.equal(labelDoc.concurrency["cancel-in-progress"], false);
 });
 
+// ---- pr-gates on a body or title edit: its own small workflow ------------------------------------
+const editedDoc = (() => {
+  const py = spawnSync("python3", ["-c", "import sys, json, yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))", path.join(repoRoot, ".github/workflows/pr-gates-edited.yml")], { encoding: "utf8" });
+  assert.equal(py.status, 0, `pr-gates-edited.yml does not parse as YAML: ${py.stderr}`);
+  return JSON.parse(py.stdout);
+})();
+
+test("pr-gates-edited: triggers only on pull_request edited, and ci.yml still does not listen to edited", () => {
+  const on = editedDoc.on ?? editedDoc.true;
+  assert.deepEqual(Object.keys(on), ["pull_request"]);
+  assert.deepEqual(on.pull_request.types, ["edited"]);
+  const ciOn = ciDoc.on ?? ciDoc.true;
+  assert.deepEqual(ciOn.pull_request.types, ["opened", "synchronize", "reopened"]);
+});
+
+test("pr-gates-edited: one job named pr-gates, same guard as ci.yml plus a body-or-title-changed condition, same permissions", () => {
+  assert.deepEqual(Object.keys(editedDoc.jobs), ["pr-gates"]);
+  const job = editedDoc.jobs["pr-gates"];
+  const ciJob = ciDoc.jobs["pr-gates"];
+  assert.equal(job.if, `${ciJob.if} && (github.event.changes.body || github.event.changes.title)`);
+  assert.equal(job["runs-on"], ciJob["runs-on"]);
+  assert.equal(job["timeout-minutes"], ciJob["timeout-minutes"]);
+  assert.deepEqual(job.permissions, { contents: "read", "pull-requests": "read" });
+  assert.deepEqual(editedDoc.permissions, { contents: "read" });
+});
+
+test("pr-gates-edited: runs for a changed body or title only, never on private, never with CI_DISABLED", () => {
+  const cond = editedDoc.jobs["pr-gates"].if;
+  const ctx = (extra) => ({ "github.event_name": "pull_request", "github.event.repository.private": false, "vars.CI_DISABLED": "", ...extra });
+  assert.equal(Boolean(evalExpr(cond, ctx({ "github.event.changes.body": "old" }))), true);
+  assert.equal(Boolean(evalExpr(cond, ctx({ "github.event.changes.title": "old" }))), true);
+  assert.equal(Boolean(evalExpr(cond, ctx({}))), false, "a base-branch-only edit carries neither");
+  assert.equal(Boolean(evalExpr(cond, ctx({ "github.event.changes.body": "old", "github.event.repository.private": true }))), false);
+  assert.equal(Boolean(evalExpr(cond, ctx({ "github.event.changes.body": "old", "vars.CI_DISABLED": "true" }))), false);
+});
+
+test("pr-gates-edited: its steps are byte-for-byte the steps of ci.yml's pr-gates job", () => {
+  assert.deepEqual(editedDoc.jobs["pr-gates"].steps, ciDoc.jobs["pr-gates"].steps);
+});
+
+test("pr-gates-edited: its concurrency group is per pull request and can never be CI's group", () => {
+  const g = editedDoc.concurrency.group;
+  assert.equal(g, "pr-gates-edited-${{ github.event.pull_request.number }}");
+  assert.notEqual(g, ciDoc.concurrency.group);
+  assert.doesNotMatch(g, /github\.workflow|head_ref|github\.ref/);
+});
+
 test("label workflow: the step re-runs CI through the script, pinned to this repository, with the head SHA as data", () => {
   const job = Object.values(labelDoc.jobs)[0];
   const step = job.steps.find((s) => s.name === "Re-run CI at full scope");
@@ -885,7 +932,7 @@ function evalExpr(src, ctx) {
       // A repository variable that is not set reads as the empty string.
       if (t.v.startsWith("vars.") && !(t.v in ctx)) return "";
       // Payload fields, dispatch inputs and upstream job outputs that this run does not carry read as null.
-      if (/^(github\.event\.deployment_status\.|inputs\.|needs\.)/.test(t.v) && !(t.v in ctx)) return null;
+      if (/^(github\.event\.deployment_status\.|github\.event\.changes\.|inputs\.|needs\.)/.test(t.v) && !(t.v in ctx)) return null;
       if (!(t.v in ctx)) throw new Error(`unsupported context "${t.v}" in: ${src}`);
       return ctx[t.v];
     }
@@ -1231,6 +1278,7 @@ test("CI_DISABLED: unset, empty or anything but true leaves CI on (public pull r
     "github.event.pull_request.head.repo.full_name": "org/repo",
     "github.repository": "org/repo",
     "github.ref": "refs/heads/main",
+    "github.event.changes.body": "the previous body",
     "vars.CI_DISABLED": v,
   });
   // The release jobs (D#6 R6-5) also require the public code-plane repository and main; they are shown to run there.
