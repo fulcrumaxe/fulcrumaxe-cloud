@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -6,6 +6,7 @@ import type { DoneCheck, NormalizedEvent } from "@fulcrumaxe/runner-protocol";
 import { createRunnerClient, type Claimed } from "../../src/daemon/client.js";
 import type { CheckOutcome } from "../../src/daemon/checkStep.js";
 import { createJobHandler, type JobHandlerDeps } from "../../src/daemon/jobHandler.js";
+import type { LockSyncOutcome } from "../../src/daemon/lockfileSync.js";
 import { createEventRelay, type Clock } from "../../src/daemon/lease.js";
 import { createFileLedger } from "../../src/daemon/ledger.js";
 import type { NixShellStep } from "../../src/daemon/nixShell.js";
@@ -51,11 +52,12 @@ afterEach(async () => {
 const clock: Clock = { now: () => new Date(), sleep: (ms, signal) => new Promise<void>((resolve) => { if (signal.aborted) return resolve(); const t = setTimeout(resolve, Math.min(ms, 1)); signal.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true }); }) };
 const withShell: NixShellStep = { prepare: async () => ({ ok: true, env: { PATH: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-node/bin" } }) } as unknown as NixShellStep;
 
-function rig(over: { outcome?: CheckOutcome; shell?: boolean; wired?: boolean; onCheck?: () => void; pin?: string | null; skipHook?: boolean; steps?: string[]; hangUntilStopped?: { onStart: () => void; seen: { aborted?: boolean } }; heartbeatMs?: number } = {}) {
+function rig(over: { lockfile?: { outcome: LockSyncOutcome | "throws"; inputs: Array<{ base: string; registryHost: string | undefined }>; stubSeen?: boolean[]; stopFails?: boolean }; outcome?: CheckOutcome; shell?: boolean; wired?: boolean; onCheck?: () => void; pin?: string | null; skipHook?: boolean; steps?: string[]; hangUntilStopped?: { onStart: () => void; seen: { aborted?: boolean } }; heartbeatMs?: number } = {}) {
   const key = generateRunnerKey();
   cloud.trust(key.publicJwk);
   const client = createRunnerClient({ origin: cloud.origin, key, now: () => new Date(), fetchFn: fetch });
   const order: string[] = [];
+  let held = "";
   const starts: StartDetachedOptions[] = [];
   const checkInputs: Array<{ base: string; baseDir: string; argv: readonly string[]; devShell: boolean | undefined }> = [];
   const port: SandboxPort = {
@@ -63,14 +65,16 @@ function rig(over: { outcome?: CheckOutcome; shell?: boolean; wired?: boolean; o
     startDetached: (handle, opts) => {
       order.push("agent");
       starts.push(opts);
+      // What the agent CLI leaves behind: an empty placeholder over a protected name, made during the run (it was not there at the baseline).
+      if (over.lockfile?.stubSeen !== undefined) writeFileSync(path.join(held, ".npmrc"), "");
       const event: NormalizedEvent = { runId: opts.runId, role: "executor", seq: 1, type: "result", ts: "2026-10-08T12:00:00.000Z", sessionId: "s1", agentOutput: { verdict: "done" } };
       return { handle, hookFired: Promise.resolve(event) };
     },
     resume: () => { throw new Error("not used"); },
-    async extendTimeout() {}, async stop() {}, async deleteSandbox() { order.push("sandbox_deleted"); }, async measure() { return []; }, async readCounters() { return undefined; }, async writeFiles() {}, async runCommand(): Promise<never> { throw new Error("not used"); }, async sandboxExists() { return true; },
+    async extendTimeout() {}, async stop() { if (over.lockfile !== undefined) order.push("agent_stopped"); if (over.lockfile?.stopFails === true) throw new Error("group survived at /home/someone/x"); }, async deleteSandbox() { order.push("sandbox_deleted"); }, async measure() { return []; }, async readCounters() { return undefined; }, async writeFiles() {}, async runCommand(): Promise<never> { throw new Error("not used"); }, async sandboxExists() { return true; },
   };
   const run: Omit<RunJobDeps, "sandbox" | "ledger"> = { workspaces: createWorkspaceStore(path.join(root, "work")), credentials: { mode: "subscription" }, planSession: () => ({ kind: "fresh", branch: null }), defaultModel: "sonnet" };
-  const git = fakeGitPath({ prepare: async () => ({ base: BASE }), publish: async () => (order.push("publish"), { pushed: true, branch: BRANCH, sha: HEAD }) });
+  const git = fakeGitPath({ prepare: async (_job, _claimed, workspace) => { held = workspace; return { base: BASE }; }, publish: async () => (order.push("publish"), { pushed: true, branch: BRANCH, sha: HEAD }) });
   git.mirrorDir = (job) => `/mirrors/${job.repo.id}.git`;
   // The pin is the merge-base with the default branch, never the commit the run started from (BASE).
   git.checkBase = async () => (over.pin === undefined ? PIN : over.pin);
@@ -79,6 +83,13 @@ function rig(over: { outcome?: CheckOutcome; shell?: boolean; wired?: boolean; o
     recordSession: (id, workspace) => recordSession(path.join(root, "sessions.json"), id, workspace), heartbeatMs: over.heartbeatMs ?? 1e9, flushMs: 1e9, runJobFn: runJob,
     ...(over.steps === undefined ? {} : { onStep: (line: string) => over.steps!.push(line) }),
     ...(over.shell === false ? {} : { nix: withShell }),
+    ...(over.lockfile === undefined ? {} : { lockfileSync: { run: async (input: { base: string; registryHost?: string | undefined }) => {
+      order.push("lockfile");
+      over.lockfile!.stubSeen?.push(existsSync(path.join(held, ".npmrc")));
+      over.lockfile!.inputs.push({ base: input.base, registryHost: input.registryHost });
+      if (over.lockfile!.outcome === "throws") throw new Error("boom at /home/someone/secret");
+      return over.lockfile!.outcome;
+    } } }),
     ...(over.skipHook === true ? { runJobFn: (async (job: never, d: RunJobDeps) => { const done = await runJob(job, { ...d, afterAgent: undefined }); return done; }) as typeof runJob } : {}),
     planePush: { baseLedger: createPlaneBaseLedger(), run: async () => (order.push("hook"), { kind: "pr_opened" as const, number: 9, seconds: 1 }) },
     ...(over.wired === false ? {} : {
@@ -127,6 +138,59 @@ describe("a job with a check", () => {
     expect(bodies("/done")).toHaveLength(1);
     expect(bodies("/done")[0]!.check).toEqual(PASSED);
     expect(runEnded()).toEqual([]);
+  });
+
+  it("brings the lockfile up to date after the agent and before the check, from the start commit and the job's registry host, and says so on a step line", async () => {
+    const lockfile = { outcome: { kind: "updated" } as LockSyncOutcome, inputs: [] as Array<{ base: string; registryHost: string | undefined }> };
+    const steps: string[] = [];
+    const r = rig({ lockfile, steps });
+    await r.handle(await r.claim(withCheck()));
+    // The agent's process tree is stopped before the runner touches the workspace, and the sandbox is still there for the check.
+    expect(r.order.slice(0, 4)).toEqual(["agent", "agent_stopped", "lockfile", "check"]);
+    expect(r.order.indexOf("sandbox_deleted")).toBeGreaterThan(r.order.indexOf("check"));
+    expect(lockfile.inputs).toEqual([{ base: BASE, registryHost: "registry.npmjs.org" }]);
+    expect(steps.some((s) => s.includes("lockfile update ended (updated)"))).toBe(true);
+  });
+
+  it("an agent that cannot be stopped is never followed by a host-side lockfile update; the check still runs and the run still ends cleanly", async () => {
+    const lockfile = { outcome: { kind: "updated" } as LockSyncOutcome, inputs: [] as Array<{ base: string; registryHost: string | undefined }>, stopFails: true };
+    const steps: string[] = [];
+    const r = rig({ lockfile, steps });
+    await r.handle(await r.claim(withCheck()));
+    expect(lockfile.inputs).toEqual([]);
+    expect(r.order).not.toContain("lockfile");
+    expect(r.order).toContain("check");
+    expect(steps.some((l) => l.includes("lockfile update ended (not run: the agent could not be stopped)"))).toBe(true);
+    expect(steps.join("\n")).not.toContain("someone");
+  });
+
+  it("runs after the agent's placeholders are cleared, so the update never sees them", async () => {
+    const lockfile = { outcome: { kind: "none" } as LockSyncOutcome, inputs: [], stubSeen: [] as boolean[] };
+    const r = rig({ lockfile });
+    await r.handle(await r.claim(withCheck()));
+    expect(lockfile.stubSeen).toEqual([false]);
+  });
+
+  it("a lockfile update that fails, is refused or throws never stops the run: the check still runs, and only the closed code is on the step line", async () => {
+    for (const [outcome, line] of [
+      [{ kind: "failed", why: "needs_network" }, "lockfile update ended (failed: needs_network)"],
+      [{ kind: "refused", reason: "other_host_tarball" }, "lockfile update ended (refused: other_host_tarball)"],
+      ["throws", "lockfile update ended (lockfile_sync_failed)"],
+    ] as const) {
+      const steps: string[] = [];
+      const r = rig({ lockfile: { outcome: outcome as LockSyncOutcome | "throws", inputs: [] }, steps });
+      await r.handle(await r.claim(withCheck()));
+      expect(r.order).toContain("check");
+      expect(steps.some((s) => s.includes(line))).toBe(true);
+      expect(steps.join("\n")).not.toContain("someone");
+    }
+  });
+
+  it("a lockfile update that found nothing to do says nothing", async () => {
+    const steps: string[] = [];
+    const r = rig({ lockfile: { outcome: { kind: "none" }, inputs: [] }, steps });
+    await r.handle(await r.claim(withCheck()));
+    expect(steps.some((s) => s.includes("lockfile update"))).toBe(false);
   });
 
   it("tells the agent, in one fixed line built from the signed vector, that the check runs after it", async () => {

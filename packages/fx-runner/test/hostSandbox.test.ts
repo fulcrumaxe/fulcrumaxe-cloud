@@ -12,7 +12,7 @@ const HOME = "/home/jane";
 /** The runner state directory must be writable: the per-job env file is made under it (D#6 C44-1). */
 const STATE = mkdtempSync(path.join(tmpdir(), "r4b13_state-"));
 
-function setup(over: { hold?: boolean; done?: unknown; envOptions?: CleanEnvOptions; mirrorsRoot?: string } = {}) {
+function setup(over: { hold?: boolean; done?: unknown; stopFails?: boolean; envOptions?: CleanEnvOptions; mirrorsRoot?: string } = {}) {
   const blocks: Block[] = [];
   const runIds: unknown[] = [];
   const starts: unknown[] = [];
@@ -29,6 +29,7 @@ function setup(over: { hold?: boolean; done?: unknown; envOptions?: CleanEnvOpti
     stop: async (handle) => {
       stops.push(handle);
       release();
+      if (over.stopFails === true) throw new Error("the agent's group did not end");
     },
     resume: async (handle) => ({ handle }),
   };
@@ -185,6 +186,26 @@ describe("hostSandbox: lifecycle", () => {
     expect(t.stops).toHaveLength(1);
     expect(await settled).toBe("sandbox_timeout");
     expect(await t.host.sandboxState?.(handle)).toBe("stopped");
+  });
+});
+
+describe("hostSandbox: stop", () => {
+  it("tells the caller when the agent could not be stopped, while delete still removes the sandbox", async () => {
+    const t = setup({ stopFails: true });
+    const handle = await t.create();
+    const { hookFired } = t.host.startDetached(handle, t.opts());
+    await hookFired.catch(() => undefined);
+    await expect(t.host.stop(handle)).rejects.toThrow("did not end");
+    await expect(t.host.deleteSandbox(handle)).resolves.toBeUndefined();
+    expect(await t.host.sandboxExists(handle)).toBe(false);
+  });
+
+  it("a stop that works resolves", async () => {
+    const t = setup();
+    const handle = await t.create();
+    const { hookFired } = t.host.startDetached(handle, t.opts());
+    await hookFired.catch(() => undefined);
+    await expect(t.host.stop(handle)).resolves.toBeUndefined();
   });
 });
 

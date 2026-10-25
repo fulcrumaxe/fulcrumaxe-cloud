@@ -169,9 +169,12 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
     entry.timer.unref();
   }
 
-  async function stopEntry(entry: Entry): Promise<void> {
+  async function stopEntry(entry: Entry, surface = false): Promise<void> {
     await entry.agentUp?.catch(noop);
-    if (entry.runtime !== undefined && entry.agent !== undefined) await entry.runtime.stop(entry.agent).catch(noop);
+    if (entry.runtime === undefined || entry.agent === undefined) return;
+    // The timer and the delete swallow a failed stop (nothing can act on it there); a caller that must know the agent's tree is gone (`stop`) gets the error.
+    if (surface) await entry.runtime.stop(entry.agent);
+    else await entry.runtime.stop(entry.agent).catch(noop);
   }
 
   function launch(handle: SandboxHandle, opts: StartDetachedOptions, resumeSessionId: string | undefined): StartDetachedResult {
@@ -349,7 +352,7 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
     },
     async stop(handle) {
       const entry = entryOf(handle);
-      if (entry !== undefined) await stopEntry(entry);
+      if (entry !== undefined) await stopEntry(entry, true);
     },
     async deleteSandbox(handle) {
       const entry = entryOf(handle);

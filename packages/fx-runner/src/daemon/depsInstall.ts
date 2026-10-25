@@ -30,7 +30,7 @@ import { checkNpmLock, checkNpmrc, checkPnpmLock, checkWorkspaceYaml, type LockR
 export const INSTALL_TIMEOUT_MS = 10 * 60_000;
 /** A lockfile over this size is not read and not installed from. The same bound as the cloud's install phase. */
 export const MAX_LOCKFILE_BYTES = 20 * 1024 * 1024;
-const MAX_SETTINGS_BYTES = 256 * 1024;
+export const MAX_SETTINGS_BYTES = 256 * 1024;
 /** The workspace-state file lists every project, so a large monorepo's is big. */
 const MAX_STATE_BYTES = 8 * 1024 * 1024;
 const OUTPUT_KEPT_CHARS = 4096;
@@ -38,7 +38,7 @@ export const TAIL_SHOWN_CHARS = 500;
 /** The most entries the workspace walk looks at before it gives up (and refuses). */
 const MAX_WALK_ENTRIES = 200_000;
 
-export type DepsRefusal = LockRefusal | "lockfile_not_regular" | "lockfile_too_big" | "node_modules_link" | "workspace_unsafe" | "corepack_shim";
+export type DepsRefusal = LockRefusal | "lockfile_not_regular" | "lockfile_too_big" | "node_modules_link" | "workspace_unsafe" | "corepack_shim" | "lockfile_version_changed";
 export type DepsFailure = "tool_missing" | "exit" | "timeout" | "aborted";
 
 /** The closed result. `refused` is the `deps_lockfile_refused` detail; `failed` is `deps_install_failed`; `installed` is `deps_installed`. */
@@ -65,10 +65,10 @@ export interface DepsInstallerDeps {
   timeoutMs?: number;
 }
 
-type Read = { kind: "absent" } | { kind: "refused"; reason: "lockfile_not_regular" | "lockfile_too_big" } | { kind: "text"; text: string };
+export type Read = { kind: "absent" } | { kind: "refused"; reason: "lockfile_not_regular" | "lockfile_too_big" } | { kind: "text"; text: string };
 
 /** One file at the workspace root, looked at without following a link and read through an open handle that is judged again: absent, refused, or its text. */
-function readRootFile(root: string, name: string, maxBytes: number): Read {
+export function readRootFile(root: string, name: string, maxBytes: number): Read {
   const file = path.join(root, name);
   let stat;
   try {
@@ -99,6 +99,22 @@ function readRootFile(root: string, name: string, maxBytes: number): Read {
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
+}
+
+/** The repo's package-manager settings (`.npmrc`, `pnpm-workspace.yaml`) judged before any package manager starts: the reason to refuse, or undefined when both are fine. */
+export function settingsRefusal(workspace: string, registry: string): LockRefusal | undefined {
+  const settings: Array<[Read, (text: string) => ReturnType<typeof checkNpmrc>]> = [
+    [readRootFile(workspace, ".npmrc", MAX_SETTINGS_BYTES), (text) => checkNpmrc(text, registry)],
+    [readRootFile(workspace, "pnpm-workspace.yaml", MAX_SETTINGS_BYTES), checkWorkspaceYaml],
+  ];
+  for (const [read, check] of settings) {
+    if (read.kind === "refused") return "npmrc_unsafe";
+    if (read.kind === "text") {
+      const verdict = check(read.text);
+      if (!verdict.ok) return verdict.reason;
+    }
+  }
+  return undefined;
 }
 
 /** Removes every `node_modules` below `root` (a link or a non-directory of that name refuses). Nothing is followed, and `.git` is not entered. */
@@ -140,7 +156,7 @@ function clearNodeModules(root: string): DepsRefusal | undefined {
 }
 
 /** True when no component of `relative` below `root` is a link or a file (a missing one ends the walk: the package manager would create it as a real directory). */
-function projectIsPlain(root: string, relative: string): boolean {
+export function projectIsPlain(root: string, relative: string): boolean {
   let current = root;
   for (const segment of relative.split("/")) {
     if (segment === "" || segment === ".") continue;
@@ -214,17 +230,8 @@ export function createDepsInstaller(deps: DepsInstallerDeps): DepsInstaller {
 
       const lock = manager === "pnpm" ? checkPnpmLock((pnpm as { text: string }).text, registryHost) : checkNpmLock((npm as { text: string }).text, registryHost);
       if (!lock.ok) return refuse(lock.reason);
-      const settings: Array<[Read, (text: string) => ReturnType<typeof checkNpmrc>]> = [
-        [readRootFile(workspace, ".npmrc", MAX_SETTINGS_BYTES), (text) => checkNpmrc(text, registry)],
-        [readRootFile(workspace, "pnpm-workspace.yaml", MAX_SETTINGS_BYTES), checkWorkspaceYaml],
-      ];
-      for (const [read, check] of settings) {
-        if (read.kind === "refused") return refuse("npmrc_unsafe");
-        if (read.kind === "text") {
-          const verdict = check(read.text);
-          if (!verdict.ok) return refuse(verdict.reason);
-        }
-      }
+      const unsafe = settingsRefusal(workspace, registry);
+      if (unsafe !== undefined) return refuse(unsafe);
       const cleared = clearNodeModules(workspace);
       if (cleared !== undefined) return refuse(cleared);
       if (!lock.projects.every((project) => projectIsPlain(workspace, project))) return refuse("workspace_unsafe");
