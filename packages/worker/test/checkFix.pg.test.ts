@@ -63,6 +63,8 @@ describe("check fix round [pg]", () => {
       resumed.push(input);
       const id = randomUUID();
       await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id, parent_run_id) VALUES ($1, $2, $3, 'executor', 'runner', 'pending', 'runner_local', $4, $5)`, [id, A.accountId, A.workItemId, A.repoId, input.parentRunId]);
+      // The real resume runs the caller's hook in the run's own create transaction.
+      if (input.inCreateTransaction) await input.inCreateTransaction(admin, id);
       await admin.query("INSERT INTO agent_run_idempotency_keys (account_id, idempotency_key, run_id, request_hash) VALUES ($1, $2, $3, $4)", [A.accountId, input.idempotency!.key, id, input.idempotency!.requestHash]);
       return { id, status: "pending", queued: true } as never;
     },
@@ -92,7 +94,7 @@ describe("check fix round [pg]", () => {
   });
 
   /** A finished executor run: `reason` is its failure reason (null: succeeded). `parent` makes it a fix round of that run. */
-  async function ended(o: { reason: string | null; parent?: string | null; summary?: string; exit?: number | null; timedOut?: boolean; check?: boolean; onItemBranch?: { pr: number; bound: boolean }; runBranch?: string; noMode?: boolean }): Promise<string> {
+  async function ended(o: { reason: string | null; parent?: string | null; summary?: string; exit?: number | null; timedOut?: boolean; check?: boolean; onItemBranch?: { pr: number; bound: boolean }; runBranch?: string; noMode?: boolean; sandbox?: boolean }): Promise<string> {
     const id = randomUUID();
     const job: Job = {
       schema_version: 1, job_id: randomUUID(), run_id: id, repo: { id: A.repoId, owner: "acme", name: "widgets", private: true }, role: "executor", mode: "local", spec: null,
@@ -102,8 +104,8 @@ describe("check fix round [pg]", () => {
     };
     await admin.query(
       `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id, parent_run_id, job_signed, cc_session_id)
-       VALUES ($1, $2, $3, 'executor', 'runner', $4, CASE WHEN $9::boolean THEN NULL ELSE 'runner_local' END, $5, $6, $7::jsonb, $8)`,
-      [id, A.accountId, A.workItemId, o.reason === null ? "succeeded" : "failed", A.repoId, o.parent ?? null, JSON.stringify(signJob(job, signing)), `sess-${id.slice(0, 8)}`, o.noMode === true],
+       VALUES ($1, $2, $3, 'executor', CASE WHEN $10::boolean THEN 'production' ELSE 'runner' END, $4, CASE WHEN $9::boolean THEN NULL WHEN $10::boolean THEN 'sandbox' ELSE 'runner_local' END, $5, $6, CASE WHEN $10::boolean THEN NULL ELSE $7::jsonb END, $8)`,
+      [id, A.accountId, A.workItemId, o.reason === null ? "succeeded" : "failed", A.repoId, o.parent ?? null, JSON.stringify(signJob(job, signing)), `sess-${id.slice(0, 8)}`, o.noMode === true, o.sandbox === true],
     );
     await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.status_changed', $3::jsonb)", [A.accountId, id, JSON.stringify({ from: "running", to: o.reason === null ? "succeeded" : "failed", ...(o.reason ? { failureReason: o.reason } : {}) })]);
     // The cloud's own record of the binding, written by the job issuer when it signed the job.
@@ -391,6 +393,27 @@ describe("check fix round [pg]", () => {
       expect(merges).not.toHaveBeenCalled();
       expect(resumed).toHaveLength(0);
       expect(await facts()).toEqual([{ kind: "escalated", code: "republish_stacked_unsupported" }]);
+    });
+
+    it("a SANDBOX check fix round on an item with a public copy syncs the item's private pull request and records the base it was brought up to date with, as a review fix round does", async () => {
+      await publicCopy();
+      const failed = await ended({ reason: "check_failed", sandbox: true });
+      // The private pull request the platform opened for the item's issue branch (its marker).
+      await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 9, 'plane.private_pr', $3::jsonb)", [A.accountId, failed, JSON.stringify({ outcome: "opened", pr: 7 })]);
+      const { out, sync } = await round(async () => ({ kind: "merged", sha: M, parents: [L, B], baseSha: B, baseRef: "main", stacked: false }), failed);
+      expect(out.ok).toBe(true);
+      expect(sync).toHaveBeenCalledWith({ repo: { id: A.repoId, owner: "acme", name: "widgets" }, branch: "fx/issue-42", prNumber: 7, publicCopy: true });
+      const newRun = (out as { runId: string }).runId;
+      expect((await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'plane.fix_base'", [newRun])).rows.map((r) => r.payload)).toEqual([{ base_sha: B, branch: "fx/issue-42" }]);
+    });
+
+    it("a sandbox check fix round with a public copy and no recorded private pull request is refused republish_base_missing, never started unrecorded", async () => {
+      await publicCopy();
+      const failed = await ended({ reason: "check_failed", sandbox: true });
+      const { out, sync } = await round(upToDate, failed);
+      expect(out).toEqual({ ok: false, reason: "republish_base_missing" });
+      expect(sync).not.toHaveBeenCalled();
+      expect(resumed).toHaveLength(0);
     });
 
     it("a round with no pull request to sync (the failed run continued another branch, or none) never republishes: refused republish_base_missing", async () => {

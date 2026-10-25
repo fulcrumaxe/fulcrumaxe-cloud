@@ -13,7 +13,9 @@ import type { ParsedRefUpdates } from "./types.js";
  * Allowed, and nothing else:
  *   private repository   ref discovery (GET info/refs?service=git-upload-pack) and POST git-upload-pack. Read only.
  *   public repository    ref discovery for either service (GET), POST git-upload-pack, POST git-receive-pack that creates exactly the recorded
- *                        branch (one update, old id all zeros), GET of that branch's ref, and POST /pulls from that branch onto main.
+ *                        branch (one update, old id all zeros) or replaces its head (one update, old id a real commit: the fix-round republish, whose
+ *                        compare-and-swap against the platform's own stamp is made by the hook's lease and enforced again by GitHub on that old id),
+ *                        GET of that branch's ref, and POST /pulls from that branch onto main.
  *
  * Repositories are compared exactly, case and all: a lookalike (another case, an added suffix, another owner) is a different repository.
  * Every reason this returns is one of the fixed strings in `PLANE_PUBLISH_DENY_REASONS`; none carries request text.
@@ -89,15 +91,15 @@ export function decidePlanePublish(req: PlanePublishRequest): PlanePublishDecisi
     if (queryKeys.length > 0) return deny("publish_request_not_allowed");
     if (target.endpoint === "git-upload-pack") return allow(side, `${side}_upload_pack_allowed`);
 
-    // git-receive-pack: only the public repository, and only a create of the recorded branch.
+    // git-receive-pack: only the public repository, and only a create of the recorded branch or a replacement of its head (never a delete).
     if (isPrivate) return deny("publish_request_not_allowed");
     const parsed = req.gitRefUpdates;
     if (!parsed || !parsed.complete) return deny("publish_receive_pack_unparsed");
     const only = parsed.updates.length === 1 ? parsed.updates[0]! : null;
-    if (!only || only.ref !== `refs/heads/${req.publishTarget.branch}` || !ZERO_ID.test(only.old) || !OBJECT_ID.test(only.new) || ZERO_ID.test(only.new)) {
+    if (!only || only.ref !== `refs/heads/${req.publishTarget.branch}` || !OBJECT_ID.test(only.old) || !OBJECT_ID.test(only.new) || ZERO_ID.test(only.new)) {
       return deny("publish_ref_not_allowed");
     }
-    return allow("public", "public_branch_create_allowed");
+    return allow("public", ZERO_ID.test(only.old) ? "public_branch_create_allowed" : "public_branch_update_allowed");
   }
 
   // A REST request: only the public repository, with no query string.

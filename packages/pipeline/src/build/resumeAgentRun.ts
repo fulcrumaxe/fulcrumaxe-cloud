@@ -149,6 +149,8 @@ export async function resumeAgentRun(
     dispatchRepoId: input.repoId,
     dispatchPrNumber: input.pr ?? null,
     idempotency: input.idempotency,
+    // Written in the run's own create transaction (FIXROUND-REPUBLISH R2-c2: the base a sandbox round was signed with).
+    inCreateTransaction: input.inCreateTransaction,
   });
 
   const run: ExecutionRun = buildExecutionRun(id, { ...input, backend: storedBackend });

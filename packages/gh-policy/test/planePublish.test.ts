@@ -45,13 +45,21 @@ describe("the public repository, git", () => {
     // A SHA-256 repository's zero id is 64 characters.
     expect(push([{ old: "0".repeat(64), new: "a".repeat(64), ref: `refs/heads/${BRANCH}` }])).toMatchObject({ allow: true });
   });
+  it("allows a receive-pack that replaces the head of exactly the recorded branch (the fix-round republish), and says which it is", () => {
+    expect(push([{ old: SHA_B, new: SHA_A, ref: `refs/heads/${BRANCH}` }])).toMatchObject({ allow: true, side: "public", reason: "public_branch_update_allowed" });
+    expect(push([{ old: "b".repeat(64), new: "a".repeat(64), ref: `refs/heads/${BRANCH}` }])).toMatchObject({ allow: true });
+    expect(push([{ old: ZERO_SHA, new: SHA_A, ref: `refs/heads/${BRANCH}` }])).toMatchObject({ allow: true, reason: "public_branch_create_allowed" });
+  });
   it.each([
     ["two ref updates", [{ old: ZERO_SHA, new: SHA_A, ref: `refs/heads/${BRANCH}` }, { old: ZERO_SHA, new: SHA_B, ref: "refs/heads/fx/other" }]],
     ["no ref update", []],
     ["a branch other than the recorded one", [{ old: ZERO_SHA, new: SHA_A, ref: "refs/heads/fx/other" }]],
     ["the recorded name as a tag", [{ old: ZERO_SHA, new: SHA_A, ref: `refs/tags/${BRANCH}` }]],
     ["main", [{ old: ZERO_SHA, new: SHA_A, ref: "refs/heads/main" }]],
-    ["a non-zero old id (an update of an existing branch)", [{ old: SHA_B, new: SHA_A, ref: `refs/heads/${BRANCH}` }]],
+    ["an update of another branch than the recorded one", [{ old: SHA_B, new: SHA_A, ref: "refs/heads/fx/other" }]],
+    ["an update of main", [{ old: SHA_B, new: SHA_A, ref: "refs/heads/main" }]],
+    ["an update of the recorded name as a tag", [{ old: SHA_B, new: SHA_A, ref: `refs/tags/${BRANCH}` }]],
+    ["two updates, one of them the recorded branch", [{ old: SHA_B, new: SHA_A, ref: `refs/heads/${BRANCH}` }, { old: SHA_B, new: SHA_A, ref: "refs/heads/main" }]],
     ["a delete of the recorded branch", [{ old: SHA_A, new: ZERO_SHA, ref: `refs/heads/${BRANCH}` }]],
     ["a create of nothing (old and new both zero)", [{ old: ZERO_SHA, new: ZERO_SHA, ref: `refs/heads/${BRANCH}` }]],
   ])("refuses a receive-pack with %s", (_label, updates) => {

@@ -36,6 +36,8 @@ export interface PlanePublishInput {
   identity: { name: string; email: string };
   commitTime: number;
   pairing: { overlayGlobs: string[]; identifierRulesPath: string | null; planDataRulesPath: string | null };
+  /** FIXROUND-REPUBLISH (R2-c2): present only for an UPDATE of the branch the platform pushed: the head it last left there (our stamp). The hook replaces exactly that head or nothing. */
+  updateOf?: string;
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -51,7 +53,9 @@ export function parsePlanePublishInput(raw: string): PlanePublishInput | undefin
     // fx-swallow-ok: a file that is not JSON is the same closed answer as any other bad input
     return undefined;
   }
-  if (!isObject(v) || !strictKeys(v, ["own", "codeRepo", "privateBase", "privateHead", "privateDefaultTip", "branch", "title", "body", "identity", "commitTime", "pairing"])) return undefined;
+  const KEYS = ["own", "codeRepo", "privateBase", "privateHead", "privateDefaultTip", "branch", "title", "body", "identity", "commitTime", "pairing"] as const;
+  if (!isObject(v) || !strictKeys(v, Object.hasOwn(v, "updateOf") ? [...KEYS, "updateOf"] : KEYS)) return undefined;
+  if (Object.hasOwn(v, "updateOf") && !(typeof v.updateOf === "string" && OBJECT_ID.test(v.updateOf))) return undefined;
   const { own, identity, pairing } = v;
   if (!isObject(own) || !strictKeys(own, ["owner", "name"]) || typeof own.owner !== "string" || !OWNER.test(own.owner) || typeof own.name !== "string" || !NAME.test(own.name)) return undefined;
   if (typeof v.codeRepo !== "string" || !CODE_REPO.test(v.codeRepo)) return undefined;
@@ -66,9 +70,9 @@ export function parsePlanePublishInput(raw: string): PlanePublishInput | undefin
   return v as unknown as PlanePublishInput;
 }
 
-export const PHASES = ["building", "scanning", "pushed", "pr_opened", "pr_failed", "refused", "no_change"] as const;
+export const PHASES = ["building", "scanning", "pushed", "pr_opened", "pr_failed", "refused", "no_change", "updated"] as const;
 export type PlanePublishPhase = (typeof PHASES)[number];
-export const TERMINAL_PHASES: readonly PlanePublishPhase[] = ["pr_opened", "pr_failed", "refused", "no_change"];
+export const TERMINAL_PHASES: readonly PlanePublishPhase[] = ["pr_opened", "pr_failed", "refused", "no_change", "updated"];
 
 export interface PlanePublishLine {
   phase: PlanePublishPhase;

@@ -35,6 +35,9 @@ const attemptWord = (attempt: string): string => createHash("sha256").update(att
 /** The run line (`run.stage`) a round that followed a base sync carries (@fx/core previewProgress `lineFor`). */
 export const BASE_SYNCED_STAGE = "base_synced";
 
+/** The run event a SANDBOX fix round carries when it must update the public pull request: `{ base_sha, branch }`, the base tip the cloud brought the branch up to date with. Written by the cloud in the run's create transaction; the settle reads it. */
+export const FIX_BASE_EVENT = "plane.fix_base";
+
 /** The one fixed line a round that followed a merge adds to its prompt (no item content): the checkout already holds the base's changes. */
 export const BASE_SYNCED_PROMPT_LINE = "Note: this branch was just brought up to date with its base branch, so the checkout already holds the base's latest changes. Do not merge or rebase it yourself.";
 

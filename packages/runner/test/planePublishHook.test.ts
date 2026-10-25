@@ -421,3 +421,120 @@ describe("the built output moved to another directory (N6: nothing reads a path 
     }
   }, 90_000);
 });
+
+describe("a fix round updates the open public branch (FIXROUND-REPUBLISH R2-c2)", () => {
+  /** The first publication: the item's work, one commit on the public tip, on the platform's branch. Returns the head the platform left there (the stamp). */
+  async function published(): Promise<string> {
+    const head = runWith({ "src/c.ts": "export const c = 3;\n", "src/a.ts": "export const a = 10;\n" });
+    const { lines } = await runHook(inputFor(head));
+    expect(lines.at(-1)).toMatchObject({ phase: "pr_opened" });
+    return sh(world.pubBare, "rev-parse", BRANCH);
+  }
+  /**
+   * Main moves on both sides (a public file in both, an overlay file in the private one only), the cloud merges the private main into the item's branch and the round adds a fix.
+   * Returns the cloud's base (the private main tip it merged), the new public tip and the round's head.
+   */
+  function fixRound(): { base2: string; tip2: string; head2: string } {
+    sh(world.priv, "checkout", "-q", "-B", "main2", world.base);
+    put(world.priv, { "src/b.ts": "export const b = 22;\n", "docs/ops/plan.md": "private plan, changed on main\n" });
+    const base2 = commitAll(world.priv, "main moved (private)");
+    const pubWork = path.join(world.root, "pubwork");
+    put(pubWork, { "src/b.ts": "export const b = 22;\n" });
+    const tip2 = commitAll(pubWork, "main moved (public)");
+    sh(pubWork, "push", "-q", world.pubBare, "main");
+    sh(world.priv, "checkout", "-q", "fx/run");
+    sh(world.priv, "merge", "-q", "--no-edit", base2);
+    put(world.priv, { "src/d.ts": "export const d = 5;\n" });
+    const head2 = commitAll(world.priv, "fix round");
+    sh(world.priv, "push", "-q", "-f", world.privBare, "fx/run", "main2:main");
+    return { base2, tip2, head2 };
+  }
+  const personCommit = (): string => {
+    const pubWork = path.join(world.root, "pubwork");
+    put(pubWork, { "src/person.ts": "export const p = 1;\n" });
+    const c = commitAll(pubWork, "a person's commit");
+    sh(pubWork, "push", "-q", "-f", world.pubBare, `${c}:refs/heads/${BRANCH}`);
+    return c;
+  };
+
+  it("replaces the branch with ONE commit whose only parent is the new public tip: no private commit goes along, the diff is the item's paths, and the private overlay change that came with the sync is not in it", async () => {
+    const stamp = await published();
+    const { base2, tip2, head2 } = fixRound();
+    const { lines } = await runHook(inputFor(head2, { privateBase: base2, updateOf: stamp }));
+    const commit = sh(world.pubBare, "rev-parse", BRANCH);
+    expect(commit).not.toBe(stamp);
+    expect(lines.map((l) => l.phase)).toEqual(["building", "scanning", "updated"]);
+    expect(lines.at(-1)).toEqual({ phase: "updated", branch: BRANCH, head_sha: commit, tip_sha: tip2 });
+    expect(sh(world.pubBare, "rev-list", "--parents", "-n1", BRANCH)).toBe(`${commit} ${tip2}`);
+    expect(sh(world.pubBare, "rev-list", "--count", `${tip2}..${BRANCH}`)).toBe("1");
+    for (const privateCommit of [head2, base2, sh(world.priv, "rev-parse", `${head2}^`)]) expect(() => sh(world.pubBare, "cat-file", "-e", privateCommit)).toThrow();
+    expect(sh(world.pubBare, "diff", "--name-only", tip2, commit).split("\n").sort()).toEqual(["src/a.ts", "src/c.ts", "src/d.ts"]);
+    expect(() => sh(world.pubBare, "cat-file", "-e", `${commit}:docs/ops/plan.md`)).toThrow();
+    // No second pull request, and every request still passed the rule set with one mint, one use and one revoke.
+    expect(world.proxy.pulls).toHaveLength(1);
+    expect(world.proxy.log.every((e) => e.decision === "allowed" && e.steps.join() === "mint,use,revoke")).toBe(true);
+  }, 60_000);
+
+  it("is a compare-and-swap: a branch that moved before the update is refused public_branch_moved with no push, and keeps the person's commit", async () => {
+    const stamp = await published();
+    const { base2, head2 } = fixRound();
+    const person = personCommit();
+    const pushes = world.proxy.log.filter((e) => e.method === "POST" && e.path.endsWith("git-receive-pack")).length;
+    const { lines } = await runHook(inputFor(head2, { privateBase: base2, updateOf: stamp }));
+    expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "public_branch_moved" });
+    expect(sh(world.pubBare, "rev-parse", BRANCH)).toBe(person);
+    expect(world.proxy.log.filter((e) => e.method === "POST" && e.path.endsWith("git-receive-pack"))).toHaveLength(pushes);
+  }, 60_000);
+
+  it("a commit a person pushes between the hook's own read of the branch and its push is kept, and the update is refused public_branch_moved", async () => {
+    const stamp = await published();
+    const { base2, head2 } = fixRound();
+    let person = "";
+    // The race: right after the hook reads the branch through the API, a person's commit lands.
+    const racing: typeof fetch = async (url, init) => {
+      const res = await fetch(url, init);
+      if (String(url).includes("/git/ref/heads/") && person === "") person = personCommit();
+      return res;
+    };
+    const raw: string[] = [];
+    await runPlanePublish(inputFor(head2, { privateBase: base2, updateOf: stamp }), { gitOrigin: world.proxy.origin, apiOrigin: world.proxy.origin, say: (l) => raw.push(l), tmpRoot: world.tmp, fetchFn: racing });
+    expect(terminalLine(parsePhaseLines(raw.join("\n")))).toMatchObject({ phase: "refused", code: "public_branch_moved" });
+    expect(person).not.toBe("");
+    expect(sh(world.pubBare, "rev-parse", BRANCH)).toBe(person);
+  }, 60_000);
+
+  it("the proxy's rule set allows the lease-checked update of the recorded branch: both pushes (the first publish and the update) passed it, and nothing was denied", async () => {
+    const stamp = await published();
+    const { base2, head2 } = fixRound();
+    await runHook(inputFor(head2, { privateBase: base2, updateOf: stamp }));
+    expect(world.proxy.log.filter((e) => e.method === "POST" && e.path.endsWith("git-receive-pack")).map((e) => e.decision)).toEqual(["allowed", "allowed"]);
+    expect(world.proxy.log.some((e) => e.decision === "denied")).toBe(false);
+  }, 60_000);
+
+  it("a republish whose fix-round base predates a rule update is scanned by the rules at the trusted private default tip, not the ones at the base", async () => {
+    const stamp = await published();
+    // The private default branch gains a new forbidden pattern after the item's base; the item's branch (and its base) never saw it.
+    sh(world.priv, "checkout", "-q", "-B", "main2", world.base);
+    put(world.priv, { "rules/ids.txt": IDS.replace("acme-internal-host\n", "acme-internal-host\nacme-new-secret\n") });
+    const tipWithRule = commitAll(world.priv, "rules updated on private main");
+    sh(world.priv, "checkout", "-q", "fx/run");
+    put(world.priv, { "src/d.ts": "export const d = 'acme-new-secret';\n" });
+    const head2 = commitAll(world.priv, "fix round");
+    sh(world.priv, "push", "-q", "-f", world.privBare, "fx/run", "main2:main");
+    const before = branches();
+    // Control: the rules as of the base do not know the pattern, so the same change would have been published.
+    const { lines } = await runHook(inputFor(head2, { privateBase: world.base, privateDefaultTip: tipWithRule, updateOf: stamp }));
+    expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "scan_refused" });
+    expect(branches()).toBe(before);
+    const old = await runHook(inputFor(head2, { privateBase: world.base, privateDefaultTip: world.base, updateOf: stamp }));
+    expect(terminalLine(old.lines)).toMatchObject({ phase: "updated" });
+  }, 60_000);
+
+  it("the input shape accepts updateOf only as a full commit id, and nothing else extra", () => {
+    const base = inputFor("a".repeat(40));
+    expect(parsePlanePublishInput(JSON.stringify({ ...base, updateOf: "b".repeat(40) }))).toMatchObject({ updateOf: "b".repeat(40) });
+    expect(parsePlanePublishInput(JSON.stringify({ ...base, updateOf: "main" }))).toBeUndefined();
+    expect(parsePlanePublishInput(JSON.stringify(base))).toMatchObject({ branch: BRANCH });
+    expect(parsePlanePublishInput(JSON.stringify({ ...base, extra: 1 }))).toBeUndefined();
+  });
+});

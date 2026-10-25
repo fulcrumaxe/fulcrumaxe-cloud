@@ -146,6 +146,26 @@ describe("D#6 R4d-5c follow-on runs inherit the parent's Spec version [pg]", () 
       expect(w.fake.calls.at(-1)).toMatchObject({ method: "resume", sessionId: "cc-owned" });
     });
 
+    it("a caller's create-transaction hook runs inside the run's own create, with the new run's id (FIXROUND-REPUBLISH: the base a sandbox round was signed with), and a hook that throws leaves no run", async () => {
+      const w = await world("sandbox");
+      await parent(w, { pin: true, finish: "succeeded" });
+      const before = await runCount(w);
+      await expect(
+        resumeAgentRun(db.runWriterPool, w.registry, { ...w.input, accountId: w.accountId, workItemId: w.workItemId, role: "executor", inCreateTransaction: async () => { throw new Error("hook failed"); } }),
+      ).rejects.toThrow("hook failed");
+      expect(await runCount(w)).toBe(before);
+      const seen: string[] = [];
+      const out = await resumeAgentRun(db.runWriterPool, w.registry, {
+        ...w.input, accountId: w.accountId, workItemId: w.workItemId, role: "executor",
+        inCreateTransaction: async (client, runId) => {
+          seen.push(runId);
+          await client.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'plane.fix_base', '{}')", [w.accountId, runId]);
+        },
+      });
+      expect(seen).toEqual([out.id]);
+      expect((await db.admin.query("SELECT kind FROM run_events WHERE run_id = $1 AND kind = 'plane.fix_base'", [out.id])).rowCount).toBe(1);
+    });
+
     it("an explicit version that is not the session run's is refused spec_version_mismatch, and no row is written", async () => {
       const w = await world("sandbox");
       await parent(w, { pin: true, finish: "succeeded" });
