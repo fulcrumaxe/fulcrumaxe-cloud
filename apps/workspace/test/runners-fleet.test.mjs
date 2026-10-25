@@ -7,7 +7,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { launchRunId } from "../apps/runs/runs-storage.js";
 import {
-  ACTION_SENTENCES, ADD_REPO_SENTENCES, CHECK_READ_FAILED, ADD_SENTENCES, CHECK_POLL_MS, ONLY_ADMINS, STATE_WORDS, accountText, actionUrl, capacityText, commandsFor, controlList, createAdder, createFleet, factsText, loadRepoChoices, parseLabels,
+  ACTION_SENTENCES, ADD_REPO_SENTENCES, CHECK_READ_FAILED, ADD_SENTENCES, CHECK_POLL_MS, ONLY_ADMINS, STATE_WORDS, accountText, actionUrl, agoText, capacityText, commandsFor, controlList, createAdder, createFleet, factsText, heldBackText, loadRepoChoices, parseLabels,
   provText, readFleet, readRunner, runnerLimitText, stateParts, versionText,
 } from "../apps/runners/runners-fleet.js";
 
@@ -513,5 +513,36 @@ describe("Check runner now", () => {
     timers.shift().fn();
     await flush();
     expect(timers).toHaveLength(0);
+  });
+});
+
+describe("the cause a runner gives for holding work back, and an honest check-in age", () => {
+  it("heldBackText words the cause a runner reported, and says nothing for none, an unknown one, or a revoked runner", () => {
+    const held = (limited_by, over = {}) => readRunner(wire({ capacity: { light: { limit: 2, in_use: 0 }, heavy: { limit: 0, in_use: 0 }, total_limit: 2, limited_by }, ...over }));
+    expect(heldBackText(held("memory"))).toBe("memory is short");
+    expect(heldBackText(held("cpu"))).toBe("the CPU is busy");
+    expect(heldBackText(held("disk"))).toBe("disk space is low");
+    expect(heldBackText(held("paused"))).toBe("claiming is paused");
+    expect(heldBackText(held("usage_limit"))).toBe("the Claude usage limit is reached");
+    expect(heldBackText(held("ceiling"))).toBe("it is at its job limit");
+    expect(heldBackText(held(null))).toBe("");
+    expect(heldBackText(held("from_the_future"))).toBe("");
+    expect(heldBackText(held("memory", { state: "revoked" }))).toBe("");
+    expect(heldBackText(readRunner(wire({ capacity: null })))).toBe("");
+  });
+
+  it("agoText reads the age of the last check-in against the clock, in the largest whole unit", () => {
+    const now = Date.parse("2026-10-24T20:00:00.000Z");
+    const ago = (secs) => agoText(new Date(now - secs * 1000).toISOString(), now);
+    expect(ago(5)).toBe("just now");
+    expect(ago(89)).toBe("just now");
+    expect(ago(120)).toBe("2 min ago");
+    expect(ago(59 * 60)).toBe("59 min ago");
+    expect(ago(3 * 3600)).toBe("3 h ago");
+    expect(ago(47 * 3600)).toBe("47 h ago");
+    expect(ago(3 * 86400)).toBe("3 days ago");
+    expect(agoText(new Date(now + 30_000).toISOString(), now)).toBe("just now");
+    expect(agoText("", now)).toBe("");
+    expect(agoText(undefined, now)).toBe("");
   });
 });

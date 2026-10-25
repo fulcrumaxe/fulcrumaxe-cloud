@@ -7,7 +7,7 @@
 import { h, timeNode } from "../_lib/dom.js";
 import { onRefresh } from "../../core/cloud-live.js";
 import {
-  CHECK_READ_FAILED, MODE_WORDS, ONLY_ADMINS, TTL_CHOICES, accountText, capacityText, controlList, createAdder, createFleet, factsText, loadRepoChoices, provText, runnerLimitText, stateParts, versionText,
+  CHECK_READ_FAILED, MODE_WORDS, ONLY_ADMINS, TTL_CHOICES, FLEET_REFRESH_MS, accountText, agoText, capacityText, controlList, createAdder, createFleet, factsText, heldBackText, loadRepoChoices, provText, runnerLimitText, stateParts, versionText,
 } from "./runners-fleet.js";
 
 const FULC = window.FULC;
@@ -232,7 +232,8 @@ function mountApp(contentEl) {
         ...line("Version", versionText(r)),
         ...line("Running now", r.runs.length === 0 ? "Nothing" : r.runs.map((x) => h("button", { type: "button", class: "runners-link", "data-testid": "runners-run", onClick: () => window.FULCWM && window.FULCWM.open("runs", { runId: x.id }) }, x.label))),
         ...line("Capacity", capacityText(r)),
-        ...line("Last check-in", r.lastSeen ? timeNode(r.lastSeen, true) : "Never"),
+        ...(heldBackText(r) ? line("Held back", heldBackText(r)) : []),
+        ...line("Last check-in", r.lastSeen ? [timeNode(r.lastSeen, true), " (" + agoText(r.lastSeen, Date.now()) + ")"] : "Never"),
         ...line("Repos", r.state === "revoked" ? "None" : r.repos.length === 0 ? "No repos" : h("bdi", null, r.repos.join(", "))),
         ...line("Credential", MODE_WORDS[r.mode] || "Unknown"),
         ...line("Labels", r.labels.length === 0 ? "None" : h("bdi", null, r.labels.join(", "))),
@@ -272,8 +273,13 @@ function mountApp(contentEl) {
   paint();
   fleet.load();
   const off = onRefresh(() => fleet.load());
+  // Read again on its own while the page is open and showing, so the check-in time and capacity never go stale on screen.
+  const refreshTimer = setInterval(() => {
+    if (!root.ownerDocument.hidden) fleet.load();
+  }, FLEET_REFRESH_MS);
   return {
     destroy() {
+      clearInterval(refreshTimer);
       off();
       ac.abort();
       adder.close();
