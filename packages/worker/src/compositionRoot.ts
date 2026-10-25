@@ -77,6 +77,7 @@ import { createRunHandoffs, type RunHandoffs } from "./runHandoffs.js";
 import { createStageResume, type StageResume } from "./stageResume.js";
 import { sweepSetupRequestChecks as runSetupRequestCheckSweep, type CheckSweepCounts } from "@fx/core/src/setup-requests/checkSweep.js";
 import { sweepBranchCleanups as runBranchCleanupSweep, type BranchCleanupCounts, type BranchCleanupGithub } from "./branchCleanup.js";
+import type { PrCloseOpen } from "./privatePrClose.js";
 import { sweepPrSlotHolders as runPrSlotSweep, type PrSlotSweepCounts, type PrStateOpen } from "./prSlotReconcile.js";
 import type { VercelEnvSource } from "@fx/core/src/setup-requests/checks.js";
 import { answerAsk, type AskAnswerResult } from "@fx/core/src/decisions/answer.js";
@@ -209,7 +210,7 @@ export interface Worker extends PlanePublish, RunActionFacade, RunnerLeaseFacade
    * D#598 P1f-5d: one pass of the branch cleanup sweep (a cron of its own, behind its own pending-work marker): removes the private branches of closed or
    * merged paired items whose head still is the recorded one. `github` is the GitHub client opener (apps/web binds it); the signing key is read here. For the cron only.
    */
-  sweepBranchCleanups(input: { github: BranchCleanupGithub }): Promise<BranchCleanupCounts>;
+  sweepBranchCleanups(input: { github: BranchCleanupGithub; closePr?: PrCloseOpen }): Promise<BranchCleanupCounts>;
   /** D#598: one pass of the stale pull-request sweep (items in a pull-request stage whose pull request was closed or merged without its webhook). */
   sweepPrSlotHolders(input: { github: PrStateOpen }): Promise<PrSlotSweepCounts>;
   /**
@@ -449,7 +450,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       return result;
     };
     const runSandboxInventory = (input: SandboxInventoryInput): Promise<SandboxInventoryResult> => sandboxInventory({ pool: pools.runnerPool, port: sandboxPort }, input);
-    return { ...planePublish, ...runActions, ...runnerLeases, ...runnerClaims, ...runnerDone, ...runnerGitTickets, ...runnerPlanePush, ...runnerLeaseSweep, sweepRunHandoffs: runHandoffs.sweepRunHandoffs, sweepParkedStages: stageResume.sweepParkedStages, sweepSetupRequestChecks: (input) => runSetupRequestCheckSweep({ pool: pools.runnerPool, envSource: input.envSource }), approveSubItem: (input) => approveSubItem({ pool: pools.receiptPool, principal: input.principal }, { workItemId: input.workItemId, key: input.key }), answerDecisionAsk: (input) => answerAsk({ pool: pools.receiptPool, principal: input.principal, ...(input.signal ? { signal: input.signal } : {}) }, { askId: input.askId, choice: input.choice }), sweepBranchCleanups: (input) => runBranchCleanupSweep({ pool: pools.runnerPool, signer: gitTicketSigner, github: input.github }), sweepPrSlotHolders: (input) => runPrSlotSweep({ pool: pools.runnerPool, openClient: input.github }), sweepProposalVerification: verifySweep, completeRunHandoff: runHandoffs.completeRunHandoff, completeHandoffOnDone: runHandoffs.completeHandoffOnDone, ...runnerQueue, ...runnerNotices, sweepInvariants: runInvariantTick, ...preview, ...retry, ...advance, ...resume, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, sandboxInventory: runSandboxInventory, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
+    return { ...planePublish, ...runActions, ...runnerLeases, ...runnerClaims, ...runnerDone, ...runnerGitTickets, ...runnerPlanePush, ...runnerLeaseSweep, sweepRunHandoffs: runHandoffs.sweepRunHandoffs, sweepParkedStages: stageResume.sweepParkedStages, sweepSetupRequestChecks: (input) => runSetupRequestCheckSweep({ pool: pools.runnerPool, envSource: input.envSource }), approveSubItem: (input) => approveSubItem({ pool: pools.receiptPool, principal: input.principal }, { workItemId: input.workItemId, key: input.key }), answerDecisionAsk: (input) => answerAsk({ pool: pools.receiptPool, principal: input.principal, ...(input.signal ? { signal: input.signal } : {}) }, { askId: input.askId, choice: input.choice }), sweepBranchCleanups: (input) => runBranchCleanupSweep({ pool: pools.runnerPool, signer: gitTicketSigner, github: input.github, ...(input.closePr ? { closePr: input.closePr } : {}) }), sweepPrSlotHolders: (input) => runPrSlotSweep({ pool: pools.runnerPool, openClient: input.github }), sweepProposalVerification: verifySweep, completeRunHandoff: runHandoffs.completeRunHandoff, completeHandoffOnDone: runHandoffs.completeHandoffOnDone, ...runnerQueue, ...runnerNotices, sweepInvariants: runInvariantTick, ...preview, ...retry, ...advance, ...resume, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, sandboxInventory: runSandboxInventory, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
   } catch (err) {
     await pools.close();
     throw err;

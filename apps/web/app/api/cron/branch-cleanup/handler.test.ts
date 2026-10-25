@@ -31,7 +31,7 @@ function setup(over: Partial<BranchCleanupHandlerDeps> = {}, pool = countingPool
   /** One statement for the list; an item that is listed cannot be read on the counting pool, so it is counted failed and asked for again in 15 minutes. */
   const sweepSpy = vi.fn(async (_input: { github: BranchCleanupHandlerDeps["github"] }) => {
     const { rows } = (await pool.pool.query("SELECT account_id, work_item_id FROM branch_cleanup_list_due($1::integer)", [50])) as unknown as { rows: unknown[] };
-    return { configured: true, listed: rows.length, deleted: 0, left: 0, recorded: 0, failed: rows.length, nextDueAt: rows.length > 0 ? clock.value + 15 * 60_000 : null };
+    return { configured: true, listed: rows.length, deleted: 0, left: 0, prsClosed: 0, recorded: 0, failed: rows.length, nextDueAt: rows.length > 0 ? clock.value + 15 * 60_000 : null };
   });
   /** D#598: the stale pull-request sweep's stand-in: one statement for its list, as the real sweep's first one. */
   const prSweepSpy = vi.fn(async (_input: { github: NonNullable<BranchCleanupHandlerDeps["prState"]> }) => {
@@ -101,7 +101,7 @@ describe("GET /api/cron/branch-cleanup", () => {
     const s = setup();
     const res = await branchCleanupHandler(req(`Bearer ${SECRET}`), s.deps);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ configured: true, listed: 0, deleted: 0, left: 0, recorded: 0, failed: 0 });
+    expect(await res.json()).toEqual({ configured: true, listed: 0, deleted: 0, left: 0, prsClosed: 0, recorded: 0, failed: 0 });
     expect(s.statements).toHaveLength(1);
     expect(s.statements[0]).toContain("branch_cleanup_list_due");
     expect(s.github).not.toHaveBeenCalled();
@@ -127,7 +127,7 @@ describe("GET /api/cron/branch-cleanup", () => {
     });
     const s = setup({ prState });
     const res = await branchCleanupHandler(req(`Bearer ${SECRET}`), s.deps);
-    expect(await res.json()).toEqual({ configured: true, listed: 0, deleted: 0, left: 0, recorded: 0, failed: 0, prSlots: { listed: 0, moved: 0, unchanged: 0, failed: 0 } });
+    expect(await res.json()).toEqual({ configured: true, listed: 0, deleted: 0, left: 0, prsClosed: 0, recorded: 0, failed: 0, prSlots: { listed: 0, moved: 0, unchanged: 0, failed: 0 } });
     expect(s.prSweepSpy).toHaveBeenCalledWith({ github: prState });
     expect(s.statements.map((x) => x.match(/[a-z_]+_list_due/)?.[0])).toEqual(["branch_cleanup_list_due", "pr_slot_reconcile_list_due"]);
     expect(marker()).toBeNull();

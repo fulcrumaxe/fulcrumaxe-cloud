@@ -1,5 +1,6 @@
 import type { NextRequest, NextResponse } from "next/server";
 import { openInstallationHttp } from "../../../../lib/github/installationHttp";
+import { createPrCloseOpener } from "../../../../lib/github/prClose";
 import { createPrStateReader } from "../../../../lib/github/prState";
 import { getWorker } from "../../../../lib/worker";
 import { branchCleanupHandler } from "./handler";
@@ -13,6 +14,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     cronSecret: process.env.CRON_SECRET ?? "",
     getWorker,
     github: openInstallationHttp,
+    closePr: createPrCloseOpener(),
     prState: createPrStateReader(),
     log: (line) => console.log(line),
   });
