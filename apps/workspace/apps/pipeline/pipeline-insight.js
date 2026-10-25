@@ -314,6 +314,33 @@ export function readyBanner(data) {
   };
 }
 
+const SLOT_CAUSE_WORDS = {
+  memory: "memory is short",
+  cpu: "the CPU is busy",
+  disk: "disk space is low",
+  paused: "the runner is paused",
+  ceiling: "the runner is at its job limit",
+  usage_limit: "the Claude usage limit is reached",
+};
+
+/**
+ * "Waiting for your runner: Code reviewer, Acceptance tester (memory is short)": the runner runs not yet claimed, with the cause the runner gave for a
+ * full slot, else the cloud's own sentence for why they wait. `views` are the runs' views and `raw` the matching wire runs.
+ */
+export function waitingLine(views, raw) {
+  const roles = views.map((v) => v.role).join(", ");
+  const causes = new Set();
+  const sentences = new Set();
+  for (const run of raw) {
+    const wait = isObj(run.wait) ? run.wait : null;
+    if (!wait) continue;
+    if (typeof wait.limited_by === "string" && Object.hasOwn(SLOT_CAUSE_WORDS, wait.limited_by)) causes.add(SLOT_CAUSE_WORDS[wait.limited_by]);
+    else if (typeof wait.text === "string" && wait.text !== "") sentences.add(wait.text);
+  }
+  const why = causes.size ? " (" + [...causes].join("; ") + ")" : sentences.size ? " · " + [...sentences].join("; ") : "";
+  return "Waiting for your runner: " + roles + why;
+}
+
 /** Everything the panel draws, from one response. */
 export function buildInsight(data) {
   const runs = (Array.isArray(data.runs) ? data.runs : []).map((r) => runView(r));
@@ -326,7 +353,11 @@ export function buildInsight(data) {
     seenRole.set(r.role, nth);
     r.contextLabel = "What this run loaded: " + r.role + (sameRole.get(r.role) > 1 ? ", run " + nth + " of " + sameRole.get(r.role) : "");
   }
-  const running = runs.filter((r) => r.live);
+  const rawRuns = Array.isArray(data.runs) ? data.runs : [];
+  // A runner run that is still pending has not been claimed: it is not running. It is told apart, with the runner's reason, instead of read as "Running now".
+  const waiting = runs.filter((r, i) => r.runner && r.status === "pending" && isObj(rawRuns[i]));
+  const waitingRaw = waiting.map((r) => rawRuns[runs.indexOf(r)]);
+  const running = runs.filter((r) => r.live && !waiting.includes(r));
   const finished = runs.filter((r) => !r.live);
   const spent = (Array.isArray(data.runs) ? data.runs : []).reduce((n, r) => n + (!LIVE_STATUSES.has(r.status) && Number.isFinite(r.usd) ? r.usd : 0), 0);
   return {
@@ -335,6 +366,7 @@ export function buildInsight(data) {
     setupPause: setupPauseLine(data),
     banner: readyBanner(data),
     runningText: running.length ? "Running now: " + running.map((r) => r.role).join(", ") : "Nothing is running right now.",
+    waitingText: waiting.length ? waitingLine(waiting, waitingRaw) : null,
     totalsText: finished.length + " agent run" + (finished.length === 1 ? "" : "s") + " finished" + (finished.length ? " · $" + spent.toFixed(2) + " so far" : ""),
     runs,
     runsTruncated: data.runs_truncated === true,
@@ -547,6 +579,7 @@ export function createInsightPanel(deps) {
       m.setupPause ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-setup-pause", "data-state": m.setupPause.state }, m.setupPause.text) : [],
       m.banner ? banner(m.banner) : [],
       h("p", { "data-testid": "pl-running" }, m.runningText),
+      m.waitingText ? h("p", { role: "status", "data-testid": "pl-waiting-runner" }, m.waitingText) : [],
       h("p", { class: "pl-muted", "data-testid": "pl-totals" }, m.totalsText),
       h("h3", { class: "pl-detail-sub" }, m.runs.length ? "Agent runs (" + m.runs.length + ")" : "Agent runs"),
       m.runs.length ? m.runs.map(runSection) : h("p", { class: "pl-muted", "data-testid": "pl-no-runs" }, SENTENCES.noRuns),

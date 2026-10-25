@@ -722,6 +722,40 @@ describe("D#600 CX-8b: the context button's accessible name is unique per run", 
   });
 });
 
+describe("runs that wait for a runner are not read as running", () => {
+  const mk = (id, role, status, extra = {}) => ({ id, role, status, runtime: "runner", created_at: "2026-10-24T18:28:00Z", lines: [], ...extra });
+  const slot = (cause) => ({ reason: "waiting_for_runner_slot", limited_by: cause, text: "Waiting for a free slot on your runner" });
+
+  it("unclaimed runner runs are not under Running now; the waiting line names them and the cause the runner gave", () => {
+    const m = buildInsight({ runs: [mk("1", "code-reviewer", "pending", { wait: slot("memory") }), mk("2", "acceptance-tester", "pending", { wait: slot("memory") })] });
+    expect(m.runningText).toBe("Nothing is running right now.");
+    expect(m.waitingText).toBe("Waiting for your runner: Code reviewer, Acceptance tester (memory is short)");
+  });
+
+  it("a running run keeps Running now while its sibling waits", () => {
+    const m = buildInsight({ runs: [mk("1", "executor", "running"), mk("2", "code-reviewer", "pending", { wait: slot("cpu") })] });
+    expect(m.runningText).toBe("Running now: Executor");
+    expect(m.waitingText).toBe("Waiting for your runner: Code reviewer (the CPU is busy)");
+  });
+
+  it("without a cause, the cloud's own sentence for the wait is shown; with none at all, only the names", () => {
+    const offline = { reason: "waiting_for_runner", limited_by: null, text: "Waiting for your runner to come online" };
+    expect(buildInsight({ runs: [mk("1", "code-reviewer", "pending", { wait: offline })] }).waitingText).toBe("Waiting for your runner: Code reviewer · Waiting for your runner to come online");
+    expect(buildInsight({ runs: [mk("1", "code-reviewer", "pending")] }).waitingText).toBe("Waiting for your runner: Code reviewer");
+  });
+
+  it("a cause this build does not know falls back to the sentence, never to the code", () => {
+    const m = buildInsight({ runs: [mk("1", "code-reviewer", "pending", { wait: { reason: "waiting_for_runner_slot", limited_by: "from_the_future", text: "Waiting for a free slot on your runner" } })] });
+    expect(m.waitingText).toBe("Waiting for your runner: Code reviewer · Waiting for a free slot on your runner");
+    expect(m.waitingText).not.toContain("from_the_future");
+  });
+
+  it("nothing waiting: no waiting line", () => {
+    expect(buildInsight(OK).waitingText).toBeNull();
+    expect(buildInsight(EMPTY).waitingText).toBeNull();
+  });
+});
+
 // ── D#598 P1f-6a: the "Public change" block, one page test per state, over the fixtures the real route produced ──────────────────
 describe("the Public change block", () => {
   const CASES = [

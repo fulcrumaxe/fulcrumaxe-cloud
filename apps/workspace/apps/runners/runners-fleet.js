@@ -52,7 +52,7 @@ export function readRunner(r) {
     version: text(r.binary_version),
     lastSeen: typeof r.last_seen_at === "string" ? r.last_seen_at : "",
     loadLabel: text(r.load_label),
-    capacity: cap ? { light: cap.light, heavy: cap.heavy, total: cap.total_limit } : null,
+    capacity: cap ? { light: cap.light, heavy: cap.heavy, total: cap.total_limit, limitedBy: typeof cap.limited_by === "string" ? cap.limited_by : "" } : null,
     runs: (Array.isArray(r.current_runs) ? r.current_runs : []).filter((x) => x && typeof x.id === "string").map((x) => ({ id: x.id, label: text(x.label) || "A run" })),
     repos: (Array.isArray(r.repos) ? r.repos : []).map((x) => text(x && x.name)).filter(Boolean),
     labels: (Array.isArray(r.labels) ? r.labels : []).map(text).filter(Boolean),
@@ -106,6 +106,34 @@ export function stateParts(r) {
 }
 
 export const versionText = (r) => [r.version || "Version unknown", r.state === "outdated" ? "Update needed" : ""].filter(Boolean).join(" · ");
+// How often the open Runners page reads the fleet again on its own, so "Last check-in" and the capacity are what the cloud has now, not what it had when the page opened.
+export const FLEET_REFRESH_MS = 30_000;
+// The cause a runner gives for holding work back (its `limited_by`), in words; a cause this build does not know says nothing rather than show a code.
+export const LIMITED_WORDS = {
+  memory: "memory is short",
+  cpu: "the CPU is busy",
+  disk: "disk space is low",
+  paused: "claiming is paused",
+  usage_limit: "the Claude usage limit is reached",
+  ceiling: "it is at its job limit",
+};
+/** "Held back: memory is short", or "" when the runner gave no cause (or one this build does not know). */
+export function heldBackText(r) {
+  if (r.state === "revoked" || r.capacity === null || !Object.hasOwn(LIMITED_WORDS, r.capacity.limitedBy)) return "";
+  return LIMITED_WORDS[r.capacity.limitedBy];
+}
+/** "just now", "5 min ago", "3 h ago", "2 days ago" for an ISO time against `nowMs`; "" when it is not a time. A time a little ahead of the clock reads "just now". */
+export function agoText(iso, nowMs) {
+  const t = typeof iso === "string" ? Date.parse(iso) : NaN;
+  if (!Number.isFinite(t)) return "";
+  const secs = Math.max(0, Math.floor((nowMs - t) / 1000));
+  if (secs < 90) return "just now";
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return mins + " min ago";
+  const hours = Math.floor(mins / 60);
+  if (hours < 48) return hours + " h ago";
+  return Math.floor(hours / 24) + " days ago";
+}
 export const capacityText = (r) =>
   r.state === "revoked" ? "None" : r.capacity === null ? "Capacity unknown" : "Light " + r.capacity.light.in_use + " of " + r.capacity.light.limit + " · Heavy " + r.capacity.heavy.in_use + " of " + r.capacity.heavy.limit;
 export const factsText = (r) => (r.facts === null ? "Not reported yet" : [r.facts.os, r.facts.arch, r.facts.engine].filter(Boolean).join(" · ") || "Not reported yet");
