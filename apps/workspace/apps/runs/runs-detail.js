@@ -643,6 +643,8 @@ export function activityLines(insight) {
 }
 
 // D#6 R-CHK-3b: the repository's approved check on a run on the person's machine. Every sentence is chosen from recorded fields; the command and the output are drawn as text.
+// Mirrors SPEC_PINNED_RUNNER_ROLES in packages/runner/src/runStatusWriter.ts (the set packages/runner/src/targets/jobIssuer.ts uses to decide which job carries the approved check); copied rather than imported because this is a browser boot file.
+const CHECK_ROLES = new Set(["executor", "docs-writer"]);
 const SPACE = "␣"; // the open-box mark the Repos app shows in place of each space
 /** One argument as the person must see it: quoted, each space marked, so a leading, trailing or doubled space cannot pass for tidy. */
 export const showArg = (a) => '"' + String(a).replace(/ /g, SPACE) + '"';
@@ -666,6 +668,7 @@ const reasonCopy = (code) => (typeof code === "string" && Object.hasOwn(CHECK_RE
 const LEGACY_NOT_SAFE = /^(the sandbox could not start the check|the check was not run:|the check could not be started)/;
 export const CHECK_COPY = {
   not_set: ["Not set", "This repository has no approved check, so nothing was run after the agent finished."],
+  read_only: ["Not run", "this run doesn't change code, so the repository's check runs only on build and fix-round runs."],
   not_run: ["Not run", "The run ended before the check ran."],
   running: ["Not finished", "The check runs on your runner after the agent finishes. Its result appears here when the run ends."],
   passed: ["Passed", "The check passed."],
@@ -685,7 +688,7 @@ export function checkView(insight) {
   const summary = r && typeof r.summary === "string" ? r.summary : "";
   const hasReason = r !== null && r.reason !== null && r.reason !== undefined;
   let state;
-  if (!c) state = "not_set";
+  if (!c) state = CHECK_ROLES.has(insight.run.role) ? "not_set" : "read_only";
   else if (c.no_dev_shell === true) state = "no_dev_shell";
   else if (r) state = hasReason ? "unsafe" : r.timed_out === true ? "timed_out" : r.exit_code === 0 ? "passed" : r.exit_code === null && LEGACY_NOT_SAFE.test(summary) ? "unsafe" : "failed";
   else if (isObj(insight.wait) && insight.wait.reason === "runner_too_old_for_check") state = "runner_too_old";

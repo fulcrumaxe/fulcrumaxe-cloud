@@ -61,6 +61,18 @@ describe("the Check block, one state each", () => {
     const body = fx("runner-too-old");
     expect(checkView(body)).toMatchObject({ state: "runner_too_old", copy: body.wait.text });
   });
+  it("a read-only run says the check runs only on code runs", () => {
+    const body = fx("not-set");
+    for (const role of ["code-reviewer", "release-manager"]) {
+      expect(checkView({ ...body, run: { ...body.run, role } })).toMatchObject({ state: "read_only", label: "Not run", copy: CHECK_COPY.read_only[1], argv: [], facts: [] });
+    }
+  });
+  it("a run that can change code with no check still says the repository has no approved check", () => {
+    const body = fx("not-set");
+    for (const role of ["executor", "docs-writer"]) {
+      expect(checkView({ ...body, run: { ...body.run, role } })).toMatchObject({ state: "not_set", label: "Not set", copy: CHECK_COPY.not_set[1] });
+    }
+  });
 });
 
 describe("what is never guessed", () => {
@@ -75,6 +87,13 @@ describe("what is never guessed", () => {
   it("a body with a malformed check reads as not set rather than throwing", () => {
     const body = fx("passed");
     for (const bad of [{ argv: "x" }, { argv: null }, 5, "a", []]) expect(checkView({ ...body, check: bad }).state).toBe("not_set");
+  });
+  it("a malformed check on a read-only run is never read as a check that ran", () => {
+    const body = fx("passed");
+    for (const bad of [{ argv: "x" }, { argv: null }, 5, "a", []]) {
+      expect(checkView({ ...body, check: bad, run: { ...body.run, role: "code-reviewer" } }).state).toBe("read_only");
+      expect(checkView({ ...body, check: bad, run: { ...body.run, role: "executor" } }).state).toBe("not_set");
+    }
   });
   it("a result with no exit status and a plain summary is a failure, not a pass", () => {
     const body = fx("failed");

@@ -127,4 +127,17 @@ test.describe("D#6 R-CHK-3b: the Check block, every state (contract fixtures)", 
     await setup(page, insight);
     await expect(tid(page, "runs-check")).toHaveCount(0);
   });
+
+  test("a read-only run says the check runs only on code runs", async ({ page }) => {
+    const insight = readFixture("getRunInsight", "200-check-not-set.json");
+    await setup(page, { ...insight, run: { ...insight.run, role: "code-reviewer" } });
+    const block = tid(page, "runs-check");
+    await expect(block).toBeVisible();
+    await expect(tid(page, "runs-check-state")).toHaveAttribute("data-state", "read_only");
+    await expect(tid(page, "runs-check-state")).toContainText("Not run");
+    await expect(block).toContainText(/this run doesn't change code, so the repository's check runs only on build and fix-round runs\./);
+    await expect(tid(page, "runs-check-argv")).toHaveCount(0);
+    await expect(tid(page, "runs-check-output")).toHaveCount(0);
+    expect(await block.innerText()).not.toMatch(/(^|[^A-Za-z])(null|undefined|NaN)([^A-Za-z]|$)/);
+  });
 });
