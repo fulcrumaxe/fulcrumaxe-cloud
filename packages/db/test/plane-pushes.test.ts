@@ -111,6 +111,7 @@ describe('plane_pushes and plane_push_attempts (migration 0831)', () => {
       ['a code outside a refusal', `code = 'overlay_path'`],
       ['a code with spaces or capitals', `state = 'refused', code = 'Overlay Path'`],
       ['a short sha', `head_sha = 'abc'`],
+      ['a short source head (migration 0909)', `source_head = 'abc'`],
       ['a refusals value that is not an array', `refusals = '{"a":1}'::jsonb`],
       ['101 refusals', `refusals = (SELECT jsonb_agg(jsonb_build_object('kind', 'x')) FROM generate_series(1, 101))`],
     ];
@@ -118,8 +119,9 @@ describe('plane_pushes and plane_push_attempts (migration 0831)', () => {
     // The valid forms pass.
     await upd(`state = 'refused', code = 'overlay_path', refusals = (SELECT jsonb_agg(jsonb_build_object('kind', 'overlay_path', 'place', 'docs/a.md', 'rule_key', 'overlay')) FROM generate_series(1, 100))`);
     await upd(`state = 'pr_opened', code = NULL, head_sha = '${sha}', tip_sha = '${sha}', pr_number = 7, pr_url = 'https://github.com/acme/pub/pull/7'`);
-    const row = (await admin.query(`SELECT state, pr_number, head_sha FROM plane_pushes WHERE id = $1`, [id])).rows[0];
-    expect(row).toMatchObject({ state: 'pr_opened', pr_number: 7, head_sha: sha });
+    await upd(`source_head = '${sha}'`);
+    const row = (await admin.query(`SELECT state, pr_number, head_sha, source_head FROM plane_pushes WHERE id = $1`, [id])).rows[0];
+    expect(row).toMatchObject({ state: 'pr_opened', pr_number: 7, head_sha: sha, source_head: sha });
   });
 
   it('identity is fixed after insert (item, repos, owner), and updated_at moves', async () => {

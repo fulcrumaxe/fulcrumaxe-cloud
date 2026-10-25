@@ -386,7 +386,7 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       const opened = await report(run, { phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9, token_revoked: true });
       expect(opened.status).toBe(200);
       expect(opened.body).toEqual({ recorded: true });
-      expect(await planeRow()).toMatchObject({ state: "pr_opened", pr_number: 9, pr_url: "https://github.com/acme/widgets-public/pull/9", code: null });
+      expect(await planeRow()).toMatchObject({ state: "pr_opened", pr_number: 9, pr_url: "https://github.com/acme/widgets-public/pull/9", code: null, source_head: null });
       const [attempt] = await attempts();
       expect(attempt).toMatchObject({ token_revoked: true, outcome: "pr_opened" });
       expect(attempt.finished_at).toBeInstanceOf(Date);
@@ -767,9 +767,10 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       await open();
       const run = await claimedRun({ continues: { baseSha: BASE } });
       await askToken(run);
+      await admin.query("UPDATE plane_pushes SET source_head = $1 WHERE state = 'pr_opened'", ["e".repeat(40)]);
       expect((await report(run, { phase: "updated", head_sha: NEW_HEAD, tip_sha: NEW_TIP, branch: (await planeRow()).branch })).status).toBe(200);
       expect(github.asked).toEqual(["pushed"]);
-      expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: NEW_HEAD, tip_sha: NEW_TIP, pr_number: 9 });
+      expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: NEW_HEAD, tip_sha: NEW_TIP, source_head: null, pr_number: 9 });
       expect((await attempts())[0]).toMatchObject({ outcome: "updated" });
       expect(await stageOf()).toBe("changes_requested");
     });

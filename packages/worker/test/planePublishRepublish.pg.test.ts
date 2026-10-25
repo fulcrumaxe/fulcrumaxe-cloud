@@ -121,7 +121,7 @@ describe("a sandbox fix round updates the open public pull request [pg]", () => 
     const branch = (await planeRow()).branch as string;
     expect(inputOf()).toMatchObject({ privateBase: FIX_BASE, privateDefaultTip: DEFAULT_TIP, privateHead: PRIVATE_HEAD, updateOf: STAMP, branch, codeRepo: "acme/widgets-public", own: { owner: "acme", name: "widgets" } });
     expect(gh.verified).toEqual([{ headSha: NEW_HEAD, tipSha: NEW_TIP, branch }]);
-    expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: NEW_HEAD, tip_sha: NEW_TIP, pr_number: 9 });
+    expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: NEW_HEAD, tip_sha: NEW_TIP, source_head: PRIVATE_HEAD, pr_number: 9 });
     // One attempt of its own kind (not one of the three pushes of a first publish), finished, on a publish run that succeeded; no second pull request.
     expect(await attempts()).toEqual([expect.objectContaining({ kind: "fix_round", attempt_no: 1, runtime: "sandbox", outcome: "updated", finished_at: expect.any(Date) })]);
     expect(await publishRuns()).toEqual([expect.objectContaining({ status: "succeeded", parent_run_id: run })]);

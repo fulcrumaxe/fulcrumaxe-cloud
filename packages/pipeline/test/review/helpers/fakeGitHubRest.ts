@@ -23,6 +23,11 @@ export interface FakeFile {
   filename: string;
   patch?: string;
   previous_filename?: string;
+  /** What GitHub reports for a changed file: its change type and the blob sha. */
+  status?: string;
+  sha?: string;
+  /** The file mode in the commit's tree (default 100644). */
+  mode?: string;
   changes?: number;
 }
 
@@ -70,6 +75,18 @@ export interface FakeRepoState {
   merges: Array<{ sha: string | undefined; method: unknown }>;
   posts: Array<{ sha: string; body: Record<string, unknown> }>;
   requests: GitHubHttpRequest[];
+  /** Git trees by commit sha (recursive listing). A commit with none gets a tree synthesized from `files`: the head holds every file not removed, the merge base every file not added. */
+  trees?: Record<string, Array<{ path: string; mode: string; type: string; sha: string }>>;
+  /** Tree reads answer `truncated: true`. */
+  treesTruncated?: boolean;
+  /** Parents by commit sha for `GET /commits/{sha}` (default: the one merge base commit). */
+  commitParents?: Record<string, string[]>;
+  /** The files a compare lists, when they differ from `files` (a compare that lists fewer than the tree diff holds). */
+  compareFiles?: FakeFile[];
+  /** A compare of two explicit shas (the files read) answered with this status; a compare against the default branch name still works. */
+  compareFilesFail?: number;
+  /** Compare reads answered with this status. */
+  compareFails?: number;
   /** D#6 R3c: the pull request's head branch as the local-only fake lists it (a runner run's `fx/<run>-g<n>`). */
   runBranch?: string;
 }
@@ -96,6 +113,8 @@ export function freshRepo(over: Partial<FakeRepoState> = {}): FakeRepoState {
   };
 }
 
+/** The merge base every compare answers with, and the commit whose tree is the "before" side. */
+export const FAKE_MERGE_BASE = "9".repeat(40);
 const json = (status: number, body: unknown): GitHubHttpResponse => ({ status, body });
 const NOT_FOUND = json(404, { message: "Not Found" });
 const STATE_ENUM = ["error", "failure", "pending", "success"];
@@ -162,6 +181,30 @@ export function fakeGitHubRest(s: FakeRepoState): GitHubHttp {
         s.merged = true;
         s.state = "closed";
         return json(200, { merged: true, sha: "f".repeat(40) });
+      }
+      if (req.method === "GET" && path === base) return json(200, { full_name: `${s.owner}/${s.name}`, default_branch: s.defaultBranch ?? "main", private: false });
+      const commit = /^\/repos\/[^/]+\/[^/]+\/commits\/([0-9a-f]{40})$/.exec(path);
+      if (req.method === "GET" && commit) return json(200, { sha: commit[1], parents: (s.commitParents?.[commit[1]!] ?? [FAKE_MERGE_BASE]).map((sha) => ({ sha })) });
+      const compare = /^\/repos\/[^/]+\/[^/]+\/compare\/(.+)\.\.\.([0-9a-f]{40})$/.exec(path);
+      if (req.method === "GET" && compare) {
+        if (s.compareFails) return json(s.compareFails, { message: "Not Found" });
+        // A branch NAME is compared as the repository knows it: only its default branch exists here. A sha is compared as given.
+        const from = compare[1]!;
+        if (!/^[0-9a-f]{40}$/.test(from) && from !== (s.defaultBranch ?? "main")) return json(404, { message: "Not Found" });
+        if (s.compareFilesFail && /^[0-9a-f]{40}$/.test(from)) return json(s.compareFilesFail, { message: "Server Error" });
+        return json(200, { status: "ahead", merge_base_commit: { sha: FAKE_MERGE_BASE }, total_commits: 1, // GitHub lists at most 300 files in a compare and does not page them (paging applies to its commits).
+        files: (s.compareFiles ?? s.files).slice(0, 300) });
+      }
+      const tree = /^\/repos\/[^/]+\/[^/]+\/git\/trees\/([0-9a-f]{40})$/.exec(path);
+      if (req.method === "GET" && tree) {
+        const sha = tree[1]!;
+        const own = s.trees?.[sha];
+        const entries =
+          own ??
+          (sha === FAKE_MERGE_BASE
+            ? s.files.filter((f) => f.status !== "added").map((f) => ({ path: f.filename, mode: "100644", type: "blob", sha: f.status === "removed" ? (f.sha ?? "1".repeat(40)) : "2".repeat(40) }))
+            : s.files.filter((f) => f.status !== "removed").map((f) => ({ path: f.filename, mode: f.mode ?? "100644", type: "blob", sha: f.sha ?? "1".repeat(40) })));
+        return json(200, { sha, truncated: s.treesTruncated === true, tree: entries });
       }
       return NOT_FOUND;
     },
