@@ -42,7 +42,7 @@ const stepNamed = (steps, name) => {
 const GUARD = "${{ github.event.repository.private && (vars.CI_RUNS_ON || 'self-hosted') || 'ubuntu-latest' }}";
 const EPHEMERAL = "(runner.environment == 'github-hosted' || (vars.CI_RUNS_ON != '' && vars.CI_RUNS_ON != 'self-hosted'))";
 const PRIVATE_PUSH = "github.event_name == 'push' && github.event.repository.private";
-const OVERLAY_OFF = `env.CI_SCOPE_OVERLAY != 'true' && !(${PRIVATE_PUSH})`;
+const OVERLAY_OFF = `env.CI_PAIRED_COPY != 'true' && env.CI_SCOPE_OVERLAY != 'true' && !(${PRIVATE_PUSH})`;
 const ifOf = (step) => (/^ {8}if: (.*)$/m.exec(step.text) ?? [, null])[1];
 
 // ---- the file is valid YAML --------------------------------------------------
@@ -439,6 +439,7 @@ test("check job: nothing is narrowed outside Run checks and the Node 22 step", (
     "Allow Chromium's user-namespace sandbox (hosted)",
     "Nix store cache (hosted)",
     "Overlay checks",
+    "Paired copy",
     "Run checks",
     "Runner protocol tests on Node 22",
     "pnpm store cache (hosted)",
@@ -481,7 +482,7 @@ test("e2e job: the first step after checkout (and the hosted-only Nix install) r
 
 test("e2e job: every step after the scope step is guarded on the scope answer", () => {
   const at = e2eSteps.findIndex((s) => s.name === "E2E scope (${{ matrix.project }})");
-  const later = e2eSteps.slice(at + 1);
+  const later = e2eSteps.slice(at + 1).filter((s) => s.name !== "Paired copy");
   assert.ok(later.length >= 4);
   for (const s of later) {
     assert.match(ifOf(s) ?? "", /env\.CI_SCOPE_E2E == 'true'/, `${s.name} is not guarded`);
@@ -895,7 +896,7 @@ const jobsOf = (doc) => Object.entries(doc.jobs ?? {});
 // can never be taken for a safe one.
 function evalExpr(src, ctx) {
   const toks = [];
-  const re = /\s*(?:('(?:[^']|'')*')|(&&|\|\||==|!=|[()!])|([A-Za-z_][A-Za-z0-9_.-]*))/y;
+  const re = /\s*(?:('(?:[^']|'')*')|(&&|\|\||==|!=|[(),!])|([A-Za-z_][A-Za-z0-9_.-]*))/y;
   let pos = 0;
   while (pos < src.length && src.slice(pos).trim() !== "") {
     re.lastIndex = pos;
@@ -926,6 +927,16 @@ function evalExpr(src, ctx) {
       if (t.v === "always" && peek()?.v === "(" && toks[i + 1]?.v === ")") {
         i += 2;
         return true;
+      }
+      // startsWith(a, b) / endsWith(a, b): GitHub compares case-insensitively and answers false for a non-string.
+      if ((t.v === "startsWith" || t.v === "endsWith") && peek()?.v === "(") {
+        take();
+        const a = or();
+        if (take()?.v !== ",") throw new Error(`missing , in: ${src}`);
+        const b = or();
+        if (take()?.v !== ")") throw new Error(`missing ) in: ${src}`);
+        if (typeof a !== "string" || typeof b !== "string") return false;
+        return t.v === "startsWith" ? a.toLowerCase().startsWith(b.toLowerCase()) : a.toLowerCase().endsWith(b.toLowerCase());
       }
       // github.event.schedule is the cron string of a scheduled run, and empty on every other event.
       if (t.v === "github.event.schedule" && !(t.v in ctx)) return "";
@@ -1908,6 +1919,7 @@ const ctxFor = (event, isPrivate, overlay = "") => ({
   "github.event_name": event,
   "github.event.repository.private": isPrivate,
   "env.CI_SCOPE_OVERLAY": overlay,
+  "env.CI_PAIRED_COPY": "",
   "env.CI_SCOPE_RUNNER_PROTOCOL": "",
 });
 const runs = (step, ctx) => Boolean(evalExpr(ifOf(step), ctx));
@@ -1955,6 +1967,128 @@ test("public repository: unchanged on push and pull request (full suite, never t
     assert.equal(runs(stepNamed(checkSteps, "CI scope (push to private main)"), ctx), false, event);
   }
   assert.equal(runs(stepNamed(checkSteps, "CI scope (push to main)"), ctxFor("push", false)), true);
+});
+
+// ---- paired copies of cloud-built items (private repository) -----------------------------------------------
+const PR_BRANCH = "github.event.pull_request.head.ref";
+const copyCtx = (over = {}) => ({
+  "github.event_name": "pull_request",
+  "github.event.repository.private": true,
+  "github.repository": "fulcrumaxe/cloud",
+  "github.event.pull_request.head.repo.full_name": "fulcrumaxe/cloud",
+  "github.event.pull_request.user.type": "Bot",
+  "github.event.pull_request.user.login": "app-bot[bot]",
+  "vars.FX_APP_BOT_LOGIN": "app-bot[bot]",
+  [PR_BRANCH]: "fx/141accef-408a-490f-b560-acffb689c897-g1",
+  ...over,
+});
+const COPY_JOBS = [
+  ["check", checkSteps],
+  ["workspace-e2e", e2eSteps],
+  ["e2e-runner", runnerE2eSteps],
+];
+
+test("paired copy: the detection step is identical in the three heavy jobs and sets only a constant flag", () => {
+  const conds = COPY_JOBS.map(([, steps]) => ifOf(stepNamed(steps, "Paired copy")));
+  assert.ok(conds[0] && conds.every((c) => c === conds[0]), "same condition everywhere");
+  for (const [, steps] of COPY_JOBS) {
+    const text = stepNamed(steps, "Paired copy").text;
+    assert.match(text, /echo "CI_PAIRED_COPY=true" >> "\$GITHUB_ENV"/);
+    // ci:full is read from the API at run time, and a failed read answers full (nothing is skipped)
+    assert.match(text, /x\.name === "ci:full"/);
+    assert.match(text, /catch\(\(\) => process\.stdout\.write\("full"\)\)/);
+    assert.match(text, /if \[ "\$verdict" != copy \]; then[\s\S]*exit 0[\s\S]*CI_PAIRED_COPY=true/, "the flag is set only after the label check");
+    // the branch name, author and body are used in the `if:` expression only, never inside a `run:` block
+    assert.doesNotMatch(text.replace(/^ {8}if: .*$/m, ""), /github\.event\.pull_request\.(head|user|title|body)/);
+  }
+});
+
+test("paired copy: runs after the hosted Nix install and the secret scan, and before every step it gates", () => {
+  const at = (steps, n) => steps.findIndex((x) => x.name === n || x.name.startsWith(n));
+  const idx = (steps) => at(steps, "Paired copy");
+  assert.ok(idx(checkSteps) > at(checkSteps, "Install Nix (hosted)"));
+  assert.ok(idx(checkSteps) > at(checkSteps, "Secret scan of the change"), "the secret scan stays the first thing that runs after checkout and setup");
+  assert.ok(idx(checkSteps) > at(checkSteps, "CI scope"), "written after the scope step so the override wins");
+  assert.ok(idx(checkSteps) < at(checkSteps, "Run checks"));
+  assert.ok(idx(e2eSteps) > at(e2eSteps, "Install Nix (hosted)") && idx(e2eSteps) > at(e2eSteps, "E2E scope"));
+  assert.ok(idx(runnerE2eSteps) > at(runnerE2eSteps, "Install Nix (hosted)") && idx(runnerE2eSteps) < at(runnerE2eSteps, "Run the end-to-end runner test"));
+});
+
+test("paired copy: the Node 22 step does not run on a copy, and nothing that needs node_modules runs without the install", () => {
+  const paired = stepNamed(checkSteps, "Paired copy");
+  assert.match(paired.text, /echo "CI_SCOPE_RUNNER_PROTOCOL=false" >> "\$GITHUB_ENV"/);
+  // The step's own scope condition is untouched (the test guard pins it); the override sets what that condition reads.
+  const node22 = stepNamed(checkSteps, "Runner protocol tests on Node 22");
+  assert.equal(ifOf(node22), `(github.event_name != 'pull_request' || env.CI_SCOPE_RUNNER_PROTOCOL != 'false') && !(${PRIVATE_PUSH})`);
+  // A copy where the classifier said runner-protocol is in scope: the env after the override is what the step sees.
+  const afterOverride = { ...ctxFor("pull_request", true), "env.CI_PAIRED_COPY": "true", "env.CI_SCOPE_RUNNER_PROTOCOL": "false" };
+  const beforeOverride = { ...afterOverride, "env.CI_SCOPE_RUNNER_PROTOCOL": "true" };
+  assert.equal(runs(node22, beforeOverride), true, "without the override this is the failure that was reproduced");
+  assert.equal(runs(node22, afterOverride), false);
+  // Every step that runs node_modules tools after the checkout either is guarded by the copy flag / the overlay or does its own install.
+  const needsInstall = checkSteps.filter((x) => /node_modules|pnpm test|scripts\/check\.sh/.test(x.text) && !/pnpm install/.test(x.text));
+  for (const x of needsInstall) {
+    const live = runs(x, { ...afterOverride, "env.CI_SCOPE_OVERLAY": "" });
+    if (x.name === "Run checks") assert.equal(live, false);
+    else assert.equal(live, false, `${x.name} needs node_modules but runs on a copy without an install`);
+  }
+});
+
+test("paired copy: recognised only for the App's own same-repository fx/*-g1 pull request on the private repository", () => {
+  const cond = ifOf(stepNamed(checkSteps, "Paired copy"));
+  const yes = (over) => Boolean(evalExpr(cond, copyCtx(over)));
+  assert.equal(yes({}), true, "the real copy PR shape (cloud#675)");
+  assert.equal(yes({ "github.event.repository.private": false }), false, "the public repository is unchanged");
+  assert.equal(yes({ "github.event_name": "push" }), false);
+  assert.equal(yes({ [PR_BRANCH]: "fx/141accef-g1-extra" }), false, "a branch that does not end in -g1");
+  assert.equal(yes({ [PR_BRANCH]: "worktree-agent-aa9297f5dcd93c71d" }), false, "an ordinary branch");
+  assert.equal(yes({ [PR_BRANCH]: "feature/fx/x-g1" }), false, "fx/ must be the prefix");
+  // forged: a human or another bot using the branch name, a fork using the branch name and the App's login
+  assert.equal(yes({ "github.event.pull_request.user.login": "some-contributor", "github.event.pull_request.user.type": "User" }), false);
+  assert.equal(yes({ "github.event.pull_request.user.login": "some-contributor" }), false);
+  assert.equal(yes({ "github.event.pull_request.user.type": "User" }), false);
+  assert.equal(yes({ "github.event.pull_request.user.login": "dependabot[bot]" }), false);
+  assert.equal(yes({ "github.event.pull_request.head.repo.full_name": "attacker/cloud" }), false, "a fork");
+  // the App login comes from a repository variable: unset (or empty) fails closed, and a different login is no copy
+  assert.equal(yes({ "vars.FX_APP_BOT_LOGIN": "" }), false, "variable unset: no pull request is a copy");
+  assert.equal(yes({ "vars.FX_APP_BOT_LOGIN": "someone-else[bot]" }), false);
+  assert.equal(yes({ "github.event.pull_request.user.login": "", "vars.FX_APP_BOT_LOGIN": "" }), false, "empty equals empty is still no copy");
+  // the two off switches
+  assert.equal(yes({ "vars.CI_PAIRED_COPY_FULL": "true" }), false);
+  assert.equal(yes({ "vars.CI_FORCE_FULL": "true" }), false);
+});
+
+test("paired copy: heavy steps skip, the secret scan, migration lint and script tests still run, and no job is skipped", () => {
+  const flagged = { ...ctxFor("pull_request", true), "env.CI_PAIRED_COPY": "true" };
+  assert.equal(runs(stepNamed(checkSteps, "Run checks"), flagged), false);
+  assert.equal(runs(stepNamed(runnerE2eSteps, "Run the end-to-end runner test"), flagged), false);
+  const over = stepNamed(e2eSteps, "Paired copy");
+  assert.match(over.text, /echo "CI_SCOPE_E2E=false" >> "\$GITHUB_ENV"/, "forces the specs off after the scope step answered");
+  assert.ok(e2eSteps.findIndex((y) => y.name.startsWith("E2E scope")) < e2eSteps.indexOf(over), "written after the scope step, so it wins");
+  for (const x of e2eSteps.filter((y) => /Run workspace e2e|Pick free e2e ports/.test(y.name))) assert.equal(runs(x, { ...flagged, "env.CI_SCOPE_E2E": "" }), false, x.name);
+  for (const n of ["Secret scan of the change", "Migration compatibility lint", "Migration lint and secret scan tests"]) assert.equal(ifOf(stepNamed(checkSteps, n)), null, n);
+  // jobs keep their real names and have no job-level skip for this (the merge gate refuses a `skipped` required check)
+  for (const [name] of COPY_JOBS) assert.doesNotMatch(String(ciDoc.jobs[name].if ?? ""), /PAIRED|Bot|fx\//);
+  assert.equal(ciDoc.jobs["workspace-e2e"].name, "workspace-e2e (${{ matrix.project }})");
+});
+
+test("paired copy: an ordinary private pull request, a fork lookalike and every public run are unchanged", () => {
+  const cond = ifOf(stepNamed(checkSteps, "Paired copy"));
+  for (const over of [
+    { [PR_BRANCH]: "some-feature" },
+    { "github.event.pull_request.head.repo.full_name": "attacker/cloud" },
+    { "github.event.pull_request.user.login": "a-maintainer","github.event.pull_request.user.type": "User" },
+  ]) {
+    assert.equal(Boolean(evalExpr(cond, copyCtx(over))), false);
+    // the flag is never set, so env.CI_PAIRED_COPY is empty and each heavy step runs as before
+    const normal = ctxFor("pull_request", true);
+    assert.equal(runs(stepNamed(checkSteps, "Run checks"), normal), true);
+    assert.equal(runs(stepNamed(checkSteps, "Runner protocol tests on Node 22"), normal), true);
+    assert.equal(runs(stepNamed(runnerE2eSteps, "Run the end-to-end runner test"), normal), true);
+    assert.equal(Boolean(evalExpr(ifOf(stepNamed(e2eSteps, "Paired copy")), copyCtx(over))), false);
+  }
+  assert.equal(Boolean(evalExpr(cond, copyCtx({ "github.event.repository.private": false }))), false, "public repository");
+  assert.equal(runs(stepNamed(checkSteps, "Run checks"), ctxFor("pull_request", false)), true);
 });
 
 // ---- the live-e2e exception: one file, one label, named secrets -----------------------------------------------
