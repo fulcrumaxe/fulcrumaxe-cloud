@@ -4,6 +4,7 @@ import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { listDriverEvents } from "@fx/core/src/work-items/driverEvents.js";
 import type { GitHubHttp } from "../../src/build/githubMergePort.js";
 import { createCiGate, type CiGate } from "../../src/review/ciWait.js";
+import { readPublicPullRequest } from "../../src/review/publicPullRequest.js";
 import { recordRound } from "../../src/review/roundDecision.js";
 import { discussingItem } from "../plan/helpers/panelFixtures.js";
 import { createFakeExecutionTarget } from "../build/helpers/fakeExecutionTarget.js";
@@ -254,5 +255,146 @@ describe("a push to the pull request while the reviewers ran (the head moved)", 
     const w = await world({ repo: { headSha: MOVED, checks: { [HEAD]: [{ name: "build", status: "in_progress", conclusion: null }], [MOVED]: [] } } });
     expect((await record(w, PASS_BOTH)).decision).toBe("ci_pending");
     await expectNothingRecorded(w);
+  });
+});
+
+/**
+ * Two planes: a paired item has a private pull request (reviewed) and a public one on the code repository (the one that merges, with the real CI).
+ * The wait reads the public one. Both repositories are fakes that answer like GitHub (fakeGitHubRest.ts), and each opener refuses any coordinates
+ * but the expected ones, so a wait that read the private repository's copy, or guessed the code repository, fails here.
+ */
+describe("a paired item: the wait reads the public pull request's CI", () => {
+  const PUB_HEAD = "c".repeat(40);
+  const PUB_PR = 12;
+  const PUB_REPO = { owner: "customer-co", name: "storefront-public" };
+  const green = [{ name: "build", status: "completed", conclusion: "success" }];
+
+  async function pairedWorld(opts: { priv?: FakeRepoState["checks"]; pub?: FakeRepoState["checks"]; prNumber?: number | null; stamp?: string | null; state?: string; managed?: boolean; pubHead?: string; pairing?: boolean; pairedWith?: string; local?: boolean }) {
+    const privChecks = opts.priv ?? { [HEAD]: [{ name: "build", status: "queued", conclusion: null }] };
+    const w = opts.local === true ? await localWorld({ checks: privChecks }) : await world({ repo: { checks: privChecks } });
+    const pubHead = opts.pubHead ?? PUB_HEAD;
+    const pub = freshRepo({ ...PUB_REPO, prNumber: PUB_PR, headSha: pubHead, checks: opts.pub ?? { [pubHead]: green } });
+    const repoId = (await h.admin.query<{ repo_id: string }>("SELECT repo_id FROM work_items WHERE id = $1", [w.workItemId])).rows[0]!.repo_id;
+    if (opts.pairing !== false) await h.admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, $3, ARRAY['.autonomous-team/**'])", [repoId, w.accountId, opts.pairedWith ?? "customer-co/storefront-public"]);
+    const withPr = opts.prNumber !== null;
+    const stamp = opts.stamp === undefined ? PUB_HEAD : opts.stamp;
+    await h.admin.query(
+      `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, state${withPr ? ", head_sha, tip_sha, pr_number, pr_url" : ""}${opts.managed ? ", managed_by_person_at" : ""})
+       VALUES ($1, $2, $3, 'customer-co/storefront-public', $4, ${withPr ? `'${opts.state ?? "pr_opened"}', $5, $5, $6, $7` : "'building'"}${opts.managed ? ", now()" : ""})`,
+      withPr ? [w.accountId, w.workItemId, repoId, "a".repeat(64), stamp, opts.prNumber ?? PUB_PR, `https://github.com/customer-co/storefront-public/pull/${opts.prNumber ?? PUB_PR}`] : [w.accountId, w.workItemId, repoId, "a".repeat(64)],
+    );
+    const opened: string[] = [];
+    const privHttp = opts.local === true ? fakeGitHubLocal(w.gh).http : fakeGitHubRest(w.gh);
+    const pubHttp = fakeGitHubRest(pub);
+    const gate = createCiGate({
+      pool: h.runWriterPool,
+      publicPullRequest: readPublicPullRequest(h.runWriterPool),
+      openHttp: async (c) => {
+        expect(`${c.owner}/${c.name}`).toBe("customer-co/storefront");
+        opened.push("private");
+        return privHttp;
+      },
+      openPublicHttp: async (c) => {
+        expect(`${c.owner}/${c.name}`).toBe("customer-co/storefront-public");
+        expect(c.repoId).toBe(repoId);
+        opened.push("public");
+        return pubHttp;
+      },
+    });
+    return { w, pub, gate, opened };
+  }
+
+  it("the private copy's CI never finishes but the public one is green: the round proceeds and the pass is recorded", async () => {
+    const t = await pairedWorld({});
+    const out = await record(t.w, PASS_BOTH, t.gate);
+    expect(out.decision).toBe("all_passed");
+    expect(await stageOf(t.w)).toBe("review_passed");
+    expect(t.opened).toEqual(["public"]);
+    // Nothing was asked of the private repository's pull request or checks.
+    expect(t.w.gh.requests).toEqual([]);
+  });
+
+  it("the public CI still running: ci_pending, nothing recorded, even though the private copy is green", async () => {
+    const t = await pairedWorld({ priv: { [HEAD]: green }, pub: { [PUB_HEAD]: [{ name: "build", status: "in_progress", conclusion: null }] } });
+    expect(await record(t.w, PASS_BOTH, t.gate)).toMatchObject({ decision: "ci_pending", recorded: [], ciReasons: ["check_running"] });
+    await expectNothingRecorded(t.w);
+    // It finishes: the same verdicts, asked again, are recorded.
+    t.pub.checks[PUB_HEAD] = green;
+    expect((await record(t.w, PASS_BOTH, t.gate)).decision).toBe("all_passed");
+  });
+
+  it("a required guard missing on the public head keeps the wait", async () => {
+    const t = await pairedWorld({});
+    t.pub.requiredContexts = ["audit-log-guard"];
+    expect(await record(t.w, PASS_BOTH, t.gate)).toMatchObject({ decision: "ci_pending", ciReasons: ["required_missing"] });
+  });
+
+  it("a public check that finished red is a finished signal, as on a single plane (the merge gate refuses a red head)", async () => {
+    const t = await pairedWorld({ pub: { [PUB_HEAD]: [{ name: "build", status: "completed", conclusion: "failure" }] } });
+    expect((await record(t.w, PASS_BOTH, t.gate)).decision).toBe("all_passed");
+  });
+
+  it("a public head that is not the one the platform pushed is a wait (wrong_head), unless a person took the branch over", async () => {
+    const moved = "d".repeat(40);
+    const t = await pairedWorld({ pubHead: moved, pub: { [moved]: green } });
+    expect(await record(t.w, PASS_BOTH, t.gate)).toMatchObject({ decision: "ci_pending", ciReasons: ["wrong_head"] });
+    await expectNothingRecorded(t.w);
+    const mine = await pairedWorld({ pubHead: moved, pub: { [moved]: green }, managed: true });
+    expect((await record(mine.w, PASS_BOTH, mine.gate)).decision).toBe("all_passed");
+  });
+
+  it("the public pull request is not open yet: the private copy is read, as before", async () => {
+    const t = await pairedWorld({ prNumber: null });
+    expect((await record(t.w, PASS_BOTH, t.gate)).decision).toBe("ci_pending");
+    expect(t.opened).toEqual(["private"]);
+  });
+
+  it("the public pull request is already merged: the private copy is read, as before", async () => {
+    const t = await pairedWorld({ state: "pr_merged" });
+    expect((await record(t.w, PASS_BOTH, t.gate)).decision).toBe("ci_pending");
+    expect(t.opened).toEqual(["private"]);
+  });
+
+  it("a pairing that was cleared returns the item to the single-repository read", async () => {
+    const t = await pairedWorld({ pairing: false });
+    expect((await record(t.w, PASS_BOTH, t.gate)).decision).toBe("ci_pending");
+    expect(t.opened).toEqual(["private"]);
+  });
+
+  it("a paired runner_local item keeps the private read through the local-only client; the public client is never opened", async () => {
+    const t = await pairedWorld({ local: true });
+    expect((await record(t.w, PASS_BOTH, t.gate)).decision).toBe("ci_pending");
+    expect(t.opened).toEqual(["private"]);
+  });
+
+  it("a stale pairing that names another code repository does not match the push record: the private copy is read", async () => {
+    const t = await pairedWorld({ pairedWith: "other-co/elsewhere" });
+    expect((await record(t.w, PASS_BOTH, t.gate)).decision).toBe("ci_pending");
+    expect(t.opened).toEqual(["private"]);
+  });
+
+  it("a single-plane item is unchanged, with a public opener wired", async () => {
+    const w = await world({ repo: { checks: { [HEAD]: [{ name: "build", status: "queued", conclusion: null }] } } });
+    const calls: string[] = [];
+    const gate = createCiGate({
+      pool: h.runWriterPool,
+      publicPullRequest: readPublicPullRequest(h.runWriterPool),
+      openHttp: async () => fakeGitHubRest(w.gh),
+      openPublicHttp: async () => {
+        calls.push("public");
+        throw new Error("must not open");
+      },
+    });
+    expect((await record(w, PASS_BOTH, gate)).decision).toBe("ci_pending");
+    w.gh.checks[HEAD] = green;
+    expect((await record(w, PASS_BOTH, gate)).decision).toBe("all_passed");
+    expect(calls).toEqual([]);
+  });
+
+  it("a failed public read throws and records nothing (the step retries), never falling back to the private copy", async () => {
+    const t = await pairedWorld({ priv: { [HEAD]: green } });
+    const gate = createCiGate({ pool: h.runWriterPool, publicPullRequest: readPublicPullRequest(h.runWriterPool), openHttp: async () => fakeGitHubRest(t.w.gh), openPublicHttp: async () => ({ request: async () => ({ status: 500, body: { message: "Server Error" } }) }) });
+    await expect(record(t.w, PASS_BOTH, gate)).rejects.toThrow();
+    await expectNothingRecorded(t.w);
   });
 });
