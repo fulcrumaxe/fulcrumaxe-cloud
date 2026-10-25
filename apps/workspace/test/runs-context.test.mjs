@@ -148,11 +148,39 @@ describe("the model, per state", () => {
     expect(el.byTestId("runs-ctx-estimated")[0].attrs.role).toBe("status");
   });
 
+  it("a live partial run: unmeasured figures show Recorded when this run ends instead of Not recorded", () => {
+    const livePartial = { ...PARTIAL, status: "running", compactions: null, first_turn_input_tokens: null, peak_context_tokens: null, cache_read_tokens: null, cache_write_tokens: null };
+    const m = contextModel(readContext(livePartial));
+    expect(m.state).toBe("partial");
+    expect(m.facts).toEqual([
+      ["First turn", CONTEXT_WORDS.live],
+      ["Largest context", CONTEXT_WORDS.live],
+      ["Compacted", CONTEXT_WORDS.live],
+      ["Calls refused (kept out of context)", "None"],
+    ]);
+    expect(m.cache).toBe("Cache use: " + CONTEXT_WORDS.live);
+    const el = drawn(livePartial);
+    expect(panelText(el)).not.toMatch(BAD);
+  });
+
   it("a measured zero is shown as a zero, not as Not recorded", () => {
     const m = contextModel(readContext({ ...MEASURED, first_turn_input_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, compactions: 0 }));
     expect(m.facts[0]).toEqual(["First turn", "0 tokens"]);
     expect(m.cache).toBe("0 of 0 tokens from cache");
     expect(m.facts[2]).toEqual(["Compacted", "Not compacted"]);
+  });
+
+  it("an ended partial run: unmeasured figures still show Not recorded even with null compactions", () => {
+    const endedPartial = { ...PARTIAL, status: "succeeded", compactions: null, first_turn_input_tokens: null, peak_context_tokens: null, cache_read_tokens: null, cache_write_tokens: null };
+    const m = contextModel(readContext(endedPartial));
+    expect(m.state).toBe("partial");
+    expect(m.facts).toEqual([
+      ["First turn", CONTEXT_WORDS.notRecorded],
+      ["Largest context", CONTEXT_WORDS.notRecorded],
+      ["Compacted", CONTEXT_WORDS.notRecorded],
+      ["Calls refused (kept out of context)", "None"],
+    ]);
+    expect(m.cache).toBe("Cache use: " + CONTEXT_WORDS.notRecorded);
   });
 
   it("D#600 CX-5b: the refused-call count is worded (none, one, many), an old row or a runner run says Not recorded, and a bad value is never drawn as a number", () => {
