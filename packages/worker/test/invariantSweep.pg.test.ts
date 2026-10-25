@@ -266,6 +266,7 @@ describe("platform invariant sweep [pg]", () => {
     try {
       // The fixture tables are tiny, so the planner is told not to prefer a sequential scan; what is checked is that an index path EXISTS for each read.
       await admin.query("SET LOCAL enable_seqscan = off");
+      await admin.query("ANALYZE agent_runs, run_events, work_items, runner_run_usage, platform_invariant_alerts");
       await admin.query(`PREPARE inv_plan(int, int, int) AS ${body}`);
       const plan = (await admin.query<Record<string, string>>("EXPLAIN EXECUTE inv_plan(100, 60, 3600)")).rows.map((r) => r["QUERY PLAN"]).join("\n");
       expect(plan).toMatch(/Index (Only )?Scan using agent_runs_ended_at_recent on agent_runs|Bitmap Index Scan on agent_runs_ended_at_recent/);
