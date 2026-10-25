@@ -170,3 +170,43 @@ export function createGitTransport(opts: { origin?: string; caInfo?: string } = 
     },
   };
 }
+
+/** The refs `fetchHeads` writes in the work repository, fixed: the branch under review and the code repository's default branch. */
+export const HEADS_REF = "refs/fx/pub-head";
+export const DEFAULT_REF = "refs/fx/pub-default";
+
+export interface PublicHeadsReader {
+  /**
+   * Fetches `branch` and the default branch (`PUBLIC_BASE_BRANCH`) of the code repository into `repoDir` (refs `HEADS_REF` and `DEFAULT_REF`) and returns both tips as
+   * they stood on the remote at that moment. With a `token` the read carries it in an Authorization header scoped to the repository's own origin, set through the
+   * environment: never in an argument list, a URL, a config file or an error message. Same hardening as the transport: no redirects, prompts, helpers or other schemes.
+   * The whole history is fetched, because the merge base of the two tips is needed.
+   */
+  fetchHeads(repoDir: string, codeRepo: string, branch: string, token?: string): Promise<{ head: string; defaultTip: string }>;
+}
+
+/** D#6 PUBLIC-MERGE PR3: the read side the local runner's merge check uses, built on the same hardening as `createGitTransport`. */
+export function createPublicHeadsReader(opts: { origin?: string; caInfo?: string } = {}): PublicHeadsReader {
+  const origin = checkOrigin(opts.origin ?? "https://github.com");
+  if (opts.caInfo !== undefined && !/^\/[A-Za-z0-9._/-]{1,200}$/.test(opts.caInfo)) throw new Error("reader caInfo must be an absolute path");
+  const hardening = [...HARDENING, "-c", `protocol.${new URL(origin).protocol === "https:" ? "https" : "http"}.allow=always`, ...(opts.caInfo === undefined ? [] : ["-c", `http.sslCAInfo=${opts.caInfo}`])];
+  return {
+    async fetchHeads(repoDir, codeRepo, branch, token) {
+      if (!CODE_REPO.test(codeRepo)) throw new Error("the paired repo must be owner/name");
+      if (!branchNameOk(branch)) throw new Error("fetch: unusable branch name");
+      await assertSafeLocalConfig(repoDir);
+      // The header travels in the child's environment, spelled as an object literal exactly as the push does (the env-manifest scan reads member accesses on `env`).
+      const env: Record<string, string> =
+        token === undefined
+          ? { ...NO_PROMPT }
+          : { ...NO_PROMPT, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: `http.${origin}/.extraHeader`, GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`x-access-token:${token}`, "utf8").toString("base64")}` };
+      await git(repoDir, [...hardening, "fetch", "--no-tags", "--quiet", "--no-write-fetch-head", `${origin}/${codeRepo}.git`, `+refs/heads/${branch}:${HEADS_REF}`, `+refs/heads/${PUBLIC_BASE_BRANCH}:${DEFAULT_REF}`], undefined, env);
+      const tip = async (ref: string): Promise<string> => {
+        const id = (await git(repoDir, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`])).toString("utf8").trim();
+        if (!OBJECT_ID.test(id)) throw new Error("the fetched tip is not a full commit id");
+        return id;
+      };
+      return { head: await tip(HEADS_REF), defaultTip: await tip(DEFAULT_REF) };
+    },
+  };
+}

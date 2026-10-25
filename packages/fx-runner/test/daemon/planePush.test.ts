@@ -480,7 +480,11 @@ describe("the pairing is the cloud's alone (P1f-3-a, P1f-3-b; P1f-2b acceptance 
     walk(src);
     const NAMES = /overlay_?[Gg]lobs|identifier_?[Rr]ules_?[Pp]ath|plan_?[Dd]ata_?[Rr]ules_?[Pp]ath/;
     const naming = files.filter((f) => NAMES.test(readFileSync(f, "utf8"))).map((f) => path.relative(src, f).split(path.sep).join("/"));
-    expect(naming).toEqual(["daemon/planePush.ts"]);
+    // D#6 PUBLIC-MERGE PR3: the merge-order handler is the one other reader, and it takes the list from the claim reply's order alone (the cloud's own row).
+    expect(naming).toEqual(["daemon/planeMerge.ts", "daemon/planePush.ts"]);
+    const merge = readFileSync(path.join(src, "daemon/planeMerge.ts"), "utf8");
+    expect(merge).not.toMatch(/process\.env|readFileSync|readFile\(|JSON\.parse|loadSettings|import\(/);
+    expect(merge.match(/order\.overlay_globs/g)?.length).toBe(1);
     // That one file builds the pairing from the reply object alone and reads nothing from disk, the environment or JSON.
     const text = readFileSync(path.join(src, "daemon/planePush.ts"), "utf8");
     expect(text).not.toMatch(/process\.env|readFileSync|readFile\(|JSON\.parse|loadSettings|import\(/);

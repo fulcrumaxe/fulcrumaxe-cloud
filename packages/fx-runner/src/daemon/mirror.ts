@@ -107,6 +107,12 @@ export interface Mirrors {
    * different repos overlap.
    */
   prepareWorkspace(repo: RepoRef, lease: PushLease, workspace: string, continues?: PushContinues | null, review?: ReviewTarget | null): Promise<{ base: string }>;
+  /**
+   * D#6 PUBLIC-MERGE PR3: fetch-only, existing-mirror-only. For a repo whose `RepoRef` came from an unsigned cloud reply, not from a verified job: it never clones, never
+   * writes config, never repoints. It fetches only a mirror that already exists as a real directory (no link), borrows no objects, and whose `remote.origin.url` is
+   * exactly this runner's own address for the repo. Anything else throws `mirror_failed` and touches nothing. Answers the mirror's directory.
+   */
+  syncExisting(repo: RepoRef): Promise<{ dir: string }>;
   /** Brings the mirror up to date and returns the tip of `continues.branch`, or throws `continuation_branch_missing`. */
   continuationTip(repo: RepoRef, continues: PushContinues): Promise<{ dir: string; tip: string }>;
 }
@@ -196,6 +202,19 @@ export function createMirrors(deps: MirrorDeps): Mirrors {
     return { dir: mirror, base };
   }
 
+  async function syncExistingUnlocked(repo: RepoRef): Promise<{ dir: string }> {
+    const mirror = dir(repo);
+    const expected = url(repo);
+    const stat = lstatOrNull(mirror);
+    if (stat === null || stat.isSymbolicLink() || !stat.isDirectory()) throw new GitPathError("mirror_failed");
+    if (lstatOrNull(path.join(mirror, "objects", "info", "alternates")) !== null) throw new GitPathError("mirror_failed");
+    // Read only: the recorded origin must be exactly the address this runner would itself have cloned from for this owner and name.
+    const origin = (await deps.git.run("mirror_failed", ["-C", mirror, "config", "--get", "remote.origin.url"])).trim();
+    if (origin !== expected) throw new GitPathError("mirror_failed");
+    await deps.git.run("mirror_failed", ["-C", mirror, "fetch", "--prune", "--no-tags", "--no-write-fetch-head", "origin"]);
+    return { dir: mirror };
+  }
+
   async function continuationTipUnlocked(repo: RepoRef, continues: PushContinues): Promise<{ dir: string; tip: string }> {
     const branch = continuesBranch(continues);
     const { dir: mirror } = await syncUnlocked(repo);
@@ -258,6 +277,7 @@ export function createMirrors(deps: MirrorDeps): Mirrors {
     dir,
     objects: (repo) => path.join(dir(repo), "objects"),
     sync: (repo) => locked(repo, () => syncUnlocked(repo)),
+    syncExisting: (repo) => locked(repo, () => syncExistingUnlocked(repo)),
     continuationTip: (repo, continues) => locked(repo, () => continuationTipUnlocked(repo, continues)),
     prepareWorkspace: (repo, lease, workspace, continues = null, review = null) => locked(repo, () => prepareUnlocked(repo, lease, workspace, continues, review)),
   };

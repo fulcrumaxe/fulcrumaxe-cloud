@@ -22,7 +22,7 @@ export interface HostedPlanePush {
   mintToken(codeRepo: string, accountId: string): Promise<{ token: string; expiresAt: Date }>;
   /**
    * D#6 PUBLIC-MERGE PR2b: a fresh credential for one merge order on the paired public repository, and the time the runner may rely on it until (as `mintToken`).
-   * `read` holds `contents: read` only; `write` holds `contents` and `pull_requests` write and is minted once per order. Neither is cached or stored.
+   * `read` holds `contents: read` only; `write` holds `contents: write` only (the `plane_merge` purpose) and is minted once per order. Neither is cached or stored.
    */
   mintMergeToken(codeRepo: string, accountId: string, kind: "read" | "write"): Promise<{ token: string; expiresAt: Date }>;
   /** The branch's head sha on the public repo, or null when there is no such branch. */

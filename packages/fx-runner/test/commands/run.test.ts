@@ -176,17 +176,17 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
   });
 
   it("keeps claiming when the cloud refuses the hello (a cloud that predates facts answers 400, an older still 404)", async () => {
-    // A 400 invalid_message is first taken as a cloud from before wake_v1: the hello goes once more without it (D#6 RUNNER-WAKE).
+    // A 400 invalid_message is taken as a cloud from before a newer capability: the hello goes again without plane_merge_v1, then, if still refused, without wake_v1 too (three hellos in all).
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     const run = start();
     await until(() => claims() >= 1);
-    expect(hellos()).toHaveLength(2);
+    expect(hellos()).toHaveLength(3);
     expect(await stop(run)).toMatchObject({ code: 0 });
     cloud.force.hello.push({ status: 404, body: { error: { code: "not_found", message: "not_found" } } });
     const again = start();
     await until(() => claims() >= 2);
-    expect(hellos()).toHaveLength(3);
+    expect(hellos()).toHaveLength(4);
     expect(await stop(again)).toMatchObject({ code: 0 });
   });
 
@@ -196,7 +196,7 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
     const run = start();
     await until(() => claims() >= 1);
     const sent = hellos().map((h) => HelloMessage.parse(h.body).capabilities);
-    expect(sent).toEqual([["proposal_verifier", "wake_v1"], ["proposal_verifier"]]);
+    expect(sent).toEqual([["proposal_verifier", "wake_v1", "plane_merge_v1"], ["proposal_verifier", "wake_v1"], ["proposal_verifier"]]);
     expect(cloud.seen.some((s) => s.path === "/api/runner/wake")).toBe(false);
     expect(await stop(run)).toMatchObject({ code: 0 });
   });
