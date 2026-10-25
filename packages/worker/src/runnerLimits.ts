@@ -1,5 +1,7 @@
 import { RUNNER_MAX_RUN_WALL_CLOCK_MS } from "@fulcrumaxe/runner-protocol";
-import { runnerLimitsFor } from "@fx/spend";
+import { RUNNER_PLAN_ID, runnerLimitsFor } from "@fx/spend";
+import { withTenant } from "@fx/db/src/withTenant.js";
+import type { Pool } from "pg";
 
 /**
  * D#6 R2b-3 (C21 section 8): the two runner limits the lease code reads, behind ONE function. Claim reads
@@ -46,4 +48,26 @@ function warnHeavyFigureMissingOnce(): void {
 /** Test hook: forget that the warning was given. */
 export function resetHeavyFigureWarning(): void {
   warnedHeavyMissing = false;
+}
+
+/** The payment-failure grace window for a `past_due` account: the same seven days `reserve` allows (packages/spend/src/reserve.ts). */
+const PAST_DUE_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * The daily cap on runner runs for one account. `accounts.plan` alone is not an entitlement (an unpaid signup defaults to a plan, and a
+ * cancelled subscription keeps it), so no cap (`null`) needs both a subscription plan and a runnable account by the same test `reserve` uses:
+ * the derived `accounts.status` is `active`, or it is `past_due` with `past_due_since` inside the grace window. A hold, a suspension, a pause,
+ * an unsubscribed or cancelled account keeps the runner tier's figure from the plan data. Throws for a plan the data cannot answer for, or when
+ * the row cannot be read: the target reads a throw as a refusal (fail closed).
+ */
+export function runsPerDayOfAccountPlan(pool: Pool, now: () => Date = () => new Date()): (accountId: string) => Promise<number | null> {
+  return async (accountId) => {
+    const row = await withTenant(pool, accountId, async (client) => (await client.query<{ plan: string; status: string; past_due_since: Date | null }>("SELECT plan, status, past_due_since FROM accounts WHERE id = $1", [accountId])).rows[0]);
+    if (row === undefined) throw new Error("runner limits: the account has no plan row");
+    const limits = runnerLimitsFor(row.plan);
+    if ("runsPerDay" in limits) return limits.runsPerDay;
+    const withinGrace = row.status === "past_due" && row.past_due_since !== null && row.past_due_since.getTime() > now().getTime() - PAST_DUE_GRACE_MS;
+    if (row.status === "active" || withinGrace) return null;
+    return runnerLimitsFor(RUNNER_PLAN_ID).runsPerDay;
+  };
 }
