@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { agentSettingsFor } from "@fx/runner";
 import { excludeDenyRules } from "@fulcrumaxe/runner-protocol";
 import { outcomeOf } from "../../../src/engines/claude/engine.js";
-import { denyRules } from "../../../src/engines/claude/filePermissions.js";
+import { denyRules, workspaceProtectedEditRules } from "../../../src/engines/claude/filePermissions.js";
 import { settingsFor } from "../../../src/engines/claude/settingsFile.js";
 import { RUN_ID, engineFor, fixtureText, makeFake, makeRig, type Rig } from "./rig.js";
 
@@ -24,7 +24,7 @@ describe("the settings file carries the job's excludes", () => {
     const { handle } = await engineFor(rig).start(withExcludes(rig, EXCLUDES));
     expect((await outcomeOf(handle)).status).toBe("ok");
     const file = settingsOf(rig);
-    expect(file.permissions.deny).toEqual([...denyRules(rig.config.protectedPaths), ...excludeDenyRules(EXCLUDES)]);
+    expect(file.permissions.deny).toEqual([...denyRules(rig.config.protectedPaths), ...workspaceProtectedEditRules(rig.workdir), ...excludeDenyRules(EXCLUDES)]);
     expect(file.permissions.deny).toEqual(expect.arrayContaining(["Read(secret/a.txt)", "Read(secret/a.txt/**)", "Read(keys)", "Read(src/**/[ab].ts)", "Read(\\(group\\)/c.txt)", "Grep", "Glob"]));
     // The same file but for the deny list: allow list, mode, sandbox block and hooks off are as without excludes.
     const plain = settingsFor("executor", rig.config.sandboxSettings, rig.workdir, rig.config.protectedPaths) as typeof file;
@@ -84,9 +84,9 @@ describe("the settings file carries the job's excludes", () => {
     const engine = engineFor(rig);
     await outcomeOf((await engine.start(withExcludes(rig, EXCLUDES))).handle);
     await outcomeOf((await engine.start({ ...withExcludes(rig, ["only/this"]), resumeSessionId: "sess-0001" } as never)).handle);
-    expect(settingsOf(rig).permissions.deny).toEqual([...denyRules(rig.config.protectedPaths), ...excludeDenyRules(["only/this"])]);
+    expect(settingsOf(rig).permissions.deny).toEqual([...denyRules(rig.config.protectedPaths), ...workspaceProtectedEditRules(rig.workdir), ...excludeDenyRules(["only/this"])]);
     await outcomeOf((await engine.start({ ...withExcludes(rig, undefined), resumeSessionId: "sess-0001" } as never)).handle);
-    expect(settingsOf(rig).permissions.deny).toEqual(denyRules(rig.config.protectedPaths));
+    expect(settingsOf(rig).permissions.deny).toEqual([...denyRules(rig.config.protectedPaths), ...workspaceProtectedEditRules(rig.workdir)]);
   });
 
   it("fails closed: a path that cannot be written as a rule refuses the start before the agent exists, and leaves no settings file", async () => {

@@ -7,7 +7,7 @@ import { RUNNER_ELIGIBLE_ROLES } from "@fulcrumaxe/runner-protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runCapture } from "../src/engines/claude/capture.js";
 import { testLaunch } from "./helpers/launch.js";
-import { confineFileTools, denyRules } from "../src/engines/claude/filePermissions.js";
+import { confineFileTools, denyRules, workspaceProtectedEditRules } from "../src/engines/claude/filePermissions.js";
 import { settingsFor } from "../src/engines/claude/settingsFile.js";
 import { createGitPath, PUSHING_ROLES, type GitJob } from "../src/daemon/gitPath.js";
 import { roleToolsFor } from "../src/job/roleTools.js";
@@ -75,7 +75,7 @@ describe("C44-5: the boundary around plain Bash is unchanged", () => {
       expect(file.permissions.defaultMode, role).toBe("dontAsk");
       expect(file.permissions.allow, role).toEqual(confineFileTools(roleToolsFor(role), workspace));
       expect(file.permissions.allow as string[], role).toContain("Bash");
-      expect(file.permissions.deny, role).toEqual(denyRules(protectedList()));
+      expect(file.permissions.deny, role).toEqual([...denyRules(protectedList()), ...workspaceProtectedEditRules(workspace)]);
       expect((file.permissions.deny as string[]).length, role).toBeGreaterThan(0);
       expect(file.permissions.blockReadsOutsideWorkingDirectories, role).toBe(true);
       expect(file.sandbox, role).toBe(sandbox);

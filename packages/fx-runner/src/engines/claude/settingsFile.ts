@@ -3,7 +3,7 @@ import path from "node:path";
 import { PROPOSAL_VERIFIER_ROLE, excludeDenyRules, verifierReadGuardHook } from "@fulcrumaxe/runner-protocol";
 import { roleToolsFor } from "../../job/roleTools.js";
 import type { ProtectedPaths } from "../../sandbox/sandboxSettings.js";
-import { anchored, checkCommandDenyRules, confineFileTools, denyRules, readRulesFor } from "./filePermissions.js";
+import { anchored, checkCommandDenyRules, confineFileTools, denyRules, readRulesFor, workspaceProtectedEditRules } from "./filePermissions.js";
 import { EngineRefusal } from "./refusal.js";
 
 /**
@@ -19,7 +19,7 @@ export function settingsFor(role: string, sandbox: Record<string, unknown>, work
     disableAllHooks: true,
     // D#600 CX-4b: the run's spill directory is read-only to the file tools: a `Read` rule for it, and no `Edit` rule (the bare file tools of the role are confined to the workspace).
     // D#6 RUNNER-AGENT-NO-FULLCHECK: the job's approved check is denied to the agent's shell (the runner runs it after the agent); a job without one adds nothing.
-    permissions: { defaultMode: "dontAsk", allow: [...confineFileTools(roleToolsFor(role), workspace), ...(spillDir === undefined ? [] : readRulesFor(spillDir))], deny: [...denyRules(protectedList), ...excludeRules(excludes), ...checkCommandDenyRules(checkArgv)], blockReadsOutsideWorkingDirectories: true },
+    permissions: { defaultMode: "dontAsk", allow: [...confineFileTools(roleToolsFor(role), workspace), ...(spillDir === undefined ? [] : readRulesFor(spillDir))], deny: [...denyRules(protectedList), ...workspaceProtectedEditRules(workspace), ...excludeRules(excludes), ...checkCommandDenyRules(checkArgv)], blockReadsOutsideWorkingDirectories: true },
     sandbox,
   };
 }
