@@ -165,11 +165,11 @@ describe("admission by headroom (fake resource probe)", () => {
 });
 
 describe("the progress floor", () => {
-  it("tight memory and nothing in hand: exactly one light slot, no heavy, and no reason given", () => {
+  it("tight memory and nothing in hand: exactly one light slot, no heavy, and the heavy class's reason is reported", () => {
     const r = rig({ availMemBytes: 1 * GIB });
     const snap = r.admission.snapshot();
     expect(snap.free).toEqual({ light: 1, heavy: 0 });
-    expect(snap.capacity).toEqual({ light: { limit: 1, in_use: 0 }, heavy: { limit: 0, in_use: 0 }, limited_by: null });
+    expect(snap.capacity).toEqual({ light: { limit: 1, in_use: 0 }, heavy: { limit: 0, in_use: 0 }, limited_by: "memory" });
   });
 
   it("tight memory and one job in hand: no slot, and memory is the reason", () => {

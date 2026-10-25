@@ -6,10 +6,13 @@
  * stops for good when the cloud no longer knows this runner (401).
  *
  * With an `admission` (D#6 C43-4) the loop holds several runs at once: after a claim it claims again at once while the machine has room,
- * and every claim reports the free capacity per class. Without one it holds a single run, as before.
+ * and every claim reports the free capacity per class. Without one it holds a single run, as before. While it waits (out an idle answer, or for a wake),
+ * it also looks at the machine every `HEADROOM_CHECK_MS` and claims again at once when room opened up that its last claim did not offer (a heavy slot
+ * that did not fit then, say): the cloud queues work for a class the runner said it had no room for, and nothing else would tell the runner it now has.
+ * That look reads the machine only; it makes no request.
  */
-import type { SandboxUnavailableReason } from "@fulcrumaxe/runner-protocol";
-import type { Admission } from "./admission.js";
+import type { LimitedBy, SandboxUnavailableReason } from "@fulcrumaxe/runner-protocol";
+import type { Admission, Snapshot } from "./admission.js";
 import type { Claimed, RunnerClient } from "./client.js";
 import type { Clock } from "./lease.js";
 import type { SandboxGate } from "./sandboxGate.js";
@@ -17,6 +20,8 @@ import { WAKE_FALLBACK_CLAIM_SECONDS, safetyClaimAt, type WakeTracker } from "./
 
 export const BACKOFF_START_SECONDS = 5;
 export const BACKOFF_MAX_SECONDS = 300;
+/** How often a waiting loop looks at its own machine for newly opened room. */
+export const HEADROOM_CHECK_MS = 15_000;
 
 /** What the loop reports about itself: closed codes and numbers, never anything the cloud or a job said. */
 export type PollEvent =
@@ -31,7 +36,9 @@ export type PollEvent =
   /** D#6 RUNNER-WAKE: a wake check said to claim (`reason`), or the safety slot came round (`safety`). */
   | { event: "wake_claim"; reason: "epoch" | "due" | "no_baseline" | "safety" }
   /** D#6 RUNNER-WAKE: the wake route failed 3 times in a row; plain 60-second claims until a claim brings a grant again. */
-  | { event: "wake_fallback" };
+  | { event: "wake_fallback" }
+  /** The classes this machine is holding back, and why; said once per change (both null: nothing is held back any more). */
+  | { event: "held"; light: LimitedBy | null; heavy: LimitedBy | null };
 
 export type PollEnd = "stopped" | "unauthorized" | "restart";
 
@@ -98,18 +105,43 @@ export async function pollLoop(deps: PollDeps): Promise<PollEnd> {
   };
   /** Waits `ms`, or less when a job ends meanwhile and the loop could claim again. True when a job's end cut it short. */
   async function nap(ms: number): Promise<boolean> {
-    if (running.size === 0) {
-      await deps.clock.sleep(ms, deps.signal);
-      return false;
-    }
-    const ended = new AbortController();
-    sleepers.add(ended);
-    try {
-      await deps.clock.sleep(ms, AbortSignal.any([deps.signal, ended.signal]));
-    } finally {
-      sleepers.delete(ended);
-    }
-    return ended.signal.aborted;
+    // Slices of at most HEADROOM_CHECK_MS, so the machine is looked at between them (a loop without admission sleeps the whole time in one piece).
+    let left = ms;
+    do {
+      const slice = deps.admission === undefined ? left : Math.min(left, HEADROOM_CHECK_MS);
+      if (running.size === 0) {
+        await deps.clock.sleep(slice, deps.signal);
+      } else {
+        const ended = new AbortController();
+        sleepers.add(ended);
+        try {
+          await deps.clock.sleep(slice, AbortSignal.any([deps.signal, ended.signal]));
+        } finally {
+          sleepers.delete(ended);
+        }
+        if (ended.signal.aborted) return true;
+      }
+      if (deps.signal.aborted) return false;
+      left -= slice;
+      if (left > 0 && headroomGrew()) return true;
+    } while (left > 0);
+    return false;
+  }
+  /** What the last claim said this machine could take; the headroom check compares the machine now with it. */
+  let offered: Snapshot | undefined;
+  /** Whether a class has more room now than the last claim offered. Reads the machine only. */
+  function headroomGrew(): boolean {
+    if (deps.admission === undefined || offered === undefined) return false;
+    const now = deps.admission.snapshot();
+    return now.free.light > offered.free.light || now.free.heavy > offered.free.heavy;
+  }
+  let heldKey = "none|none";
+  /** One `held` event per change of what is held back. */
+  function noteHeld(snapshot: Snapshot): void {
+    const key = `${snapshot.limits.light ?? "none"}|${snapshot.limits.heavy ?? "none"}`;
+    if (key === heldKey) return;
+    heldKey = key;
+    log({ event: "held", light: snapshot.limits.light, heavy: snapshot.limits.heavy });
   }
   /** Waits `seconds`, or less when a job ends meanwhile and the loop could claim again. */
   async function waitForWork(seconds: number): Promise<void> {
@@ -184,6 +216,10 @@ export async function pollLoop(deps: PollDeps): Promise<PollEnd> {
       }
       const gate = await deps.gate.check();
       const snapshot = deps.admission?.snapshot();
+      if (snapshot !== undefined && gate.open) {
+        offered = snapshot;
+        noteHeld(snapshot);
+      }
       const reply = await deps.client.claim(gate.open ? undefined : gate.reason, gate.open ? snapshot?.capacity : undefined);
       if (!gate.open && reply.kind === "claimed") {
         // Not reachable with the real client, which refuses a job on a status poll. Whatever sent it, nothing is run on a closed gate.

@@ -89,9 +89,9 @@ Commands:
                      --check shows the current and the available version. --pin holds a version (installing it now, older ones included). --rollback returns to the kept previous version.
   config set auto-update on|off
                      Turn automatic updates, which happen between jobs only, on or off.
-  config set concurrency.total <1-8> | concurrency.heavy <1-4> | reserve-gb <1-256|auto>
+  config set concurrency.total <1-8> | concurrency.heavy <1-4> | reserve-gb <1-256|auto> | cpu-reserve <0-256 cores|auto>
   config set budget.light.memory <1-8 GB> | budget.heavy.memory <2-32 GB> | budget.light.tasks | budget.heavy.tasks <64-65536>
-  config unset concurrency.total | concurrency.heavy | reserve-gb | budget.<class>.memory | budget.<class>.tasks
+  config unset concurrency.total | concurrency.heavy | reserve-gb | cpu-reserve | budget.<class>.memory | budget.<class>.tasks
                      Return a setting to its automatic default.
                      Lower the most jobs held at once, or set the memory kept free for your own work. A change applies from the next claim; running jobs are never stopped.
                      The budget is the hard limit one job runs under (memory and processes); a job past it is stopped on its own, others go on.

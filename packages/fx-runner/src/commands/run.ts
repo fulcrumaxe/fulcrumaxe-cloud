@@ -27,10 +27,10 @@ import { ApiKeyError, perJobApiKey, readApiKey } from "../credentials.js";
 import { createAdmission } from "../daemon/admission.js";
 import { createUsageGate } from "../daemon/usageGate.js";
 import { createFootprintStore } from "../daemon/footprints.js";
-import { realResourceProbe, type ResourceProbe } from "../daemon/resources.js";
+import { machineMemoryBytes, realResourceProbe, type ResourceProbe } from "../daemon/resources.js";
 import { CANARY_BLOCK_HINT, claimBlockReason, ensureInstructionCanary } from "../instructionCanaryState.js";
 import { isPaused, loadSettings } from "../runnerSettings.js";
-import { budgetsOf, capUnenforced, setUpJobLimits, UNENFORCED_LINE, type JobLimits } from "../sandbox/jobLimits.js";
+import { budgetsOf, capUnenforced, setUpJobLimits, UNENFORCED_LINE, type Budgets, type JobLimits } from "../sandbox/jobLimits.js";
 import { createJobsInHand } from "../daemon/jobsInHand.js";
 import { readHostFacts } from "../hostFacts.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../version.js";
@@ -43,6 +43,7 @@ import { createSandboxedPurge } from "../daemon/resumePurgeSandbox.js";
 import { createJobHandler } from "../daemon/jobHandler.js";
 import { createPlaneBaseLedger, createPlanePushHook } from "../daemon/planePush.js";
 import { createPlanePushGithub } from "../daemon/planePushGithub.js";
+import type { LimitedBy } from "@fulcrumaxe/runner-protocol";
 import { createGitTransport } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
@@ -183,7 +184,25 @@ export function localTools(host: RunHost, searchPath: string): { binaryPath: str
   }
 }
 
+const HELD_WORDS: Readonly<Record<LimitedBy, string>> = {
+  memory: "memory is short",
+  cpu: "the CPU is busy",
+  disk: "disk space is low",
+  paused: "claiming is paused",
+  usage_limit: "the plan's usage limit is reached",
+  ceiling: "at the job limit",
+};
+
+/** The one journal line for a change in what the machine holds back: which classes, and why. Nothing held back says so too. */
+export function describeHeld(light: LimitedBy | null, heavy: LimitedBy | null): string {
+  if (light === null && heavy === null) return "taking all kinds of jobs again";
+  if (light !== null && heavy !== null && light === heavy) return `holding back all new jobs: ${HELD_WORDS[light]}`;
+  if (light !== null && heavy !== null) return `holding back all new jobs: ${HELD_WORDS[light]} (heavy jobs: ${HELD_WORDS[heavy]})`;
+  return light === null ? `holding back heavy jobs (reviews and builds): ${HELD_WORDS[heavy!]}; light jobs are still taken` : `holding back light jobs: ${HELD_WORDS[light]}`;
+}
+
 function describePoll(event: PollEvent): string | undefined {
+  if (event.event === "held") return describeHeld(event.light, event.heavy);
   if (event.event === "idle" || event.event === "rate_limited") return undefined;
   if (event.event === "sandbox_unavailable") return undefined;
   if (event.event === "error") return `cloud error ${event.status}${event.code === undefined ? "" : ` ${event.code}`}`;
@@ -234,7 +253,9 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
   if (keepClear.some((other) => pathsOverlap(mirrorsRoot, other))) throw new CliError("mirrors_root_overlap: the repo mirrors directory overlaps the runner's state, binary, workspace or temp directory");
 
   // Per-job hard limits (D#6 C43-5): tried once here. Without them the runner holds back (2 jobs, 1 heavy) and says so.
-  const { enforced, limits, reason } = hooks.jobLimits ?? (await setUpJobLimits({ platform: host.platform, uid: host.uid, runtimeDir: host.xdgRuntimeDir, searchPath, capture: host.engine.capture, isDir: host.sandbox.isDir, readText: host.sandbox.readText }, () => budgetsOf(loadSettings(stateDir))));
+  const footprints = createFootprintStore(stateDir);
+  const budgets = (): Budgets => budgetsOf(loadSettings(stateDir), footprints.classEstimate("heavy").memBytes, hooks.probe?.read().totalMemBytes ?? machineMemoryBytes());
+  const { enforced, limits, reason } = hooks.jobLimits ?? (await setUpJobLimits({ platform: host.platform, uid: host.uid, runtimeDir: host.xdgRuntimeDir, searchPath, capture: host.engine.capture, isDir: host.sandbox.isDir, readText: host.sandbox.readText }, budgets));
   if (!enforced) ctx.out(`fx-runner: ${UNENFORCED_LINE}${reason === undefined ? "" : ` (${reason})`}`);
 
   const ledgerFile = path.join(stateDir, LEDGER_FILE);
@@ -399,9 +420,9 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         // Several runs at once while the machine has room (D#6 C43-4). Settings and the pause are read again before every claim.
         admission: createAdmission({
           probe: hooks.probe ?? realResourceProbe({ platform: host.platform, diskPaths: [workspaceRoot, path.dirname(mirrorsRoot)], vmStatText: () => vmStat }),
-          footprints: createFootprintStore(stateDir),
+          footprints,
           settings: () => capUnenforced(loadSettings(stateDir), enforced),
-          heavyBudgetBytes: () => budgetsOf(loadSettings(stateDir)).heavy.memoryBytes,
+          heavyBudgetBytes: () => budgets().heavy.memoryBytes,
           paused: () => isPaused(stateDir) || claimBlockReason(stateDir) !== undefined,
           usage: () => usage.state(),
           now: () => clock.now().getTime(),

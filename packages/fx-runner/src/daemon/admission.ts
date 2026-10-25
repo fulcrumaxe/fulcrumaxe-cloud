@@ -2,7 +2,8 @@
  * Resource-aware admission (D#6 C43-4): before each claim the runner works out, from what the machine has free right now, how many more jobs of
  * each class it could take, and says so on the claim as `capacity`. A claim is offered a slot only when the class's footprint fits the headroom:
  *  - memory: MemAvailable minus a reserve for the person's own work (25% of RAM, at least 2 GB, or the person's setting);
- *  - CPU: the 1-minute load per core against a threshold (0.8), plus the cores of jobs still starting up;
+ *  - CPU: the sustained load (the smaller of the 1-minute and 5-minute averages, so a brief spike does not zero the heavy class) against the cores
+ *    minus a reserve for the person (20% of the cores, or the person's `cpu-reserve`), plus the cores of jobs still starting up;
  *  - disk: the workspace and store volumes keep a minimum free;
  *  - safety ceilings (total 8, heavy 4 by default, lowered by the person) and the person's pause.
  * Progress floor: with no job in hand (and not paused, disk fine) one light job is always admitted, so a busy machine cannot starve the runner.
@@ -21,7 +22,7 @@ export interface AdmissionConfig {
   /** Fraction of RAM kept free for the person (default 0.25). */
   reserveFraction: number;
   minReserveBytes: number;
-  /** 1-minute load per core above which no job is claimed (default 0.8). */
+  /** Sustained load per core above which no job is claimed (default 0.8); the person's `cpu-reserve` replaces the margin it leaves. */
   loadPerCore: number;
   /** Free space the workspace and store volumes keep (default 5 GB). */
   minFreeDiskBytes: number;
@@ -35,6 +36,8 @@ export const DEFAULT_ADMISSION: AdmissionConfig = { reserveFraction: 0.25, minRe
 
 export interface Snapshot {
   capacity: ClaimCapacity;
+  /** What stops the next job of each class (null: one fits). Both classes, where `limitedBy` names the machine-wide one only. */
+  limits: Record<JobClass, LimitedBy | null>;
   /** More jobs of each class that fit right now. */
   free: Record<JobClass, number>;
   limitedBy: LimitedBy | null;
@@ -83,6 +86,14 @@ export function reserveBytesOf(reading: ResourceReading, config: AdmissionConfig
   return settings.reserveGb === undefined ? Math.max(reading.totalMemBytes * config.reserveFraction, config.minReserveBytes) : settings.reserveGb * GIB;
 }
 
+/** Cores kept free for the person: their `cpu-reserve`, else the share the load-per-core threshold leaves (20% of the cores). */
+export function cpuReserveOf(reading: ResourceReading, config: AdmissionConfig, settings: RunnerSettings): number {
+  return settings.cpuReserve === undefined ? reading.cores * (1 - config.loadPerCore) : settings.cpuReserve;
+}
+
+/** The load that counts (note: min(load1, load5) can admit for about a minute at the start of an outside CPU burst, until the 1-minute figure catches up): the smaller of the 1-minute and 5-minute averages, so a spike that just began (5 minutes still low) or one that just ended (1 minute already low) does not block. */
+export const sustainedLoad = (reading: ResourceReading): number => Math.min(reading.load1, reading.load5 ?? reading.load1);
+
 export function createAdmission(deps: AdmissionDeps): Admission {
   const config: AdmissionConfig = { ...DEFAULT_ADMISSION, ...deps.config };
   const inHand = new Set<InHand>();
@@ -111,7 +122,7 @@ export function createAdmission(deps: AdmissionDeps): Admission {
       }
     }
     const headMem = reading.availMemBytes - reserveBytesOf(reading, config, settings) - heldMem;
-    const headCores = reading.cores * config.loadPerCore - reading.load1 - heldCores;
+    const headCores = reading.cores - cpuReserveOf(reading, config, settings) - sustainedLoad(reading) - heldCores;
     const diskOk = reading.freeDiskBytes === undefined || reading.freeDiskBytes >= config.minFreeDiskBytes;
     const paused = deps.paused();
     const usage = deps.usage?.() ?? { blocked: false, single: false };
@@ -144,11 +155,15 @@ export function createAdmission(deps: AdmissionDeps): Admission {
     const ceilingHeavy = Math.min(MAX_HEAVY_CAPACITY, heavy.count + used.heavy);
     // Named only when nothing at all can be claimed; the light class is the one that fits most easily, so its reason is the binding one.
     const limitedBy = light.count === 0 && heavy.count === 0 ? light.limit : null;
+    // What the claim reports is wider: also the heavy reason when only the heavy class is held back. A heavy run waits on a runner that still shows free
+    // light slots, and without this the cloud could not say why (a light run never reads it: it has a free slot).
+    const reported = limitedBy ?? (heavy.count === 0 && light.count > 0 ? heavy.limit : null);
     return {
+      limits: { light: light.count > 0 ? null : light.limit, heavy: heavy.count > 0 ? null : heavy.limit },
       capacity: {
         light: { limit: ceilingLight, in_use: clamp(used.light, MAX_LIGHT_CAPACITY) },
         heavy: { limit: ceilingHeavy, in_use: clamp(used.heavy, MAX_HEAVY_CAPACITY) },
-        limited_by: limitedBy,
+        limited_by: reported,
       },
       free: { light: light.count, heavy: heavy.count },
       limitedBy,

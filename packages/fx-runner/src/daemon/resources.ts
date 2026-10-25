@@ -16,6 +16,8 @@ export interface ResourceReading {
   availMemBytes: number;
   /** The 1-minute load average. */
   load1: number;
+  /** The 5-minute load average; absent (a fake reading) reads as the 1-minute one. */
+  load5?: number;
   cores: number;
   /** The smallest free space of the volumes jobs write to (workspaces and the package store); undefined when it cannot be read. */
   freeDiskBytes: number | undefined;
@@ -71,6 +73,9 @@ export function realResourceProbe(options: RealProbeOptions): ResourceProbe {
     return least;
   };
   return {
-    read: () => ({ totalMemBytes: os.totalmem(), availMemBytes: availMem(), load1: os.loadavg()[0] ?? 0, cores: Math.max(1, os.availableParallelism()), freeDiskBytes: freeDisk() }),
+    read: () => ({ totalMemBytes: os.totalmem(), availMemBytes: availMem(), load1: os.loadavg()[0] ?? 0, load5: os.loadavg()[1] ?? 0, cores: Math.max(1, os.availableParallelism()), freeDiskBytes: freeDisk() }),
   };
 }
+
+/** The machine's total memory, for callers that may not name a node built-in themselves. */
+export const machineMemoryBytes = (): number => os.totalmem();
