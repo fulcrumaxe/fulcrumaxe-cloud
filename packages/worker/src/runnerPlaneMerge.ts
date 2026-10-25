@@ -27,7 +27,7 @@ export const PLANE_MERGE_OPEN_STATES: readonly PlaneMergeState[] = ["pending", "
 const isOpen = (s: PlaneMergeState): boolean => PLANE_MERGE_OPEN_STATES.includes(s);
 
 /** Codes the store itself writes. Gate reasons and the runner's abort codes are written by the caller through `finish`. */
-export const PLANE_MERGE_CODES = { superseded: "superseded_by_new_order", timeout: "runner_merge_timeout", failed: "runner_merge_failed", pairingChanged: "pairing_changed", headMoved: "public_head_moved", merged: "merged" } as const;
+export const PLANE_MERGE_CODES = { superseded: "superseded_by_new_order", timeout: "runner_merge_timeout", failed: "runner_merge_failed", pairingChanged: "pairing_changed", personManaged: "public_branch_person_managed", headMoved: "public_head_moved", merged: "merged" } as const;
 
 export interface PlaneMergeOrder {
   id: string;
@@ -75,6 +75,12 @@ export type PlaceOrderResult =
   | { kind: "placed"; order: PlaneMergeOrder; superseded: string[] }
   /** An open order for exactly these heads and this pairing exists; nothing changed. */
   | { kind: "unchanged"; order: PlaneMergeOrder }
+  /**
+   * An order of the item is AUTHORIZED: a write credential is out with a runner and the cloud holds no copy of it, so it cannot be revoked here. The order is
+   * not superseded; it ends by the runner's report, by its lease running out (`lapsedAuthorized`, then a GitHub read) or by its deadline, and the new heads get
+   * their order afterwards. GitHub's `sha` binding keeps the credential from merging anything but the head it was issued for.
+   */
+  | { kind: "in_flight"; order: PlaneMergeOrder }
   | { kind: "not_paired" }
   /** The push record is not an open, platform-managed public pull request. */
   | { kind: "push_not_open" }
@@ -111,6 +117,26 @@ const ENDS: Record<"pending" | "claimed" | "authorized", { cloud: readonly Plane
 };
 
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
+
+/**
+ * The private head the public head was built from, for a push record `p`. A sandbox-built stamp carries it (`source_head`). A RUNNER-built stamp carries none
+ * (nothing a runner reports is stored as one): its source head is the branch head the CLOUD read from GitHub when the run that pushed it finished (the `done`
+ * event), found through the newest finished runner attempt whose outcome moved the stamp. The attempt is chosen first; a newest run with no succeeded done event
+ * answers NULL, never an older run's head. The same definition as `readPublicPullRequest` in packages/pipeline (which this package cannot import), so an order is
+ * bound to exactly the head the gate cleared. Every `runner_local` item is runner-built, so without this no order could ever be placed.
+ */
+const sourceHeadSql = (p: string): string =>
+  `COALESCE(${p}.source_head, (
+     SELECT (SELECT e.payload->>'headOid'
+               FROM run_events e
+              WHERE e.account_id = a.account_id AND e.run_id = a.run_id AND e.kind = 'run.status_changed'
+                AND e.payload->>'viaRunnerDone' = 'true' AND e.payload->>'to' = 'succeeded' AND e.payload->>'headOid' IS NOT NULL
+              ORDER BY e.created_at DESC, e.seq DESC LIMIT 1)
+       FROM plane_push_attempts a
+      WHERE a.account_id = ${p}.account_id AND a.plane_push_id = ${p}.id AND a.runtime = 'runner'
+        AND a.finished_at IS NOT NULL AND a.outcome IN ('pr_opened', 'updated', 'pushed', 'pr_failed')
+      ORDER BY a.finished_at DESC, a.id DESC LIMIT 1
+   ))`;
 const COLUMNS = `o.id, o.account_id, o.work_item_id, o.plane_push_id, o.repo_id, o.code_repo, o.pr_number, o.expected_public_head, o.reviewed_head, o.pairing_digest, o.state,
   o.runner_id, o.lease_generation, o.lease_expires_at, o.attempts, o.read_token_generation, o.write_token_issued_at, o.token_purpose, o.outcome_code, o.deadline_at, o.finished_at`;
 
@@ -175,6 +201,12 @@ export interface RunnerPlaneMergeStore {
   expireDue(input: { accountId: string; orderId?: string }): Promise<PlaneMergeOrder[]>;
   /** Authorized orders whose lease ran out without a report. They are never re-authorized; the caller reads GitHub, then calls `finish`. */
   lapsedAuthorized(accountId: string): Promise<PlaneMergeOrder[]>;
+  /** True when at least one pending order could be claimed by this runner right now (the claim reply's `merge_order` flag). Reads only. */
+  hasClaimable(input: { accountId: string; runnerId: string }): Promise<boolean>;
+  /** True while the runner is still one that may act on an order of this repository: not revoked, registered by a still-current owner or admin, in scope, not paused or draining, listing the capability. */
+  runnerTrusted(input: { accountId: string; runnerId: string; repoId: string }): Promise<boolean>;
+  /** One order of the account by id, whatever its state; null when none. Reads only (a late report for an order that is already over looks it up). */
+  getById(input: { accountId: string; orderId: string }): Promise<PlaneMergeOrder | null>;
   /** The newest order of an item, whatever its state; null when none. */
   latestForItem(input: { accountId: string; workItemId: string }): Promise<PlaneMergeOrder | null>;
 }
@@ -187,6 +219,11 @@ export function createRunnerPlaneMergeStore(pool: Pool, deps: RunnerPlaneMergeDe
   const now = deps.now ?? Date.now;
   const clock = () => new Date(now());
 
+  const lockOrderRead = async (client: PoolClient, accountId: string, orderId: string): Promise<PlaneMergeOrder | null> => {
+    const { rows } = await client.query<Row>(`SELECT ${COLUMNS} FROM plane_merge_orders o WHERE o.account_id = $1 AND o.id = $2`, [accountId, orderId]);
+    return rows[0] ? toOrder(rows[0]) : null;
+  };
+
   const lockOrder = async (client: PoolClient, accountId: string, orderId: string): Promise<PlaneMergeOrder | null> => {
     const { rows } = await client.query<Row>(`SELECT ${COLUMNS} FROM plane_merge_orders o WHERE o.account_id = $1 AND o.id = $2 FOR UPDATE`, [accountId, orderId]);
     return rows[0] ? toOrder(rows[0]) : null;
@@ -194,7 +231,8 @@ export function createRunnerPlaneMergeStore(pool: Pool, deps: RunnerPlaneMergeDe
 
   /** The fence on a locked order. Does not write, so it never extends a lease. */
   const check = (order: PlaneMergeOrder | null, lease: { runnerId: string; leaseGeneration: number }, at: Date): PlaneMergeFence => {
-    if (!order || order.runnerId !== lease.runnerId) return { kind: "fenced", reason: "unknown" };
+    // An order whose runner row was deleted has a null runner (the foreign key nulls it): null must never match anyone, whatever the caller sent.
+    if (!order || order.runnerId === null || order.runnerId !== lease.runnerId) return { kind: "fenced", reason: "unknown" };
     if (order.leaseGeneration !== lease.leaseGeneration) return { kind: "fenced", reason: "stale_generation" };
     if (order.state !== "claimed" && order.state !== "authorized") return { kind: "fenced", reason: "order_terminal" };
     if (order.deadlineAt.getTime() <= at.getTime()) return { kind: "fenced", reason: "order_expired" };
@@ -232,8 +270,8 @@ export function createRunnerPlaneMergeStore(pool: Pool, deps: RunnerPlaneMergeDe
         const at = clock();
         // The push record, locked: the same row serialises every order placement of the item.
         const { rows } = await client.query<{ id: string; repo_id: string; code_repo: string; pairing_digest: string; pr_number: number | null; head_sha: string | null; source_head: string | null; state: string; managed: boolean }>(
-          `SELECT id, repo_id, code_repo, pairing_digest, pr_number, head_sha, source_head, state, managed_by_person_at IS NOT NULL AS managed
-             FROM plane_pushes WHERE account_id = $1 AND work_item_id = $2 FOR UPDATE`,
+          `SELECT p.id, p.repo_id, p.code_repo, p.pairing_digest, p.pr_number, p.head_sha, ${sourceHeadSql("p")} AS source_head, p.state, p.managed_by_person_at IS NOT NULL AS managed
+             FROM plane_pushes p WHERE p.account_id = $1 AND p.work_item_id = $2 FOR UPDATE OF p`,
           [input.accountId, input.workItemId],
         );
         const push = rows[0];
@@ -243,6 +281,7 @@ export function createRunnerPlaneMergeStore(pool: Pool, deps: RunnerPlaneMergeDe
 
         const { rows: open } = await client.query<Row>(`SELECT ${COLUMNS} FROM plane_merge_orders o WHERE o.account_id = $1 AND o.work_item_id = $2 AND o.state IN ('pending', 'claimed', 'authorized') FOR UPDATE`, [input.accountId, input.workItemId]);
         const current = open[0] ? toOrder(open[0]) : null;
+        if (current && current.state === "authorized") return { kind: "in_flight", order: current };
         if (current && current.expectedPublicHead === push.head_sha && current.reviewedHead === push.source_head && current.pairingDigest === push.pairing_digest && current.deadlineAt.getTime() > at.getTime()) return { kind: "unchanged", order: current };
         const superseded: string[] = [];
         if (current) {
@@ -267,7 +306,7 @@ export function createRunnerPlaneMergeStore(pool: Pool, deps: RunnerPlaneMergeDe
         // Eligibility, computed now from the runner's own rows: registered by an owner or admin who still is one (the trust its reviews have), not revoked,
         // the order's repository in its scope, not paused or draining, and its latest hello listed the capability.
         const { rows } = await client.query<Row & { branch: string; push_state: string; push_head: string | null; push_source: string | null; push_managed: boolean; gh_owner: string | null; gh_name: string | null; code_repo_live: string | null; overlay_globs: string[] | null; id_rules: string | null; plan_rules: string | null }>(
-          `SELECT ${COLUMNS}, p.branch, p.state AS push_state, p.head_sha AS push_head, p.source_head AS push_source, p.managed_by_person_at IS NOT NULL AS push_managed,
+          `SELECT ${COLUMNS}, p.branch, p.state AS push_state, p.head_sha AS push_head, ${sourceHeadSql("p")} AS push_source, p.managed_by_person_at IS NOT NULL AS push_managed,
                   rp.gh_owner, rp.gh_name, pr.code_repo AS code_repo_live, pr.overlay_globs, pr.identifier_rules_path AS id_rules, pr.plan_data_rules_path AS plan_rules
              FROM plane_merge_orders o
              JOIN runners rn ON rn.account_id = o.account_id AND rn.id = $2 AND rn.revoked_at IS NULL
@@ -286,6 +325,11 @@ export function createRunnerPlaneMergeStore(pool: Pool, deps: RunnerPlaneMergeDe
           [input.accountId, input.runnerId, PLANE_MERGE_MAX_ATTEMPTS, at, PLANE_MERGE_CAPABILITY],
         );
         for (const r of rows) {
+          // A person took the public branch over: the merge is theirs, and the card should say why (not "the head moved").
+          if (r.push_managed) {
+            await end(client, r.id, input.accountId, "blocked", PLANE_MERGE_CODES.personManaged, at);
+            continue;
+          }
           // The order still describes what the item and its pairing are now; if not it is finished here and the next one is tried.
           const live = r.state === "pending" && r.push_state === "pr_opened" && !r.push_managed && r.push_head === r.expected_public_head && r.push_source === r.reviewed_head;
           if (!live) {
@@ -310,11 +354,13 @@ export function createRunnerPlaneMergeStore(pool: Pool, deps: RunnerPlaneMergeDe
 
     fence: async (lease) => {
       requireUuid(lease.orderId);
+      requireUuid(lease.runnerId);
       return withTenant(pool, lease.accountId, async (client) => check(await lockOrder(client, lease.accountId, lease.orderId), lease, clock()));
     },
 
     grantReadToken: async (lease) => {
       requireUuid(lease.orderId);
+      requireUuid(lease.runnerId);
       return withTenant(pool, lease.accountId, async (client): Promise<GrantReadResult> => {
         const fenced = check(await lockOrder(client, lease.accountId, lease.orderId), lease, clock());
         if (fenced.kind !== "ok") return fenced;
@@ -331,6 +377,7 @@ export function createRunnerPlaneMergeStore(pool: Pool, deps: RunnerPlaneMergeDe
 
     authorize: async (lease) => {
       requireUuid(lease.orderId);
+      requireUuid(lease.runnerId);
       return withTenant(pool, lease.accountId, async (client): Promise<AuthorizeResult> => {
         const at = clock();
         const fenced = check(await lockOrder(client, lease.accountId, lease.orderId), lease, at);
@@ -348,6 +395,7 @@ export function createRunnerPlaneMergeStore(pool: Pool, deps: RunnerPlaneMergeDe
     finish: async (input) => {
       requireUuid(input.orderId);
       if (!CODE.test(input.code)) throw new Error("finish: bad code");
+      if (input.actor.by === "runner") requireUuid(input.actor.runnerId);
       return withTenant(pool, input.accountId, async (client): Promise<FinishResult> => {
         const at = clock();
         const order = await lockOrder(client, input.accountId, input.orderId);
@@ -380,6 +428,50 @@ export function createRunnerPlaneMergeStore(pool: Pool, deps: RunnerPlaneMergeDe
         const { rows } = await client.query<Row>(`SELECT ${COLUMNS} FROM plane_merge_orders o WHERE o.account_id = $1 AND o.state = 'authorized' AND o.lease_expires_at <= $2 ORDER BY o.created_at`, [accountId, clock()]);
         return rows.map(toOrder);
       }),
+
+    hasClaimable: async (input) => {
+      requireUuid(input.accountId);
+      requireUuid(input.runnerId);
+      return withTenant(pool, input.accountId, async (client) => {
+        const { rows } = await client.query<{ one: number }>(
+          `SELECT 1 AS one FROM plane_merge_orders o
+             JOIN runners rn ON rn.account_id = o.account_id AND rn.id = $2 AND rn.revoked_at IS NULL
+             JOIN account_members am ON am.account_id = rn.account_id AND am.user_id = rn.registered_by AND am.role IN ('owner', 'admin')
+             JOIN runner_capabilities cap ON cap.account_id = rn.account_id AND cap.runner_id = rn.id AND $5::text = ANY(cap.capabilities)
+             LEFT JOIN runner_settings s ON s.account_id = rn.account_id AND s.runner_id = rn.id
+            WHERE o.account_id = $1 AND o.state = 'pending' AND o.attempts < $3 AND o.deadline_at > $4
+              AND o.repo_id = ANY(rn.allowed_repo_ids)
+              AND (s.runner_id IS NULL OR (s.paused_at IS NULL AND s.draining = false))
+            LIMIT 1`,
+          [input.accountId, input.runnerId, PLANE_MERGE_MAX_ATTEMPTS, clock(), PLANE_MERGE_CAPABILITY],
+        );
+        return rows.length > 0;
+      });
+    },
+
+    runnerTrusted: async (input) => {
+      requireUuid(input.accountId);
+      requireUuid(input.runnerId);
+      requireUuid(input.repoId);
+      return withTenant(pool, input.accountId, async (client) => {
+        const { rows } = await client.query<{ one: number }>(
+          `SELECT 1 AS one FROM runners rn
+             JOIN account_members am ON am.account_id = rn.account_id AND am.user_id = rn.registered_by AND am.role IN ('owner', 'admin')
+             JOIN runner_capabilities cap ON cap.account_id = rn.account_id AND cap.runner_id = rn.id AND $4::text = ANY(cap.capabilities)
+             LEFT JOIN runner_settings s ON s.account_id = rn.account_id AND s.runner_id = rn.id
+            WHERE rn.account_id = $1 AND rn.id = $2 AND rn.revoked_at IS NULL AND $3::uuid = ANY(rn.allowed_repo_ids)
+              AND (s.runner_id IS NULL OR (s.paused_at IS NULL AND s.draining = false))
+            LIMIT 1`,
+          [input.accountId, input.runnerId, input.repoId, PLANE_MERGE_CAPABILITY],
+        );
+        return rows.length > 0;
+      });
+    },
+
+    getById: async (input) => {
+      requireUuid(input.orderId);
+      return withTenant(pool, input.accountId, async (client) => lockOrderRead(client, input.accountId, input.orderId));
+    },
 
     latestForItem: async (input) =>
       withTenant(pool, input.accountId, async (client) => {

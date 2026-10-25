@@ -89,8 +89,18 @@ export interface FakeRepoState {
   compareFails?: number;
   /** D#6 R3c: the pull request's head branch as the local-only fake lists it (a runner run's `fx/<run>-g<n>`). */
   runBranch?: string;
-  /** The repository's GitHub id as `GET /repos/{owner}/{repo}` reports it (default 7001). */
+  /** The repository's GitHub id as `GET /repos/{owner}/{repo}` reports it (default: `defaultGhId(owner, name)`, different for every repository). */
   ghId?: number;
+}
+
+/**
+ * The id `GET /repos/{owner}/{repo}` reports when a test names none: a stable number derived from the repository's full name, so two repositories never share one
+ * (a lock that read the WRONG repository's id would then show up as a different number, not by luck as the same one). Range 1,000,000 to 9,999,999.
+ */
+export function defaultGhId(owner: string, name: string): number {
+  let h = 2166136261;
+  for (const ch of `${owner}/${name}`.toLowerCase()) h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0;
+  return 1_000_000 + (h % 9_000_000);
 }
 
 export function freshRepo(over: Partial<FakeRepoState> = {}): FakeRepoState {
@@ -184,7 +194,7 @@ export function fakeGitHubRest(s: FakeRepoState): GitHubHttp {
         s.state = "closed";
         return json(200, { merged: true, sha: "f".repeat(40) });
       }
-      if (req.method === "GET" && path === base) return json(200, { id: s.ghId ?? 7001, full_name: `${s.owner}/${s.name}`, default_branch: s.defaultBranch ?? "main", private: false });
+      if (req.method === "GET" && path === base) return json(200, { id: s.ghId ?? defaultGhId(s.owner, s.name), full_name: `${s.owner}/${s.name}`, default_branch: s.defaultBranch ?? "main", private: false });
       const commit = /^\/repos\/[^/]+\/[^/]+\/commits\/([0-9a-f]{40})$/.exec(path);
       if (req.method === "GET" && commit) return json(200, { sha: commit[1], parents: (s.commitParents?.[commit[1]!] ?? [FAKE_MERGE_BASE]).map((sha) => ({ sha })) });
       const compare = /^\/repos\/[^/]+\/[^/]+\/compare\/(.+)\.\.\.([0-9a-f]{40})$/.exec(path);

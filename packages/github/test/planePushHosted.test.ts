@@ -41,6 +41,8 @@ interface World {
   fail?: "ref" | "commit" | "compare" | "pulls";
   /** How `POST /pulls` answers: created (the default), refused for good (422), or down (503). */
   create?: "ok" | "refused" | "down";
+  /** What the mint answer says the token holds, given what was asked (default: exactly what was asked, plus the implicit metadata read). */
+  answerPermissions?: (asked: Record<string, string>) => Record<string, string>;
 }
 
 async function setup(world: World, expiresInMs = 3_600_000, now?: () => number) {
@@ -82,16 +84,19 @@ async function setup(world: World, expiresInMs = 3_600_000, now?: () => number) 
   }) as typeof fetch;
   let n = 0;
   const mintedTokens: string[] = [];
+  const requested: Array<{ permissions: Record<string, string>; repositories: string[] }> = [];
   const requester: AccessTokenRequester = async (p) => {
     const token = `ghs_hosted${++n}`;
     mintedTokens.push(token);
-    return { token, expiresAt: new Date(Date.now() + expiresInMs).toISOString(), permissions: { metadata: "read", ...p.permissions }, repositories: (p.repositories ?? []).map((x) => x) };
+    requested.push({ permissions: { ...(p.permissions as Record<string, string>) }, repositories: [...(p.repositories ?? [])] });
+    const asked = { metadata: "read", ...p.permissions } as Record<string, string>;
+    return { token, expiresAt: new Date(Date.now() + expiresInMs).toISOString(), permissions: world.answerPermissions ? world.answerPermissions(asked) : asked, repositories: (p.repositories ?? []).map((x) => x) };
   };
   const api = createPlanePushApi({ appCredentials: () => ({ appId: "12345", privateKeyPem, webhookSecret: "unused" }), requester, cache: new InstallationTokenCache(), fetchImpl });
   const hosted = createHostedPlanePush(api, { ...(now ? { now } : {}), ownsInstallation: OWNS });
   /** The order of calls that carried one of the minted tokens, plus the revokes. */
   const trail = () => s.seen.filter((x) => x.path !== "/repos/acme/widgets/installation").map((x) => `${x.method} ${x.path} ${x.headers["authorization"]?.replace("Bearer ", "")}`);
-  return { hosted, server: s, mintedTokens, trail, revoked };
+  return { hosted, server: s, mintedTokens, requested, trail, revoked };
 }
 
 const pr = (over: Record<string, unknown> = {}) => ({
@@ -238,6 +243,43 @@ describe("mintToken", () => {
     }) as typeof fetch;
     const api = createPlanePushApi({ appCredentials: () => ({ appId: "1", privateKeyPem, webhookSecret: "x" }), requester: async () => { throw new Error("unused"); }, cache: new InstallationTokenCache(), fetchImpl });
     await expect(createHostedPlanePush(api, { ownsInstallation: OWNS }).mintToken("acme/widgets", ACCOUNT)).rejects.toMatchObject({ code: "app_not_installed" });
+  });
+});
+
+describe("mintMergeToken (a merge order's two credentials)", () => {
+  it("read: one repository, contents read and nothing else; write: contents and pull requests write; neither is revoked by the hosted side (the runner holds it)", async () => {
+    const t = await setup({});
+    const read = await t.hosted.mintMergeToken("acme/widgets", ACCOUNT, "read");
+    const write = await t.hosted.mintMergeToken("acme/widgets", ACCOUNT, "write");
+    expect(read.token).not.toBe(write.token);
+    expect(t.requested).toEqual([
+      { permissions: { metadata: "read", contents: "read" }, repositories: ["widgets"] },
+      { permissions: { contents: "write", pull_requests: "write" }, repositories: ["widgets"] },
+    ]);
+    expect(t.server.seen.some((x) => x.method === "DELETE")).toBe(false);
+    // Each call is a new mint, never a cached token.
+    const again = await t.hosted.mintMergeToken("acme/widgets", ACCOUNT, "write");
+    expect(again.token).not.toBe(write.token);
+  });
+
+  it("refuses a read token made wider than asked, and a write token that carries an extra permission, and hands out neither", async () => {
+    const wide = await setup({ answerPermissions: (a) => ({ ...a, contents: "write" }) });
+    await expect(wide.hosted.mintMergeToken("acme/widgets", ACCOUNT, "read")).rejects.toMatchObject({ code: "token_scope_mismatch" });
+    const extra = await setup({ answerPermissions: (a) => ({ ...a, issues: "write" }) });
+    await expect(extra.hosted.mintMergeToken("acme/widgets", ACCOUNT, "write")).rejects.toMatchObject({ code: "token_scope_mismatch" });
+  });
+
+  it("mints nothing for an account that does not own the installation", async () => {
+    const t = await setup({});
+    await expect(t.hosted.mintMergeToken("acme/widgets", "22222222-2222-4222-8222-222222222222", "write")).rejects.toMatchObject({ code: "code_repo_installation_not_owned" });
+    await expect(t.hosted.mintMergeToken("acme/widgets", "22222222-2222-4222-8222-222222222222", "read")).rejects.toMatchObject({ code: "code_repo_installation_not_owned" });
+    expect(t.mintedTokens).toEqual([]);
+  });
+
+  it("expires at the smaller of GitHub's expiry minus 5 minutes and 55 minutes from now, like the push token", async () => {
+    const short = await setup({}, 20 * 60_000, () => Date.now());
+    const b = await short.hosted.mintMergeToken("acme/widgets", ACCOUNT, "write");
+    expect(Math.abs(b.expiresAt.getTime() - (Date.now() + 15 * 60_000))).toBeLessThan(5_000);
   });
 });
 

@@ -1,11 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// Records what the security trigger is asked, so a test can see WHICH paths reached it (the gate itself only answers with reasons).
+const triggerCalls = vi.hoisted(() => [] as Array<{ files: Array<{ path: string }>; truncated?: boolean }>);
+vi.mock("../../src/review/securityTrigger.js", async (original) => {
+  const real = await original<typeof import("../../src/review/securityTrigger.js")>();
+  return { ...real, securityTriggers: (input: Parameters<typeof real.securityTriggers>[0]) => (triggerCalls.push({ files: input.files.map((f) => ({ path: f.path })), truncated: input.truncated }), real.securityTriggers(input)) };
+});
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { listDriverEvents } from "@fx/core/src/work-items/driverEvents.js";
 import { LocalOnlyGithubError } from "@fx/runner-cloud";
 import type { GitHubHttp, LocalGitHubHttp } from "../../src/build/githubMergePort.js";
 import { LOCAL_REVIEW_DESCRIPTION, REVIEW_STATUS_CONTEXT } from "../../src/review/githubReads.js";
-import { runMergeGateForItem, type LocalReviewOptInPort } from "../../src/review/mergeGateRun.js";
+import { runMergeGateForItem, type GoAttestation, type LocalReviewOptInPort, type MergeDelegate } from "../../src/review/mergeGateRun.js";
+import { securityTriggers } from "../../src/review/securityTrigger.js";
 import { readPublicPullRequest } from "../../src/review/publicPullRequest.js";
 import { discussingItem } from "../plan/helpers/panelFixtures.js";
 import { seedAccount, seedRepo } from "../build/helpers/seed.js";
@@ -74,7 +82,7 @@ async function world(o: Opts = {}) {
   const runnerId = randomUUID();
   const k = randomUUID().replace(/-/g, "").padEnd(43, "k");
   await h.admin.query("INSERT INTO runners (id, account_id, registered_by, public_key_jwk, jkt, credential_mode) VALUES ($1, $2, $3, $4::jsonb, $5, 'subscription')", [runnerId, accountId, admin, JSON.stringify({ kty: "OKP", crv: "Ed25519", x: k }), k]);
-  const priv = freshRepo({ headSha: HEAD, draft: true, checks: { [HEAD]: [green] }, protectedWithoutChecks: true, runBranch: BRANCH, files: [(local ? file : patched)("src/ui/button.tsx")], ...o.priv });
+  const priv = freshRepo({ ghId: ghRepoId, headSha: HEAD, draft: true, checks: { [HEAD]: [green] }, protectedWithoutChecks: true, runBranch: BRANCH, files: [(local ? file : patched)("src/ui/button.tsx")], ...o.priv });
   if (local) {
     // What the runner's `done` recorded: the private pull request and the run branch it came from.
     const executor = randomUUID();
@@ -298,12 +306,28 @@ describe("a paired runner_local item: each stop the platform's own record adds",
     expectNoMergeAnywhere(w);
   });
 
-  it("the changed paths of either pull request decide the security reviewer: a sensitive path only on the public side needs one, and none is recorded", async () => {
+  it("the changed paths of BOTH pull requests reach the security trigger: a sensitive path only on the public side is in the list (the reviewer row stays, so the stop is not an artefact of its absence)", async () => {
     const w = await world({ pub: { files: [file("src/ui/button.tsx"), file("packages/auth/session.ts")] } });
-    await h.admin.query("DELETE FROM agent_runs WHERE work_item_id = $1 AND role = 'security-reviewer'", [w.workItemId]);
+    expect(w.priv.files.map((f) => f.filename)).toEqual(["src/ui/button.tsx"]);
+    triggerCalls.length = 0;
     const out = await gate(w);
-    expect(reasons(out).some((r) => r.includes("security"))).toBe(true);
+    const asked = triggerCalls.at(-1)!;
+    expect(asked.files.map((f) => f.path).sort()).toEqual(["packages/auth/session.ts", "src/ui/button.tsx"]);
+    // By path alone (a runner_local list never shows a diff, which fires the trigger by itself) the private list is clean and the public one is not,
+    // so the sensitive path reached the trigger through the PUBLIC pull request's paths and no other way.
+    const byPath = (paths: string[]) => securityTriggers({ files: paths.map((path) => ({ path })), truncated: false });
+    expect(byPath(w.priv.files.map((f) => f.filename))).toEqual([]);
+    expect(byPath(asked.files.map((f) => f.path))).toContain("auth_sessions_tokens");
+    // Both lists were read through the paths-only document (one each), and the security reviewer's row is still there and passes.
+    expect([...w.privLocal.calls, ...w.pubLocal.calls].filter((c) => c.label === "A1 PullRequestFiles")).toHaveLength(2);
+    expect((await h.admin.query("SELECT 1 FROM agent_runs WHERE work_item_id = $1 AND role = 'security-reviewer'", [w.workItemId])).rowCount).toBe(1);
+    expect(reasons(out)).toEqual(["runner_merge_unavailable"]);
     expectNoMergeAnywhere(w);
+    // And without the public-side path the list the trigger sees does not hold it.
+    const plain = await world();
+    triggerCalls.length = 0;
+    await gate(plain);
+    expect(triggerCalls.at(-1)!.files.map((f) => f.path)).toEqual(["src/ui/button.tsx"]);
   });
 });
 
@@ -529,5 +553,244 @@ describe("failure paths: a read that fails is a throw (the step's retry), never 
     const w = await world();
     await gate(w);
     for (const answer of [...w.pubLocal.answers, ...w.privLocal.answers]) expect(JSON.stringify(answer)).not.toMatch(/"patch"/);
+  });
+});
+
+
+// ---- D#6 PUBLIC-MERGE PR2b: the order phase and the go phase ----
+
+const attest = (o: Partial<GoAttestation> = {}): GoAttestation => ({ reviewedHead: HEAD, publicHead: PUB_HEAD, same: true, incomplete: false, paths: ["src/ui/button.tsx"], ...o });
+type DelegateCall = Parameters<MergeDelegate>[0];
+
+/** The gate with the merge handed to a delegate (the order phase), or with the runner's attestation as well (the go phase). The delegate records its calls. */
+function delegating(w: World, o: { go?: Partial<GoAttestation>; optIn?: LocalReviewOptInPort; pubHttp?: GitHubHttp; delegate?: MergeDelegate } = {}) {
+  const calls: DelegateCall[] = [];
+  const delegate: MergeDelegate = o.delegate ?? (async () => ({ delegated: true }));
+  const run = () =>
+    runMergeGateForItem(
+      {
+        pool: h.runWriterPool,
+        http: w.privLocal.http,
+        localReviewOptIn: o.optIn ?? on,
+        publicPlane: { open: async () => o.pubHttp ?? w.pubLocal.http, read: readPublicPullRequest(h.runWriterPool) },
+        mergeDelegate: async (a) => (calls.push(a), delegate(a)),
+      },
+      { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber, ...(o.go !== undefined ? { goPhase: { attestation: attest(o.go) } } : {}) },
+    );
+  return { run, calls };
+}
+const filesReads = (w: World) => [...w.privLocal.calls, ...w.pubLocal.calls].filter((c) => c.label === "A1 PullRequestFiles").length;
+
+describe("the order phase: the gate's single merge call hands the merge to the delegate", () => {
+  it("every condition met: merge_delegated for the PUBLIC head, the delegate called once with both shas, nothing merged, the status posted as before", async () => {
+    const w = await world();
+    const { run, calls } = delegating(w);
+    const out = await run();
+    expect(out).toMatchObject({ outcome: "merge_delegated", headSha: PUB_HEAD, reasons: [], status: "posted" });
+    expect(calls).toEqual([{ accountId: w.accountId, workItemId: w.workItemId, sha: PUB_HEAD, reviewedHead: HEAD }]);
+    expectNoMergeAnywhere(w);
+    expect(w.pub.posts).toHaveLength(1);
+    const ev = (await events(w)).find((e) => e.kind === "merge_gate");
+    expect(ev).toMatchObject({ code: "merge_delegated", head_sha: HEAD, pr_number: w.priv.prNumber, reasons: [] });
+  });
+
+  it("a delegate that cannot place the order gives its reason, and the item is a human merge", async () => {
+    const w = await world();
+    const { run, calls } = delegating(w, { delegate: async () => ({ delegated: false, reason: "public_head_unrecorded" }) });
+    const out = await run();
+    expect(out).toMatchObject({ outcome: "ready_human_merges", reasons: ["public_head_unrecorded"] });
+    expect(calls).toHaveLength(1);
+    expectNoMergeAnywhere(w);
+  });
+
+  it("a blocked condition never reaches the delegate", async () => {
+    const w = await world({ pub: { checks: { [PUB_HEAD]: [{ name: "build", status: "completed", conclusion: "failure" }] } } });
+    const { run, calls } = delegating(w);
+    expect(reasons(await run())).toContain("ci_not_green");
+    expect(calls).toEqual([]);
+  });
+
+  it("a single-plane runner_local item still merges through the fence (A10 on its own repository); the delegate is not called", async () => {
+    const w = await world({ pairing: false });
+    w.priv.draft = false;
+    const { run, calls } = delegating(w);
+    expect(await run()).toMatchObject({ outcome: "merged", headSha: HEAD });
+    expect(calls).toEqual([]);
+    expect(w.priv.merges).toEqual([{ sha: HEAD, method: "squash" }]);
+  });
+
+  it("the delegate never receives a way to merge: the code repository's fence has no A10, so even a delegate that tried could not", async () => {
+    const w = await world();
+    const { run } = delegating(w, {
+      delegate: async () => {
+        await expect(w.pubLocal.http.request({ method: "PUT", path: "/repos/acme/widgets-public/pulls/12/merge", body: { sha: PUB_HEAD, merge_method: "squash" } })).rejects.toBeInstanceOf(LocalOnlyGithubError);
+        return { delegated: true };
+      },
+    });
+    expect((await run()).outcome).toBe("merge_delegated");
+    expectNoMergeAnywhere(w);
+  });
+});
+
+describe("the go phase: the whole gate again from fresh reads, with the runner's attestation", () => {
+  it("nothing blocks: merge_delegated, the delegate called once, NO status posted and none recorded, no live file list read, nothing merged", async () => {
+    const w = await world();
+    const { run, calls } = delegating(w, { go: {} });
+    const out = await run();
+    expect(out).toMatchObject({ outcome: "merge_delegated", headSha: PUB_HEAD, status: "skipped" });
+    expect(calls).toHaveLength(1);
+    expect(w.pub.posts).toEqual([]);
+    expect(filesReads(w)).toBe(0);
+    expect((await events(w)).filter((e) => e.kind === "review_status")).toEqual([]);
+    expect((await events(w)).find((e) => e.kind === "merge_gate")).toMatchObject({ code: "merge_delegated" });
+    expectNoMergeAnywhere(w);
+  });
+
+  it("the security trigger and the tier use the ATTESTED paths, not a live list: a sensitive attested path is in the trigger's input, the live (clean) lists are never read", async () => {
+    const w = await world();
+    triggerCalls.length = 0;
+    const { run } = delegating(w, { go: { paths: ["packages/auth/session.ts", "src/ui/button.tsx"] } });
+    await run();
+    expect(triggerCalls.at(-1)!.files.map((f) => f.path)).toEqual(["packages/auth/session.ts", "src/ui/button.tsx"]);
+    expect(filesReads(w)).toBe(0);
+    // A live list that changed after the check cannot matter: whatever the live public list holds, the attested one is what the trigger saw.
+    const live = await world({ pub: { files: [file("docs/readme.md")] } });
+    triggerCalls.length = 0;
+    await delegating(live, { go: { paths: ["packages/auth/session.ts"] } }).run();
+    expect(triggerCalls.at(-1)!.files.map((f) => f.path)).toEqual(["packages/auth/session.ts"]);
+  });
+
+  it("an attested path that needs a security reviewer the order phase did not need blocks (fail closed): no security row, no go", async () => {
+    const w = await world();
+    await h.admin.query("DELETE FROM agent_runs WHERE work_item_id = $1 AND role = 'security-reviewer'", [w.workItemId]);
+    const { run, calls } = delegating(w, { go: { paths: ["packages/auth/session.ts"] } });
+    const out = await run();
+    expect(out.outcome).toBe("ready_human_merges");
+    expect(reasons(out).some((r) => r.includes("security"))).toBe(true);
+    expect(calls).toEqual([]);
+  });
+
+  it("the content check said the heads differ (same: false), or could not tell (incomplete): public_head_not_reviewed, and an incomplete list fires the trigger", async () => {
+    const differs = await world();
+    const a = delegating(differs, { go: { same: false } });
+    expect(reasons(await a.run())).toContain("public_head_not_reviewed");
+    expect(a.calls).toEqual([]);
+    const unknown = await world();
+    triggerCalls.length = 0;
+    const b = delegating(unknown, { go: { same: false, incomplete: true } });
+    expect(reasons(await b.run())).toContain("public_head_not_reviewed");
+    expect(triggerCalls.at(-1)!.truncated).toBe(true);
+    expect(b.calls).toEqual([]);
+    expectNoMergeAnywhere(differs);
+    expectNoMergeAnywhere(unknown);
+  });
+
+  it("the fulcrumaxe/review status on the public head is NOT merge authority: a green status with the reviewer rows gone is a stop, and a status alone is not the repository's CI", async () => {
+    const noReviewer = await world();
+    noReviewer.pub.statuses[PUB_HEAD] = { [REVIEW_STATUS_CONTEXT]: "success" };
+    await h.admin.query("DELETE FROM agent_runs WHERE work_item_id = $1 AND role IN ('security-reviewer', 'code-reviewer')", [noReviewer.workItemId]);
+    const a = delegating(noReviewer, { go: {} });
+    const out = await a.run();
+    expect(out.outcome).toBe("ready_human_merges");
+    expect(reasons(out).length).toBeGreaterThan(0);
+    expect(a.calls).toEqual([]);
+    const onlyStatus = await world({ pub: { checks: { [PUB_HEAD]: [] } } });
+    onlyStatus.pub.statuses[PUB_HEAD] = { [REVIEW_STATUS_CONTEXT]: "success" };
+    const b = delegating(onlyStatus, { go: {} });
+    expect(reasons(await b.run())).toContain("repo_ci_missing");
+    expect(b.calls).toEqual([]);
+  });
+
+  it("a head that moved: the live public head is not the attested one, or the private head is not the reviewed one, or the public head moves while the gate reads (head_moved, no delegate)", async () => {
+    const pubMoved = await world();
+    const a = delegating(pubMoved, { go: { publicHead: OTHER } });
+    expect(await a.run()).toMatchObject({ outcome: "head_moved" });
+    const privMoved = await world();
+    const b = delegating(privMoved, { go: { reviewedHead: OTHER } });
+    expect(await b.run()).toMatchObject({ outcome: "head_moved", headSha: HEAD });
+    const racing = await world();
+    racing.pub.checks[OTHER] = [green];
+    let lists = 0;
+    const real = racing.pubLocal.http;
+    const moving: LocalGitHubHttp = {
+      request: async (req) => {
+        if (req.method === "GET" && req.path === "/repos/acme/widgets-public/pulls" && ++lists === 2) racing.pub.headSha = OTHER;
+        return real.request(req);
+      },
+      graphql: (op, v) => real.graphql(op, v),
+    };
+    const c = delegating(racing, { go: {}, pubHttp: moving });
+    expect((await c.run()).outcome).toBe("head_moved");
+    for (const x of [a, b, c]) expect(x.calls).toEqual([]);
+    for (const w of [pubMoved, privMoved, racing]) expectNoMergeAnywhere(w);
+  });
+
+  describe("every #487 block reason still applies (from fresh reads, between the order and the go)", () => {
+    const cases: Array<[string, () => Promise<World>, string, () => void]> = [
+      ["a person took the branch over", () => world({ managed: true }), "public_branch_person_managed", () => undefined],
+      ["the public head is not the stamped one", () => world({ stamp: OTHER }), "public_head_unrecorded", () => undefined],
+      ["no stamp", () => world({ stamp: null }), "public_head_unrecorded", () => undefined],
+      ["no source head", () => world({ source: null }), "public_head_unrecorded", () => undefined],
+      ["built from another private head", () => world({ source: OTHER }), "public_head_not_reviewed", () => undefined],
+      ["auto-merge turned off", () => world({ autoMerge: false }), "auto_merge_not_allowed", () => undefined],
+      ["CI turned red", () => world({ pub: { checks: { [PUB_HEAD]: [{ name: "build", status: "completed", conclusion: "failure" }] } } }), "ci_not_green", () => undefined],
+      ["the public pull request became a draft", () => world({ pub: { draft: true } }), "pr_draft", () => undefined],
+      ["the base is not the default branch", () => world({ pub: { baseRef: "feature", defaultBranch: "main" } }), "stacked_on_open_pr", () => undefined],
+      ["the repository has no branch protection", () => world({ pub: { protectedWithoutChecks: false } }), "no_branch_protection", () => undefined],
+      ["the public repository has no CI of its own", () => world({ pub: { checks: { [PUB_HEAD]: [] } } }), "repo_ci_missing", () => undefined],
+      ["the public pull request merged or closed", () => world({ state: "pr_merged" }), "public_pr_not_open", () => undefined],
+      ["the operator locked the private repository", async () => { const w = await world(); process.env[ENV] = String(w.ghRepoId); return w; }, "human_merge_only", () => undefined],
+      ["the operator locked the code repository", async () => { const w = await world(); process.env[ENV] = String(w.pub.ghId); return w; }, "human_merge_only", () => undefined],
+    ];
+    it.each(cases)("%s", async (_name, make, reason) => {
+      const w = await make();
+      const { run, calls } = delegating(w, { go: {} });
+      const out = await run();
+      expect(out.outcome).toBe("ready_human_merges");
+      expect(reasons(out)).toContain(reason);
+      expect(calls).toEqual([]);
+      expectNoMergeAnywhere(w);
+    });
+
+    it("the opt-in turned off between the order and the go: local_review_not_enabled", async () => {
+      const w = await world();
+      const { run, calls } = delegating(w, { go: {}, optIn: off });
+      const out = await run();
+      expect(reasons(out)).toContain("local_review_not_enabled");
+      expect(calls).toEqual([]);
+    });
+
+    it("a reviewer's needs-fix on the reviewed head", async () => {
+      const w = await world();
+      await h.admin.query("UPDATE agent_runs SET envelope = '{\"verdict\":\"needs-fix\"}'::jsonb WHERE work_item_id = $1 AND role = 'code-reviewer'", [w.workItemId]);
+      const { run, calls } = delegating(w, { go: {} });
+      expect(reasons(await run())).toContain("verdict_not_pass_code_reviewer");
+      expect(calls).toEqual([]);
+    });
+
+    it("the lock reads each repository's OWN id: a list that holds neither fake id locks nothing, and one that holds the code repository's id locks it", async () => {
+      const w = await world();
+      expect(w.priv.ghId).toBe(w.ghRepoId);
+      expect(w.pub.ghId).not.toBe(w.priv.ghId);
+      process.env[ENV] = "999";
+      expect((await delegating(w, { go: {} }).run()).outcome).toBe("merge_delegated");
+    });
+  });
+
+  it("the go phase exists only for a paired runner_local item with a delegate: anything else is refused, and nothing is read as a go", async () => {
+    const sandbox = await world({ executionMode: "sandbox" });
+    const calls: DelegateCall[] = [];
+    const out = await runMergeGateForItem(
+      { pool: h.runWriterPool, http: fakeGitHubRest(sandbox.priv), localReviewOptIn: on, publicPlane: { open: async () => fakeGitHubRest(sandbox.pub), read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async (a) => (calls.push(a), { delegated: true }) },
+      { accountId: sandbox.accountId, workItemId: sandbox.workItemId, prNumber: sandbox.priv.prNumber, goPhase: { attestation: attest() } },
+    );
+    expect(out).toEqual({ outcome: "refused", reason: "go_not_applicable" });
+    const local = await world();
+    const noDelegate = await runMergeGateForItem(
+      { pool: h.runWriterPool, http: local.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => local.pubLocal.http, read: readPublicPullRequest(h.runWriterPool) } },
+      { accountId: local.accountId, workItemId: local.workItemId, prNumber: local.priv.prNumber, goPhase: { attestation: attest() } },
+    );
+    expect(noDelegate).toEqual({ outcome: "refused", reason: "go_not_applicable" });
+    expect(calls).toEqual([]);
   });
 });

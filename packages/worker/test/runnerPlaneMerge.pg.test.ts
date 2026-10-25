@@ -112,8 +112,8 @@ describe("plane merge order store [pg]", () => {
       expect((await admin.query("SELECT 1 FROM plane_merge_orders WHERE work_item_id = $1", [w])).rows).toHaveLength(1);
     });
 
-    it("supersedes the open order when new heads are cleared (a pending one, a claimed one and an authorized one alike)", async () => {
-      for (const upTo of ["pending", "claimed", "authorized"] as const) {
+    it("supersedes the open order when new heads are cleared (a pending one and a claimed one)", async () => {
+      for (const upTo of ["pending", "claimed"] as const) {
         const w = await item(A);
         const old = await placed(A, w);
         let held: PlaneMergeOrder | null = null;
@@ -121,7 +121,6 @@ describe("plane merge order store [pg]", () => {
           const c = await claimed();
           expect(c.id).toBe(old.id);
           held = c;
-          if (upTo === "authorized") expect((await store.authorize(lease(c))).kind).toBe("authorized");
         }
         const next = "c".repeat(40);
         await admin.query("UPDATE plane_pushes SET head_sha = $2 WHERE work_item_id = $1", [w, next]);
@@ -138,6 +137,43 @@ describe("plane merge order store [pg]", () => {
       }
     });
 
+    it("binds a RUNNER-built stamp (source_head NULL) to the head the cloud read when the pushing run finished, and to nothing older or unfinished", async () => {
+      const w = await item(A, { source: undefined });
+      await admin.query("UPDATE plane_pushes SET source_head = NULL WHERE work_item_id = $1", [w]);
+      const pushId = (await admin.query("SELECT id FROM plane_pushes WHERE work_item_id = $1", [w])).rows[0].id as string;
+      // No runner attempt yet: the source head is not known, so no order is placed for any head.
+      expect((await place(A, w)).kind).toBe("push_changed");
+      const run = randomUUID();
+      await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, runner_id) VALUES ($1, $2, $3, 'executor', 'runner', 'succeeded', 'runner_local', $4)", [run, A.accountId, w, runner]);
+      await admin.query("INSERT INTO plane_push_attempts (account_id, plane_push_id, run_id, lease_generation, runtime, kind, attempt_no, finished_at, outcome) VALUES ($1, $2, $3, 1, 'runner', 'push', 1, now(), 'pr_opened')", [A.accountId, pushId, run]);
+      // The run's done event is not recorded yet: still unknown.
+      expect((await place(A, w)).kind).toBe("push_changed");
+      await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.status_changed', $3::jsonb)", [A.accountId, run, JSON.stringify({ from: "running", to: "succeeded", viaRunnerDone: true, headOid: REVIEWED })]);
+      expect((await place(A, w, { reviewed: "d".repeat(40) })).kind).toBe("push_changed");
+      const made = await place(A, w);
+      expect(made.kind).toBe("placed");
+      if (made.kind !== "placed") return;
+      expect(made.order.reviewedHead).toBe(REVIEWED);
+      // The claim re-derives it the same way, so the order is claimable.
+      expect((await claim(A)).kind).toBe("claimed");
+    });
+
+    it("does not supersede an AUTHORIZED order (its write credential is out and cannot be revoked here): it answers in_flight and the order stands", async () => {
+      const w = await item(A);
+      const old = await placed(A, w);
+      const c = await claimed();
+      expect((await store.authorize(lease(c))).kind).toBe("authorized");
+      const next = "c".repeat(40);
+      await admin.query("UPDATE plane_pushes SET head_sha = $2 WHERE work_item_id = $1", [w, next]);
+      const r = await place(A, w, { head: next });
+      expect(r).toMatchObject({ kind: "in_flight", order: { id: old.id, state: "authorized" } });
+      expect(await row(old.id)).toMatchObject({ state: "authorized", outcome_code: null });
+      expect((await admin.query("SELECT 1 FROM plane_merge_orders WHERE work_item_id = $1", [w])).rows).toHaveLength(1);
+      // Once that order is over (here: the cloud ended it after its own read) the new heads get their order.
+      await store.finish({ accountId: A.accountId, orderId: old.id, to: "head_moved", code: PLANE_MERGE_CODES.headMoved, actor: { by: "cloud" } });
+      expect((await place(A, w, { head: next })).kind).toBe("placed");
+    });
+
     it("refuses what the push record does not say: heads that differ, a record that is not an open platform-managed pull request, another tenant's item, no record", async () => {
       expect(await place(A, await item(A), { head: "d".repeat(40) })).toEqual({ kind: "push_changed" });
       expect(await place(A, await item(A), { reviewed: "d".repeat(40) })).toEqual({ kind: "push_changed" });
@@ -150,6 +186,18 @@ describe("plane merge order store [pg]", () => {
       await admin.query(`INSERT INTO work_items (id, account_id, repo_id, kind, provenance) VALUES ($1, $2, $3, 'feature', 'internal')`, [bare, A.accountId, A.repoId]);
       expect(await place(A, bare)).toEqual({ kind: "not_paired" });
       expect((await admin.query("SELECT 1 FROM plane_merge_orders WHERE account_id = ANY($1)", [[A.accountId, B.accountId]])).rows).toHaveLength(0);
+    });
+
+    it("an open order with the SAME heads but a changed pairing digest is superseded by a new order, not handed back as unchanged", async () => {
+      const w = await item(A);
+      const first = await placed(A, w);
+      await admin.query("UPDATE plane_pushes SET pairing_digest = $2 WHERE work_item_id = $1", [w, "f".repeat(64)]);
+      const again = await place(A, w);
+      expect(again.kind).toBe("placed");
+      if (again.kind !== "placed") return;
+      expect(again.superseded).toEqual([first.id]);
+      expect(again.order.pairingDigest).toBe("f".repeat(64));
+      expect(await row(first.id)).toMatchObject({ state: "superseded" });
     });
 
     it("replaces an order whose deadline passed instead of handing it back", async () => {
@@ -245,17 +293,23 @@ describe("plane merge order store [pg]", () => {
       expect(await row(good.id)).toMatchObject({ state: "blocked", outcome_code: PLANE_MERGE_CODES.pairingChanged });
     });
 
-    it("finishes an order whose push record moved on (a new head, a person's takeover, a closed pull request) as superseded, and claims the next", async () => {
+    it("finishes an order whose push record moved on (a new head, a closed pull request) as superseded, and claims the next", async () => {
       const moved = await placed(A, await item(A));
-      const taken = await placed(A, await item(A));
       const closed = await placed(A, await item(A));
       const fine = await placed(A, await item(A));
       await admin.query("UPDATE plane_pushes SET head_sha = $2 WHERE id = $1", [moved.planePushId, "e".repeat(40)]);
-      await admin.query("UPDATE plane_pushes SET managed_by_person_at = now() WHERE id = $1", [taken.planePushId]);
       await admin.query("UPDATE plane_pushes SET state = 'pr_closed' WHERE id = $1", [closed.planePushId]);
       const got = await claimed();
       expect(got.id).toBe(fine.id);
-      for (const o of [moved, taken, closed]) expect(await row(o.id)).toMatchObject({ state: "superseded", outcome_code: PLANE_MERGE_CODES.headMoved });
+      for (const o of [moved, closed]) expect(await row(o.id)).toMatchObject({ state: "superseded", outcome_code: PLANE_MERGE_CODES.headMoved });
+    });
+
+    it("a pending order whose branch a person took over ends blocked with public_branch_person_managed (so the card says why), and the next order is claimed", async () => {
+      const taken = await placed(A, await item(A));
+      const fine = await placed(A, await item(A));
+      await admin.query("UPDATE plane_pushes SET managed_by_person_at = now() WHERE id = $1", [taken.planePushId]);
+      expect((await claimed()).id).toBe(fine.id);
+      expect(await row(taken.id)).toMatchObject({ state: "blocked", outcome_code: "public_branch_person_managed" });
     });
   });
 
@@ -500,6 +554,75 @@ describe("plane merge order store [pg]", () => {
       expect(await store.authorize(lease(o))).toEqual({ kind: "fenced", reason: "lease_expired" });
       expect((await store.finish({ accountId: A.accountId, orderId: o.id, to: "failed", code: PLANE_MERGE_CODES.failed, actor: { by: "cloud" } })).kind).toBe("finished");
       expect(await store.lapsedAuthorized(A.accountId)).toEqual([]);
+    });
+  });
+
+  describe("runner identity in the fence (PR2a review)", () => {
+    it("a runner id that is not a uuid is refused outright, by every call that takes a runner", async () => {
+      await placed(A, await item(A));
+      const o = await claimed();
+      const bad = { ...lease(o), runnerId: "not-a-uuid" };
+      await expect(store.fence(bad)).rejects.toThrow();
+      await expect(store.grantReadToken(bad)).rejects.toThrow();
+      await expect(store.authorize(bad)).rejects.toThrow();
+      await expect(store.finish({ accountId: A.accountId, orderId: o.id, to: "blocked", code: "x_code", actor: { by: "runner", runnerId: "not-a-uuid", leaseGeneration: 1 } })).rejects.toThrow();
+      expect((await row(o.id)).state).toBe("claimed");
+    });
+
+    it("an order whose runner row was deleted (runner null) matches no caller: null never equals anything", async () => {
+      await placed(A, await item(A));
+      const o = await claimed();
+      await admin.query("DELETE FROM runners WHERE id = $1", [runner]);
+      expect((await row(o.id)).runner_id).toBeNull();
+      const other = await mkRunner(A);
+      for (const id of [runner, other]) {
+        expect(await store.fence({ ...lease(o), runnerId: id })).toEqual({ kind: "fenced", reason: "unknown" });
+        expect(await store.authorize({ ...lease(o), runnerId: id })).toEqual({ kind: "fenced", reason: "unknown" });
+        expect(await store.grantReadToken({ ...lease(o), runnerId: id })).toEqual({ kind: "fenced", reason: "unknown" });
+        expect(await store.finish({ accountId: A.accountId, orderId: o.id, to: "blocked", code: "x_code", actor: { by: "runner", runnerId: id, leaseGeneration: 1 } })).toEqual({ kind: "fenced", reason: "unknown" });
+      }
+    });
+  });
+
+  describe("hasClaimable and runnerTrusted", () => {
+    it("hasClaimable is true only while a pending order could be taken by this runner, and claims nothing", async () => {
+      const ask = (id: string = runner) => store.hasClaimable({ accountId: A.accountId, runnerId: id });
+      expect(await ask()).toBe(false);
+      await placed(A, await item(A));
+      expect(await ask()).toBe(true);
+      expect(await ask()).toBe(true);
+      expect(await ask(await mkRunner(A, { caps: ["wake_v1"] }))).toBe(false);
+      expect(await ask(await mkRunner(A, { paused: true }))).toBe(false);
+      expect(await ask(await mkRunner(A, { draining: true }))).toBe(false);
+      expect(await ask(await mkRunner(A, { revoked: true }))).toBe(false);
+      expect(await ask(await mkRunner(A, { scope: [] }))).toBe(false);
+      await claimed();
+      expect(await ask()).toBe(false);
+    });
+
+    it("runnerTrusted re-reads the runner now: revoked, a registrant who lost the admin role, pause, drain, scope and capability each turn it off", async () => {
+      const w = await item(A);
+      await placed(A, w);
+      const o = await claimed();
+      const trusted = () => store.runnerTrusted({ accountId: A.accountId, runnerId: runner, repoId: o.repoId });
+      expect(await trusted()).toBe(true);
+      await admin.query("INSERT INTO runner_settings (runner_id, account_id, paused_at, draining) VALUES ($1, $2, now(), false)", [runner, A.accountId]);
+      expect(await trusted()).toBe(false);
+      await admin.query("UPDATE runner_settings SET paused_at = NULL, draining = true WHERE runner_id = $1", [runner]);
+      expect(await trusted()).toBe(false);
+      await admin.query("UPDATE runner_settings SET draining = false WHERE runner_id = $1", [runner]);
+      expect(await trusted()).toBe(true);
+      await admin.query("UPDATE runners SET allowed_repo_ids = '{}' WHERE id = $1", [runner]);
+      expect(await trusted()).toBe(false);
+      await admin.query("UPDATE runners SET allowed_repo_ids = ARRAY[$2]::uuid[] WHERE id = $1", [runner, A.repoId]);
+      await admin.query("UPDATE runner_capabilities SET capabilities = '{}' WHERE runner_id = $1", [runner]);
+      expect(await trusted()).toBe(false);
+      await admin.query("UPDATE runner_capabilities SET capabilities = ARRAY['plane_merge_v1'] WHERE runner_id = $1", [runner]);
+      // A registrant who stops being an owner or admin: the database revokes the runner itself on that change, and the trust read is false either way.
+      await admin.query("UPDATE account_members SET role = 'member' WHERE account_id = $1 AND user_id = $2", [A.accountId, A.userId]);
+      expect(await trusted()).toBe(false);
+      await admin.query("UPDATE runners SET revoked_at = NULL WHERE id = $1", [runner]).catch(() => undefined);
+      expect(await trusted()).toBe(false);
     });
   });
 

@@ -8,6 +8,7 @@ import { readRecordedRunnerPullRequest } from "@fx/runner";
 import { createGitHubMergeGatePort, isLocalGitHubHttp, type GitHubHttp, type LocalGitHubHttp } from "../build/githubMergePort.js";
 import { carriedRunsHead, gateReviewerReasons, loadRunsOnSha, runMergeGate, RUNNER_ADMIN_OK_SQL, SHA_PATTERN, type MergeBlockReason, type ReviewMode } from "../build/mergeGate.js";
 import { listChangedFiles, listChangedFilesLocal, postReviewStatus, type ListFilesResult } from "./githubReads.js";
+import type { ChangedFile } from "./securityTrigger.js";
 import { checkPublicContent, type ContentCheck } from "./publicContentMatch.js";
 import { loadReviewContext, type ReviewContext } from "./context.js";
 import type { PublicPullRequest, PublicPullRequestLookup } from "./publicPullRequest.js";
@@ -54,13 +55,45 @@ export interface MergeGateRunInput {
   accountId: string;
   workItemId: string;
   prNumber: number;
+  /**
+   * The GO phase of a paired `runner_local` item's merge order: the whole gate again from fresh reads, with the content attested by the runner for the fixed
+   * shas. The security trigger and the tier come from `attestation.paths`; `same: false` adds `public_head_not_reviewed`; the live public head must be the
+   * attested one and the live private head the attested reviewed head (else `head_moved`). No `fulcrumaxe/review` status is posted and none is read as authority.
+   */
+  goPhase?: { attestation: GoAttestation };
 }
 
 export type StatusOutcome = "posted" | "skipped" | "failed";
 
 export type MergeGateRunResult =
   | { outcome: "refused"; reason: string }
-  | { outcome: "merged" | "ready_human_merges" | "pr_not_open" | "head_moved"; headSha: string; reasons: MergeBlockReason[]; status: StatusOutcome };
+  | { outcome: "merged" | "merge_delegated" | "ready_human_merges" | "pr_not_open" | "head_moved"; headSha: string; reasons: MergeBlockReason[]; status: StatusOutcome };
+
+/**
+ * Two planes, `runner_local`: what the customer's runner attests about the CONTENT of the two commits (fixed shas; the runner has the git objects, the cloud
+ * must not). `paths` is the public change set, `incomplete` means the runner could not know (it implies `same` false). The go phase uses nothing else about
+ * content: its security trigger and tier rest on these paths, never on a live file list.
+ */
+export interface GoAttestation {
+  reviewedHead: string;
+  publicHead: string;
+  same: boolean;
+  incomplete: boolean;
+  paths: readonly string[];
+}
+
+/**
+ * The hand-over of a paired `runner_local` item's merge, called by the gate's single merge call site once every condition is met. The ORDER phase places a
+ * merge order; the GO phase authorizes the single write credential. Either answers `delegated: true`, or `delegated: false` with the reason a person sees.
+ * Nothing here merges, and the gate never learns what the credential is.
+ */
+export type MergeDelegate = (args: { accountId: string; workItemId: string; sha: string; reviewedHead: string }) => Promise<{ delegated: true } | { delegated: false; reason: MergeBlockReason }>;
+
+/** The pull request the item's runner run recorded with its `done` (its number and run branch), or null: the item's OWN pull request, which the reviewers judged. */
+export async function readItemRecordedPullRequest(pool: Pool, accountId: string, workItemId: string): Promise<{ number: number; branch: string } | null> {
+  const recorded = await withTenant(pool, accountId, (client) => readRecordedRunnerPullRequest(client, { accountId, workItemId }));
+  return recorded === null ? null : { number: recorded.number, branch: recorded.branch };
+}
 
 /** Whether this head's code-reviewer run set the security flag: a succeeded production run whose envelope says `security_review_needed` is exactly true. */
 export async function reviewerFlaggedSecurity(pool: Pool, accountId: string, workItemId: string, headSha: string, localOn: boolean): Promise<boolean> {
@@ -138,7 +171,7 @@ export interface PublicPlanePort {
   read: PublicPullRequestLookup;
 }
 
-export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; localReviewOptIn?: LocalReviewOptInPort; publicPlane?: PublicPlanePort }, input: MergeGateRunInput): Promise<MergeGateRunResult> {
+export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; localReviewOptIn?: LocalReviewOptInPort; publicPlane?: PublicPlanePort; mergeDelegate?: MergeDelegate }, input: MergeGateRunInput): Promise<MergeGateRunResult> {
   const { pool, http } = deps;
   const { accountId, workItemId, prNumber } = input;
   const loaded = await loadReviewContext(pool, accountId, workItemId);
@@ -161,6 +194,12 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
   // 1. The head the reviewers judged (the item's own pull request), and, for a paired item, the public pull request that merges.
   const head = await port.getPullRequest(pr);
   const headSha = head.headSha;
+  const go = input.goPhase;
+  if (go !== undefined) {
+    // The go phase only exists for a paired runner_local item, and only for the private head the order was placed for.
+    if (!runnerLocal || deps.publicPlane === undefined || deps.mergeDelegate === undefined) return { outcome: "refused", reason: "go_not_applicable" };
+    if (headSha !== go.attestation.reviewedHead) return { outcome: "head_moved", headSha, reasons: [], status: "skipped" };
+  }
   const lookup = deps.publicPlane !== undefined ? await deps.publicPlane.read(accountId, workItemId) : null;
   const publicPr: PublicPullRequest | null = lookup?.pr ?? null;
   // Paired: the repository has a pairing, whether or not its public pull request is open.
@@ -182,8 +221,19 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
     mergePort = createReviewGitHubPort({ pool, http: mergeHttp }, { ...ctx, owner: publicPr.owner, name: publicPr.name }, { accountId, workItemId, prNumber: publicPr.number, recordedBranch: publicPr.branch });
     // The operator's lock names a repository by its GitHub id: either half of the pairing listed means a person merges.
     if (!humanLocked) humanLocked = humanMergeOnly(await readRepoGhId(mergeHttp, publicPr.owner, publicPr.name));
-    // Defence in depth for `runner_local`: even a client that allowed it could not make the cloud merge this pull request.
-    if (runnerLocal) mergePort = { ...mergePort, mergePullRequest: async () => { throw new Error("merge gate: the cloud does not merge a runner_local repository's pull request"); } };
+    // Defence in depth for `runner_local`: the cloud never calls merge on this pull request, whatever client it was given. The gate's merge call site is the
+    // delegate (an order, or the single write credential) when one is wired, and a refusal to merge otherwise.
+    if (runnerLocal) {
+      const delegate = deps.mergeDelegate;
+      mergePort = {
+        ...mergePort,
+        mergePullRequest: async (_ref, { sha }) => {
+          if (delegate === undefined) throw new Error("merge gate: the cloud does not merge a runner_local repository's pull request");
+          const out = await delegate({ accountId, workItemId, sha, reviewedHead: headSha });
+          return out.delegated ? { merged: false, delegated: true } : { merged: false, delegated: false, reason: out.reason };
+        },
+      };
+    }
     mergeRef = { repoId: ctx.repoId, prNumber: publicPr.number };
     const live = await mergePort.getPullRequest(mergeRef);
     mergeHead = live.headSha;
@@ -207,6 +257,7 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
     // content check below computes. When it could not (or a stop is already known), the list is incomplete, which fires the security trigger.
     let content: ContentCheck | null = null;
     // A runner_local repo is read through the paths-only fence: the trees and patches the content check needs are not reachable, and the cloud must not receive them.
+    if (go !== undefined && !go.attestation.same && !extraBlockReasons.includes("public_head_not_reviewed")) extraBlockReasons.push("public_head_not_reviewed");
     if (publicPr !== null && !runnerLocal) {
       content = extraBlockReasons.length > 0
         ? { same: false, files: [], incomplete: false }
@@ -223,7 +274,11 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
           });
       if (extraBlockReasons.length === 0 && !content.same) extraBlockReasons.push("public_head_not_reviewed");
     }
-    const files = content !== null
+    // The go phase reads NO live list: the attested paths of the fixed shas stand (a file with no diff shown, as in every runner_local list, so the security
+    // trigger fires exactly as it did when the order was placed).
+    const files = go !== undefined
+      ? ({ ok: true, files: go.attestation.paths.map((path): ChangedFile => ({ path, previousPath: null, patch: null, changes: 1 })), truncated: go.attestation.incomplete } as const)
+      : content !== null
       ? ({ ok: true, files: content.files, truncated: content.incomplete } as const)
       : publicPr !== null && localHttp !== null && isLocalGitHubHttp(localHttp) && isLocalGitHubHttp(mergeHttp)
         ? extraBlockReasons.length > 0
@@ -246,13 +301,16 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
     // The status goes on the commit that merges (the public head for a paired item), and only on a head the platform pushed.
     // A paired item's public head is read once more right before the post: a status never goes on a head that moved after the checks above.
     const stillThere = publicPr === null || (await mergePort.getPullRequest(mergeRef)).headSha === mergeHead;
-    if (reviewMode !== "runner_local_off" && extraBlockReasons.length === 0 && stillThere && gateReviewerReasons(plan.roles, rows, reviewMode).length === 0) {
+    // The go phase posts nothing: the status is the order phase's signal for a repository without CI, and never merge authority (the rows above decide).
+    if (go === undefined && reviewMode !== "runner_local_off" && extraBlockReasons.length === 0 && stillThere && gateReviewerReasons(plan.roles, rows, reviewMode).length === 0) {
       const posted = await postReviewStatus(mergeHttp, { owner: mergeTarget.owner, name: mergeTarget.name, sha: mergeHead, local: reviewMode === "runner_local_on" });
       status = posted.ok ? "posted" : "failed";
     }
-    await withTenant(pool, accountId, (client) =>
-      recordDriverEvent(client, accountId, { workItemId, kind: "review_status", dedupeKey: publicPr === null ? `status:${headSha}` : `status:${headSha}:${mergeHead}`, code: status, headSha, prNumber }),
-    );
+    if (go === undefined) {
+      await withTenant(pool, accountId, (client) =>
+        recordDriverEvent(client, accountId, { workItemId, kind: "review_status", dedupeKey: publicPr === null ? `status:${headSha}` : `status:${headSha}:${mergeHead}`, code: status, headSha, prNumber }),
+      );
+    }
   }
 
   // 4. The gate. It merges (bound to the head's sha) or marks the PR for a person.
@@ -273,10 +331,11 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
       accountId,
       workItemId,
       pr: mergeRef,
-      ...(publicPr !== null ? { reviewedHeadSha: headSha, expectedHeadSha: mergeHead } : {}),
+      // The go phase binds to the head the runner attested (the order's); the order phase to the head just read.
+      ...(publicPr !== null ? { reviewedHeadSha: headSha, expectedHeadSha: go?.attestation.publicHead ?? mergeHead } : {}),
       extraBlockReasons,
       // A paired runner_local item is merged by its runner or a person, never by the cloud (the runner side is not built yet: a person).
-      ...(paired && runnerLocal ? { mergeUnavailableReason: "runner_merge_unavailable" as const } : {}),
+      ...(paired && runnerLocal && deps.mergeDelegate === undefined ? { mergeUnavailableReason: "runner_merge_unavailable" as const } : {}),
       tier: ctx.tier,
       securityDiffTriggerFired: gateSecurityTrigger,
       debaterEnabled,
@@ -295,7 +354,7 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
     await recordDriverEvent(client, accountId, {
       workItemId,
       kind: "merge_gate",
-      dedupeKey: `${keyHead}:${out.outcome}`,
+      dedupeKey: `${keyHead}:${go !== undefined ? "go:" : ""}${out.outcome}`,
       code: toCode(out.outcome),
       reasons: reasons.map((r) => toCode(r)),
       headSha: headForRow,

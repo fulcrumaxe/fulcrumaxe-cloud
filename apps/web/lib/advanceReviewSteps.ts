@@ -51,6 +51,7 @@ export type ReviewWorker = Pick<
   | "advanceStartFix"
   | "advanceStartCheckFix"
   | "advanceMergeGate"
+  | "advanceMergeOrder"
   | "advanceVerifiedReviewGate"
   | "advanceRecordEvent"
   | "advanceCancel"
@@ -495,6 +496,20 @@ export interface GateOut {
   reasons: string[];
   status: string | null;
   headSha: string | null;
+}
+
+/** D#6 PUBLIC-MERGE PR2b: where the item's merge order stands (see `AdvanceMergeOrderResult`); fixed words only. */
+export interface MergeOrderOut {
+  state: string;
+  code: string | null;
+  /** `blocked` only: the merge gate recorded this stop itself (see `AdvanceMergeOrderResult`). */
+  gateRecorded?: boolean;
+}
+
+export async function mergeOrderBody(worker: ReviewWorker | null, who: StepWho): Promise<MergeOrderOut> {
+  if (!worker) return { state: "refused", code: "worker_unavailable" };
+  const out = await worker.advanceMergeOrder(who);
+  return { state: out.state, code: out.code, ...(out.gateRecorded !== undefined ? { gateRecorded: out.gateRecorded } : {}) };
 }
 
 export async function mergeGateBody(worker: ReviewWorker | null, who: StepWho, prNumber: number): Promise<GateOut> {

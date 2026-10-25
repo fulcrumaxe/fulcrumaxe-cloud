@@ -1,6 +1,6 @@
 import { GITHUB_GRAPHQL_DOCUMENTS, LocalOnlyGithubError, localOnlyGithub, type GithubClient, type GithubRequest, type GithubResponse } from "@fx/runner-cloud";
 import type { LocalGitHubHttp } from "../../../src/build/githubMergePort.js";
-import type { FakeRepoState } from "./fakeGitHubRest.js";
+import { defaultGhId, type FakeRepoState } from "./fakeGitHubRest.js";
 
 /**
  * D#6 R3c: the GitHub a `runner_local` repo's review and merge path talks to, as a strict fake, over the same `FakeRepoState` the
@@ -179,7 +179,7 @@ export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts:
         // A2: the repository itself. Only the fields the gate reads are served (id, names, default branch); never contents.
         if (Object.keys(query).length > 0 || req.body !== undefined) deny("A2 query or body");
         label = "A2";
-        reply = () => json(200, { id: s.ghId ?? 7001, full_name: full, default_branch: s.defaultBranch ?? "main", private: false });
+        reply = () => json(200, { id: s.ghId ?? defaultGhId(s.owner, s.name), full_name: full, default_branch: s.defaultBranch ?? "main", private: false });
       } else if (method === "GET" && path === `${base}/pulls`) {
         if (req.body !== undefined) deny("body on GET");
         label = "A3";

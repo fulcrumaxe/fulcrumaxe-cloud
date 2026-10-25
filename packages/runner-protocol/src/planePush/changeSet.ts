@@ -43,6 +43,9 @@ const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof
 /**
  * A tree from the entries a tree listing gives (GitHub's `tree` array, or any list of the same shape). Directory entries are skipped. Null when any
  * entry is not an object with string path, mode, type and sha, has a mode that is not a leaf mode, an id that is not a full object id, or repeats a path.
+ *
+ * An EMPTY listing is a tree here (a commit with no files): this reader accepts it where `treeFromLsTree` refuses empty output. The two are not interchangeable
+ * on that one input; the runner's content check treats an unreadable base as "could not know", never as "no files".
  */
 export function treeFromEntries(entries: readonly unknown[]): Map<string, TreeEntry> | null {
   const out = new Map<string, TreeEntry>();

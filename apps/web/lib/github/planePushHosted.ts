@@ -30,6 +30,8 @@ export function createLivePlanePushPort(env: NodeJS.ProcessEnv = process.env): P
   };
   return {
     mintToken: (codeRepo, accountId) => guard(() => hosted.mintToken(codeRepo, accountId)),
+    // D#6 PUBLIC-MERGE PR2b: a merge order's read credential (claim) and its one write credential (go); neither is cached or kept.
+    mintMergeToken: (codeRepo, accountId, kind) => guard(() => hosted.mintMergeToken(codeRepo, accountId, kind)),
     verifyPushed: (input) => guard(() => hosted.verifyPushed(input)),
     verifyPullRequest: (input) => guard(() => hosted.verifyPullRequest(input)),
     revokeToken: (token) => hosted.revokeToken(token),

@@ -1,3 +1,4 @@
+import type { Pool } from "pg";
 import type { BranchSyncPort } from "@fx/github";
 import { envKekSource, type KekSource } from "@fx/model-connection";
 import { contextWindowTokensFor, outsideMeterOn } from "@fx/spend";
@@ -61,6 +62,7 @@ import { loadJobSigner } from "./jobSigner.js";
 import { loadGitTicketSigner } from "./gitTicketSigner.js";
 import { createRunnerGitTicketFacade, type RunnerGitTicketFacade } from "./runnerGitTicket.js";
 import { createRunnerPlanePushFacade, type RunnerPlanePushFacade } from "./runnerPlanePush.js";
+import { createRunnerPlaneMergeStore, type RunnerPlaneMergeStore } from "./runnerPlaneMerge.js";
 import { createPlanePublish, createPublishSettler, type PlanePublish, type PlanePublishDeps } from "./planePublish.js";
 import { createRunActionFacade, type RunActionFacade } from "./runActions.js";
 import { createRunnerLeaseFacade, type RunnerLeaseFacade } from "./runnerLeases.js";
@@ -79,7 +81,7 @@ import { createStageResume, type StageResume } from "./stageResume.js";
 import { sweepSetupRequestChecks as runSetupRequestCheckSweep, type CheckSweepCounts } from "@fx/core/src/setup-requests/checkSweep.js";
 import { sweepBranchCleanups as runBranchCleanupSweep, type BranchCleanupCounts, type BranchCleanupGithub } from "./branchCleanup.js";
 import type { PrCloseOpen } from "./privatePrClose.js";
-import { sweepPrSlotHolders as runPrSlotSweep, type PrSlotSweepCounts, type PrStateOpen } from "./prSlotReconcile.js";
+import { reconcileHolder, sweepPrSlotHolders as runPrSlotSweep, type PrSlotSweepCounts, type PrStateOpen, type ReconcileOutcome } from "./prSlotReconcile.js";
 import type { VercelEnvSource } from "@fx/core/src/setup-requests/checks.js";
 import { answerAsk, type AskAnswerResult } from "@fx/core/src/decisions/answer.js";
 import { approveSubItem, type SubItemApprovalResult } from "@fx/core/src/decisions/approveSubItem.js";
@@ -214,6 +216,15 @@ export interface Worker extends PlanePublish, RunActionFacade, RunnerLeaseFacade
   sweepBranchCleanups(input: { github: BranchCleanupGithub; closePr?: PrCloseOpen }): Promise<BranchCleanupCounts>;
   /** D#598: one pass of the stale pull-request sweep (items in a pull-request stage whose pull request was closed or merged without its webhook). */
   sweepPrSlotHolders(input: { github: PrStateOpen }): Promise<PrSlotSweepCounts>;
+  /** D#6 PUBLIC-MERGE PR2b: reads ONE item's pull request from GitHub and moves the item as the webhook would when it merged or closed (the same read as the sweep, at most once per window). */
+  reconcilePrHolder(input: { github: PrStateOpen; accountId: string; workItemId: string }): Promise<ReconcileOutcome>;
+  /**
+   * D#6 PUBLIC-MERGE PR2b: runs `fn` with the runner login's pool, for a pipeline callback that apps/web supplies (the merge gate run again in the go phase of a merge
+   * order, as the review stage's `mergeGate` is handed the same pool). The pool is lent for the call and never returned.
+   */
+  withRunnerPool<T>(fn: (pool: Pool) => Promise<T>): Promise<T>;
+  /** D#6 PUBLIC-MERGE PR2b: the merge-order store (order placement, claims, the single write grant, the end of an order). Its holder owns the authority warning in runnerPlaneMerge.ts. */
+  planeMerge: RunnerPlaneMergeStore;
   /**
    * D#483 S4-b2b: one pass of the claim verifier sweep (its own cron). Works across tenants like the other sweeps and is for the cron only:
    * the list is one definer (migration 0889), the rest runs per proposal under its own tenant, and one pass at a time holds an advisory lock.
@@ -410,6 +421,8 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     const runnerGitTickets = createRunnerGitTicketFacade(pools.runnerPool, { signer: gitTicketSigner, audience: githubProxyForwardUrl(githubForward) });
     // D#598 P1f-2: the public-push token and report routes' database half. Needs no setting of its own.
     const runnerPlanePush = createRunnerPlanePushFacade(pools.runnerPool);
+    // D#6 PUBLIC-MERGE PR2b: the merge-order store, over the same login.
+    const planeMerge = createRunnerPlaneMergeStore(pools.runnerPool);
     // D#598 P1f-5b: the sandbox publish step and "Try the push again". The pool, the port and the proxy-only policy are the worker's own.
     const planePublish = createPlanePublish(options.ports.planePublish ? { ...options.ports.planePublish, pool: pools.runnerPool, port: sandboxPort, networkPolicy: () => buildPublishFirewallPolicy({ githubForward, lookup: options.lookup }) } : null);
     const runnerLeaseSweep = createRunnerLeaseSweeper(pools.runnerPool, { followUp, onError: (runId) => console.warn(JSON.stringify({ event: "runner.lease_sweep_failed", run_id: runId })) });
@@ -451,7 +464,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       return result;
     };
     const runSandboxInventory = (input: SandboxInventoryInput): Promise<SandboxInventoryResult> => sandboxInventory({ pool: pools.runnerPool, port: sandboxPort }, input);
-    return { ...planePublish, ...runActions, ...runnerLeases, ...runnerClaims, ...runnerDone, ...runnerGitTickets, ...runnerPlanePush, ...runnerLeaseSweep, sweepRunHandoffs: runHandoffs.sweepRunHandoffs, sweepParkedStages: stageResume.sweepParkedStages, sweepSetupRequestChecks: (input) => runSetupRequestCheckSweep({ pool: pools.runnerPool, envSource: input.envSource }), approveSubItem: (input) => approveSubItem({ pool: pools.receiptPool, principal: input.principal }, { workItemId: input.workItemId, key: input.key }), answerDecisionAsk: (input) => answerAsk({ pool: pools.receiptPool, principal: input.principal, ...(input.signal ? { signal: input.signal } : {}) }, { askId: input.askId, choice: input.choice }), sweepBranchCleanups: (input) => runBranchCleanupSweep({ pool: pools.runnerPool, signer: gitTicketSigner, github: input.github, ...(input.closePr ? { closePr: input.closePr } : {}) }), sweepPrSlotHolders: (input) => runPrSlotSweep({ pool: pools.runnerPool, openClient: input.github }), sweepProposalVerification: verifySweep, completeRunHandoff: runHandoffs.completeRunHandoff, completeHandoffOnDone: runHandoffs.completeHandoffOnDone, ...runnerQueue, ...runnerNotices, sweepInvariants: runInvariantTick, ...preview, ...retry, ...advance, ...resume, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, sandboxInventory: runSandboxInventory, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
+    return { ...planePublish, ...runActions, ...runnerLeases, ...runnerClaims, ...runnerDone, ...runnerGitTickets, ...runnerPlanePush, ...runnerLeaseSweep, sweepRunHandoffs: runHandoffs.sweepRunHandoffs, sweepParkedStages: stageResume.sweepParkedStages, sweepSetupRequestChecks: (input) => runSetupRequestCheckSweep({ pool: pools.runnerPool, envSource: input.envSource }), approveSubItem: (input) => approveSubItem({ pool: pools.receiptPool, principal: input.principal }, { workItemId: input.workItemId, key: input.key }), answerDecisionAsk: (input) => answerAsk({ pool: pools.receiptPool, principal: input.principal, ...(input.signal ? { signal: input.signal } : {}) }, { askId: input.askId, choice: input.choice }), sweepBranchCleanups: (input) => runBranchCleanupSweep({ pool: pools.runnerPool, signer: gitTicketSigner, github: input.github, ...(input.closePr ? { closePr: input.closePr } : {}) }), sweepPrSlotHolders: (input) => runPrSlotSweep({ pool: pools.runnerPool, openClient: input.github }), reconcilePrHolder: (input) => reconcileHolder(pools.runnerPool, input.github, input.accountId, input.workItemId), planeMerge, withRunnerPool: (fn) => fn(pools.runnerPool), sweepProposalVerification: verifySweep, completeRunHandoff: runHandoffs.completeRunHandoff, completeHandoffOnDone: runHandoffs.completeHandoffOnDone, ...runnerQueue, ...runnerNotices, sweepInvariants: runInvariantTick, ...preview, ...retry, ...advance, ...resume, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, sandboxInventory: runSandboxInventory, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
   } catch (err) {
     await pools.close();
     throw err;
@@ -471,7 +484,7 @@ let instance: Promise<Worker> | undefined;
 export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
   if (instance) return instance;
   const mine: Promise<Worker> = buildWorker(options).then(
-    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, sandboxInventory: inventory, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, claimRunnerRun, heartbeatRunnerRun, ingestRunnerEvents, beginRunnerDone, finishRunnerDone, gitTicketContext, signGitTicket, planePushGrant, planePushPairing, planePushSettleGrant, planePushReportContext, planePushRecordReport, sweepRunnerLeases, sweepRunHandoffs, completeRunHandoff, completeHandoffOnDone, publishPairedChange, retryPublish, settlePairedBuild, openPublicPullRequest, sweepRunnerQueue, sweepRunnerNotices, sweepInvariants: runInvariants, sweepParkedStages, sweepSetupRequestChecks, answerDecisionAsk, approveSubItem, sweepBranchCleanups, sweepPrSlotHolders, sweepProposalVerification, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, performRespecWorkItem, performAmendSpec, performResumeDecision, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advanceDecision, advancePrFound, advanceLightSpec, advanceRespec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceRecordMergeOnly, advanceStartFix, advanceStartCheckFix, advanceReviewRuns, advanceMergeGate, advanceVerifiedReviewGate, advanceRecordEvent, advanceCancel, advanceCancelStepRuns }) => {
+    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, sandboxInventory: inventory, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, claimRunnerRun, heartbeatRunnerRun, ingestRunnerEvents, beginRunnerDone, finishRunnerDone, gitTicketContext, signGitTicket, planePushGrant, planePushPairing, planePushSettleGrant, planePushReportContext, planePushRecordReport, sweepRunnerLeases, sweepRunHandoffs, completeRunHandoff, completeHandoffOnDone, publishPairedChange, retryPublish, settlePairedBuild, openPublicPullRequest, sweepRunnerQueue, sweepRunnerNotices, sweepInvariants: runInvariants, sweepParkedStages, sweepSetupRequestChecks, answerDecisionAsk, approveSubItem, sweepBranchCleanups, sweepPrSlotHolders, reconcilePrHolder, planeMerge, withRunnerPool, sweepProposalVerification, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, performRespecWorkItem, performAmendSpec, performResumeDecision, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advanceDecision, advancePrFound, advanceLightSpec, advanceRespec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceRecordMergeOnly, advanceStartFix, advanceStartCheckFix, advanceReviewRuns, advanceMergeGate, advanceMergeOrder, advanceVerifiedReviewGate, advanceRecordEvent, advanceCancel, advanceCancelStepRuns }) => {
       let closing: Promise<void> | undefined;
       return {
         registry,
@@ -516,6 +529,9 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
         approveSubItem,
         sweepBranchCleanups,
         sweepPrSlotHolders,
+        reconcilePrHolder,
+        planeMerge,
+        withRunnerPool,
         sweepProposalVerification,
         performStartPreview,
         previewReady,
@@ -544,6 +560,7 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
         advanceStartCheckFix,
         advanceReviewRuns,
         advanceMergeGate,
+        advanceMergeOrder,
         advanceVerifiedReviewGate,
         advanceRecordEvent,
         advanceCancel,

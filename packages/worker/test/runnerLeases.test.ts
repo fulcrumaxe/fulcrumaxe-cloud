@@ -68,6 +68,9 @@ describe("CARRY-8 still holds with the lease facade in the tree", () => {
 
   it("the package entry exports the method's types and reason list, never the factory that takes a pool", () => {
     expect("createRunnerLeaseFacade" in publicSurface).toBe(false);
+    // D#6 PUBLIC-MERGE PR2b: the merge-order store is reached as `Worker.planeMerge`; its pool-taking factory (and its words) are not part of the package entry.
+    expect("createRunnerPlaneMergeStore" in publicSurface).toBe(false);
+    expect(Object.keys(publicSurface).filter((k) => /PLANE_MERGE|PlaneMerge/.test(k))).toEqual([]);
     expect(Object.keys(publicSurface).filter((k) => /RUNNER_LOGIN|RUN_WRITER|Pool/i.test(k))).toEqual([]);
   });
 });

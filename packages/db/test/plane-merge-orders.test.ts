@@ -123,6 +123,32 @@ describe('plane_merge_orders (migration 0910)', () => {
     await expect(upd(a, claimed.id, `state = 'merged', outcome_code = 'merged', finished_at = now()`), 'merged without a write credential').rejects.toBeTruthy();
   });
 
+  it('refuses an INSERT that is not a fresh pending order (0912): every other state or counter, written directly', async () => {
+    const cols = `(account_id, work_item_id, plane_push_id, repo_id, code_repo, pr_number, expected_public_head, reviewed_head, pairing_digest, deadline_at`;
+    const born: Array<[string, string, string]> = [
+      ['already claimed', `, state, runner_id, lease_generation, lease_expires_at, attempts`, `, 'claimed', '${runnerA}', 1, now() + interval '10 minutes', 1`],
+      ['already authorized', `, state, runner_id, lease_generation, lease_expires_at, attempts, write_token_issued_at`, `, 'authorized', '${runnerA}', 1, now() + interval '10 minutes', 1, now()`],
+      ['already merged', `, state, write_token_issued_at, outcome_code, finished_at`, `, 'merged', now(), 'merged', now()`],
+      ['already expired', `, state, outcome_code, finished_at`, `, 'expired', 'runner_merge_timeout', now()`],
+      ['with a runner', `, runner_id`, `, '${runnerA}'`],
+      ['with attempts', `, attempts`, `, 2`],
+      ['with a lease generation', `, lease_generation`, `, 2`],
+      ['with a read credential mark', `, lease_generation, state, runner_id, lease_expires_at, read_token_generation`, `, 1, 'claimed', '${runnerA}', now() + interval '10 minutes', 1`],
+      ['with an outcome code', `, outcome_code`, `, 'x_code'`],
+    ];
+    for (const [label, extraCols, extraVals] of born) {
+      const item = await freshItem(a);
+      await expect(
+        as(a, (c) =>
+          c.query(`INSERT INTO plane_merge_orders ${cols}${extraCols}) VALUES ($1, $2, $3, $4, 'acme/pub', 7, $5, $6, $7, now() + interval '1 hour'${extraVals})`, [a.accountId, item.itemId, item.pushId, a.repoId, HEAD, REVIEWED, DIGEST]),
+        ),
+        label,
+      ).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });
+    }
+    // The ordinary insert still works.
+    expect((await insertOrder(a, await freshItem(a))).rows[0]!.state).toBe('pending');
+  });
+
   it('allows one open order per item, and another once it is finished', async () => {
     const item = await freshItem(a);
     const first = (await insertOrder(a, item)).rows[0]!.id;

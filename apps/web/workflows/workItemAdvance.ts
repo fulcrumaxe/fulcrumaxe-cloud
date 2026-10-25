@@ -13,6 +13,7 @@ import {
   findPrBody,
   fixDescentBody,
   mergeGateBody,
+  mergeOrderBody,
   prFoundBody,
   recordMergeOnlyBody,
   recordRoundBody,
@@ -27,6 +28,7 @@ import {
   type DescentOut,
   type FixOut,
   type GateOut,
+  type MergeOrderOut,
   type MergeOnlyOut,
   type PrLookup,
   type ReviewCtx,
@@ -126,6 +128,12 @@ const REVIEW_POLL_MS = 30_000;
 const REVIEW_WAIT_MS = 45 * 60_000;
 /** D#598 P7b: how often a round that met unfinished CI or repo-wide guards asks again, and how long it waits before the driver stops (`ci_wait_timeout`). */
 const CI_POLL_MS = 60_000;
+/**
+ * D#6 PUBLIC-MERGE PR2b: how often a workflow whose gate handed the merge to the customer's runner (`merge_delegated`) looks at the order, and the most looks it makes.
+ * The order's own deadline (60 minutes, enforced by the step) ends the wait first; the count only bounds the loop. The polling exists only while an order is open.
+ */
+const MERGE_ORDER_POLL_MS = 30_000;
+const MERGE_ORDER_MAX_POLLS = 130;
 /** After the first ten minutes the round asks every two minutes: a long wait costs about half the GitHub calls. */
 const CI_POLL_SLOW_MS = 120_000;
 const CI_POLL_FAST_FOR_MS = 10 * 60_000;
@@ -391,6 +399,11 @@ export async function advanceStartFixStep(
 export async function advanceFixDescentStep(ctx: Pick<ReviewCtx, "repoId" | "owner" | "name" | "executionMode" | "prExecutionMode">, base: string, head: string): Promise<DescentOut> {
   "use step";
   return fixDescentBody(openInstallationHttp, ctx, base, head);
+}
+
+export async function advanceMergeOrderStep(accountId: string, userId: string, workItemId: string, haltEpoch: number): Promise<MergeOrderOut> {
+  "use step";
+  return mergeOrderBody(await getWorker(), { accountId, userId, workItemId, haltEpoch });
 }
 
 export async function advanceMergeGateStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, prNumber: number): Promise<GateOut> {
@@ -1367,6 +1380,43 @@ async function personFixRound(args: AdvanceStartArgs, ctx: ReviewCtx): Promise<{
   return { ctx: next };
 }
 
+/**
+ * D#6 PUBLIC-MERGE PR2b: the gate placed a merge order and the customer's runner merges the public pull request. Waits (a durable sleep, then one read of the order)
+ * until it is over: merged (GitHub says so, read by the cloud), a head moved (review again), or a stop for a person with the order's fixed reason. An order past its
+ * 60-minute deadline is expired by the step itself (`runner_merge_timeout`).
+ */
+async function waitForMergeOrder(args: AdvanceStartArgs, pr: { number: number; headSha: string }): Promise<{ next: "continue" } | { next: "end"; result: Result }> {
+  const { accountId, userId, workItemId } = args;
+  const stop = async (code: string, record: boolean): Promise<{ next: "end"; result: Result }> => {
+    if (record) await advanceEventStep(accountId, userId, workItemId, { kind: "merge_gate", dedupeKey: `${pr.headSha}:order:${code}`, code: "ready_human_merges", reasons: [code], headSha: pr.headSha, prNumber: pr.number });
+    await advanceLogStep("advance.merge_order", { work_item_id: workItemId, pr: pr.number, state: "stopped", code });
+    return { next: "end", result: { status: "ready_human_merges", detail: code } };
+  };
+  for (let polls = 0; polls < MERGE_ORDER_MAX_POLLS; polls++) {
+    const order = await advanceMergeOrderStep(accountId, userId, workItemId, args.haltEpoch);
+    if (order.state === "merged") {
+      await advanceLogStep("advance.merge_order", { work_item_id: workItemId, pr: pr.number, state: "merged", code: order.code ?? "" });
+      return { next: "end", result: { status: "merged" } };
+    }
+    if (order.state === "head_moved") {
+      await advanceLogStep("advance.merge_order", { work_item_id: workItemId, pr: pr.number, state: "head_moved", code: order.code ?? "" });
+      return { next: "continue" };
+    }
+    // The go phase already recorded the gate's own reasons for a block it found; a stop the gate never saw (a claim-time takeover or pairing change, a go phase
+    // that was refused or found the pull request closed) is recorded here, so the card says why.
+    if (order.state === "blocked") return stop(order.code ?? "runner_merge_failed", order.gateRecorded !== true);
+    if (order.state === "failed") return stop(order.code ?? "runner_merge_failed", true);
+    if (order.state === "refused") {
+      await stopped(args, "merge_order", order.code ?? "refused", { head: pr.headSha, pr: pr.number });
+      return { next: "end", result: { status: "needs_human", detail: order.code ?? "refused" } };
+    }
+    // `none` (an order that should exist does not) is a stop, not a wait.
+    if (order.state === "none") return stop("runner_merge_failed", true);
+    await sleep(MERGE_ORDER_POLL_MS);
+  }
+  return stop("runner_merge_timeout", true);
+}
+
 async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promise<Result> {
   const { accountId, userId, workItemId, actionId } = args;
 
@@ -1423,6 +1473,11 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
         const gate = await advanceMergeGateStep(accountId, userId, workItemId, args.haltEpoch, pr.number);
         await advanceLogStep("advance.merge_gate", { work_item_id: workItemId, pr: pr.number, outcome: gate.outcome, reasons: gate.reasons.join(","), status: gate.status });
         if (gate.outcome === "head_moved") continue;
+        if (gate.outcome === "merge_delegated") {
+          const waited = await waitForMergeOrder(args, pr);
+          if (waited.next === "continue") continue;
+          return waited.result;
+        }
         if (gate.outcome === "error" || gate.outcome === "refused") await stopped(args, "merge_gate", gate.reasons[0] ?? gate.outcome, { head: pr.headSha, pr: pr.number });
         return { status: gate.outcome, detail: gate.reasons.join(",") || undefined };
       }
@@ -1483,6 +1538,11 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       await advanceLogStep("advance.merge_gate", { work_item_id: workItemId, pr: pr.number, outcome: gate.outcome, reasons: gate.reasons.join(","), status: gate.status });
       // The head moved while the gate ran: review the new head.
       if (gate.outcome === "head_moved") continue;
+      if (gate.outcome === "merge_delegated") {
+        const waited = await waitForMergeOrder(args, pr);
+        if (waited.next === "continue") continue;
+        return waited.result;
+      }
       if (gate.outcome === "error" || gate.outcome === "refused") await stopped(args, "merge_gate", gate.reasons[0] ?? gate.outcome, { head: pr.headSha, pr: pr.number });
       return { status: gate.outcome, detail: gate.reasons.join(",") || undefined };
     }

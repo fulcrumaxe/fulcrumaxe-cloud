@@ -150,7 +150,12 @@ export interface CiSnapshot {
   protectionUnreadable?: boolean;
 }
 
-export type MergeCallOutcome = { merged: true } | { merged: false; httpStatus: number };
+/**
+ * What the one merge call answered. Two planes, `runner_local`: the port's merge call does not merge. It hands the merge to the customer's runner (an order
+ * placed, or the single write credential authorized) and answers `delegated: true`; or, when it could not even do that, `delegated: false` with the reason a
+ * person sees. Neither is a refusal by the host, so neither is classified from a re-read.
+ */
+export type MergeCallOutcome = { merged: true } | { merged: false; httpStatus: number } | { merged: false; delegated: true } | { merged: false; delegated: false; reason: MergeBlockReason };
 
 /** GitHub's documented `mergeable_state` values. A value GitHub adds later reads as `unknown`, which never classifies anything. */
 export type MergeableState = "clean" | "behind" | "dirty" | "blocked" | "unstable" | "has_hooks" | "draft" | "unknown";
@@ -311,6 +316,12 @@ export type MergeBlockReason =
   | "public_pr_not_open"
   /** Two planes, `runner_local`: everything else is met, but the cloud does not merge such a repository's pull request and no runner step exists yet; a person merges. */
   | "runner_merge_unavailable"
+  /** Two planes, `runner_local`: the runner did not finish a merge order in time (60 minutes); a person merges. */
+  | "runner_merge_timeout"
+  /** Two planes, `runner_local`: the runner's merge order failed (its attempts ran out, or the credential could not be issued); a person merges. */
+  | "runner_merge_failed"
+  /** Two planes, `runner_local`: the runner said it merged and GitHub does not say so (or names another head); nothing is recorded as merged and a person looks. */
+  | "runner_report_mismatch"
   /** D#598 P3b (C3 R-598-P5b-6): the PR's base is not the repository's default branch, so it builds on a pull request that has not merged. */
   | "stacked_on_open_pr"
   /** Rides with `stacked_on_open_pr` when the parent's pull request number is known: the number the page puts in its sentence. */
@@ -329,6 +340,8 @@ export type MergeBlockReason =
 
 export type MergeGateResult =
   | { outcome: "merged"; headSha: string }
+  /** Two planes, `runner_local`: every condition was met and the merge was handed to the customer's runner (see `MergeCallOutcome`). Nothing merged, nothing marked. */
+  | { outcome: "merge_delegated"; headSha: string }
   | { outcome: "ready_human_merges"; headSha: string; reasons: MergeBlockReason[] }
   /** The PR is closed or already merged: nothing to gate, nothing marked
    * (a merged PR must never be labelled "ready, human merges"). */
@@ -705,6 +718,7 @@ export async function runMergeGate(deps: MergeGateDeps, input: MergeGateInput): 
   if (outcome.merged === true) {
     return { outcome: "merged", headSha };
   }
+  if ("delegated" in outcome) return outcome.delegated ? { outcome: "merge_delegated", headSha } : markHuman(deps, input.pr, headSha, [outcome.reason]);
   // A refused merge is classified from structured re-reads (D#519 MQ1), never from GitHub's message text and never by assuming a
   // status means one thing: 405 covers a conflict, an out-of-date branch and a protection refusal alike, and a 422 may or may not
   // be a moved head.
