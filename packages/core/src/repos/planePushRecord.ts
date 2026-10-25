@@ -84,6 +84,8 @@ export interface PlanePushRow {
   branch: string;
   headSha: string | null;
   tipSha: string | null;
+  /** The private head the public head was built from (null for a row written before the column, or before any push). */
+  sourceHead: string | null;
   prNumber: number | null;
   prUrl: string | null;
   state: PlanePushState;
@@ -113,6 +115,7 @@ interface Row {
   branch: string;
   head_sha: string | null;
   tip_sha: string | null;
+  source_head: string | null;
   pr_number: number | null;
   pr_url: string | null;
   state: PlanePushState;
@@ -123,7 +126,7 @@ interface Row {
   updated_at: Date;
 }
 
-const COLUMNS = `id, account_id, work_item_id, repo_id, code_repo, pairing_digest, branch, head_sha, tip_sha, pr_number, pr_url, state, code, refusals, managed_by_person_at, created_at, updated_at`;
+const COLUMNS = `id, account_id, work_item_id, repo_id, code_repo, pairing_digest, branch, head_sha, tip_sha, source_head, pr_number, pr_url, state, code, refusals, managed_by_person_at, created_at, updated_at`;
 
 function toRow(r: Row): PlanePushRow {
   return {
@@ -136,6 +139,7 @@ function toRow(r: Row): PlanePushRow {
     branch: r.branch,
     headSha: r.head_sha,
     tipSha: r.tip_sha,
+    sourceHead: r.source_head,
     prNumber: r.pr_number,
     prUrl: r.pr_url,
     state: r.state,
@@ -225,6 +229,8 @@ export interface VerifiedOutcome {
   refusals?: readonly PlaneRefusalEntry[];
   headSha?: string;
   tipSha?: string;
+  /** The private head this public head was built from; stored with the head and never overwritten by an outcome that carries none. */
+  sourceHead?: string;
   prNumber?: number;
   prUrl?: string;
 }
@@ -263,6 +269,7 @@ export async function recordVerifiedOutcome(client: Queryable, input: { accountI
   if (needSha && (!o.headSha || !SHA.test(o.headSha) || !o.tipSha || !SHA.test(o.tipSha))) bad('needs the pushed head and the tip it was built on');
   if (o.headSha !== undefined && !SHA.test(o.headSha)) bad('head is not a full sha');
   if (o.tipSha !== undefined && !SHA.test(o.tipSha)) bad('tip is not a full sha');
+  if (o.sourceHead !== undefined && !SHA.test(o.sourceHead)) bad('source head is not a full sha');
   if (o.state === 'pr_opened' && (!Number.isSafeInteger(o.prNumber) || o.prNumber! <= 0 || typeof o.prUrl !== 'string')) bad('needs the pull request number and url');
   if (o.state === 'refused' && (o.code === undefined || !CODE.test(o.code))) bad('needs a refusal code');
   if (o.state !== 'refused' && o.code !== undefined) bad('only a refusal carries a code');
@@ -282,7 +289,8 @@ export async function recordVerifiedOutcome(client: Queryable, input: { accountI
             head_sha = COALESCE($6, head_sha),
             tip_sha = COALESCE($7, tip_sha),
             pr_number = COALESCE($8, pr_number),
-            pr_url = COALESCE($9, pr_url)
+            pr_url = COALESCE($9, pr_url),
+            source_head = CASE WHEN $6::text IS NULL THEN source_head ELSE $11::text END
       WHERE id = $1 AND account_id = $2 AND managed_by_person_at IS NULL AND NOT (state = ANY ($10::text[]))
       RETURNING ${COLUMNS}`,
     [
@@ -296,6 +304,7 @@ export async function recordVerifiedOutcome(client: Queryable, input: { accountI
       o.prNumber ?? null,
       o.prUrl ?? null,
       SETTLED,
+      o.sourceHead ?? null,
     ],
   );
   return rows[0] ? toRow(rows[0]) : null;
@@ -305,13 +314,13 @@ export async function recordVerifiedOutcome(client: Queryable, input: { accountI
  * FIXROUND-REPUBLISH (R2-c1): moves the stamp to the head a fix round's update pushed (verified against GitHub by the caller). Only an open, platform-owned pull request moves: a row a person took over, or one in
  * any other state, is left alone and null comes back. The state stays `pr_opened`: the same pull request, a new head.
  */
-export async function recordUpdatedHead(client: Queryable, input: { accountId: string; id: string; headSha: string; tipSha: string }): Promise<PlanePushRow | null> {
-  if (!SHA.test(input.headSha) || !SHA.test(input.tipSha)) throw new PlanePushRecordError('bad_outcome', 'plane push update: head and tip must be full shas');
+export async function recordUpdatedHead(client: Queryable, input: { accountId: string; id: string; headSha: string; tipSha: string; sourceHead: string | null }): Promise<PlanePushRow | null> {
+  if (!SHA.test(input.headSha) || !SHA.test(input.tipSha) || (input.sourceHead !== null && !SHA.test(input.sourceHead))) throw new PlanePushRecordError('bad_outcome', 'plane push update: head and tip must be full shas');
   const { rows } = await client.query<Row>(
-    `UPDATE plane_pushes SET head_sha = $3, tip_sha = $4
+    `UPDATE plane_pushes SET head_sha = $3, tip_sha = $4, source_head = $5
       WHERE id = $1 AND account_id = $2 AND state = 'pr_opened' AND managed_by_person_at IS NULL
       RETURNING ${COLUMNS}`,
-    [input.id, input.accountId, input.headSha, input.tipSha],
+    [input.id, input.accountId, input.headSha, input.tipSha, input.sourceHead],
   );
   return rows[0] ? toRow(rows[0]) : null;
 }

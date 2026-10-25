@@ -247,6 +247,19 @@ export interface MergeGateInput {
    * or `autoMerge` says. Absent or false: today's rule.
    */
   humanMergeOnly?: boolean;
+  /**
+   * Two planes: the head the reviewers judged, when the pull request merged is a different commit (a paired item's public pull request; the reviewers
+   * ran on the private run branch's head). Reviewer records are read at this head. CI, the `sha` bound to the merge and the marking stay on the head
+   * of `pr`. Absent: the head of `pr` is both, as for a single-plane repository.
+   */
+  reviewedHeadSha?: string;
+  /**
+   * Two planes: the head of `pr` the caller already checked (its stamp, its changed files). The gate reads the pull request itself and, when that head is
+   * not this one, stops with `head_moved` BEFORE reading CI or merging, so every decision is made for one commit. Absent: no such check.
+   */
+  expectedHeadSha?: string;
+  /** Stops the caller already knows (e.g. `public_head_unrecorded`); any entry means the gate does not merge and marks the pull request for a person. */
+  extraBlockReasons?: readonly MergeBlockReason[];
 }
 
 export type ReviewMode = "cloud" | "runner_local_off" | "runner_local_on";
@@ -282,6 +295,12 @@ export type MergeBlockReason =
   | "local_reviews_passed_advisory"
   | "auto_merge_not_allowed"
   | "human_merge_only"
+  /** Two planes: the public pull request's head is not the one the platform last pushed (a push not recorded yet, or a branch changed by someone else). */
+  | "public_head_unrecorded"
+  /** Two planes: a person took the public branch over, so what it holds was not reviewed here; the merge is theirs. */
+  | "public_branch_person_managed"
+  /** Two planes: the public head was built from a private head other than the one the reviewers cleared. */
+  | "public_head_not_reviewed"
   /** D#598 P3b (C3 R-598-P5b-6): the PR's base is not the repository's default branch, so it builds on a pull request that has not merged. */
   | "stacked_on_open_pr"
   /** Rides with `stacked_on_open_pr` when the parent's pull request number is known: the number the page puts in its sentence. */
@@ -630,8 +649,18 @@ export async function runMergeGate(deps: MergeGateDeps, input: MergeGateInput): 
     return markHuman(deps, input.pr, String(headSha), reasons);
   }
 
+  // Two planes: the caller checked one head of this pull request; if it is not the head now, nothing below (CI, reviewer rows, the merge) is for it.
+  if (input.expectedHeadSha !== undefined && input.expectedHeadSha !== headSha) {
+    return { outcome: "head_moved", staleHeadSha: input.expectedHeadSha, newHeadSha: headSha };
+  }
+  // A reviewed head that is given must be well formed; it is never replaced by the pull request's own head.
+  if (input.reviewedHeadSha !== undefined && !SHA_PATTERN.test(input.reviewedHeadSha)) {
+    reasons.push("head_sha_malformed");
+    return markHuman(deps, input.pr, headSha, reasons);
+  }
   const roles = gatedRoles(input);
-  const rows = await loadEffectiveRunsOnSha(deps.pool, input.accountId, input.workItemId, headSha);
+  const evidenceHead = input.reviewedHeadSha ?? headSha;
+  const rows = await loadEffectiveRunsOnSha(deps.pool, input.accountId, input.workItemId, evidenceHead);
   // A head with no reviewer rows at all has never had its reviews
   // dispatched (or a dispatch after a moved head threw before writing any):
   // request them, so a retry cannot strand a new head with no reviews.
@@ -654,6 +683,7 @@ export async function runMergeGate(deps: MergeGateDeps, input: MergeGateInput): 
   if (allowed !== true) reasons.push("auto_merge_not_allowed");
   // D#6 M1G-a: the operator's lock. A reason is always added, so the merge call below is unreachable for a locked repo.
   if (input.humanMergeOnly === true) reasons.push("human_merge_only");
+  for (const r of input.extraBlockReasons ?? []) if (!reasons.includes(r)) reasons.push(r);
 
   if (reasons.length > 0) {
     return markHuman(deps, input.pr, headSha, reasons);

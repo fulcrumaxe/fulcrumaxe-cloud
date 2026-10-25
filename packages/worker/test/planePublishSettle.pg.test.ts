@@ -372,7 +372,7 @@ describe("settling a paired sandbox build, and opening the public pull request a
 
       expect(await reopen()).toEqual({ kind: "opened", prNumber: 9, attemptNo: 1 });
       const row = await planeRow();
-      expect(row).toMatchObject({ state: "pr_opened", pr_number: 9, pr_url: "https://github.com/acme/widgets-public/pull/9", head_sha: HEAD, tip_sha: TIP, code: null });
+      expect(row).toMatchObject({ state: "pr_opened", pr_number: 9, pr_url: "https://github.com/acme/widgets-public/pull/9", head_sha: HEAD, tip_sha: TIP, source_head: PRIVATE_HEAD, code: null });
       expect(gh.opened).toEqual([{ accountId: expect.any(String), codeRepo: "acme/widgets-public", branch: row.branch, title: expect.any(String), body: expect.any(String) }]);
       expect(gh.opened[0]!.body).not.toContain("Add a thing");
       const [push, pr] = await attempts();

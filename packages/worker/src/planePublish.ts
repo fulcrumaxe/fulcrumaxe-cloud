@@ -317,6 +317,8 @@ async function attempt(deps: PlanePublishDeps, accountId: string, which: { runId
     crashed = true;
     ({ outcome, label } = { outcome: { state: "refused", code: PUBLISH_CODES.hookCrashed }, label: PUBLISH_CODES.hookCrashed });
   }
+  // The public head is stamped with the private head it was built from (read before the sandbox started), so the merge gate can tie the two.
+  if (outcome.headSha !== undefined) outcome = { ...outcome, sourceHead: head };
   const seconds = Math.max(0, Math.round((now() - started) / 1000));
   // The price comes from the vCPUs this sandbox was created with (1), not the pinned 2 every agent sandbox has.
   const cost = sandboxRunCost([{ ownDurationMs: seconds * 1000 }], { vcpus: PLANE_PUBLISH_VCPUS });
@@ -519,13 +521,14 @@ async function republish(deps: PlanePublishDeps, accountId: string, facts: Facts
     identity, commitTime: Math.floor(now() / 1000),
     pairing: { overlayGlobs: pairing.overlayGlobs, identifierRulesPath: pairing.identifierRulesPath, planDataRulesPath: pairing.planDataRulesPath },
   };
+  const sourceHead: string = head;
   const finish = (end: UpdateEnd, extra: { failed: boolean; usd: number; envelope: Record<string, unknown> | null }) =>
     finishAttempt(deps.pool, accountId, {
       pushId: facts.pushId, attemptId, runId: publishRunId, outcome: null, label: end.kind === "updated" ? "updated" : end.label, ...extra,
       after: async (client) => {
         if (end.kind === "updated") {
           // Only an open, platform-owned row moves; a person who took the branch over meanwhile keeps it.
-          await recordUpdatedHead(client, { accountId, id: facts.pushId, headSha: end.headSha, tipSha: end.tipSha });
+          await recordUpdatedHead(client, { accountId, id: facts.pushId, headSha: end.headSha, tipSha: end.tipSha, sourceHead });
         } else {
           await recordRepublishRefusal(client, who, { code: end.code, prNumber: null, moveToNeedsPerson: true, attempt: facts.runId });
         }
@@ -645,8 +648,8 @@ async function noteFooterSkipped(pool: Pool, accountId: string, runId: string, f
 
 async function openPublicPullRequest(deps: PlanePublishDeps, accountId: string, workItemId: string): Promise<OpenPublicResult> {
   const { rows } = await withTenant(deps.pool, accountId, (c) =>
-    c.query<{ id: string; code_repo: string; branch: string; state: PlanePushState; head_sha: string | null; tip_sha: string | null; managed: boolean; title: string; run_id: string | null; pairing_repo: string | null; pr_footer: string | null; issue: string | null }>(
-      `SELECT p.id, p.code_repo, p.branch, p.state, p.head_sha, p.tip_sha, p.managed_by_person_at IS NOT NULL AS managed, COALESCE(w.title, '') AS title,
+    c.query<{ id: string; code_repo: string; branch: string; state: PlanePushState; head_sha: string | null; tip_sha: string | null; source_head: string | null; managed: boolean; title: string; run_id: string | null; pairing_repo: string | null; pr_footer: string | null; issue: string | null }>(
+      `SELECT p.id, p.code_repo, p.branch, p.state, p.head_sha, p.tip_sha, p.source_head, p.managed_by_person_at IS NOT NULL AS managed, COALESCE(w.title, '') AS title,
               (SELECT r.id FROM agent_runs r WHERE r.account_id = p.account_id AND r.work_item_id = p.work_item_id AND r.role = 'executor' ORDER BY r.created_at DESC, r.id LIMIT 1) AS run_id,
               (SELECT rp.code_repo FROM repo_pairing rp WHERE rp.account_id = p.account_id AND rp.repo_id = p.repo_id) AS pairing_repo,
               (SELECT rp.pr_footer FROM repo_pairing rp WHERE rp.account_id = p.account_id AND rp.repo_id = p.repo_id) AS pr_footer, w.gh_number::text AS issue
@@ -688,7 +691,7 @@ async function openPublicPullRequest(deps: PlanePublishDeps, accountId: string, 
     const opened = await deps.hosted.openPullRequest({ accountId, codeRepo: p.code_repo, branch: p.branch, title: text.title, body: text.body });
     const pr = await deps.hosted.verifyPullRequest({ accountId, codeRepo: p.code_repo, branch: p.branch, number: opened.number });
     if (pr === null || !publicPullRequestUrlMatches(p.code_repo, opened.number, pr.url)) return await stop(PUBLISH_CODES.reportMismatch);
-    await end("pr_opened", { state: "pr_opened", headSha: p.head_sha, tipSha: p.tip_sha, prNumber: opened.number, prUrl: pr.url });
+    await end("pr_opened", { state: "pr_opened", headSha: p.head_sha, tipSha: p.tip_sha, ...(p.source_head !== null ? { sourceHead: p.source_head } : {}), prNumber: opened.number, prUrl: pr.url });
     return { kind: "opened", prNumber: opened.number, attemptNo };
   } catch (err) {
     // fx-swallow-ok: GitHub's answer becomes one of two fixed words; the item stays "pushed, pull request not opened" and can be tried again

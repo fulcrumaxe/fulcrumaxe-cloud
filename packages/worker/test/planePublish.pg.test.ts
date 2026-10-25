@@ -166,7 +166,7 @@ describe("the paired publish step [pg]", () => {
       const input = JSON.parse(fake.state.writtenFiles.find((f) => f.path.endsWith("input.json"))!.content);
       const row = await planeRow();
       expect(input).toMatchObject({ own: { owner: "acme", name: "widgets" }, codeRepo: "acme/widgets-public", privateBase: BASE, privateHead: PRIVATE_HEAD, privateDefaultTip: DEFAULT_HEAD, branch: row.branch });
-      expect(row).toMatchObject({ state: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9, pr_url: "https://github.com/acme/widgets-public/pull/9", code: null });
+      expect(row).toMatchObject({ state: "pr_opened", head_sha: HEAD, tip_sha: TIP, source_head: PRIVATE_HEAD, pr_number: 9, pr_url: "https://github.com/acme/widgets-public/pull/9", code: null });
       expect(github.asked).toEqual(["pushed", "pr"]);
     });
 
@@ -208,7 +208,7 @@ describe("the paired publish step [pg]", () => {
       output = () => say({ phase: "pr_failed", head_sha: HEAD, tip_sha: TIP });
       expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId })).toMatchObject({ kind: "published", state: "pushed_pr_not_opened" });
       expect(github.asked).toEqual(["pushed"]);
-      expect(await planeRow()).toMatchObject({ state: "pushed_pr_not_opened", head_sha: HEAD, pr_number: null });
+      expect(await planeRow()).toMatchObject({ state: "pushed_pr_not_opened", head_sha: HEAD, source_head: PRIVATE_HEAD, pr_number: null });
     });
 
     it("a hook refusal is recorded with its code and place-plus-rule entries", async () => {

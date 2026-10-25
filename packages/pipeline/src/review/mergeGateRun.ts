@@ -8,7 +8,9 @@ import { readRecordedRunnerPullRequest } from "@fx/runner";
 import { createGitHubMergeGatePort, isLocalGitHubHttp, type GitHubHttp } from "../build/githubMergePort.js";
 import { carriedRunsHead, gateReviewerReasons, loadRunsOnSha, runMergeGate, RUNNER_ADMIN_OK_SQL, SHA_PATTERN, type MergeBlockReason, type ReviewMode } from "../build/mergeGate.js";
 import { listChangedFiles, listChangedFilesLocal, postReviewStatus } from "./githubReads.js";
+import { checkPublicContent, type ContentCheck } from "./publicContentMatch.js";
 import { loadReviewContext, type ReviewContext } from "./context.js";
+import type { PublicPullRequestLookup } from "./publicPullRequest.js";
 import { reviewPlanFor } from "./reviewPlan.js";
 import { securityTriggers } from "./securityTrigger.js";
 
@@ -111,7 +113,24 @@ export function createReviewGitHubPort(deps: { pool: Pool; http: GitHubHttp }, c
   });
 }
 
-export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; localReviewOptIn?: LocalReviewOptInPort }, input: MergeGateRunInput): Promise<MergeGateRunResult> {
+/**
+ * Two planes. A paired item has a private pull request (the run branch's copy, which the reviewers judged) and a public one on the code repository (the
+ * one that can merge: private main only moves by sync commits). When `publicPlane` is given and the item has an open public pull request (its `read`), the gate reads and merges THAT pull request at its live head: its CI and required contexts, its changed files (for the
+ * security and tier decisions), the review status and the merge. Reviewer records stay bound to the private head the reviewers judged, because that
+ * is the commit they saw; the two heads are different commits by construction. What binds the public head to the platform's own push is its stamp
+ * (`plane_pushes.head_sha`): a live head that is not the stamped one (and no person took the branch over) adds `public_head_unrecorded`, so nothing
+ * merges. The auto-merge opt-in, the operator's human-merge lock and every ruleset refusal apply unchanged, and a refused merge stays a human merge.
+ * The private copy is not merged here. A `runner_local` repo, and a paired item whose public pull request is not open yet, take the path below as before.
+ */
+export type OpenPublicHttp = (ctx: { repoId: string; owner: string; name: string; executionMode: string }) => Promise<GitHubHttp>;
+
+export interface PublicPlanePort {
+  open: OpenPublicHttp;
+  /** Finds the item's public pull request (`readPublicPullRequest(pool)`); injected so this file names no repository or plane. */
+  read: PublicPullRequestLookup;
+}
+
+export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; localReviewOptIn?: LocalReviewOptInPort; publicPlane?: PublicPlanePort }, input: MergeGateRunInput): Promise<MergeGateRunResult> {
   const { pool, http } = deps;
   const { accountId, workItemId, prNumber } = input;
   const loaded = await loadReviewContext(pool, accountId, workItemId);
@@ -130,17 +149,65 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
   const localHttp = ctx.executionMode === "runner_local" ? http : null;
   const port = createReviewGitHubPort({ pool, http }, ctx, { accountId, workItemId, prNumber });
 
-  // 1. The head the gate will bind to.
+  // 1. The head the reviewers judged (the item's own pull request), and, for a paired item, the public pull request that merges.
   const head = await port.getPullRequest(pr);
   const headSha = head.headSha;
+  const publicPr = deps.publicPlane !== undefined && localHttp === null ? await deps.publicPlane.read(accountId, workItemId) : null;
+  let mergeHttp = http;
+  let mergeTarget = { owner: ctx.owner, name: ctx.name, prNumber };
+  let mergePort = port;
+  let mergeRef = pr;
+  let mergeHead = headSha;
+  let mergeOpen = head.state === "open" && !head.merged;
+  let mergeBaseRef = head.baseRef;
+  const extraBlockReasons: MergeBlockReason[] = [];
+  if (publicPr !== null && deps.publicPlane !== undefined) {
+    mergeHttp = await deps.publicPlane.open({ repoId: ctx.repoId, owner: publicPr.owner, name: publicPr.name, executionMode: ctx.executionMode });
+    mergeTarget = { owner: publicPr.owner, name: publicPr.name, prNumber: publicPr.number };
+    mergePort = createReviewGitHubPort({ pool, http: mergeHttp }, { ...ctx, owner: publicPr.owner, name: publicPr.name }, { accountId, workItemId, prNumber: publicPr.number });
+    mergeRef = { repoId: ctx.repoId, prNumber: publicPr.number };
+    const live = await mergePort.getPullRequest(mergeRef);
+    mergeHead = live.headSha;
+    mergeOpen = live.state === "open" && !live.merged;
+    mergeBaseRef = live.baseRef;
+    // Every one of these is a stop: a person's branch is theirs to merge, and a head the platform did not push from the head the reviewers cleared is unproven.
+    if (publicPr.managedByPerson) extraBlockReasons.push("public_branch_person_managed");
+    else if (!SHA_PATTERN.test(mergeHead) || publicPr.stampedHead === null || publicPr.stampedHead !== mergeHead || publicPr.sourceHead === null) extraBlockReasons.push("public_head_unrecorded");
+    else if (publicPr.sourceHead !== headSha) extraBlockReasons.push("public_head_not_reviewed");
+  }
   let status: StatusOutcome = "skipped";
   let gateSecurityTrigger = false;
 
-  if (head.state === "open" && !head.merged && SHA_PATTERN.test(headSha)) {
+  // A paired item is judged on its public pull request: the private copy being closed or merged does not skip the file read below.
+  const readable = publicPr !== null ? mergeOpen && SHA_PATTERN.test(mergeHead) && SHA_PATTERN.test(headSha) : head.state === "open" && !head.merged && SHA_PATTERN.test(headSha);
+  // The changed files (security trigger, tier) are read for the public head checked here; the gate re-reads the pull request and stops if it moved.
+  if (publicPr !== null && mergeOpen && !readable) extraBlockReasons.push("head_sha_malformed");
+  if (readable) {
     // 2. Who is required on that head.
-    const files = localHttp !== null && isLocalGitHubHttp(localHttp)
-      ? await listChangedFilesLocal(localHttp, { owner: ctx.owner, name: ctx.name, pr: prNumber })
-      : await listChangedFiles(http, { owner: ctx.owner, name: ctx.name, pr: prNumber });
+    // A paired item reads NO live file list: its changed files (for the security trigger and the tier) are the public change set at the bound commits, which the
+    // content check below computes. When it could not (or a stop is already known), the list is incomplete, which fires the security trigger.
+    let content: ContentCheck | null = null;
+    if (publicPr !== null) {
+      content = extraBlockReasons.length > 0
+        ? { same: false, files: [], incomplete: false }
+        : await checkPublicContent({
+            privateHttp: http,
+            privateRepo: { owner: ctx.owner, name: ctx.name },
+            privateBaseRef: head.baseRef,
+            reviewedHead: headSha,
+            publicHttp: mergeHttp,
+            publicRepo: { owner: mergeTarget.owner, name: mergeTarget.name },
+            publicBaseRef: mergeBaseRef,
+            publicHead: mergeHead,
+            overlayGlobs: publicPr.overlayGlobs,
+          });
+      if (extraBlockReasons.length === 0 && !content.same) extraBlockReasons.push("public_head_not_reviewed");
+    }
+    const files = content !== null
+      ? ({ ok: true, files: content.files, truncated: content.incomplete } as const)
+      : localHttp !== null && isLocalGitHubHttp(localHttp)
+        ? await listChangedFilesLocal(localHttp, { owner: ctx.owner, name: ctx.name, pr: prNumber })
+        : await listChangedFiles(http, { owner: ctx.owner, name: ctx.name, pr: prNumber });
     if (!files.ok) throw new Error(`merge gate: files ${files.reason}`);
     const plan = reviewPlanFor({
       tier: ctx.tier,
@@ -152,12 +219,15 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
     // 3. Owner ruling B: only when the reviewers clear this head by our records.
     const rows = await loadRunsOnSha(pool, accountId, workItemId, headSha);
     // Never in `runner_local_off`: the opt-in is off, so the gate cannot merge on these reviews and our status must not say it can.
-    if (reviewMode !== "runner_local_off" && gateReviewerReasons(plan.roles, rows, reviewMode).length === 0) {
-      const posted = await postReviewStatus(http, { owner: ctx.owner, name: ctx.name, sha: headSha, local: reviewMode === "runner_local_on" });
+    // The status goes on the commit that merges (the public head for a paired item), and only on a head the platform pushed.
+    // A paired item's public head is read once more right before the post: a status never goes on a head that moved after the checks above.
+    const stillThere = publicPr === null || (await mergePort.getPullRequest(mergeRef)).headSha === mergeHead;
+    if (reviewMode !== "runner_local_off" && extraBlockReasons.length === 0 && stillThere && gateReviewerReasons(plan.roles, rows, reviewMode).length === 0) {
+      const posted = await postReviewStatus(mergeHttp, { owner: mergeTarget.owner, name: mergeTarget.name, sha: mergeHead, local: reviewMode === "runner_local_on" });
       status = posted.ok ? "posted" : "failed";
     }
     await withTenant(pool, accountId, (client) =>
-      recordDriverEvent(client, accountId, { workItemId, kind: "review_status", dedupeKey: `status:${headSha}`, code: status, headSha, prNumber }),
+      recordDriverEvent(client, accountId, { workItemId, kind: "review_status", dedupeKey: publicPr === null ? `status:${headSha}` : `status:${headSha}:${mergeHead}`, code: status, headSha, prNumber }),
     );
   }
 
@@ -165,7 +235,7 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
   const out = await runMergeGate(
     {
       pool,
-      github: port,
+      github: mergePort,
       // @fx/trust's autoMergeAllowed over the repository's guard settings, exactly. Never wrapped in a try that could read as true.
       isAutoMergeAllowed: async () => autoMergeAllowed({ provenance: ctx.provenance }, { autoMerge: ctx.autoMerge, blockExternalAutoMerge: ctx.blockExternalAutoMerge }),
       // The driver reviews the head itself; nothing is dispatched from inside the gate.
@@ -175,25 +245,27 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
     },
     // D#6 M1G-a: read from the environment now, on this request. A malformed setting locks every repo; an unknown repo id
     // counts as locked while any id is listed.
-    { accountId, workItemId, pr, tier: ctx.tier, securityDiffTriggerFired: gateSecurityTrigger, debaterEnabled, reviewMode, humanMergeOnly: humanMergeOnly(ctx.ghRepoId) },
+    { accountId, workItemId, pr: mergeRef, ...(publicPr !== null ? { reviewedHeadSha: headSha, expectedHeadSha: mergeHead, extraBlockReasons } : {}), tier: ctx.tier, securityDiffTriggerFired: gateSecurityTrigger, debaterEnabled, reviewMode, humanMergeOnly: humanMergeOnly(ctx.ghRepoId) },
   );
 
   // 5. The outcome, as facts.
   const reasons = out.outcome === "ready_human_merges" ? out.reasons : [];
   const outHead = out.outcome === "head_moved" ? out.staleHeadSha : out.headSha;
-  const headForRow = SHA_PATTERN.test(outHead) ? outHead : null;
+  // The card's rows speak of the head the reviewers judged and the item's own pull request; a paired item's public head rides in the dedupe key.
+  const headForRow = publicPr !== null ? (SHA_PATTERN.test(headSha) ? headSha : null) : SHA_PATTERN.test(outHead) ? outHead : null;
+  const keyHead = publicPr !== null ? `${headForRow ?? "nohead"}:${SHA_PATTERN.test(outHead) ? outHead : "nopublic"}` : (headForRow ?? "nohead");
   await withTenant(pool, accountId, async (client) => {
     await recordDriverEvent(client, accountId, {
       workItemId,
       kind: "merge_gate",
-      dedupeKey: `${headForRow ?? "nohead"}:${out.outcome}`,
+      dedupeKey: `${keyHead}:${out.outcome}`,
       code: toCode(out.outcome),
       reasons: reasons.map((r) => toCode(r)),
       headSha: headForRow,
       prNumber,
     });
     if (out.outcome === "merged") {
-      await recordDriverEvent(client, accountId, { workItemId, kind: "merged_by_gate", dedupeKey: `merged:${out.headSha}`, headSha: out.headSha, prNumber });
+      await recordDriverEvent(client, accountId, { workItemId, kind: "merged_by_gate", dedupeKey: `merged:${out.headSha}`, headSha: headForRow, prNumber });
     }
   });
   return { outcome: out.outcome, headSha: outHead, reasons, status };
