@@ -470,6 +470,18 @@ describe("done route [pg]", () => {
       expect(labels(s.fake)).not.toContain("A1 MarkReady");
     });
 
+    it("a lockfile change next to a manifest the Spec names succeeds: the lockfile is derived from the manifest", async () => {
+      const s = await scene({ scope: ["packages/a/package.json", "src/**"], files: [file("packages/a/package.json"), file("pnpm-lock.yaml"), file("src/app.ts")] });
+      expect(parsedDone(await s.call())).toEqual({ continue: false, outcome: "succeeded", failure_reason: null, pr_number: 1 });
+      expect(labels(s.fake)).toContain("A1 MarkReady");
+    });
+
+    it("a lockfile change with no manifest in the scope is still a scope_violation", async () => {
+      const s = await scene({ scope: ["src/**"], files: [file("src/app.ts"), file("pnpm-lock.yaml")] });
+      expect(parsedDone(await s.call())).toEqual({ continue: false, outcome: "failed", failure_reason: "scope_violation", pr_number: 1 });
+      expect(s.repo.pulls[0]!.state).toBe("closed");
+    });
+
     it("a DELETED path outside the scope is a violation: a deletion reports its own path", async () => {
       const s = await scene({ files: [file("src/app.ts"), file("docs/old.md", "DELETED")] });
       expect(parsedDone(await s.call())).toMatchObject({ failure_reason: "scope_violation", pr_number: 1 });

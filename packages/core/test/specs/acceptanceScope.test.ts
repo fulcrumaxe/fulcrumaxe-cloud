@@ -183,6 +183,26 @@ describe("pathInScope", () => {
     expect(pathsOutsideScope(UNKNOWN as never, ["a", "b"])).toEqual(["a", "b"]);
   });
 
+  it("a root lockfile is in scope when the scope names a package.json, and only then", () => {
+    for (const lock of ["pnpm-lock.yaml", "package-lock.json"]) {
+      expect(inScope(["packages/runner-cloud/package.json"], lock), lock).toBe(true);
+      expect(inScope(["package.json"], lock), lock).toBe(true);
+      expect(inScope(["packages/*/package.json"], lock), lock).toBe(true);
+      expect(inScope(["packages/{a,b}/package.json"], lock), lock).toBe(true);
+      expect(inScope(["src/app.ts", "src/**"], lock), lock).toBe(false);
+      expect(inScope(["packages/runner-cloud/**"], lock), `${lock} subtree`).toBe(false);
+      expect(inScope(["packages/package.json.bak", "docs/package-json.md"], lock), lock).toBe(false);
+    }
+  });
+
+  it("the lockfile rule is exact: nested lockfiles, other lockfiles and unknown scopes get nothing", () => {
+    const withManifest = ["packages/a/package.json"];
+    for (const path of ["packages/a/pnpm-lock.yaml", "yarn.lock", "PNPM-LOCK.YAML", "pnpm-lock.yaml.bak", "packages/a/package-lock.json"]) expect(inScope(withManifest, path), path).toBe(false);
+    expect(pathInScope(UNKNOWN as never, "pnpm-lock.yaml")).toBe(false);
+    expect(pathsOutsideScope(scope("src/a.ts"), ["src/a.ts", "pnpm-lock.yaml"])).toEqual(["pnpm-lock.yaml"]);
+    expect(pathsOutsideScope(scope("src/a.ts", "package.json"), ["src/a.ts", "pnpm-lock.yaml", "docs/x.md"])).toEqual(["docs/x.md"]);
+  });
+
   it("pathsOutsideScope lists the paths that are not in scope, in order", () => {
     expect(pathsOutsideScope(scope("src/**", "README.md"), ["src/a.ts", ".github/workflows/ci.yml", "README.md", "package.json"])).toEqual([".github/workflows/ci.yml", "package.json"]);
     expect(pathsOutsideScope(scope("src/**"), [])).toEqual([]);

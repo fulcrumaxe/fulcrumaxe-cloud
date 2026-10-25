@@ -136,11 +136,35 @@ export function parseAcceptanceScope(value: unknown): AcceptanceScope {
   return { kind: "known", entries: Object.freeze(entries) };
 }
 
-/** Whether `path` (a changed file's path, as GitHub reports it) is inside the scope. An unknown scope holds nothing. */
+/**
+ * The workspace lockfiles our runner installs from (`packages/runner/src/depsInstall.ts`: pnpm first, then npm), at the repository root.
+ * A lockfile is derived from the package manifests, so it follows them into scope (see `pathInScope`).
+ */
+export const WORKSPACE_LOCKFILES: readonly string[] = Object.freeze(["pnpm-lock.yaml", "package-lock.json"]);
+
+/**
+ * Whether the scope can change at least one package manifest: an entry that names a `package.json` (exactly, or with `*` in its
+ * last segment). A directory subtree does not count: the Spec has to name the manifest it changes. Only a known scope can.
+ */
+function scopeIncludesManifest(scope: AcceptanceScope): boolean {
+  if (scope.kind !== "known") return false;
+  return scope.entries.some((entry) => {
+    const c = compile(entry);
+    if (c === null) return false;
+    return !c.subtree && segmentMatches(c.segments[c.segments.length - 1]!, "package.json");
+  });
+}
+
+/**
+ * Whether `path` (a changed file's path, as GitHub reports it) is inside the scope. An unknown scope holds nothing. One extra rule:
+ * a root workspace lockfile (`WORKSPACE_LOCKFILES`) is in scope whenever the scope includes a package manifest, because a
+ * dependency change to a manifest cannot be installed without the lockfile moving with it. With no manifest in scope it is out.
+ */
 export function pathInScope(scope: AcceptanceScope, path: string): boolean {
   if (scope.kind !== "known" || typeof path !== "string" || path.length === 0) return false;
   const parts = path.split("/");
   if (parts.some((s) => s === "" || s === "." || s === "..")) return false;
+  if (WORKSPACE_LOCKFILES.includes(path) && scopeIncludesManifest(scope)) return true;
   return scope.entries.some((entry) => {
     const c = compile(entry);
     if (c === null) return false;
