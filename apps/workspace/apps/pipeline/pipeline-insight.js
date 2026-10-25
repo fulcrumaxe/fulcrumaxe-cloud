@@ -162,6 +162,7 @@ const RESULT_WORDS = {
   waiting: "the build is waiting for a build slot",
   merged: "Merge gate: merged",
   ready_human_merges: "Merge gate: not merged, a person merges",
+  merge_delegated: "Merging on your runner",
   pr_not_open: "Merge gate: the pull request is not open",
   head_moved: "Merge gate: the pull request changed after review",
   refused: "Merge gate: refused",
@@ -180,6 +181,16 @@ const REASON_WORDS = {
   merge_call_refused: "GitHub refused the merge",
   // Two planes: a paired repository merges its public pull request, so these two say why a person does.
   public_pr_not_open: "The public pull request is not open (not opened yet, closed or merged).",
+  // Two planes, a runner_local repository: the merge goes through the customer's own runner, and these say why a person merges instead.
+  runner_merge_timeout: "Your runner did not finish the merge in time (60 minutes). A person merges the public pull request.",
+  runner_merge_failed: "Your runner could not finish the merge. A person merges the public pull request.",
+  runner_report_mismatch: "Your runner reported a merge that GitHub does not show. A person looks at the public pull request.",
+  public_branch_person_managed: "A person took over the public branch, so the merge is theirs. A person merges the public pull request.",
+  public_head_unrecorded: "The public pull request's head is not the one the platform pushed. A person looks at it before it merges.",
+  public_head_not_reviewed: "The public pull request does not hold exactly what was reviewed. A person looks at it before it merges.",
+  no_pull_request: "The platform has no pull request on record for this item to merge. A person looks.",
+  go_not_applicable: "The merge could not go through your runner for this item. A person merges the public pull request.",
+  pairing_changed: "The public repository's pairing changed while the merge waited. A person merges the public pull request.",
   runner_merge_unavailable: "Everything else is met. A person merges the public pull request, because it is not merged from the cloud for a repository that runs on your machine.",
   // D#598 P3b (C3 R-598-P5b-6). Read through `stackedWords`, which puts the parent's number in; this is the sentence for a stop that carries none.
   stacked_on_open_pr: "This builds on a pull request that hasn't merged yet.",

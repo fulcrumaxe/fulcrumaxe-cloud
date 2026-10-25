@@ -52,10 +52,10 @@ const utcTimestamp = z.string().datetime();
  */
 const wake = WakeGrant.optional();
 
-/** Nothing for this runner to do right now. */
 /** D#6 PUBLIC-MERGE PR2a: `merge_order` is only ever true: a merge order waits for this runner. Sent only to a runner whose latest hello listed `plane_merge_v1` (the same gating as `wake`). */
 const mergeOrder = z.literal(true).optional();
 
+/** Nothing for this runner to do right now. */
 export const ClaimIdleReply = z.object({ retry_after: retryAfter(3600), wake, merge_order: mergeOrder }).strict();
 export type ClaimIdleReply = z.infer<typeof ClaimIdleReply>;
 

@@ -60,6 +60,8 @@ interface World {
   fixPushes: string | null;
   fixOutcome: AdvanceRunOutcome;
   gates: Array<{ outcome: string; reasons?: string[]; status?: string }>;
+  /** D#6 PUBLIC-MERGE PR2b: where the item's merge order stands at each look (the last one repeats). Absent: no order. */
+  orders?: Array<{ state: string; code: string | null; gateRecorded?: boolean }>;
   refuseStart: Set<string>;
   pinned: number;
   loadReview: { ok: boolean; reason?: string; specVersion?: number };
@@ -106,6 +108,7 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
   const keyed: Array<{ step: string; runId: string }> = [];
   const rounds = [...w.rounds];
   const gates = [...w.gates];
+  const orders = [...(w.orders ?? [{ state: "none", code: null }])];
   let n = 0;
   let gateCalls = 0;
   const worker = {
@@ -145,6 +148,7 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
       return { ok: true as const, runId: `fix-${req.round}` };
     }),
     advanceMergeGate: vi.fn(async () => (gates.length > 1 ? gates.shift()! : gates[0]!)),
+    advanceMergeOrder: vi.fn(async () => (orders.length > 1 ? orders.shift()! : orders[0]!)),
     advanceRecordEvent: vi.fn(async (_who: unknown, _e: { kind: string; code?: string; reasons?: string[]; headSha?: string; prNumber?: number; runId?: string }) => ({ recorded: true })),
     advanceCancel: vi.fn(async () => undefined),
     advanceVerifiedReviewGate: vi.fn(async (_who: unknown, input: { prNumber: number; headSha: string; seenHead: string | null }) => (w.verifiedGate ? w.verifiedGate(++gateCalls, input) : { state: "dispatch" })),
@@ -1620,5 +1624,81 @@ describe("Request changes: a person's fix round comes first", () => {
     expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
     expect(t.worker.advanceStartFix).not.toHaveBeenCalled();
     expect(t.started.filter((s) => s.headSha === H1).length).toBeGreaterThan(0);
+  });
+});
+
+
+describe("a merge handed to the customer's runner (merge_delegated): the workflow waits for the order, and only the order's end decides", () => {
+  const delegated = { outcome: "merge_delegated", reasons: [] as string[], status: "posted" };
+  const open = { state: "open", code: null };
+
+  it("waits (a durable sleep, then one read of the order) until GitHub, read by the cloud, says merged: the workflow ends merged", async () => {
+    const t = setup(fresh({ gates: [delegated], orders: [open, open, { state: "merged", code: "merged" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged" });
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(1);
+    expect(t.worker.advanceMergeOrder).toHaveBeenCalledTimes(3);
+    expect(t.worker.advanceMergeOrder).toHaveBeenCalledWith(WHO);
+    expect(world.sleeps).toBe(2);
+    expect(logs.find((l) => l.event === "advance.merge_order")).toMatchObject({ state: "merged" });
+  });
+
+  it("the merge-only re-check path waits the same way", async () => {
+    const t = setup(fresh({ mergeOnly: [{ decision: "all_passed" }], gates: [delegated], orders: [open, { state: "merged", code: "merged" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged" });
+    expect(t.worker.advanceMergeOrder).toHaveBeenCalledTimes(2);
+    expect(t.worker.advanceRecordRound).not.toHaveBeenCalled();
+  });
+
+  it("a head that moved (the order ended head_moved or was superseded) goes back to the review loop: the gate is asked again on the new head", async () => {
+    const t = setup(fresh({ head: H1, gates: [delegated, { outcome: "merged", reasons: [], status: "posted" }], orders: [open, { state: "head_moved", code: "public_head_moved" }], rounds: [{ decision: "all_passed", round: 0 }] }));
+    const out = await workItemAdvanceWorkflow(ARGS);
+    expect(out.status).toBe("merged");
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(2);
+  });
+
+  it("a block the go phase found (the gate already recorded its reasons) ends ready_human_merges with the order's code and writes no second event", async () => {
+    const t = setup(fresh({ gates: [delegated], orders: [open, { state: "blocked", code: "ci_not_green", gateRecorded: true }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "ready_human_merges", detail: "ci_not_green" });
+    expect(t.worker.advanceRecordEvent).not.toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "merge_gate" }));
+  });
+
+  it("a stop the gate never saw is recorded as the gate's own fact, so the card says why: a claim-time takeover or pairing change, a go phase that was refused or found the pull request closed, a failed order, a timeout", async () => {
+    const cases = [
+      ["blocked", "public_branch_person_managed"],
+      ["blocked", "pairing_changed"],
+      ["blocked", "public_pr_not_open"],
+      ["blocked", "no_pull_request"],
+      ["blocked", "go_not_applicable"],
+      ["failed", "runner_merge_failed"],
+      ["failed", "runner_merge_timeout"],
+      ["failed", "runner_report_mismatch"],
+    ] as const;
+    for (const [state, code] of cases) {
+      const t = setup(fresh({ gates: [delegated], orders: [open, { state, code, gateRecorded: false }] }));
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "ready_human_merges", detail: code });
+      expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "merge_gate", code: "ready_human_merges", reasons: [code], headSha: H1, prNumber: 41 }));
+    }
+  });
+
+  it("an order that does not exist is a stop, not a wait; a refused step is needs_human", async () => {
+    const none = setup(fresh({ gates: [delegated], orders: [{ state: "none", code: null }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "ready_human_merges", detail: "runner_merge_failed" });
+    expect(none.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ reasons: ["runner_merge_failed"] }));
+    setup(fresh({ gates: [delegated], orders: [{ state: "refused", code: "item_halted" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toMatchObject({ status: "needs_human", detail: "item_halted" });
+  });
+
+  it("the wait is bounded: an order that never ends stops the workflow with runner_merge_timeout after the poll limit, and the polling stops there", async () => {
+    const t = setup(fresh({ gates: [delegated], orders: [open] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "ready_human_merges", detail: "runner_merge_timeout" });
+    expect(t.worker.advanceMergeOrder).toHaveBeenCalledTimes(130);
+    expect(world.sleeps).toBe(130);
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ reasons: ["runner_merge_timeout"] }));
+  });
+
+  it("no order is looked at unless the gate delegated: every other outcome ends exactly as before", async () => {
+    const t = setup(fresh({ gates: [{ outcome: "ready_human_merges", reasons: ["ci_not_green"], status: "posted" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "ready_human_merges", detail: "ci_not_green" });
+    expect(t.worker.advanceMergeOrder).not.toHaveBeenCalled();
   });
 });

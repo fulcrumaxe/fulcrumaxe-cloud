@@ -89,6 +89,8 @@ export interface RunnerCloudDeps {
    * and nothing is written. A reviewer's `done` needs no GitHub call and works without it.
    */
   pullRequests?: RunPullRequestPort | null;
+  /** D#6 PUBLIC-MERGE PR2b: the merge-order routes' gate, store and GitHub reads. Null while it is not configured; those routes then answer 503 `not_configured`. */
+  planeMerge?: PlaneMergePort | null;
   /** D#598 P1f-2: the GitHub access of the public-push routes. Null while it is not configured; those routes then answer 503 `not_configured`. */
   planePush?: PlanePushHostedPort | null;
   /**
@@ -163,6 +165,75 @@ export interface PlanePushHostedPort {
   verifyPullRequest(input: { accountId: string; codeRepo: string; branch: string; number: number }): Promise<{ url: string } | null>;
   /** Revokes a token this side minted and could not hand out. True when it is gone (revoked, or already invalid); never throws. */
   revokeToken(token: string): Promise<boolean>;
+  /**
+   * D#6 PUBLIC-MERGE PR2b: a fresh, never-cached credential for one merge order on `codeRepo` alone: `read` (contents read) for the content check, `write`
+   * (contents and pull requests write) for the one go. Absent from an older port: the merge-order routes then answer 503 `not_configured`.
+   */
+  mintMergeToken?(codeRepo: string, accountId: string, kind: "read" | "write"): Promise<{ token: string; expiresAt: Date }>;
+}
+
+/**
+ * D#6 PUBLIC-MERGE PR2b: the part of a merge order the routes read (the shape of packages/worker `PlaneMergeOrder`, which this package cannot import).
+ * Every value here is the cloud's own row; nothing a runner sent is ever copied into it.
+ */
+export interface PlaneMergeOrderFacts {
+  id: string;
+  workItemId: string;
+  planePushId: string;
+  repoId: string;
+  codeRepo: string;
+  prNumber: number;
+  expectedPublicHead: string;
+  reviewedHead: string;
+  pairingDigest: string;
+  state: string;
+  leaseGeneration: number;
+  writeTokenIssuedAt: Date | null;
+  outcomeCode: string | null;
+}
+export interface PlaneMergeLease {
+  accountId: string;
+  runnerId: string;
+  orderId: string;
+  leaseGeneration: number;
+}
+/** The order store (packages/worker `RunnerPlaneMergeStore`), as the routes use it. */
+export interface PlaneMergeStorePort {
+  claimNext(input: { accountId: string; runnerId: string }): Promise<{ kind: "claimed"; order: PlaneMergeOrderFacts; facts: { publicBranch: string; privateOwner: string; privateName: string; overlayGlobs: string[] } } | { kind: "none" }>;
+  grantReadToken(lease: PlaneMergeLease): Promise<{ kind: "granted"; order: PlaneMergeOrderFacts } | { kind: "already_issued" } | { kind: "fenced"; reason: string }>;
+  fence(lease: PlaneMergeLease): Promise<{ kind: "ok"; order: PlaneMergeOrderFacts } | { kind: "fenced"; reason: string }>;
+  authorize(lease: PlaneMergeLease): Promise<{ kind: "authorized"; order: PlaneMergeOrderFacts } | { kind: "already_issued" } | { kind: "fenced"; reason: string }>;
+  finish(input: { accountId: string; orderId: string; to: string; code: string; actor: { by: "runner"; runnerId: string; leaseGeneration: number } | { by: "cloud" } }): Promise<{ kind: "finished"; order: PlaneMergeOrderFacts } | { kind: "fenced"; reason: string } | { kind: "not_allowed"; from: string } | { kind: "not_found" }>;
+  /** One order by id, whatever its state (a late report for an order that is already over looks it up); null when there is none. */
+  getById(input: { accountId: string; orderId: string }): Promise<PlaneMergeOrderFacts | null>;
+  /** The runner's trust, read now (not revoked, registered by a current owner or admin, in scope of the repository, not paused or draining, listing the capability). */
+  runnerTrusted(input: { accountId: string; runnerId: string; repoId: string }): Promise<boolean>;
+}
+/** What the go phase concluded, from the whole gate run again on fresh reads. */
+export type PlaneMergeGoResult = { kind: "go" } | { kind: "blocked"; reasons: string[] } | { kind: "head_moved" } | { kind: "pr_not_open" } | { kind: "refused"; reason: string };
+/** The cloud's own read of the public pull request through its fenced client (paths and states only). */
+export interface PublicPullFacts {
+  open: boolean;
+  merged: boolean;
+  headSha: string;
+}
+/**
+ * D#6 PUBLIC-MERGE PR2b: everything the three merge-order routes need beyond the signature check, supplied by apps/web (the gate, the fenced GitHub client and the
+ * item records live in packages this one cannot import). `goPhase` runs the whole merge gate again from fresh reads with the runner's attestation; the gate
+ * calls `delegate` at its single merge call site, and only if every condition is met.
+ */
+export interface PlaneMergePort {
+  store: PlaneMergeStorePort;
+  goPhase(input: {
+    accountId: string;
+    order: PlaneMergeOrderFacts;
+    attestation: { reviewedHead: string; publicHead: string; same: boolean; incomplete: boolean; paths: readonly string[] };
+    delegate: () => Promise<{ delegated: true } | { delegated: false; reason: string }>;
+  }): Promise<PlaneMergeGoResult>;
+  /** The public pull request, read through the fenced client. Throws when GitHub cannot be asked. */
+  readPublicPull(input: { accountId: string; order: PlaneMergeOrderFacts }): Promise<PublicPullFacts>;
+  /** A verified merge: recorded as the gate's merge, the item's pull-request state reconciled, and the private copy closed (best effort). */
+  recordMerged(input: { accountId: string; order: PlaneMergeOrderFacts }): Promise<{ privateCopy: "closed" | "left" | "failed" }>;
 }
 
 export type FailRunnerLeases = (input: { accountId: string; runnerId: string; reason: "runner_revoked" }) => Promise<{ runIds: string[]; complete: boolean }>;

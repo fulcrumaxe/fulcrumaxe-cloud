@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
   recordRound: vi.fn(),
   createCiGate: vi.fn(),
   recordMergeOnlyRecheck: vi.fn(),
+  createReviewGitHubPort: vi.fn(),
+  readItemRecordedPullRequest: vi.fn(),
 }));
 vi.mock("@fx/pipeline", async (original) => ({
   ...(await original<typeof import("@fx/pipeline")>()),
@@ -14,6 +16,8 @@ vi.mock("@fx/pipeline", async (original) => ({
   recordRound: mocks.recordRound,
   createCiGate: mocks.createCiGate,
   recordMergeOnlyRecheck: mocks.recordMergeOnlyRecheck,
+  createReviewGitHubPort: mocks.createReviewGitHubPort,
+  readItemRecordedPullRequest: mocks.readItemRecordedPullRequest,
 }));
 
 import { createReviewDeps } from "../lib/advanceReview";
@@ -74,6 +78,83 @@ describe("the review stage's merge gate (D#6 R2b)", () => {
     await createReviewDeps(open).mergeGate(pool, { accountId: ACCOUNT, workItemId: ITEM, prNumber: 7 });
     expect(open).toHaveBeenLastCalledWith("merge_gate", { repoId: REPO, owner: "acme", name: "widgets" });
     expect((mocks.runMergeGateForItem.mock.calls[1]![0] as { http: unknown }).http).toBe(plain);
+  });
+
+  describe("reconcileMergeOrder (an authorized order the runner never reported on)", () => {
+    const HEAD_PUB = "c".repeat(40);
+    const order = { id: "4d5e6f7a-8b9c-4d1e-9f2a-3b4c5d6e7f80", accountId: ACCOUNT, workItemId: ITEM, planePushId: "3c4d5e6f-7a8b-4c9d-8e1f-2a3b4c5d6e7f", repoId: REPO, codeRepo: "acme/widgets-public", prNumber: 12, expectedPublicHead: HEAD_PUB, reviewedHead: "a".repeat(40), pairingDigest: "d".repeat(64), state: "authorized", leaseGeneration: 1, writeTokenIssuedAt: new Date(), outcomeCode: null };
+    const pool = { connect: async () => ({ query: async (sql: string) => ({ rows: /FROM plane_pushes/.test(sql) ? [{ branch: "fx/p-x" }] : [], rowCount: 0 }), release: () => undefined }) } as never;
+
+    beforeEach(() => {
+      mocks.createReviewGitHubPort.mockReset();
+      mocks.readItemRecordedPullRequest.mockReset();
+      mocks.loadReviewContext.mockResolvedValue({ ok: true, ctx: { repoId: REPO, owner: "acme", name: "widgets", executionMode: "runner_local" } });
+      mocks.readItemRecordedPullRequest.mockResolvedValue(null);
+    });
+
+    it("a merge GitHub confirms ends the order merged and then reconciles the item's stage (the reconcile the worker passes in)", async () => {
+      mocks.createReviewGitHubPort.mockReturnValue({ getPullRequest: async () => ({ state: "closed", merged: true, headSha: HEAD_PUB }) });
+      const finish = vi.fn(async () => ({ kind: "finished", order }));
+      const reconcile = vi.fn(async () => "merged");
+      const plain = { request: vi.fn(async () => ({ status: 200, body: [] })) };
+      await createReviewDeps(async () => plain as never).reconcileMergeOrder!(pool, { finish } as never, order as never, { reconcile });
+      expect(finish).toHaveBeenCalledWith(expect.objectContaining({ orderId: order.id, to: "merged", actor: { by: "cloud" } }));
+      expect(reconcile).toHaveBeenCalledTimes(1);
+      expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ accountId: ACCOUNT, workItemId: ITEM }));
+      expect(finish.mock.invocationCallOrder[0]!).toBeLessThan(reconcile.mock.invocationCallOrder[0]!);
+    });
+
+    it("no merge, no reconcile: an open pull request at the same head ends the order failed and reconciles nothing", async () => {
+      mocks.createReviewGitHubPort.mockReturnValue({ getPullRequest: async () => ({ state: "open", merged: false, headSha: HEAD_PUB }) });
+      const finish = vi.fn(async () => ({ kind: "finished", order }));
+      const reconcile = vi.fn(async () => "open");
+      await createReviewDeps(async () => ({ request: vi.fn() }) as never).reconcileMergeOrder!(pool, { finish } as never, order as never, { reconcile });
+      expect(finish).toHaveBeenCalledWith(expect.objectContaining({ to: "failed", code: "runner_merge_failed" }));
+      expect(reconcile).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("the code repository's client (D#6 PUBLIC-MERGE): the cloud never calls merge there", () => {
+    const merge = { method: "PUT", path: "/repos/acme/widgets-public/pulls/12/merge", body: { sha: "c".repeat(40), merge_method: "squash" } } as const;
+    const list = { method: "GET", path: "/repos/acme/widgets-public/pulls", query: { head: "acme:fx/p-1", state: "all", per_page: 100 } } as const;
+    type Opener = (c: { repoId: string; owner: string; name: string; executionMode: string }) => Promise<{ request(r: unknown): Promise<unknown> }>;
+    const code = { repoId: REPO, owner: "acme", name: "widgets-public", executionMode: "runner_local" };
+
+    async function exercise(opener: Opener, plain: { request: ReturnType<typeof vi.fn> }) {
+      const client = await opener(code);
+      // A merge PUT is refused by the fence BEFORE any request is made; a list read (A3) is not.
+      await expect(client.request(merge)).rejects.toThrow(/local-only github: refused/);
+      expect(plain.request).not.toHaveBeenCalled();
+      await client.request(list);
+      expect(plain.request).toHaveBeenCalledTimes(1);
+      expect(plain.request.mock.calls[0]![0]).toMatchObject({ method: "GET", path: list.path });
+    }
+
+    it("the merge gate's public client (publicPlane.open) refuses a merge PUT on the code repository and allows the pull request list", async () => {
+      const plain = { request: vi.fn(async () => ({ status: 200, body: [] })) };
+      const open = vi.fn(async () => plain as never);
+      const { pool } = fakePool(true);
+      mocks.loadReviewContext.mockResolvedValue({ ok: true, ctx: { repoId: REPO, owner: "acme", name: "widgets", executionMode: "runner_local" } });
+      await createReviewDeps(open).mergeGate(pool, { accountId: ACCOUNT, workItemId: ITEM, prNumber: 7 });
+      const gateDeps = mocks.runMergeGateForItem.mock.calls[0]![0] as { publicPlane: { open: Opener }; http: { request(r: unknown): Promise<unknown> } };
+      plain.request.mockClear();
+      await exercise(gateDeps.publicPlane.open, plain);
+      // The same fence on the item's OWN repository does allow the merge call (A10): the single-plane runner_local path is unchanged.
+      plain.request.mockClear();
+      await gateDeps.http.request(merge);
+      expect(plain.request).toHaveBeenCalledTimes(1);
+    });
+
+    it("the CI wait's public client (createCiGate openPublicHttp) is the same fenced client without the merge call", async () => {
+      mocks.recordRound.mockResolvedValue({ decision: "ci_pending", round: 0, recorded: [] });
+      mocks.createCiGate.mockImplementation((d: unknown) => ({ gate: true, d }));
+      const plain = { request: vi.fn(async () => ({ status: 200, body: [] })) };
+      const open = vi.fn(async () => plain as never);
+      const { pool } = fakePool(false);
+      await createReviewDeps(open).recordRound(pool, {} as never, { accountId: ACCOUNT, workItemId: ITEM, headSha: "a".repeat(40), prNumber: 7, requiredRoles: [], verdicts: [] } as never);
+      const d = (mocks.recordRound.mock.calls.at(-1)![3] as { d: { openPublicHttp: Opener } }).d;
+      await exercise(d.openPublicHttp, plain);
+    });
   });
 
   it("the port answers off when the setting is not there", async () => {

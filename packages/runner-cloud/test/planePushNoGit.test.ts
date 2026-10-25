@@ -39,9 +39,9 @@ function allCloudSource(): string[] {
 }
 
 function entries(): string[] {
-  const dirs = readdirSync(runnerRoutes).filter((d) => d.startsWith("plane-push-"));
+  const dirs = readdirSync(runnerRoutes).filter((d) => d.startsWith("plane-push-") || d.startsWith("plane-merge-"));
   const files = dirs.flatMap((d) => readdirSync(path.join(runnerRoutes, d)).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => path.join(runnerRoutes, d, f)));
-  return [...files, path.join(cloudSrc, "planePush.ts")];
+  return [...files, path.join(cloudSrc, "planePush.ts"), path.join(cloudSrc, "planeMerge.ts")];
 }
 
 function resolveRelative(from: string, spec: string): string | null {
@@ -69,7 +69,7 @@ function closure(start: string[]): Map<string, string> {
 describe("the public-push routes never run git or a process (import graph)", () => {
   it("finds the three routes and the handlers module", () => {
     const files = entries().map((f) => path.relative(repoRoot, f));
-    expect(files).toEqual(expect.arrayContaining(["apps/web/app/api/runner/plane-push-pairing/handler.ts", "apps/web/app/api/runner/plane-push-pairing/route.ts", "apps/web/app/api/runner/plane-push-report/handler.ts", "apps/web/app/api/runner/plane-push-report/route.ts", "apps/web/app/api/runner/plane-push-token/handler.ts", "apps/web/app/api/runner/plane-push-token/route.ts", "packages/runner-cloud/src/planePush.ts"]));
+    expect(files).toEqual(expect.arrayContaining(["apps/web/app/api/runner/plane-push-pairing/handler.ts", "apps/web/app/api/runner/plane-push-pairing/route.ts", "apps/web/app/api/runner/plane-push-report/handler.ts", "apps/web/app/api/runner/plane-push-report/route.ts", "apps/web/app/api/runner/plane-push-token/handler.ts", "apps/web/app/api/runner/plane-push-token/route.ts", "packages/runner-cloud/src/planePush.ts", "apps/web/app/api/runner/plane-merge-claim/handler.ts", "apps/web/app/api/runner/plane-merge-verify/route.ts", "apps/web/app/api/runner/plane-merge-report/handler.ts", "packages/runner-cloud/src/planeMerge.ts"]));
   });
 
   it("no entry file, and nothing it reaches inside the package, names the git builder, the transport, the push route, a child process or the pipeline", () => {

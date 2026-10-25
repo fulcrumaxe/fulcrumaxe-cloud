@@ -67,6 +67,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "advanceLoadReview",
       "advanceLoadSpecText",
       "advanceMergeGate",
+      "advanceMergeOrder",
       "advancePanel",
       "advancePrFound",
       "advanceRecordEvent",
@@ -105,6 +106,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "performResumeDecision",
       "performRetryRun",
       "performStartPreview",
+      "planeMerge",
       "planePushGrant",
       "planePushPairing",
       "planePushRecordReport",
@@ -113,6 +115,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "previewReady",
       "publishPairedChange",
       "purgeRunActions",
+      "reconcilePrHolder",
       "registry",
       "resolveRunSeat",
       "retryPublish",
@@ -132,6 +135,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "sweepRunnerQueue",
       "sweepSandboxReap",
       "sweepSetupRequestChecks",
+      "withRunnerPool",
     ]);
     // With no follower and no prompt builder given, a request is refused up front.
     expect(worker.previewReady()).toBe(false);

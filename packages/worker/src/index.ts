@@ -4,6 +4,8 @@ export type { RunnerLeaseFacade, FailRunnerLeasesInput, FailRunnerLeasesResult, 
 export type { RunnerClaimFacade, ClaimRunnerRunInput, ClaimRunnerRunResult, HeartbeatRunnerRunInput, HeartbeatRunnerRunResult, IngestRunnerEventsInput, IngestRunnerEventsResult, LeaseVerdict } from "./runnerClaims.js";
 export type { RunnerDoneFacade, RunnerDoneVerdict, DoneFailureReason, BeginRunnerDoneResult, FinishRunnerDoneInput, FinishRunnerDoneResult } from "./runnerDone.js";
 export { PUBLIC_UNAVAILABLE_NOTE, mayRetryPublish, createPublishSettler, type OpenPublicResult, type PrivatePullRequest, type PlanePublish, type PlanePublishDeps, type PublishResult, type RetryFacts } from "./planePublish.js";
+// D#6 PUBLIC-MERGE PR2b: the order store's types only, never the factory that takes a pool (the composition root builds the store; apps/web reaches it as `Worker.planeMerge`).
+export type { PlaneMergeOrder, PlaneMergeState, RunnerPlaneMergeStore } from "./runnerPlaneMerge.js";
 export type { RunnerPlanePushFacade, PlanePushGrantResult, PlanePushPairing, PlanePushPairingResult, PlanePushRecordInput, PlanePushRecordResult, PlanePushReportContextResult } from "./runnerPlanePush.js";
 export type { RunnerGitTicketFacade, GitTicketContext, GitTicketContextResult, SignGitTicketInput, SignedGitTicket } from "./runnerGitTicket.js";
 export type { RunnerLimits, RunnerLimitsSource } from "./runnerLimits.js";
@@ -30,6 +32,6 @@ export { createVercelKeepAlive } from "./keepAlive.js";
 export type { ParkedStageEntryInput, StageResumeCounts } from "./stageResume.js";
 // D#7 DP4b-2: the one fixed word the decision step answers with.
 export type { DecisionStepCode } from "./decisionIntake.js";
-export type { AdvanceFacade, AdvanceStartArgs, AdvanceTriageInput, AdvanceTriageResult, AdvanceRunRequest, AdvanceRunStart, AdvanceRunOutcome, AdvanceItem, AdvanceProposal, AdvancePrSource, AdvanceStepPorts, AdvanceStepResult, AdvanceStepWho, AdvanceReviewContext, AdvanceReviewLoad, AdvanceReviewDeps, AdvanceRoundInput, AdvanceRoundResult, AdvanceMergeOnlyInput, AdvanceMergeOnlyResult, AdvanceVerdictInput, AdvanceFixRequest, AdvanceMergeGateResult } from "./advance.js";
+export type { AdvanceFacade, AdvanceStartArgs, AdvanceTriageInput, AdvanceTriageResult, AdvanceRunRequest, AdvanceRunStart, AdvanceRunOutcome, AdvanceItem, AdvanceProposal, AdvancePrSource, AdvanceStepPorts, AdvanceStepResult, AdvanceStepWho, AdvanceReviewContext, AdvanceReviewLoad, AdvanceReviewDeps, AdvanceRoundInput, AdvanceRoundResult, AdvanceMergeOnlyInput, AdvanceMergeOnlyResult, AdvanceVerdictInput, AdvanceFixRequest, AdvanceMergeGateResult, AdvanceMergeOrderResult } from "./advance.js";
 export type { PrStateOpen, PrStateHttp, PrSlotSweepCounts } from "./prSlotReconcile.js";
 export type { PrCloseOpen, PrCloseHttp } from "./privatePrClose.js";

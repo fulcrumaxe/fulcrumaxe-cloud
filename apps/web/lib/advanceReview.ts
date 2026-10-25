@@ -1,7 +1,11 @@
 import type { AdvanceReviewDeps } from "@fx/worker";
+import { markRunnerWork } from "@fx/core/src/pendingWork.js";
+import { settleAuthorizedOrder } from "@fx/runner-cloud";
 import { createCiGate, readPublicPullRequest, createPgLocalReviewOptIn, debaterEnabledFor, loadReviewContext, recordMergeOnlyRecheck, recordRound, resumeAgentRun, runMergeGateForItem, type GatheredVerdict, type GitHubHttp, type VerdictRole } from "@fx/pipeline";
 import { openInstallationHttp } from "./github/installationHttp";
 import { openForRepo } from "./github/localOnlyHttp";
+import { createAppRunPullRequestPort } from "./github/runnerPullRequest";
+import { createPlaneMergeOps } from "./planeMerge";
 
 /**
  * D#483 P3: the review stage's pipeline pieces, as the plain-data functions the worker's `review` dependency takes
@@ -16,6 +20,9 @@ import { openForRepo } from "./github/localOnlyHttp";
  *  - mergeGate: the pipeline's merge gate over the real GitHub port, with a `merge_gate` token. A failure to read GitHub is
  *    an answer (`error`), not a throw, so the driver can record it and stop instead of retrying a step that cannot succeed.
  */
+/** The run-pull-request port that closes a private copy after a verified merge; built on first use. */
+let privateCloser: ReturnType<typeof createAppRunPullRequestPort> | undefined;
+
 export function createReviewDeps(open: typeof openInstallationHttp = openInstallationHttp): AdvanceReviewDeps {
   // The merge gate's token purpose for one repository (the item's own, or the paired code repository its installation serves), fenced for a runner_local repo.
   const openReviewHttp = (c: { repoId: string; owner: string; name: string; executionMode: string }) => openForRepo(open, c.executionMode, "merge_gate", { repoId: c.repoId, owner: c.owner, name: c.name }) as Promise<GitHubHttp>;
@@ -59,7 +66,13 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
       return out.decision === "full_review" ? { decision: out.decision, reason: out.reason } : { decision: out.decision };
     },
     resume: (pool, registry, input) => resumeAgentRun(pool, registry, input),
-    async mergeGate(pool, input) {
+    // D#6 PUBLIC-MERGE PR2b: an authorized merge order the runner never reported on (its lease ran out, or its deadline passed) is ended from GitHub's own answer,
+    // read through the fenced client: the runner may have merged before it stopped.
+    async reconcileMergeOrder(pool, store, order, extras) {
+      const ops = createPlaneMergeOps({ open, withPool: (fn) => fn(pool), reconcile: extras.reconcile, closePrivate: (repo, number) => (privateCloser ??= createAppRunPullRequestPort()).close({ repo, number }) });
+      await settleAuthorizedOrder({ store, goPhase: ops.goPhase, readPublicPull: ops.readPublicPull, recordMerged: ops.recordMerged }, order.accountId, order, null);
+    },
+    async mergeGate(pool, input, extras) {
       const loaded = await loadReviewContext(pool, input.accountId, input.workItemId);
       if (!loaded.ok) return { outcome: "refused", reason: loaded.reason };
       const c = loaded.ctx;
@@ -67,7 +80,36 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
         // D#6 R3c: a runner_local repo's gate (find, files, CI, protection, status, merge) goes through the local-only fence.
         const http = await openForRepo(open, c.executionMode, "merge_gate", { repoId: c.repoId, owner: c.owner, name: c.name });
         // D#6 R2b: the stored per-repo opt-in decides whether a runner repo's local reviews count; a repo with none is advisory.
-        const out = await runMergeGateForItem({ pool, http, localReviewOptIn: createPgLocalReviewOptIn(pool), publicPlane: { open: openPublicHttp, read: readPublicPullRequest(pool) } }, input);
+        // Two planes, `runner_local`: the gate does not merge a paired item's public pull request. At its merge call site it places the item's merge order, and the
+        // customer's runner claims it (the go phase, plane-merge-verify, runs the whole gate again before the one write credential is issued).
+        const orders = extras?.orders;
+        const out = await runMergeGateForItem(
+          {
+            pool,
+            http,
+            localReviewOptIn: createPgLocalReviewOptIn(pool),
+            publicPlane: { open: openPublicHttp, read: readPublicPullRequest(pool) },
+            mergeDelegate: async ({ accountId, workItemId, sha, reviewedHead }) => {
+              // No store means no order can be placed: a human merge with the PR1 reason, never a merge.
+              if (orders === undefined) return { delegated: false, reason: "runner_merge_unavailable" };
+              const placed = await orders.placeOrder({ accountId, workItemId, expectedPublicHead: sha, reviewedHead });
+              switch (placed.kind) {
+                case "placed":
+                  // A no-DB hint to the account's runners that an order waits (the claim reply then carries `merge_order`); never awaited.
+                  void markRunnerWork(accountId);
+                  return { delegated: true };
+                case "unchanged":
+                case "in_flight":
+                  return { delegated: true };
+                case "push_changed":
+                  return { delegated: false, reason: "public_head_unrecorded" };
+                default:
+                  return { delegated: false, reason: "public_pr_not_open" };
+              }
+            },
+          },
+          input,
+        );
         return out.outcome === "refused" ? { outcome: "refused", reason: out.reason } : { outcome: out.outcome, headSha: out.headSha, reasons: out.reasons, status: out.status };
       } catch (err) {
         const e = err as { name?: string; reason?: string };

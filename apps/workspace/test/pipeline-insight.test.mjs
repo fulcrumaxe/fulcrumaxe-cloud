@@ -145,6 +145,17 @@ describe("recorded pipeline steps", () => {
       expect(reasonWord("public_pr_not_open")).toMatch(/public pull request is not open/);
       expect(reasonWord("runner_merge_unavailable")).toMatch(/A person merges the public pull request/);
     });
+
+    it("the runner-merge stops have sentences, never raw codes", () => {
+      for (const code of ["runner_merge_timeout", "runner_merge_failed", "runner_report_mismatch", "pairing_changed", "public_branch_person_managed", "public_head_unrecorded", "public_head_not_reviewed", "no_pull_request", "go_not_applicable"]) {
+        const word = reasonWord(code);
+        expect(word).toMatch(/runner|pairing|public|pull request/i);
+        expect(word).not.toMatch(/_/);
+        // A real sentence, not the fallback that shows the code with its underscores as spaces.
+        expect(word).not.toBe(code.replace(/_/g, " "));
+        expect(word.length).toBeGreaterThan(code.length + 15);
+      }
+    });
   });
 });
 

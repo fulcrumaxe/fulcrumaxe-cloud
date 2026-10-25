@@ -59,6 +59,10 @@ describe("diffTreeEntries", () => {
     const priv = diffTreeEntries(base, head, (p) => !p.startsWith("docs/ops/")).keys;
     expect(sameChangeKeys(priv, diffTreeEntries(base, head, keep).keys)).toBe(false);
     expect(sameChangeKeys(priv, priv.slice(1))).toBe(false);
+    // A prefix of the other list (the same leading keys, one fewer) is not the same change, whichever side is shorter.
+    expect(priv.length).toBeGreaterThan(1);
+    expect(sameChangeKeys(priv.slice(0, -1), priv)).toBe(false);
+    expect(sameChangeKeys(priv, priv.slice(0, -1))).toBe(false);
     expect(sameChangeKeys(priv, [...priv])).toBe(true);
     expect(sameChangeKeys([], [])).toBe(true);
   });
@@ -71,6 +75,15 @@ describe("treeFromLsTree", () => {
     const t = treeFromLsTree(out)!;
     expect([...t.keys()]).toEqual(["a b.ts", "line\nbreak", "tab\there"]);
     expect(t.get("tab\there")).toEqual({ mode: "160000", type: "commit", sha: C });
+  });
+  it("refuses output cut short: a complete record followed by one without its final NUL", () => {
+    expect(treeFromLsTree(`100644 blob ${A}\ta\x00100644 blob ${B}\tb\0`)).not.toBeNull();
+    expect(treeFromLsTree(`100644 blob ${A}\ta\x00100644 blob ${B}\tb`)).toBeNull();
+    expect(treeFromLsTree(`100644 blob ${A}\ta\x00100644 blob ${B}\t`)).toBeNull();
+  });
+  it("an empty tree: the ls-tree reader refuses it, the entries reader (GitHub's listing) accepts it", () => {
+    expect(treeFromLsTree("")).toBeNull();
+    expect(treeFromEntries([])?.size).toBe(0);
   });
   it("refuses empty, unterminated, malformed and repeated output", () => {
     for (const bad of ["", `100644 blob ${A}\ta`, `100644 blob ${A} a\0`, `100644 blob zz\ta\0`, `100644 blob ${A}\ta\0\0`, `100644 blob ${A}\ta\x00100644 blob ${B}\ta\0`, `100664 blob ${A}\ta\0`]) {

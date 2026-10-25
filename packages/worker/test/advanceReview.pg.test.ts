@@ -1,12 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { PREVIEW_WORKDIR, insertAgentRun, writeRunStatus, type CancelResult, type ExecutionRun, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { DuplicateExecutorRunError, ExecutionModeChangedError } from "@fx/runner";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { createRunActionFacade } from "../src/runActions.js";
+import { createRunnerPlaneMergeStore, type PlaneMergeOrder } from "../src/runnerPlaneMerge.js";
+import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
+import { pairingDigest } from "@fx/core/src/repos/planePushRecord.js";
 import { createAdvanceModule, type AdvanceModuleDeps, type AdvanceReviewDeps, type AdvanceRoundInput } from "../src/advance.js";
 import { upToDateHeads, withIssuePr } from "./withIssuePr.js";
 import type { RunStarter } from "../src/preview.js";
@@ -1044,7 +1047,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const w = await item(a);
       const rd = review();
       expect(await build({}, rd).module.advanceMergeGate(who(a, w), 41)).toMatchObject({ outcome: "merged" });
-      expect(rd.mergeGate).toHaveBeenCalledWith(writerPool, { accountId: a.accountId, workItemId: w, prNumber: 41 });
+      expect(rd.mergeGate).toHaveBeenCalledWith(writerPool, { accountId: a.accountId, workItemId: w, prNumber: 41 }, { orders: expect.objectContaining({ placeOrder: expect.any(Function) }) });
       const ext = await item(a, { provenance: "external" });
       expect(await build({}, rd).module.advanceMergeGate(who(a, ext), 41)).toEqual({ outcome: "refused", reason: "external_requires_human" });
       expect(await build({}, rd).module.advanceMergeGate(who(a, w), 0)).toEqual({ outcome: "refused", reason: "invalid_input" });
@@ -1362,6 +1365,147 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const live = await keyed(a, w, `advance:${w}:panel:d2:r1:product-owner`);
       await t.module.advanceCancelStepRuns({ accountId: b.accountId, userId: b.userId, workItemId: w, haltEpoch: 0 }, "panel", action);
       expect(await statusOf(live)).toBe("running");
+    });
+  });
+
+  describe("advanceMergeOrder (D#6 PUBLIC-MERGE PR2b)", () => {
+    const PUB = "c".repeat(40);
+    const SRC = "d".repeat(40);
+    const orders = () => createRunnerPlaneMergeStore(appPool);
+
+    /** An item with a public pull request on record, an order placed for it, and a runner that can take it. */
+    async function ordered(o: { claim?: boolean; authorize?: boolean; provenance?: string } = {}) {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a, { provenance: o.provenance });
+      const runnerId = await insertRunner(admin, a.accountId, a.userId);
+      await admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[] WHERE id = $1", [runnerId, [a.repoId]]);
+      await admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, ARRAY['plane_merge_v1'])", [runnerId, a.accountId]);
+      await admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, 'acme/widgets-public', ARRAY['docs/ops/'])", [a.repoId, a.accountId]);
+      const digest = pairingDigest({ codeRepo: "acme/widgets-public", overlayGlobs: ["docs/ops/"], identifierRulesPath: null, planDataRulesPath: null });
+      await admin.query(
+        `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, state, head_sha, tip_sha, pr_number, pr_url, source_head)
+         VALUES ($1, $2, $3, 'acme/widgets-public', $4, 'pr_opened', $5, $5, 12, 'https://github.com/acme/widgets-public/pull/12', $6)`,
+        [a.accountId, w, a.repoId, digest, PUB, SRC],
+      );
+      const store = orders();
+      const placed = await store.placeOrder({ accountId: a.accountId, workItemId: w, expectedPublicHead: PUB, reviewedHead: SRC });
+      if (placed.kind !== "placed") throw new Error(`not placed: ${placed.kind}`);
+      let order: PlaneMergeOrder = placed.order;
+      if (o.claim || o.authorize) {
+        const c = await store.claimNext({ accountId: a.accountId, runnerId });
+        if (c.kind !== "claimed") throw new Error("not claimed");
+        order = c.order;
+        if (o.authorize) {
+          const r = await store.authorize({ accountId: a.accountId, runnerId, orderId: order.id, leaseGeneration: order.leaseGeneration });
+          if (r.kind !== "authorized") throw new Error("not authorized");
+          order = r.order;
+        }
+      }
+      return { a, w, runnerId, order, store };
+    }
+    // Real timers come back after every test of this block (some move the clock).
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("an item with no order is none; an open order (pending, claimed or authorized) is open", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const bare = await item(a);
+      expect(await build({}, review()).module.advanceMergeOrder(who(a, bare))).toEqual({ state: "none", code: null });
+      for (const stage of [{}, { claim: true }, { authorize: true }]) {
+        const w = await ordered(stage);
+        expect(await build({}, review()).module.advanceMergeOrder(who(w.a, w.w))).toEqual({ state: "open", code: null });
+      }
+    });
+
+    it("an order a person's branch takeover or the runner ended is reported with its fixed code: merged, head_moved (also superseded), blocked, failed", async () => {
+      const cases: Array<[string, string, string, string]> = [
+        ["merged", "merged", "merged", "merged"],
+        ["head_moved", "head_moved", "public_head_moved", "head_moved"],
+        ["superseded", "superseded", "superseded_by_new_order", "head_moved"],
+        ["blocked", "blocked", "ci_not_green", "blocked"],
+        ["failed", "failed", "runner_merge_failed", "failed"],
+      ];
+      for (const [to, , code, state] of cases) {
+        const w = await ordered({ authorize: to === "merged" || to === "head_moved" || to === "failed", claim: to === "blocked" });
+        await w.store.finish({ accountId: w.a.accountId, orderId: w.order.id, to: to as never, code, actor: { by: "cloud" } });
+        expect(await build({}, review()).module.advanceMergeOrder(who(w.a, w.w)), to).toEqual(state === "blocked" ? { state, code, gateRecorded: false } : { state, code });
+      }
+    });
+
+    it("a blocked order says whether the merge gate itself recorded the stop (a ready_human_merges fact since the order was placed): a claim-time takeover has none, a go-phase block has", async () => {
+      const w = await ordered({ claim: true });
+      await w.store.finish({ accountId: w.a.accountId, orderId: w.order.id, to: "blocked", code: "public_branch_person_managed", actor: { by: "cloud" } });
+      expect(await build({}, review()).module.advanceMergeOrder(who(w.a, w.w))).toEqual({ state: "blocked", code: "public_branch_person_managed", gateRecorded: false });
+      // Once the gate has recorded a ready_human_merges fact for the item since the order was placed, the stop counts as recorded.
+      const x = await ordered({ claim: true });
+      await x.store.finish({ accountId: x.a.accountId, orderId: x.order.id, to: "blocked", code: "ci_not_green", actor: { by: "cloud" } });
+      expect(await build({}, review()).module.advanceMergeOrder(who(x.a, x.w))).toMatchObject({ state: "blocked", gateRecorded: false });
+      await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, reasons, dedupe_key) VALUES ($1, $2, 'merge_gate', 'ready_human_merges', ARRAY['ci_not_green'], 'new')", [x.a.accountId, x.w]);
+      expect(await build({}, review()).module.advanceMergeOrder(who(x.a, x.w))).toEqual({ state: "blocked", code: "ci_not_green", gateRecorded: true });
+    });
+
+    it("a ready_human_merges fact from BEFORE the order was placed, or a merge_gate fact with another code, does not count as the gate having recorded the stop", async () => {
+      const w = await ordered({ claim: true });
+      const fact = (code: string, key: string) =>
+        admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, reasons, dedupe_key) VALUES ($1, $2, 'merge_gate', $3, ARRAY[]::text[], $4)", [w.a.accountId, w.w, code, key]);
+      // A fact from an earlier gate run, then the first order is replaced by a new one: the old fact predates it.
+      await fact("ready_human_merges", "before");
+      await w.store.finish({ accountId: w.a.accountId, orderId: w.order.id, to: "superseded", code: "superseded_by_new_order", actor: { by: "cloud" } });
+      const again = await w.store.placeOrder({ accountId: w.a.accountId, workItemId: w.w, expectedPublicHead: PUB, reviewedHead: SRC });
+      if (again.kind !== "placed") throw new Error(`not placed: ${again.kind}`);
+      await w.store.finish({ accountId: w.a.accountId, orderId: again.order.id, to: "blocked", code: "public_branch_person_managed", actor: { by: "cloud" } });
+      expect(await build({}, review()).module.advanceMergeOrder(who(w.a, w.w))).toEqual({ state: "blocked", code: "public_branch_person_managed", gateRecorded: false });
+      // Another code after the order (the order phase's own merge_delegated fact) is not a recorded stop either.
+      await fact("merge_delegated", "after-delegated");
+      expect(await build({}, review()).module.advanceMergeOrder(who(w.a, w.w))).toMatchObject({ state: "blocked", gateRecorded: false });
+      // Only a ready_human_merges fact written after the order counts.
+      await fact("ready_human_merges", "after");
+      expect(await build({}, review()).module.advanceMergeOrder(who(w.a, w.w))).toMatchObject({ state: "blocked", gateRecorded: true });
+    });
+
+    it("an order past its 60-minute deadline is expired by the step itself: failed with runner_merge_timeout, and a late runner is fenced out", async () => {
+      const w = await ordered({ claim: true });
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.now() + 61 * 60_000);
+      expect(await build({}, review()).module.advanceMergeOrder(who(w.a, w.w))).toEqual({ state: "failed", code: "runner_merge_timeout" });
+      expect(await w.store.authorize({ accountId: w.a.accountId, runnerId: w.runnerId, orderId: w.order.id, leaseGeneration: w.order.leaseGeneration })).toMatchObject({ kind: "fenced" });
+    });
+
+    it("a lapsed lease returns the order to the queue (open again); the third lapse fails it", async () => {
+      const w = await ordered({ claim: true });
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.now() + 11 * 60_000);
+      expect(await build({}, review()).module.advanceMergeOrder(who(w.a, w.w))).toEqual({ state: "open", code: null });
+      expect((await admin.query("SELECT state FROM plane_merge_orders WHERE id = $1", [w.order.id])).rows[0].state).toBe("pending");
+    });
+
+    it("an AUTHORIZED order whose lease ran out is reconciled from GitHub before anything else: the hook ends it (merged), or its failure leaves it open until the deadline", async () => {
+      const w = await ordered({ authorize: true });
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.now() + 11 * 60_000);
+      const seen: string[] = [];
+      const hook = vi.fn(async (_pool: Pool, store: ReturnType<typeof orders>, order: PlaneMergeOrder) => {
+        seen.push(order.id);
+        await store.finish({ accountId: order.accountId, orderId: order.id, to: "merged", code: "merged", actor: { by: "cloud" } });
+      });
+      expect(await build({}, review({ reconcileMergeOrder: hook as never })).module.advanceMergeOrder(who(w.a, w.w))).toEqual({ state: "merged", code: "merged" });
+      expect(seen).toEqual([w.order.id]);
+      const x = await ordered({ authorize: true });
+      vi.setSystemTime(Date.now() + 11 * 60_000);
+      const failing = vi.fn(async () => {
+        throw new Error("GitHub down");
+      });
+      expect(await build({}, review({ reconcileMergeOrder: failing as never })).module.advanceMergeOrder(who(x.a, x.w))).toEqual({ state: "open", code: null });
+      expect(failing).toHaveBeenCalledTimes(1);
+      // The deadline still bounds the wait: past it the order is expired even though GitHub could not be asked.
+      vi.setSystemTime(Date.now() + 60 * 60_000);
+      expect(await build({}, review({ reconcileMergeOrder: failing as never })).module.advanceMergeOrder(who(x.a, x.w))).toEqual({ state: "failed", code: "runner_merge_timeout" });
+    });
+
+    it("the same guards as every step: an external item and a missing review port are refused", async () => {
+      const w = await ordered({ provenance: "external" });
+      expect(await build({}, review()).module.advanceMergeOrder(who(w.a, w.w))).toEqual({ state: "refused", code: "external_requires_human" });
     });
   });
 

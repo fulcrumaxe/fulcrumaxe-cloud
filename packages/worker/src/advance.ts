@@ -8,7 +8,8 @@ import { NO_VERDICT_ESCALATION_CODE, readReviewHold } from "@fx/core/src/work-it
 import { VERDICT_ROLES } from "@fx/core/src/work-items/verdictRoles.js";
 import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError } from "@fx/core/src/work-items/stages.js";
 import { MAX_WAITING_ATTEMPT, assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
-import { markWorkPending } from "@fx/core/src/pendingWork.js";
+import { markRunnerWork, markWorkPending } from "@fx/core/src/pendingWork.js";
+import { createRunnerPlaneMergeStore, PLANE_MERGE_OPEN_STATES, type PlaneMergeOrder, type RunnerPlaneMergeStore } from "./runnerPlaneMerge.js";
 import { setupHoldFor } from "@fx/core/src/setup-requests/store.js";
 import { markCorrectionApplied } from "@fx/core/src/corrections/index.js";
 import { ITEM_PR_BRANCH, JobMemorySchema, type JobMemory } from "@fulcrumaxe/runner-protocol";
@@ -20,7 +21,7 @@ import { checkRoundHeadroom } from "./panelHeadroom.js";
 import type { RaiseEnvelopeAsk } from "./envelopeAsk.js";
 import { ingestRunMemoryProposals } from "./memoryIntake.js";
 import { isItemWaitingOnAnswer } from "@fx/db/src/decisionAsks.js";
-import { reconcileSlotHolders, type PrStateOpen } from "./prSlotReconcile.js";
+import { reconcileHolder, reconcileSlotHolders, type PrStateOpen } from "./prSlotReconcile.js";
 import type { DecisionIntake, DecisionStepCode } from "./decisionIntake.js";
 import { isContextSpill, type ContextAssembly, type ContextSection, type ContextSpill } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
@@ -250,7 +251,13 @@ export interface AdvanceReviewDeps {
   /** The pipeline's `resumeAgentRun`: an executor fix round continues the PR's persistent sandbox and session. */
   resume: (pool: Pool, registry: ExecutionTargetRegistry, input: StartAgentRunInput) => Promise<{ id: string; status: string }>;
   /** The merge gate over the real GitHub port (a token of the `merge_gate` purpose). */
-  mergeGate: (pool: Pool, input: { accountId: string; workItemId: string; prNumber: number }) => Promise<AdvanceMergeGateResult>;
+  mergeGate: (pool: Pool, input: { accountId: string; workItemId: string; prNumber: number }, extras?: { orders: RunnerPlaneMergeStore }) => Promise<AdvanceMergeGateResult>;
+  /**
+   * D#6 PUBLIC-MERGE PR2b: ends an AUTHORIZED merge order whose lease ran out (or whose deadline passed) without a report, from what GitHub says through the
+   * cloud's own fenced client (the runner may have merged before it stopped). Throws when GitHub cannot be asked, and then ends nothing. Absent: such an order is
+   * only ended by its deadline.
+   */
+  reconcileMergeOrder?: (pool: Pool, store: RunnerPlaneMergeStore, order: PlaneMergeOrder, extras: { reconcile: (input: { accountId: string; workItemId: string; github: PrStateOpen }) => Promise<unknown> }) => Promise<void>;
   /** D#598 P7c: the pipeline's `recordMergeOnlyRecheck`. Absent, every new head gets a full review. */
   recordMergeOnly?: (pool: Pool, input: AdvanceMergeOnlyInput) => Promise<AdvanceMergeOnlyResult>;
 }
@@ -321,6 +328,22 @@ export interface AdvanceRoundResult {
   recorded: Array<{ role: string; runId: string; verdict: string; outcome: string }>;
   nextRound?: number;
 }
+/**
+ * D#6 PUBLIC-MERGE PR2b: where the merge order of a paired `runner_local` item stands. `open`: still waiting for the runner (pending, claimed or authorized).
+ * `merged`: GitHub, read by the cloud, says the public pull request merged at the order's head. `head_moved`: a head moved (or the order was replaced); review
+ * again. `blocked`/`failed`/`expired`: a person merges, and `code` is the fixed reason. `none`: the item has no order. `refused`: the step may not run.
+ */
+export interface AdvanceMergeOrderResult {
+  state: "open" | "merged" | "head_moved" | "blocked" | "failed" | "none" | "refused";
+  code: string | null;
+  /**
+   * Only for `blocked`: whether the merge gate itself recorded this stop as a `ready_human_merges` fact since the order was placed (a go-phase block carries the
+   * gate's full reasons). False for a stop that never passed through the gate (a claim-time takeover or pairing change, a refused or closed pull request in the
+   * go phase): the workflow records those, so the card says why.
+   */
+  gateRecorded?: boolean;
+}
+
 export interface AdvanceMergeGateResult {
   outcome: string;
   headSha?: string;
@@ -645,6 +668,11 @@ export interface AdvanceFacade {
   advanceReviewRuns(who: AdvanceStepWho, req: { headSha: string; rereview: number }): Promise<Array<{ role: string; runId: string; attempt: number; noVerdictEnds: number }>>;
   /** D#483 P3: the merge gate on the pull request's current head. */
   advanceMergeGate(who: AdvanceStepWho, prNumber: number): Promise<AdvanceMergeGateResult>;
+  /**
+   * D#6 PUBLIC-MERGE PR2b: one look at the merge order the gate placed (`merge_delegated`): lapsed leases are returned to the queue, an authorized order the runner
+   * never reported on is ended from GitHub's own answer, and an order past its 60-minute deadline is expired (`runner_merge_timeout`). One read of the order otherwise.
+   */
+  advanceMergeOrder(who: AdvanceStepWho): Promise<AdvanceMergeOrderResult>;
   /**
    * D#6 R5b-2a: whether the reviewers of a pull request may start now. Only a `runner_verified` repository waits: its reviews start ten minutes after the
    * later of the executor's end and the newest push (answer `wait`), and not without a usable model key (`key_missing`). Any other mode answers
@@ -1825,9 +1853,68 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (!Number.isSafeInteger(prNumber) || prNumber <= 0) return { outcome: "refused", reason: "invalid_input" };
     const bad = await guardStep(who);
     if (bad) return { outcome: "refused", reason: bad.reason ?? "refused" };
-    const out = await deps.review.mergeGate(runnerPool, { accountId: who.accountId, workItemId: who.workItemId, prNumber });
+    const out = await deps.review.mergeGate(runnerPool, { accountId: who.accountId, workItemId: who.workItemId, prNumber }, { orders: planeMerge });
     console.info(JSON.stringify({ event: "advance.merge_gate", work_item_id: who.workItemId, pr: prNumber, outcome: out.outcome, reasons: out.reasons ?? null, status: out.status ?? null }));
     return out;
+  }
+
+  const planeMerge: RunnerPlaneMergeStore = createRunnerPlaneMergeStore(runnerPool);
+  const mergeOrderView = (order: PlaneMergeOrder | null): AdvanceMergeOrderResult => {
+    if (order === null) return { state: "none", code: null };
+    switch (order.state) {
+      case "pending":
+      case "claimed":
+      case "authorized":
+        return { state: "open", code: null };
+      case "merged":
+        return { state: "merged", code: order.outcomeCode };
+      case "head_moved":
+      case "superseded":
+        return { state: "head_moved", code: order.outcomeCode };
+      case "blocked":
+        return { state: "blocked", code: order.outcomeCode };
+      default:
+        return { state: "failed", code: order.outcomeCode };
+    }
+  };
+
+  async function advanceMergeOrder(who: AdvanceStepWho): Promise<AdvanceMergeOrderResult> {
+    const bad = await guardStep(who);
+    if (bad) return { state: "refused", code: bad.reason ?? "refused" };
+    const rec = { accountId: who.accountId, workItemId: who.workItemId };
+    const reaped = await planeMerge.reapLeases(who.accountId);
+    // A lease that ran out returned the order to the queue: tell the account's runners (a no-DB hint, never awaited).
+    if (reaped.requeued > 0) void markRunnerWork(who.accountId);
+    let order = await planeMerge.latestForItem(rec);
+    if (order === null) return { state: "none", code: null };
+    const at = Date.now();
+    const pastDeadline = order.deadlineAt.getTime() <= at;
+    if (order.state === "authorized" && (pastDeadline || (order.leaseExpiresAt !== null && order.leaseExpiresAt.getTime() <= at)) && deps.review?.reconcileMergeOrder) {
+      try {
+        await deps.review.reconcileMergeOrder(runnerPool, planeMerge, order, { reconcile: (input) => reconcileHolder(runnerPool, input.github, input.accountId, input.workItemId) });
+      } catch (error) {
+        // fx-swallow-ok: GitHub could not be asked; nothing was ended, and the next look asks again (the deadline below still bounds the wait)
+        reportError(error, { stage: "advance.merge_order_reconcile" });
+      }
+      order = (await planeMerge.latestForItem(rec)) ?? order;
+    }
+    if (PLANE_MERGE_OPEN_STATES.includes(order.state) && order.deadlineAt.getTime() <= at) {
+      await planeMerge.expireDue({ accountId: who.accountId, orderId: order.id });
+      order = (await planeMerge.latestForItem(rec)) ?? order;
+    }
+    const view = mergeOrderView(order);
+    if (view.state !== "blocked") return view;
+    const recorded = await withTenant(runnerPool, who.accountId, async (client) => {
+      const r = await client.query<{ one: number }>(
+        `SELECT 1 AS one FROM work_item_driver_events e
+          WHERE e.account_id = $1 AND e.work_item_id = $2 AND e.kind = 'merge_gate' AND e.code = 'ready_human_merges'
+            AND e.created_at >= (SELECT o.created_at FROM plane_merge_orders o WHERE o.account_id = $1 AND o.id = $3)
+          LIMIT 1`,
+        [who.accountId, who.workItemId, order.id],
+      );
+      return r.rows.length > 0;
+    });
+    return { ...view, gateRecorded: recorded };
   }
 
   async function advanceVerifiedReviewGate(who: AdvanceStepWho, input: { prNumber: number; headSha: string; seenHead: string | null }): Promise<VerifiedReviewGate | { state: "refused"; reason: string }> {
@@ -1940,6 +2027,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     advanceStartCheckFix,
     advanceReviewRuns,
     advanceMergeGate,
+    advanceMergeOrder,
     advanceVerifiedReviewGate,
     advanceRecordEvent,
     advanceCancel,

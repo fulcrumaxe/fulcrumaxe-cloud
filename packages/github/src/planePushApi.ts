@@ -87,46 +87,62 @@ export function createPlanePushApi(deps: PlanePushApiDeps) {
     return { status: res.status, body: parsed };
   }
 
+  type MintKind = "push" | "merge_read" | "merge_write";
+  async function mintFor(codeRepo: string, kind: MintKind, opts: { ownsInstallation: PushInstallationOwnership; onExpiry?: (expiresAtMs: number) => void }): Promise<string> {
+    // Fail closed: a caller that cannot say whose installation this is gets no token.
+    if (typeof opts?.ownsInstallation !== "function") throw new PlanePushApiError("code_repo_installation_not_owned");
+    const { owner, name } = split(codeRepo);
+    const credentials = deps.appCredentials("team");
+    const jwt = await mintAppJwt(credentials.appId, credentials.privateKeyPem, deps.now);
+    const found = await call("GET", `/repos/${owner}/${name}/installation`, jwt);
+    if (found.status === 404) throw new PlanePushApiError("app_not_installed");
+    const id = found.status === 200 && found.body !== null && typeof found.body === "object" ? (found.body as { id?: unknown }).id : undefined;
+    if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) throw new PlanePushApiError("public_unavailable");
+    let owned: boolean;
+    try {
+      owned = (await opts.ownsInstallation(id)) === true;
+    } catch {
+      // fx-swallow-ok: an ownership lookup that cannot be answered is a refusal to mint, never a mint
+      throw new PlanePushApiError("public_unavailable");
+    }
+    if (!owned) throw new PlanePushApiError("code_repo_installation_not_owned");
+    try {
+      return await getInstallationToken({
+        installationId: id,
+        appKind: "team",
+        // The read credential is the read-only contents purpose; both write kinds are the plane-push purpose, told apart by role.
+        purpose: kind === "merge_read" ? "plane_publish_read" : "plane_push",
+        role: kind === "push" ? "plane_push" : kind === "merge_read" ? "plane_merge_read" : "plane_merge_write",
+        scope: { repositories: [name], permissions: kind === "merge_read" ? { metadata: "read", contents: "read" } : { contents: "write", pull_requests: "write" } },
+        appCredentials: deps.appCredentials,
+        requester: deps.requester,
+        cache: deps.cache,
+        ...(opts.onExpiry ? { onExpiry: opts.onExpiry } : {}),
+        ...(deps.now ? { now: deps.now } : {}),
+      });
+    } catch (err) {
+      if (err instanceof InstallationTokenError && err.reason === "token_scope_mismatch") throw new PlanePushApiError("token_scope_mismatch");
+      // GitHub refuses a mint for a repository the installation does not cover with 404 or 422.
+      const status = err instanceof InstallationTokenError ? (err.cause as { status?: unknown } | undefined)?.status : undefined;
+      if (status === 404 || status === 422) throw new PlanePushApiError("app_not_installed");
+      if (err instanceof MintTimeoutError || err instanceof InstallationTokenError) throw new PlanePushApiError("public_unavailable");
+      throw err;
+    }
+  }
+
   return {
     async mintPushToken(codeRepo: string, opts: { ownsInstallation: PushInstallationOwnership; onExpiry?: (expiresAtMs: number) => void }): Promise<string> {
-      // Fail closed: a caller that cannot say whose installation this is gets no token.
-      if (typeof opts?.ownsInstallation !== "function") throw new PlanePushApiError("code_repo_installation_not_owned");
-      const { owner, name } = split(codeRepo);
-      const credentials = deps.appCredentials("team");
-      const jwt = await mintAppJwt(credentials.appId, credentials.privateKeyPem, deps.now);
-      const found = await call("GET", `/repos/${owner}/${name}/installation`, jwt);
-      if (found.status === 404) throw new PlanePushApiError("app_not_installed");
-      const id = found.status === 200 && found.body !== null && typeof found.body === "object" ? (found.body as { id?: unknown }).id : undefined;
-      if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) throw new PlanePushApiError("public_unavailable");
-      let owned: boolean;
-      try {
-        owned = (await opts.ownsInstallation(id)) === true;
-      } catch {
-        // fx-swallow-ok: an ownership lookup that cannot be answered is a refusal to mint, never a mint
-        throw new PlanePushApiError("public_unavailable");
-      }
-      if (!owned) throw new PlanePushApiError("code_repo_installation_not_owned");
-      try {
-        return await getInstallationToken({
-          installationId: id,
-          appKind: "team",
-          purpose: "plane_push",
-          role: "plane_push",
-          scope: { repositories: [name], permissions: { contents: "write", pull_requests: "write" } },
-          appCredentials: deps.appCredentials,
-          requester: deps.requester,
-          cache: deps.cache,
-          ...(opts.onExpiry ? { onExpiry: opts.onExpiry } : {}),
-          ...(deps.now ? { now: deps.now } : {}),
-        });
-      } catch (err) {
-        if (err instanceof InstallationTokenError && err.reason === "token_scope_mismatch") throw new PlanePushApiError("token_scope_mismatch");
-        // GitHub refuses a mint for a repository the installation does not cover with 404 or 422.
-        const status = err instanceof InstallationTokenError ? (err.cause as { status?: unknown } | undefined)?.status : undefined;
-        if (status === 404 || status === 422) throw new PlanePushApiError("app_not_installed");
-        if (err instanceof MintTimeoutError || err instanceof InstallationTokenError) throw new PlanePushApiError("public_unavailable");
-        throw err;
-      }
+      return mintFor(codeRepo, "push", opts);
+    },
+
+    /**
+     * D#6 PUBLIC-MERGE PR2b: the two credentials of a merge order on a paired public repository, each for ONE repository and minted anew on every call (never
+     * cached, so it can be revoked after use). `read` is `contents: read` (the runner fetches the commits it compares) and nothing else; `write` is the plane-push
+     * set (`contents` and `pull_requests` write: GitHub's merge endpoint needs both) and is only ever minted for the one go of one order. The installation is found
+     * and its ownership checked exactly as for a push.
+     */
+    async mintMergeToken(codeRepo: string, kind: "read" | "write", opts: { ownsInstallation: PushInstallationOwnership; onExpiry?: (expiresAtMs: number) => void }): Promise<string> {
+      return mintFor(codeRepo, kind === "read" ? "merge_read" : "merge_write", opts);
     },
 
     /**

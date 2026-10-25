@@ -1,4 +1,4 @@
-import { CLAIM_IDLE_RETRY_AFTER_SECONDS, CLAIM_MIN_INTERVAL_SECONDS, ClaimMessage, ClaimReply, ClaimRateLimitedReply } from "@fulcrumaxe/runner-protocol";
+import { CLAIM_IDLE_RETRY_AFTER_SECONDS, CLAIM_MIN_INTERVAL_SECONDS, ClaimMessage, ClaimReply, ClaimRateLimitedReply, PLANE_MERGE_CAPABILITY, PLANE_MERGE_MAX_ATTEMPTS } from "@fulcrumaxe/runner-protocol";
 import { PAUSED_RETRY_AFTER_SECONDS } from "@fx/runner";
 import { allowRunnerWake } from "@fx/core/src/pendingWork.js";
 import { asRunner, parseJsonBody, parseMessage, requireLeases, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
@@ -67,7 +67,26 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
         const caps = await client.query<{ capabilities: string[] }>("SELECT capabilities FROM runner_capabilities WHERE runner_id = $1", [runner.runnerId]);
         capabilities = caps.rows[0]?.capabilities ?? null;
       }
-      return { waited, pausedFor, heldByPerson, capabilities };
+      // D#6 PUBLIC-MERGE PR2b: whether a merge order waits for THIS runner (one EXISTS in the same transaction; no extra round trip, no poll of its own). The same
+      // eligibility as `claimNext` in packages/worker/src/runnerPlaneMerge.ts (a test holds the two together): the runner's own rows, listing the capability on its
+      // latest hello, in scope, not paused or draining. Only while the merge routes are configured.
+      let mergeOrder = false;
+      if (waited <= 0 && message.sandbox_unavailable === undefined && !heldByPerson && deps.planeMerge) {
+        const waiting = await client.query<{ one: number }>(
+          `SELECT 1 AS one FROM plane_merge_orders o
+             JOIN runners rn ON rn.account_id = o.account_id AND rn.id = $2 AND rn.revoked_at IS NULL
+             JOIN account_members am ON am.account_id = rn.account_id AND am.user_id = rn.registered_by AND am.role IN ('owner', 'admin')
+             JOIN runner_capabilities cap ON cap.account_id = rn.account_id AND cap.runner_id = rn.id AND $4::text = ANY(cap.capabilities)
+             LEFT JOIN runner_settings s ON s.account_id = rn.account_id AND s.runner_id = rn.id
+            WHERE o.account_id = $1 AND o.state = 'pending' AND o.attempts < $3 AND o.deadline_at > now()
+              AND o.repo_id = ANY(rn.allowed_repo_ids)
+              AND (s.runner_id IS NULL OR (s.paused_at IS NULL AND s.draining = false))
+            LIMIT 1`,
+          [runner.accountId, runner.runnerId, PLANE_MERGE_MAX_ATTEMPTS, PLANE_MERGE_CAPABILITY],
+        );
+        mergeOrder = waiting.rows.length > 0;
+      }
+      return { waited, pausedFor, heldByPerson, capabilities, mergeOrder };
     }),
   );
   const wait = gate.waited;
@@ -79,7 +98,11 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
 
   // Every 200 below carries the grant when there is one; the 429 above never does.
   const wakeGrant = wakeGrantFor(wakeKey, runner, gate.capabilities, deps.now?.() ?? new Date());
-  const wake = wakeGrant ? { wake: wakeGrant } : {};
+  const wake = {
+    ...(wakeGrant ? { wake: wakeGrant } : {}),
+    // Only ever `true`, and only for a runner whose own rows say an order waits for it; the runner then calls plane-merge-claim (no polling of its own).
+    ...(gate.mergeOrder ? { merge_order: true as const } : {}),
+  };
   // D#6 RUNNER-WAKE R3b: the allow record the wake check requires, written only for a runner this claim just verified in the database and granted.
   if (wakeGrant) await allowRunnerWake(runner, (deps.now?.() ?? new Date()).getTime());
 

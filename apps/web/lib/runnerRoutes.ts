@@ -2,7 +2,7 @@ import type { NextRequest } from "next/server";
 import type { Pool } from "pg";
 import { NextResponse } from "next/server";
 import { MAX_BODY_BYTES, RunnerHttpError, errorResponse, readWakeKey, toResponse } from "@fx/runner-cloud";
-import type { FailRunnerLeases, PlanePushHostedPort, RunnerCloudDeps, RunnerLeaseOps, RunnerHttpRequest, RunnerHttpResponse, RunPullRequestPort, SessionPrincipal } from "@fx/runner-cloud";
+import type { FailRunnerLeases, PlaneMergePort, PlaneMergeStorePort, PlanePushHostedPort, RunnerCloudDeps, RunnerLeaseOps, RunnerHttpRequest, RunnerHttpResponse, RunPullRequestPort, SessionPrincipal } from "@fx/runner-cloud";
 import { PgRateLimitStore, type RateLimitStore } from "@fx/api/src/ratelimit/store.js";
 import { bucketKeyForAnonIp, clientIpFromRequest } from "@fx/api/src/ratelimit/limits.js";
 import { defaultAuthDeps } from "../app/api/auth/_lib/deps";
@@ -12,6 +12,7 @@ import { getWorker } from "./worker";
 import { createAppRunPullRequestPort } from "./github/runnerPullRequest";
 import { readPlanePushIdentity } from "@fx/core/src/repos/planePushIdentity.js";
 import { createLivePlanePushPort } from "./github/planePushHosted";
+import { createPlaneMergeOps } from "./planeMerge";
 import { openPlanSource } from "./github/planSource";
 import { runnerSeenFromCache } from "./runnerSeenCache";
 import { applyRefreshedSessionCookie, resolveActiveSession } from "./shell/session-guard";
@@ -50,6 +51,29 @@ let pullRequests: RunPullRequestPort | undefined;
 /** D#598 P1f-2: the GitHub side of the public-push routes. Built on first use; a missing App answers the routes' fixed `not_configured`. */
 let planePush: PlanePushHostedPort | undefined;
 
+/**
+ * D#6 PUBLIC-MERGE PR2b: the merge-order routes' store, gate and GitHub reads. Built on first use over the worker (resolved per call, so a missing worker is a 503
+ * `not_configured`), the review stage's own fenced clients and the run-pull-request port that closes the private copy.
+ */
+let planeMerge: PlaneMergePort | undefined;
+function livePlaneMerge(): PlaneMergePort {
+  const ops = createPlaneMergeOps({
+    withPool: async (fn) => (await requireWorker()).withRunnerPool(fn),
+    reconcile: async (input) => (await requireWorker()).reconcilePrHolder(input),
+    closePrivate: (repo, number) => (pullRequests ??= createAppRunPullRequestPort()).close({ repo, number }),
+  });
+  const store: PlaneMergeStorePort = {
+    claimNext: async (input) => (await requireWorker()).planeMerge.claimNext(input),
+    grantReadToken: async (input) => (await requireWorker()).planeMerge.grantReadToken(input),
+    fence: async (input) => (await requireWorker()).planeMerge.fence(input),
+    authorize: async (input) => (await requireWorker()).planeMerge.authorize(input),
+    finish: async (input) => (await requireWorker()).planeMerge.finish(input as Parameters<Awaited<ReturnType<typeof requireWorker>>["planeMerge"]["finish"]>[0]),
+    getById: async (input) => (await requireWorker()).planeMerge.getById(input),
+    runnerTrusted: async (input) => (await requireWorker()).planeMerge.runnerTrusted(input),
+  };
+  return { store, goPhase: ops.goPhase, readPublicPull: ops.readPublicPull, recordMerged: ops.recordMerged };
+}
+
 async function requireWorker() {
   const worker = await getWorker();
   if (!worker) throw new RunnerHttpError(503, "not_configured", "the runner API has no worker configured");
@@ -86,7 +110,7 @@ function planePushIdentity(): { name: string; email: string } | null {
 
 export function runnerDeps(): RunnerCloudDeps {
   const auth = defaultAuthDeps();
-  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, maxRunners: (plan) => runnerLimitsFor(plan).maxRunners, accountRunnerCaps: accountRunnerCaps, accountJobLimit, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }), pullRequests: (pullRequests ??= createAppRunPullRequestPort()), planePush: (planePush ??= createLivePlanePushPort()), readAllowanceFile, planePushIdentity, wakeKey, runnerSeen: runnerSeenFromCache() };
+  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, maxRunners: (plan) => runnerLimitsFor(plan).maxRunners, accountRunnerCaps: accountRunnerCaps, accountJobLimit, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }), pullRequests: (pullRequests ??= createAppRunPullRequestPort()), planePush: (planePush ??= createLivePlanePushPort()), planeMerge: (planeMerge ??= livePlaneMerge()), readAllowanceFile, planePushIdentity, wakeKey, runnerSeen: runnerSeenFromCache() };
 }
 
 /** D#6 RUNNER-WAKE R3a: the wake token's HMAC key, read on every call. Missing or shorter than 32 bytes: null, and no runner is sent a wake grant. */
