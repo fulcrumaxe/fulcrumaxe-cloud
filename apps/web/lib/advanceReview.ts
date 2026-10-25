@@ -19,6 +19,8 @@ import { openForRepo } from "./github/localOnlyHttp";
 export function createReviewDeps(open: typeof openInstallationHttp = openInstallationHttp): AdvanceReviewDeps {
   // The merge gate's token purpose for one repository (the item's own, or the paired code repository its installation serves), fenced for a runner_local repo.
   const openReviewHttp = (c: { repoId: string; owner: string; name: string; executionMode: string }) => openForRepo(open, c.executionMode, "merge_gate", { repoId: c.repoId, owner: c.owner, name: c.name }) as Promise<GitHubHttp>;
+  // The paired CODE repository of a runner_local item: the same fenced client without the merge call, because the cloud never merges there (the runner or a person does).
+  const openPublicHttp = (c: { repoId: string; owner: string; name: string; executionMode: string }) => openForRepo(open, c.executionMode, "merge_gate", { repoId: c.repoId, owner: c.owner, name: c.name }, { withoutMerge: true }) as Promise<GitHubHttp>;
   return {
     async load(pool, accountId, workItemId) {
       const r = await loadReviewContext(pool, accountId, workItemId);
@@ -41,7 +43,7 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
         },
         // D#598 P7b: the head's CI is read with the merge gate's token purpose (check runs, statuses, branch protection) and, for a runner_local repo, its fence.
         // Two planes: a paired item's CI is read on the public pull request that merges (`openPublicHttp` gets the code repository's coordinates).
-        createCiGate({ pool, openHttp: openReviewHttp, openPublicHttp: openReviewHttp, publicPullRequest: readPublicPullRequest(pool) }),
+        createCiGate({ pool, openHttp: openReviewHttp, openPublicHttp, publicPullRequest: readPublicPullRequest(pool) }),
       ),
     // D#598 P7c: a head that is only a merge of the base branch is re-checked from facts (GitHub's commit and compare reads, our own records), with no reviewer run.
     // The reads use the merge gate's token purpose, like the CI wait; the head's CI is waited for before anything is recorded.
@@ -52,7 +54,7 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
       const out = await recordMergeOnlyRecheck(
         pool,
         { accountId: input.accountId, workItemId: input.workItemId, headSha: input.headSha, prNumber: input.prNumber, baseRef: input.baseRef, requiredRoles: input.requiredRoles as VerdictRole[] },
-        { http: await openReviewHttp({ repoId: c.repoId, owner: c.owner, name: c.name, executionMode: c.executionMode }), ci: createCiGate({ pool, openHttp: openReviewHttp, openPublicHttp: openReviewHttp, publicPullRequest: readPublicPullRequest(pool) }) },
+        { http: await openReviewHttp({ repoId: c.repoId, owner: c.owner, name: c.name, executionMode: c.executionMode }), ci: createCiGate({ pool, openHttp: openReviewHttp, openPublicHttp, publicPullRequest: readPublicPullRequest(pool) }) },
       );
       return out.decision === "full_review" ? { decision: out.decision, reason: out.reason } : { decision: out.decision };
     },
@@ -65,7 +67,7 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
         // D#6 R3c: a runner_local repo's gate (find, files, CI, protection, status, merge) goes through the local-only fence.
         const http = await openForRepo(open, c.executionMode, "merge_gate", { repoId: c.repoId, owner: c.owner, name: c.name });
         // D#6 R2b: the stored per-repo opt-in decides whether a runner repo's local reviews count; a repo with none is advisory.
-        const out = await runMergeGateForItem({ pool, http, localReviewOptIn: createPgLocalReviewOptIn(pool), publicPlane: { open: openReviewHttp, read: readPublicPullRequest(pool) } }, input);
+        const out = await runMergeGateForItem({ pool, http, localReviewOptIn: createPgLocalReviewOptIn(pool), publicPlane: { open: openPublicHttp, read: readPublicPullRequest(pool) } }, input);
         return out.outcome === "refused" ? { outcome: "refused", reason: out.reason } : { outcome: out.outcome, headSha: out.headSha, reasons: out.reasons, status: out.status };
       } catch (err) {
         const e = err as { name?: string; reason?: string };

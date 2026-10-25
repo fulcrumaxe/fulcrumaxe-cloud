@@ -140,6 +140,11 @@ describe("recorded pipeline steps", () => {
     it("a person-readable stop for the reason code alone", () => {
       expect(reasonWord("stacked_on_open_pr")).toBe("This builds on a pull request that hasn't merged yet.");
     });
+
+    it("the two-plane stops have sentences, never raw codes", () => {
+      expect(reasonWord("public_pr_not_open")).toMatch(/public pull request is not open/);
+      expect(reasonWord("runner_merge_unavailable")).toMatch(/A person merges the public pull request/);
+    });
   });
 });
 

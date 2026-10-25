@@ -301,11 +301,11 @@ const QUERY_VALUES: Readonly<Record<string, (value: string) => boolean>> = {
 };
 
 /** The rule a call breaks, or null when it is on the allowlist. `not_allowlisted` for anything the list does not hold; `accept` for a media type other than JSON. */
-export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | "query" | "headers" | "body">): string | null {
+export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | "query" | "headers" | "body">, exclude: readonly string[] = []): string | null {
   if (typeof req.method !== "string" || typeof req.path !== "string") return NOT_ALLOWLISTED;
   const where = canonical(foldContinuationBranchPath(req.path));
   if (where === null) return NOT_ALLOWLISTED;
-  const entry = LOCAL_ONLY_ALLOWLIST.find((e) => e.method === req.method && e.paths.some((template) => templateMatches(template, where.segments)));
+  const entry = LOCAL_ONLY_ALLOWLIST.find((e) => !exclude.includes(e.id) && e.method === req.method && e.paths.some((template) => templateMatches(template, where.segments)));
   if (!entry) return NOT_ALLOWLISTED;
 
   const given = Object.entries(req.query ?? {});
@@ -337,10 +337,15 @@ export interface LocalOnlyGithub extends GithubClient {
   graphql(op: GithubGraphqlOperation, variables: Readonly<Record<string, unknown>>): Promise<GithubResponse>;
 }
 
-/** Wraps `inner`: every call is checked first, and one the allowlist does not hold throws `LocalOnlyGithubError` without reaching `inner`. */
-export function localOnlyGithub(inner: GithubClient): LocalOnlyGithub {
+/**
+ * Wraps `inner`: every call is checked first, and one the allowlist does not hold throws `LocalOnlyGithubError` without reaching `inner`.
+ * `exclude` leaves entries out of the list for this client (by id): the client for a paired repository's code repository leaves out A10, so the
+ * cloud cannot call merge on it at all and a runner or a person merges there.
+ */
+export function localOnlyGithub(inner: GithubClient, options: { exclude?: readonly string[] } = {}): LocalOnlyGithub {
+  const exclude = options.exclude ?? [];
   const send = (req: GithubRequest): Promise<GithubResponse> => {
-    const rule = localOnlyViolation(req);
+    const rule = localOnlyViolation(req, exclude);
     if (rule !== null) return Promise.reject(new LocalOnlyGithubError(rule));
     const hasAccept = Object.keys(req.headers ?? {}).some((name) => name.toLowerCase() === "accept");
     return inner.request(hasAccept ? req : { ...req, headers: { ...req.headers, accept: JSON_ACCEPT } });

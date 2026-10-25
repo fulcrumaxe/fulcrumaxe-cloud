@@ -260,6 +260,12 @@ export interface MergeGateInput {
   expectedHeadSha?: string;
   /** Stops the caller already knows (e.g. `public_head_unrecorded`); any entry means the gate does not merge and marks the pull request for a person. */
   extraBlockReasons?: readonly MergeBlockReason[];
+  /**
+   * Two planes, `runner_local`: the cloud never calls merge for such a repository's public pull request (its merge belongs to the customer's runner or to a
+   * person). When every other condition is met, the gate stops here instead of merging and marks the pull request for a person with this reason. Absent:
+   * today's rule. A condition that already blocks is reported as it is; this reason appears only on a pull request that would otherwise have merged.
+   */
+  mergeUnavailableReason?: MergeBlockReason;
 }
 
 export type ReviewMode = "cloud" | "runner_local_off" | "runner_local_on";
@@ -301,6 +307,10 @@ export type MergeBlockReason =
   | "public_branch_person_managed"
   /** Two planes: the public head was built from a private head other than the one the reviewers cleared. */
   | "public_head_not_reviewed"
+  /** Two planes: the item's repository is paired and its public pull request is not open (not opened yet, closed or merged). The private copy never merges in its place. */
+  | "public_pr_not_open"
+  /** Two planes, `runner_local`: everything else is met, but the cloud does not merge such a repository's pull request and no runner step exists yet; a person merges. */
+  | "runner_merge_unavailable"
   /** D#598 P3b (C3 R-598-P5b-6): the PR's base is not the repository's default branch, so it builds on a pull request that has not merged. */
   | "stacked_on_open_pr"
   /** Rides with `stacked_on_open_pr` when the parent's pull request number is known: the number the page puts in its sentence. */
@@ -688,6 +698,8 @@ export async function runMergeGate(deps: MergeGateDeps, input: MergeGateInput): 
   if (reasons.length > 0) {
     return markHuman(deps, input.pr, headSha, reasons);
   }
+  // The caller says this pull request is never merged by the cloud: stop before the one merge call below.
+  if (input.mergeUnavailableReason !== undefined) return markHuman(deps, input.pr, headSha, [input.mergeUnavailableReason]);
 
   const outcome = await deps.github.mergePullRequest(input.pr, { sha: headSha });
   if (outcome.merged === true) {

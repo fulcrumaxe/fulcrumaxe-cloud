@@ -178,6 +178,9 @@ const REASON_WORDS = {
   human_merge_only: "the operator set this repository so that a person merges",
   local_reviews_passed_advisory: "Reviews passed on your machine. A person merges this pull request.",
   merge_call_refused: "GitHub refused the merge",
+  // Two planes: a paired repository merges its public pull request, so these two say why a person does.
+  public_pr_not_open: "The public pull request is not open (not opened yet, closed or merged).",
+  runner_merge_unavailable: "Everything else is met. A person merges the public pull request, because it is not merged from the cloud for a repository that runs on your machine.",
   // D#598 P3b (C3 R-598-P5b-6). Read through `stackedWords`, which puts the parent's number in; this is the sentence for a stop that carries none.
   stacked_on_open_pr: "This builds on a pull request that hasn't merged yet.",
 };

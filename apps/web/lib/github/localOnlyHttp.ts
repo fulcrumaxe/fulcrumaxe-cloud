@@ -13,13 +13,13 @@ import type { LocalGitHubHttp } from "@fx/pipeline";
  * A refusal is logged as one line with the rule it broke and nothing else (never a path, a name or a body), and thrown unchanged:
  * the caller's catch turns it into a fixed code, so a refused call reads as "GitHub unavailable" and never as a green answer.
  */
-export function fenceInstallationHttp(http: InstallationHttp): LocalGitHubHttp {
+export function fenceInstallationHttp(http: InstallationHttp, options: { exclude?: readonly string[] } = {}): LocalGitHubHttp {
   const fenced = localOnlyGithub({
     async request(req) {
       if (req.method !== "GET" && req.method !== "POST" && req.method !== "PUT" && req.method !== "PATCH") throw new LocalOnlyGithubError("not_allowlisted");
       return http.request({ method: req.method, path: req.path, query: req.query, body: req.body });
     },
-  });
+  }, options);
   const logRefusal = (err: unknown): never => {
     if (err instanceof LocalOnlyGithubError) console.warn(JSON.stringify({ event: "advance.local_only_refused", rule: err.rule }));
     throw err;
@@ -32,8 +32,11 @@ export function fenceInstallationHttp(http: InstallationHttp): LocalGitHubHttp {
 
 type Open = (kind: InstallationHttpKind, target: InstallationHttpTarget) => Promise<InstallationHttp>;
 
-/** Opens the `read` or `merge_gate` client for a repository, as the plain client for a sandbox repo and the fenced one for a `runner_local` repo. */
-export async function openForRepo(open: Open, executionMode: string, kind: "read" | "merge_gate", target: InstallationHttpTarget): Promise<InstallationHttp | LocalGitHubHttp> {
+/**
+ * Opens the `read` or `merge_gate` client for a repository, as the plain client for a sandbox repo and the fenced one for a `runner_local` repo.
+ * `withoutMerge` (the paired code repository of a `runner_local` item) takes the merge call out of the fence: the cloud never merges there.
+ */
+export async function openForRepo(open: Open, executionMode: string, kind: "read" | "merge_gate", target: InstallationHttpTarget, options: { withoutMerge?: boolean } = {}): Promise<InstallationHttp | LocalGitHubHttp> {
   if (executionMode !== "runner_local") return open(kind, target);
-  return fenceInstallationHttp(await open(kind, { ...target, allowGraphql: true }));
+  return fenceInstallationHttp(await open(kind, { ...target, allowGraphql: true }), options.withoutMerge === true ? { exclude: ["A10"] } : {});
 }

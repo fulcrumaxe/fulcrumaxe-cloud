@@ -89,6 +89,8 @@ export interface FakeRepoState {
   compareFails?: number;
   /** D#6 R3c: the pull request's head branch as the local-only fake lists it (a runner run's `fx/<run>-g<n>`). */
   runBranch?: string;
+  /** The repository's GitHub id as `GET /repos/{owner}/{repo}` reports it (default 7001). */
+  ghId?: number;
 }
 
 export function freshRepo(over: Partial<FakeRepoState> = {}): FakeRepoState {
@@ -182,7 +184,7 @@ export function fakeGitHubRest(s: FakeRepoState): GitHubHttp {
         s.state = "closed";
         return json(200, { merged: true, sha: "f".repeat(40) });
       }
-      if (req.method === "GET" && path === base) return json(200, { full_name: `${s.owner}/${s.name}`, default_branch: s.defaultBranch ?? "main", private: false });
+      if (req.method === "GET" && path === base) return json(200, { id: s.ghId ?? 7001, full_name: `${s.owner}/${s.name}`, default_branch: s.defaultBranch ?? "main", private: false });
       const commit = /^\/repos\/[^/]+\/[^/]+\/commits\/([0-9a-f]{40})$/.exec(path);
       if (req.method === "GET" && commit) return json(200, { sha: commit[1], parents: (s.commitParents?.[commit[1]!] ?? [FAKE_MERGE_BASE]).map((sha) => ({ sha })) });
       const compare = /^\/repos\/[^/]+\/[^/]+\/compare\/(.+)\.\.\.([0-9a-f]{40})$/.exec(path);

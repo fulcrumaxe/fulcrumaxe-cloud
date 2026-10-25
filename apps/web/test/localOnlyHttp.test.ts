@@ -88,4 +88,26 @@ describe("openForRepo", () => {
     await expect(got.request({ method: "GET", path: "/repos/acme/widgets/pulls/41/files" })).rejects.toBeInstanceOf(LocalOnlyGithubError);
     expect(seen).toEqual([]);
   });
+
+  it("withoutMerge (a paired runner_local item's code repository): the same client with the squash call out of the fence, so it is refused before the installation client", async () => {
+    const { http, seen } = inner();
+    const open = vi.fn(async () => http);
+    const got = await openForRepo(open, "runner_local", "merge_gate", TARGET, { withoutMerge: true });
+    expect(open).toHaveBeenCalledWith("merge_gate", { ...TARGET, allowGraphql: true });
+    await expect(got.request({ method: "PUT", path: "/repos/acme/widgets/pulls/12/merge", body: { sha: SHA, merge_method: "squash" } })).rejects.toBeInstanceOf(LocalOnlyGithubError);
+    expect(seen).toEqual([]);
+    // Its reads still pass.
+    await got.request({ method: "GET", path: "/repos/acme/widgets" });
+    await got.request({ method: "GET", path: "/repos/acme/widgets/pulls", query: { state: "all", head: "acme:fx/p-1", per_page: 100 } });
+    expect(seen.map((r) => r.path)).toEqual(["/repos/acme/widgets", "/repos/acme/widgets/pulls"]);
+  });
+
+  it("withoutMerge changes nothing for a sandbox repo, and the default fence keeps the squash call", async () => {
+    const { http, seen } = inner();
+    const open = vi.fn(async () => http);
+    expect(await openForRepo(open, "sandbox", "merge_gate", TARGET, { withoutMerge: true })).toBe(http);
+    const got = await openForRepo(open, "runner_local", "merge_gate", TARGET);
+    await got.request({ method: "PUT", path: "/repos/acme/widgets/pulls/12/merge", body: { sha: SHA, merge_method: "squash" } });
+    expect(seen).toHaveLength(1);
+  });
 });

@@ -284,8 +284,12 @@ describe("a paired item: the wait reads the public pull request's CI", () => {
       withPr ? [w.accountId, w.workItemId, repoId, "a".repeat(64), stamp, opts.prNumber ?? PUB_PR, `https://github.com/customer-co/storefront-public/pull/${opts.prNumber ?? PUB_PR}`] : [w.accountId, w.workItemId, repoId, "a".repeat(64)],
     );
     const opened: string[] = [];
-    const privHttp = opts.local === true ? fakeGitHubLocal(w.gh).http : fakeGitHubRest(w.gh);
-    const pubHttp = fakeGitHubRest(pub);
+    const privLocal = opts.local === true ? fakeGitHubLocal(w.gh) : null;
+    const privHttp = privLocal !== null ? privLocal.http : fakeGitHubRest(w.gh);
+    // A runner_local pair: the code repository is read through its own fence, and its pull request is found by the branch our push record names.
+    if (opts.local === true && withPr) pub.runBranch = String((await h.admin.query("SELECT branch FROM plane_pushes WHERE work_item_id = $1", [w.workItemId])).rows[0].branch);
+    const pubLocal = opts.local === true ? fakeGitHubLocal(pub, { exclude: ["A10"] }) : null;
+    const pubHttp = pubLocal !== null ? pubLocal.http : fakeGitHubRest(pub);
     const gate = createCiGate({
       pool: h.runWriterPool,
       publicPullRequest: readPublicPullRequest(h.runWriterPool),
@@ -301,7 +305,7 @@ describe("a paired item: the wait reads the public pull request's CI", () => {
         return pubHttp;
       },
     });
-    return { w, pub, gate, opened };
+    return { w, pub, gate, opened, privLocal, pubLocal };
   }
 
   it("the private copy's CI never finishes but the public one is green: the round proceeds and the pass is recorded", async () => {
@@ -361,8 +365,37 @@ describe("a paired item: the wait reads the public pull request's CI", () => {
     expect(t.opened).toEqual(["private"]);
   });
 
-  it("a paired runner_local item keeps the private read through the local-only client; the public client is never opened", async () => {
+  it("a paired runner_local item: the wait reads the PUBLIC pull request through the code repository's fence, and the private copy is never asked", async () => {
     const t = await pairedWorld({ local: true });
+    expect((await record(t.w, PASS_BOTH, t.gate)).decision).toBe("all_passed");
+    expect(t.opened).toEqual(["public"]);
+    expect(t.privLocal!.calls).toEqual([]);
+    expect(t.pubLocal!.calls.map((c) => c.label)).toEqual(expect.arrayContaining(["A3", "A8", "A9 CommitChecks"]));
+    expect(t.pubLocal!.denied).toEqual([]);
+    expect(t.pubLocal!.refused).toEqual([]);
+  });
+
+  it("a paired runner_local item: the public CI still running holds the round although the private copy is green; a green one releases it", async () => {
+    const t = await pairedWorld({ local: true, priv: { [HEAD]: green }, pub: { [PUB_HEAD]: [{ name: "build", status: "in_progress", conclusion: null }] } });
+    expect(await record(t.w, PASS_BOTH, t.gate)).toMatchObject({ decision: "ci_pending", ciReasons: ["check_running"] });
+    await expectNothingRecorded(t.w);
+    t.pub.checks[PUB_HEAD] = green;
+    expect((await record(t.w, PASS_BOTH, t.gate)).decision).toBe("all_passed");
+  });
+
+  it("a paired runner_local item: a public head the platform did not push is a wait (wrong_head); a failed public read throws and records nothing", async () => {
+    const moved = "d".repeat(40);
+    const t = await pairedWorld({ local: true, pubHead: moved, pub: { [moved]: green } });
+    expect(await record(t.w, PASS_BOTH, t.gate)).toMatchObject({ decision: "ci_pending", ciReasons: ["wrong_head"] });
+    const ok = await pairedWorld({ local: true });
+    ok.pub.runBranch = "fx/p-not-ours";
+    const gate = createCiGate({ pool: h.runWriterPool, publicPullRequest: readPublicPullRequest(h.runWriterPool), openHttp: async () => ok.privLocal!.http, openPublicHttp: async () => fakeGitHubLocal(ok.pub, { exclude: ["A10"] }).http });
+    await expect(record(ok.w, PASS_BOTH, gate)).rejects.toThrow(/not listed/);
+    await expectNothingRecorded(ok.w);
+  });
+
+  it("a paired runner_local item whose public pull request is not open yet: the private copy is read through its own fence, as before", async () => {
+    const t = await pairedWorld({ local: true, prNumber: null });
     expect((await record(t.w, PASS_BOTH, t.gate)).decision).toBe("ci_pending");
     expect(t.opened).toEqual(["private"]);
   });
