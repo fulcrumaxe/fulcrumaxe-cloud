@@ -69,6 +69,20 @@ env:
 # pull requests and every public run (push included) are unchanged. Private is told apart the same way as
 # everywhere in this file, by github.event.repository.private.
 #
+# PAIRED COPIES (private repository only). A cloud-built item on a paired repository opens a private run-branch pull
+# request (head fx/<run>-g1, from the same repository, authored by the cloud's GitHub App) beside its public pull
+# request; the merge gate and the CI wait judge the PUBLIC pull request's CI, and the private copy is closed after the
+# public merge. Running its full CI here only duplicates the public run and holds the one runner. The `Paired copy`
+# step in `check`, `workspace-e2e` and `e2e-runner` recognises such a pull request from facts GitHub supplies
+# and an outside contributor cannot forge: the head repository is this repository (not a fork), the author is the App's
+# bot account (its login is the repository variable FX_APP_BOT_LOGIN; unset means no pull request is ever a copy), and the head
+# branch is fx/...-g1. It then sets CI_PAIRED_COPY: `check` skips "Run checks" (the Node 22
+# step by setting CI_SCOPE_RUNNER_PROTOCOL=false after the scope step: it needs the install "Run checks" does, and its test guard allows only the scope condition), `e2e-runner` skips its test, `workspace-e2e` skips its scope step (so every later step skips). The secret scan,
+# the migration lint and the CI script tests still run, and every job finishes `success` under its real name (none is
+# skipped at job level). The `ci:full` label (read from the API at that step), CI_PAIRED_COPY_FULL=true and CI_FORCE_FULL=true each turn this off, e.g.
+# for an item whose repository is not paired and whose private pull request is the only one. Every other pull
+# request, and every public run, is unchanged.
+#
 # The e2e jobs never skip at job level. A matrix job skipped by its own `if:` reports under the unexpanded
 # name `workspace-e2e (${{ matrix.project }})` and as skipped, so the three named checks would be missing.
 # They always run, and when the change cannot affect the specs they say so in their first step, skip the
@@ -338,13 +352,39 @@ jobs:
         run: |
           echo "CI scope: overlay checks only (push to private main; the public repository ran the full suite on this tree)" | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # Paired copy of a cloud-built item (private repository only, see PAIRED COPIES at the top of this file).
+      # Sets CI_PAIRED_COPY for the heavy steps below; reads nothing from the pull request but the fields in the `if:`.
+      - name: Paired copy
+        if: github.event_name == 'pull_request' && github.event.repository.private && vars.CI_PAIRED_COPY_FULL != 'true' && vars.CI_FORCE_FULL != 'true' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.type == 'Bot' && vars.FX_APP_BOT_LOGIN != '' && github.event.pull_request.user.login == vars.FX_APP_BOT_LOGIN && startsWith(github.event.pull_request.head.ref, 'fx/') && endsWith(github.event.pull_request.head.ref, '-g1')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # A person who asked for full CI (the `ci:full` label) gets it. The label is read from the API now, never
+          # from the event payload (a re-run replays the payload as it was). If the read fails the answer is full.
+          verdict="$(nix develop .#ci --command node -e '
+            const url = (process.env.GITHUB_API_URL || "https://api.github.com") + "/repos/" + process.env.REPO + "/issues/" + process.env.PR_NUMBER + "/labels?per_page=100";
+            fetch(url, { headers: { authorization: "Bearer " + process.env.GH_TOKEN, accept: "application/vnd.github+json", "user-agent": "ci" } })
+              .then(async (r) => { if (!r.ok) throw new Error(String(r.status)); const l = await r.json(); process.stdout.write(l.some((x) => x.name === "ci:full") ? "full" : "copy"); })
+              .catch(() => process.stdout.write("full"));
+          ')"
+          if [ "$verdict" != copy ]; then
+            echo "CI scope: full (ci:full label, or the labels could not be read) on a paired copy" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "CI_PAIRED_COPY=true" >> "$GITHUB_ENV"
+          # Written after the CI scope step, so it wins: the Node 22 step (which needs the install "Run checks" would have done) skips by its own scope condition.
+          echo "CI_SCOPE_RUNNER_PROTOCOL=false" >> "$GITHUB_ENV"
+          echo "CI scope: paired copy of a cloud-built item (the public pull request ran the full suite; only the secret scan, the migration lint and the CI script tests run here)" | tee -a "$GITHUB_STEP_SUMMARY"
+
       # node, pnpm and postgresql (initdb/pg_ctl/createdb) all come from flake.nix's
       # `ci` devShell (D#507: lean, no Python tooling, so a fresh runner fetches it
       # all from the public cache). It is built from the same shared package list as
       # the `default` shell a developer runs locally, so it cannot drift from it. packages/db's own vitest globalSetup provisions and tears down its own
       # throwaway Postgres cluster; nothing else needs configuring here.
       - name: Run checks
-        if: env.CI_SCOPE_OVERLAY != 'true' && !(github.event_name == 'push' && github.event.repository.private)
+        if: env.CI_PAIRED_COPY != 'true' && env.CI_SCOPE_OVERLAY != 'true' && !(github.event_name == 'push' && github.event.repository.private)
         env:
           # The browser tier runs on every event, push included, with Chromium's
           # sandbox on. check.sh still refuses FX_BROWSER_TIER=skip on pull_request.
@@ -433,6 +473,32 @@ jobs:
           CI_PR_NUMBER: ${{ github.event.pull_request.number }}
           GH_TOKEN: ${{ github.token }}
         run: nix develop .#ci --command node scripts/ci/affected.mjs --base HEAD^1 --head HEAD --force-full "$CI_FORCE_FULL" --labels-api --github --e2e-step
+
+      # Paired copy of a cloud-built item (private repository only, see PAIRED COPIES at the top of this file).
+      # Sets CI_PAIRED_COPY for the heavy steps below; reads nothing from the pull request but the fields in the `if:`.
+      - name: Paired copy
+        if: github.event_name == 'pull_request' && github.event.repository.private && vars.CI_PAIRED_COPY_FULL != 'true' && vars.CI_FORCE_FULL != 'true' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.type == 'Bot' && vars.FX_APP_BOT_LOGIN != '' && github.event.pull_request.user.login == vars.FX_APP_BOT_LOGIN && startsWith(github.event.pull_request.head.ref, 'fx/') && endsWith(github.event.pull_request.head.ref, '-g1')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # A person who asked for full CI (the `ci:full` label) gets it. The label is read from the API now, never
+          # from the event payload (a re-run replays the payload as it was). If the read fails the answer is full.
+          verdict="$(nix develop .#ci --command node -e '
+            const url = (process.env.GITHUB_API_URL || "https://api.github.com") + "/repos/" + process.env.REPO + "/issues/" + process.env.PR_NUMBER + "/labels?per_page=100";
+            fetch(url, { headers: { authorization: "Bearer " + process.env.GH_TOKEN, accept: "application/vnd.github+json", "user-agent": "ci" } })
+              .then(async (r) => { if (!r.ok) throw new Error(String(r.status)); const l = await r.json(); process.stdout.write(l.some((x) => x.name === "ci:full") ? "full" : "copy"); })
+              .catch(() => process.stdout.write("full"));
+          ')"
+          if [ "$verdict" != copy ]; then
+            echo "CI scope: full (ci:full label, or the labels could not be read) on a paired copy" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "CI_PAIRED_COPY=true" >> "$GITHUB_ENV"
+          # Written after the scope step, so it wins: no e2e step below runs, and the job still ends `success`.
+          echo "CI_SCOPE_E2E=false" >> "$GITHUB_ENV"
+          echo "CI scope: paired copy of a cloud-built item (the public pull request ran the full suite; only the secret scan, the migration lint and the CI script tests run here)" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Nix store cache (hosted)
         if: env.CI_SCOPE_E2E == 'true' && runner.environment == 'github-hosted' && !startsWith(vars.CI_RUNS_ON, 'ubicloud')
@@ -533,6 +599,30 @@ jobs:
           key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: pnpm-store-${{ runner.os }}-
 
+      # Paired copy of a cloud-built item (private repository only, see PAIRED COPIES at the top of this file).
+      # Sets CI_PAIRED_COPY for the heavy steps below; reads nothing from the pull request but the fields in the `if:`.
+      - name: Paired copy
+        if: github.event_name == 'pull_request' && github.event.repository.private && vars.CI_PAIRED_COPY_FULL != 'true' && vars.CI_FORCE_FULL != 'true' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.type == 'Bot' && vars.FX_APP_BOT_LOGIN != '' && github.event.pull_request.user.login == vars.FX_APP_BOT_LOGIN && startsWith(github.event.pull_request.head.ref, 'fx/') && endsWith(github.event.pull_request.head.ref, '-g1')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # A person who asked for full CI (the `ci:full` label) gets it. The label is read from the API now, never
+          # from the event payload (a re-run replays the payload as it was). If the read fails the answer is full.
+          verdict="$(nix develop .#ci --command node -e '
+            const url = (process.env.GITHUB_API_URL || "https://api.github.com") + "/repos/" + process.env.REPO + "/issues/" + process.env.PR_NUMBER + "/labels?per_page=100";
+            fetch(url, { headers: { authorization: "Bearer " + process.env.GH_TOKEN, accept: "application/vnd.github+json", "user-agent": "ci" } })
+              .then(async (r) => { if (!r.ok) throw new Error(String(r.status)); const l = await r.json(); process.stdout.write(l.some((x) => x.name === "ci:full") ? "full" : "copy"); })
+              .catch(() => process.stdout.write("full"));
+          ')"
+          if [ "$verdict" != copy ]; then
+            echo "CI scope: full (ci:full label, or the labels could not be read) on a paired copy" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "CI_PAIRED_COPY=true" >> "$GITHUB_ENV"
+          echo "CI scope: paired copy of a cloud-built item (the public pull request ran the full suite; only the secret scan, the migration lint and the CI script tests run here)" | tee -a "$GITHUB_STEP_SUMMARY"
+
       # Private repository, pull requests only: is this an overlay-only change? Only that answer is used here; the
       # test below still runs on every other pull request and on every push, whatever the scope otherwise is.
       - name: Overlay scope
@@ -545,5 +635,5 @@ jobs:
         run: nix develop .#ci --command node scripts/ci/affected.mjs --base HEAD^1 --head HEAD --force-full "$CI_FORCE_FULL" --labels-api --github
 
       - name: Run the end-to-end runner test
-        if: env.CI_SCOPE_OVERLAY != 'true' && !(github.event_name == 'push' && github.event.repository.private)
+        if: env.CI_PAIRED_COPY != 'true' && env.CI_SCOPE_OVERLAY != 'true' && !(github.event_name == 'push' && github.event.repository.private)
         run: nix develop .#ci --command bash -euo pipefail -c 'pnpm install --frozen-lockfile && pnpm test:e2e-runner'
