@@ -247,14 +247,14 @@ describe("mintToken", () => {
 });
 
 describe("mintMergeToken (a merge order's two credentials)", () => {
-  it("read: one repository, contents read and nothing else; write: contents and pull requests write; neither is revoked by the hosted side (the runner holds it)", async () => {
+  it("read: one repository, contents read and nothing else; write: contents write ONLY (no pull requests write); neither is revoked by the hosted side (the runner holds it)", async () => {
     const t = await setup({});
     const read = await t.hosted.mintMergeToken("acme/widgets", ACCOUNT, "read");
     const write = await t.hosted.mintMergeToken("acme/widgets", ACCOUNT, "write");
     expect(read.token).not.toBe(write.token);
     expect(t.requested).toEqual([
       { permissions: { metadata: "read", contents: "read" }, repositories: ["widgets"] },
-      { permissions: { contents: "write", pull_requests: "write" }, repositories: ["widgets"] },
+      { permissions: { contents: "write" }, repositories: ["widgets"] },
     ]);
     expect(t.server.seen.some((x) => x.method === "DELETE")).toBe(false);
     // Each call is a new mint, never a cached token.

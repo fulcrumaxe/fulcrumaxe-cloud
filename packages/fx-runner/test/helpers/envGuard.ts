@@ -70,6 +70,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/sandbox/checkHome.ts": ["fs", "path"], // D#6 chknested: makes the check's own home (a fresh mkdtemp directory with two exclusively created files) inside the job's temp directory; nothing is read
   "src/sandbox/checkSeccomp.ts": ["os"], // D#6 R-CHK-2: os.arch() picks the system call numbers of the seccomp filter the check runs under; nothing else
   "src/job/lockfileCheck.ts": ["path"], // D#6 C44-4: normalising a repo-relative link target
+  "src/daemon/planeMerge.ts": ["fs", "path"], // D#6 PUBLIC-MERGE PR3: the merge order's throwaway repository directory under the state directory: lstat of the work root and of each work directory (a link is never followed or deleted), a 0700 create, and a sweep of leftovers; every program runs through the shared git reader
   "src/daemon/mirror.ts": ["fs", "path"], // the persistent mirrors: a 0700 directory of bare repositories, one per repo id
   "src/daemon/nixShell.ts": ["crypto", "fs", "path"], // D#6 R7c: the dev shell step's own 0700 data directory and its cache files, a SHA-256 of the lock file, and the search for the nix binary; nix itself runs through the injected capture
   "src/daemon/gitPathA.ts": ["fs", "os", "path"], // cloud-verified path: realpath and statfs of the mirrors directory (must not be a temp directory or memory-backed), and the temp directory's location

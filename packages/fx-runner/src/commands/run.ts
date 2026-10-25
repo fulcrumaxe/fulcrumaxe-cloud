@@ -43,8 +43,9 @@ import { createSandboxedPurge } from "../daemon/resumePurgeSandbox.js";
 import { createJobHandler } from "../daemon/jobHandler.js";
 import { createPlaneBaseLedger, createPlanePushHook } from "../daemon/planePush.js";
 import { createPlanePushGithub } from "../daemon/planePushGithub.js";
+import { createPlaneMergeHandler } from "../daemon/planeMerge.js";
 import type { LimitedBy } from "@fulcrumaxe/runner-protocol";
-import { createGitTransport } from "@fulcrumaxe/runner-protocol/planePush";
+import { createGitTransport, createPublicHeadsReader } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
 import { createLockfileSync, type LockfileSync } from "../daemon/lockfileSync.js";
@@ -334,6 +335,19 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       baseLedger: planeBase,
       run: createPlanePushHook({ client, github: createPlanePushGithub(), transport: createGitTransport(), baseLedger: planeBase, workRoot: path.join(stateDir, "plane-push"), uid: host.uid, say: (line) => ctx.out(line) }),
     };
+    // D#6 PUBLIC-MERGE PR3: a paired item's public pull request is merged here, with the cloud-minted single-use credential; the order is claimed only after a claim reply says one waits.
+    const planeMerge = createPlaneMergeHandler({
+      client,
+      github: createPlanePushGithub(),
+      reader: createPublicHeadsReader(),
+      syncMirror: async (repo) => {
+        if (git.syncMirror === undefined) throw new Error("no mirror");
+        return git.syncMirror(repo);
+      },
+      workRoot: path.join(stateDir, "plane-merge"),
+      uid: host.uid,
+      say: (line) => ctx.out(line),
+    });
     const handle = createJobHandler({
       planePush,
       ...(depsInstall === undefined ? {} : { depsInstall, packageStoreRoot }),
@@ -441,6 +455,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
           now: () => clock.now().getTime(),
         }),
         onClaimed: (claimed) => jobs.track(() => handle(claimed)),
+        onMergeOrder: async () => ((await jobs.track(() => planeMerge())) === "none" ? "none" : "handled"),
         ...(autoUpdate === undefined || updateHost === undefined
           ? {}
           : {

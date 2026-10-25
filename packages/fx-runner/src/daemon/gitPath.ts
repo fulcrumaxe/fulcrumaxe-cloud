@@ -45,6 +45,12 @@ export interface GitPath {
    */
   mirrorDir?(job: GitJob): string;
   /**
+   * D#6 PUBLIC-MERGE PR3: brings an EXISTING mirror up to date and answers its directory, so a merge order can read the reviewed private head from it. The repo
+   * named here came from an unsigned cloud reply, so this only fetches: a mirror a verified job already made for that id, whose origin is exactly this runner's address
+   * for the owner and name. It never clones, writes config or repoints (`mirror.syncExisting`); anything else throws `mirror_failed`. Optional: a path without a mirror gives none.
+   */
+  syncMirror?(repo: { id: string; owner: string; name: string }): Promise<{ dir: string }>;
+  /**
    * D#6 R7c: what the repo's Nix dev shell may be built from at `sha`. A commit in the history of the mirror's default branch (the mirror's HEAD
    * follows it) is used as it is. Any other commit is replaced by its merge-base with that HEAD (`fromDefault`); with no merge-base the answer is `not_default_branch`. Both paths give it
    * (`mirrorNixSource`, R-CHK-2c); a path without one gives no job a dev shell.
@@ -168,6 +174,10 @@ export function createGitPath(deps: GitPathDeps): GitPath {
     },
     readGrants: (job) => [mirrors.objects(job.repo)],
     mirrorDir: (job) => mirrors.dir(job.repo),
+    syncMirror: async (repo) => {
+      await assertGitVersion(git);
+      return mirrors.syncExisting(repo);
+    },
     repoMap: (job, sha) => readRepoMap({ listing: listingGit, small: git, listingCap: deps.captureLarge === undefined ? SMALL_CAPTURE_CHARS : LISTING_CAP }, mirrors.dir(job.repo), sha),
     checkBase: (job, sha) => mirrorCheckBase(git, mirrors.dir(job.repo), sha),
     nixSource: (job, sha) => mirrorNixSource(git, mirrors.dir(job.repo), sha),

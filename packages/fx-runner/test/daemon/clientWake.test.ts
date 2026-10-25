@@ -35,11 +35,27 @@ describe("hello", () => {
     cloud.wake.enabled = true;
     expect(await client.hello(hello)).toEqual({ kind: "ok" });
     const sent = hellos();
-    expect(sent).toHaveLength(2);
-    expect(sent[0]!.capabilities).toEqual(["proposal_verifier", "wake_v1"]);
-    expect(sent[1]!.capabilities).toEqual(["proposal_verifier"]);
+    // Two steps: the newest capability goes first, and wake_v1 only when that still does not help.
+    expect(sent).toHaveLength(3);
+    expect(sent[0]!.capabilities).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1"]);
+    expect(sent[1]!.capabilities).toEqual(["proposal_verifier", "wake_v1"]);
+    expect(sent[2]!.capabilities).toEqual(["proposal_verifier"]);
     // Claims work as before: idle with the cloud's retry_after, and no grant.
     expect(await client.claim()).toEqual({ kind: "idle", retryAfter: 60 });
+  });
+
+  it("a cloud that knows wake_v1 but not plane_merge_v1 keeps its wake grant: only plane_merge_v1 is dropped, in one retry", async () => {
+    const sentCaps: string[][] = [];
+    const fetchFn = (async (_url: string, init: RequestInit) => {
+      const caps = (JSON.parse(String(init.body)) as { capabilities?: string[] }).capabilities ?? [];
+      sentCaps.push(caps);
+      if (caps.includes("plane_merge_v1")) return new Response(JSON.stringify({ error: { code: "invalid_message", message: "x" } }), { status: 400, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ protocol_version: 1, wake: { token: `${"a".repeat(32)}.${"b".repeat(43)}`, poll_s: 20, transport: "poll" } }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+    const middle = createRunnerClient({ origin: "https://cloud.example.test", key, now: () => new Date(), fetchFn });
+    const reply = await middle.hello(hello);
+    expect(sentCaps).toEqual([["proposal_verifier", "wake_v1", "plane_merge_v1"], ["proposal_verifier", "wake_v1"]]);
+    expect(reply).toMatchObject({ kind: "ok", wake: { poll_s: 20 } });
   });
 
   it("a hello refused for another reason is not retried", async () => {

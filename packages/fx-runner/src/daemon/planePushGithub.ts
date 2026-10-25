@@ -6,6 +6,10 @@
  *   openPullRequest  `POST /repos/<o>/<n>/pulls`: the one call that makes the pushed branch a pull request.
  *   revokeToken      `DELETE /installation/token` with the token itself as the bearer: 204, and the token answers 401 afterwards.
  *
+ * D#6 PUBLIC-MERGE PR3 adds the two calls of a merge order, made with the order's single-use write token:
+ *   getPull          `GET /repos/<o>/<n>/pulls/<number>`: the head, base, state and draft flag the merge decision is re-read from.
+ *   mergePull        `PUT /repos/<o>/<n>/pulls/<number>/merge` with `{ sha, merge_method: "squash" }`: GitHub itself refuses (409) when the head is not `sha`.
+ *
  * The token is minted on the cloud side and travels here in the token reply; it is used as a bearer for these calls and, through the transport, as
  * the push header, and for nothing else. Every path is built here from a validated owner, name and branch. Redirects are an error, every call has a
  * timeout, and no error carries a token, a header, a request body or GitHub's text: a failure carries a closed `code` from the route's refusal list.
@@ -71,11 +75,29 @@ async function readCapped(res: Response): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+/** What a merge decision reads of a pull request. `defaultBranch` is the base repository's own setting, not the pull request's say-so. */
+export interface PullState {
+  number: number;
+  state: string;
+  merged: boolean;
+  draft: boolean;
+  headSha: string;
+  headRef: string;
+  headRepo: string;
+  baseRef: string;
+  baseRepo: string;
+  defaultBranch: string;
+}
+
 export interface PlanePushGithub {
   branchExists(input: { codeRepo: string; branch: string; token: string }): Promise<boolean>;
   openPullRequest(input: { codeRepo: string; branch: string; base: string; title: string; body: string; token: string }): Promise<{ number: number; url: string }>;
   /** The branch's head (a full commit id), or null when it does not exist. */
   branchHead(input: { codeRepo: string; branch: string; token: string }): Promise<string | null>;
+  /** The pull request as GitHub has it now; throws `public_unavailable` on anything but a 200 with the expected shape. */
+  getPull(input: { codeRepo: string; number: number; token: string }): Promise<PullState>;
+  /** One squash merge naming the head it expects. Never throws for a refusal: GitHub's status comes back; throws `public_unavailable` only when no answer arrived. */
+  mergePull(input: { codeRepo: string; number: number; sha: string; token: string }): Promise<{ status: number; merged: boolean }>;
   /** True on GitHub's 204 and on a 401 (already gone). Anything else, or no answer, is false: the token then lapses at its own expiry. Never throws. */
   revokeToken(token: string): Promise<boolean>;
 }
@@ -85,7 +107,7 @@ export function createPlanePushGithub(deps: PlanePushGithubDeps = {}): PlanePush
   const origin = checkOrigin(deps.apiOrigin ?? "https://api.github.com");
   const timeoutMs = deps.timeoutMs ?? CALL_TIMEOUT_MS;
 
-  async function call(method: "GET" | "POST" | "DELETE", path: string, token: string, body?: unknown): Promise<{ status: number; body: unknown }> {
+  async function call(method: "GET" | "POST" | "PUT" | "DELETE", path: string, token: string, body?: unknown): Promise<{ status: number; body: unknown }> {
     let res: Response;
     try {
       res = await fetchFn(new URL(path, origin), {
@@ -145,6 +167,35 @@ export function createPlanePushGithub(deps: PlanePushGithubDeps = {}): PlanePush
         throw new PlanePushGithubError(res.status >= 500 || res.status === 429 ? "public_unavailable" : "pr_failed");
       }
       return { number: b.number, url: b.html_url };
+    },
+
+    async getPull({ codeRepo, number, token }) {
+      const { owner, name } = split(codeRepo);
+      if (!Number.isSafeInteger(number) || number < 1) throw new PlanePushGithubError("public_unavailable");
+      const res = await call("GET", `/repos/${owner}/${name}/pulls/${number}`, token);
+      const b = res.body;
+      const obj = (v: unknown): Record<string, unknown> | undefined => (v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined);
+      const root = obj(b);
+      const head = obj(root?.head);
+      const base = obj(root?.base);
+      const headRepo = obj(head?.repo);
+      const baseRepo = obj(base?.repo);
+      if (
+        res.status !== 200 || root === undefined || typeof root.number !== "number" || typeof root.state !== "string" || typeof root.draft !== "boolean" || typeof root.merged !== "boolean" ||
+        typeof head?.sha !== "string" || !/^[0-9a-f]{40}$/.test(head.sha) || typeof head.ref !== "string" || typeof base?.ref !== "string" ||
+        typeof headRepo?.full_name !== "string" || typeof baseRepo?.full_name !== "string" || typeof baseRepo.default_branch !== "string"
+      ) {
+        throw new PlanePushGithubError("public_unavailable");
+      }
+      return { number: root.number, state: root.state, merged: root.merged, draft: root.draft, headSha: head.sha, headRef: head.ref, headRepo: headRepo.full_name, baseRef: base.ref, baseRepo: baseRepo.full_name, defaultBranch: baseRepo.default_branch };
+    },
+
+    async mergePull({ codeRepo, number, sha, token }) {
+      const { owner, name } = split(codeRepo);
+      if (!Number.isSafeInteger(number) || number < 1 || !/^[0-9a-f]{40}$/.test(sha)) throw new PlanePushGithubError("public_unavailable");
+      const res = await call("PUT", `/repos/${owner}/${name}/pulls/${number}/merge`, token, { sha, merge_method: "squash" });
+      const merged = res.status === 200 && res.body !== null && typeof res.body === "object" && (res.body as { merged?: unknown }).merged === true;
+      return { status: res.status, merged };
     },
 
     async revokeToken(token) {

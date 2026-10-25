@@ -110,10 +110,10 @@ export function createPlanePushApi(deps: PlanePushApiDeps) {
       return await getInstallationToken({
         installationId: id,
         appKind: "team",
-        // The read credential is the read-only contents purpose; both write kinds are the plane-push purpose, told apart by role.
-        purpose: kind === "merge_read" ? "plane_publish_read" : "plane_push",
+        // The read credential is the read-only contents purpose; the merge write credential is its own purpose (`contents: write` only); a push is the plane-push purpose.
+        purpose: kind === "merge_read" ? "plane_publish_read" : kind === "merge_write" ? "plane_merge" : "plane_push",
         role: kind === "push" ? "plane_push" : kind === "merge_read" ? "plane_merge_read" : "plane_merge_write",
-        scope: { repositories: [name], permissions: kind === "merge_read" ? { metadata: "read", contents: "read" } : { contents: "write", pull_requests: "write" } },
+        scope: { repositories: [name], permissions: kind === "merge_read" ? { metadata: "read", contents: "read" } : kind === "merge_write" ? { contents: "write" } : { contents: "write", pull_requests: "write" } },
         appCredentials: deps.appCredentials,
         requester: deps.requester,
         cache: deps.cache,
@@ -137,8 +137,8 @@ export function createPlanePushApi(deps: PlanePushApiDeps) {
 
     /**
      * D#6 PUBLIC-MERGE PR2b: the two credentials of a merge order on a paired public repository, each for ONE repository and minted anew on every call (never
-     * cached, so it can be revoked after use). `read` is `contents: read` (the runner fetches the commits it compares) and nothing else; `write` is the plane-push
-     * set (`contents` and `pull_requests` write: GitHub's merge endpoint needs both) and is only ever minted for the one go of one order. The installation is found
+     * cached, so it can be revoked after use). `read` is `contents: read` (the runner fetches the commits it compares) and nothing else; `write` is the `plane_merge`
+     * set (`contents: write` only: that is all GitHub's merge endpoint needs; no `pull_requests` write) and is only ever minted for the one go of one order. The installation is found
      * and its ownership checked exactly as for a push.
      */
     async mintMergeToken(codeRepo: string, kind: "read" | "write", opts: { ownsInstallation: PushInstallationOwnership; onExpiry?: (expiresAtMs: number) => void }): Promise<string> {
