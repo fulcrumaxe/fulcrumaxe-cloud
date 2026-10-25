@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { COPY } from "@fulcrumaxe/runner-protocol";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
-import { CLOUD_VERIFIED_COPY_SHA256, getRepoMode } from "../src/index.js";
+import { CLOUD_VERIFIED_COPY_SHA256, LOCAL_AUTO_MERGE_COPY_SHA256, getRepoMode, setExecutionMode } from "../src/index.js";
 import { harness, respond, type Harness } from "./helpers.js";
 
 /** [pg] D#6 R5b-2b-iii (C40): the state-read route behind the repo mode picker. Real rows, real row security. */
@@ -42,6 +42,18 @@ describe("GET /api/runners/repos/:id/execution-mode [pg]", () => {
     expect(body(res).copy_sha256).toBe(createHash("sha256").update(COPY.cloudVerified, "utf8").digest("hex"));
     expect((body(res).copy as Record<string, string>).cloudVerifiedHelp).toBe(COPY.cloudVerified);
     expect((body(res).copy as Record<string, string>).keyRequired).toBe(COPY.keyRequired);
+  });
+
+  it("answers whether local-review auto-merge is on, the hash of its wording and the wording; reading it back after turning it on", async () => {
+    const f = await fresh();
+    const id = await repo(f, "runner_local");
+    const off = body(await get(f, f.m1, id));
+    expect(off).toMatchObject({ auto_merge: false, auto_merge_copy_sha256: LOCAL_AUTO_MERGE_COPY_SHA256 });
+    expect(off.auto_merge_copy_sha256).toBe(createHash("sha256").update(COPY.localAutoMerge, "utf8").digest("hex"));
+    expect((off.copy as Record<string, string>).autoMergeWording).toBe(COPY.localAutoMerge);
+    const on = await respond(() => setExecutionMode(h.deps({ repoVisibility: async () => "private" }), { accountId: f.accountId, userId: f.o1 }, id, { auto_merge: true, confirm_repo: "Acme/widgets", copy_sha256: LOCAL_AUTO_MERGE_COPY_SHA256 }));
+    expect(on.status).toBe(200);
+    expect(body(await get(f, f.m1, id)).auto_merge).toBe(true);
   });
 
   it("key_required is true with no key connected and with only a broken key", async () => {

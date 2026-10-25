@@ -35,6 +35,16 @@ export const COPY = {
   modeKeyGone: "No usable model API key is connected any more, so cloud-verified stayed off.",
   modePublicRepo: "A public repository can't run on a runner.",
   modeVisibilityUnknown: "The repository's visibility couldn't be read. Try again in a moment.",
+  /** D#6 R2b: the repo settings control for local-review auto-merge (opt-in). `localAutoMerge` above is the wording an admin reads before turning it on. */
+  autoMergeTitle: "Merge after reviews on your machine",
+  autoMergeIsOn: "Auto-merge is on for this repo.",
+  autoMergeIsOff: "Auto-merge is off. A person merges every pull request.",
+  autoMergeTurnOn: "Turn on auto-merge",
+  autoMergeTurnOff: "Turn off auto-merge",
+  autoMergeSavedOn: "Saved. Auto-merge is on.",
+  autoMergeSavedOff: "Saved. Auto-merge is off.",
+  autoMergeHumanOnly: "A person merges every pull request in this repository, so auto-merge can't be turned on.",
+  autoMergeNotLocal: "Auto-merge is only for repositories that run on your machine (local-only).",
   /** D#6 R5b-2a / R5b-2b-i: the gate line of a cloud-verified pull request whose review did not start. Exact text; the one place each is written. */
   reviewKeyMissing: "A review is waiting for your model key to be connected.",
   reviewQuietUnsettled: "Reviews are waiting for pushes to settle.",

@@ -1,5 +1,5 @@
 // D#6 R2b-4b: the Runners section of the Repos app, and the runner-run setting in a repo's settings.
-// D#6 R5b-2b-iii adds the repo mode picker at the end of this file.
+// D#6 R5b-2b-iii adds the repo mode picker, and D#6 R2b the local-review auto-merge control under it, at the end of this file.
 //
 // Two halves in one file, each a controller with no DOM (unit-tested with a fake call()) and a view built with h():
 //  - the Runners section lists the account's runners, with each one's repos and whether its owner lets work run on their Claude
@@ -399,7 +399,7 @@ export function pickerModel(st) {
 }
 
 /** The mode of one repo: read it, pick, confirm, POST. Nothing is sent until the confirm button is pressed with the exact name typed. */
-export function createModeController({ call = api, signal, repoId, onChange = () => {} } = {}) {
+export function createModeController({ call = api, signal, repoId, onChange = () => {}, onApplied = () => {} } = {}) {
   let st = { status: "loading", view: null, choice: null, typed: "", phase: "idle", error: "" };
   let gen = 0;
   const set = (patch) => {
@@ -441,6 +441,7 @@ export function createModeController({ call = api, signal, repoId, onChange = ()
       const done = await call("POST", modeUrl(repoId), body, signal);
       const next = done && MODES.includes(done.execution_mode) ? done.execution_mode : mode;
       set({ view: { ...st.view, mode: next }, choice: null, typed: "", phase: "saved", error: "" });
+      onApplied(); // the auto-merge control under the picker re-reads: leaving local-only turns it off
     } catch (e) {
       if (cancelled(e)) return;
       const copy = st.view.copy;
@@ -453,9 +454,9 @@ export function createModeController({ call = api, signal, repoId, onChange = ()
 }
 
 /** The view. `el` goes into the repo's settings; it repaints itself and keeps focus on the control the user was on. */
-export function createModeControl({ call = api, signal, repoId, doc = document } = {}) {
+export function createModeControl({ call = api, signal, repoId, doc = document, onApplied } = {}) {
   const el = h("fieldset", { class: "repos-mode", "data-testid": "repos-mode" });
-  const ctl = createModeController({ call, signal, repoId, onChange: () => paint() });
+  const ctl = createModeController({ call, signal, repoId, onChange: () => paint(), onApplied });
   const id = (s) => "repos-mode-" + s;
   let focusError = false;
   function paint() {
@@ -507,6 +508,179 @@ export function createModeControl({ call = api, signal, repoId, doc = document }
     if (target) {
       target.focus();
       if (!toError && target.tagName === "INPUT" && target.type === "text") target.setSelectionRange(target.value.length, target.value.length);
+    }
+  }
+  paint();
+  return { el, load: () => ctl.load(false), reload: () => ctl.load(true) };
+}
+
+// ── D#6 R2b: the "Merge after reviews on your machine" control in a repo's settings, shown only while the repo runs on a runner (local-only).
+//
+// Same two halves as the mode picker above it (it lives in this file so the app's boot makes no extra request): a controller with no DOM (unit-tested with a fake call()) and a view built with h().
+// It reads the same route as the picker (GET /api/runners/repos/:id/execution-mode), which also says whether auto-merge is on and carries the
+// exact wording an admin reads first and its hash. Every word is the server's copy; this control writes none of its own, and stays hidden
+// until it has an answer (the picker above already says when a read failed). Turning it on shows the wording, asks for the repository's full name typed back exactly (the
+// server checks it too) and sends the hash of the wording that was shown, so the server's 409 `copy_changed` applies. Turning it off sends
+// nothing but the off switch and asks nothing: it is the safe direction. A refusal is a sentence chosen by status and code, never the server's
+// message. Owners and admins change it (the server says so with `can_change`); everyone else reads the state and the adminOnly line.
+const AM_KEYS = ["autoMergeWording", "autoMergeTitle", "autoMergeIsOn", "autoMergeIsOff", "autoMergeTurnOn", "autoMergeTurnOff", "autoMergeSavedOn", "autoMergeSavedOff", "autoMergeHumanOnly", "autoMergeNotLocal"];
+
+/** The state read, or null unless the picker's part and every auto-merge part arrived. */
+export function readAutoMerge(b) {
+  const v = readView(b);
+  if (!v || typeof b.auto_merge !== "boolean" || typeof b.auto_merge_copy_sha256 !== "string" || !b.auto_merge_copy_sha256) return null;
+  if (!AM_KEYS.every((k) => typeof v.copy[k] === "string" && v.copy[k] !== "")) return null;
+  return { ...v, autoMerge: b.auto_merge, amHash: b.auto_merge_copy_sha256 };
+}
+
+/** The sentence for a refused change, by status and code. `copy` is the server's copy. */
+export function autoMergeRefusal(e, copy) {
+  const s = e && e.status;
+  if (s === 403) return copy.adminOnly;
+  if (s === 400 && e.code === "confirmation_mismatch") return copy.nameMismatch;
+  if (s === 409 && e.code === "copy_changed") return copy.copyChanged;
+  if (s === 409 && e.code === "human_merge_only") return copy.autoMergeHumanOnly;
+  if (s === 409 && e.code === "not_runner_local") return copy.autoMergeNotLocal;
+  return copy.saveFailed;
+}
+
+/** What the control shows for a state, with no DOM. `st`: { status, view, confirming, typed, phase, saved, error }; `phase` is idle | saving | error | saved. */
+export function autoMergeModel(st) {
+  // Before the answer, after a failed read, or on an answer without the auto-merge parts, there is nothing true to show: the picker above
+  // already says when the read failed, so this control stays out of the way instead of repeating it.
+  if (st.status !== "ready" || !st.view) return { kind: "hidden" };
+  const v = st.view;
+  // Only a repo on the local runner has the control; a sandbox or cloud-verified repo has no auto-merge opt-in to show.
+  if (v.mode !== "runner_local") return { kind: "hidden" };
+  const busy = st.phase === "saving";
+  const typedOk = v.fullName !== null && st.typed === v.fullName;
+  return {
+    kind: "ready",
+    on: v.autoMerge,
+    locked: !v.canChange,
+    statusText: v.autoMerge ? v.copy.autoMergeIsOn : v.copy.autoMergeIsOff,
+    wording: v.copy.autoMergeWording,
+    canTurnOn: v.canChange && !v.autoMerge && !st.confirming && !busy,
+    canTurnOff: v.canChange && v.autoMerge && !busy,
+    confirm: st.confirming && !v.autoMerge && v.canChange ? { applyDisabled: !typedOk || busy } : null,
+    saving: busy,
+    saved: st.phase === "saved" ? st.saved : "",
+    error: st.phase === "error" ? st.error : "",
+  };
+}
+
+/** Auto-merge of one repo: read it, ask for the name, POST. Nothing is sent to turn it on until the confirm button is pressed with the exact name typed. */
+export function createAutoMergeController({ call = api, signal, repoId, onChange = () => {} } = {}) {
+  let st = { status: "loading", view: null, confirming: false, typed: "", phase: "idle", saved: "", error: "" };
+  let gen = 0;
+  const set = (patch) => {
+    st = { ...st, ...patch };
+    onChange();
+  };
+  async function load(quiet) {
+    const mine = ++gen;
+    try {
+      const view = readAutoMerge(await call("GET", modeUrl(repoId), undefined, signal));
+      if (mine !== gen) return;
+      if (!view) return quiet && st.view ? undefined : set({ status: "error", view: null });
+      // A repo that is no longer on the local runner, or already on, has nothing to confirm.
+      set({ status: "ready", view, ...(view.mode !== "runner_local" || view.autoMerge ? { confirming: false, typed: "" } : {}) });
+    } catch (e) {
+      if (mine !== gen || cancelled(e)) return;
+      if (!quiet || st.status !== "ready") set({ status: "error" });
+    }
+  }
+  const begin = () => {
+    const m = autoMergeModel(st);
+    if (m.kind === "ready" && m.canTurnOn) set({ confirming: true, typed: "", phase: "idle", saved: "", error: "" });
+  };
+  // Typing repaints nothing (the view only flips the apply button), so focus never leaves the input.
+  const type = (text) => {
+    if (st.phase !== "saving") st = { ...st, typed: text };
+  };
+  const cancel = () => st.phase !== "saving" && set({ confirming: false, typed: "", phase: "idle", saved: "", error: "" });
+  async function send(body, savedKey) {
+    gen++; // a read still out must not overwrite this write
+    set({ phase: "saving", error: "", saved: "" });
+    try {
+      const done = await call("POST", modeUrl(repoId), body, signal);
+      const on = done && typeof done.auto_merge === "boolean" ? done.auto_merge : body.auto_merge;
+      set({ view: { ...st.view, autoMerge: on }, confirming: false, typed: "", phase: "saved", saved: st.view.copy[savedKey], error: "" });
+      load(true); // show what the server says now
+    } catch (e) {
+      if (cancelled(e)) return;
+      const copy = st.view.copy;
+      set({ phase: "error", error: autoMergeRefusal(e, copy), ...(e && e.status === 403 ? { view: { ...st.view, canChange: false }, confirming: false } : {}) });
+      // The wording, the name or the mode moved under the user: show what is true now, keep their words about it.
+      if (e && (e.status === 409 || e.status === 400)) load(true);
+    }
+  }
+  function turnOn() {
+    const m = autoMergeModel(st);
+    if (m.kind !== "ready" || !m.confirm || m.confirm.applyDisabled) return; // a double press is one request
+    return send({ auto_merge: true, confirm_repo: st.typed, copy_sha256: st.view.amHash }, "autoMergeSavedOn");
+  }
+  function turnOff() {
+    const m = autoMergeModel(st);
+    if (m.kind !== "ready" || !m.canTurnOff) return;
+    return send({ auto_merge: false }, "autoMergeSavedOff");
+  }
+  return { load, begin, type, cancel, turnOn, turnOff, get state() { return st; } };
+}
+
+/** The view. `el` goes into the repo's settings; it repaints itself and keeps focus on the control the user was on. */
+export function createAutoMergeControl({ call = api, signal, repoId, doc = document } = {}) {
+  const el = h("fieldset", { class: "repos-mode", "data-testid": "repos-automerge" });
+  const ctl = createAutoMergeController({ call, signal, repoId, onChange: () => paint() });
+  const id = (s) => "repos-automerge-" + s;
+  let focusError = false;
+  let focusName = false;
+  function paint() {
+    const m = autoMergeModel(ctl.state);
+    el.hidden = m.kind === "hidden";
+    if (m.kind === "hidden") return el.replaceChildren();
+    const v = ctl.state.view;
+    const held = el.contains(doc.activeElement) ? doc.activeElement.id : "";
+    const parts = [
+      h("legend", { class: "repos-subtitle" }, v.copy.autoMergeTitle),
+      h("p", { "data-testid": "repos-automerge-state" }, m.statusText),
+      h("p", { class: "repos-muted", id: id("wording"), "data-testid": "repos-automerge-wording" }, m.wording)
+    ];
+    if (m.locked) parts.push(h("p", { id: id("locked"), class: "repos-muted", "data-testid": "repos-automerge-admin-only" }, v.copy.adminOnly));
+    if (!m.locked && !m.confirm) {
+      const label = m.on ? v.copy.autoMergeTurnOff : v.copy.autoMergeTurnOn;
+      parts.push(h("div", { class: "repos-actions" },
+        h("button", { type: "button", class: "repos-btn", id: id("toggle"), "data-testid": "repos-automerge-toggle", "aria-describedby": id("wording"), disabled: m.saving, onClick: () => (m.on ? ctl.turnOff() : ctl.begin()) }, m.saving ? v.copy.saving : label)));
+    }
+    if (m.confirm) {
+      const input = h("input", {
+        type: "text", id: id("name"), class: "repos-allow-name", autocomplete: "off", autocapitalize: "off", spellcheck: "false", value: ctl.state.typed, disabled: m.saving,
+        "data-testid": "repos-automerge-name", "aria-describedby": id("name-help"),
+        onInput: () => {
+          ctl.type(input.value);
+          const apply = el.querySelector("#" + id("apply"));
+          if (apply) apply.setAttribute("aria-disabled", autoMergeModel(ctl.state).confirm.applyDisabled ? "true" : "false");
+        },
+      });
+      parts.push(h("div", { class: "repos-confirm", role: "group", "aria-label": v.copy.autoMergeTurnOn, "data-testid": "repos-automerge-confirm" },
+        h("label", { for: id("name"), id: id("name-help") }, v.copy.typeName, " ", h("bdi", null, v.fullName || "")),
+        input,
+        h("div", { class: "repos-actions" },
+          h("button", { type: "button", class: "repos-btn", id: id("apply"), "data-testid": "repos-automerge-apply", "aria-disabled": m.confirm.applyDisabled ? "true" : "false", onClick: () => ctl.turnOn() }, m.saving ? v.copy.saving : v.copy.autoMergeTurnOn),
+          h("button", { type: "button", class: "repos-btn", "data-testid": "repos-automerge-cancel", disabled: m.saving, onClick: () => ctl.cancel() }, v.copy.cancel))));
+    }
+    parts.push(h("p", { class: "repos-muted", role: "status", "data-testid": "repos-automerge-saved" }, m.saved));
+    parts.push(h("p", { class: "repos-error", role: "alert", tabindex: "-1", id: id("error"), "data-testid": "repos-automerge-error" }, m.error));
+    el.replaceChildren(...parts);
+    // A new error takes focus once; opening the question puts focus on the name field; a repaint keeps focus where the user was.
+    const toError = m.error && (!focusError || held === id("error"));
+    focusError = !!m.error;
+    const toName = !!m.confirm && !focusName && !toError;
+    focusName = !!m.confirm;
+    const target = toError ? el.querySelector("#" + id("error")) : toName ? el.querySelector("#" + id("name")) : held ? el.querySelector('[id="' + held + '"]') : null;
+    if (target) {
+      target.focus();
+      if (target.tagName === "INPUT" && target.type === "text") target.setSelectionRange(target.value.length, target.value.length);
     }
   }
   paint();
