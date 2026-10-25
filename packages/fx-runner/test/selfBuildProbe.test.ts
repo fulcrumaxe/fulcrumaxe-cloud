@@ -59,6 +59,15 @@ function processesVisible(): boolean {
 interface Report { step: string; summary: { fail: number }; checks: { id: string; result: string; detail: string }[] }
 const result = (text: string, id: string): string | undefined => (JSON.parse(text) as Report).checks.find((check) => check.id === id)?.result;
 
+/** True when `dir` (default: init's process directory) is owned by `uid`, false when someone else's, null when it cannot be looked at. */
+function initDirOwnedBy(uid: number, dir = "/proc/1"): boolean | null {
+  try {
+    return statSync(dir).uid === uid;
+  } catch {
+    return null;
+  }
+}
+
 describe("the probe, with no sandbox, on a throwaway home", () => {
   it("covers exactly the credential floor", () => {
     expect(rig().sh(["list-floor"]).stdout.trim().split("\n")).toEqual([...CREDENTIAL_FLOOR]);
@@ -262,12 +271,24 @@ describe("the probe, with no sandbox, on a throwaway home", () => {
     // Init is root's: refused for anyone else. In a process table of our own (the runner's check starts the tests in a new PID namespace) every
     // process there is ours, init included, so the root directory stands in as the thing owned by someone else.
     const uid = process.getuid?.() ?? 0;
-    const notOurs = statSync("/proc/1").uid !== uid ? "/proc/1" : "/";
+    // /proc/1 may not be there at all (a new PID namespace over the host's /proc, hidepid, a sandboxed runner): then it cannot be the stand-in.
+    const notOurs = initDirOwnedBy(uid) === false ? "/proc/1" : "/";
     if (uid !== 0) expect(check(notOurs)).toBe(1);
     // Order matters: the ownership test comes before the kill, inside the scan.
     const scan = /^kill_decoys\(\) \{[\s\S]*?^\}/m.exec(source)?.[0] ?? "";
     expect(scan.indexOf('proc_is_ours "$d" || continue')).toBeGreaterThan(-1);
     expect(scan.indexOf('proc_is_ours "$d" || continue')).toBeLessThan(scan.indexOf("kill -KILL"));
+  });
+
+  it("a process directory that is not visible (no init directory, as in a PID namespace or under hidepid) is not ours, and is no crash", () => {
+    const source = readFileSync(SCRIPT, "utf8");
+    const fn = /^proc_is_ours\(\) \{.*\}$/m.exec(source)?.[0];
+    expect(fn).toBeDefined();
+    const gone = path.join(tmpdir(), "fx-probe-no-such-proc", "1");
+    const res = spawnSync("bash", ["-c", `${fn}\nproc_is_ours "$1"`, "bash", gone], { encoding: "utf8" });
+    expect([res.status, res.stderr]).toEqual([1, ""]);
+    // The stand-in choice in the test above survives the same absence.
+    expect(initDirOwnedBy(process.getuid?.() ?? 0, gone)).toBeNull();
   });
 
   it("reading the command line of a process that has just exited is silent, so unplant's stderr stays empty on a busy host", () => {
