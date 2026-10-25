@@ -33,7 +33,7 @@ import type {
  *
  * `admit` refuses before anything is created, and every refusal is a member of the closed `AdmitDenyReason` set:
  *  - the role must be one a runner may run. Per the owner ruling (C12 section 1) that includes the four reviewer roles;
- *  - the account may start at most `limits.runsPerDay()` runner runs in a UTC day (the runner plan's data, injected: this
+ *  - the account may start at most `limits.runsPerDay(accountId)` runner runs in a UTC day, unless that is null (no cap on a subscription plan); the figure is the runner tier's plan data, injected: this
  *    file may not import `@fx/spend`, and a figure written here would be a second copy of a private one);
  *  - the repo must be private. A public repo is refused, and so is a repo whose visibility could not be read.
  *
@@ -103,11 +103,12 @@ export interface JobIssuer {
 
 /**
  * The runner tier's limits, as the target needs them. The composition root reads them from the plan data (D#6 R2b
- * criterion 12). `runsPerDay` throws when the plan data is unavailable, and `admit` then refuses: a missing figure never
- * becomes an unlimited one.
+ * criterion 12). `runsPerDay` takes the account id and answers `null` for no cap (a subscription plan). It throws when the plan
+ * data is unavailable, and `admit` then refuses: a missing figure never becomes an unlimited one; only an explicit `null` is no cap.
  */
 export interface RunnerLimitsPort {
-  runsPerDay(): number;
+  /** The account's daily cap on runner runs, or `null` for none (an account on a subscription plan runs on its own machine and its own Claude plan). */
+  runsPerDay(accountId: string): number | null | Promise<number | null>;
 }
 
 /** Fails closed: every `admit` is refused as `runner_daily_limit`. For a composition root that has no plan data wired. */
@@ -208,14 +209,14 @@ export class RunnerTarget implements ExecutionTarget {
     if (early !== null) return { admitted: false, reason: early };
 
     // The limit is read first: when the plan data is unavailable the door stays shut and nothing is counted.
-    let perDay: number;
+    let perDay: number | null;
     try {
-      perDay = this.deps.limits.runsPerDay();
+      perDay = await this.deps.limits.runsPerDay(run.accountId);
     } catch {
       // fx-swallow-ok: unavailable plan data is a refusal (fail closed), not a crash; the composition root reports it when it loads the data
       return { admitted: false, reason: "runner_daily_limit" };
     }
-    if ((await this.runsToday(run.accountId)) > perDay) return { admitted: false, reason: "runner_daily_limit" };
+    if (perDay !== null && (await this.runsToday(run.accountId)) > perDay) return { admitted: false, reason: "runner_daily_limit" };
 
     const late = await this.visibilityRefusal(run);
     if (late !== null) return { admitted: false, reason: late };

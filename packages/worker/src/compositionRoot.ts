@@ -1,6 +1,6 @@
 import type { BranchSyncPort } from "@fx/github";
 import { envKekSource, type KekSource } from "@fx/model-connection";
-import { contextWindowTokensFor, outsideMeterOn, runnerLimitsFor } from "@fx/spend";
+import { contextWindowTokensFor, outsideMeterOn } from "@fx/spend";
 import type { HostLookup } from "@fx/net-guard";
 import {
   RunnerTarget,
@@ -56,6 +56,7 @@ import { createExtensionPolicyFor } from "./extensionPolicy.js";
 import { createVercelKeepAlive, slotWaitUntil } from "./keepAlive.js";
 import { createConnectionStatusPort, createDecryptTenantKey, createModelConnectionPort } from "./ports.js";
 import { createWorkerPools, type WorkerPools } from "./pools.js";
+import { runsPerDayOfAccountPlan } from "./runnerLimits.js";
 import { loadJobSigner } from "./jobSigner.js";
 import { loadGitTicketSigner } from "./gitTicketSigner.js";
 import { createRunnerGitTicketFacade, type RunnerGitTicketFacade } from "./runnerGitTicket.js";
@@ -356,7 +357,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     const repoVisibility = options.ports.repoVisibility ?? unwiredRepoVisibility;
     const jobSigner = loadJobSigner(env);
     const jobIssuer = options.ports.jobIssuer ?? (jobSigner ? createJobIssuer({ pool: pools.runnerPool, signer: jobSigner, visibility: repoVisibility, context: createPgJobContext(pools.runnerPool), contextWindowTokensFor, ...(options.ports.continuationBase ? { continuationBase: options.ports.continuationBase } : {}), ...(options.ports.continuationBinding ? { continuationBinding: options.ports.continuationBinding } : {}) }) : unwiredJobIssuer);
-    const runnerLimits = options.ports.runnerLimits ?? { runsPerDay: () => runnerLimitsFor('runner').runsPerDay };
+    const runnerLimits = options.ports.runnerLimits ?? { runsPerDay: runsPerDayOfAccountPlan(pools.runnerPool) };
     const runnerTarget = new RunnerTarget({ pool: pools.runnerPool, issuer: jobIssuer, visibility: repoVisibility, limits: runnerLimits }, "runner_local");
     // D#6 R5b-2a: a cloud-verified repository's agents run on the runner, and its four reviewers in the sandbox target above, on the customer's key.
     const guardedSandbox = guardWorkdir(sandboxTarget);
