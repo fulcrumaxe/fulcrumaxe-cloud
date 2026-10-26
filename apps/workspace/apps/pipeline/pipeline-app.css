@@ -15,6 +15,10 @@
 }
 
 .pl-board { box-sizing: border-box; height: 100%; overflow: auto; padding: 14px; }
+.pl-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 8px; }
+.pl-head .pl-title { margin: 0; }
+.pl-needs-you { max-width: 100%; overflow-wrap: anywhere; }
+.pl-needs-you[hidden] { display: none; }
 .pl-title { margin: 0 0 8px; font-size: 1rem; letter-spacing: 0.06em; font-weight: 600; }
 .pl-muted { color: var(--text-muted, rgba(26, 255, 128, 0.55)); }
 .pl-status { margin: 0 0 8px; color: var(--text-muted, rgba(26, 255, 128, 0.55)); }

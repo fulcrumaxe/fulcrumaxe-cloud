@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { ASKS_FIRST_URL, ASKS_URL, LIST_URL, MAX_ASK_PAGES, MERGE_URL, PROVIDER_HOSTS, START_ASK_TYPES, STALLED_URL, WORDS, startAnswerWords, actionUrl, answerUrl, approveUrl, createNeedsYou, failureSentence, notShownWords, providerLink, pullRequestLink, quotedReason, readAsk, readMerge, readRequest, readStalled } from "../apps/needs-you/needs-you-model.js";
+import { ASKS_FIRST_URL, ASKS_URL, LIST_URL, LIVE_EVENTS, MAX_ASK_PAGES, ME_URL, MERGE_URL, NEEDS_HUMAN_URL, PROVIDER_HOSTS, START_ASK_TYPES, STALLED_URL, WORDS, startAnswerWords, actionUrl, answerUrl, approveUrl, createNeedsYou, failureSentence, notShownWords, providerLink, pullRequestLink, quotedReason, readAsk, readMerge, readPerson, readRequest, readStalled } from "../apps/needs-you/needs-you-model.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
 const fixture = (op, name) => JSON.parse(readFileSync(join(PACKAGES, "api", "fixtures", "v1", op, name), "utf8"));
@@ -33,9 +33,9 @@ const closed = (state, over = {}) => req({ state, status_sentence: null, check_i
 function fakeCall(routes) {
   const log = [];
   const askLog = []; // the decision-ask calls; kept apart so the setup-request tests below count only their own requests
-  const all = { ["GET " + ASKS_FIRST_URL]: { data: [], next_cursor: null }, ["GET " + MERGE_URL]: { items: [], not_shown: 0 }, ["GET " + STALLED_URL]: { items: [], not_shown: 0 }, ...routes };
+  const all = { ["GET " + ASKS_FIRST_URL]: { data: [], next_cursor: null }, ["GET " + MERGE_URL]: { items: [], not_shown: 0 }, ["GET " + STALLED_URL]: { items: [], not_shown: 0 }, ["GET " + NEEDS_HUMAN_URL]: { data: [], next_cursor: null }, ["GET " + ME_URL]: { is_admin: true }, ...routes };
   const call = vi.fn(async (method, path, body) => {
-    (path.startsWith(ASKS_URL) || path.startsWith(MERGE_URL) || path.startsWith(STALLED_URL) || path.endsWith("/approve") ? askLog : log).push([method, path, body]);
+    (path.startsWith(ASKS_URL) || path === ME_URL || path.startsWith("/api/v1/work-items") || path.startsWith(MERGE_URL) || path.startsWith(STALLED_URL) || path.endsWith("/approve") ? askLog : log).push([method, path, body]);
     // The real API answers 400 to any body on the done and withdraw routes (packages/api/src/handler.ts).
     if (method === "POST" && /\/(done|withdraw)$/.test(path) && body !== undefined) throw fail(400, "invalid_request");
     const r = all[method + " " + path];
@@ -421,14 +421,14 @@ describe("decision asks", () => {
         sent.push([path, body]);
         return { ask_id: START.id, receipt_id: "r1", answered_option: body.choice };
       }
-      return path === ASKS_FIRST_URL ? asksOf([START]) : path === LIST_URL ? setups : { items: [], not_shown: 0 };
+      return path === ASKS_FIRST_URL ? asksOf([START]) : path === LIST_URL ? setups : path === NEEDS_HUMAN_URL ? asksOf([]) : path === ME_URL ? { is_admin: true } : { items: [], not_shown: 0 };
     };
     const list = createNeedsYou({ call });
     await list.load();
     expect(list.state.rows.map((r) => r.id)).toEqual([START.id]);
     await list.answer(START.id, "start");
     expect(sent).toEqual([[answerUrl(START.id), { choice: "start" }]]);
-    expect(list.state.rows[0]).toMatchObject({ state: "done", sentence: WORDS.startedByAnswer });
+    expect(list.state.rows).toEqual([]); // an answered ask leaves at once; no "Started" row is kept
     expect(list.state.announce).toBe(WORDS.startedByAnswer);
   });
 
@@ -448,11 +448,11 @@ describe("decision asks", () => {
     ]) {
       const opts = type === "something_new" ? ASK.options : [{ id: "start", label: "Start it" }, { id: "hold", label: "Hold it for now" }];
       const a = ask({ id: "22222222-2222-4222-8222-222222222222", decision_type: type, options: opts });
-      const call = async (method, path, body) => (method === "POST" ? { ask_id: a.id, receipt_id: "r1", answered_option: body.choice } : path === ASKS_FIRST_URL ? asksOf([a]) : path === LIST_URL ? setups : { items: [], not_shown: 0 });
+      const call = async (method, path, body) => (method === "POST" ? { ask_id: a.id, receipt_id: "r1", answered_option: body.choice } : path === ASKS_FIRST_URL ? asksOf([a]) : path === LIST_URL ? setups : path === NEEDS_HUMAN_URL ? asksOf([]) : path === ME_URL ? { is_admin: true } : { items: [], not_shown: 0 });
       const list = createNeedsYou({ call });
       await list.load();
       await list.answer(a.id, choice);
-      expect(list.state.rows[0].sentence).toBe(said);
+      expect(list.state.rows).toEqual([]);
       expect(list.state.announce).toBe(said + (said.endsWith(".") ? "" : "."));
     }
   });
@@ -483,7 +483,7 @@ describe("decision asks", () => {
     expect(f.list.state.rows.map((r) => r.kind)).toEqual(["ask", "setup"]);
     expect(f.list.state.notShown).toBe(0);
     expect(f.log).toEqual([["GET", LIST_URL, undefined]]);
-    expect(f.askLog).toEqual([["GET", ASKS_FIRST_URL, undefined], ["GET", MERGE_URL, undefined], ["GET", STALLED_URL, undefined]]);
+    expect(f.askLog).toEqual([["GET", ME_URL, undefined], ["GET", ASKS_FIRST_URL, undefined], ["GET", MERGE_URL, undefined], ["GET", STALLED_URL, undefined], ["GET", NEEDS_HUMAN_URL, undefined]]);
     expect(notShownWords(1)).toBe("1 more isn't shown.");
     expect(notShownWords(3)).toBe("3 more aren't shown.");
   });
@@ -514,21 +514,21 @@ describe("decision asks", () => {
   });
 
   it("answers with the chosen option's id and one POST, then shows the answer by the option's name and drops the ask from the open count", async () => {
-    const f = await loaded({ [GET]: setups, [GET_ASKS]: asksOf([ASK]), [ANSWER]: ANSWERED });
+    let served = [ASK];
+    const f = await loaded({ [GET]: setups, [GET_ASKS]: () => asksOf(served), [ANSWER]: () => ((served = []), ANSWERED) });
     await f.list.answer(ASK.id, "bump_now");
     expect(f.askLog.filter((l) => l[0] === "POST")).toEqual([["POST", answerUrl(ASK.id), { choice: "bump_now" }]]);
-    const [row] = f.list.state.rows;
-    expect(row).toMatchObject({ kind: "ask", state: "done", sentence: "Answered: Update the dependency now" });
+    expect(f.list.state.rows).toEqual([]); // not a feed: no "Answered" row is kept
     expect(f.list.state.announce).toBe("Answered: Update the dependency now.");
-    await f.list.load(); // the ask is gone from the server's list: the answered row stays for this window
-    expect(f.list.state.rows).toHaveLength(1);
+    await f.list.load();
+    expect(f.list.state.rows).toEqual([]);
   });
 
   it("Deny sends choice deny and says Deny", async () => {
     const f = await loaded({ [GET]: setups, [GET_ASKS]: asksOf([ASK]), [ANSWER]: { ...ANSWERED, answered_option: "deny" } });
     await f.list.answer(ASK.id, "deny");
     expect(f.askLog.filter((l) => l[0] === "POST")[0][2]).toEqual({ choice: "deny" });
-    expect(f.list.state.rows[0].sentence).toBe("Answered: Deny");
+    expect(f.list.state.announce).toBe("Answered: Deny.");
   });
 
   it("sends one request per press, and nothing for an option the ask does not list or an ask it does not have", async () => {
@@ -707,5 +707,261 @@ describe("items that stopped on their own (R6)", () => {
   it("a failed stalled read is the error state, never a list that looks empty", async () => {
     const { list } = await loaded({ [GET]: listOf([]), [STALLED_GET]: fail(500, "internal") });
     expect(list.state.status).toBe("error");
+  });
+});
+
+// D#37 WS-F1d (C47): the due line, the timeout sentence, the admin gate, the Idempotency-Key, the order, the extra rows, the live events.
+describe("WS-F1d: asks", () => {
+  const ASK = fixture("listDecisionAsks", "200-ok.json").data[0];
+  const ANSWERED = fixture("answerDecisionAsk", "200-ok.json");
+  const GET_ASKS = "GET " + ASKS_FIRST_URL;
+  const ANSWER = "POST " + answerUrl(ASK.id);
+  const ask = (over = {}) => ({ ...ASK, ...over });
+  const asksOf = (data) => ({ data, next_cursor: null });
+  const setups = listOf([]);
+  const when = (iso) => new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(iso));
+  const posts = (f) => f.call.mock.calls.filter((c) => c[0] === "POST");
+
+  it("A1: an open ask says Answer by, an overdue one Was due, and a missing or bad date gives no line", () => {
+    expect(readAsk(ask()).due).toBe("Answer by " + when(ASK.answer_due_at));
+    expect(readAsk(ask({ state: "overdue" })).due).toBe("Was due " + when(ASK.answer_due_at));
+    for (const bad of [undefined, null, "", "not a date", 5]) expect(readAsk(ask({ answer_due_at: bad })).due).toBe("");
+    expect(JSON.stringify(readAsk(ask({ answer_due_at: "nope" })))).not.toContain("Invalid Date");
+  });
+
+  it.each([
+    ["open, proceed_recommended", { timeout_outcome: "proceed_recommended" }, "If nobody answers in time, the agent goes ahead with: Update the dependency now."],
+    ["open, proceed_recommended, none recommended", { timeout_outcome: "proceed_recommended", proposed: "gone" }, "If nobody answers in time, the agent goes ahead with its recommended option."],
+    ["open, stop_and_flag", { timeout_outcome: "stop_and_flag" }, "If nobody answers in time, the work stays paused until someone answers."],
+    ["overdue, stop_and_flag", { timeout_outcome: "stop_and_flag", state: "overdue" }, "The work is paused until someone answers."],
+    ["overdue, proceed_recommended", { timeout_outcome: "proceed_recommended", state: "overdue" }, ""],
+    ["any other value", { timeout_outcome: "whatever" }, ""],
+  ])("A2: the timeout sentence, %s", (_name, over, sentence) => {
+    expect(readAsk(ask(over)).timeout).toBe(sentence);
+  });
+
+  it("A3: only an admin can answer; a member, a missing field and a failed me read all send nothing, and the list still loads", async () => {
+    for (const me of [{ is_admin: false }, {}, null, fail(500, "x"), fail(401, "unauthorized")]) {
+      const f = await loaded({ [GET]: setups, [GET_ASKS]: asksOf([ASK]), ["GET " + ME_URL]: me, [ANSWER]: ANSWERED });
+      expect(f.list.state.status).toBe("ready");
+      expect(f.list.state.isAdmin).toBe(false);
+      await f.list.answer(ASK.id, "bump_now");
+      expect(posts(f)).toHaveLength(0);
+    }
+    const f = await loaded({ [GET]: setups, [GET_ASKS]: asksOf([ASK]) });
+    expect(f.list.state.isAdmin).toBe(true);
+  });
+
+  it("A3: who may answer is read once per window, and an admin's 403 keeps the ask with the existing sentence", async () => {
+    const f = await loaded({ [GET]: setups, [GET_ASKS]: asksOf([ASK]), [ANSWER]: fail(403, "forbidden") });
+    await f.list.answer(ASK.id, "bump_now");
+    await f.list.load();
+    expect(f.call.mock.calls.filter((c) => c[1] === ME_URL)).toHaveLength(1);
+    expect(f.list.state.error).toBe(WORDS.onlyAdmins);
+    expect(f.list.state.rows.map((r) => r.id)).toEqual([ASK.id]);
+  });
+
+  it("A4: every answer carries a UUID Idempotency-Key; the same key is resent after a network error or a 5xx, and a different choice gets a new one", async () => {
+    let n = 0;
+    const replies = [fail(0, "offline"), fail(503, "unavailable"), ANSWERED];
+    const f = await loaded({ [GET]: setups, [GET_ASKS]: asksOf([ASK]), [ANSWER]: () => replies[n++] });
+    await f.list.answer(ASK.id, "bump_now");
+    await f.list.answer(ASK.id, "bump_now");
+    await f.list.answer(ASK.id, "bump_now");
+    const keys = posts(f).map((c) => c[4].idempotencyKey);
+    expect(keys).toHaveLength(3);
+    expect(keys[0]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(new Set(keys).size).toBe(1);
+    let m = 0;
+    const g = await loaded({ [GET]: setups, [GET_ASKS]: asksOf([ASK]), [ANSWER]: () => (m++ === 2 ? ANSWERED : fail(0, "offline")) });
+    await g.list.answer(ASK.id, "bump_now");
+    await g.list.answer(ASK.id, "leave_it");
+    await g.list.answer(ASK.id, "leave_it");
+    const k = posts(g).map((c) => c[4].idempotencyKey);
+    expect(k[0]).not.toBe(k[1]);
+    expect(k[1]).toBe(k[2]);
+  });
+
+  it("A4: a replayed 200 names the response's option, not the button pressed; a 422 shows the fixed sentence, re-reads and settles the key", async () => {
+    const f = await loaded({ [GET]: setups, [GET_ASKS]: asksOf([ASK]), [ANSWER]: { ...ANSWERED, answered_option: "leave_it" } });
+    await f.list.answer(ASK.id, "bump_now");
+    expect(f.list.state.announce).toBe("Answered: Leave it as it is.");
+    let reads = 0;
+    let n = 0;
+    const g = await loaded({ [GET]: setups, [GET_ASKS]: () => (reads++, asksOf([ASK])), [ANSWER]: () => (n++ ? ANSWERED : fail(422, "invalid_choice")) });
+    await g.list.answer(ASK.id, "bump_now");
+    expect(g.list.state.error).toBe(WORDS.failed);
+    expect(reads).toBe(2);
+    await g.list.answer(ASK.id, "bump_now");
+    const k = posts(g).map((c) => c[4].idempotencyKey);
+    expect(k[0]).not.toBe(k[1]);
+  });
+
+  it("A5: an answered ask leaves no row, and focus goes to the next row (or the list heading when none)", async () => {
+    const second = ask({ id: "second-ask", work_item_id: "w-2", answer_due_at: "2030-01-01T00:00:00.000Z" });
+    const f = await loaded({ [GET]: setups, [GET_ASKS]: asksOf([ASK, second]), [ANSWER]: ANSWERED });
+    await f.list.answer(ASK.id, "bump_now");
+    expect(f.list.state.rows.map((r) => r.id)).toEqual(["second-ask"]);
+    expect(f.list.state.focusId).toBe("second-ask");
+    f.list.clearAnnounce();
+    expect(f.list.state.focusId).toBeNull();
+    const g = await loaded({ [GET]: setups, [GET_ASKS]: asksOf([ASK]), [ANSWER]: ANSWERED });
+    await g.list.answer(ASK.id, "bump_now");
+    expect(g.list.state.focusId).toBe("");
+  });
+});
+
+describe("WS-F1d: rows and order", () => {
+  const ASK = fixture("listDecisionAsks", "200-ok.json").data[0];
+  const GET_ASKS = "GET " + ASKS_FIRST_URL;
+  const GET_ITEMS = "GET " + NEEDS_HUMAN_URL;
+  const page = (data, next_cursor = null) => ({ data, next_cursor });
+  const item = (id, over = {}) => ({ id, title: "Item " + id, stage: "needs_human", updated_at: "2026-10-20T00:00:00.000Z", ...over });
+  const stalled = (id, since) => ({ ...STALLED.items[0], work_item_id: id, title: "Stalled " + id, since });
+  const mergeOf = (id, n) => ({ ...MERGES.items[0], work_item_id: id, title: "Merge " + id, pr_number: n });
+  const setups = listOf([]);
+  const A = (id, wid, over = {}) => ({ ...ASK, id, work_item_id: wid, ...over });
+
+  it("B1: needs_human items are read page by page, and a fifth full page says more items need a person", async () => {
+    const two = NEEDS_HUMAN_URL + "&cursor=c2";
+    const f = await loaded({ [GET]: setups, [GET_ITEMS]: page([item("i1")], "c2"), ["GET " + two]: page([item("i2")]) });
+    expect(f.list.state.rows.map((r) => r.id)).toEqual(["person-i1", "person-i2"]);
+    expect(f.list.state.moreItems).toBe(false);
+    const g = await loaded({ [GET]: setups, [GET_ITEMS]: () => page([item("i1")], "more"), ["GET " + NEEDS_HUMAN_URL + "&cursor=more"]: () => page([], "more") });
+    expect(g.list.state.moreItems).toBe(true);
+    expect(g.askLog.filter(([, path]) => path.startsWith("/api/v1/work-items"))).toHaveLength(MAX_ASK_PAGES);
+    expect(WORDS.moreItems).toBe("More items need a person than this list shows.");
+  });
+
+  it("B2/B3: one row per work item (ask, then stalled, then needs-a-person, then merge); a needs-a-person row has the fixed sentence and no action", async () => {
+    const f = await loaded({
+      [GET]: setups,
+      [GET_ASKS]: page([A("a1", "w1")]),
+      ["GET " + STALLED_URL]: { items: [stalled("w1", "2026-10-01T00:00:00.000Z"), stalled("w2", "2026-10-02T00:00:00.000Z")], not_shown: 0 },
+      [GET_ITEMS]: page([item("w1"), item("w2"), item("w3", { title: null })]),
+      ["GET " + MERGE_URL]: { items: [mergeOf("w1", 1), mergeOf("w3", 2), mergeOf("w4", 3)], not_shown: 0 },
+    });
+    expect(f.list.state.rows.map((r) => [r.kind, r.workItemId])).toEqual([["ask", "w1"], ["stalled", "w2"], ["person", "w3"], ["merge", "w4"]]);
+    const person = f.list.state.rows[2];
+    expect(person).toMatchObject({ title: "Work item", sentence: "This item needs a person. Open its card to see why and choose what happens next.", reason: "" });
+    expect(Object.keys(person).filter((k) => /action|approve|continue/i.test(k))).toEqual([]);
+    expect(readPerson({ id: "" })).toBeNull();
+    expect(readPerson(null)).toBeNull();
+  });
+
+  it("B4: a shuffled mixed set comes out in the fixed order", async () => {
+    const f = await loaded({
+      [GET]: listOf([req()]),
+      [GET_ASKS]: page([A("a-late", "w1", { answer_due_at: "2026-12-01T00:00:00.000Z" }), A("a-over", "w2", { state: "overdue", answer_due_at: "2026-12-05T00:00:00.000Z" }), A("a-b", "w3", { answer_due_at: "2026-11-01T00:00:00.000Z" }), A("a-a", "w4", { answer_due_at: "2026-11-01T00:00:00.000Z" })]),
+      ["GET " + STALLED_URL]: { items: [stalled("s-new", "2026-10-09T00:00:00.000Z")], not_shown: 0 },
+      [GET_ITEMS]: page([item("p-old", { updated_at: "2026-10-01T00:00:00.000Z" })]),
+      ["GET " + MERGE_URL]: { items: [mergeOf("m1", 1)], not_shown: 0 },
+    });
+    expect(f.list.state.rows.map((r) => r.id)).toEqual(["a-over", "a-a", "a-b", "a-late", "person-p-old", "stalled-s-new", "merge-m1", BASE.id]);
+  });
+});
+
+describe("WS-F1d: live", () => {
+  const rig = async () => {
+    const f = fakeCall({ [GET]: listOf([]) });
+    const list = createNeedsYou({ call: f.call });
+    const subs = new Map(); // type -> Set
+    const count = () => [...subs.values()].reduce((n, s) => n + s.size, 0);
+    const listen = (type, fn) => (subs.has(type) || subs.set(type, new Set()), subs.get(type).add(fn), () => subs.get(type).delete(fn));
+    const timers = [];
+    list.start({ listen, setTimer: (fn, ms) => (timers.push({ fn, ms }), timers.length), clearTimer: () => {} });
+    return { ...f, list, subs, count, timers };
+  };
+  const reads = (f) => f.call.mock.calls.filter((c) => c[1] === LIST_URL).length;
+
+  it("C1: each of the six events reads the list again", async () => {
+    expect(LIVE_EVENTS).toEqual(["decision.ask_answered", "decision.ask_overdue", "work_item.needs_human", "work_item.stage_changed", "work_item.closed", "pr.opened"]);
+    const r = await rig();
+    for (const [i, type] of LIVE_EVENTS.entries()) {
+      [...r.subs.get(type)][0]();
+      await flush();
+      expect(reads(r)).toBe(i + 1);
+    }
+  });
+
+  it("C1: reads are coalesced, one in flight and one more after it for any number of events during it", async () => {
+    let release;
+    const gate = new Promise((res) => (release = res));
+    const f = fakeCall({ [GET]: () => gate.then(() => listOf([])) });
+    const list = createNeedsYou({ call: f.call });
+    const subs = [];
+    list.start({ listen: (_t, fn) => (subs.push(fn), () => {}), setTimer: () => 0, clearTimer: () => {} });
+    subs.forEach((fn) => fn()); // six events at once
+    subs[0]();
+    await flush();
+    expect(f.call.mock.calls.filter((c) => c[1] === LIST_URL)).toHaveLength(1);
+    release();
+    await flush();
+    await flush();
+    expect(f.call.mock.calls.filter((c) => c[1] === LIST_URL)).toHaveLength(2);
+  });
+
+  it("C2: stop() removes every subscription and the timer", async () => {
+    const r = await rig();
+    expect(r.count()).toBe(LIVE_EVENTS.length);
+    r.list.stop();
+    expect(r.count()).toBe(0);
+    r.timers[0].fn(); // a timer that fired anyway reads nothing once stopped
+    await flush();
+    expect(reads(r)).toBe(0);
+  });
+
+  it("C3: a new ask with no event appears at the 30 second refresh", async () => {
+    let asks = [];
+    const f = fakeCall({ [GET]: listOf([]), ["GET " + ASKS_FIRST_URL]: () => ({ data: asks, next_cursor: null }) });
+    const list = createNeedsYou({ call: f.call });
+    const timers = [];
+    list.start({ setTimer: (fn, ms) => (timers.push({ fn, ms }), 1), clearTimer: () => {} });
+    await list.load();
+    expect(list.state.rows).toEqual([]);
+    asks = [fixture("listDecisionAsks", "200-ok.json").data[0]];
+    timers[0].fn();
+    await flush();
+    expect(list.state.rows).toHaveLength(1);
+  });
+});
+
+describe("WS-F1d: every state", () => {
+  const ASK = fixture("listDecisionAsks", "200-ok.json").data[0];
+  const page = (data, next_cursor = null) => ({ data, next_cursor });
+  const base = { ["GET " + LIST_URL]: listOf([]) };
+  const reads = {
+    setup: ["GET " + LIST_URL, listOf([])],
+    asks: ["GET " + ASKS_FIRST_URL, page([])],
+    merge: ["GET " + MERGE_URL, { items: [], not_shown: 0 }],
+    stalled: ["GET " + STALLED_URL, { items: [], not_shown: 0 }],
+    items: ["GET " + NEEDS_HUMAN_URL, page([])],
+  };
+
+  it("E5: any one of the five reads failing on first load is the error screen with no rows; a later failure keeps the last good list", async () => {
+    for (const [name, [key]] of Object.entries(reads)) {
+      const { list } = await loaded({ ...base, [key]: fail(503, "unavailable") });
+      expect(list.state, name).toMatchObject({ status: "error", rows: [] });
+    }
+    let down = false;
+    const f = await loaded({ ...base, ["GET " + ASKS_FIRST_URL]: () => (down ? fail(503, "x") : page([ASK])) });
+    down = true;
+    await f.list.load();
+    expect(f.list.state.status).toBe("ready");
+    expect(f.list.state.rows).toHaveLength(1);
+  });
+
+  it("E9: no kind puts null, undefined, NaN or Invalid Date into a row", async () => {
+    const f = await loaded({
+      ["GET " + LIST_URL]: listOf([BASE]),
+      ["GET " + ASKS_FIRST_URL]: page([{ ...ASK, answer_due_at: null, timeout_outcome: null, rationale: null }]),
+      ["GET " + MERGE_URL]: MERGES,
+      ["GET " + STALLED_URL]: { items: [{ ...STALLED.items[0], work_item_id: "s1", title: null }], not_shown: 0 },
+      ["GET " + NEEDS_HUMAN_URL]: page([{ id: "p1", title: null, updated_at: "nope" }]),
+    });
+    expect(f.list.state.rows.map((r) => r.kind)).toEqual(["ask", "stalled", "person", "merge", "setup"]);
+    const shown = f.list.state.rows.flatMap((r) => [r.title, r.reason, r.sentence, r.due, r.timeout, r.proposedLabel]).filter((v) => v !== undefined);
+    expect(shown.every((v) => typeof v === "string")).toBe(true);
+    expect(shown.join("|")).not.toMatch(/null|undefined|NaN|Invalid Date/);
   });
 });

@@ -258,6 +258,11 @@ export function startFixtureServer({ distDir = DEFAULT_DIST_DIR, port = DEFAULT_
     // D#37 WS-F1a: opening the Pipeline app lists work items (its repos read is the Repos block above).
     // GET only, body from the contract fixture; item, timeline and error cases are mocked by pipeline.spec.ts.
     if (urlPath === "/api/v1/work-items" && req.method === "GET") {
+      // D#37 WS-F1d: the Needs you app and the board button also read the items that need a person; none here.
+      if ((req.url || "").includes("stage=needs_human")) {
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" }).end(JSON.stringify({ data: [], next_cursor: null }));
+        return;
+      }
       readFile(join(V1_FIXTURES_DIR, "listWorkItems", "200-page.json")).then(
         (body) => {
           res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });

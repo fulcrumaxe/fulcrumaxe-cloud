@@ -23,7 +23,9 @@ import {
 } from "./pipeline-storage.js";
 import { createOperatorPanel, createRunsPanel } from "./pipeline-actions.js";
 import { api } from "../_lib/api.js";
-import { createInsightPanel, createPlan } from "./pipeline-insight.js";
+import { NEEDS_YOU_APP, createInsightPanel, createPlan } from "./pipeline-insight.js";
+// One source for the count: the Needs you app's own reads and row rules (D#37 C47). Nothing of them is copied here.
+import { LIVE_EVENTS, entryLabel, readNeedsYouCount } from "../needs-you/needs-you-model.js";
 import { approveView, canApprove, createApprove, createInbox } from "./pipeline-actions.js";
 import { getAllPages } from "./pipeline-storage.js";
 
@@ -84,10 +86,42 @@ function mountApp(contentEl, launchArg) {
   const status = h("p", { class: "pl-status", role: "status", "data-testid": "pl-status" });
   const columns = h("div", { class: "pl-columns", "data-testid": "pl-columns" });
   const detail = h("aside", { class: "pl-detail", "aria-label": "Work item detail", "data-testid": "pl-detail", hidden: true });
+  // "Needs you (N)": one button that opens the Needs you window. It is drawn only while that app is registered (as the per-card link is), and its
+  // number is read at most once every 10 s, only while this window is open and the page is visible. No Needs you row is ever drawn on the board.
+  const nyRegistered = () => !!(window.FULCWM && window.FULCApps && window.FULCApps.get(NEEDS_YOU_APP));
+  const nyButton = h("button", { type: "button", class: "pl-btn pl-needs-you", "data-testid": "pl-needs-you", onClick: () => window.FULCWM && window.FULCWM.open(NEEDS_YOU_APP) }, entryLabel(null));
+  nyButton.hidden = !nyRegistered();
+  const nyAc = new AbortController();
+  let nyCount = null;
+  let nyAt = 0;
+  let nyTimer = null;
+  let nyBusy = false;
+  async function nyRead() {
+    if (nyAc.signal.aborted || nyBusy || document.hidden) return;
+    const wait = nyAt + 10000 - Date.now();
+    if (wait > 0) {
+      if (!nyTimer) nyTimer = setTimeout(() => ((nyTimer = null), nyRead()), wait);
+      return;
+    }
+    nyBusy = true;
+    nyAt = Date.now();
+    try {
+      nyCount = await readNeedsYouCount(api, nyAc.signal);
+    } catch {
+      // fx-swallow-ok: a failed read leaves the button with no number; the board shows no error for it
+      nyCount = null;
+    }
+    nyBusy = false;
+    if (nyAc.signal.aborted) return;
+    nyButton.textContent = entryLabel(nyCount);
+    nyButton.hidden = !nyRegistered();
+  }
+  const nyOffs = [onRefresh(nyRead), ...LIVE_EVENTS.map((t) => on(t, nyRead))];
+  document.addEventListener("visibilitychange", nyRead);
   const root = h(
     "div",
     { class: "pl-app", "data-testid": "pl-app" },
-    h("div", { class: "pl-board" }, h("h2", { class: "pl-title" }, "Pipeline"), status, columns),
+    h("div", { class: "pl-board" }, h("div", { class: "pl-head" }, h("h2", { class: "pl-title" }, "Pipeline"), nyButton), status, columns),
     detail
   );
   contentEl.replaceChildren(root);
@@ -381,6 +415,7 @@ function mountApp(contentEl, launchArg) {
   const tap = (type, dto) => runs && runs.live(type, dto);
   board.connectLive({ on: (t, f) => on(t, (d) => (tap(t, d), f(d))), onRefresh: (f) => onRefresh((...a) => (tap("refresh"), f(...a))) });
   board.load();
+  nyRead();
   if (launchArg && typeof launchArg === "object") select(launchArg.workItemId);
 
   return {
@@ -388,6 +423,10 @@ function mountApp(contentEl, launchArg) {
     destroy() {
       window.removeEventListener("resize", onViewportChange);
       if (window.visualViewport) window.visualViewport.removeEventListener("resize", onViewportChange);
+      nyAc.abort();
+      clearTimeout(nyTimer);
+      nyOffs.forEach((off) => off());
+      document.removeEventListener("visibilitychange", nyRead);
       insight.stop();
       operator.destroy();
       if (historyAc) historyAc.abort();

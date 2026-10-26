@@ -4,7 +4,7 @@
 // is a text node and never markup. Controls use aria-disabled, not disabled, so a pressed control keeps focus while its request is in flight and a
 // second press is ignored. When a row changes under the person, focus goes to the same control, else to the row's heading.
 import { h } from "../_lib/dom.js";
-import { onRefresh } from "../../core/cloud-live.js";
+import { on, onRefresh } from "../../core/cloud-live.js";
 import { WORDS, createNeedsYou, notShownWords } from "./needs-you-model.js";
 
 const FULC = window.FULC;
@@ -64,14 +64,28 @@ function mountApp(contentEl) {
       "li",
       { class: "ny-row", "data-testid": "ny-row", "data-kind": "ask", "data-id": row.id, "data-state": row.state, "aria-busy": working ? "true" : "false" },
       h("h3", { id: headId, class: "ny-row-title", tabindex: "-1", "data-testid": "ny-title" }, row.title),
-      row.state === "open" ? null : h("p", { class: "ny-state", "data-testid": "ny-state" }, row.sentence),
-      row.state === "open" && row.overdue ? h("p", { class: "ny-state", "data-testid": "ny-overdue" }, WORDS.overdue) : null,
-      row.state === "open" && row.proposedLabel ? h("p", { class: "ny-proposed", "data-testid": "ny-proposed" }, WORDS.recommended + ": " + row.proposedLabel) : null,
+      row.overdue ? h("p", { class: "ny-state", "data-testid": "ny-overdue" }, WORDS.overdue) : null,
+      row.due ? h("p", { class: "ny-due", "data-testid": "ny-due" }, row.due) : null,
+      row.proposedLabel ? h("p", { class: "ny-proposed", "data-testid": "ny-proposed" }, WORDS.recommended + ": " + row.proposedLabel) : null,
       // The agent's reason is a quotation: a text node inside a blockquote, never markup and never an instruction.
       row.reason ? h("blockquote", { class: "ny-quote", "data-testid": "ny-reason" }, row.reason) : null,
-      row.state === "open"
+      row.timeout ? h("p", { class: "ny-sentence", "data-testid": "ny-timeout" }, row.timeout) : null,
+      // Only an owner or admin sees the buttons (the server stays the judge); anyone else is told whose answer it waits for.
+      list.state.isAdmin
         ? h("div", { class: "ny-actions" }, row.options.map((o) => choiceButton(row, o.id, o.label, o.id === row.proposed)).concat(choiceButton(row, "deny", WORDS.deny, false)))
-        : null
+        : h("p", { class: "ny-sentence", "data-testid": "ny-waiting" }, WORDS.waitingAdmin)
+    );
+  }
+
+  // A work item that needs a person and is not on the stalled list: the fixed sentence and one plain navigation to its card.
+  function personView(row) {
+    const headId = "ny-h-" + row.id;
+    return h(
+      "li",
+      { class: "ny-row", "data-testid": "ny-row", "data-kind": "person", "data-id": row.id, "data-state": row.state },
+      h("h3", { id: headId, class: "ny-row-title", tabindex: "-1", "data-testid": "ny-title" }, row.title),
+      h("p", { class: "ny-sentence", "data-testid": "ny-sentence" }, row.sentence),
+      h("div", { class: "ny-actions" }, h("button", { type: "button", class: "ny-btn", "data-testid": "ny-open-" + row.id, "data-act": "open", "aria-label": WORDS.open + ": " + row.title, onClick: () => window.FULCWM && window.FULCWM.open("pipeline", { workItemId: row.workItemId }) }, WORDS.open))
     );
   }
 
@@ -125,6 +139,7 @@ function mountApp(contentEl) {
   function rowView(row) {
     if (row.kind === "stalled") return stalledView(row);
     if (row.kind === "ask") return askView(row);
+    if (row.kind === "person") return personView(row);
     if (row.kind === "merge") return mergeView(row);
     const working = list.busyVerb(row.id);
     const headId = "ny-h-" + row.id;
@@ -132,7 +147,7 @@ function mountApp(contentEl) {
     const sentence = working === "done" && row.hasCheck ? WORDS.checkingNow : row.sentence;
     return h(
       "li",
-      { class: "ny-row", "data-testid": "ny-row", "data-id": row.id, "data-state": row.state, "aria-busy": working ? "true" : "false" },
+      { class: "ny-row", "data-testid": "ny-row", "data-kind": "setup", "data-id": row.id, "data-state": row.state, "aria-busy": working ? "true" : "false" },
       h("h3", { id: headId, class: "ny-row-title", tabindex: "-1", "data-testid": "ny-title" }, row.title),
       row.state === "open" ? null : h("p", { class: "ny-state", "data-testid": "ny-state" }, row.state === "done" ? WORDS.done : WORDS.withdrawn),
       row.reason ? h("p", { class: "ny-reason", "data-testid": "ny-reason" }, row.reason) : null,
@@ -165,6 +180,7 @@ function mountApp(contentEl) {
       : s.rows.length === 0 ? h("p", { class: "ny-muted", "data-testid": "ny-empty" }, WORDS.empty)
       : h("ul", { class: "ny-rows", "data-testid": "ny-rows" }, s.rows.map(rowView));
     setText(heading, WORDS.title + (s.status === "ready" ? " (" + openCount + ")" : ""));
+    const focusId = s.focusId;
     if (s.announce !== "") {
       live.textContent = s.announce;
       list.clearAnnounce(); // said once; a later draw does not say it again
@@ -175,8 +191,13 @@ function mountApp(contentEl) {
     content.replaceChildren(body);
     if (s.status === "ready" && s.notShown > 0) content.appendChild(h("p", { class: "ny-muted", "data-testid": "ny-not-shown" }, notShownWords(s.notShown)));
     if (s.status === "ready" && s.moreAsks) content.appendChild(h("p", { class: "ny-muted", "data-testid": "ny-more-asks" }, WORDS.moreAsks));
+    if (s.status === "ready" && s.moreItems) content.appendChild(h("p", { class: "ny-muted", "data-testid": "ny-more-items" }, WORDS.moreItems));
     if (s.status === "ready" && s.truncated) content.appendChild(h("p", { class: "ny-muted", "data-testid": "ny-older" }, WORDS.older));
-    if (heldKey) {
+    if (focusId !== null) {
+      // An answered ask left the list: focus goes to the next row's heading, or to the list heading when there is none.
+      const next = [...content.querySelectorAll("[data-id]")].find((r) => r.getAttribute("data-id") === focusId);
+      (next ? next.querySelector("h3") : heading).focus();
+    } else if (heldKey) {
       const row = [...content.querySelectorAll("[data-id]")].find((r) => r.getAttribute("data-id") === heldKey[0]);
       const again = row && heldKey[1] ? [...row.querySelectorAll("[data-act]")].find((b) => b.getAttribute("data-act") === heldKey[1]) : null;
       (again || (row && row.querySelector("h3")) || heading).focus();
@@ -185,7 +206,7 @@ function mountApp(contentEl) {
 
   paint();
   list.load();
-  list.start({ subscribe: onRefresh, hidden: () => document.hidden });
+  list.start({ subscribe: onRefresh, listen: on, hidden: () => document.hidden });
   return {
     destroy() {
       list.stop();

@@ -52,6 +52,8 @@ async function mockApi(page: Page, initial: { status: number; json: unknown }, s
   await page.route((u) => u.pathname.startsWith("/api/v1/") && u.pathname !== "/api/v1/events", async (route) => {
     const url = new URL(route.request().url());
     const p = url.pathname;
+    // D#37 WS-F1d: the board button's needs_human read is not one of the board's polls; it is answered empty and not counted.
+    if (p === "/api/v1/work-items" && url.searchParams.get("stage") === "needs_human") return send(route, 200, { data: [], next_cursor: null });
     mock.requests.push(`${route.request().method()} ${p}`);
     if (route.request().method() === "POST" && p.endsWith("/approve")) {
       mock.approvals.push({ path: p, body: route.request().postData() });
