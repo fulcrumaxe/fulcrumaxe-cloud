@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MAX_BODY_BYTES, utf8ByteLength } from "@fx/discussions";
-import { assembleSpecBody, assembleSpecBodyChecked, SUMMARY_MAX_BYTES } from "../../src/plan/spec.js";
+import { assembleSpecBody, assembleSpecBodyChecked, SUMMARY_MAX_BYTES, withAllowedFilesSection } from "../../src/plan/spec.js";
 import type { PanelRole } from "../../src/plan/panelRoles.js";
 import { isWellFormedString } from "../../src/plan/unicode.js";
 import { outsideFences } from "./helpers/specFences.js";
@@ -143,5 +143,27 @@ describe("assembleSpecBody: bounded by bytes, the store's unit", () => {
     expect(r.ok).toBe(true);
     if (r.ok) expect(bytes(r.body)).toBe(MAX_BODY_BYTES);
     expect(assembleSpecBodyChecked({ ...base, summary: "", spec: fits + "y" })).toEqual({ ok: false, reason: "spec_too_large" });
+  });
+});
+
+describe("assembleSpecBody: the Planned PRs table (D#483 S5-b2b)", () => {
+  const rows = [
+    { key: "api", title: "Add the API", depends_on: [] },
+    { key: "ui", title: "The screen", depends_on: ["api"] },
+  ];
+  it("is written by the pipeline between the quoted Spec and the file list, so the file list stays last", () => {
+    const body = assembleSpecBody({ ...base, summary: "", spec: "1. Works.", acceptanceFiles: ["src/a.ts"], plannedPrs: rows });
+    expect(body.indexOf("1. Works.")).toBeLessThan(body.indexOf("### Planned PRs"));
+    expect(body.indexOf("### Planned PRs")).toBeLessThan(body.indexOf("### Files this Spec allows"));
+    expect(body).toContain("| ui | The screen | api |");
+    const respecced = withAllowedFilesSection(body, ["src/b.ts"]);
+    expect(respecced).toContain("src/b.ts");
+    expect(respecced).not.toContain("src/a.ts");
+    expect(respecced).toContain("### Planned PRs");
+  });
+  it("is absent when there is no table, and a heading in the model's text sits inside the fence", () => {
+    expect(assembleSpecBody({ ...base, summary: "", spec: "1. Works.", acceptanceFiles: ["src/a.ts"] })).not.toContain("### Planned PRs");
+    const body = assembleSpecBody({ ...base, summary: "", spec: "### Planned PRs\n| a | b | c |", acceptanceFiles: ["src/a.ts"] });
+    expect(outsideFences(body)).not.toContain("### Planned PRs");
   });
 });

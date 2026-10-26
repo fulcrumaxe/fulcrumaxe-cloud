@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExecutionTargetRegistry } from "@fx/runner";
 import { ForbiddenError } from "@fx/core/src/tenancy/errors.js";
+import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { sanitize } from "@fx/trust";
 import { pgHarness } from "../helpers/pgHarness.js";
 import { seedAccount, seedRepo } from "../build/helpers/seed.js";
@@ -680,3 +681,73 @@ describe("D#2 H27a: a question or a project never starts a build", () => {
   });
 });
 
+
+describe("D#483 S5-b2b: the Planned PRs table of the product Spec", () => {
+  const ROWS = [
+    { key: "api", title: "Add the API route", depends_on: [] },
+    { key: "ui", title: "The screen", depends_on: ["api"] },
+  ];
+  const frontmatter = async (workItemId: string) => (await h.admin.query<{ frontmatter: Record<string, unknown> }>(`SELECT frontmatter FROM spec_versions WHERE work_item_id = $1 ORDER BY version`, [workItemId])).rows.map((x) => x.frontmatter);
+
+  it("asks the PM for the table, stores the rows it accepted in the frontmatter, and shows the table in the Spec body", async () => {
+    const r = await rig();
+    r.writer.output = () => ({ summary: "s", spec: "1. Works.", acceptance_files: ["src/a.ts"], planned_prs: ROWS });
+    expect(await runSpecStep(r.deps, { workItemId: r.workItemId })).toMatchObject({ status: "published" });
+    expect(r.writer.calls[0]!.prompt).toContain("planned_prs");
+    expect(await frontmatter(r.workItemId)).toEqual([{ acceptance_files: ["src/a.ts"], planned_prs: ROWS }]);
+    const body = (await state(r.workItemId)).specs[0]!.body;
+    expect(body).toContain("| ui | The screen | api |");
+    expect(body.indexOf("### Planned PRs")).toBeLessThan(body.indexOf("### Files this Spec allows"));
+  });
+
+  it("no table, an empty table and a single row stay one item: nothing is stored and no section is written", async () => {
+    for (const planned_prs of [undefined, [], [ROWS[0]]]) {
+      const r = await rig();
+      r.writer.output = () => ({ summary: "s", spec: "1. Works.", acceptance_files: ["src/a.ts"], ...(planned_prs === undefined ? {} : { planned_prs }) });
+      expect(await runSpecStep(r.deps, { workItemId: r.workItemId })).toMatchObject({ status: "published" });
+      expect(await frontmatter(r.workItemId)).toEqual([{ acceptance_files: ["src/a.ts"] }]);
+      expect((await state(r.workItemId)).specs[0]!.body).not.toContain("### Planned PRs");
+    }
+  });
+
+  it("an unreadable table is refused with a named outcome and publishes nothing; an over-size one likewise", async () => {
+    const bad: Array<[unknown, string]> = [
+      [[{ key: "fix-1", title: "T" }, ROWS[0]], "invalid_planned_prs"],
+      [[{ key: "a", title: "A | B" }, ROWS[0]], "invalid_planned_prs"],
+      ["api, ui", "invalid_planned_prs"],
+      [[{ key: "a", title: "lone \ud800 surrogate" }, ROWS[0]], "invalid_planned_prs"],
+      [Array.from({ length: 13 }, (_, i) => ({ key: `k${i}`, title: "T", depends_on: [] })), "planned_prs_too_large"],
+    ];
+    for (const [planned_prs, reason] of bad) {
+      const r = await rig();
+      r.writer.output = () => ({ summary: "s", spec: "1. Works.", acceptance_files: ["src/a.ts"], planned_prs });
+      expect(await runSpecStep(r.deps, { workItemId: r.workItemId })).toEqual({ status: "refused", reason });
+      const after = await state(r.workItemId);
+      expect(after.specs).toHaveLength(0);
+      expect(after.stage).toBe("discussing");
+    }
+  });
+
+  it("publishSpec re-reads the table itself: rows that were not checked are refused before anything is written", async () => {
+    const r = await rig();
+    const ctx = { pool: h.runWriterPool, principal: systemPrincipal(r.accountId, "pipeline.spec") };
+    await expect(publishSpec(ctx, { workItemId: r.workItemId, body: "x", acceptanceFiles: ["src/a.ts"], plannedPrs: [{ key: "check-1", title: "T", depends_on: [] }, ROWS[0]!] })).rejects.toMatchObject({ code: "invalid_planned_prs" });
+    expect((await state(r.workItemId)).specs).toHaveLength(0);
+  });
+
+  it("end to end: the Spec the step published, once a person approves it, makes one child per row from that version", async () => {
+    const r = await rig();
+    r.writer.output = () => ({ summary: "s", spec: "1. Works.", acceptance_files: ["src/a.ts"], planned_prs: ROWS });
+    await runSpecStep(r.deps, { workItemId: r.workItemId });
+    const userId = randomUUID();
+    await h.admin.query("INSERT INTO users (id, email) VALUES ($1, $2)", [userId, `${userId}@example.test`]);
+    await h.admin.query("INSERT INTO account_members (account_id, user_id, role) VALUES ($1, $2, 'owner')", [r.accountId, userId]);
+    await withTenant(h.pureAppUserPool, r.accountId, userId, (c) => c.query("SELECT * FROM work_item_approval_record($1, 'work_item_approve')", [r.workItemId]));
+    const versionId = (await state(r.workItemId)).specs[0]!.id;
+    const kids = await h.admin.query(`SELECT planned_pr_key, title, planned_pr_spec_version_id, stage FROM work_items WHERE parent_id = $1 ORDER BY planned_pr_key`, [r.workItemId]);
+    expect(kids.rows).toEqual([
+      { planned_pr_key: "api", title: "Add the API route", planned_pr_spec_version_id: versionId, stage: "triaged" },
+      { planned_pr_key: "ui", title: "The screen", planned_pr_spec_version_id: versionId, stage: "triaged" },
+    ]);
+  });
+});
