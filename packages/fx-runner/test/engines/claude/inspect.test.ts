@@ -57,7 +57,7 @@ describe("authState keeps `no` apart from `unknown`", () => {
 describe("inspectBinary answers without a verdict, and never throws for what the binary says", () => {
   it("a good build: its version and no missing flag", async () => {
     const fake = makeFake();
-    expect(await inspectBinary({ launch: testLaunch(), storedPath: fake.binary, cacheDir: cache(), spawn }, env())).toEqual({ version: "2.1.294", missingFlags: [] });
+    expect(await inspectBinary({ launch: testLaunch(), storedPath: fake.binary, cacheDir: cache(), spawn }, env())).toEqual({ version: "2.1.295", missingFlags: [] });
   });
 
   it("a build below the minimum: the version, and --help is not read", async () => {
@@ -76,7 +76,7 @@ describe("inspectBinary answers without a verdict, and never throws for what the
     const dir = cache();
     const first = await inspectBinary({ launch: testLaunch(), storedPath: fake.binary, cacheDir: dir, spawn }, env());
     expect(first.missingFlags).toEqual(["--tools"]);
-    expect(JSON.parse(readFileSync(path.join(dir, "claude-flags.json"), "utf8"))["2.1.294"]).toEqual({ missing: ["--tools"] });
+    expect(JSON.parse(readFileSync(path.join(dir, "claude-flags.json"), "utf8"))["2.1.295"]).toEqual({ missing: ["--tools"] });
     await inspectBinary({ launch: testLaunch(), storedPath: fake.binary, cacheDir: dir, spawn }, env());
     expect(fake.calls().filter((c) => c === "--help ")).toHaveLength(1);
   });

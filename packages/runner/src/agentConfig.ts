@@ -138,7 +138,7 @@ export function runnerToolsForRole(role: string): readonly string[] {
  *  - a PreToolUse hook (`VERIFIER_READ_GUARD`) refuses any Read, Glob or Grep whose path, file path, glob or Glob pattern is absolute outside
  *    the checkout, climbs with `..`, starts at `~`, holds a backslash, or names `.git` or `.env`, and any Glob pattern with a `{` or `,/`
  *    (brace alternation could name an absolute root). The CLI does not limit Glob and Grep to a path by rule (CX-5b), so the hook is what
- *    keeps those two in the tree. It fails closed: input over `VERIFIER_GUARD_MAX_INPUT` characters, input it cannot read, another tool,
+ *    keeps those two in the tree. It fails closed: input over `VERIFIER_GUARD_MAX_INPUT` bytes, input it cannot read, another tool,
  *    or a path it cannot resolve is refused (exit 2).
  * The rules and the hook's lexical checks see names, not files. A symlink committed in the repository could name a place outside the tree
  * by a relative, in-tree name. Two things stop that: the clone writes every link as a plain file (`core.symlinks=false`, repoClone.ts), and,
@@ -157,8 +157,8 @@ export const VERIFIER_DENY: readonly string[] = Object.freeze([
 ]);
 /**
  * The guard's text, its input bound and its hook entry live in @fulcrumaxe/runner-protocol (verifierGuard.ts), so a local runner runs the very
- * same script (S4-b2c). Re-exported here under the names this package always had. A PreToolUse command hook killed at its `timeout` does not
- * block the call; the input bound keeps the script far inside the timeout instead.
+ * same script (S4-b2c). Re-exported here under the names this package always had.
+ * The hook entry carries `onFailure: "block"` (set in the shared helper), so a timeout or crash refuses the call; see verifierGuard.ts.
  */
 export { VERIFIER_GUARD_MAX_INPUT, VERIFIER_READ_GUARD_SCRIPT } from "@fulcrumaxe/runner-protocol";
 export const VERIFIER_READ_GUARD = verifierReadGuardHook(VERIFIER_WORKDIR);

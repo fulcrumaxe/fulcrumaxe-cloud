@@ -8,13 +8,14 @@ import { shortQuestionEnv } from "../../daemon/cliStubs.js";
 import { EngineRefusal } from "./refusal.js";
 
 /**
- * The lowest build the runner accepts: the oldest one the real-binary canary (`scripts/canary.sh`) has been run on and
- * passed, which is what proves the file-tool confinement settings (`permissions.deny`, `blockReadsOutsideWorkingDirectories`)
- * are honoured. Change it in this one place, to the version the canary printed. Every flag in `REQUIRED_FLAGS` exists well
+ * The lowest build the runner accepts: the greater of the oldest build the real-binary canary (`scripts/canary.sh`) has
+ * been run on and passed, and 2.1.295, the first build with the hook `onFailure` field the verifier guard relies on.
+ * The canary is what proves the file-tool confinement settings (`permissions.deny`, `blockReadsOutsideWorkingDirectories`)
+ * are honoured. Change it in this one place, to the greater of the version the canary printed and 2.1.295. Every flag in `REQUIRED_FLAGS` exists well
  * below it (`--permission-prompts`, the newest, is 2.1.259, from the CLI reference); the flag check below is the real test
  * for those, this constant keeps the refusal message and the doctor output simple.
  */
-export const MIN_CLAUDE_VERSION = "2.1.294";
+export const MIN_CLAUDE_VERSION = "2.1.295";
 
 /** The one thing the engine is given: where the binary is, and which version it reported. */
 export interface ClaudeBinary {

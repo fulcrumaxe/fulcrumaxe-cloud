@@ -9,7 +9,7 @@ const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtur
 /** The build the committed fixtures were captured from. */
 export const CAPTURED_VERSION = "2.1.289";
 /** What the fake prints for `--version`: at least `MIN_CLAUDE_VERSION`, or the engine would refuse it. */
-export const DEFAULT_VERSION = "2.1.294";
+export const DEFAULT_VERSION = "2.1.295";
 
 /** A run id as the job schema types it: a uuid. */
 export const RUN_ID = "3f6c1a52-8d0e-4b7a-9c14-0a5e6d2b7f38";

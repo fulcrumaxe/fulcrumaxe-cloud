@@ -619,7 +619,7 @@ describe.each(shells)("install.sh under %s", (shellName, shellPath) => {
 
     it.each([
       ["missing", null],
-      ["older than the minimum", "2.1.293 (Claude Code)"],
+      ["older than the minimum", "2.1.294 (Claude Code)"],
       ["a lower major", "1.99.999 (Claude Code)"],
       ["not a version", "hello"],
     ])("Claude Code %s exits 4, prints Anthropic's own install line, never downloads it, and still leaves fx-runner installed", async (_n, claude) => {
@@ -632,7 +632,7 @@ describe.each(shells)("install.sh under %s", (shellName, shellPath) => {
       expect(log(f, "curl")).toHaveLength(1);
     }, T);
 
-    it.each([[MIN_CLAUDE_VERSION], ["2.1.295"], ["2.2.0"], ["3.0.0"], ["2.1.1000"]])("Claude Code %s is accepted (exit 0)", async (version) => {
+    it.each([[MIN_CLAUDE_VERSION], ["2.1.296"], ["2.2.0"], ["3.0.0"], ["2.1.1000"]])("Claude Code %s is accepted (exit 0)", async (version) => {
       serveAll();
       const f = fixture({ withDeps: true, claude: `${version} (Claude Code)` });
       const r = await run(f, sh);

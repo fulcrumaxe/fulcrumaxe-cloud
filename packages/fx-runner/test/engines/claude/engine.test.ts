@@ -87,10 +87,10 @@ describe("engine run", () => {
     const local: LocalOnlyEvent[] = [];
     const rig = makeRig({ onLocalEvent: (event) => void local.push(event) });
     const { handle } = await engineFor(rig).start(rig.startOptions());
-    expect((await outcomeOf(handle)).engineVersion).toBe("2.1.294");
-    expect(local[0]).toMatchObject({ seq: 0, type: "engine_version", engine_version: "2.1.294" });
+    expect((await outcomeOf(handle)).engineVersion).toBe("2.1.295");
+    expect(local[0]).toMatchObject({ seq: 0, type: "engine_version", engine_version: "2.1.295" });
     const records = readFileSync(path.join(rig.config.logDir, `${RUN_ID}.jsonl`), "utf8").trim().split("\n").map((line) => JSON.parse(line) as { kind: string; line: string });
-    expect(records[0]).toEqual({ kind: "meta", line: '{"engine_version":"2.1.294"}' });
+    expect(records[0]).toEqual({ kind: "meta", line: '{"engine_version":"2.1.295"}' });
   });
 
   it("backstop: an unknown-option exit before the init line is claude_flags_unsupported, with nothing processed and no generic failure", async () => {
@@ -99,7 +99,7 @@ describe("engine run", () => {
     rig.fake.set("unknown-option", "1");
     const opts = rig.startOptions();
     const { handle } = await engineFor(rig).start(opts);
-    expect(await outcomeOf(handle)).toEqual({ status: "failed", failureReason: "claude_flags_unsupported", engineVersion: "2.1.294" });
+    expect(await outcomeOf(handle)).toEqual({ status: "failed", failureReason: "claude_flags_unsupported", engineVersion: "2.1.295" });
     expect(opts.events).toEqual([]);
     expect(local.map((event) => event.type)).toEqual(["engine_version"]);
   });
@@ -115,7 +115,7 @@ describe("engine run", () => {
     expect(settings.permissions.allow.some((rule) => rule.startsWith(`Edit(//${rig.workdir.slice(1)}`))).toBe(true);
   });
 
-  // The text is the CLI 2.1.294's own (read from the binary), including the warning sign it prefixes.
+  // The text is the CLI 2.1.295's own (read from the binary), including the warning sign it prefixes.
   const FORCED = "⚠ Permission mode forced to default — CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set (allowed_non_write_users hardening). Declare allowedTools explicitly, or set CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0 to opt out.\n";
 
   it("fails closed when the CLI says it forced the permission mode: the run is stopped and reported as permission_mode_forced", async () => {
@@ -124,7 +124,7 @@ describe("engine run", () => {
     rig.fake.set("stderr-first.txt", FORCED);
     rig.fake.set("hang", "1");
     const { handle } = await engineFor(rig).start(rig.startOptions());
-    expect(await outcomeOf(handle)).toEqual({ status: "failed", failureReason: "permission_mode_forced", engineVersion: "2.1.294" });
+    expect(await outcomeOf(handle)).toEqual({ status: "failed", failureReason: "permission_mode_forced", engineVersion: "2.1.295" });
     const child = handle.child as { exitCode: number | null; signalCode: string | null };
     expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
   });

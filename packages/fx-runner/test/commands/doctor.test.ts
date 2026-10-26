@@ -146,12 +146,12 @@ describe("each check fails on its own", () => {
 
   it("a version below the minimum: FAIL, and the flags are not checked", async () => {
     register();
-    const old = makeFake({ version: "2.1.293 (Claude Code)" });
+    const old = makeFake({ version: "2.1.294 (Claude Code)" });
     rmSync(path.join(toolbin, "claude"));
     symlinkSync(old.binary, path.join(toolbin, "claude"));
     const result = await doctor();
     expect(levelOf(result.out, "Claude version")).toBe("FAIL");
-    expect(result.out).toContain("2.1.293, at least 2.1.294: no");
+    expect(result.out).toContain("2.1.294, at least 2.1.295: no");
     expect(levelOf(result.out, "Claude flags")).toBe("WARN");
     expect(old.calls()).toEqual(["--version ", "auth status"]);
     expect(result.code).toBe(1);

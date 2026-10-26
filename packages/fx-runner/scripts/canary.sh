@@ -17,7 +17,7 @@
 # if ~/.bashrc.fx-canary-bak already exists (a previous run was cut off: restore that file by hand first).
 #
 # The test prints one PASS or FAIL line per probe; the exit status is non-zero if any is FAIL. Record the CLI version
-# printed first, and set MIN_CLAUDE_VERSION (src/engines/claude/pin.ts) to the oldest version this passes on.
+# printed first, and set MIN_CLAUDE_VERSION (src/engines/claude/pin.ts) to the greater of the oldest version this passes on and 2.1.295 (the first build with the hook onFailure field).
 set -euo pipefail
 
 CLAUDE_BIN="${1:?usage: canary.sh /absolute/path/to/claude}"

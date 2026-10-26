@@ -37,11 +37,11 @@ const assistant = (blocks: unknown[]): string => JSON.stringify({ type: "assista
 
 describe("what is printed", () => {
   it("renders agent text, tool uses, tool results, the result and the engine notes from a real captured stream", () => {
-    const records: Array<["stdout" | "stderr" | "meta", string]> = [["meta", JSON.stringify({ engine_version: "2.1.294" })], ...fixtureText("stream.tooluse.synthetic.jsonl").split("\n").filter(Boolean).map((l): ["stdout", string] => ["stdout", l]), ["stderr", "a warning on stderr"]];
+    const records: Array<["stdout" | "stderr" | "meta", string]> = [["meta", JSON.stringify({ engine_version: "2.1.295" })], ...fixtureText("stream.tooluse.synthetic.jsonl").split("\n").filter(Boolean).map((l): ["stdout", string] => ["stdout", l]), ["stderr", "a warning on stderr"]];
     writeRun([], records);
     const { code, lines } = print(RUN);
     expect(code).toBe(0);
-    expect(lines).toContain('meta: {"engine_version":"2.1.294"}');
+    expect(lines).toContain('meta: {"engine_version":"2.1.295"}');
     expect(lines).toContain("stderr: a warning on stderr");
     expect(lines.some((l) => l.startsWith("assistant: "))).toBe(true);
     expect(lines.some((l) => l.startsWith("  tool: "))).toBe(true);

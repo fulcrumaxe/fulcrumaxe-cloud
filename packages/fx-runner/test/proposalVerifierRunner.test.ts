@@ -5,6 +5,7 @@ import path from "node:path";
 import { PROPOSAL_VERIFIER_RUNNER_TOOLS, VERIFIER_READ_GUARD_SCRIPT } from "@fulcrumaxe/runner-protocol";
 import { roleToolsDigest as cloudDigest } from "@fx/runner";
 import { describe, expect, it } from "vitest";
+import { MIN_CLAUDE_VERSION, compareVersions } from "../src/engines/claude/pin.js";
 import { claudeArgv } from "../src/engines/claude/argv.js";
 import { EngineRefusal } from "../src/engines/claude/refusal.js";
 import { settingsFor, writeJobFiles } from "../src/engines/claude/settingsFile.js";
@@ -53,7 +54,10 @@ describe("the claim verifier's settings file", () => {
     expect(file.hooks?.PreToolUse).toHaveLength(1);
     const hook = file.hooks!.PreToolUse![0]!;
     expect(hook.matcher).toBe("Read|Glob|Grep");
-    expect(hook.hooks).toEqual([{ type: "command", command: `/bin/sh -c '${VERIFIER_READ_GUARD_SCRIPT}' fx-read-guard ${WS}`, timeout: 5 }]);
+    expect(hook.hooks).toEqual([{ type: "command", command: `/bin/sh -c '${VERIFIER_READ_GUARD_SCRIPT}' fx-read-guard ${WS}`, timeout: 5, onFailure: "block" }]);
+    // The bytes written to disk carry it too: a timeout or crash of the guard refuses the call (CLI 2.1.295 or later, the runner's minimum).
+    expect(JSON.parse(JSON.stringify(file)).hooks.PreToolUse[0].hooks.map((h: Record<string, unknown>) => h.onFailure)).toEqual(["block"]);
+    expect(compareVersions(MIN_CLAUDE_VERSION, "2.1.295")).toBeGreaterThanOrEqual(0);
   });
 
   it("confines reads to the checkout, denies its .git and .env files and the protected paths, and allows nothing else", () => {
