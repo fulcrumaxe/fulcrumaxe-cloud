@@ -1,4 +1,4 @@
-import type { AdvanceFacade, AdvanceRunOutcome, AdvanceStepResult, DecisionStepCode, PlanePublish, StartGateStepInput, StartGateStepOut } from "@fx/worker";
+import { ADVANCE_CONTINUE_CODES, type AdvanceContinueOut, type AdvanceFacade, type AdvanceRunOutcome, type AdvanceStepResult, type DecisionStepCode, type PlanePublish, type StartGateStepInput, type StartGateStepOut } from "@fx/worker";
 import { isQueuedOnRunner, type AdvanceWorker } from "./advanceSteps";
 
 /**
@@ -185,4 +185,29 @@ export async function buildFailedBody(worker: AdvanceWorker | null, accountId: s
     if (run.runtime === "runner") code = runnerFailureCode(run.failureReason);
   }
   return outcomeOf(await worker.advanceBuildFailed(accountId, workItemId, runId, code, ...(attempt === undefined ? [] : [attempt])));
+}
+
+/**
+ * D#2 H14c-3-3b-2 (C88 R1): the answer of the continue step, as fixed words and a run id. Fails closed: a worker that is missing, throws, or answers anything this
+ * list does not know (an unknown code, a continuation without a run id, a park without a known reason) is `today`, the path the workflow took before
+ * continuation existed. The workflow never starts anything from a value this function did not check.
+ */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const TODAY: AdvanceContinueOut = { code: "today", runId: null, parkedAs: null };
+export async function continueBody(worker: Pick<AdvanceFacade, "advanceContinue"> | null, who: StepWho, endedRunId: string): Promise<AdvanceContinueOut> {
+  if (!worker) return TODAY;
+  let out: AdvanceContinueOut;
+  try {
+    out = await worker.advanceContinue(who, endedRunId);
+  } catch (err) {
+    // fx-swallow-ok: a throw would be retried by the Workflow service and a retry of a spend step is not wanted; the name is the trace and today's path is the answer
+    console.warn(JSON.stringify({ event: "advance.continue_step_failed", run_id: endedRunId, error: err instanceof Error ? err.name : "unknown" }));
+    return TODAY;
+  }
+  const code = typeof out?.code === "string" ? out.code : "";
+  if (!(ADVANCE_CONTINUE_CODES as readonly string[]).includes(code)) return TODAY;
+  const runId = typeof out.runId === "string" && UUID.test(out.runId) ? out.runId : null;
+  if ((code === "continued" || code === "duplicate") && runId === null) return TODAY;
+  if (code === "parked") return typeof out.parkedAs === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(out.parkedAs) ? { code: "parked", runId: null, parkedAs: out.parkedAs } : TODAY;
+  return { code: out.code, runId: code === "continued" || code === "duplicate" ? runId : null, parkedAs: null };
 }
