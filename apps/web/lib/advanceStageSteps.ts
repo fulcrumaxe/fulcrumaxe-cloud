@@ -1,4 +1,4 @@
-import { ADVANCE_CONTINUE_CODES, type AdvanceContinueOut, type AdvanceFacade, type AdvanceRunOutcome, type AdvanceStepResult, type DecisionStepCode, type PlanePublish, type StartGateStepInput, type StartGateStepOut } from "@fx/worker";
+import { ADVANCE_CONTINUE_CODES, type AdvanceContinueOut, type ContinuationSite, type AdvanceFacade, type AdvanceRunOutcome, type AdvanceStepResult, type DecisionStepCode, type PlanePublish, type StartGateStepInput, type StartGateStepOut } from "@fx/worker";
 import { isQueuedOnRunner, type AdvanceWorker } from "./advanceSteps";
 
 /**
@@ -194,11 +194,11 @@ export async function buildFailedBody(worker: AdvanceWorker | null, accountId: s
  */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TODAY: AdvanceContinueOut = { code: "today", runId: null, parkedAs: null };
-export async function continueBody(worker: Pick<AdvanceFacade, "advanceContinue"> | null, who: StepWho, endedRunId: string): Promise<AdvanceContinueOut> {
+export async function continueBody(worker: Pick<AdvanceFacade, "advanceContinue"> | null, who: StepWho, endedRunId: string, site?: ContinuationSite): Promise<AdvanceContinueOut> {
   if (!worker) return TODAY;
   let out: AdvanceContinueOut;
   try {
-    out = await worker.advanceContinue(who, endedRunId);
+    out = site === undefined ? await worker.advanceContinue(who, endedRunId) : await worker.advanceContinue(who, endedRunId, site);
   } catch (err) {
     // fx-swallow-ok: a throw would be retried by the Workflow service and a retry of a spend step is not wanted; the name is the trace and today's path is the answer
     console.warn(JSON.stringify({ event: "advance.continue_step_failed", run_id: endedRunId, error: err instanceof Error ? err.name : "unknown" }));

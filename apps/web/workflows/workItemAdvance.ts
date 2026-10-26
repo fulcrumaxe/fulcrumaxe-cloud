@@ -1,5 +1,5 @@
 import { sleep } from "workflow";
-import type { AdvanceContinueOut, AdvanceRunStart, AdvanceStartArgs, AdvanceTriageResult, DecisionStepCode, StartGateStepInput, StartGateStepOut } from "@fx/worker";
+import type { AdvanceContinueOut, ContinuationSite, AdvanceRunStart, AdvanceStartArgs, AdvanceTriageResult, DecisionStepCode, StartGateStepInput, StartGateStepOut } from "@fx/worker";
 import { getWorker } from "../lib/worker";
 import { getIssueReader } from "../lib/github/issueRead";
 import { openInstallationHttp } from "../lib/github/installationHttp";
@@ -237,9 +237,9 @@ export async function advanceCheckFixStep(accountId: string, userId: string, wor
  * D#2 H14c-3-3b-2 (C88 R1): an executor run the workflow waited on ended at a limit. Continues it when the customer's run limits allow. The answer is one fixed
  * word (and a run id); the step never throws for a refusal, and a replay answers the child the first pass started.
  */
-export async function advanceContinueStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, endedRunId: string): Promise<AdvanceContinueOut> {
+export async function advanceContinueStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, endedRunId: string, site?: ContinuationSite): Promise<AdvanceContinueOut> {
   "use step";
-  return continueBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, endedRunId);
+  return continueBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, endedRunId, site);
 }
 
 export async function advanceStageStep(accountId: string, workItemId: string): Promise<string | null> {
@@ -558,16 +558,9 @@ export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promis
       await advanceLogStep("advance.failed", { work_item_id: workItemId, at: "classify_start", reason: started.reason });
       return { status: "failed", detail: `classify_refused:${started.reason}` };
     }
-    let waited = 0;
-    let outcome = await advanceRunOutcomeStep(accountId, started.runId);
-    let pendingWaited = 0;
-    while (!outcome.done && waited < CLASSIFY_WAIT_MS && pendingWaited < RUNNER_PENDING_CEILING_MS) {
-      const queued = outcome.queuedOnRunner;
-      await sleep(POLL_MS);
-      if (queued) pendingWaited += POLL_MS;
-      else waited += POLL_MS;
-      outcome = await advanceRunOutcomeStep(accountId, started.runId);
-    }
+    const followed = await followSeat(args, workItemId, "classify", started.runId, (id) => advanceRunOutcomeStep(accountId, id), CLASSIFY_WAIT_MS);
+    if ("end" in followed) return followed.end;
+    const outcome = followed.outcome;
     if (!outcome.done) {
       // The run is stopped, not left to a runner that keeps answering its heartbeat: only a cancelled run is fenced (409) at the next one, so the runner ends its work.
       await advanceCancelStep(accountId, args.userId, workItemId, outcome.tailRunId ?? started.runId);
@@ -704,16 +697,9 @@ async function lightPhase(args: AdvanceStartArgs, rootId: string, issue: { categ
     await advanceLogStep("advance.failed", { work_item_id: rootId, at: "light_spec_start", reason: started.reason });
     return { status: "failed", detail: `light_spec_refused:${started.reason}` };
   }
-  let waited = 0;
-  let outcome = await advanceBuildOutcomeStep(accountId, started.runId);
-  let pendingWaited = 0;
-  while (!outcome.done && waited < LIGHT_SPEC_WAIT_MS && pendingWaited < RUNNER_PENDING_CEILING_MS) {
-    const queued = outcome.queuedOnRunner;
-    await sleep(POLL_MS);
-    if (queued) pendingWaited += POLL_MS;
-    else waited += POLL_MS;
-    outcome = await advanceBuildOutcomeStep(accountId, started.runId);
-  }
+  const followed = await followSeat(args, rootId, "light_spec", started.runId, (id) => advanceBuildOutcomeStep(accountId, id), LIGHT_SPEC_WAIT_MS);
+  if ("end" in followed) return followed.end;
+  const outcome = followed.outcome;
   if (!outcome.done) {
     await advanceCancelStep(accountId, userId, rootId, outcome.tailRunId);
     await advanceLogStep("advance.stopped", { work_item_id: rootId, at: "light_spec", reason: "wait_timeout" });
@@ -723,7 +709,7 @@ async function lightPhase(args: AdvanceStartArgs, rootId: string, issue: { categ
     await advanceLogStep("advance.stopped", { work_item_id: rootId, at: "light_spec", reason: `run_${outcome.status}` });
     return { status: "light_spec_failed", detail: `run_${outcome.status}` };
   }
-  const published = await advanceLightSpecPublishStep(accountId, userId, rootId, args.haltEpoch, started.runId, actionId);
+  const published = await advanceLightSpecPublishStep(accountId, userId, rootId, args.haltEpoch, followed.runId, actionId);
   if (published.status === "not_feasible") {
     await advanceLogStep("advance.stopped", { work_item_id: rootId, at: "light_spec", reason: "not_feasible" });
     return { status: "not_feasible" };
@@ -757,16 +743,9 @@ async function respecPhase(args: AdvanceStartArgs): Promise<Result> {
     await advanceLogStep("advance.failed", { work_item_id: workItemId, at: "respec_start", reason: started.reason });
     return { status: "failed", detail: `respec_refused:${started.reason}` };
   }
-  let waited = 0;
-  let outcome = await advanceBuildOutcomeStep(accountId, started.runId);
-  let pendingWaited = 0;
-  while (!outcome.done && waited < LIGHT_SPEC_WAIT_MS && pendingWaited < RUNNER_PENDING_CEILING_MS) {
-    const queued = outcome.queuedOnRunner;
-    await sleep(POLL_MS);
-    if (queued) pendingWaited += POLL_MS;
-    else waited += POLL_MS;
-    outcome = await advanceBuildOutcomeStep(accountId, started.runId);
-  }
+  const followed = await followSeat(args, workItemId, "respec", started.runId, (id) => advanceBuildOutcomeStep(accountId, id), LIGHT_SPEC_WAIT_MS);
+  if ("end" in followed) return followed.end;
+  const outcome = followed.outcome;
   if (!outcome.done) {
     await advanceCancelStep(accountId, userId, workItemId, outcome.tailRunId);
     await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "respec", reason: "wait_timeout" });
@@ -776,7 +755,7 @@ async function respecPhase(args: AdvanceStartArgs): Promise<Result> {
     await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "respec", reason: `run_${outcome.status}` });
     return { status: "respec_failed", detail: `run_${outcome.status}` };
   }
-  const published = await advanceRespecPublishStep(accountId, userId, workItemId, args.haltEpoch, started.runId, actionId, version as number);
+  const published = await advanceRespecPublishStep(accountId, userId, workItemId, args.haltEpoch, followed.runId, actionId, version as number);
   if (isHaltReason(published.reason)) return haltedEnd(args, "respec");
   if (published.status !== "published") {
     await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "respec", reason: published.reason ?? "refused" });
@@ -1062,8 +1041,8 @@ async function buildStopped(args: AdvanceStartArgs, runId: string | null, code: 
  * out), or the end of the workflow. A result `today` (and anything the step does not name) hands the outcome back unchanged, so the caller records the failure exactly as
  * it did before continuation existed.
  *
- * Bounded three ways: at most `MAX_CONTINUATIONS_PER_WORK_ITEM + 1` looks in one workflow, the step's own count of stored automatic continuations (the cap that
- * survives a restarted workflow), and the database's one live continuation per parent. A busy answer is slept on at most three times.
+ * Bounded three ways: at most `MAX_CONTINUATIONS_PER_WORK_ITEM + 1` looks at this call site (the bound is per call site, not per workflow), the step's own count of stored
+ * continuations (the cap that bounds the whole workflow and survives a restart), and the database's one live continuation per parent. A busy answer is slept on at most three times.
  * C88 R5 / the run-extension dial seam: the worker step is the one place that decides whether a limit end continues on its own; the dial of H14c-5c-3 joins there, not here.
  */
 async function continueLimitEnds(args: AdvanceStartArgs, startRunId: string, startOutcome: BuildRunOutcome): Promise<{ runId: string; outcome: BuildRunOutcome } | { end: Result }> {
@@ -1112,6 +1091,57 @@ async function waitForExecutorRun(accountId: string, runId: string): Promise<Bui
   return outcome;
 }
 
+/**
+ * D#2 H14c-3-3b-3 (C89): a seat other than the executor (classify, the short Spec, re-spec, a reviewer) whose run ended at a limit. One question to the worker step, at a
+ * fixed `site`; the answer is the child run to wait for, the end of the workflow, or null: today's path, nothing started. A busy answer is slept on at most three times.
+ * The child's task is the seat's own stored prompt (the worker reads it, never this file), so nothing about the seat's text passes through here.
+ */
+async function continueSeat(args: AdvanceStartArgs, workItemId: string, site: ContinuationSite, endedRunId: string): Promise<{ runId: string } | { end: Result } | null> {
+  const { accountId, userId, haltEpoch } = args;
+  let step = await advanceContinueStep(accountId, userId, workItemId, haltEpoch, endedRunId, site);
+  for (let busy = 0; step.code === "busy" && busy < CONTINUE_BUSY_RETRIES; busy++) {
+    await sleep(CONTINUE_BUSY_SLEEP_MS);
+    step = await advanceContinueStep(accountId, userId, workItemId, haltEpoch, endedRunId, site);
+  }
+  if ((step.code === "continued" || step.code === "duplicate") && step.runId !== null && step.runId !== endedRunId) {
+    await advanceLogStep("advance.continued", { work_item_id: workItemId, from_run_id: endedRunId, run_id: step.runId, replay: step.code === "duplicate", site });
+    return { runId: step.runId };
+  }
+  // C7's park already wrote the move to Needs a person; only the end is ours (no card sentence: the sentences name the build).
+  if (step.code === "parked" && step.parkedAs !== null) return { end: { status: "failed", detail: `${site}_parked:${step.parkedAs}` } };
+  if (step.code === "work_item_closed") return { end: { status: "failed", detail: `${site}_item_closed` } };
+  if (step.code === "waiting_on_answer") return { end: await waitingOnAnswer(args, endedRunId) };
+  if (step.code === "halted") return { end: await haltedEnd(args, "continue") };
+  return null;
+}
+
+/**
+ * The wait for a seat run and, when it ends at a limit, for each continuation of it (at most `MAX_CONTINUATIONS_PER_WORK_ITEM`, each with its own wait budgets).
+ * Answers the last run and how it ended, or the end of the workflow. A seat that cannot be continued ends exactly as it did before continuation existed.
+ */
+async function followSeat<T extends { done: boolean; status: string; queuedOnRunner: boolean; tailRunId?: string }>(
+  args: AdvanceStartArgs, workItemId: string, site: ContinuationSite, firstRunId: string, read: (runId: string) => Promise<T>, waitMs: number,
+): Promise<{ runId: string; outcome: T } | { end: Result }> {
+  let runId = firstRunId;
+  for (let looks = 0; ; looks++) {
+    let waited = 0;
+    let pendingWaited = 0;
+    let outcome = await read(runId);
+    while (!outcome.done && waited < waitMs && pendingWaited < RUNNER_PENDING_CEILING_MS) {
+      const queued = outcome.queuedOnRunner;
+      await sleep(POLL_MS);
+      if (queued) pendingWaited += POLL_MS;
+      else waited += POLL_MS;
+      outcome = await read(runId);
+    }
+    if (!outcome.done || !LIMIT_END_STATUSES.includes(outcome.status) || looks >= MAX_CONTINUATIONS_PER_WORK_ITEM) return { runId, outcome };
+    const next = await continueSeat(args, workItemId, site, outcome.tailRunId ?? runId);
+    if (next === null) return { runId, outcome };
+    if ("end" in next) return next;
+    runId = next.runId;
+  }
+}
+
 interface Verdict {
   role: string;
   runId: string;
@@ -1126,11 +1156,13 @@ interface Verdict {
 }
 
 /** Waits for one reviewer run. A run still going when the wait ends is cancelled: it has no verdict (a review that could not finish is never a pass, and never a fail either). */
-async function waitForReviewer(accountId: string, userId: string, workItemId: string, role: string, firstRunId: string, restart: () => Promise<string | null>): Promise<Verdict> {
+async function waitForReviewer(args: AdvanceStartArgs, role: string, firstRunId: string, restart: () => Promise<string | null>): Promise<Verdict | { end: Result }> {
+  const { accountId, userId, workItemId } = args;
   let runId = firstRunId;
   let waited = 0;
   let out = await advanceReviewerOutcomeStep(accountId, runId);
   let pendingWaited = 0;
+  let continued = 0;
   for (let restarts = 0; ; restarts++) {
     while (!out.done && waited < REVIEW_WAIT_MS && pendingWaited < RUNNER_PENDING_CEILING_MS) {
       const queued = out.queuedOnRunner;
@@ -1145,6 +1177,20 @@ async function waitForReviewer(accountId: string, userId: string, workItemId: st
       if (again !== null && again !== runId) {
         await advanceLogStep("advance.review_restarted", { work_item_id: workItemId, from_run_id: runId, run_id: again, role, reason: PLACEMENT_CHANGED });
         runId = again;
+        out = await advanceReviewerOutcomeStep(accountId, runId);
+        continue;
+      }
+    }
+    // D#2 H14c-3-3b-3 (C89): the reviewer ended at a limit. It is run again from its stored prompt and the child's verdict is the one recorded. A stop (halted, parked, waiting on an answer, item closed)
+    // ends the workflow here, like every other seat: no re-run follows a stop that was already recorded. Today's path (null) reads the run as a review with no verdict.
+    if (out.done && LIMIT_END_STATUSES.includes(out.status) && continued < MAX_CONTINUATIONS_PER_WORK_ITEM) {
+      const next = await continueSeat(args, workItemId, "reviewer", out.tailRunId);
+      if (next !== null && "end" in next) return next;
+      if (next !== null) {
+        continued++;
+        runId = next.runId;
+        waited = 0;
+        pendingWaited = 0;
         out = await advanceReviewerOutcomeStep(accountId, runId);
         continue;
       }
@@ -1165,11 +1211,12 @@ async function waitForReviewer(accountId: string, userId: string, workItemId: st
  * re-run step allows (the fix-round limit). Then the entry goes back marked `noVerdict` and the round hands the item to a person. A spending limit that
  * denies a re-run is a pause, like any reviewer start's.
  */
-async function reviewUntilVerdict(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; baseRef: string; branch: string }, role: string, firstRunId: string, prior: Array<{ role: string; runId: string }>, rereview: number, attemptOf: Map<string, number>): Promise<{ verdict: Verdict; pause: { pause: string; attempt: number } | null }> {
+async function reviewUntilVerdict(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; baseRef: string; branch: string }, role: string, firstRunId: string, prior: Array<{ role: string; runId: string }>, rereview: number, attemptOf: Map<string, number>): Promise<{ verdict: Verdict; pause: { pause: string; attempt: number } | null } | { end: Result }> {
   const { accountId, userId, workItemId } = args;
   let runId = firstRunId;
   for (let ends = 1; ; ends++) {
-    const v = await waitForReviewer(accountId, userId, workItemId, role, runId, async () => (await advanceStartReviewerStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, role, prior, rereview, (attemptOf.get(role) ?? 0) > 0 ? attemptOf.get(role) : undefined)).runId);
+    const v = await waitForReviewer(args, role, runId, async () => (await advanceStartReviewerStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, role, prior, rereview, (attemptOf.get(role) ?? 0) > 0 ? attemptOf.get(role) : undefined)).runId);
+    if ("end" in v) return v;
     if (!v.noVerdict) return { verdict: v, pause: null };
     const next = await advanceReviewRerunStep(accountId, userId, workItemId, args.haltEpoch, pr.headSha, rereview, role, ends);
     if (!next.rerun) {
@@ -1218,7 +1265,7 @@ async function waitOnHead(args: AdvanceStartArgs, stage: "review" | "fix_round",
  * restart of it by the sweep) are used as they are and never asked for again. After the four hours a pause is still the answer: the caller ends `review_paused:<pause>`,
  * which is no failure, and the sweep starts the review again when the limit allows it.
  */
-async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; baseRef: string; branch: string }, roles: string[], prior: Array<{ role: string; runId: string }>, round: number, rereview = 0): Promise<{ verdicts: Verdict[]; refused: string[]; refusedWhy: Record<string, string>; paused: { pause: string; attempt: number } | null }> {
+async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; baseRef: string; branch: string }, roles: string[], prior: Array<{ role: string; runId: string }>, round: number, rereview = 0): Promise<{ verdicts: Verdict[]; refused: string[]; refusedWhy: Record<string, string>; paused: { pause: string; attempt: number } | null; end?: Result }> {
   const { accountId, userId, workItemId } = args;
   const answers = new Map<string, StartedReviewer>();
   const attemptOf = new Map<string, number>();
@@ -1259,6 +1306,7 @@ async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number
   for (const s of started) {
     if (s.runId !== null) {
       const got = await reviewUntilVerdict(args, ctx, pr, s.role, s.runId, prior, rereview, attemptOf);
+      if ("end" in got) return { verdicts: [], refused: [], refusedWhy: {}, paused: null, end: got.end };
       if (got.pause !== null) return { verdicts: [], refused: [], refusedWhy: {}, paused: got.pause };
       verdicts.push(got.verdict);
     }
@@ -1633,6 +1681,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     }
     const roundOne = again !== null ? again.roles.filter((r) => r !== "debater") : plan.roles.filter((r) => r !== "debater");
     const first = await runReviewers(args, ctx, pr, roundOne, [], attempt, rereview);
+    if (first.end) return first.end;
     if (first.paused !== null) return pausedEnd(workItemId, "review", first.paused.pause, first.paused.attempt);
     const verdicts = [...first.verdicts];
     let refused = [...first.refused];
@@ -1644,6 +1693,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       const extra = plan.roles.filter((r) => r !== "debater" && !roundOne.includes(r) && !carried.some((c) => c.role === r));
       if (extra.length > 0) {
         const more = await runReviewers(args, ctx, pr, extra, [], attempt, rereview);
+        if (more.end) return more.end;
         if (more.paused !== null) return pausedEnd(workItemId, "review", more.paused.pause, more.paused.attempt);
         verdicts.push(...more.verdicts);
         refused = [...refused, ...more.refused];
@@ -1658,6 +1708,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       const passes = [...carried, ...verdicts.filter((v) => v.verdict === "pass").map((v) => ({ role: v.role, runId: v.runId }))];
       debaterRan = true;
       const debate = await runReviewers(args, ctx, pr, ["debater"], passes, attempt, rereview);
+      if (debate.end) return debate.end;
       if (debate.paused !== null) return pausedEnd(workItemId, "review", debate.paused.pause, debate.paused.attempt);
       verdicts.push(...debate.verdicts);
       refused = [...refused, ...debate.refused];

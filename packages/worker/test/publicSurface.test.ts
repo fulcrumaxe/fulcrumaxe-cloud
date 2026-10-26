@@ -203,7 +203,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
   });
 
   it("the package entry exports no way to get at the pools or the internal builder", () => {
-    expect(Object.keys(entry).sort()).toEqual(["ADVANCE_CONTINUE_CODES", "CONTINUE_LOOP_CEILING", "CONTINUE_PROMPT", "PUBLIC_UNAVAILABLE_NOTE", "RunActionForbiddenError", "RunActionInputError", "RunActionRefusedError", "RunActionUnavailableError", "SEAT_CONTINUE_PROMPT", "StartupGuardError", "VercelCredentialsUnavailableError", "assertWorkdirAllowed", "continuationStartInput", "createGithubRepoVisibility", "createHandoffCloudTarget", "createPublishSettler", "createVercelKeepAlive", "createWorker", "followStatusBody", "followTimeoutBody", "mayRetryPublish", "operatorMode", "productionVercelCredentials", "runnerJobsConfigured", "runnerLimitsFor"]);
+    expect(Object.keys(entry).sort()).toEqual(["ADVANCE_CONTINUE_CODES", "CONTINUATION_SITES", "CONTINUE_LOOP_CEILING", "CONTINUE_PROMPT", "PUBLIC_UNAVAILABLE_NOTE", "RunActionForbiddenError", "RunActionInputError", "RunActionRefusedError", "RunActionUnavailableError", "StartupGuardError", "VercelCredentialsUnavailableError", "assertWorkdirAllowed", "continuationStartInput", "createGithubRepoVisibility", "createHandoffCloudTarget", "createPublishSettler", "createVercelKeepAlive", "createWorker", "followStatusBody", "followTimeoutBody", "mayRetryPublish", "operatorMode", "productionVercelCredentials", "runnerJobsConfigured", "runnerLimitsFor"]);
   });
 
   it("is safe to call from many routes: one build, one set of pools, one run of the guards", async () => {

@@ -17,6 +17,7 @@ import {
   type StartAgentRunInput,
   type StartAgentRunResult,
 } from "@fx/runner";
+import { MAX_CONTINUATIONS_PER_WORK_ITEM } from "@fx/core/src/run-limits/limits.js";
 import type { PanelSeatRequest, PanelSeatResult } from "./panel.js";
 
 /**
@@ -85,6 +86,11 @@ export interface SandboxPanelRunnerDeps {
    * by half again each poll up to 8x this value, so a follower on a long
    * seat settles at a few reads a minute. */
   pollMs?: number;
+  /**
+   * D#2 H14c-3-3b-3 (C89): a seat whose run ended at a limit (`timed_out` / `killed_spend`) is asked for here before it is rejected: the run that continues it, or null. The worker's
+   * composition root supplies it (this package does not import the worker); it starts the child from the seat's own stored prompt. Absent: a seat that ends at a limit is rejected, as it always was.
+   */
+  continueSeat?: (endedRunId: string) => Promise<string | null>;
 }
 
 export class PanelSeatAbortedError extends Error {
@@ -165,15 +171,42 @@ export function createSandboxPanelRunner(deps: SandboxPanelRunnerDeps): { runSea
     await releaseKey(key);
   }
 
-  /** The finished run's envelope, or a rejection when it did not succeed. */
-  async function settled(runId: string, request: PanelSeatRequest): Promise<PanelSeatResult> {
-    const row = await readRun(runId);
-    if (!row || row.role !== request.role || row.work_item_id !== request.workItemId) throw new PanelSeatFailedError("mismatch");
-    if (row.status !== "succeeded") {
-      await releaseKey(request.idempotencyKey);
-      throw new PanelSeatFailedError(row.status);
+  /** Waits for the run to reach a terminal status (backing off like a follower), stopping it if `signal` aborts first. */
+  async function untilTerminal(runId: string, input: StartAgentRunInput, key: string, signal: AbortSignal): Promise<void> {
+    const aborted = whenAborted(signal);
+    try {
+      for (let wait = pollMs; ; wait = Math.min(Math.ceil(wait * 1.5), pollMs * 8)) {
+        const row = await readRun(runId);
+        if (row && TERMINAL.includes(row.status)) return;
+        const woke = await Promise.race([aborted.promise, new Promise<"tick">((r) => setTimeout(() => r("tick"), wait))]);
+        if (woke === "aborted") {
+          await cancelSeat(runId, input, key);
+          throw new PanelSeatAbortedError();
+        }
+      }
+    } finally {
+      aborted.dispose();
     }
-    return { agentRunId: runId, agentOutput: row.envelope };
+  }
+
+  /**
+   * The finished run's envelope, or a rejection when it did not succeed. C89: a run that ended at a limit is first offered to `continueSeat`; the child (the same item and role, checked
+   * here) is waited for and settles the seat instead. Bounded by the ceiling of continuations per item.
+   */
+  async function settled(runId: string, request: PanelSeatRequest, input: StartAgentRunInput, signal: AbortSignal): Promise<PanelSeatResult> {
+    let id = runId;
+    for (let hops = 0; ; hops++) {
+      const row = await readRun(id);
+      if (!row || row.role !== request.role || row.work_item_id !== request.workItemId) throw new PanelSeatFailedError("mismatch");
+      if (row.status === "succeeded") return { agentRunId: id, agentOutput: row.envelope };
+      const child = (row.status === "timed_out" || row.status === "killed_spend") && hops < MAX_CONTINUATIONS_PER_WORK_ITEM ? await deps.continueSeat?.(id).catch(() => null) : null;
+      if (!child) {
+        await releaseKey(request.idempotencyKey);
+        throw new PanelSeatFailedError(row.status);
+      }
+      await untilTerminal(child, input, request.idempotencyKey, signal);
+      id = child;
+    }
   }
 
   /** Follows the run another call (or an earlier attempt) started under this key. */
@@ -192,20 +225,8 @@ export function createSandboxPanelRunner(deps: SandboxPanelRunnerDeps): { runSea
     });
     if (!claim) return "retry"; // released between the conflict and this read
     if (claim.request_hash !== hash) throw new IdempotencyKeyMismatchError();
-    const aborted = whenAborted(signal);
-    try {
-      for (let wait = pollMs; ; wait = Math.min(Math.ceil(wait * 1.5), pollMs * 8)) {
-        const row = await readRun(claim.run_id);
-        if (row && TERMINAL.includes(row.status)) return await settled(claim.run_id, request);
-        const woke = await Promise.race([aborted.promise, new Promise<"tick">((r) => setTimeout(() => r("tick"), wait))]);
-        if (woke === "aborted") {
-          await cancelSeat(claim.run_id, input, request.idempotencyKey);
-          throw new PanelSeatAbortedError();
-        }
-      }
-    } finally {
-      aborted.dispose();
-    }
+    await untilTerminal(claim.run_id, input, request.idempotencyKey, signal);
+    return settled(claim.run_id, request, input, signal);
   }
 
   async function drive(
@@ -240,7 +261,7 @@ export function createSandboxPanelRunner(deps: SandboxPanelRunnerDeps): { runSea
     }
     // Finished and finalized: nothing left to stop. A late abort still rejects.
     if (signal.aborted) throw new PanelSeatAbortedError();
-    return settled(started.id, request);
+    return settled(started.id, request, input, signal);
   }
 
   return {

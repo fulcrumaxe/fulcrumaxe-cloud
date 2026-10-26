@@ -106,4 +106,9 @@ export interface AdvanceRunPorts {
   outcome(runId: string): Promise<AdvanceRunOutcome>;
   /** The existing cancel path (the same one the Cancel button uses). Safe on a finished run. */
   cancel(runId: string): Promise<void>;
+  /**
+   * D#2 H14c-3-3b-3 (C89): a seat run (`spec`: the project manager writing the Spec; `panel_workflow`: a panel seat) ended at a limit. The run that continues it, or null (the seat has
+   * failed, as it always did). The worker decides and starts the child from the seat's own stored prompt. Absent: a seat is never continued.
+   */
+  continueRun?(endedRunId: string, site: "spec" | "panel_workflow"): Promise<string | null>;
 }
