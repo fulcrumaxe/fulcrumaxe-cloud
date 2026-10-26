@@ -208,6 +208,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "mirrors_root_overlap",
   "api_key_not_configured",
   "context_spill_unwritable",
+  // The shell sandbox could not start a Bash call under the job's rules; the run ended before the agent began.
+  "sandbox_unusable",
   // D#6 R5b-3: the key file holds something that is not a key, or is a link, or belongs to another user or is open to other users.
   "api_key_format",
   "api_key_unsafe",

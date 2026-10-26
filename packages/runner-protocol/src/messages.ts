@@ -108,6 +108,8 @@ export const RUNNER_SETUP_DETAILS = [
   "api_key_not_configured",
   // D#600 CX-4b (additive under C8 section 6; the cloud deploys first): the files a cut prompt points at could not be written, so the run did not start with a marker that leads nowhere.
   "context_spill_unwritable",
+  // The shell sandbox could not start a Bash call under this job's rules (bubblewrap refused a no-op before the agent began). Additive under C8 section 6; the cloud deploys first.
+  "sandbox_unusable",
 ] as const;
 /**
  * D#599 HO-1 (additive under C8 section 6; the cloud deploys first): how a handed-off run ended its side of the move. `pushed`: the

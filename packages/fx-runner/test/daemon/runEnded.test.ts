@@ -34,6 +34,7 @@ describe("C1: each git-path code is reported under its own detail", () => {
     expect(endOfFailure("push_rejected")).toEqual({ reason: "push_rejected" });
     // A job stopped by its own memory budget (D#6 C43-5) has its own reason on the wire, never the bare agent_failed; the agent's own failures keep agent_failed.
     expect(endOfFailure("resource_limit")).toEqual({ reason: "resource_limit" });
+    expect(endOfFailure("sandbox_unusable")).toEqual({ reason: "runner_setup", detail: "sandbox_unusable" });
     for (const code of ["agent_error", "no_result", "agent_exit"]) expect(endOfFailure(code), code).toEqual({ reason: "agent_failed" });
     expect(endOfFailure("push_too_large", 7)).toEqual({ reason: "runner_setup", detail: "push_too_large", sizeMb: 7 });
     expect(endOfFailure("continuation_branch_missing")).toEqual({ reason: "runner_setup", detail: "continuation_branch_missing" });

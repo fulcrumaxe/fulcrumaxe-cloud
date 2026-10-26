@@ -123,7 +123,7 @@ describe("what the dashboard shows for a runner_setup event", () => {
     expect(runnerSetupText("head_not_from_base")).toBe("The agent's work did not start from this run's starting point, so the runner did not publish it. Build again.");
     expect(runnerSetupText("sandbox_stub_committed")).toBe("The agent committed empty placeholder files the sandbox makes, so the runner did not publish it. Build again.");
     expect(runnerSetupText("workspace_git_refused")).toBe("The runner could not safely read the agent's git folder, so nothing was published. Update fx-runner, then Build again.");
-    expect(Object.keys(GIT_PATH_LINES).sort()).toEqual(["context_spill_unwritable", "git_version_unsupported", "head_not_from_base", "mirror_dir_insecure", "mirror_failed", "push_failed", "push_ref_refused", "review_sha_not_in_mirror", "sandbox_stub_committed", "snapshot_refused", "workspace_failed", "workspace_git_refused"]);
+    expect(Object.keys(GIT_PATH_LINES).sort()).toEqual(["context_spill_unwritable", "git_version_unsupported", "head_not_from_base", "mirror_dir_insecure", "mirror_failed", "push_failed", "push_ref_refused", "review_sha_not_in_mirror", "sandbox_stub_committed", "sandbox_unusable", "snapshot_refused", "workspace_failed", "workspace_git_refused"]);
     for (const [detail, line] of Object.entries(GIT_PATH_LINES)) {
       expect(RUNNER_SETUP_DETAILS as readonly string[], detail).toContain(detail);
       expect(runnerSetupText(detail)).toBe(line);

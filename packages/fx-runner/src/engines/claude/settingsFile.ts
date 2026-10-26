@@ -90,7 +90,7 @@ export function mcpConfigFor(_job: { role: string }): { mcpServers: Record<strin
  * Writes `settings.json` and `mcp.json` (0600) into `jobDir` (0700) and returns their paths. `jobDir` must be outside
  * the workspace: a file inside it would be readable and writable by the agent.
  */
-export function writeJobFiles(jobDir: string, workspace: string, role: string, sandbox: Record<string, unknown>, protectedList: ProtectedPaths, excludes: readonly string[] = [], spillDir?: string, checkArgv?: readonly string[]): { settingsPath: string; mcpPath: string } {
+export function writeJobFiles(jobDir: string, workspace: string, role: string, sandbox: Record<string, unknown>, protectedList: ProtectedPaths, excludes: readonly string[] = [], spillDir?: string, checkArgv?: readonly string[]): { settingsPath: string; mcpPath: string; settings: Record<string, unknown> } {
   const rel = path.relative(path.resolve(workspace), path.resolve(jobDir));
   if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))) throw new EngineRefusal("bad_start_options", "job directory is inside the workspace");
   // The read guard compares the agent's absolute paths with the checkout it is given, so the checkout must be its own real path (a link on the way
@@ -99,7 +99,8 @@ export function writeJobFiles(jobDir: string, workspace: string, role: string, s
   mkdirSync(jobDir, { recursive: true, mode: 0o700 });
   const settingsPath = path.join(jobDir, "settings.json");
   const mcpPath = path.join(jobDir, "mcp.json");
-  writeFileSync(settingsPath, `${JSON.stringify(settingsFor(role, sandbox, path.resolve(workspace), protectedList, excludes, spillDir, checkArgv), null, 2)}\n`, { mode: 0o600 });
+  const settings = settingsFor(role, sandbox, path.resolve(workspace), protectedList, excludes, spillDir, checkArgv);
+  writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
   writeFileSync(mcpPath, `${JSON.stringify(mcpConfigFor({ role }), null, 2)}\n`, { mode: 0o600 });
-  return { settingsPath, mcpPath };
+  return { settingsPath, mcpPath, settings };
 }
