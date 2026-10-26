@@ -314,7 +314,7 @@ describe("AAP-a1 criterion 11: tightenAskDisposition only ever tightens", () => 
   const dispositions: Disposition[] = ["act", "announce", "ask"];
   const outcomes: RuleOutcome[] = ["approve", "deny", "ask"];
   const rank: Record<string, number> = { act: 0, announce: 1, ask: 2, deny: 3 };
-  for (const type of ["spend_past_envelope", "run_extension"]) {
+  for (const type of ["spend_past_envelope", "run_extension", "start_work_small", "start_work_bug", "start_work_doc"]) {
     it(`${type}: never looser than the disposition it was given, and deny and ask rules tighten`, () => {
       for (const d of dispositions) {
         for (const o of outcomes) {
@@ -330,7 +330,7 @@ describe("AAP-a1 criterion 11: tightenAskDisposition only ever tightens", () => 
     expect(tightenAskDisposition("spend_past_envelope", "ask", "approve")).toBe("ask");
   });
   it("any other type comes back exactly as given, even for a deny rule", () => {
-    for (const type of ["tool_call", "start_work_small", "publish_release_artifact", "not_a_type", "start_parent_item"]) {
+    for (const type of ["tool_call", "start_parent_item", "publish_release_artifact", "not_a_type", "start_parent_item"]) {
       for (const d of dispositions) for (const o of outcomes) expect(tightenAskDisposition(type, d, o)).toBe(d);
     }
   });

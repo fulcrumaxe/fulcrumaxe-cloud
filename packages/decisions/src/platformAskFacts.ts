@@ -18,6 +18,14 @@ export interface PlatformAskFact {
   readonly unit: "usd" | "count" | "text";
 }
 
+/** D#483 S5-b1a-2: what a rule sees of a dial start of a small, bug or doc item (the auto-start gate). Money is the weekly auto-start limit's, in dollars rounded up to the cent. */
+const START_FACTS = Object.freeze({
+  repo: Object.freeze({ type: "text", unit: "text" }),
+  category: Object.freeze({ type: "text", unit: "text" }),
+  remaining_usd: Object.freeze({ type: "usd", unit: "usd" }),
+  first_run_usd: Object.freeze({ type: "usd", unit: "usd" }),
+} as const);
+
 export const PLATFORM_ASK_FACTS = Object.freeze({
   spend_past_envelope: Object.freeze({
     spent_usd: Object.freeze({ type: "usd", unit: "usd" }),
@@ -36,6 +44,9 @@ export const PLATFORM_ASK_FACTS = Object.freeze({
     role: Object.freeze({ type: "text", unit: "text" }),
     repo: Object.freeze({ type: "text", unit: "text" }),
   }),
+  start_work_small: START_FACTS,
+  start_work_bug: START_FACTS,
+  start_work_doc: START_FACTS,
 } as const satisfies Readonly<Record<string, Readonly<Record<string, PlatformAskFact>>>>);
 
 export type PlatformAskType = keyof typeof PLATFORM_ASK_FACTS;

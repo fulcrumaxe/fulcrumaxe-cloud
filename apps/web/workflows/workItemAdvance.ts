@@ -448,7 +448,7 @@ type Result = { status: string; detail?: string };
  * dial decides, a hold stays, and no person receipt is recorded.
  */
 async function startGatePhase(args: AdvanceStartArgs, itemId: string, input: Omit<StartGateStepInput, "origin">): Promise<Result | null> {
-  const gateInput: StartGateStepInput = { ...input, origin: args.personFiled === true ? "person_click" : "unattended" };
+  const gateInput: StartGateStepInput = { ...input, origin: args.personFiled === true ? "person_click" : "unattended", ...(args.dialFiled === true && input.mode === "triage_end" ? { fromItemId: args.workItemId } : {}) };
   const out = await advanceStartGateStep(args.accountId, args.userId, itemId, args.haltEpoch, gateInput);
   // Going on leaves the receipt as its record and no log line; a stop says why.
   if (out.proceed) return null;
@@ -599,7 +599,7 @@ export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promis
       return { status: "stopped", detail: "project_not_specified" };
     }
     // An item that came in small, bug or doc (a trusted label said so) and that triage found larger is asked before the panel runs, click or not.
-    if (cameInAs !== null && (triaged.category === "feature" || triaged.category === "critical")) {
+    if ((cameInAs !== null || args.dialFiled === true) && (triaged.category === "feature" || triaged.category === "critical")) {
       const gate = await startGatePhase(args, triaged.workItemId, { mode: "triage_end", category: triaged.category, cameInAs });
       if (gate !== null) return gate;
     }

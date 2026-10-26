@@ -41,6 +41,7 @@
       "unverifiable": 0,
       "pending": 0
     },
+    "auto_started": false,
     "evidence_count": 0
   },
   "work_item_id": "77777777-7777-4777-8777-777777777777",

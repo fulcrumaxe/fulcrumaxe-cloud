@@ -27931,6 +27931,10 @@
                             "type": "integer",
                             "minimum": -9007199254740991,
                             "maximum": 9007199254740991
+                          },
+                          "auto_started": {
+                            "type": "boolean",
+                            "description": "True when the repository's own start setting started this item without a click and announces it (the Balanced setting). The Inbox shows a notice for it."
                           }
                         },
                         "required": [
@@ -27968,7 +27972,8 @@
                           "verify_retry",
                           "inbox_section",
                           "claim_counts",
-                          "evidence_count"
+                          "evidence_count",
+                          "auto_started"
                         ],
                         "additionalProperties": false
                       }
@@ -28383,6 +28388,10 @@
                           "minimum": -9007199254740991,
                           "maximum": 9007199254740991
                         },
+                        "auto_started": {
+                          "type": "boolean",
+                          "description": "True when the repository's own start setting started this item without a click and announces it (the Balanced setting). The Inbox shows a notice for it."
+                        },
                         "claims": {
                           "type": "array",
                           "items": {
@@ -28558,6 +28567,7 @@
                         "inbox_section",
                         "claim_counts",
                         "evidence_count",
+                        "auto_started",
                         "claims",
                         "evidence",
                         "verify_wait"
@@ -28971,6 +28981,10 @@
                           "type": "integer",
                           "minimum": -9007199254740991,
                           "maximum": 9007199254740991
+                        },
+                        "auto_started": {
+                          "type": "boolean",
+                          "description": "True when the repository's own start setting started this item without a click and announces it (the Balanced setting). The Inbox shows a notice for it."
                         }
                       },
                       "required": [
@@ -29008,7 +29022,8 @@
                         "verify_retry",
                         "inbox_section",
                         "claim_counts",
-                        "evidence_count"
+                        "evidence_count",
+                        "auto_started"
                       ],
                       "additionalProperties": false
                     },
@@ -29554,6 +29569,10 @@
                           "type": "integer",
                           "minimum": -9007199254740991,
                           "maximum": 9007199254740991
+                        },
+                        "auto_started": {
+                          "type": "boolean",
+                          "description": "True when the repository's own start setting started this item without a click and announces it (the Balanced setting). The Inbox shows a notice for it."
                         }
                       },
                       "required": [
@@ -29591,7 +29610,8 @@
                         "verify_retry",
                         "inbox_section",
                         "claim_counts",
-                        "evidence_count"
+                        "evidence_count",
+                        "auto_started"
                       ],
                       "additionalProperties": false
                     }
@@ -30008,6 +30028,10 @@
                           "type": "integer",
                           "minimum": -9007199254740991,
                           "maximum": 9007199254740991
+                        },
+                        "auto_started": {
+                          "type": "boolean",
+                          "description": "True when the repository's own start setting started this item without a click and announces it (the Balanced setting). The Inbox shows a notice for it."
                         }
                       },
                       "required": [
@@ -30045,7 +30069,8 @@
                         "verify_retry",
                         "inbox_section",
                         "claim_counts",
-                        "evidence_count"
+                        "evidence_count",
+                        "auto_started"
                       ],
                       "additionalProperties": false
                     }
@@ -30452,6 +30477,10 @@
                           "type": "integer",
                           "minimum": -9007199254740991,
                           "maximum": 9007199254740991
+                        },
+                        "auto_started": {
+                          "type": "boolean",
+                          "description": "True when the repository's own start setting started this item without a click and announces it (the Balanced setting). The Inbox shows a notice for it."
                         }
                       },
                       "required": [
@@ -30489,7 +30518,8 @@
                         "verify_retry",
                         "inbox_section",
                         "claim_counts",
-                        "evidence_count"
+                        "evidence_count",
+                        "auto_started"
                       ],
                       "additionalProperties": false
                     }
@@ -31202,6 +31232,10 @@
                                 "type": "integer",
                                 "minimum": -9007199254740991,
                                 "maximum": 9007199254740991
+                              },
+                              "auto_started": {
+                                "type": "boolean",
+                                "description": "True when the repository's own start setting started this item without a click and announces it (the Balanced setting). The Inbox shows a notice for it."
                               }
                             },
                             "required": [
@@ -31239,7 +31273,8 @@
                               "verify_retry",
                               "inbox_section",
                               "claim_counts",
-                              "evidence_count"
+                              "evidence_count",
+                              "auto_started"
                             ],
                             "additionalProperties": false
                           },

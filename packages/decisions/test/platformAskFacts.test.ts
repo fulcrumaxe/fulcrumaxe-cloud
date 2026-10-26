@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { PLATFORM_ASK_FACTS, platformAskRequest, usdCeilCents } from "../src/index.js";
 
 describe("PLATFORM_ASK_FACTS (a customer-visible surface, pinned)", () => {
-  it("lists exactly these names, types and units for the two types", () => {
+  it("lists exactly these names, types and units for each type", () => {
     expect(JSON.parse(JSON.stringify(PLATFORM_ASK_FACTS))).toEqual({
       spend_past_envelope: {
         spent_usd: { type: "usd", unit: "usd" },
@@ -21,8 +21,16 @@ describe("PLATFORM_ASK_FACTS (a customer-visible surface, pinned)", () => {
         role: { type: "text", unit: "text" },
         repo: { type: "text", unit: "text" },
       },
+      ...Object.fromEntries(
+        ["start_work_small", "start_work_bug", "start_work_doc"].map((t) => [t, {
+          repo: { type: "text", unit: "text" },
+          category: { type: "text", unit: "text" },
+          remaining_usd: { type: "usd", unit: "usd" },
+          first_run_usd: { type: "usd", unit: "usd" },
+        }]),
+      ),
     });
-    expect(Object.keys(PLATFORM_ASK_FACTS)).toEqual(["spend_past_envelope", "run_extension"]);
+    expect(Object.keys(PLATFORM_ASK_FACTS)).toEqual(["spend_past_envelope", "run_extension", "start_work_small", "start_work_bug", "start_work_doc"]);
   });
 
   it("is frozen all the way down", () => {

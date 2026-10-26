@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import { withTenant } from "@fx/db/src/withTenant.js";
 import { checkStartPair, decideStart, settleStartClick } from "@fx/core/src/decisions/startDecide.js";
 
 /**
@@ -21,6 +22,11 @@ export interface StartGateStepInput {
    * the parked-stage sweep or the slot wake included, is `unattended`: the dial decides, and no person receipt is ever recorded.
    */
   origin: StartGateOrigin;
+  /**
+   * D#483 S5-b1a-2: the item the dial started (set only on a dial-filed advance, at the end of triage). The category it came in as is then read from that item's
+   * own start-gate row, the one the auto-start sweep wrote (decided by the dial, a small, bug or doc type), never from text.
+   */
+  fromItemId?: string | null;
 }
 export type StartGateStepOut =
   | { proceed: true; how: string }
@@ -47,12 +53,22 @@ export function createStartGate(receiptPool: Pool): StartGatePort {
         const r = await settleStartClick(ctx, { workItemId: who.workItemId, userId: who.userId });
         return { proceed: true, how: r.proceed ? r.how : "unknown" };
       }
+      let cameInAs = input.mode === "triage_end" ? input.cameInAs : null;
+      if (cameInAs === null && input.mode === "triage_end" && typeof input.fromItemId === "string") {
+        const row = await withTenant(receiptPool, who.accountId, (c) =>
+          c.query<{ decision_type: string }>(
+            `SELECT decision_type FROM start_gate WHERE account_id = $2::uuid AND work_item_id = $1::uuid AND outcome = 'started' AND decided_by = 'policy' AND decision_type IN ('start_work_small', 'start_work_bug', 'start_work_doc')`,
+            [input.fromItemId, who.accountId],
+          ),
+        );
+        if (row.rows.length === 1) cameInAs = row.rows[0]!.decision_type.replace("start_work_", "");
+      }
       const r = await decideStart(ctx, {
         workItemId: who.workItemId,
         origin: person ? "person_click" : "unattended",
         ...(person ? { userId: who.userId } : {}),
         category: input.mode === "build" ? null : input.category,
-        cameInAs: input.mode === "triage_end" ? input.cameInAs : null,
+        cameInAs,
       });
       return r.proceed ? { proceed: true, how: r.how } : { proceed: false, reason: r.reason, blockedBy: word(r.blockedBy) };
     } catch (err) {

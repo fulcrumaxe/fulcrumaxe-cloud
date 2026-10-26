@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { markWorkPending, setPendingHooks } from "@fx/core/src/pendingWork";
-import type { ProposalVerifyCounts } from "@fx/worker";
+import type { AutoStartCounts, ProposalVerifyCounts } from "@fx/worker";
 import { makeRegion, storeOf, type FakeRegion } from "../../../../test/support/runtimeCacheFake";
 import { PROPOSAL_VERIFY_PASS_MS, proposalVerifySweepHandler, type ProposalVerifySweepHandlerDeps } from "./handler";
 
@@ -11,15 +11,17 @@ import { PROPOSAL_VERIFY_PASS_MS, proposalVerifySweepHandler, type ProposalVerif
  */
 const SECRET = "test-cron-secret";
 const NONE: ProposalVerifyCounts = { listed: 0, started: 0, waiting: 0, recorded: 0, daily_limit: 0, daily_cap: 0, skipped: 0, failed: 0 };
+const AUTO_NONE: AutoStartCounts = { listed: 0, started: 0, asked: 0, held_by_rule: 0, no_room: 0, not_ready: 0, replayed: 0, failed: 0 };
 const KEY = "pending:proposal-verify-sweep";
 const clock = { value: Date.parse("2026-10-22T12:00:00Z") };
 let region: FakeRegion;
 
-function setup(sweep: () => Promise<ProposalVerifyCounts> = async () => NONE, over: Partial<ProposalVerifySweepHandlerDeps> = {}) {
+function setup(sweep: () => Promise<ProposalVerifyCounts> = async () => NONE, over: Partial<ProposalVerifySweepHandlerDeps> = {}, auto: () => Promise<AutoStartCounts> = async () => AUTO_NONE) {
   const sweepProposalVerification = vi.fn(sweep);
-  const getWorker = vi.fn(async (): Promise<{ sweepProposalVerification: typeof sweepProposalVerification } | null> => ({ sweepProposalVerification }));
+  const sweepAutoStart = vi.fn(auto);
+  const getWorker = vi.fn(async (): Promise<{ sweepProposalVerification: typeof sweepProposalVerification; sweepAutoStart: typeof sweepAutoStart } | null> => ({ sweepProposalVerification, sweepAutoStart }));
   const log = vi.fn();
-  return { sweepProposalVerification, getWorker, log, deps: { cronSecret: SECRET, getWorker, log, now: () => clock.value, ...over } satisfies ProposalVerifySweepHandlerDeps };
+  return { sweepProposalVerification, sweepAutoStart, getWorker, log, deps: { cronSecret: SECRET, getWorker, log, now: () => clock.value, ...over } satisfies ProposalVerifySweepHandlerDeps };
 }
 const req = (authorization: string | null, method = "GET") =>
   new NextRequest("https://example.test/api/cron/proposal-verify-sweep", { method, headers: authorization === null ? {} : { authorization } });
@@ -64,7 +66,7 @@ describe("GET /api/cron/proposal-verify-sweep", () => {
     const s = setup(async () => ({ ...NONE, listed: 3, started: 2, daily_limit: 1 }));
     const res = await proposalVerifySweepHandler(req(`Bearer ${SECRET}`), s.deps);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ configured: true, ...NONE, listed: 3, started: 2, daily_limit: 1 });
+    expect(await res.json()).toEqual({ configured: true, ...NONE, listed: 3, started: 2, daily_limit: 1, auto_start: AUTO_NONE });
     expect(s.sweepProposalVerification).toHaveBeenCalledTimes(1);
     expect(marker()).toBe(clock.value + PROPOSAL_VERIFY_PASS_MS);
   });
@@ -82,6 +84,29 @@ describe("GET /api/cron/proposal-verify-sweep", () => {
     const s = setup();
     await proposalVerifySweepHandler(req(`Bearer ${SECRET}`), s.deps);
     expect(marker()).toBeNull();
+  });
+
+  it("S5-b1a-2: the auto-start pass runs once after the check pass; proposals the weekly limit has no room for wait for its renewal, not for the next 15 minutes", async () => {
+    await markWorkPending("proposal-verify-sweep", { since: clock.value });
+    const renewsAt = "2026-10-26T00:00:00.000Z";
+    const s = setup(async () => NONE, {}, async () => ({ ...AUTO_NONE, listed: 2, no_room: 2, renews_at: renewsAt }));
+    const res = await proposalVerifySweepHandler(req(`Bearer ${SECRET}`), s.deps);
+    expect(await res.json()).toMatchObject({ configured: true, auto_start: { no_room: 2, renews_at: renewsAt } });
+    expect(s.sweepAutoStart).toHaveBeenCalledTimes(1);
+    expect(marker()).toBe(Date.parse(renewsAt));
+  });
+
+  it("S5-b1a-2: a pass that started something keeps the next pass coming; a fault in the auto-start pass never hides the check pass's counts", async () => {
+    await markWorkPending("proposal-verify-sweep", { since: clock.value });
+    const started = setup(async () => NONE, {}, async () => ({ ...AUTO_NONE, listed: 1, started: 1 }));
+    await proposalVerifySweepHandler(req(`Bearer ${SECRET}`), started.deps);
+    expect(marker()).toBe(clock.value + PROPOSAL_VERIFY_PASS_MS);
+    await markWorkPending("proposal-verify-sweep", { since: clock.value });
+    const broken = setup(async () => ({ ...NONE, listed: 1 }), {}, async () => { throw new Error("boom"); });
+    const res = await proposalVerifySweepHandler(req(`Bearer ${SECRET}`), broken.deps);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ configured: true, listed: 1, auto_start: null });
+    expect(JSON.stringify(broken.log.mock.calls)).not.toContain("boom");
   });
 
   it("an unconfigured worker is reported, not an error", async () => {

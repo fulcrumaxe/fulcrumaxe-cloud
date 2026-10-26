@@ -8,7 +8,7 @@
 
 import { test, expect, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { REPO, REPO_GONE, WIN, holdRequest, expectNoPlaceholders, goTab, isUuid, newMock, openPipeline, press, proposal, refusal, setup, tid, type PlanMock } from "./helpers/plan-mock";
+import { REPO, REPO_GONE, WIN, fx, holdRequest, expectNoPlaceholders, goTab, isUuid, newMock, openPipeline, press, proposal, refusal, setup, tid, type PlanMock } from "./helpers/plan-mock";
 
 const rows = (page: Page) => tid(page, "pl-inbox-row");
 const filter = (page: Page, key: string) => tid(page, `pl-filter-${key}`);
@@ -612,6 +612,86 @@ test.describe("D#483 S3-L2b fix round: focus, announcements and names", () => {
     expect(box.pickLeft).toBeGreaterThanOrEqual(box.shellLeft - 0.5);
     expect(box.scrollW).toBeLessThanOrEqual(box.clientW + 1);
     for (const extra of box.panelScroll) expect(extra).toBeLessThanOrEqual(1);
+  });
+});
+
+test.describe("D#483 S5-b1a-2: the Inbox says why nothing starts on its own", () => {
+  const OFF = { ...fx("getAutostartEnvelope", "200-off.json") };
+  const ON = { ...fx("getAutostartEnvelope", "200-on.json") };
+
+  const withNew = (autostart: Record<string, unknown> | null) => {
+    const m = newMock();
+    m.proposals = [proposal(1)];
+    m.autostart = autostart;
+    return m;
+  };
+
+  test("while the weekly auto-start limit is off, the New list carries the server's sentence", async ({ page }) => {
+    const { errors } = await start(page, withNew(OFF));
+    await expect(rows(page)).toHaveCount(1);
+    await expect(tid(page, "pl-inbox-autostart-off")).toHaveText(`${OFF.off_sentence}.`);
+    await expectNoPlaceholders(page);
+    expect(errors).toEqual([]);
+  });
+
+  test("with a limit set, the sentence is not shown", async ({ page }) => {
+    await start(page, withNew(ON));
+    await expect(rows(page)).toHaveCount(1);
+    await expect(tid(page, "pl-inbox-autostart-off")).toHaveCount(0);
+  });
+
+  test("when the limit cannot be read, the sentence is not shown", async ({ page }) => {
+    await start(page, withNew(null));
+    await expect(rows(page)).toHaveCount(1);
+    await expect(tid(page, "pl-inbox-autostart-off")).toHaveCount(0);
+  });
+
+  const ITEM = "00000000-0000-4000-8000-0000000000aa";
+  // The page runs under the fake clock the e2e helpers install (2026-01-01T00:00Z), so "days ago" is counted from that, not from this machine's clock.
+  const PAGE_NOW = Date.parse("2026-01-01T00:00:00Z");
+  const ago = (days: number) => new Date(PAGE_NOW - days * 86_400_000).toISOString();
+  test("an item the dial started on its own and announced gets one plain line naming it, with a way to its card; started by a person, or on act, gets none", async ({ page }) => {
+    const m = newMock();
+    m.proposals = [
+      proposal(1, { state: "approved", inbox_section: null, work_item_id: ITEM, work_item_stage: "triaged", roadmap_position: 1, decided_at: ago(2), auto_started: true }),
+      proposal(2, { state: "approved", inbox_section: null, work_item_id: "00000000-0000-4000-8000-0000000000bb", work_item_stage: "triaged", roadmap_position: 2, decided_at: "2026-10-20T11:00:00.000Z", auto_started: false }),
+      proposal(3),
+    ];
+    const { errors } = await start(page, m);
+    await expect(rows(page)).toHaveCount(1);
+    const lines = page.locator(`${WIN} [data-testid="pl-inbox-autostarted-line"]`);
+    await expect(lines).toHaveCount(1);
+    await expect(lines).toContainText("Started on its own under your setting: Issue number 1.");
+    await expectNoPlaceholders(page);
+    await press(page, tid(page, "pl-inbox-autostarted-open"));
+    await expect(tid(page, "pl-tab-board")).toHaveAttribute("aria-selected", "true");
+    expect(errors).toEqual([]);
+  });
+
+  test("only items auto-started in the last 7 days are named: 6 days ago is, 8 days ago is not, and a time in the future is not", async ({ page }) => {
+    const m = newMock();
+    const at = (n: number, decided_at: string) => proposal(n, { state: "approved", inbox_section: null, work_item_id: `00000000-0000-4000-8000-0000000001${String(n).padStart(2, "0")}`, work_item_stage: "triaged", roadmap_position: n, decided_at, auto_started: true });
+    m.proposals = [at(1, ago(6)), at(2, ago(8)), at(3, ago(-1)), proposal(4)];
+    await start(page, m);
+    await expect(rows(page)).toHaveCount(1);
+    const lines = page.locator(`${WIN} [data-testid="pl-inbox-autostarted-line"]`);
+    await expect(lines).toHaveCount(1);
+    await expect(lines).toContainText("Issue number 1.");
+  });
+
+  test("with nothing auto-started there is no such line", async ({ page }) => {
+    const m = newMock();
+    m.proposals = [proposal(1)];
+    await start(page, m);
+    await expect(rows(page)).toHaveCount(1);
+    await expect(tid(page, "pl-inbox-autostarted")).toHaveCount(0);
+  });
+
+  test("an empty New list has no sentence to give", async ({ page }) => {
+    const m = newMock();
+    m.autostart = OFF;
+    await start(page, m);
+    await expect(tid(page, "pl-inbox-autostart-off")).toHaveCount(0);
   });
 });
 

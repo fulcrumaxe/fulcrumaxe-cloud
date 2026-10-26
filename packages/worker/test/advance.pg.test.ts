@@ -90,8 +90,8 @@ describe("advance_work_item [pg]", { timeout: 60_000 }, () => {
     return id;
   }
   /** A claimed advance_work_item action, requested by the session member through the real definer. */
-  async function action(a: SeedRefs, workItemId: string): Promise<string> {
-    const row = await withTenant(appPool, a.accountId, a.userId, undefined, async (c) => (await c.query("SELECT * FROM run_action_request('advance_work_item', $1, NULL, $2)", [workItemId, "h".repeat(64)])).rows[0]);
+  async function action(a: SeedRefs, workItemId: string, key: string | null = null): Promise<string> {
+    const row = await withTenant(appPool, a.accountId, a.userId, undefined, async (c) => (await c.query("SELECT * FROM run_action_request('advance_work_item', $1, $3, $2)", [workItemId, "h".repeat(64), key])).rows[0]);
     expect(await createRunActionFacade(writerPool, {} as never).claimRunAction(row.action_id, 600)).not.toBeNull();
     return row.action_id;
   }
@@ -117,6 +117,31 @@ describe("advance_work_item [pg]", { timeout: 60_000 }, () => {
     // The only start that may record a person start receipt: the one a person's own session filed.
     expect((t.started[0] as { personFiled?: boolean }).personFiled).toBe(true);
     expect((t.started[0] as { specVersion?: number | null }).specVersion).toBeNull();
+  });
+
+  it("S5-b1a-2: a start the dial filed (key `dial:`) is never a person's click, though the request stands in a person's name; a person's own key is", async () => {
+    const a = await seedAccount(admin, randomUUID());
+    const w = await world(a);
+    const t = build();
+    expect(await t.module.performAdvanceWorkItem(await action(a, w, `dial:${randomUUID()}`))).toMatchObject({ result: "done" });
+    expect(t.started[0]).toMatchObject({ personFiled: false, dialFiled: true, workItemId: w });
+    const b = await seedAccount(admin, randomUUID());
+    const w2 = await world(b);
+    const t2 = build();
+    await t2.module.performAdvanceWorkItem(await action(b, w2, "a-persons-key"));
+    expect(t2.started[0]).toMatchObject({ personFiled: true });
+    expect(t2.started[0]).not.toHaveProperty("dialFiled");
+  });
+
+  it("S5-b1a-2: so is a start for an item whose proposal the dial approved, whatever the key", async () => {
+    const a = await seedAccount(admin, randomUUID());
+    const w = await world(a);
+    // As the migration role would have it: the dial's approval stamps the proposal.
+    const receipt = randomUUID();
+    await admin.query(`INSERT INTO proposals (account_id, repo_id, dedupe_key, sources, title, provenance, owner_process, state, work_item_id, roadmap_position, decided_at, decided_by_kind, decision_receipt_id) VALUES ($1, $2, $3, '{github_issue}', 'T', 'internal', 'product', 'approved', $4, 1, now(), 'dial', $5)`, [a.accountId, a.repoId, `gh:issue:${900000 + Math.floor(Math.random() * 90000)}`, w, receipt]);
+    const t = build();
+    await t.module.performAdvanceWorkItem(await action(a, w, "some-key"));
+    expect(t.started[0]).toMatchObject({ personFiled: false, dialFiled: true });
   });
 
   it("an admin is allowed too", async () => {

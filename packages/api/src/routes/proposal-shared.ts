@@ -63,6 +63,7 @@ export const proposalSchema = z.object({
     pending: z.number().int(),
   }),
   evidence_count: z.number().int(),
+  auto_started: z.boolean().describe("True when the repository's own start setting started this item without a click and announces it (the Balanced setting). The Inbox shows a notice for it."),
 });
 
 const claimSchema = z.object({

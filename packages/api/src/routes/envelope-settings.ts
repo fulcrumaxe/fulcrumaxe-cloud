@@ -2,6 +2,7 @@ import { z } from "zod";
 import { firstRunReservationUsd } from "@fx/pipeline/estimate";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { ForbiddenError, NotFoundError } from "@fx/core/src/tenancy/errors.js";
+import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { UUID_RE } from "@fx/core/src/plan/index.js";
 import {
   AUTOSTART_OFF_SENTENCE,
@@ -193,6 +194,8 @@ export const envelopeSettingRoutes: RouteEntry[] = [
       }
       try {
         const out = await withTenant(ctx.pool, accountId, userId, (client) => changeAutostart(client, { accountId, amountUsd }));
+        // D#483 S5-b1a-2: a newly confirmed limit lets waiting proposals start; the auto-start pass wakes now instead of at the backstop.
+        if (out.written && amountUsd > 0) void markWorkPending("proposal-verify-sweep");
         return { ...autostartView(out.state), changed: out.written };
       } catch (error) {
         throw mapError(error);

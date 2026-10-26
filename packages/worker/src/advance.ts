@@ -129,6 +129,12 @@ export interface AdvanceStartArgs {
    * before it existed: those go through the gate as unattended and never record a person's click, whatever their attempt number.
    */
   personFiled?: boolean;
+  /**
+   * D#483 S5-b1a-2: true when the start was filed by the dial (the auto-start sweep files it as a session request for the person who confirmed the weekly limit,
+   * under the idempotency key `dial:<receipt>`). Such a start is never a person's click: `personFiled` is false, and the triage gate learns the kind the dial
+   * started the item as from the sweep's own start-gate row, not from a label.
+   */
+  dialFiled?: boolean;
 }
 
 /**
@@ -835,7 +841,16 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       }
     }
 
-    await deps.startAdvance({ accountId, userId, workItemId, actionId, haltEpoch: lifted.halt_epoch, specVersion: item.spec_version === null ? null : Number(item.spec_version), personFiled: true, ...(respec ? { respec: true } : {}) });
+    // A start the dial filed is the dial's, not the person's in whose name the request stands: the request's key says so, and so does the proposal it approved.
+    const dialFiled = await withTenant(runnerPool, accountId, userId, async (client) => {
+      const r = await client.query(
+        `SELECT 1 FROM run_action_requests q WHERE q.id = $1 AND q.account_id = $2 AND q.idempotency_key LIKE 'dial:%'
+         UNION ALL SELECT 1 FROM proposals p WHERE p.account_id = $2 AND p.work_item_id = $3 AND p.decided_by_kind = 'dial'`,
+        [actionId, accountId, workItemId],
+      );
+      return r.rows.length > 0;
+    });
+    await deps.startAdvance({ accountId, userId, workItemId, actionId, haltEpoch: lifted.halt_epoch, specVersion: item.spec_version === null ? null : Number(item.spec_version), personFiled: !dialFiled, ...(dialFiled ? { dialFiled: true } : {}), ...(respec ? { respec: true } : {}) });
     console.info(JSON.stringify({ event: respec ? "advance.respec_started" : "advance.started", work_item_id: workItemId, action_id: actionId, ...(waitReason === null ? {} : { waiting: waitReason }) }));
     if (waitReason !== null) return { result: "done", outcome: { work_item_id: workItemId, advance: "waiting", reason: waitReason, reasons: [waitReason] } };
     return { result: "done", outcome: { work_item_id: workItemId, advance: "started" } };
