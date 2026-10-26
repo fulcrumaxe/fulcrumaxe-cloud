@@ -32,6 +32,9 @@ export function parseSteps(body) {
   return steps;
 }
 
+// The steps resolveAccess last parsed, so the setup strip (below) does not read a second time.
+let bootSteps = null;
+
 /** @returns {Promise<"desktop" | "onboarding" | "gate">} */
 export async function resolveAccess(session, doFetch = (...a) => fetch(...a)) {
   const access = session && session.workspace_access;
@@ -43,6 +46,7 @@ export async function resolveAccess(session, doFetch = (...a) => fetch(...a)) {
     const res = await doFetch("/api/v1/onboarding", { credentials: "include", headers: { Accept: "application/json" }, signal: controller.signal });
     if (!res.ok) return "gate";
     const steps = parseSteps(await res.json());
+    bootSteps = steps;
     return steps && steps.some(isOpenStep) ? "onboarding" : "gate";
   } catch (_) {
     return "gate";
@@ -70,5 +74,105 @@ export function openOnboardingWhenReady() {
   };
   tick();
 }
+// ---- WS-F9b: the "finish setup" strip. Owners and admins only; members make no read. ----
+// Shown on the whole desktop (open sessions as well as onboarding mode) until every step is done or skipped. One read at
+// boot (none when resolveAccess already made it), then only what the Onboarding app reports; no timer.
+const DISMISS_KEY = "fulc.setup-strip.dismissed";
+const REOPENABLE = ["model_key", "readonly_app"]; // the two steps that follow live state and can open again
+const strip = { active: false, steps: null, el: null, dismissed: null, ro: null };
+
+/** "01"-style record of which reopenable steps are open, taken when the strip is dismissed. */
+export const stripSnapshot = (steps) => REOPENABLE.map((id) => (steps.find((s) => s.step === id).completed_at === null ? "1" : "0")).join("");
+/** The strip shows while a step is open and it was not dismissed. Dismissal ends when a reopenable step opens that was closed at the time. */
+export function stripState(steps, dismissed) {
+  if (!steps || !steps.some(isOpenStep)) return { show: false, dismissed: null };
+  if (dismissed !== null) {
+    const now = stripSnapshot(steps);
+    if (![...now].some((c, i) => c === "1" && dismissed[i] === "0")) return { show: false, dismissed };
+  }
+  return { show: true, dismissed: null };
+}
+function readDismissed() {
+  try { const v = window.sessionStorage.getItem(DISMISS_KEY); if (v !== null) return v; } catch (_) { /* storage blocked: memory only */ }
+  return strip.dismissed;
+}
+function writeDismissed(v) {
+  strip.dismissed = v;
+  try { if (v === null) window.sessionStorage.removeItem(DISMISS_KEY); else window.sessionStorage.setItem(DISMISS_KEY, v); } catch (_) { /* memory only */ }
+}
+function renderStrip() {
+  const st = strip.steps ? stripState(strip.steps, readDismissed()) : { show: false, dismissed: null };
+  if (strip.steps && st.dismissed === null && readDismissed() !== null) writeDismissed(null);
+  if (!st.show) {
+    if (strip.ro) { strip.ro.disconnect(); strip.ro = null; }
+    if (strip.el) strip.el.remove();
+    strip.el = null;
+    reserveStripBand(null);
+    return;
+  }
+  const left = strip.steps.filter(isOpenStep).length;
+  const text = "Finish setup: " + left + (left === 1 ? " step left" : " steps left");
+  if (strip.el) { strip.el.querySelector(".setup-strip-text").textContent = text; return; }
+  const el = document.createElement("section");
+  el.className = "setup-strip";
+  el.setAttribute("aria-label", "Finish setup");
+  el.setAttribute("data-testid", "setup-strip");
+  const label = document.createElement("span");
+  label.className = "setup-strip-text";
+  label.textContent = text;
+  const go = document.createElement("button");
+  go.type = "button"; go.className = "setup-strip-btn"; go.textContent = "Open Onboarding";
+  go.setAttribute("data-testid", "setup-strip-open");
+  go.addEventListener("click", () => window.FULCWM && window.FULCWM.open("onboarding"));
+  const no = document.createElement("button");
+  no.type = "button"; no.className = "setup-strip-btn"; no.textContent = "Dismiss";
+  no.setAttribute("aria-label", "Dismiss the finish setup reminder");
+  no.setAttribute("data-testid", "setup-strip-dismiss");
+  no.addEventListener("click", () => {
+    writeDismissed(stripSnapshot(strip.steps));
+    renderStrip();
+    const next = document.querySelector("#taskbar button");
+    if (next) next.focus();
+  });
+  el.append(label, go, no);
+  strip.el = el;
+  const host = document.getElementById("windows-container");
+  if (host) {
+    host.append(el);
+    reserveStripBand(el);
+    if (typeof ResizeObserver !== "undefined") { strip.ro = new ResizeObserver(() => reserveStripBand(el)); strip.ro.observe(el); }
+  } else {
+    (document.getElementById("desktop-screen") || document.body).append(el);
+  }
+}
+/** Keeps the work area clear of the strip: the windows container reserves a band as tall as the strip (it wraps on narrow screens). */
+function reserveStripBand(el) {
+  const host = document.getElementById("windows-container");
+  if (!host) return;
+  if (!el) { host.classList.remove("has-setup-strip"); host.style.removeProperty("--setup-strip-h"); return; }
+  host.style.setProperty("--setup-strip-h", Math.ceil(el.getBoundingClientRect().height) + "px");
+  host.classList.add("has-setup-strip");
+}
+/** What the Onboarding app calls after each read of the steps. Ignored unless this session is showing the strip. */
+export function reportSteps(steps) {
+  if (!strip.active || !Array.isArray(steps) || steps.length !== STEP_IDS.length) return;
+  strip.steps = steps;
+  renderStrip();
+}
+/** Owners and admins only. Never throws and never blocks the desktop: any failure leaves no strip. */
+export async function startSetupStrip(session, doFetch = (...a) => fetch(...a)) {
+  if (!session || !session.is_admin || strip.active) return false;
+  strip.active = true;
+  try {
+    if (!bootSteps) {
+      const res = await doFetch("/api/v1/onboarding", { credentials: "include", headers: { Accept: "application/json" } });
+      if (res.ok) bootSteps = parseSteps(await res.json());
+    }
+    if (bootSteps && !strip.steps) strip.steps = bootSteps;
+    renderStrip();
+  } catch (_) { /* no strip */ }
+  return true;
+}
+
 // boot.js reads these from window (a page tag loads this file first), so boot imports nothing new.
-if (typeof window !== "undefined") window.FULCOnboardingMode = { resolveAccess, enterOnboardingMode, openOnboardingWhenReady };
+if (typeof window !== "undefined") window.FULCOnboardingMode = { resolveAccess, enterOnboardingMode, openOnboardingWhenReady, startSetupStrip, reportSteps };

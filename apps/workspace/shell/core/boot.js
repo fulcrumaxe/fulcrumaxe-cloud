@@ -386,6 +386,7 @@ import { markSigninVisible } from "./boot-metrics.js";
         if (access === 'onboarding' && mode.enterOnboardingMode()) {
           window.showDesktop(cloudSession.username || cloudSession.email, !!cloudSession.is_admin);
           mode.openOnboardingWhenReady();
+          mode.startSetupStrip(cloudSession); // WS-F9b: owners/admins; reuses the read above
           return;
         }
         if (window.FULCSubscriptionGate && typeof window.FULCSubscriptionGate.render === 'function') {
@@ -400,6 +401,8 @@ import { markSigninVisible } from "./boot-metrics.js";
       // async work and returns right away, well before the desktop is
       // actually rendered.
       window.showDesktop(cloudSession.username || cloudSession.email, !!cloudSession.is_admin);
+      // WS-F9b: the finish-setup strip (owners/admins only); not awaited, so the desktop never waits on it.
+      if (window.FULCOnboardingMode) window.FULCOnboardingMode.startSetupStrip(cloudSession);
       return;
     }
 

@@ -128,8 +128,17 @@ async function gateFor(page: Page, m: Mock) {
 }
 
 test.describe("the gate decision (criterion 1)", () => {
-  test("open: the full desktop, no onboarding read, nothing opens by itself", async ({ page }) => {
-    const m = mock({ access: "open" });
+  test("open, an owner or admin: the full desktop and the one read the finish-setup strip makes; nothing opens by itself", async ({ page }) => {
+    const m = mock({ access: "open", onboarding: [json(ONB.done)] });
+    await setup(page, m);
+    await bootToDesktop(page);
+    expect(v1(m).filter((r) => r.includes("/api/v1/onboarding"))).toEqual(["GET /api/v1/onboarding"]);
+    await expect(page.locator("#subscription-gate-screen")).toHaveCount(0);
+    await expect(win(page, "onboarding")).toHaveCount(0);
+  });
+
+  test("open, a member: the full desktop, no onboarding read, nothing opens by itself", async ({ page }) => {
+    const m = mock({ access: "open", isAdmin: false });
     await setup(page, m);
     await bootToDesktop(page);
     expect(v1(m).filter((r) => r.includes("/api/v1/onboarding"))).toEqual([]);
@@ -284,7 +293,7 @@ test.describe("the step list (criteria 4, 5, 8, 11)", () => {
     await expect(current(page)).toHaveAttribute("data-testid", "ob-step-preview");
     await expect(ob(page).locator('[data-testid="ob-step-model_key"] .ob-state')).toContainText("Done");
     await expect(ob(page).locator('[data-testid="ob-step-model_key"] time')).toHaveAttribute("datetime", ONB.step3.steps[0].completed_at);
-    await expect(ob(page).locator('[data-testid="ob-step-first_pr"]')).toContainText("Your first pull request will show here");
+    await expect(ob(page).locator('[data-testid="ob-step-first_pr"]')).not.toContainText("will show here"); // no placeholder; no Runs button until step 6 is up next
     await expect(ob(page).locator('[data-testid="ob-step-preview"]')).not.toContainText("null"); // step 3 returns no button node
     const stored = await page.evaluate(() => JSON.stringify([{ ...localStorage }, { ...sessionStorage }]));
     expect(stored).not.toMatch(/readonly_app|model_key|ob-step/);
