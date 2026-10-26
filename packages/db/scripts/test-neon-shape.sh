@@ -595,6 +595,10 @@ check_receipt_writer_role_shape() {
               AND p.proargtypes = array_to_string('{uuid,text,uuid,uuid,integer,integer}'::regtype[]::oid[], ' ')::oidvector)
             OR (p.proname = 'decision_ask_withdraw_by_id'
               AND p.proargtypes = array_to_string('{uuid,text}'::regtype[]::oid[], ' ')::oidvector)
+            OR (p.proname = 'sub_item_ask_key'
+              AND p.proargtypes = array_to_string('{uuid,text}'::regtype[]::oid[], ' ')::oidvector)
+            OR (p.proname = 'sub_item_policy_receipt_write'
+              AND p.proargtypes = array_to_string('{uuid,text,uuid,uuid,uuid,text,integer,integer}'::regtype[]::oid[], ' ')::oidvector)
             OR (p.proname = 'start_gate_claim'
               AND p.proargtypes = array_to_string('{uuid,text,text,integer,text}'::regtype[]::oid[], ' ')::oidvector)
             OR (p.proname = 'start_gate_attach'

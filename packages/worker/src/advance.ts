@@ -26,6 +26,7 @@ import type { DecisionIntake, DecisionStepCode } from "./decisionIntake.js";
 import { parseDecisionSnapshot, writeDecisionSnapshot, type DecisionOffer, type DecisionSnapshot } from "./decisionSnapshot.js";
 import { decisionOfferForItem, decisionStartFor } from "./decisionStart.js";
 import type { StartGatePort, StartGateStepInput, StartGateStepOut } from "./startGateStep.js";
+import type { FixGatePort, FixGateStepInput, FixGateStepOut } from "./fixGateStep.js";
 import { isContextSpill, type ContextAssembly, type ContextSection, type ContextSpill } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
 import { advanceContinue as advanceContinueCore, type AdvanceContinueOut } from "./advanceContinue.js";
@@ -252,6 +253,8 @@ export interface AdvanceModuleDeps {
   decisionIntake?: DecisionIntake | null;
   /** D#7 start gate (b): the stage driver's call into `decideStart` on the receipt login. Absent, `advanceStartGate` lets the advance go on (nothing is recorded). */
   startGate?: StartGatePort | null;
+  /** D#483 S5-b2a part 2: the review fix round's gate on the receipt login. Absent, `advanceFixGate` stops the round (`fix_gate_unavailable`): nothing is spent that cannot be decided. */
+  fixGate?: FixGatePort | null;
   /** The execution registry `cancelRun` dispatches through. Absent, a step's cancel is a no-op that the lost-run sweep backs up. */
   registry?: ExecutionTargetRegistry | null;
   /** D#483 P3, injected from apps/web the same way: the review stage's pipeline pieces. Absent, the review steps answer `review_unavailable`. */
@@ -728,6 +731,8 @@ export interface AdvanceFacade {
    * (`start_after_reclassify`) and the workflow ends waiting. Answers `proceed: true` or a fixed reason it stopped (`asked`, `held`, `blocked`).
    */
   advanceStartGate(who: AdvanceStepWho, input: StartGateStepInput): Promise<StartGateStepOut>;
+  /** D#483 S5-b2a part 2: whether a review fix round may start now (see `gateFixRound`). Fixed words out. Never called for a person's Request changes round or a continuation. */
+  advanceFixGate(who: AdvanceStepWho, input: FixGateStepInput): Promise<FixGateStepOut>;
 }
 
 /** Package-internal: `runnerPool` is the runner login's pool and is captured here, never exposed. */
@@ -2091,8 +2096,18 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return deps.startGate({ accountId: who.accountId, userId: who.userId, workItemId: who.workItemId }, input);
   }
 
+  async function advanceFixGate(who: AdvanceStepWho, input: FixGateStepInput): Promise<FixGateStepOut> {
+    // Fail closed, as the start gate does: a round that cannot be decided does not start. The halt guard is the same as every other step's.
+    if (!deps.fixGate) return { proceed: false, reason: "blocked", blockedBy: "fix_gate_unavailable" };
+    if (!UUID_RE.test(who.accountId) || !UUID_RE.test(who.workItemId) || !UUID_RE.test(who.userId)) return { proceed: false, reason: "blocked", blockedBy: "bad_ids" };
+    const bad = await guardStep(who);
+    if (bad) return { proceed: false, reason: "blocked", blockedBy: bad.reason === "item_halted" || bad.reason === "halted_since_approval" ? "halted" : "refused" };
+    return deps.fixGate({ accountId: who.accountId, userId: who.userId, workItemId: who.workItemId }, { personFiled: input.personFiled === true });
+  }
+
   return {
     advanceStartGate,
+    advanceFixGate,
     performAdvanceWorkItem,
     performRespecWorkItem,
     performAmendSpec,

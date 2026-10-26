@@ -447,3 +447,12 @@ export async function withdrawSubItemAsk(client: PoolClient, askId: string, key:
   const { rows } = await client.query<{ moved: boolean }>('SELECT decision_ask_withdraw_by_id($1::uuid, $2::text) AS moved', [askId, key]);
   return rows[0]!.moved;
 }
+
+/**
+ * D#483 S5-b2a part 2 (migration 0917): names the sub-item a just-raised `launch_sub_item` ask is about. Call it in the same transaction as `raiseAsk`. A second
+ * live ask for the same (work item, key) fails on a unique index (23505) and the whole transaction rolls back, so a race never leaves two open asks.
+ */
+export async function keySubItemAsk(client: PoolClient, askId: string, key: string): Promise<boolean> {
+  const { rows } = await client.query<{ moved: boolean }>('SELECT sub_item_ask_key($1::uuid, $2::text) AS moved', [askId, key]);
+  return rows[0]!.moved;
+}

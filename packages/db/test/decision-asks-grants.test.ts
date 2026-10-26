@@ -94,9 +94,9 @@ describe('decision_asks grants (0666)', () => {
     return rows;
   }
 
-  it('the only column-level UPDATE on decision_asks is receipt_writer\'s five answer columns and the withdrawal reason (0826)', async () => {
+  it('the only column-level UPDATE on decision_asks is receipt_writer\'s five answer columns, the withdrawal reason (0826) and the sub-item key (0917)', async () => {
     expect(await columnUpdaters()).toEqual([
-      { role: 'receipt_writer', columns: ['state', 'answered_option', 'answered_by', 'answered_at', 'receipt_id', 'withdrawn_reason'] },
+      { role: 'receipt_writer', columns: ['state', 'answered_option', 'answered_by', 'answered_at', 'receipt_id', 'withdrawn_reason', 'sub_item_key'] },
     ]);
   });
 

@@ -83,6 +83,8 @@ interface World {
   /** A person's Request changes waits for its fix round (the review load says so), and the fix rounds already started. */
   personRequest?: boolean;
   fixRoundsStarted?: number;
+  /** D#483 S5-b2a part 2: the fix-round gate's answer, per call (the input is what the workflow passes). Absent: the item is not gated. */
+  fixGate?: (input: { personFiled: boolean }) => { proceed: boolean; how?: string; announce?: boolean; reason?: string; blockedBy?: string | null };
 }
 
 function fresh(over: Partial<World> = {}): World {
@@ -153,6 +155,7 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
     advanceMergeOrder: vi.fn(async () => (orders.length > 1 ? orders.shift()! : orders[0]!)),
     advanceRecordEvent: vi.fn(async (_who: unknown, _e: { kind: string; code?: string; reasons?: string[]; headSha?: string; prNumber?: number; runId?: string }) => ({ recorded: true })),
     advanceStartGate: vi.fn(async (..._args: unknown[]) => ({ proceed: true as const, how: "person_receipt" })),
+    advanceFixGate: vi.fn(async (_who: unknown, input: { personFiled: boolean }) => (w.fixGate ? w.fixGate(input) : { proceed: true as const, how: "not_gated", announce: false })),
     advanceCancel: vi.fn(async () => undefined),
     advanceVerifiedReviewGate: vi.fn(async (_who: unknown, input: { prNumber: number; headSha: string; seenHead: string | null }) => (w.verifiedGate ? w.verifiedGate(++gateCalls, input) : { state: "dispatch" })),
     advanceBuild: vi.fn(),
@@ -1802,5 +1805,79 @@ describe("D#2 H14c-3-3b-3: a reviewer that ended at a limit is continued, and th
     await workItemAdvanceWorkflow(ARGS);
     const recorded = t.worker.advanceRecordRound.mock.calls[0]![1].verdicts.find((v) => v.role === "code-reviewer")!;
     expect([recorded.verdict, recorded.noVerdict, recorded.endCode]).toEqual(["fail", true, "timed_out"]);
+  });
+});
+
+describe("D#483 S5-b2a part 2: the fix-round gate (review fix rounds only)", () => {
+  const needsFix = (role: string) => (role === "code-reviewer" ? { status: "succeeded", envelope: { verdict: "needs-fix", findings: ["a.ts:1 - wrong"], summary: "" } } : { status: "succeeded", envelope: { verdict: "pass", findings: [], summary: "" } });
+  const fixWorld = (over: Partial<World> = {}) => fresh({ verdict: needsFix, rounds: [{ decision: "fix", round: 0, nextRound: 1 }, { decision: "all_passed", round: 1 }], ...over });
+
+  it("is asked once, before the round is started, with the workflow's own person fact; a go starts the round", async () => {
+    const t = setup(fixWorld());
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+    expect(t.worker.advanceFixGate).toHaveBeenCalledTimes(1);
+    expect(t.worker.advanceFixGate).toHaveBeenCalledWith(WHO, { personFiled: false });
+    expect(t.worker.advanceFixGate.mock.invocationCallOrder[0]!).toBeLessThan(t.worker.advanceStartFix.mock.invocationCallOrder[0]!);
+    expect(t.worker.advanceStartFix).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes personFiled when a person's own session filed the advance (the gate decides what that means)", async () => {
+    const t = setup(fixWorld());
+    await workItemAdvanceWorkflow({ ...ARGS, personFiled: true });
+    expect(t.worker.advanceFixGate).toHaveBeenCalledWith(WHO, { personFiled: true });
+  });
+
+  it("an advance the dial filed (personFiled false, dialFiled true) reaches the gate as NOT person-filed, so it is never the after-hold answer", async () => {
+    const t = setup(fixWorld());
+    await workItemAdvanceWorkflow({ ...ARGS, personFiled: false, dialFiled: true });
+    expect(t.worker.advanceFixGate).toHaveBeenCalledTimes(1);
+    expect(t.worker.advanceFixGate).toHaveBeenCalledWith(WHO, { personFiled: false });
+    const u = setup(fixWorld());
+    await workItemAdvanceWorkflow({ ...ARGS, dialFiled: true });
+    expect(u.worker.advanceFixGate).toHaveBeenCalledWith(WHO, { personFiled: false });
+  });
+
+  it("an ask parks the workflow waiting and starts NO fix round, no reservation, no run", async () => {
+    const t = setup(fixWorld({ fixGate: () => ({ proceed: false, reason: "asked", blockedBy: null }) }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "waiting", detail: "fix_launch_ask_open" });
+    expect(t.worker.advanceStartFix).not.toHaveBeenCalled();
+    expect(t.started.filter((s) => /^fix/.test(s.step))).toEqual([]);
+    expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
+  });
+
+  it("a block stops with its fixed word and a recorded stop; nothing starts. A gate that is not wired, or answers nothing usable, never starts a round", async () => {
+    const t = setup(fixWorld({ fixGate: () => ({ proceed: false, reason: "blocked", blockedBy: "respec_needs_approval" }) }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "stopped", detail: "fix_launch_blocked:respec_needs_approval" });
+    expect(t.worker.advanceStartFix).not.toHaveBeenCalled();
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "respec_needs_approval" }));
+    const u = setup(fixWorld({ fixGate: () => ({ proceed: false, reason: "blocked", blockedBy: "fix_gate_unavailable" }) }));
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("stopped");
+    expect(u.worker.advanceStartFix).not.toHaveBeenCalled();
+  });
+
+  it("a person's Request changes round bypasses the gate: a person's click is the answer", async () => {
+    const t = setup(fresh({ personRequest: true, realDecide: true, listRuns: true, verdict: () => ({ status: "succeeded", envelope: { verdict: "pass", findings: [], summary: "fine" } }), fixGate: () => ({ proceed: false, reason: "asked", blockedBy: null }) }), { ...AT_PR, stage: "changes_requested" });
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+    expect(t.worker.advanceStartFix.mock.calls[0]![1]).toMatchObject({ person: true });
+    expect(t.worker.advanceFixGate).not.toHaveBeenCalled();
+  });
+
+  it("a continuation of a fix round that ended at a limit is NOT a new round: the gate is asked for the round once, never for the continuation", async () => {
+    const CHILD = "99999999-9999-4999-8999-000000000002";
+    const t = setup(fixWorld({ fixOutcome: { status: "timed_out", done: true, envelope: null } }));
+    const original = t.worker.advanceRunOutcome.getMockImplementation()!;
+    t.worker.advanceRunOutcome.mockImplementation(async (account: string, id: string) => (id === CHILD ? { status: "succeeded", done: true, envelope: { summary: "fixed" } } : original(account, id)));
+    const step = vi.fn(async () => ({ code: "continued", runId: CHILD, parkedAs: null }));
+    (t.worker as unknown as Record<string, unknown>).advanceContinue = step;
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+    expect(step).toHaveBeenCalledWith(WHO, "fix-1");
+    expect(t.worker.advanceFixGate).toHaveBeenCalledTimes(1);
+    expect(t.worker.advanceStartFix).toHaveBeenCalledTimes(1);
+  });
+
+  it("a second round is gated again (a go is for one round)", async () => {
+    const t = setup(fresh({ verdict: needsFix, fixPushes: H2, rounds: [{ decision: "fix", round: 0, nextRound: 1 }, { decision: "fix", round: 1, nextRound: 2 }, { decision: "all_passed", round: 2 }] }));
+    await workItemAdvanceWorkflow(ARGS);
+    expect(t.worker.advanceFixGate.mock.calls.length).toBe(t.worker.advanceStartFix.mock.calls.length);
   });
 });

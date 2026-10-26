@@ -78,6 +78,7 @@ function setup(script: Script = {}) {
       const r = rounds.length > 1 ? rounds.shift()! : rounds[0]!;
       return { decision: r.decision, round: r.round ?? 0, ...(r.nextRound !== null ? { nextRound: r.nextRound ?? (r.round ?? 0) + 1 } : {}), recorded: input.verdicts.map((v) => ({ role: v.role, runId: v.runId, verdict: v.verdict, outcome: "passed" })) };
     }),
+    advanceFixGate: vi.fn(async (..._args: unknown[]) => ({ proceed: true as const, how: "not_gated", announce: false })),
     advanceStartFix: vi.fn(async (_who: unknown, req: AdvanceFixRequest) => {
       fixes.push(req);
       fixCalls += 1;
