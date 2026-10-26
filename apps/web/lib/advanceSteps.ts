@@ -39,7 +39,7 @@ export type LoadedAdvance =
   /** An item discussed by the pipeline that has no Spec yet (a panel or Spec step that failed): the panel and the Spec run again. */
   | { ok: true; mode: "spec" }
   /** An item at `in_progress` with no run live: its build ended and nobody recorded what came of it. Look for the pull request (found: the review; none: Needs human, against `executorRunId`). */
-  | { ok: true; mode: "check_build"; specVersion: number | null; executorRunId: string | null }
+  | { ok: true; mode: "check_build"; specVersion: number | null; executorRunId: string | null; checkFailedRunId: string | null }
   /** An item whose pull request is open (pr_opened, changes_requested, review_passed): reviews, fix rounds and the merge gate. Pinned to the approved Spec version. */
   | { ok: true; mode: "review"; number: number; specVersion: number | null }
   | {
@@ -101,7 +101,7 @@ export async function loadBody(worker: AdvanceWorker | null, reader: IssueReader
   if (verdict.action === "rebuild") return { ok: true, mode: "rebuild", number: ghNumber, specVersion: item.specVersion, repoId: item.repoId, owner: item.ghOwner, name: item.ghName, executionMode: item.executionMode, recordedPr: item.recordedPr, prExecutionMode: item.prExecutionMode };
   // The panel and the Spec again, for the pipeline's own root item: no issue read either.
   if (verdict.action === "spec") return { ok: true, mode: "spec" };
-  if (verdict.action === "check_build") return { ok: true, mode: "check_build", specVersion: item.specVersion, executorRunId: item.executorRunId };
+  if (verdict.action === "check_build") return { ok: true, mode: "check_build", specVersion: item.specVersion, executorRunId: item.executorRunId, checkFailedRunId: item.checkFailedRunId ?? null };
   // A reviewer kept ending without a verdict and the item sits at Needs a person: Approve reviews the open pull request again. The workflow looks for that
   // pull request first (the rebuild mode's lookup) and builds again when none is open, as it always did.
   if (verdict.action === "review" && item.stage === "needs_human") return { ok: true, mode: "rebuild", reviewHold: true, number: ghNumber, specVersion: item.specVersion, repoId: item.repoId, owner: item.ghOwner, name: item.ghName, executionMode: item.executionMode, recordedPr: item.recordedPr, prExecutionMode: item.prExecutionMode };

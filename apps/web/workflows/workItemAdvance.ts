@@ -468,11 +468,11 @@ async function startGatePhase(args: AdvanceStartArgs, itemId: string, input: Omi
 }
 
 /**
- * D#483 S5-b2a part 2: null to go on with the review fix round, else the workflow's end. An ask ends it waiting (the answer files one advance that comes back here
+ * D#483 S5-b2a part 2: null to go on with the review fix round (or, given `checkFailedRunId`, the check fix round of that failed run), else the workflow's end. An ask ends it waiting (the answer files one advance that comes back here
  * and finds the receipt); everything else that is not a go is a recorded stop. Never called for a person's Request changes round or for a continuation.
  */
-async function fixGatePhase(args: AdvanceStartArgs): Promise<Result | null> {
-  const out = await advanceFixGateStep(args.accountId, args.userId, args.workItemId, args.haltEpoch, { personFiled: args.personFiled === true });
+async function fixGatePhase(args: AdvanceStartArgs, checkFailedRunId?: string): Promise<Result | null> {
+  const out = await advanceFixGateStep(args.accountId, args.userId, args.workItemId, args.haltEpoch, { personFiled: args.personFiled === true, ...(checkFailedRunId === undefined ? {} : { checkFailedRunId }) });
   if (out.proceed) return null;
   await advanceLogStep("advance.fix_gate_stopped", { work_item_id: args.workItemId, reason: out.reason, blocked_by: out.blockedBy });
   if (out.reason === "asked") return { status: "waiting", detail: "fix_launch_ask_open" };
@@ -554,6 +554,9 @@ export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promis
   if (loaded.mode === "rebuild") return rebuildPhase(args, pinned(loaded.specVersion), { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.number, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode }, loaded.reviewHold === true);
   if (loaded.mode === "review") return reviewPhase(args, pinned(loaded.specVersion));
   // An item left at In progress with nothing running: look for its pull request (found: the review; none: Needs human).
+  // D#483 S5-b2a part 3: the newest build run failed its check and the fix round was asked about (or decided): follow that run's check fix round, behind the same gate. A person's answer
+  // (or an unattended restart) lands here; with no question on record for the run, "Check the build" is what it always was.
+  if (loaded.mode === "check_build" && loaded.checkFailedRunId !== null) return buildPhase({ ...args, resumeRunId: loaded.checkFailedRunId }, pinned(loaded.specVersion));
   if (loaded.mode === "check_build") return checkBuildPhase(args, pinned(loaded.specVersion), loaded.executorRunId);
   // The pipeline's own root item, left at Discussing without a Spec: the panel and the Spec once more.
   if (loaded.mode === "spec") {
@@ -899,6 +902,9 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
   // D#6 R-CHK-3 (C47): a run whose approved check failed has no pull request, and its work is on the run branch. Each fix round resumes it and is waited for like the build;
   // the worker refuses a round past the plan's `maxFixRounds()` (`escalated`), and the item then goes to Needs human. Bounded here as well, so the loop cannot run on.
   for (let round = 1; round <= CHECK_FIX_ROUNDS_CEILING && outcome.done && outcome.status === "failed" && outcome.failureReason === "check_failed"; round++) {
+    // D#483 S5-b2a part 3: the dial decides whether THIS check fix round (the failed run it resumes) starts. An ask ends the workflow waiting; the answer files an advance that comes back here.
+    const checkGate = await fixGatePhase(args, outcome.tailRunId);
+    if (checkGate !== null) return checkGate;
     const fix = await advanceCheckFixStep(accountId, userId, workItemId, args.haltEpoch, outcome.tailRunId);
     if (fix.status === "escalated") {
       const recorded = await advanceBuildFailedStep(accountId, workItemId, outcome.tailRunId, "check_rounds_used");

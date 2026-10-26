@@ -53,6 +53,8 @@ interface SetupOptions {
   decision?: DecisionStepCode;
   /** D#6 R-CHK-3: what the check fix start answers, one per call (the last repeats); a started run named `run-fix-<n>` when absent. */
   checkFix?: AdvanceRunStart[];
+  /** D#483 S5-b2a part 3: what the fix-round gate answers, by the failed run it was asked about; absent: a go. */
+  fixGate?: (input: { personFiled: boolean; checkFailedRunId?: string }) => { proceed: true; how: string; announce: boolean } | { proceed: false; reason: "asked" | "blocked"; blockedBy: string | null };
 }
 
 function setup(o: SetupOptions = {}) {
@@ -83,6 +85,7 @@ function setup(o: SetupOptions = {}) {
       checkFixCalls += 1;
       return o.checkFix ? (o.checkFix[checkFixCalls - 1] ?? o.checkFix.at(-1)!) : { ok: true as const, runId: `run-fix-${checkFixCalls}` };
     }),
+    advanceFixGate: vi.fn(async (_who: unknown, input: { personFiled: boolean; checkFailedRunId?: string }) => (o.fixGate ? o.fixGate(input) : { proceed: true as const, how: "not_gated", announce: false })),
     advanceDecision: vi.fn(async (): Promise<DecisionStepCode> => o.decision ?? "none"),
     advanceCancel: vi.fn(async () => undefined),
     advanceRecordEvent: vi.fn(async () => ({ recorded: true })),
@@ -432,6 +435,84 @@ describe("the build for an item at Spec ready", () => {
       expect(w.advanceBuildFailed).toHaveBeenCalledTimes(1);
       expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-b", code);
       expect(w.advanceRecordEvent).toHaveBeenCalledWith(WHO, { kind: "stopped", dedupeKey: "build:run-b", code, runId: "run-b" });
+    });
+
+    // D#483 S5-b2a part 3: the dial decides each check fix round, by the failed run it would resume.
+    describe("the fix-round gate (check fix rounds)", () => {
+      const ASKED = { proceed: false as const, reason: "asked" as const, blockedBy: null };
+      const IN_PROGRESS: AdvanceItem = { ...AT_SPEC, stage: "in_progress", executorRunId: "run-b" };
+      const fixOk = (id: string) => (id === "run-fix-1" ? { status: "succeeded" as const, done: true, envelope: { summary: "Fixed." } } : undefined);
+
+      it("is asked once for the failed run, with the workflow's person fact, BEFORE the round is started; a go starts it", async () => {
+        const w = setup({ item: AT_SPEC, buildOutcomes: [checkFailed("run-b")], outcomeFor: fixOk });
+        expect(await workItemAdvanceWorkflow(ARGS)).toEqual(REVIEW_STOPS);
+        expect(w.advanceFixGate).toHaveBeenCalledTimes(1);
+        expect(w.advanceFixGate).toHaveBeenCalledWith(WHO, { personFiled: false, checkFailedRunId: "run-b" });
+        expect(w.advanceFixGate.mock.invocationCallOrder[0]!).toBeLessThan(w.advanceStartCheckFix.mock.invocationCallOrder[0]!);
+        const person = setup({ item: AT_SPEC, buildOutcomes: [checkFailed("run-b")], outcomeFor: fixOk });
+        await workItemAdvanceWorkflow({ ...ARGS, personFiled: true });
+        expect(person.advanceFixGate).toHaveBeenCalledWith(WHO, { personFiled: true, checkFailedRunId: "run-b" });
+        // A dial-filed advance is not person-filed.
+        const dial = setup({ item: AT_SPEC, buildOutcomes: [checkFailed("run-b")], outcomeFor: fixOk });
+        await workItemAdvanceWorkflow({ ...ARGS, personFiled: false, dialFiled: true });
+        expect(dial.advanceFixGate).toHaveBeenCalledWith(WHO, { personFiled: false, checkFailedRunId: "run-b" });
+      });
+
+      it("an ask ends the workflow waiting: no fix round, no failure recorded, the item stays where it is", async () => {
+        const w = setup({ item: AT_SPEC, buildOutcomes: [checkFailed("run-b")], fixGate: () => ASKED });
+        expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "waiting", detail: "fix_launch_ask_open" });
+        expect(w.advanceStartCheckFix).not.toHaveBeenCalled();
+        expect(w.advanceBuildFailed).not.toHaveBeenCalled();
+        expect(events()).toContain("advance.fix_gate_stopped");
+      });
+
+      it("a block stops with its fixed word; a gate that cannot answer never starts a round", async () => {
+        const w = setup({ item: AT_SPEC, buildOutcomes: [checkFailed("run-b")], fixGate: () => ({ proceed: false, reason: "blocked", blockedBy: "respec_needs_approval" }) });
+        expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "stopped", detail: "fix_launch_blocked:respec_needs_approval" });
+        const u = setup({ item: AT_SPEC, buildOutcomes: [checkFailed("run-b")], fixGate: () => ({ proceed: false, reason: "blocked", blockedBy: "fix_gate_unavailable" }) });
+        expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("stopped");
+        expect(w.advanceStartCheckFix).not.toHaveBeenCalled();
+        expect(u.advanceStartCheckFix).not.toHaveBeenCalled();
+      });
+
+      it("a round that fails its check again is gated again, for ITS failed run (a go is for one round)", async () => {
+        const w = setup({ item: AT_SPEC, buildOutcomes: [checkFailed("run-b")], outcomeFor: (id) => (id === "run-fix-1" ? checkFailed("run-fix-1") : id === "run-fix-2" ? { status: "succeeded", done: true, envelope: { summary: "Done." } } : undefined) });
+        await workItemAdvanceWorkflow(ARGS);
+        expect(w.advanceFixGate.mock.calls.map((c) => (c[1] as { checkFailedRunId: string }).checkFailedRunId)).toEqual(["run-b", "run-fix-1"]);
+        expect(w.advanceStartCheckFix).toHaveBeenCalledTimes(2);
+        // The second ask waits: the first round ran, the second does not.
+        const v = setup({ item: AT_SPEC, buildOutcomes: [checkFailed("run-b")], outcomeFor: (id) => (id === "run-fix-1" ? checkFailed("run-fix-1") : undefined), fixGate: (i) => (i.checkFailedRunId === "run-b" ? { proceed: true, how: "policy_receipt", announce: true } : ASKED) });
+        expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "waiting", detail: "fix_launch_ask_open" });
+        expect(v.advanceStartCheckFix).toHaveBeenCalledTimes(1);
+      });
+
+      it("re-entry: an in-progress item whose newest build run failed its check (a question is on record) resumes THAT run's round behind the gate, and starts no new build", async () => {
+        const w = setup({ item: { ...IN_PROGRESS, checkFailedRunId: "run-b" }, buildOutcomes: [checkFailed("run-b")], outcomeFor: fixOk });
+        expect(await workItemAdvanceWorkflow({ ...ARGS, personFiled: true })).toEqual(REVIEW_STOPS);
+        expect(w.advanceBuild).not.toHaveBeenCalled();
+        expect(w.advanceStartRun).not.toHaveBeenCalled();
+        expect(w.advanceBuildFailed).not.toHaveBeenCalled();
+        expect(w.advanceFixGate).toHaveBeenCalledTimes(1);
+        expect(w.advanceFixGate).toHaveBeenCalledWith(WHO, { personFiled: true, checkFailedRunId: "run-b" });
+        expect(w.advanceStartCheckFix).toHaveBeenCalledTimes(1);
+        expect(w.advanceStartCheckFix).toHaveBeenCalledWith(WHO, "run-b");
+        expect(w.advanceFixGate.mock.invocationCallOrder[0]!).toBeLessThan(w.advanceStartCheckFix.mock.invocationCallOrder[0]!);
+      });
+
+      it("re-entry that is still asked ends waiting again; an unattended one is not person-filed", async () => {
+        const w = setup({ item: { ...IN_PROGRESS, checkFailedRunId: "run-b" }, buildOutcomes: [checkFailed("run-b")], fixGate: () => ASKED });
+        expect(await workItemAdvanceWorkflow({ ...ARGS, personFiled: false })).toEqual({ status: "waiting", detail: "fix_launch_ask_open" });
+        expect(w.advanceFixGate).toHaveBeenCalledWith(WHO, { personFiled: false, checkFailedRunId: "run-b" });
+        expect(w.advanceStartCheckFix).not.toHaveBeenCalled();
+        expect(w.advanceBuildFailed).not.toHaveBeenCalled();
+      });
+
+      it("with no question on record for the failed run, 'Check the build' is what it always was: no gate, no fix round", async () => {
+        const w = setup({ item: { ...IN_PROGRESS, checkFailedRunId: null }, buildOutcomes: [checkFailed("run-b")] });
+        await workItemAdvanceWorkflow(ARGS);
+        expect(w.advanceFixGate).not.toHaveBeenCalled();
+        expect(w.advanceStartCheckFix).not.toHaveBeenCalled();
+      });
     });
 
     it("a run that failed another way gets no check fix round", async () => {

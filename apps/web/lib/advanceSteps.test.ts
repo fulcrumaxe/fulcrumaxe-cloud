@@ -126,8 +126,11 @@ describe("loadBody: an item at in_progress is loaded for \"Check the build\"", (
   const withItem = (over: Partial<AdvanceItem>) => worker({ advanceLoadItem: async (): Promise<AdvanceItem | null> => ({ ...AT_BUILD, ...over }) });
 
   it("is checked, pinned to the Spec version, carries the executor run to record against, and reads no issue", async () => {
-    expect(await loadBody(withItem({}), null, ACCOUNT, ITEM)).toEqual({ ok: true, mode: "check_build", specVersion: 2, executorRunId: RUN });
-    expect(await loadBody(withItem({ executorRunId: null }), null, ACCOUNT, ITEM)).toEqual({ ok: true, mode: "check_build", specVersion: 2, executorRunId: null });
+    expect(await loadBody(withItem({}), null, ACCOUNT, ITEM)).toEqual({ ok: true, mode: "check_build", specVersion: 2, executorRunId: RUN, checkFailedRunId: null });
+    expect(await loadBody(withItem({ executorRunId: null }), null, ACCOUNT, ITEM)).toEqual({ ok: true, mode: "check_build", specVersion: 2, executorRunId: null, checkFailedRunId: null });
+  });
+  it("D#483 S5-b2a part 3: carries the failed check run the worker named, and nothing else", async () => {
+    expect(await loadBody(withItem({ checkFailedRunId: RUN }), null, ACCOUNT, ITEM)).toMatchObject({ ok: true, mode: "check_build", checkFailedRunId: RUN });
   });
   it.each([
     ["no published Spec", { hasSpec: false, specVersion: null }, "not_advanceable"],

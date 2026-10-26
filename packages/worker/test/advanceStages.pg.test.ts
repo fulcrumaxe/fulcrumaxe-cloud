@@ -203,6 +203,37 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
     expect(await m.advanceLoadItem(a.accountId, triaged)).toMatchObject({ hasDiscussion: false, kind: null, hasSpec: false });
   });
 
+  it("D#483 S5-b2a part 3: advanceLoadItem names the newest executor run only when it failed its check AND a fix-round question or receipt is on record for that very run", async () => {
+    const a = await seedAccount(admin, randomUUID());
+    const other = await seedAccount(admin, randomUUID());
+    const w = await item(a, { stage: "in_progress" });
+    const m = build().module;
+    const key = (id: string) => `check-${id.replace(/-/g, "").slice(0, 12)}`;
+    const failed = async (reason: string) => {
+      const id = await run(a, w, "running");
+      await writeRunStatus(writerPool, { accountId: a.accountId, runId: id, from: "running", to: "failed", failureReason: reason as never });
+      return id;
+    };
+    const ask = (acct: SeedRefs, itemId: string, runId: string, subKey: string) => admin.query(
+      `INSERT INTO decision_asks (account_id, repo_id, work_item_id, run_id, decision_type, options, proposed, rationale, input_trust_classes, answer_due_at, timeout_outcome, sub_item_key)
+       VALUES ($1, $2, $3, $4, 'launch_sub_item', '[{"id":"a","label":"A"},{"id":"b","label":"B"}]', 'a', 'r', '[]', now() + interval '2 days', 'stop_and_flag', $5)`, [acct.accountId, acct.repoId, itemId, runId, subKey]);
+    const first = await failed("check_failed");
+    // A failed check with no question on record: "Check the build" keeps its meaning.
+    expect((await m.advanceLoadItem(a.accountId, w))?.checkFailedRunId).toBeNull();
+    // A question keyed to ANOTHER run, or to a review round, does not count.
+    await ask(a, w, first, "fix-1");
+    await ask(a, w, first, key(randomUUID()));
+    expect((await m.advanceLoadItem(a.accountId, w))?.checkFailedRunId).toBeNull();
+    await ask(a, w, first, key(first));
+    expect((await m.advanceLoadItem(a.accountId, w))?.checkFailedRunId).toBe(first);
+    expect(await m.advanceLoadItem(other.accountId, w)).toBeNull();
+    // A newer run that failed for another reason is the newest run now: nothing to resume.
+    const second = await failed("no_commit");
+    await ask(a, w, second, key(second));
+    expect((await m.advanceLoadItem(a.accountId, w))?.checkFailedRunId).toBeNull();
+    expect((await m.advanceLoadItem(a.accountId, w))?.executorRunId).toBe(second);
+  });
+
   // ---- advanceStartRun: clone, pr, exclusive ----------------------------------------------------
 
   it("a run with clone gets the working directory and the repository to clone; pr names the sandbox; without them neither is set", async () => {
