@@ -1,6 +1,6 @@
 import { appendFileSync, chmodSync, mkdirSync } from "node:fs";
 import path from "node:path";
-import { LocalOnlyEvent, normalizeRepoPath, redactText, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
+import { LocalOnlyEvent, normalizeRepoPath, redactText, type NormalizedEvent, type TokenTotals } from "@fulcrumaxe/runner-protocol";
 import { activityOf } from "./activity.js";
 import { isInitLine, isKnownKeySource } from "./credentialCheck.js";
 
@@ -109,7 +109,7 @@ export interface StageMarks {
  * `secrets` are the run's real credential values (the API key, the subscription token): a tool use's activity is rechecked against them
  * before it is attached (D#6 C42-2). `marks` makes `writing_result` go out once, on the first write tool or the first line of the envelope.
  */
-export function projectLocalOnly(message: Record<string, unknown>, normalized: NormalizedEvent, nextSeq: () => number, repoRoot: string, secrets: readonly string[] = [], marks: StageMarks = { writingResult: false }): LocalOnlyEvent[] {
+export function projectLocalOnly(message: Record<string, unknown>, normalized: NormalizedEvent, nextSeq: () => number, repoRoot: string, secrets: readonly string[] = [], marks: StageMarks = { writingResult: false }, metered?: TokenTotals): LocalOnlyEvent[] {
   const events: LocalOnlyEvent[] = [];
   if (!marks.writingResult && (normalized.writesResult === true || (normalized.toolUses ?? []).some((use) => use.writes))) {
     marks.writingResult = true;
@@ -137,12 +137,17 @@ export function projectLocalOnly(message: Record<string, unknown>, normalized: N
   }
   if (message.type === "result" && normalized.usage !== undefined) {
     const usd = normalized.costUsd;
+    // The run's metered total when the engine has one (every assistant message counted once), else the result line's own figures.
+    const u = metered ?? { inputTokens: normalized.usage.inputTokens, outputTokens: normalized.usage.outputTokens, cacheReadTokens: normalized.usage.cacheReadTokens ?? 0, cacheWriteTokens: normalized.usage.cacheWriteTokens ?? 0 };
+    // A class that totals zero is left off (an absent field, never a zero).
+    const cacheRead = u.cacheReadTokens > 0 ? u.cacheReadTokens : undefined;
+    const cacheWrite = u.cacheWriteTokens > 0 ? u.cacheWriteTokens : undefined;
     events.push(
       LocalOnlyEvent.parse({
         seq: nextSeq(),
         ts: normalized.ts,
         type: "usage",
-        usage: { input: normalized.usage.inputTokens, output: normalized.usage.outputTokens, ...tokenCount("cache_read", normalized.usage.cacheReadTokens), ...tokenCount("cache_write", normalized.usage.cacheWriteTokens), ...(typeof usd === "number" && Number.isFinite(usd) && usd >= 0 ? { usd } : {}) },
+        usage: { input: u.inputTokens, output: u.outputTokens, ...tokenCount("cache_read", cacheRead), ...tokenCount("cache_write", cacheWrite), ...(typeof usd === "number" && Number.isFinite(usd) && usd >= 0 ? { usd } : {}) },
       }),
     );
   }

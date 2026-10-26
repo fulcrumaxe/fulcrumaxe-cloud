@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { LocalOnlyEvent } from "@fulcrumaxe/runner-protocol";
 import { outcomeOf } from "../../../src/engines/claude/engine.js";
-import { LineBuffer } from "../../../src/engines/claude/stream.js";
+import { LineBuffer, projectLocalOnly } from "../../../src/engines/claude/stream.js";
 import { RUN_ID, engineFor, fixtureText, makeRig } from "./rig.js";
 
 describe("stream", () => {
@@ -58,5 +58,16 @@ describe("stream", () => {
     expect(buffer.push("x".repeat(5 * 1024 * 1024))).toEqual([]);
     expect(buffer.push("tail\nok\n")).toEqual(["ok"]);
     expect(buffer.end()).toEqual([]);
+  });
+});
+
+describe("the usage event", () => {
+  it("carries the metered run total (cache included), not the result line's last-turn figure", () => {
+    const result = { type: "result", is_error: false, usage: { input_tokens: 329, output_tokens: 2000, cache_read_input_tokens: 90000 }, total_cost_usd: 0.5 };
+    const normalized = { runId: "r", role: "executor", seq: 0, type: "result", ts: "2026-01-01T00:00:00.000Z", costUsd: 0.5, usage: { inputTokens: 329, outputTokens: 2000, cacheReadTokens: 90000 } } as never;
+    let n = 0;
+    const metered = { inputTokens: 346, outputTokens: 4400, cacheReadTokens: 167000, cacheWriteTokens: 33500 };
+    const [event] = projectLocalOnly(result, normalized, () => n++, "/work", [], { writingResult: true }, metered);
+    expect(event).toMatchObject({ type: "usage", usage: { input: 346, output: 4400, cache_read: 167000, cache_write: 33500, usd: 0.5 } });
   });
 });

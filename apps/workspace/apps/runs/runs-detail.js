@@ -75,7 +75,10 @@ const COMPUTE_BILL = { sandbox: "Sandbox compute, billed to the workspace", work
  */
 export function runnerUsageLine(u) {
   const price = Number.isFinite(u.api_equivalent_usd) ? usd(u.api_equivalent_usd) : null;
-  const toks = (tokens(u.tokens_in) || "0") + " in / " + (tokens(u.tokens_out) || "0") + " out tokens";
+  // Input counts what the model read in all: the fresh tokens plus those read from or written to the prompt cache (a session re-reads its context every turn).
+  const cached = (Number.isFinite(u.cache_read_tokens) ? u.cache_read_tokens : 0) + (Number.isFinite(u.cache_write_tokens) ? u.cache_write_tokens : 0);
+  const inAll = (Number.isFinite(u.tokens_in) ? u.tokens_in : 0) + cached;
+  const toks = (tokens(inAll) || "0") + " in" + (cached > 0 ? " (" + (tokens(cached) || "0") + " cached)" : "") + " / " + (tokens(u.tokens_out) || "0") + " out tokens";
   if (u.credential_mode === "api_key") return "On your own API key · " + (price ? price + " at API prices" : "no API price for this model") + " · " + toks;
   return "On your Claude plan · " + (price ? "API-equivalent " + price : "no API price for this model") + " · " + toks;
 }
@@ -177,7 +180,8 @@ export function runnerEventLine(p) {
     case "usage": {
       // Tokens only: the runner's own `usd` is never shown (the cloud recomputes the figure; the cost block shows that one).
       const u = isObj(e.usage) ? e.usage : {};
-      line = (tokens(u.input) || "0") + " in / " + (tokens(u.output) || "0") + " out tokens";
+      const cachedIn = (Number.isFinite(u.cache_read) ? u.cache_read : 0) + (Number.isFinite(u.cache_write) ? u.cache_write : 0);
+      line = (tokens((Number.isFinite(u.input) ? u.input : 0) + cachedIn) || "0") + " in" + (cachedIn > 0 ? " (" + tokens(cachedIn) + " cached)" : "") + " / " + (tokens(u.output) || "0") + " out tokens";
       break;
     }
     case "run_ended":

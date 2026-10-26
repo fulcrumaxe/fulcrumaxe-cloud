@@ -30,8 +30,8 @@ describe("every state of a runner run has a fixture on both screens", () => {
 describe("the Runs detail, one expectation per state", () => {
   // The model-usage row: value and the detail under it.
   const COST = {
-    "runner-succeeded-with-pr": { value: "On your Claude plan · API-equivalent $0.01 · 1,000 in / 200 out tokens", detail: "Estimate, priced at this run's model" },
-    "runner-usage-not-priced": { value: "On your Claude plan · no API price for this model · 500 in / 100 out tokens", detail: /not the same as \$0/ },
+    "runner-succeeded-with-pr": { value: "On your Claude plan · API-equivalent $0.01 · 6,300 in (5,300 cached) / 200 out tokens", detail: "Estimate, priced at this run's model" },
+    "runner-usage-not-priced": { value: "On your Claude plan · no API price for this model · 5,800 in (5,300 cached) / 100 out tokens", detail: /not the same as \$0/ },
     "runner-usage-not-recorded": { value: "Not recorded", detail: /not the same as \$0/ },
     "runner-running-activity": { value: "Counting…", detail: null },
     "runner-waiting": { value: "Counting…", detail: null },
