@@ -49,6 +49,7 @@ function setup(panel: AdvanceStepResult[], spec: AdvanceStepResult[]) {
     advanceCancel: vi.fn(async () => undefined),
     advanceCancelStepRuns: vi.fn(async () => undefined),
     advanceRecordEvent: vi.fn(async () => ({ recorded: true })),
+    advanceStartGate: vi.fn(async (..._args: unknown[]) => ({ proceed: true as const, how: "person_receipt" })),
   };
   setWorkerWiringForTests({ provider: () => ({}) as never, createWorker: async () => worker as unknown as Worker });
   setIssueReaderForTests(async () => issue);

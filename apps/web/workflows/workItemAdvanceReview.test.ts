@@ -152,6 +152,7 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
     advanceMergeGate: vi.fn(async () => (gates.length > 1 ? gates.shift()! : gates[0]!)),
     advanceMergeOrder: vi.fn(async () => (orders.length > 1 ? orders.shift()! : orders[0]!)),
     advanceRecordEvent: vi.fn(async (_who: unknown, _e: { kind: string; code?: string; reasons?: string[]; headSha?: string; prNumber?: number; runId?: string }) => ({ recorded: true })),
+    advanceStartGate: vi.fn(async (..._args: unknown[]) => ({ proceed: true as const, how: "person_receipt" })),
     advanceCancel: vi.fn(async () => undefined),
     advanceVerifiedReviewGate: vi.fn(async (_who: unknown, input: { prNumber: number; headSha: string; seenHead: string | null }) => (w.verifiedGate ? w.verifiedGate(++gateCalls, input) : { state: "dispatch" })),
     advanceBuild: vi.fn(),

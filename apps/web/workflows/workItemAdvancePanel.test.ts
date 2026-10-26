@@ -39,6 +39,7 @@ function build(panel: (call: number) => AdvanceStepResult) {
     advancePanel: vi.fn(async (..._args: unknown[]): Promise<AdvanceStepResult> => panel(calls++)),
     advanceSpec: vi.fn(async (..._args: unknown[]): Promise<AdvanceStepResult> => PUBLISHED),
     advanceRecordEvent: vi.fn(async (..._args: unknown[]) => ({ recorded: true })),
+    advanceStartGate: vi.fn(async (..._args: unknown[]) => ({ proceed: true as const, how: "person_receipt" })),
     advanceStartRun: vi.fn(),
     advanceCancel: vi.fn(async () => undefined),
   };

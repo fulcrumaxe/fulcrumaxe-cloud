@@ -25,6 +25,7 @@ import { reconcileHolder, reconcileSlotHolders, type PrStateOpen } from "./prSlo
 import type { DecisionIntake, DecisionStepCode } from "./decisionIntake.js";
 import { CATALOGUE_VERSION } from "@fx/decisions";
 import { parseDecisionSnapshot, resolveDecisionOffer, writeDecisionSnapshot, type DecisionOffer, type DecisionSnapshot } from "./decisionSnapshot.js";
+import type { StartGatePort, StartGateStepInput, StartGateStepOut } from "./startGateStep.js";
 import { isContextSpill, type ContextAssembly, type ContextSection, type ContextSpill } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
 import { readVerifiedReviewGate, type VerifiedReviewGate } from "./verifiedReviewGate.js";
@@ -120,6 +121,12 @@ export interface AdvanceStartArgs {
    * (outcome, decisions, pull request, review) exactly as it follows a build's. Absent on every other start, and on a workflow started before it existed.
    */
   resumeRunId?: string;
+  /**
+   * D#7 start gate: true only on the start `performDriven` files, i.e. the one a signed-in owner or admin's own session made in this run. It is the only thing
+   * that lets the start gate record a PERSON receipt. Absent on every restart (the parked-stage sweep, the slot wake, a resumed run) and on a workflow started
+   * before it existed: those go through the gate as unattended and never record a person's click, whatever their attempt number.
+   */
+  personFiled?: boolean;
 }
 
 /**
@@ -233,6 +240,8 @@ export interface AdvanceModuleDeps {
   raiseEnvelopeAsk?: RaiseEnvelopeAsk | null;
   /** D#7 DP4b-2: reads a succeeded executor run's decision fields (receipts, asks, refusals) on the receipt login. Absent, `advanceDecision` answers `none`. */
   decisionIntake?: DecisionIntake | null;
+  /** D#7 start gate (b): the stage driver's call into `decideStart` on the receipt login. Absent, `advanceStartGate` lets the advance go on (nothing is recorded). */
+  startGate?: StartGatePort | null;
   /** The execution registry `cancelRun` dispatches through. Absent, a step's cancel is a no-op that the lost-run sweep backs up. */
   registry?: ExecutionTargetRegistry | null;
   /** D#483 P3, injected from apps/web the same way: the review stage's pipeline pieces. Absent, the review steps answer `review_unavailable`. */
@@ -697,6 +706,12 @@ export interface AdvanceFacade {
    * included) and the tail of each one's follow-up chain. For the workflow's wait that ran out, when it holds no run id.
    */
   advanceCancelStepRuns(who: AdvanceStepWho, step: "panel" | "spec", actionId: string): Promise<void>;
+  /**
+   * D#7 start gate (b): the start decision at the end of triage and at the entry of the short Spec, the spec step and the build. The advance was filed by a
+   * person (`performDriven`), so the click is the decision: a PERSON start receipt, never an ask; an item that came in small and triage found larger is asked
+   * (`start_after_reclassify`) and the workflow ends waiting. Answers `proceed: true` or a fixed reason it stopped (`asked`, `held`, `blocked`).
+   */
+  advanceStartGate(who: AdvanceStepWho, input: StartGateStepInput): Promise<StartGateStepOut>;
 }
 
 /** Package-internal: `runnerPool` is the runner login's pool and is captured here, never exposed. */
@@ -810,7 +825,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       }
     }
 
-    await deps.startAdvance({ accountId, userId, workItemId, actionId, haltEpoch: lifted.halt_epoch, specVersion: item.spec_version === null ? null : Number(item.spec_version), ...(respec ? { respec: true } : {}) });
+    await deps.startAdvance({ accountId, userId, workItemId, actionId, haltEpoch: lifted.halt_epoch, specVersion: item.spec_version === null ? null : Number(item.spec_version), personFiled: true, ...(respec ? { respec: true } : {}) });
     console.info(JSON.stringify({ event: respec ? "advance.respec_started" : "advance.started", work_item_id: workItemId, action_id: actionId, ...(waitReason === null ? {} : { waiting: waitReason }) }));
     if (waitReason !== null) return { result: "done", outcome: { work_item_id: workItemId, advance: "waiting", reason: waitReason, reasons: [waitReason] } };
     return { result: "done", outcome: { work_item_id: workItemId, advance: "started" } };
@@ -2031,7 +2046,15 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     for (const id of ids) await cancelItemRun(who, id);
   }
 
+  async function advanceStartGate(who: AdvanceStepWho, input: StartGateStepInput): Promise<StartGateStepOut> {
+    // Fail closed: with no gate wired nothing starts (a start that cannot be decided and recorded does not happen).
+    if (!deps.startGate) return { proceed: false, reason: "blocked", blockedBy: "start_gate_unavailable" };
+    if (!UUID_RE.test(who.accountId) || !UUID_RE.test(who.workItemId) || !UUID_RE.test(who.userId)) return { proceed: false, reason: "blocked", blockedBy: "bad_ids" };
+    return deps.startGate({ accountId: who.accountId, userId: who.userId, workItemId: who.workItemId }, input);
+  }
+
   return {
+    advanceStartGate,
     performAdvanceWorkItem,
     performRespecWorkItem,
     performAmendSpec,

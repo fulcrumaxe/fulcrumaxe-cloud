@@ -134,6 +134,7 @@ describe("a runner run's pull request moves its item at once [pg]", () => {
       advanceDecision: vi.fn(async (): Promise<DecisionStepCode> => "none"),
       advanceCancel: vi.fn(async () => undefined),
       advanceRecordEvent: vi.fn(async () => ({ recorded: true })),
+      advanceStartGate: vi.fn(async () => ({ proceed: true as const, how: "person_receipt" })),
       // With `lookupFinds`, the first review load is `findBuiltPr`'s; every other load (the review phase's) stops at once.
       advanceLoadReview: vi.fn(async () =>
         o.lookupFinds && worker.advanceLoadReview.mock.calls.length === 1

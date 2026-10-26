@@ -113,7 +113,9 @@ describe("advance_work_item [pg]", { timeout: 60_000 }, () => {
     expect(out).toEqual({ result: "done", outcome: { work_item_id: w, advance: "started" } });
     expect(t.started).toHaveLength(1);
     expect(t.started[0]).toMatchObject({ accountId: a.accountId, userId: a.userId, workItemId: w, haltEpoch: 0 });
-    expect(Object.keys(t.started[0]!).sort()).toEqual(["accountId", "actionId", "haltEpoch", "specVersion", "userId", "workItemId"]);
+    expect(Object.keys(t.started[0]!).sort()).toEqual(["accountId", "actionId", "haltEpoch", "personFiled", "specVersion", "userId", "workItemId"]);
+    // The only start that may record a person start receipt: the one a person's own session filed.
+    expect((t.started[0] as { personFiled?: boolean }).personFiled).toBe(true);
     expect((t.started[0] as { specVersion?: number | null }).specVersion).toBeNull();
   });
 

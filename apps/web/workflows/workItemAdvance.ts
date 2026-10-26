@@ -1,12 +1,12 @@
 import { sleep } from "workflow";
-import type { AdvanceRunStart, AdvanceStartArgs, AdvanceTriageResult, DecisionStepCode } from "@fx/worker";
+import type { AdvanceRunStart, AdvanceStartArgs, AdvanceTriageResult, DecisionStepCode, StartGateStepInput, StartGateStepOut } from "@fx/worker";
 import { getWorker } from "../lib/worker";
 import { getIssueReader } from "../lib/github/issueRead";
 import { openInstallationHttp } from "../lib/github/installationHttp";
 import { publishLightSpecBody, startLightSpecBody, type LightPublished } from "../lib/advanceLightSteps";
 import { publishRespecBody, startRespecBody, type RespecPublished } from "../lib/advanceRespecSteps";
 import { loadBody, runOutcomeBody, startClassifyBody, triageBody, type ClassifyOutcome, type LoadedAdvance, type TriageLoaded } from "../lib/advanceSteps";
-import { buildBody, buildFailedBody, buildOutcomeBody, cancelRunBody, cancelStepRunsBody, checkFixBody, type CheckFixOut, decisionBody, panelBody, specBody, stageBody, type BuildRunOutcome, type StepOutcome } from "../lib/advanceStageSteps";
+import { buildBody, buildFailedBody, buildOutcomeBody, cancelRunBody, cancelStepRunsBody, checkFixBody, type CheckFixOut, decisionBody, panelBody, specBody, stageBody, startGateBody, type BuildRunOutcome, type StepOutcome } from "../lib/advanceStageSteps";
 import {
   cancelBody,
   eventBody,
@@ -254,6 +254,17 @@ export async function advanceCancelStepRunsStep(accountId: string, userId: strin
   return cancelStepRunsBody(await getWorker(), { accountId, userId, workItemId, haltEpoch: 0 }, step, actionId);
 }
 
+/**
+ * D#7 start gate (b): the start decision. The advance was filed by a person's click, so the click is the decision (a PERSON start receipt, never an ask);
+ * only an item that came in small and that triage found larger is asked, and then the workflow ends waiting for the answer. The answer files the next
+ * `advance_work_item` (keyed `startask:<ask id>`), which re-enters at the item's stage (the short Spec, or the panel) and does not come back here for a
+ * small start: the pair is already started. Fixed words only.
+ */
+export async function advanceStartGateStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, input: StartGateStepInput): Promise<StartGateStepOut> {
+  "use step";
+  return startGateBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, input);
+}
+
 /** One structured line: a fixed event code and ids/codes. Never text from the issue or from a model. */
 export async function advanceLogStep(event: string, fields: Record<string, string | number | boolean | null>): Promise<void> {
   "use step";
@@ -413,6 +424,23 @@ export async function advanceMergeGateStep(accountId: string, userId: string, wo
 
 type Result = { status: string; detail?: string };
 
+/**
+ * Null: go on. Otherwise the workflow's end: waiting for an answer, a hold, or a refusal (nothing was started, nothing was spent). The gate is asked on EVERY
+ * entry. Whether the run is a person's click is the explicit fact `personFiled` (set only by the start a person's own session made), never the attempt number: a
+ * restart by the parked-stage sweep or the slot wake asks as `unattended`, so it goes on only for a pair already started (or an item not gated), and otherwise the
+ * dial decides, a hold stays, and no person receipt is recorded.
+ */
+async function startGatePhase(args: AdvanceStartArgs, itemId: string, input: Omit<StartGateStepInput, "origin">): Promise<Result | null> {
+  const gateInput: StartGateStepInput = { ...input, origin: args.personFiled === true ? "person_click" : "unattended" };
+  const out = await advanceStartGateStep(args.accountId, args.userId, itemId, args.haltEpoch, gateInput);
+  // Going on leaves the receipt as its record and no log line; a stop says why.
+  if (out.proceed) return null;
+  await advanceLogStep("advance.start_gate_stopped", { work_item_id: itemId, at: gateInput.mode, reason: out.reason, blocked_by: out.blockedBy });
+  if (out.reason === "asked") return { status: "waiting", detail: "start_ask_open" };
+  if (out.reason === "held") return { status: "stopped", detail: "start_held" };
+  return { status: "stopped", detail: `start_blocked:${out.blockedBy ?? "none"}` };
+}
+
 /** D#483 S5-k1c: the stages before the build that wait on a limit (packages/pipeline waitingStages.ts; a test holds the names). */
 type EarlyWaitStage = "classify" | "spec" | "respec" | "panel";
 /** D#483 S5-k1d: and the two after it, which wait on one head of the open pull request. */
@@ -478,16 +506,26 @@ export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promis
   // The Spec the person approved: the version read when the approval was performed (carried in the arguments), else the one
   // this load read. A newer version appearing since refuses the build and the review.
   const pinned = (read: number | null): number | null => (args.specVersion !== undefined ? args.specVersion : read);
-  if (loaded.mode === "build") return buildPhase(args, pinned(loaded.specVersion));
+  if (loaded.mode === "build") {
+    const gate = await startGatePhase(args, workItemId, { mode: "build", category: null, cameInAs: null });
+    return gate ?? buildPhase(args, pinned(loaded.specVersion));
+  }
   // Build again, for an item at Needs a person: a fresh build, unless a pull request is still open for the issue's branch.
   if (loaded.mode === "rebuild") return rebuildPhase(args, pinned(loaded.specVersion), { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.number, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode }, loaded.reviewHold === true);
   if (loaded.mode === "review") return reviewPhase(args, pinned(loaded.specVersion));
   // An item left at In progress with nothing running: look for its pull request (found: the review; none: Needs human).
   if (loaded.mode === "check_build") return checkBuildPhase(args, pinned(loaded.specVersion), loaded.executorRunId);
   // The pipeline's own root item, left at Discussing without a Spec: the panel and the Spec once more.
-  if (loaded.mode === "spec") return specPhase(args, workItemId, firstAttemptOf(args));
+  if (loaded.mode === "spec") {
+    // A click on an item whose reclassify ask is still open (or was held) answers it or decides again; an item with no such pair goes straight on.
+    const gate = await startGatePhase(args, workItemId, { mode: "spec", category: null, cameInAs: null });
+    return gate ?? specPhase(args, workItemId, firstAttemptOf(args));
+  }
   // A small, bug or doc item the pipeline triaged earlier and has no Spec: the short Spec again, from the issue as it reads now.
-  if (loaded.mode === "light") return lightPhase(args, workItemId, { category: loaded.category, title: loaded.title, body: loaded.body }, firstAttemptOf(args));
+  if (loaded.mode === "light") {
+    const gate = await startGatePhase(args, workItemId, { mode: "light", category: loaded.category, cameInAs: null });
+    return gate ?? lightPhase(args, workItemId, { category: loaded.category, title: loaded.title, body: loaded.body }, firstAttemptOf(args));
+  }
 
   let category: string;
   if (loaded.decided !== null) {
@@ -528,6 +566,12 @@ export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promis
     category = word;
   }
 
+  // The category the item came in as: one trusted label that named a small kind (bug, documentation, docs, small), and no trusted label asking for urgency. A label that
+  // DECIDED the category leaves no hint, and nothing was reclassified. The names repeat packages/pipeline's DECISIVE_LABELS and ESCALATING_LABELS (a workflow imports no value).
+  const labelKinds = new Set(loaded.hints.map((h) => h.toLowerCase()).map((h) => (h === "bug" ? "bug" : h === "documentation" || h === "docs" || h === "doc" ? "doc" : h === "small" ? "small" : "")).filter((k) => k !== ""));
+  const urgent = loaded.hints.some((h) => ["critical", "urgent", "blocker", "security"].includes(h.toLowerCase()));
+  const cameInAs: string | null = labelKinds.size === 1 && !urgent ? [...labelKinds][0]! : null;
+
   const triaged = await advanceTriageStep(accountId, workItemId, loaded, category);
   await advanceLogStep(triaged.status === "triaged" ? "advance.triaged" : "advance.stopped", {
     work_item_id: workItemId,
@@ -544,10 +588,17 @@ export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promis
       await advanceEventStep(accountId, args.userId, triaged.workItemId, { kind: "stopped", dedupeKey: `project:${actionId}`, code: "project_not_specified" });
       return { status: "stopped", detail: "project_not_specified" };
     }
+    // An item that came in small, bug or doc (a trusted label said so) and that triage found larger is asked before the panel runs, click or not.
+    if (cameInAs !== null && (triaged.category === "feature" || triaged.category === "critical")) {
+      const gate = await startGatePhase(args, triaged.workItemId, { mode: "triage_end", category: triaged.category, cameInAs });
+      if (gate !== null) return gate;
+    }
     return specPhase(args, triaged.workItemId, 0);
   }
   // Small, bug and doc run no panel: the project manager writes a short Spec straight from the issue, then the build.
   if (triaged.status === "triaged" && triaged.stage === "triaged" && triaged.workItemId && (triaged.category === "small" || triaged.category === "bug" || triaged.category === "doc")) {
+    const gate = await startGatePhase(args, triaged.workItemId, { mode: "triage_end", category: triaged.category, cameInAs });
+    if (gate !== null) return gate;
     return lightPhase(args, triaged.workItemId, { category: triaged.category, title: loaded.title, body: loaded.body }, 0);
   }
   // A question stays at Triaged, answered in its thread.

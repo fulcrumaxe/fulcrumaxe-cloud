@@ -216,7 +216,7 @@ describe('start gate (migration 0913) [pg]', () => {
     await expect(appPool.query(`INSERT INTO start_gate (account_id, work_item_id, decision_type, preset, dial_version, outcome) VALUES ($1, $2, 'start_work_small', 'cautious', 0, 'asked')`, [a.accountId, wi])).rejects.toMatchObject({ code: '42501' });
     const { askId } = await raise(a, wi);
     const res = await answerAsk(as(a), { askId: askId!, choice: 'hold' });
-    await expect(admin.query(`UPDATE start_gate SET outcome = 'started' WHERE work_item_id = $1`, [wi])).rejects.toMatchObject({ message: expect.stringContaining('start_gate_terminal') });
+    await expect(admin.query(`UPDATE start_gate SET outcome = 'started' WHERE work_item_id = $1`, [wi])).rejects.toMatchObject({ message: expect.stringContaining('start_gate_frozen') });
     await expect(admin.query(`UPDATE start_gate SET preset = 'autonomous' WHERE work_item_id = $1`, [wi])).rejects.toMatchObject({ message: expect.stringContaining('start_gate_frozen') });
     expect(res.receiptId).toBeTruthy();
     // A claim whose ask is never attached rolls back at commit.

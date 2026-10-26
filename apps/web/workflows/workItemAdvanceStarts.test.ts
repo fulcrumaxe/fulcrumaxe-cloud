@@ -57,6 +57,7 @@ function build(o: Options = {}) {
     advanceBuild: vi.fn(async (..._args: unknown[]): Promise<AdvanceStepResult> => ({ status: "refused", reason: "no_model" })),
     advanceBuildFailed: vi.fn(async (): Promise<AdvanceStepResult> => ({ status: "recorded", stage: "needs_human" })),
     advanceRecordEvent: vi.fn(async (..._args: unknown[]) => ({ recorded: true })),
+    advanceStartGate: vi.fn(async (..._args: unknown[]) => ({ proceed: true as const, how: "person_receipt" })),
     advanceLoadSpecText: vi.fn(async () => ({ version: 4, body: "SPEC BODY" })),
     advanceCancel: vi.fn(async () => undefined),
     advanceLightSpec: vi.fn(async () => ({ status: "published", reason: null, version: 1 })),
