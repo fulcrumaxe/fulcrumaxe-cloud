@@ -157,7 +157,7 @@ describe('token-inventory: write scopes open only the routes that declare them',
       (r) => `${r.operationId}:${r.tokenSelfOnly ? 'self' : r.scope}`,
     );
     const read = [
-      'getAccount', 'listRuns', 'getRun', 'listWorkItems', 'getWorkItem', 'getStats', 'getWorkItemTimeline',
+      'getAccount', 'listRuns', 'getRun', 'listWorkItems', 'listDecisionAsks', 'getWorkItem', 'getStats', 'getWorkItemTimeline',
       'listWebhookEndpoints', 'getWebhookEndpoint', 'listWebhookDeliveries', 'listEvents', 'listRunEvents',
       'getModelConnection', 'getVercelConnection', 'listRepos', 'getRepo', 'getRepoSettings', 'getRepoPairing', 'listRoles', 'getUsage', 'getBudgets',
       'getRunLimits', 'getRunAction', 'exportRunEvents', 'listDiscussions', 'getDiscussion',

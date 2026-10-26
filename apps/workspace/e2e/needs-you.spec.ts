@@ -62,6 +62,11 @@ interface Mock {
   retryAfter?: string;
   posts: string[];
 }
+/** The ask list as the API pages it: one ask a page, the cursor is the index of the next one, so the app must follow it to show them all. */
+const askPage = (asks: unknown[], cursor: string | null) => {
+  const at = cursor === null ? 0 : Number(cursor);
+  return { data: asks.slice(at, at + 1), next_cursor: at + 1 < asks.length ? String(at + 1) : null };
+};
 const json = (route: Route, status: number, body: unknown) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
 async function setup(page: Page, tweak: Partial<Mock> = {}) {
@@ -83,8 +88,8 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
       if (mock.listStatus !== 200) return json(route, mock.listStatus, { error: { code: "server_error", message: SERVER_TEXT, request_id: "r" } });
       return json(route, 200, { requests: mock.requests.filter((r) => r.state === "open"), truncated: false });
     }
-    if (p === "/api/v1/decision-asks" && req.method() === "GET") return json(route, 200, { asks: mock.asks, not_shown: mock.notShown });
-    if (p === "/api/v1/merge-ready" && req.method() === "GET") return json(route, 200, { items: mock.merges, not_shown: 0 });
+    if (p === "/api/v1/decision-asks" && req.method() === "GET") return json(route, 200, askPage(mock.asks, new URL(req.url()).searchParams.get("cursor")));
+    if (p === "/api/v1/merge-ready" && req.method() === "GET") return json(route, 200, { items: mock.merges, not_shown: mock.notShown });
     if (p === "/api/v1/stalled-items" && req.method() === "GET") return json(route, 200, { items: mock.stalled, not_shown: 0 });
     const answerMatch = p.match(/^\/api\/v1\/decision-asks\/([^/]+)\/answer$/);
     if (answerMatch && req.method() === "POST") {
@@ -353,6 +358,24 @@ test.describe("D#598 P8c: Needs you", () => {
     await expect(t(page, "ny-link")).toHaveCount(0);
     await expect(page.locator(`${WIN} .ny-link`)).toHaveCount(0);
     await expect(t(page, "ny-row").locator("button")).toHaveCount(0);
+    await clean(page, errors);
+  });
+
+  test("asks on two pages are each shown once, in order", async ({ page }) => {
+    const { errors } = await setup(page, { requests: [], asks: [ask({ id: "a-1", label: "First decision" }), ask({ id: "a-2", label: "Second decision" })] });
+    await open(page);
+    await expect(page.locator(`${WIN} h2`)).toHaveText("Needs you (2)");
+    await expect(t(page, "ny-title")).toHaveText(["First decision", "Second decision"]);
+    await expect(t(page, "ny-more-asks")).toHaveCount(0);
+    await clean(page, errors);
+  });
+
+  test("past five pages of asks the window says so in words, not a number", async ({ page }) => {
+    const asks = [1, 2, 3, 4, 5, 6].map((n) => ask({ id: `a-${n}`, label: `Decision ${n}` }));
+    const { errors } = await setup(page, { requests: [], asks });
+    await open(page);
+    await expect(page.locator(`${WIN} h2`)).toHaveText("Needs you (5)");
+    await expect(t(page, "ny-more-asks")).toHaveText("More decisions are waiting than this list shows.");
     await clean(page, errors);
   });
 

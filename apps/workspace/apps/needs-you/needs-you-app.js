@@ -174,6 +174,7 @@ function mountApp(contentEl) {
     setText(alertEl, s.error);
     content.replaceChildren(body);
     if (s.status === "ready" && s.notShown > 0) content.appendChild(h("p", { class: "ny-muted", "data-testid": "ny-not-shown" }, notShownWords(s.notShown)));
+    if (s.status === "ready" && s.moreAsks) content.appendChild(h("p", { class: "ny-muted", "data-testid": "ny-more-asks" }, WORDS.moreAsks));
     if (s.status === "ready" && s.truncated) content.appendChild(h("p", { class: "ny-muted", "data-testid": "ny-older" }, WORDS.older));
     if (heldKey) {
       const row = [...content.querySelectorAll("[data-id]")].find((r) => r.getAttribute("data-id") === heldKey[0]);

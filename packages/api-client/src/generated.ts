@@ -1790,10 +1790,13 @@ export interface Operations {
   };
   listDecisionAsks: {
     path: undefined;
-    query: undefined;
+    query: {
+      limit?: string;
+      cursor?: string;
+    };
     body: undefined;
     response: {
-      asks: Array<{
+      data: Array<{
         id: string;
         work_item_id: string;
         decision_type: string;
@@ -1808,7 +1811,7 @@ export interface Operations {
         timeout_outcome: "stop_and_flag" | "proceed_recommended";
         state: "open" | "overdue";
       }>;
-      not_shown: number;
+      next_cursor: string | null;
     };
   };
   answerDecisionAsk: {
@@ -4939,12 +4942,12 @@ export const operations = {
   listDecisionAsks: {
     method: "GET",
     path: "/api/v1/decision-asks",
-    tokenAccess: false,
-    scope: null,
+    tokenAccess: true,
+    scope: "read",
     tokenSelfOnly: false,
     idempotency: "never",
     pathParams: [],
-    queryParams: [],
+    queryParams: ["limit","cursor"],
     hasBody: false,
   },
   answerDecisionAsk: {
@@ -4953,7 +4956,7 @@ export const operations = {
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,
-    idempotency: "never",
+    idempotency: "optional",
     pathParams: ["id"],
     queryParams: [],
     hasBody: true,

@@ -216,8 +216,12 @@ describe('answerAsk (DP11b)', () => {
     const page = await listPendingAsks(ctx);
     expect(page.asks.map((q) => q.id)).toEqual([z, y, x]);
     expect(page.asks[0]).toMatchObject({ state: 'overdue', options: OPTIONS, proposed: 'apply', rationale: 'because', timeoutOutcome: 'stop_and_flag' });
-    expect(page).toMatchObject({ hasMore: false, total: 3 });
-    expect(await listPendingAsks(ctx, { limit: 2 })).toMatchObject({ hasMore: true, total: 3, asks: [{ id: z }, { id: y }] });
+    expect(page.nextCursor).toBeNull();
+    const first = await listPendingAsks(ctx, { limit: 2 });
+    expect(first.asks.map((q) => q.id)).toEqual([z, y]);
+    const rest = await listPendingAsks(ctx, { limit: 2, cursor: first.nextCursor! });
+    expect(rest.asks.map((q) => q.id)).toEqual([x]);
+    expect(rest.nextCursor).toBeNull();
     expect((await listPendingAsks({ pool: appPool, principal: { accountId: b.accountId, userId: b.userId } })).asks.map((q) => q.id)).not.toContain(x);
   });
 });

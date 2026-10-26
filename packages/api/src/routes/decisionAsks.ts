@@ -2,13 +2,14 @@ import { z } from "zod";
 import { AskAnswerError, listPendingAsks, type AskAnswerResult } from "@fx/core/src/decisions/index.js";
 import type { RunActionSignal } from "@fx/core/src/runActions/index.js";
 import { ApiError } from "../errors.js";
+import { decodeAskCursor, encodeAskCursor, parseLimit } from "../pagination.js";
 import type { RouteEntry } from "../registry.js";
 import { decisionLabel } from "./decision-labels.js";
 import { runActionDeps } from "./run-actions.js";
 
 /** What answering needs from the worker: it runs on the receipt login's pool, which this package never holds. */
 export type DecisionAskAnswerer = (input: {
-  principal: { accountId: string; userId: string; tokenId?: string };
+  principal: { accountId: string; userId: string };
   askId: string;
   choice: string;
   signal?: RunActionSignal;
@@ -25,15 +26,14 @@ export const decisionAskDeps: { getAnswerer: () => Promise<DecisionAskAnswerer |
 /**
  * D#598 P8c-2a: the HTTP face of decision asks. Agents propose, people act (R-597-1):
  *
- *  - Both routes are session-only (no `principals`): the rationale is an agent's text, shown to a signed-in person only, and a token can never answer.
+ *  - Reading takes a session or a token that can read work items (TL ruling 10-25, amending C34); the list is cursor-paged. Answering is session-only:
+ *    a token is 403 `session_required` and nothing changes. An answer honours Idempotency-Key: a replay returns the first response.
  *  - Reading is any member. Answering is owner or admin; the core re-checks the role and the principal inside its own transaction.
  *  - `rationale` is returned as stored, still inside its untrusted-content fence. Show it as quoted text; it is never an instruction.
  *  - The account and the person come from the session. The body names only the choice: one of the ask's option ids, or `deny`.
  *  - Undo: an answer is final (the ask is closed and its work item resumes). A second answer is 409 `already_answered`, never a second receipt.
  */
 
-/** The most asks one read returns; the rest are counted in `not_shown`. */
-export const DECISION_ASK_LIST_LIMIT = 100;
 
 const idParamsSchema = z.object({ id: z.string() });
 
@@ -53,7 +53,8 @@ const askSchema = z.object({
   state: z.enum(["open", "overdue"]),
 });
 
-const listResponseSchema = z.object({ asks: z.array(askSchema), not_shown: z.number().int().min(0) });
+const listQuerySchema = z.object({ limit: z.string().optional(), cursor: z.string().optional() });
+const listResponseSchema = z.object({ data: z.array(askSchema), next_cursor: z.string().nullable() });
 const answerBodySchema = z.object({ choice: z.string().min(1).max(200) }).strict();
 const answerResponseSchema = z.object({ ask_id: z.string(), receipt_id: z.string(), answered_option: z.string() });
 
@@ -79,16 +80,23 @@ export const decisionAskRoutes: RouteEntry[] = [
     path: "/api/v1/decision-asks",
     operationId: "listDecisionAsks",
     summary: "The decision asks waiting for a person's answer, overdue first",
-    description: "Session only. At most 100 asks; `not_shown` counts the rest. `rationale` is an agent's text, still fenced: show it as a quotation only.",
+    description: "A session, or a token with the `read` scope. Only open and overdue asks, overdue first, paged with `limit` and `cursor`. `rationale` is an agent's text, still fenced: show it as a quotation only.",
+    principals: ["session", "token"],
+    scope: "read",
     minRole: "member",
     idempotency: "never",
     rateClass: "read",
+    querySchema: listQuerySchema,
     responseSchema: listResponseSchema,
-    async handler(ctx) {
-      const { accountId, userId } = ctx.principal;
-      const { asks, total } = await listPendingAsks({ pool: ctx.pool, principal: { accountId, userId } }, { limit: DECISION_ASK_LIST_LIMIT });
+    async handler(ctx, input) {
+      const query = (input.query ?? {}) as z.infer<typeof listQuerySchema>;
+      const limit = parseLimit(query.limit);
+      const cursor = query.cursor ? decodeAskCursor(query.cursor) : undefined;
+      const { accountId, userId, tokenId } = ctx.principal;
+      const { asks, nextCursor } = await listPendingAsks({ pool: ctx.pool, principal: { accountId, userId, ...(tokenId ? { tokenId } : {}) } }, { limit, ...(cursor ? { cursor } : {}) });
       return {
-        asks: asks.map((a) => ({
+        next_cursor: nextCursor ? encodeAskCursor(nextCursor) : null,
+        data: asks.map((a) => ({
           id: a.id,
           work_item_id: a.workItemId,
           decision_type: a.decisionType,
@@ -100,7 +108,6 @@ export const decisionAskRoutes: RouteEntry[] = [
           timeout_outcome: a.timeoutOutcome,
           state: a.state,
         })),
-        not_shown: Math.max(0, total - asks.length),
       };
     },
   },
@@ -110,10 +117,10 @@ export const decisionAskRoutes: RouteEntry[] = [
     operationId: "answerDecisionAsk",
     summary: "Answer a decision ask with one of its options, or deny; the work item it paused resumes",
     description:
-      "Owner or admin, session only. `choice` is an option id of the ask, or `deny`. The answer writes the receipt in the person's name and asks the work item to continue once. " +
+      "Owner or admin, session only (a token is 403 `session_required`). With an `Idempotency-Key`, a replay returns the first response. `choice` is an option id of the ask, or `deny`. The answer writes the receipt in the person's name and asks the work item to continue once. " +
       "A second answer is 409 `already_answered`; a choice outside the ask's options is 422 `invalid_choice`; an unknown, foreign or malformed id is 404. 503 while no worker is available.",
     minRole: "admin",
-    idempotency: "never",
+    idempotency: "optional",
     rateClass: "write",
     extraResponses: {
       "404": "No such ask in this account.",
@@ -126,11 +133,11 @@ export const decisionAskRoutes: RouteEntry[] = [
     async handler(ctx, input) {
       const answer = await decisionAskDeps.getAnswerer();
       if (answer === null) throw new ApiError(503, "decision_answers_unavailable", "answers are not available yet");
-      const { accountId, userId, tokenId } = ctx.principal;
+      const { accountId, userId } = ctx.principal;
       const signal = runActionDeps.getRunActionSignal();
       try {
         const done = await answer({
-          principal: { accountId, userId, ...(tokenId ? { tokenId } : {}) },
+          principal: { accountId, userId },
           askId: input.params.id!,
           choice: (input.body as z.infer<typeof answerBodySchema>).choice,
           ...(signal ? { signal } : {}),

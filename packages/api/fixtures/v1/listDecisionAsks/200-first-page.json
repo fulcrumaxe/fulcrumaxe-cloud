@@ -1,0 +1,20 @@
+{
+  "data": [
+    {
+      "id": "5c0d9e2a-8b41-4f6e-9a37-2d1e4c6b8a90",
+      "work_item_id": "9d2c7b1e-5f3a-4e8b-8a6d-1c2b3a4d5e66",
+      "decision_type": "dependency_patch_bump",
+      "label": "Patch-level dependency updates",
+      "options": [
+        { "id": "bump_now", "label": "Update the dependency now" },
+        { "id": "leave_it", "label": "Leave it as it is" }
+      ],
+      "proposed": "bump_now",
+      "rationale": "<<UNTRUSTED EXTERNAL CONTENT>>\nThe patch release fixes a crash we hit in the last run.\n<<END UNTRUSTED>>",
+      "answer_due_at": "2026-10-23T09:00:00.000Z",
+      "timeout_outcome": "stop_and_flag",
+      "state": "open"
+    }
+  ],
+  "next_cursor": "eyJ2IjoiYTEiLCJvdmVyZHVlIjpmYWxzZSwiZHVlX2F0IjoiMjAyNi0xMC0yM1QwOTowMDowMC4wMDAwMDBaIiwiaWQiOiI1YzBkOWUyYS04YjQxLTRmNmUtOWEzNy0yZDFlNGM2YjhhOTAifQ"
+}

@@ -190,3 +190,40 @@ export function decodeQueueCursor(cursor: string): { priority: number; queueRank
   }
   return { priority: p.priority!, queueRank: p.queue_rank, createdAt: p.created_at, id: p.id };
 }
+
+interface AskCursorPayload {
+  v: "a1";
+  overdue: boolean;
+  due_at: string;
+  id: string;
+}
+
+/** The decision-ask list's cursor: versioned, carrying the whole order key (overdue first, due time, id). */
+export function encodeAskCursor(key: { overdue: boolean; answerDueAt: string; id: string }): string {
+  const payload: AskCursorPayload = { v: "a1", overdue: key.overdue, due_at: key.answerDueAt, id: key.id };
+  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+}
+
+/** InvalidCursorError (422) for anything that is not a well-formed `a1` payload, including another list's cursor. */
+export function decodeAskCursor(cursor: string): { overdue: boolean; answerDueAt: string; id: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+  } catch {
+    throw new InvalidCursorError();
+  }
+  const p = parsed as Partial<AskCursorPayload> | null;
+  if (
+    typeof p !== "object" ||
+    p === null ||
+    p.v !== "a1" ||
+    typeof p.overdue !== "boolean" ||
+    typeof p.due_at !== "string" ||
+    !isValidCursorTimestamp(p.due_at) ||
+    typeof p.id !== "string" ||
+    !cursorIdSchema.safeParse(p.id).success
+  ) {
+    throw new InvalidCursorError();
+  }
+  return { overdue: p.overdue, answerDueAt: p.due_at, id: p.id };
+}

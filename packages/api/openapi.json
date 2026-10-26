@@ -15511,10 +15511,33 @@
       "get": {
         "operationId": "listDecisionAsks",
         "summary": "The decision asks waiting for a person's answer, overdue first",
-        "description": "Session only. At most 100 asks; `not_shown` counts the rest. `rationale` is an agent's text, still fenced: show it as a quotation only.",
+        "description": "A session, or a token with the `read` scope. Only open and overdue asks, overdue first, paged with `limit` and `cursor`. `rationale` is an agent's text, still fenced: show it as a quotation only.",
         "security": [
           {
             "session": []
+          },
+          {
+            "token": [
+              "read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -15526,7 +15549,7 @@
                   "$schema": "https://json-schema.org/draft/2020-12/schema",
                   "type": "object",
                   "properties": {
-                    "asks": {
+                    "data": {
                       "type": "array",
                       "items": {
                         "type": "object",
@@ -15601,15 +15624,16 @@
                         "additionalProperties": false
                       }
                     },
-                    "not_shown": {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 9007199254740991
+                    "next_cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     }
                   },
                   "required": [
-                    "asks",
-                    "not_shown"
+                    "data",
+                    "next_cursor"
                   ],
                   "additionalProperties": false
                 }
@@ -15656,6 +15680,25 @@
               }
             }
           },
+          "429": {
+            "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
           "500": {
             "description": "Error",
             "content": {
@@ -15673,12 +15716,13 @@
       "post": {
         "operationId": "answerDecisionAsk",
         "summary": "Answer a decision ask with one of its options, or deny; the work item it paused resumes",
-        "description": "Owner or admin, session only. `choice` is an option id of the ask, or `deny`. The answer writes the receipt in the person's name and asks the work item to continue once. A second answer is 409 `already_answered`; a choice outside the ask's options is 422 `invalid_choice`; an unknown, foreign or malformed id is 404. 503 while no worker is available.",
+        "description": "Owner or admin, session only (a token is 403 `session_required`). With an `Idempotency-Key`, a replay returns the first response. `choice` is an option id of the ask, or `deny`. The answer writes the receipt in the person's name and asks the work item to continue once. A second answer is 409 `already_answered`; a choice outside the ask's options is 422 `invalid_choice`; an unknown, foreign or malformed id is 404. 503 while no worker is available.",
         "security": [
           {
             "session": []
           }
         ],
+        "x-fx-idempotency": "optional",
         "parameters": [
           {
             "name": "id",
