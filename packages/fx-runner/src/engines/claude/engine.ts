@@ -16,6 +16,7 @@ import { MIN_CLAUDE_VERSION, versionSupported, type BinarySource } from "./pin.j
 import { EngineRefusal } from "./refusal.js";
 import { DEFAULT_KILL_GRACE_MS, OWN_PROCESS_GROUP, terminateGroup } from "./processGroup.js";
 import { readSessionIndex, recordSession } from "./session.js";
+import { bashSandboxUnusableFor } from "./bashSandboxProbe.js";
 import { writeJobFiles } from "./settingsFile.js";
 import { LineBuffer, createRunLog, nearLimitOf, projectLocalOnly, type StageMarks } from "./stream.js";
 
@@ -143,6 +144,8 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
 
     const excludes = (opts as EngineStartOptions).excludes;
     const files = writeJobFiles(jobDir, workdir, opts.role, config.sandboxSettings, config.protectedPaths, excludes, (opts as EngineStartOptions).spillDir, (opts as EngineStartOptions).checkArgv);
+    // The shell sandbox must be able to start a Bash call under this job's own rules. If bubblewrap refuses, every Bash call would fail and the agent would loop to "incomplete", so the run ends now.
+    if (await bashSandboxUnusableFor(files.settings, workdir, path.join(jobDir, "probe"), { env, spawn: spawnFn, launch: config.launch })) throw new EngineRefusal("sandbox_unusable");
     const argv = claudeArgv({ cliModel: opts.model, roleTools, allowRules: [...confineFileTools(roleTools, path.resolve(workdir)), ...((opts as EngineStartOptions).spillDir === undefined ? [] : readRulesFor((opts as EngineStartOptions).spillDir!))], ...files, ...(resumeSessionId === undefined ? {} : { resumeSessionId }) });
     const secrets = [env.ANTHROPIC_API_KEY, env[SUBSCRIPTION_TOKEN_VAR]].filter((value): value is string => typeof value === "string");
     const log = createRunLog(config.logDir, opts.runId, secrets);

@@ -44,7 +44,7 @@ export interface SandboxTools {
 }
 
 /** The first absolute directory of `searchPath` that holds an executable file called `name`, joined to it; undefined when none does. */
-function findExecutable(name: string, searchPath: string): string | undefined {
+export function findExecutable(name: string, searchPath: string): string | undefined {
   for (const dir of searchPath.split(path.delimiter)) {
     if (dir === "" || !path.isAbsolute(dir)) continue;
     const candidate = path.join(dir, name);

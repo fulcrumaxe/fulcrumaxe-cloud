@@ -122,13 +122,17 @@ describe("workspaceProtectedEditRules: the file tools honour the sandbox's prote
 
   it("has a rule for every name of the shared list, the .env files and .git", () => {
     for (const name of SANDBOX_PROTECTED_FILES) expect(deny).toContain(`Edit(//home/jane/work/run-1/${name})`);
-    expect(deny).toContain("Edit(//home/jane/work/run-1/.git/**)");
+    expect(deny).toContain("Edit(//home/jane/work/run-1/.git/hooks/**)");
+    expect(deny).toContain("Edit(//home/jane/work/run-1/.git/config)");
+    // Never the whole folder: a read-only bind over it ends every Bash call before it starts (bashSandbox.bwrap.test.ts).
+    expect(deny).not.toContain("Edit(//home/jane/work/run-1/.git)");
+    expect(deny).not.toContain("Edit(//home/jane/work/run-1/.git/**)");
     expect(deny).toContain("Edit(//home/jane/work/run-1/.env.*)");
   });
 
   it("denies the lock file, .npmrc, .env, a nested .env and .git/config, and allows src/foo.ts", () => {
-    for (const f of ["pnpm-lock.yaml", ".npmrc", ".gitmodules", ".env", ".env.local", "apps/web/.env", ".git/config", ".git/hooks/pre-commit", ".git"]) expect(denied(`${WS}/${f}`), f).toBe(true);
-    for (const f of ["src/foo.ts", "package.json", "apps/web/pnpm-lock.yaml.md", "environment.ts", "src/.github/x.yml"]) expect(denied(`${WS}/${f}`), f).toBe(false);
+    for (const f of ["pnpm-lock.yaml", ".npmrc", ".gitmodules", ".env", ".env.local", "apps/web/.env", ".git/config", ".git/hooks/pre-commit"]) expect(denied(`${WS}/${f}`), f).toBe(true);
+    for (const f of ["src/foo.ts", "package.json", "apps/web/pnpm-lock.yaml.md", "environment.ts", "src/.github/x.yml", ".git/index", ".git/refs/heads/x"]) expect(denied(`${WS}/${f}`), f).toBe(false);
     expect(confineFileTools(roleToolsFor("executor"), WS)).toContain("Edit(//home/jane/work/run-1/**)");
   });
 

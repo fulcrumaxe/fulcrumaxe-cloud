@@ -101,6 +101,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/engines/claude/session.ts": ["crypto", "fs", "path"], // crypto: random temp-file names for the index write
   "src/engines/claude/processGroup.ts": [],
   "src/engines/claude/settingsFile.ts": ["fs", "path"],
+  "src/engines/claude/bashSandboxProbe.ts": ["fs", "path"], // the throwaway workspace the start-up probe builds and removes
   "src/engines/claude/stream.ts": ["fs", "path"],
   // The host sandbox tier and the job runner: directories and paths on this machine, and the OS name for platform detection. No child processes.
   "src/job/workspace.ts": ["fs", "path"],
