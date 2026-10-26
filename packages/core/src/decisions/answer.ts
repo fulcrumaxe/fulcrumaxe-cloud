@@ -5,6 +5,8 @@ import { DIAL_VERSION_CATALOGUE_DEFAULT, ReceiptWriteError, writeReceipt } from 
 import { emitDomainEvent } from '../domain-events/emit.js';
 import { announceNewRunAction, type RunActionSignal } from '../runActions/index.js';
 import { withTenant } from '../tenancy/withTenant.js';
+import { answerStartAsk } from './startAnswer.js';
+import { startGateForAsk } from '@fx/db/src/startGate.js';
 
 /**
  * D#7 DP11b (DP-C9): the answer service. One transaction on the RECEIPT pool, under `withTenant` with the
@@ -69,6 +71,7 @@ export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promi
   const { accountId, userId, tokenId } = ctx.principal;
   const choice = input.choice;
   let resumeActionId: string | null = null;
+  let startActionId: string | null = null;
   // 1. Principal checks.
   if (tokenId !== undefined) throw new AskAnswerError(403, 'session_required');
   try {
@@ -87,7 +90,12 @@ export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promi
       // 3-5. Only a pending ask; a choice of this ask's or 'deny'; a run to hang the receipt on (DP-C3 3b-2).
       if (ask.state !== 'open' && ask.state !== 'overdue') throw new AskAnswerError(409, 'already_answered');
       if (typeof choice !== 'string' || (choice !== 'deny' && !ask.options.some((o) => o.id === choice))) throw new AskAnswerError(422, 'invalid_choice');
-      if (ask.run_id === null) throw new AskAnswerError(409, 'ask_no_run');
+      if (ask.run_id === null) {
+        // A start ask (D#7 start gate) hangs on the work item, not a run. Any other ask without a run still has nothing to resume.
+        const gate = await startGateForAsk(client, ask.id);
+        if (gate === null) throw new AskAnswerError(409, 'ask_no_run');
+        return answerStartAsk(client, { accountId, ask, gate, choice, onAction: (id) => { startActionId = id; } });
+      }
       // 6. The dial version in force now; 0 (the catalogue default) when there is no row or no repo.
       const dial = ask.repo_id === null ? null : await getCurrentDialSetting(client, ask.repo_id, ask.decision_type);
       // 7. The receipt: rejectedAlternative is the recommendation the person turned down, or 'deny' when they took it.
@@ -125,6 +133,7 @@ export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promi
       return { askId: ask.id, receiptId: receipt.id, answeredOption: choice };
     });
     if (resumeActionId !== null && ctx.signal) await announceNewRunAction({ signal: ctx.signal }, { actionId: resumeActionId, accountId, kind: 'resume_decision' });
+    if (startActionId !== null && ctx.signal) await announceNewRunAction({ signal: ctx.signal }, { actionId: startActionId, accountId, kind: 'advance_work_item' });
     return result;
   } catch (err) {
     if (err instanceof AskAnswerDefinerError) throw new AskAnswerError(...DEFINER_ERRORS[err.code]);
