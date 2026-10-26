@@ -57,6 +57,8 @@ export interface RunActionsWorker {
   performAmendSpec?(actionId: string): Promise<PerformResult>;
   /** Optional the same way: a worker without it refuses `resume_unavailable`. Resumes an item parked on an answered ask (D#7 DP11c). */
   performResumeDecision?(actionId: string): Promise<PerformResult>;
+  /** Optional the same way: a worker without it refuses `continue_unavailable`. Continues an item parked at a run limit, on a customer's click (D#2 H14c-3-3b-4). */
+  performContinueWorkItem?(actionId: string): Promise<PerformResult>;
 }
 
 /** A performer is handed the action id and nothing else: the facade derives who it runs as from the database. */
@@ -72,6 +74,7 @@ const PERFORMERS: Readonly<Record<string, Performer>> = Object.freeze({
   respec_work_item: async (worker, actionId) => (await worker.performRespecWorkItem?.(actionId)) ?? { result: "refused", errorCode: "respec_unavailable" },
   amend_spec_work_item: async (worker, actionId) => (await worker.performAmendSpec?.(actionId)) ?? { result: "refused", errorCode: "amend_unavailable" },
   resume_decision: async (worker, actionId) => (await worker.performResumeDecision?.(actionId)) ?? { result: "refused", errorCode: "resume_unavailable" },
+  continue_work_item: async (worker, actionId) => (await worker.performContinueWorkItem?.(actionId)) ?? { result: "refused", errorCode: "continue_unavailable" },
 });
 
 /** The performer for a kind, or undefined (a kind nobody performs is settled refused, never retried). */

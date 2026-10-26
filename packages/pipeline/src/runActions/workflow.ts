@@ -58,6 +58,8 @@ function errorCodeFor(err: unknown): string {
   if (name === "ResumeDeferredError") return "resume_deferred";
   if (name === "ResumePausedError") return "resume_paused";
   if (name === "AuthorCheckUnavailableError") return "author_check_unavailable";
+  // D#2 H14c-3-3b-4: another caller is deciding the item right now. Retried with backoff; at the attempt cap the settle writes `failed busy`.
+  if (name === "ContinueBusyError") return "busy";
   return "perform_failed";
 }
 
