@@ -193,3 +193,27 @@ export async function writeSubItemApprovalReceipt(client: PoolClient, input: Sub
   );
   return { id: rows[0]!.o_id, replayed: rows[0]!.o_replayed };
 }
+
+export interface SubItemPolicyReceiptInput extends Omit<SubItemApprovalReceiptInput, 'dialVersion'> {
+  /** The person approval row the launch relied on. */
+  approvalId: string;
+  /** `launch` (Autonomous) or `announce` (Balanced: the card says so). */
+  chosen: 'launch' | 'announce';
+  dialVersion: number;
+}
+
+/**
+ * D#483 S5-b2a part 2 (migration 0917): the receipt the DIAL leaves when it launches a sub-item without a click. The actor is `policy`, written by the definer,
+ * and a session that has a person (or a token) is refused: a person's Approve is `writeSubItemApprovalReceipt`. It lands on the same unique row as the person's,
+ * so one key under one Spec version has one receipt whoever wrote it, and a replay answers it (`replayed`) and writes nothing.
+ */
+export async function writeSubItemPolicyReceipt(client: PoolClient, input: SubItemPolicyReceiptInput): Promise<{ id: string; replayed: boolean }> {
+  if (!isText(input.runId) || !isText(input.workItemId) || !isText(input.specVersionId) || !isText(input.approvalId)) throw new ReceiptWriteError('receipt_missing_run_id');
+  if (!SUB_ITEM_KEY.test(input.key) || (input.chosen !== 'launch' && input.chosen !== 'announce')) throw new ReceiptWriteError('receipt_chosen_invalid');
+  if (!Number.isInteger(input.dialVersion) || input.dialVersion < DIAL_VERSION_CATALOGUE_DEFAULT || input.dialVersion > INT4_MAX) throw new ReceiptWriteError('receipt_invalid_dial_version');
+  const { rows } = await client.query<{ o_id: string; o_replayed: boolean }>(
+    'SELECT o_id, o_replayed FROM sub_item_policy_receipt_write($1::uuid, $2::text, $3::uuid, $4::uuid, $5::uuid, $6::text, $7::integer, $8::integer)',
+    [input.workItemId, input.key, input.specVersionId, input.runId, input.approvalId, input.chosen, input.dialVersion, CATALOGUE_VERSION],
+  );
+  return { id: rows[0]!.o_id, replayed: rows[0]!.o_replayed };
+}

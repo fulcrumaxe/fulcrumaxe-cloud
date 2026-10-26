@@ -1,12 +1,12 @@
 import { sleep } from "workflow";
-import type { AdvanceContinueOut, ContinuationSite, AdvanceRunStart, AdvanceStartArgs, AdvanceTriageResult, DecisionStepCode, StartGateStepInput, StartGateStepOut } from "@fx/worker";
+import type { AdvanceContinueOut, ContinuationSite, AdvanceRunStart, AdvanceStartArgs, AdvanceTriageResult, DecisionStepCode, FixGateStepInput, FixGateStepOut, StartGateStepInput, StartGateStepOut } from "@fx/worker";
 import { getWorker } from "../lib/worker";
 import { getIssueReader } from "../lib/github/issueRead";
 import { openInstallationHttp } from "../lib/github/installationHttp";
 import { publishLightSpecBody, startLightSpecBody, type LightPublished } from "../lib/advanceLightSteps";
 import { publishRespecBody, startRespecBody, type RespecPublished } from "../lib/advanceRespecSteps";
 import { loadBody, runOutcomeBody, startClassifyBody, triageBody, type ClassifyOutcome, type LoadedAdvance, type TriageLoaded } from "../lib/advanceSteps";
-import { buildBody, buildFailedBody, buildOutcomeBody, cancelRunBody, cancelStepRunsBody, checkFixBody, continueBody, type CheckFixOut, decisionBody, panelBody, specBody, stageBody, startGateBody, type BuildRunOutcome, type StepOutcome } from "../lib/advanceStageSteps";
+import { buildBody, buildFailedBody, buildOutcomeBody, cancelRunBody, cancelStepRunsBody, checkFixBody, continueBody, type CheckFixOut, decisionBody, fixGateBody, panelBody, specBody, stageBody, startGateBody, type BuildRunOutcome, type StepOutcome } from "../lib/advanceStageSteps";
 import {
   cancelBody,
   eventBody,
@@ -282,6 +282,15 @@ export async function advanceStartGateStep(accountId: string, userId: string, wo
   return startGateBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, input);
 }
 
+/**
+ * D#483 S5-b2a part 2: the fix-round gate (a review fix round only). Cautious asks, Balanced writes its receipt and the card says so, an unknown state asks or stops.
+ * Fixed words only. Not a start: nothing here reserves or spends.
+ */
+export async function advanceFixGateStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, input: FixGateStepInput): Promise<FixGateStepOut> {
+  "use step";
+  return fixGateBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, input);
+}
+
 /** One structured line: a fixed event code and ids/codes. Never text from the issue or from a model. */
 export async function advanceLogStep(event: string, fields: Record<string, string | number | boolean | null>): Promise<void> {
   "use step";
@@ -456,6 +465,20 @@ async function startGatePhase(args: AdvanceStartArgs, itemId: string, input: Omi
   if (out.reason === "asked") return { status: "waiting", detail: "start_ask_open" };
   if (out.reason === "held") return { status: "stopped", detail: "start_held" };
   return { status: "stopped", detail: `start_blocked:${out.blockedBy ?? "none"}` };
+}
+
+/**
+ * D#483 S5-b2a part 2: null to go on with the review fix round, else the workflow's end. An ask ends it waiting (the answer files one advance that comes back here
+ * and finds the receipt); everything else that is not a go is a recorded stop. Never called for a person's Request changes round or for a continuation.
+ */
+async function fixGatePhase(args: AdvanceStartArgs): Promise<Result | null> {
+  const out = await advanceFixGateStep(args.accountId, args.userId, args.workItemId, args.haltEpoch, { personFiled: args.personFiled === true });
+  if (out.proceed) return null;
+  await advanceLogStep("advance.fix_gate_stopped", { work_item_id: args.workItemId, reason: out.reason, blocked_by: out.blockedBy });
+  if (out.reason === "asked") return { status: "waiting", detail: "fix_launch_ask_open" };
+  if (out.blockedBy === "halted") return haltedEnd(args, "fix_gate");
+  await stopped(args, "fix_gate", out.blockedBy ?? "fix_launch_blocked");
+  return { status: "stopped", detail: `fix_launch_blocked:${out.blockedBy ?? "none"}` };
 }
 
 /** D#483 S5-k1c: the stages before the build that wait on a limit (packages/pipeline waitingStages.ts; a test holds the names). */
@@ -1778,6 +1801,8 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
 
     // A fix round: the executor RESUMES the build's sandbox and session with the findings, then the head is read again.
     const failing = verdicts.filter((v) => v.verdict !== "pass" && !v.unverifiable).map((v) => ({ role: v.role, runId: v.runId }));
+    const fixGate = await fixGatePhase(args);
+    if (fixGate !== null) return fixGate;
     const fixAsk = await askFixUntilAllowed(args, ctx, pr, round.nextRound ?? round.round + 1, failing, rereview);
     if (fixAsk.pause !== null) return pausedEnd(workItemId, "fix_round", fixAsk.pause, fixAsk.attempt);
     let fix: FixOut = fixAsk.fix;

@@ -6,6 +6,8 @@ import { emitDomainEvent } from '../domain-events/emit.js';
 import { announceNewRunAction, type RunActionSignal } from '../runActions/index.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { answerStartAsk } from './startAnswer.js';
+import { approveSubItemIn, SubItemApprovalError } from './approveSubItem.js';
+import { FIX_ASK_START } from './fixRoundGate.js';
 import { startGateForAsk } from '@fx/db/src/startGate.js';
 
 /**
@@ -63,6 +65,7 @@ interface AskRow {
   decision_type: string;
   options: { id: string }[];
   proposed: string;
+  sub_item_key: string | null;
   state: string;
   rule_set_version: number;
 }
@@ -82,7 +85,7 @@ export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promi
       // 2. Read the ask through RLS: a missing, foreign or malformed id is the same 404.
       const found = typeof input.askId === 'string' && UUID_RE.test(input.askId)
         ? await client.query<AskRow>(
-          `SELECT id, repo_id, work_item_id, run_id, decision_type, options, proposed, state, rule_set_version
+          `SELECT id, repo_id, work_item_id, run_id, decision_type, options, proposed, state, rule_set_version, sub_item_key
              FROM decision_asks WHERE id = $1::uuid AND account_id = $2::uuid`, [input.askId, accountId])
         : { rows: [] as AskRow[] };
       const ask = found.rows[0];
@@ -90,6 +93,21 @@ export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promi
       // 3-5. Only a pending ask; a choice of this ask's or 'deny'; a run to hang the receipt on (DP-C3 3b-2).
       if (ask.state !== 'open' && ask.state !== 'overdue') throw new AskAnswerError(409, 'already_answered');
       if (typeof choice !== 'string' || (choice !== 'deny' && !ask.options.some((o) => o.id === choice))) throw new AskAnswerError(422, 'invalid_choice');
+      // A fix-round ask (D#483 S5-b2a part 2). Starting it IS the sub-item approval (the card's Approve runs the same function): the keyed receipt in the person's name,
+      // the ask closed, and one advance request that re-enters the workflow waiting on it. A hold or a deny takes the generic path below, which files no resume.
+      if (ask.decision_type === 'launch_sub_item') {
+        if (ask.sub_item_key === null) throw new AskAnswerError(409, 'ask_no_run');
+        if (choice === FIX_ASK_START) {
+          try {
+            const done = await approveSubItemIn(client, { accountId, userId }, { workItemId: ask.work_item_id, key: ask.sub_item_key });
+            startActionId = done.advanceActionId;
+            return { askId: ask.id, receiptId: done.receiptId, answeredOption: choice };
+          } catch (err) {
+            if (err instanceof SubItemApprovalError) throw new AskAnswerError(409, 'ask_receipt_mismatch');
+            throw err;
+          }
+        }
+      }
       if (ask.run_id === null) {
         // A start ask (D#7 start gate) hangs on the work item, not a run. Any other ask without a run still has nothing to resume.
         const gate = await startGateForAsk(client, ask.id);
@@ -116,10 +134,12 @@ export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promi
       if (receipt.store !== 'decision_receipts') throw new AskAnswerError(409, 'ask_receipt_mismatch');
       // 8. The compare-and-set, linking the receipt in the same UPDATE.
       await answerAskIn(client, { askId: ask.id, choice, receiptId: receipt.id });
-      // 8b. The resume request (DP11c), in this same transaction: the person's own request, one per ask, so a replay gets the same action.
-      const resume = await client.query<{ action_id: string; replayed: boolean }>('SELECT action_id, replayed FROM run_action_request($1, $2, $3, $4)',
-        ['resume_decision', ask.id, `ask:${ask.id}`, `resume:${ask.id}`]);
-      if (!resume.rows[0]!.replayed) resumeActionId = resume.rows[0]!.action_id;
+      // 8b. The resume request (DP11c), in this same transaction: the person's own request, one per ask, so a replay gets the same action. A held fix round has no run to resume.
+      if (ask.decision_type !== 'launch_sub_item') {
+        const resume = await client.query<{ action_id: string; replayed: boolean }>('SELECT action_id, replayed FROM run_action_request($1, $2, $3, $4)',
+          ['resume_decision', ask.id, `ask:${ask.id}`, `resume:${ask.id}`]);
+        if (!resume.rows[0]!.replayed) resumeActionId = resume.rows[0]!.action_id;
+      }
       // 9. The event goes to the outbox on this transaction, so it exists only if the answer commits. Ids only.
       await emitDomainEvent(client, {
         type: 'decision.ask_answered',

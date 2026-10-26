@@ -85,5 +85,60 @@ export async function readStartDecision(client: Pick<PoolClient, 'query'>, workI
       LIMIT 1`,
     [workItemId],
   );
-  return rows[0] ? describeStartDecision(rows[0]) : null;
+  const start = rows[0] ? describeStartDecision(rows[0]) : null;
+  return (await readFixRoundDecision(client, workItemId, start)) ?? start;
+}
+
+export interface FixRoundFacts {
+  /** `ask` while a fix-round ask is open, `hold` after a person held it, `receipt` for the newest keyed receipt. */
+  kind: 'ask' | 'hold' | 'receipt';
+  key: string;
+  chosen: string | null;
+  decided_by: string | null;
+  at: Date | null;
+  name: string | null;
+}
+
+const roundOf = (key: string): string => { const m = /^fix-([0-9]{1,3})$/.exec(key); return m ? `fix round ${m[1]}` : 'a fix round'; };
+const cap = (t: string): string => t.charAt(0).toUpperCase() + t.slice(1);
+
+/** D#483 S5-b2a part 2: the card's sentence for a fix round the gate asked about or launched. Pure. Null for a key or value this build does not know how to word safely. */
+export function describeFixRound(f: FixRoundFacts): StartDecision | null {
+  if (f.kind === 'ask') {
+    return { state: 'asked', by: null, name: null, at: null, sentence: `Waiting for an owner or admin to answer in Needs you: your setting asks before ${roundOf(f.key)} starts.` };
+  }
+  if (f.kind === 'hold') {
+    return { state: 'declined', by: null, name: null, at: f.at ? f.at.toISOString() : null, sentence: `${cap(roundOf(f.key))} is held. It starts when an owner or admin starts it.` };
+  }
+  const at = f.at ? f.at.toISOString() : null;
+  if (f.decided_by === null) return null;
+  if (f.decided_by !== 'policy') {
+    const name = f.name !== null && f.name.trim() !== '' ? f.name.trim().slice(0, NAME_MAX) : null;
+    return { state: 'started', by: 'person', name, at, sentence: `${cap(roundOf(f.key))} approved by ${name ?? 'a person'}.` };
+  }
+  const setting = f.chosen === 'announce' ? 'your Balanced setting' : 'your Autonomous setting';
+  return { state: 'started', by: 'dial', name: null, at, sentence: `${cap(roundOf(f.key))} started automatically under ${setting}. No one had to answer.` };
+}
+
+/** The newer of the start decision and the item's latest fix-round fact wins: an open fix-round ask always shows; a receipt shows only when it is newer than the start. */
+async function readFixRoundDecision(client: Pick<PoolClient, 'query'>, workItemId: string, start: StartDecision | null): Promise<StartDecision | null> {
+  const ask = await client.query<{ sub_item_key: string }>(
+    `SELECT sub_item_key FROM decision_asks WHERE work_item_id = $1::uuid AND decision_type = 'launch_sub_item' AND sub_item_key IS NOT NULL
+        AND state IN ('open', 'overdue') ORDER BY raised_at DESC, id DESC LIMIT 1`, [workItemId]);
+  if (ask.rows[0]) return describeFixRound({ kind: 'ask', key: ask.rows[0].sub_item_key, chosen: null, decided_by: null, at: null, name: null });
+  // A round a person held shows as held until a receipt for that key exists (a later start, by anyone, ends the hold).
+  const held = await client.query<{ sub_item_key: string; answered_at: Date }>(
+    `SELECT a.sub_item_key, a.answered_at FROM decision_asks a
+      WHERE a.work_item_id = $1::uuid AND a.decision_type = 'launch_sub_item' AND a.state = 'answered' AND a.answered_option = 'fix_hold' AND a.sub_item_key ~ '^fix-[0-9]{1,3}$'
+        AND NOT EXISTS (SELECT 1 FROM decision_receipts r WHERE r.work_item_id = a.work_item_id AND r.decision_type = 'launch_sub_item' AND r.sub_item_key = a.sub_item_key)
+      ORDER BY a.answered_at DESC, a.id DESC LIMIT 1`, [workItemId]);
+  if (held.rows[0]) return describeFixRound({ kind: 'hold', key: held.rows[0].sub_item_key, chosen: null, decided_by: null, at: held.rows[0].answered_at, name: null });
+  const r = await client.query<{ sub_item_key: string; chosen: string; actor: string; created_at: Date; name: string | null }>(
+    `SELECT r.sub_item_key, r.chosen, r.actor, r.created_at, COALESCE(NULLIF(u.name, ''), NULLIF(u.github_login, '')) AS name
+       FROM decision_receipts r LEFT JOIN users u ON u.id::text = r.actor
+      WHERE r.work_item_id = $1::uuid AND r.decision_type = 'launch_sub_item' AND r.sub_item_key ~ '^fix-[0-9]{1,3}$'
+      ORDER BY r.created_at DESC, r.id DESC LIMIT 1`, [workItemId]);
+  const row = r.rows[0];
+  if (!row || (start?.at != null && new Date(start.at).getTime() >= row.created_at.getTime())) return null;
+  return describeFixRound({ kind: 'receipt', key: row.sub_item_key, chosen: row.chosen, decided_by: row.actor, at: row.created_at, name: row.name });
 }

@@ -1,4 +1,5 @@
-import type { Pool } from 'pg';
+import { createHash } from 'node:crypto';
+import type { Pool, PoolClient } from 'pg';
 import { withdrawSubItemAsk } from '@fx/db/src/decisionAsks.js';
 import { getCurrentDialSetting } from '@fx/db/src/decisions.js';
 import { DIAL_VERSION_CATALOGUE_DEFAULT, writeSubItemApprovalReceipt } from '@fx/db/src/receiptWriter.js';
@@ -52,6 +53,8 @@ export interface SubItemApprovalResult {
   specVersionId: string;
   /** How many open asks this approval closed. */
   withdrawnAsks: number;
+  /** The advance request this approval filed to re-enter a workflow that was waiting on the ask (null when none was waiting, or it was already filed). */
+  advanceActionId: string | null;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -64,51 +67,7 @@ export async function approveSubItem(ctx: SubItemApprovalCtx, input: SubItemAppr
   if (typeof input.key !== 'string' || !KEY_RE.test(input.key)) throw new SubItemApprovalError('invalid_key');
   if (typeof input.workItemId !== 'string' || !UUID_RE.test(input.workItemId)) throw new SubItemApprovalError('not_found');
   try {
-    return await withTenant(ctx.pool, accountId, userId, tokenId, async (client) => {
-      const member = await client.query<{ role: string }>('SELECT role FROM account_members WHERE account_id = $1 AND user_id = $2', [accountId, userId]);
-      if (member.rows[0] === undefined) throw new SubItemApprovalError('session_required');
-      if (member.rows[0].role !== 'owner' && member.rows[0].role !== 'admin') throw new SubItemApprovalError('forbidden');
-      const item = (await client.query<{ repo_id: string | null }>('SELECT repo_id FROM work_items WHERE id = $1::uuid AND account_id = $2::uuid', [input.workItemId, accountId])).rows[0];
-      if (item === undefined) throw new SubItemApprovalError('not_found');
-      const spec = (await client.query<{ id: string }>(
-        'SELECT id FROM spec_versions WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND erased_at IS NULL ORDER BY version DESC LIMIT 1', [accountId, input.workItemId])).rows[0];
-      if (spec === undefined) throw new SubItemApprovalError('no_spec');
-      const approval = (await client.query<{ spec_version_id: string | null }>(
-        'SELECT spec_version_id FROM work_item_approvals WHERE account_id = $1::uuid AND work_item_id = $2::uuid ORDER BY created_at DESC, id DESC LIMIT 1', [accountId, input.workItemId])).rows[0];
-      if (approval === undefined) throw new SubItemApprovalError('parent_not_approved');
-      if (approval.spec_version_id !== spec.id) throw new SubItemApprovalError('respec_needs_approval');
-      // A fix round is approved only for the NEXT round (rounds started + 1): an approval for any other number would hang on an unrelated run and
-      // later count when that round arrives.
-      const isFix = input.key.startsWith('fix-');
-      if (isFix) {
-        const m = FIX_KEY_RE.exec(input.key);
-        if (m === null) throw new SubItemApprovalError('invalid_key');
-        const started = (await client.query<{ n: string }>(
-          `SELECT count(*)::text AS n FROM work_item_driver_events WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND kind = 'fix_round_started'`, [accountId, input.workItemId])).rows[0]!.n;
-        if (Number(m[1]) !== Number(started) + 1) throw new SubItemApprovalError('wrong_round');
-      }
-      // The open ask for THIS key, when one exists, names the anchor run. Otherwise: for a fix round, the newest SUCCEEDED run of a verdict role (the
-      // driver's own list); for a planned PR, the run that published the approved Spec.
-      const asks = await client.query<{ id: string; run_id: string | null }>(
-        `SELECT id, run_id FROM decision_asks WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND decision_type = 'launch_sub_item' AND sub_item_key = $3::text
-            AND state IN ('open', 'overdue') ORDER BY raised_at DESC, id DESC`, [accountId, input.workItemId, input.key]);
-      const askRun = asks.rows.find((a) => a.run_id !== null)?.run_id ?? null;
-      const anchorId = askRun ?? (isFix
-        ? (await client.query<{ id: string }>(
-          `SELECT id FROM agent_runs WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND role = ANY($3::text[]) AND status = 'succeeded'
-            ORDER BY COALESCE(ended_at, created_at) DESC, id DESC LIMIT 1`, [accountId, input.workItemId, VERDICT_ROLES])).rows[0]?.id
-        : (await client.query<{ id: string }>(
-          'SELECT id FROM agent_runs WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND spec_version_id = $3::uuid ORDER BY created_at DESC, id DESC LIMIT 1',
-          [accountId, input.workItemId, spec.id])).rows[0]?.id);
-      if (anchorId === undefined || anchorId === null) throw new SubItemApprovalError('no_anchor_run');
-      const dial = item.repo_id === null ? null : await getCurrentDialSetting(client, item.repo_id, 'launch_sub_item');
-      const receipt = await writeSubItemApprovalReceipt(client, {
-        runId: anchorId, workItemId: input.workItemId, key: input.key, specVersionId: spec.id, dialVersion: dial?.version ?? DIAL_VERSION_CATALOGUE_DEFAULT,
-      });
-      let withdrawn = 0;
-      for (const ask of asks.rows) if (await withdrawSubItemAsk(client, ask.id, input.key)) withdrawn += 1;
-      return { receiptId: receipt.id, replayed: receipt.replayed, specVersionId: spec.id, withdrawnAsks: withdrawn };
-    });
+    return await withTenant(ctx.pool, accountId, userId, tokenId, (client) => approveSubItemIn(client, { accountId, userId }, input));
   } catch (err) {
     const message = (err as { message?: string } | null)?.message ?? '';
     if ((err as { code?: string } | null)?.code === '42501') {
@@ -116,4 +75,65 @@ export async function approveSubItem(ctx: SubItemApprovalCtx, input: SubItemAppr
     }
     throw err;
   }
+}
+
+/**
+ * The approval inside a transaction the caller owns (`withTenant` on the receipt pool with the person's user id set): the card's Approve and the answer to a
+ * `launch_sub_item` ask in Needs you both run exactly this, so the two can never disagree.
+ */
+export async function approveSubItemIn(client: PoolClient, who: { accountId: string; userId: string }, input: SubItemApprovalInput): Promise<SubItemApprovalResult> {
+  const { accountId, userId } = who;
+  const member = await client.query<{ role: string }>('SELECT role FROM account_members WHERE account_id = $1 AND user_id = $2', [accountId, userId]);
+  if (member.rows[0] === undefined) throw new SubItemApprovalError('session_required');
+  if (member.rows[0].role !== 'owner' && member.rows[0].role !== 'admin') throw new SubItemApprovalError('forbidden');
+  const item = (await client.query<{ repo_id: string | null }>('SELECT repo_id FROM work_items WHERE id = $1::uuid AND account_id = $2::uuid', [input.workItemId, accountId])).rows[0];
+  if (item === undefined) throw new SubItemApprovalError('not_found');
+  const spec = (await client.query<{ id: string }>(
+    'SELECT id FROM spec_versions WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND erased_at IS NULL ORDER BY version DESC LIMIT 1', [accountId, input.workItemId])).rows[0];
+  if (spec === undefined) throw new SubItemApprovalError('no_spec');
+  const approval = (await client.query<{ spec_version_id: string | null }>(
+    'SELECT spec_version_id FROM work_item_approvals WHERE account_id = $1::uuid AND work_item_id = $2::uuid ORDER BY created_at DESC, id DESC LIMIT 1', [accountId, input.workItemId])).rows[0];
+  if (approval === undefined) throw new SubItemApprovalError('parent_not_approved');
+  if (approval.spec_version_id !== spec.id) throw new SubItemApprovalError('respec_needs_approval');
+  // A fix round is approved only for the NEXT round (rounds started + 1): an approval for any other number would hang on an unrelated run and
+  // later count when that round arrives.
+  const isFix = input.key.startsWith('fix-');
+  if (isFix) {
+    const m = FIX_KEY_RE.exec(input.key);
+    if (m === null) throw new SubItemApprovalError('invalid_key');
+    const started = (await client.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM work_item_driver_events WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND kind = 'fix_round_started'`, [accountId, input.workItemId])).rows[0]!.n;
+    if (Number(m[1]) !== Number(started) + 1) throw new SubItemApprovalError('wrong_round');
+  }
+  // The open ask for THIS key, when one exists, names the anchor run. Otherwise: for a fix round, the newest SUCCEEDED run of a verdict role (the
+  // driver's own list); for a planned PR, the run that published the approved Spec.
+  const asks = await client.query<{ id: string; run_id: string | null }>(
+    `SELECT id, run_id FROM decision_asks WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND decision_type = 'launch_sub_item' AND sub_item_key = $3::text
+        AND state IN ('open', 'overdue') ORDER BY raised_at DESC, id DESC`, [accountId, input.workItemId, input.key]);
+  const askRun = asks.rows.find((a) => a.run_id !== null)?.run_id ?? null;
+  const anchorId = askRun ?? (isFix
+    ? (await client.query<{ id: string }>(
+      `SELECT id FROM agent_runs WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND role = ANY($3::text[]) AND status = 'succeeded'
+        ORDER BY COALESCE(ended_at, created_at) DESC, id DESC LIMIT 1`, [accountId, input.workItemId, VERDICT_ROLES])).rows[0]?.id
+    : (await client.query<{ id: string }>(
+      'SELECT id FROM agent_runs WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND spec_version_id = $3::uuid ORDER BY created_at DESC, id DESC LIMIT 1',
+      [accountId, input.workItemId, spec.id])).rows[0]?.id);
+  if (anchorId === undefined || anchorId === null) throw new SubItemApprovalError('no_anchor_run');
+  const dial = item.repo_id === null ? null : await getCurrentDialSetting(client, item.repo_id, 'launch_sub_item');
+  const receipt = await writeSubItemApprovalReceipt(client, {
+    runId: anchorId, workItemId: input.workItemId, key: input.key, specVersionId: spec.id, dialVersion: dial?.version ?? DIAL_VERSION_CATALOGUE_DEFAULT,
+  });
+  let withdrawn = 0;
+  let advanceActionId: string | null = null;
+  for (const ask of asks.rows) {
+    if (!(await withdrawSubItemAsk(client, ask.id, input.key))) continue;
+    withdrawn += 1;
+    // A workflow ended waiting on this ask: ONE advance re-enters it (keyed by the ask, so a replay finds the same request). An approval nobody was waiting for files none.
+    if (isFix && advanceActionId === null) {
+      const req = await client.query<{ action_id: string; replayed: boolean }>('SELECT action_id, replayed FROM run_action_request($1, $2, $3, $4)',
+        ['advance_work_item', input.workItemId, `subitem:${ask.id}`, createHash('sha256').update(`advance_work_item:${input.workItemId}`).digest('hex')]);
+      if (!req.rows[0]!.replayed) advanceActionId = req.rows[0]!.action_id;
+    }
+  }
+  return { receiptId: receipt.id, replayed: receipt.replayed, specVersionId: spec.id, withdrawnAsks: withdrawn, advanceActionId };
 }

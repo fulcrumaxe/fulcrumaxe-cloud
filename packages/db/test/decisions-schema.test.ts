@@ -95,6 +95,7 @@ describe('decision_settings / decision_receipts schema (DP2 items 1, 3, 7)', () 
         'actor',
         'catalogue_version',
         'chosen',
+        'approval_id',
         'class',
         'created_at',
         'decision_type',

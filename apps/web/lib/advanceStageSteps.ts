@@ -1,4 +1,4 @@
-import { ADVANCE_CONTINUE_CODES, type AdvanceContinueOut, type ContinuationSite, type AdvanceFacade, type AdvanceRunOutcome, type AdvanceStepResult, type DecisionStepCode, type PlanePublish, type StartGateStepInput, type StartGateStepOut } from "@fx/worker";
+import { ADVANCE_CONTINUE_CODES, type AdvanceContinueOut, type ContinuationSite, type AdvanceFacade, type AdvanceRunOutcome, type AdvanceStepResult, type DecisionStepCode, type PlanePublish, type StartGateStepInput, type StartGateStepOut, type FixGateStepInput, type FixGateStepOut } from "@fx/worker";
 import { isQueuedOnRunner, type AdvanceWorker } from "./advanceSteps";
 
 /**
@@ -149,6 +149,12 @@ export async function decisionBody(worker: DecisionWorker | null, who: StepWho, 
 export async function startGateBody(worker: Pick<AdvanceFacade, "advanceStartGate"> | null, who: StepWho, input: StartGateStepInput): Promise<StartGateStepOut> {
   if (!worker) return { proceed: false, reason: "blocked", blockedBy: "worker_unavailable" };
   return worker.advanceStartGate(who, input);
+}
+
+/** D#483 S5-b2a part 2: the fix-round gate. No worker: the round does not start. */
+export async function fixGateBody(worker: Pick<AdvanceFacade, "advanceFixGate"> | null, who: StepWho, input: FixGateStepInput): Promise<FixGateStepOut> {
+  if (!worker) return { proceed: false, reason: "blocked", blockedBy: "worker_unavailable" };
+  return worker.advanceFixGate(who, input);
 }
 
 /** The item's stage now, or null (gone, or no worker). */
