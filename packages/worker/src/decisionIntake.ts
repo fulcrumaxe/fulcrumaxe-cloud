@@ -9,7 +9,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { parseDecisionRequestField, parseDecisionsTakenField, type DecisionOption } from "@fx/roles/decision-request";
 import { recordDecisionIdsEvent, recordDecisionRefusedEvent, type DecisionRefusalCode } from "@fx/runner";
 import { sanitize } from "@fx/trust";
-import { DecisionSnapshotInvalidError, SNAPSHOT_KEY_PATTERN, declaredDecisionTypes, dispositionForDial, readDecisionSnapshot } from "./decisionSnapshot.js";
+import { DecisionSnapshotInvalidError, NO_DIAL_ROW_PRESET, SNAPSHOT_KEY_PATTERN, declaredDecisionTypes, dispositionForDial, readDecisionSnapshot } from "./decisionSnapshot.js";
 
 /**
  * D#7 DP4b-2 (correction DP-C11, R-7-DP4b-2, -4, -7, -8): the call site. After an executor run ends `succeeded`, the workflow asks this once; it reads the
@@ -79,6 +79,15 @@ const PRESET_NAMES: readonly string[] = PRESETS.map((p) => p.name);
 export function askPolicyFor(entry: CatalogueEntry, resolved: { answerWindowMinutes: number; timeoutOutcome: TimeoutOutcome }): AskPolicy {
   const proceed = resolved.timeoutOutcome === "proceed_recommended" && entry.timeoutOutcomes.includes("proceed_recommended");
   return { answerWindowMinutes: resolved.answerWindowMinutes, onTimeout: proceed ? "proceed_recommended" : "stop_and_flag" };
+}
+
+/**
+ * The preset an ask's timing starts from. A type with no dial row follows the same default as its disposition (`NO_DIAL_ROW_PRESET`, owner ruling 2026-10-25);
+ * a row that adopted a preset uses it; a per-type override row (no preset) stays Cautious, the strictest timing.
+ */
+export function askPresetOf(row: { preset: string | null } | null): PresetName {
+  if (row === null) return NO_DIAL_ROW_PRESET;
+  return PRESET_NAMES.includes(row.preset ?? "") ? (row.preset as PresetName) : "cautious";
 }
 
 const asObject = (v: unknown): Record<string, unknown> | null => (v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null);
@@ -167,7 +176,7 @@ export function createDecisionIntake(deps: DecisionIntakeDeps): DecisionIntake {
       if (e.kind === "taken") refuse("decided_without_asking", key);
       if (askedTypes.has(snap.decision_type)) continue;
       askedTypes.add(snap.decision_type);
-      const preset = dial !== null && PRESET_NAMES.includes(dial.preset ?? "") ? (dial.preset as PresetName) : "cautious";
+      const preset = askPresetOf(dial);
       out.asks.push({ entry, key: snap.key, options: e.v.options, proposed: chosen, rationale: e.v.rationale, preset });
     }
     return out;

@@ -23,6 +23,8 @@ import { ingestRunMemoryProposals } from "./memoryIntake.js";
 import { isItemWaitingOnAnswer } from "@fx/db/src/decisionAsks.js";
 import { reconcileHolder, reconcileSlotHolders, type PrStateOpen } from "./prSlotReconcile.js";
 import type { DecisionIntake, DecisionStepCode } from "./decisionIntake.js";
+import { CATALOGUE_VERSION } from "@fx/decisions";
+import { parseDecisionSnapshot, resolveDecisionOffer, writeDecisionSnapshot, type DecisionOffer, type DecisionSnapshot } from "./decisionSnapshot.js";
 import { isContextSpill, type ContextAssembly, type ContextSection, type ContextSpill } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
 import { readVerifiedReviewGate, type VerifiedReviewGate } from "./verifiedReviewGate.js";
@@ -132,6 +134,8 @@ export interface AdvanceStepPorts {
   startedAttempts(head: string, tail: string): Promise<Array<{ attempt: number; status: string }>>;
   /** D#483 S5-k1e: the read-only headroom check for a whole round of seats: would a spending limit deny them if all were started now? Writes no run row. */
   headroom(roles: readonly string[]): Promise<{ ok: true } | { ok: false; reason: string }>;
+  /** D#7 DP4b-3: the decisions a new executor run is offered (the prompt's keys and the snapshot to write in its create transaction), resolved from the item's repository dials now. */
+  decisionOffer?(): Promise<DecisionOffer>;
   outcome(runId: string): Promise<AdvanceRunOutcome>;
   /** The existing cancel path, as the approver (so the cancel is audited as theirs and needs their membership to still be active). Safe on a finished run. */
   cancel(runId: string): Promise<void>;
@@ -441,6 +445,11 @@ export interface AdvanceRunRequest {
   jobMemory?: JobMemory;
   /** D#7 DP11c: the run this one continues the work of (a resume's parked run). Linked on the new run's row; the parked run is not touched. The run must belong to this item. */
   parentRunId?: string;
+  /**
+   * D#7 DP4b-3: the run's decision snapshot, built from `portsFor(...).decisionOffer()` before the prompt. Written as the run's `decision.snapshot` row inside its create
+   * transaction, so a run never exists without it and a failed write leaves no run. Anything that is not exactly the snapshot's schema refuses the start. Executor builds only.
+   */
+  decisionSnapshot?: DecisionSnapshot;
 }
 
 /** The assembly time when it is a whole number of milliseconds in the ledger's range (and `cold` a boolean); anything else is dropped. */
@@ -948,6 +957,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     // A prompt that was cut needs its files: a spill that is not exactly the closed shape refuses the start rather than send a cut prompt with nothing to read.
     if (req.contextSpill !== undefined && !isContextSpill(req.contextSpill)) return { ok: false, reason: "invalid_input" };
     if (req.jobMemory !== undefined && !JobMemorySchema.safeParse(req.jobMemory).success) return { ok: false, reason: "invalid_input" };
+    // D#7 DP4b-3: only an executor run has a decision snapshot, and it must be exactly the snapshot's schema (checked again when it is written).
+    const snapshotOf = req.decisionSnapshot === undefined ? undefined : parseDecisionSnapshot(req.decisionSnapshot);
+    if (req.decisionSnapshot !== undefined && (req.role !== "executor" || snapshotOf === null)) return { ok: false, reason: "invalid_input" };
     const baseKey = `advance:${req.workItemId}:${req.step}`;
     let key = baseKey;
     const found = await withTenant(runnerPool, req.accountId, async (client) => {
@@ -1015,6 +1027,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       ...(req.headSha !== undefined ? { headSha: req.headSha } : {}),
       // The runner clones this repository (shallow, default branch) into the workdir before the agent starts.
       ...(cloneFrom ? { workdir: PREVIEW_WORKDIR, cloneRepo: cloneFrom } : {}),
+      // D#7 DP4b-3: the snapshot is written in the run's create transaction, on its client; a write that fails rolls the run back (no run, no key, no sandbox call).
+      ...(snapshotOf ? { inCreateTransaction: (client: PoolClient, runId: string) => writeDecisionSnapshot(client, runId, snapshotOf) } : {}),
       idempotency: { key, requestHash: createHash("sha256").update(`${key}:${req.role}`).digest("hex") },
     };
     let started: Awaited<ReturnType<RunStarter["start"]>>;
@@ -1155,10 +1169,24 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     await cancelRun({ pool: runnerPool, principal: { accountId: who.accountId, userId: who.userId, kind: "session" } }, runId, deps.registry);
   }
 
+  /**
+   * D#7 DP4b-3: what a new executor run of this item is offered, resolved from the item's repository dials now (no dial row: Balanced). The repository is the item's own,
+   * read here, never taken from the step. An item with no repository is offered nothing and gets an empty snapshot.
+   */
+  async function decisionOfferFor(who: AdvanceStepWho): Promise<DecisionOffer> {
+    return withTenant(runnerPool, who.accountId, async (client) => {
+      const r = await client.query<{ repo_id: string | null }>("SELECT repo_id FROM work_items WHERE id = $1 AND account_id = $2", [who.workItemId, who.accountId]);
+      const repoId = r.rows[0]?.repo_id ?? null;
+      if (repoId === null) return { items: [], snapshot: { catalogue_version: CATALOGUE_VERSION, entries: [] } };
+      return resolveDecisionOffer(client, repoId, "executor", (line) => console.warn(line));
+    });
+  }
+
   /** The ports one step gets: bound to one account and item, so the step cannot name another. */
   function portsFor(who: AdvanceStepWho): AdvanceStepPorts {
     return {
       startRun: (req) => advanceStartRun({ ...req, accountId: who.accountId, workItemId: who.workItemId, haltEpoch: who.haltEpoch }),
+      decisionOffer: () => decisionOfferFor(who),
       findStep: (stepPrefix) => findStepRun(who, stepPrefix),
       startedAttempts: (head, tail) => startedSeatAttempts(who, head, tail),
       headroom: (roles) => checkRoundHeadroom(runnerPool, deps.resolveRunSeat, who, roles),

@@ -112,7 +112,9 @@ describe("decision snapshot [pg]", () => {
     const write = (version: number, disposition: string, preset: string | null): Promise<unknown> =>
       admin.query(`INSERT INTO decision_settings (account_id, repo_id, decision_type, disposition, preset, version, changed_by) VALUES ($1, $2, $3, $4, $5, $6, $7)`, [t.accountId, dialRepo, TYPE, disposition, preset, version, t.userId]);
 
-    expect((await snapshotNow()).entries[0]).toMatchObject({ dial_version: 0, disposition: entry.defaultDisposition });
+    // No row: the Balanced preset's value (owner ruling 2026-10-25), not the catalogue default, which is unchanged and is "ask".
+    expect(entry.defaultDisposition).toBe("ask");
+    expect((await snapshotNow()).entries[0]).toMatchObject({ dial_version: 0, disposition: "announce" });
     await write(1, "ask", "cautious");
     await write(2, "announce", null);
     const frozen = await snapshotNow();

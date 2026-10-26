@@ -309,6 +309,7 @@ const SECTION_NAMES = {
   note: "Notes",
   corrections: "Corrections",
   findings: "Findings",
+  decisions: "Decisions the agent could make",
   output: "Output block",
   repo_instructions: "Repo instructions",
   pinned: "Pinned files",

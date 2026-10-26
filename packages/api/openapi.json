@@ -6178,6 +6178,7 @@
                               "note",
                               "corrections",
                               "findings",
+                              "decisions",
                               "output",
                               "repo_instructions",
                               "pinned"

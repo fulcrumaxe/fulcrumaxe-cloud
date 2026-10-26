@@ -46,6 +46,21 @@ export interface AdvanceRunRequest {
   memoryTokens?: number;
   /** D#601 MEM-3b: a runner run's recalled memory, split by who wrote it. It rides in the signed job and the prompt holds none of it. Absent: none, or not a runner run. */
   jobMemory?: { person: string; fenced: string };
+  /** D#7 DP4b-3: the decision snapshot (from `DecisionOffer.snapshot`) the run's create transaction writes, so the run never exists without it. Executor builds only. Absent: none written. */
+  decisionSnapshot?: DecisionOffer["snapshot"];
+}
+
+/** D#7 DP4b-3: one decision the executor may meet in this run, as the prompt lists it. `label` is a fixed catalogue name; `instruction` is one of two words. */
+export interface DecisionOfferItem {
+  key: string;
+  label: string;
+  instruction: "decide" | "ask";
+}
+
+/** D#7 DP4b-3: what a new executor run is offered. `snapshot` is the row written in the run's create transaction; `items` is the list the prompt shows (the same keys). */
+export interface DecisionOffer {
+  items: DecisionOfferItem[];
+  snapshot: { catalogue_version: number; entries: Array<{ key: string; decision_type: string; disposition: "act" | "announce" | "ask"; dial_version: number }> };
 }
 
 export type AdvanceRunStart = { ok: true; runId: string } | { ok: false; reason: string };
@@ -68,6 +83,8 @@ export interface AdvanceRunOutcome {
 }
 
 export interface AdvanceRunPorts {
+  /** D#7 DP4b-3: the decisions a new executor run is offered, resolved from the item's repository dials now. Absent: none offered and no snapshot written. */
+  decisionOffer?(): Promise<DecisionOffer>;
   /** Starts the run, or finds the one an earlier call of the same step started. A refusal is data, never a throw. */
   startRun(request: AdvanceRunRequest): Promise<AdvanceRunStart>;
   /**

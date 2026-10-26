@@ -16,7 +16,7 @@ import { takeBuildSlot } from "./buildSlots.js";
 import { pauseForDenial } from "./reservationPauses.js";
 import { attemptKey } from "./attemptKeys.js";
 import { clampAssemblyMs } from "./assemblyClock.js";
-import { assemblePrompt, renderMemorySlot, MEMORY_MARKER_ROOM, type PinnedItem, type AssembledPrompt, type AssembleOptions, type MemoryPort, type NoteItem, type RenderedMemory } from "../prompt/assemblePrompt.js";
+import { assemblePrompt, decisionsBlock, renderMemorySlot, MEMORY_MARKER_ROOM, type DecisionLine, type PinnedItem, type AssembledPrompt, type AssembleOptions, type MemoryPort, type NoteItem, type RenderedMemory } from "../prompt/assemblePrompt.js";
 import { createMemoryPort, guardMemoryPort, memoryTokensOf, type RecallSkip } from "../prompt/memoryRecall.js";
 import { readMemorySlotBytes } from "../prompt/memorySlotSetting.js";
 import { effectiveContextBudget, readContextBudgetBytes } from "../prompt/contextBudget.js";
@@ -104,6 +104,8 @@ export interface ExecutorPromptInput {
    * Absent: the prompt is unchanged. With `stackBase` the branch the run builds on is already pinned, so only the pull request steps change.
    */
   planeBase?: { sha: string };
+  /** D#7 DP4b-3: the decisions this run may meet (opaque keys, fixed labels, two instructions), resolved at spawn. Absent or empty: the prompt has no decisions section. */
+  decisions?: readonly DecisionLine[];
 }
 
 /**
@@ -183,6 +185,7 @@ export function assembleExecutorPrompt(input: ExecutorPromptInput, options?: Ass
     memoryItem: input.memory?.item,
     runNotes: input.runNotes,
     notes: input.notes,
+    decisions: decisionsBlock(input.decisions ?? []),
     output: [
       "Your final block must include a `summary`: a plain-text account of the session for the repository owner, no markup needed. Say what you changed and why, the files you touched, the commands you ran to test it and their result, and anything you were unsure about or left out.",
       ...agentOutputBlock(paired ? `{"verdict":"done","branch":"${branch}","tests":"passed","summary":"<plain-text summary for the repository owner>"}` : `{"verdict":"done","branch":"${branch}","pr_number":0,"tests":"passed","summary":"<plain-text summary for the repository owner>"}`),
@@ -225,6 +228,7 @@ function buildRunnerExecutorPrompt(input: ExecutorPromptInput, options?: Assembl
     memoryItem: input.memory?.item,
     runNotes: input.runNotes,
     notes: input.notes,
+    decisions: decisionsBlock(input.decisions ?? []),
     output: [
       "Your final block must include a `summary`: a plain-text account of the session for the repository owner, no markup needed. Say what you changed and why, the files you touched, the commands you ran to test it and their result, and anything you were unsure about or left out.",
       ...agentOutputBlock('{"verdict":"done","tests":"passed","summary":"<plain-text summary for the repository owner>"}'),
@@ -456,9 +460,14 @@ export async function startBuildForItem(
   const { readable: pinPaths, excluded: excludedPins } = splitPinsByExcludes(allPins, excludePatterns);
   const fetched = pinPaths.length === 0 || facts.repo_id === null ? undefined : await readPins(options.pins, { accountId, repoId: facts.repo_id, owner: facts.gh_owner, name: facts.gh_name, paths: pinPaths, ...(stackBase ? { sha: stackBase.sha } : planeBase ? { sha: planeBase.sha } : {}) });
   const pinRead = allPins.length === 0 || facts.repo_id === null ? undefined : { ...(fetched ?? { items: [], missing: 0, tooLarge: 0 }), excluded: excludedPins };
+  // D#7 DP4b-3: the decisions this run is offered, resolved from the repository's dials now (the sandbox and the runner prompt both carry them). The snapshot goes to
+  // the run's create transaction with the start below; a replay that finds its run reads nothing and writes nothing. A port that fails fails the step: a run never starts
+  // without the snapshot its prompt's keys map to.
+  const offer = prior || !ports.decisionOffer ? undefined : await ports.decisionOffer();
   const assembleStarted = performance.now();
   const assembled = assembleExecutorPrompt(
     {
+      ...(offer && offer.items.length > 0 ? { decisions: offer.items } : {}),
       owner: facts.gh_owner, name: facts.gh_name, number, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human", runtime: promptRuntimeOf(executionMode), runNotes: renderRunNotes(notes),
       ...(map ? { map } : {}), ...(memory ? { memory } : {}), ...(stackBase ? { stackBase } : {}), ...(planeBase ? { planeBase } : {}),
       ...(rules.some((r) => r.kind === "exclude") ? { excludeLine: true } : {}),
@@ -484,7 +493,7 @@ export async function startBuildForItem(
       accountId,
       workItemId,
       async (client): Promise<BuildStartResult> => {
-        const started = await ports.startRun({ step, role: "executor", prompt, contextSections: sections, contextAssembly, ...(spill ? { contextSpill: spill } : {}), ...(memoryAside ? { jobMemory: memoryAside } : {}), memoryTokens: memoryTokensOf(memory?.stable, memory?.item), clone: true, pr: number, exclusive: true, ...(planeBase ? { headSha: planeBase.sha } : {}), expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
+        const started = await ports.startRun({ step, role: "executor", prompt, ...(offer ? { decisionSnapshot: offer.snapshot } : {}), contextSections: sections, contextAssembly, ...(spill ? { contextSpill: spill } : {}), ...(memoryAside ? { jobMemory: memoryAside } : {}), memoryTokens: memoryTokensOf(memory?.stable, memory?.item), clone: true, pr: number, exclusive: true, ...(planeBase ? { headSha: planeBase.sha } : {}), expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
         // A halt refuses the start itself (the database, not the stage): say so plainly so the workflow ends instead of retrying.
         // D#483 S5-k1: a spend denial is a named pause, not a failure: the item stays where it is and the workflow asks again.
         const pause = started.ok ? null : pauseForDenial(started.reason);

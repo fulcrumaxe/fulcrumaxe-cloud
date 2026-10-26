@@ -27,6 +27,8 @@ export const CONTEXT_SECTION_CODES = [
   "note",
   "corrections",
   "findings",
+  // D#7 DP4b-3: the decisions an executor run may meet (a fixed list of opaque keys). After `findings`, before `output`.
+  "decisions",
   "output",
   "repo_instructions",
   // D#600 CX-4a: files a person pinned (CX-5 supplies them). Never cut.

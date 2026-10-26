@@ -68,6 +68,11 @@ describe("decision intake: the call site [pg]", { timeout: 120_000 }, () => {
     declared: string[];
     /** The dial row per type, written as version 1 before the snapshot. A type with none has no row (version 0). */
     dials?: Record<string, { disposition: string; preset?: string | null }>;
+    /**
+     * A repository with no dial row for a class-2 or class-3 type is Balanced (owner ruling 2026-10-25), which would not stop and ask. The tests of the ask path want a
+     * "stop and ask" key, so by default such a type gets an explicit Cautious row; `noRows: true` leaves it without one (the no-row default itself).
+     */
+    noRows?: boolean;
     envelope: unknown;
     status?: string;
     role?: string;
@@ -85,7 +90,14 @@ describe("decision intake: the call site [pg]", { timeout: 120_000 }, () => {
     const a = spec.a ?? (await seedAccount(admin, randomUUID()));
     const itemId = spec.itemId ?? (await newItem(a));
     const dials = new Map<string, SnapshotDial>();
-    for (const [type, d] of Object.entries(spec.dials ?? {})) {
+    const cautious = spec.noRows === true ? [] : spec.declared.filter((t) => t !== CLASS1 && !(t in (spec.dials ?? {})));
+    const rows: Record<string, { disposition: string; preset?: string | null }> = { ...Object.fromEntries(cautious.map((t) => [t, { disposition: "ask", preset: "cautious" }])), ...spec.dials };
+    for (const [type, d] of Object.entries(rows)) {
+      // A default row is written once per repository (a second world of the same account reuses it).
+      if (cautious.includes(type) && (await admin.query(`SELECT 1 FROM decision_settings WHERE account_id = $1 AND repo_id = $2 AND decision_type = $3`, [a.accountId, a.repoId, type])).rows.length > 0) {
+        dials.set(type, { version: 1, disposition: d.disposition, preset: d.preset ?? null });
+        continue;
+      }
       await admin.query(`INSERT INTO decision_settings (account_id, repo_id, decision_type, disposition, preset, version, changed_by) VALUES ($1, $2, $3, $4, $5, 1, $6)`, [a.accountId, a.repoId, type, d.disposition, d.preset ?? null, a.userId]);
       dials.set(type, { version: 1, disposition: d.disposition, preset: d.preset ?? null });
     }
@@ -264,6 +276,13 @@ describe("decision intake: the call site [pg]", { timeout: 120_000 }, () => {
       const w = await world({ declared: [CLASS3], envelope: { decision_request: request("d1") } });
       expect(await w.step()).toBe("parked");
       expect(await asks(w.runId)).toHaveLength(1);
+    });
+
+    it("a class-3 key on a repository with no dial row at all parks under the Balanced default and stops on timeout", async () => {
+      const w = await world({ declared: [CLASS3], noRows: true, envelope: { decision_request: request("d1") } });
+      expect(w.snapshot.entries[0]).toMatchObject({ decision_type: CLASS3, disposition: "ask", dial_version: 0 });
+      expect(await w.step()).toBe("parked");
+      expect((await asks(w.runId))[0]).toMatchObject({ decision_type: CLASS3, timeout_outcome: "stop_and_flag" });
     });
 
     it("a park for a run that is not the item's, or a run id that is not a run, raises nothing (every park carries the real run)", async () => {
