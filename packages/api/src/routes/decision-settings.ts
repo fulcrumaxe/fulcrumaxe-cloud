@@ -8,6 +8,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { assertRepoExists } from "@fx/core/src/role-settings/internal.js";
 import { assertRepoIdShape } from "@fx/core/src/repos/read.js";
 import { ForbiddenError } from "@fx/core/src/tenancy/errors.js";
+import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { ApiError } from "../errors.js";
 import { decisionLabel, invariantLabel } from "./decision-labels.js";
 import type { RouteEntry } from "../registry.js";
@@ -229,7 +230,7 @@ export const decisionSettingRoutes: RouteEntry[] = [
       const name = (input.body as z.infer<typeof presetBodySchema>).preset;
       const { accountId, userId, role } = ctx.principal;
       try {
-        return await withTenant(ctx.pool, accountId, userId, async (client) => {
+        const out = await withTenant(ctx.pool, accountId, userId, async (client) => {
           await assertRepoExists(client, repoId);
           const before = await currentRows(client, repoId);
           const moved = movesFor(name, before);
@@ -238,6 +239,9 @@ export const decisionSettingRoutes: RouteEntry[] = [
           }
           return { ...view(repoId, role === "owner" || role === "admin", await currentRows(client, repoId)), moved };
         });
+        // D#483 S5-b1a-2: a looser dial can let a waiting proposal start; the auto-start pass wakes now instead of at the backstop.
+        if (out.moved.length > 0) void markWorkPending("proposal-verify-sweep");
+        return out;
       } catch (error) {
         throw mapWriteError(error);
       }
@@ -270,7 +274,7 @@ export const decisionSettingRoutes: RouteEntry[] = [
       }
       const { accountId, userId, role } = ctx.principal;
       try {
-        return await withTenant(ctx.pool, accountId, userId, async (client) => {
+        const out = await withTenant(ctx.pool, accountId, userId, async (client) => {
           await assertRepoExists(client, repoId);
           const current = await getCurrentDialSetting(client, repoId, entry.id);
           // The value already in force (a version, else the catalogue default) is the request satisfied: no version, no audit row.
@@ -280,6 +284,8 @@ export const decisionSettingRoutes: RouteEntry[] = [
           }
           return view(repoId, role === "owner" || role === "admin", await currentRows(client, repoId));
         });
+        if (body.disposition !== "ask") void markWorkPending("proposal-verify-sweep");
+        return out;
       } catch (error) {
         throw mapWriteError(error);
       }

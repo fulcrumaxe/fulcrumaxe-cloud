@@ -5,6 +5,7 @@ import { createPool } from '@fx/db/src/pool.js';
 import { insertApiToken } from '@fx/core/src/tokens/service.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
 import { FIXED_INVARIANTS } from '@fx/db/src/dialInventory.js';
+import { setPendingHooks } from '@fx/core/src/pendingWork.js';
 import { generateToken } from '../src/tokens/format.js';
 import { hashToken } from '../src/tokens/resolve.js';
 import { handleApiRequest } from '../src/handler.js';
@@ -201,6 +202,23 @@ describe('D#7 DP10a: decision settings routes', () => {
     expect(await auditRows(f.owner.accountId)).toHaveLength(0);
     const bad = await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/preset/preview`, { preset: 'reckless' });
     expect(bad.status).toBe(422);
+  });
+
+  it('S5-b1a-2: a preset that moves a dial, or a dial set looser, wakes the auto-start pass; setting it to ask does not', async () => {
+    const sets: string[] = [];
+    setPendingHooks({ store: { get: async () => null, set: async (key) => { sets.push(key); }, delete: async () => {} } });
+    try {
+      const f = await fixture();
+      expect((await call(f.admin, 'POST', `/repos/${f.repoId}/decision-settings/dial`, { decision_type: 'start_work_small', disposition: 'ask' })).status).toBe(200);
+      expect(sets).toEqual([]);
+      expect((await call(f.admin, 'POST', `/repos/${f.repoId}/decision-settings/dial`, { decision_type: 'start_work_small', disposition: 'act' })).status).toBe(200);
+      expect(sets).toContain('pending:proposal-verify-sweep');
+      sets.length = 0;
+      expect((await call(f.admin, 'POST', `/repos/${f.repoId}/decision-settings/preset`, { preset: 'autonomous' })).status).toBe(200);
+      expect(sets).toContain('pending:proposal-verify-sweep');
+    } finally {
+      setPendingHooks(null);
+    }
   });
 
   it('applying a preset appends one version per moved class 2 dial with an audit row naming both values, and never touches class 1 or 3', async () => {

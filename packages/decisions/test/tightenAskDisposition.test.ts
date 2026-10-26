@@ -10,8 +10,8 @@ const DISPOSITIONS = ["act", "announce", "ask"] as const;
 const OUTCOMES: RuleOutcome[] = ["approve", "deny", "ask"];
 
 describe("tightenAskDisposition (public export)", () => {
-  it("never loosens: for the two tightenable types the result is the given disposition, ask, or deny", () => {
-    for (const type of ["spend_past_envelope", "run_extension"]) {
+  it("never loosens: for the tightenable types the result is the given disposition, ask, or deny", () => {
+    for (const type of ["spend_past_envelope", "run_extension", "start_work_small", "start_work_bug", "start_work_doc"]) {
       for (const disposition of DISPOSITIONS) {
         expect(tightenAskDisposition(type, disposition, "approve"), `${type} ${disposition} approve`).toBe(disposition);
         expect(tightenAskDisposition(type, disposition, "ask"), `${type} ${disposition} ask`).toBe("ask");
@@ -26,7 +26,7 @@ describe("tightenAskDisposition (public export)", () => {
   });
 
   it("any other decision type comes back unchanged, whatever the rule says", () => {
-    for (const type of ["test_strategy_choice", "tool_call", "start_work_small", "no_such_type", ""]) {
+    for (const type of ["test_strategy_choice", "tool_call", "start_parent_item", "start_after_reclassify", "no_such_type", ""]) {
       for (const disposition of DISPOSITIONS) {
         for (const outcome of OUTCOMES) expect(tightenAskDisposition(type, disposition, outcome), `${type} ${disposition} ${outcome}`).toBe(disposition);
       }

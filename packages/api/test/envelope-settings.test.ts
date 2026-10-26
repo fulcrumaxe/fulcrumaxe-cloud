@@ -8,6 +8,7 @@ import { insertApiToken, type Scope } from '@fx/core/src/tokens/service.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
 import { firstRunReservationUsd } from '@fx/pipeline/estimate';
 import { resetPlanDataCache } from '@fx/plan-data';
+import { setPendingHooks } from '@fx/core/src/pendingWork.js';
 import { foregroundBudgetUsd } from '@fx/spend';
 import { generateToken } from '../src/tokens/format.js';
 import { hashToken } from '../src/tokens/resolve.js';
@@ -303,6 +304,22 @@ describe('envelope edits, the weekly auto-start envelope and the default margin 
       expect(start.getUTCDay()).toBe(1);
       expect([start.getUTCHours(), start.getUTCMinutes(), start.getUTCSeconds()]).toEqual([0, 0, 0]);
       expect(new Date(out.renews_at).getTime() - start.getTime()).toBe(7 * 24 * 3600 * 1000);
+    });
+
+    it('S5-b1a-2: confirming or raising the limit wakes the auto-start pass; turning it off, or the same amount again, does not', async () => {
+      const sets: string[] = [];
+      setPendingHooks({ store: { get: async () => null, set: async (key) => { sets.push(key); }, delete: async () => {} } });
+      try {
+        const t = await team();
+        await call(t.owner, 'PUT', '/account/autostart-envelope', { amount_usd: 20, confirm: true });
+        expect(sets).toContain('pending:proposal-verify-sweep');
+        sets.length = 0;
+        await call(t.owner, 'PUT', '/account/autostart-envelope', { amount_usd: 20, confirm: true });
+        await call(t.owner, 'PUT', '/account/autostart-envelope', { amount_usd: 0 });
+        expect(sets).toEqual([]);
+      } finally {
+        setPendingHooks(null);
+      }
     });
 
     it('a person confirms it: a positive amount without confirm is refused (400) and writes nothing', async () => {

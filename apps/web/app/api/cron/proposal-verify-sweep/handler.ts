@@ -47,9 +47,18 @@ export async function proposalVerifySweepHandler(req: NextRequest, deps: Proposa
         return { result: { configured: false }, workFound: false, nextDueAt: null };
       }
       const counts = await worker.sweepProposalVerification();
-      // Proposals still waiting (held by a limit, a run in flight, or the pass budget) keep the next pass connecting.
-      const workFound = counts.listed > 0;
-      return { result: { configured: true, ...counts }, workFound, nextDueAt: workFound ? now() + PROPOSAL_VERIFY_PASS_MS : null };
+      // D#483 S5-b1a-2: the auto-start gate runs after the check pass, in this same tick. A fault in it never hides the verifier's own counts.
+      const autoStart = await worker.sweepAutoStart().catch((err: unknown) => {
+        deps.log(`proposal verify sweep: auto-start pass failed (${err instanceof Error ? err.name : "error"})`);
+        return null;
+      });
+      // Proposals still waiting (held by a limit, a run in flight, or the pass budget) keep the next pass connecting. Proposals the weekly limit has no room for
+      // wait for its renewal instead of polling: the gate cannot start them before then, and the backstop still looks now and then.
+      const moreToGate = autoStart !== null && (autoStart.started > 0 || autoStart.failed > 0);
+      const workFound = counts.listed > 0 || moreToGate;
+      const renewsAt = autoStart?.renews_at !== undefined ? Date.parse(autoStart.renews_at) : Number.NaN;
+      const nextDueAt = workFound ? now() + PROPOSAL_VERIFY_PASS_MS : Number.isFinite(renewsAt) ? renewsAt : null;
+      return { result: { configured: true, ...counts, auto_start: autoStart }, workFound, nextDueAt };
     },
     deps.log,
     now,

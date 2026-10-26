@@ -329,10 +329,10 @@ export function clampRuleOutcome(outcome: RuleOutcome, toolCallDisposition: Disp
   return outcome === "approve" && toolCallDisposition === "ask" ? "ask" : outcome;
 }
 
-const TIGHTENABLE_ASK_TYPES: ReadonlySet<string> = new Set(["spend_past_envelope", "run_extension"]);
+const TIGHTENABLE_ASK_TYPES: ReadonlySet<string> = new Set(["spend_past_envelope", "run_extension", "start_work_small", "start_work_bug", "start_work_doc"]);
 
 /**
- * What a rule may do to a platform-raised ask: make it stricter, never looser, and only for the two types whose facts the platform computes.
+ * What a rule may do to a platform-raised ask: make it stricter, never looser, and only for the types whose facts the platform computes.
  * An `ask` rule asks, a `deny` rule denies, and an `approve` rule changes nothing. Any other type comes back exactly as it was given.
  */
 export function tightenAskDisposition(type: string, disposition: Disposition, ruleOutcome: RuleOutcome): Disposition | "deny" {

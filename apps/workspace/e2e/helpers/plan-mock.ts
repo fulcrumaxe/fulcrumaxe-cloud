@@ -63,6 +63,7 @@ export function proposal(n: number, over: Record<string, unknown> = {}): Proposa
     verify_retry: false,
     claim_counts: { supported: 0, refuted: 0, unverifiable: 0, pending: 0 },
     evidence_count: 0,
+    auto_started: false,
     ...over,
   } as Record<string, unknown>;
   // The real column rule (0839 proposals_verification_stamped): a proposal is stamped exactly when it is no longer pending, so a pending row has no check time or sha.
@@ -111,6 +112,8 @@ export interface PlanMock {
    */
   estimates: Record<string, { basis: "history" | "seed" | "none"; total_usd: number | null }> | null;
   estimateMeta: { margin_pct: number | null; remaining_budget_usd: number; first_run_usd: number };
+  /** D#483 S5-b1a-2: what the weekly auto-start route answers; null (the default) leaves it unanswered (404), as before the Inbox read it. */
+  autostart: Record<string, unknown> | null;
   /** Requests held open until released (see holdRequest). Each holds the first request that matches, once. */
   holds: { re: RegExp; used: boolean; release: () => void; gate: Promise<void> }[];
 }
@@ -152,6 +155,7 @@ export function newMock(): PlanMock {
     details: {},
     estimates: null,
     estimateMeta: { margin_pct: 20, remaining_budget_usd: 437, first_run_usd: 10 },
+    autostart: null,
     holds: [],
   };
 }
@@ -183,6 +187,7 @@ export async function installMock(page: Page, m: PlanMock) {
     }
     if (req.method() === "GET") {
       if (p === "/api/v1/work-items") return send(route, { status: 200, json: { data: [], next_cursor: null } });
+      if (p === "/api/v1/account/autostart-envelope" && m.autostart) return send(route, { status: 200, json: m.autostart });
       if (p === "/api/v1/repos") return m.reposFail ? send(route, refusal(500, "internal_error")) : send(route, { status: 200, json: m.repos });
       if (p === "/api/v1/proposals") {
         if (m.listFails) return send(route, refusal(500, "internal_error"));

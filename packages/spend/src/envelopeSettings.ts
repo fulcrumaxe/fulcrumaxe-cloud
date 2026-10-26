@@ -1,6 +1,6 @@
 import type { PoolClient } from 'pg';
 import { envelopeDefaultMarginPct } from '@fx/plan-data';
-import { currentEnvelope, envelopeSpentUsd, weekStartUtc, type EnvelopeScope } from './envelope.js';
+import { currentEnvelope, envelopeLockKey, envelopeSpentUsd, weekStartUtc, type EnvelopeScope } from './envelope.js';
 import { EnvelopeWriteError, writeEnvelopeVersion } from './envelopeWrite.js';
 
 /**
@@ -214,4 +214,49 @@ export async function changeAutostart(client: PoolClient, input: { accountId: st
   const state = await readAutostart(client, accountId, input.now);
   await audit(client, 'autostart_envelope.changed', { envelope_id: state.envelopeId, from_version: before.version, to_version: state.version, from: before.amountUsd, to: amountUsd });
   return { written: true, state };
+}
+
+// ---- room under the weekly auto-start limit ------------------------------------------------------------------------------------------------
+
+export type AutostartRoomReason = 'ok' | 'off' | 'unpriced' | 'exhausted';
+export interface AutostartRoom {
+  /** True only when one more item's first run fits what is left this week after the items already started and not yet running. */
+  fits: boolean;
+  reason: AutostartRoomReason;
+  envelopeId: string | null;
+  /** What is left this week (the amount less this week's spend), before the items waiting to run are set aside. */
+  remainingUsd: number;
+  /** Items the gate started on this envelope whose first run has not been reserved yet: each holds one first run's price. */
+  pendingItems: number;
+}
+
+const tt = (usd: number): number => Math.round(usd * 10_000);
+
+/**
+ * Whether the weekly auto-start limit has room for one more item, DECIDED UNDER THE ENVELOPE'S LOCK. The lock is `reserve()`'s own (`envelopeLockKey`) and is
+ * held to the end of the caller's transaction, so the caller starts the item in that same transaction: a second gate (or a run's admission) waits here until the
+ * first commits, then sees the item it started. Room = the week's remaining amount covers (items started but not yet running + this one) first runs. Spend past
+ * the first run is the envelope's own admission (S5-d). Fails closed: no envelope, an amount of 0, a price that is not a positive number, or any sum that
+ * does not fit is `fits: false`. Must run inside a `withTenant` transaction.
+ */
+export async function autostartRoom(client: PoolClient, input: { accountId: string; firstRunUsd: number; now?: Date }): Promise<AutostartRoom> {
+  const { accountId } = input;
+  const found = await client.query<{ id: string }>(`SELECT id FROM approval_envelopes WHERE account_id = $1 AND scope = 'weekly_autostart' AND version = 1 LIMIT 1`, [accountId]);
+  const envelopeId = found.rows[0]?.id ?? null;
+  if (envelopeId === null) return { fits: false, reason: 'off', envelopeId: null, remainingUsd: 0, pendingItems: 0 };
+  await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [envelopeLockKey(accountId, envelopeId)]);
+  const state = await readAutostart(client, accountId, input.now);
+  if (!state.enabled || state.envelopeId !== envelopeId) return { fits: false, reason: 'off', envelopeId, remainingUsd: 0, pendingItems: 0 };
+  const pending = await client.query<{ n: number }>(
+    `SELECT count(*)::int AS n FROM work_items w
+      WHERE w.account_id = $1 AND w.envelope_id = $2 AND w.stage = 'triaged'
+        AND NOT EXISTS (SELECT 1 FROM agent_runs r WHERE r.account_id = w.account_id AND r.work_item_id = w.id)`,
+    [accountId, envelopeId],
+  );
+  const pendingItems = pending.rows[0]?.n ?? Number.POSITIVE_INFINITY;
+  const out = { envelopeId, remainingUsd: state.remainingThisWeekUsd, pendingItems };
+  // A price that rounds to nothing in the unit the money columns hold is no price: it would make every item free.
+  if (!Number.isFinite(input.firstRunUsd) || tt(input.firstRunUsd) <= 0 || !Number.isFinite(pendingItems)) return { fits: false, reason: 'unpriced', ...out };
+  const fits = (pendingItems + 1) * tt(input.firstRunUsd) <= tt(state.remainingThisWeekUsd);
+  return { fits, reason: fits ? 'ok' : 'exhausted', ...out };
 }

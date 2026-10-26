@@ -325,7 +325,7 @@ export async function reserveWith(client: PoolClient, params: ReserveParams): Pr
   }
   // Taken last, so every caller takes its locks in the same order. Two runs on one batch envelope queue here instead of both passing.
   if (envelopeId !== null) {
-    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${params.accountId}:envelope:${envelopeId}`]);
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [envelopeLockKey(params.accountId, envelopeId)]);
   }
 
   // 3. The item's spend envelope (D#483 S5-d); it replaces the Feature/Small cap below for an item that has one. A run that reserves no model money
@@ -409,7 +409,7 @@ export async function reserve(pool: Pool, params: ReserveParams): Promise<Reserv
 }
 
 // Declaration-merged here, at the end of the file, so no line above moves (the marketing site cites lines of this file).
-import { envelopeAdmits, envelopeRunUsd, itemEnvelopeId, recordEnvelopeCharge } from './envelope.js';
+import { envelopeAdmits, envelopeLockKey, envelopeRunUsd, itemEnvelopeId, recordEnvelopeCharge } from './envelope.js';
 export interface ReserveParams {
   /**
    * Set ONLY by the runner for a run on the operator's own subscription (decided there from the operator

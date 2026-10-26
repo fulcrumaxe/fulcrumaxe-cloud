@@ -908,6 +908,14 @@ const newKey = () => (typeof crypto !== "undefined" && crypto.randomUUID ? crypt
  * `getRepo()` answers { id, name, connected } for the picked repository (name is owner/name), or null when none is picked.
  * `onOpenWorkItem(id)` is the app's way to show a work item on the board.
  */
+/** The Inbox names an auto-started item for a week. Older ones are on the board, and their card says how they started. */
+const AUTO_NOTICE_MS = 7 * 24 * 60 * 60 * 1000;
+/** Within the last week by the page's own clock; a time in the future, or one that does not parse, is not recent. */
+const isRecent = (iso) => {
+  const age = Date.now() - Date.parse(iso);
+  return age >= 0 && age <= AUTO_NOTICE_MS;
+};
+
 export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) {
   const view = h("div", { class: "pl-inbox-view" });
   const live = h("p", { class: "pl-sr", role: "status", "aria-live": "polite", "data-testid": "pl-inbox-live" });
@@ -932,6 +940,8 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
   let seq = 0;
   let destroyed = false;
   let loadedFor = null; // the repo id the rows belong to
+  let autoStarted = []; // D#483 S5-b1a-2: items the repo's dial started on its own and announced, newest first: [{ id, title, workItemId }]
+  let autostartOff = null; // D#483 S5-b1a-2: the server's own sentence while the weekly auto-start limit is off; null when it is on or could not be read
 
   const gate = createRetryGate({
     onChange: (remaining) => {
@@ -996,6 +1006,8 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
     paint();
     if (status === "ready") {
       void loadEstimates(repo, mine);
+      void loadAutostart(mine);
+      void loadAutoStarted(repo, mine);
       // An opened proposal whose check changed since its detail was read is read again; one that left the list is closed.
       for (const id of [...opened]) {
         const p = rows.find((r) => r.id === id);
@@ -1042,6 +1054,50 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
       opened.add(p.id);
       void fetchDetail(p);
     }
+  }
+
+  /** The weekly auto-start limit, read once per load. While it is off nothing starts on its own, and the Inbox says how to turn it on in the server's own sentence. A failed read shows nothing. */
+  async function loadAutostart(mine) {
+    try {
+      const res = await call("GET", "/api/v1/account/autostart-envelope");
+      if (mine !== seq || destroyed) return;
+      autostartOff = res && res.enabled === false && typeof res.off_sentence === "string" && res.off_sentence.trim() !== "" ? res.off_sentence.trim() : null;
+      paint();
+    } catch {
+      if (mine !== seq || destroyed) return;
+      autostartOff = null;
+    }
+  }
+
+  /** The approved proposals the dial started on its own and announced (the server marks them `auto_started`), from the first page of the approved list. A failed read shows no notice. */
+  async function loadAutoStarted(repo, mine) {
+    try {
+      const body = await call("GET", "/api/v1/proposals?repo_id=" + encodeURIComponent(repo.id) + "&state=approved&owner=product");
+      if (mine !== seq || destroyed) return;
+      const list = body && Array.isArray(body.proposals) ? body.proposals : [];
+      autoStarted = list
+        .filter((p) => validProposal(p) && p.auto_started === true && typeof p.work_item_id === "string" && p.work_item_id !== "" && isRecent(str(p.decided_at)))
+        .map((p) => ({ id: p.id, title: p.title, workItemId: p.work_item_id, at: str(p.decided_at) }))
+        .sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0))
+        .slice(0, 3);
+      paint();
+    } catch {
+      if (mine !== seq || destroyed) return;
+      autoStarted = [];
+    }
+  }
+
+  /** One plain line per auto-started item, with the way to its card. Items that were started by a person, or by the dial on its "act" setting, have none. */
+  function autoStartedNotices() {
+    if (!autoStarted.length) return null;
+    return h(
+      "div",
+      { class: "pl-inbox-autostarted", role: "status", "data-testid": "pl-inbox-autostarted" },
+      autoStarted.map((n) =>
+        h("p", { class: "pl-inbox-sentence", "data-testid": "pl-inbox-autostarted-line" }, "Started on its own under your setting: " + n.title + ". ",
+          h("button", { type: "button", class: "pl-btn", "data-testid": "pl-inbox-autostarted-open", "data-focus": n.id + ":autostarted", onClick: () => onOpenWorkItem(n.workItemId) }, "Open its card"))
+      )
+    );
   }
 
   /** The estimate of every new, product-owned row not yet read, in sets of 50 (the route's limit). A failure leaves the field blank and optional. */
@@ -1339,6 +1395,8 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
       h("h2", { id: "pl-inbox-h", class: "pl-panel-title", tabindex: "-1", "data-focus": "heading" }, repo ? "Inbox for " + repo.name : "Inbox"),
       filters,
       note ? h("p", { class: "pl-inbox-sentence", "data-testid": "pl-inbox-note-line" }, note) : null,
+      autoStartedNotices(),
+      filter === "new" && autostartOff !== null && rows.some((r) => r.state === "new" && r.owner_process !== "internal_loop") ? h("p", { class: "pl-inbox-sentence", "data-testid": "pl-inbox-autostart-off" }, autostartOff + ".") : null,
       body()
     );
     if (key) {

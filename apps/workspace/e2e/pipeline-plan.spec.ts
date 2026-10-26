@@ -427,7 +427,8 @@ test.describe("D#483 S3-L2b: Plan actions", () => {
 
 const click = async (loc: ReturnType<Page["locator"]>) => loc.evaluate((e) => (e as HTMLElement).click()); // a click that does not move focus, on every project
 const activeId = (page: Page) => page.evaluate(() => (document.activeElement as HTMLElement | null)?.getAttribute("data-focus") ?? document.activeElement?.id ?? "");
-const planReqs = (m: PlanMock) => m.requests.filter((r) => /\/plan(\?|$)|state=approved/.test(r)).length;
+// The Plan tab's own reads only: its plan GET and its approved-proposals pages. The Inbox's notice read (state=approved with owner=product) is the Inbox's, and the Inbox is the tab the person is on.
+const planReqs = (m: PlanMock) => m.requests.filter((r) => /\/plan(\?|$)|state=approved($|&cursor=)/.test(r)).length;
 const running = () => withLatest({ state: "running", finished_at: null, counts: {}, started_at: new Date().toISOString() }, false);
 
 test.describe("D#483 S3-L2b fix round: leaving the Plan tab stops everything", () => {

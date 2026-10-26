@@ -3201,6 +3201,7 @@ export interface Operations {
           pending: number;
         };
         evidence_count: number;
+        auto_started: boolean;
       }>;
       next_cursor: string | null;
     };
@@ -3253,6 +3254,7 @@ export interface Operations {
           pending: number;
         };
         evidence_count: number;
+        auto_started: boolean;
         claims: Array<{
           id: string;
           text: string;
@@ -3324,6 +3326,7 @@ export interface Operations {
           pending: number;
         };
         evidence_count: number;
+        auto_started: boolean;
       };
       work_item_id: string;
       envelope: ({
@@ -3390,6 +3393,7 @@ export interface Operations {
           pending: number;
         };
         evidence_count: number;
+        auto_started: boolean;
       };
     };
   };
@@ -3441,6 +3445,7 @@ export interface Operations {
           pending: number;
         };
         evidence_count: number;
+        auto_started: boolean;
       };
     };
   };
@@ -3492,6 +3497,7 @@ export interface Operations {
           pending: number;
         };
         evidence_count: number;
+        auto_started: boolean;
       };
     };
   };
@@ -3582,6 +3588,7 @@ export interface Operations {
             pending: number;
           };
           evidence_count: number;
+          auto_started: boolean;
         };
         work_item_id: string;
         started: boolean;

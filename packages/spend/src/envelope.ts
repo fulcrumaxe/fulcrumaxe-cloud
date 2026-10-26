@@ -12,6 +12,12 @@ import type { PoolClient } from 'pg';
 
 export type EnvelopeScope = 'item' | 'batch' | 'weekly_autostart';
 
+/**
+ * The advisory lock one envelope's money is decided under. `reserve()` takes it before admitting a run, and the auto-start gate (`autostartRoom`) takes it
+ * before starting an item on the weekly envelope, so an admission and a start never both read the same headroom. Held to the end of the transaction.
+ */
+export const envelopeLockKey = (accountId: string, envelopeId: string): string => `${accountId}:envelope:${envelopeId}`;
+
 /** The item's envelope, or null when it draws on none (it keeps the plan's Feature/Small cap). */
 export async function itemEnvelopeId(client: PoolClient, accountId: string, workItemId: string): Promise<string | null> {
   const { rows } = await client.query<{ envelope_id: string | null }>('SELECT envelope_id FROM work_items WHERE id = $1 AND account_id = $2', [workItemId, accountId]);
