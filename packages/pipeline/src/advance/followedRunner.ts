@@ -3,6 +3,7 @@ import type { SpecWriter, SpecWriteRequest } from "../plan/spec.js";
 import { PanelYieldError } from "../plan/panel.js";
 import { PanelSeatAbortedError, PanelSeatFailedError } from "../plan/sandboxPanelRunner.js";
 import type { WaitClock } from "../plan/waitBudget.js";
+import { MAX_CONTINUATIONS_PER_WORK_ITEM } from "@fx/core/src/run-limits/limits.js";
 import type { AdvanceRunPorts } from "./runPorts.js";
 import { pauseForDenial } from "./reservationPauses.js";
 import { SpecWriterPausedError } from "./stageStarts.js";
@@ -83,7 +84,9 @@ export function createFollowedRunner(ports: AdvanceRunPorts, options: FollowedRu
     throw new PanelSeatAbortedError();
   }
 
-  async function follow(runId: string, signal: AbortSignal, clock?: WaitClock): Promise<PanelSeatResult> {
+  async function follow(firstRunId: string, signal: AbortSignal, site: "spec" | "panel_workflow", clock?: WaitClock): Promise<PanelSeatResult> {
+    let runId = firstRunId;
+    let continued = 0;
     let failures = 0;
     let credited = false;
     // The run to stop when the wait is abandoned: the end of the follow-up chain, which moves when a lost run is followed.
@@ -110,7 +113,17 @@ export function createFollowedRunner(ports: AdvanceRunPorts, options: FollowedRu
           yieldNow = yieldAt !== null && out.runtime === "runner" && now() >= yieldAt;
         }
         if (out.done) {
-          if (out.status !== "succeeded") throw new PanelSeatFailedError(out.status);
+          if (out.status !== "succeeded") {
+            // C89: a seat that ended at a limit is run again from its own stored prompt (the worker decides); the child is followed here. Any other answer is the failure it always was.
+            const next = (out.status === "timed_out" || out.status === "killed_spend") && continued < MAX_CONTINUATIONS_PER_WORK_ITEM ? await ports.continueRun?.(out.tailRunId ?? runId, site).catch(() => null) : null;
+            if (next) {
+              continued++;
+              runId = next;
+              live = next;
+              continue;
+            }
+            throw new PanelSeatFailedError(out.status);
+          }
           return { agentRunId: runId, agentOutput: out.envelope };
         }
       } catch (err) {
@@ -138,7 +151,7 @@ export function createFollowedRunner(ports: AdvanceRunPorts, options: FollowedRu
       if (pause !== null) throw new SpecWriterPausedError(pause);
       throw new PanelSeatFailedError(`refused:${started.reason}`);
     }
-    return follow(started.runId, signal, clock);
+    return follow(started.runId, signal, "spec", clock);
   }
 
   /**
@@ -155,7 +168,7 @@ export function createFollowedRunner(ports: AdvanceRunPorts, options: FollowedRu
       if (pause !== null) return { denied: true, pause };
       throw new PanelSeatFailedError(`refused:${started.reason}`);
     }
-    return follow(started.runId, signal, clock);
+    return follow(started.runId, signal, "panel_workflow", clock);
   }
 
   return {

@@ -29,6 +29,7 @@ import type { StartGatePort, StartGateStepInput, StartGateStepOut } from "./star
 import { isContextSpill, type ContextAssembly, type ContextSection, type ContextSpill } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
 import { advanceContinue as advanceContinueCore, type AdvanceContinueOut } from "./advanceContinue.js";
+import type { ContinuationSite } from "./continuation.js";
 import { readVerifiedReviewGate, type VerifiedReviewGate } from "./verifiedReviewGate.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 import { startCheckFixRound } from "./checkFix.js";
@@ -147,6 +148,8 @@ export interface AdvanceStepPorts {
   outcome(runId: string): Promise<AdvanceRunOutcome>;
   /** The existing cancel path, as the approver (so the cancel is audited as theirs and needs their membership to still be active). Safe on a finished run. */
   cancel(runId: string): Promise<void>;
+  /** D#2 H14c-3-3b-3 (C89): see the pipeline's `AdvanceRunPorts.continueRun`. */
+  continueRun?(endedRunId: string, site: "spec" | "panel_workflow"): Promise<string | null>;
 }
 
 /** What a pipeline step answers, as plain data: the pipeline's own status word and the ids a later step needs. */
@@ -679,7 +682,7 @@ export interface AdvanceFacade {
    * answers one fixed code (see `AdvanceContinueOut`); anything this step cannot decide is `today`, the path the workflow took before continuation existed. Never throws.
    * A replay answers the child the first pass started. The halt guard is the same as every other step's (`halted`).
    */
-  advanceContinue(who: AdvanceStepWho, endedRunId: string): Promise<AdvanceContinueOut>;
+  advanceContinue(who: AdvanceStepWho, endedRunId: string, site?: ContinuationSite): Promise<AdvanceContinueOut>;
   /**
    * D#483 S5-k1d: the reviewer runs of one head and re-review round that really started (every run but a `refused_spend` one), newest per role. A restarted review
    * uses these runs and asks only for the roles that have none, because the key of a denied ask finds its own refused run again and must never be replayed.
@@ -1214,6 +1217,10 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       headroom: (roles) => checkRoundHeadroom(runnerPool, deps.resolveRunSeat, who, roles),
       outcome: (runId) => advanceRunOutcome(who.accountId, runId),
       cancel: (runId) => cancelItemRun(who, runId),
+      continueRun: async (runId, site) => {
+        const answer = await advanceContinue(who, runId, site);
+        return (answer.code === "continued" || answer.code === "duplicate") && answer.runId !== null && answer.runId !== runId ? answer.runId : null;
+      },
     };
   }
 
@@ -1525,14 +1532,14 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return out;
   }
 
-  async function advanceContinue(who: AdvanceStepWho, endedRunId: string): Promise<AdvanceContinueOut> {
+  async function advanceContinue(who: AdvanceStepWho, endedRunId: string, site?: ContinuationSite): Promise<AdvanceContinueOut> {
     const bad = await guardStep(who);
     if (bad) return { code: bad.reason === "item_halted" || bad.reason === "halted_since_approval" ? "halted" : "today", runId: null, parkedAs: null };
     const out = await advanceContinueCore(
       { pool: runnerPool, registry: deps.registry, resolveRunSeat: deps.resolveRunSeat, logError: (name) => console.warn(JSON.stringify({ event: "advance.continue_error", work_item_id: who.workItemId, run_id: endedRunId, error: name })) },
-      who.accountId, who.workItemId, endedRunId,
+      who.accountId, who.workItemId, endedRunId, undefined, site,
     );
-    console.info(JSON.stringify({ event: "advance.continue", work_item_id: who.workItemId, ended_run_id: endedRunId, code: out.code, run_id: out.runId, parked_as: out.parkedAs }));
+    console.info(JSON.stringify({ event: "advance.continue", work_item_id: who.workItemId, ended_run_id: endedRunId, site: site ?? "executor", code: out.code, run_id: out.runId, parked_as: out.parkedAs }));
     return out;
   }
 

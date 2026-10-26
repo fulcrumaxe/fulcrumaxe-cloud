@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   SandboxTarget,
   createFakeSandbox,
@@ -506,5 +506,44 @@ describe("H14c-PANEL-2: abort stops the sandbox and closes the reservation", () 
     expect(w.stops.length).toBeGreaterThanOrEqual(1);
     const hung = await h.admin.query<{ status: string }>(`SELECT status FROM agent_runs WHERE account_id = $1 AND role = 'security-expert'`, [accountId]);
     expect(hung.rows.map((r) => r.status)).toEqual(["cancelled"]);
+  });
+});
+
+describe("D#2 H14c-3-3b-3 (C89): a seat that ended at a limit is continued in-process", () => {
+  const runnerDeps = (w: World, accountId: string, repoId: string) => ({
+    pool: h.runWriterPool, accountId, registry: w.registry, hookWait: w.hookWait, pollMs: 10,
+    resolveSeat: () => ({ repoId, product: "team" as const, roleCard: "fixture role card", model: "haiku-4.5", capUsd: 5, spend: { plan: "starter" as const, estimateComputeUsd: 1, trigger: "foreground" as const } }),
+  });
+  /** Two finished seats of one item; the first is then marked as ended at `status`. */
+  async function endedAt(status: string) {
+    const { accountId, repoId } = await tenant();
+    const w = world();
+    const wi = randomUUID();
+    await seedWorkItem(h.admin, accountId, wi, repoId);
+    const live = new AbortController().signal;
+    await runnerFor(w, accountId, repoId).runSeat(request(wi, "k1"), live);
+    const child = await runnerFor(w, accountId, repoId).runSeat(request(wi, "k2"), live);
+    const ended = (await h.admin.query<{ run_id: string }>(`SELECT run_id FROM agent_run_idempotency_keys WHERE account_id = $1 AND idempotency_key = 'k1'`, [accountId])).rows[0]!.run_id;
+    await h.admin.query(`UPDATE agent_runs SET status = $2 WHERE id = $1`, [ended, status]);
+    return { wi, live, ended, child: child.agentRunId, runner: (continueSeat?: (id: string) => Promise<string | null>) => createSandboxPanelRunner({ ...runnerDeps(w, accountId, repoId), ...(continueSeat ? { continueSeat } : {}) }) };
+  }
+
+  it.each(["timed_out", "killed_spend"])("a seat whose run ended %s is settled by the child the worker started, and the child's envelope is the seat's", async (status) => {
+    const f = await endedAt(status);
+    const asked: string[] = [];
+    const out = await f.runner(async (id) => (asked.push(id), f.child)).runSeat(request(f.wi, "k1"), f.live);
+    expect(asked).toEqual([f.ended]);
+    expect(out).toEqual({ agentRunId: f.child, agentOutput: { comment: "security-expert agrees" } });
+  });
+
+  it("with no continuation (absent, null or a throw) the seat is rejected with the run's own end, as before; any other end is never offered", async () => {
+    const f = await endedAt("timed_out");
+    for (const dep of [undefined, async () => null, async (): Promise<string | null> => { throw new Error("private text"); }]) {
+      await expect(f.runner(dep).runSeat(request(f.wi, "k1"), f.live)).rejects.toMatchObject({ runStatus: "timed_out" });
+    }
+    const failed = await endedAt("failed");
+    const asked = vi.fn(async () => failed.child);
+    await expect(failed.runner(asked).runSeat(request(failed.wi, "k1"), failed.live)).rejects.toMatchObject({ runStatus: "failed" });
+    expect(asked).not.toHaveBeenCalled();
   });
 });

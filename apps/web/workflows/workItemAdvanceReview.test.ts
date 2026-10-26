@@ -1750,3 +1750,57 @@ describe("a merge handed to the customer's runner (merge_delegated): the workflo
     expect(t.worker.advanceMergeOrder).not.toHaveBeenCalled();
   });
 });
+
+describe("D#2 H14c-3-3b-3: a reviewer that ended at a limit is continued, and the child's verdict is the one recorded", () => {
+  const CHILD = "99999999-9999-4999-8999-000000000002";
+  const endsAtLimit = (status: string) => (role: string) => (role === "code-reviewer" ? { status, envelope: null } : { status: "succeeded", envelope: { verdict: "pass", findings: [], summary: "fine" } });
+  const withContinue = (t: ReturnType<typeof setup>, answer: unknown) => {
+    const original = t.worker.advanceRunOutcome.getMockImplementation()!;
+    t.worker.advanceRunOutcome.mockImplementation(async (account: string, id: string) => (id === CHILD ? { status: "succeeded", done: true, envelope: { verdict: "pass", findings: [], summary: "fine" } } : original(account, id)));
+    const step = vi.fn(async () => answer);
+    (t.worker as unknown as Record<string, unknown>).advanceContinue = step;
+    return step;
+  };
+
+  it.each(["timed_out", "killed_spend"])("a reviewer that ended %s is asked about at the reviewer site, the child is followed, and the child's pass is recorded", async (status) => {
+    const t = setup(fresh({ verdict: endsAtLimit(status), rounds: [{ decision: "all_passed" }] }));
+    const step = withContinue(t, { code: "continued", runId: CHILD, parkedAs: null });
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+    expect(step).toHaveBeenCalledWith(WHO, "run-1-code-reviewer", "reviewer");
+    expect(step).toHaveBeenCalledTimes(1);
+    const recorded = t.worker.advanceRecordRound.mock.calls[0]![1].verdicts.find((v) => v.role === "code-reviewer")!;
+    expect([recorded.runId, recorded.verdict, recorded.noVerdict === true]).toEqual([CHILD, "pass", false]);
+  });
+
+  it.each([
+    ["parked", { code: "parked", runId: null, parkedAs: "max_resumes" }, { status: "failed", detail: "reviewer_parked:max_resumes" }],
+    ["closed", { code: "work_item_closed", runId: null, parkedAs: null }, { status: "failed", detail: "reviewer_item_closed" }],
+  ])("%s: a stop ends the whole workflow there: no re-run, no round recorded", async (_name, answer, result) => {
+    const t = setup(fresh({ verdict: endsAtLimit("timed_out"), rounds: [{ decision: "reviewer_no_verdict" }] }));
+    const step = withContinue(t, answer);
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual(result);
+    expect(t.worker.advanceRecordRound).not.toHaveBeenCalled();
+    expect(t.started.filter((r) => r.role === "code-reviewer")).toHaveLength(1);
+    expect(step).toHaveBeenCalledTimes(1);
+  });
+
+  it("a halt or an open ask ends the workflow there too", async () => {
+    for (const code of ["halted", "waiting_on_answer"]) {
+      const t = setup(fresh({ verdict: endsAtLimit("timed_out"), rounds: [{ decision: "reviewer_no_verdict" }] }));
+      withContinue(t, { code, runId: null, parkedAs: null });
+      await workItemAdvanceWorkflow(ARGS);
+      expect(t.worker.advanceRecordRound).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each([
+    ["today", { code: "today", runId: null, parkedAs: null }],
+    ["a child that is the ended run itself", { code: "continued", runId: "run-1-code-reviewer", parkedAs: null }],
+  ])("%s: the reviewer ends with no verdict, exactly as before continuation existed", async (_name, answer) => {
+    const t = setup(fresh({ verdict: endsAtLimit("timed_out"), rounds: [{ decision: "reviewer_no_verdict" }] }));
+    withContinue(t, answer);
+    await workItemAdvanceWorkflow(ARGS);
+    const recorded = t.worker.advanceRecordRound.mock.calls[0]![1].verdicts.find((v) => v.role === "code-reviewer")!;
+    expect([recorded.verdict, recorded.noVerdict, recorded.endCode]).toEqual(["fail", true, "timed_out"]);
+  });
+});

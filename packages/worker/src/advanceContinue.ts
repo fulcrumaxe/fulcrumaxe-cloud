@@ -1,8 +1,8 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { EXECUTOR_ROLE, WorkItemHaltedError, type ExecutionTargetRegistry } from "@fx/runner";
+import { WorkItemHaltedError, type ExecutionTargetRegistry } from "@fx/runner";
 import { REFUSED_BY_CODES, continueAfterLimit, type ContinueAfterLimitResult } from "@fx/pipeline";
-import { continuationStartInput, type ContinuationDeps } from "./continuation.js";
+import { SITE_RULES, continuationStartInput, type ContinuationDeps, type ContinuationSite } from "./continuation.js";
 
 /**
  * D#2 H14c-3-3b-2 (C88 R1, R5, R7, section 3): what the advance workflow asks, at the moment it reads an executor run that ended at a limit
@@ -34,8 +34,6 @@ const out = (code: AdvanceContinueCode, runId: string | null = null, parkedAs: s
 const TODAY = out("today");
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-/** The stages an executor run that a workflow waits on can end in: the build, a check fix round, a review fix round. Anything else is not continued. */
-const CONTINUABLE_STAGES = new Set(["in_progress", "pr_opened", "changes_requested", "review_passed"]);
 const CLOSED_STAGES = new Set(["merged", "closed_unmerged", "closed"]);
 /** Parks whose fixed word the workflow can show (the pipeline's list plus the monthly budget); anything else read back is not trusted. */
 const PARK_AS: ReadonlySet<string> = new Set([...REFUSED_BY_CODES, "monthly_budget_reached"]);
@@ -107,8 +105,10 @@ function mapResult(r: ContinueAfterLimitResult): AdvanceContinueOut | "duplicate
  * The step. `endedRunId` is the run the workflow just read as ended; the step never trusts the workflow for anything else. Never throws.
  * The halt checks (the item's halt marker and epoch) are the caller's guard; a halt raised inside the start itself is `halted` here.
  */
-export async function advanceContinue(deps: AdvanceContinueDeps, accountId: string, workItemId: string, endedRunId: string, at?: Date): Promise<AdvanceContinueOut> {
+export async function advanceContinue(deps: AdvanceContinueDeps, accountId: string, workItemId: string, endedRunId: string, at?: Date, site: ContinuationSite = "executor"): Promise<AdvanceContinueOut> {
   try {
+    // C89: the site is a fixed word from the wait that asked; an unknown one is not a site.
+    if (!Object.hasOwn(SITE_RULES, site)) return TODAY;
     if (!UUID_RE.test(accountId) || !UUID_RE.test(workItemId) || !UUID_RE.test(endedRunId)) return TODAY;
     const registry = deps.registry;
     if (!registry) return TODAY;
@@ -119,7 +119,7 @@ export async function advanceContinue(deps: AdvanceContinueDeps, accountId: stri
     // A replay (or a retry of a step the platform cut short) finds the run the first pass started and starts nothing.
     const existing = await childOf(deps.pool, accountId, endedRunId);
     if (existing !== null) return out("duplicate", existing);
-    return await decide(deps, accountId, workItemId, endedRunId, at);
+    return await decide(deps, accountId, workItemId, endedRunId, at, site);
   } catch (err) {
     deps.logError?.(err instanceof Error ? err.name : "unknown");
     if (err instanceof WorkItemHaltedError) return out("halted");
@@ -134,24 +134,28 @@ export async function advanceContinue(deps: AdvanceContinueDeps, accountId: stri
   }
 }
 
-async function decide(deps: AdvanceContinueDeps, accountId: string, workItemId: string, endedRunId: string, at: Date | undefined): Promise<AdvanceContinueOut> {
-  // 2. CARRY-25: only the run that just ended. It must be THIS item's newest executor run: a run of another item, another role or an older run is never the tail.
+async function decide(deps: AdvanceContinueDeps, accountId: string, workItemId: string, endedRunId: string, at: Date | undefined, site: ContinuationSite): Promise<AdvanceContinueOut> {
+  // 2. CARRY-25: only the run that just ended. It must be THIS item's newest run of its role (the executor's from the executor site, any other seat's from its own site, and a
+  // reviewer's must have a head): a run of another item, another role or an older run is never the tail.
+  const rule = SITE_RULES[site];
   const state = await withTenant(deps.pool, accountId, async (client) => {
     const item = await client.query<{ stage: string }>(`SELECT stage FROM work_items WHERE account_id = $1 AND id = $2`, [accountId, workItemId]);
+    const me = await client.query<{ role: string; head_sha: string | null }>(`SELECT role, head_sha FROM agent_runs WHERE account_id = $1 AND work_item_id = $2 AND id = $3`, [accountId, workItemId, endedRunId]);
     const newest = await client.query<{ id: string }>(
       `SELECT id FROM agent_runs WHERE account_id = $1 AND work_item_id = $2 AND role = $3 AND status <> 'refused_spend' ORDER BY created_at DESC, id DESC LIMIT 1`,
-      [accountId, workItemId, EXECUTOR_ROLE],
+      [accountId, workItemId, me.rows[0]?.role ?? ""],
     );
-    return { stage: item.rows[0]?.stage, newest: newest.rows[0]?.id };
+    return { stage: item.rows[0]?.stage, newest: newest.rows[0]?.id, role: me.rows[0]?.role, head: me.rows[0]?.head_sha ?? null };
   });
-  if (state.stage === undefined || state.newest !== endedRunId) return TODAY;
+  if (state.stage === undefined || state.newest !== endedRunId || state.role === undefined) return TODAY;
+  if (!rule.roles.includes(state.role) || (site === "reviewer" && state.head === null)) return TODAY;
   if (CLOSED_STAGES.has(state.stage)) return out("work_item_closed");
-  if (state.stage === "needs_human") {
+  if (state.stage === "needs_human" && !rule.stages.includes("needs_human")) {
     // Already parked by a first pass whose child was never made: say what was recorded (R7).
     const parked = await recordedPark(deps.pool, accountId, workItemId, endedRunId);
     return parked === null ? TODAY : out("parked", null, parked);
   }
-  if (!CONTINUABLE_STAGES.has(state.stage)) return TODAY;
+  if (!rule.stages.includes(state.stage)) return TODAY;
   // 3. R5: an open decision ask on the run fronts the continuation; nothing is continued while it is open.
   if (await hasOpenAsk(deps.pool, accountId, endedRunId)) return out("waiting_on_answer");
   // The seam for the run-extension dial (H14c-5c-3, TL ruling 10-25): it decides here whether a limit end continues on its own. Nothing is wired to it in this part, so
@@ -162,8 +166,12 @@ async function decide(deps: AdvanceContinueDeps, accountId: string, workItemId: 
     if (verdict !== "allow") return TODAY;
   }
   // 4. The start input comes from the seat as it resolves now (R4); a refusal starts nothing.
-  const input = await continuationStartInput(deps, accountId, endedRunId);
-  if ("refused" in input) return TODAY;
+  const input = await continuationStartInput(deps, accountId, endedRunId, site);
+  if ("refused" in input) {
+    // Only the fixed code is logged, never any text. Every refusal (prompt_not_retained, spec_changed, a seat's own word) is today's path with nothing started.
+    deps.logError?.(`refused:${input.refused}`);
+    return TODAY;
+  }
   // 5. The library: the decision, the lock, the keyed start.
   const result = mapResult(await (deps.continueAfter ?? continueAfterLimit)(deps.pool, deps.registry!, { accountId, runId: endedRunId, resumeInput: input, ...(at ? { at } : {}) }));
   if (result !== "duplicate") return result;
