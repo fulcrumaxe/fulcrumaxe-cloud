@@ -662,6 +662,39 @@ describe('plan import (live build L1)', () => {
       expect(back.summary).toContain('Edited text for D#1:D.');
     });
 
+    it('S5-b1a-3: a checked plan-task proposal whose roadmap text changes is sent back to be checked (its verdict and category are cleared); unchanged text keeps them', async () => {
+      const r = await seedAccount(admin, randomUUID());
+      const repoId = await repo(r);
+      const keys = ['D#1:A', 'D#1:B'];
+      const roadmap = (tag: string, only: string[] = keys) => rm(Object.fromEntries(only.map((k) => [k, { note: `${tag} text for ${k}.` }])), { m1: only });
+      expect((await run(r, repoId, source({ files: { 'roadmap.json': roadmap('Original') } }))).state).toBe('succeeded');
+      const pid = async (key: string) => (await admin.query('SELECT id FROM proposals WHERE repo_id = $1 AND dedupe_key = $2', [repoId, key])).rows[0].id as string;
+      const state = async (key: string) => (await admin.query('SELECT verification, verifier_category, verified_run_id, state FROM proposals WHERE repo_id = $1 AND dedupe_key = $2', [repoId, key])).rows[0];
+      for (const key of ['plan:D#1:A', 'plan:D#1:B']) {
+        await withTenant(appPool, r.accountId, r.userId, async (c) => c.query("SELECT * FROM proposal_record_verification($1::uuid, 'verified', $2, $3::uuid, '[]'::jsonb, '[]'::jsonb, 'doc')", [await pid(key), 'a'.repeat(40), r.runId]));
+      }
+      // B is left out of the file next (withdrawn), A is re-imported unchanged: A keeps its verdict.
+      expect((await run(r, repoId, source({ files: { 'roadmap.json': roadmap('Original', ['D#1:A']) } }))).state).toBe('succeeded');
+      expect(await state('plan:D#1:A')).toMatchObject({ verification: 'verified', verifier_category: 'doc' });
+      expect((await state('plan:D#1:B')).state).toBe('withdrawn');
+      // Both come back with rewritten text: both are requeued, the withdrawn one too, and neither keeps a run or a category to be trusted.
+      expect((await run(r, repoId, source({ files: { 'roadmap.json': roadmap('Rewritten into big work') } }))).state).toBe('succeeded');
+      for (const key of ['plan:D#1:A', 'plan:D#1:B']) {
+        expect(await state(key)).toEqual({ verification: 'pending', verifier_category: null, verified_run_id: null, state: 'new' });
+      }
+    });
+
+    it('S5-b1a-3: the import role may not change a proposal provenance', async () => {
+      const r = await seedAccount(admin, randomUUID());
+      const repoId = await repo(r);
+      expect((await run(r, repoId, source({ discussions: [{ number: 31, title: 'Outside text', body: 'B.', closed: false }] }))).state).toBe('succeeded');
+      await expect(withTenant(appPool, r.accountId, r.userId, async (c) => {
+        await c.query('SET LOCAL ROLE plan_importer');
+        await c.query("UPDATE proposals SET provenance = 'internal' WHERE repo_id = $1 AND dedupe_key = 'gh:discussion:31'", [repoId]);
+      })).rejects.toMatchObject({ code: '42501' });
+      expect((await admin.query("SELECT provenance FROM proposals WHERE repo_id = $1 AND dedupe_key = 'gh:discussion:31'", [repoId])).rows[0].provenance).toBe('external');
+    });
+
     it('a repo with nothing at all imports at level 3 as an empty plan', async () => {
       const r = await seedAccount(admin, randomUUID());
       const repoId = await repo(r);

@@ -72,12 +72,12 @@ export interface AutoStartDeps {
   warn?(line: string): void;
 }
 
-interface Facts {
+export interface Facts {
   id: string; repo_id: string; state: string; title: string | null; gh_number: number | null; owner_process: string; provenance: string; verification: string;
-  verified_run_id: string | null; category_hint: string | null; dial_withdrawn_at: Date | null; account_status: string | null; connected: boolean; owner: string | null; name: string | null;
+  verified_run_id: string | null; category_hint: string | null; verifier_category: string | null; dial_withdrawn_at: Date | null; account_status: string | null; connected: boolean; owner: string | null; name: string | null;
 }
 
-const FACTS_SQL = `SELECT p.id, p.repo_id, p.state, p.title, p.gh_number, p.owner_process, p.provenance, p.verification, p.verified_run_id, p.category_hint, p.dial_withdrawn_at,
+const FACTS_SQL = `SELECT p.id, p.repo_id, p.state, p.title, p.gh_number, p.owner_process, p.provenance, p.verification, p.verified_run_id, p.category_hint, p.verifier_category, p.dial_withdrawn_at,
        a.status AS account_status, (r.installation_id IS NOT NULL) AS connected, r.gh_owner AS owner, r.gh_name AS name
   FROM proposals p
   LEFT JOIN accounts a ON a.id = p.account_id
@@ -86,12 +86,22 @@ const FACTS_SQL = `SELECT p.id, p.repo_id, p.state, p.title, p.gh_number, p.owne
 
 const smallKind = (hint: string | null): SmallKind | null => (SMALL as readonly string[]).includes(hint ?? "") ? (hint as SmallKind) : null;
 
+/**
+ * D#483 S5-b1a-3: the proposal's category for the gate: the verifier's stored category, else the discovery hint. The verifier's category counts ONLY for an
+ * internal proposal that names a verified run; for any other proposal it is not read at all (an external one asks whatever the model said, and `resolveStart`
+ * refuses it a second time). The model's word is never trusted beyond the fixed kinds: whatever it is, only small, bug and doc can start (`smallKind`).
+ */
+export function gateCategory(p: Pick<Facts, "provenance" | "verified_run_id" | "verifier_category" | "category_hint">): string | null {
+  const trusted = p.provenance === "internal" && p.verified_run_id !== null && p.verifier_category !== null;
+  return trusted ? p.verifier_category : p.category_hint;
+}
+
 async function gateOne(deps: AutoStartDeps, client: PoolClient, accountId: string, proposalId: string): Promise<AutoStartOutcome> {
   const p = (await client.query<Facts>(FACTS_SQL, [accountId, proposalId])).rows[0];
   if (p === undefined || p.state !== "new") return "replayed";
   // A person withdrew an earlier dial approval of this proposal: only a person approves it again (the lister and the definer say the same).
   if (p.dial_withdrawn_at !== null) return "not_ready";
-  const kind = smallKind(p.category_hint);
+  const kind = smallKind(gateCategory(p));
   if (kind === null || p.verified_run_id === null) return resolveStart(startInput(p, "cautious")).outcome === "refused" ? "not_ready" : "asked";
   const decisionType = `start_work_${kind}` as const;
   // The dial: only a row that was written starts anything. An unknown disposition reads as Cautious.
@@ -154,7 +164,7 @@ async function gateOne(deps: AutoStartDeps, client: PoolClient, accountId: strin
 }
 
 function startInput(p: Facts, preset: PresetName): StartInput {
-  const hint = p.category_hint;
+  const hint = gateCategory(p);
   return {
     preset,
     ownerProcess: p.owner_process as StartInput["ownerProcess"],

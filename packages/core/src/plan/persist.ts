@@ -189,6 +189,30 @@ const ITEM_PROPOSALS_SQL = `
         state = CASE WHEN proposals.state = 'withdrawn' THEN 'new' ELSE proposals.state END,
         last_import_id = EXCLUDED.last_import_id, updated_at = now()`;
 
+/**
+ * D#483 S5-b1a-3: rows whose verified text an import is about to rewrite. A verdict (and the category stored with it) describes the text it read; the upserts
+ * above rewrite title and summary of a `new` or `withdrawn` row, so a checked row whose text would change is sent back to be checked, as an edited issue is
+ * (`applyIssueChange`). Read BEFORE the upserts, as the import role; the requeue itself runs after them (see `requeueChanged`).
+ */
+const CHANGED_TEXT_SQL = `
+  SELECT p.id FROM proposals p
+    JOIN jsonb_to_recordset($2::jsonb) AS t(key text, title text, summary text) ON p.dedupe_key = t.key
+   WHERE p.repo_id = $1::uuid AND p.state IN ('new', 'withdrawn') AND p.verification <> 'pending'
+     AND (p.title IS DISTINCT FROM left(t.title, 256) OR p.summary IS DISTINCT FROM left(t.summary, 2000))`;
+
+async function changedTextIds(client: PoolClient, repoId: string, rows: Array<{ key: string; title: string; summary: string | null }>): Promise<string[]> {
+  if (rows.length === 0) return [];
+  return (await client.query<{ id: string }>(CHANGED_TEXT_SQL, [repoId, JSON.stringify(rows)])).rows.map((r) => r.id);
+}
+
+/** The requeue definer needs the tenant session, not the import role: step out of the role, requeue, step back in. */
+async function requeueChanged(client: PoolClient, ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  await client.query('RESET ROLE');
+  for (const id of ids) await client.query('SELECT proposal_requeue_verification($1::uuid)', [id]);
+  await client.query('SET LOCAL ROLE plan_importer');
+}
+
 function taskPayload(t: ComputedTask): Record<string, unknown> {
   return {
     task_key: t.key,
@@ -235,11 +259,14 @@ export async function writeSucceededImport(pool: Pool, principal: ImportPrincipa
     await client.query(`UPDATE plan_milestones SET removed_at = now() WHERE repo_id = $1::uuid AND last_import_id IS DISTINCT FROM $2::uuid AND removed_at IS NULL`, [w.repoId, w.importId]);
     // Proposals: remaining leaf tasks only. Done tasks never become proposals.
     const remaining = w.computed.tasks.filter((t) => t.status !== 'done').map(taskPayload);
+    const changed = await changedTextIds(client, w.repoId, remaining.map((t) => ({ key: `plan:${t.task_key as string}`, title: t.title as string, summary: t.summary as string | null })));
     await client.query(PROPOSALS_SQL, [accountId, w.repoId, w.importId, JSON.stringify(remaining), w.owner]);
     if (w.itemProposals && w.itemProposals.length > 0) {
       const items = w.itemProposals.map((p) => ({ dedupe_key: p.dedupeKey, source: p.source, gh_number: p.ghNumber, discussion_number: p.discussionNumber, title: p.title, summary: p.summary, owner: p.owner }));
+      changed.push(...(await changedTextIds(client, w.repoId, items.map((i) => ({ key: i.dedupe_key, title: i.title, summary: i.summary })))));
       await client.query(ITEM_PROPOSALS_SQL, [accountId, w.repoId, w.importId, JSON.stringify(items)]);
     }
+    await requeueChanged(client, changed);
     // A `new` proposal this import did not touch belongs to a task, issue or Discussion that is now done, closed or gone (or to a
     // level the repo no longer uses): derived, so withdrawn. A proposal from another source (a preview) is not the importer's.
     await client.query(

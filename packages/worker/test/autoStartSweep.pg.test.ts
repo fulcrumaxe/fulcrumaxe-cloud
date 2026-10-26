@@ -431,4 +431,87 @@ describe("the auto-start sweep [pg]", { timeout: 90_000 }, () => {
       expect(await written(f.t)).toEqual(before);
     });
   });
+
+  describe("S5b1a-3: the verifier's stored category is the gate's category for an internal roadmap proposal", () => {
+    const SHA = "a".repeat(40);
+    /** The real verification definer, as the verifier's own tenant session records a verdict. */
+    async function verify(t: SeedRefs, proposal: string, o: { category?: string | null; verification?: string } = {}): Promise<void> {
+      const verification = o.verification ?? "verified";
+      const named = verification === "verified" || verification === "partly_verified";
+      await withTenant(receiptPool, t.accountId, (c) => c.query("SELECT * FROM proposal_record_verification($1::uuid, $2, $3, $4::uuid, '[]'::jsonb, '[]'::jsonb, $5)",
+        [proposal, verification, verification === "refuted" || named ? SHA : null, named ? t.runId : null, o.category === undefined ? null : o.category]));
+    }
+    /** An internal roadmap proposal with NO discovery hint, verified through the definer with `category`. */
+    async function roadmapFixture(o: { category?: string | null; provenance?: string } = {}): Promise<Fx> {
+      const f = await fixture({ hint: null, verified: false, disposition: "announce", ...(o.provenance ? { provenance: o.provenance } : {}) });
+      await verify(f.t, f.proposal, { category: o.category === undefined ? "small" : o.category });
+      return f;
+    }
+    const stored = async (id: string) => (await admin.query("SELECT verifier_category, verified_run_id IS NOT NULL AS named FROM proposals WHERE id = $1", [id])).rows[0];
+
+    it("an internal small proposal, verified with category small, with room and an announce dial, starts; so does a bug under an act dial", async () => {
+      const f = await roadmapFixture();
+      expect((await stored(f.proposal)).verifier_category).toBe("small");
+      expect(await gate.gateProposal(f.t.accountId, f.proposal)).toBe("started");
+      expect(await written(f.t)).toEqual({ items: 1, receipts: 2, actions: 1, approved: 1, envelopes: 1 });
+      const act = await fixture({ hint: null, verified: false, disposition: "act", kind: "bug" });
+      await verify(act.t, act.proposal, { category: "bug" });
+      expect(await gate.gateProposal(act.t.accountId, act.proposal)).toBe("started");
+    });
+
+    it("the same external proposal does not start, whatever category the verifier gave it", async () => {
+      for (const category of ["small", "bug", "doc"]) {
+        const f = await roadmapFixture({ provenance: "external", category });
+        expect(await gate.gateProposal(f.t.accountId, f.proposal)).toBe("asked");
+        expect(await written(f.t)).toEqual(NOTHING);
+      }
+    });
+
+    it("a category outside small, bug and doc asks; a missing one asks; no dial row still starts nothing", async () => {
+      for (const category of ["feature", "project", "critical", "question", null]) {
+        const f = await roadmapFixture({ category });
+        expect(await gate.gateProposal(f.t.accountId, f.proposal)).toBe("asked");
+        expect(await written(f.t)).toEqual(NOTHING);
+      }
+      const noDial = await fixture({ hint: null, verified: false, disposition: null });
+      await verify(noDial.t, noDial.proposal, { category: "small" });
+      expect(await gate.gateProposal(noDial.t.accountId, noDial.proposal)).toBe("not_ready");
+    });
+
+    it("the verifier's word beats the hint: a feature verdict over a small hint asks; no verdict falls back to the hint", async () => {
+      const f = await fixture({ hint: "small", verified: false });
+      await verify(f.t, f.proposal, { category: "feature" });
+      expect(await gate.gateProposal(f.t.accountId, f.proposal)).toBe("asked");
+      const g = await fixture({ hint: "small", verified: false });
+      await verify(g.t, g.proposal, { category: null });
+      expect(await gate.gateProposal(g.t.accountId, g.proposal)).toBe("started");
+    });
+
+    it("the definer keeps the category only with a named run, drops it on a later verdict, and refuses a value outside the fixed set", async () => {
+      const f = await fixture({ hint: null, verified: false });
+      await verify(f.t, f.proposal, { verification: "refuted", category: "small" });
+      expect(await stored(f.proposal)).toEqual({ verifier_category: null, named: false });
+      await verify(f.t, f.proposal, { category: "doc" });
+      expect((await stored(f.proposal)).verifier_category).toBe("doc");
+      await verify(f.t, f.proposal, { verification: "not_checked", category: "doc" });
+      expect(await stored(f.proposal)).toEqual({ verifier_category: null, named: false });
+      await expect(verify(f.t, f.proposal, { category: "small; DROP" })).rejects.toMatchObject({ code: "22023" });
+      await expect(verify(f.t, f.proposal, { category: "Small" })).rejects.toMatchObject({ code: "22023" });
+    });
+
+    it("a re-queued proposal loses its named run, so the stale category is not read and the gate asks", async () => {
+      const f = await roadmapFixture();
+      await withTenant(receiptPool, f.t.accountId, (c) => c.query("SELECT proposal_requeue_verification($1::uuid)", [f.proposal]));
+      expect((await stored(f.proposal)).named).toBe(false);
+      expect(["asked", "not_ready"]).toContain(await gate.gateProposal(f.t.accountId, f.proposal));
+      expect(await written(f.t)).toEqual(NOTHING);
+    });
+
+    it("one tenant's verdict cannot be recorded against another tenant's proposal", async () => {
+      const a = await roadmapFixture({ category: "feature" });
+      const b = await fixture({ hint: null, verified: false });
+      await expect(verify(b.t, a.proposal, { category: "small" })).rejects.toMatchObject({ code: "P0002" });
+      expect((await stored(a.proposal)).verifier_category).toBe("feature");
+    });
+  });
 });
