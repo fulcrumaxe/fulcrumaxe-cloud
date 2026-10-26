@@ -16254,6 +16254,142 @@
         }
       }
     },
+    "/api/v1/stalled-items": {
+      "get": {
+        "operationId": "listStalledItems",
+        "summary": "The work items that stopped on their own and need a push, newest first",
+        "description": "Session only, any member. At most 100 items; `not_shown` counts the rest. An item is listed while its stage expects the pipeline to carry on by itself and nothing is running, no question is waiting and no request is in flight; it leaves when it moves. `action_label` names the card's top button and `can_act` says whether the caller may press it (it is the approve route). Read only.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The work items that stopped on their own and need a push, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "work_item_id": {
+                            "type": "string"
+                          },
+                          "title": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "stage": {
+                            "type": "string"
+                          },
+                          "code": {
+                            "type": "string"
+                          },
+                          "why": {
+                            "type": "string"
+                          },
+                          "action_label": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "can_act": {
+                            "type": "boolean"
+                          },
+                          "since": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "work_item_id",
+                          "title",
+                          "stage",
+                          "code",
+                          "why",
+                          "action_label",
+                          "can_act",
+                          "since"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "not_shown": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "not_shown"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/action-rules": {
       "get": {
         "operationId": "getActionAccountRules",

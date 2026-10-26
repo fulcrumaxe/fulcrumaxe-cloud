@@ -63,6 +63,8 @@ interface World {
   /** D#6 PUBLIC-MERGE PR2b: where the item's merge order stands at each look (the last one repeats). Absent: no order. */
   orders?: Array<{ state: string; code: string | null; gateRecorded?: boolean }>;
   refuseStart: Set<string>;
+  /** The worker's reason for a refused reviewer start; "no_model" when absent. */
+  refuseReason?: string;
   pinned: number;
   loadReview: { ok: boolean; reason?: string; specVersion?: number };
   /** `runner_local`: the repository's agents run on a runner; `recorded` is what its run's `done` recorded (null: nothing). */
@@ -121,7 +123,7 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
     advanceLoadSpecText: vi.fn(async (_who: unknown, v: number) => (v === w.pinned ? { version: v, body: "SPEC BODY: the footer shows the year." } : null)),
     advanceStartRun: vi.fn(async (req: AdvanceRunRequest) => {
       started.push(req);
-      if (w.refuseStart.has(req.role)) return { ok: false as const, reason: "no_model" };
+      if (w.refuseStart.has(req.role)) return { ok: false as const, reason: w.refuseReason ?? "no_model" };
       const id = `run-${++n}-${req.role}`;
       runs.set(id, { role: req.role, head: req.headSha ?? "", step: req.step });
       keyed.push({ step: req.step, runId: id });
@@ -719,7 +721,17 @@ describe("what happens after the verdicts are recorded", () => {
     const out = await workItemAdvanceWorkflow(ARGS);
     expect(out).toEqual({ status: "needs_human", detail: "reviewer_not_started:acceptance-tester" });
     expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
-    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "not_started_acceptance_tester" }));
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "not_started_no_model" }));
+  });
+
+  // Live 2026-10-25 (cloud#673): the security reviewer was refused for the runner's daily limit, the round ended incomplete and the item sat at pull request open with
+  // nothing running. The stop names the cause, not only the role, so the card and the Needs you row can say what happened.
+  it("a reviewer refused for the runner's daily limit stops with that reason in its code, and nothing merges", async () => {
+    const t = setup(fresh({ refuseStart: new Set(["acceptance-tester"]), refuseReason: "runner_daily_limit", rounds: [{ decision: "incomplete" }] }));
+    const out = await workItemAdvanceWorkflow(ARGS);
+    expect(out).toEqual({ status: "needs_human", detail: "reviewer_not_started:acceptance-tester" });
+    expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "not_started_runner_daily_limit" }));
   });
 
   // D#598 P7b: the recording step answers `ci_pending` (and records nothing) while the head's CI or a repo-wide guard runs; the workflow asks again every minute.

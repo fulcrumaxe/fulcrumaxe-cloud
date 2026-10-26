@@ -1,6 +1,8 @@
 // D#598 P8c: the Needs you list's logic, with no DOM (unit-tested with a fake call()). The page is needs-you-app.js.
 //
-// A row is a pull request waiting for a person to merge it (GET /api/v1/merge-ready, D#598 P8c-2b: a link to GitHub, no buttons; the cloud drops it when the
+// A row is a work item that stopped on its own (GET /api/v1/stalled-items: what stopped in the cloud's words, and one button that does what the card's top button
+// does, POST /api/v1/work-items/{id}/approve; the cloud drops the row when the item moves), a pull request waiting for a person to merge it
+// (GET /api/v1/merge-ready, D#598 P8c-2b: a link to GitHub, no buttons; the cloud drops it when the
 // pull request is merged or closed), a decision ask (GET /api/v1/decision-asks, D#598 P8c-2a) or a setup request (GET /api/v1/setup-requests). An ask shows the cloud's own name for
 // the decision, the option the agent recommends, one button per option and Deny, and the agent's reason as a quotation. Answering is final (the work item
 // resumes), so there is no undo here; a second answer from another window is told it was already answered.
@@ -19,6 +21,9 @@ export const actionUrl = (id, verb) => "/api/v1/setup-requests/" + encodeURIComp
 export const ASKS_URL = "/api/v1/decision-asks";
 export const answerUrl = (id) => "/api/v1/decision-asks/" + encodeURIComponent(id) + "/answer";
 export const MERGE_URL = "/api/v1/merge-ready";
+export const STALLED_URL = "/api/v1/stalled-items";
+/** The card's top button: the approve route. The id is encoded; no body goes with it (the route takes none). */
+export const approveUrl = (id) => "/api/v1/work-items/" + encodeURIComponent(id) + "/approve";
 export const REFRESH_MS = 30000;
 export const PROVIDER_HOSTS = ["github.com", "vercel.com"];
 const STATES = ["open", "done", "withdrawn"];
@@ -44,6 +49,10 @@ export const WORDS = {
   alreadyAnswered: "That was already answered.",
   mergeStep: "Merge this pull request on GitHub",
   openPr: "Open pull request",
+  stalledStarted: "Started. The card moves when it is done.",
+  stalledGone: "This item has moved on, so there is nothing to start. Open its card to see where it is.",
+  stalledBusy: "The agents are already working on this one.",
+  stalledNoAction: "Open this item's card to choose what happens next.",
 };
 
 const text = (v) => (typeof v === "string" ? v : "");
@@ -132,12 +141,40 @@ export function readMerge(m) {
   return { kind: "merge", id: "merge-" + m.work_item_id, title, reason: text(m.why), state: "open", sentence: WORDS.mergeStep, link: pullRequestLink(m.pr_url) };
 }
 
+/**
+ * One item of the stalled read, or null when it is not usable. `why` and `action_label` are the cloud's own sentences. A row the caller may not act on, or
+ * whose stage has no automatic step, has no button (`action` is ""), and says to open the card instead.
+ */
+export function readStalled(m) {
+  if (!m || typeof m.work_item_id !== "string" || m.work_item_id === "") return null;
+  const title = typeof m.title === "string" && m.title !== "" ? m.title : "Work item";
+  const label = typeof m.action_label === "string" ? m.action_label : "";
+  const canAct = m.can_act === true && label !== "";
+  return {
+    kind: "stalled",
+    id: "stalled-" + m.work_item_id,
+    workItemId: m.work_item_id,
+    title,
+    reason: text(m.why),
+    state: "open",
+    sentence: canAct ? "" : WORDS.stalledNoAction,
+    action: canAct ? label : "",
+  };
+}
+
 /** The sentence for a failed action, chosen by status; the server's own message is never shown. */
 export function failureSentence(e) {
   if (isRateLimited(e)) return retryWords(waitSeconds(e));
   if (e && e.status === 403) return WORDS.onlyAdmins;
   if (e && e.status === 409 && e.code === "already_answered") return WORDS.alreadyAnswered;
   return WORDS.failed;
+}
+
+/** The sentence for a refused press of a stalled row's button: the approve route's own refusals have their own words; the rest are the common ones. */
+export function stalledFailureSentence(e) {
+  if (e && e.status === 409 && e.code === "already_running") return WORDS.stalledBusy;
+  if (e && (e.status === 404 || (e.status === 409 && e.code === "not_approvable"))) return WORDS.stalledGone;
+  return failureSentence(e);
 }
 
 const cancelled = (e) => !!e && e.name === "AbortError";
@@ -160,12 +197,12 @@ export function createNeedsYou({ call = api, signal, onChange = () => {} } = {})
     const mine = ++gen;
     try {
       // Both reads must answer: a screen that showed only one of them would say nothing is waiting while the other part is unread.
-      const [data, asks, merges] = await Promise.all([call("GET", LIST_URL, undefined, signal), call("GET", ASKS_URL, undefined, signal), call("GET", MERGE_URL, undefined, signal)]);
+      const [data, asks, merges, stalled] = await Promise.all([call("GET", LIST_URL, undefined, signal), call("GET", ASKS_URL, undefined, signal), call("GET", MERGE_URL, undefined, signal), call("GET", STALLED_URL, undefined, signal)]);
       if (mine !== gen) return;
-      if (!data || !Array.isArray(data.requests) || !asks || !Array.isArray(asks.asks) || !merges || !Array.isArray(merges.items)) throw new Error("shape");
-      open = [...asks.asks.map(readAsk).filter(Boolean), ...merges.items.map(readMerge).filter(Boolean), ...data.requests.map(readRequest).filter((r) => r && r.state === "open")];
+      if (!data || !Array.isArray(data.requests) || !asks || !Array.isArray(asks.asks) || !merges || !Array.isArray(merges.items) || !stalled || !Array.isArray(stalled.items)) throw new Error("shape");
+      open = [...asks.asks.map(readAsk).filter(Boolean), ...stalled.items.map(readStalled).filter(Boolean), ...merges.items.map(readMerge).filter(Boolean), ...data.requests.map(readRequest).filter((r) => r && r.state === "open")];
       for (const r of open) closed.delete(r.id);
-      st = { ...st, status: "ready", truncated: data.truncated === true, notShown: [asks, merges].reduce((n, r) => n + (Number.isInteger(r.not_shown) && r.not_shown > 0 ? r.not_shown : 0), 0) };
+      st = { ...st, status: "ready", truncated: data.truncated === true, notShown: [asks, merges, stalled].reduce((n, r) => n + (Number.isInteger(r.not_shown) && r.not_shown > 0 ? r.not_shown : 0), 0) };
       merge();
     } catch (e) {
       if (mine !== gen || cancelled(e)) return;
@@ -231,6 +268,31 @@ export function createNeedsYou({ call = api, signal, onChange = () => {} } = {})
     onChange();
   }
 
+  /**
+   * The button of a stalled row: the card's top button, one request with no body. A second press while one is in flight is ignored. Accepted, the person is
+   * told it started and the list is read again (the cloud drops the row once the item is moving). Any refusal is a fixed sentence, then a re-read.
+   */
+  async function unstick(id) {
+    const row = open.find((r) => r.id === id && r.kind === "stalled");
+    if (!row || row.action === "" || busy.has(id)) return;
+    busy.set(id, "unstick");
+    st = { ...st, error: "", announce: "" };
+    onChange();
+    try {
+      const res = await call("POST", approveUrl(row.workItemId), undefined, signal);
+      if (!res || typeof res.action_id !== "string") throw new Error("shape");
+      st = { ...st, announce: WORDS.stalledStarted };
+    } catch (e) {
+      busy.delete(id);
+      if (cancelled(e)) return;
+      st = { ...st, error: stalledFailureSentence(e) };
+      await load(); // a refused press may mean the item changed under the person: show what is true now
+      return;
+    }
+    busy.delete(id);
+    await load();
+  }
+
   /** The app has put the announcement on the page: it is said once, so it is not kept for the next draw. Does not redraw. */
   const clearAnnounce = () => {
     st = { ...st, announce: "" };
@@ -257,5 +319,5 @@ export function createNeedsYou({ call = api, signal, onChange = () => {} } = {})
     stopFn = null;
   }
 
-  return { load, act, answer, start, stop, clearAnnounce, anyBusy: () => busy.size > 0, busyVerb: (id) => busy.get(id) || "", get state() { return st; } };
+  return { load, act, answer, unstick, start, stop, clearAnnounce, anyBusy: () => busy.size > 0, busyVerb: (id) => busy.get(id) || "", get state() { return st; } };
 }

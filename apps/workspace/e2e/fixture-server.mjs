@@ -344,6 +344,12 @@ export function startFixtureServer({ distDir = DEFAULT_DIST_DIR, port = DEFAULT_
       return;
     }
 
+    // Opening the Needs you app also lists the items that stopped on their own (GET only). None here: the rows of the other lists are what these tests look at.
+    if (urlPath === "/api/v1/stalled-items" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" }).end(JSON.stringify({ items: [], not_shown: 0 }));
+      return;
+    }
+
     // D#598 P0a: the real API refuses ANY body on the setup-request done and withdraw routes (packages/api/src/handler.ts: 400
     // invalid_request, "this route does not accept a request body"). This fake does the same, so a client that sends "{}" fails here as it
     // does on the real API. Without a body it answers with the contract fixture.

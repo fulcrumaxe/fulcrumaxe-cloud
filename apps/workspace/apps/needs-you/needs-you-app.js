@@ -88,7 +88,42 @@ function mountApp(contentEl) {
     );
   }
 
+  // An item that stopped on its own: what stopped, in the cloud's words, and the card's own top button (or, where none applies, a line to open the card).
+  function stalledView(row) {
+    const headId = "ny-h-" + row.id;
+    const working = list.busyVerb(row.id);
+    return h(
+      "li",
+      { class: "ny-row", "data-testid": "ny-row", "data-kind": "stalled", "data-id": row.id, "data-state": row.state, "aria-busy": working ? "true" : "false" },
+      h("h3", { id: headId, class: "ny-row-title", tabindex: "-1", "data-testid": "ny-title" }, row.title),
+      row.reason ? h("p", { class: "ny-reason", "data-testid": "ny-reason" }, row.reason) : null,
+      row.sentence ? h("p", { class: "ny-sentence", "data-testid": "ny-sentence" }, row.sentence) : null,
+      row.action
+        ? h(
+            "div",
+            { class: "ny-actions" },
+            h(
+              "button",
+              {
+                type: "button",
+                class: "ny-btn",
+                "data-testid": "ny-unstick-" + row.id,
+                "data-act": "unstick",
+                "aria-disabled": working ? "true" : "false",
+                "aria-label": row.action + ": " + row.title,
+                onClick: () => {
+                  if (!list.busyVerb(row.id)) list.unstick(row.id);
+                },
+              },
+              row.action
+            )
+          )
+        : null
+    );
+  }
+
   function rowView(row) {
+    if (row.kind === "stalled") return stalledView(row);
     if (row.kind === "ask") return askView(row);
     if (row.kind === "merge") return mergeView(row);
     const working = list.busyVerb(row.id);
