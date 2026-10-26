@@ -20,6 +20,9 @@ export const LIST_URL = "/api/v1/setup-requests?state=open";
 export const actionUrl = (id, verb) => "/api/v1/setup-requests/" + encodeURIComponent(id) + "/" + verb;
 export const ASKS_URL = "/api/v1/decision-asks";
 export const answerUrl = (id) => "/api/v1/decision-asks/" + encodeURIComponent(id) + "/answer";
+/** The asks arrive in pages (API-1 cursor); this many pages are read before the screen says the rest are not shown. */
+export const MAX_ASK_PAGES = 5;
+export const ASKS_FIRST_URL = ASKS_URL + "?limit=200";
 export const MERGE_URL = "/api/v1/merge-ready";
 export const STALLED_URL = "/api/v1/stalled-items";
 /** The card's top button: the approve route. The id is encoded; no body goes with it (the route takes none). */
@@ -35,6 +38,7 @@ export const WORDS = {
   error: "Needs you isn't available right now.",
   empty: "Nothing needs you right now.",
   older: "Older requests aren't shown.",
+  moreAsks: "More decisions are waiting than this list shows.",
   markDone: "Mark done",
   withdraw: "Withdraw",
   done: "Done",
@@ -179,12 +183,26 @@ export function stalledFailureSentence(e) {
 
 const cancelled = (e) => !!e && e.name === "AbortError";
 
+/** Reads the ask list page by page (cursor). `more` is true when the page limit was reached with more still waiting. A page of the wrong shape is an error, not an empty list. */
+export async function readAllAsks(call, signal) {
+  const asks = [];
+  let url = ASKS_FIRST_URL;
+  for (let page = 0; page < MAX_ASK_PAGES; page += 1) {
+    const res = await call("GET", url, undefined, signal);
+    if (!res || !Array.isArray(res.data) || !(res.next_cursor === null || typeof res.next_cursor === "string")) throw new Error("shape");
+    asks.push(...res.data);
+    if (res.next_cursor === null) return { asks, more: false };
+    url = ASKS_FIRST_URL + "&cursor=" + encodeURIComponent(res.next_cursor);
+  }
+  return { asks, more: true };
+}
+
 /**
  * The list: the open requests the cloud returns, then the ones this person closed in this window, each showing its outcome (a request put back
  * by a failed check is open again and so is simply in the open part). `state` is { status, rows, truncated, announce, error }.
  */
 export function createNeedsYou({ call = api, signal, onChange = () => {} } = {}) {
-  let st = { status: "loading", rows: [], truncated: false, notShown: 0, announce: "", error: "" };
+  let st = { status: "loading", rows: [], truncated: false, moreAsks: false, notShown: 0, announce: "", error: "" };
   const closed = new Map(); // id -> row closed here, shown until the window closes
   const busy = new Map(); // id -> "done" | "withdraw"
   let open = [];
@@ -197,12 +215,12 @@ export function createNeedsYou({ call = api, signal, onChange = () => {} } = {})
     const mine = ++gen;
     try {
       // Both reads must answer: a screen that showed only one of them would say nothing is waiting while the other part is unread.
-      const [data, asks, merges, stalled] = await Promise.all([call("GET", LIST_URL, undefined, signal), call("GET", ASKS_URL, undefined, signal), call("GET", MERGE_URL, undefined, signal), call("GET", STALLED_URL, undefined, signal)]);
+      const [data, asks, merges, stalled] = await Promise.all([call("GET", LIST_URL, undefined, signal), readAllAsks(call, signal), call("GET", MERGE_URL, undefined, signal), call("GET", STALLED_URL, undefined, signal)]);
       if (mine !== gen) return;
-      if (!data || !Array.isArray(data.requests) || !asks || !Array.isArray(asks.asks) || !merges || !Array.isArray(merges.items) || !stalled || !Array.isArray(stalled.items)) throw new Error("shape");
+      if (!data || !Array.isArray(data.requests) || !asks ||!merges || !Array.isArray(merges.items) || !stalled || !Array.isArray(stalled.items)) throw new Error("shape");
       open = [...asks.asks.map(readAsk).filter(Boolean), ...stalled.items.map(readStalled).filter(Boolean), ...merges.items.map(readMerge).filter(Boolean), ...data.requests.map(readRequest).filter((r) => r && r.state === "open")];
       for (const r of open) closed.delete(r.id);
-      st = { ...st, status: "ready", truncated: data.truncated === true, notShown: [asks, merges, stalled].reduce((n, r) => n + (Number.isInteger(r.not_shown) && r.not_shown > 0 ? r.not_shown : 0), 0) };
+      st = { ...st, status: "ready", truncated: data.truncated === true, moreAsks: asks.more, notShown: [merges, stalled].reduce((n, r) => n + (Number.isInteger(r.not_shown) && r.not_shown > 0 ? r.not_shown : 0), 0) };
       merge();
     } catch (e) {
       if (mine !== gen || cancelled(e)) return;

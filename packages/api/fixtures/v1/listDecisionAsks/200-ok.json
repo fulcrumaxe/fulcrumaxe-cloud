@@ -1,5 +1,5 @@
 {
-  "asks": [
+  "data": [
     {
       "id": "5c0d9e2a-8b41-4f6e-9a37-2d1e4c6b8a90",
       "work_item_id": "9d2c7b1e-5f3a-4e8b-8a6d-1c2b3a4d5e66",
@@ -16,5 +16,5 @@
       "state": "open"
     }
   ],
-  "not_shown": 0
+  "next_cursor": null
 }

@@ -12,7 +12,7 @@ import { generateToken } from '../src/tokens/format.js';
 import { hashToken } from '../src/tokens/resolve.js';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
-import { decisionAskDeps, decisionAskRoutes } from '../src/routes/decisionAsks.js';
+import { decisionAskDeps } from '../src/routes/decisionAsks.js';
 import { runActionDeps } from '../src/routes/run-actions.js';
 
 /**
@@ -31,6 +31,10 @@ interface Identity {
 interface ErrorBody {
   error: { code: string; message: string };
   details?: { path: string; code: string }[];
+}
+interface Page {
+  data: AskDto[];
+  next_cursor: string | null;
 }
 interface AskDto {
   id: string;
@@ -81,8 +85,8 @@ describe('D#598 P8c-2a: decision asks', () => {
     await Promise.all([adminPool.end(), platformOpsPool.end(), appUserPool.end(), receiptPool.end()]);
   });
 
-  async function call(identity: Identity, method: string, urlPath: string, body?: unknown, bearer?: string): Promise<Response> {
-    const headers = new Headers();
+  async function call(identity: Identity, method: string, urlPath: string, body?: unknown, bearer?: string, extra: Record<string, string> = {}): Promise<Response> {
+    const headers = new Headers(extra);
     if (bearer) headers.set('authorization', `Bearer ${bearer}`);
     else headers.set('cookie', `${SESSION_COOKIE_NAME}=${await signSession(identity)}`);
     if (body !== undefined) headers.set('content-type', 'application/json');
@@ -107,13 +111,25 @@ describe('D#598 P8c-2a: decision asks', () => {
       } as never));
   const readAsk = async (id: string) => (await admin.query(`SELECT * FROM decision_asks WHERE id = $1`, [id])).rows[0];
   const count = async (sql: string, id: string) => (await admin.query(sql, [id])).rows[0].n as number;
+  /** Every row an answer could touch: the ask, its work item, the receipts of its run and the resume requests. */
+  const snapshot = async (id: string): Promise<unknown> => {
+    const ask = await readAsk(id);
+    const rows = async (sql: string, arg: unknown = ask.run_id) => (await admin.query(sql, [arg])).rows;
+    return {
+      ask,
+      workItem: await rows(`SELECT * FROM work_items WHERE id = $1`, ask.work_item_id),
+      receipts: await rows(`SELECT id FROM decision_receipts WHERE run_id = $1 ORDER BY id`),
+      requests: (await admin.query(`SELECT id FROM run_action_requests WHERE target_id = $1 ORDER BY id`, [id])).rows,
+    };
+  };
   const code = async (res: Response): Promise<string> => ((await res.json()) as ErrorBody).error.code;
-  const list = async (who: Identity, bearer?: string): Promise<Response> => call(who, 'GET', '/decision-asks', undefined, bearer);
-  const answer = (who: Identity, id: string, body: unknown = { choice: 'skip' }, bearer?: string) => call(who, 'POST', `/decision-asks/${id}/answer`, body, bearer);
-  const readToken = async (who: Identity): Promise<string> => {
+  const list = async (who: Identity, bearer?: string, qs = ''): Promise<Response> => call(who, 'GET', `/decision-asks${qs}`, undefined, bearer);
+  const answer = (who: Identity, id: string, body: unknown = { choice: 'skip' }, bearer?: string, key?: string) =>
+    call(who, 'POST', `/decision-asks/${id}/answer`, body, bearer, key ? { 'idempotency-key': key } : {});
+  const readToken = async (who: Identity, scope = 'read'): Promise<string> => {
     const plaintext = generateToken();
     await insertApiToken(appUserPool, {
-      accountId: who.accountId, createdBy: who.userId, tokenHash: hashToken(plaintext), displayHint: 'fxat_...test', scopes: ['read'] as never, expiresAt: new Date(Date.now() + 86_400_000),
+      accountId: who.accountId, createdBy: who.userId, tokenHash: hashToken(plaintext), displayHint: 'fxat_...test', scopes: [scope] as never, expiresAt: new Date(Date.now() + 86_400_000),
     });
     return plaintext;
   };
@@ -124,59 +140,135 @@ describe('D#598 P8c-2a: decision asks', () => {
       const id = await raise(f.refs);
       const res = await list(f.member);
       expect(res.status).toBe(200);
-      const body = (await res.json()) as { asks: AskDto[]; not_shown: number };
-      expect(body.not_shown).toBe(0);
-      expect(body.asks).toHaveLength(1);
-      expect(body.asks[0]).toMatchObject({ id, decision_type: 'test_strategy_choice', label: 'How to test a change', options: OPTIONS, proposed: 'apply', rationale: FENCED, state: 'open' });
-      expect(JSON.stringify(body)).not.toMatch(/undefined|null/);
+      const body = (await res.json()) as Page;
+      expect(body.next_cursor).toBeNull();
+      expect(body.data).toHaveLength(1);
+      expect(body.data[0]).toMatchObject({ id, decision_type: 'test_strategy_choice', label: 'How to test a change', options: OPTIONS, proposed: 'apply', rationale: FENCED, state: 'open' });
+      expect(JSON.stringify(body.data)).not.toMatch(/undefined|null/);
     });
 
-    it('answered asks and another account\'s asks are not listed; a token can neither read nor write', async () => {
+    it('answered asks and another account\'s asks are not listed', async () => {
       const f = await fixture();
       const other = await fixture();
       const answered = await raise(f.refs);
       const pending = await raise(f.refs);
       await raise(other.refs);
       expect((await answer(f.admin, answered)).status).toBe(200);
-      const body = (await (await list(f.member)).json()) as { asks: AskDto[] };
-      expect(body.asks.map((a) => a.id)).toEqual([pending]);
-      const bearer = await readToken(f.admin);
-      const viaToken = await list(f.admin, bearer);
-      expect(viaToken.status).toBe(403);
-      expect(await code(viaToken)).toBe('session_required');
-      const answerViaToken = await answer(f.admin, pending, { choice: 'skip' }, bearer);
-      expect(answerViaToken.status).toBe(403);
-      expect((await readAsk(pending)).state).toBe('open');
+      const body = (await (await list(f.member)).json()) as Page;
+      expect(body.data.map((a) => a.id)).toEqual([pending]);
     });
 
-    it('is capped at 100 and says how many are not shown', async () => {
+    it('a read token lists the same asks; a token without the read scope is refused; a token of another account sees none of them', async () => {
       const f = await fixture();
-      for (let i = 0; i < 102; i += 1) await raise(f.refs);
-      const body = (await (await list(f.member)).json()) as { asks: AskDto[]; not_shown: number };
-      expect(body.asks).toHaveLength(100);
-      expect(body.not_shown).toBe(2);
+      const other = await fixture();
+      const id = await raise(f.refs);
+      const ok = await list(f.member, await readToken(f.member));
+      expect(ok.status).toBe(200);
+      expect(((await ok.json()) as Page).data.map((a) => a.id)).toEqual([id]);
+      const noScope = await list(f.admin, await readToken(f.admin, 'work_items:write'));
+      expect(noScope.status).toBe(403);
+      expect(await code(noScope)).toBe('insufficient_scope');
+      expect(((await (await list(other.member, await readToken(other.member))).json()) as Page).data).toEqual([]);
+      expect((await list(f.member, 'fxat_not-a-real-token')).status).toBe(401);
     });
-  });
 
-  describe('the principal handed to the worker', () => {
-    const answerRoute = decisionAskRoutes.find((r) => r.operationId === 'answerDecisionAsk')!;
-
-    it('a session answer carries no tokenId; a token principal reaching the handler passes its tokenId on, so the core refuses it with 403 session_required', async () => {
+    it('a token cannot answer: 403 session_required, whatever its scopes, and the ask is untouched', async () => {
       const f = await fixture();
       const id = await raise(f.refs);
-      const seen: unknown[] = [];
+      const before = await snapshot(id);
+      let asked = 0;
       const prev = decisionAskDeps.getAnswerer;
-      decisionAskDeps.getAnswerer = async () => async (input) => (seen.push(input.principal), answerAsk({ pool: receiptPool, principal: input.principal }, { askId: input.askId, choice: input.choice }));
+      decisionAskDeps.getAnswerer = async () => async () => (asked += 1, Promise.reject(new Error('the answerer must not run')));
       try {
-        const handle = (principal: Record<string, unknown>) =>
-          answerRoute.handler({ pool: appUserPool, principal } as never, { params: { id }, body: { choice: 'skip' }, query: {} } as never);
-        await expect(handle({ kind: 'token', accountId: f.refs.accountId, userId: f.admin.userId, tokenId: 'tok-1', scopes: [] })).rejects.toMatchObject({ status: 403, code: 'session_required' });
-        expect(seen[0]).toEqual({ accountId: f.refs.accountId, userId: f.admin.userId, tokenId: 'tok-1' });
-        expect((await readAsk(id)).state).toBe('open');
-        expect((await answer(f.admin, id)).status).toBe(200);
-        expect(seen[1]).toEqual({ accountId: f.refs.accountId, userId: f.admin.userId });
+        for (const scope of ['read', 'work_items:write', 'discussions:write', 'corrections:write']) {
+          const res = await answer(f.admin, id, { choice: 'skip' }, await readToken(f.admin, scope));
+          expect(res.status, scope).toBe(403);
+          expect(await code(res), scope).toBe('session_required');
+        }
       } finally {
         decisionAskDeps.getAnswerer = prev;
+      }
+      expect(asked).toBe(0);
+      expect(await snapshot(id)).toEqual(before);
+      expect(signals).toEqual([]);
+    });
+
+    it('pages with a cursor: overdue first, no repeats across pages, the last page ends the cursor, an empty list is empty', async () => {
+      const f = await fixture();
+      expect((await (await list(f.member)).json()) as Page).toEqual({ data: [], next_cursor: null });
+      const ids: string[] = [];
+      for (let i = 0; i < 5; i += 1) ids.push(await raise(f.refs, { policy: { answerWindowMinutes: 60 - i, onTimeout: 'stop_and_flag' } }));
+
+      await admin.query(`UPDATE decision_asks SET state = 'overdue' WHERE id = $1`, [ids[0]]);
+      const seen: string[] = [];
+      let cursor: string | null = null;
+      let pages = 0;
+      do {
+        const res = await list(f.member, undefined, `?limit=2${cursor ? `&cursor=${cursor}` : ''}`);
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as Page;
+        pages += 1;
+        expect(body.data.length).toBeLessThanOrEqual(2);
+        seen.push(...body.data.map((a) => a.id));
+        cursor = body.next_cursor;
+      } while (cursor && pages < 10);
+      expect(pages).toBe(3);
+      expect(seen).toEqual([ids[0], ids[4], ids[3], ids[2], ids[1]]);
+    });
+
+    it('120 asks read with limit=50 come back 50 / 50 / 20, no row twice, none missing, in the order of one unpaged read', async () => {
+      const f = await fixture();
+      for (let i = 0; i < 120; i += 1) await raise(f.refs, { policy: { answerWindowMinutes: 30 + (i % 40), onTimeout: 'stop_and_flag' } });
+      const unpaged = ((await (await list(f.member, undefined, '?limit=200')).json()) as Page).data.map((a) => a.id);
+      expect(unpaged).toHaveLength(120);
+      const sizes: number[] = [];
+      const paged: string[] = [];
+      let cursor: string | null = null;
+      do {
+        const body = (await (await list(f.member, undefined, `?limit=50${cursor ? `&cursor=${cursor}` : ''}`)).json()) as Page;
+        sizes.push(body.data.length);
+        paged.push(...body.data.map((a) => a.id));
+        cursor = body.next_cursor;
+      } while (cursor);
+      expect(sizes).toEqual([50, 50, 20]);
+      expect(paged).toEqual(unpaged);
+      expect(new Set(paged).size).toBe(120);
+    });
+
+    it('an ask that turns overdue between two pages can be missed once but is never shown twice, and the next read shows it', async () => {
+      const f = await fixture();
+      const ids: string[] = [];
+      for (let i = 0; i < 4; i += 1) ids.push(await raise(f.refs, { policy: { answerWindowMinutes: 20 + i, onTimeout: 'stop_and_flag' } }));
+      const one = (await (await list(f.member, undefined, '?limit=2')).json()) as Page;
+      expect(one.data.map((a) => a.id)).toEqual([ids[0], ids[1]]);
+      await admin.query(`UPDATE decision_asks SET state = 'overdue' WHERE id = $1`, [ids[2]]); // the sweep, between the pages
+      const two = (await (await list(f.member, undefined, `?limit=2&cursor=${one.next_cursor}`)).json()) as Page;
+      const seen = [...one.data, ...two.data].map((a) => a.id);
+      expect(new Set(seen).size).toBe(seen.length);
+      expect(seen).not.toContain(ids[2]); // moved in front of the page already read: missed this pass
+      const fresh = ((await (await list(f.member)).json()) as Page).data.map((a) => a.id);
+      expect(fresh[0]).toBe(ids[2]);
+      expect(fresh).toHaveLength(4);
+    });
+
+    it('only open and overdue asks are listed: answered, proceeded and withdrawn ones are not', async () => {
+      const f = await fixture();
+      const [open, answered, proceeded, timedOut] = [await raise(f.refs), await raise(f.refs), await raise(f.refs), await raise(f.refs)];
+      expect((await answer(f.admin, answered)).status).toBe(200);
+      await admin.query(`UPDATE decision_asks SET state = 'proceeded', answered_option = proposed, answered_at = now() WHERE id = $1`, [proceeded]);
+      await admin.query(`UPDATE decision_asks SET state = 'withdrawn' WHERE id = $1`, [timedOut]);
+      expect(((await (await list(f.member)).json()) as Page).data.map((a) => a.id)).toEqual([open]);
+    });
+
+    it('DECISION_ASK_LIST_LIMIT no longer exists', async () => {
+      const mod = (await import('../src/routes/decisionAsks.js')) as Record<string, unknown>;
+      expect(mod.DECISION_ASK_LIST_LIMIT).toBeUndefined();
+    });
+
+    it("a malformed cursor or limit is 422, and so is another list's cursor", async () => {
+      const f = await fixture();
+      for (const qs of ['?cursor=!!', `?cursor=${Buffer.from('{"v":"q1"}').toString('base64url')}`, '?limit=0', '?limit=201', '?limit=abc']) {
+        expect((await list(f.member, undefined, qs)).status, qs).toBe(422);
       }
     });
   });
@@ -215,6 +307,35 @@ describe('D#598 P8c-2a: decision asks', () => {
       expect((await readAsk(id)).answered_option).toBe('skip');
     });
 
+    it('Idempotency-Key: a replay returns the first response and files nothing twice; the same key with another body is 422 idempotency_key_reused', async () => {
+      const f = await fixture();
+      const id = await raise(f.refs);
+      let asked = 0;
+      const prev = decisionAskDeps.getAnswerer;
+      decisionAskDeps.getAnswerer = async () => (input) => (asked += 1, answerAsk({ pool: receiptPool, principal: input.principal }, { askId: input.askId, choice: input.choice }));
+      try {
+        const first = await answer(f.admin, id, { choice: 'skip' }, undefined, 'k-answer-1');
+        expect(first.status).toBe(200);
+        const firstBody = await first.json();
+        const afterFirst = await snapshot(id);
+        const replay = await answer(f.admin, id, { choice: 'skip' }, undefined, 'k-answer-1');
+        expect(replay.status).toBe(200);
+        expect(replay.headers.get('idempotent-replayed')).toBe('true');
+        expect(await replay.json()).toEqual(firstBody);
+        const changed = await answer(f.admin, id, { choice: 'apply' }, undefined, 'k-answer-1');
+        expect(changed.status).toBe(422);
+        expect(await code(changed)).toBe('idempotency_key_reused');
+        expect(asked).toBe(1);
+        expect(await snapshot(id)).toEqual(afterFirst);
+      } finally {
+        decisionAskDeps.getAnswerer = prev;
+      }
+      expect(await count(`SELECT count(*)::int AS n FROM run_action_requests WHERE kind = 'resume_decision' AND target_id = $1`, id)).toBe(1);
+      expect((await readAsk(id)).answered_option).toBe('skip');
+      // Without the key the same second answer is still the plain 409.
+      expect(await code(await answer(f.admin, id, { choice: 'skip' }))).toBe('already_answered');
+    });
+
     it('a choice outside the options is 422 invalid_choice and nothing changes', async () => {
       const f = await fixture();
       const id = await raise(f.refs);
@@ -240,9 +361,11 @@ describe('D#598 P8c-2a: decision asks', () => {
     it('a member cannot answer (403) and the ask stays open', async () => {
       const f = await fixture();
       const id = await raise(f.refs);
+      const before = await snapshot(id);
       const res = await answer(f.member, id);
       expect(res.status).toBe(403);
-      expect((await readAsk(id)).state).toBe('open');
+      expect(await code(res)).toBe('insufficient_role');
+      expect(await snapshot(id)).toEqual(before);
     });
 
     it('the body is strict: no body, an empty choice, or any other field is 422 and nothing is answered', async () => {
@@ -273,10 +396,34 @@ describe('D#598 P8c-2a: decision asks', () => {
     });
   });
 
-  it('the registry: both routes are session-only and answering needs an admin', () => {
+  it('every answer is JSON, never HTML: success, refusals and a hostile rationale alike', async () => {
+    const f = await fixture();
+    const id = await raise(f.refs);
+    const responses = [
+      await list(f.member),
+      await list(f.member, await readToken(f.member)),
+      await answer(f.member, id),
+      await answer(f.admin, id, { choice: 'merge' }),
+      await answer(f.admin, randomUUID()),
+      await answer(f.admin, id, { choice: 'skip' }, await readToken(f.admin)),
+      await answer(f.admin, id),
+      await answer(f.admin, id),
+      await call(f.member, 'GET', '/decision-asks', undefined, undefined, { accept: 'text/html' }),
+      await call(f.admin, 'POST', `/decision-asks/${id}/answer`, { choice: 'skip' }, undefined, { accept: 'text/html' }),
+    ];
+    for (const res of responses) {
+      expect(res.headers.get('content-type') ?? '').toMatch(/^application\/json/);
+      expect((await res.text()).trimStart().startsWith('{')).toBe(true);
+    }
+  });
+
+  it('the registry: the list takes a session or a read token; answering is session-only, needs an admin and honours Idempotency-Key', () => {
     const entries = ROUTES.filter((r) => r.path.startsWith('/api/v1/decision-asks'));
     expect(entries.map((r) => r.operationId).sort()).toEqual(['answerDecisionAsk', 'listDecisionAsks']);
-    for (const e of entries) expect(e.principals).toBeUndefined();
-    expect(entries.find((e) => e.operationId === 'answerDecisionAsk')!.minRole).toBe('admin');
+    const read = entries.find((e) => e.operationId === 'listDecisionAsks')!;
+    const write = entries.find((e) => e.operationId === 'answerDecisionAsk')!;
+    expect(read).toMatchObject({ principals: ['session', 'token'], scope: 'read', minRole: 'member' });
+    expect(write.principals).toBeUndefined();
+    expect(write).toMatchObject({ minRole: 'admin', idempotency: 'optional' });
   });
 });

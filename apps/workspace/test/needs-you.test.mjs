@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { ASKS_URL, LIST_URL, MERGE_URL, PROVIDER_HOSTS, STALLED_URL, WORDS, actionUrl, answerUrl, approveUrl, createNeedsYou, failureSentence, notShownWords, providerLink, pullRequestLink, quotedReason, readAsk, readMerge, readRequest, readStalled } from "../apps/needs-you/needs-you-model.js";
+import { ASKS_FIRST_URL, ASKS_URL, LIST_URL, MAX_ASK_PAGES, MERGE_URL, PROVIDER_HOSTS, STALLED_URL, WORDS, actionUrl, answerUrl, approveUrl, createNeedsYou, failureSentence, notShownWords, providerLink, pullRequestLink, quotedReason, readAsk, readMerge, readRequest, readStalled } from "../apps/needs-you/needs-you-model.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
 const fixture = (op, name) => JSON.parse(readFileSync(join(PACKAGES, "api", "fixtures", "v1", op, name), "utf8"));
@@ -33,7 +33,7 @@ const closed = (state, over = {}) => req({ state, status_sentence: null, check_i
 function fakeCall(routes) {
   const log = [];
   const askLog = []; // the decision-ask calls; kept apart so the setup-request tests below count only their own requests
-  const all = { ["GET " + ASKS_URL]: { asks: [], not_shown: 0 }, ["GET " + MERGE_URL]: { items: [], not_shown: 0 }, ["GET " + STALLED_URL]: { items: [], not_shown: 0 }, ...routes };
+  const all = { ["GET " + ASKS_FIRST_URL]: { data: [], next_cursor: null }, ["GET " + MERGE_URL]: { items: [], not_shown: 0 }, ["GET " + STALLED_URL]: { items: [], not_shown: 0 }, ...routes };
   const call = vi.fn(async (method, path, body) => {
     (path.startsWith(ASKS_URL) || path.startsWith(MERGE_URL) || path.startsWith(STALLED_URL) || path.endsWith("/approve") ? askLog : log).push([method, path, body]);
     // The real API answers 400 to any body on the done and withdraw routes (packages/api/src/handler.ts).
@@ -387,12 +387,12 @@ describe("the announcement is said once", () => {
 // D#598 P8c-2a: decision asks. The contract fixtures are the API's own, so the shapes cannot drift from the routes.
 describe("decision asks", () => {
   const ASKS = fixture("listDecisionAsks", "200-ok.json");
-  const ASK = ASKS.asks[0];
+  const ASK = ASKS.data[0];
   const ANSWERED = fixture("answerDecisionAsk", "200-ok.json");
-  const GET_ASKS = "GET " + ASKS_URL;
+  const GET_ASKS = "GET " + ASKS_FIRST_URL;
   const ANSWER = "POST " + answerUrl(ASK.id);
   const ask = (over = {}) => ({ ...ASK, ...over });
-  const asksOf = (asks, over = {}) => ({ asks, not_shown: 0, ...over });
+  const asksOf = (asks, over = {}) => ({ data: asks, next_cursor: null, ...over });
   const setups = listOf([]);
 
   it("reads the contract fixture whole: the cloud's name, the options, the recommended one, and the reason without its fence", () => {
@@ -421,7 +421,7 @@ describe("decision asks", () => {
         sent.push([path, body]);
         return { ask_id: START.id, receipt_id: "r1", answered_option: body.choice };
       }
-      return path === ASKS_URL ? asksOf([START]) : path === LIST_URL ? setups : { items: [], not_shown: 0 };
+      return path === ASKS_FIRST_URL ? asksOf([START]) : path === LIST_URL ? setups : { items: [], not_shown: 0 };
     };
     const list = createNeedsYou({ call });
     await list.load();
@@ -452,18 +452,35 @@ describe("decision asks", () => {
     expect(JSON.stringify(row)).not.toMatch(/null|undefined/);
   });
 
-  it("lists asks before setup requests, from one GET each, and counts the ones the API did not send", async () => {
-    const f = await loaded({ [GET]: listOf([req()]), [GET_ASKS]: asksOf([ASK], { not_shown: 3 }) });
+  it("lists asks before setup requests, from one GET each", async () => {
+    const f = await loaded({ [GET]: listOf([req()]), [GET_ASKS]: asksOf([ASK]) });
     expect(f.list.state.rows.map((r) => r.kind)).toEqual(["ask", "setup"]);
-    expect(f.list.state.notShown).toBe(3);
+    expect(f.list.state.notShown).toBe(0);
     expect(f.log).toEqual([["GET", LIST_URL, undefined]]);
-    expect(f.askLog).toEqual([["GET", ASKS_URL, undefined], ["GET", MERGE_URL, undefined], ["GET", STALLED_URL, undefined]]);
+    expect(f.askLog).toEqual([["GET", ASKS_FIRST_URL, undefined], ["GET", MERGE_URL, undefined], ["GET", STALLED_URL, undefined]]);
     expect(notShownWords(1)).toBe("1 more isn't shown.");
     expect(notShownWords(3)).toBe("3 more aren't shown.");
   });
 
+  it("follows next_cursor until the last page, so every ask is listed", async () => {
+    const second = ask({ id: "second-ask" });
+    const pageTwo = ASKS_FIRST_URL + "&cursor=" + encodeURIComponent("c 1/2");
+    const f = await loaded({ [GET]: listOf([]), [GET_ASKS]: asksOf([ASK], { next_cursor: "c 1/2" }), ["GET " + pageTwo]: asksOf([second]) });
+    expect(f.list.state.rows.map((r) => r.id)).toEqual([ASK.id, "second-ask"]);
+    expect(f.list.state.truncated).toBe(false);
+    expect(f.askLog.filter(([, path]) => path.startsWith(ASKS_URL))).toEqual([["GET", ASKS_FIRST_URL, undefined], ["GET", pageTwo, undefined]]);
+  });
+
+  it("stops after the page limit (5) and says so in words, with no number", async () => {
+    const f = await loaded({ [GET]: listOf([]), [GET_ASKS]: () => asksOf([ASK], { next_cursor: "more" }), ["GET " + ASKS_FIRST_URL + "&cursor=more"]: () => asksOf([], { next_cursor: "more" }) });
+    expect(f.list.state.moreAsks).toBe(true);
+    expect(MAX_ASK_PAGES).toBe(5);
+    expect(WORDS.moreAsks).toBe("More decisions are waiting than this list shows.");
+    expect(f.askLog.filter(([, path]) => path.startsWith(ASKS_URL))).toHaveLength(MAX_ASK_PAGES);
+  });
+
   it("a read that fails, or answers a shape it should not, is the error screen, not an empty list", async () => {
-    for (const asks of [fail(503, "unavailable"), { asks: "x" }, null]) {
+    for (const asks of [fail(503, "unavailable"), { data: "x", next_cursor: null }, { asks: [] }, null]) {
       const { list } = await loaded({ [GET]: setups, [GET_ASKS]: asks });
       expect(list.state.status).toBe("error");
       expect(list.state.rows).toEqual([]);
