@@ -7,7 +7,7 @@
  * `.git` or `.env`, and any Glob pattern with a `{` or `,/` (brace alternation could name an absolute root). It resolves the real location of
  * the Read target and of each Glob/Grep root (`cd -P` / `pwd -P`, the checkout's own real path included) and refuses a link as the last part
  * of a path, anything whose real directory is outside the checkout, and any path whose directory does not resolve. It fails closed: input over
- * `VERIFIER_GUARD_MAX_INPUT` characters, input it cannot read, another tool, or a path it cannot resolve is refused (exit 2).
+ * `VERIFIER_GUARD_MAX_INPUT` bytes, input it cannot read, another tool, or a path it cannot resolve is refused (exit 2).
  */
 
 /** The role the platform runs to check a proposal's claims. Not in the role manifest. */
@@ -20,16 +20,20 @@ export const PROPOSAL_VERIFIER_ROLE = "proposal-verifier";
 export const PROPOSAL_VERIFIER_RUNNER_TOOLS: readonly string[] = Object.freeze(["Read", "Glob", "Grep"]);
 
 /**
- * The most hook input the guard looks at. Its `case` matches cost time that grows with the square of the input under bash, and the CLI
- * lets a tool call through when a hook runs past its timeout, so the input is bounded before any match: well under a second at this size.
+ * The most hook input the guard looks at, in bytes (the script sets `LC_ALL=C`, so `${#j}` counts bytes under every shell, not characters).
+ * The prefix removals (`${t#*...}`) cost time that grows with the square of the input under bash, and the guard now fails closed when the
+ * hook runs past its timeout (a slow run would block a legitimate read), so the input is bounded before any match. 8 KB is twice the longest
+ * path a file system holds (PATH_MAX, 4096) plus the roughly 500 bytes of fields the CLI wraps around it. The worst shape, a run of escaped
+ * quotes, took about 1.6 s at the earlier 32 KB cap and takes about 0.1 s at this one (median of ten runs on the team's host).
  */
-export const VERIFIER_GUARD_MAX_INPUT = 32768;
+export const VERIFIER_GUARD_MAX_INPUT = 8192;
 
 /**
  * The hook script (POSIX sh, builtins only). It holds no single quote, so it is passed whole to `sh -c '...'`. Its one argument (`$1`) is the
  * checkout, the directory it confines to and resolves relative paths from.
  */
-export const VERIFIER_READ_GUARD_SCRIPT = `exec 2>/dev/null
+export const VERIFIER_READ_GUARD_SCRIPT = `LC_ALL=C; export LC_ALL
+exec 2>/dev/null
 W=$1
 [ -n "$W" ] || exit 2
 q=\\"
@@ -88,9 +92,11 @@ export function verifierGuardCommand(checkout: string): string {
 }
 
 /**
- * The PreToolUse hook entry for one checkout. A command hook killed at its `timeout` does not block the call; the input bound above keeps the
- * script far inside the timeout instead (SEC-HOOK-1 tracks `onFailure: "block"`).
+ * The PreToolUse hook entry for one checkout. By default the CLI lets a tool call through when a command hook times out, cannot start, or
+ * exits with a code other than 0 or 2. `onFailure: "block"` (Claude Code 2.1.295 or later) makes each of those refuse the call, as exit 2
+ * does, so the guard fails closed even when it is killed at its `timeout` or crashes. Both places that run the guard need a CLI that honours
+ * it: the sandbox image pins at least 2.1.295 (versions.lock.json) and a local runner's minimum is 2.1.295 (fx-runner's `MIN_CLAUDE_VERSION`).
  */
-export function verifierReadGuardHook(checkout: string): { matcher: string; hooks: Array<{ type: "command"; command: string; timeout: number }> } {
-  return { matcher: "Read|Glob|Grep", hooks: [{ type: "command", command: verifierGuardCommand(checkout), timeout: 5 }] };
+export function verifierReadGuardHook(checkout: string): { matcher: string; hooks: Array<{ type: "command"; command: string; timeout: number; onFailure: "block" }> } {
+  return { matcher: "Read|Glob|Grep", hooks: [{ type: "command", command: verifierGuardCommand(checkout), timeout: 5, onFailure: "block" }] };
 }

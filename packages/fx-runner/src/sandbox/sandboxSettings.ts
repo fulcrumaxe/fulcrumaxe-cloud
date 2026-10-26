@@ -245,7 +245,7 @@ function assertMirrorGrants(mirrorsRoot: string, reads: readonly string[], write
  *
  * This is the only builder: the engine writes its result into the settings file, and the sandbox probe in `doctor` calls
  * the same function. Every key here is in the sandboxing documentation for Claude Code; the minimum version this runner
- * supports is `MIN_CLAUDE_VERSION` (2.1.294, the oldest build the canary has passed on), and `strictAllowlist` needs
+ * supports is `MIN_CLAUDE_VERSION` (2.1.295, the first build with the hook `onFailure` field the verifier guard relies on), and `strictAllowlist` needs
  * 2.1.219 and `credentials` 2.1.246, both below it.
  */
 export function sandboxSettings(input: SandboxInput): Record<string, unknown> {

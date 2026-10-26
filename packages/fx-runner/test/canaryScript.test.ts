@@ -46,7 +46,7 @@ function makeHome(): { home: string; claude: string; bashrc: string; pidfile: st
   mkdirSync(stubs);
   // Not named for the agent binary: the repo's test guard blocks any child process whose command line names it, and the script takes any path.
   const claude = path.join(stubs, "agent-cli");
-  writeFileSync(claude, "#!/usr/bin/env bash\necho '2.1.294 (Claude Code)'\n", { mode: 0o755 });
+  writeFileSync(claude, "#!/usr/bin/env bash\necho '2.1.295 (Claude Code)'\n", { mode: 0o755 });
   writeFileSync(path.join(stubs, "pnpm"), PNPM_STUB, { mode: 0o755 });
   // The script wants the CLI's two sandbox tools on PATH (Linux); these stand in for them.
   for (const tool of ["bwrap", "socat"]) writeFileSync(path.join(stubs, tool), "#!/bin/sh\n", { mode: 0o755 });

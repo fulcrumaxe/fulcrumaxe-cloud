@@ -51,7 +51,7 @@ darwin-x64 fx-runner-darwin-x64
 linux-x64 fx-runner-linux-x64
 linux-arm64 fx-runner-linux-arm64"
 # src/engines/claude/pin.ts: MIN_CLAUDE_VERSION
-MIN_CLAUDE_VERSION="2.1.294"
+MIN_CLAUDE_VERSION="2.1.295"
 # src/platformSupport.ts
 WINDOWS_UNSUPPORTED_NOTICE="fx-runner does not support Windows yet, including WSL2. Linux and macOS are supported."
 MACOS_PREVIEW_NOTICE="macOS support is a preview, not yet verified: jobs run in Claude Code's own sandbox, which has not been proven on macOS yet."
