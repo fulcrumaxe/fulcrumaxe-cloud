@@ -172,3 +172,88 @@ describe("the registry limit (app-registry.js restrictTo)", () => {
     expect(enterOnboardingMode()).toBe(false);
   });
 });
+
+// D#37 WS-F9b: the finish-setup strip. The pure rules here; the drawn strip is in e2e/setup-strip.spec.ts.
+describe("the finish-setup strip rules", () => {
+  const steps = (name, patch = {}) => parseSteps({ ...fixture(name), steps: fixture(name).steps.map((s) => (patch[s.step] ? { ...s, ...patch[s.step] } : s)) });
+  const open = (id) => ({ [id]: { completed_at: null } });
+
+  it("shows while a step is open and never when every step is done or skipped", async () => {
+    const { stripState } = await import("../shell/core/onboarding-mode.js");
+    expect(stripState(steps("200-new.json"), null).show).toBe(true);
+    expect(stripState(steps("200-pay.json"), null).show).toBe(true);
+    expect(stripState(steps("200-complete.json"), null).show).toBe(false);
+    expect(stripState(steps("200-complete.json", { preview: { completed_at: null, skipped: true } }), null).show).toBe(false);
+    expect(stripState(null, null).show).toBe(false);
+  });
+
+  it("a dismissed strip stays away while nothing reopens", async () => {
+    const { stripState, stripSnapshot } = await import("../shell/core/onboarding-mode.js");
+    const s = steps("200-pay.json");
+    const snap = stripSnapshot(s);
+    expect(snap).toBe("00");
+    expect(stripState(s, snap).show).toBe(false);
+    expect(stripState(steps("200-new.json"), "11").show).toBe(false); // already open at dismissal: not a reopening
+  });
+
+  for (const id of ["model_key", "readonly_app"]) {
+    it(`reopening ${id} after a dismissal brings the strip back and ends the dismissal`, async () => {
+      const { stripState, stripSnapshot } = await import("../shell/core/onboarding-mode.js");
+      const snap = stripSnapshot(steps("200-pay.json"));
+      expect(stripState(steps("200-pay.json", open(id)), snap)).toEqual({ show: true, dismissed: null });
+    });
+  }
+
+  it("reopening a later step (write app) does not undo a dismissal", async () => {
+    const { stripState, stripSnapshot } = await import("../shell/core/onboarding-mode.js");
+    const snap = stripSnapshot(steps("200-pay.json"));
+    expect(stripState(steps("200-pay.json", open("write_app")), snap).show).toBe(false);
+  });
+});
+
+describe("startSetupStrip: who reads, and how often", () => {
+  const load = async () => {
+    vi.resetModules();
+    global.window = {};
+    return import("../shell/core/onboarding-mode.js");
+  };
+  afterEach(() => { delete global.window; delete global.document; });
+
+  it("a member makes no read at all", async () => {
+    const { startSetupStrip } = await load();
+    const doFetch = reply(200, fixture("200-pay.json"));
+    expect(await startSetupStrip({ is_admin: false }, doFetch)).toBe(false);
+    expect(await startSetupStrip({}, doFetch)).toBe(false);
+    expect(await startSetupStrip(null, doFetch)).toBe(false);
+    expect(doFetch).not.toHaveBeenCalled();
+  });
+
+  it("an owner or admin of an open session makes exactly one read, however often it is started", async () => {
+    const { startSetupStrip } = await load();
+    const doFetch = reply(200, fixture("200-pay.json"));
+    expect(await startSetupStrip({ is_admin: true }, doFetch)).toBe(true);
+    expect(await startSetupStrip({ is_admin: true }, doFetch)).toBe(false);
+    expect(doFetch).toHaveBeenCalledTimes(1);
+    expect(doFetch.mock.calls[0][0]).toBe("/api/v1/onboarding");
+  });
+
+  it("an onboarding-mode session reuses the read resolveAccess made", async () => {
+    const { startSetupStrip, resolveAccess } = await load();
+    const doFetch = reply(200, fixture("200-pay.json"));
+    expect(await resolveAccess({ workspace_access: "no_subscription" }, doFetch)).toBe("onboarding");
+    await startSetupStrip({ is_admin: true }, doFetch);
+    expect(doFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("a 403, a network failure and a bad body leave no strip and do not throw", async () => {
+    for (const doFetch of [reply(403, {}), vi.fn(() => Promise.reject(new TypeError("offline"))), reply(200, { steps: [] })]) {
+      const { startSetupStrip } = await load();
+      await expect(startSetupStrip({ is_admin: true }, doFetch)).resolves.toBe(true);
+    }
+  });
+
+  it("reportSteps does nothing for a session that is not showing the strip", async () => {
+    const { reportSteps } = await load();
+    expect(() => reportSteps(parseSteps(fixture("200-pay.json")))).not.toThrow();
+  });
+});

@@ -135,3 +135,38 @@
     z-index: 15;
     display: none;
 }
+
+/* D#37 WS-F9b: the finish-setup strip (core/onboarding-mode.js). It lives inside #windows-container, in a band the
+   container reserves below its windows (a transparent bottom border, sized by --setup-strip-h), so it sits on the
+   work-area edge next to the taskbar and never covers a window, its controls or the dock (a free-floating window is drawn over the band, not the band over it). Maximized windows refit to
+   the smaller area through the window manager's ResizeObserver on the container. */
+#windows-container.has-setup-strip { border-bottom: var(--setup-strip-h, 0px) solid transparent; }
+.setup-strip {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: calc(-1 * var(--setup-strip-h, 0px));
+    pointer-events: auto;
+    box-sizing: border-box;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    padding: 6px 10px;
+    background: var(--bg-surface, #0a0a0a);
+    color: var(--text-primary, #1aff80);
+    border-top: 1px solid var(--accent, #1aff80);
+    font-family: var(--font-mono, monospace);
+    font-size: 0.85rem;
+}
+.setup-strip-btn {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 6px 12px;
+    background: transparent;
+    color: inherit;
+    border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+    font: inherit;
+    cursor: pointer;
+}
+.setup-strip-btn:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }

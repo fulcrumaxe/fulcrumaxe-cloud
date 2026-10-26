@@ -11,7 +11,7 @@
 //     optional: once the server reports it skipped (a plan is chosen and no preview finished) it shows "Skipped", has no
 //     Start button, and does not count as open. The wording is in TEXT; the two places it is offered are in render().
 //   * Steps 1, 2 and 5 only open the app that does the step. Step 3 is onboarding-preview.js. Step 4 is the gate's own
-//     plan picker (FULCSubscriptionGate.mountPlans), not a copy. Step 6 is a placeholder until WS-F9b.
+//     plan picker (FULCSubscriptionGate.mountPlans), not a copy. Step 6 opens Runs, where the first pull request shows; it is Done or Up next by its time, with no text of its own.
 //   * Every node comes from h(); the server's text is never parsed as markup.
 import { h, timeNode } from "../_lib/dom.js";
 import { api, ApiFailure } from "../_lib/api.js";
@@ -27,7 +27,7 @@ const LABELS = {
   write_app: "Install the GitHub App (write)",
   first_pr: "Get your first pull request",
 };
-const HANDOFF = { model_key: ["model-key", "Open Model Key"], readonly_app: ["repos", "Open Repos"], write_app: ["repos", "Open Repos"] };
+const HANDOFF = { model_key: ["model-key", "Open Model Key"], readonly_app: ["repos", "Open Repos"], write_app: ["repos", "Open Repos"], first_pr: ["runs", "Open Runs"] };
 // Domain events after which step 1 or 2 may have changed.
 const LIVE_EVENTS = ["model_connection.changed", "model_connection.broken", "installation.changed"];
 // The repo list step 3 offers follows the account's repos too (a detach or a sync changes it without changing a step),
@@ -113,12 +113,12 @@ function mountOnboarding(host) {
           done ? h("span", { class: "ob-state" }, "Done ", timeNode(s.completed_at, true))
             : s.skipped ? h("span", { class: "ob-state", "data-testid": "ob-skipped" }, TEXT.skipped)
             : i === current ? h("span", { class: "ob-state" }, "Up next") : null));
-      const action = i === current ? stepAction(s.step) : null;
+      // Step 6 keeps its button once done: Runs is where the pull request is.
+      const action = i === current || (done && s.step === "first_pr") ? stepAction(s.step) : null;
       if (action) li.append(action); // steps 3 and 4 return no node: appending null would print "null"
       if (s.step === "preview" && preview) li.append(previewHost);
       if (s.step === "preview" && i === current && payOpen && !payShown) li.append(planButton(TEXT.skipPreview, "ob-skip-preview"));
       if (s.step === "pay" && payShown && payOpen) li.append(payHost); // under step 4 whether or not it is current
-      if (s.step === "first_pr") li.append(h("p", { class: "ob-muted" }, "Your first pull request will show here"));
       return li;
     });
     const skipAhead = payOpen && !payShown ? planButton(TEXT.skipAhead, "ob-skip-ahead") : "";
@@ -137,6 +137,8 @@ function mountOnboarding(host) {
       if (!steps) throw new Error("shape");
       st.steps = steps;
       st.error = "";
+      // WS-F9b: the shell's finish-setup strip follows what this app has just read (owners/admins only; no-op otherwise).
+      if (window.FULCOnboardingMode && window.FULCOnboardingMode.reportSteps) window.FULCOnboardingMode.reportSteps(steps);
     } catch (e) {
       if (e && e.name === "AbortError") return;
       st.error = e instanceof ApiFailure && e.status === 403 ? FORBIDDEN : LOAD_FAILED;
