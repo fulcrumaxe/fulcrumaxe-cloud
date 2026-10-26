@@ -754,6 +754,9 @@ export interface WriteRunStatusParams {
    * any query. Written as a `checkpoint` event in the same transaction, only
    * when the status write updated a row. `extensionsUsed` counts the in-run extensions (X-4). */
   checkpoint?: LimitCheckpoint | AgentCheckpoint;
+  /** D#2 H14c-3-3b-1 (C88 R3, CARRY-26): why a run was killed for spend, stored on the move's `run.status_changed` event in the same transaction as the status
+   * (jsonb, no column, no migration). Only `running -> killed_spend`, and only `per_run_cap` or `monthly_budget`; anything else throws before any query. */
+  abortReason?: AbortReason;
   /** D#2 H14c-3-2c (CARRY-17): one `run.metering` row, same transaction, only when the status write updated a row. */
   metering?: {
     meteredUsd: number | null;
@@ -764,6 +767,10 @@ export interface WriteRunStatusParams {
     modelCalls?: number | null;
   };
 }
+
+/** The two causes of a `killed_spend` end: the run's own cap, or the account's monthly budget. */
+export type AbortReason = "per_run_cap" | "monthly_budget";
+const ABORT_REASONS: readonly string[] = ["per_run_cap", "monthly_budget"];
 
 interface CheckpointBase {
   ccSessionId: string | null;
@@ -834,6 +841,9 @@ export async function writeRunStatus(pool: Pool, params: WriteRunStatusParams): 
 
 function checkRunStatusParams(params: WriteRunStatusParams): void {
   assertLegalRunTransition(params.from, params.to);
+  if (params.abortReason !== undefined && !(params.from === "running" && params.to === "killed_spend" && ABORT_REASONS.includes(params.abortReason))) {
+    throw new Error("writeRunStatus: an abortReason (per_run_cap or monthly_budget) belongs to running -> killed_spend only");
+  }
   const checkpoint = params.checkpoint;
   const allowed =
     checkpoint?.reason === "agent_checkpoint" ? params.to === "timed_out" : CHECKPOINT_KINDS[params.to]?.includes((checkpoint as LimitCheckpoint | undefined)?.kind ?? "");
@@ -843,11 +853,12 @@ function checkRunStatusParams(params: WriteRunStatusParams): void {
 }
 
 /** The `run.status_changed` `run_events` row of one status move, with the failure reason when there is one. */
-async function recordRunStatusChanged(client: PoolClient, params: Pick<WriteRunStatusParams, "accountId" | "runId" | "from" | "to" | "failureReason" | "runnerDone">): Promise<void> {
+async function recordRunStatusChanged(client: PoolClient, params: Pick<WriteRunStatusParams, "accountId" | "runId" | "from" | "to" | "failureReason" | "runnerDone" | "abortReason">): Promise<void> {
   await insertRunEvent(client, params.accountId, params.runId, "run.status_changed", {
     from: params.from,
     to: params.to,
     ...(params.failureReason ? { failureReason: params.failureReason } : {}),
+    ...(params.abortReason ? { abortReason: params.abortReason } : {}),
     ...(params.runnerDone
       ? {
           viaRunnerDone: true,

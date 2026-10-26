@@ -17,6 +17,10 @@ export {
   decideContinuation,
   readEnded,
   seatPrompt,
+  assembleSeatPrompt,
+  classifySpendKill,
+  REFUSED_BY_CODES,
+  PARK_REASONS,
   continueLockPoolCount,
   continueLockPoolMax,
   setContinueLockPoolMax,
@@ -26,6 +30,7 @@ export {
 } from "./continuation.js";
 export type {
   RefusedBy,
+  SpendKill,
   ContinuationFacts,
   ContinueAfterLimitResult,
   ContinueAfterLimitInput,
