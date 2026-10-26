@@ -100,4 +100,40 @@ describe("amendSpec [pg]", () => {
     expect(await statusOf(IDS[0]!)).toBe("accepted");
     expect(await statusOf(second)).toBe("rejected");
   });
+
+  describe("the Planned PRs table (D#483 S5-b2b)", () => {
+    const ROWS = [
+      { key: "api", title: "Add the API", depends_on: [] },
+      { key: "ui", title: "The screen", depends_on: ["api"] },
+    ];
+    it("publishSpec stores a table of two or more rows in the frontmatter and nothing for fewer; an unreadable one is refused", async () => {
+      const t = await seedTenant(db.admin);
+      const stored = await seedWorkItemAt(db.admin, t.accountId, "discussing");
+      await publishSpec(ctx(t.owner), { workItemId: stored, body: "s\n", acceptanceFiles: LIST, plannedPrs: ROWS });
+      expect((await versions(stored))[0].frontmatter).toEqual({ acceptance_files: LIST, planned_prs: ROWS });
+      for (const plannedPrs of [undefined, [], [ROWS[0]!]]) {
+        const wi = await seedWorkItemAt(db.admin, t.accountId, "discussing");
+        await publishSpec(ctx(t.owner), { workItemId: wi, body: "s\n", acceptanceFiles: LIST, ...(plannedPrs === undefined ? {} : { plannedPrs }) });
+        expect((await versions(wi))[0].frontmatter).toEqual({ acceptance_files: LIST });
+      }
+      const bad = await seedWorkItemAt(db.admin, t.accountId, "discussing");
+      for (const plannedPrs of [[{ key: "fix-2", title: "T", depends_on: [] }, ROWS[0]!], [ROWS[0]!, ROWS[0]!], "x" as never]) {
+        await expect(publishSpec(ctx(t.owner), { workItemId: bad, body: "s\n", acceptanceFiles: LIST, plannedPrs })).rejects.toMatchObject({ code: "invalid_planned_prs" });
+      }
+      expect(await versions(bad)).toEqual([]);
+    });
+
+    it("an amendment carries the table forward unchanged, and refuses to carry one that is unreadable", async () => {
+      const { t, wi, body, IDS } = await specAt("spec_ready");
+      await db.admin.query(`UPDATE spec_versions SET frontmatter = $2::jsonb WHERE work_item_id = $1`, [wi, JSON.stringify({ acceptance_files: LIST, planned_prs: ROWS })]);
+      await amendSpec(ctx(t.system), { workItemId: wi, body: `${body}\nmore\n`, basedOnVersion: 1, correctionIds: IDS });
+      expect((await versions(wi))[1].frontmatter).toEqual({ acceptance_files: LIST, planned_prs: ROWS, amended_corrections: IDS });
+
+      const broken = await specAt("spec_ready");
+      await db.admin.query(`UPDATE spec_versions SET frontmatter = $2::jsonb WHERE work_item_id = $1`, [broken.wi, JSON.stringify({ acceptance_files: LIST, planned_prs: [{ key: "fix-1", title: "T" }, ROWS[0]] })]);
+      await expect(amendSpec(ctx(broken.t.system), { workItemId: broken.wi, body: `${broken.body}\nx\n`, basedOnVersion: 1, correctionIds: broken.IDS })).rejects.toMatchObject({ code: "invalid_planned_prs" });
+      expect((await versions(broken.wi)).map((r) => r.version)).toEqual([1]);
+      expect(await statusOf(broken.IDS[0]!)).toBe("accepted");
+    });
+  });
 });

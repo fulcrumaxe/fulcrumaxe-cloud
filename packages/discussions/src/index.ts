@@ -62,6 +62,7 @@ export type {
   RunIdInput,
   SpecAsOfResult,
 } from "./specs.js";
+export { MAX_PLANNED_PRS, MAX_PLANNED_PR_TITLE, PLANNED_PR_KEY_RE, RESERVED_PLANNED_PR_PREFIXES, isPlannedPrKey, parsePlannedPrs, plannedPrsSection, type PlannedPr, type PlannedPrsParse } from "./plannedPrs.js";
 export { publishSpec, respecSpec, amendSpec, addCorrection, specAsOf, correctionsSince } from "./specs.js";
 
 export type { SetStageInput } from "./stages.js";

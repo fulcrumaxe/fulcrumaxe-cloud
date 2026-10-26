@@ -3,6 +3,7 @@ import type { PoolClient } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { NotFoundError } from "@fx/core/src/tenancy/errors.js";
 import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
+import { parsePlannedPrs, type PlannedPr } from "./plannedPrs.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import type { DiscussionsContext } from "./principals.js";
@@ -66,6 +67,11 @@ export interface PublishSpecInput {
    * `frontmatter = {"acceptance_files": <the list as given>}` and nothing else.
    */
   acceptanceFiles: readonly string[];
+  /**
+   * D#483 S5-b2b: the Planned PRs table (two or more rows), stored as `frontmatter.planned_prs`. Absent or a single row: nothing is stored and the item stays one item.
+   * Re-read here by the same parser the Spec step uses; an unreadable table is refused `invalid_planned_prs` before anything is written.
+   */
+  plannedPrs?: readonly PlannedPr[];
 }
 
 /** `spec.publish`. Inserts the next `spec_versions` row (previous
@@ -146,6 +152,13 @@ async function writeSpecVersion(
     throw new DiscussionsError("invalid_file_scope", "a Spec needs a readable list of the files it allows");
   }
 
+  let plannedPrs: PlannedPr[] | null = null;
+  if (!amend && Object.hasOwn(input, "plannedPrs") && input.plannedPrs !== undefined) {
+    const planned = parsePlannedPrs(input.plannedPrs);
+    if (planned.kind === "invalid" || planned.kind === "too_large") throw new DiscussionsError("invalid_planned_prs", "the Planned PRs table could not be read");
+    if (planned.kind === "ok") plannedPrs = planned.rows;
+  }
+
   return withTenant(ctx.pool, accountIdOf(ctx.principal), async (client) => {
     const workItem = await lockWorkItem(client, workItemId);
     // A halted item gets no Spec from the pipeline (a person may still write one). Checked here and not only in recordStage:
@@ -173,8 +186,8 @@ async function writeSpecVersion(
       throw new DiscussionsError("spec_frozen", `the Spec is frozen while the work item is "${workItem.stage}"`);
     }
     if (respec !== null) {
-      const { rows: latest } = await client.query<{ version: number; acceptance_files: unknown }>(
-        `SELECT version, frontmatter -> 'acceptance_files' AS acceptance_files FROM spec_versions
+      const { rows: latest } = await client.query<{ version: number; acceptance_files: unknown; planned_prs: unknown }>(
+        `SELECT version, frontmatter -> 'acceptance_files' AS acceptance_files, frontmatter -> 'planned_prs' AS planned_prs FROM spec_versions
           WHERE work_item_id = $1 AND erased_at IS NULL ORDER BY version DESC LIMIT 1`,
         [workItemId],
       );
@@ -184,6 +197,10 @@ async function writeSpecVersion(
         // The list is N's own, carried forward; a Spec with no readable list is re-specced first.
         if (parseAcceptanceScope(latest[0]!.acceptance_files).kind !== "known") throw new DiscussionsError("invalid_file_scope", "a Spec needs a readable list of the files it allows");
         acceptanceFiles = latest[0]!.acceptance_files;
+        // The table is part of the Spec text N already shows, so an amendment carries it forward unchanged (re-read, not trusted).
+        const carried = parsePlannedPrs(latest[0]!.planned_prs);
+        if (carried.kind === "invalid" || carried.kind === "too_large") throw new DiscussionsError("invalid_planned_prs", "the Planned PRs table could not be read");
+        if (carried.kind === "ok") plannedPrs = carried.rows;
       } else if (parseAcceptanceScope(latest[0]!.acceptance_files).kind === "known") {
         throw new DiscussionsError("spec_has_file_list", "the newest Spec version already has a readable file list");
       }
@@ -212,7 +229,7 @@ async function writeSpecVersion(
          (account_id, work_item_id, version, body, body_sha256, created_by_kind, created_by_user_id, frontmatter)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
        RETURNING id, created_at`,
-      [accountIdOf(ctx.principal), workItemId, version, body, bodySha256, actor.kind, actor.userId, JSON.stringify(amend ? { acceptance_files: acceptanceFiles, amended_corrections: respec!.correctionIds } : { acceptance_files: acceptanceFiles })],
+      [accountIdOf(ctx.principal), workItemId, version, body, bodySha256, actor.kind, actor.userId, JSON.stringify({ acceptance_files: acceptanceFiles, ...(plannedPrs === null ? {} : { planned_prs: plannedPrs }), ...(amend ? { amended_corrections: respec!.correctionIds } : {}) })],
     );
     const specVersionId = rows[0]!.id;
 

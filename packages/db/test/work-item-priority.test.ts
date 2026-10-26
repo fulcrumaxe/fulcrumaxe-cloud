@@ -196,5 +196,5 @@ describe('migration 0670: work item priority (D#2 H26a)', () => {
   });
 });
 
-/** The columns app_user cannot UPDATE on work_items: 0613 closes provenance, parent_id never had a column grant, 0778 opened title (the issue read fills a NULL title), 0781 adds placement closed (only its definers write it), and 0798 adds runner_routing closed (only runner_routing_set writes it), and 0848 adds envelope_id closed (the approval paths set it; D#483 S5-d). */
-const PRE_0670_CLOSED = ['envelope_id', 'parent_id', 'placement', 'provenance', 'runner_routing'];
+/** The columns app_user cannot UPDATE on work_items: 0613 closes provenance, parent_id never had a column grant, 0778 opened title (the issue read fills a NULL title), 0781 adds placement closed (only its definers write it), and 0798 adds runner_routing closed (only runner_routing_set writes it), and 0848 adds envelope_id closed (the approval paths set it; D#483 S5-d), and 0919 adds planned_pr_key and planned_pr_spec_version_id closed (only a person's approval creates a planned PR; D#483 S5-b2b). */
+const PRE_0670_CLOSED = ['envelope_id', 'parent_id', 'placement', 'planned_pr_key', 'planned_pr_spec_version_id', 'provenance', 'runner_routing'];
