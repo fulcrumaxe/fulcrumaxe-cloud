@@ -215,6 +215,8 @@ describe("the proposal verifier sweep [pg]", { timeout: 120_000 }, () => {
     const p = await row(id);
     // The definer counts CONSECUTIVE failed checks (0839): a real verdict resets it.
     expect(p).toMatchObject({ state: "new", verification: "partly_verified", verify_attempts: 0, verified_sha: SHA, verified_run_id: runs[1]!.id });
+    // S5-b1a-3: the verifier's parsed category is stored with the verdict.
+    expect((await admin.query("SELECT verifier_category FROM proposals WHERE id = $1", [id])).rows[0]).toEqual({ verifier_category: "bug" });
     const claims = (await admin.query("SELECT text, verdict, refute_code, checked_sha FROM proposal_claims WHERE proposal_id = $1 ORDER BY text", [id])).rows;
     expect(claims).toEqual([
       { text: "add returns the sum", verdict: "supported", refute_code: null, checked_sha: SHA },

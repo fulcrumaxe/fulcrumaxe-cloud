@@ -57,6 +57,8 @@ export interface VerifyRecord {
   verified_sha: string | null;
   claims: ReadonlyArray<{ text: string; verdict: string; refute_code?: string }>;
   evidence: ReadonlyArray<{ kind: string; ref: string; excerpt: string; commit_sha: string }>;
+  /** The verifier's parsed category (S5-b1a-3), or null when the output was refused whole. The definer keeps it only with a named run. */
+  category?: string | null;
 }
 /** One repository through the read-only plan client: its default branch's head, and a file at a commit (null when absent). */
 export interface VerifyRepoReader {
@@ -181,13 +183,14 @@ export function createProposalVerifySweep(deps: ProposalVerifyDeps): () => Promi
       const fresh = await readProposal(client, accountId, p.id);
       if (!fresh || !eligible(fresh) || fresh.verify_attempts !== p.verify_attempts || requestHash(fresh) !== requestHash(p)) return "skipped";
       const named = rec.verification === "verified" || rec.verification === "partly_verified";
-      await client.query("SELECT * FROM proposal_record_verification($1::uuid, $2::text, $3::text, $4::uuid, $5::jsonb, $6::jsonb)", [
+      await client.query("SELECT * FROM proposal_record_verification($1::uuid, $2::text, $3::text, $4::uuid, $5::jsonb, $6::jsonb, $7::text)", [
         p.id,
         rec.verification,
         rec.verification === "check_failed" || rec.verification === "not_checked" ? null : rec.verified_sha,
         named ? run.id : null,
         JSON.stringify(rec.claims),
         JSON.stringify(rec.evidence),
+        named ? (rec.category ?? null) : null,
       ]);
       return "recorded";
     });
