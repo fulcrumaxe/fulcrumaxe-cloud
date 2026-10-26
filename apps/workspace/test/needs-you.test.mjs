@@ -9,13 +9,14 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { ASKS_URL, LIST_URL, MERGE_URL, PROVIDER_HOSTS, WORDS, actionUrl, answerUrl, createNeedsYou, failureSentence, notShownWords, providerLink, pullRequestLink, quotedReason, readAsk, readMerge, readRequest } from "../apps/needs-you/needs-you-model.js";
+import { ASKS_URL, LIST_URL, MERGE_URL, PROVIDER_HOSTS, STALLED_URL, WORDS, actionUrl, answerUrl, approveUrl, createNeedsYou, failureSentence, notShownWords, providerLink, pullRequestLink, quotedReason, readAsk, readMerge, readRequest, readStalled } from "../apps/needs-you/needs-you-model.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
 const fixture = (op, name) => JSON.parse(readFileSync(join(PACKAGES, "api", "fixtures", "v1", op, name), "utf8"));
 const LIST = fixture("listSetupRequests", "200-ok.json");
 const BASE = LIST.requests[0];
 const MERGES = fixture("listMergeReady", "200-ok.json");
+const STALLED = fixture("listStalledItems", "200-ok.json");
 const SERVER_TEXT = "server text that must never be shown";
 const fail = (status, code, extra = {}) => Object.assign(new Error(SERVER_TEXT), { status, code, ...extra });
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -32,9 +33,9 @@ const closed = (state, over = {}) => req({ state, status_sentence: null, check_i
 function fakeCall(routes) {
   const log = [];
   const askLog = []; // the decision-ask calls; kept apart so the setup-request tests below count only their own requests
-  const all = { ["GET " + ASKS_URL]: { asks: [], not_shown: 0 }, ["GET " + MERGE_URL]: { items: [], not_shown: 0 }, ...routes };
+  const all = { ["GET " + ASKS_URL]: { asks: [], not_shown: 0 }, ["GET " + MERGE_URL]: { items: [], not_shown: 0 }, ["GET " + STALLED_URL]: { items: [], not_shown: 0 }, ...routes };
   const call = vi.fn(async (method, path, body) => {
-    (path.startsWith(ASKS_URL) || path.startsWith(MERGE_URL) ? askLog : log).push([method, path, body]);
+    (path.startsWith(ASKS_URL) || path.startsWith(MERGE_URL) || path.startsWith(STALLED_URL) || path.endsWith("/approve") ? askLog : log).push([method, path, body]);
     // The real API answers 400 to any body on the done and withdraw routes (packages/api/src/handler.ts).
     if (method === "POST" && /\/(done|withdraw)$/.test(path) && body !== undefined) throw fail(400, "invalid_request");
     const r = all[method + " " + path];
@@ -428,7 +429,7 @@ describe("decision asks", () => {
     expect(f.list.state.rows.map((r) => r.kind)).toEqual(["ask", "setup"]);
     expect(f.list.state.notShown).toBe(3);
     expect(f.log).toEqual([["GET", LIST_URL, undefined]]);
-    expect(f.askLog).toEqual([["GET", ASKS_URL, undefined], ["GET", MERGE_URL, undefined]]);
+    expect(f.askLog).toEqual([["GET", ASKS_URL, undefined], ["GET", MERGE_URL, undefined], ["GET", STALLED_URL, undefined]]);
     expect(notShownWords(1)).toBe("1 more isn't shown.");
     expect(notShownWords(3)).toBe("3 more aren't shown.");
   });
@@ -573,6 +574,67 @@ describe("pull requests waiting for a person to merge (D#598 P8c-2b)", () => {
 
   it("a failed merge-ready read is the error state, never a list that looks empty", async () => {
     const { list } = await loaded({ [GET]: listOf([]), [MERGE_GET]: fail(500, "internal") });
+    expect(list.state.status).toBe("error");
+  });
+});
+
+describe("items that stopped on their own (R6)", () => {
+  const stalled = (n, over = {}) => ({ ...STALLED.items[0], work_item_id: "w-" + n, ...over });
+  const STALLED_GET = "GET " + STALLED_URL;
+  const APPROVE = (n) => "POST " + approveUrl("w-" + n);
+
+  it("reads the contract fixture whole: the title, what stopped in the cloud's words, and the card's own button", () => {
+    const row = readStalled(STALLED.items[0]);
+    expect(row).toMatchObject({ kind: "stalled", title: STALLED.items[0].title, reason: STALLED.items[0].why, state: "open", action: STALLED.items[0].action_label, sentence: "" });
+  });
+
+  it("a caller who may not act, or a stage with no automatic step, gets no button and a line to open the card; no text is null", () => {
+    for (const row of [readStalled(stalled(1, { can_act: false })), readStalled(stalled(2, { action_label: null })), readStalled(stalled(3, { title: null, why: null }))]) {
+      if (row.action === "") expect(row.sentence).toBe(WORDS.stalledNoAction);
+      for (const v of Object.values(row)) expect(v === null || v === undefined).toBe(false);
+    }
+    expect(readStalled(stalled(1, { can_act: false })).action).toBe("");
+    expect(readStalled(stalled(3, { title: null })).title).toBe("Work item");
+    expect(readStalled({ ...stalled(4), work_item_id: "" })).toBeNull();
+    expect(readStalled(null)).toBeNull();
+  });
+
+  it("lists the stalled row beside the others, from one extra GET, with the pull request rows still separate", async () => {
+    const { list } = await loaded({ [GET]: listOf([BASE]), [STALLED_GET]: { items: [stalled(1)], not_shown: 2 } });
+    expect(list.state.rows.map((r) => r.kind)).toEqual(["stalled", "setup"]);
+    expect(list.state.notShown).toBe(2);
+  });
+
+  it("the button posts the approve route once, with no body, tells the person it started, and the row is gone on the re-read", async () => {
+    let items = [stalled(1)];
+    const f = await loaded({ [GET]: listOf([]), [STALLED_GET]: () => ({ items, not_shown: 0 }), [APPROVE(1)]: () => { items = []; return { action_id: "a-1", state: "accepted" }; } });
+    const id = f.list.state.rows[0].id;
+    const first = f.list.unstick(id);
+    const second = f.list.unstick(id); // a second press while one is in flight is ignored
+    await Promise.all([first, second]);
+    expect(f.askLog.filter(([m, p]) => m === "POST" && p === approveUrl("w-1"))).toEqual([["POST", approveUrl("w-1"), undefined]]);
+    expect(f.list.state.rows).toEqual([]);
+    expect(f.list.state.announce).toBe(WORDS.stalledStarted);
+  });
+
+  it("a refused press is a fixed sentence, never the server's, and the list is read again", async () => {
+    const f = await loaded({ [GET]: listOf([]), [STALLED_GET]: { items: [stalled(1)], not_shown: 0 }, [APPROVE(1)]: fail(409, "already_running") });
+    await f.list.unstick(f.list.state.rows[0].id);
+    expect(f.list.state.error).toBe(WORDS.stalledBusy);
+    const gone = await loaded({ [GET]: listOf([]), [STALLED_GET]: { items: [stalled(1)], not_shown: 0 }, [APPROVE(1)]: fail(409, "not_approvable") });
+    await gone.list.unstick(gone.list.state.rows[0].id);
+    expect(gone.list.state.error).toBe(WORDS.stalledGone);
+    expect(JSON.stringify(f.list.state)).not.toContain(SERVER_TEXT);
+  });
+
+  it("a row with no button sends nothing when its id is pressed", async () => {
+    const f = await loaded({ [GET]: listOf([]), [STALLED_GET]: { items: [stalled(1, { can_act: false })], not_shown: 0 } });
+    await f.list.unstick(f.list.state.rows[0].id);
+    expect(f.askLog.some(([m]) => m === "POST")).toBe(false);
+  });
+
+  it("a failed stalled read is the error state, never a list that looks empty", async () => {
+    const { list } = await loaded({ [GET]: listOf([]), [STALLED_GET]: fail(500, "internal") });
     expect(list.state.status).toBe("error");
   });
 });

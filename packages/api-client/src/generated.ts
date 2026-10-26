@@ -1868,6 +1868,24 @@ export interface Operations {
       not_shown: number;
     };
   };
+  listStalledItems: {
+    path: undefined;
+    query: undefined;
+    body: undefined;
+    response: {
+      items: Array<{
+        work_item_id: string;
+        title: string | null;
+        stage: string;
+        code: string;
+        why: string;
+        action_label: string | null;
+        can_act: boolean;
+        since: string;
+      }>;
+      not_shown: number;
+    };
+  };
   getActionAccountRules: {
     path: undefined;
     query: undefined;
@@ -4965,6 +4983,17 @@ export const operations = {
   listMergeReady: {
     method: "GET",
     path: "/api/v1/merge-ready",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: false,
+  },
+  listStalledItems: {
+    method: "GET",
+    path: "/api/v1/stalled-items",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,

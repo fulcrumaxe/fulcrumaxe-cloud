@@ -47,6 +47,8 @@ interface Mock {
   asks: Req[];
   /** The merge-ready read: pull requests waiting for a person to merge them. */
   merges: Req[];
+  /** The stalled-items read: items that stopped on their own. */
+  stalled: Req[];
   /** What the answer POST replies: the contract's body, or a number for an error status. */
   answerReply: Req | number;
   /** The bodies the answer POSTs carried, by path. */
@@ -67,7 +69,7 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
   page.on("console", (m) => m.type() === "error" && !m.text().startsWith("Failed to load resource") && errors.push(m.text()));
   page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
   await page.addInitScript(() => document.addEventListener("securitypolicyviolation", (e) => console.error(`CSP ${e.violatedDirective}`)));
-  const mock: Mock = { requests: [request()], asks: [], merges: [], answerReply: { ask_id: A1, receipt_id: "e1b7c3d4-2f58-4a09-8c6b-7d3e9f1a2b45", answered_option: "bump_now" }, answers: [], notShown: 0, listStatus: 200, doneAnswer: closed("done"), withdrawAnswer: closed("withdrawn"), delay: 0, posts: [], ...tweak };
+  const mock: Mock = { requests: [request()], asks: [], merges: [], stalled: [], answerReply: { ask_id: A1, receipt_id: "e1b7c3d4-2f58-4a09-8c6b-7d3e9f1a2b45", answered_option: "bump_now" }, answers: [], notShown: 0, listStatus: 200, doneAnswer: closed("done"), withdrawAnswer: closed("withdrawn"), delay: 0, posts: [], ...tweak };
   await page.route((u) => u.pathname === "/", async (route) => {
     const res = await route.fetch();
     await route.fulfill({ response: res, headers: { ...res.headers(), "content-security-policy": CSP } });
@@ -83,6 +85,7 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
     }
     if (p === "/api/v1/decision-asks" && req.method() === "GET") return json(route, 200, { asks: mock.asks, not_shown: mock.notShown });
     if (p === "/api/v1/merge-ready" && req.method() === "GET") return json(route, 200, { items: mock.merges, not_shown: 0 });
+    if (p === "/api/v1/stalled-items" && req.method() === "GET") return json(route, 200, { items: mock.stalled, not_shown: 0 });
     const answerMatch = p.match(/^\/api\/v1\/decision-asks\/([^/]+)\/answer$/);
     if (answerMatch && req.method() === "POST") {
       mock.answers.push({ path: p, body: req.postDataJSON() });
@@ -417,6 +420,22 @@ test.describe("D#598 P8c: Needs you", () => {
     await press(t(page, `ny-choice-${A1}-bump_now`));
     await expect(t(page, "ny-action-error")).toHaveText("That was already answered.");
     await expect(t(page, "ny-empty")).toHaveText("Nothing needs you right now.");
+    await clean(page, errors);
+  });
+
+  test("an item that stopped on its own shows what stopped and the card's button, and axe is clean under every theme", async ({ page }) => {
+    const row = { work_item_id: "7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f", title: "Use the shared pushing-roles list", stage: "pr_opened", code: "stopped", why: "A reviewer couldn't start (runner daily limit), so the review stopped before it could finish.", action_label: "Approve and review", can_act: true, since: "2026-10-25T16:12:26.000Z" };
+    const { errors } = await setup(page, { requests: [], stalled: [row] });
+    await open(page);
+    await expect(page.locator(`${WIN} h2`)).toHaveText("Needs you (1)");
+    await expect(t(page, "ny-title")).toHaveText("Use the shared pushing-roles list");
+    await expect(t(page, "ny-reason")).toContainText("runner daily limit");
+    const button = t(page, `ny-unstick-stalled-${row.work_item_id}`);
+    await expect(button).toHaveText("Approve and review");
+    for (const theme of THEMES) {
+      await applyTheme(page, theme);
+      expect(await axeSeriousOrCritical(page), theme).toEqual([]);
+    }
     await clean(page, errors);
   });
 

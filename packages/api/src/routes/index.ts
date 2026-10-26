@@ -23,6 +23,7 @@ import { setupRequestRoutes } from "./setupRequests.js";
 import { decisionAskRoutes } from "./decisionAsks.js";
 import { subItemApprovalRoutes } from "./subItemApprovals.js";
 import { mergeReadyRoutes } from "./mergeReady.js";
+import { stalledItemRoutes } from "./stalledItems.js";
 import { githubRoutes } from "./github.js";
 import { billingRoutes } from "./billing.js";
 import { runLimitRoutes } from "./run-limits.js";
@@ -90,6 +91,7 @@ export const ROUTES: RouteEntry[] = [
   ...decisionAskRoutes,
   ...subItemApprovalRoutes,
   ...mergeReadyRoutes,
+  ...stalledItemRoutes,
   ...actionRuleRoutes,
   ...githubRoutes,
   ...billingRoutes,

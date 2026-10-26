@@ -226,7 +226,7 @@ describe("S5k1d-6: a refusal that is not a pause ends as it ends today", () => {
     expect(out).toEqual({ status: "needs_human", detail: "reviewer_not_started:acceptance-tester" });
     expect(world.sleeps).toBe(0);
     expect(facts(t, "review")).toEqual([]);
-    expect(recorded(t).find((e) => e.kind === "stopped")).toMatchObject({ code: "not_started_acceptance_tester" });
+    expect(recorded(t).find((e) => e.kind === "stopped")).toMatchObject({ code: "not_started_no_model" });
   });
 
   it("a halted item is a halt, not a pause", async () => {

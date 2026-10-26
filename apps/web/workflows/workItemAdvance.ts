@@ -1081,7 +1081,7 @@ async function waitOnHead(args: AdvanceStartArgs, stage: "review" | "fix_round",
  * restart of it by the sweep) are used as they are and never asked for again. After the four hours a pause is still the answer: the caller ends `review_paused:<pause>`,
  * which is no failure, and the sweep starts the review again when the limit allows it.
  */
-async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; baseRef: string; branch: string }, roles: string[], prior: Array<{ role: string; runId: string }>, round: number, rereview = 0): Promise<{ verdicts: Verdict[]; refused: string[]; paused: { pause: string; attempt: number } | null }> {
+async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; baseRef: string; branch: string }, roles: string[], prior: Array<{ role: string; runId: string }>, round: number, rereview = 0): Promise<{ verdicts: Verdict[]; refused: string[]; refusedWhy: Record<string, string>; paused: { pause: string; attempt: number } | null }> {
   const { accountId, userId, workItemId } = args;
   const answers = new Map<string, StartedReviewer>();
   const attemptOf = new Map<string, number>();
@@ -1101,7 +1101,7 @@ async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number
     if (denied.length === 0) break;
     const pause = pauseOf(denied[0]!.reason) as string;
     await waitOnHead(args, "review", pause, attempt, pr, rereview);
-    if (waited >= BUILD_SPEND_WAIT_MS) return { verdicts: [], refused: [], paused: { pause, attempt } };
+    if (waited >= BUILD_SPEND_WAIT_MS) return { verdicts: [], refused: [], refusedWhy: {}, paused: { pause, attempt } };
     if (waited === 0) await advanceLogStep("advance.stage_waiting", { work_item_id: workItemId, at: "review_start", reason: pause });
     await sleep(BUILD_SPEND_POLL_MS);
     waited += BUILD_SPEND_POLL_MS;
@@ -1122,11 +1122,14 @@ async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number
   for (const s of started) {
     if (s.runId !== null) {
       const got = await reviewUntilVerdict(args, ctx, pr, s.role, s.runId, prior, rereview, attemptOf);
-      if (got.pause !== null) return { verdicts: [], refused: [], paused: got.pause };
+      if (got.pause !== null) return { verdicts: [], refused: [], refusedWhy: {}, paused: got.pause };
       verdicts.push(got.verdict);
     }
   }
-  return { verdicts, refused: started.filter((s) => s.runId === null).map((s) => s.role), paused: null };
+  // Who was refused, and the worker's closed reason for each (a role setting, the runner's daily limit, ...): the stop's code names the reason, so the card and Needs you can say it.
+  const refusedWhy: Record<string, string> = {};
+  for (const s of started) if (s.runId === null && s.reason !== null && s.reason !== undefined) refusedWhy[s.role] = s.reason;
+  return { verdicts, refused: started.filter((s) => s.runId === null).map((s) => s.role), refusedWhy, paused: null };
 }
 
 /**
@@ -1492,6 +1495,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     if (first.paused !== null) return pausedEnd(workItemId, "review", first.paused.pause, first.paused.attempt);
     const verdicts = [...first.verdicts];
     let refused = [...first.refused];
+    let refusedWhy: Record<string, string> = { ...first.refusedWhy };
 
     // The code reviewer's "security review needed" flag adds the security reviewer for this head.
     if (verdicts.some((v) => v.role === "code-reviewer" && v.securityNeeded)) {
@@ -1502,6 +1506,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
         if (more.paused !== null) return pausedEnd(workItemId, "review", more.paused.pause, more.paused.attempt);
         verdicts.push(...more.verdicts);
         refused = [...refused, ...more.refused];
+        refusedWhy = { ...refusedWhy, ...more.refusedWhy };
       }
     }
 
@@ -1515,6 +1520,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       if (debate.paused !== null) return pausedEnd(workItemId, "review", debate.paused.pause, debate.paused.attempt);
       verdicts.push(...debate.verdicts);
       refused = [...refused, ...debate.refused];
+      refusedWhy = { ...refusedWhy, ...debate.refusedWhy };
     }
 
     // Every verdict is in: record them, passes first and non-passes last, in ONE step.
@@ -1573,7 +1579,8 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     }
     if (round.decision !== "fix") {
       // incomplete (a required reviewer could not start) or refused: nothing is decided, nothing is merged.
-      await stopped(args, "review", refused.length > 0 ? `not_started_${refused[0]}` : round.decision, { head: pr.headSha, pr: pr.number });
+      // The code names the worker's reason when it gave one (`not_started_runner_daily_limit`), the role otherwise: the person reading the card needs the cause, not only the role.
+      await stopped(args, "review", refused.length > 0 ? `not_started_${refusedWhy[refused[0]!] ?? refused[0]}` : round.decision, { head: pr.headSha, pr: pr.number });
       return { status: "needs_human", detail: refused.length > 0 ? `reviewer_not_started:${refused.join(",")}` : round.decision };
     }
 

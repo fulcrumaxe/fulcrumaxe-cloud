@@ -78,7 +78,7 @@ describe('D#598 P8c-2b: merge-ready list', () => {
   const gate = (refs: SeedRefs, workItemId: string, over: { code?: string; pr?: number; reasons?: string[] } = {}) =>
     admin.query(
       `INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, reasons, pr_number, dedupe_key) VALUES ($1, $2, 'merge_gate', $3, $4::text[], $5, $6)`,
-      [refs.accountId, workItemId, over.code ?? 'ready_human_merges', over.reasons ?? ['ci_not_green'], over.pr ?? 7, randomUUID()],
+      [refs.accountId, workItemId, over.code ?? 'ready_human_merges', over.reasons ?? ['local_review_not_enabled'], over.pr ?? 7, randomUUID()],
     );
   const setStage = (id: string, stage: string) => admin.query(`UPDATE work_items SET stage = $2 WHERE id = $1`, [id, stage]);
 
@@ -167,6 +167,21 @@ describe('D#598 P8c-2b: merge-ready list', () => {
     const body = await read(f.member);
     expect(body.items).toHaveLength(MERGE_READY_LIST_LIMIT);
     expect(body.not_shown).toBe(2);
+  });
+
+  // Live 2026-10-25 (cloud#673): the gate answered "ready, a person merges" while the pull request was still a draft with no public copy open and its checks
+  // not green. That is not a pull request for a person to merge; it is an answer the gate gave too early (the stalled list shows it, with the button that asks again).
+  it('does not list a gate answer whose reasons time can clear (draft, checks not green, public copy not open): it is not ready yet', async () => {
+    const f = await fixture();
+    for (const reason of ['pr_draft', 'ci_not_green', 'public_pr_not_open', 'public_head_unrecorded']) {
+      const id = await item(f.refs, `Not ready: ${reason}`);
+      await gate(f.refs, id, { reasons: ['local_review_not_enabled', reason] });
+    }
+    const ready = await item(f.refs, 'Really ready');
+    await gate(f.refs, ready, { reasons: ['local_review_not_enabled'] });
+    const body = await read(f.member);
+    expect(body.items.map((i) => i.work_item_id)).toEqual([ready]);
+    expect(body.not_shown).toBe(0);
   });
 
   it('builds the link only from a well-formed repository and number', () => {
