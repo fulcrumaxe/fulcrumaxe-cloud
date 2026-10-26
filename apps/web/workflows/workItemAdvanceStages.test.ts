@@ -86,6 +86,7 @@ function setup(o: SetupOptions = {}) {
     advanceDecision: vi.fn(async (): Promise<DecisionStepCode> => o.decision ?? "none"),
     advanceCancel: vi.fn(async () => undefined),
     advanceRecordEvent: vi.fn(async () => ({ recorded: true })),
+    advanceStartGate: vi.fn(async (..._args: unknown[]) => ({ proceed: true as const, how: "person_receipt" })),
     advanceLoadReview: vi.fn(async (): Promise<{ ok: false; reason: string } | { ok: true; ctx: Record<string, unknown> }> => ({ ok: false, reason: "no_spec" })),
     advanceLightSpec: vi.fn(async (_who: unknown, _run: string, _action: string) => o.light ?? { status: "published", reason: null, version: 1 }),
   };

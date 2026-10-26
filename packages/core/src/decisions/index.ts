@@ -4,3 +4,7 @@ export { listPendingAsks } from './pending.js';
 export type { PendingAsk, PendingAsksCtx } from './pending.js';
 export { ASK_PROCEEDED_OUTCOME, SWEEP_REAL_CLOCK, sweepOverdueAsks } from './sweepOverdue.js';
 export type { OverdueSweepResult, SweepClock } from './sweepOverdue.js';
+export { checkStartPair, decideStart, settleStartClick } from './startDecide.js';
+export type { DecideStartInput, DecideStartResult, StartHeld, StartHow, StartOrigin } from './startDecide.js';
+export { raiseStartAsk, recordStartReceipt } from './startGate.js';
+export type { StartGateCtx, StartGateInput, StartGateResult } from './startGate.js';

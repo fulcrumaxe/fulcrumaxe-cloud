@@ -1,4 +1,4 @@
-import type { AdvanceFacade, AdvanceRunOutcome, AdvanceStepResult, DecisionStepCode, PlanePublish } from "@fx/worker";
+import type { AdvanceFacade, AdvanceRunOutcome, AdvanceStepResult, DecisionStepCode, PlanePublish, StartGateStepInput, StartGateStepOut } from "@fx/worker";
 import { isQueuedOnRunner, type AdvanceWorker } from "./advanceSteps";
 
 /**
@@ -140,6 +140,15 @@ export type DecisionWorker = Pick<AdvanceFacade, "advanceDecision">;
 export async function decisionBody(worker: DecisionWorker | null, who: StepWho, runId: string): Promise<DecisionStepCode> {
   if (!worker) return "none";
   return worker.advanceDecision(who.accountId, who.userId, who.workItemId, who.haltEpoch, runId);
+}
+
+/**
+ * D#7 start gate (b): the start decision for the advance a person filed. Fixed words only cross into the workflow: `proceed`, or the reason it stopped. No worker:
+ * the advance stops (`blocked`), because a start that cannot be recorded does not happen.
+ */
+export async function startGateBody(worker: Pick<AdvanceFacade, "advanceStartGate"> | null, who: StepWho, input: StartGateStepInput): Promise<StartGateStepOut> {
+  if (!worker) return { proceed: false, reason: "blocked", blockedBy: "worker_unavailable" };
+  return worker.advanceStartGate(who, input);
 }
 
 /** The item's stage now, or null (gone, or no worker). */

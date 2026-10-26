@@ -12,7 +12,7 @@ import { ReceiptWriteError } from './receiptWriter.js';
 /** The decisions a start gate covers. The first three are class 2 (a dial may start them); the last two are class 3 (always a person's). */
 export const START_DECISION_TYPES = ['start_work_small', 'start_work_bug', 'start_work_doc', 'start_parent_item', 'start_after_reclassify'] as const;
 export type StartDecisionType = (typeof START_DECISION_TYPES)[number];
-export type StartGateOutcome = 'asked' | 'started' | 'declined';
+export type StartGateOutcome = 'asked' | 'started' | 'declined' | 'withdrawn';
 /** The ids of a start ask's options. Anything but `start` (the second option, or `deny`) declines. */
 export const START_ASK_START = 'start';
 export const START_ASK_HOLD = 'hold';
@@ -103,4 +103,37 @@ export async function startGateForAsk(client: Pick<PoolClient, 'query'>, askId: 
     [askId],
   );
   return rows[0] ? { id: rows[0].id, decisionType: rows[0].decision_type, workItemId: rows[0].work_item_id } : null;
+}
+
+/**
+ * Migration 0916. Moves an `asked` row whose own ask was withdrawn (its item closed, halted or superseded) to `withdrawn`, the state a pair can be asked or
+ * started from again. Returns the row's outcome after the call; any row that is not an asked row with a withdrawn ask is returned unchanged.
+ */
+export async function releaseStartGate(client: PoolClient, gateId: string): Promise<StartGateOutcome> {
+  const { rows } = await client.query<{ o: StartGateOutcome }>('SELECT start_gate_release($1::uuid) AS o', [gateId]);
+  return rows[0]!.o;
+}
+
+/**
+ * Migration 0916. Re-opens a `withdrawn` row for a new ask (`asked`, the dial only), or a `declined` / `withdrawn` row for a new start (`started`: a person's
+ * click, or the dial for a withdrawn class 2 pair). The row then waits for its ask or its receipt to be attached, in the same transaction.
+ */
+export async function reopenStartGate(client: PoolClient, input: { gateId: string; outcome: 'asked' | 'started' }): Promise<void> {
+  await client.query('SELECT start_gate_reopen($1::uuid, $2::text)', [input.gateId, input.outcome]);
+}
+
+/** The gate row of a pair, if any (readable by app_user under RLS), with its ask's state. */
+export async function startGateOf(
+  client: Pick<PoolClient, 'query'>,
+  workItemId: string,
+  decisionType: StartDecisionType,
+): Promise<{ id: string; outcome: StartGateOutcome; askId: string | null; askState: string | null; receiptId: string | null } | null> {
+  const { rows } = await client.query<{ id: string; outcome: StartGateOutcome; ask_id: string | null; ask_state: string | null; receipt_id: string | null }>(
+    `SELECT g.id, g.outcome, g.ask_id, a.state AS ask_state, g.receipt_id
+       FROM start_gate g LEFT JOIN decision_asks a ON a.id = g.ask_id AND a.account_id = g.account_id
+      WHERE g.work_item_id = $1::uuid AND g.decision_type = $2::text`,
+    [workItemId, decisionType],
+  );
+  const r = rows[0];
+  return r ? { id: r.id, outcome: r.outcome, askId: r.ask_id, askState: r.ask_state, receiptId: r.receipt_id } : null;
 }

@@ -59,6 +59,7 @@ function setup(o: Options) {
     advanceCancel: vi.fn(async (..._args: unknown[]) => undefined),
     advanceCancelStepRuns: vi.fn(async (..._args: unknown[]) => undefined),
     advanceRecordEvent: vi.fn(async () => ({ recorded: true })),
+    advanceStartGate: vi.fn(async (..._args: unknown[]) => ({ proceed: true as const, how: "person_receipt" })),
     advanceLoadSpecText: vi.fn(async () => ({ version: 4, body: "SPEC BODY" })),
   };
   setWorkerWiringForTests({ provider: () => ({}) as never, createWorker: async () => worker as unknown as Worker });

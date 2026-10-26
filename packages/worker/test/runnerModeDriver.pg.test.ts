@@ -97,7 +97,7 @@ describe("a repo switched off a runner, through the real advance workflow [pg]",
         return { runId: id };
       },
     };
-    const module = createAdvanceModule(writerPool, { starter, resolveRunSeat: async () => SEAT, startAdvance: async () => undefined, triage: null, build: startBuildForItem, buildFailed: markBuildNeedsHuman } as never);
+    const module = createAdvanceModule(writerPool, { starter, resolveRunSeat: async () => SEAT, startAdvance: async () => undefined, triage: null, startGate: async () => ({ proceed: true as const, how: "person_receipt" }), build: startBuildForItem, buildFailed: markBuildNeedsHuman } as never);
     setWorkerWiringForTests({ provider: () => ({}) as never, createWorker: async () => module as never });
 
     const switched: unknown[] = [];

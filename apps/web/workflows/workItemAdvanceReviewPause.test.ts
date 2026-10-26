@@ -88,6 +88,7 @@ function setup(script: Script = {}) {
     }),
     advanceMergeGate: vi.fn(async () => ({ outcome: "merged", reasons: [], status: "posted" })),
     advanceRecordEvent: vi.fn(async (_who: unknown, _e: Record<string, unknown>) => ({ recorded: true })),
+    advanceStartGate: vi.fn(async (..._args: unknown[]) => ({ proceed: true as const, how: "person_receipt" })),
     advanceCancel: vi.fn(async () => undefined),
     advanceVerifiedReviewGate: vi.fn(async () => ({ state: "dispatch" })),
     advanceBuildFailed: vi.fn(async () => ({ status: "recorded", stage: "needs_human" })),
