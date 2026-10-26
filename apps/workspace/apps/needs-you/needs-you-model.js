@@ -57,7 +57,14 @@ export const WORDS = {
   stalledGone: "This item has moved on, so there is nothing to start. Open its card to see where it is.",
   stalledBusy: "The agents are already working on this one.",
   stalledNoAction: "Open this item's card to choose what happens next.",
+  startedByAnswer: "Started. The card moves when it is done.",
+  heldByAnswer: "Held. Nothing starts until a person starts it from the card.",
 };
+
+/** The decision types a start gate raises asks for (D#7 start gate). An answer to one of these starts the item or holds it; any other ask keeps the generic "Answered" words. */
+export const START_ASK_TYPES = ["start_work_small", "start_work_bug", "start_work_doc", "start_parent_item", "start_after_reclassify"];
+/** The sentence after a start ask is answered: the id `start` starts the item, every other choice (the second option, or Deny) holds it. */
+export const startAnswerWords = (choice) => (choice === "start" ? WORDS.startedByAnswer : WORDS.heldByAnswer);
 
 const text = (v) => (typeof v === "string" ? v : "");
 
@@ -112,6 +119,7 @@ export function readAsk(a) {
   const proposed = options.find((o) => o.id === a.proposed);
   return {
     kind: "ask",
+    startAsk: START_ASK_TYPES.includes(a.decision_type),
     id: a.id,
     title: a.label,
     reason: quotedReason(a.rationale),
@@ -272,8 +280,9 @@ export function createNeedsYou({ call = api, signal, onChange = () => {} } = {})
       const picked = row.options.find((o) => o.id === res.answered_option);
       const name = picked ? picked.label : WORDS.deny;
       open = open.filter((r) => r.id !== id);
-      closed.set(id, { ...row, state: "done", sentence: WORDS.answered + ": " + name });
-      st = { ...st, announce: WORDS.answered + ": " + name + "." };
+      const said = row.startAsk ? startAnswerWords(res.answered_option) : WORDS.answered + ": " + name;
+      closed.set(id, { ...row, state: "done", sentence: said });
+      st = { ...st, announce: said.endsWith(".") ? said : said + "." };
       merge();
     } catch (e) {
       busy.delete(id);

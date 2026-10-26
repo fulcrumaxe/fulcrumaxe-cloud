@@ -316,6 +316,28 @@ export function setupPauseLine(data) {
   return { state: p.state, text: sentence !== "" ? sentence : SETUP_PAUSE_WORDS[p.state] };
 }
 
+/**
+ * D#7 start gate (c): how the item's start was decided, for the card. The server sends `start_decision` only for an item that went through the start gate,
+ * with a fixed sentence and, once decided, when. The line shows that sentence and the time (the receipt of the decision: who or which setting, and when). A
+ * sentence that is missing or blank falls back to the words below by state; a state this build does not know, or anything malformed, gets the generic line
+ * or nothing. A code never reaches the screen.
+ */
+export const START_DECISION_WORDS = {
+  asked: "Waiting for an owner or admin to answer in Needs you: a setting asks before this starts.",
+  started: "This item was started.",
+  declined: "This item was held. It does not start until a person starts it.",
+  withdrawn: "The question about starting this was withdrawn before anyone answered. It is decided again the next time this item comes up to start.",
+  unknown: "A decision about starting this item is on record.",
+};
+export function startDecisionLine(data) {
+  const d = data && data.start_decision;
+  if (!isObj(d)) return null;
+  const state = typeof d.state === "string" && Object.hasOwn(START_DECISION_WORDS, d.state) ? d.state : "unknown";
+  const sentence = typeof d.sentence === "string" ? d.sentence.trim() : "";
+  const when = typeof d.at === "string" ? formatWhen(d.at) : "";
+  return { state, text: (sentence !== "" ? sentence : START_DECISION_WORDS[state]) + (when !== "" ? " " + when + "." : "") };
+}
+
 /** The "Ready to merge" banner, only at review_passed, with the repo's real auto-merge setting. */
 export function readyBanner(data) {
   if (!data || data.stage !== "review_passed") return null;
@@ -378,6 +400,7 @@ export function buildInsight(data) {
     flags: stateFlags(data),
     notice: noticeBanner(data),
     setupPause: setupPauseLine(data),
+    startDecision: startDecisionLine(data),
     banner: readyBanner(data),
     runningText: running.length ? "Running now: " + running.map((r) => r.role).join(", ") : "Nothing is running right now.",
     waitingText: waiting.length ? waitingLine(waiting, waitingRaw) : null,
@@ -591,6 +614,7 @@ export function createInsightPanel(deps) {
       state.stale ? h("p", { class: "pl-muted", role: "status", "data-testid": "pl-live-state" }, SENTENCES.stale) : [],
       m.notice ? noticeView(m.notice) : [],
       m.setupPause ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-setup-pause", "data-state": m.setupPause.state }, m.setupPause.text) : [],
+      m.startDecision ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-start-decision", "data-state": m.startDecision.state }, m.startDecision.text) : [],
       m.banner ? banner(m.banner) : [],
       h("p", { "data-testid": "pl-running" }, m.runningText),
       m.waitingText ? h("p", { role: "status", "data-testid": "pl-waiting-runner" }, m.waitingText) : [],

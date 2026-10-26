@@ -9,6 +9,7 @@ import { redactText } from '@fx/runtime/src/redact.js';
 import { setupPauseFor, type SetupHold, type SetupRequest } from '../setup-requests/store.js';
 import { parseAcceptanceScope } from '../specs/acceptanceScope.js';
 import { readPublicChange, type PublicChange } from '../repos/publicChange.js';
+import { readStartDecision, type StartDecision } from './startDecision.js';
 import { BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, BASE_SYNC_UNAVAILABLE_SENTENCE, FIX_ROUND_STOP_SENTENCE, REPUBLISH_BASE_MISSING, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE, REPUBLISH_STACKED_UNSUPPORTED } from './baseSync.js';
 import { PUBLIC_BRANCH_MOVED, PUBLIC_BRANCH_MOVED_SENTENCE, PUBLIC_HEAD_UNAVAILABLE, PUBLIC_HEAD_UNAVAILABLE_SENTENCE } from '../repos/planePushRecord.js';
 import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_FAILED_OUTSIDE_CHANGE_SENTENCE } from './checkFailure.js';
@@ -177,6 +178,8 @@ export interface WorkItemActivity {
   review_recheck: { kind: 'merge_only' } | null;
   /** D#598 P1f-6a: the item's change to its paired public repository, or null for an item with none. */
   public_change: PublicChange | null;
+  /** D#7 start gate (c): how the item's start was decided (asked, started by a person or by the dial, held, withdrawn), in fixed sentences. Null for an item that never went through the gate. */
+  start_decision: StartDecision | null;
   /** D#598 P8c-3: the setup request the item is paused on, read in this same call (no extra request). Null when no request holds it; the API words it. */
   setup_pause: { hold: SetupHold; request: SetupRequest | null } | null;
   /**
@@ -790,6 +793,7 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       notice,
       review_recheck: reviewRecheck,
       public_change: await readPublicChange(client, accountId, workItemId, facts),
+      start_decision: await readStartDecision(client, workItemId),
       setup_pause: await setupPauseFor(client, workItemId),
       actions: facts ? operatorActionsFor(facts) : [],
       close_on_github: facts ? closeOnGithub(facts) : false,
