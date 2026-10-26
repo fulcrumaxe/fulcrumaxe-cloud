@@ -19,6 +19,8 @@ export { RunActionInputError, RunActionUnavailableError, RunActionForbiddenError
 export { productionVercelCredentials, VercelCredentialsUnavailableError } from "./vercelCredentials.js";
 export { StartupGuardError, type StartupRule } from "./pools.js";
 export type { SeatRequest, SeatResult, SeatRefusal, SeatRunConfig } from "./seat.js";
+// D#2 H14c-3-3b-1 (C88 R4): the start input of a continuation, from the seat as it resolves now. A function over the seat source, not over a pool the caller reaches.
+export { continuationStartInput, CONTINUE_PROMPT, SEAT_CONTINUE_PROMPT, type ContinuationDeps, type ContinuationStartInput, type ContinuationRefusal } from "./continuation.js";
 // D#599 HO-2a: the cloud target of a run handoff (the seat a cloud run of the item would get, and its reservations); a factory over a pool the caller owns.
 export { createHandoffCloudTarget, runnerJobsConfigured, type HandoffCloudTargetPort } from "./handoffTarget.js";
 // D#2 H14c-3-3a-3: the follower's two step bodies, standalone functions (not Worker methods); the timeout writes with the runner's own writer over the runner login.

@@ -540,8 +540,10 @@ export class SandboxTarget implements ExecutionTarget {
    * outlives the window stops and measures the sandbox (the run never started, so the stream's finalize is switched
    * off) and throws `AgentStartError`, which `startAgentRun` turns into a failed run with a fixed reason.
    */
-  private async awaitAgentStart(run: ExecutionRun, bk: RunBookkeeping, handle: SandboxHandle, launched: Promise<void> | undefined): Promise<void> {
-    if (!launched) return;
+  private async awaitAgentStart(
+    run: ExecutionRun, bk: RunBookkeeping, handle: SandboxHandle, launched: Promise<void> | undefined, isNotFound?: (err: unknown) => boolean,
+  ): Promise<"started" | "not_found"> {
+    if (!launched) return "started";
     let timer: ReturnType<typeof setTimeout> | undefined;
     let cloneReason: CloneError["reason"] | undefined;
     let cloneDetail: CloneError["detail"];
@@ -549,6 +551,7 @@ export class SandboxTarget implements ExecutionTarget {
       launched.then(
         () => "started" as const,
         (err: unknown) => {
+          if (isNotFound?.(err)) return "not_found" as const;
           if (err instanceof CloneError) {
             cloneReason = err.reason;
             cloneDetail = err.detail;
@@ -562,8 +565,9 @@ export class SandboxTarget implements ExecutionTarget {
     ]).finally(() => clearTimeout(timer));
     if (outcome === "started") {
       console.info(JSON.stringify({ event: "run.agent_started", run_id: run.id }));
-      return;
+      return "started";
     }
+    if (outcome === "not_found") return "not_found"; // nothing ran; the caller dispatches a fresh session (CARRY-11)
     bk.hookResumed = true; // no agent ever ran: the stream's finalize must not write an outcome for it
     bk.stoppedDirectly = true; // the cancel that follows must not stop (and re-measure) it again
     await this.stopAndMeasure(run, bk, handle, true);
@@ -707,11 +711,7 @@ export class SandboxTarget implements ExecutionTarget {
         // to resume -- dispatch a fresh sandbox under this same run
         // instead of failing the whole fix round. D#600 CX-2: that fresh session holds nothing the resumed one did, so a
         // round that sent only "Spec unchanged" supplies the prompt that carries the Spec body for exactly this case.
-        return this.dispatch(
-          run.fallbackPrompt === undefined
-            ? run
-            : { ...run, prompt: run.fallbackPrompt, contextSections: run.fallbackContextSections, contextSpill: run.fallbackContextSpill },
-        );
+        return this.dispatch(this.freshSessionRun(run));
       }
       throw err;
     }
@@ -719,20 +719,30 @@ export class SandboxTarget implements ExecutionTarget {
     const hookToken = randomUUID();
     bk.hookToken = hookToken;
     const { hookFired, launched } = startResult;
+    // CARRY-11: the real port answers a snapshot that is gone by REJECTING `hookFired` (and `launched`), not by throwing. That is the same fallback as the
+    // synchronous throw above, once: a fresh dispatch under this run. The rejection must not reach the abort branch below, which would fail the run.
+    const notFound = (err: unknown): boolean => err instanceof SandboxNotFoundError;
     const finalizing = hookFired
       .then((lastEvent) =>
         this.finalizeAndResume(run, buildTerminalReport(lastEvent, getSessionId() ?? sessionId, bk.cumulativeModelUsd, snapshotOf(bk))),
       )
       .catch((err: unknown) =>
-        this.finalizeAndResume(
+        notFound(err) ? undefined : this.finalizeAndResume(
           run,
           buildAbortTerminalReport(abortOf(bk, err), getSessionId() ?? sessionId, bk.cumulativeModelUsd, snapshotOf(bk)),
         ),
       );
     this.keepAlive(finalizing);
-    await this.awaitAgentStart(run, bk, handle, launched);
+    if ((await this.awaitAgentStart(run, bk, handle, launched, notFound)) === "not_found") return this.dispatch(this.freshSessionRun(run));
 
     return { hookToken };
+  }
+
+  /** The run as a fresh session sees it: a round that sent only "Spec unchanged" supplies the prompt that carries the Spec body (D#600 CX-2). */
+  private freshSessionRun(run: ExecutionRun): ExecutionRun {
+    return run.fallbackPrompt === undefined
+      ? run
+      : { ...run, prompt: run.fallbackPrompt, contextSections: run.fallbackContextSections, contextSpill: run.fallbackContextSpill };
   }
 
   /**
@@ -1013,6 +1023,8 @@ export class SandboxTarget implements ExecutionTarget {
       from: "running",
       to: report.status,
       failureReason: report.failureReason,
+      // CARRY-26: a spend kill says whose limit it was, on the same status event.
+      ...(report.status === "killed_spend" && report.abortReason ? { abortReason: report.abortReason } : {}),
       // CARRY-17: a report with no metering block still leaves a row, flagged. An operator run is flagged
       // too (which mode ran), and one that the model host rejected says so.
       metering: operatorRun

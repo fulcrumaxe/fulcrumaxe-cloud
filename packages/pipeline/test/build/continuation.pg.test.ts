@@ -8,7 +8,7 @@ import { startAgentRun, writeRunStatus, type StartAgentRunInput } from "@fx/runn
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { MAX_CONTINUATIONS_PER_WORK_ITEM } from "@fx/core/src/run-limits/limits.js";
-import { AUTO_CONTINUE_HASH, HANDOFF_CONTINUE_HASH, readEnded, continueLockPoolMax, continuationKey, continueAfterLimit, continueLockPoolCount, continueWorkItem, decideContinuation, inspectContinueLock, seatPrompt, setContinueLockPoolMax, type ContinuationFacts } from "../../src/build/continuation.js";
+import { AUTO_CONTINUE_HASH, HANDOFF_CONTINUE_HASH, PARK_REASONS, REFUSED_BY_CODES, readEnded, continueLockPoolMax, continuationKey, continueAfterLimit, continueLockPoolCount, continueWorkItem, decideContinuation, inspectContinueLock, seatPrompt, setContinueLockPoolMax, type ContinuationFacts } from "../../src/build/continuation.js";
 import { continueAfterLimitLocked, continueWorkItemLocked } from "../../src/build/continuationTesting.js";
 import { createFakeExecutionTarget } from "./helpers/fakeExecutionTarget.js";
 import { seedAccount, seedRepo, seedWorkItem } from "./helpers/seed.js";
@@ -74,7 +74,7 @@ describe("H14c-5d-1 continuation [pg]", () => {
   type Fx = Awaited<ReturnType<typeof seed>>;
 
   /** An executor run that has ended: `checkpoint` false leaves it without one. */
-  async function ended(f: Fx, o: { status?: "timed_out" | "killed_spend" | "failed"; kind?: string; checkpoint?: boolean; parent?: string; hash?: string; role?: string; summary?: string } = {}) {
+  async function ended(f: Fx, o: { status?: "timed_out" | "killed_spend" | "failed"; kind?: string; checkpoint?: boolean; parent?: string; hash?: string; role?: string; summary?: string; abortReason?: "per_run_cap" | "monthly_budget" | null } = {}) {
     const status = o.status ?? "timed_out";
     const started = await startAgentRun(db.runWriterPool, f.registry, {
       ...f.input, accountId: f.accountId, workItemId: f.workItemId, role: o.role ?? "executor", parentRunId: o.parent,
@@ -85,6 +85,8 @@ describe("H14c-5d-1 continuation [pg]", () => {
     await writeRunStatus(db.runWriterPool, {
       accountId: f.accountId, runId: started.id, from: "running", to: status,
       result: { sessionId: "cc-owned" },
+      // CARRY-26: a spend kill stores its cause (null: a legacy row, from before it was stored).
+      ...(status === "killed_spend" && o.abortReason !== null ? { abortReason: o.abortReason ?? (o.checkpoint === false ? "monthly_budget" as const : "per_run_cap" as const) } : {}),
       ...(status !== "failed" && o.checkpoint !== false
         ? { checkpoint: o.summary !== undefined
             ? { reason: "agent_checkpoint" as const, summary: o.summary, ccSessionId: "cc-forged", meteredUsd: 1, extensionsUsed: 0 }
@@ -316,6 +318,92 @@ describe("H14c-5d-1 continuation [pg]", () => {
     expect(f.fake.calls.filter((c) => c.method === "dispatch").length).toBe(2); // the ended run's own, and the one continuation
     expect(seatPrompt("p", undefined)).toBe("p"); // a limit checkpoint has no summary
     expect(Buffer.byteLength(seatPrompt("p", "é".repeat(50_000)))).toBeLessThan(5_000); // capped again on read
+  });
+
+  describe("C88 CARRY-26: the kill cause is read, never inferred", () => {
+    const manualOf = (f: Fx, requestId: string) => continueWorkItem({ pool: db.runWriterPool, registry: f.registry }, { accountId: f.accountId, workItemId: f.workItemId, requestId, resumeInput: f.input });
+    const SPEND_PARK = { outcome: "parked", reason: "run_limit_reached", refusedBy: "spend" } as const;
+    const MONTHLY_PARK = { outcome: "parked", reason: "monthly_budget_reached" } as const;
+    // [name, stored cause, has a per_run_usd checkpoint, automatic answer, manual answer]
+    const rows = [
+      ["(a) per_run_cap with its checkpoint", "per_run_cap", true, "continued", "continued"],
+      ["(b) monthly_budget with no checkpoint", "monthly_budget", false, MONTHLY_PARK, "continued"],
+      ["(c) no stored cause, with a checkpoint (a legacy row)", null, true, SPEND_PARK, SPEND_PARK],
+      ["(c) no stored cause, no checkpoint (a legacy row)", null, false, SPEND_PARK, SPEND_PARK],
+      ["(c) per_run_cap but no checkpoint", "per_run_cap", false, SPEND_PARK, SPEND_PARK],
+      ["(c) monthly_budget but a checkpoint", "monthly_budget", true, SPEND_PARK, SPEND_PARK],
+    ] as const;
+
+    it.each(rows)("%s", async (_name, abortReason, checkpoint, auto, manual) => {
+      for (const route of ["automatic", "manual"] as const) {
+        const f = await seed();
+        const prev = await ended(f, { status: "killed_spend", checkpoint, abortReason });
+        const r = route === "automatic" ? await go(f, prev) : await manualOf(f, "req-cause");
+        const want = route === "automatic" ? auto : manual;
+        if (want === "continued") {
+          expect(r.outcome).toBe("continued");
+          continue;
+        }
+        expect(r).toEqual(want);
+        expect(await runCount(f)).toBe(1); // never continued: no run row, nothing resumed
+        expect(f.fake.calls.filter((c) => c.method === "resume")).toHaveLength(0);
+        expect(await stage(f)).toBe("needs_human");
+        const park = want.reason === "monthly_budget_reached"
+          ? { reason: "monthly_budget_reached" }
+          : { reason: "run_limit_reached", ...(checkpoint ? { limit_kind: "per_run_usd", checkpoint_event_id: expect.any(String) } : {}), refused_by: "spend" };
+        expect(await parkEvents(f)).toEqual([park]);
+      }
+    });
+
+    it("the cause is read from the status event of the move into killed_spend", async () => {
+      const f = await seed();
+      const read = (id: string) => withTenant(db.runWriterPool, f.accountId, (c) => readEnded(c, f.accountId, id));
+      expect(await read(await ended(f, { status: "killed_spend", checkpoint: false }))).toMatchObject({ status: "killed_spend", spend: "monthly" });
+      expect(await read(await ended(f, { status: "killed_spend", checkpoint: false, abortReason: null }))).toMatchObject({ spend: "unrecorded" });
+      expect((await read(await ended(f)))?.spend).toBeUndefined(); // only a spend kill has one
+    });
+
+    it("C88 R6 / item 8: every refusal and park the continuation can return is in the fixed list, and none is a platform-budget code", () => {
+      expect([...REFUSED_BY_CODES].sort()).toEqual(["auto_resume_off", "foreign_session", "max_resumes", "silence_twice", "spend", "work_item_ceiling"]);
+      expect([...PARK_REASONS].sort()).toEqual(["monthly_budget_reached", "run_limit_reached"]);
+      for (const code of [...REFUSED_BY_CODES, ...PARK_REASONS]) expect(code).not.toMatch(/platform|hosting|our_|operator/i);
+      // decideContinuation can only answer from the list, whatever the facts
+      for (const manual of [true, false, undefined]) {
+        for (const totalContinuations of [0, MAX_CONTINUATIONS_PER_WORK_ITEM]) {
+          for (const autoResume of [true, false]) {
+            for (const [limitKind, silenceCheckpoints] of [["run_time", 1], ["silence", 2]] as const) {
+              const d = decideContinuation({ ...facts, manual, totalContinuations, autoResume, autoContinuations: 2, limitKind, silenceCheckpoints });
+              if (!d.continue) expect(REFUSED_BY_CODES).toContain(d.refusedBy);
+            }
+          }
+        }
+      }
+      // and the source holds no platform-spend check
+      const src = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "../../src/build/continuation.ts"), "utf8");
+      expect(src.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "")).not.toMatch(/platform_budget|hosting_spend|PLATFORM_|operatorBudget/i);
+    });
+  });
+
+  describe("C88 CARRY-24: a foreign session parks, it does not escape", () => {
+    it("automatic and manual: a session that is not the executor's own parks foreign_session; no run row, no reservation", async () => {
+      for (const route of ["automatic", "manual"] as const) {
+        const f = await seed();
+        const prev = await ended(f);
+        await db.admin.query(`UPDATE agent_runs SET cc_session_id = NULL WHERE work_item_id = $1`, [f.workItemId]);
+        const r = route === "automatic"
+          ? await go(f, prev)
+          : await continueWorkItem({ pool: db.runWriterPool, registry: f.registry }, { accountId: f.accountId, workItemId: f.workItemId, requestId: "req-foreign", resumeInput: f.input });
+        expect(r).toEqual({ outcome: "parked", reason: "run_limit_reached", refusedBy: "foreign_session" });
+        expect(await runCount(f)).toBe(1);
+        expect(f.fake.calls.filter((c) => c.method === "admit")).toHaveLength(1); // the ended run's own; the continuation never reached admit
+        expect(await stage(f)).toBe("needs_human");
+        expect(await parkEvents(f)).toEqual([{ reason: "run_limit_reached", limit_kind: "run_time", checkpoint_event_id: expect.any(String), refused_by: "foreign_session" }]);
+        if (route === "automatic") {
+          expect(await go(f, prev)).toEqual(r); // a replay parks the same way and writes no second event
+          expect(await parkEvents(f)).toHaveLength(1);
+        }
+      }
+    });
   });
 
   describe("C8 continueWorkItem", () => {
