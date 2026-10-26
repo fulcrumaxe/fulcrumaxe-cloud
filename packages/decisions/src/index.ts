@@ -103,3 +103,4 @@ export type {
   ReversalDeclaration,
   TimeoutOutcome,
 } from "./types.js";
+export { DECISION_LABELS, decisionLabel } from "./labels.js";

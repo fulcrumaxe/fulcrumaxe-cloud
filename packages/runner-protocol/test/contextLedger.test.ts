@@ -136,7 +136,7 @@ describe("ContextLedgerCapture", () => {
   });
 
   it("the closed vocabularies are exactly the Spec's", () => {
-    expect([...CONTEXT_SECTION_CODES]).toEqual(["card", "boundary", "map", "memory_stable", "memory_item", "spec", "note", "corrections", "findings", "output", "repo_instructions", "pinned"]);
+    expect([...CONTEXT_SECTION_CODES]).toEqual(["card", "boundary", "map", "memory_stable", "memory_item", "spec", "note", "corrections", "findings", "decisions", "output", "repo_instructions", "pinned"]);
     expect([...CONTEXT_TRIMMED_REASONS]).toEqual(["findings_cap", "memory_slot", "over_budget", "pin_missing", "pins_over_budget", "pin_too_large", "pin_excluded"]);
   });
 });

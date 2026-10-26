@@ -23,6 +23,13 @@ describe("ContextLedgerBody", () => {
     for (const bad of ["too_big", "", 3, null, "OVER_BUDGET"]) expect(ContextLedgerBody.safeParse({ ...ok, sections: [{ ...ok.sections[0], trimmed_reason: bad }] }).success, String(bad)).toBe(false);
   });
 
+  it("D#7 DP4b-3: a decisions section is a known code, a ledger that uses only the older codes still parses, and a near miss is refused", () => {
+    expect(ContextLedgerBody.safeParse({ ...ok, sections: [{ ...ok.sections[0], code: "decisions" }] }).success).toBe(true);
+    const older = ["card", "boundary", "map", "memory_stable", "memory_item", "spec", "note", "corrections", "findings", "output", "repo_instructions", "pinned"];
+    expect(ContextLedgerBody.safeParse({ ...ok, sections: older.map((code) => ({ ...ok.sections[0], code })) }).success).toBe(true);
+    for (const bad of ["decision", "decisions_taken", "Decisions"]) expect(ContextLedgerBody.safeParse({ ...ok, sections: [{ ...ok.sections[0], code: bad }] }).success, bad).toBe(false);
+  });
+
   it("accepts a full ledger and a partial one with nothing measured", () => {
     expect(ContextLedgerBody.safeParse(ok).success).toBe(true);
     expect(ContextLedgerBody.safeParse({ basis: "partial", sections: [], tool_output_bytes: {}, compactions: 0 }).success).toBe(true);

@@ -8,7 +8,7 @@ import type { ContextSection, ContextSectionCode, ContextSpill, ContextSpillCode
  * `assemblePrompt`, which emits them in ONE fixed order, stable text first so the model's prompt cache can hold the front of it:
  *
  *   1 role line  2 boundary  3 role card  4 backstops  5 repo map  6 memory (stable)  7 Spec  8 memory (this item)
- *   9 notes and corrections (de-duplicated)  10 findings  11 output block
+ *   9 notes and corrections (de-duplicated)  10 findings  11 decisions (D#7 DP4b-3)  12 output block
  *
  * It returns the text and the section list the context ledger stores (code, bytes, sha256, trimmed bytes). Untrusted text reaches the
  * prompt only through `sanitize`, the existing fence; this module invents no other.
@@ -197,6 +197,44 @@ export interface PinnedItem {
   text: string;
 }
 
+/** One decision an executor run may meet (D#7 DP4b-3), as `decisionsBlock` lists it. The key is `d1`..`d99`; `instruction` is one of two words. */
+export interface DecisionLine {
+  key: string;
+  label: string;
+  instruction: "decide" | "ask";
+}
+
+const DECISION_KEY = /^d[1-9][0-9]?$/;
+/** The only characters a label may keep. No newline, quote, backtick, colon, bracket or angle bracket: a label can name a decision and nothing more. */
+const DECISION_LABEL = /^[A-Za-z0-9 ,.'()/-]{1,100}$/;
+const DECISION_LABEL_FALLBACK = "A decision";
+const DECISION_INSTRUCTION = { decide: "decide yourself and report it", ask: "stop and ask" } as const;
+
+/**
+ * D#7 DP4b-3: the `decisions` section. Fixed text plus a structured list: nothing a repository or a person wrote is put in. Each line is a key checked against
+ * `^d[1-9][0-9]?$`, a label checked against an allow-list of characters (anything else is replaced by a fixed phrase) and written as a JSON string, and one of two
+ * fixed instructions picked by a closed enum. An entry that fails the key or the instruction check is dropped. No entries: no section (returns undefined).
+ * The block names no catalogue id, class, preset or dial (D#7 DP-C2b): the keys are opaque and are mapped back through the run's own snapshot.
+ */
+export function decisionsBlock(lines: readonly DecisionLine[]): string | undefined {
+  const rows: string[] = [];
+  const seen = new Set<string>();
+  for (const l of lines) {
+    if (typeof l.key !== "string" || !DECISION_KEY.test(l.key) || seen.has(l.key) || (l.instruction !== "decide" && l.instruction !== "ask")) continue;
+    seen.add(l.key);
+    const label = typeof l.label === "string" && DECISION_LABEL.test(l.label) ? l.label : DECISION_LABEL_FALLBACK;
+    rows.push(`- ${l.key}: ${JSON.stringify(label)} -> ${DECISION_INSTRUCTION[l.instruction]}`);
+  }
+  if (rows.length === 0) return undefined;
+  return [
+    "DECISIONS YOU MAY MEET IN THIS WORK (a fixed list; each key is opaque and means only what its line says):",
+    ...rows,
+    'If you reach a decision marked "stop and ask", do not settle it yourself: put one `decision_request` field in your final block, {"type":"<key>","options":[{"id":"<id>","label":"<label>"}],"proposed":"<id>","rationale":"<why>"} with two to six options, and finish what you can without it.',
+    'If you reach a decision marked "decide yourself and report it", decide it, carry on, and list it in a `decisions_taken` field of your final block: [{"type":"<key>","options":[{"id":"<id>","label":"<label>"}],"chosen":"<id>","rationale":"<why>"}].',
+    "Name a decision only by its key from this list. Set either field to null when you have nothing to report in it.",
+  ].join("\n");
+}
+
 export interface PromptParts {
   roleLine: string;
   boundary?: string;
@@ -215,6 +253,8 @@ export interface PromptParts {
   runNotes?: string;
   notes?: readonly NoteItem[];
   findings?: FindingsSlot;
+  /** D#7 DP4b-3: the rendered `decisionsBlock`. After the findings, before the output block. Never cut. */
+  decisions?: string;
   output: string;
 }
 
@@ -321,6 +361,7 @@ function slotsOf(parts: PromptParts, spill: boolean, full: boolean, aside = fals
       add("findings", render((i) => (marked && i.full !== undefined ? `${i.text}\n${trimmedMarker("findings")}` : i.text)), "\n\n", { trimmed: cutBytes, reason: "findings_cap", ...(marked ? { spillText: whole } : {}) });
     }
   }
+  add("decisions", parts.decisions);
   add("output", parts.output);
   return slots;
 }

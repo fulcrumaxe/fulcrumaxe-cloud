@@ -77,7 +77,7 @@ describe(`migration 0792: ${ROLE}, run_context_ledger and its function (D#600 CX
     expect(fk.rows).toEqual([{ confdeltype: 'c' }]);
   });
 
-  it.each([MIGRATION, '0869_run_context_ledger_merge_sections.sql', '0875_run_context_ledger_denied_calls.sql', '0883_run_context_ledger_tool_calls_assembly.sql', '0902_run_context_ledger_pinned_append.sql'])('%s never grants platform_ops a privilege, revokes one from it or makes it an owner', (file) => {
+  it.each([MIGRATION, '0869_run_context_ledger_merge_sections.sql', '0875_run_context_ledger_denied_calls.sql', '0883_run_context_ledger_tool_calls_assembly.sql', '0902_run_context_ledger_pinned_append.sql', '0915_run_context_ledger_decisions_code.sql'])('%s never grants platform_ops a privilege, revokes one from it or makes it an owner', (file) => {
     const sql = readFileSync(path.join(DEFAULT_MIGRATIONS_DIR, file), 'utf8')
       .split('\n')
       .map((line) => line.replace(/--.*$/, ''))
@@ -200,6 +200,17 @@ describe('migration 0875: run_context_ledger_record stores denied_tool_calls and
     expect(rows[0].sections.map((x: { trimmed_reason: string }) => x.trimmed_reason)).toEqual(['pin_missing', 'pins_over_budget', 'pin_too_large', 'pin_excluded']);
     const u = await seedAccount(admin, randomUUID());
     await expect(record(u.accountId, u.runId, 0, [note('pin_gone')])).rejects.toThrow(/invalid_message/);
+  });
+
+  it('D#7 DP4b-3 (0915): accepts a decisions section, keeps it in order, and still refuses a code outside the closed list', async () => {
+    const t = await seedAccount(admin, randomUUID());
+    const section = (code: string) => ({ code, bytes: 3, sha256: sha, trimmed_bytes: 0 });
+    await record(t.accountId, t.runId, 0, [section('findings'), section('decisions'), section('output')]);
+    const { rows } = await admin.query('SELECT sections FROM run_context_ledger WHERE account_id = $1 AND run_id = $2', [t.accountId, t.runId]);
+    expect(rows[0].sections.map((x: { code: string }) => x.code)).toEqual(['findings', 'decisions', 'output']);
+    const u = await seedAccount(admin, randomUUID());
+    await expect(record(u.accountId, u.runId, 0, [section('decision')]), 'a near miss').rejects.toThrow(/invalid_message/);
+    await expect(record(u.accountId, u.runId, 0, [section('decisions_taken')]), 'another name').rejects.toThrow(/invalid_message/);
   });
 
   it('the older functions are gone: one function, one owner, one ACL (the exact signature the shape check pins)', async () => {

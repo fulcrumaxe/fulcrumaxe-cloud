@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { CATALOGUE, CATALOGUE_VERSION, PRESETS, getCatalogueEntry } from "@fx/decisions";
+import { askPresetOf } from "../src/decisionIntake.js";
 import {
   buildDecisionSnapshot,
   declaredDecisionTypes,
   declaredTypesOfCard,
   dispositionForDial,
+  NO_DIAL_ROW_PRESET,
+  offerInstruction,
   parseDecisionSnapshot,
   type SnapshotDial,
 } from "../src/decisionSnapshot.js";
@@ -41,11 +44,12 @@ describe("buildDecisionSnapshot", () => {
       ["d1", "nonbreaking_refactor_approach"],
       ["d2", "test_strategy_choice"],
     ]);
-    // No dial row: version 0 and the catalogue default.
+    // No dial row: version 0 and the Balanced value (owner ruling 2026-10-25), which for these two class-2 entries is announce; their catalogue default is still ask.
     expect(snap.entries.map((e) => [e.dial_version, e.disposition])).toEqual([
-      [0, entry("nonbreaking_refactor_approach").defaultDisposition],
-      [0, entry("test_strategy_choice").defaultDisposition],
+      [0, "announce"],
+      [0, "announce"],
     ]);
+    expect(entry("nonbreaking_refactor_approach").defaultDisposition).toBe("ask");
   });
 
   it("a role with no declarations gets an empty snapshot", () => {
@@ -113,8 +117,15 @@ describe("dispositionForDial", () => {
   const classOne = entry("dependency_patch_bump");
   const classThree = CATALOGUE.find((e) => e.class === "human_in_the_loop")!;
 
-  it("no row is the catalogue default", () => {
-    for (const e of CATALOGUE) expect(dispositionForDial(e, null), e.id).toBe(e.defaultDisposition);
+  it("no row is the Balanced preset's value for the entry (owner ruling 2026-10-25), not the catalogue default; class 1 stays act and class 3 stays ask", () => {
+    for (const e of CATALOGUE) {
+      expect(dispositionForDial(e, null), e.id).toBe(dispositionForDial(e, dial(1, "ask", "balanced")));
+      expect(e.allowedDispositions, e.id).toContain(dispositionForDial(e, null));
+    }
+    expect(dispositionForDial(classThree, null)).toBe("ask");
+    expect(dispositionForDial(entry("test_strategy_choice"), null)).toBe("announce");
+    // The catalogue defaults themselves are untouched.
+    expect(entry("test_strategy_choice").defaultDisposition).toBe("ask");
   });
 
   it("a row that adopted a preset is what decide() says under that preset, for every entry and preset", () => {
@@ -175,5 +186,33 @@ describe("parseDecisionSnapshot (the schema a stored row must pass)", () => {
     ["an entry that is not an object", { ...good, entries: ["d1"] }],
   ])("refuses %s", (_label, payload) => {
     expect(parseDecisionSnapshot(payload)).toBeNull();
+  });
+});
+
+describe("askPresetOf (ask timing follows the same no-row default as the disposition)", () => {
+  it("no dial row is Balanced, the same constant the disposition uses", () => {
+    expect(askPresetOf(null)).toBe(NO_DIAL_ROW_PRESET);
+    expect(askPresetOf(null)).toBe("balanced");
+  });
+
+  it("a row that adopted a preset uses it; a per-type override row (no preset) or an unknown preset stays Cautious", () => {
+    expect(askPresetOf({ preset: "autonomous" })).toBe("autonomous");
+    expect(askPresetOf({ preset: "cautious" })).toBe("cautious");
+    expect(askPresetOf({ preset: null })).toBe("cautious");
+    expect(askPresetOf({ preset: "nonsense" })).toBe("cautious");
+  });
+});
+
+describe("the decision offer fails closed", () => {
+  it("only act and announce read as decide; ask reads as ask", () => {
+    expect(offerInstruction("act")).toBe("decide");
+    expect(offerInstruction("announce")).toBe("decide");
+    expect(offerInstruction("ask")).toBe("ask");
+  });
+
+  it("any other value, even one the type does not allow, reads as ask", () => {
+    expect(offerInstruction("" as never)).toBe("ask");
+    expect(offerInstruction("proceed" as never)).toBe("ask");
+    expect(offerInstruction(undefined as never)).toBe("ask");
   });
 });

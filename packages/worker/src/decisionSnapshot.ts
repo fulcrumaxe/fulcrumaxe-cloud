@@ -5,6 +5,7 @@ import {
   PRESETS,
   decide,
   findUnresolvedDeclarations,
+  decisionLabel,
   getCatalogueEntry,
   type CatalogueEntry,
   type Disposition,
@@ -59,17 +60,25 @@ export interface SnapshotDial {
 const PRESET_NAMES: readonly string[] = PRESETS.map((p) => p.name);
 const DISPOSITIONS: readonly string[] = ["act", "announce", "ask"];
 
+/**
+ * Owner ruling 2026-10-25: a repository with no dial row behaves as Balanced. This is an explicit default applied where a run's disposition is frozen and
+ * again where the intake recomputes it (both go through `dispositionForDial`). The catalogue's own `defaultDisposition` values are not changed (they pin the
+ * catalogue hash, and other readers such as the runner claim keep their own no-row rules). Class 1 stays `act` and class 3 stays `ask` under it, and an entry
+ * whose allowed values exclude the preset's value is clamped toward `ask` by `decide()`, exactly as for a row that adopted Balanced.
+ */
+export const NO_DIAL_ROW_PRESET: PresetName = "balanced";
+
 const isPreset = (value: unknown): value is PresetName => typeof value === "string" && PRESET_NAMES.includes(value);
 
 /**
  * The disposition a dial row means for one catalogue entry, as the snapshot freezes it and as the call site recomputes it (the tamper check,
  * DP4b-2). Pure.
- *  - No row (version 0): the catalogue default.
+ *  - No row (version 0): the Balanced preset's value for the entry (owner ruling 2026-10-25), see `NO_DIAL_ROW_PRESET`. Catalogue defaults are unchanged.
  *  - A row that adopted a preset: `decide()` under that preset, so the class, the preset and the entry's allowed values clamp it exactly as everywhere else.
  *  - A row that is a per-type override (no preset): the stored disposition if the entry allows it, else `ask` (fails closed, as `resolveStoredDial`).
  */
 export function dispositionForDial(entry: CatalogueEntry, dial: SnapshotDial | null): Disposition {
-  if (dial === null) return entry.defaultDisposition;
+  if (dial === null) return decide(entry, { preset: NO_DIAL_ROW_PRESET }, { type: entry.id, options: ["yes", "no"], proposed: "yes", rationale: "snapshot" }).disposition;
   if (isPreset(dial.preset)) {
     return decide(entry, { preset: dial.preset }, { type: entry.id, options: ["yes", "no"], proposed: "yes", rationale: "snapshot" }).disposition;
   }
@@ -200,4 +209,37 @@ export async function readDecisionSnapshot(client: PoolClient, runId: string): P
   const parsed = rows.length === 1 ? parseDecisionSnapshot(rows[0]!.payload) : null;
   if (parsed === null) throw new DecisionSnapshotInvalidError();
   return parsed;
+}
+
+/** One line of the prompt's decisions block, as the pipeline renders it. The label is a fixed catalogue name, never text from a repository or a person. */
+export interface DecisionOfferItem {
+  key: string;
+  label: string;
+  /** `decide`: "decide yourself and report it" (`act` and `announce` both read so). `ask`: "stop and ask". */
+  instruction: "decide" | "ask";
+}
+
+/** Fails closed by construction: only `act` and `announce` read as "decide yourself and report it"; `ask` and anything else read as "stop and ask". */
+export function offerInstruction(disposition: Disposition): DecisionOfferItem["instruction"] {
+  return disposition === "act" || disposition === "announce" ? "decide" : "ask";
+}
+
+export interface DecisionOffer {
+  items: DecisionOfferItem[];
+  snapshot: DecisionSnapshot;
+}
+
+/**
+ * D#7 DP4b-3: what a new executor run is offered, resolved once at spawn from the dials in force for the item's repository: the snapshot to write in the run's
+ * create transaction and the list the prompt shows. Both come from one `buildDecisionSnapshot`, so the keys in the prompt are the keys in the row.
+ * `client` must come from `withTenant`. The label of an entry is `decisionLabel(decision_type)`, a constant table; nothing a repository or a person wrote reaches it.
+ */
+export async function resolveDecisionOffer(client: PoolClient, repoId: string, role: string, warn?: (line: string) => void): Promise<DecisionOffer> {
+  const declared = declaredDecisionTypes(role);
+  const dials = await readSnapshotDials(client, repoId, declared);
+  const snapshot = buildDecisionSnapshot({ role, dials, declared, ...(warn ? { warn } : {}) });
+  return {
+    snapshot,
+    items: snapshot.entries.map((e): DecisionOfferItem => ({ key: e.key, label: decisionLabel(e.decision_type), instruction: offerInstruction(e.disposition) })),
+  };
 }

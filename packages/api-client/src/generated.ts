@@ -746,7 +746,7 @@ export interface Operations {
       recorded: boolean;
       basis: ("measured" | "partial") | (null);
       sections: Array<{
-        code: "card" | "boundary" | "map" | "memory_stable" | "memory_item" | "spec" | "note" | "corrections" | "findings" | "output" | "repo_instructions" | "pinned";
+        code: "card" | "boundary" | "map" | "memory_stable" | "memory_item" | "spec" | "note" | "corrections" | "findings" | "decisions" | "output" | "repo_instructions" | "pinned";
         bytes: number;
         trimmed_bytes: number;
         trimmed_reason?: "findings_cap" | "memory_slot" | "over_budget" | "pin_missing" | "pins_over_budget" | "pin_too_large" | "pin_excluded";
