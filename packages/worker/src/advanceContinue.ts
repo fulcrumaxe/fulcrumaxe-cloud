@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { WorkItemHaltedError, type ExecutionTargetRegistry } from "@fx/runner";
 import { REFUSED_BY_CODES, continueAfterLimit, type ContinueAfterLimitResult } from "@fx/pipeline";
+import { decisionStartFor } from "./decisionStart.js";
 import { SITE_RULES, continuationStartInput, type ContinuationDeps, type ContinuationSite } from "./continuation.js";
 
 /**
@@ -172,8 +173,15 @@ async function decide(deps: AdvanceContinueDeps, accountId: string, workItemId: 
     deps.logError?.(`refused:${input.refused}`);
     return TODAY;
   }
+  // 4b. D#7 DP4b-3b: only an executor continuation is a run that may decide (the other seats declare no decisions, so they get no block and no snapshot row). It is offered what the
+  // dials say now and gets a snapshot of its own in its create transaction; the ended run's is not copied. A read that fails throws: nothing starts, and the step answers `today`.
+  let resumeInput = input;
+  if (site === "executor") {
+    const dec = await decisionStartFor(deps.pool, accountId, workItemId);
+    resumeInput = { ...input, prompt: dec.prompt(input.prompt), inCreateTransaction: dec.inCreateTransaction(input.inCreateTransaction) };
+  }
   // 5. The library: the decision, the lock, the keyed start.
-  const result = mapResult(await (deps.continueAfter ?? continueAfterLimit)(deps.pool, deps.registry!, { accountId, runId: endedRunId, resumeInput: input, ...(at ? { at } : {}) }));
+  const result = mapResult(await (deps.continueAfter ?? continueAfterLimit)(deps.pool, deps.registry!, { accountId, runId: endedRunId, resumeInput, ...(at ? { at } : {}) }));
   if (result !== "duplicate") return result;
   // 6. R7: the library says this run was continued already. Its child is the answer; with none (the attempt was refused for spend) and the item parked, the recorded park.
   const child = await childOf(deps.pool, accountId, endedRunId);

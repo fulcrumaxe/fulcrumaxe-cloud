@@ -12,6 +12,7 @@ import { createDecisionIntake } from "../src/decisionIntake.js";
 import type { RunStarter } from "../src/preview.js";
 import type { SeatResult } from "../src/seat.js";
 import { createResumeModule } from "../src/resumeDecision.js";
+import { decisionsBlock } from "@fx/pipeline";
 
 /**
  * [pg] D#7 DP11c (DP-C9 section 5 criterion 4, C11, C15): the end-to-end resume on real machinery, and the checks that make "no handle lingers" and "the sibling
@@ -85,7 +86,7 @@ describe("resume_decision end to end on real start, intake and sandbox inventory
     follows: AdvanceStartArgs[];
     resume: ReturnType<typeof createResumeModule>;
     /** Starts an executor run the way the build does, through the real keyed start, and returns its id. */
-    build: (a: SeedRefs, itemId: string, ghNumber: number) => Promise<{ runId: string; sandbox: string }>;
+    build: (a: SeedRefs, itemId: string, ghNumber: number, prompt?: string) => Promise<{ runId: string; sandbox: string }>;
     /** The run ends the way an executor run does: succeeded with an envelope, and its sandbox stops. */
     end: (a: SeedRefs, runId: string, sandbox: string, envelope: Record<string, unknown>, opts?: { leakHandle?: boolean }) => Promise<void>;
   }
@@ -111,6 +112,7 @@ describe("resume_decision end to end on real start, intake and sandbox inventory
           idempotency: input.idempotency,
           startPrompt: input.prompt,
           inCreateTransaction: async (client, runId) => {
+            if (input.inCreateTransaction) return input.inCreateTransaction(client, runId);
             await writeDecisionSnapshot(client, runId, buildDecisionSnapshot({ role: "executor", dials: new Map(), declared: [CLASS3] }));
           },
         });
@@ -140,8 +142,8 @@ describe("resume_decision end to end on real start, intake and sandbox inventory
         await sandboxInventory({ pool: runnerPool, port, log: () => undefined }, { now: Date.now() });
         return (await admin.query<{ live: number; stopped_executor: number }>("SELECT live, stopped_executor FROM sandbox_inventory WHERE account_id = $1", [accountId])).rows[0];
       },
-      build: async (a, itemId, ghNumber) => {
-        const out = await advance.advanceStartRun({ accountId: a.accountId, workItemId: itemId, step: "build", role: "executor", prompt: `${PROMPT_MARK} for ${itemId}`, clone: true, pr: ghNumber, exclusive: true, haltEpoch: 0 });
+      build: async (a, itemId, ghNumber, prompt) => {
+        const out = await advance.advanceStartRun({ accountId: a.accountId, workItemId: itemId, step: "build", role: "executor", prompt: prompt ?? `${PROMPT_MARK} for ${itemId}`, clone: true, pr: ghNumber, exclusive: true, haltEpoch: 0 });
         if (!out.ok) throw new Error(`build start refused: ${out.reason}`);
         const sandbox = (await admin.query<{ sandbox_name: string }>("SELECT sandbox_name FROM agent_runs WHERE id = $1", [out.runId])).rows[0]!.sandbox_name;
         return { runId: out.runId, sandbox };
@@ -169,8 +171,8 @@ describe("resume_decision end to end on real start, intake and sandbox inventory
   }
 
   /** The parked state, reached the real way: a running build ends succeeded with a decision_request in its envelope, and the real intake parks it. */
-  async function park(h: Harness, a: SeedRefs, itemId: string, ghNumber: number, opts: { leakHandle?: boolean } = {}) {
-    const run = await h.build(a, itemId, ghNumber);
+  async function park(h: Harness, a: SeedRefs, itemId: string, ghNumber: number, opts: { leakHandle?: boolean; prompt?: string } = {}) {
+    const run = await h.build(a, itemId, ghNumber, opts.prompt);
     await h.end(a, run.runId, run.sandbox, { verdict: "done", decision_request: { type: "d1", options: OPTIONS, proposed: "keep", rationale: "Smaller diff, same behaviour." } }, opts);
     const intake = createDecisionIntake({ runnerPool, receiptPool, declared: () => [CLASS3] });
     expect(await intake({ accountId: a.accountId, workItemId: itemId, haltEpoch: 0, runId: run.runId })).toBe("parked");
@@ -226,6 +228,74 @@ describe("resume_decision end to end on real start, intake and sandbox inventory
     // Performing it again resumes nothing more.
     expect(await h.resume.performResumeDecision(actionId)).toEqual(out);
     expect((await admin.query("SELECT count(*)::int AS n FROM agent_runs WHERE work_item_id = $1", [parkedItem])).rows[0].n).toBe(2);
+  });
+
+  it("D#7 DP4b-3b: the resumed run is offered what the dials say NOW, with its prompt's block and its snapshot agreeing; the parked run's snapshot is left as it was", async () => {
+    const a = await seedAccount(admin, randomUUID());
+    const h = harness();
+    const item = await newItem(a, 81);
+    // The parked run was told to decide its first decision itself, and its prompt (kept on the run) still says so.
+    const stale = decisionsBlock([{ key: "d1", label: "How to restructure code without changing what it does", instruction: "decide" }])!;
+    const parked = await park(h, a, item, 81, { prompt: `${PROMPT_MARK} for ${item}\n\n${stale}` });
+    const parkedSnapshot = (await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'decision.snapshot'", [parked.runId])).rows;
+    expect(parkedSnapshot).toHaveLength(1);
+    // Between the park and the answer the customer turns that decision to "ask".
+    await admin.query("INSERT INTO decision_settings (account_id, repo_id, decision_type, disposition, preset, version, changed_by) VALUES ($1, $2, 'nonbreaking_refactor_approach', 'ask', NULL, 1, $3)", [a.accountId, a.repoId, a.userId]);
+    await answer(a, parked.askId, "split");
+    const out = await h.resume.performResumeDecision(await claimed(parked.askId));
+    expect(out).toMatchObject({ result: "done", outcome: { cause: "decision_resolved" } });
+    const resumedId = (out as unknown as { outcome: { run_id: string } }).outcome.run_id;
+    const snaps = (await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'decision.snapshot'", [resumedId])).rows.map((r) => r.payload);
+    expect(snaps).toHaveLength(1);
+    expect(snaps[0].entries[0]).toEqual({ key: "d1", decision_type: "nonbreaking_refactor_approach", disposition: "ask", dial_version: 1 });
+    expect(snaps[0].entries.map((e: { key: string }) => e.key)).toEqual(["d1", "d2"]);
+    // The prompt: one block, keyed as the row is, d1 now "stop and ask"; the answer reaches the run through the resume block as before.
+    const prompt = (await admin.query("SELECT payload->>'prompt' AS p FROM run_events WHERE run_id = $1 AND kind = 'run.input'", [resumedId])).rows[0].p as string;
+    expect(prompt.split("DECISIONS YOU MAY MEET IN THIS WORK")).toHaveLength(2);
+    expect(prompt).toContain('- d1: "How to restructure code without changing what it does" -> stop and ask');
+    expect(prompt).not.toContain('- d1: "How to restructure code without changing what it does" -> decide yourself and report it');
+    expect(prompt).toContain("cause: decision_resolved\noption: split");
+    expect((await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'decision.snapshot'", [parked.runId])).rows).toEqual(parkedSnapshot);
+  });
+
+  it("D#7 DP4b-3b: a dial read that fails after the resume action is claimed starts no run and settles nothing, so the action is retried; the retry resumes once", async () => {
+    const a = await seedAccount(admin, randomUUID());
+    const h = harness();
+    const item = await newItem(a, 91);
+    const parked = await park(h, a, item, 91);
+    await answer(a, parked.askId, "split");
+    const actionId = await claimed(parked.askId);
+    const failing = new Proxy(runnerPool, {
+      get(target, prop, receiver) {
+        if (prop !== "connect") return Reflect.get(target, prop, receiver);
+        // The callback form (used by pool.query) is passed through untouched.
+        return async (...cbArgs: unknown[]) => {
+          if (cbArgs.length > 0) return (target.connect as (...a: unknown[]) => unknown).apply(target, cbArgs);
+          const client = (await target.connect()) as PoolClient;
+          const original = client.query;
+          const query = client.query.bind(client) as (...args: unknown[]) => Promise<unknown>;
+          const release = client.release.bind(client);
+          (client as unknown as { release: unknown }).release = (...args: unknown[]) => {
+            (client as unknown as { query: unknown }).query = original;
+            (client as unknown as { release: unknown }).release = release;
+            return (release as (...a: unknown[]) => void)(...args);
+          };
+          (client as unknown as { query: unknown }).query = (...args: unknown[]) => {
+            const text = typeof args[0] === "string" ? args[0] : (args[0] as { text?: string } | undefined)?.text ?? "";
+            return text.includes("decision_settings") ? Promise.reject(new Error("dial store unavailable")) : query(...args);
+          };
+          return client;
+        };
+      },
+    }) as Pool;
+    const broken = createResumeModule(failing, { startRun: h.advance.advanceStartRun, startFix: h.advance.advanceStartFix, startAdvance: async () => undefined });
+    await expect(broken.performResumeDecision(actionId)).rejects.toThrow();
+    expect((await admin.query("SELECT count(*)::int AS n FROM agent_runs WHERE work_item_id = $1", [item])).rows[0].n).toBe(1);
+    // Not settled: still claimed, nothing recorded as done, failed or refused.
+    expect((await admin.query("SELECT state FROM run_action_requests WHERE id = $1", [actionId])).rows[0].state).toBe("claimed");
+    const retried = await h.resume.performResumeDecision(actionId);
+    expect(retried).toMatchObject({ result: "done", outcome: { cause: "decision_resolved" } });
+    expect((await admin.query("SELECT count(*)::int AS n FROM agent_runs WHERE work_item_id = $1", [item])).rows[0].n).toBe(2);
   });
 
   it("the same with deny gives decision_denied", async () => {

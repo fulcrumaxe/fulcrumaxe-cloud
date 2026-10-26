@@ -7,6 +7,7 @@ import { isResumeContext, type ResumeContext } from "@fx/roles/next-role-request
 import { readExecutionMode, sideOfMode } from "@fx/runner";
 import { sanitize } from "@fx/trust";
 import { RESERVATION_PAUSE_REASONS, SPEND_DENIAL_REASONS, type AdvanceFixRequest, type AdvanceRunRequest, type AdvanceRunStart, type AdvanceStartArgs, type AdvanceStepWho } from "./advance.js";
+import { decisionStartFor } from "./decisionStart.js";
 import { RunActionInputError, type PerformResult } from "./runActions.js";
 
 /**
@@ -389,7 +390,10 @@ export function createResumeModule(runnerPool: Pool, deps: ResumeModuleDeps): Re
       return outcome(started.runId);
     }
 
-    const prompt = `${stripResumeContext(f.parked.prompt)}\n\n${renderResumeContext(ctx)}`;
+    // D#7 DP4b-3b: the resumed run is offered what the dials and the catalogue say NOW, not what the parked run was told. Its prompt's block is replaced to match, and the
+    // snapshot below is written with the run. The answer reaches the run through the resume block, as before.
+    const dec = await decisionStartFor(runnerPool, accountId, workItemId);
+    const prompt = `${dec.prompt(stripResumeContext(f.parked.prompt))}\n\n${renderResumeContext(ctx)}`;
     const step = spendAttempt > 0 ? `${resumeStepKey(askId)}:s${spendAttempt}` : resumeStepKey(askId);
     if (!STEP_RE.test(step)) return note("start_refused");
     const started = await deps.startRun({
@@ -403,6 +407,7 @@ export function createResumeModule(runnerPool: Pool, deps: ResumeModuleDeps): Re
       exclusive: true,
       haltEpoch: f.item.halt_epoch,
       parentRunId: f.parked.id,
+      decisionSnapshot: dec.offer.snapshot,
       ...(f.parked.execution_mode !== null && /^[a-z][a-z_]{0,31}$/.test(f.parked.execution_mode) ? { expectedExecutionMode: f.parked.execution_mode } : {}),
       ...(f.parked.spec_version_id === null ? {} : { specVersionId: f.parked.spec_version_id }),
     });

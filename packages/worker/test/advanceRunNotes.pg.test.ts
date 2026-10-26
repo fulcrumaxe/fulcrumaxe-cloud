@@ -9,6 +9,7 @@ import { createCorrection, decideCorrection, getCorrection, type CorrectionCtx }
 import { correctionReasonCode, renderRunNotes } from "@fx/core/src/corrections/driver.js";
 import { requestChanges } from "@fx/core/src/work-items/operatorMoves.js";
 import { maxFixRounds } from "@fx/spend";
+import { swapDecisionsBlock } from "@fx/pipeline";
 import { createAdvanceModule, type AdvanceModuleDeps } from "../src/advance.js";
 import { upToDateHeads, withIssuePr } from "./withIssuePr.js";
 import type { RunStarter } from "../src/preview.js";
@@ -188,7 +189,8 @@ describe("advance: run notes at run boundaries [pg]", { timeout: 60_000 }, () =>
     const req = { issue: t.n, headSha: HEAD, prompt: "FIX IT", round: 1, actionId: randomUUID(), reviewer: "code" as const, failingRunId: randomUUID() };
     const fix = await m.module.advanceStartFix(t.who, req);
     expect(fix.ok).toBe(true);
-    expect(m.prompts.at(-1)).toBe("FIX IT");
+    // D#7 DP4b-3b: the round also carries its decisions block; without it the prompt is the old one, byte for byte.
+    expect(swapDecisionsBlock(m.prompts.at(-1)!, undefined)).toBe("FIX IT");
     const key = (await admin.query<{ idempotency_key: string }>("SELECT idempotency_key FROM agent_run_idempotency_keys WHERE run_id = $1", [(fix as { runId: string }).runId])).rows[0]!.idempotency_key;
     expect(key).toBe(`advance:${t.w}:fix:${HEAD}:${req.actionId}`);
     expect(await events(t.w)).toEqual([]);
