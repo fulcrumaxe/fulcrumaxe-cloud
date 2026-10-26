@@ -104,6 +104,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "performAmendSpec",
       "performCancelRun",
       "performCancelWorkItem",
+      "performContinueWorkItem",
       "performRespecWorkItem",
       "performResumeDecision",
       "performRetryRun",

@@ -162,7 +162,8 @@ describe("C3: the dispatcher", () => {
     expect(performerFor("start_preview")).toBeTypeOf("function");
     expect(performerFor("retry_run")).toBeTypeOf("function");
     expect(performerFor("advance_work_item")).toBeTypeOf("function");
-    for (const kind of ["continue_work_item", "constructor", "__proto__", "toString", ""]) expect(performerFor(kind)).toBeUndefined();
+    expect(performerFor("continue_work_item")).toBeTypeOf("function");
+    for (const kind of ["frobnicate", "constructor", "__proto__", "toString", ""]) expect(performerFor(kind)).toBeUndefined();
   });
 });
 
@@ -205,11 +206,33 @@ describe("C3/C4: the workflow's steps over a fake facade", () => {
   });
 
   it("a kind with no performer settles refused kind_not_supported, without a retry and without any perform call", async () => {
-    const { worker, settles } = fakeWorker({ claimed: { id: ID, kind: "continue_work_item", attempts: 1 } });
+    const { worker, settles } = fakeWorker({ claimed: { id: ID, kind: "frobnicate", attempts: 1 } });
     await runActionSteps(worker, ID);
     expect(settles).toEqual([[ID, { state: "refused", errorCode: "kind_not_supported", outcome: { reason: "kind_not_supported" } }]]);
     expect(worker.performCancelRun).not.toHaveBeenCalled();
     expect(worker.performCancelWorkItem).not.toHaveBeenCalled();
+  });
+
+  it("continue_work_item (D#2 H14c-3-3b-4): performContinueWorkItem gets the id; done and refused settle as the performer said; a worker without it refuses continue_unavailable", async () => {
+    const done = fakeWorker({ claimed: { id: ID, kind: "continue_work_item", attempts: 1 }, performContinueWorkItem: vi.fn(async (): Promise<PerformResult> => ({ result: "done", outcome: { run_id: "r2" } })) });
+    await runActionSteps(done.worker, ID);
+    expect(done.worker.performContinueWorkItem).toHaveBeenCalledWith(ID);
+    expect(done.settles).toEqual([[ID, { state: "done", outcome: { run_id: "r2" } }]]);
+    const denied = fakeWorker({ claimed: { id: ID, kind: "continue_work_item", attempts: 1 }, performContinueWorkItem: vi.fn(async (): Promise<PerformResult> => ({ result: "refused", errorCode: "work_item_ceiling" })) });
+    await runActionSteps(denied.worker, ID);
+    expect(denied.settles).toEqual([[ID, { state: "refused", errorCode: "work_item_ceiling", outcome: { reason: "work_item_ceiling" } }]]);
+    const bare = fakeWorker({ claimed: { id: ID, kind: "continue_work_item", attempts: 1 } });
+    await runActionSteps(bare.worker, ID);
+    expect(bare.settles).toEqual([[ID, { state: "refused", errorCode: "continue_unavailable", outcome: { reason: "continue_unavailable" } }]]);
+  });
+
+  it("a busy continue (the performer throws ContinueBusyError) is retried with backoff, and at the fifth attempt the code settled is busy", async () => {
+    const busy = Object.assign(new Error("x"), { name: "ContinueBusyError" });
+    for (const attempts of [1, 2, 5]) {
+      const { worker, settles } = fakeWorker({ claimed: { id: ID, kind: "continue_work_item", attempts }, performContinueWorkItem: vi.fn(async () => Promise.reject(busy)) });
+      await runActionSteps(worker, ID);
+      expect(settles).toEqual([[ID, { state: "accepted", errorCode: "busy", retryAfterSeconds: 2 ** attempts * 5 }]]);
+    }
   });
 
   it("retry_run: performRetryRun gets the id and its outcome settles done; a refusal settles refused; a worker without the method refuses retry_unavailable", async () => {

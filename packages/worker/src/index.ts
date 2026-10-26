@@ -19,6 +19,8 @@ export { RunActionInputError, RunActionUnavailableError, RunActionForbiddenError
 export { productionVercelCredentials, VercelCredentialsUnavailableError } from "./vercelCredentials.js";
 export { StartupGuardError, type StartupRule } from "./pools.js";
 export type { SeatRequest, SeatResult, SeatRefusal, SeatRunConfig } from "./seat.js";
+// D#2 H14c-3-3b-4: the performer's facade type only; the module is built inside the worker, and the run-action workflow maps its busy error by name.
+export type { ContinueFacade } from "./continueAction.js";
 // D#2 H14c-3-3b-1 (C88 R4): the start input of a continuation, from the seat as it resolves now. A function over the seat source, not over a pool the caller reaches.
 // D#2 H14c-3-3b-2 (C88 R1): the advance workflow's continue step answer type and the fixed codes it answers with.
 export { ADVANCE_CONTINUE_CODES, CONTINUE_LOOP_CEILING, type AdvanceContinueCode, type AdvanceContinueOut } from "./advanceContinue.js";
