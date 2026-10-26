@@ -6,6 +6,9 @@
 // that was pressed (or moves to the row's heading when the control goes), the outcome is announced once, axe is clean under every theme, and no null,
 // undefined or id reaches the page.
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { test, expect, type Page, type Route } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { waitForDesktop } from "./helpers/boot";
@@ -19,6 +22,9 @@ const S1 = "We check for this every 60 seconds. The item continues by itself onc
 const S2 = "We can't check this one for you. Press Mark done when it's finished.";
 const S3 = "Checking now.";
 const S4 = "We checked and it isn't done yet: STRIPE_WEBHOOK_SECRET isn't set on cloud-staging yet. The item is paused again.";
+const WORK_ITEMS = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "api", "fixtures", "v1", "listWorkItems", "200-page.json"), "utf8"));
+const WI1 = WORK_ITEMS.data[0].id as string;
+const WI2 = "55555555-5555-4555-8555-555555555551";
 const HOSTILE = '<img src=x onerror="window.__pwned=1"><script>window.__pwned=2</script> **bold** [x](javascript:window.__pwned=3) https://evil.example/a &amp;';
 
 type Req = Record<string, unknown>;
@@ -40,6 +46,7 @@ const merge = (over: Req = {}): Req => ({
   work_item_id: "4b7e1c20-3d95-4a6f-8e12-7a9c5d0b3f81", title: "Add a retry to the export job", pr_number: 42, pr_url: "https://github.com/example-org/example-repo/pull/42",
   why: "The checks are done. A person merges this pull request on GitHub.", since: "2026-10-22T15:30:00.000Z", ...over,
 });
+const needsItem = (over: Req = {}): Req => ({ id: WI2, title: "Waiting item", stage: "needs_human", updated_at: "2026-10-24T10:00:00.000Z", ...over });
 const closed = (state: "done" | "withdrawn", over: Req = {}) => request({ state, status_sentence: null, check_interval_seconds: null, ...over });
 
 interface Mock {
@@ -54,6 +61,21 @@ interface Mock {
   /** The bodies the answer POSTs carried, by path. */
   answers: { path: string; body: unknown }[];
   notShown: number;
+  /** The needs_human work items, paged one to a page like the asks. */
+  items: Req[];
+  /** When true every work-items page still carries a cursor. */
+  itemsMore: boolean;
+  /** Whether the signed-in person is an owner or admin; "fail" makes the me read answer 500. */
+  admin: boolean;
+  me: "ok" | "fail";
+  /** Request paths (substrings) that answer 500. */
+  fail: string[];
+  /** The Idempotency-Key of every answer POST, and how many of the next answers are lost to a network error. */
+  keys: string[];
+  dropAnswers: number;
+  /** When true the account stream answers with streamFrame (then idle) instead of hanging. */
+  streaming: boolean;
+  streamFrame: string | null;
   listStatus: number;
   /** What a POST answers: a request, or a number for an error status. */
   doneAnswer: Req | number;
@@ -67,6 +89,10 @@ const askPage = (asks: unknown[], cursor: string | null) => {
   const at = cursor === null ? 0 : Number(cursor);
   return { data: asks.slice(at, at + 1), next_cursor: at + 1 < asks.length ? String(at + 1) : null };
 };
+const itemPage = (items: unknown[], cursor: string | null, more: boolean) => {
+  const at = cursor === null ? 0 : Number(cursor);
+  return { data: items.slice(at, at + 1), next_cursor: at + 1 < items.length || more ? String(at + 1) : null };
+};
 const json = (route: Route, status: number, body: unknown) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
 async function setup(page: Page, tweak: Partial<Mock> = {}) {
@@ -74,16 +100,34 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
   page.on("console", (m) => m.type() === "error" && !m.text().startsWith("Failed to load resource") && errors.push(m.text()));
   page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
   await page.addInitScript(() => document.addEventListener("securitypolicyviolation", (e) => console.error(`CSP ${e.violatedDirective}`)));
-  const mock: Mock = { requests: [request()], asks: [], merges: [], stalled: [], answerReply: { ask_id: A1, receipt_id: "e1b7c3d4-2f58-4a09-8c6b-7d3e9f1a2b45", answered_option: "bump_now" }, answers: [], notShown: 0, listStatus: 200, doneAnswer: closed("done"), withdrawAnswer: closed("withdrawn"), delay: 0, posts: [], ...tweak };
+  const mock: Mock = { requests: [request()], asks: [], merges: [], stalled: [], answerReply: { ask_id: A1, receipt_id: "e1b7c3d4-2f58-4a09-8c6b-7d3e9f1a2b45", answered_option: "bump_now" }, answers: [], notShown: 0, items: [], itemsMore: false, admin: true, me: "ok", fail: [], keys: [], dropAnswers: 0, streaming: false, streamFrame: null, listStatus: 200, doneAnswer: closed("done"), withdrawAnswer: closed("withdrawn"), delay: 0, posts: [], ...tweak };
   await page.route((u) => u.pathname === "/", async (route) => {
     const res = await route.fetch();
     await route.fulfill({ response: res, headers: { ...res.headers(), "content-security-policy": CSP } });
   });
-  await page.route("**/api/v1/events", () => new Promise<void>(() => {}));
+  await page.route("**/api/v1/events", async (route) => {
+    if (!mock.streaming) return new Promise<void>(() => {});
+    const body = mock.streamFrame ?? "event: idle\ndata: {}\n\n";
+    mock.streamFrame = null;
+    await route.fulfill({ status: 200, contentType: "text/event-stream", headers: { "cache-control": "no-store" }, body });
+  });
+  // Who may answer: the fixture account is a member, so each test says what it is (and a failed read is a 500).
+  await page.route("**/api/cloud/auth/me", async (route) => {
+    if (mock.me === "fail") return json(route, 500, { error: { code: "server_error", message: SERVER_TEXT, request_id: "r" } });
+    const res = await route.fetch();
+    const headers = { ...res.headers() };
+    delete headers["content-length"];
+    await route.fulfill({ status: res.status(), headers, json: { ...(await res.json()), is_admin: mock.admin } });
+  });
   await page.route((u) => u.pathname.startsWith("/api/v1/") && u.pathname !== "/api/v1/events", async (route) => {
     const req = route.request();
     const p = new URL(req.url()).pathname;
     if ((req.headers()["accept"] ?? "").includes("text/event-stream")) return route.fulfill({ status: 200, contentType: "text/event-stream", body: "event: idle\ndata: {}\n\n" });
+    if (req.method() === "GET" && mock.fail.some((f) => p.includes(f))) return json(route, 500, { error: { code: "server_error", message: SERVER_TEXT, request_id: "r" } });
+    if (p === "/api/v1/work-items" && req.method() === "GET") {
+      const u = new URL(req.url());
+      return json(route, 200, u.searchParams.get("stage") === "needs_human" ? itemPage(mock.items, u.searchParams.get("cursor"), mock.itemsMore) : WORK_ITEMS);
+    }
     if (p === "/api/v1/setup-requests" && req.method() === "GET") {
       if (mock.listStatus !== 200) return json(route, mock.listStatus, { error: { code: "server_error", message: SERVER_TEXT, request_id: "r" } });
       return json(route, 200, { requests: mock.requests.filter((r) => r.state === "open"), truncated: false });
@@ -94,6 +138,11 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
     const answerMatch = p.match(/^\/api\/v1\/decision-asks\/([^/]+)\/answer$/);
     if (answerMatch && req.method() === "POST") {
       mock.answers.push({ path: p, body: req.postDataJSON() });
+      mock.keys.push(req.headers()["idempotency-key"] ?? "");
+      if (mock.dropAnswers > 0) {
+        mock.dropAnswers -= 1;
+        return route.abort("failed");
+      }
       if (mock.delay > 0) await new Promise((r) => setTimeout(r, mock.delay));
       if (typeof mock.answerReply === "number") return json(route, mock.answerReply, { error: { code: mock.answerReply === 403 ? "forbidden" : mock.answerReply === 409 ? "already_answered" : "x", message: SERVER_TEXT, request_id: "r" } });
       mock.asks = mock.asks.filter((a) => a.id !== answerMatch[1]);
@@ -135,7 +184,7 @@ const press = async (loc: ReturnType<Page["locator"]>) => {
 async function clean(page: Page, errors: string[]) {
   expect(errors).toEqual([]);
   const text = await page.evaluate(() => document.body.innerText);
-  expect(text).not.toMatch(/\bnull\b|undefined|NaN|ApiError|Could not load/);
+  expect(text).not.toMatch(/\bnull\b|undefined|NaN|Invalid Date|ApiError|Could not load/);
   expect(text).not.toContain(SERVER_TEXT);
   expect(text).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i); // no id stands in for a name
 }
@@ -405,16 +454,21 @@ test.describe("D#598 P8c: Needs you", () => {
     expect(errors).toEqual([]);
   });
 
-  test("choosing an option sends exactly that choice once, shows the answer, announces it once and moves focus to the heading", async ({ page }) => {
-    const { mock, errors } = await setup(page, { requests: [], asks: [ask()], delay: 200 });
+  // D#37 WS-F1d: an answered ask leaves the list at once (the list is not a feed); the outcome is said once in the live region.
+  test("choosing an option sends exactly that choice once, removes the ask, announces it once and moves focus to the next row's heading (or the list heading)", async ({ page }) => {
+    const { mock, errors } = await setup(page, { requests: [], asks: [ask(), ask({ id: "a-2", work_item_id: WI2, label: "Second decision", answer_due_at: "2030-01-01T00:00:00.000Z" })], delay: 200 });
     await open(page);
     await t(page, `ny-choice-${A1}-bump_now`).dblclick();
-    await expect(t(page, "ny-state")).toHaveText("Answered: Update the dependency now");
     await expect(t(page, "ny-live")).toHaveText("Answered: Update the dependency now.");
     expect(mock.answers).toEqual([{ path: `/api/v1/decision-asks/${A1}/answer`, body: { choice: "bump_now" } }]);
+    await expect(t(page, "ny-state")).toHaveCount(0); // no "Answered" row is kept
     await expect(t(page, `ny-choice-${A1}-bump_now`)).toHaveCount(0);
-    await expect(page.locator(`${WIN} h2`)).toHaveText("Needs you (0)");
+    await expect(page.locator(`${WIN} h2`)).toHaveText("Needs you (1)");
+    await expect(t(page, "ny-title")).toHaveText("Second decision");
     expect(await focusedTestId(page)).toBe("ny-title");
+    await press(t(page, `ny-choice-a-2-deny`));
+    await expect(page.locator(`${WIN} h2`)).toHaveText("Needs you (0)");
+    expect(await page.evaluate(() => document.activeElement?.id)).toBe("ny-heading");
     await clean(page, errors);
   });
 
@@ -429,8 +483,9 @@ test.describe("D#598 P8c: Needs you", () => {
       await open(page);
       await expect(t(page, "ny-title")).toHaveText("Starting a small piece of work");
       await press(t(page, `ny-choice-${A1}-${choice}`));
-      await expect(t(page, "ny-state")).toHaveText(said);
       await expect(t(page, "ny-live")).toHaveText(said);
+      await expect(t(page, "ny-state")).toHaveCount(0); // not a feed: no kept row
+      await expect(t(page, "ny-row")).toHaveCount(0);
       expect(mock.answers.map((x) => x.body)).toEqual([{ choice }]);
       await clean(page, errors);
     });
@@ -440,7 +495,7 @@ test.describe("D#598 P8c: Needs you", () => {
     const { mock } = await setup(page, { requests: [], asks: [ask()], answerReply: { ask_id: A1, receipt_id: "e1b7c3d4-2f58-4a09-8c6b-7d3e9f1a2b45", answered_option: "deny" } });
     await open(page);
     await press(t(page, `ny-choice-${A1}-deny`));
-    await expect(t(page, "ny-state")).toHaveText("Answered: Deny");
+    await expect(t(page, "ny-live")).toHaveText("Answered: Deny.");
     expect(mock.answers.map((a) => a.body)).toEqual([{ choice: "deny" }]);
   });
 
@@ -488,7 +543,7 @@ test.describe("D#598 P8c: Needs you", () => {
       expect(await axeSeriousOrCritical(page), theme).toEqual([]);
     }
     await press(t(page, `ny-choice-${A1}-deny`));
-    await expect(t(page, "ny-state")).toContainText("Answered");
+    await expect(t(page, "ny-empty")).toBeVisible();
     expect(await axeSeriousOrCritical(page)).toEqual([]);
   });
 
@@ -520,4 +575,124 @@ test.describe("D#598 P8c: Needs you", () => {
     expect(m.over).toBe(false);
     expect(m.h).toBeGreaterThanOrEqual(43.5);
   });
+
+  // ── D#37 WS-F1d (C47) ─────────────────────────────────────────────────────────────────────────────────────────────
+  const stalledRow = { work_item_id: "7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f", title: "Stalled item", stage: "pr_opened", code: "stopped", why: "A reviewer couldn't start.", action_label: "Approve and review", can_act: true, since: "2026-10-25T16:12:26.000Z" };
+  const countIs = (page: Page, n: number) => expect(page.locator(`${WIN} h2`)).toHaveText(`Needs you (${n})`);
+  const closeWin = (page: Page) => page.evaluate(() => (window as unknown as { FULCWM: { close: (id: string) => void } }).FULCWM.close("needs-you")).then(() => expect(page.locator(WIN)).toHaveCount(0));
+  const frame = (type: string) => `id: c-${Math.random().toString(36).slice(2)}\nevent: ${type}\ndata: ${JSON.stringify({ id: "e1", type, created_at: "2026-10-26T00:00:00.000Z", data: {} })}\n\n`;
+
+  test("A1/A2: an ask says when to answer by, and what happens if nobody does", async ({ page }) => {
+    const { errors } = await setup(page, { requests: [], asks: [ask({ timeout_outcome: "proceed_recommended" }), ask({ id: "a-2", work_item_id: WI2, state: "overdue", timeout_outcome: "stop_and_flag" })] });
+    await open(page);
+    const rows = t(page, "ny-row");
+    await expect(rows.nth(0).locator('[data-testid="ny-due"]')).toHaveText(/^Was due \S/); // overdue first
+    await expect(rows.nth(0).locator('[data-testid="ny-timeout"]')).toHaveText("The work is paused until someone answers.");
+    await expect(rows.nth(1).locator('[data-testid="ny-due"]')).toHaveText(/^Answer by \S/);
+    await expect(rows.nth(1).locator('[data-testid="ny-timeout"]')).toHaveText("If nobody answers in time, the agent goes ahead with: Update the dependency now.");
+    await clean(page, errors);
+  });
+
+  test("A3/E7: a member sees the waiting sentence and no buttons, and so does a failed me read; nothing can be sent", async ({ page }) => {
+    const { mock, errors } = await setup(page, { requests: [], asks: [ask()], admin: false });
+    await open(page);
+    await expect(t(page, "ny-waiting")).toHaveText("Waiting for an owner or admin to answer.");
+    await expect(t(page, "ny-row").locator("button")).toHaveCount(0);
+    await closeWin(page);
+    mock.admin = true;
+    mock.me = "fail";
+    await open(page);
+    await countIs(page, 1); // the list still loads
+    await expect(t(page, "ny-waiting")).toBeVisible();
+    await expect(t(page, "ny-row").locator("button")).toHaveCount(0);
+    await expect(t(page, "ny-error")).toHaveCount(0);
+    expect(mock.answers).toEqual([]);
+    await clean(page, errors);
+  });
+
+  test("E6: a network error then a second press resends the same Idempotency-Key, and the replayed answer removes the row and names the response's option", async ({ page }) => {
+    const { mock, errors } = await setup(page, { requests: [], asks: [ask()], dropAnswers: 1, answerReply: { ask_id: A1, receipt_id: "e1b7c3d4-2f58-4a09-8c6b-7d3e9f1a2b45", answered_option: "leave_it" } });
+    await open(page);
+    await press(t(page, `ny-choice-${A1}-bump_now`));
+    await expect(t(page, "ny-action-error")).toHaveText("That didn't go through. Try again.");
+    await press(t(page, `ny-choice-${A1}-bump_now`));
+    await expect(t(page, "ny-live")).toHaveText("Answered: Leave it as it is.");
+    await expect(t(page, "ny-row")).toHaveCount(0);
+    expect(mock.keys).toHaveLength(2);
+    expect(mock.keys[0]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(mock.keys[1]).toBe(mock.keys[0]);
+    await clean(page, errors);
+  });
+
+  test("B3/E2: a needs_human item the stalled list does not carry has the fixed sentence and one Open button, and Open selects its card in Pipeline", async ({ page }) => {
+    const { errors } = await setup(page, { requests: [], items: [needsItem({ id: WI1, title: "Add a dark mode toggle" })] });
+    await open(page);
+    await countIs(page, 1);
+    await expect(t(page, "ny-sentence")).toHaveText("This item needs a person. Open its card to see why and choose what happens next.");
+    await expect(t(page, "ny-row").locator("button")).toHaveCount(1);
+    await press(t(page, `ny-open-person-${WI1}`));
+    await expect(page.locator(`#windows-container .fulc-window[data-app-id="pipeline"] [data-testid="pl-card"][data-id="${WI1}"]`)).toBeVisible();
+    await expect(page.locator(`#windows-container .fulc-window[data-app-id="pipeline"] [data-testid="pl-detail"]`)).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+
+  test("B4/E3: every kind at once comes in the fixed order, and an item with an ask and a needs_human flag shows once, as the ask", async ({ page }) => {
+    const { errors } = await setup(page, {
+      requests: [request()], asks: [ask({ work_item_id: WI1 })], merges: [merge()], stalled: [stalledRow],
+      items: [needsItem({ id: WI1, title: "Same item as the ask" }), needsItem(), needsItem({ id: stalledRow.work_item_id, title: "Same item as the stalled row" })],
+    });
+    await open(page);
+    await countIs(page, 5);
+    await expect(t(page, "ny-row")).toHaveCount(5);
+    const kinds = await t(page, "ny-row").evaluateAll((els) => els.map((e) => e.getAttribute("data-kind")));
+    expect(kinds).toEqual(["ask", "person", "stalled", "merge", "setup"]);
+    await expect(t(page, "ny-title").first()).toHaveText("Patch-level dependency updates");
+    await expect(page.locator(`${WIN} [data-id="person-${WI1}"]`)).toHaveCount(0);
+    await clean(page, errors);
+  });
+
+  test("E4: five full pages of needs_human items say more items need a person", async ({ page }) => {
+    const items = [1, 2, 3, 4, 5].map((n) => needsItem({ id: `55555555-5555-4555-8555-55555555550${n}`, title: `Item ${n}` }));
+    const { errors } = await setup(page, { requests: [], items, itemsMore: true });
+    await open(page);
+    await countIs(page, 5);
+    await expect(t(page, "ny-more-items")).toHaveText("More items need a person than this list shows.");
+    await clean(page, errors);
+  });
+
+  test("E5: any one of the five reads failing on first load is the error sentence with no rows", async ({ page }) => {
+    const { mock } = await setup(page, { requests: [request()], asks: [ask()] });
+    for (const path of ["setup-requests", "decision-asks", "merge-ready", "stalled-items", "work-items"]) {
+      mock.fail = [path];
+      await open(page);
+      await expect(t(page, "ny-error")).toHaveText("Needs you isn't available right now.");
+      await expect(t(page, "ny-row")).toHaveCount(0);
+      await closeWin(page);
+    }
+  });
+
+  test("E8: a needs_human item and an ask with hostile text render as inert text", async ({ page }) => {
+    const { errors } = await setup(page, { requests: [], asks: [ask({ rationale: HOSTILE })], items: [needsItem({ title: HOSTILE })] });
+    await open(page);
+    await countIs(page, 2);
+    await expect(t(page, "ny-title").nth(1)).toHaveText(HOSTILE);
+    await expect(t(page, "ny-row").locator("img, script, a, b, strong, em, iframe, svg")).toHaveCount(0);
+    expect(await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned)).toBeUndefined();
+    expect(errors).toEqual([]);
+  });
+
+  // Three events to a page: the live client backs off after each short stream, so a longer run would wait out its own backoff.
+  for (const events of [["decision.ask_answered", "decision.ask_overdue", "work_item.needs_human"], ["work_item.stage_changed", "work_item.closed", "pr.opened"]]) {
+    test(`C1: ${events.join(", ")} each refresh the list within 5 s, without a reload`, async ({ page }) => {
+      const { mock } = await setup(page, { requests: [], streaming: true });
+      await open(page);
+      await countIs(page, 0);
+      for (const [i, type] of events.entries()) {
+        mock.asks = Array.from({ length: i + 1 }, (_, n) => ask({ id: `a-${n}`, work_item_id: `55555555-5555-4555-8555-55555555${String(n).padStart(4, "0")}`, label: `Decision ${n}` }));
+        mock.streamFrame = frame(type);
+        await expect.poll(async () => { if (mock.streamFrame !== null) await page.evaluate(() => window.dispatchEvent(new Event("pointerdown"))); return mock.streamFrame; }, { timeout: 30_000 }).toBeNull();
+        await expect(page.locator(`${WIN} h2`)).toHaveText(`Needs you (${i + 1})`, { timeout: 5000 });
+      }
+    });
+  }
 });

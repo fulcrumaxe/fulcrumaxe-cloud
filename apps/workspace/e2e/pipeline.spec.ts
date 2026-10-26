@@ -76,6 +76,8 @@ async function mockApi(page: Page): Promise<Mock> {
   const err = (code: string) => ({ error: { code, message: "server text that must never be shown", request_id: "req_1" } });
   await page.route((u) => u.pathname.startsWith("/api/v1/work-items") || u.pathname === "/api/v1/repos", async (route) => {
     const url = new URL(route.request().url());
+    // D#37 WS-F1d: the board button reads the items that need a person for the Needs you count; this mock has none, and the read is not one of the board's.
+    if (url.pathname === "/api/v1/work-items" && url.searchParams.get("stage") === "needs_human") return json(route, 200, { data: [], next_cursor: null });
     mock.requests.push(`${route.request().method()} ${url.pathname}`);
     if (url.pathname === "/api/v1/repos") return mock.reposStatus === 200 ? json(route, 200, REPOS) : json(route, mock.reposStatus, err("internal"));
     if (url.pathname === "/api/v1/work-items") return mock.listStatus === 200 ? json(route, 200, mock.list) : json(route, mock.listStatus, err("unauthorized"));
@@ -290,7 +292,7 @@ test.describe("D#37 WS-F1a: Pipeline app (mocked API)", () => {
     expect(mock.requests.length).toBe(before);
     const text = await page.locator(WIN).innerText();
     expect(text).not.toMatch(/Terminal|Cancel|Retry|Run in|agent/i);
-    expect(await page.locator(`${WIN} .pl-app button`).allInnerTexts()).toEqual(["acme/docs #42\nAdd a dark mode toggle\nFeature"]);
+    expect(await page.locator(`${WIN} .pl-app button`).allInnerTexts()).toEqual(["Needs you (3)", "acme/docs #42\nAdd a dark mode toggle\nFeature"]); // the one header button (D#37 WS-F1d), then the card
   });
 
   test("a mocked 401 on the list shows the app's own error line and never 'Reload the page'", async ({ page }) => {
@@ -374,7 +376,7 @@ test.describe("D#37 WS-F1a: Pipeline app (mocked API)", () => {
     for (let i = 0; i < 20; i++) {
       await page.evaluate(() => (window as unknown as { FULCWM: { open: (id: string) => void } }).FULCWM.open("pipeline"));
       await expect(page.locator(WIN)).toBeVisible();
-      expect(await subscriberCount(page)).toBe(baseline + 5);
+      expect(await subscriberCount(page)).toBe(baseline + 12); // the board's five, plus the Needs you count button's refresh and six events (D#37 WS-F1d)
       await page.evaluate(() => (window as unknown as { FULCWM: { close: (id: string) => void } }).FULCWM.close("pipeline"));
       await expect(page.locator(WIN)).toHaveCount(0);
     }
@@ -438,5 +440,69 @@ test.describe("D#37 WS-F1a: Pipeline app (mocked API)", () => {
     expect(code).not.toMatch(/401/);
     expect(code).not.toMatch(/draggable|dragstart|drop/);
     expect(code.replace(/\/\/.*$/gm, "")).not.toMatch(/cancel|retry/i);
+  });
+});
+
+// D#37 WS-F1d (C47 group D): the board's one "Needs you (N)" button. The count is the Needs you app's own read; the board draws no Needs you row.
+test.describe("D#37 WS-F1d: Pipeline board entry to Needs you", () => {
+  const NY = `#windows-container .fulc-window[data-app-id="needs-you"]`;
+  const button = (page: Page) => tid(page, "pl-needs-you");
+  const body = async (page: Page) => (await page.locator(WIN).innerText()).trim();
+
+  test("D1/D4: the button counts the same list the Needs you window shows, opens it, and the board draws no Needs you row", async ({ page }) => {
+    const { w } = await setup(page);
+    await expect(button(page)).toHaveText("Needs you (3)"); // the fixture server's ask, pull request and setup request
+    await expect(page.locator(`${WIN} [data-testid="ny-row"]`)).toHaveCount(0);
+    await button(page).click();
+    await expect(page.locator(NY)).toBeVisible();
+    await expect(page.locator(`${NY} h2`)).toHaveText("Needs you (3)");
+    expect(w.errors).toEqual([]);
+    expect(await body(page)).not.toMatch(/\bnull\b|undefined|NaN|Invalid Date|ApiError|Could not load/);
+  });
+
+  test("D1/E1: with nothing waiting the button says so; after a failed read it carries no number and the board shows no error for it", async ({ page }) => {
+    const empty = { setup: { requests: [], truncated: false }, ask: { data: [], next_cursor: null }, merge: { items: [], not_shown: 0 } };
+    await page.route("**/api/v1/setup-requests?*", (r) => r.fulfill({ json: empty.setup }));
+    await page.route("**/api/v1/decision-asks?*", (r) => r.fulfill({ json: empty.ask }));
+    await page.route("**/api/v1/merge-ready", (r) => r.fulfill({ json: empty.merge }));
+    await setup(page);
+    await expect(button(page)).toHaveText("Nothing needs you");
+    await page.unroute("**/api/v1/merge-ready");
+    await page.route("**/api/v1/merge-ready", (r) => r.fulfill({ status: 500, json: { error: { code: "server_error", message: "x", request_id: "r" } } }));
+    await page.goto("/");
+    await waitForDesktop(page);
+    await openPipeline(page);
+    await expect(button(page)).toHaveText("Needs you");
+    expect(await body(page)).not.toMatch(/\bnull\b|undefined|NaN|Invalid Date|ApiError|Could not load|isn't available/);
+  });
+
+  test("D1/E4: when the ask pages hit the cap the number gets a plus", async ({ page }) => {
+    await page.route("**/api/v1/decision-asks?*", (r) => r.fulfill({ json: { data: [], next_cursor: "more" } }));
+    await setup(page);
+    await expect(button(page)).toHaveText(/^Needs you \(\d+\+\)$/);
+  });
+
+  test("D3: an event re-reads the count, at most once every 10 s", async ({ page }) => {
+    let asks = 0;
+    await page.route("**/api/v1/decision-asks?*", (r) => (asks++, r.fulfill({ json: { data: [], next_cursor: null } })));
+    const { mock } = await setup(page);
+    await expect(button(page)).toHaveText("Needs you (2)");
+    const before = asks;
+    for (let i = 0; i < 3; i++) await inject(page, mock, "pr.opened", {});
+    await expect.poll(() => asks - before, { timeout: 25_000 }).toBeGreaterThanOrEqual(1); // the events do cause a read, held to the 10 s spacing
+    await page.waitForTimeout(1500);
+    expect(asks - before).toBe(1); // three events cost one read
+  });
+
+  test("D1: the header does not scroll sideways and the button is a 44 px target", async ({ page }) => {
+    await setup(page);
+    await expect(button(page)).toHaveText("Needs you (3)");
+    const m = await page.evaluate((sel) => {
+      const board = document.querySelector(`${sel} .pl-head`) as HTMLElement; // the columns scroll sideways by design; the header must not
+      const b = document.querySelector(`${sel} [data-testid="pl-needs-you"]`) as HTMLElement;
+      return { over: board.scrollWidth > board.clientWidth, h: b.getBoundingClientRect().height };
+    }, WIN);
+    expect(m.over).toBe(false);
+    expect(m.h).toBeGreaterThanOrEqual(43.5);
   });
 });

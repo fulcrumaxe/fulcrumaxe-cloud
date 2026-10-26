@@ -25,6 +25,11 @@ export const MAX_ASK_PAGES = 5;
 export const ASKS_FIRST_URL = ASKS_URL + "?limit=200";
 export const MERGE_URL = "/api/v1/merge-ready";
 export const STALLED_URL = "/api/v1/stalled-items";
+/** Work items that need a person: read page by page like the asks, so an item the stalled list does not carry still has a row. */
+export const NEEDS_HUMAN_URL = "/api/v1/work-items?stage=needs_human&limit=200";
+export const ME_URL = "/api/cloud/auth/me";
+/** The live events that make the list read again (C28 rule (i): the shell's one stream, no new subscription). */
+export const LIVE_EVENTS = ["decision.ask_answered", "decision.ask_overdue", "work_item.needs_human", "work_item.stage_changed", "work_item.closed", "pr.opened"];
 /** The card's top button: the approve route. The id is encoded; no body goes with it (the route takes none). */
 export const approveUrl = (id) => "/api/v1/work-items/" + encodeURIComponent(id) + "/approve";
 export const REFRESH_MS = 30000;
@@ -39,6 +44,15 @@ export const WORDS = {
   empty: "Nothing needs you right now.",
   older: "Older requests aren't shown.",
   moreAsks: "More decisions are waiting than this list shows.",
+  moreItems: "More items need a person than this list shows.",
+  waitingAdmin: "Waiting for an owner or admin to answer.",
+  personSentence: "This item needs a person. Open its card to see why and choose what happens next.",
+  open: "Open",
+  entry: "Needs you",
+  entryNone: "Nothing needs you",
+  proceedUnnamed: "If nobody answers in time, the agent goes ahead with its recommended option.",
+  stopOpen: "If nobody answers in time, the work stays paused until someone answers.",
+  stopOverdue: "The work is paused until someone answers.",
   markDone: "Mark done",
   withdraw: "Withdraw",
   done: "Done",
@@ -60,6 +74,25 @@ export const WORDS = {
   startedByAnswer: "Started. The card moves when it is done.",
   heldByAnswer: "Held. Nothing starts until a person starts it from the card.",
 };
+
+const DUE_FORMAT = { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" };
+const dueMs = (iso) => (typeof iso === "string" ? Date.parse(iso) : NaN);
+
+/** `answer_due_at` in the viewer's time zone, or "" when it is missing or does not parse (never "Invalid Date"). */
+export function dueTime(iso) {
+  const ms = dueMs(iso);
+  return Number.isFinite(ms) ? new Intl.DateTimeFormat(undefined, DUE_FORMAT).format(new Date(ms)) : "";
+}
+
+/** The sentence for an ask that goes ahead with its recommended option when nobody answers. */
+export const proceedWords = (name) => "If nobody answers in time, the agent goes ahead with: " + name + ".";
+
+/** What happens if nobody answers, from `timeout_outcome`; "" when there is nothing to say. */
+export function timeoutSentence(outcome, overdue, proposedLabel) {
+  if (outcome === "proceed_recommended") return overdue ? "" : proposedLabel ? proceedWords(proposedLabel) : WORDS.proceedUnnamed;
+  if (outcome === "stop_and_flag") return overdue ? WORDS.stopOverdue : WORDS.stopOpen;
+  return "";
+}
 
 /** The decision types a start gate raises asks for (D#7 start gate). An answer to one of these starts the item or holds it; any other ask keeps the generic "Answered" words. */
 export const START_ASK_TYPES = ["start_work_small", "start_work_bug", "start_work_doc", "start_parent_item", "start_after_reclassify"];
@@ -117,14 +150,20 @@ export function readAsk(a) {
   const options = a.options.filter((o) => o && typeof o.id === "string" && o.id !== "" && typeof o.label === "string" && o.label !== "").map((o) => ({ id: o.id, label: o.label }));
   if (options.length === 0) return null;
   const proposed = options.find((o) => o.id === a.proposed);
+  const overdue = a.state === "overdue";
+  const due = dueTime(a.answer_due_at);
   return {
     kind: "ask",
     startAsk: START_ASK_TYPES.includes(a.decision_type),
     id: a.id,
+    workItemId: text(a.work_item_id),
+    due: due === "" ? "" : (overdue ? "Was due " : "Answer by ") + due,
+    dueMs: dueMs(a.answer_due_at),
+    timeout: timeoutSentence(a.timeout_outcome, overdue, proposed ? proposed.label : ""),
     title: a.label,
     reason: quotedReason(a.rationale),
     state: "open",
-    overdue: a.state === "overdue",
+    overdue,
     options,
     proposed: proposed ? proposed.id : "",
     proposedLabel: proposed ? proposed.label : "",
@@ -150,7 +189,7 @@ export function pullRequestLink(url) {
 export function readMerge(m) {
   if (!m || typeof m.work_item_id !== "string" || m.work_item_id === "" || !Number.isInteger(m.pr_number) || m.pr_number < 1) return null;
   const title = typeof m.title === "string" && m.title !== "" ? m.title : "Pull request #" + m.pr_number;
-  return { kind: "merge", id: "merge-" + m.work_item_id, title, reason: text(m.why), state: "open", sentence: WORDS.mergeStep, link: pullRequestLink(m.pr_url) };
+  return { kind: "merge", id: "merge-" + m.work_item_id, workItemId: m.work_item_id, title, reason: text(m.why), state: "open", sentence: WORDS.mergeStep, link: pullRequestLink(m.pr_url) };
 }
 
 /**
@@ -166,12 +205,37 @@ export function readStalled(m) {
     kind: "stalled",
     id: "stalled-" + m.work_item_id,
     workItemId: m.work_item_id,
+    sinceMs: dueMs(m.since),
     title,
     reason: text(m.why),
     state: "open",
     sentence: canAct ? "" : WORDS.stalledNoAction,
     action: canAct ? label : "",
   };
+}
+
+/** One needs_human work item, or null when it is not usable. The title is untrusted text; a row without one is "Work item". */
+export function readPerson(w) {
+  if (!w || typeof w.id !== "string" || w.id === "") return null;
+  return { kind: "person", id: "person-" + w.id, workItemId: w.id, title: typeof w.title === "string" && w.title !== "" ? w.title : "Work item", reason: "", state: "open", sentence: WORDS.personSentence, sinceMs: dueMs(w.updated_at) };
+}
+
+const ms = (n) => (Number.isFinite(n) ? n : Infinity);
+
+/**
+ * One row per work item, in one fixed order. Precedence: open ask, stalled row, needs-a-person row, merge row (a second ask of one item is a
+ * second decision, so asks are all kept). Order: asks (overdue first, then due time, then id), then stalled and needs-a-person rows together
+ * oldest first, then merge rows, then setup requests. Sorts are stable, so the server's order breaks every remaining tie.
+ */
+export function arrangeRows({ asks, stalled, people, merges, requests }) {
+  const taken = new Set(asks.map((a) => a.workItemId));
+  const fresh = (rows) => rows.filter((r) => !taken.has(r.workItemId) && taken.add(r.workItemId));
+  const s = fresh(stalled);
+  const p = fresh(people);
+  const m = fresh(merges);
+  const sortedAsks = [...asks].sort((a, b) => Number(b.overdue) - Number(a.overdue) || ms(a.dueMs) - ms(b.dueMs) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const person = [...s, ...p].sort((a, b) => ms(a.sinceMs) - ms(b.sinceMs));
+  return [...sortedAsks, ...person, ...m, ...requests];
 }
 
 /** The sentence for a failed action, chosen by status; the server's own message is never shown. */
@@ -191,18 +255,46 @@ export function stalledFailureSentence(e) {
 
 const cancelled = (e) => !!e && e.name === "AbortError";
 
-/** Reads the ask list page by page (cursor). `more` is true when the page limit was reached with more still waiting. A page of the wrong shape is an error, not an empty list. */
-export async function readAllAsks(call, signal) {
-  const asks = [];
-  let url = ASKS_FIRST_URL;
+/** Reads a cursor-paged list (`data`, `next_cursor`) up to MAX_ASK_PAGES pages. `more` is true when the page limit was reached with more still waiting. A page of the wrong shape is an error, not an empty list. */
+export async function readPages(call, firstUrl, signal) {
+  const data = [];
+  let url = firstUrl;
   for (let page = 0; page < MAX_ASK_PAGES; page += 1) {
     const res = await call("GET", url, undefined, signal);
     if (!res || !Array.isArray(res.data) || !(res.next_cursor === null || typeof res.next_cursor === "string")) throw new Error("shape");
-    asks.push(...res.data);
-    if (res.next_cursor === null) return { asks, more: false };
-    url = ASKS_FIRST_URL + "&cursor=" + encodeURIComponent(res.next_cursor);
+    data.push(...res.data);
+    if (res.next_cursor === null) return { data, more: false };
+    url = firstUrl + "&cursor=" + encodeURIComponent(res.next_cursor);
   }
-  return { asks, more: true };
+  return { data, more: true };
+}
+
+/** The five reads behind the list, and the rows they make (the one place the row rules live; the Pipeline board's count calls it too). Any failed read rejects. */
+export async function readAll(call, signal) {
+  const [data, asks, merges, stalled, items] = await Promise.all([call("GET", LIST_URL, undefined, signal), readPages(call, ASKS_FIRST_URL, signal), call("GET", MERGE_URL, undefined, signal), call("GET", STALLED_URL, undefined, signal), readPages(call, NEEDS_HUMAN_URL, signal)]);
+  if (!data || !Array.isArray(data.requests) || !merges || !Array.isArray(merges.items) || !stalled || !Array.isArray(stalled.items)) throw new Error("shape");
+  const rows = arrangeRows({
+    asks: asks.data.map(readAsk).filter(Boolean),
+    stalled: stalled.items.map(readStalled).filter(Boolean),
+    people: items.data.map(readPerson).filter(Boolean),
+    merges: merges.items.map(readMerge).filter(Boolean),
+    requests: data.requests.map(readRequest).filter((r) => r && r.state === "open"),
+  });
+  const notShown = [merges, stalled].reduce((n, r) => n + (Number.isInteger(r.not_shown) && r.not_shown > 0 ? r.not_shown : 0), 0);
+  return { rows, truncated: data.truncated === true, moreAsks: asks.more, moreItems: items.more, notShown };
+}
+
+/** The Pipeline board's number: the same reads and row rules as the list. `more` is true when a page cap was reached or rows are not shown. */
+export async function readNeedsYouCount(call = api, signal) {
+  const r = await readAll(call, signal);
+  return { count: r.rows.length + r.notShown, more: r.moreAsks || r.moreItems || r.notShown > 0 };
+}
+
+/** The board button's words: no number while the count is unknown (loading or failed). */
+export function entryLabel(c) {
+  if (!c) return WORDS.entry;
+  if (c.count === 0 && !c.more) return WORDS.entryNone;
+  return WORDS.entry + " (" + c.count + (c.more ? "+" : "") + ")";
 }
 
 /**
@@ -210,7 +302,10 @@ export async function readAllAsks(call, signal) {
  * by a failed check is open again and so is simply in the open part). `state` is { status, rows, truncated, announce, error }.
  */
 export function createNeedsYou({ call = api, signal, onChange = () => {} } = {}) {
-  let st = { status: "loading", rows: [], truncated: false, moreAsks: false, notShown: 0, announce: "", error: "" };
+  let st = { status: "loading", rows: [], truncated: false, moreAsks: false, moreItems: false, notShown: 0, isAdmin: false, announce: "", focusId: null, error: "" };
+  // Who may answer is read once per window open, beside the first list read. A failed read means "not an admin", never the list's error.
+  let adminRead = null;
+  const keys = new Map(); // ask id -> { choice, key }: the Idempotency-Key of an answer that has not settled yet
   const closed = new Map(); // id -> row closed here, shown until the window closes
   const busy = new Map(); // id -> "done" | "withdraw"
   let open = [];
@@ -222,13 +317,13 @@ export function createNeedsYou({ call = api, signal, onChange = () => {} } = {})
   async function load() {
     const mine = ++gen;
     try {
-      // Both reads must answer: a screen that showed only one of them would say nothing is waiting while the other part is unread.
-      const [data, asks, merges, stalled] = await Promise.all([call("GET", LIST_URL, undefined, signal), readAllAsks(call, signal), call("GET", MERGE_URL, undefined, signal), call("GET", STALLED_URL, undefined, signal)]);
+      // Every read must answer: a screen that showed only some of them would say nothing is waiting while another part is unread.
+      adminRead ||= Promise.resolve(call("GET", ME_URL, undefined, signal)).then((me) => !!me && me.is_admin === true, () => false);
+      const [all, isAdmin] = await Promise.all([readAll(call, signal), adminRead]);
       if (mine !== gen) return;
-      if (!data || !Array.isArray(data.requests) || !asks ||!merges || !Array.isArray(merges.items) || !stalled || !Array.isArray(stalled.items)) throw new Error("shape");
-      open = [...asks.asks.map(readAsk).filter(Boolean), ...stalled.items.map(readStalled).filter(Boolean), ...merges.items.map(readMerge).filter(Boolean), ...data.requests.map(readRequest).filter((r) => r && r.state === "open")];
+      open = all.rows;
       for (const r of open) closed.delete(r.id);
-      st = { ...st, status: "ready", truncated: data.truncated === true, moreAsks: asks.more, notShown: [merges, stalled].reduce((n, r) => n + (Number.isInteger(r.not_shown) && r.not_shown > 0 ? r.not_shown : 0), 0) };
+      st = { ...st, status: "ready", isAdmin, truncated: all.truncated, moreAsks: all.moreAsks, moreItems: all.moreItems, notShown: all.notShown };
       merge();
     } catch (e) {
       if (mine !== gen || cancelled(e)) return;
@@ -269,24 +364,29 @@ export function createNeedsYou({ call = api, signal, onChange = () => {} } = {})
    */
   async function answer(id, choice) {
     const row = open.find((r) => r.id === id && r.kind === "ask");
-    if (!row || busy.has(id)) return;
+    if (!row || busy.has(id) || !st.isAdmin) return;
     if (choice !== "deny" && !row.options.some((o) => o.id === choice)) return;
+    // One key per ask and choice, kept until the answer settles: a press again after a network error or a 5xx replays the same answer.
+    let k = keys.get(id);
+    if (!k || k.choice !== choice) keys.set(id, (k = { choice, key: crypto.randomUUID() }));
     busy.set(id, "answer");
     st = { ...st, error: "", announce: "" };
     onChange();
     try {
-      const res = await call("POST", answerUrl(id), { choice }, signal);
+      const res = await call("POST", answerUrl(id), { choice }, signal, { idempotencyKey: k.key });
       if (!res || typeof res.answered_option !== "string") throw new Error("shape");
+      keys.delete(id);
+      // The outcome is the response's option (a replay names the first answer), said once; the row is gone and focus goes to the next one.
       const picked = row.options.find((o) => o.id === res.answered_option);
-      const name = picked ? picked.label : WORDS.deny;
+      const at = st.rows.findIndex((r) => r.id === id);
       open = open.filter((r) => r.id !== id);
-      const said = row.startAsk ? startAnswerWords(res.answered_option) : WORDS.answered + ": " + name;
-      closed.set(id, { ...row, state: "done", sentence: said });
-      st = { ...st, announce: said.endsWith(".") ? said : said + "." };
       merge();
+      const next = st.rows[at];
+      st = { ...st, announce: row.startAsk ? startAnswerWords(res.answered_option) : WORDS.answered + ": " + (picked ? picked.label : WORDS.deny) + ".", focusId: next ? next.id : "" };
     } catch (e) {
       busy.delete(id);
       if (cancelled(e)) return;
+      if (e && e.status >= 400 && e.status < 500) keys.delete(id); // a refusal settles the key
       st = { ...st, error: failureSentence(e) };
       await load(); // a refused answer may mean the ask changed under the person: show what is true now
       return;
@@ -322,26 +422,48 @@ export function createNeedsYou({ call = api, signal, onChange = () => {} } = {})
 
   /** The app has put the announcement on the page: it is said once, so it is not kept for the next draw. Does not redraw. */
   const clearAnnounce = () => {
-    st = { ...st, announce: "" };
+    st = { ...st, announce: "", focusId: null };
   };
 
+  // Live events and the timer read through refresh(): one read in flight, and events that arrive during it cause one more read after it.
+  let reading = false;
+  let again = false;
+  let running = false;
+  async function refresh() {
+    if (!running) return;
+    if (reading) {
+      again = true;
+      return;
+    }
+    reading = true;
+    await load();
+    reading = false;
+    if (again) {
+      again = false;
+      await refresh();
+    }
+  }
   let stopFn = null;
   /**
-   * Reads again on the live stream's refresh and every REFRESH_MS, but not while the page is hidden. `subscribe(handler)` returns its off function.
-   * Starting twice replaces the first. Nothing is left running after stop().
+   * Reads again on the live stream's refresh, on each of LIVE_EVENTS and every REFRESH_MS, but not on the timer while the page is hidden.
+   * `subscribe(handler)` and `listen(type, handler)` return their off function. Starting twice replaces the first. Nothing is left running after stop().
    */
-  function start({ subscribe, setTimer = setInterval, clearTimer = clearInterval, hidden = () => false } = {}) {
+  function start({ subscribe, listen, setTimer = setInterval, clearTimer = clearInterval, hidden = () => false } = {}) {
     stop();
-    const off = typeof subscribe === "function" ? subscribe(() => load()) : () => {};
+    running = true;
+    const offs = [typeof subscribe === "function" ? subscribe(() => refresh()) : () => {}];
+    if (typeof listen === "function") for (const type of LIVE_EVENTS) offs.push(listen(type, () => refresh()));
     const timer = setTimer(() => {
-      if (!hidden()) load();
+      if (!hidden()) refresh();
     }, REFRESH_MS);
     stopFn = () => {
-      off();
+      offs.forEach((off) => off());
       clearTimer(timer);
     };
   }
   function stop() {
+    running = false;
+    again = false;
     if (stopFn) stopFn();
     stopFn = null;
   }
