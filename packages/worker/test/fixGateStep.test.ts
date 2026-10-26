@@ -29,6 +29,16 @@ describe("createFixGate", () => {
     }
   });
 
+  it("D#483 S5-b2a part 3: names the failed check run for a check fix round, and only then (a review round passes no run)", async () => {
+    const RUN = "99999999-9999-4999-8999-999999999999";
+    await createFixGate(POOL)(WHO, { personFiled: true, checkFailedRunId: RUN });
+    expect(gateFixRound.mock.calls[0]![1]).toEqual({ workItemId: WHO.workItemId, personUserId: WHO.userId, checkFailedRunId: RUN });
+    await createFixGate(POOL)(WHO, { personFiled: false, checkFailedRunId: RUN });
+    expect(gateFixRound.mock.calls[1]![1]).toEqual({ workItemId: WHO.workItemId, personUserId: null, checkFailedRunId: RUN });
+    await createFixGate(POOL)(WHO, { personFiled: false });
+    expect(Object.keys(gateFixRound.mock.calls[2]![1] as object)).toEqual(["workItemId", "personUserId"]);
+  });
+
   it("answers with fixed words: a go with its notice flag, an ask, a block; a blockedBy that is not a plain word never crosses", async () => {
     expect(await createFixGate(POOL)(WHO, { personFiled: false })).toEqual({ proceed: true, how: "policy_receipt", announce: true });
     gateFixRound.mockResolvedValue({ proceed: false, reason: "asked", key: "fix-1", blockedBy: null, askId: "x" });

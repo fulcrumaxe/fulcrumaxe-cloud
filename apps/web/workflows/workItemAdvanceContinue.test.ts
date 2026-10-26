@@ -56,6 +56,7 @@ function setup(o: Opts = {}) {
   let loads = 0;
   const worker: Record<string, unknown> = {
     advanceStartGate: vi.fn(async (..._args: unknown[]) => ({ proceed: true as const, how: "person_receipt" })),
+    advanceFixGate: vi.fn(async (..._args: unknown[]) => ({ proceed: true as const, how: "not_gated", announce: false })),
     advanceLoadItem: vi.fn(async () => (loads++ === 0 ? AT_SPEC : { ...AT_SPEC, stage: "pr_opened" })),
     advanceStartRun: vi.fn(async (_r: AdvanceRunRequest): Promise<AdvanceRunStart> => ({ ok: true as const, runId: "run-1" })),
     advanceRunOutcome: vi.fn(async (_a: string, id: string): Promise<AdvanceRunOutcome> => {
@@ -269,6 +270,9 @@ describe("a check fix round", () => {
     expect(w.advanceContinue).toHaveBeenCalledWith(WHO, "run-fix-1");
     expect(w.advanceBuildFailed).not.toHaveBeenCalled();
     expect(logs.find((l) => l.event === "advance.built")).toMatchObject({ run_id: CHILD(1) });
+    // D#483 S5-b2a part 3: the gate was asked for the failed run once; the continuation of the round it started is not a new round and passes no gate.
+    expect(w.advanceFixGate!.mock.calls.map((c) => c[1])).toEqual([{ personFiled: false, checkFailedRunId: "run-b" }]);
+    expect(w.advanceStartCheckFix).toHaveBeenCalledTimes(1);
   });
 
   it("a fix round parked by a run limit ends build_parked, with no failure transition", async () => {

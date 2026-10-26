@@ -549,6 +549,11 @@ export interface AdvanceItem extends AdvancePrSource {
   /** The item's newest executor run (any status), or null. A build that ended with no pull request is recorded against it. */
   executorRunId: string | null;
   /**
+   * D#483 S5-b2a part 3: set when the item's newest executor run FAILED ITS CHECK and a fix-round question or receipt is on record for it (the gate asked, or decided, before
+   * the workflow ended). The re-entry resumes that run's check fix round. Null for any other item, so "Check the build" keeps its meaning for them.
+   */
+  checkFailedRunId?: string | null;
+  /**
    * D#483 S4-e: the proposal this item was approved from, when there is one (third-party text, to be fenced by the prompt that reads it).
    * Absent or null for an item with no proposal. S4-b3: `claims` and `evidence` are read with it (see `AdvanceProposal`).
    */
@@ -956,9 +961,14 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
 
   async function loadItemRow(accountId: string, workItemId: string): Promise<Omit<AdvanceItem, keyof AdvancePrSource> | null> {
     return withTenant(runnerPool, accountId, async (client) => {
-      const r = await client.query<{ stage: string; provenance: string; repo_id: string | null; gh_number: string | null; discussion_id: string | null; gh_owner: string | null; gh_name: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; executor_run_id: string | null; p_id: string | null; p_title: string | null; p_summary: string | null }>(
+      const r = await client.query<{ stage: string; provenance: string; repo_id: string | null; gh_number: string | null; discussion_id: string | null; gh_owner: string | null; gh_name: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; executor_run_id: string | null; check_failed_run_id: string | null; p_id: string | null; p_title: string | null; p_summary: string | null }>(
         `SELECT w.stage, w.provenance, w.repo_id, w.gh_number, w.discussion_id, r.gh_owner, r.gh_name, d.kind,
                 (SELECT ar.id FROM agent_runs ar WHERE ar.account_id = w.account_id AND ar.work_item_id = w.id AND ar.role = 'executor' ORDER BY ar.created_at DESC, ar.id DESC LIMIT 1) AS executor_run_id,
+                (SELECT x.id FROM (SELECT a.id, a.status, a.account_id FROM agent_runs a WHERE a.account_id = w.account_id AND a.work_item_id = w.id AND a.role = 'executor' ORDER BY a.created_at DESC, a.id DESC LIMIT 1) x
+                  WHERE x.status = 'failed'
+                    AND EXISTS (SELECT 1 FROM run_events e WHERE e.account_id = x.account_id AND e.run_id = x.id AND e.kind = 'run.status_changed' AND e.payload->>'to' = 'failed' AND e.payload->>'failureReason' = 'check_failed')
+                    AND (EXISTS (SELECT 1 FROM decision_asks k WHERE k.account_id = w.account_id AND k.work_item_id = w.id AND k.decision_type = 'launch_sub_item' AND k.sub_item_key = 'check-' || left(replace(x.id::text, '-', ''), 12))
+                      OR EXISTS (SELECT 1 FROM decision_receipts k WHERE k.account_id = w.account_id AND k.work_item_id = w.id AND k.decision_type = 'launch_sub_item' AND k.sub_item_key = 'check-' || left(replace(x.id::text, '-', ''), 12)))) AS check_failed_run_id,
                 pr.id AS p_id, pr.title AS p_title, pr.summary AS p_summary,
                 EXISTS (SELECT 1 FROM spec_versions s WHERE s.account_id = w.account_id AND s.work_item_id = w.id AND s.erased_at IS NULL) AS has_spec,
                 (SELECT max(s.version) FROM spec_versions s WHERE s.account_id = w.account_id AND s.work_item_id = w.id AND s.erased_at IS NULL) AS spec_version
@@ -986,6 +996,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
             hasSpec: row.has_spec,
             specVersion: row.spec_version === null ? null : Number(row.spec_version),
             executorRunId: row.executor_run_id,
+            checkFailedRunId: row.check_failed_run_id,
             proposal: row.p_id === null || facts === null ? null : { id: row.p_id, title: row.p_title ?? "", summary: row.p_summary, claims: facts.claims, evidence: facts.evidence },
           }
         : null;
@@ -2102,7 +2113,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (!UUID_RE.test(who.accountId) || !UUID_RE.test(who.workItemId) || !UUID_RE.test(who.userId)) return { proceed: false, reason: "blocked", blockedBy: "bad_ids" };
     const bad = await guardStep(who);
     if (bad) return { proceed: false, reason: "blocked", blockedBy: bad.reason === "item_halted" || bad.reason === "halted_since_approval" ? "halted" : "refused" };
-    return deps.fixGate({ accountId: who.accountId, userId: who.userId, workItemId: who.workItemId }, { personFiled: input.personFiled === true });
+    return deps.fixGate({ accountId: who.accountId, userId: who.userId, workItemId: who.workItemId }, { personFiled: input.personFiled === true, ...(input.checkFailedRunId === undefined ? {} : { checkFailedRunId: input.checkFailedRunId }) });
   }
 
   return {

@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from 'pg';
 import { withdrawSubItemAsk } from '@fx/db/src/decisionAsks.js';
 import { getCurrentDialSetting } from '@fx/db/src/decisions.js';
 import { DIAL_VERSION_CATALOGUE_DEFAULT, writeSubItemApprovalReceipt } from '@fx/db/src/receiptWriter.js';
+import { CHECK_KEY_RE, checkKeyOf } from './fixRoundGate.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { VERDICT_ROLES } from '../work-items/verdictRoles.js';
 
@@ -105,13 +106,26 @@ export async function approveSubItemIn(client: PoolClient, who: { accountId: str
       `SELECT count(*)::text AS n FROM work_item_driver_events WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND kind = 'fix_round_started'`, [accountId, input.workItemId])).rows[0]!.n;
     if (Number(m[1]) !== Number(started) + 1) throw new SubItemApprovalError('wrong_round');
   }
+  // A check fix round is approved only for the failed run it would resume, and only while that run is still the item's newest executor run (a round started or a
+  // later run makes the key stale). That run is the receipt's anchor: a check fix round has no review yet.
+  const isCheck = input.key.startsWith('check-');
+  let checkRun: string | null = null;
+  if (isCheck) {
+    if (!CHECK_KEY_RE.test(input.key)) throw new SubItemApprovalError('invalid_key');
+    const newest = (await client.query<{ id: string; failed: boolean }>(
+      `SELECT ar.id, (ar.status = 'failed' AND EXISTS (SELECT 1 FROM run_events e WHERE e.account_id = ar.account_id AND e.run_id = ar.id AND e.kind = 'run.status_changed'
+                AND e.payload->>'to' = 'failed' AND e.payload->>'failureReason' = 'check_failed')) AS failed
+         FROM agent_runs ar WHERE ar.account_id = $1::uuid AND ar.work_item_id = $2::uuid AND ar.role = 'executor' ORDER BY ar.created_at DESC, ar.id DESC LIMIT 1`, [accountId, input.workItemId])).rows[0];
+    if (newest === undefined || !newest.failed || checkKeyOf(newest.id) !== input.key) throw new SubItemApprovalError('wrong_round');
+    checkRun = newest.id;
+  }
   // The open ask for THIS key, when one exists, names the anchor run. Otherwise: for a fix round, the newest SUCCEEDED run of a verdict role (the
   // driver's own list); for a planned PR, the run that published the approved Spec.
   const asks = await client.query<{ id: string; run_id: string | null }>(
     `SELECT id, run_id FROM decision_asks WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND decision_type = 'launch_sub_item' AND sub_item_key = $3::text
         AND state IN ('open', 'overdue') ORDER BY raised_at DESC, id DESC`, [accountId, input.workItemId, input.key]);
   const askRun = asks.rows.find((a) => a.run_id !== null)?.run_id ?? null;
-  const anchorId = askRun ?? (isFix
+  const anchorId = checkRun ?? askRun ?? (isFix
     ? (await client.query<{ id: string }>(
       `SELECT id FROM agent_runs WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND role = ANY($3::text[]) AND status = 'succeeded'
         ORDER BY COALESCE(ended_at, created_at) DESC, id DESC LIMIT 1`, [accountId, input.workItemId, VERDICT_ROLES])).rows[0]?.id
@@ -129,7 +143,7 @@ export async function approveSubItemIn(client: PoolClient, who: { accountId: str
     if (!(await withdrawSubItemAsk(client, ask.id, input.key))) continue;
     withdrawn += 1;
     // A workflow ended waiting on this ask: ONE advance re-enters it (keyed by the ask, so a replay finds the same request). An approval nobody was waiting for files none.
-    if (isFix && advanceActionId === null) {
+    if ((isFix || isCheck) && advanceActionId === null) {
       const req = await client.query<{ action_id: string; replayed: boolean }>('SELECT action_id, replayed FROM run_action_request($1, $2, $3, $4)',
         ['advance_work_item', input.workItemId, `subitem:${ask.id}`, createHash('sha256').update(`advance_work_item:${input.workItemId}`).digest('hex')]);
       if (!req.rows[0]!.replayed) advanceActionId = req.rows[0]!.action_id;

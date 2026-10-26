@@ -99,7 +99,7 @@ export interface FixRoundFacts {
   name: string | null;
 }
 
-const roundOf = (key: string): string => { const m = /^fix-([0-9]{1,3})$/.exec(key); return m ? `fix round ${m[1]}` : 'a fix round'; };
+const roundOf = (key: string): string => { const m = /^fix-([0-9]{1,3})$/.exec(key); return m ? `fix round ${m[1]}` : /^check-[0-9a-f]{12}$/.test(key) ? 'the check fix round' : 'a fix round'; };
 const cap = (t: string): string => t.charAt(0).toUpperCase() + t.slice(1);
 
 /** D#483 S5-b2a part 2: the card's sentence for a fix round the gate asked about or launched. Pure. Null for a key or value this build does not know how to word safely. */
@@ -129,14 +129,14 @@ async function readFixRoundDecision(client: Pick<PoolClient, 'query'>, workItemI
   // A round a person held shows as held until a receipt for that key exists (a later start, by anyone, ends the hold).
   const held = await client.query<{ sub_item_key: string; answered_at: Date }>(
     `SELECT a.sub_item_key, a.answered_at FROM decision_asks a
-      WHERE a.work_item_id = $1::uuid AND a.decision_type = 'launch_sub_item' AND a.state = 'answered' AND a.answered_option = 'fix_hold' AND a.sub_item_key ~ '^fix-[0-9]{1,3}$'
+      WHERE a.work_item_id = $1::uuid AND a.decision_type = 'launch_sub_item' AND a.state = 'answered' AND a.answered_option = 'fix_hold' AND a.sub_item_key ~ '^(fix-[0-9]{1,3}|check-[0-9a-f]{12})$'
         AND NOT EXISTS (SELECT 1 FROM decision_receipts r WHERE r.work_item_id = a.work_item_id AND r.decision_type = 'launch_sub_item' AND r.sub_item_key = a.sub_item_key)
       ORDER BY a.answered_at DESC, a.id DESC LIMIT 1`, [workItemId]);
   if (held.rows[0]) return describeFixRound({ kind: 'hold', key: held.rows[0].sub_item_key, chosen: null, decided_by: null, at: held.rows[0].answered_at, name: null });
   const r = await client.query<{ sub_item_key: string; chosen: string; actor: string; created_at: Date; name: string | null }>(
     `SELECT r.sub_item_key, r.chosen, r.actor, r.created_at, COALESCE(NULLIF(u.name, ''), NULLIF(u.github_login, '')) AS name
        FROM decision_receipts r LEFT JOIN users u ON u.id::text = r.actor
-      WHERE r.work_item_id = $1::uuid AND r.decision_type = 'launch_sub_item' AND r.sub_item_key ~ '^fix-[0-9]{1,3}$'
+      WHERE r.work_item_id = $1::uuid AND r.decision_type = 'launch_sub_item' AND r.sub_item_key ~ '^(fix-[0-9]{1,3}|check-[0-9a-f]{12})$'
       ORDER BY r.created_at DESC, r.id DESC LIMIT 1`, [workItemId]);
   const row = r.rows[0];
   if (!row || (start?.at != null && new Date(start.at).getTime() >= row.created_at.getTime())) return null;

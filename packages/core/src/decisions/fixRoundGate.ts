@@ -25,6 +25,10 @@ import { withTenant } from '../tenancy/withTenant.js';
  *      An unattended re-entry asks again. Steps 1-4 always run in a TENANT-ONLY transaction (the policy receipt definer refuses a session with a person); only step 5's
  *      receipt uses the person's session, in a transaction of its own.
  *
+ * A CHECK fix round (D#483 S5-b2a part 3) goes through the same steps. It has no `fix_round_started` event, so its key names the FAILED run it would resume:
+ * `check-<first 12 hex of that run's id>`. One failed run, one key, one approval; the next failed check is another run and asks again. Its anchor for the receipt is that run.
+ * A failed run that is not this item's executor run, or did not fail its check, is never gated for (blocked, fail closed).
+ *
  * The parent envelope is enforced by the reservation the round makes when it starts (the existing spending-limit pause), not here: the resolver is given room.
  */
 export interface FixGateCtx {
@@ -35,11 +39,18 @@ export interface FixGateInput {
   workItemId: string;
   /** The signed-in person whose click filed this advance, or null for an unattended re-entry. */
   personUserId: string | null;
+  /** Set for a CHECK fix round: the failed (`check_failed`) executor run it would resume. Absent: a review fix round. */
+  checkFailedRunId?: string;
 }
 export type FixGateHow = 'not_gated' | 'already_decided' | 'policy_receipt' | 'person_answer';
 export type FixGateResult =
   | { proceed: true; how: FixGateHow; key: string | null; announce: boolean }
   | { proceed: false; reason: 'asked' | 'blocked'; key: string | null; blockedBy: string | null; askId: string | null };
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** The sub-item key of a check fix round: the first 12 hex of the failed run's id (lowercase, no dashes). Fits the database's `[a-z0-9-]{1,32}`. */
+export const checkKeyOf = (failedRunId: string): string => `check-${failedRunId.replace(/-/g, '').slice(0, 12).toLowerCase()}`;
+export const CHECK_KEY_RE = /^check-[0-9a-f]{12}$/;
 
 export const FIX_ASK_START = 'fix_start';
 export const FIX_ASK_HOLD = 'fix_hold';
@@ -51,9 +62,10 @@ const go = (how: FixGateHow, key: string | null, announce = false): FixGateResul
 const stop = (reason: 'asked' | 'blocked', key: string | null, blockedBy: string | null, askId: string | null = null): FixGateResult => ({ proceed: false, reason, key, blockedBy, askId });
 
 const askRationale = (title: string | null, key: string): string =>
-  sanitize(`${title ? `"${title.slice(0, 200)}": ` : ''}Your setting asks before a fix round starts (${key.replace('fix-', 'round ')}). Nothing starts until you answer: start the round, or hold it.`);
+  sanitize(`${title ? `"${title.slice(0, 200)}": ` : ''}Your setting asks before ${CHECK_KEY_RE.test(key) ? 'a check fix round' : `a fix round (${key.replace('fix-', 'round ')})`} starts. Nothing starts until you answer: start the round, or hold it.`);
 
 export async function gateFixRound(ctx: FixGateCtx, input: FixGateInput): Promise<FixGateResult> {
+  if (input.checkFailedRunId !== undefined && !UUID_RE.test(input.checkFailedRunId)) return stop('blocked', null, 'fix_launch_unreadable');
   const run = (client: PoolClient): Promise<Decided> => decide(client, ctx.accountId, input);
   let decided: Decided;
   try {
@@ -116,13 +128,25 @@ async function decide(client: PoolClient, accountId: string, input: FixGateInput
       WHERE a.account_id = $1::uuid AND a.work_item_id = $2::uuid ORDER BY a.created_at DESC, a.id DESC LIMIT 1`, [accountId, workItemId])).rows[0];
   if (approval === undefined || spec === undefined) return go('not_gated', null);
 
-  const started = (await client.query<{ n: string }>(
-    `SELECT count(*)::text AS n FROM work_item_driver_events WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND kind = 'fix_round_started'`, [accountId, workItemId])).rows[0]!.n;
-  const key = `fix-${Number(started) + 1}`;
+  let key: string;
+  if (input.checkFailedRunId !== undefined) {
+    // A check fix round resumes one FAILED run of this item: it must be this item's NEWEST executor run (as approveSubItem requires), failed on its check. A stale id is not current: blocked, nothing written, no ask.
+    const failed = await client.query(
+      `SELECT 1 FROM agent_runs ar WHERE ar.account_id = $1::uuid AND ar.id = $2::uuid AND ar.work_item_id = $3::uuid AND ar.role = 'executor' AND ar.status = 'failed'
+          AND ar.id = (SELECT n.id FROM agent_runs n WHERE n.account_id = ar.account_id AND n.work_item_id = ar.work_item_id AND n.role = 'executor' ORDER BY n.created_at DESC, n.id DESC LIMIT 1)
+          AND EXISTS (SELECT 1 FROM run_events e WHERE e.account_id = ar.account_id AND e.run_id = ar.id AND e.kind = 'run.status_changed' AND e.payload->>'to' = 'failed' AND e.payload->>'failureReason' = 'check_failed')`,
+      [accountId, input.checkFailedRunId, workItemId]);
+    if (failed.rowCount !== 1) return stop('blocked', null, 'fix_launch_unreadable');
+    key = checkKeyOf(input.checkFailedRunId);
+  } else {
+    const started = (await client.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM work_item_driver_events WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND kind = 'fix_round_started'`, [accountId, workItemId])).rows[0]!.n;
+    key = `fix-${Number(started) + 1}`;
+  }
 
   const receipt = await client.query<{ id: string }>(
     `SELECT id FROM decision_receipts WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND decision_type = 'launch_sub_item'
-        AND sub_item_key = $3::text AND spec_version_id = $4::uuid LIMIT 1`, [accountId, workItemId, key, spec.id]);
+        AND sub_item_key = $3::text AND spec_version_id = $4::uuid AND ($5::uuid IS NULL OR run_id = $5::uuid) LIMIT 1`, [accountId, workItemId, key, spec.id, input.checkFailedRunId ?? null]);
   if (receipt.rows[0] !== undefined) return go('already_decided', key);
 
   if (item.provenance !== 'internal') return stop('blocked', key, 'untrusted_work_creation');
@@ -132,7 +156,8 @@ async function decide(client: PoolClient, accountId: string, input: FixGateInput
   const preset = presetOf(dial?.disposition);
   const dialVersion = dial?.version ?? DIAL_VERSION_CATALOGUE_DEFAULT;
 
-  const anchor = (await client.query<{ id: string }>(
+  // A review fix round hangs on the newest verdict run; a check fix round has no review yet, so it hangs on the failed run it resumes.
+  const anchor = input.checkFailedRunId ?? (await client.query<{ id: string }>(
     `SELECT id FROM agent_runs WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND role = ANY($3::text[]) AND status = 'succeeded'
       ORDER BY COALESCE(ended_at, created_at) DESC, id DESC LIMIT 1`, [accountId, workItemId, VERDICT_ROLES])).rows[0]?.id;
 
@@ -182,7 +207,7 @@ async function decide(client: PoolClient, accountId: string, input: FixGateInput
   const rationale = askRationale(item.title, key);
   const askId = await raiseAsk(client, {
     class: cls, decisionType: 'launch_sub_item', workItemId, runId: anchor,
-    options: [{ id: FIX_ASK_START, label: 'Start the fix round' }, { id: FIX_ASK_HOLD, label: 'Hold it for now' }],
+    options: [{ id: FIX_ASK_START, label: CHECK_KEY_RE.test(key) ? 'Start the check fix round' : 'Start the fix round' }, { id: FIX_ASK_HOLD, label: 'Hold it for now' }],
     proposed: FIX_ASK_START, rationale, quotedInputs: [{ trust: 'untrusted', storedBody: rationale }], preset,
   });
   if (!(await keySubItemAsk(client, askId, key))) throw new Error('fixRoundGate: the new ask could not be keyed');
