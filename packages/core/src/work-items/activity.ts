@@ -10,6 +10,7 @@ import { setupPauseFor, type SetupHold, type SetupRequest } from '../setup-reque
 import { parseAcceptanceScope } from '../specs/acceptanceScope.js';
 import { readPublicChange, type PublicChange } from '../repos/publicChange.js';
 import { readStartDecision, type StartDecision } from './startDecision.js';
+import { MONTHLY_BUDGET_PARKED_STOP, RUN_LIMIT_PARKED_STOP, continuationStopSentence } from './continuationStops.js';
 import { BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, BASE_SYNC_UNAVAILABLE_SENTENCE, FIX_ROUND_STOP_SENTENCE, REPUBLISH_BASE_MISSING, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE, REPUBLISH_STACKED_UNSUPPORTED } from './baseSync.js';
 import { PUBLIC_BRANCH_MOVED, PUBLIC_BRANCH_MOVED_SENTENCE, PUBLIC_HEAD_UNAVAILABLE, PUBLIC_HEAD_UNAVAILABLE_SENTENCE } from '../repos/planePushRecord.js';
 import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_FAILED_OUTSIDE_CHANGE_SENTENCE } from './checkFailure.js';
@@ -632,18 +633,20 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       // Build again was pressed and the driver stopped before starting anything (an open pull request, or GitHub could not be asked):
       // the newest such stop since the item reached Needs a person, by a fixed code.
       const rebuildStop = (
-        await client.query<{ code: string | null }>(
-          `SELECT e.code FROM work_item_driver_events e
+        await client.query<{ code: string | null; reasons: string[] | null }>(
+          `SELECT e.code, e.reasons FROM work_item_driver_events e
             WHERE e.work_item_id = $1::uuid AND e.kind IN ('stopped', 'escalated') AND e.code = ANY($2::text[])
               -- An escalation is written in the same transaction as the move to Needs a person, so its stamp equals the move's: it counts with >=, as the reviewer_no_verdict lookup below does. A stop is written after the move.
               AND CASE WHEN e.kind = 'escalated' THEN e.created_at >= COALESCE((SELECT max(t.created_at) FROM work_item_transitions t WHERE t.work_item_id = $1::uuid AND t.to_stage = 'needs_human'), '-infinity'::timestamptz)
                        ELSE e.created_at > COALESCE((SELECT max(t.created_at) FROM work_item_transitions t WHERE t.work_item_id = $1::uuid AND t.to_stage = 'needs_human'), '-infinity'::timestamptz) END
             ORDER BY e.seq DESC LIMIT 1`,
-          [workItemId, ['rebuild_pr_open', 'rebuild_check_unavailable', CHECK_FIX_BRANCH_STOP_CODE, PUBLIC_BRANCH_MOVED, PUBLIC_HEAD_UNAVAILABLE, BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, REPUBLISH_BASE_MISSING, REPUBLISH_STACKED_UNSUPPORTED, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE, CHECK_FAILED_OUTSIDE_CHANGE]],
+          [workItemId, ['rebuild_pr_open', 'rebuild_check_unavailable', CHECK_FIX_BRANCH_STOP_CODE, PUBLIC_BRANCH_MOVED, PUBLIC_HEAD_UNAVAILABLE, BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, REPUBLISH_BASE_MISSING, REPUBLISH_STACKED_UNSUPPORTED, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE, CHECK_FAILED_OUTSIDE_CHANGE, RUN_LIMIT_PARKED_STOP, MONTHLY_BUDGET_PARKED_STOP]],
         )
       ).rows[0];
+      // C88 section 3: a build parked at a run limit shows the fixed sentence of its refused_by (or "Needs your attention" for one this code does not know).
+      const contStopSentence = continuationStopSentence(rebuildStop?.code, rebuildStop?.reasons);
       const rebuildSentence = rebuildStop?.code && Object.hasOwn(CHECK_FAILED_SENTENCES, rebuildStop.code) ? CHECK_FAILED_SENTENCES[rebuildStop.code] : undefined;
-      const branchStop = rebuildStop?.code === CHECK_FIX_BRANCH_STOP_CODE || rebuildStop?.code === PUBLIC_BRANCH_MOVED || rebuildStop?.code === PUBLIC_HEAD_UNAVAILABLE || rebuildStop?.code === BASE_SYNC_CONFLICT || rebuildStop?.code === BASE_SYNC_UNAVAILABLE || rebuildStop?.code === REPUBLISH_BASE_MISSING || rebuildStop?.code === REPUBLISH_STACKED_UNSUPPORTED || rebuildStop?.code === REPUBLISH_BRANCH_MOVED || rebuildStop?.code === REPUBLISH_FAILED || rebuildStop?.code === REPUBLISH_NO_CHANGE || rebuildStop?.code === CHECK_FAILED_OUTSIDE_CHANGE;
+      const branchStop = rebuildStop?.code === CHECK_FIX_BRANCH_STOP_CODE || rebuildStop?.code === PUBLIC_BRANCH_MOVED || rebuildStop?.code === PUBLIC_HEAD_UNAVAILABLE || rebuildStop?.code === BASE_SYNC_CONFLICT || rebuildStop?.code === BASE_SYNC_UNAVAILABLE || rebuildStop?.code === REPUBLISH_BASE_MISSING || rebuildStop?.code === REPUBLISH_STACKED_UNSUPPORTED || rebuildStop?.code === REPUBLISH_BRANCH_MOVED || rebuildStop?.code === REPUBLISH_FAILED || rebuildStop?.code === REPUBLISH_NO_CHANGE || rebuildStop?.code === CHECK_FAILED_OUTSIDE_CHANGE || contStopSentence !== null;
       // A reviewer that kept ending without a verdict handed the item over: the notice names it and how it ended, never the executor's summary.
       const noVerdict = rebuildSentence || branchStop
         ? undefined
@@ -684,7 +687,9 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       const summary = ex?.summary?.trim() ? safeModelText(ex.summary, ACTIVITY_LIMITS.maxNoticeChars) : null;
       notice = rebuildSentence
         ? { kind: 'check_failed', reason: rebuildSentence }
-        : branchStop
+        : contStopSentence !== null
+          ? { kind: 'needs_human', reason: contStopSentence }
+          : branchStop
           ? { kind: 'needs_human', reason: rebuildStop?.code && Object.hasOwn(FIX_ROUND_STOP_SENTENCE, rebuildStop.code) ? FIX_ROUND_STOP_SENTENCE[rebuildStop.code]! : rebuildStop?.code === CHECK_FAILED_OUTSIDE_CHANGE ? CHECK_FAILED_OUTSIDE_CHANGE_SENTENCE : rebuildStop?.code === PUBLIC_BRANCH_MOVED ? PUBLIC_BRANCH_MOVED_SENTENCE : rebuildStop?.code === PUBLIC_HEAD_UNAVAILABLE ? PUBLIC_HEAD_UNAVAILABLE_SENTENCE : CHECK_FIX_BRANCH_SENTENCE }
           : unverifiableSentence
           ? { kind: 'needs_human', reason: unverifiableSentence }

@@ -1,12 +1,12 @@
 import { sleep } from "workflow";
-import type { AdvanceRunStart, AdvanceStartArgs, AdvanceTriageResult, DecisionStepCode, StartGateStepInput, StartGateStepOut } from "@fx/worker";
+import type { AdvanceContinueOut, AdvanceRunStart, AdvanceStartArgs, AdvanceTriageResult, DecisionStepCode, StartGateStepInput, StartGateStepOut } from "@fx/worker";
 import { getWorker } from "../lib/worker";
 import { getIssueReader } from "../lib/github/issueRead";
 import { openInstallationHttp } from "../lib/github/installationHttp";
 import { publishLightSpecBody, startLightSpecBody, type LightPublished } from "../lib/advanceLightSteps";
 import { publishRespecBody, startRespecBody, type RespecPublished } from "../lib/advanceRespecSteps";
 import { loadBody, runOutcomeBody, startClassifyBody, triageBody, type ClassifyOutcome, type LoadedAdvance, type TriageLoaded } from "../lib/advanceSteps";
-import { buildBody, buildFailedBody, buildOutcomeBody, cancelRunBody, cancelStepRunsBody, checkFixBody, type CheckFixOut, decisionBody, panelBody, specBody, stageBody, startGateBody, type BuildRunOutcome, type StepOutcome } from "../lib/advanceStageSteps";
+import { buildBody, buildFailedBody, buildOutcomeBody, cancelRunBody, cancelStepRunsBody, checkFixBody, continueBody, type CheckFixOut, decisionBody, panelBody, specBody, stageBody, startGateBody, type BuildRunOutcome, type StepOutcome } from "../lib/advanceStageSteps";
 import {
   cancelBody,
   eventBody,
@@ -118,6 +118,14 @@ const CLASSIFY_WAIT_MS = 15 * 60_000;
 const BUILD_POLL_MS = 60_000;
 /** The run's own ceiling is 240 minutes and its watchdog adds five; the workflow gives up a little after that. */
 const BUILD_WAIT_MS = 250 * 60_000;
+/**
+ * D#2 H14c-3-3b-2 (C88 R1, section 3): the run statuses that end an executor run at a limit and may be continued; the most continuations of one work item (a
+ * workflow body imports no value from a package, so a test holds this equal to `MAX_CONTINUATIONS_PER_WORK_ITEM`); and how a busy answer is waited out.
+ */
+const LIMIT_END_STATUSES: readonly string[] = ["timed_out", "killed_spend"];
+const MAX_CONTINUATIONS_PER_WORK_ITEM = 10;
+const CONTINUE_BUSY_SLEEP_MS = 30_000;
+const CONTINUE_BUSY_RETRIES = 3;
 /** D#6 R-CHK-3: a hard stop on check fix rounds in one driver run, above any `maxFixRounds()` the plan sets. The worker is what enforces the plan's limit. */
 const CHECK_FIX_ROUNDS_CEILING = 20;
 /** After a run that succeeded, how long to wait for the pull request to reach the item (the webhook is a moment behind). */
@@ -223,6 +231,15 @@ export async function advanceBuildOutcomeStep(accountId: string, runId: string):
 export async function advanceCheckFixStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, failedRunId: string): Promise<CheckFixOut> {
   "use step";
   return checkFixBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, failedRunId);
+}
+
+/**
+ * D#2 H14c-3-3b-2 (C88 R1): an executor run the workflow waited on ended at a limit. Continues it when the customer's run limits allow. The answer is one fixed
+ * word (and a run id); the step never throws for a refusal, and a replay answers the child the first pass started.
+ */
+export async function advanceContinueStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, endedRunId: string): Promise<AdvanceContinueOut> {
+  "use step";
+  return continueBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, endedRunId);
 }
 
 export async function advanceStageStep(accountId: string, workItemId: string): Promise<string | null> {
@@ -870,6 +887,13 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
     }
     break;
   }
+  // D#2 H14c-3-3b-2: a build that ended at a limit is continued (or parked with its reason) before any failure is recorded.
+  {
+    const next = await continueLimitEnds(args, runId, outcome);
+    if ("end" in next) return next.end;
+    runId = next.runId;
+    outcome = next.outcome;
+  }
   // D#6 R-CHK-3 (C47): a run whose approved check failed has no pull request, and its work is on the run branch. Each fix round resumes it and is waited for like the build;
   // the worker refuses a round past the plan's `maxFixRounds()` (`escalated`), and the item then goes to Needs human. Bounded here as well, so the loop cannot run on.
   for (let round = 1; round <= CHECK_FIX_ROUNDS_CEILING && outcome.done && outcome.status === "failed" && outcome.failureReason === "check_failed"; round++) {
@@ -904,6 +928,11 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
       else waited += BUILD_POLL_MS;
       outcome = await advanceBuildOutcomeStep(accountId, runId);
     }
+    // D#2 H14c-3-3b-2: the same for a check fix round that ended at a limit.
+    const next = await continueLimitEnds(args, runId, outcome);
+    if ("end" in next) return next.end;
+    runId = next.runId;
+    outcome = next.outcome;
   }
   if (!outcome.done) {
     // The wait ran out. The run must not keep going (and spending) behind a card that says Needs human.
@@ -1022,8 +1051,65 @@ async function checkBuildPhase(args: AdvanceStartArgs, pinned: number | null, ex
 }
 
 /** A build that ended without a pull request, as a fact of the item: a fixed code and the executor's run, whose summary says why. */
-async function buildStopped(args: AdvanceStartArgs, runId: string | null, code: string): Promise<void> {
-  await advanceEventStep(args.accountId, args.userId, args.workItemId, { kind: "stopped", dedupeKey: `build:${runId ?? args.actionId}`, code: code.replace(/[^a-z0-9_]/g, "_").slice(0, 64), ...(runId === null ? {} : { runId }) });
+async function buildStopped(args: AdvanceStartArgs, runId: string | null, code: string, reasons: string[] = []): Promise<void> {
+  await advanceEventStep(args.accountId, args.userId, args.workItemId, { kind: "stopped", dedupeKey: `build:${runId ?? args.actionId}`, code: code.replace(/[^a-z0-9_]/g, "_").slice(0, 64), ...(reasons.length === 0 ? {} : { reasons }), ...(runId === null ? {} : { runId }) });
+}
+
+/**
+ * D#2 H14c-3-3b-2 (C88 R1, section 3): an executor run the workflow waits on (the build, a check fix round, a review fix round) that ended at a limit is
+ * continued, or parked with a fixed reason, before any failure is recorded. `outcome` is the run's end as the caller read it. Answers the run to carry on
+ * with and how it stands (the caller's own handling follows: a child that is still running when its wait runs out ends like any run whose wait ran
+ * out), or the end of the workflow. A result `today` (and anything the step does not name) hands the outcome back unchanged, so the caller records the failure exactly as
+ * it did before continuation existed.
+ *
+ * Bounded three ways: at most `MAX_CONTINUATIONS_PER_WORK_ITEM + 1` looks in one workflow, the step's own count of stored automatic continuations (the cap that
+ * survives a restarted workflow), and the database's one live continuation per parent. A busy answer is slept on at most three times.
+ * C88 R5 / the run-extension dial seam: the worker step is the one place that decides whether a limit end continues on its own; the dial of H14c-5c-3 joins there, not here.
+ */
+async function continueLimitEnds(args: AdvanceStartArgs, startRunId: string, startOutcome: BuildRunOutcome): Promise<{ runId: string; outcome: BuildRunOutcome } | { end: Result }> {
+  const { accountId, userId, workItemId, haltEpoch } = args;
+  let runId = startRunId;
+  let outcome = startOutcome;
+  for (let looks = 0; looks <= MAX_CONTINUATIONS_PER_WORK_ITEM && outcome.done && LIMIT_END_STATUSES.includes(outcome.status); looks++) {
+    let step = await advanceContinueStep(accountId, userId, workItemId, haltEpoch, outcome.tailRunId);
+    for (let busy = 0; step.code === "busy" && busy < CONTINUE_BUSY_RETRIES; busy++) {
+      await sleep(CONTINUE_BUSY_SLEEP_MS);
+      step = await advanceContinueStep(accountId, userId, workItemId, haltEpoch, outcome.tailRunId);
+    }
+    if ((step.code === "continued" || step.code === "duplicate") && step.runId !== null && step.runId !== outcome.tailRunId) {
+      await advanceLogStep("advance.continued", { work_item_id: workItemId, from_run_id: outcome.tailRunId, run_id: step.runId, replay: step.code === "duplicate" });
+      runId = step.runId;
+      outcome = await waitForExecutorRun(accountId, runId);
+      continue;
+    }
+    if (step.code === "parked" && step.parkedAs !== null) {
+      const monthly = step.parkedAs === "monthly_budget_reached";
+      // C7's park already wrote the move to Needs a person; only the card's fact and the end are ours.
+      await buildStopped(args, outcome.tailRunId, monthly ? "monthly_budget_parked" : "run_limit_parked", monthly ? [] : [step.parkedAs]);
+      await advanceLogStep("advance.failed", { work_item_id: workItemId, run_id: runId, at: "build", reason: "run_limit_parked", parked_as: step.parkedAs });
+      return { end: { status: "failed", detail: `build_parked:${step.parkedAs}` } };
+    }
+    if (step.code === "work_item_closed") return { end: { status: "failed", detail: "build_item_closed" } };
+    if (step.code === "waiting_on_answer") return { end: await waitingOnAnswer(args, outcome.tailRunId) };
+    if (step.code === "halted") return { end: await haltedEnd(args, "continue") };
+    break;
+  }
+  return { runId, outcome };
+}
+
+/** The wait for one executor run the workflow did not start itself (a continuation): the same poll and the same two budgets as the build's, counted afresh for this run. */
+async function waitForExecutorRun(accountId: string, runId: string): Promise<BuildRunOutcome> {
+  let waited = 0;
+  let pendingWaited = 0;
+  let outcome = await advanceBuildOutcomeStep(accountId, runId);
+  while (!outcome.done && waited < BUILD_WAIT_MS && pendingWaited < RUNNER_PENDING_CEILING_MS) {
+    const queued = outcome.queuedOnRunner;
+    await sleep(BUILD_POLL_MS);
+    if (queued) pendingWaited += BUILD_POLL_MS;
+    else waited += BUILD_POLL_MS;
+    outcome = await advanceBuildOutcomeStep(accountId, runId);
+  }
+  return outcome;
 }
 
 interface Verdict {
@@ -1342,7 +1428,7 @@ async function recheckMergeOnly(args: AdvanceStartArgs, input: Parameters<typeof
  * Waits for a fix run to end, restarting it on the new side when its item moved there (D#599 PL-2, keyed by the worker). Answers the run followed last and
  * how it stands: `done` false when the wait ran out.
  */
-async function followFix(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; branch: string }, round: number, failing: Array<{ role: string; runId: string }>, rereview: number, runId: string, attempt: number, person = false): Promise<{ runId: string; fixed: BuildRunOutcome }> {
+async function followFix(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; branch: string }, round: number, failing: Array<{ role: string; runId: string }>, rereview: number, runId: string, attempt: number, person = false): Promise<{ runId: string; fixed: BuildRunOutcome; end?: Result }> {
   const { accountId, userId, workItemId, actionId } = args;
   let waited = 0;
   let fixed = await advanceBuildOutcomeStep(accountId, runId);
@@ -1365,7 +1451,10 @@ async function followFix(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: n
         continue;
       }
     }
-    return { runId, fixed };
+    // D#2 H14c-3-3b-2: a fix round that ended at a limit is continued (or parked with its reason) before the caller records a failed round.
+    const next = await continueLimitEnds(args, runId, fixed);
+    if ("end" in next) return { runId, fixed, end: next.end };
+    return { runId: next.runId, fixed: next.outcome };
   }
 }
 
@@ -1400,7 +1489,8 @@ async function personFixRound(args: AdvanceStartArgs, ctx: ReviewCtx): Promise<{
     return { end: { status: "fix_refused", detail: ask.fix.reason ?? undefined } };
   }
   const next: ReviewCtx = { ...ctx, fixRoundsStarted: round };
-  const { runId, fixed } = await followFix(args, next, pr, round, failing, 0, ask.fix.runId, ask.attempt, true);
+  const { runId, fixed, end } = await followFix(args, next, pr, round, failing, 0, ask.fix.runId, ask.attempt, true);
+  if (end) return { end };
   const failed = async (code: string): Promise<{ end: Result }> => {
     await advanceEventStep(accountId, userId, workItemId, { kind: "fix_round_failed", dedupeKey: `fixfail:${pr.headSha}:${actionId}`, code, headSha: pr.headSha, runId });
     return { end: { status: "fix_failed", detail: code } };
@@ -1648,6 +1738,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       return { status: "fix_refused", detail: fix.reason ?? undefined };
     }
     const followed = await followFix(args, ctx, pr, round.nextRound ?? round.round + 1, failing, rereview, fix.runId, fixAsk.attempt);
+    if (followed.end) return followed.end;
     fix = { ...fix, runId: followed.runId };
     const fixed = followed.fixed;
     if (!fixed.done) {

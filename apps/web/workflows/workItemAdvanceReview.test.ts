@@ -965,6 +965,41 @@ describe("fix rounds", () => {
     expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "fix_round_failed", code: `run_${status}` }));
   });
 
+  describe("D#2 H14c-3-3b-2: a fix round that ended at a limit is continued before it is recorded as failed", () => {
+    const CHILD = "99999999-9999-4999-8999-000000000001";
+    const withContinue = (t: ReturnType<typeof setup>, answer: unknown) => {
+      const original = t.worker.advanceRunOutcome.getMockImplementation()!;
+      t.worker.advanceRunOutcome.mockImplementation(async (account: string, id: string) => (id === CHILD ? { status: "succeeded", done: true, envelope: { summary: "fixed" } } : original(account, id)));
+      const step = vi.fn(async () => answer);
+      (t.worker as unknown as Record<string, unknown>).advanceContinue = step;
+      return step;
+    };
+
+    it.each(["timed_out", "killed_spend"])("a fix run that ends %s is continued, the child is followed, and the review goes on to the gate", async (status) => {
+      const t = setup(fresh({ verdict: needsFix, rounds: [{ decision: "fix", round: 0, nextRound: 1 }, { decision: "all_passed", round: 1 }], fixOutcome: { status, done: true, envelope: null } }));
+      const step = withContinue(t, { code: "continued", runId: CHILD, parkedAs: null });
+      expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+      expect(step).toHaveBeenCalledWith(WHO, "fix-1");
+      expect(t.worker.advanceRecordEvent).not.toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "fix_round_failed" }));
+    });
+
+    it("a fix round parked by a run limit ends the workflow with the park and records no failed round", async () => {
+      const t = setup(fresh({ verdict: needsFix, rounds: [{ decision: "fix", round: 0, nextRound: 1 }], fixOutcome: { status: "timed_out", done: true, envelope: null } }));
+      withContinue(t, { code: "parked", runId: null, parkedAs: "max_resumes" });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_parked:max_resumes" });
+      expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "run_limit_parked", reasons: ["max_resumes"] }));
+      expect(t.worker.advanceRecordEvent).not.toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "fix_round_failed" }));
+    });
+
+    it("a worker with no continue step (or one that answers today) leaves the fix round failing exactly as before", async () => {
+      const t = setup(fresh({ verdict: needsFix, rounds: [{ decision: "fix", round: 0, nextRound: 1 }], fixOutcome: { status: "timed_out", done: true, envelope: null } }));
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "fix_failed", detail: "timed_out" });
+      const u = setup(fresh({ verdict: needsFix, rounds: [{ decision: "fix", round: 0, nextRound: 1 }], fixOutcome: { status: "timed_out", done: true, envelope: null } }));
+      withContinue(u, { code: "today", runId: null, parkedAs: null });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "fix_failed", detail: "timed_out" });
+    });
+  });
+
   it("a fix run that never ends is cancelled and recorded", async () => {
     const t = setup(fresh({ verdict: needsFix, rounds: [{ decision: "fix", round: 0, nextRound: 1 }], fixOutcome: { status: "running", done: false, envelope: null } }));
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "fix_failed", detail: "wait_timeout" });

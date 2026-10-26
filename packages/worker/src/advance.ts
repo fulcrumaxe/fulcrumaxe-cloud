@@ -28,6 +28,7 @@ import { parseDecisionSnapshot, resolveDecisionOffer, writeDecisionSnapshot, typ
 import type { StartGatePort, StartGateStepInput, StartGateStepOut } from "./startGateStep.js";
 import { isContextSpill, type ContextAssembly, type ContextSection, type ContextSpill } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
+import { advanceContinue as advanceContinueCore, type AdvanceContinueOut } from "./advanceContinue.js";
 import { readVerifiedReviewGate, type VerifiedReviewGate } from "./verifiedReviewGate.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 import { startCheckFixRound } from "./checkFix.js";
@@ -673,6 +674,12 @@ export interface AdvanceFacade {
    * A replay returns the run it started.
    */
   advanceStartCheckFix(who: AdvanceStepWho, failedRunId: string): Promise<AdvanceRunStart>;
+  /**
+   * D#2 H14c-3-3b-2 (C88 R1): an executor run the workflow waits on ended at a limit (`timed_out` / `killed_spend`). Continues it when the customer's run limits allow, and
+   * answers one fixed code (see `AdvanceContinueOut`); anything this step cannot decide is `today`, the path the workflow took before continuation existed. Never throws.
+   * A replay answers the child the first pass started. The halt guard is the same as every other step's (`halted`).
+   */
+  advanceContinue(who: AdvanceStepWho, endedRunId: string): Promise<AdvanceContinueOut>;
   /**
    * D#483 S5-k1d: the reviewer runs of one head and re-review round that really started (every run but a `refused_spend` one), newest per role. A restarted review
    * uses these runs and asks only for the roles that have none, because the key of a denied ask finds its own refused run again and must never be replayed.
@@ -1518,6 +1525,17 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return out;
   }
 
+  async function advanceContinue(who: AdvanceStepWho, endedRunId: string): Promise<AdvanceContinueOut> {
+    const bad = await guardStep(who);
+    if (bad) return { code: bad.reason === "item_halted" || bad.reason === "halted_since_approval" ? "halted" : "today", runId: null, parkedAs: null };
+    const out = await advanceContinueCore(
+      { pool: runnerPool, registry: deps.registry, resolveRunSeat: deps.resolveRunSeat, logError: (name) => console.warn(JSON.stringify({ event: "advance.continue_error", work_item_id: who.workItemId, run_id: endedRunId, error: name })) },
+      who.accountId, who.workItemId, endedRunId,
+    );
+    console.info(JSON.stringify({ event: "advance.continue", work_item_id: who.workItemId, ended_run_id: endedRunId, code: out.code, run_id: out.runId, parked_as: out.parkedAs }));
+    return out;
+  }
+
   async function advanceStartFix(who: AdvanceStepWho, req: AdvanceFixRequest): Promise<AdvanceRunStart> {
     const review = deps.review;
     if (!review || !deps.registry) return { ok: false, reason: "resume_unavailable" };
@@ -2076,6 +2094,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     advanceRecordMergeOnly,
     advanceStartFix,
     advanceStartCheckFix,
+    advanceContinue,
     advanceReviewRuns,
     advanceMergeGate,
     advanceMergeOrder,
