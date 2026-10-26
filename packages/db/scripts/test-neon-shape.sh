@@ -594,7 +594,15 @@ check_receipt_writer_role_shape() {
             OR (p.proname = 'sub_item_approval_receipt_write'
               AND p.proargtypes = array_to_string('{uuid,text,uuid,uuid,integer,integer}'::regtype[]::oid[], ' ')::oidvector)
             OR (p.proname = 'decision_ask_withdraw_by_id'
-              AND p.proargtypes = array_to_string('{uuid,text}'::regtype[]::oid[], ' ')::oidvector)))
+              AND p.proargtypes = array_to_string('{uuid,text}'::regtype[]::oid[], ' ')::oidvector)
+            OR (p.proname = 'start_gate_claim'
+              AND p.proargtypes = array_to_string('{uuid,text,text,integer,text}'::regtype[]::oid[], ' ')::oidvector)
+            OR (p.proname = 'start_gate_attach'
+              AND p.proargtypes = array_to_string('{uuid,uuid,uuid}'::regtype[]::oid[], ' ')::oidvector)
+            OR (p.proname = 'start_receipt_write'
+              AND p.proargtypes = array_to_string('{uuid,text,text,text,integer,integer}'::regtype[]::oid[], ' ')::oidvector)
+            OR (p.proname = 'start_ask_answer'
+              AND p.proargtypes = array_to_string('{uuid,text,uuid}'::regtype[]::oid[], ' ')::oidvector)))
         UNION ALL SELECT 'relation ' || c.relname FROM pg_class c WHERE c.relowner = r.oid
         UNION ALL SELECT 'schema ' || n.nspname FROM pg_namespace n WHERE n.nspowner = r.oid
         UNION ALL SELECT 'type ' || t.typname FROM pg_type t WHERE t.typowner = r.oid) x), ''),
