@@ -117,16 +117,21 @@ describe("cost block for a run on the person's machine", () => {
   const rows = (u, status = "succeeded") => costRows(COST, status, u);
   it("priced, on a Claude plan", () => {
     const [model, compute] = rows(usage());
-    expect(model.value).toBe("On your Claude plan · API-equivalent $1.23 · 182,000 in / 9,400 out tokens");
+    expect(model.value).toBe("On your Claude plan · API-equivalent $1.23 · 187,000 in (5,000 cached) / 9,400 out tokens");
     expect(model.bill).toBeNull();
     expect(compute.value).toBe("Ran on your machine: no sandbox compute");
   });
   it("unpriced", () => {
-    expect(rows(usage({ api_equivalent_usd: null }))[0].value).toBe("On your Claude plan · no API price for this model · 182,000 in / 9,400 out tokens");
+    expect(rows(usage({ api_equivalent_usd: null }))[0].value).toBe("On your Claude plan · no API price for this model · 187,000 in (5,000 cached) / 9,400 out tokens");
   });
   it("API-key mode, priced and unpriced", () => {
-    expect(rows(usage({ credential_mode: "api_key" }))[0].value).toBe("On your own API key · $1.23 at API prices · 182,000 in / 9,400 out tokens");
-    expect(rows(usage({ credential_mode: "api_key", api_equivalent_usd: null }))[0].value).toBe("On your own API key · no API price for this model · 182,000 in / 9,400 out tokens");
+    expect(rows(usage({ credential_mode: "api_key" }))[0].value).toBe("On your own API key · $1.23 at API prices · 187,000 in (5,000 cached) / 9,400 out tokens");
+    expect(rows(usage({ credential_mode: "api_key", api_equivalent_usd: null }))[0].value).toBe("On your own API key · no API price for this model · 187,000 in (5,000 cached) / 9,400 out tokens");
+  });
+  it("a cache-heavy run shows input including cache, with the cached part named", () => {
+    const u = usage({ tokens_in: 346, tokens_out: 13000, cache_read_tokens: 1100000, cache_write_tokens: 100000 });
+    expect(runnerUsageLine(u)).toBe("On your Claude plan · API-equivalent $1.23 · 1,200,346 in (1,200,000 cached) / 13,000 out tokens");
+    expect(runnerUsageText({ runtime: "runner", runner_usage: u })).toBe(runnerUsageLine(u));
   });
   it("a small figure keeps four places, zero stays $0.00", () => {
     expect(runnerUsageLine(usage({ api_equivalent_usd: 0.0042 }))).toContain("API-equivalent $0.0042");

@@ -68,7 +68,10 @@ export function runnerUsageText(run) {
   const u = isObj(run.runner_usage) ? run.runner_usage : null;
   if (!u) return null;
   const price = Number.isFinite(u.api_equivalent_usd) ? apiUsd(u.api_equivalent_usd) : null;
-  const toks = tok(u.tokens_in) + " in / " + tok(u.tokens_out) + " out tokens";
+  // Input counts what the model read in all: the fresh tokens plus those read from or written to the prompt cache (a session re-reads its context every turn).
+  const cached = (Number.isFinite(u.cache_read_tokens) ? u.cache_read_tokens : 0) + (Number.isFinite(u.cache_write_tokens) ? u.cache_write_tokens : 0);
+  const inAll = (Number.isFinite(u.tokens_in) ? u.tokens_in : 0) + cached;
+  const toks = tok(inAll) + " in" + (cached > 0 ? " (" + tok(cached) + " cached)" : "") + " / " + tok(u.tokens_out) + " out tokens";
   if (u.credential_mode === "api_key") return "On your own API key \u00b7 " + (price ? price + " at API prices" : "no API price for this model") + " \u00b7 " + toks;
   return "On your Claude plan \u00b7 " + (price ? "API-equivalent " + price : "no API price for this model") + " \u00b7 " + toks;
 }
@@ -85,7 +88,8 @@ export function ownPlanLine(item) {
   if (item.own_plan_usage_state === "not_recorded") return "On your own plan: usage was not recorded for a finished run. That is not the same as $0.";
   if (item.own_plan_usage_state === "not_priced") {
     const t = isObj(item.own_plan_tokens) ? item.own_plan_tokens : {};
-    return "On your own plan: " + tok(t.input) + " in / " + tok(t.output) + " out tokens, with no API price for the model. That is not the same as $0.";
+    const cached = (Number.isFinite(t.cache_read) ? t.cache_read : 0) + (Number.isFinite(t.cache_write) ? t.cache_write : 0);
+    return "On your own plan: " + tok((Number.isFinite(t.input) ? t.input : 0) + cached) + " in" + (cached > 0 ? " (" + tok(cached) + " cached)" : "") + " / " + tok(t.output) + " out tokens, with no API price for the model. That is not the same as $0.";
   }
   return ownPlanText(item.own_plan_api_equivalent_usd);
 }

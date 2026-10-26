@@ -1,7 +1,7 @@
 import { NotAPlainSegment, segmentUnder } from "../../job/plainSegment.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
-import { CONTEXT_WARN_PCT, ContextLedgerCapture, SESSION_ID_PATTERN, contextNoteLine, contextPct, disabledToolsFor, normalizeMessage, type AgentHandle, type AgentRuntime, type LocalOnlyEvent, type StartOptions } from "@fulcrumaxe/runner-protocol";
+import { CONTEXT_WARN_PCT, ContextLedgerCapture, createUsageMeter, SESSION_ID_PATTERN, contextNoteLine, contextPct, disabledToolsFor, normalizeMessage, type AgentHandle, type AgentRuntime, type LocalOnlyEvent, type StartOptions } from "@fulcrumaxe/runner-protocol";
 import { assertEnabledSandbox, type ProtectedPaths } from "../../sandbox/sandboxSettings.js";
 import { SUBSCRIPTION_TOKEN_VAR, cleanEnv, type CleanEnvOptions, type CredentialMode } from "../../job/cleanEnv.js";
 import { UnknownRoleError, roleToolsFor } from "../../job/roleTools.js";
@@ -174,6 +174,9 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
       let sessionId: string | undefined;
       let agentOutput: Record<string, unknown> | undefined;
       const ledger = new ContextLedgerCapture(disabledToolsFor(excludes));
+      // The run total is metered from every assistant message and the result line's cumulative figures, with the same meter the sandbox path
+      // uses: the result line's own `usage` alone can describe one turn. This is the person's own CLI, so the hostile-line ceilings are lifted.
+      const meter = createUsageMeter({ maxLineInputSideTokens: Number.MAX_SAFE_INTEGER, maxLineOutputTokens: Number.MAX_SAFE_INTEGER, maxIds: Number.MAX_SAFE_INTEGER });
       const engineVersion = binary.version;
       log.write("meta", JSON.stringify({ engine_version: engineVersion }));
       // The version goes out first, so a breaking release shows up across runs.
@@ -221,7 +224,8 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
         await opts.onEvent(event);
         const near = nearLimitOf(message);
         if (near !== undefined) config.onNearLimit?.(near);
-        for (const local of projectLocalOnly(message, event, () => localSeq++, workdir, secrets, marks)) await config.onLocalEvent?.(local);
+        meter.observe(event);
+        for (const local of projectLocalOnly(message, event, () => localSeq++, workdir, secrets, marks, meter.total())) await config.onLocalEvent?.(local);
       };
       const enqueue = (line: string): void => {
         chain = chain.then(() => handleLine(line)).catch(() => {

@@ -60,5 +60,11 @@ export async function recordRunnerUsage(client: PoolClient, input: { accountId: 
     if (planDataUnavailable(error)) return;
     throw error;
   }
+  // Cross-check against the CLI's own total_cost_usd the runner reported. Never used as the figure; a large gap (a subagent on another model, a
+  // price table out of date) is logged so it is seen, not silently resolved either way.
+  const reported = input.stored.reduce((n, e) => n + (e.type === "usage" && typeof e.usage?.usd === "number" ? e.usage.usd : 0), 0);
+  if (reported > 0 && Math.abs(reported - usd) > Math.max(0.05, 0.25 * reported)) {
+    console.warn(JSON.stringify({ event: "runner_usage.cost_mismatch", run_id: input.runId, model: totals.model, computed_usd: usd, cli_reported_usd: Math.round(reported * 10000) / 10000 }));
+  }
   await client.query("SELECT runner_usage_price($1::uuid, $2::uuid, $3::numeric, $4::text)", [input.accountId, input.runId, usd, version]);
 }

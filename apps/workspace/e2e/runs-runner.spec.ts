@@ -154,8 +154,8 @@ test.describe("D#6 R2b-5b: a run on the person's own machine (mocked API)", () =
 const STATES = readdirSync(join(V1, "getRunInsight")).filter((f) => f.startsWith("200-runner-")).map((f) => f.slice(4, -5));
 const insightOf = (name: string) => readFixture("getRunInsight", `200-${name}.json`);
 const COST: Record<string, [string, string | RegExp]> = {
-  "runner-succeeded-with-pr": ["On your Claude plan · API-equivalent $0.01 · 1,000 in / 200 out tokens", "Estimate, priced at this run's model"],
-  "runner-usage-not-priced": ["On your Claude plan · no API price for this model · 500 in / 100 out tokens", /not the same as \$0/],
+  "runner-succeeded-with-pr": ["On your Claude plan · API-equivalent $0.01 · 6,300 in (5,300 cached) / 200 out tokens", "Estimate, priced at this run's model"],
+  "runner-usage-not-priced": ["On your Claude plan · no API price for this model · 5,800 in (5,300 cached) / 100 out tokens", /not the same as \$0/],
   "runner-usage-not-recorded": ["Not recorded", /not the same as \$0/],
   "runner-running-activity": ["Counting…", ""],
   "runner-waiting": ["Counting…", ""],

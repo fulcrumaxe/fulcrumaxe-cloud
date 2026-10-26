@@ -61,6 +61,27 @@ function toNormalizedUsage(usage: {
   };
 }
 
+type RawUsage = Parameters<typeof toNormalizedUsage>[0];
+
+/**
+ * The run total a `result` line carries. The CLI's top-level `usage` is not reliable as a run total on a multi-turn run (it can describe
+ * the last turn: a few hundred uncached input tokens beside millions read from cache), while `modelUsage` holds each model's cumulative
+ * counts, subagents' models included. So each token class is the larger of the two, never the smaller: a figure can only be completed, not lowered.
+ */
+export function resultUsageOf(message: Record<string, unknown>): RawUsage | undefined {
+  const top = isRecord(message.usage) ? (message.usage as RawUsage) : undefined;
+  const per = isRecord(message.modelUsage) ? Object.values(message.modelUsage).filter(isRecord) : [];
+  if (per.length === 0) return top;
+  const sum = (key: string): number => per.reduce((n, m) => n + (typeof m[key] === "number" && Number.isFinite(m[key]) && (m[key] as number) >= 0 ? (m[key] as number) : 0), 0);
+  const big = (a: number | undefined, b: number): number => Math.max(typeof a === "number" && Number.isFinite(a) ? a : 0, b);
+  return {
+    input_tokens: big(top?.input_tokens, sum("inputTokens")),
+    output_tokens: big(top?.output_tokens, sum("outputTokens")),
+    cache_creation_input_tokens: big(top?.cache_creation_input_tokens, sum("cacheCreationInputTokens")),
+    cache_read_input_tokens: big(top?.cache_read_input_tokens, sum("cacheReadInputTokens")),
+  };
+}
+
 /** Map one raw stream-json message onto our normalized event shape. */
 export function normalizeMessage(
   opts: Pick<StartOptions, "runId" | "role"> & { backend?: string },
@@ -110,7 +131,7 @@ export function normalizeMessage(
   if (message.type === "result") {
     const isError = Boolean(message.is_error);
     const resultText = typeof message.result === "string" ? message.result : undefined;
-    const usage = message.usage as Parameters<typeof toNormalizedUsage>[0] | undefined;
+    const usage = resultUsageOf(message);
     return {
       ...base,
       type: isError ? "error" : "result",
