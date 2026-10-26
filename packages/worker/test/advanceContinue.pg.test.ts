@@ -124,6 +124,51 @@ describe("advanceContinue [pg]", () => {
       expect(await stageOf(f)).toBe("in_progress");
     });
 
+    it("D#7 DP4b-3b: the continuation child has a decision snapshot of its own from the dials now, and a prompt that offers exactly its keys; a read that fails starts nothing", async () => {
+      const f = await item();
+      const ended = await endedReal(f);
+      // The customer turns the first decision to "ask" after the ended run started.
+      await admin.query("INSERT INTO decision_settings (account_id, repo_id, decision_type, disposition, preset, version, changed_by) VALUES ($1, $2, 'nonbreaking_refactor_approach', 'ask', NULL, 1, $3)", [f.a.accountId, f.a.repoId, f.a.userId]);
+      // A pool whose dial read fails: the step answers today's path and the library is never reached.
+      const failing = new Proxy(writerPool, {
+        get(target, prop, receiver) {
+          if (prop !== "connect") return Reflect.get(target, prop, receiver);
+          return async () => {
+            const client = (await target.connect()) as PoolClient;
+            const original = client.query;
+            const query = client.query.bind(client) as (...args: unknown[]) => Promise<unknown>;
+            const release = client.release.bind(client);
+            (client as unknown as { release: unknown }).release = (...args: unknown[]) => {
+              (client as unknown as { query: unknown }).query = original;
+              (client as unknown as { release: unknown }).release = release;
+              return (release as (...a: unknown[]) => void)(...args);
+            };
+            (client as unknown as { query: unknown }).query = (...args: unknown[]) => {
+              const text = typeof args[0] === "string" ? args[0] : (args[0] as { text?: string } | undefined)?.text ?? "";
+              return text.includes("decision_settings") ? Promise.reject(new Error("dial store unavailable")) : query(...args);
+            };
+            return client;
+          };
+        },
+      }) as Pool;
+      expect((await run(f, ended, { pool: failing })).code).toBe("today");
+      expect(libCalls).toBe(0);
+      expect(await children(ended)).toBe(0);
+
+      let sent: StartAgentRunInput | undefined;
+      const out = await run(f, ended, { continueAfter: (...a) => ((sent = a[2].resumeInput as StartAgentRunInput), continueAfterLimit(...a)) });
+      expect(out.code).toBe("continued");
+      const snaps = (await admin.query("SELECT account_id, payload FROM run_events WHERE run_id = $1 AND kind = 'decision.snapshot'", [out.runId])).rows;
+      expect(snaps).toHaveLength(1);
+      expect(snaps[0].account_id).toBe(f.a.accountId);
+      expect(snaps[0].payload.entries[0]).toEqual({ key: "d1", decision_type: "nonbreaking_refactor_approach", disposition: "ask", dial_version: 1 });
+      expect((await admin.query("SELECT count(*)::int AS n FROM run_events WHERE run_id = $1 AND kind = 'decision.snapshot'", [ended])).rows[0].n).toBe(0);
+      const prompt = sent!.prompt;
+      expect(prompt.startsWith("Your previous run of this task stopped at a run limit.")).toBe(true);
+      expect(prompt).toContain('- d1: "How to restructure code without changing what it does" -> stop and ask');
+      expect(prompt.split("DECISIONS YOU MAY MEET IN THIS WORK")).toHaveLength(2);
+    });
+
     it("a per-run-cap spend kill with its checkpoint is continued too", async () => {
       const f = await item();
       const out = await run(f, await endedReal(f, { status: "killed_spend" }));

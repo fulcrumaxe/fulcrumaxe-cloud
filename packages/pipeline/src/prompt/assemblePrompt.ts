@@ -226,13 +226,55 @@ export function decisionsBlock(lines: readonly DecisionLine[]): string | undefin
     rows.push(`- ${l.key}: ${JSON.stringify(label)} -> ${DECISION_INSTRUCTION[l.instruction]}`);
   }
   if (rows.length === 0) return undefined;
-  return [
-    "DECISIONS YOU MAY MEET IN THIS WORK (a fixed list; each key is opaque and means only what its line says):",
-    ...rows,
-    'If you reach a decision marked "stop and ask", do not settle it yourself: put one `decision_request` field in your final block, {"type":"<key>","options":[{"id":"<id>","label":"<label>"}],"proposed":"<id>","rationale":"<why>"} with two to six options, and finish what you can without it.',
-    'If you reach a decision marked "decide yourself and report it", decide it, carry on, and list it in a `decisions_taken` field of your final block: [{"type":"<key>","options":[{"id":"<id>","label":"<label>"}],"chosen":"<id>","rationale":"<why>"}].',
-    "Name a decision only by its key from this list. Set either field to null when you have nothing to report in it.",
-  ].join("\n");
+  return [DECISIONS_HEAD, ...rows, ...DECISIONS_TAIL].join("\n");
+}
+
+const DECISIONS_HEAD = "DECISIONS YOU MAY MEET IN THIS WORK (a fixed list; each key is opaque and means only what its line says):";
+const DECISIONS_TAIL = [
+  'If you reach a decision marked "stop and ask", do not settle it yourself: put one `decision_request` field in your final block, {"type":"<key>","options":[{"id":"<id>","label":"<label>"}],"proposed":"<id>","rationale":"<why>"} with two to six options, and finish what you can without it.',
+  'If you reach a decision marked "decide yourself and report it", decide it, carry on, and list it in a `decisions_taken` field of your final block: [{"type":"<key>","options":[{"id":"<id>","label":"<label>"}],"chosen":"<id>","rationale":"<why>"}].',
+  "Name a decision only by its key from this list. Set either field to null when you have nothing to report in it.",
+] as const;
+
+const reEscape = (t: string): string => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** A block `decisionsBlock` wrote, and nothing else: the fixed head, lines of exactly the written shape, the fixed tail. */
+const DECISIONS_BLOCK_RE = new RegExp(
+  `${reEscape(DECISIONS_HEAD)}\\n(?:- d[1-9][0-9]?: "[A-Za-z0-9 ,.'()/-]{1,100}" -> (?:decide yourself and report it|stop and ask)\\n)+${DECISIONS_TAIL.map(reEscape).join("\\n")}`,
+  "g",
+);
+const FENCE_OPEN = /<<UNTRUSTED EXTERNAL CONTENT>>/g;
+const FENCE_CLOSE = /<<END UNTRUSTED>>/g;
+const OUTPUT_OPENER = "End your final message with this block, and nothing after it:";
+
+/**
+ * D#7 DP4b-3b: a run that is not a first build (a fix round, a check fix, a run resumed after an answer) is told what THIS run may decide.
+ * Returns `prompt` with its decisions block replaced by `block` (removed when `block` is undefined). Only a block outside every untrusted fence counts as the
+ * prompt's own: text inside a fence is data (a Spec or a finding can hold a look-alike) and is never rewritten. A prompt with no block of its own gets `block`
+ * before its output section (the output block stays last), or at the end when it has none.
+ */
+export function swapDecisionsBlock(prompt: string, block: string | undefined): string {
+  const outsideFence = (at: number): boolean => {
+    const before = prompt.slice(0, at);
+    return (before.match(FENCE_OPEN)?.length ?? 0) <= (before.match(FENCE_CLOSE)?.length ?? 0);
+  };
+  const own = [...prompt.matchAll(DECISIONS_BLOCK_RE)].filter((m) => outsideFence(m.index!));
+  const last = own[own.length - 1];
+  if (last) {
+    const before = prompt.slice(0, last.index);
+    const after = prompt.slice(last.index! + last[0].length);
+    return block === undefined ? (before.endsWith("\n\n") ? before.slice(0, -2) : before) + after : before + block + after;
+  }
+  if (block === undefined) return prompt;
+  // The last output opener that is outside every fence: a run note or finding appended after the output block can quote the sentence, and the block must not land in it.
+  let opener = prompt.lastIndexOf(OUTPUT_OPENER);
+  while (opener > 0 && !outsideFence(opener)) opener = prompt.lastIndexOf(OUTPUT_OPENER, opener - 1);
+  const para = opener > 0 ? prompt.lastIndexOf("\n\n", opener) : -1;
+  return para > 0 ? `${prompt.slice(0, para)}\n\n${block}${prompt.slice(para)}` : `${prompt}\n\n${block}`;
+}
+
+/** The ledger section of a decisions block, as the assembler records it, for a prompt the block was put into after assembly. */
+export function decisionsSectionOf(block: string): ContextSection {
+  return { code: "decisions", bytes: bytesOf(block), sha256: sha256Of(block), trimmed_bytes: 0 };
 }
 
 export interface PromptParts {

@@ -563,7 +563,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
         product: "team",
         pr: req.issue,
         parentRunId: parent,
-        prompt: "FIX PROMPT",
+        prompt: expect.stringMatching(/^FIX PROMPT\n\nDECISIONS YOU MAY MEET IN THIS WORK/),
         workdir: PREVIEW_WORKDIR,
         repoId: a.repoId,
       });
@@ -599,8 +599,8 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
         const resume = realResume();
         const out = await build({}, review({ resume: resume.fn })).module.advanceStartFix(who(a, w), fixRequest(a, { prompt: "Spec v1 unchanged", held: { version: 1, sha256: sha("spec") }, fallbackPrompt: "SPEC v1: spec", fallbackContextSections: [{ code: "spec", bytes: 5, sha256: "c".repeat(64), trimmed_bytes: 0 }] }));
         expect(out.ok).toBe(true);
-        expect(resume.inputs[0]).toMatchObject({ prompt: "Spec v1 unchanged", fallbackPrompt: "SPEC v1: spec" });
-        expect(resume.inputs[0]!.fallbackContextSections).toHaveLength(1);
+        expect(resume.inputs[0]).toMatchObject({ prompt: expect.stringMatching(/^Spec v1 unchanged\n\nDECISIONS YOU MAY MEET/), fallbackPrompt: expect.stringMatching(/^SPEC v1: spec\n\nDECISIONS YOU MAY MEET/) });
+        expect(resume.inputs[0]!.fallbackContextSections).toHaveLength(2);
       });
 
       it("D#600 CX-4a: a spill rides to the resume (with the notes added to its uncut prompt), the fallback has its own, and one outside the closed shape is refused", async () => {
@@ -613,8 +613,10 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
         const t = build({}, review({ resume: resume.fn }));
         const out = await t.module.advanceStartFix(who(a, w), fixRequest(a, { prompt: "Spec v1 unchanged", held: { version: 1, sha256: sha("spec") }, fallbackPrompt: "SPEC v1: spec", fallbackContextSections: sec, contextSpill: spill("UNCUT held"), fallbackContextSpill: spill("UNCUT body") }));
         expect(out.ok).toBe(true);
-        expect(resume.inputs[0]!.contextSpill).toEqual(spill("UNCUT held"));
-        expect(resume.inputs[0]!.fallbackContextSpill).toEqual(spill("UNCUT body"));
+        // D#7 DP4b-3b: the uncut copy of each prompt carries the same decisions block (and its ledger section) as the prompt that goes out.
+        const withDecisions = (prompt: string) => ({ files: [{ code: "findings" as const, text: "FULL FINDINGS" }], uncut: { prompt: expect.stringMatching(new RegExp(`^${prompt}\\n\\nDECISIONS YOU MAY MEET`)), sections: [...sec, expect.objectContaining({ code: "decisions" })] } });
+        expect(resume.inputs[0]!.contextSpill).toEqual(withDecisions("UNCUT held"));
+        expect(resume.inputs[0]!.fallbackContextSpill).toEqual(withDecisions("UNCUT body"));
         const bad = { files: [{ code: "../etc", text: "x" }], uncut: { prompt: "p", sections: sec } };
         expect(await t.module.advanceStartFix(who(a, w), fixRequest(a, { contextSpill: bad as never }))).toEqual({ ok: false, reason: "invalid_input" });
         expect(await t.module.advanceStartFix(who(a, w), fixRequest(a, { fallbackContextSpill: spill("x") }))).toEqual({ ok: false, reason: "invalid_input" });
@@ -628,10 +630,10 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
         const resume = realResume();
         const out = await build({}, review({ resume: resume.fn })).module.advanceStartFix(who(a, w), fixRequest(a, { prompt: "Spec v2 unchanged", held: { version: 2, sha256: sha("v2") }, fallbackPrompt: "SPEC v2: v2", fallbackContextSections: [{ code: "spec", bytes: 5, sha256: "c".repeat(64), trimmed_bytes: 0 }] }));
         expect(out.ok).toBe(true);
-        expect(resume.inputs[0]!.prompt).toBe("SPEC v2: v2");
+        expect(resume.inputs[0]!.prompt).toMatch(/^SPEC v2: v2\n\nDECISIONS YOU MAY MEET/);
         expect(resume.inputs[0]!.prompt).not.toContain("unchanged");
         expect(resume.inputs[0]!.fallbackPrompt).toBeUndefined();
-        expect(resume.inputs[0]!.contextSections).toHaveLength(1);
+        expect(resume.inputs[0]!.contextSections).toHaveLength(2);
       });
 
       it("a held line whose hash is not the pinned Spec's, or a held line with no body prompt, is refused or answered with the body", async () => {
@@ -643,7 +645,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
         expect(await t.module.advanceStartFix(who(a, w), fixRequest(a, { prompt: "unchanged", held: { version: 1, sha256: sha("spec") } }))).toEqual({ ok: false, reason: "invalid_input" });
         const out = await t.module.advanceStartFix(who(a, w), fixRequest(a, { prompt: "unchanged", held: { version: 1, sha256: sha("other") }, fallbackPrompt: "SPEC v1: spec" }));
         expect(out.ok).toBe(true);
-        expect(resume.inputs[0]!.prompt).toBe("SPEC v1: spec");
+        expect(resume.inputs[0]!.prompt).toMatch(/^SPEC v1: spec\n\nDECISIONS YOU MAY MEET/);
       });
     });
 

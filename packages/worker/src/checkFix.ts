@@ -4,6 +4,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { ITEM_PR_BRANCH } from "@fulcrumaxe/runner-protocol";
 import { DispatchFailedError, IdempotencyKeyTakenError, ExecutionModeChangedError, JobIssueError, PREVIEW_WORKDIR, acceptQueuedRunnerRun, insertRunEvent, readBoundItemBranch, readRecordedRunnerPullRequest, RUNNER_RUN_BRANCH, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { escapeFenceLookalikes } from "@fx/pipeline";
+import { decisionStartFor } from "./decisionStart.js";
 import { checkFixRound } from "@fx/spend";
 import { REPUBLISH_BASE_MISSING } from "@fx/core/src/work-items/baseSync.js";
 import { CHECK_FAILED_OUTSIDE_CHANGE, failedOutsideChange } from "@fx/core/src/work-items/checkFailure.js";
@@ -141,7 +142,9 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
   const held = deps.beforeStart ? await deps.beforeStart(target, failedRunId) : null;
   if (held !== null) return { ok: false, reason: held };
   const { baseSha, synced, needed } = deps.baseSync?.() ?? { baseSha: null, synced: false, needed: false };
-  const prompt = checkFixPrompt({ round: facts.round, argv, exitCode: row.exit_code, timedOut: row.timed_out === true, summary: row.summary ?? "" }) + (synced ? `\n\n${BASE_SYNCED_PROMPT_LINE}` : "");
+  // D#7 DP4b-3b: what this round may decide, resolved now and written with the run; the block is in the prompt the run reads.
+  const dec = await decisionStartFor(deps.pool, who.accountId, who.workItemId);
+  const prompt = dec.prompt(checkFixPrompt({ round: facts.round, argv, exitCode: row.exit_code, timedOut: row.timed_out === true, summary: row.summary ?? "" }) + (synced ? `\n\n${BASE_SYNCED_PROMPT_LINE}` : ""));
   const idempotency = { key, requestHash: createHash("sha256").update(`${key}:executor`).digest("hex") };
   try {
     if (bound !== null) {
@@ -161,6 +164,7 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
         ...expectedExecutionMode,
         ...(row.spec_version_id === null ? {} : { specVersionId: row.spec_version_id }),
         continues: { branch: bound.branch, prNumber: bound.prNumber, ...(baseSha === null ? {} : { baseSha }) },
+        inCreateTransaction: dec.inCreateTransaction(),
         workdir: PREVIEW_WORKDIR,
         cloneRepo: { owner: row.gh_owner, name: row.gh_name },
         idempotency,
@@ -184,9 +188,11 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
         // The base of a round that republishes the public pull request: signed only for the branch it was synced on (the issuer compares).
         ...(needed === true && baseSha !== null && target !== null ? { base: { sha: baseSha, branch: target.pr.branch } } : {}),
         // A sandbox round has no signed job to carry the base: the cloud records it in the run's create transaction, as for a review fix round.
-        ...(needed === true && baseSha !== null && target !== null && row.run_mode === "sandbox"
-          ? { inCreateTransaction: (client: PoolClient, runId: string) => insertRunEvent(client, who.accountId, runId, FIX_BASE_EVENT, { base_sha: baseSha, branch: target!.pr.branch }) }
-          : {}),
+        inCreateTransaction: dec.inCreateTransaction(
+          needed === true && baseSha !== null && target !== null && row.run_mode === "sandbox"
+            ? (client: PoolClient, runId: string) => insertRunEvent(client, who.accountId, runId, FIX_BASE_EVENT, { base_sha: baseSha, branch: target!.pr.branch })
+            : undefined,
+        ),
         workdir: PREVIEW_WORKDIR,
         idempotency,
       }),

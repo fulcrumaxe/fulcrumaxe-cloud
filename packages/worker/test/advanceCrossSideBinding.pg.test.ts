@@ -210,7 +210,8 @@ describe("advance: a round that carries on from a pull request the other side op
       expect(m.started).toHaveLength(1);
       expect(m.started[0]!.continues).toEqual({ branch: `fx/issue-${t.n}`, prNumber: 41, baseSha: "c".repeat(40) });
       expect(m.started[0]!.parentRunId).toBe(build);
-      expect(m.started[0]!.inCreateTransaction).toBeUndefined();
+      // D#7 DP4b-3b: the hook is the decision snapshot write only; the binding is still not written here (asserted below).
+    expect(m.started[0]!.inCreateTransaction).toBeTypeOf("function");
       expect(await boundEvents((fix as { runId: string }).runId)).toEqual([]);
     });
 
@@ -302,7 +303,8 @@ describe("advance: a round that carries on from a pull request the other side op
     const fix = await m.module.advanceStartFix(t.who, fixReq(t));
     expect(fix.ok).toBe(true);
     expect(m.started[0]!.continues).toBeUndefined();
-    expect(m.started[0]!.inCreateTransaction).toBeUndefined();
+    // D#7 DP4b-3b: the hook is the decision snapshot write only; the binding is still not written here (asserted below).
+    expect(m.started[0]!.inCreateTransaction).toBeTypeOf("function");
   });
 
   it("a same-side round names no pull request to the starter and still resumes", async () => {

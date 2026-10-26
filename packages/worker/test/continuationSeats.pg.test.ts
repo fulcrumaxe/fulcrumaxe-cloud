@@ -151,6 +151,16 @@ describe("continued seats [pg]", () => {
       expect(dispatched.at(-1)!.workdir).toBe(SITE_RULES[site].clone ? PREVIEW_WORKDIR : undefined);
     });
 
+    it.each(["reviewer", "panel_workflow"] as const)("D#7 DP4b-3b: a %s continuation carries no decisions block and writes no snapshot row (the seat declares no decisions)", async (site) => {
+      const { a, registry } = await item(site);
+      const ended = await endedSeat(a, registry, ROLE_OF[site], site === "reviewer" ? { pr: 41, head: "abc123" } : {});
+      const out = await go(a, ended, site);
+      expect(out).toMatchObject({ code: "continued" });
+      expect((await inputOf(out.runId!)).prompt).not.toContain("DECISIONS YOU MAY MEET IN THIS WORK");
+      const rows = await admin.query("SELECT count(*)::int AS n FROM run_events WHERE account_id = $1 AND kind = 'decision.snapshot' AND run_id IN ($2, $3)", [a.accountId, ended, out.runId]);
+      expect(rows.rows[0].n).toBe(0);
+    });
+
     it("with no summary the child's prompt is the base's, byte for byte, and its stored hash is the base's hash", async () => {
       const { a, registry } = await item("classify");
       const ended = await endedSeat(a, registry, "project-manager", { summary: null });

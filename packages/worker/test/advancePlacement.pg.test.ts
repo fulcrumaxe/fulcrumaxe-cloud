@@ -253,9 +253,10 @@ describe("advance: placement at run boundaries [pg]", { timeout: 60_000 }, () =>
     expect(m.started).toHaveLength(1);
     const input = m.started[0]!;
     expect(input.prompt.startsWith("SPEC v1: the full body")).toBe(true);
+    expect(input.prompt).toContain("DECISIONS YOU MAY MEET IN THIS WORK");
     expect(input.prompt).toContain("check the migration first");
     expect(input.prompt).not.toContain("unchanged");
-    expect(input.contextSections).toEqual(sections);
+    expect(input.contextSections).toEqual([...sections, expect.objectContaining({ code: "decisions" })]);
     expect(input.specVersionId).toBe(t.specVersionId);
 
     // No fallback: the caller's own prompt and sections, with the notes.
@@ -269,7 +270,7 @@ describe("advance: placement at run boundaries [pg]", { timeout: 60_000 }, () =>
     const plain = um.started[0]!;
     expect(plain.prompt.startsWith("FIX IT")).toBe(true);
     expect(plain.prompt).toContain("second note");
-    expect(plain.contextSections).toEqual(own);
+    expect(plain.contextSections).toEqual([...own, expect.objectContaining({ code: "decisions" })]);
     expect(plain.specVersionId).toBe(u.specVersionId);
   });
 

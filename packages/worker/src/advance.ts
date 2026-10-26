@@ -23,8 +23,8 @@ import { ingestRunMemoryProposals } from "./memoryIntake.js";
 import { isItemWaitingOnAnswer } from "@fx/db/src/decisionAsks.js";
 import { reconcileHolder, reconcileSlotHolders, type PrStateOpen } from "./prSlotReconcile.js";
 import type { DecisionIntake, DecisionStepCode } from "./decisionIntake.js";
-import { CATALOGUE_VERSION } from "@fx/decisions";
-import { parseDecisionSnapshot, resolveDecisionOffer, writeDecisionSnapshot, type DecisionOffer, type DecisionSnapshot } from "./decisionSnapshot.js";
+import { parseDecisionSnapshot, writeDecisionSnapshot, type DecisionOffer, type DecisionSnapshot } from "./decisionSnapshot.js";
+import { decisionOfferForItem, decisionStartFor } from "./decisionStart.js";
 import type { StartGatePort, StartGateStepInput, StartGateStepOut } from "./startGateStep.js";
 import { isContextSpill, type ContextAssembly, type ContextSection, type ContextSpill } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
@@ -1198,13 +1198,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
    * D#7 DP4b-3: what a new executor run of this item is offered, resolved from the item's repository dials now (no dial row: Balanced). The repository is the item's own,
    * read here, never taken from the step. An item with no repository is offered nothing and gets an empty snapshot.
    */
-  async function decisionOfferFor(who: AdvanceStepWho): Promise<DecisionOffer> {
-    return withTenant(runnerPool, who.accountId, async (client) => {
-      const r = await client.query<{ repo_id: string | null }>("SELECT repo_id FROM work_items WHERE id = $1 AND account_id = $2", [who.workItemId, who.accountId]);
-      const repoId = r.rows[0]?.repo_id ?? null;
-      if (repoId === null) return { items: [], snapshot: { catalogue_version: CATALOGUE_VERSION, entries: [] } };
-      return resolveDecisionOffer(client, repoId, "executor", (line) => console.warn(line));
-    });
+  function decisionOfferFor(who: AdvanceStepWho): Promise<DecisionOffer> {
+    return decisionOfferForItem(runnerPool, who.accountId, who.workItemId);
   }
 
   /** The ports one step gets: bound to one account and item, so the step cannot name another. */
@@ -1715,11 +1710,14 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       });
       useFallback = !(pinned !== null && Number(pinned.version) === req.held.version && pinned.body_sha256 === req.held.sha256);
     }
-    const prompt = withNotes(useFallback ? req.fallbackPrompt! : req.prompt);
-    const sections = sectionsOf(useFallback ? req.fallbackContextSections : req.contextSections);
+    // D#7 DP4b-3b: what THIS round may decide, from the dials and the catalogue as they stand now, and the snapshot written with the run. Every prompt that can go out
+    // (the round's, the body-carrying fallback, the uncut copy of each) carries the same block, so the keys the run reads are the keys in its own row.
+    const dec = await decisionStartFor(runnerPool, who.accountId, who.workItemId);
+    const prompt = dec.prompt(withNotes(useFallback ? req.fallbackPrompt! : req.prompt));
+    const sections = dec.sections(sectionsOf(useFallback ? req.fallbackContextSections : req.contextSections));
     // The fresh session a lost snapshot falls back to has no Spec: it gets the body-carrying prompt whatever the check said.
-    const fallbackPrompt = req.fallbackPrompt === undefined || useFallback ? undefined : withNotes(req.fallbackPrompt);
-    const fallbackSections = fallbackPrompt === undefined ? undefined : sectionsOf(req.fallbackContextSections);
+    const fallbackPrompt = req.fallbackPrompt === undefined || useFallback ? undefined : dec.prompt(withNotes(req.fallbackPrompt));
+    const fallbackSections = fallbackPrompt === undefined ? undefined : dec.sections(sectionsOf(req.fallbackContextSections));
 
     // D#599 PL-2: a round whose effective side is not the side the build's session ran on cannot continue that session: a session belongs to the
     // side that made it. It starts a fresh executor session instead, carrying the fix prompt, the pinned Spec version and the fenced notes above.
@@ -1728,10 +1726,10 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       const r = await client.query<{ execution_mode: string | null; spec_version_id: string | null }>("SELECT execution_mode, spec_version_id FROM agent_runs WHERE id = $1 AND account_id = $2 AND work_item_id = $3", [parent, who.accountId, who.workItemId]);
       return r.rows[0];
     });
-    const freshPrompt = req.fallbackPrompt === undefined ? prompt : withNotes(req.fallbackPrompt);
-    const freshSections = req.fallbackPrompt === undefined ? sections : sectionsOf(req.fallbackContextSections);
+    const freshPrompt = req.fallbackPrompt === undefined ? prompt : dec.prompt(withNotes(req.fallbackPrompt));
+    const freshSections = req.fallbackPrompt === undefined ? sections : dec.sections(sectionsOf(req.fallbackContextSections));
     // D#600 CX-4a: the files for the prompt that goes out, with the notes added to the uncut prompt as they are to the cut one.
-    const spillWithNotes = (s: ContextSpill | undefined): ContextSpill | undefined => (s === undefined ? undefined : { ...s, uncut: { ...s.uncut, prompt: withNotes(s.uncut.prompt) } });
+    const spillWithNotes = (s: ContextSpill | undefined): ContextSpill | undefined => dec.spill(s === undefined ? undefined : { ...s, uncut: { ...s.uncut, prompt: withNotes(s.uncut.prompt) } });
     const spill = spillWithNotes(useFallback ? req.fallbackContextSpill : req.contextSpill);
     const fallbackSpill = fallbackPrompt === undefined ? undefined : spillWithNotes(req.fallbackContextSpill);
     const freshSpill = req.fallbackPrompt === undefined ? spill : spillWithNotes(req.fallbackContextSpill);
@@ -1749,7 +1747,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         // D#599 PL-2b-2: the round carries on from the pull request the other side opened. A runner round continues its branch with no session (the issuer
         // reads GitHub and binds the pull request); a sandbox round is bound to the pull request the item recorded, in its own create transaction.
         let continues: { branch: string; prNumber?: number; baseSha?: string } | undefined;
-        let inCreateTransaction: StartAgentRunInput["inCreateTransaction"];
+        let bindTransaction: StartAgentRunInput["inCreateTransaction"];
         if (req.pr !== undefined) {
           const bound = req.pr;
           if (isRunnerMode(effective)) {
@@ -1768,7 +1766,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           } else {
             const recorded = await withTenant(runnerPool, who.accountId, (client) => readRecordedRunnerPullRequest(client, { accountId: who.accountId, workItemId: who.workItemId }));
             if (recorded === null || recorded.number !== bound.number || recorded.branch !== bound.branch) return refuse("pr_unbound");
-            inCreateTransaction = async (client, runId) => {
+            bindTransaction = async (client, runId) => {
               await recordSandboxContinuesBound(client, { accountId: who.accountId, runId, prNumber: bound.number, branch: bound.branch });
               // The branch recorded is the one the sync was made on (`bound` is that same pair); a round that republishes never starts without its base.
               if (sandboxRepublish) await insertRunEvent(client, who.accountId, runId, FIX_BASE_EVENT, { base_sha: baseTip!, branch: syncedBranch! });
@@ -1791,7 +1789,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           ...(assemblyOf(req.contextAssembly) ? { contextAssembly: assemblyOf(req.contextAssembly) } : {}),
           ...(freshSpill ? { contextSpill: freshSpill } : {}),
           ...(continues ? { continues, parentRunId: parent } : {}),
-          ...(inCreateTransaction ? { inCreateTransaction } : {}),
+          inCreateTransaction: dec.inCreateTransaction(bindTransaction),
           // A fresh session: the repository is cloned into the workdir, as for a build.
           workdir: PREVIEW_WORKDIR,
           cloneRepo: { owner: coords.gh_owner, name: coords.gh_name },
@@ -1819,7 +1817,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
             parentRunId: parent,
             prompt,
             ...(republishes ? { base: { sha: baseTip!, branch: syncedBranch! } } : {}),
-            ...(sandboxRepublish ? { inCreateTransaction: (client: PoolClient, runId: string) => insertRunEvent(client, who.accountId, runId, FIX_BASE_EVENT, { base_sha: baseTip!, branch: syncedBranch! }) } : {}),
+            inCreateTransaction: dec.inCreateTransaction(sandboxRepublish ? (client: PoolClient, runId: string) => insertRunEvent(client, who.accountId, runId, FIX_BASE_EVENT, { base_sha: baseTip!, branch: syncedBranch! }) : undefined),
             ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
             ...(sections ? { contextSections: sections } : {}),
             ...(assemblyOf(req.contextAssembly) ? { contextAssembly: assemblyOf(req.contextAssembly) } : {}),
