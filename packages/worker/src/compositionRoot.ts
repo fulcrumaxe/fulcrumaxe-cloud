@@ -402,7 +402,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
         ? createProposalVerifySweep({ pool: pools.runnerPool, resolveSeat: resolveRunSeat, starter: previewStarter, ...(advanceStarter ? { runnerStarter: advanceStarter } : {}), visibility: repoVisibility, github: options.verify.github, settings: discoverySettings, prompt: options.verify.prompt, record: options.verify.record })
         : async (): Promise<ProposalVerifyCounts> => ({ idle: "not_configured", listed: 0, started: 0, waiting: 0, recorded: 0, daily_limit: 0, daily_cap: 0, skipped: 0, failed: 0 });
     // D#483 S5-k1b: the parked-stage sweep restarts a stage whose workflow gave up waiting for a spending limit, once the limit allows it.
-    const stageResume = createStageResume(pools.runnerPool, { resolveRunSeat, startAdvance: options.advance?.startAdvance ?? null });
+    const stageResume = createStageResume(pools.runnerPool, { resolveRunSeat, startAdvance: options.advance?.startAdvance ?? null, buildWaitReason: options.advance?.buildWaitReason ? (accountId, workItemId) => options.advance!.buildWaitReason!(pools.runnerPool, accountId, workItemId) : null });
     // D#6 R2b-3 (C21 section 4): the run after a lost lease or a usage limit is dispatched through the runner target; a second loss fails the work item through the stage driver.
     const followUp = createFollowUpPorts({ pool: pools.runnerPool, registry, buildFailed: (accountId, workItemId, runId, code) => advance.advanceBuildFailed(accountId, workItemId, runId, code) });
     // D#599 HO-2b: a handoff finishes from the runner's event, from `done`, or from the 30 s sweep. The branch head is read through the continuation base (GitHub), the stage driver parks an item whose move cannot go on, and the

@@ -16,6 +16,9 @@ const REVIEWER_STAGES = new Set<string>(WORK_ITEM_STAGES_REQUIRING_REVIEWER);
 const VALID_REVIEWERS = new Set<string>(WORK_ITEM_TRANSITION_REVIEWERS);
 const VALID_SOURCES = new Set(['webhook', 'control_plane']);
 
+/** The stages that hold a build slot (packages/pipeline buildSlots.ts BUILD_SLOT_STAGES; a test holds the two lists equal). */
+export const SLOT_HOLDING_STAGES: ReadonlySet<string> = new Set(['in_progress', 'pr_opened', 'changes_requested', 'review_passed']);
+
 const AT_WINDOW_MS = 5 * 60 * 1000;
 
 export interface RecordStageInput {
@@ -150,6 +153,12 @@ export async function recordStage(
     void markWorkPending('branch-cleanup');
     // The end-of-item sandbox reap pass (a 15-minute reconcile job) is what looks at this item's sandbox; the reconciler is otherwise on a slow cadence.
     void markWorkPending('reconcile');
+  }
+
+  // A move out of a stage that holds a build slot frees it. An item waiting for that slot whose workflow is gone has nothing left that asks again, so this wakes
+  // the parked-stage sweep (a hint, as above: the sweep reads the rows). A replay is a duplicate and returned before this line, so it wakes nothing.
+  if (SLOT_HOLDING_STAGES.has(fromStage) && !SLOT_HOLDING_STAGES.has(toStage)) {
+    void markWorkPending('stage-resume-sweep');
   }
 
   return { recorded: true, transitionId };

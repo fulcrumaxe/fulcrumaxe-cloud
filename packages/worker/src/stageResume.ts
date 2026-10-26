@@ -6,6 +6,8 @@ import { readReviewHold } from "@fx/core/src/work-items/reviewHold.js";
 import { reportError } from "@fx/telemetry";
 import type { SeatRequest, SeatResult } from "./seat.js";
 import type { AdvanceStartArgs } from "./advance.js";
+import { compareQueueOrder } from "@fx/core/src/work-items/queueOrder.js";
+import { toQueueRank } from "@fx/core/src/work-items/priority.js";
 
 /**
  * D#483 S5-k1b: the parked-stage sweep. One pass looks at every item whose start a spending limit denied for longer than its workflow waits, and starts the
@@ -60,8 +62,18 @@ export interface ParkedStageEntryInput {
   pauseForDenial(denial: string): string | null;
 }
 
+/**
+ * The waits that mean "no build slot yet" (packages/pipeline buildSlots.ts BUILD_WAIT_REASONS; a test holds the two lists equal).
+ * A build waits for a slot inside its workflow for at most four hours; this is the wake for the case where that workflow is gone when the slot frees.
+ */
+export const SLOT_WAIT_REASONS: readonly string[] = Object.freeze(["one_build_per_repo_until_d598", "waiting_for_build_slot_repo", "waiting_for_build_slot_account"]);
+
 export interface StageResumeDeps {
   resolveRunSeat: (request: SeatRequest) => Promise<SeatResult>;
+  /**
+   * The pipeline's `readBuildWaitReason`: the reason an item's build would still wait for a slot right now, or null (it would get one). Absent: the slot wake is off.
+   */
+  buildWaitReason?: ((accountId: string, workItemId: string) => Promise<string | null>) | null;
   startAdvance: ((args: AdvanceStartArgs) => Promise<void>) | null;
   now?: () => number;
   log?: (line: string) => void;
@@ -77,6 +89,9 @@ export interface StageResumeCounts {
   /** Not resumed for a reason that is no failure (approval gone, Spec changed, a run is live, not a pause denial, claimed by another pass...). */
   skipped: number;
   failed: number;
+  /** The slot wake: orphaned waiters listed, and workflows it started (at most one per repository per pass). */
+  slotListed?: number;
+  slotStarted?: number;
 }
 
 /** Same value as RESERVATION_SWEEP_SECONDS and RESERVATION_ORPHAN_AFTER_SECONDS in @fx/pipeline (a test pins them). */
@@ -289,11 +304,93 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
         }
       }
     }
+    // The slot wake runs on the same tick but never schedules another one (see sweepSlotWaiters).
+    for (const entry of entries) {
+      if (entry.stage !== "build") continue;
+      const slots = await sweepSlotWaiters(entry);
+      counts.slotListed = slots.listed;
+      counts.slotStarted = slots.started;
+      counts.failed += slots.failed;
+    }
     // Something is parked (or was just refreshed): look again in a pass. Otherwise the marker is cleared and the next writer sets it.
     return { ...counts, nextDueAt: counts.listed > 0 ? now() + STAGE_RESUME_PASS_SECONDS * 1000 : null };
   }
 
-  return { sweepParkedStages };
+  /**
+   * The slot wake. A build waits for a free slot inside its workflow (asking every minute for four hours). When that workflow is gone, nothing asks any more
+   * and the item sits at Spec ready after its slot freed. This pass runs when a slot frees (recordStage marks the sweep pending) and starts the build of the
+   * OLDEST orphaned waiter of each repository, once, under the approval it already has. An orphaned waiter is an item at Spec ready, not halted, whose latest
+   * waiting fact is a slot reason at least STAGE_RESUME_ORPHAN_AFTER_SECONDS old (a live workflow refreshes it every minute). Everything `planFor` demands still
+   * holds (a performed approval by an owner or admin, the Spec as approved, no live run, no refusal since): an item that needs a person's approval is left as it is.
+   * It schedules no pass of its own: a pass that finds the slot still held leaves the waiters for the next slot that frees.
+   */
+  async function sweepSlotWaiters(entry: ParkedStageEntryInput): Promise<{ listed: number; started: number; failed: number }> {
+    const out = { listed: 0, started: 0, failed: 0 };
+    if (entry.stage !== "build" || !deps.buildWaitReason || deps.startAdvance === null) return out;
+    const wait = deps.buildWaitReason;
+    const bucket = Math.floor(now() / (STAGE_RESUME_PASS_SECONDS * 1000));
+    let listed: { account_id: string; work_item_id: string; pause: string }[];
+    try {
+      listed = (await runnerPool.query<{ account_id: string; work_item_id: string; pause: string }>("SELECT account_id, work_item_id, pause FROM work_item_list_parked_stage($1, $2::text[], $3::text[], $4, $5)", [entry.stage, [...entry.itemStages], [...SLOT_WAIT_REASONS], STAGE_RESUME_ORPHAN_AFTER_SECONDS, LIST_LIMIT])).rows;
+    } catch (err) {
+      out.failed += 1;
+      reportError(err, { stage: "advance.slot_wake_list" });
+      log(JSON.stringify({ event: "slot_wake.list_failed", code: (err as { code?: string }).code ?? "error" }));
+      return out;
+    }
+    out.listed = listed.length;
+    // Queue order inside a repository: the first item of the queue takes the slot.
+    const keyed: { c: (typeof listed)[number]; repoId: string | null; key: { id: string; priority: number; queueRank: number | bigint | null; createdAt: Date } }[] = [];
+    for (const c of listed) {
+      try {
+        const row = (
+          await withTenant(runnerPool, c.account_id, (client) =>
+            client.query<{ repo_id: string | null; priority: number; queue_rank: string | null; created_at: Date }>("SELECT repo_id, priority, queue_rank, created_at FROM work_items WHERE id = $1 AND account_id = $2", [c.work_item_id, c.account_id]),
+          )
+        ).rows[0];
+        if (row) keyed.push({ c, repoId: row.repo_id, key: { id: c.work_item_id, priority: row.priority, queueRank: toQueueRank(row.queue_rank), createdAt: row.created_at } });
+      } catch (err) {
+        out.failed += 1;
+        reportError(err, { stage: "advance.slot_wake_item" });
+      }
+    }
+    keyed.sort((x, y) => compareQueueOrder(x.key, y.key));
+    const startedRepos = new Set<string>();
+    for (const { c, repoId } of keyed) {
+      try {
+        if (repoId !== null && startedRepos.has(`${c.account_id}:${repoId}`)) continue;
+        const planned = await planFor(entry, c.account_id, c.work_item_id);
+        if ("skip" in planned) {
+          log(JSON.stringify({ event: "slot_wake.skipped", work_item_id: c.work_item_id, reason: planned.skip }));
+          continue;
+        }
+        // Still no slot for it (held, or a better-ordered waiter is alive): the next slot that frees looks again.
+        if ((await wait(c.account_id, c.work_item_id)) !== null) continue;
+        const { plan } = planned;
+        const claimed = await fact(entry, c.account_id, c.work_item_id, c.pause, plan.attempt, `slotwake:${plan.actionId}:${plan.attempt}:${bucket}`, plan.head);
+        if (!claimed) continue;
+        await deps.startAdvance({
+          accountId: c.account_id,
+          userId: plan.userId,
+          workItemId: c.work_item_id,
+          actionId: plan.actionId,
+          haltEpoch: plan.haltEpoch,
+          specVersion: plan.specVersion,
+          ...(plan.attempt > 0 ? { startAttempt: plan.attempt } : {}),
+        });
+        if (repoId !== null) startedRepos.add(`${c.account_id}:${repoId}`);
+        out.started += 1;
+        log(JSON.stringify({ event: "slot_wake.started", work_item_id: c.work_item_id, attempt: plan.attempt }));
+      } catch (err) {
+        out.failed += 1;
+        reportError(err, { stage: "advance.slot_wake_item" });
+        log(JSON.stringify({ event: "slot_wake.item_failed", work_item_id: c.work_item_id, code: (err as { code?: string }).code ?? "error" }));
+      }
+    }
+    return out;
+  }
+
+  return { sweepParkedStages, sweepSlotWaiters };
 }
 
 export type StageResume = ReturnType<typeof createStageResume>;
