@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { ASKS_FIRST_URL, ASKS_URL, LIST_URL, MAX_ASK_PAGES, MERGE_URL, PROVIDER_HOSTS, STALLED_URL, WORDS, actionUrl, answerUrl, approveUrl, createNeedsYou, failureSentence, notShownWords, providerLink, pullRequestLink, quotedReason, readAsk, readMerge, readRequest, readStalled } from "../apps/needs-you/needs-you-model.js";
+import { ASKS_FIRST_URL, ASKS_URL, LIST_URL, MAX_ASK_PAGES, MERGE_URL, PROVIDER_HOSTS, START_ASK_TYPES, STALLED_URL, WORDS, startAnswerWords, actionUrl, answerUrl, approveUrl, createNeedsYou, failureSentence, notShownWords, providerLink, pullRequestLink, quotedReason, readAsk, readMerge, readRequest, readStalled } from "../apps/needs-you/needs-you-model.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
 const fixture = (op, name) => JSON.parse(readFileSync(join(PACKAGES, "api", "fixtures", "v1", op, name), "utf8"));
@@ -428,7 +428,33 @@ describe("decision asks", () => {
     expect(list.state.rows.map((r) => r.id)).toEqual([START.id]);
     await list.answer(START.id, "start");
     expect(sent).toEqual([[answerUrl(START.id), { choice: "start" }]]);
-    expect(list.state.rows[0]).toMatchObject({ state: "done", sentence: "Answered: Start it" });
+    expect(list.state.rows[0]).toMatchObject({ state: "done", sentence: WORDS.startedByAnswer });
+    expect(list.state.announce).toBe(WORDS.startedByAnswer);
+  });
+
+  // D#7 start gate (c): every start decision type gets the start words; every other choice holds; a type the page does not know keeps the generic words.
+  it("words the answer of every kind of start ask: Start it starts, Hold and Deny hold, and a non-start ask keeps the generic words", async () => {
+    for (const t of START_ASK_TYPES) expect(readAsk(ask({ decision_type: t })).startAsk).toBe(true);
+    expect(readAsk(ask({ decision_type: "something_new" })).startAsk).toBe(false);
+    expect(readAsk(ask({ decision_type: undefined })).startAsk).toBe(false);
+    expect(startAnswerWords("start")).toBe(WORDS.startedByAnswer);
+    for (const c of ["hold", "deny", "", undefined, "anything_else"]) expect(startAnswerWords(c)).toBe(WORDS.heldByAnswer);
+    for (const w of [WORDS.startedByAnswer, WORDS.heldByAnswer]) expect(w).not.toMatch(/null|undefined|_/);
+    for (const [type, choice, said] of [
+      ["start_after_reclassify", "start", WORDS.startedByAnswer],
+      ["start_parent_item", "hold", WORDS.heldByAnswer],
+      ["start_work_bug", "deny", WORDS.heldByAnswer],
+      ["something_new", "bump_now", "Answered: Update the dependency now"],
+    ]) {
+      const opts = type === "something_new" ? ASK.options : [{ id: "start", label: "Start it" }, { id: "hold", label: "Hold it for now" }];
+      const a = ask({ id: "22222222-2222-4222-8222-222222222222", decision_type: type, options: opts });
+      const call = async (method, path, body) => (method === "POST" ? { ask_id: a.id, receipt_id: "r1", answered_option: body.choice } : path === ASKS_FIRST_URL ? asksOf([a]) : path === LIST_URL ? setups : { items: [], not_shown: 0 });
+      const list = createNeedsYou({ call });
+      await list.load();
+      await list.answer(a.id, choice);
+      expect(list.state.rows[0].sentence).toBe(said);
+      expect(list.state.announce).toBe(said + (said.endsWith(".") ? "" : "."));
+    }
   });
 
   it("the reason is only ever text: markup, a command and a link stay characters, and the fence is removed only at the ends", () => {

@@ -517,6 +517,31 @@ test.describe("D#483 live parity: the notice, Check the build, the board's polli
     await expectNoOverflow(page);
   });
 
+  test("D#7 start gate (c): the card says how the start was decided, follows the server on refresh, and draws nothing without a decision", async ({ page }) => {
+    const sd = (k: string) => fx("getWorkItemActivity", `200-start-decision-${k}.json`);
+    const { mock, errors } = await setup(page, { status: 200, json: sd("asked") }, "in_progress");
+    await openDetail(page);
+    const line = tid(page, "pl-start-decision");
+    await expect(line).toHaveText(sd("asked").start_decision.sentence);
+    await expect(line).toHaveAttribute("data-state", "asked");
+    for (const k of ["started-person", "started-dial", "declined", "withdrawn"]) {
+      mock.activity = { status: 200, json: sd(k) };
+      await page.clock.runFor(10_000);
+      await expect(line).toContainText(sd(k).start_decision.sentence);
+      await expect(line).not.toContainText(/start_work|start_parent|policy|null|undefined/);
+      await expectNoOverflow(page);
+    }
+    // A decided start shows its time after the sentence; an unknown state shows the generic line, never a code.
+    await expect(line).toHaveText(/^The question about starting this was withdrawn/);
+    mock.activity = { status: 200, json: { ...OK, start_decision: { state: "from_the_future", by: null, name: null, at: null, sentence: "" } } };
+    await page.clock.runFor(10_000);
+    await expect(line).toHaveText("A decision about starting this item is on record.");
+    mock.activity = { status: 200, json: OK };
+    await page.clock.runFor(10_000);
+    await expect(line).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+
   test("no notice, no banner", async ({ page }) => {
     await setup(page, { status: 200, json: OK });
     await openDetail(page);

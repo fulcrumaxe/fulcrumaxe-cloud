@@ -512,6 +512,13 @@ export interface Operations {
         state: "open" | "withdrawn";
         sentence: string | null;
       }) | (null);
+      start_decision?: {
+        state: "asked" | "started" | "declined" | "withdrawn" | "unknown";
+        by: ("person" | "dial") | (null);
+        name: string | null;
+        at: string | null;
+        sentence: string;
+      };
       actions: Array<"request_changes" | "build_again" | "respec" | "back_to_discussion" | "treat_as_feature" | "close" | "reopen" | "retry_push" | "open_pr">;
       close_on_github: boolean;
       request_changes_blocked: ("live" | "rounds") | (null);

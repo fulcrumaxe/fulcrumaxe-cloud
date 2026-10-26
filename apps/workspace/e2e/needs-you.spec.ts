@@ -418,6 +418,24 @@ test.describe("D#598 P8c: Needs you", () => {
     await clean(page, errors);
   });
 
+  for (const [choice, said] of [["start", "Started. The card moves when it is done."], ["hold", "Held. Nothing starts until a person starts it from the card."]]) {
+    test(`D#7 start gate (c): a start ask answered with ${choice} is worded in start words, never a code`, async ({ page }) => {
+      const start = ask({
+        decision_type: "start_work_small", label: "Starting a small piece of work", proposed: "start",
+        options: [{ id: "start", label: "Start it" }, { id: "hold", label: "Hold it for now" }],
+        rationale: '<<UNTRUSTED EXTERNAL CONTENT>>\n"Fix the typo": Your Cautious setting asks before this kind of work starts. Nothing starts until you answer: start it now, or hold it.\n<<END UNTRUSTED>>',
+      });
+      const { mock, errors } = await setup(page, { requests: [], asks: [start], answerReply: { ask_id: A1, receipt_id: "e1b7c3d4-2f58-4a09-8c6b-7d3e9f1a2b45", answered_option: choice } });
+      await open(page);
+      await expect(t(page, "ny-title")).toHaveText("Starting a small piece of work");
+      await press(t(page, `ny-choice-${A1}-${choice}`));
+      await expect(t(page, "ny-state")).toHaveText(said);
+      await expect(t(page, "ny-live")).toHaveText(said);
+      expect(mock.answers.map((x) => x.body)).toEqual([{ choice }]);
+      await clean(page, errors);
+    });
+  }
+
   test("Deny sends choice deny", async ({ page }) => {
     const { mock } = await setup(page, { requests: [], asks: [ask()], answerReply: { ask_id: A1, receipt_id: "e1b7c3d4-2f58-4a09-8c6b-7d3e9f1a2b45", answered_option: "deny" } });
     await open(page);

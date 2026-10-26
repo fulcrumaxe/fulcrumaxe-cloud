@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  FLAG_WORDS, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, phaseOf, pullUrl, readyBanner, reasonWord, roleWord, runView, statusWord, stepView, usdText,
+  FLAG_WORDS, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, phaseOf, pullUrl, readyBanner, reasonWord, roleWord, runView, statusWord, stepView, usdText,
 } from "../apps/pipeline/pipeline-insight.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
@@ -502,6 +502,62 @@ describe("the view", () => {
       panel.start("item-xss");
       await flush();
       expect(lineOf(panel)).toEqual([hostile]);
+      expect(findAll(panel.el, (e) => e.tag === "img")).toHaveLength(0);
+    });
+  });
+
+  describe("D#7 start gate (c): how the item's start was decided", () => {
+    const FX = Object.fromEntries(["asked", "started-person", "started-dial", "declined", "withdrawn", "unknown"].map((k) => [k, fx("200-start-decision-" + k + ".json")]));
+    const lineOf = (panel) => byId(panel.el, "pl-start-decision").map((e) => e.textContent);
+
+    it("shows the cloud's sentence for each outcome, with when it was decided, from the activity read alone", async () => {
+      for (const [k, data] of Object.entries(FX)) {
+        const { panel, calls } = make(data);
+        panel.start("item-sd-" + k);
+        await flush();
+        const [line] = lineOf(panel);
+        expect(line.startsWith(data.start_decision.sentence), k).toBe(true);
+        if (data.start_decision.at !== null) expect(line.length, k).toBeGreaterThan(data.start_decision.sentence.length + 4); // the time follows
+        else expect(line, k).toBe(data.start_decision.sentence);
+        expect(byId(panel.el, "pl-start-decision")[0].getAttribute("data-state")).toBe(data.start_decision.state);
+        expect(calls).toHaveLength(1);
+        expect(line).not.toMatch(/start_work|start_parent|start_after|policy|null|undefined|NaN|[0-9a-f]{8}-[0-9a-f]{4}/);
+      }
+    });
+
+    it("says who and which setting decided: a person by name, the dial by its preset", () => {
+      expect(FX["started-person"].start_decision.sentence).toBe("Started by Ada Lovelace.");
+      expect(FX["started-dial"].start_decision.sentence).toMatch(/^Started automatically under your Autonomous setting/);
+      expect(FX.declined.start_decision.sentence).toMatch(/^Held by Ada Lovelace\./);
+    });
+
+    it("falls back to words for the state when the sentence is missing, and to a generic line for a state it does not know", () => {
+      for (const sentence of [undefined, "", "   ", 5, null]) {
+        for (const state of ["asked", "started", "declined", "withdrawn"]) expect(buildInsight({ ...OK, start_decision: { state, sentence } }).startDecision.text).toBe(START_DECISION_WORDS[state]);
+      }
+      for (const state of ["unknown", "brand_new_state", undefined, 7, null]) {
+        const m = buildInsight({ ...OK, start_decision: { state, sentence: "" } });
+        expect(m.startDecision).toEqual({ state: "unknown", text: START_DECISION_WORDS.unknown });
+      }
+      for (const text of Object.values(START_DECISION_WORDS)) expect(text).not.toMatch(/null|undefined|NaN|_/);
+      expect(buildInsight({ ...OK, start_decision: { state: "started", sentence: "Started by a person.", at: "not a date" } }).startDecision.text).toBe("Started by a person.");
+    });
+
+    it("draws nothing without a start decision, or with a malformed one", async () => {
+      for (const sd of [undefined, null, "started", 3, [], true]) {
+        const { panel } = make({ ...OK, start_decision: sd });
+        panel.start("item-sd-none");
+        await flush();
+        expect(lineOf(panel)).toEqual([]);
+      }
+    });
+
+    it("shows hostile text as text only", async () => {
+      const hostile = "<img src=x onerror=alert(1)>";
+      const { panel } = make({ ...OK, start_decision: { state: "started", by: "person", name: hostile, at: null, sentence: "Started by " + hostile + "." } });
+      panel.start("item-sd-xss");
+      await flush();
+      expect(lineOf(panel)).toEqual(["Started by " + hostile + "."]);
       expect(findAll(panel.el, (e) => e.tag === "img")).toHaveLength(0);
     });
   });
