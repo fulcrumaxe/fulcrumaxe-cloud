@@ -31,6 +31,7 @@ import { JSON_SCHEMA, load } from "js-yaml";
 import { redactShapes } from "@fulcrumaxe/runner-protocol";
 import { MAX_LOCKFILE_BYTES, projectIsPlain, readRootFile, registryUrlOf, settingsRefusal, TAIL_SHOWN_CHARS, type DepsRefusal } from "./depsInstall.js";
 import type { InstallCapture } from "./engineKit.js";
+import { GitPathError } from "./git.js";
 import { findTool } from "./nixShell.js";
 import { installEnv, type CleanEnvOptions } from "../job/cleanEnv.js";
 import { checkPnpmLock } from "../job/lockfileCheck.js";
@@ -225,7 +226,13 @@ export function createLockfileSync(deps: LockfileSyncDeps): LockfileSync {
       if (before.kind === "absent") return { kind: "none" };
       if (before.kind === "refused") return refuse(before.reason);
 
-      const changed = await deps.changedFiles(workspace, base).catch(() => null);
+      // A git folder of a shape the sandbox does not leave (`workspace_git_refused`) is a workspace not to touch; any other failed read only skips the update.
+      let refusedShape = false;
+      const changed = await deps.changedFiles(workspace, base).catch((error: unknown) => {
+        refusedShape = error instanceof GitPathError && error.code === "workspace_git_refused";
+        return null;
+      });
+      if (refusedShape) return refuse("workspace_unsafe");
       if (changed === null) {
         deps.say("fx-runner: lockfile update skipped (lockfile_sync_unknown_changes)");
         return { kind: "none" };

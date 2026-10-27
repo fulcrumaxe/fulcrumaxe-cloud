@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
+import { pinFixture } from "../helpers/pinFixture.js";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -18,7 +19,7 @@ let root: string;
 let ws: string;
 let scratch: string;
 let base: string;
-const git = (...args: string[]): string => execFileSync("git", ["-C", ws, ...args], { encoding: "utf8" }).trim();
+const git = (...args: string[]): string => execFileSync("git", ["-C", ws, ...args], { encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" } }).trim();
 const put = (rel: string, text: string): void => {
   mkdirSync(path.dirname(path.join(ws, rel)), { recursive: true });
   writeFileSync(path.join(ws, rel), text);
@@ -50,8 +51,6 @@ beforeEach(() => {
   mkdirSync(ws);
   mkdirSync(scratch);
   git("init", "-q", "-b", "main");
-  git("config", "user.email", "t@example.invalid");
-  git("config", "user.name", "t");
   put("pnpm-workspace.yaml", "packages:\n  - a\n  - b\n");
   put("package.json", pkg("root", {}, { private: true }));
   put("a/package.json", pkg("@x/a"));
@@ -61,6 +60,7 @@ beforeEach(() => {
   git("add", "-A");
   git("commit", "-q", "-m", "start");
   base = git("rev-parse", "HEAD");
+  pinFixture(ws);
 });
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -435,12 +435,19 @@ describe("what the update refuses or puts back", () => {
     expect(r.said[0]).toContain("pnpm not found");
   });
 
-  it("when git cannot name the changed files the lockfile is left alone, and a line says why", async () => {
+  it("when git cannot name the changed files (the listing answers null) the lockfile is left alone, and a line says why", async () => {
+    put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
+    const r = subject({ changedFiles: async () => null });
+    expect(await r.run()).toEqual({ kind: "none" });
+    expect(r.said).toEqual(["fx-runner: lockfile update skipped (lockfile_sync_unknown_changes)"]);
+  });
+
+  it("when the git folder has no shape the sandbox leaves, the lockfile is refused and left alone, and a line says why", async () => {
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     rmSync(path.join(ws, ".git"), { recursive: true, force: true });
     const r = subject();
-    expect(await r.run()).toEqual({ kind: "none" });
-    expect(r.said).toEqual(["fx-runner: lockfile update skipped (lockfile_sync_unknown_changes)"]);
+    expect(await r.run()).toEqual({ kind: "refused", reason: "workspace_unsafe" });
+    expect(r.said).toEqual(["fx-runner: lockfile update refused (lockfile_sync_refused: workspace_unsafe)"]);
   });
 });
 

@@ -54,6 +54,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/daemon/resources.ts": ["fs", "os", "path"], // D#6 C43-4: what the machine has free: os.freemem (MemAvailable), load average and core count, and statfs of the workspace and cache volumes; no process is started and no process-table file is read
   "src/daemon/footprints.ts": ["fs", "path"], // D#6 C43-4: the learned per-repo, per-role memory estimates: lstat and a bounded read of one small file in the state directory, written through the private-file writer
   "src/sandbox/jobLimits.ts": ["path"], // D#6 C43-5: path joins and an absolute-path check; every program (systemd-run, systemctl, env) runs through the injected capture or the engine's own start
+  "src/daemon/workspacePin.ts": ["crypto", "fs", "path"], // D#6 RUNNER-HOSTREAD-GITDIR-SHAPE: lstat of the workspace git folder and its config, a SHA-256 of the config bytes, a realpath key; nothing is written
   "src/daemon/resumeClean.ts": ["fs", "path"], // D#6 RUNNER-RESUME-CLEAN: realpath of the workspace root before the purge
   "src/daemon/resumePurge.ts": ["fs", "path"], // D#6 RUNNER-RESUME-CLEAN: lstat, unlink and rmdir of ignored build output in a resumed workspace without following a link; realpath of each entry's parent
   "src/daemon/resumePurgeSandbox.ts": ["fs", "path"], // D#6 RESUME-CLEAN-MAC: a 0600 list file in a fresh directory under the state directory for the sandboxed purge child, removed afterwards; the child runs through the injected capture

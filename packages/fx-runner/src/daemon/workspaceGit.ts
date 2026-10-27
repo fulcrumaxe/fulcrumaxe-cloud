@@ -149,7 +149,24 @@ export function assertWorkspaceGit(workspace: string, mirrorObjects: string): st
  * directory, which a non-strict `upload-pack` would try before the directory itself, and an alternates line that is not absolute.
  */
 export function assertGitDirShape(gitDir: string, mirrorObjects: string, requireAlternates: boolean, tolerateSandboxStubs = false): void {
-  if (!path.isAbsolute(gitDir) || !path.isAbsolute(mirrorObjects)) return refuse();
+  if (!path.isAbsolute(mirrorObjects)) return refuse();
+  checkGitDirShape(gitDir, mirrorObjects, requireAlternates, tolerateSandboxStubs);
+}
+
+/**
+ * The shape check before the daemon's own git READS of a workspace (listings and ref digests). The same rules as
+ * `assertWorkspaceGit`, with `objects/info/alternates` absent or exactly the mirror's objects the clone borrowed (the pin in `workspacePin.ts` holds it). A refusal is `push_ref_refused`/`workspace_git_refused`, closed codes.
+ * Do not call this directly from a read site: go through `hostRead.ts`.
+ */
+export function assertHostReadableGit(workspace: string, mirrorObjects: string): void {
+  if (!path.isAbsolute(workspace) || !path.isAbsolute(mirrorObjects)) return refuse();
+  const gitDir = path.join(workspace, ".git");
+  if (kindOf(gitDir) !== "dir") refuse();
+  checkGitDirShape(gitDir, mirrorObjects, false, true);
+}
+
+function checkGitDirShape(gitDir: string, mirrorObjects: string | null, requireAlternates: boolean, tolerateSandboxStubs: boolean): void {
+  if (!path.isAbsolute(gitDir)) return refuse();
   if (kindOf(path.join(gitDir, ".git")) !== "none") refuse();
   if (tolerateSandboxStubs) assertSandboxStubs(gitDir);
   else if (kindOf(path.join(gitDir, "commondir")) !== "none") refuse();
@@ -161,6 +178,14 @@ export function assertGitDirShape(gitDir: string, mirrorObjects: string, require
   if (kindOf(refs) !== "dir" || kindOf(objects) !== "dir") refuse();
   const info = path.join(objects, "info");
   if (!["dir", "none"].includes(kindOf(info))) refuse();
+  // `.git/info` holds the exclude and attributes files git reads on every listing: a plain directory of plain files, no link out of the workspace.
+  const repoInfo = path.join(gitDir, "info");
+  if (!["dir", "none"].includes(kindOf(repoInfo))) refuse();
+  if (kindOf(repoInfo) === "dir") {
+    for (const entry of closed(() => readdirSync(repoInfo, { withFileTypes: true }))) {
+      if (!entry.isFile() || entry.isSymbolicLink()) refuse();
+    }
+  }
   const budget = { left: MAX_ENTRIES };
   closed(() => assertPlainTree(refs, budget));
   closed(() => assertPlainTree(objects, budget));
@@ -176,5 +201,5 @@ export function assertGitDirShape(gitDir: string, mirrorObjects: string, require
     return text.split("\n").map((line) => line.trim()).filter((line) => line !== "");
   });
   // Git reads a relative line against `objects/`, not the daemon's directory, so only an absolute line is ever compared.
-  if (lines.length !== 1 || !path.isAbsolute(lines[0]!) || !same(lines[0]!, mirrorObjects)) refuse();
+  if (lines.length !== 1 || !path.isAbsolute(lines[0]!) || (mirrorObjects !== null && !same(lines[0]!, mirrorObjects))) refuse();
 }

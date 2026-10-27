@@ -22,6 +22,7 @@
 import { realpathSync } from "node:fs";
 import path from "node:path";
 import type { Git } from "./git.js";
+import { runWorkspaceGit } from "./hostRead.js";
 import { purgeListed, relOf, type CleanCounts } from "./resumePurge.js";
 
 export type { CleanCounts } from "./resumePurge.js";
@@ -34,7 +35,7 @@ export type SandboxedPurge = (realRoot: string, entries: readonly string[]) => P
 
 /** Ignored entries git lists for `workspace`, as repository-relative paths (a trailing slash marks a whole ignored directory). */
 async function ignoredEntries(git: Git, workspace: string, capChars: number): Promise<{ entries: string[]; capped: boolean }> {
-  const out = await git.run("workspace_failed", ["-C", workspace, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"]);
+  const out = await runWorkspaceGit(git, "workspace_failed", workspace, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"]);
   const parts = out.split("\0");
   const tail = parts.pop(); // after the last NUL: empty, or the cut-off tail of an output that hit the capture's limit
   return { entries: parts.filter((entry) => entry !== ""), capped: (tail ?? "") !== "" || out.length >= capChars };

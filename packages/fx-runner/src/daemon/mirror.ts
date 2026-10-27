@@ -14,6 +14,7 @@ import { segmentUnder } from "../job/plainSegment.js";
 import { WaitAborted, withKeyLock } from "./keyedLock.js";
 import { CREDENTIAL_FLOOR, pathsOverlap } from "../sandbox/sandboxSettings.js";
 import { GitPathError, type Git } from "./git.js";
+import { pinWorkspaceGit } from "./hostRead.js";
 import { writeWorkspaceExclude } from "./workspaceExclude.js";
 import { continuesBranch, pushPlan, type PushContinues, type PushLease } from "./push.js";
 
@@ -233,13 +234,15 @@ export function createMirrors(deps: MirrorDeps): Mirrors {
     });
 
   /** After a checkout: keeps the sandbox's stub files out of `git add -A`, except for names the checked-out commit tracks (D#6 C44-3). */
-  async function excludeStubs(workspace: string): Promise<void> {
+  async function excludeStubs(workspace: string, mirror: string): Promise<void> {
     // `ls-tree` without `-r` names only the root entries (a tracked directory by its own name), so the answer stays small. The names are
     // not passed as arguments: the test guard refuses a git argv that names the agent's own directory.
     const listing = await deps.git.run("workspace_failed", ["-C", workspace, "ls-tree", "-z", "--name-only", "HEAD"]);
     // The capture keeps 64 K; a root listing that long may be cut, and a cut list could hide a tracked name, so it is not used.
     if (listing.length >= LISTING_CAP_GUARD) throw new GitPathError("workspace_failed");
     writeWorkspaceExclude(workspace, listing.split("\0").filter((entry) => entry !== ""));
+    // The workspace is now exactly what the daemon's clone left, and the agent has not started: record its git folder for every later host read (hostRead.ts).
+    await pinWorkspaceGit(deps.git, workspace, path.join(mirror, "objects"));
   }
 
   async function prepareUnlocked(repo: RepoRef, lease: PushLease, workspace: string, continues: PushContinues | null, review: ReviewTarget | null): Promise<{ base: string }> {
@@ -254,7 +257,7 @@ export function createMirrors(deps: MirrorDeps): Mirrors {
       if (holders.trim() === "") throw new GitPathError("review_sha_not_in_mirror");
       await deps.git.run("workspace_failed", ["clone", "--reference", mirror, "--no-local", "--", mirror, workspace]);
       await deps.git.run("workspace_failed", ["-C", workspace, "checkout", "--detach", sha]);
-      await excludeStubs(workspace);
+      await excludeStubs(workspace, mirror);
       return { base: sha };
     }
     const plan = pushPlan(lease, continues);
@@ -262,13 +265,13 @@ export function createMirrors(deps: MirrorDeps): Mirrors {
       const { dir: mirror, tip } = await continuationTipUnlocked(repo, continues);
       await deps.git.run("workspace_failed", ["clone", "--reference", mirror, "--no-local", "--", mirror, workspace]);
       await deps.git.run("workspace_failed", ["-C", workspace, "checkout", "-B", plan.branch, tip]);
-      await excludeStubs(workspace);
+      await excludeStubs(workspace, mirror);
       return { base: tip };
     }
     const { dir: mirror, base } = await syncUnlocked(repo);
     await deps.git.run("workspace_failed", ["clone", "--reference", mirror, "--no-local", "--", mirror, workspace]);
     await deps.git.run("workspace_failed", ["-C", workspace, "checkout", "-b", plan.branch]);
-    await excludeStubs(workspace);
+    await excludeStubs(workspace, mirror);
     return { base };
   }
 

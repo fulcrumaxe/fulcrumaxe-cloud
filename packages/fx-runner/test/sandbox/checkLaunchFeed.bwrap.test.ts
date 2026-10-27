@@ -1,3 +1,4 @@
+import { pinFixture } from "../helpers/pinFixture.js";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -60,6 +61,7 @@ describe.skipIf(!usable)("RUNNER-SECCOMP-FD-1: the check under real bubblewrap t
     git("add", ".");
     git("commit", "-q", "-m", "base");
     base = git("rev-parse", "HEAD");
+    pinFixture(workspace);
     const runtime = {
       start: async () => ({ handle: { runId: "r1", done: Promise.resolve({ status: "done" }) } as unknown as AgentHandle }),
       stop: async () => undefined,

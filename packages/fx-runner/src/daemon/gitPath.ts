@@ -14,6 +14,7 @@ import { createMirrors, type Mirrors, type MirrorDeps } from "./mirror.js";
 import type { NixFromDefault, NixSource } from "./nixShell.js";
 import { LISTING_CAP, readRepoMap } from "./repoMap.js";
 import { sweepSnapshots } from "./snapshot.js";
+import { pinWorkspaceGit } from "./hostRead.js";
 import { cleanResumedWorkspace, type SandboxedPurge } from "./resumeClean.js";
 import { publishBranch, PUSH_BRANCH_PREFIX, pushPlan, workspaceHead, type PushLease, type Published } from "./push.js";
 
@@ -158,6 +159,9 @@ export function createGitPath(deps: GitPathDeps): GitPath {
       const { dir, tip } = await mirrors.continuationTip(job.repo, job.continues);
       try {
         if ((await workspaceHead(git, dir, workspace, snapshotsRoot)) !== tip) return null;
+        // A kept workspace is re-vetted and re-pinned here, not refused outright: its shape and its config keys are checked again (hostRead.ts) and every later
+        // host read carries the nested-repository neutral arguments. Its safety therefore rests on those static checks, not on a record of what the agent did in the earlier round.
+        await pinWorkspaceGit(listingGit, workspace, path.join(dir, "objects"));
         // At the tip and about to be reused: the first round's ignored build output must not reach this run's check (D#6 RUNNER-RESUME-CLEAN).
         await cleanResumedWorkspace(listingGit, workspace, deps.log, deps.captureLarge === undefined ? SMALL_CAPTURE_CHARS : LISTING_CAP, deps.platform, deps.sandboxedPurge);
         return { base: tip };

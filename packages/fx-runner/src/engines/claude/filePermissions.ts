@@ -69,6 +69,9 @@ export function workspaceProtectedEditRules(workspace: string): string[] {
     `Edit(${root}/.git/hooks)`,
     `Edit(${root}/.git/hooks/**)`,
     `Edit(${root}/.git/config)`,
+    // `config.worktree` is config git reads for the host's own reads too; a file bind is as safe as the one on `.git/config`.
+    // `.git/commondir` is not denied here: a bind leaves an empty one and git then refuses to run in the sandbox (bashSandbox.bwrap.test.ts); the host-side shape check covers it.
+    `Edit(${root}/.git/config.worktree)`,
   ];
 }
 

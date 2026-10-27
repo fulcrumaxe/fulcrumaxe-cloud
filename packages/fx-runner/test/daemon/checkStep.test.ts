@@ -7,6 +7,8 @@ import { CHECK_NOT_RUN_REASONS } from "@fulcrumaxe/runner-protocol";
 import { changedFilesLine, createBaseFile, createChangedFiles, createCheckStep, createFailedFiles, createVcsState, normalised, skippedTests, type CheckStepInput } from "../../src/daemon/checkStep.js";
 import { runCapture, runInstall } from "../../src/engines/claude/capture.js";
 import { testLaunch } from "../helpers/launch.js";
+import { GitPathError } from "../../src/daemon/git.js";
+import { pinFixture } from "../helpers/pinFixture.js";
 
 /**
  * D#6 R-CHK-2: the check step on real child processes (no fake spawn) and a real git repository for the base-commit pinning. The sandbox tool is not part of this
@@ -28,6 +30,7 @@ beforeEach(() => {
   writeFileSync(path.join(ws, "scripts", "check.sh"), "#!/bin/sh\necho base check\nexit 3\n", { mode: 0o755 });
   git("init", "-q");
   base = commit("base");
+  pinFixture(ws);
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
@@ -231,7 +234,8 @@ describe("the files the branch changed, named in the summary's header of a faile
 
   it("createChangedFiles answers null when git cannot say (an unknown base), never an empty list", async () => {
     expect(await changedFiles(ws, "f".repeat(40))).toBeNull();
-    expect(await changedFiles(path.join(root, "not-a-repo"), base)).toBeNull();
+    // A folder with no git folder of the shape the sandbox leaves is not read at all.
+    await expect(changedFiles(path.join(root, "not-a-repo"), base)).rejects.toMatchObject({ code: "workspace_git_refused" });
   });
 
   it("a failing check names the failed test files first and then the changed files; the output tail follows", async () => {
@@ -436,6 +440,25 @@ describe("the reason code", () => {
       },
     });
     expect(out.body.reason).toBe("pin_failed");
+  });
+
+  it("a refused git folder ends the check with a plain sentence: before the check (protected_unreadable) and after it (protected_changed)", async () => {
+    const refusing = (okCalls: number) => {
+      let calls = 0;
+      return async (): Promise<string> => {
+        if (calls++ >= okCalls) throw new GitPathError("workspace_git_refused");
+        return "state";
+      };
+    };
+    const stepWith = (okCalls: number) => createCheckStep({ capture: (command, args, env, cwd, timeoutMs, tail, signal, feed, onLine) => runInstall(spawn, command, args, env, cwd, timeoutMs, tail, signal, feed, onLine), now: () => new Date(), vcsState: refusing(okCalls) });
+    const input = (): CheckStepInput => ({ check: { argv: [script("ok.sh", "exit 0")], dev_shell: false, timeout_s: 60 }, workspace: ws, base, baseDir: ws, baseFile, launch: (v) => ({ tool: v[0]!, args: v.slice(1), env: { PATH: process.env.PATH ?? "" } }) });
+    const before = await stepWith(0)(input());
+    expect(before.body.reason).toBe("protected_unreadable");
+    expect(before.body.summary).toContain("the workspace's git folder was changed in a way the runner will not read");
+    const after = await stepWith(1)(input());
+    expect(after.body.reason).toBe("protected_changed");
+    expect(after.passed).toBe(false);
+    expect(after.body.summary).toContain("the workspace's git folder was changed in a way the runner will not read");
   });
 
   it("a check that changes protected paths is protected_changed, even though its own exit status was 0", async () => {
