@@ -332,6 +332,6 @@ describe("guards on the file", () => {
   });
 });
 
-/** The cron list on main when this part was written: the part adds no entry (R1, push not poll). */
-const FROZEN_CRON_PATHS = ["/api/cron/api-sweep", "/api/cron/branch-cleanup", "/api/cron/compute-settle-sweep", "/api/cron/handoff-sweep", "/api/cron/invariant-sweep", "/api/cron/proposal-verify-sweep", "/api/cron/reconcile", "/api/cron/run-action-sweep", "/api/cron/runner-sweeper", "/api/cron/setup-request-check", "/api/cron/stage-resume-sweep"];
-const FROZEN_SWEEP_NAMES = ["api-sweep", "run-action-sweep", "compute-settle-sweep", "reconcile", "runner-sweeper", "invariant-sweep", "handoff-sweep", "stage-resume-sweep", "setup-request-check", "branch-cleanup", "proposal-verify-sweep"];
+/** The cron list and sweep names: this part adds no entry (R1, push not poll). D#519 MQ3-b added `merge-queue-sweep`, which is behind its own pending-work marker. */
+const FROZEN_CRON_PATHS = ["/api/cron/api-sweep", "/api/cron/branch-cleanup", "/api/cron/compute-settle-sweep", "/api/cron/handoff-sweep", "/api/cron/invariant-sweep", "/api/cron/merge-queue-sweep", "/api/cron/proposal-verify-sweep", "/api/cron/reconcile", "/api/cron/run-action-sweep", "/api/cron/runner-sweeper", "/api/cron/setup-request-check", "/api/cron/stage-resume-sweep"];
+const FROZEN_SWEEP_NAMES = ["api-sweep", "run-action-sweep", "compute-settle-sweep", "reconcile", "runner-sweeper", "invariant-sweep", "handoff-sweep", "stage-resume-sweep", "setup-request-check", "branch-cleanup", "proposal-verify-sweep", "merge-queue-sweep"];

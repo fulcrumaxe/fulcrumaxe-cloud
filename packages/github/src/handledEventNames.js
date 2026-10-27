@@ -14,4 +14,8 @@ export const HANDLED_EVENT_NAMES = Object.freeze([
   'pull_request',
   'pull_request_review',
   'push',
+  // D#519 MQ3-b: CI results are only a wake-up signal for the merge queue (`onRepoEvent`); they map to no work item change.
+  'check_run',
+  'check_suite',
+  'status',
 ]);

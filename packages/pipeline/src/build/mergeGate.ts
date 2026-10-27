@@ -265,6 +265,8 @@ export interface MergeGateInput {
   expectedHeadSha?: string;
   /** Stops the caller already knows (e.g. `public_head_unrecorded`); any entry means the gate does not merge and marks the pull request for a person. */
   extraBlockReasons?: readonly MergeBlockReason[];
+  /** D#519 MQ3-b: check-run names and status contexts that were green on the reviewed head; each must be present and green on the head gated (`missingExpectedSignals`). Absent: none expected. */
+  expectedSignals?: readonly string[];
   /**
    * Two planes, `runner_local`: the cloud never calls merge for such a repository's public pull request (its merge belongs to the customer's runner or to a
    * person). When every other condition is met, the gate stops here instead of merging and marks the pull request for a person with this reason. Absent:
@@ -441,6 +443,50 @@ export function isCiGreen(snapshot: CiSnapshot, headSha: string): boolean {
     // Present under that name and, given the every-signal rule above, green.
     return checks.length + statuses.length > 0;
   });
+}
+
+/**
+ * D#519 MQ3-b, the expected-signal rule. Every check-run name and status context that was present and green on the REVIEWED head must
+ * be present and green on a head the queue refreshed, or the new head is not proven: a slow CI system may not have posted its checks
+ * yet, and "only our own `fulcrumaxe/review` has posted" is not CI. Our own review status is left out, because the gate itself posts it
+ * on the head it merges. Names are compared exactly, like `requiredContexts`.
+ */
+export function greenSignalNames(snapshot: CiSnapshot): string[] {
+  const ours = REVIEW_STATUS_CONTEXT_NAME.toLowerCase();
+  const names = [...snapshot.checkRuns.filter(isGreenCheck).map((c) => c.name), ...snapshot.statuses.filter((s) => s.state === "success").map((s) => s.context)];
+  return [...new Set(names.filter((n) => n.toLowerCase() !== ours))];
+}
+
+/**
+ * The signals a refreshed head must show: EVERY check-run name and status context present on the reviewed head, whatever state its newest
+ * run is in now. A check that was green there and is being re-run (in progress, cancelled, failed) must not drop out of the set, or the
+ * refreshed head could merge without that check ever running on it. Our own review status is left out, as in `greenSignalNames`.
+ */
+export function expectedSignalNames(snapshot: CiSnapshot): string[] {
+  const ours = REVIEW_STATUS_CONTEXT_NAME.toLowerCase();
+  return [...new Set([...snapshot.checkRuns.map((c) => c.name), ...snapshot.statuses.map((s) => s.context)].filter((n) => n.toLowerCase() !== ours))];
+}
+
+/** The expected signals the snapshot does not show as green. A run of that name that has not completed green, or none at all, is missing. */
+export function missingExpectedSignals(snapshot: CiSnapshot, expected: readonly string[]): string[] {
+  const green = new Set(greenSignalNames(snapshot));
+  return expected.filter((name) => !green.has(name));
+}
+
+export type CiVerdict = "green" | "red" | "pending";
+
+/**
+ * D#519 MQ3-b: what the queue does with the CI of one head. `green` is exactly what the gate would accept, plus the expected signals.
+ * `red` is a run that COMPLETED without a green conclusion, or a failed status: waiting cannot fix that. Everything else (a run still
+ * going, a signal not posted yet, a snapshot for another sha, an unreadable protection rule) is `pending`: it waits, bounded by the
+ * queue's CI wait, and is never read as green.
+ */
+export function classifyCi(snapshot: CiSnapshot, headSha: string, expected: readonly string[] = []): CiVerdict {
+  if (isCiGreen(snapshot, headSha) && missingExpectedSignals(snapshot, expected).length === 0) return "green";
+  if (snapshot.headSha !== headSha || !Array.isArray(snapshot.checkRuns) || !Array.isArray(snapshot.statuses)) return "pending";
+  const failedRun = snapshot.checkRuns.some((c) => c.status === "completed" && !isGreenCheck(c));
+  const failedStatus = snapshot.statuses.some((s) => s.state === "failure" || s.state === "error");
+  return failedRun || failedStatus ? "red" : "pending";
 }
 
 export interface RunRow {
@@ -695,7 +741,7 @@ export async function runMergeGate(deps: MergeGateDeps, input: MergeGateInput): 
   if (mode === "runner_local_off") reasons.push("local_review_not_enabled");
 
   const ci = await deps.github.getCiSnapshot(input.pr, headSha);
-  if (!isCiGreen(ci, headSha)) reasons.push("ci_not_green");
+  if (!isCiGreen(ci, headSha) || missingExpectedSignals(ci, input.expectedSignals ?? []).length > 0) reasons.push("ci_not_green");
   if (mode === "runner_local_on") {
     // (c): GitHub, not a runner, decides CI and protection. Our own status must not be the only CI signal.
     if (!hasRepoOwnCi(ci)) reasons.push("repo_ci_missing");

@@ -282,7 +282,7 @@ export interface AdvanceReviewDeps {
   /** The pipeline's `resumeAgentRun`: an executor fix round continues the PR's persistent sandbox and session. */
   resume: (pool: Pool, registry: ExecutionTargetRegistry, input: StartAgentRunInput) => Promise<{ id: string; status: string }>;
   /** The merge gate over the real GitHub port (a token of the `merge_gate` purpose). */
-  mergeGate: (pool: Pool, input: { accountId: string; workItemId: string; prNumber: number }, extras?: { orders: RunnerPlaneMergeStore }) => Promise<AdvanceMergeGateResult>;
+  mergeGate: (pool: Pool, input: { accountId: string; workItemId: string; prNumber: number; expectedSignals?: readonly string[]; expectedHeadSha?: string }, extras?: { orders: RunnerPlaneMergeStore }) => Promise<AdvanceMergeGateResult>;
   /**
    * D#6 PUBLIC-MERGE PR2b: ends an AUTHORIZED merge order whose lease ran out (or whose deadline passed) without a report, from what GitHub says through the
    * cloud's own fenced client (the runner may have merged before it stopped). Throws when GitHub cannot be asked, and then ends nothing. Absent: such an order is

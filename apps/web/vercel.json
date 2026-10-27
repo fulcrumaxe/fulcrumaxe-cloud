@@ -48,6 +48,10 @@
     {
       "path": "/api/cron/proposal-verify-sweep",
       "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/merge-queue-sweep",
+      "schedule": "* * * * *"
     }
   ]
 }

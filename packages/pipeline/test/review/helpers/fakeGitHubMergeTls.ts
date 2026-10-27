@@ -121,6 +121,13 @@ export interface MergeWorld {
   mergeAnswer?: number;
   /** Runs when a merge request arrives, before it is answered (a push racing the merge, or `mergeable` starting to compute). */
   onMerge?: (w: MergeWorld) => void;
+  /**
+   * D#519 MQ3-b: the merge reply is held open this many ms after the request arrives (real I/O, not a microtask), and `mergeGauge` counts the
+   * merge requests that are open at once, shared across worlds by passing the same object. With no delay a handler answers in the same tick it
+   * was called, so no two requests can ever overlap in the gauge and "never two in flight" could not fail.
+   */
+  mergeDelayMs?: number;
+  mergeGauge?: { now: number; max: number };
   /** Forces the update-branch call's status. */
   updateAnswer?: number;
   /** Classic protection exists but requires no status checks: GitHub answers 404 "Required status checks not enabled". */
@@ -131,6 +138,8 @@ export interface MergeWorld {
   checkNames: string[];
   /** D#598 P7b: replaces `checkNames` with runs in any state. GitHub's `conclusion` is null until a run has completed, and `status` is queued | in_progress | completed. */
   checkRuns?: Array<{ name: string; status: "queued" | "in_progress" | "completed"; conclusion: string | null }>;
+  /** D#519 MQ3-b: the runs of ONE commit, replacing `checkRuns` / `checkNames` for that sha (a refreshed head whose CI has not all posted yet). */
+  checkRunsBySha?: Record<string, Array<{ name: string; status: "queued" | "in_progress" | "completed"; conclusion: string | null }>>;
   /** D#598 P7b: commit statuses on every commit (context -> state); the combined state is derived the way GitHub derives it. */
   statuses?: Record<string, "error" | "failure" | "pending" | "success">;
   /** Replaces the `message` of the merge and update-branch errors, to show no code reads it (protection's documented 404 messages stay exact). */
@@ -217,7 +226,7 @@ function paged<T>(all: T[], query: URLSearchParams): T[] {
 }
 
 /** The rule set above as a `route` for `startStrictGithubServer`. */
-export function mergeRoute(w: MergeWorld): (req: GhRequest) => GhReply {
+export function mergeRoute(w: MergeWorld): (req: GhRequest) => GhReply | Promise<GhReply> {
   const base = `/repos/${w.owner}/${w.name}`;
   const json = (status: number, body: unknown): GhReply => ({ status, headers: { "content-type": "application/json; charset=utf-8" }, body: JSON.stringify(body) });
   const err = (status: number, message: string): GhReply => ghError(status, w.messageOverride ?? message);
@@ -266,15 +275,24 @@ export function mergeRoute(w: MergeWorld): (req: GhRequest) => GhReply {
     if (req.method === "PUT" && req.path === `${base}/pulls/${w.prNumber}/merge`) {
       const b = (body ?? {}) as { sha?: unknown; merge_method?: unknown };
       if (b.merge_method !== undefined && !MERGE_METHODS.includes(b.merge_method as string)) return err(422, "Validation Failed");
+      if (w.mergeGauge) w.mergeGauge.max = Math.max(w.mergeGauge.max, ++w.mergeGauge.now);
       w.onMerge?.(w);
       w.merges.push({ sha: b.sha, method: b.merge_method });
-      if (w.mergeAnswer !== undefined) return err(w.mergeAnswer, "Pull Request is not mergeable");
-      if (b.sha !== undefined && b.sha !== w.headSha) return err(409, "Head branch was modified. Review and try the merge again.");
-      // 405 is every "the merge cannot be performed".
-      if (w.state !== "open" || w.merged || w.draft || w.conflict || (w.behindBy > 0 && requiresUpToDate(w))) return err(405, "Pull Request is not mergeable");
-      w.merged = true;
-      w.state = "closed";
-      return json(200, { merged: true, sha: "f".repeat(40), message: "Pull Request successfully merged" });
+      const answer = (): GhReply => {
+        if (w.mergeAnswer !== undefined) return err(w.mergeAnswer, "Pull Request is not mergeable");
+        if (b.sha !== undefined && b.sha !== w.headSha) return err(409, "Head branch was modified. Review and try the merge again.");
+        // 405 is every "the merge cannot be performed".
+        if (w.state !== "open" || w.merged || w.draft || w.conflict || (w.behindBy > 0 && requiresUpToDate(w))) return err(405, "Pull Request is not mergeable");
+        w.merged = true;
+        w.state = "closed";
+        return json(200, { merged: true, sha: "f".repeat(40), message: "Pull Request successfully merged" });
+      };
+      const done = (): GhReply => {
+        const reply = answer();
+        if (w.mergeGauge) w.mergeGauge.now -= 1;
+        return reply;
+      };
+      return w.mergeDelayMs ? new Promise<GhReply>((resolve) => setTimeout(() => resolve(done()), w.mergeDelayMs)) : done();
     }
 
     if (req.method === "PUT" && req.path === `${base}/pulls/${w.prNumber}/update-branch`) {
@@ -353,8 +371,10 @@ export function mergeRoute(w: MergeWorld): (req: GhRequest) => GhReply {
 
     const checks = /^\/repos\/[^/]+\/[^/]+\/commits\/([0-9a-f]{40})\/check-runs$/.exec(req.path);
     if (req.method === "GET" && checks) {
-      const runs = w.checkRuns ?? w.checkNames.map((name) => ({ name, status: "completed" as const, conclusion: "success" as string | null }));
-      const list = runs.map((r, i) => ({ id: i + 1, head_sha: checks[1], name: r.name, status: r.status, conclusion: r.status === "completed" ? r.conclusion : null, app: { id: 1 } }));
+      const runs = w.checkRunsBySha?.[checks[1]!] ?? w.checkRuns ?? w.checkNames.map((name) => ({ name, status: "completed" as const, conclusion: "success" as string | null }));
+      // The default `filter` is `latest`: of the runs that share a name only the newest is listed (`all` lists every one). The list is oldest first.
+      const wanted = query.get("filter") === "all" ? runs : runs.filter((r, i) => runs.map((o) => o.name).lastIndexOf(r.name) === i);
+      const list = wanted.map((r, i) => ({ id: i + 1, head_sha: checks[1], name: r.name, status: r.status, conclusion: r.status === "completed" ? r.conclusion : null, app: { id: 1 } }));
       return json(200, { total_count: list.length, check_runs: paged(list, query) });
     }
     const combined = /^\/repos\/[^/]+\/[^/]+\/commits\/([0-9a-f]{40})\/status$/.exec(req.path);

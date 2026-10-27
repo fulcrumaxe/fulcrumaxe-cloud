@@ -9,4 +9,7 @@ export declare const HANDLED_EVENT_NAMES: readonly [
   'pull_request',
   'pull_request_review',
   'push',
+  'check_run',
+  'check_suite',
+  'status',
 ];

@@ -61,6 +61,14 @@ export interface MergeGateRunInput {
    * attested one and the live private head the attested reviewed head (else `head_moved`). No `fulcrumaxe/review` status is posted and none is read as authority.
    */
   goPhase?: { attestation: GoAttestation };
+  /** D#519 MQ3-b: the signals that were green on the reviewed head, for a head the queue refreshed (see `missingExpectedSignals`). */
+  expectedSignals?: readonly string[];
+  /**
+   * D#519 MQ3-b: the head the caller checked CI on. The gate stops with `head_moved` if the pull request's head is any other commit when
+   * it reads it, so a push (or a force-push back to an older head) after the caller's check can never be merged on that check. A paired
+   * item's own binding (below) takes precedence.
+   */
+  expectedHeadSha?: string;
 }
 
 export type StatusOutcome = "posted" | "skipped" | "failed";
@@ -332,8 +340,9 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
       workItemId,
       pr: mergeRef,
       // The go phase binds to the head the runner attested (the order's); the order phase to the head just read.
-      ...(publicPr !== null ? { reviewedHeadSha: headSha, expectedHeadSha: go?.attestation.publicHead ?? mergeHead } : {}),
+      ...(publicPr !== null ? { reviewedHeadSha: headSha, expectedHeadSha: go?.attestation.publicHead ?? mergeHead } : input.expectedHeadSha !== undefined ? { expectedHeadSha: input.expectedHeadSha } : {}),
       extraBlockReasons,
+      ...(input.expectedSignals !== undefined ? { expectedSignals: input.expectedSignals } : {}),
       // A paired runner_local item is merged by its runner or a person, never by the cloud (the runner side is not built yet: a person).
       ...(paired && runnerLocal && deps.mergeDelegate === undefined ? { mergeUnavailableReason: "runner_merge_unavailable" as const } : {}),
       tier: ctx.tier,

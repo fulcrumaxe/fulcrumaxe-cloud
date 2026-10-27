@@ -291,6 +291,14 @@ describe("the pull request itself", () => {
     expect((await events(w)).find((e) => e.kind === "merge_gate")).toMatchObject({ code: "head_moved" });
   });
 
+  it("D#519 MQ3-b: a head other than the one the caller checked CI on answers head_moved before CI is read or any merge call is made", async () => {
+    const w = await world();
+    await passBoth(w);
+    const out = await runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(w.gh) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber, expectedHeadSha: OTHER });
+    expect(out).toMatchObject({ outcome: "head_moved" });
+    expect(w.gh.merges).toEqual([]);
+  });
+
   it("GitHub refusing the merge for another reason is recorded as merge_call_refused", async () => {
     const w = await world({ repo: { mergeStatus: 405 } });
     await passBoth(w);
