@@ -942,6 +942,7 @@ describe('D#31 API-5: the v1 event streams (real HTTP, real Postgres)', () => {
       const app = countingPool(appUserPool);
       const ops = countingPool(platformOpsPool);
       const localPoller = new AccountPoller({ pool: app.pool, platformOpsPool: ops.pool, clock });
+      clock.track(localPoller); // advance() waits for each tick's queries to finish, so the counts below do not depend on host speed
       const localDeps: StreamDeps = { pool: appUserPool, platformOpsPool, clock, poller: localPoller };
 
       const conns: Response[] = [];
@@ -1029,6 +1030,7 @@ describe('D#31 API-5: the v1 event streams (real HTTP, real Postgres)', () => {
       const clock = new ManualClock(Date.now(), 5);
       const broken = { query: async () => { throw new Error('db down'); } } as unknown as Pool;
       const p = new AccountPoller({ pool: appUserPool, platformOpsPool: broken, clock });
+      clock.track(p);
       let failed = 0;
       p.subscribe(accountId, 0n, { onEvents: () => {}, onFail: () => { failed++; } });
       await clock.advance(10_000);
