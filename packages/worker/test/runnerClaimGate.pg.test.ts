@@ -1,7 +1,7 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { BASE_SHA_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, CONTINUES_CROSS_SIDE_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { BASE_SHA_JOB_MIN_PROTOCOL, BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL, CHILD_BRANCH_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, CONTINUES_CROSS_SIDE_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
@@ -126,6 +126,17 @@ describe("the claim's protocol gate [pg]", () => {
     expect((await claim(older)).kind).toBe("idle");
     expect(await holder(job)).toEqual({ status: "pending", runner_id: null });
     const current = await runnerAt(BASE_SHA_JOB_MIN_PROTOCOL);
+    expect(await claim(current)).toMatchObject({ kind: "claimed", runId: job });
+  });
+
+  // D#483 S5-b2c-3: a continuation on a planned PR child's branch (fx/<parent#>-<key>) is never claimed by a runner whose strict parse predates that shape.
+  it("a continuation on a child's branch is not handed to a runner at the previous version, and is claimed at the child-branch version", async () => {
+    const continues = { parent_run_id: randomUUID(), session_id: null, branch: "fx/41-api", pr_number: 52 };
+    const previous = await runnerAt(BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL);
+    const job = await pending(CHILD_BRANCH_JOB_MIN_PROTOCOL, { continues });
+    expect((await claim(previous)).kind).toBe("idle");
+    expect(await holder(job)).toEqual({ status: "pending", runner_id: null });
+    const current = await runnerAt(CHILD_BRANCH_JOB_MIN_PROTOCOL);
     expect(await claim(current)).toMatchObject({ kind: "claimed", runId: job });
   });
 

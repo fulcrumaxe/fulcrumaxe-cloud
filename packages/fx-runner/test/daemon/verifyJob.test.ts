@@ -109,6 +109,28 @@ describe("a fix round's branch must have the shape of a run branch (C25 section 
       expect(check(signRaw(job, forger))).toEqual({ ok: false, reason: "job_signature_invalid" });
       expect(check(signRaw(job)).ok).toBe(true);
     });
+    describe("a planned PR child's branch (D#483 S5-b2c-3)", () => {
+      const child = { parent_run_id: parent, session_id: null, branch: "fx/41-api", pr_number: 52 };
+      it("fx/<parent#>-<key> with a null session and its pull request number is accepted, and the parsed job is returned", () => {
+        expect(check(signRaw(jobFor({ continues: child })))).toEqual({ ok: true, job: expect.objectContaining({ continues: child }) });
+      });
+      it("only on a bound job: a session, a missing pull request number, or a shape that is not exactly the pattern is continues_branch_invalid, signature good", () => {
+        expect(check(signRaw(jobFor({ continues: { ...child, session_id: "s1" } })))).toEqual({ ok: false, reason: "continues_branch_invalid" });
+        const withoutPr: Record<string, unknown> = { ...child };
+        delete withoutPr["pr_number"];
+        expect(check(signRaw({ ...jobFor(), continues: withoutPr }))).toEqual({ ok: false, reason: "continues_branch_invalid" });
+        for (const branch of ["fx/12-", "fx/12-a/b", "fx/12-..", "fx/12-ABC", `fx/12-${"a".repeat(33)}`, "fx/012-a"]) {
+          expect(check(signRaw(jobFor({ continues: { ...child, branch } }))), branch).toEqual({ ok: false, reason: "continues_branch_invalid" });
+        }
+      });
+      it("the runner never picks its own branch: a branch changed after signing, or a forged signature, is job_signature_invalid", () => {
+        const signed = signRaw(jobFor({ continues: child })) as { job: { continues: { branch: string } } };
+        signed.job.continues.branch = "fx/issue-41";
+        expect(check(signed)).toEqual({ ok: false, reason: "job_signature_invalid" });
+        const forger = generateKeyPairSync("ed25519").privateKey;
+        expect(check(signRaw(jobFor({ continues: child }), forger))).toEqual({ ok: false, reason: "job_signature_invalid" });
+      });
+    });
     it("a run branch with a pull request number is refused", () => {
       const run = "fx/2a2a2a2a-2b2b-4c2c-8d2d-2e2e2e2e2e2e-g1";
       expect(check(signRaw(jobFor({ continues: { parent_run_id: parent, session_id: "s1", branch: run, pr_number: 41 } })))).toEqual({ ok: false, reason: "continues_branch_invalid" });

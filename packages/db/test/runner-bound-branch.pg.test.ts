@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createPool } from '../src/pool.js';
 import { seedAccount, type SeedRefs } from './helpers/seed.js';
 import { PG_ERROR } from './helpers/pgErrors.js';
+import { plannedFixture } from './helpers/plannedChildren.js';
 
 const ROLE = 'runner_bound_definer';
 const FN = 'resolve_runner_bound_branch(uuid,uuid)';
@@ -12,7 +13,7 @@ const PROXY_LOGIN = 'fx_rbound_test_login';
 /** Everything the role holds, exactly: column SELECT on what the body reads, and the schema. */
 const EXPECTED_PRIVILEGES = [
   ...['id', 'account_id', 'work_item_id', 'job_signed'].map((c) => `column agent_runs.${c} SELECT`),
-  ...['id', 'account_id', 'gh_number'].map((c) => `column work_items.${c} SELECT`),
+  ...['id', 'account_id', 'gh_number', 'parent_id', 'planned_pr_key'].map((c) => `column work_items.${c} SELECT`),
   ...['account_id', 'run_id', 'kind', 'payload', 'seq'].map((c) => `column run_events.${c} SELECT`),
   'schema public USAGE',
 ].sort();
@@ -163,6 +164,43 @@ describe('migration 0828: resolve_runner_bound_branch (D#599 PL-2b-2)', () => {
       for (const table of ['agent_runs', 'work_items', 'run_events']) {
         await expect(proxyPool.query(`SELECT * FROM ${table} LIMIT 1`), table).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
       }
+    });
+  });
+
+  describe('D#483 S5-b2c-3 (migration 0922): a planned PR child', () => {
+    /** A child whose runner run continues `branch`, with the cloud's binding event. The parent's issue number is 41; the child's key is api. */
+    async function child(o: { parentNumber?: number | null; branch?: string; event?: boolean } = {}): Promise<World & { sibling: string }> {
+      const f = await plannedFixture(admin, appPool, { dial: null, weeklyUsd: null });
+      await admin.query('UPDATE work_items SET gh_number = $2 WHERE id = $1', [f.parent, o.parentNumber === undefined ? 41 : o.parentNumber]);
+      const run = randomUUID();
+      const branch = o.branch ?? 'fx/41-api';
+      const job = { job: { continues: { parent_run_id: randomUUID(), session_id: null, branch, pr_number: 52 } }, signature: 'x' };
+      await admin.query(
+        `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id, job_signed) VALUES ($1, $2, $3, 'executor', 'runner', 'running', 'runner_verified', $4, $5::jsonb)`,
+        [run, f.t.accountId, f.kids.api, f.t.repoId, JSON.stringify(job)],
+      );
+      if (o.event !== false) await bind(f.t, run, { branch, pr_number: 52 });
+      return { refs: f.t, run, sibling: f.kids.ui! };
+    }
+
+    it("answers the child's own branch, fx/<parent's number>-<key>, when the event, the job and the child agree", async () => {
+      expect(await ask(await child())).toBe('fx/41-api');
+    });
+
+    it("answers NULL for the parent's fx/issue-<n>, a sibling's branch, the key under another number, and a missing event", async () => {
+      for (const branch of ['fx/issue-41', 'fx/41-ui', 'fx/42-api', 'fx/4-api']) expect(await ask(await child({ branch })), branch).toBeNull();
+      expect(await ask(await child({ event: false }))).toBeNull();
+    });
+
+    it('answers NULL when the parent has no issue number or is gone (fail closed, no fallback)', async () => {
+      expect(await ask(await child({ parentNumber: null }))).toBeNull();
+      const w = await child();
+      await admin.query('DELETE FROM work_items WHERE id = (SELECT parent_id FROM work_items WHERE id = (SELECT work_item_id FROM agent_runs WHERE id = $1))', [w.run]);
+      expect(await ask(w)).toBeNull();
+    });
+
+    it('a top-level item is answered as before: its own fx/issue-<n>', async () => {
+      expect(await ask(await world({ issue: 7, branch: 'fx/issue-7' }))).toBe('fx/issue-7');
     });
   });
 });

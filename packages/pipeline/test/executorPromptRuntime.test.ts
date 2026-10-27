@@ -14,9 +14,9 @@ import { expectOneGenuineEnvelope } from "./plan/helpers/panelFixtures.js";
 const GOLDEN = path.join(path.dirname(fileURLToPath(import.meta.url)), "golden");
 const golden = (name: string): string => readFileSync(path.join(GOLDEN, name), "utf8");
 
-const BUILD = { owner: "acme", name: "widgets", number: 41, version: 3, spec: "1. Add a footer.\n2. Test it." };
+const BUILD = { owner: "acme", name: "widgets", number: 41, branch: "fx/issue-41", version: 3, spec: "1. Add a footer.\n2. Test it." };
 const HEAD = "a".repeat(40);
-const FIX = { owner: "acme", name: "widgets", issue: 7, pr: 41, headSha: HEAD, version: 3, spec: "Acceptance: the footer shows the year.", findings: [{ role: "code-reviewer", verdict: "needs-fix", findings: ["src/a.ts:3 - off by one"], summary: "one problem" }] };
+const FIX = { owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", pr: 41, headSha: HEAD, version: 3, spec: "Acceptance: the footer shows the year.", findings: [{ role: "code-reviewer", verdict: "needs-fix", findings: ["src/a.ts:3 - off by one"], summary: "one problem" }] };
 
 /** What a runner run must never be told (A1, A4). */
 const FORBIDDEN = ["checkout -b", "checkout -B", "git push", "api.github.com", "/pulls", "--force"];

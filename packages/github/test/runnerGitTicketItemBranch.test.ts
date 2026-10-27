@@ -35,3 +35,13 @@ describe("the ticket claims and the item pull request branch", () => {
     expect(GIT_TICKET_REF_PATTERN.test("fx/issue-07")).toBe(false);
   });
 });
+
+describe("the ticket claims and a planned PR child's branch (D#483 S5-b2c-3)", () => {
+  it("accepts fx/<parent#>-<key> and refuses what is not exactly that shape", () => {
+    expect(parseRunnerGitTicketClaims(wire("fx/41-api"))?.ref).toBe("fx/41-api");
+    expect(GIT_TICKET_REF_PATTERN.test("fx/41-api")).toBe(true);
+    for (const ref of ["fx/12-", "fx/12-a/b", "fx/12-..", "fx/12-ABC", `fx/12-${"a".repeat(33)}`, "fx/012-a", "fx/41-api\n", "refs/heads/fx/41-api"]) {
+      expect(parseRunnerGitTicketClaims(wire(ref)), JSON.stringify(ref)).toBeNull();
+    }
+  });
+});

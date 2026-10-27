@@ -71,7 +71,7 @@ describe("the review prompt by execution mode, and the job's reviewed commit [pg
 
   /** The call `startReviewerBody` makes: the prompt is built for `builtFor`, then the run is started with that mode and the head. */
   async function startReviewer(m: ReturnType<typeof module>, w: Awaited<ReturnType<typeof world>>, role: ReviewPromptRole, builtFor: string) {
-    const prompt = buildReviewPrompt({ role, owner: "acme", name: "widgets", issue: 7, pr: 41, headSha: HEAD, baseRef: "main", version: 1, spec: SPEC, runtime: promptRuntimeOf(builtFor) });
+    const prompt = buildReviewPrompt({ role, owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", pr: 41, headSha: HEAD, baseRef: "main", version: 1, spec: SPEC, runtime: promptRuntimeOf(builtFor) });
     const out = await m.advanceStartRun({ accountId: w.a.accountId, workItemId: w.workItemId, haltEpoch: 0, step: `review:${HEAD}:${role}`, role, prompt, clone: true, headSha: HEAD, expectedExecutionMode: builtFor });
     return { prompt, out };
   }
@@ -116,7 +116,7 @@ describe("the review prompt by execution mode, and the job's reviewed commit [pg
     const w = await world(from);
     const before = Number((await admin.query("SELECT count(*) FROM agent_runs WHERE account_id = $1", [w.a.accountId])).rows[0].count);
     const m = module(chain());
-    const prompt = buildReviewPrompt({ role: "code-reviewer", owner: "acme", name: "widgets", issue: 7, pr: 41, headSha: HEAD, baseRef: "main", version: 1, spec: SPEC, runtime: promptRuntimeOf(from) });
+    const prompt = buildReviewPrompt({ role: "code-reviewer", owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", pr: 41, headSha: HEAD, baseRef: "main", version: 1, spec: SPEC, runtime: promptRuntimeOf(from) });
     await admin.query("UPDATE repos SET execution_mode = $2 WHERE id = $1", [w.a.repoId, to]);
     const out = await m.advanceStartRun({ accountId: w.a.accountId, workItemId: w.workItemId, haltEpoch: 0, step: `review:${HEAD}:code-reviewer`, role: "code-reviewer", prompt, clone: true, headSha: HEAD, expectedExecutionMode: from });
     expect(out).toEqual({ ok: false, reason: "execution_mode_changed" });

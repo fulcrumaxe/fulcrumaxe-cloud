@@ -86,7 +86,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
 
   function review(over: Partial<AdvanceReviewDeps> = {}): AdvanceReviewDeps {
     return {
-      load: vi.fn(async () => ({ ok: true as const, ctx: { workItemId: "x", stage: "pr_opened", repoId: "r", owner: "acme", name: "widgets", issue: 7, tier: "feature", specVersion: 1, debaterEnabled: false } })),
+      load: vi.fn(async () => ({ ok: true as const, ctx: { workItemId: "x", stage: "pr_opened", repoId: "r", owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", tier: "feature", specVersion: 1, debaterEnabled: false } })),
       recordRound: vi.fn(async (_p, _r, input: AdvanceRoundInput) => ({ decision: "all_passed", round: 0, recorded: input.verdicts.map((v) => ({ ...v, outcome: "passed" })) })),
       resume: realResume().fn,
       mergeGate: vi.fn(async () => ({ outcome: "merged", headSha: HEAD, reasons: [], status: "posted" })),

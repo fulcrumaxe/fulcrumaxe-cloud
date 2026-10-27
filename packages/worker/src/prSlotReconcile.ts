@@ -2,6 +2,7 @@ import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { listDuePrSlotReconciles, PR_SLOT_RECONCILE_LIST_LIMIT } from "@fx/db/src/prSlotReconcileLister.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
+import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
 import { IllegalStageTransitionError } from "@fx/core/src/work-items/stages.js";
 import { ITEM_PR_BRANCH, RUNNER_RUN_BRANCH } from "@fulcrumaxe/runner-protocol";
 import { effectiveModeSql, isRunnerMode, readRecordedRunnerPullRequest, readSandboxBoundPullRequest } from "@fx/runner";
@@ -18,7 +19,7 @@ import { effectiveModeSql, isRunnerMode, readRecordedRunnerPullRequest, readSand
  * webhook for the same close finds the item already at that stage and is a no-op (eventMapper treats it as a duplicate).
  *
  * Which pull request. The one the review and the merge look up: a runner run's is the number and branch its `done` recorded; a sandbox round bound to a
- * pull request another side opened is that pair; a sandbox build is the item's own branch `fx/issue-<n>`. It is read with the list call
+ * pull request another side opened is that pair; a sandbox build is the item's own branch, which is its build identity's (`fx/issue-<n>`, or a planned PR child's `fx/<parent#>-<key>`; D#483 S5-b2c-3). It is read with the list call
  * (`GET /repos/{o}/{r}/pulls?state=all&head=<o>:<branch>`), which is the read a `runner_local` repository's fenced client allows (A3), through the
  * read-only installation client (`metadata: read`, `pull_requests: read`, GET only) the caller opens. Any open pull request on that branch means the item
  * is still in review and nothing changes; otherwise the newest one decides: `merged_at` set is merged, else closed unmerged.
@@ -117,8 +118,8 @@ interface Holder {
 
 /** The item's pull request target and stage entry time, read under its tenant (`lock`: the row is locked, as recordStage will). Not a claim on the window. */
 async function resolveHolder(client: PoolClient, accountId: string, workItemId: string, lock: boolean): Promise<Holder | "not_held" | "no_pull_request"> {
-  const r = await client.query<{ stage: string; repo_id: string | null; gh_number: string | null; gh_owner: string | null; gh_name: string | null; execution_mode: string | null; newest_mode: string | null }>(
-    `SELECT w.stage, w.repo_id, w.gh_number, r.gh_owner, r.gh_name, ${effectiveModeSql("w", "r")} AS execution_mode,
+  const r = await client.query<{ stage: string; repo_id: string | null; gh_owner: string | null; gh_name: string | null; execution_mode: string | null; newest_mode: string | null }>(
+    `SELECT w.stage, w.repo_id, r.gh_owner, r.gh_name, ${effectiveModeSql("w", "r")} AS execution_mode,
             (SELECT ar.execution_mode FROM agent_runs ar WHERE ar.account_id = w.account_id AND ar.work_item_id = w.id AND ar.role = 'executor' ORDER BY ar.created_at DESC, ar.id DESC LIMIT 1) AS newest_mode
        FROM work_items w JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
       WHERE w.id = $1 AND w.account_id = $2${lock ? " FOR UPDATE OF w" : ""}`,
@@ -147,8 +148,10 @@ async function resolveHolder(client: PoolClient, accountId: string, workItemId: 
     target = { branch: paired.branch, number: paired.pr_number };
   } else {
     const recorded = isRunnerMode(prMode) ? await readRecordedRunnerPullRequest(client, { accountId, workItemId }) : await readSandboxBoundPullRequest(client, { accountId, workItemId });
-    const issue = row.gh_number === null ? null : Number(row.gh_number);
-    target = recorded !== null ? { branch: recorded.branch, number: recorded.number } : !isRunnerMode(prMode) && issue !== null && Number.isSafeInteger(issue) && issue > 0 ? { branch: `fx/issue-${issue}`, number: null } : null;
+    // The item's own branch is the build identity's. This is a read of what exists (it acts for a pull request already open or already closed), so it runs no launch check: a parent that
+    // was deleted or re-specced since does not stop a child's slot from being freed. A child without a recorded branch and without a parent has none, and nothing is done.
+    const identity = recorded === null && !isRunnerMode(prMode) ? await resolveBuildIdentity(client, accountId, workItemId, "observe") : null;
+    target = recorded !== null ? { branch: recorded.branch, number: recorded.number } : identity?.ok ? { branch: identity.identity.branch, number: null } : null;
   }
   if (target === null) return "no_pull_request";
   // The latest move into a pull-request stage from outside them. No such move: the entry time is unknown, so no closed pull request can be shown to be the one in force.

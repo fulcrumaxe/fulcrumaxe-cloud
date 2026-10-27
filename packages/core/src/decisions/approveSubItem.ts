@@ -7,6 +7,7 @@ import { CHECK_KEY_RE, checkKeyOf } from './fixRoundGate.js';
 import { ChildLaunchRefusal, fileChildLaunch, findPlannedChild, prepareChildLaunch, type ChildLaunchCode, type ChildLaunchDeps } from './childLaunch.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { VERDICT_ROLES } from '../work-items/verdictRoles.js';
+import { resolveBuildIdentity } from '../work-items/buildIdentity.js';
 
 /**
  * D#483 S5-b2a part 1: a person's Approve on one sub-item of an approved parent (a fix round, later a planned PR). One transaction on the
@@ -95,15 +96,30 @@ export async function approveSubItemIn(client: PoolClient, who: { accountId: str
   const member = await client.query<{ role: string }>('SELECT role FROM account_members WHERE account_id = $1 AND user_id = $2', [accountId, userId]);
   if (member.rows[0] === undefined) throw new SubItemApprovalError('session_required');
   if (member.rows[0].role !== 'owner' && member.rows[0].role !== 'admin') throw new SubItemApprovalError('forbidden');
-  const item = (await client.query<{ repo_id: string | null }>('SELECT repo_id FROM work_items WHERE id = $1::uuid AND account_id = $2::uuid', [input.workItemId, accountId])).rows[0];
+  const item = (await client.query<{ repo_id: string | null; parent_id: string | null }>('SELECT repo_id, parent_id FROM work_items WHERE id = $1::uuid AND account_id = $2::uuid', [input.workItemId, accountId])).rows[0];
   if (item === undefined) throw new SubItemApprovalError('not_found');
+  // D#483 S5-b2c-3 (R8): a fix round or check fix round of a planned PR child is approved like a top-level item's, keyed on the CHILD: what changes is what it is held to. Its Spec version
+  // is its pinned one and its approval is its parent's newest; the identity's launch checks (a parent deleted or closed, a Spec not approved again, a key that left the approved Spec)
+  // refuse with their own codes, before anything is written. Every other item keeps its own newest Spec version and its own newest approval.
+  const roundKey = input.key.startsWith('fix-') || input.key.startsWith('check-');
+  let childSpecId: string | null = null;
+  if (roundKey) {
+    const identity = await resolveBuildIdentity(client, accountId, input.workItemId, 'start');
+    if (!identity.ok && identity.isChild && identity.reason !== 'not_found' && identity.reason !== 'no_issue_link') throw new SubItemApprovalError(identity.reason);
+    if (identity.ok && identity.identity.isChild) childSpecId = identity.identity.specVersionId;
+  }
+  const isChildRound = childSpecId !== null;
   const spec = (await client.query<{ id: string }>(
-    'SELECT id FROM spec_versions WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND erased_at IS NULL ORDER BY version DESC LIMIT 1', [accountId, input.workItemId])).rows[0];
+    isChildRound
+      ? 'SELECT id FROM spec_versions WHERE account_id = $1::uuid AND id = $3::uuid AND work_item_id = $2::uuid AND erased_at IS NULL'
+      : 'SELECT id FROM spec_versions WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND erased_at IS NULL ORDER BY version DESC LIMIT 1',
+    isChildRound ? [accountId, item.parent_id, childSpecId] : [accountId, input.workItemId])).rows[0];
   if (spec === undefined) throw new SubItemApprovalError('no_spec');
   const approval = (await client.query<{ spec_version_id: string | null }>(
-    'SELECT spec_version_id FROM work_item_approvals WHERE account_id = $1::uuid AND work_item_id = $2::uuid ORDER BY created_at DESC, id DESC LIMIT 1', [accountId, input.workItemId])).rows[0];
+    'SELECT spec_version_id FROM work_item_approvals WHERE account_id = $1::uuid AND work_item_id = $2::uuid ORDER BY created_at DESC, id DESC LIMIT 1', [accountId, isChildRound ? item.parent_id : input.workItemId])).rows[0];
   if (approval === undefined) throw new SubItemApprovalError('parent_not_approved');
-  if (approval.spec_version_id !== spec.id) throw new SubItemApprovalError('respec_needs_approval');
+  // For a child the identity already held the approval to the parent's newest Spec (a started child stays on its pin after a re-approval, R11), so the comparison is the top-level item's alone.
+  if (!isChildRound && approval.spec_version_id !== spec.id) throw new SubItemApprovalError('respec_needs_approval');
   // A fix round is approved only for the NEXT round (rounds started + 1): an approval for any other number would hang on an unrelated run and
   // later count when that round arrives.
   // A planned PR key names a child of this parent (migration 0919). Its launch is checked before anything is written: any refusal here throws, and the whole

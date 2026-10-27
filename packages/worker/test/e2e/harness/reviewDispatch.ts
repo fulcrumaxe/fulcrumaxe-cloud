@@ -21,7 +21,7 @@ export function createHarnessReviewDeps(): AdvanceReviewDeps {
       const r = await loadReviewContext(pool, accountId, workItemId);
       if (!r.ok) return { ok: false, reason: r.reason };
       const c = r.ctx;
-      return { ok: true, ctx: { workItemId: c.workItemId, stage: c.stage, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, tier: c.tier, specVersion: c.specVersion, debaterEnabled: false, personRequestPending: c.personRequestPending } };
+      return { ok: true, ctx: { workItemId: c.workItemId, stage: c.stage, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, branch: c.branch, tier: c.tier, specVersion: c.specVersion, debaterEnabled: false, personRequestPending: c.personRequestPending } };
     },
     // D#598 P7b: this harness has no GitHub, so its CI is settled (the wait itself is tested in packages/pipeline/test/review/ciWait*.test.ts).
     recordRound: (pool, registry, input) => recordRound(pool, registry, { ...input, requiredRoles: input.requiredRoles as never, verdicts: input.verdicts as never }, { read: async () => ({ state: "settled", reasons: [] }) }),
@@ -43,7 +43,7 @@ export interface FoundPullRequest {
 export async function findRecordedPr(module: AdvanceFacade, who: AdvanceStepWho, http: LocalGitHubHttp): Promise<FoundPullRequest> {
   const loaded = await module.advanceLoadReview(who);
   if (!loaded.ok) throw new Error(`review context: ${loaded.reason}`);
-  const found = await findPullRequestForItem(http, { owner: loaded.ctx.owner, name: loaded.ctx.name, issue: loaded.ctx.issue, executionMode: loaded.ctx.executionMode, recordedPr: loaded.ctx.recordedPr });
+  const found = await findPullRequestForItem(http, { owner: loaded.ctx.owner, name: loaded.ctx.name, branch: loaded.ctx.branch, executionMode: loaded.ctx.executionMode, recordedPr: loaded.ctx.recordedPr });
   if (!found.ok) throw new Error(`pull request lookup: ${found.reason}`);
   return { ctx: loaded.ctx, pr: found.pr };
 }

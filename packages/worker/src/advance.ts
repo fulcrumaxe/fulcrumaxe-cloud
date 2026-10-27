@@ -4,6 +4,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { advanceActionFor, type AdvanceAction } from "@fx/core/src/work-items/advance.js";
 import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
+import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
 import { NO_VERDICT_ESCALATION_CODE, readReviewHold } from "@fx/core/src/work-items/reviewHold.js";
 import { VERDICT_ROLES } from "@fx/core/src/work-items/verdictRoles.js";
 import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError } from "@fx/core/src/work-items/stages.js";
@@ -54,8 +55,6 @@ import { RunActionInputError, type PerformResult } from "./runActions.js";
  * sweep at once) finds the first one's run through the keys below, so it cannot start a second classify run.
  */
 
-/** The item's own pull request branch is this prefix and its issue number (runner-protocol `ITEM_PR_BRANCH`). */
-const ITEM_PR_PREFIX = "fx/issue-";
 
 /**
  * D#483 S5-b2c-2: the Spec versions an item is built and reviewed against (alias `s`, item `w`). Its own, except for a planned PR child, whose is the one version of its parent that
@@ -317,8 +316,10 @@ export interface AdvanceReviewContext extends AdvancePrSource {
   owner: string;
   name: string;
   issue: number;
-  /** A planned PR child's own branch, `fx/<parent#>-<key>`; absent for every other item. */
-  branch?: string;
+  /** The item's branch, from its build identity: `fx/issue-<n>`, or a planned PR child's own `fx/<parent#>-<key>`. */
+  branch: string;
+  /** A planned PR child: `issue` is its parent's (D#483 S5-b2c-3). */
+  child?: true;
   /** critical | feature | small | bug | doc */
   tier: string;
   specVersion: number;
@@ -556,8 +557,10 @@ export interface AdvanceItem extends AdvancePrSource {
   reviewHold?: boolean;
   /** D#483 S5-b2c-2: a planned PR child. `ghNumber`, `kind`, `hasSpec` and `specVersion` are then its parent's issue and the Spec version it names. */
   child?: true;
-  /** A child's own branch, `fx/<parent#>-<key>` (the pipeline's `childBranchFor`; this package cannot import it). Absent for every other item. */
+  /** The item's branch from its build identity: `fx/issue-<n>`, or a planned PR child's own `fx/<parent#>-<key>`. Absent when the identity is refused. */
   branch?: string;
+  /** Why the build identity was refused (`no_issue_link`, `child_orphaned`): the plan answers with it in place of a bare missing number. */
+  identityRefusal?: string;
   /** The item's newest executor run (any status), or null. A build that ended with no pull request is recorded against it. */
   executorRunId: string | null;
   /**
@@ -770,17 +773,18 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const read = await withTenant(runnerPool, accountId, userId, async (client) => {
       const role = await client.query<{ role: string }>("SELECT role FROM account_members WHERE account_id = $1 AND user_id = $2", [accountId, userId]);
       // D#483 S5-b2c-2: a planned PR child reads its PARENT's issue number and the Spec version it names (its kind is its own, it has no discussion); `child` routes it straight to the build.
-      const item = await client.query<{ stage: string; provenance: string; repo_id: string | null; gh_number: string | null; discussion_id: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; acceptance_files: unknown; child: boolean }>(
-        `SELECT w.stage, w.provenance, w.repo_id, CASE WHEN w.planned_pr_key IS NULL THEN w.gh_number ELSE p.gh_number END AS gh_number, w.discussion_id,
+      const item = await client.query<{ stage: string; provenance: string; repo_id: string | null; discussion_id: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; acceptance_files: unknown; child: boolean }>(
+        `SELECT w.stage, w.provenance, w.repo_id, w.discussion_id,
                 CASE WHEN w.planned_pr_key IS NULL THEN d.kind ELSE w.kind END AS kind, (w.planned_pr_key IS NOT NULL) AS child,
                 EXISTS (SELECT 1 FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL}) AS has_spec,
                 (SELECT max(s.version) FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL}) AS spec_version,
                 (SELECT s.frontmatter -> 'acceptance_files' FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL} ORDER BY s.version DESC LIMIT 1) AS acceptance_files
            FROM work_items w LEFT JOIN discussions d ON d.account_id = w.account_id AND d.id = w.discussion_id
-           LEFT JOIN work_items p ON p.account_id = w.account_id AND p.id = w.parent_id AND w.planned_pr_key IS NOT NULL
           WHERE w.id = $1 AND w.account_id = $2`,
         [workItemId, accountId],
       );
+      // D#483 S5-b2c-3 (R7): the issue number is the build identity's (a planned PR child's is its parent's); this read runs no launch check, the build does.
+      const identity = item.rows[0] ? await resolveBuildIdentity(client, accountId, workItemId, "observe") : null;
       const live = await client.query<{ n: string }>(
         "SELECT count(*) AS n FROM agent_runs WHERE account_id = $1 AND work_item_id = $2 AND NOT (status = ANY($3::text[]))",
         [accountId, workItemId, [...ADVANCE_TERMINAL_STATUSES]],
@@ -791,7 +795,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         [accountId, workItemId],
       );
       const hold = item.rows[0]?.stage === "needs_human" ? await readReviewHold(client, workItemId) : false;
-      return { role: role.rows[0]?.role, item: item.rows[0] ? { ...item.rows[0], no_verdict_hold: hold } : undefined, live: Number(live.rows[0]?.n ?? 0), proposalOwner: owner.rows[0]?.owner_process ?? null };
+      return { role: role.rows[0]?.role, item: item.rows[0] ? { ...item.rows[0], issue_number: identity?.ok ? identity.identity.issueNumber : null, no_verdict_hold: hold } : undefined, live: Number(live.rows[0]?.n ?? 0), proposalOwner: owner.rows[0]?.owner_process ?? null };
     });
     if (read.role !== "owner" && read.role !== "admin") return refused("principal_not_authorised");
     const item = read.item;
@@ -804,7 +808,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (item.provenance !== "internal") return refused("external_requires_human");
     if (item.repo_id === null) return refused("no_repo");
     // S4-e: an item approved from a proposal with no issue (a Discussion, a task, a docs/code/interview source) has no number; the proposal is its input.
-    if (item.gh_number === null && read.proposalOwner === null) return refused("no_issue_link");
+    if (item.issue_number === null && read.proposalOwner === null) return refused("no_issue_link");
     const verdict = advanceActionFor({ ...item, ...(item.child ? { child: true } : {}) });
     if (!verdict.ok) return refused("not_advanceable");
     // A Re-spec is for the two stages a build starts from, and only while the newest Spec has no readable list (the same table and parser the route and the card ask).
@@ -976,8 +980,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
 
   async function loadItemRow(accountId: string, workItemId: string): Promise<Omit<AdvanceItem, keyof AdvancePrSource> | null> {
     return withTenant(runnerPool, accountId, async (client) => {
-      const r = await client.query<{ child: boolean; planned_pr_key: string | null; stage: string; provenance: string; repo_id: string | null; gh_number: string | null; discussion_id: string | null; gh_owner: string | null; gh_name: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; executor_run_id: string | null; check_failed_run_id: string | null; p_id: string | null; p_title: string | null; p_summary: string | null }>(
-        `SELECT w.stage, w.provenance, w.repo_id, CASE WHEN w.planned_pr_key IS NULL THEN w.gh_number ELSE par.gh_number END AS gh_number, w.discussion_id, r.gh_owner, r.gh_name,
+      const r = await client.query<{ child: boolean; planned_pr_key: string | null; stage: string; provenance: string; repo_id: string | null; discussion_id: string | null; gh_owner: string | null; gh_name: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; executor_run_id: string | null; check_failed_run_id: string | null; p_id: string | null; p_title: string | null; p_summary: string | null }>(
+        `SELECT w.stage, w.provenance, w.repo_id, w.discussion_id, r.gh_owner, r.gh_name,
                 CASE WHEN w.planned_pr_key IS NULL THEN d.kind ELSE w.kind END AS kind, (w.planned_pr_key IS NOT NULL) AS child, w.planned_pr_key,
                 (SELECT ar.id FROM agent_runs ar WHERE ar.account_id = w.account_id AND ar.work_item_id = w.id AND ar.role = 'executor' ORDER BY ar.created_at DESC, ar.id DESC LIMIT 1) AS executor_run_id,
                 (SELECT x.id FROM (SELECT a.id, a.status, a.account_id FROM agent_runs a WHERE a.account_id = w.account_id AND a.work_item_id = w.id AND a.role = 'executor' ORDER BY a.created_at DESC, a.id DESC LIMIT 1) x
@@ -989,7 +993,6 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
                 EXISTS (SELECT 1 FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL}) AS has_spec,
                 (SELECT max(s.version) FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL}) AS spec_version
            FROM work_items w
-           LEFT JOIN work_items par ON par.account_id = w.account_id AND par.id = w.parent_id AND w.planned_pr_key IS NOT NULL
            LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
            LEFT JOIN discussions d ON d.account_id = w.account_id AND d.id = w.discussion_id
            LEFT JOIN proposals pr ON pr.account_id = w.account_id AND pr.work_item_id = w.id AND pr.state = 'approved'
@@ -997,17 +1000,20 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         [workItemId, accountId],
       );
       const row = r.rows[0];
+      // D#483 S5-b2c-3 (R7): the issue number and the branch are the build identity's. A read of what exists, so no launch check: the build re-runs them when it starts.
+      const identity = row ? await resolveBuildIdentity(client, accountId, workItemId, "observe") : null;
       const reviewHold = row?.stage === "needs_human" ? await readReviewHold(client, workItemId) : false;
       const facts = row && row.p_id !== null ? await readProposalIntakeFacts(client, accountId, row.p_id) : null;
       return row
         ? {
             reviewHold,
             ...(row.child ? { child: true } : {}),
-            ...(row.child && row.planned_pr_key !== null && row.gh_number !== null ? { branch: `fx/${Number(row.gh_number)}-${row.planned_pr_key}` } : {}),
+            ...(identity?.ok ? { branch: identity.identity.branch } : {}),
+            ...(identity !== null && !identity.ok ? { identityRefusal: identity.reason } : {}),
             stage: row.stage,
             provenance: row.provenance,
             repoId: row.repo_id,
-            ghNumber: row.gh_number === null ? null : Number(row.gh_number),
+            ghNumber: identity?.ok ? identity.identity.issueNumber : null,
             ghOwner: row.gh_owner,
             ghName: row.gh_name,
             hasDiscussion: row.discussion_id !== null,
@@ -1643,9 +1649,13 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const claimedRun = async (): Promise<string | null> => (await claimed())?.runId ?? null;
     // The fact is written on every path that returns a started run (it is deduped): a step that died between the resume
     // and the event write would otherwise leave the run uncounted, and `fixRoundsStarted` would undercount.
+    // D#483 S5-b2c-3 (R7): the item's own branch is its build identity's. Read without launch checks here (a replay of a start must find its run even after the parent went), and
+    // with them below, before anything new is written. A top-level item that has no issue number has no item branch: a pair is then only the recorded one (as it always was).
+    const observed = await withTenant(runnerPool, who.accountId, (client) => resolveBuildIdentity(client, who.accountId, who.workItemId, "observe"));
+    const itemBranch = observed.ok ? observed.identity.branch : null;
     const started = async (runId: string): Promise<AdvanceRunStart> => {
       await recordCorrectionsApplied(who, runId);
-      await writeEvent(who, { kind: "fix_round_started", dedupeKey: `fix:${attemptKey}`, headSha: req.headSha, round: req.round, runId, ...(req.pr && req.pr.branch === `${ITEM_PR_PREFIX}${req.issue}` ? { prNumber: req.pr.number } : {}) });
+      await writeEvent(who, { kind: "fix_round_started", dedupeKey: `fix:${attemptKey}`, headSha: req.headSha, round: req.round, runId, ...(req.pr && itemBranch !== null && req.pr.branch === itemBranch ? { prNumber: req.pr.number } : {}) });
       return { ok: true, runId };
     };
     const prior = await claimed();
@@ -1655,6 +1665,13 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       if (denied !== null) return refuse(denied);
       await attachRunNotes(runnerPool, who.accountId, who.workItemId, prior.runId, { suffix: prior.step.slice(keyBase.length) });
       return started(prior.runId);
+    }
+
+    // D#483 S5-b2c-3 (R8): a planned PR child's round re-runs the launch rule's checks against the rows as they are now (a deleted parent, a Spec not approved again, a key that left
+    // the approved Spec). Nothing is written, no run and no reservation made: the refusal is the resolver's code. A top-level item has no check here.
+    if (observed.ok ? observed.identity.isChild : observed.isChild || observed.reason === "not_found") {
+      const begin = await withTenant(runnerPool, who.accountId, (client) => resolveBuildIdentity(client, who.accountId, who.workItemId, "start"));
+      if (!begin.ok) return refuse(begin.reason);
     }
 
     // One executor at a time: a second concurrent resume is refused (the database's one-live-executor-per-PR index is the backstop).
@@ -1693,8 +1710,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       const publicCopy = await hasPublicCopy(runnerPool, who);
       const repoId = state.repoId;
       const found = await withTenant(runnerPool, who.accountId, async (client) => {
-        const r = await client.query<{ gh_owner: string | null; gh_name: string | null; gh_number: string | null }>(
-          "SELECT r.gh_owner, r.gh_name, w.gh_number FROM work_items w JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id WHERE w.id = $1 AND w.account_id = $2",
+        const r = await client.query<{ gh_owner: string | null; gh_name: string | null }>(
+          "SELECT r.gh_owner, r.gh_name FROM work_items w JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id WHERE w.id = $1 AND w.account_id = $2",
           [who.workItemId, who.accountId],
         );
         return { coords: r.rows[0], recorded: await readRecordedRunnerPullRequest(client, { accountId: who.accountId, workItemId: who.workItemId }), bound: await readSandboxBoundPullRequest(client, { accountId: who.accountId, workItemId: who.workItemId }) };
@@ -1707,7 +1724,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           ? runnerSide
             ? found.recorded
             : found.bound
-          : same(found.recorded) || same(found.bound) || (found.coords?.gh_number != null && req.pr.branch === `${ITEM_PR_PREFIX}${found.coords.gh_number}`)
+          : same(found.recorded) || same(found.bound) || (itemBranch !== null && req.pr.branch === itemBranch)
             ? req.pr
             : null;
       if (pr !== null && found.coords?.gh_owner && found.coords.gh_name) {

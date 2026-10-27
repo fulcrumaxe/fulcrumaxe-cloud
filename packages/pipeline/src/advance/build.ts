@@ -26,7 +26,8 @@ import { type PinContentPort } from "../prompt/pinContent.js";
 import { pinLedgerNotes, pinnedBody, pinnedLabel, splitPinsByExcludes } from "@fulcrumaxe/runner-protocol";
 import { mapIdentityOf, recalledEntriesOf, recordRunContextInputs, recordRunItemSources, type ItemSourceRecord } from "../prompt/runContextInputs.js";
 import type { AdvanceRunPorts } from "./runPorts.js";
-import { childBranchFor, childBuildBlocker, childPromptTitle } from "./childBuild.js";
+import { childPromptTitle } from "./childBuild.js";
+import { childEnvelopeBlocker, resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
 import { recordChildBranch } from "@fx/runner";
 
 /**
@@ -50,8 +51,8 @@ import { recordChildBranch } from "@fx/runner";
 export const BOT_NAME = "fulcrumaxe-bot";
 export const BOT_EMAIL = "bot@fulcrumaxe.dev";
 
-export const branchFor = (number: number): string => `fx/issue-${number}`;
-export { childBranchFor };
+// D#483 S5-b2c-3 (R7): the names live in @fx/core's buildIdentity.ts; re-exported for the importers that read them here.
+export { branchFor, childBranchFor } from "@fx/core/src/work-items/buildIdentity.js";
 
 /**
  * D#6 R4d-1 (C32): where the run executes, chosen from `repos.execution_mode`. `runner` is either runner mode: a run on the
@@ -78,8 +79,10 @@ export const roundIsCrossSide = (opened: string | null | undefined, effective: s
 export interface ExecutorPromptInput {
   owner: string;
   name: string;
-  /** The issue's number. */
+  /** The issue's number (a planned PR child's: its parent's). */
   number: number;
+  /** The branch the run pushes, from the build identity (`fx/issue-<n>`, or a child's `fx/<parent#>-<key>`). */
+  branch: string;
   /** The published Spec version and its body. */
   version: number;
   spec: string;
@@ -119,7 +122,6 @@ export interface ExecutorPromptInput {
 }
 
 /** The branch a run pushes: the child's own, else the issue's. */
-const branchOfInput = (input: Pick<ExecutorPromptInput, "number" | "child">): string => (input.child ? childBranchFor(input.number, input.child.key) : branchFor(input.number));
 
 /**
  * The lines that scope a child's run to its own planned PR. The scope line carries ONLY the key (the database's CHECK keeps it `^[a-z0-9-]{1,32}$`). The title comes from the
@@ -143,7 +145,7 @@ export function buildExecutorPrompt(input: ExecutorPromptInput): string {
 export function assembleExecutorPrompt(input: ExecutorPromptInput, options?: AssembleOptions): AssembledPrompt {
   if (input.runtime === "runner") return buildRunnerExecutorPrompt(input, options);
   const { owner, name, number, version } = input;
-  const branch = branchOfInput(input);
+  const branch = input.branch;
   const child = input.child;
   const repo = `${owner}/${name}`;
   const stack = input.stackBase;
@@ -265,7 +267,6 @@ function buildRunnerExecutorPrompt(input: ExecutorPromptInput, options?: Assembl
 interface BuildFacts {
   stage: string;
   provenance: string;
-  gh_number: string | null;
   gh_owner: string | null;
   gh_name: string | null;
   kind: string | null;
@@ -289,12 +290,11 @@ async function readFacts(pool: Pool, accountId: string, workItemId: string): Pro
     // A planned PR child (`planned_pr_key` set) builds on its PARENT's issue number and reads the Spec version it names (a version of the parent: never one of its own, and never
     // the parent's newest unapproved one). Its kind is its own (copied from the parent when it was made) and it has no discussion. Every other item reads its own, as always.
     const { rows } = await client.query<BuildFacts>(
-      `SELECT w.stage, w.provenance, CASE WHEN w.planned_pr_key IS NULL THEN w.gh_number ELSE p.gh_number END AS gh_number, r.gh_owner, r.gh_name,
+      `SELECT w.stage, w.provenance, r.gh_owner, r.gh_name,
               CASE WHEN w.planned_pr_key IS NULL THEN d.kind ELSE w.kind END AS kind, s.version, s.body, s.id AS spec_version_id, s.acceptance_files, ${effectiveModeSql("w", "r")} AS execution_mode, w.repo_id, w.stack_parent_id,
               w.planned_pr_key,
               CASE WHEN w.planned_pr_key IS NULL THEN NULL ELSE (SELECT e ->> 'title' FROM jsonb_array_elements(CASE WHEN jsonb_typeof(s.planned_prs) = 'array' THEN s.planned_prs ELSE '[]'::jsonb END) e WHERE e ->> 'key' = w.planned_pr_key LIMIT 1) END AS child_title
          FROM work_items w
-         LEFT JOIN work_items p ON p.account_id = w.account_id AND p.id = w.parent_id AND w.planned_pr_key IS NOT NULL
          LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
          LEFT JOIN discussions d ON d.account_id = w.account_id AND d.id = w.discussion_id
          LEFT JOIN LATERAL (
@@ -415,13 +415,17 @@ export async function startBuildForItem(
   // Fail closed, as the intake gate does: only the exact literal "internal" is internal.
   if (facts.provenance !== "internal") return { status: "refused", reason: "external_requires_human" };
   if (!facts.gh_owner || !facts.gh_name) return { status: "refused", reason: "no_repo" };
-  // D#483 S5-b2c-2: a planned PR child re-runs launch checks 1 to 4 now (time passes between the launch and the build), before anything else is asked of its parent's rows.
+  // D#483 S5-b2c-2 / S5-b2c-3: the issue number and the branch come from the build identity. For a planned PR child it re-runs launch checks 1 to 4 now (time passes between the
+  // launch and the build) before anything else is asked of its parent's rows; the build then adds its own envelope check (a start filed by the generic advance action skips the gate).
   const isChild = facts.planned_pr_key !== null;
-  if (isChild) {
-    const blocked = await withTenant(pool, accountId, (client) => childBuildBlocker(client, accountId, workItemId));
-    if (blocked !== null) return { status: "refused", reason: blocked };
-  }
-  if (facts.gh_number === null) return { status: "refused", reason: "no_issue_link" };
+  const resolved = await withTenant(pool, accountId, async (client) => {
+    const identity = await resolveBuildIdentity(client, accountId, workItemId, "start");
+    if (!identity.ok) return identity;
+    const blocked = identity.identity.isChild ? await childEnvelopeBlocker(client, accountId, workItemId) : null;
+    return blocked === null ? identity : ({ ok: false, reason: blocked } as const);
+  });
+  if (!resolved.ok) return { status: "refused", reason: resolved.reason };
+  const identity = resolved.identity;
   // A question or a project never starts a build (its Spec is an answer or a plan).
   if (facts.kind !== null && !isBuildableKind(facts.kind)) return { status: "refused", reason: "kind_not_buildable" };
   if (facts.body === null || facts.version === null) return { status: "refused", reason: "no_spec" };
@@ -430,8 +434,8 @@ export async function startBuildForItem(
   // A child's entry is the build itself: it is launched from `triaged` (it has no triage, classify, panel or Spec of its own).
   if (facts.stage !== "spec_ready" && facts.stage !== "needs_human" && facts.stage !== "in_progress" && !(isChild && facts.stage === "triaged")) return { status: "refused", reason: `stage_${facts.stage}` };
 
-  const number = Number(facts.gh_number);
-  const branch = isChild ? childBranchFor(number, facts.planned_pr_key!) : branchFor(number);
+  const number = identity.issueNumber;
+  const branch = identity.branch;
   // The prompt is built for the item's EFFECTIVE mode (its placement, else the repository's; D#599 PL-2); the start refuses `execution_mode_changed` if that is different by then.
   const executionMode = facts.execution_mode ?? "sandbox";
   // D#6 R4d-5a (C34 section 2.1): a runner build is checked against the Spec's own file list at done, so a Spec with no readable list is refused HERE, before any
@@ -515,7 +519,7 @@ export async function startBuildForItem(
   const assembled = assembleExecutorPrompt(
     {
       ...(offer && offer.items.length > 0 ? { decisions: offer.items } : {}),
-      owner: facts.gh_owner, name: facts.gh_name, number, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human", runtime: promptRuntimeOf(executionMode), runNotes: renderRunNotes(notes),
+      owner: facts.gh_owner, name: facts.gh_name, number, branch, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human", runtime: promptRuntimeOf(executionMode), runNotes: renderRunNotes(notes),
       ...(isChild ? { child: { key: facts.planned_pr_key!, title: facts.child_title } } : {}),
       ...(map ? { map } : {}), ...(memory ? { memory } : {}), ...(stackBase ? { stackBase } : {}), ...(planeBase ? { planeBase } : {}),
       ...(rules.some((r) => r.kind === "exclude") ? { excludeLine: true } : {}),

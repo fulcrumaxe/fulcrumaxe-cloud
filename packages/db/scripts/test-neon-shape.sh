@@ -1841,7 +1841,7 @@ check_runner_bound_definer_exception_shape() {
 # exactly its one function and nothing else.
 check_runner_bound_definer_role_shape() {
   local dbname="$1" out rc=0 problems
-  local expected="'column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.work_item_id SELECT','column agent_runs.job_signed SELECT','column work_items.id SELECT','column work_items.account_id SELECT','column work_items.gh_number SELECT','column run_events.account_id SELECT','column run_events.run_id SELECT','column run_events.kind SELECT','column run_events.payload SELECT','column run_events.seq SELECT','schema public USAGE'"
+  local expected="'column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.work_item_id SELECT','column agent_runs.job_signed SELECT','column work_items.id SELECT','column work_items.account_id SELECT','column work_items.gh_number SELECT','column work_items.parent_id SELECT','column work_items.planned_pr_key SELECT','column run_events.account_id SELECT','column run_events.run_id SELECT','column run_events.kind SELECT','column run_events.payload SELECT','column run_events.seq SELECT','schema public USAGE'"
   out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
     WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'runner_bound_definer'),
     held AS (
@@ -1856,7 +1856,7 @@ check_runner_bound_definer_role_shape() {
       CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
                 OR pg_has_role('fx_migrator', 'runner_bound_definer', 'USAGE') THEN 'fx_migrator holds a live membership' END,
       CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
-      CASE WHEN (SELECT count(*) FROM held) <> 13 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 13 granted by 0828' END,
+      CASE WHEN (SELECT count(*) FROM held) <> 15 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 15 granted by 0828 and 0922' END,
       CASE WHEN (SELECT count(*) FROM mine) <> 1
               OR EXISTS (SELECT 1 FROM mine WHERE oid <> 'public.resolve_runner_bound_branch(uuid,uuid)'::regprocedure::oid)
               OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)

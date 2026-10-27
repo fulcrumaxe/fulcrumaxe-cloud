@@ -23,9 +23,9 @@ const HEAD = "a".repeat(40);
 const SPEC = "Acceptance: the footer shows the year.";
 const sha = (s: string): string => createHash("sha256").update(s, "utf8").digest("hex");
 const codes = (r: { sections: ReadonlyArray<{ code: string }> }): string[] => r.sections.map((s) => s.code);
-const EXEC = { owner: "acme", name: "widgets", number: 7, version: 3, spec: SPEC };
-const FIX: FixPromptInput = { owner: "acme", name: "widgets", issue: 7, pr: 41, headSha: HEAD, version: 3, spec: SPEC, findings: [{ role: "code-reviewer", verdict: "needs-fix", findings: ["src/a.ts:3 - off by one"], summary: "one problem" }] };
-const REVIEW: ReviewPromptInput = { role: "code-reviewer", owner: "acme", name: "widgets", issue: 7, pr: 41, headSha: HEAD, baseRef: "main", version: 3, spec: SPEC };
+const EXEC = { owner: "acme", name: "widgets", number: 7, branch: "fx/issue-7", version: 3, spec: SPEC };
+const FIX: FixPromptInput = { owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", pr: 41, headSha: HEAD, version: 3, spec: SPEC, findings: [{ role: "code-reviewer", verdict: "needs-fix", findings: ["src/a.ts:3 - off by one"], summary: "one problem" }] };
+const REVIEW: ReviewPromptInput = { role: "code-reviewer", owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", pr: 41, headSha: HEAD, baseRef: "main", version: 3, spec: SPEC };
 const entry = (over: Partial<MemoryEntry> & { text: string }): MemoryEntry => ({ id: "mem-1", version: 1, name: "House style", origin: "person", ...over });
 
 describe("renderMemorySlot: the line head (D#601 MEM-3)", () => {

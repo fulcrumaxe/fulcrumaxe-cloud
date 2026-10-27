@@ -1049,7 +1049,7 @@ describe("runner follow-up runs [pg]", () => {
         visibility: { visibility: async () => "private" },
         continuationBase: { headOid },
         ...(continuationBinding ? { continuationBinding } : {}),
-        context: { load: async () => ({ repo: { owner: "acme", name: "app" }, spec: null, parentBranch: null, issueNumber: 12 }) },
+        context: { load: async () => ({ repo: { owner: "acme", name: "app" }, spec: null, parentBranch: null, issueNumber: 12, itemBranch: "fx/issue-12" }) },
         now: () => new Date(clock),
       });
       const target = new RunnerTarget({ limits: createFakeRunnerLimits(30), pool: writerPool, issuer, visibility: { visibility: async () => "private" } });

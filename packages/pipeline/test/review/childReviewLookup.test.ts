@@ -28,26 +28,26 @@ describe("a child's pull request lookup", () => {
   it("looks for fx/<parent#>-<key> and answers with that branch", async () => {
     const branch = childBranchFor(41, "api");
     const { http, calls } = strictPulls(branch);
-    expect(await findOpenPullRequest(http, { owner: "acme", name: "widgets", issue: 41, branch })).toEqual({ ok: true, pr: { number: 52, headSha: HEAD, baseRef: "main", branch } });
+    expect(await findOpenPullRequest(http, { owner: "acme", name: "widgets", branch })).toEqual({ ok: true, pr: { number: 52, headSha: HEAD, baseRef: "main", branch } });
     expect(calls).toHaveLength(1);
   });
 
   it("the item-level lookup passes the child's branch through, for a sandbox repo", async () => {
     const branch = childBranchFor(41, "ui");
     const { http } = strictPulls(branch);
-    const out = await findPullRequestForItem(http, { owner: "acme", name: "widgets", issue: 41, branch, executionMode: "sandbox", recordedPr: null });
+    const out = await findPullRequestForItem(http, { owner: "acme", name: "widgets", branch, executionMode: "sandbox", recordedPr: null });
     expect(out).toMatchObject({ ok: true, pr: { branch: "fx/41-ui" } });
   });
 
   it("fails if fx/issue-<parent#> is used for a child: the strict fake refuses that request", async () => {
     const { http } = strictPulls(childBranchFor(41, "api"));
-    await expect(findOpenPullRequest(http, { owner: "acme", name: "widgets", issue: 41 })).rejects.toThrow(/unexpected request/);
+    await expect(findOpenPullRequest(http, { owner: "acme", name: "widgets", branch: branchFor(41) })).rejects.toThrow(/unexpected request/);
     expect(branchFor(41)).toBe("fx/issue-41");
   });
 
   it("a branch that could not be printed into a command is refused before any request", async () => {
     const { http, calls } = strictPulls("x");
-    expect(await findOpenPullRequest(http, { owner: "acme", name: "widgets", issue: 41, branch: "fx/1; curl evil" })).toEqual({ ok: false, reason: "malformed" });
+    expect(await findOpenPullRequest(http, { owner: "acme", name: "widgets", branch: "fx/1; curl evil" })).toEqual({ ok: false, reason: "malformed" });
     expect(calls).toEqual([]);
   });
 

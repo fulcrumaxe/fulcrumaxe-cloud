@@ -23,6 +23,8 @@ export type LoadFailure =
   | "not_found"
   | "external_requires_human"
   | "no_issue_link"
+  /** D#483 S5-b2c-3: the build identity's other refusals (a planned PR child whose parent was deleted). */
+  | "child_orphaned"
   | "not_advanceable"
   | "reader_unavailable"
   | "issue_missing"
@@ -33,7 +35,7 @@ export type LoadedAdvance =
   /** An item at `spec_ready` with a published Spec: the build follows. No issue read (the Spec is in the database). `specVersion` is the Spec the person approved: the build is pinned to it. */
   | { ok: true; mode: "build"; number: number; specVersion: number | null }
   /** An item at `needs_human` that still has its Spec ("Build again"): a fresh build, after a look for a pull request that is still open for the issue's branch (the repository facts are for that lookup). */
-  | ({ ok: true; mode: "rebuild"; number: number; specVersion: number | null; repoId: string; owner: string; name: string; reviewHold?: boolean; branch?: string } & AdvancePrSource)
+  | ({ ok: true; mode: "rebuild"; number: number; specVersion: number | null; repoId: string; owner: string; name: string; reviewHold?: boolean; branch: string } & AdvancePrSource)
   /** A small, bug or doc item the pipeline triaged (no panel) that has no Spec yet: the project manager's short Spec, from the issue as it reads NOW (an edited issue is what a re-approval wants). */
   | { ok: true; mode: "light"; category: string; title: string; body: string }
   /** An item discussed by the pipeline that has no Spec yet (a panel or Spec step that failed): the panel and the Spec run again. */
@@ -78,7 +80,7 @@ export async function loadBody(worker: AdvanceWorker | null, reader: IssueReader
   if (!item.repoId || !item.ghOwner || !item.ghName) return { ok: false, reason: "no_issue_link" };
   // S4-e: an item with no issue number is loaded only when a proposal backs it, and only for the triage; every later mode still needs the number.
   const fromProposal = item.ghNumber === null && item.proposal ? item.proposal : null;
-  if (item.ghNumber === null && fromProposal === null) return { ok: false, reason: "no_issue_link" };
+  if (item.ghNumber === null && fromProposal === null) return { ok: false, reason: (item.identityRefusal === "child_orphaned" ? "child_orphaned" : "no_issue_link") };
   // The one table (@fx/core work-items/advance.ts), the same one the route and the worker's perform ask, says whether this
   // stage and state can be advanced and by what. A later stage adds a mode here and a branch in the workflow.
   const verdict = advanceActionFor({ stage: item.stage, discussion_id: item.hasDiscussion ? "d" : null, kind: item.kind, has_spec: item.hasSpec, no_verdict_hold: item.reviewHold === true, ...(item.child === true ? { child: true } : {}) });
@@ -96,15 +98,17 @@ export async function loadBody(worker: AdvanceWorker | null, reader: IssueReader
     return { ok: true, mode: "triage", repoId: item.repoId, owner: item.ghOwner, name: item.ghName, number: null, proposalId: fromProposal.id, login: PROPOSAL_TRIAGE_LOGIN, title: fromProposal.title, body: intake, decided: null, because: null, hints: [] };
   }
   const ghNumber = item.ghNumber as number;
+  // Build again looks for the pull request on the item's branch, which is its build identity's (the worker derives the number and the branch from the same read).
+  if ((verdict.action === "rebuild" || (verdict.action === "review" && item.stage === "needs_human")) && item.branch === undefined) return { ok: false, reason: (item.identityRefusal === "child_orphaned" ? "child_orphaned" : "no_issue_link") };
   // The build: the Spec is in the database, so no issue is read.
   if (verdict.action === "build") return { ok: true, mode: "build", number: ghNumber, specVersion: item.specVersion };
-  if (verdict.action === "rebuild") return { ok: true, mode: "rebuild", number: ghNumber, specVersion: item.specVersion, repoId: item.repoId, owner: item.ghOwner, name: item.ghName, executionMode: item.executionMode, recordedPr: item.recordedPr, prExecutionMode: item.prExecutionMode, ...(item.branch === undefined ? {} : { branch: item.branch }) };
+  if (verdict.action === "rebuild") return { ok: true, mode: "rebuild", number: ghNumber, specVersion: item.specVersion, repoId: item.repoId, owner: item.ghOwner, name: item.ghName, executionMode: item.executionMode, recordedPr: item.recordedPr, prExecutionMode: item.prExecutionMode, branch: item.branch! };
   // The panel and the Spec again, for the pipeline's own root item: no issue read either.
   if (verdict.action === "spec") return { ok: true, mode: "spec" };
   if (verdict.action === "check_build") return { ok: true, mode: "check_build", specVersion: item.specVersion, executorRunId: item.executorRunId, checkFailedRunId: item.checkFailedRunId ?? null };
   // A reviewer kept ending without a verdict and the item sits at Needs a person: Approve reviews the open pull request again. The workflow looks for that
   // pull request first (the rebuild mode's lookup) and builds again when none is open, as it always did.
-  if (verdict.action === "review" && item.stage === "needs_human") return { ok: true, mode: "rebuild", reviewHold: true, number: ghNumber, specVersion: item.specVersion, repoId: item.repoId, owner: item.ghOwner, name: item.ghName, executionMode: item.executionMode, recordedPr: item.recordedPr, prExecutionMode: item.prExecutionMode, ...(item.branch === undefined ? {} : { branch: item.branch }) };
+  if (verdict.action === "review" && item.stage === "needs_human") return { ok: true, mode: "rebuild", reviewHold: true, number: ghNumber, specVersion: item.specVersion, repoId: item.repoId, owner: item.ghOwner, name: item.ghName, executionMode: item.executionMode, recordedPr: item.recordedPr, prExecutionMode: item.prExecutionMode, branch: item.branch! };
   if (verdict.action === "review") return { ok: true, mode: "review", number: ghNumber, specVersion: item.specVersion };
   if (!reader) return { ok: false, reason: "reader_unavailable" };
   const light = verdict.action === "light_spec";

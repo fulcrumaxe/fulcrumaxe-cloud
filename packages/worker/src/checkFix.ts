@@ -10,6 +10,7 @@ import { REPUBLISH_BASE_MISSING } from "@fx/core/src/work-items/baseSync.js";
 import { CHECK_FAILED_OUTSIDE_CHANGE, failedOutsideChange } from "@fx/core/src/work-items/checkFailure.js";
 import { BASE_SYNCED_PROMPT_LINE, FIX_BASE_EVENT, hasPublicCopy } from "./fixRoundBase.js";
 import { PRIVATE_PR_MARKER } from "./planePublish.js";
+import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
 import type { RunStarter } from "./preview.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 
@@ -70,8 +71,8 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
   if (!UUID.test(who.accountId) || !UUID.test(who.workItemId) || !UUID.test(failedRunId)) return { ok: false, reason: "invalid_input" };
   const key = `advance:${who.workItemId}:checkfix:${failedRunId}`;
   const facts = await withTenant(deps.pool, who.accountId, async (client) => {
-    const run = await client.query<{ repo_id: string | null; argv: unknown; exit_code: number | null; timed_out: boolean | null; summary: string | null; gh_number: string | null; prior: string | null; continues_branch: string | null; run_mode: string | null; spec_version_id: string | null; gh_owner: string | null; gh_name: string | null }>(
-      `SELECT w.repo_id, w.gh_number, ar.spec_version_id, ar.execution_mode AS run_mode, ar.job_signed #>> '{job,continues,branch}' AS continues_branch, rp.gh_owner, rp.gh_name, ar.job_signed #> '{job,check,argv}' AS argv, c.exit_code, c.timed_out, c.summary,
+    const run = await client.query<{ repo_id: string | null; argv: unknown; exit_code: number | null; timed_out: boolean | null; summary: string | null; prior: string | null; continues_branch: string | null; run_mode: string | null; spec_version_id: string | null; gh_owner: string | null; gh_name: string | null }>(
+      `SELECT w.repo_id, ar.spec_version_id, ar.execution_mode AS run_mode, ar.job_signed #>> '{job,continues,branch}' AS continues_branch, rp.gh_owner, rp.gh_name, ar.job_signed #> '{job,check,argv}' AS argv, c.exit_code, c.timed_out, c.summary,
               (SELECT run_id FROM agent_run_idempotency_keys k WHERE k.account_id = $1 AND k.idempotency_key = $4) AS prior
          FROM agent_runs ar
          JOIN work_items w ON w.account_id = ar.account_id AND w.id = ar.work_item_id
@@ -104,8 +105,12 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
   if (checkFixRound(facts.round) === "escalate") return { ok: false, reason: CHECK_ROUNDS_USED };
   if (facts.live) return { ok: false, reason: "already_running" };
   const { row } = facts;
-  const ghNumber = row.gh_number === null ? NaN : Number(row.gh_number);
-  if (row.repo_id === null || !Number.isSafeInteger(ghNumber) || ghNumber < 1) return { ok: false, reason: "no_repo" };
+  // D#483 S5-b2c-3 (R7, R8): the issue number and the branch are the build identity's. A planned PR child re-runs the launch rule's checks here (a deleted parent, a Spec not approved
+  // again, a key that left the approved Spec) and is refused with the identity's own code before anything is written; a top-level item without a number is refused as it always was.
+  const resolved = row.repo_id === null ? null : await withTenant(deps.pool, who.accountId, (c) => resolveBuildIdentity(c, who.accountId, who.workItemId, "start"));
+  if (row.repo_id === null || resolved === null) return { ok: false, reason: "no_repo" };
+  if (!resolved.ok) return { ok: false, reason: resolved.reason === "no_issue_link" || resolved.reason === "not_found" ? "no_repo" : resolved.reason };
+  const { issueNumber, branch: itemBranch } = resolved.identity;
   const argv = Array.isArray(row.argv) && row.argv.every((a): a is string => typeof a === "string") ? row.argv : [];
   // A failed run that worked on the item's own pull request branch (a cross-side round) recorded no branch of its own: the branch is the one its binding
   // names. Read only when the run's event, its signed job and the item's issue number all agree (`readBoundItemBranch`); otherwise the round says so, by name.
@@ -137,7 +142,7 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
       ),
     );
     const number = Number(marked.rows[0]?.pr);
-    if (Number.isSafeInteger(number) && number > 0) target = { repo: { id: row.repo_id, owner: row.gh_owner, name: row.gh_name }, pr: { number, branch: `fx/issue-${ghNumber}` } };
+    if (Number.isSafeInteger(number) && number > 0) target = { repo: { id: row.repo_id, owner: row.gh_owner, name: row.gh_name }, pr: { number, branch: itemBranch } };
   }
   const held = deps.beforeStart ? await deps.beforeStart(target, failedRunId) : null;
   if (held !== null) return { ok: false, reason: held };
@@ -158,7 +163,7 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
         workItemId: who.workItemId,
         role: "executor",
         product: "team",
-        pr: ghNumber,
+        pr: issueNumber,
         parentRunId: failedRunId,
         prompt,
         ...expectedExecutionMode,
@@ -182,7 +187,7 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
         workItemId: who.workItemId,
         role: "executor",
         product: "team",
-        pr: ghNumber,
+        pr: issueNumber,
         parentRunId: failedRunId,
         prompt,
         // The base of a round that republishes the public pull request: signed only for the branch it was synced on (the issuer compares).

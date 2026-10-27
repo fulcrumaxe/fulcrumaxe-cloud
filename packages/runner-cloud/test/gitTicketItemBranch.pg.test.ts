@@ -116,4 +116,24 @@ describe("git-ticket route, item pull request branch [pg]", () => {
     expect((await ask()).status).toBe(200);
     expect(signedRefs).toEqual([branch]);
   });
+
+  describe("a planned PR child's branch (D#483 S5-b2c-3)", () => {
+    it("signs fx/<parent#>-<key> for a run whose job continues it and whose bound event names it", async () => {
+      context = ctx("fx/41-api", "fx/41-api");
+      expect((await ask()).status).toBe(200);
+      expect(signedRefs).toEqual(["fx/41-api"]);
+    });
+
+    it("answers 403 ticket_branch_unbound and signs nothing when the binding names the parent's branch, a sibling's, or the key under another number", async () => {
+      for (const bound of ["fx/issue-41", "fx/41-ui", "fx/42-api", null, undefined] as const) {
+        calls.length = 0;
+        context = ctx("fx/41-api", bound);
+        const res = await ask();
+        expect(res.status, String(bound)).toBe(403);
+        expect(res.body).toMatchObject({ error: { code: "ticket_branch_unbound" } });
+        expect(calls).toEqual(["context"]);
+      }
+      expect(signedRefs).toEqual([]);
+    });
+  });
 });

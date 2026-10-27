@@ -551,7 +551,7 @@ export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promis
     return gate ?? buildPhase(args, pinned(loaded.specVersion));
   }
   // Build again, for an item at Needs a person: a fresh build, unless a pull request is still open for the issue's branch.
-  if (loaded.mode === "rebuild") return rebuildPhase(args, pinned(loaded.specVersion), { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.number, ...(loaded.branch === undefined ? {} : { branch: loaded.branch }), executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode }, loaded.reviewHold === true);
+  if (loaded.mode === "rebuild") return rebuildPhase(args, pinned(loaded.specVersion), { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.number, branch: loaded.branch, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode }, loaded.reviewHold === true);
   if (loaded.mode === "review") return reviewPhase(args, pinned(loaded.specVersion));
   // An item left at In progress with nothing running: look for its pull request (found: the review; none: Needs human).
   // D#483 S5-b2a part 3: the newest build run failed its check and the fix round was asked about (or decided): follow that run's check fix round, behind the same gate. A person's answer
@@ -1012,7 +1012,7 @@ async function findBuiltPr(args: AdvanceStartArgs, pinned: number | null): Promi
     await stopped(args, "build_pr_load", CHECK_UNAVAILABLE);
     return { end: { status: "failed", detail: `check_build_${loaded.reason}` } };
   }
-  const ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode, ...(loaded.branch === undefined ? {} : { branch: loaded.branch }) };
+  const ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode, branch: loaded.branch, ...(loaded.child ? { child: true as const } : {}) };
   const found = await advanceFindPrStep(ctx);
   if (found.ok) return { stage: await advancePrFoundStep(accountId, userId, workItemId, args.haltEpoch, found.number) };
   if (found.reason === "no_open_pr") return { stage: "in_progress" };
@@ -1035,7 +1035,7 @@ async function checkBuildPhase(args: AdvanceStartArgs, pinned: number | null, ex
     await stopped(args, "check_build_load", CHECK_UNAVAILABLE);
     return { status: "failed", detail: `check_build_${loaded.reason}` };
   }
-  const ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode, ...(loaded.branch === undefined ? {} : { branch: loaded.branch }) };
+  const ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode, branch: loaded.branch, ...(loaded.child ? { child: true as const } : {}) };
   const found = await advanceFindPrStep(ctx);
   if (found.ok) {
     const stage = await advancePrFoundStep(accountId, userId, workItemId, args.haltEpoch, found.number);
@@ -1431,7 +1431,7 @@ async function awaitVerifiedQuiet(args: AdvanceStartArgs, ctx: ReviewCtx, first:
         await stopped(args, "review_load", loaded.reason);
         return { end: { status: "failed", detail: `review_${loaded.reason}` } };
       }
-      const next: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, fixRoundsStarted: loaded.fixRoundsStarted, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode, ...(loaded.branch === undefined ? {} : { branch: loaded.branch }) };
+      const next: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, fixRoundsStarted: loaded.fixRoundsStarted, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode, branch: loaded.branch, ...(loaded.child ? { child: true as const } : {}) };
       const again = await advanceFindPrStep(next);
       if (!again.ok) {
         await stopped(args, "review_pr", again.reason);
@@ -1647,7 +1647,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     await stopped(args, "review_load", loaded.reason);
     return { status: "failed", detail: `review_${loaded.reason}` };
   }
-  let ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, fixRoundsStarted: loaded.fixRoundsStarted, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode, ...(loaded.branch === undefined ? {} : { branch: loaded.branch }) };
+  let ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, fixRoundsStarted: loaded.fixRoundsStarted, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode, branch: loaded.branch, ...(loaded.child ? { child: true as const } : {}) };
   // A person pressed Request changes: their fix round comes first, on the pull request's current head. The review below then checks the new head, as after any fix.
   if (loaded.personRequestPending) {
     const person = await personFixRound(args, ctx);

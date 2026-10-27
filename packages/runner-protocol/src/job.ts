@@ -125,17 +125,24 @@ const branchName = z
   .refine((value) => !value.includes(".."));
 
 /**
- * D#599 PL-2b: the one extra branch a continuation may push to besides a run branch: the item's own pull request head, `fx/issue-<n>`. `n` is
- * the item's issue number (1 to 10 digits, no leading zero). The pattern is exported once and every check that widens a branch rule imports
- * it: no copy, no prefix, no wildcard.
- */
-export const ITEM_PR_BRANCH = /^fx\/issue-[1-9][0-9]{0,9}$/;
-
-/**
  * The shape of every branch a runner run pushes, and so of every branch a continuation may continue: `fx/<run id>-g<lease generation>`, the
  * generation a positive integer of at most nine places. The one copy: the schema below, the job issuer, `done` and the verdict writer all import it.
  */
-export const RUNNER_RUN_BRANCH = /^fx\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-g[1-9][0-9]{0,8}$/;
+const RUN_BRANCH_REST = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-g[1-9][0-9]{0,8}";
+export const RUNNER_RUN_BRANCH = new RegExp(`^fx/${RUN_BRANCH_REST}$`);
+
+/**
+ * D#599 PL-2b: the one extra branch a continuation may push to besides a run branch: the item's own pull request head. Two shapes, and no third:
+ *  - `fx/issue-<n>`, `n` the item's issue number (1 to 10 digits, no leading zero);
+ *  - D#483 S5-b2c-3: `fx/<n>-<key>`, a planned PR child's branch, `n` its PARENT's issue number (1 to 12 digits, no leading zero) and `key` the child's key
+ *    (`[a-z0-9-]{1,32}`). A run branch (`fx/<uuid>-g<n>`) can look like this when the first group of the uuid is all digits, so that shape is excluded here.
+ * The pattern is exported once and every check that widens a branch rule imports it: no copy, no prefix, no wildcard. Whether `n` and `key` are the item's
+ * own is decided by the cloud (the job issuer, the ticket route), never by a pattern; the shape only ever applies to a job that carries a bound pull request number.
+ */
+export const ITEM_PR_BRANCH = new RegExp(`^fx/(?:issue-[1-9][0-9]{0,9}|(?!${RUN_BRANCH_REST}$)[1-9][0-9]{0,11}-[a-z0-9-]{1,32})$`);
+
+/** True for the child shape of `ITEM_PR_BRANCH` (`fx/<parent#>-<key>`), false for `fx/issue-<n>` and for anything that is not an item pull request branch. */
+export const isChildItemBranch = (branch: string): boolean => ITEM_PR_BRANCH.test(branch) && !branch.startsWith("fx/issue-");
 
 /** The largest value of a Postgres `integer`; a pull request number in a job stays inside it. */
 const PR_NUMBER_MAX = 2_147_483_647;

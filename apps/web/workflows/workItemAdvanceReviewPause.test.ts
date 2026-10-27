@@ -26,7 +26,7 @@ const REPO = "33333333-3333-4333-8333-333333333333";
 const ARGS: AdvanceStartArgs = { accountId: ACCOUNT, userId: "55555555-5555-4555-8555-555555555555", workItemId: ITEM, actionId: "44444444-4444-4444-8444-444444444444", haltEpoch: 0 };
 const H1 = "a".repeat(40);
 const H2 = "b".repeat(40);
-const AT_PR: AdvanceItem = { stage: "pr_opened", provenance: "internal", repoId: REPO, ghNumber: 7, ghOwner: "acme", ghName: "widgets", hasDiscussion: true, kind: "feature", hasSpec: true, specVersion: 3, executorRunId: null, executionMode: "sandbox", recordedPr: null };
+const AT_PR: AdvanceItem = { stage: "pr_opened", provenance: "internal", repoId: REPO, ghNumber: 7, branch: "fx/issue-7", ghOwner: "acme", ghName: "widgets", hasDiscussion: true, kind: "feature", hasSpec: true, specVersion: 3, executorRunId: null, executionMode: "sandbox", recordedPr: null };
 
 const DENIAL = "model_budget_exceeded";
 const PAUSE = "account_budget_reached";
@@ -59,7 +59,7 @@ function setup(script: Script = {}) {
     // The first read is the workflow's load; later ones are the stage looks after the executor run ended (the pull request is open by then).
     advanceLoadItem: vi.fn(async () => (++loads === 1 ? (script.item ?? AT_PR) : AT_PR)),
     advanceBuild: vi.fn(async (..._args: unknown[]) => ({ status: "started", runId: "run-b", branch: "fx/issue-7" })),
-    advanceLoadReview: vi.fn(async () => ({ ok: true as const, ctx: { workItemId: ITEM, stage: "pr_opened", repoId: REPO, owner: "acme", name: "widgets", issue: 7, tier: "feature", specVersion: 3, debaterEnabled: false, executionMode: "sandbox", recordedPr: null } })),
+    advanceLoadReview: vi.fn(async () => ({ ok: true as const, ctx: { workItemId: ITEM, stage: "pr_opened", repoId: REPO, owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", tier: "feature", specVersion: 3, debaterEnabled: false, executionMode: "sandbox", recordedPr: null } })),
     advanceLoadSpecText: vi.fn(async (_who: unknown, v: number) => (v === 3 ? { version: 3, body: "SPEC BODY" } : null)),
     advanceReviewRuns: vi.fn(async (_who: unknown, _req: { headSha: string; rereview: number }) => script.known ?? []),
     advanceRecordMergeOnly: vi.fn(async () => ({ decision: "full_review", reason: "no_prior_review" })),

@@ -15,25 +15,25 @@ describe("findOpenPullRequest", () => {
   it("asks for the open pull request whose head is fx/issue-<n> in this repository, and reads number, head and base only", async () => {
     const calls: unknown[] = [];
     const http: GitHubHttp = { request: async (r) => (calls.push(r), { status: 200, body: [pull({ title: "T", body: "SECRET" })] }) };
-    expect(await findOpenPullRequest(http, { ...repo, issue: 7 })).toEqual({ ok: true, pr: { number: 41, headSha: HEAD, baseRef: "main", branch: "fx/issue-7" } });
+    expect(await findOpenPullRequest(http, { ...repo, branch: "fx/issue-7" })).toEqual({ ok: true, pr: { number: 41, headSha: HEAD, baseRef: "main", branch: "fx/issue-7" } });
     expect(calls[0]).toEqual({ method: "GET", path: "/repos/acme/widgets/pulls", query: { state: "open", head: "acme:fx/issue-7", per_page: 5 } });
   });
 
   it("no pull request is no_open_pr", async () => {
-    expect(await findOpenPullRequest(withList([]), { ...repo, issue: 7 })).toEqual({ ok: false, reason: "no_open_pr" });
+    expect(await findOpenPullRequest(withList([]), { ...repo, branch: "fx/issue-7" })).toEqual({ ok: false, reason: "no_open_pr" });
   });
 
   it("a pull request from another repository's branch (a fork) is not ours", async () => {
-    expect(await findOpenPullRequest(withList([pull({ head: { sha: HEAD, repo: { full_name: "evil/widgets" } } })]), { ...repo, issue: 7 })).toEqual({ ok: false, reason: "malformed" });
-    expect(await findOpenPullRequest(withList([pull({ head: { sha: HEAD, repo: null } })]), { ...repo, issue: 7 })).toEqual({ ok: false, reason: "malformed" });
+    expect(await findOpenPullRequest(withList([pull({ head: { sha: HEAD, repo: { full_name: "evil/widgets" } } })]), { ...repo, branch: "fx/issue-7" })).toEqual({ ok: false, reason: "malformed" });
+    expect(await findOpenPullRequest(withList([pull({ head: { sha: HEAD, repo: null } })]), { ...repo, branch: "fx/issue-7" })).toEqual({ ok: false, reason: "malformed" });
   });
 
   it("the owner's case does not matter", async () => {
-    expect((await findOpenPullRequest(withList([pull({ head: { sha: HEAD, repo: { full_name: "Acme/Widgets" } } })]), { ...repo, issue: 7 })).ok).toBe(true);
+    expect((await findOpenPullRequest(withList([pull({ head: { sha: HEAD, repo: { full_name: "Acme/Widgets" } } })]), { ...repo, branch: "fx/issue-7" })).ok).toBe(true);
   });
 
   it("two open pull requests from the branch are ambiguous: the driver will not pick one", async () => {
-    expect(await findOpenPullRequest(withList([pull(), pull({ number: 42 })]), { ...repo, issue: 7 })).toEqual({ ok: false, reason: "ambiguous_pr" });
+    expect(await findOpenPullRequest(withList([pull(), pull({ number: 42 })]), { ...repo, branch: "fx/issue-7" })).toEqual({ ok: false, reason: "ambiguous_pr" });
   });
 
   it.each([
@@ -43,16 +43,16 @@ describe("findOpenPullRequest", () => {
     ["a missing base", pull({ base: undefined })],
     ["a base that is not a string", pull({ base: { ref: 7 } })],
   ])("%s is malformed", async (_n, p) => {
-    expect(await findOpenPullRequest(withList([p]), { ...repo, issue: 7 })).toEqual({ ok: false, reason: "malformed" });
+    expect(await findOpenPullRequest(withList([p]), { ...repo, branch: "fx/issue-7" })).toEqual({ ok: false, reason: "malformed" });
   });
 
   it.each(["main; curl x | sh", "$(id)", "a b", "-x", "a..b"])("a base branch %j that could not be printed into a shell command is refused", async (ref) => {
-    expect(await findOpenPullRequest(withList([pull({ base: { ref } })]), { ...repo, issue: 7 })).toEqual({ ok: false, reason: "bad_base_ref" });
+    expect(await findOpenPullRequest(withList([pull({ base: { ref } })]), { ...repo, branch: "fx/issue-7" })).toEqual({ ok: false, reason: "bad_base_ref" });
   });
 
   it("an answer that is not a list, and a status that is not 200, are not read as 'no pull request'", async () => {
-    expect(await findOpenPullRequest(withList({ message: "x" }), { ...repo, issue: 7 })).toEqual({ ok: false, reason: "malformed" });
-    for (const status of [401, 403, 404, 500, 502]) expect(await findOpenPullRequest(withList([], status), { ...repo, issue: 7 })).toEqual({ ok: false, reason: "github_unavailable" });
+    expect(await findOpenPullRequest(withList({ message: "x" }), { ...repo, branch: "fx/issue-7" })).toEqual({ ok: false, reason: "malformed" });
+    for (const status of [401, 403, 404, 500, 502]) expect(await findOpenPullRequest(withList([], status), { ...repo, branch: "fx/issue-7" })).toEqual({ ok: false, reason: "github_unavailable" });
   });
 });
 
@@ -98,7 +98,7 @@ describe("findRecordedPullRequest (a runner run's pull request, by what its done
 describe("findPullRequestForItem (the runner or sandbox switch)", () => {
   it("a runner_local repo is found by its recorded pull request through the list call (A3), and never asks for fx/issue-<n> or GET pulls/<n>", async () => {
     const { http, calls } = recordingHttp(200, [runnerPull()]);
-    const out = await findPullRequestForItem(http, { ...repo, issue: 7, executionMode: "runner_local", recordedPr: recorded });
+    const out = await findPullRequestForItem(http, { ...repo, branch: "fx/issue-7", executionMode: "runner_local", recordedPr: recorded });
     expect(out).toEqual({ ok: true, pr: { number: 41, headSha: HEAD, baseRef: "main", branch: RUN_BRANCH } });
     expect(JSON.stringify(calls)).not.toContain("fx/issue-7");
     expect(calls).toEqual([{ method: "GET", path: "/repos/acme/widgets/pulls", query: { state: "open", head: `acme:${RUN_BRANCH}`, per_page: 5 } }]);
@@ -106,20 +106,20 @@ describe("findPullRequestForItem (the runner or sandbox switch)", () => {
 
   it("a runner_local repo with no recorded pull request fails closed as no_open_pr without asking GitHub, even when fx/issue-<n> has one open", async () => {
     const { http, calls } = recordingHttp(200, [pull()]);
-    expect(await findPullRequestForItem(http, { ...repo, issue: 7, executionMode: "runner_local", recordedPr: null })).toEqual({ ok: false, reason: "no_open_pr" });
+    expect(await findPullRequestForItem(http, { ...repo, branch: "fx/issue-7", executionMode: "runner_local", recordedPr: null })).toEqual({ ok: false, reason: "no_open_pr" });
     expect(calls).toEqual([]);
   });
 
   it("a sandbox repo keeps the lookup by fx/issue-<n>, and a recorded pull request does not change it", async () => {
     const { http, calls } = recordingHttp(200, [pull()]);
-    const out = await findPullRequestForItem(http, { ...repo, issue: 7, executionMode: "sandbox", recordedPr: recorded });
+    const out = await findPullRequestForItem(http, { ...repo, branch: "fx/issue-7", executionMode: "sandbox", recordedPr: recorded });
     expect(out).toEqual({ ok: true, pr: { number: 41, headSha: HEAD, baseRef: "main", branch: "fx/issue-7" } });
     expect(calls).toEqual([{ method: "GET", path: "/repos/acme/widgets/pulls", query: { state: "open", head: "acme:fx/issue-7", per_page: 5 } }]);
   });
 
   it("an execution mode that is not runner_local is a sandbox build", async () => {
     const { http, calls } = recordingHttp(200, []);
-    expect(await findPullRequestForItem(http, { ...repo, issue: 7, executionMode: "sandbox", recordedPr: null })).toEqual({ ok: false, reason: "no_open_pr" });
+    expect(await findPullRequestForItem(http, { ...repo, branch: "fx/issue-7", executionMode: "sandbox", recordedPr: null })).toEqual({ ok: false, reason: "no_open_pr" });
     expect(calls).toHaveLength(1);
   });
 });

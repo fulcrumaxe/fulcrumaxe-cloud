@@ -4,7 +4,7 @@ import { ReviewPromptInputError, buildFixPrompt, buildReviewPrompt, isSafeRef, t
 
 /** D#483 P3: the review and fix prompts. Built from platform-held values; everything a person or a model wrote is fenced. */
 const HEAD = "a".repeat(40);
-const BASE: ReviewPromptInput = { role: "code-reviewer", owner: "acme", name: "widgets", issue: 7, pr: 41, headSha: HEAD, baseRef: "main", version: 3, spec: "Acceptance: the footer shows the year." };
+const BASE: ReviewPromptInput = { role: "code-reviewer", owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", pr: 41, headSha: HEAD, baseRef: "main", version: 3, spec: "Acceptance: the footer shows the year." };
 const MARKER = "<!-- AGENT_OUTPUT -->";
 const END = "<!-- /AGENT_OUTPUT -->";
 
@@ -133,7 +133,7 @@ describe("buildReviewPrompt", () => {
 });
 
 describe("buildFixPrompt", () => {
-  const FIX = { owner: "acme", name: "widgets", issue: 7, pr: 41, headSha: HEAD, version: 3, spec: "Acceptance: the footer shows the year.", findings: [{ role: "code-reviewer", verdict: "needs-fix", findings: ["src/a.ts:3 - off by one"], summary: "one problem" }] };
+  const FIX = { owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", pr: 41, headSha: HEAD, version: 3, spec: "Acceptance: the footer shows the year.", findings: [{ role: "code-reviewer", verdict: "needs-fix", findings: ["src/a.ts:3 - off by one"], summary: "one problem" }] };
 
   it("continues the session: no clone, the branch of the ISSUE, the commit being fixed, the bot identity, no new pull request", () => {
     const p = buildFixPrompt(FIX);

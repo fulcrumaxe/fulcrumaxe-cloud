@@ -63,7 +63,7 @@ describe("decideStackStart", () => {
 });
 
 describe("the executor prompt for a stacked child", () => {
-  const base = { owner: "acme", name: "widgets", number: 42, version: 1, spec: "Do the thing." };
+  const base = { owner: "acme", name: "widgets", number: 42, branch: "fx/issue-42", version: 1, spec: "Do the thing." };
 
   it("fetches the parent's branch, checks the commit, branches from it and opens the pull request against it", () => {
     const p = buildExecutorPrompt({ ...base, stackBase: { branch: "fx/issue-41", sha: HEAD } });

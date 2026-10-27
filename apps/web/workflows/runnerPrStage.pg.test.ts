@@ -138,7 +138,7 @@ describe("a runner run's pull request moves its item at once [pg]", () => {
       // With `lookupFinds`, the first review load is `findBuiltPr`'s; every other load (the review phase's) stops at once.
       advanceLoadReview: vi.fn(async () =>
         o.lookupFinds && worker.advanceLoadReview.mock.calls.length === 1
-          ? { ok: true as const, ctx: { workItemId: itemId, stage: "in_progress", repoId: REPO_FX, owner: "acme", name: "widgets", issue: ISSUE, tier: "feature", specVersion: 3, debaterEnabled: false, executionMode: "sandbox", recordedPr: null } }
+          ? { ok: true as const, ctx: { workItemId: itemId, stage: "in_progress", repoId: REPO_FX, owner: "acme", name: "widgets", issue: ISSUE, branch: `fx/issue-${ISSUE}`, tier: "feature", specVersion: 3, debaterEnabled: false, executionMode: "sandbox", recordedPr: null } }
           : { ok: false as const, reason: "no_spec" },
       ),
       // The driver's own record of a pull request it found: the real stage write.

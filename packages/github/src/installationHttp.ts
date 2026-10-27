@@ -24,7 +24,7 @@ import { getInstallationToken, type AccessTokenRequester, type InstallationToken
  *
  *   - `branch_delete` D#598 P1f-5d: removes ONE branch of a private repository and nothing else. Token: the `branch_delete` purpose
  *                  (`contents: write`, one repository, minted fresh and revoked by `close()`). The client is pinned to the one branch it was
- *                  opened for, which must be one of the two shapes the platform pushes (`fx/issue-<n>` or `fx/<run id>-g<generation>`), and
+ *                  opened for, which must be one of the shapes the platform pushes (`fx/issue-<n>`, a planned PR child's `fx/<parent#>-<key>`, or `fx/<run id>-g<generation>`), and
  *                  allows exactly: `GET` the repository, `GET` that branch's ref, and `DELETE` that branch's ref ONCE. A push, a second
  *                  branch, a second delete and every other path are refused before a token is used.
  *
@@ -94,8 +94,11 @@ export interface InstallationHttpTarget {
   prNumber?: number;
 }
 
-/** The branches the platform pushes to a private repository: the item's pull request branch, or a runner run's branch. Nothing else is ever deleted. */
-export const DELETABLE_BRANCH = /^fx\/(?:issue-[1-9][0-9]{0,9}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}-g[1-9][0-9]{0,5})$/;
+/**
+ * The branches the platform pushes to a private repository: the item's pull request branch (`fx/issue-<n>`, or a planned PR child's `fx/<parent#>-<key>`, D#483 S5-b2c-3),
+ * or a runner run's branch. Nothing else is ever deleted. Whose branch it is, is decided by the grant's recorded head and the caller, never by this shape.
+ */
+export const DELETABLE_BRANCH = /^fx\/(?:issue-[1-9][0-9]{0,9}|[1-9][0-9]{0,11}-[a-z0-9-]{1,32}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}-g[1-9][0-9]{0,5})$/;
 
 const CALL_TIMEOUT_MS = 15_000;
 const RUNNER_PR_PERMISSIONS = Object.freeze({ metadata: "read", contents: "read", pull_requests: "write" } as const);

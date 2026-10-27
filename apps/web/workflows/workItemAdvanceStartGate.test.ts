@@ -23,7 +23,7 @@ const ARGS: AdvanceStartArgs = { accountId: ACCOUNT, userId: "55555555-5555-4555
 /** A restart nobody clicked: the parked-stage sweep or the slot wake (no `personFiled`), at a later attempt. */
 const { personFiled: _p, ...NOT_FILED } = ARGS;
 const RESTART: AdvanceStartArgs = { ...NOT_FILED, startAttempt: 1 };
-const ITEM_OK: AdvanceItem = { stage: "triaged", provenance: "internal", repoId: REPO, ghNumber: 7, ghOwner: "acme", ghName: "widgets", hasDiscussion: false, kind: null, hasSpec: false, specVersion: null, executorRunId: null, executionMode: "sandbox", recordedPr: null };
+const ITEM_OK: AdvanceItem = { stage: "triaged", provenance: "internal", repoId: REPO, ghNumber: 7, branch: "fx/issue-7", ghOwner: "acme", ghName: "widgets", hasDiscussion: false, kind: null, hasSpec: false, specVersion: null, executorRunId: null, executionMode: "sandbox", recordedPr: null };
 const lightItem: AdvanceItem = { ...ITEM_OK, hasDiscussion: true, kind: "small" };
 const specItem: AdvanceItem = { ...ITEM_OK, stage: "discussing", hasDiscussion: true, kind: "feature" };
 const buildItem: AdvanceItem = { ...ITEM_OK, stage: "spec_ready", hasDiscussion: true, kind: "feature", hasSpec: true, specVersion: 4 };

@@ -24,7 +24,7 @@ const ACCOUNT = "11111111-1111-4111-8111-111111111111";
 const ITEM = "22222222-2222-4222-8222-222222222222";
 const REPO = "33333333-3333-4333-8333-333333333333";
 const ARGS: AdvanceStartArgs = { accountId: ACCOUNT, userId: "55555555-5555-4555-8555-555555555555", workItemId: ITEM, actionId: "44444444-4444-4444-8444-444444444444", haltEpoch: 0 };
-const specItem: AdvanceItem = { stage: "discussing", provenance: "internal", repoId: REPO, ghNumber: 7, ghOwner: "acme", ghName: "widgets", hasDiscussion: true, kind: "feature", hasSpec: false, specVersion: null, executorRunId: null, executionMode: "sandbox", recordedPr: null };
+const specItem: AdvanceItem = { stage: "discussing", provenance: "internal", repoId: REPO, ghNumber: 7, branch: "fx/issue-7", ghOwner: "acme", ghName: "widgets", hasDiscussion: true, kind: "feature", hasSpec: false, specVersion: null, executorRunId: null, executionMode: "sandbox", recordedPr: null };
 const issue = (): IssueReadResult => ({ status: "found", title: "T", body: "B", login: "owner-1", state: "open", labels: [] });
 
 const PAUSES = ["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate", "envelope_reached"];

@@ -31,7 +31,7 @@ const ITEM = "22222222-2222-4222-8222-222222222222";
 const REPO = "33333333-3333-4333-8333-333333333333";
 const ARGS: AdvanceStartArgs = { accountId: ACCOUNT, userId: "55555555-5555-4555-8555-555555555555", workItemId: ITEM, actionId: "44444444-4444-4444-8444-444444444444", haltEpoch: 0 };
 const WHO = { accountId: ACCOUNT, userId: ARGS.userId, workItemId: ITEM, haltEpoch: 0 };
-const AT_SPEC: AdvanceItem = { stage: "spec_ready", provenance: "internal", repoId: REPO, ghNumber: 7, ghOwner: "acme", ghName: "widgets", hasDiscussion: true, kind: "feature", hasSpec: true, specVersion: 3, executorRunId: null, executionMode: "sandbox", recordedPr: null };
+const AT_SPEC: AdvanceItem = { stage: "spec_ready", provenance: "internal", repoId: REPO, ghNumber: 7, branch: "fx/issue-7", ghOwner: "acme", ghName: "widgets", hasDiscussion: true, kind: "feature", hasSpec: true, specVersion: 3, executorRunId: null, executionMode: "sandbox", recordedPr: null };
 const REVIEW_STOPS = { status: "failed", detail: "review_no_spec" };
 const issue: IssueReadResult = { status: "found", title: "T", body: "B", login: "owner-1", state: "open", labels: [] };
 const CHILD = (n: number) => `99999999-9999-4999-8999-${String(n).padStart(12, "0")}`;
