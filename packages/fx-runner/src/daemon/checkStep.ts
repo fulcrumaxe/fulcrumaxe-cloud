@@ -33,8 +33,9 @@ import { closeSync, constants, lstatSync, mkdirSync, openSync, readFileSync, rmd
 import path from "node:path";
 import { CHECK_SUMMARY_MAX_BYTES, redactShapes, type Check, type CheckNotRunReason, type DoneCheck } from "@fulcrumaxe/runner-protocol";
 import type { InstallCapture } from "./engineKit.js";
-import { guardConfigEnv, type GitCapture } from "./git.js";
+import { GitPathError, guardConfigEnv, type GitCapture } from "./git.js";
 import { gitEnv, type CleanEnvOptions } from "../job/cleanEnv.js";
+import { readWorkspaceGit } from "./hostRead.js";
 import { protectedRootNames, VCS_DIR } from "../sandbox/checkProtected.js";
 
 /** How much raw output is kept before redaction; the summary is cut to `CHECK_SUMMARY_MAX_BYTES` afterwards. */
@@ -165,11 +166,11 @@ export function changedFilesLine(files: readonly string[] | null): string {
 
 /** The workspace's changed paths against `base`, read with the daemon's guarded git (the same guard as `createVcsState`). Null when a call fails or its listing was cut. */
 export function createChangedFiles(capture: GitCapture, envOptions: CleanEnvOptions): NonNullable<CheckStepDeps["changedFiles"]> {
-  const env = (): Record<string, string> => ({ ...gitEnv(envOptions), ...guardConfigEnv() });
   return async (workspace, base) => {
     // `--no-renames`: a rename names both paths. The untracked listing is the files the agent made and has not committed (ignored files are not changes).
-    const tracked = await capture("git", ["-C", workspace, "diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", base, "--"], env(), 30_000);
-    const fresh = await capture("git", ["-C", workspace, "ls-files", "-z", "--others", "--exclude-standard"], env(), 30_000);
+    // Both reads go through `readWorkspaceGit`: the git folder's shape is checked first, and a shape it does not know throws `workspace_git_refused`.
+    const tracked = await readWorkspaceGit(capture, envOptions, workspace, ["diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", base, "--"], 30_000);
+    const fresh = await readWorkspaceGit(capture, envOptions, workspace, ["ls-files", "-z", "--others", "--exclude-standard"], 30_000);
     if (tracked.code !== 0 || tracked.timedOut || fresh.code !== 0 || fresh.timedOut) return null;
     // A listing as long as the capture keeps could have been cut: the list is then not complete, and not offered.
     if (tracked.stdout.length >= LISTING_CAP_GUARD || fresh.stdout.length >= LISTING_CAP_GUARD) return null;
@@ -393,11 +394,11 @@ async function guardProtected(workspace: string, before: Snapshot, deps: CheckSt
 
 /** The git state digest the daemon uses: HEAD and every ref, read with the guarded git of its other workspace calls. Throws when a call fails. */
 export function createVcsState(capture: GitCapture, envOptions: CleanEnvOptions): CheckStepDeps["vcsState"] {
-  const env = (): Record<string, string> => ({ ...gitEnv(envOptions), ...guardConfigEnv() });
   return async (workspace) => {
-    const refs = await capture("git", ["-C", workspace, "for-each-ref", "--format=%(objectname) %(refname)"], env(), 30_000);
-    const head = await capture("git", ["-C", workspace, "rev-parse", "--verify", "HEAD"], env(), 30_000);
-    const symbolic = await capture("git", ["-C", workspace, "symbolic-ref", "-q", "HEAD"], env(), 30_000);
+    // A refused shape throws here; the check step turns a throw from this read into `protected_unreadable` (the check is not run).
+    const refs = await readWorkspaceGit(capture, envOptions, workspace, ["for-each-ref", "--format=%(objectname) %(refname)"], 30_000);
+    const head = await readWorkspaceGit(capture, envOptions, workspace, ["rev-parse", "--verify", "HEAD"], 30_000);
+    const symbolic = await readWorkspaceGit(capture, envOptions, workspace, ["symbolic-ref", "-q", "HEAD"], 30_000);
     if (refs.code !== 0 || refs.timedOut || head.code !== 0 || head.timedOut) throw new Error("version-control state unreadable");
     return `${head.stdout.trim()}\n${symbolic.stdout.trim()}\n${refs.stdout}`;
   };
@@ -423,6 +424,9 @@ export function createBaseFile(capture: GitCapture, envOptions: CleanEnvOptions)
     return bytes;
   };
 }
+
+/** The plain sentence when the workspace's git folder is not the one the runner made (see `hostRead.ts`). */
+const GIT_FOLDER_CHANGED = "the workspace's git folder was changed in a way the runner will not read";
 
 export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) => Promise<CheckOutcome> {
   return async (input) => {
@@ -450,10 +454,11 @@ export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) =>
     let before: Snapshot;
     try {
       before = await snapshotOf(input.workspace, names, deps);
-    } catch {
+    } catch (error) {
       // fx-swallow-ok: a workspace whose protected state cannot be read is not checked; the failure is the returned outcome
       const lost = giveBack(held);
-      return failed("protected_unreadable", `the check was not run: the workspace's protected files could not be read${lost.length === 0 ? "" : `; not given back: ${lost.join(", ")}`}`);
+      const why = error instanceof GitPathError && error.code === "workspace_git_refused" ? GIT_FOLDER_CHANGED : "the workspace's protected files could not be read";
+      return failed("protected_unreadable", `the check was not run: ${why}${lost.length === 0 ? "" : `; not given back: ${lost.join(", ")}`}`);
     }
     let out: Awaited<ReturnType<InstallCapture>>;
     const failedFiles = createFailedFiles(input.workspace);
@@ -465,13 +470,17 @@ export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) =>
       return failed("start_failed", `the check could not be started${lost.length === 0 ? "" : `; not given back: ${lost.join(", ")}`}`);
     }
     let guard: { changed: string[]; unrestored: string[] };
+    let gitFolderChanged = false;
     try {
       guard = await guardProtected(input.workspace, before, deps);
-    } catch {
+    } catch (error) {
       // fx-swallow-ok: if the protected state cannot be compared the check cannot pass; the failure is named below
       guard = { changed: ["(could not be compared)"], unrestored: ["(could not be compared)"] };
+      // The version-control digest is read through `readWorkspaceGit`, which re-checks the pinned git folder after the check's processes have ended.
+      if (error instanceof GitPathError && error.code === "workspace_git_refused") gitFolderChanged = true;
     }
     const lost = giveBack(held);
+    if (gitFolderChanged) return failed("protected_changed", `the check did not pass: ${GIT_FOLDER_CHANGED}${lost.length === 0 ? "" : `; not given back: ${lost.join(", ")}`}`);
     const skipped = skippedTests(out.tail);
     let shown = redactShapes(out.tail);
     shown = shown.split(input.workspace).join("<workspace>");

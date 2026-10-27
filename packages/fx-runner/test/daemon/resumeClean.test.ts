@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
+import { pinFixture } from "../helpers/pinFixture.js";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -41,6 +42,7 @@ beforeEach(() => {
   put("src/app.ts", "tracked");
   sh("-C", ws, "add", "-A");
   sh("-C", ws, "commit", "-q", "-m", "base");
+  pinFixture(ws);
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 

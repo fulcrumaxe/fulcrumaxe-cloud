@@ -21,6 +21,7 @@ import { assertGitVersion, createGit, GitPathError, type Git, type GitCapture, t
 import { mirrorCheckBase, mirrorNixSource, PUSHING_ROLES, type GitJob, type GitPath, type GitPathDeps } from "./gitPath.js";
 import { createMirrors, githubUrl, type Mirrors, type RepoRef } from "./mirror.js";
 import { LISTING_CAP } from "./repoMap.js";
+import { pinWorkspaceGit } from "./hostRead.js";
 import { cleanResumedWorkspace, type SandboxedPurge } from "./resumeClean.js";
 import { publishBranch, pushPlan, workspaceHead, type PushLease } from "./push.js";
 import { gitProxyHashFor, gitProxyPinned, PINNED_GIT_PROXIES, type PinnedGitProxies } from "../keyring.js";
@@ -146,6 +147,9 @@ export function createGitPathA(deps: GitPathADeps): GitPath {
       const { dir, tip } = await session.mirrors.continuationTip(job.repo, job.continues);
       try {
         if ((await workspaceHead(session.git, dir, workspace, snapshotsRoot)) !== tip) return null;
+        // A kept workspace is re-vetted and re-pinned here, not refused outright: its shape and its config keys are checked again (hostRead.ts) and every later
+        // host read carries the nested-repository neutral arguments. Its safety therefore rests on those static checks, not on a record of what the agent did in the earlier round.
+        await pinWorkspaceGit(listingGit, workspace, path.join(dir, "objects"));
         // At the tip and about to be reused: drop the first round's ignored build output (D#6 RUNNER-RESUME-CLEAN). A local read, so the plain git, no ticket.
         await cleanResumedWorkspace(listingGit, workspace, deps.log, deps.captureLarge === undefined ? 64 * 1024 : LISTING_CAP, platform, deps.sandboxedPurge);
         return { base: tip };

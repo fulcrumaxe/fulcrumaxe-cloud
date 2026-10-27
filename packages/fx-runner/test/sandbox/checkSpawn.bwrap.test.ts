@@ -1,3 +1,4 @@
+import { pinFixture } from "../helpers/pinFixture.js";
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -91,6 +92,7 @@ describe.skipIf(!usable)("RUNNER-CHECK-SPAWN-1: a check that starts child proces
     git("add", ".");
     git("commit", "-q", "-m", "base");
     base = git("rev-parse", "HEAD");
+    pinFixture(workspace);
     const runtime = {
       start: async () => ({ handle: { runId: "r1", done: Promise.resolve({ status: "done" }) } as unknown as AgentHandle }),
       stop: async () => undefined,

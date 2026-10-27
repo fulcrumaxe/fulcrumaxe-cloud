@@ -109,7 +109,7 @@ export interface Git {
    * Runs git; resolves with the first 64 K of standard output, or throws `GitPathError(code)` on a non-zero exit or a timeout.
    * `config` adds entries after the guard config (same mechanism and precedence: the environment, which no file outranks).
    */
-  run(code: GitPathCode, args: readonly string[], config?: ReadonlyArray<readonly [string, string]>, timeoutMs?: number): Promise<string>;
+  run(code: GitPathCode, args: readonly string[], config?: ReadonlyArray<readonly [string, string]>, timeoutMs?: number, extraEnv?: Readonly<Record<string, string>>): Promise<string>;
 }
 
 /**
@@ -151,8 +151,8 @@ export async function assertGitVersion(git: Git): Promise<void> {
 
 export function createGit(deps: GitDeps): Git {
   return {
-    async run(code, args, config, timeoutMs) {
-      const env = { ...gitEnv(deps.envOptions), ...(config === undefined ? guardConfigEnv() : configEnv(config)) };
+    async run(code, args, config, timeoutMs, extraEnv) {
+      const env = { ...gitEnv(deps.envOptions), ...(config === undefined ? guardConfigEnv() : configEnv(config)), ...extraEnv };
       // A per-call limit can only shorten the command's time, never lengthen it.
       const result = await deps.capture("git", args, env, Math.min(deps.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS, timeoutMs ?? Number.POSITIVE_INFINITY));
       if (result.timedOut || result.code !== 0) throw new GitPathError((deps.mapHttp === true && !result.timedOut ? httpFailureCode(result.stderr) : undefined) ?? code);

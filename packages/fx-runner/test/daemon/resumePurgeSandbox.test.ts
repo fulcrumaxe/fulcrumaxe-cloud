@@ -1,3 +1,4 @@
+import { pinFixture } from "../helpers/pinFixture.js";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,6 +21,11 @@ beforeEach(() => {
   outside = path.join(root, "outside");
   state = path.join(root, "state");
   for (const dir of [ws, outside, state]) mkdirSync(dir);
+  // The listing is read only from a git folder of the shape the sandbox leaves (`hostRead.ts`): a minimal one.
+  for (const dir of ["refs", "objects"]) mkdirSync(path.join(ws, ".git", dir), { recursive: true });
+  writeFileSync(path.join(ws, ".git", "HEAD"), "ref: refs/heads/main\n");
+  writeFileSync(path.join(ws, ".git", "config"), "[core]\n\tbare = false\n");
+  pinFixture(ws);
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
@@ -132,7 +138,8 @@ describe("createSandboxedPurge (the child protocol)", () => {
 });
 
 describe("cleanResumedWorkspace on darwin", () => {
-  const listing = (entries: string[]) => ({ run: async () => `${entries.join("\0")}\0` }) as never;
+  // The first call of a read is the config-key listing (`git config --list`); the second is the ignored-entries listing.
+  const listing = (entries: string[]) => ({ run: async (_code: string, args: readonly string[]) => (args[0] === "config" ? "core.bare\nfalse\0" : `${entries.join("\0")}\0`) }) as never;
 
   it("hands the listed entries to the sandboxed purge and removes nothing itself", async () => {
     put(ws, "dist/a.js");

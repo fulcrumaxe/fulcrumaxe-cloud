@@ -2,6 +2,9 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createChangedFiles, createVcsState } from "../../../src/daemon/checkStep.js";
+import { configEnv, guardConfigEnv, type Git, type GitCapture } from "../../../src/daemon/git.js";
+import { pinWorkspaceGit } from "../../../src/daemon/hostRead.js";
 import { bashSandboxArgs, bashSandboxUnusable, editDeniedPaths } from "../../../src/engines/claude/bashSandboxProbe.js";
 import { settingsFor } from "../../../src/engines/claude/settingsFile.js";
 import { SANDBOX_PROTECTED_FILES } from "../../../src/daemon/sandboxStubs.js";
@@ -74,6 +77,99 @@ describe.skipIf(!usable)("the agent's Bash starts under the job's own file rules
     expect(status.code, status.out).toBe(0);
   });
 
+  it("with the config.worktree file bind in place, true, git status, and branch plus commit still pass, and the file is read-only", () => {
+    const ws = newWorkspace("shape-binds");
+    const settings = settingsOf(ws);
+    expect(underBwrap(settings, ws, "true")).toMatchObject({ code: 0 });
+    const status = underBwrap(settings, ws, "git status --porcelain");
+    expect(status.code, status.out).toBe(0);
+    const commit = underBwrap(settings, ws, "echo y > g && git checkout -q -b shape && git add g && git -c user.email=a@b -c user.name=a commit -q -m shape && git log --oneline | wc -l");
+    expect(commit.code, commit.out).toBe(0);
+    for (const file of ["config.worktree"]) {
+      for (const attempt of [`echo ../elsewhere > .git/${file}`, `rm -f .git/${file}`, `mv .git/${file} .git/${file}.old`]) {
+        const result = underBwrap(settings, ws, attempt);
+        expect(result.code, attempt).not.toBe(0);
+      }
+    }
+  });
+
+  it("control: a deny on .git/commondir is NOT usable (the bind leaves an empty commondir and git refuses to start), so that file is guarded by the host-side shape check instead", () => {
+    const ws = newWorkspace("commondir-control");
+    const settings = settingsOf(ws);
+    const withCommondir = { permissions: { deny: [...settings.permissions.deny, `Edit(/${ws}/.git/commondir)`] } };
+    expect(underBwrap(withCommondir, ws, "true")).toMatchObject({ code: 0 });
+    const status = underBwrap(withCommondir, ws, "git status --porcelain");
+    expect(status.code).not.toBe(0);
+    expect(editDeniedPaths(settings)).not.toContain(path.join(ws, ".git/commondir"));
+  });
+
+  it("the whole .git swap inside ONE Bash call (new .git, config of its own, a clean filter, core.worktree) is refused by the host read: no program runs, no outside folder is listed", async () => {
+    const source = newWorkspace("swap-src");
+    const ws = path.join(root, "swap-ws");
+    const env = { PATH: process.env["PATH"] ?? "", HOME: root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+    execFileSync("git", ["clone", "-q", "--reference", path.join(source, ".git"), "--no-local", "--", source, ws], { env });
+    const realGit: Git = { async run(_code, args, config, _timeout, extraEnv) { return execFileSync("git", [...args], { env: { ...env, ...(config === undefined ? guardConfigEnv() : configEnv(config)), ...extraEnv }, encoding: "utf8" }); } };
+    await pinWorkspaceGit(realGit, ws, path.join(source, ".git", "objects"));
+    const base = execFileSync("git", ["-C", ws, "rev-parse", "HEAD"], { env, encoding: "utf8" }).trim();
+    const marker = path.join(root, "swap-marker");
+    const outside = path.join(root, "swap-outside");
+    mkdirSync(outside);
+    writeFileSync(path.join(outside, "secret.txt"), "s\n");
+    const settings = settingsOf(ws);
+    underBwrap(settings, ws, "true"); // the CLI's placeholders, as in a real run
+    // All in one call: the new folder is writable until the call ends, so its config can be written.
+    const swap = [
+      "mv .git .gitold", "mkdir .git", "cp -r .gitold/HEAD .gitold/refs .gitold/objects .gitold/index .gitold/config .git/",
+      `git config filter.x.clean 'touch ${marker}; cat'`, `git config core.worktree ${outside}`, "mkdir -p .git/info", "echo '* filter=x' > .git/info/attributes", "echo changed >> README",
+    ].join(" && ");
+    const result = underBwrap(settings, ws, swap);
+    expect(result.code, result.out).toBe(0);
+    // Control: an unchecked host read of the swapped folder really starts the agent's program (with core.worktree dropped so the diff reaches the changed file).
+    execFileSync("git", ["-C", ws, "config", "--unset", "core.worktree"], { env });
+    execFileSync("git", ["-C", ws, "diff", "--name-only", base, "--"], { env, stdio: "ignore" });
+    expect(existsSync(marker)).toBe(true);
+    rmSync(marker);
+    execFileSync("git", ["-C", ws, "config", "core.worktree", outside], { env });
+    const calls: string[][] = [];
+    const capture: GitCapture = async (_command, args) => (calls.push([...args]), { code: 0, stdout: "", timedOut: false });
+    await expect(createChangedFiles(capture, {} as never)(ws, base)).rejects.toMatchObject({ code: "workspace_git_refused" });
+    await expect(createVcsState(capture, {} as never)(ws)).rejects.toMatchObject({ code: "workspace_git_refused" });
+    expect(calls).toEqual([]);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("a nested repository with a clean filter, committed as a gitlink and dirtied inside ONE Bash call, starts no program on the host read", async () => {
+    const source = newWorkspace("nested-src");
+    const ws = path.join(root, "nested-ws");
+    const env = { PATH: process.env["PATH"] ?? "", HOME: root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+    execFileSync("git", ["clone", "-q", "--reference", path.join(source, ".git"), "--no-local", "--", source, ws], { env });
+    const realGit: Git = { async run(_code, args, config, _timeout, extraEnv) { return execFileSync("git", [...args], { env: { ...env, ...(config === undefined ? guardConfigEnv() : configEnv(config)), ...extraEnv }, encoding: "utf8" }); } };
+    await pinWorkspaceGit(realGit, ws, path.join(source, ".git", "objects"));
+    const marker = path.join(root, "nested-marker");
+    const settings = settingsOf(ws);
+    underBwrap(settings, ws, "true");
+    const id = "-c user.email=a@b -c user.name=a";
+    const attack = [
+      "mkdir sub", "cd sub", "git init -q -b main", "echo one > f", "echo '* filter=x' > .gitattributes", "git add .", `git ${id} commit -q -m inner`,
+      `git config filter.x.clean 'touch ${marker}; cat'`, "cd ..", "git add sub", `git ${id} commit -q -m gitlink`, "echo two > sub/f",
+    ].join(" && ");
+    const result = underBwrap(settings, ws, attack);
+    expect(result.code, result.out).toBe(0);
+    const base = execFileSync("git", ["-C", ws, "rev-parse", "HEAD"], { env, encoding: "utf8" }).trim();
+    execFileSync("git", ["-C", ws, "diff", "--name-only", base, "--"], { env, stdio: "ignore" });
+    expect(existsSync(marker)).toBe(true); // control: an unguarded host diff starts the nested repository's filter
+    rmSync(marker);
+    const capture: GitCapture = (command, args, e, timeoutMs) =>
+      new Promise((resolve) => {
+        const run = spawnSync(command, [...args], { env: e, timeout: timeoutMs, encoding: "utf8" });
+        resolve({ code: run.status, stdout: run.stdout, timedOut: false });
+      });
+    const listed = await createChangedFiles(capture, {} as never)(ws, base);
+    expect(listed).not.toContain("sub/f");
+    await createVcsState(capture, {} as never)(ws);
+    expect(existsSync(marker)).toBe(false);
+  });
+
   it("the agent can still commit, branch and add files (the index, objects and refs stay writable)", () => {
     const ws = newWorkspace("commit");
     const settings = settingsOf(ws);
@@ -87,7 +183,7 @@ describe.skipIf(!usable)("the agent's Bash starts under the job's own file rules
     writeFileSync(path.join(ws, ".env"), "A=1\n");
     const settings = settingsOf(ws);
     underBwrap(settings, ws, "true"); // makes the placeholders, as the CLI does
-    const attempts = ["echo x > .git/hooks/pre-commit", "echo x >> .git/config", "echo x > .git/hooks/new", "echo x >> .env", ...SANDBOX_PROTECTED_FILES.map((name) => `echo x >> ${name}`)];
+    const attempts = ["echo x > .git/hooks/pre-commit", "echo x >> .git/config", "echo x > .git/config.worktree", "echo x > .git/hooks/new", "echo x >> .env", ...SANDBOX_PROTECTED_FILES.map((name) => `echo x >> ${name}`)];
     for (const attempt of attempts) {
       const result = underBwrap(settings, ws, attempt);
       expect(result.code, attempt).not.toBe(0);
@@ -100,6 +196,7 @@ describe.skipIf(!usable)("the agent's Bash starts under the job's own file rules
     const paths = editDeniedPaths(settingsOf(ws));
     expect(paths).toContain(path.join(ws, ".git/hooks"));
     expect(paths).toContain(path.join(ws, ".git/config"));
+    expect(paths).toContain(path.join(ws, ".git/config.worktree"));
     expect(paths).not.toContain(path.join(ws, ".git"));
     for (const name of SANDBOX_PROTECTED_FILES) expect(paths).toContain(path.join(ws, name));
   });
