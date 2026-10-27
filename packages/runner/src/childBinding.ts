@@ -36,8 +36,22 @@ export async function recordChildPullRequest(client: PoolClient, accountId: stri
   return writeOnce(client, accountId, runId, CHILD_BINDING_PR_KIND, { branch, prNumber });
 }
 
+const PUBLIC_BRANCH = /^fx\/p-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const CODE_REPO = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/;
+
 /**
- * Binds `prNumber` to the newest executor run of `workItemId` that recorded a branch and has no number yet. Used by the stage driver once its own lookup found the
+ * D#483 S5-b2c-4 (R9): a PAIRED child's pull request is on the code plane. The publish step records it once its hosted side confirmed the pull request, as `{ branch, prNumber, plane: "code", codeRepo }`:
+ * `branch` is the public branch (`fx/p-<push id>`, the push row's), `prNumber` the code repository's number. It is a run event of the executor run like the private binding, set once, and never written from a
+ * webhook. The webhook maps a code-plane event to the child only when this record and the child's `plane_pushes` row agree on repository, number and branch.
+ */
+export async function recordChildCodePullRequest(client: PoolClient, accountId: string, runId: string, input: { branch: string; prNumber: number; codeRepo: string }): Promise<boolean> {
+  if (!PUBLIC_BRANCH.test(input.branch) || !Number.isSafeInteger(input.prNumber) || input.prNumber <= 0 || !CODE_REPO.test(input.codeRepo)) throw new Error("recordChildCodePullRequest: invalid input");
+  return writeOnce(client, accountId, runId, CHILD_BINDING_PR_KIND, { branch: input.branch, prNumber: input.prNumber, plane: "code", codeRepo: input.codeRepo });
+}
+
+/**
+ * Binds `prNumber` to the newest executor run of `workItemId` that recorded a branch and has no number yet. A paired child (one with a `plane_pushes` row) is never bound here: its pull request is
+ * the code plane's, bound by `recordChildCodePullRequest`, and its private draft maps by the run's `plane.private_pr` marker. Used by the stage driver once its own lookup found the
  * child's pull request on that branch. Null when the item has no such run.
  */
 export async function recordChildPullRequestForItem(client: PoolClient, accountId: string, workItemId: string, prNumber: number): Promise<{ recorded: boolean; branch: string } | null> {
@@ -46,6 +60,7 @@ export async function recordChildPullRequestForItem(client: PoolClient, accountI
        FROM agent_runs r JOIN run_events b ON b.account_id = r.account_id AND b.run_id = r.id AND b.kind = $3
       WHERE r.account_id = $1 AND r.work_item_id = $2 AND r.role = 'executor'
         AND NOT EXISTS (SELECT 1 FROM run_events n WHERE n.account_id = r.account_id AND n.run_id = r.id AND n.kind = $4)
+        AND NOT EXISTS (SELECT 1 FROM plane_pushes pp WHERE pp.account_id = r.account_id AND pp.work_item_id = r.work_item_id)
       ORDER BY r.created_at DESC, r.id DESC LIMIT 1`,
     [accountId, workItemId, CHILD_BINDING_KIND, CHILD_BINDING_PR_KIND],
   );
@@ -62,7 +77,7 @@ export async function readChildBoundPullRequest(client: PoolClient, accountId: s
   const { rows } = await client.query<{ n: string | null }>(
     `SELECT n.payload->>'prNumber' AS n
        FROM agent_runs r JOIN run_events b ON b.account_id = r.account_id AND b.run_id = r.id AND b.kind = $3
-       LEFT JOIN run_events n ON n.account_id = r.account_id AND n.run_id = r.id AND n.kind = $4
+       LEFT JOIN run_events n ON n.account_id = r.account_id AND n.run_id = r.id AND n.kind = $4 AND COALESCE(n.payload->>'plane', 'private') <> 'code'
       WHERE r.account_id = $1 AND r.work_item_id = $2 AND r.role = 'executor'
       ORDER BY r.created_at DESC, r.id DESC LIMIT 1`,
     [accountId, workItemId, CHILD_BINDING_KIND, CHILD_BINDING_PR_KIND],

@@ -148,8 +148,8 @@ describe("buildPlanePushText: the body", () => {
 });
 
 describe("buildPlanePushText takes the item title, the run id and the pairing footer inputs and nothing else", () => {
-  it("by type: exactly the title, the run id and the optional footer template with the issue number", () => {
-    expectTypeOf(buildPlanePushText).parameters.toEqualTypeOf<[{ itemTitle: string; runId: string; prFooter?: string | null; issueNumber?: number | null }]>();
+  it("by type: exactly the title, the run id and the optional footer template with the issue number (and, for a planned PR child, the flag that says the number is its parent's)", () => {
+    expectTypeOf(buildPlanePushText).parameters.toEqualTypeOf<[{ itemTitle: string; runId: string; prFooter?: string | null; issueNumber?: number | null; child?: boolean }]>();
     expectTypeOf(buildPlanePushText).returns.toEqualTypeOf<{ title: string; body: string }>();
     expect(buildPlanePushText.length).toBe(1);
   });
@@ -180,8 +180,9 @@ describe("buildPlanePushText takes the item title, the run id and the pairing fo
     for (const top of ["packages", "apps"]) walk(path.join(root, top));
     // packages/worker/src/planePublish.ts is the sandbox twin of the runner token route: it calls the builder with the item's stored title and the executor run's id,
     // both the platform's own rows, and nothing an agent wrote (the hook's output is parsed and verified separately and never reaches this call).
+    // childTitle.ts only asks whether a title reads as a closing keyword (hasClosingKeywordReference); it builds no text.
     // pairing.ts only validates the footer template (checkPrFooter) and runnerPlanePush.ts only asks whether a footer would be skipped (prFooterSkipReason); neither builds text.
-    expect(importers.sort()).toEqual(["packages/core/src/repos/pairing.ts", "packages/core/src/repos/planePushText.ts", "packages/runner-cloud/src/planePush.ts", "packages/runner-protocol/src/planePush/planePushRoute.ts", "packages/runner-protocol/src/replies.ts", "packages/worker/src/planePublish.ts", "packages/worker/src/runnerPlanePush.ts"]);
+    expect(importers.sort()).toEqual(["packages/core/src/repos/pairing.ts", "packages/core/src/repos/planePushText.ts", "packages/core/src/work-items/childTitle.ts", "packages/runner-cloud/src/planePush.ts", "packages/runner-protocol/src/planePush/planePushRoute.ts", "packages/runner-protocol/src/replies.ts", "packages/worker/src/planePublish.ts", "packages/worker/src/runnerPlanePush.ts"]);
   });
 });
 

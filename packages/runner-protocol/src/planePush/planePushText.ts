@@ -105,15 +105,42 @@ export function checkPrFooter(template: unknown, codeRepo: string): string | nul
   return null;
 }
 
-/** Why a stored footer is left off this pull request, or null when it renders (or there is none). The only reason today: it needs an issue number the item lacks. */
-export function prFooterSkipReason(template: string | null | undefined, issueNumber: number | null | undefined): "no_issue_number" | null {
-  if (!template) return null;
-  return template.includes("{issue_number}") && (issueNumber === null || issueNumber === undefined) ? "no_issue_number" : null;
+/**
+ * A GitHub closing keyword (close, closes, closed, fix, fixes, fixed, resolve, resolves, resolved, any case) followed by an issue reference (`#12`, or `owner/repo#12`). GitHub closes the
+ * referenced issue when a pull request whose description holds one merges, which a planned PR child must never do to its parent's issue.
+ */
+const CLOSING_KEYWORD_REFERENCE = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b[\s:]*(?:(?:https?:\/\/)?(?:www\.)?github\.com\/[\w.-]+\/[\w.-]+\/(?:issues|pull)\/\d|(?:[\w.-]+\/[\w.-]+)?#\d|gh-\d)/i;
+
+/**
+ * True when `text` holds a closing keyword followed by an issue reference: `#12`, `owner/repo#12`, `GH-12`, or a link to an issue or pull request (with or without the scheme and `www.`; any case; a colon
+ * or spaces between). The ONE pattern for the whole planned PR child path: the prompt's title guard, both pull request texts and the final body guard all use it.
+ */
+export const hasClosingKeywordReference = (text: string): boolean => CLOSING_KEYWORD_REFERENCE.test(text);
+
+/** The fixed code a child's text is refused with when its finished body still closes an issue. */
+export const CHILD_BODY_CLOSING_CODE = "child_body_closing_keyword";
+
+/** The final guard on a planned PR child's finished body: throws `child_body_closing_keyword` when it still closes an issue. */
+export function assertChildBodySafe(body: string): void {
+  if (hasClosingKeywordReference(body)) throw new Error(CHILD_BODY_CLOSING_CODE);
 }
 
-/** The footer line for this run, or null (no template, a placeholder without a value, or a template with a placeholder this build does not know). */
-export function renderPrFooter(template: string | null | undefined, vars: { issueNumber?: number | null; runId: string }): string | null {
-  if (!template || !placeholdersOk(template) || prFooterSkipReason(template, vars.issueNumber) !== null) return null;
+/**
+ * Why a stored footer is left off this pull request, or null when it renders (or there is none). `no_issue_number`: it needs an issue number the item lacks. For a planned PR child (`child: true`), whose
+ * `issueNumber` is its PARENT's number in the private repository, which means nothing on the public one: `child_issue_placeholder` (the footer has the `{issue_number}` placeholder, whatever else it says,
+ * checked before rendering) and `child_closing_keyword` (the footer as it renders holds a closing keyword followed by an issue reference).
+ */
+export function prFooterSkipReason(template: string | null | undefined, issueNumber: number | null | undefined, options: { child?: boolean } = {}): "no_issue_number" | "child_issue_placeholder" | "child_closing_keyword" | null {
+  if (!template) return null;
+  if (options.child === true && template.includes("{issue_number}")) return "child_issue_placeholder";
+  if (template.includes("{issue_number}") && (issueNumber === null || issueNumber === undefined)) return "no_issue_number";
+  if (options.child === true && placeholdersOk(template) && hasClosingKeywordReference(template.replace(PLACEHOLDER, (_all, name: string) => (name === "run_id" ? "run" : String(issueNumber))))) return "child_closing_keyword";
+  return null;
+}
+
+/** The footer line for this run, or null (no template, a placeholder without a value, a template with a placeholder this build does not know, or, for a child, a closing keyword). */
+export function renderPrFooter(template: string | null | undefined, vars: { issueNumber?: number | null; runId: string; child?: boolean }): string | null {
+  if (!template || !placeholdersOk(template) || prFooterSkipReason(template, vars.issueNumber, { child: vars.child === true }) !== null) return null;
   return template.replace(PLACEHOLDER, (_all, name: string) => (name === "run_id" ? vars.runId : String(vars.issueNumber)));
 }
 
@@ -121,7 +148,7 @@ export function renderPrFooter(template: string | null | undefined, vars: { issu
  * The item's title and the run id build the text; the optional footer (the pairing's template and the item's issue number) is appended to the body
  * after a blank line. Both are ours, never an agent's.
  */
-export function buildPlanePushText(input: { itemTitle: string; runId: string; prFooter?: string | null; issueNumber?: number | null }): PlanePushText {
+export function buildPlanePushText(input: { itemTitle: string; runId: string; prFooter?: string | null; issueNumber?: number | null; child?: boolean }): PlanePushText {
   if (typeof input.runId !== "string" || !RUN_ID.test(input.runId)) throw new Error("buildPlanePushText: the run id must be a lowercase uuid");
   const item = typeof input.itemTitle === "string" ? input.itemTitle : "";
   // Clean, cut, clean again: a cut can leave a trailing space, and the second pass is a no-op on anything else.
@@ -129,7 +156,12 @@ export function buildPlanePushText(input: { itemTitle: string; runId: string; pr
   const fallback = `Change from fulcrumaxe run ${input.runId.slice(0, 8)}`;
   const title = cut.length > 0 && PLANE_TITLE_LINE.test(cut) && cut.trim() === cut ? cut : fallback;
   const lines = ["This change was prepared by a fulcrumaxe run and checked against the paired repository's rules before it was sent.", "", `Run: ${input.runId}`, ""];
-  const footer = renderPrFooter(input.prFooter, { issueNumber: input.issueNumber, runId: input.runId });
+  // A planned PR child's `issueNumber` is its PARENT's, a number of the private repository. On the public repository the same number is an unrelated issue, so the public body carries no `#<number>` line
+  // for it; the child maps by its binding and push row. The footer (if it does not close anything) is the owner's own text.
+  const footer = renderPrFooter(input.prFooter, { issueNumber: input.issueNumber, runId: input.runId, child: input.child === true });
   if (footer !== null) lines.push(footer, "");
-  return { title, body: lines.join("\n") };
+  const body = lines.join("\n");
+  // Final guard: a child's finished body that still closes an issue is never handed out.
+  if (input.child === true) assertChildBodySafe(body);
+  return { title, body };
 }

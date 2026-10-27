@@ -280,7 +280,7 @@ export interface RunnerLeaseOps {
     | { kind: "already_issued" }
     | { kind: "attempts_exhausted" }
     | { kind: "refused"; code: string }
-    | { kind: "granted"; attemptId: string; id: string; codeRepo: string; branch: string; itemTitle: string; prFooter: string | null; issueNumber: number | null; updateOf: string | null }
+    | { kind: "granted"; attemptId: string; id: string; codeRepo: string; branch: string; itemTitle: string; prFooter: string | null; issueNumber: number | null; child: boolean; updateOf: string | null }
   >;
   /** D#598 P1f-2b: the repository's live pairing, only while its digest equals the build-start stamp. Read-only; the hook calls it twice. */
   planePushPairing?(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }): Promise<

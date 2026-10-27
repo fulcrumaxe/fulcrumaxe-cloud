@@ -1,4 +1,6 @@
 import { COPY } from "@fulcrumaxe/runner-protocol";
+import { safeChildTitle } from "@fx/core/src/work-items/childTitle.js";
+import { cleanWorkItemTitle } from "@fx/core/src/work-items/title.js";
 import type { TenantQueryable } from "./acceptanceScope.js";
 import { LocalOnlyGithubError, localOnlyGithub, type GithubClient, type GithubGraphqlOperation, type GithubResponse, type LocalOnlyGithub } from "./localOnlyGithub.js";
 
@@ -135,7 +137,8 @@ export async function loadRunPullRequestText(client: TenantQueryable, run: { acc
   if (rows.length !== 1 || !row) return null;
   const base = { runId: run.runId, workItemId: row.work_item_id, workItemTitle: row.title };
   // A planned PR child references its parent's issue and never closes it (it has no number of its own).
-  return row.is_child ? { ...base, issueNumber: null, parentIssueNumber: issueOf(row.parent_number) } : { ...base, issueNumber: issueOf(row.gh_number) };
+  // D#483 S5-b2c-4: its title is the one a person reads (`cleanWorkItemTitle`), on the private plane as on the public one.
+  return row.is_child ? { ...base, workItemTitle: safeChildTitle(cleanWorkItemTitle(row.title)), issueNumber: null, parentIssueNumber: issueOf(row.parent_number) } : { ...base, issueNumber: issueOf(row.gh_number) };
 }
 
 /** An issue number a body may reference: a positive integer of at most 9 digits. Anything else (a huge bigint) is no reference, not a crash in `done`. */

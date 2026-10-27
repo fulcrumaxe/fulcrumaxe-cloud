@@ -633,6 +633,7 @@ async function findRunnerOpenedPrItem(client: PoolClient, accountId: string, rep
  * a runner's done is for its own. The pull request must be on exactly that repository (the delivery's own full name, compared without case), carry exactly that
  * number, and come from exactly that branch, so a pull request of anyone else, a same-number pull request on another repository and a branch of the same
  * name elsewhere find nothing. The pull request body takes no part. Newest item first when more than one carries the record (a re-opened item).
+ * A planned PR child is never found here: its code-plane pull request maps only through `findPairedChildCodePullRequest`, which also needs the run's own binding.
  */
 async function findPublicPullRequestItem(client: PoolClient, accountId: string, repoFullName: string, prNumber: number, headRef: string | null): Promise<string | null> {
   if (!Number.isSafeInteger(prNumber) || prNumber <= 0 || headRef === null || !REPO_FULL_NAME_RE.test(repoFullName)) return null;
@@ -640,6 +641,7 @@ async function findPublicPullRequestItem(client: PoolClient, accountId: string, 
     `SELECT w.id
        FROM plane_pushes p JOIN work_items w ON w.account_id = p.account_id AND w.id = p.work_item_id
       WHERE p.account_id = $1 AND lower(p.code_repo) = lower($2) AND p.pr_number = $3 AND p.branch = $4
+        AND w.planned_pr_key IS NULL
       ORDER BY (w.stage = 'closed') ASC, w.created_at DESC, w.id DESC LIMIT 1`,
     [accountId, repoFullName, prNumber, headRef],
   );
@@ -655,6 +657,52 @@ const unlinkedReason = (linkedIssueNumber: number | null): string =>
 const CHILD_BRANCH_RE = /^fx\/[0-9]{1,12}-[a-z0-9-]{1,32}$/;
 
 /**
+ * D#483 S5-b2c-4 (R9): the planned PR child whose PUBLIC pull request this is, or null. A paired child's pull request is on the code plane: it maps only when the child's executor run holds the
+ * binding the publish step wrote after the hosted side confirmed the pull request (`child.binding_pr`, `plane: "code"`, the code repository and the number) AND the child's own `plane_pushes`
+ * row says the same repository, the same number and the same public branch. A row of the parent or of a sibling, a number in another repository and a branch of another name find nothing.
+ * The delivery's own repository is compared without case. Nothing in the pull request but those three facts takes part.
+ */
+async function findPairedChildCodePullRequest(client: PoolClient, accountId: string, repoFullName: string, prNumber: number, headRef: string | null): Promise<string | null> {
+  if (headRef === null || !Number.isSafeInteger(prNumber) || prNumber <= 0 || !REPO_FULL_NAME_RE.test(repoFullName)) return null;
+  const { rows } = await client.query<{ id: string }>(
+    `SELECT w.id
+       FROM plane_pushes p
+       JOIN work_items w ON w.account_id = p.account_id AND w.id = p.work_item_id AND w.planned_pr_key IS NOT NULL
+       JOIN agent_runs r ON r.account_id = w.account_id AND r.work_item_id = w.id AND r.role = 'executor'
+       JOIN run_events n ON n.account_id = r.account_id AND n.run_id = r.id AND n.kind = $5
+                        AND n.payload->>'plane' = 'code' AND lower(n.payload->>'codeRepo') = lower($2)
+                        AND n.payload->>'prNumber' = $6::text AND n.payload->>'branch' = $4
+      WHERE p.account_id = $1 AND lower(p.code_repo) = lower($2) AND p.pr_number = $3 AND p.branch = $4
+      ORDER BY (w.stage = 'closed') ASC, r.created_at DESC, r.id DESC LIMIT 1`,
+    [accountId, repoFullName, prNumber, headRef, CHILD_BINDING_PR_KIND, String(prNumber)],
+  );
+  return rows[0]?.id ?? null;
+}
+
+/** The run event a paired item's executor run carries once its private pull request is open (`{ outcome, pr }`, written by the publish step; packages/worker planePublish.ts `PRIVATE_PR_MARKER`). */
+const PRIVATE_PR_MARKER_KIND = 'plane.private_pr';
+
+/**
+ * D#483 S5-b2c-4 (R9): the paired planned PR child whose PRIVATE draft pull request this is, or null. Only the run's marker maps it: the child's executor run wrote `plane.private_pr` with exactly
+ * this number, in THIS repository, and recorded exactly this head branch (`child.binding`). The head must be in the base repository (the caller refuses a fork before this). Before the marker exists
+ * nothing maps, whatever the branch is called.
+ */
+async function findPairedChildPrivatePullRequest(client: PoolClient, accountId: string, repoId: string, prNumber: number, headRef: string): Promise<string | null> {
+  const { rows } = await client.query<{ id: string }>(
+    `SELECT w.id
+       FROM work_items w
+       JOIN agent_runs r ON r.account_id = w.account_id AND r.work_item_id = w.id AND r.role = 'executor'
+       JOIN run_events m ON m.account_id = r.account_id AND m.run_id = r.id AND m.kind = $5 AND m.payload->>'pr' = $3::text
+       JOIN run_events b ON b.account_id = r.account_id AND b.run_id = r.id AND b.kind = $6 AND b.payload->>'branch' = $4
+      WHERE w.account_id = $1 AND w.repo_id = $2 AND w.planned_pr_key IS NOT NULL
+        AND EXISTS (SELECT 1 FROM plane_pushes pp WHERE pp.account_id = w.account_id AND pp.work_item_id = w.id)
+      ORDER BY r.created_at DESC, r.id DESC LIMIT 1`,
+    [accountId, repoId, String(prNumber), headRef, PRIVATE_PR_MARKER_KIND, CHILD_BINDING_KIND],
+  );
+  return rows[0]?.id ?? null;
+}
+
+/**
  * D#483 S5-b2c-2 (R1): the planned PR child whose executor run recorded this pull request, or null. Looked up FIRST on open, push, close and merge, so a child's pull request
  * never moves its parent (its body names the parent's issue without a closing keyword, and the parent is never found by it).
  *
@@ -665,14 +713,20 @@ const CHILD_BRANCH_RE = /^fx\/[0-9]{1,12}-[a-z0-9-]{1,32}$/;
  * A fork's pull request of the same branch name, a second pull request on a branch whose number is set, a pull request of the same number in another repository (the lookup is by
  * the delivery's own repository) and a pull request with only a body link to the parent find no child.
  */
-async function findChildPullRequestItem(client: PoolClient, accountId: string, repoId: string, prNumber: number, headRef: string | null, from: { isFork: boolean; trusted: boolean; baseIsDefault: boolean }): Promise<string | null> {
-  if (from.isFork || headRef === null || !CHILD_BRANCH_RE.test(headRef) || !Number.isSafeInteger(prNumber) || prNumber <= 0) return null;
+async function findChildPullRequestItem(client: PoolClient, accountId: string, repoId: string, repoFullName: string, prNumber: number, headRef: string | null, from: { isFork: boolean; trusted: boolean; baseIsDefault: boolean }): Promise<string | null> {
+  if (from.isFork || headRef === null || !Number.isSafeInteger(prNumber) || prNumber <= 0) return null;
+  // D#483 S5-b2c-4: a PAIRED child's pull requests are the code plane's (binding plus its push row) and its private draft (the run's marker). Neither is found by the branch-only rules below.
+  const onCodePlane = await findPairedChildCodePullRequest(client, accountId, repoFullName, prNumber, headRef);
+  if (onCodePlane) return onCodePlane;
+  if (!CHILD_BRANCH_RE.test(headRef)) return null;
+  const marked = await findPairedChildPrivatePullRequest(client, accountId, repoId, prNumber, headRef);
+  if (marked) return marked;
   const recorded = await client.query<{ id: string }>(
     `SELECT w.id
        FROM work_items w
        JOIN agent_runs r ON r.account_id = w.account_id AND r.work_item_id = w.id AND r.role = 'executor'
        JOIN run_events n ON n.account_id = r.account_id AND n.run_id = r.id AND n.kind = $5
-                        AND n.payload->>'prNumber' = $3::text AND n.payload->>'branch' = $4
+                        AND n.payload->>'prNumber' = $3::text AND n.payload->>'branch' = $4 AND COALESCE(n.payload->>'plane', 'private') <> 'code'
       WHERE w.account_id = $1 AND w.repo_id = $2 AND w.planned_pr_key IS NOT NULL
       ORDER BY r.created_at DESC, r.id DESC LIMIT 1`,
     [accountId, repoId, String(prNumber), headRef, CHILD_BINDING_PR_KIND],
@@ -687,6 +741,7 @@ async function findChildPullRequestItem(client: PoolClient, accountId: string, r
        JOIN run_events b ON b.account_id = r.account_id AND b.run_id = r.id AND b.kind = $4 AND b.payload->>'branch' = $3
       WHERE w.account_id = $1 AND w.repo_id = $2 AND w.planned_pr_key IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM run_events n WHERE n.account_id = r.account_id AND n.run_id = r.id AND n.kind = $5)
+        AND NOT EXISTS (SELECT 1 FROM plane_pushes pp WHERE pp.account_id = w.account_id AND pp.work_item_id = w.id)
       ORDER BY r.created_at DESC, r.id DESC LIMIT 1`,
     [accountId, repoId, headRef, CHILD_BINDING_KIND, CHILD_BINDING_PR_KIND],
   );
@@ -763,7 +818,7 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
       // D#483 P1: a close or merge also finds the item a runner run opened this pull request for (its body carries no "Closes #N"). An open or a push never does: those keep the body link.
       const closing = mapped.toStage === 'merged' || mapped.toStage === 'closed_unmerged';
       // D#483 S5-b2c-2: a planned PR child's own pull request is found first, on every action; it never falls through to the parent's issue.
-      const child = await findChildPullRequestItem(client, ctx.accountId, ctx.repoId, mapped.prNumber, mapped.headRef ?? null, { isFork: mapped.isFork, trusted: mapped.trust === 'trusted', baseIsDefault: mapped.baseIsDefault === true });
+      const child = await findChildPullRequestItem(client, ctx.accountId, ctx.repoId, ctx.repo.fullName, mapped.prNumber, mapped.headRef ?? null, { isFork: mapped.isFork, trusted: mapped.trust === 'trusted', baseIsDefault: mapped.baseIsDefault === true });
       const workItemId = child ? child : closing ? await findPullRequestItem(client, ctx.accountId, ctx.repoId, mapped.prNumber, mapped.linkedIssueNumber, { repoFullName: ctx.repo.fullName, headRef: mapped.headRef ?? null }) : await findBodyLinkedItem(client, ctx.accountId, ctx.repoId, mapped.linkedIssueNumber);
       if (!workItemId) return { applied: 'skipped', reason: unlinkedReason(mapped.linkedIssueNumber) };
 
@@ -825,7 +880,7 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
       if (mapped.isFork && mapped.trust !== 'trusted') {
         return { applied: 'skipped', reason: 'pull_request: fork or untrusted head repo, no push recorded' };
       }
-      const workItemId = (await findChildPullRequestItem(client, ctx.accountId, ctx.repoId, mapped.prNumber, mapped.headRef ?? null, { isFork: mapped.isFork, trusted: mapped.trust === 'trusted', baseIsDefault: mapped.baseIsDefault === true })) ?? (await findBodyLinkedItem(client, ctx.accountId, ctx.repoId, mapped.linkedIssueNumber));
+      const workItemId = (await findChildPullRequestItem(client, ctx.accountId, ctx.repoId, ctx.repo.fullName, mapped.prNumber, mapped.headRef ?? null, { isFork: mapped.isFork, trusted: mapped.trust === 'trusted', baseIsDefault: mapped.baseIsDefault === true })) ?? (await findBodyLinkedItem(client, ctx.accountId, ctx.repoId, mapped.linkedIssueNumber));
       if (!workItemId) return { applied: 'skipped', reason: unlinkedReason(mapped.linkedIssueNumber) };
       // One row per delivery (GitHub keeps the delivery id on a redelivery, so that stays a no-op). Keyed on the delivery, not the head: a push back
       // to a head seen before (A, B, A) is a new push and restarts the quiet period.
