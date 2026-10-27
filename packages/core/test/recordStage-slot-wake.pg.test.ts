@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
+import { plannedFixture } from '@fx/db/test/helpers/plannedChildren.js';
 import { setPendingHooks } from '../src/pendingWork.js';
 import { withTenant } from '../src/tenancy/withTenant.js';
 import { recordStage } from '../src/work-items/recordStage.js';
@@ -56,6 +57,18 @@ describe('recordStage wakes the slot wake when a build slot frees [pg]', () => {
   ] as const)('a move from %s to %s marks the sweep pending', async (from, to) => {
     await move(await item(from), to);
     expect(pending()).toEqual(['pending:stage-resume-sweep']);
+  });
+
+  it('D#483 S5-b2c-2: a planned PR child that merges wakes the auto-start sweep (a sibling may now launch); an ordinary item that merges does not', async () => {
+    const sweep = 'pending:proposal-verify-sweep';
+    await move(await item('pr_opened'), 'merged');
+    expect(markers.has(sweep)).toBe(false);
+    const f = await plannedFixture(admin, appPool, { dial: null, weeklyUsd: null });
+    const child = f.kids.api!;
+    await admin.query("UPDATE work_items SET stage = 'pr_opened' WHERE id = $1", [child]);
+    await withTenant(appPool, f.t.accountId, (client) => recordStage(client, { workItemId: child, toStage: 'merged', at: new Date(), source: 'webhook', sourceRef: `t:${randomUUID()}` }));
+    await Promise.resolve();
+    expect(markers.has(sweep)).toBe(true);
   });
 
   it('a move that frees nothing marks nothing, and a duplicate of a freeing move does not mark again', async () => {

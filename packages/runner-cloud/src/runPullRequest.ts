@@ -105,6 +105,8 @@ export interface RunPullRequestText {
   workItemTitle: string | null;
   /** The work item's issue number from our own row (never the job or the runner), or null/absent when it has none. */
   issueNumber?: number | null;
+  /** D#483 S5-b2c-2: a planned PR child's parent issue number, from our own rows. The body then says `Refs #<n>` and never closes it: a child's merge must not close the parent's issue. */
+  parentIssueNumber?: number | null;
 }
 
 export interface RunPullRequestPort {
@@ -121,16 +123,19 @@ export interface RunPullRequestPort {
  * Null when the run has no work item. `client` must be under the run's tenant.
  */
 export async function loadRunPullRequestText(client: TenantQueryable, run: { accountId: string; runId: string }): Promise<RunPullRequestText | null> {
-  const { rows } = await client.query<{ work_item_id: string; title: string | null; gh_number: string | null }>(
-    `SELECT ar.work_item_id, w.title, w.gh_number
+  const { rows } = await client.query<{ work_item_id: string; title: string | null; gh_number: string | null; parent_number: string | null; is_child: boolean }>(
+    `SELECT ar.work_item_id, w.title, w.gh_number, p.gh_number AS parent_number, (w.planned_pr_key IS NOT NULL) AS is_child
        FROM agent_runs ar
        JOIN work_items w ON w.account_id = ar.account_id AND w.id = ar.work_item_id
+       LEFT JOIN work_items p ON p.account_id = w.account_id AND p.id = w.parent_id
       WHERE ar.account_id = $1 AND ar.id = $2`,
     [run.accountId, run.runId],
   );
-  return rows.length === 1
-    ? { runId: run.runId, workItemId: rows[0]!.work_item_id, workItemTitle: rows[0]!.title, issueNumber: issueOf(rows[0]!.gh_number) }
-    : null;
+  const row = rows[0];
+  if (rows.length !== 1 || !row) return null;
+  const base = { runId: run.runId, workItemId: row.work_item_id, workItemTitle: row.title };
+  // A planned PR child references its parent's issue and never closes it (it has no number of its own).
+  return row.is_child ? { ...base, issueNumber: null, parentIssueNumber: issueOf(row.parent_number) } : { ...base, issueNumber: issueOf(row.gh_number) };
 }
 
 /** An issue number a body may reference: a positive integer of at most 9 digits. Anything else (a huge bigint) is no reference, not a crash in `done`. */
@@ -159,12 +164,13 @@ export function pullRequestTitle(workItemTitle: string | null): string {
  * pull_request webhook moves the item at once. Nothing the agent wrote can reach it, because nothing else is an input. The number comes
  * from our own work item row and must be a positive integer of at most 9 digits.
  */
-export function pullRequestBody(input: { runId: string; workItemId: string; issueNumber?: number | null }, options: { readyFallback?: boolean } = {}): string {
+export function pullRequestBody(input: { runId: string; workItemId: string; issueNumber?: number | null; parentIssueNumber?: number | null }, options: { readyFallback?: boolean } = {}): string {
   if (!UUID.test(input.runId) || !UUID.test(input.workItemId)) throw new TypeError("pullRequestBody: ids must be UUIDs");
   const issue = input.issueNumber ?? null;
-  if (issue !== null && !(Number.isSafeInteger(issue) && issue >= 1 && issue <= 999_999_999)) throw new TypeError("pullRequestBody: the issue number must be a positive integer of at most 9 digits");
+  const parent = input.parentIssueNumber ?? null;
+  for (const n of [issue, parent]) if (n !== null && !(Number.isSafeInteger(n) && n >= 1 && n <= 999_999_999)) throw new TypeError("pullRequestBody: the issue number must be a positive integer of at most 9 digits");
   const template = COPY.pullRequestBody.replace("{run}", input.runId).replace("{item}", input.workItemId);
-  const body = issue === null ? template : `${template}\n\nCloses #${issue}`;
+  const body = issue !== null ? `${template}\n\nCloses #${issue}` : parent !== null ? `${template}\n\nRefs #${parent}` : template;
   return options.readyFallback === true ? `${body}
 
 ${READY_FALLBACK_LINE}` : body;
@@ -345,7 +351,7 @@ export function createRunPullRequestPort(deps: {
     },
 
     async openDraft({ repo, branch, base, run }) {
-      const ids = { runId: run.runId, workItemId: run.workItemId, issueNumber: run.issueNumber ?? null };
+      const ids = { runId: run.runId, workItemId: run.workItemId, issueNumber: run.issueNumber ?? null, parentIssueNumber: run.parentIssueNumber ?? null };
       const title = pullRequestTitle(run.workItemTitle);
       const body = pullRequestBody(ids);
       const gh = await client(repo);

@@ -512,6 +512,15 @@ export interface Operations {
         state: "open" | "withdrawn";
         sentence: string | null;
       }) | (null);
+      child_launch?: {
+        code: string | null;
+        sentence: string | null;
+        offers: ("close" | "parent") | (null);
+        warning: ({
+          code: "waiting_on_planned_pr";
+          sentence: string;
+        }) | (null);
+      };
       start_decision?: {
         state: "asked" | "started" | "declined" | "withdrawn" | "unknown";
         by: ("person" | "dial") | (null);

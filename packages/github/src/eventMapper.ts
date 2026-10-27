@@ -19,6 +19,7 @@ import { syncFailureTag } from './syncFailureTag.js';
 import { installationDiscoveryRef } from './installDiscovery.js';
 import { decideOwnerProcess } from '@fx/core/src/plan/ownerProcess.js';
 import { markWorkPending } from '@fx/core/src/pendingWork.js';
+import { CHILD_BINDING_KIND, CHILD_BINDING_PR_KIND, recordChildPullRequest } from '@fx/runner';
 import { applyIssueChange, fencedIssueSummary, proposalTitle, proposeFromIssue, type IssueChange, type ProposeOutcome } from './issueProposal.js';
 
 /**
@@ -155,6 +156,8 @@ export interface TransitionPrEvent {
   isFork: boolean;
   /** The head branch name, or null when the payload carries none. Only the paired-repository lookup reads it (it must be the branch the platform pushed). */
   headRef?: string | null;
+  /** True only when the pull request's base branch is the repository's default branch, both as the delivery states them. A planned PR child's number is bound only from such a pull request. */
+  baseIsDefault?: boolean;
 }
 
 /**
@@ -168,6 +171,9 @@ export interface RecordPrPushEvent {
   linkedIssueNumber: number | null;
   trust: AuthorTrust;
   isFork: boolean;
+  /** The head branch name, or null when the payload carries none. Only the planned PR child lookup reads it. */
+  headRef?: string | null;
+  baseIsDefault?: boolean;
 }
 
 /** push touching .mcp.json on the default branch: routes to the C25 hook point. */
@@ -268,8 +274,10 @@ export interface GithubPullRequestPayload {
     author_association: string | null;
     /** CWE-863: null/differing id vs base.repo.id means a fork. */
     head: { repo: { id: number } | null; sha?: string; ref?: string };
-    base: { repo: { id: number } };
+    base: { repo: { id: number }; ref?: string };
   };
+  /** GitHub sends the repository on every delivery; only its default branch is read, to decide whether a pull request targets it. */
+  repository?: { default_branch?: string };
 }
 export interface GithubPullRequestReviewPayload {
   action: string;
@@ -415,20 +423,23 @@ export function mapEvent(
       const headRepoId = p.pull_request.head.repo?.id ?? null;
       const isFork = headRepoId == null || headRepoId !== p.pull_request.base.repo.id;
       const headRef = typeof p.pull_request.head.ref === 'string' ? p.pull_request.head.ref : null;
+      const baseRef = p.pull_request.base.ref;
+      const defaultBranch = p.repository?.default_branch;
+      const baseIsDefault = typeof baseRef === 'string' && baseRef !== '' && typeof defaultBranch === 'string' && baseRef === defaultBranch;
       if (p.action === 'opened') {
-        return { kind: 'transition_pr', toStage: 'pr_opened', at: new Date(p.pull_request.created_at), prNumber, linkedIssueNumber, trust, isFork, headRef };
+        return { kind: 'transition_pr', toStage: 'pr_opened', at: new Date(p.pull_request.created_at), prNumber, linkedIssueNumber, trust, isFork, headRef, baseIsDefault };
       }
       if (p.action === 'closed') {
         const closedAt = p.pull_request.merged_at ?? p.pull_request.created_at;
         const toStage = p.pull_request.merged ? 'merged' : 'closed_unmerged';
-        return { kind: 'transition_pr', toStage, at: new Date(closedAt), prNumber, linkedIssueNumber, trust, isFork, headRef };
+        return { kind: 'transition_pr', toStage, at: new Date(closedAt), prNumber, linkedIssueNumber, trust, isFork, headRef, baseIsDefault };
       }
       if (p.action === 'synchronize') {
         const headSha = p.pull_request.head.sha;
         if (typeof headSha !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(headSha)) {
           return { kind: 'ignored', reason: 'pull_request.synchronize: no head commit id' };
         }
-        return { kind: 'record_pr_push', prNumber, headSha, linkedIssueNumber, trust, isFork };
+        return { kind: 'record_pr_push', prNumber, headSha, linkedIssueNumber, trust, isFork, headRef, baseIsDefault };
       }
       return { kind: 'ignored', reason: `pull_request.${p.action}: not opened/closed/synchronize, no stage change` };
     }
@@ -640,6 +651,51 @@ const unlinkedReason = (linkedIssueNumber: number | null): string =>
     ? 'pull_request: no Closes/Fixes/Resolves #N reference in body, and no run recorded this pull request'
     : `pull_request: no work item linked to issue #${linkedIssueNumber}`;
 
+/** A planned PR child's branch: `fx/<parent#>-<key>`. Nothing else is ever looked up as a child's. */
+const CHILD_BRANCH_RE = /^fx\/[0-9]{1,12}-[a-z0-9-]{1,32}$/;
+
+/**
+ * D#483 S5-b2c-2 (R1): the planned PR child whose executor run recorded this pull request, or null. Looked up FIRST on open, push, close and merge, so a child's pull request
+ * never moves its parent (its body names the parent's issue without a closing keyword, and the parent is never found by it).
+ *
+ *   - Recorded: a run of a child in THIS repository recorded exactly this number AND exactly this branch (`child.binding_pr`). Only the recorded number maps after that.
+ *   - Not recorded yet (the opened delivery can arrive before the run ends): the child's newest run that recorded exactly this branch and no number maps, only for a pull request
+ *     whose head repository is the base repository and whose author is trusted. That first match records the number, once.
+ *
+ * A fork's pull request of the same branch name, a second pull request on a branch whose number is set, a pull request of the same number in another repository (the lookup is by
+ * the delivery's own repository) and a pull request with only a body link to the parent find no child.
+ */
+async function findChildPullRequestItem(client: PoolClient, accountId: string, repoId: string, prNumber: number, headRef: string | null, from: { isFork: boolean; trusted: boolean; baseIsDefault: boolean }): Promise<string | null> {
+  if (from.isFork || headRef === null || !CHILD_BRANCH_RE.test(headRef) || !Number.isSafeInteger(prNumber) || prNumber <= 0) return null;
+  const recorded = await client.query<{ id: string }>(
+    `SELECT w.id
+       FROM work_items w
+       JOIN agent_runs r ON r.account_id = w.account_id AND r.work_item_id = w.id AND r.role = 'executor'
+       JOIN run_events n ON n.account_id = r.account_id AND n.run_id = r.id AND n.kind = $5
+                        AND n.payload->>'prNumber' = $3::text AND n.payload->>'branch' = $4
+      WHERE w.account_id = $1 AND w.repo_id = $2 AND w.planned_pr_key IS NOT NULL
+      ORDER BY r.created_at DESC, r.id DESC LIMIT 1`,
+    [accountId, repoId, String(prNumber), headRef, CHILD_BINDING_PR_KIND],
+  );
+  if (recorded.rows[0]) return recorded.rows[0].id;
+  // Binding a number the first time needs a trusted author AND a pull request into the repository's default branch: a same-head pull request into another base is not the child's.
+  if (!from.trusted || !from.baseIsDefault) return null;
+  const open = await client.query<{ id: string; run_id: string }>(
+    `SELECT w.id, r.id AS run_id
+       FROM work_items w
+       JOIN agent_runs r ON r.account_id = w.account_id AND r.work_item_id = w.id AND r.role = 'executor'
+       JOIN run_events b ON b.account_id = r.account_id AND b.run_id = r.id AND b.kind = $4 AND b.payload->>'branch' = $3
+      WHERE w.account_id = $1 AND w.repo_id = $2 AND w.planned_pr_key IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM run_events n WHERE n.account_id = r.account_id AND n.run_id = r.id AND n.kind = $5)
+      ORDER BY r.created_at DESC, r.id DESC LIMIT 1`,
+    [accountId, repoId, headRef, CHILD_BINDING_KIND, CHILD_BINDING_PR_KIND],
+  );
+  const row = open.rows[0];
+  if (!row) return null;
+  await recordChildPullRequest(client, accountId, row.run_id, headRef, prNumber);
+  return row.id;
+}
+
 /** The item a pull request event acts on: the one a runner run recorded this pull request for, else the one its body closes. Null when neither names one. */
 async function findPullRequestItem(
   client: PoolClient,
@@ -706,7 +762,9 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
       }
       // D#483 P1: a close or merge also finds the item a runner run opened this pull request for (its body carries no "Closes #N"). An open or a push never does: those keep the body link.
       const closing = mapped.toStage === 'merged' || mapped.toStage === 'closed_unmerged';
-      const workItemId = closing ? await findPullRequestItem(client, ctx.accountId, ctx.repoId, mapped.prNumber, mapped.linkedIssueNumber, { repoFullName: ctx.repo.fullName, headRef: mapped.headRef ?? null }) : await findBodyLinkedItem(client, ctx.accountId, ctx.repoId, mapped.linkedIssueNumber);
+      // D#483 S5-b2c-2: a planned PR child's own pull request is found first, on every action; it never falls through to the parent's issue.
+      const child = await findChildPullRequestItem(client, ctx.accountId, ctx.repoId, mapped.prNumber, mapped.headRef ?? null, { isFork: mapped.isFork, trusted: mapped.trust === 'trusted', baseIsDefault: mapped.baseIsDefault === true });
+      const workItemId = child ? child : closing ? await findPullRequestItem(client, ctx.accountId, ctx.repoId, mapped.prNumber, mapped.linkedIssueNumber, { repoFullName: ctx.repo.fullName, headRef: mapped.headRef ?? null }) : await findBodyLinkedItem(client, ctx.accountId, ctx.repoId, mapped.linkedIssueNumber);
       if (!workItemId) return { applied: 'skipped', reason: unlinkedReason(mapped.linkedIssueNumber) };
 
       let result;
@@ -732,6 +790,10 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
         // D#598: the same for a close or a merge that arrives after the item is already at that very stage (the worker read the pull request's state
         // back from GitHub when this delivery was late or lost, packages/worker prSlotReconcile.ts, and recorded the same move). Also refused before
         // anything is written, so it is a no-op and not a failed delivery.
+        // A planned PR child that a person closed: its pull request's later merge or close leaves it closed (the platform never touches the pull request).
+        if (err instanceof IllegalStageTransitionError && child !== null && err.from === 'closed') {
+          return { applied: 'transitioned', workItemId, recorded: false };
+        }
         if (err instanceof IllegalStageTransitionError && (mapped.toStage === 'merged' || mapped.toStage === 'closed_unmerged') && err.from === mapped.toStage) {
           return { applied: 'transitioned', workItemId, recorded: false };
         }
@@ -763,7 +825,7 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
       if (mapped.isFork && mapped.trust !== 'trusted') {
         return { applied: 'skipped', reason: 'pull_request: fork or untrusted head repo, no push recorded' };
       }
-      const workItemId = await findBodyLinkedItem(client, ctx.accountId, ctx.repoId, mapped.linkedIssueNumber);
+      const workItemId = (await findChildPullRequestItem(client, ctx.accountId, ctx.repoId, mapped.prNumber, mapped.headRef ?? null, { isFork: mapped.isFork, trusted: mapped.trust === 'trusted', baseIsDefault: mapped.baseIsDefault === true })) ?? (await findBodyLinkedItem(client, ctx.accountId, ctx.repoId, mapped.linkedIssueNumber));
       if (!workItemId) return { applied: 'skipped', reason: unlinkedReason(mapped.linkedIssueNumber) };
       // One row per delivery (GitHub keeps the delivery id on a redelivery, so that stays a no-op). Keyed on the delivery, not the head: a push back
       // to a head seen before (A, B, A) is a new push and restarts the quiet period.

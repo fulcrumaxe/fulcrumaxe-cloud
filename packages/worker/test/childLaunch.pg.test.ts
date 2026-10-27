@@ -14,6 +14,9 @@ import { CHILD_BUILD_SUPPORTED } from "@fx/pipeline";
 import { childEnvelopeRoom } from "@fx/spend";
 import { createAutoStartSweep } from "../src/autoStartSweep.js";
 import { createAdvanceModule, type AdvanceModuleDeps, type AdvanceStartArgs } from "../src/advance.js";
+import { createHash } from "node:crypto";
+import { recordChildBranch, recordChildPullRequest } from "@fx/runner";
+import { startBuildForItem } from "@fx/pipeline/testing/build";
 import { createRunActionFacade } from "../src/runActions.js";
 import type { RunStarter } from "../src/preview.js";
 import type { SeatResult } from "../src/seat.js";
@@ -119,9 +122,8 @@ describe("the planned PR child launch gate [pg]", { timeout: 90_000 }, () => {
       expect((await admin.query("SELECT envelope_id FROM work_items WHERE id = $1", [f.kids.api])).rows[0].envelope_id).toBe(f.envelope);
       expect((await requestsOf(f, "ui"))).toHaveLength(0);
 
-      // The driver: the same request, performed, starts the workflow as the dial's start. (The child gets an issue number here only to get past the build's own
-      // link check, which the build row of this chain replaces; the classification under test is the request key.)
-      await admin.query("UPDATE work_items SET gh_number = 99100 WHERE id = $1", [f.kids.api]);
+      // The driver: the same request, performed, starts the workflow as the dial's start. A child builds on its parent's issue number, so the parent gets one here (the classification under test is the request key).
+      await admin.query("UPDATE work_items SET gh_number = 99100 WHERE id = $1", [f.parent]);
       await claim(reqs[0].id);
       const d = driver();
       expect(await d.module.performAdvanceWorkItem(reqs[0].id)).toMatchObject({ result: "done" });
@@ -227,7 +229,7 @@ describe("the planned PR child launch gate [pg]", { timeout: 90_000 }, () => {
       // No dial path was used: no policy receipt, no child_launch.dial audit row.
       expect((await admin.query(`SELECT actor FROM decision_receipts WHERE work_item_id = $1 AND sub_item_key = 'api'`, [f.parent])).rows).toEqual([{ actor: f.t.userId }]);
       expect((await written(f.t)).audits).toBe(0);
-      await admin.query("UPDATE work_items SET gh_number = 99101 WHERE id = $1", [f.kids.api]);
+      await admin.query("UPDATE work_items SET gh_number = 99101 WHERE id = $1", [f.parent]);
       await claim(reqs[0].id);
       const d = driver();
       await d.module.performAdvanceWorkItem(reqs[0].id);
@@ -373,7 +375,7 @@ describe("the planned PR child launch gate [pg]", { timeout: 90_000 }, () => {
 
   describe("S5b2c1-12: the pairing guard", () => {
     it("with the build unsupported the pass derives reasons and files nothing, and a person's Approve answers 409 child_build_unsupported", async () => {
-      expect(CHILD_BUILD_SUPPORTED).toBe(false);
+      expect(CHILD_BUILD_SUPPORTED).toBe(true);
       supported = false;
       try {
         const f = await fixture({ dial: "act" });
@@ -427,6 +429,106 @@ describe("the planned PR child launch gate [pg]", { timeout: 90_000 }, () => {
       expect(counts.children!.failed).toBe(0);
       void childLaunchSentence;
       void f;
+    });
+  });
+
+  // Case (d): a re-approval at a version with one Planned PR row, or none, never creates or re-stamps children (a table of fewer than two rows is no table).
+  describe("case (d): a re-approved version with one Planned PR row, or none", () => {
+    it.each([
+      ["one row", [row("docs", "The docs")]],
+      ["no rows", undefined],
+    ])("%s: the child keeps its old pin and is held as key_not_in_approved_spec; nothing is filed", async (_n, table) => {
+      const f = await fixture({ dial: "act" });
+      const v2 = await addSpec(admin, f.t, f.parent, 2, table);
+      await reapprove(appPool, f);
+      const pin = (await admin.query("SELECT planned_pr_spec_version_id AS v FROM work_items WHERE id = $1", [f.kids.api])).rows[0].v;
+      expect(pin).toBe(f.specV1);
+      expect(pin).not.toBe(v2);
+      expect(await sweep.gateChild(f.t.accountId, f.kids.api)).toEqual({ outcome: "held_by_rule", code: "key_not_in_approved_spec" });
+      expect(await written(f.t)).toEqual(NOTHING);
+    });
+  });
+
+  // The stage driver's own lookup never replaces a number already bound to the child's run.
+  describe("the driver's pull request lookup and the recorded binding", () => {
+    it("a lookup that finds another number than the bound one moves nothing and keeps the binding; the bound number moves the child to pr_opened", async () => {
+      const f = await fixture();
+      const child = f.kids.api!;
+      await admin.query("UPDATE work_items SET stage = 'in_progress' WHERE id = $1", [child]);
+      const runId = randomUUID();
+      await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'production', 'succeeded')`, [runId, f.t.accountId, child]);
+      await withTenant(appPool, f.t.accountId, async (c) => {
+        await recordChildBranch(c, f.t.accountId, runId, "fx/41-api");
+        await recordChildPullRequest(c, f.t.accountId, runId, "fx/41-api", 7);
+      });
+      const events = async () => (await admin.query(`SELECT kind, payload FROM run_events WHERE run_id = $1 AND kind LIKE 'child.%' ORDER BY seq`, [runId])).rows;
+      const before = await events();
+      const d = driver();
+      const who = { accountId: f.t.accountId, userId: f.t.userId, workItemId: child, haltEpoch: 0 };
+      const m = d.module as unknown as { advancePrFound(w: typeof who, n: number): Promise<{ status: string; reason?: string; stage?: string | null }> };
+      expect(await m.advancePrFound(who, 8)).toEqual({ status: "refused", reason: "child_pr_binding_mismatch", stage: "in_progress" });
+      expect((await admin.query("SELECT stage FROM work_items WHERE id = $1", [child])).rows[0].stage).toBe("in_progress");
+      expect(await events()).toEqual(before);
+      expect(await m.advancePrFound(who, 7)).toEqual({ status: "recorded", stage: "pr_opened" });
+      expect(await events()).toEqual(before);
+    });
+  });
+
+  // D#483 S5-b2c-2 (F1): the generic advance action files a start on a child without the launch gate (no blocker check, no envelope link). The build entry enforces both
+  // itself, so a start filed directly builds nothing in each case.
+  describe("a start filed directly on a child (the generic advance action) builds nothing when the child is blocked or off its parent's envelope", () => {
+    async function direct(f: PlannedFixture, key: string): Promise<{ builds: number; result: unknown }> {
+      const childId = f.kids[key]!;
+      await admin.query("UPDATE work_items SET gh_number = 99200 WHERE id = $1", [f.parent]);
+      await admin.query("UPDATE repos SET gh_owner = 'customer-co', gh_name = 'storefront' WHERE id = $1", [f.t.repoId]);
+      const req = await withTenant(appPool, f.t.accountId, f.t.userId, async (c) =>
+        (await c.query<{ action_id: string }>("SELECT action_id FROM run_action_request($1, $2, $3, $4)", ["advance_work_item", childId, `direct:${randomUUID()}`, createHash("sha256").update(`advance_work_item:${childId}`).digest("hex")])).rows[0]!.action_id);
+      await claim(req);
+      const d = driver();
+      expect(await d.module.performAdvanceWorkItem(req)).toMatchObject({ result: "done" });
+      expect(d.started[0]).toMatchObject({ workItemId: childId, personFiled: true });
+      let builds = 0;
+      const ports = {
+        async startRun() { builds += 1; return { ok: true as const, runId: randomUUID() }; },
+        async findStep() { return null; },
+        async outcome() { return { status: "running", done: false, envelope: null }; },
+        async cancel() {},
+      };
+      const result = await startBuildForItem(writerPool, f.t.accountId, childId, req, ports as never, {});
+      return { builds, result };
+    }
+    const nothing = async (f: PlannedFixture, key: string) => {
+      expect((await admin.query("SELECT 1 FROM agent_runs WHERE work_item_id = $1", [f.kids[key]])).rowCount).toBe(0);
+      expect((await admin.query("SELECT stage FROM work_items WHERE id = $1", [f.kids[key]])).rows[0].stage).toBe("triaged");
+    };
+
+    it("no envelope on the child: parent_no_envelope", async () => {
+      const f = await fixture();
+      expect(await direct(f, "api")).toMatchObject({ builds: 0, result: { status: "refused", reason: "parent_no_envelope" } });
+      await nothing(f, "api");
+    });
+    it("another envelope than the parent's: parent_no_envelope", async () => {
+      const f = await fixture();
+      const other = randomUUID();
+      await admin.query(`INSERT INTO approval_envelopes (id, account_id, repo_id, scope, amount_usd, version, created_by) VALUES ($1, $2, NULL, 'batch', 5, 1, $3)`, [other, f.t.accountId, f.t.userId]);
+      await admin.query("UPDATE work_items SET envelope_id = $2 WHERE id = $1", [f.kids.api, other]);
+      expect(await direct(f, "api")).toMatchObject({ builds: 0, result: { status: "refused", reason: "parent_no_envelope" } });
+      await nothing(f, "api");
+    });
+    it("a child whose key left the approved Spec: key_not_in_approved_spec, even with the parent's envelope on it", async () => {
+      const f = await fixture();
+      await admin.query("UPDATE work_items SET envelope_id = $2 WHERE id = $1", [f.kids.api, f.envelope]);
+      await addSpec(admin, f.t, f.parent, 2, [row("ui", "The screen"), row("docs", "The docs")]);
+      await reapprove(appPool, f);
+      expect(await direct(f, "api")).toMatchObject({ builds: 0, result: { status: "refused", reason: "key_not_in_approved_spec" } });
+      await nothing(f, "api");
+    });
+    it("a closed parent: parent_closed", async () => {
+      const f = await fixture();
+      await admin.query("UPDATE work_items SET envelope_id = $2 WHERE id = $1", [f.kids.api, f.envelope]);
+      await admin.query("UPDATE work_items SET stage = 'closed' WHERE id = $1", [f.parent]);
+      expect(await direct(f, "api")).toMatchObject({ builds: 0, result: { status: "refused", reason: "parent_closed" } });
+      await nothing(f, "api");
     });
   });
 });

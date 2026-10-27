@@ -3,6 +3,7 @@ import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { effectiveModeSql } from "@fx/runner";
 import type { WorkItemTier } from "../build/types.js";
 import { tierOfKind } from "./reviewPlan.js";
+import { childBranchFor } from "../advance/childBuild.js";
 
 /**
  * D#483 P3: what the review stage reads about a work item before it starts anything, in one tenant-scoped read. Facts
@@ -22,8 +23,10 @@ export interface ReviewContext {
   executionMode: string;
   owner: string;
   name: string;
-  /** The issue's number (names the executor's branch and sandbox). */
+  /** The issue's number (names the executor's branch and sandbox). For a planned PR child it is the PARENT's. */
   issue: number;
+  /** D#483 S5-b2c-2: a planned PR child's own branch (`fx/<parent#>-<key>`), which its reviews and fix rounds use. Absent for every other item (`fx/issue-<n>`). */
+  branch?: string;
   tier: WorkItemTier;
   specVersion: number;
   /** Fix rounds already started for the item (the driver events): review round N is the one after N-1 fix rounds. */
@@ -54,6 +57,7 @@ interface Row {
   gh_name: string | null;
   kind: string | null;
   version: number | null;
+  planned_pr_key: string | null;
   fix_rounds: string | null;
   debater_mode: string | null;
   auto_merge: unknown;
@@ -64,7 +68,8 @@ interface Row {
 export async function loadReviewContext(pool: Pool, accountId: string, workItemId: string): Promise<LoadReviewContextResult> {
   const row = await withTenant(pool, accountId, async (client) => {
     const { rows } = await client.query<Row>(
-      `SELECT w.stage, w.provenance, w.repo_id, r.gh_repo_id, ${effectiveModeSql("w", "r")} AS execution_mode, w.gh_number, r.gh_owner, r.gh_name, d.kind, s.version,
+      `SELECT w.stage, w.provenance, w.repo_id, r.gh_repo_id, ${effectiveModeSql("w", "r")} AS execution_mode, CASE WHEN w.planned_pr_key IS NULL THEN w.gh_number ELSE p.gh_number END AS gh_number, r.gh_owner, r.gh_name,
+              CASE WHEN w.planned_pr_key IS NULL THEN d.kind ELSE w.kind END AS kind, s.version, w.planned_pr_key,
               (SELECT count(*)::text FROM work_item_driver_events e WHERE e.account_id = w.account_id AND e.work_item_id = w.id AND e.kind = 'fix_round_started') AS fix_rounds,
               (SELECT rs.mode FROM role_settings rs WHERE rs.account_id = w.account_id AND rs.repo_id = w.repo_id AND rs.role = 'debater') AS debater_mode,
               r.settings->'autoMerge' AS auto_merge, r.settings->'blockExternalAutoMerge' AS block_external,
@@ -73,11 +78,13 @@ export async function loadReviewContext(pool: Pool, accountId: string, workItemI
                        WHERE t.account_id = w.account_id AND t.work_item_id = w.id AND t.to_stage = 'changes_requested'
                          AND c.kind = 'run_note' AND c.status = 'accepted') AS person_request
          FROM work_items w
+         LEFT JOIN work_items p ON p.account_id = w.account_id AND p.id = w.parent_id AND w.planned_pr_key IS NOT NULL
          LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
          LEFT JOIN discussions d ON d.account_id = w.account_id AND d.id = w.discussion_id
          LEFT JOIN LATERAL (
            SELECT sv.version FROM spec_versions sv
-            WHERE sv.account_id = w.account_id AND sv.work_item_id = w.id AND sv.erased_at IS NULL
+            WHERE sv.account_id = w.account_id AND sv.erased_at IS NULL
+              AND (CASE WHEN w.planned_pr_key IS NULL THEN sv.work_item_id = w.id ELSE sv.id = w.planned_pr_spec_version_id AND sv.work_item_id = w.parent_id END)
             ORDER BY sv.version DESC LIMIT 1
          ) s ON true
         WHERE w.id = $1 AND w.account_id = $2`,
@@ -105,6 +112,7 @@ export async function loadReviewContext(pool: Pool, accountId: string, workItemI
       owner: row.gh_owner,
       name: row.gh_name,
       issue: Number(row.gh_number),
+      ...(row.planned_pr_key === null ? {} : { branch: childBranchFor(Number(row.gh_number), row.planned_pr_key) }),
       tier,
       specVersion: Number(row.version),
       fixRoundsStarted: Number(row.fix_rounds ?? "0"),
@@ -119,8 +127,11 @@ export async function loadReviewContext(pool: Pool, accountId: string, workItemI
 /** The Spec text of one version, or null when that version is gone (erased) or was replaced as the newest. */
 export async function loadSpecText(pool: Pool, accountId: string, workItemId: string, expectedVersion: number): Promise<{ version: number; body: string } | null> {
   return withTenant(pool, accountId, async (client) => {
+    // A planned PR child reviews against the Spec version it names (a version of its parent); everything else against its own newest.
     const { rows } = await client.query<{ version: number; body: string }>(
-      "SELECT version, body FROM spec_versions WHERE account_id = $1 AND work_item_id = $2 AND erased_at IS NULL ORDER BY version DESC LIMIT 1",
+      `SELECT sv.version, sv.body FROM work_items w JOIN spec_versions sv ON sv.account_id = w.account_id AND sv.erased_at IS NULL
+          AND (CASE WHEN w.planned_pr_key IS NULL THEN sv.work_item_id = w.id ELSE sv.id = w.planned_pr_spec_version_id AND sv.work_item_id = w.parent_id END)
+        WHERE w.id = $2 AND w.account_id = $1 ORDER BY sv.version DESC LIMIT 1`,
       [accountId, workItemId],
     );
     const r = rows[0];

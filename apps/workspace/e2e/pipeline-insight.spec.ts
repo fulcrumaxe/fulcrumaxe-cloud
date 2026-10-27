@@ -544,6 +544,26 @@ test.describe("D#483 live parity: the notice, Check the build, the board's polli
     expect(errors).toEqual([]);
   });
 
+  // D#483 S5-b2c-2: the planned PR child's card shows the reason it does not launch yet, in the server's fixed sentence, and the sibling warning; neither shows a code.
+  test("a planned PR child shows why it does not launch, and clears when the reason does", async ({ page }) => {
+    const held = { ...OK, child_launch: { code: "key_not_in_approved_spec", sentence: "This planned PR is no longer in the approved Spec.", offers: "close", warning: null } };
+    const { errors, mock } = await setup(page, { status: 200, json: held }, "triaged");
+    await openDetail(page);
+    const line = tid(page, "pl-child-launch");
+    await expect(line).toHaveText("This planned PR is no longer in the approved Spec.");
+    await expect(line).toHaveAttribute("data-offers", "close");
+    await expect(line).not.toContainText(/key_not_in_approved_spec|null|undefined/);
+    await expectNoOverflow(page);
+    mock.activity = { status: 200, json: { ...OK, child_launch: { code: null, sentence: null, offers: null, warning: { code: "waiting_on_planned_pr", sentence: "Waits for The API to merge." } } } };
+    await page.clock.runFor(10_000);
+    await expect(line).toHaveCount(0);
+    await expect(tid(page, "pl-child-launch-warning")).toHaveText("Waits for The API to merge.");
+    mock.activity = { status: 200, json: OK };
+    await page.clock.runFor(10_000);
+    await expect(tid(page, "pl-child-launch-warning")).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+
   test("no notice, no banner", async ({ page }) => {
     await setup(page, { status: 200, json: OK });
     await openDetail(page);

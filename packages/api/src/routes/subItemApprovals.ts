@@ -1,4 +1,6 @@
+import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { z } from "zod";
+import { childLaunchSentence } from "@fx/core/src/decisions/childLaunch.js";
 import { SubItemApprovalError, type SubItemApprovalResult } from "@fx/core/src/decisions/approveSubItem.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { ApiError } from "../errors.js";
@@ -38,7 +40,7 @@ const approveResponse = z.object({
 });
 const reapproveResponse = z.object({ work_item_id: z.string(), approval_id: z.string(), spec_version_id: z.string() });
 
-const MESSAGES: Record<string, string> = {
+export const MESSAGES: Record<string, string> = {
   session_required: "this route accepts a session principal only",
   forbidden: "only an owner or admin can approve",
   not_found: "work item not found",
@@ -48,13 +50,14 @@ const MESSAGES: Record<string, string> = {
   no_spec: "the work item has no published Spec",
   no_anchor_run: "there is no finished run this approval can hang on",
   wrong_round: "only the next fix round can be approved",
-  child_build_unsupported: "Planned PRs can't start yet.",
-  child_orphaned: "The item this planned PR belonged to was deleted.",
-  parent_closed: "The item this planned PR belongs to is closed.",
-  key_not_in_approved_spec: "This planned PR is no longer in the approved Spec.",
-  parent_no_envelope: "This planned PR has no spending limit to draw on. Set one on the item it belongs to.",
-  parent_envelope_reached: "This item's spending limit is used up. Nothing more starts until you raise the limit or stop the item.",
-  child_closed: "This planned PR was closed.",
+  // The planned PR child's sentences come from the one map in @fx/core. A sentence that names a title gets its fixed fallback here: this route has none to give.
+  child_build_unsupported: childLaunchSentence("child_build_unsupported"),
+  child_orphaned: childLaunchSentence("child_orphaned"),
+  parent_closed: childLaunchSentence("parent_closed"),
+  key_not_in_approved_spec: childLaunchSentence("key_not_in_approved_spec"),
+  parent_no_envelope: childLaunchSentence("parent_no_envelope"),
+  parent_envelope_reached: childLaunchSentence("parent_envelope_reached"),
+  child_closed: childLaunchSentence("child_closed"),
 };
 const REAPPROVE_MESSAGES: Record<string, string> = {
   parent_not_approved: MESSAGES.parent_not_approved!,
@@ -131,6 +134,8 @@ export const subItemApprovalRoutes: RouteEntry[] = [
         const row = await withTenant(ctx.pool, accountId, userId, tokenId, async (client) =>
           (await client.query<{ o_approval_id: string; o_spec_version_id: string; o_replayed: boolean }>("SELECT * FROM work_item_approval_record($1::uuid, 'reapprove_after_respec')", [id])).rows[0]!);
         if (row.o_replayed) ctx.markReplayed?.();
+        // D#483 S5-b2c-2: a re-approval moves not-started children forward and may launch them: wake the auto-start sweep (a hint; it reads the rows).
+        void markWorkPending("proposal-verify-sweep");
         return { work_item_id: id, approval_id: row.o_approval_id, spec_version_id: row.o_spec_version_id };
       } catch (error) {
         const e = error as { code?: string; message?: string } | null;

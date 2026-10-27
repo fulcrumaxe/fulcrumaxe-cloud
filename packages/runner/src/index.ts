@@ -28,6 +28,7 @@ export * from "./targets/verifiedTarget.js";
 export * from "./targets/jobIssuer.js";
 export * from "./targets/githubRepoVisibility.js";
 export * from "./runStatusWriter.js";
+export * from "./childBinding.js";
 export * from "./runnerProgress.js";
 export * from "./contextLedgerWriter.js";
 export * from "./startAgentRun.js";

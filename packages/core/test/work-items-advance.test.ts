@@ -134,3 +134,25 @@ describe('advanceActionFor', () => {
     expect([...ADVANCE_NON_BUILDABLE_KINDS]).toEqual(['question', 'project']);
   });
 });
+
+/** D#483 S5-b2c-2: a planned PR child's entry is the build, straight from `triaged`; it has no discussion and no Spec of its own. */
+describe('advanceActionFor for a planned PR child', () => {
+  const CHILD = { stage: 'triaged', discussion_id: null, kind: 'feature', has_spec: true, child: true };
+
+  it('builds from triaged (no triage, no short Spec) when the Spec version it names exists and its kind is built', () => {
+    expect(advanceActionFor(CHILD)).toEqual({ ok: true, action: 'build' });
+    expect(advanceActionFor({ ...CHILD, has_spec: false })).toMatchObject({ ok: false, message: 'work item has no published Spec' });
+    expect(advanceActionFor({ ...CHILD, kind: 'project' })).toMatchObject({ ok: false });
+    expect(advanceActionFor({ ...CHILD, kind: null })).toMatchObject({ ok: false });
+  });
+
+  it('rebuilds from needs_human and reviews from the pull request stages without a discussion of its own', () => {
+    expect(advanceActionFor({ ...CHILD, stage: 'needs_human' })).toEqual({ ok: true, action: 'rebuild' });
+    expect(advanceActionFor({ ...CHILD, stage: 'pr_opened' })).toEqual({ ok: true, action: 'review' });
+    expect(advanceActionFor({ ...CHILD, stage: 'in_progress' })).toEqual({ ok: true, action: 'check_build' });
+  });
+
+  it('an item that is not a child is unchanged: a triaged item with no discussion is still triaged by the driver', () => {
+    expect(advanceActionFor({ ...CHILD, child: undefined, has_spec: false, kind: null })).toEqual({ ok: true, action: 'triage' });
+  });
+});

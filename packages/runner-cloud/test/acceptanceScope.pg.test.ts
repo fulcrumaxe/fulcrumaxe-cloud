@@ -4,7 +4,8 @@ import { sha256Text } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { loadAcceptanceScope } from "../src/acceptanceScope.js";
-import { loadRunPullRequestText } from "../src/runPullRequest.js";
+import { plannedFixture } from "@fx/db/test/helpers/plannedChildren.js";
+import { loadRunPullRequestText, pullRequestBody } from "../src/runPullRequest.js";
 import { harness, type Harness } from "./helpers.js";
 
 /** [pg] D#6 R2b-3e: the scope is read from the run's own spec version, under the run's tenant, against the real tables. */
@@ -76,5 +77,21 @@ describe("loadAcceptanceScope [pg]", () => {
     expect(await withTenant(h.appPool, A.accountId, (client) => loadRunPullRequestText(client, { accountId: A.accountId, runId: A.runId }))).toMatchObject({ issueNumber: null });
     expect(await withTenant(h.appPool, A.accountId, (client) => loadRunPullRequestText(client, { accountId: A.accountId, runId: B.runId }))).toBeNull();
     expect(await withTenant(h.appPool, A.accountId, (client) => loadRunPullRequestText(client, { accountId: A.accountId, runId: randomUUID() }))).toBeNull();
+  });
+
+  it("D#483 S5-b2c-2: a planned PR child's pull request text references its PARENT's issue (Refs, never a closing keyword) and not its own, which it has none of", async () => {
+    const f = await plannedFixture(h.admin, h.appPool, { dial: null, weeklyUsd: null });
+    await h.admin.query("UPDATE work_items SET gh_number = 41 WHERE id = $1", [f.parent]);
+    const child = f.kids.api!;
+    const runId = randomUUID();
+    await h.admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'runner', 'running')`, [runId, f.t.accountId, child]);
+    const text = await withTenant(h.appPool, f.t.accountId, (client) => loadRunPullRequestText(client, { accountId: f.t.accountId, runId }));
+    expect(text).toMatchObject({ runId, workItemId: child, issueNumber: null, parentIssueNumber: 41 });
+    const body = pullRequestBody({ runId, workItemId: child, issueNumber: text!.issueNumber, parentIssueNumber: text!.parentIssueNumber });
+    expect(body).toContain("Refs #41");
+    expect(body).not.toMatch(/(close[sd]?|fix(e[sd])?|resolve[sd]?)\b[\s:]*#\d/i);
+    // The body names the run and the child item by id (the platform's fixed template); it never names the parent's item.
+    expect(body).toContain(child);
+    expect(body).not.toContain(f.parent);
   });
 });

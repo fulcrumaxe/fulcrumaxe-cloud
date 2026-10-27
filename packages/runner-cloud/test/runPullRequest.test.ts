@@ -154,6 +154,20 @@ describe("openDraft (A3, A4)", () => {
     expect(repo.pulls[0]!.body).toContain(RUN.workItemId);
   });
 
+  it("a planned PR child's draft body is POSTed with `Refs #<parent>` and no closing keyword, on the draft path and on the draft-unsupported retry", async () => {
+    const child = { ...RUN, issueNumber: null, parentIssueNumber: 41 };
+    const draftSide = setup();
+    await draftSide.port.openDraft({ repo: REPO, branch: BRANCH, base: "main", run: child });
+    const retrySide = setup({ drafts: false });
+    await retrySide.port.openDraft({ repo: REPO, branch: BRANCH, base: "main", run: child });
+    for (const side of [draftSide, retrySide]) {
+      const body = side.repo.pulls[0]!.body as string;
+      expect(body).toContain("\nRefs #41");
+      expect(body).not.toMatch(/(close[sd]?|fix(e[sd])?|resolve[sd]?)\b[\s:]*#\d/i);
+      expect(body).toContain(RUN.workItemId);
+    }
+  });
+
   it("sends `Closes #<issue>` in the POST body on the draft path, and again on the draft-unsupported retry", async () => {
     const issue = { ...RUN, issueNumber: 595 };
     const draftSide = setup();
