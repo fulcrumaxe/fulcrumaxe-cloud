@@ -4,7 +4,7 @@ import type { MergeGateGitHubPort } from "../build/mergeGate.js";
 import type { PullRequestRef } from "../build/types.js";
 import { decideCarryForward } from "./carryForward.js";
 import { MAX_REFRESHES } from "./policy.js";
-import { attachWorkRun, listHeadRefreshes, markRefreshRequested, readRefreshRequested, recordHeadRefresh, releaseForWork, renewSlot, returnToReview, stopEntry, type HeadRefreshRow } from "./store.js";
+import { attachWorkRun, finishWork, listHeadRefreshes, markRefreshRequested, readRefreshRequested, recordHeadRefresh, releaseForWork, renewSlot, returnToReview, stopEntry, type HeadRefreshRow } from "./store.js";
 import type { MergeQueueEntry } from "./types.js";
 
 /**
@@ -36,7 +36,12 @@ export type RefreshGitHubPort = Pick<MergeGateGitHubPort, "getMergeability" | "u
 export type StartDeltaReview = (
   client: PoolClient,
   args: { entry: MergeQueueEntry; fromSha: string; toSha: string; baseSha: string },
-) => Promise<{ started: true; runId: string | null } | { started: false; reason: "refused_spend" }>;
+/**
+ * `started: false` says why nothing ran. `refused_spend`: the entry needs a person. `main_side_only`: the merge touched none of the PR's
+ * files (C4 2.4), so no review is needed and the entry goes straight back to `queued`. Anything else (`head_changed`, `spec_changed`,
+ * `invalid_input`, `worker_unavailable`): the entry returns to review, at its original place, and nothing was started.
+ */
+) => Promise<{ started: true; runId: string | null } | { started: false; reason: "refused_spend" | "main_side_only" | "head_changed" | "spec_changed" | "invalid_input" | "worker_unavailable" }>;
 
 export interface RefreshStepDeps<G> {
   github: RefreshGitHubPort;
@@ -73,6 +78,10 @@ export type RefreshOutcome<G> =
   | { outcome: "needs_delta_review"; fromSha: string; toSha: string; baseSha: string; reason: "files_overlap" | "files_unknown"; runId: string | null }
   /** The delta review's start was refused for spend. The entry is stopped (`refused_spend`) and holds no slot. */
   | { outcome: "refused_spend"; fromSha: string; toSha: string }
+  /** The merge touched only files from the default branch (C4 2.4): no review, the entry is `queued` again and holds no slot. */
+  | { outcome: "delta_skipped"; fromSha: string; toSha: string }
+  /** The delta review could not start (head moved, Spec changed, bad input, no worker): the entry is back in review and holds no slot. */
+  | { outcome: "delta_not_started"; fromSha: string; toSha: string; reason: string }
   /** The head is not a verified platform refresh. No row, nothing carried, the entry is back in review. */
   | { outcome: "foreign_head"; headSha: string; reason: VerifyFailure }
   /** The refresh bound was spent. The entry is stopped with `branch_behind`. */
@@ -231,8 +240,16 @@ async function afterHeadChange<G>(deps: RefreshStepDeps<G>, input: RefreshStepIn
     if (!released.ok) return { outcome: "slot_lost" };
     const started = await deps.startDeltaReview(c, { entry: released.entry, fromSha, toSha, baseSha });
     if (!started.started) {
-      await stopEntry(c, { accountId, entryId, reason: started.reason });
-      return { outcome: "refused_spend", fromSha, toSha };
+      if (started.reason === "refused_spend") {
+        await stopEntry(c, { accountId, entryId, reason: started.reason });
+        return { outcome: "refused_spend", fromSha, toSha };
+      }
+      if (started.reason === "main_side_only") {
+        await finishWork(c, { accountId, entryId });
+        return { outcome: "delta_skipped", fromSha, toSha };
+      }
+      await returnToReview(c, { accountId, entryId });
+      return { outcome: "delta_not_started", fromSha, toSha, reason: started.reason };
     }
     if (started.runId !== null) await attachWorkRun(c, { accountId, entryId, runId: started.runId });
     return { outcome: "needs_delta_review", fromSha, toSha, baseSha, reason, runId: started.runId };
