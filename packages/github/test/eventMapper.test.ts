@@ -38,6 +38,9 @@ describe('mapEvent (D#2 H13a body criterion 2)', () => {
         'pull_request',
         'pull_request_review',
         'push',
+        'check_run',
+        'check_suite',
+        'status',
       ].sort(),
     );
   });

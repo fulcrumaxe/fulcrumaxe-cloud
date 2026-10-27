@@ -255,6 +255,7 @@ describe("the schedule", () => {
       { path: "/api/cron/setup-request-check", schedule: "* * * * *" },
       { path: "/api/cron/branch-cleanup", schedule: "* * * * *" },
       { path: "/api/cron/proposal-verify-sweep", schedule: "*/15 * * * *" },
+      { path: "/api/cron/merge-queue-sweep", schedule: "* * * * *" },
     ]);
   });
 

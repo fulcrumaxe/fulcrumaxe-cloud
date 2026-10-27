@@ -18,6 +18,7 @@
     { "method": "GET", "path": "/api/cron/compute-settle-sweep", "expect": 401 },
     { "method": "GET", "path": "/api/cron/handoff-sweep", "expect": 401 },
     { "method": "GET", "path": "/api/cron/invariant-sweep", "expect": 401 },
+    { "method": "GET", "path": "/api/cron/merge-queue-sweep", "expect": 401 },
     { "method": "GET", "path": "/api/cron/proposal-verify-sweep", "expect": 401 },
     { "method": "GET", "path": "/api/cron/reconcile", "expect": 401 },
     { "method": "GET", "path": "/api/cron/run-action-sweep", "expect": 401 },

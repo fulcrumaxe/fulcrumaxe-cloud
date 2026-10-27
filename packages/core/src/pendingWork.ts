@@ -25,7 +25,7 @@ import { createHash } from "node:crypto";
  * the cron routes authenticate before they read one.
  */
 
-export const SWEEP_NAMES = ["api-sweep", "run-action-sweep", "compute-settle-sweep", "reconcile", "runner-sweeper", "invariant-sweep", "handoff-sweep", "stage-resume-sweep", "setup-request-check", "branch-cleanup", "proposal-verify-sweep"] as const;
+export const SWEEP_NAMES = ["api-sweep", "run-action-sweep", "compute-settle-sweep", "reconcile", "runner-sweeper", "invariant-sweep", "handoff-sweep", "stage-resume-sweep", "setup-request-check", "branch-cleanup", "proposal-verify-sweep", "merge-queue-sweep"] as const;
 export type SweepName = (typeof SWEEP_NAMES)[number];
 
 /** The backstop slot length while there has been work in the last ACTIVITY_WINDOW_MS. */

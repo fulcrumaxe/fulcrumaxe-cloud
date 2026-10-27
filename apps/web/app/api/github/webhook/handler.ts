@@ -15,6 +15,7 @@ import {
   type HandleWebhookResult,
 } from "@fx/github";
 import { buildSyncRepos } from "../../../../lib/github/repoSync";
+import { wakeMergeQueue } from "../../../../lib/mergeQueue";
 import { intakeAllowlist } from "../../../../lib/github/intakeTrust";
 import { issueAuthorPermission } from "../../../../lib/github/issueAuthorPermission";
 import { repoHasEngineLoop } from "../../../../lib/github/repoHasEngineLoop";
@@ -106,6 +107,8 @@ export function defaultGithubWebhookDeps(): GithubWebhookHandlerDeps {
     appUserPool: cachedAppUserPool,
     platformOpsPool: cachedPlatformOpsPool,
     hooks,
+    // D#519 MQ3-b: a pull request or CI event for a repo with a live merge-queue entry wakes the queue.
+    onRepoEvent: (event) => wakeMergeQueue(cachedAppUserPool!, event),
     allowlist: intakeAllowlist() ?? undefined,
     issueAuthorPermission,
     repoHasEngineLoop,

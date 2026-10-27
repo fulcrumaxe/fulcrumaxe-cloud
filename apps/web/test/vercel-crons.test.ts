@@ -44,6 +44,10 @@ describe("apps/web/vercel.json", () => {
     expect(config.crons.filter((c) => c.path === "/api/cron/proposal-verify-sweep")).toEqual([{ path: "/api/cron/proposal-verify-sweep", schedule: "*/15 * * * *" }]);
   });
 
+  it("the merge queue sweep (D#519 MQ3-b) fires every minute behind its own pending-work marker: a waiting CI or a lost webhook is picked up within a minute of the marker, and an idle platform opens no connection", () => {
+    expect(config.crons.filter((c) => c.path === "/api/cron/merge-queue-sweep")).toEqual([{ path: "/api/cron/merge-queue-sweep", schedule: "* * * * *" }]);
+  });
+
   it("changes nothing else: a crons list (each entry just a path and a schedule, no sweep at every minute) and the workflow step's function limit (pinned in stepMaxDuration.test.ts)", () => {
     expect(Object.keys(config)).toEqual(["functions", "crons"]);
     for (const cron of config.crons) expect(Object.keys(cron).sort()).toEqual(["path", "schedule"]);

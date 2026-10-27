@@ -343,6 +343,43 @@ export async function renewSlot(
   );
 }
 
+/** The phase of a holder whose tick ended while it waits (for CI, or for GitHub to apply a refresh). No tick is working on it, so the next one may adopt it. */
+export const PARKED_PHASE = "parked";
+
+/**
+ * D#519 MQ3-b: a tick that must wait (CI still running, GitHub not done) ends and keeps the slot, so entries behind it cannot overtake.
+ * The next tick, from a webhook or the sweep, takes it over here: a compare-and-set on `phase = 'parked'` with a live lease, so of two
+ * ticks racing for it exactly one wins, and a tick that is mid-merge (any other phase) is never taken over. Null when nothing is parked.
+ */
+export async function adoptParkedSlot(client: Queryable, input: { accountId: string; repoId: string; holder: string; now?: Date; leaseSeconds?: number }): Promise<MergeQueueEntry | null> {
+  const leaseSeconds = input.leaseSeconds ?? MERGE_QUEUE_LEASE_SECONDS;
+  assertLease(leaseSeconds);
+  return one(
+    client,
+    `UPDATE merge_queue_entries
+        SET slot_holder = $3, phase = NULL, lease_until = COALESCE($4::timestamptz, now()) + make_interval(secs => $5)
+      WHERE account_id = $1 AND repo_id = $2 AND state = 'in_flight' AND phase = '${PARKED_PHASE}' AND lease_until > COALESCE($4::timestamptz, now())
+      RETURNING ${COLUMNS}`,
+    [input.accountId, input.repoId, input.holder, nowParam(input.now), leaseSeconds],
+  );
+}
+
+/**
+ * A stopped `ci_not_green` entry returns to the queue, at its original position, when a check or status finishes on its head (or on a
+ * head it was refreshed to) or on its pull request. Every other stop stays a stop: only a person ends those.
+ */
+export async function requeueCiStopped(client: Queryable, input: { accountId: string; repoId: string; prNumbers?: readonly number[]; headSha?: string }): Promise<MergeQueueEntry[]> {
+  if (input.headSha !== undefined) assertSha(input.headSha);
+  return many(
+    client,
+    `UPDATE merge_queue_entries e SET state = 'queued', reason = NULL, ${CLEAR_SLOT_AND_WORK}
+      WHERE e.account_id = $1 AND e.repo_id = $2 AND e.state = 'stopped' AND e.reason = 'ci_not_green'
+        AND (e.pr_number = ANY($3::int[]) OR e.head_sha = $4 OR EXISTS (SELECT 1 FROM head_refreshes h WHERE h.account_id = e.account_id AND h.entry_id = e.id AND h.to_sha = $4))
+      RETURNING ${COLUMNS}`,
+    [input.accountId, input.repoId, [...(input.prNumbers ?? [])], input.headSha ?? null],
+  );
+}
+
 /** The holder gives the slot back; the entry stays queued at its original position. Null when the caller no longer holds it. */
 export async function releaseToQueue(client: Queryable, input: { accountId: string; entryId: string; holder: string }): Promise<MergeQueueEntry | null> {
   return one(
@@ -563,15 +600,17 @@ export interface HeadRefreshRow {
   toSha: string;
   baseSha: string;
   filesOverlap: boolean;
+  /** When the row was written (MQ3-b measures the bounded CI wait from the last refresh). Absent on a hand-built row. */
+  createdAt?: Date;
 }
 
 /** The refreshes recorded for one entry, oldest first. */
 export async function listHeadRefreshes(client: Queryable, accountId: string, entryId: string): Promise<HeadRefreshRow[]> {
-  const { rows } = await client.query<{ from_sha: string; to_sha: string; base_sha: string; files_overlap: boolean }>(
-    `SELECT from_sha, to_sha, base_sha, files_overlap FROM head_refreshes WHERE account_id = $1 AND entry_id = $2 ORDER BY created_at, id`,
+  const { rows } = await client.query<{ from_sha: string; to_sha: string; base_sha: string; files_overlap: boolean; created_at: Date }>(
+    `SELECT from_sha, to_sha, base_sha, files_overlap, created_at FROM head_refreshes WHERE account_id = $1 AND entry_id = $2 ORDER BY created_at, id`,
     [accountId, entryId],
   );
-  return rows.map((r) => ({ fromSha: r.from_sha, toSha: r.to_sha, baseSha: r.base_sha, filesOverlap: r.files_overlap }));
+  return rows.map((r) => ({ fromSha: r.from_sha, toSha: r.to_sha, baseSha: r.base_sha, filesOverlap: r.files_overlap, createdAt: r.created_at }));
 }
 
 /**

@@ -1,0 +1,94 @@
+import type { Pool } from "pg";
+import { markWorkPending } from "@fx/core/src/pendingWork.js";
+import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
+import { createGitHubMergeGatePort, mergeQueue, type GitHubHttp } from "@fx/pipeline";
+import type { AdvanceReviewDeps, RunnerPlaneMergeStore } from "@fx/worker";
+import type { GithubWebhookPayload, GithubWebhookEventName } from "@fx/github";
+import { createReviewDeps } from "./advanceReview";
+import { openInstallationHttp, readRepoAppLogin } from "./github/installationHttp";
+import { openForRepo } from "./github/localOnlyHttp";
+
+/**
+ * D#519 MQ3-b: the merge queue's production wiring. The decisions are `mergeQueue.runQueueTick`'s; this file only binds its ports.
+ *
+ *  - `tickMergeQueueRepo`: GitHub through the merge gate's own client for the repository (the installation's `merge_gate` token), the
+ *    gate through the review stage's `mergeGate` (the same reads and the one merge call, now given the signals that were green on the
+ *    reviewed head), and the App's login for MQ3-a's identity check. A `runner_local` repository is not ticked: its merge belongs to the
+ *    customer's runner (D#6), and the fenced client the cloud would use for it cannot read what the tick reads.
+ *  - `sweepMergeQueue`: the cron's pass. It lists the repos that need a tick (a lapsed lease, or queued entries and no holder) and ticks
+ *    each. A tick that parked its slot (CI still running) asks for the next pass in a little over the lease, so a missed webhook costs
+ *    minutes, not the thirty-minute backstop.
+ *  - `wakeMergeQueue`: the webhook's trigger. Pull request and check events change what the queue should do: a pull request closed
+ *    outside the queue is settled, a finished check puts a `ci_not_green` entry back, and the sweep is told there is work. It reads
+ *    only structured fields of the verified payload and only when the repository has a live entry.
+ */
+
+export const MERGE_QUEUE_RECHECK_MS = (mergeQueue.MERGE_QUEUE_LEASE_SECONDS + 30) * 1000;
+
+export interface MergeQueueTickerDeps {
+  /** The agent-run-writer pool: the gate reads reviewer rows through it, and the queue's own tables are reachable from it as `app_user`. */
+  pool: Pool;
+  orders: RunnerPlaneMergeStore;
+  open?: typeof openInstallationHttp;
+  review?: AdvanceReviewDeps;
+  appLogin?: (repoId: string) => Promise<string>;
+  /** MQ3-a's delta-review start, bound by the workflow's reviewer start. */
+  startDeltaReview?: mergeQueue.StartDeltaReview;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+export async function tickMergeQueueRepo(deps: MergeQueueTickerDeps, target: { accountId: string; repoId: string }): Promise<mergeQueue.QueueTickResult | null> {
+  const { pool, orders } = deps;
+  const open = deps.open ?? openInstallationHttp;
+  const review = deps.review ?? createReviewDeps(open);
+  const inTenant: mergeQueue.QueueTickDeps["inTenant"] = (accountId, fn) => withTenant(pool, accountId, fn);
+  const repo = await inTenant(target.accountId, async (c) =>
+    (await c.query<{ gh_owner: string | null; gh_name: string | null; execution_mode: string }>(`SELECT gh_owner, gh_name, execution_mode FROM repos WHERE account_id = $1 AND id = $2`, [target.accountId, target.repoId])).rows[0],
+  );
+  if (!repo?.gh_owner || !repo.gh_name || repo.execution_mode === "runner_local") return null;
+  const owner = repo.gh_owner;
+  const name = repo.gh_name;
+  const http = (await openForRepo(open, repo.execution_mode, "merge_gate", { repoId: target.repoId, owner, name })) as GitHubHttp;
+  const github = createGitHubMergeGatePort({ http, resolveRepo: async () => ({ owner, name }), markReadyForHumanMerge: async () => undefined, mergeMethod: "squash" });
+  const out = await mergeQueue.runQueueTick(
+    {
+      github,
+      inTenant,
+      ourLogin: await (deps.appLogin ?? readRepoAppLogin)(target.repoId),
+      gate: async ({ entry, headSha, expectedSignals }) => {
+        const res = await review.mergeGate(pool, { accountId: target.accountId, workItemId: entry.workItemId!, prNumber: entry.prNumber, expectedSignals, expectedHeadSha: headSha }, { orders });
+        // A GitHub read that failed or a refused context is a throw: the step retries, the lease lapses, nothing is read as permission to merge.
+        if (res.outcome === "refused" || res.outcome === "error") throw new Error(`merge queue: gate ${res.outcome}`);
+        switch (res.outcome) {
+          case "merged":
+          case "merge_delegated":
+          case "pr_not_open":
+          case "head_moved":
+            return { outcome: res.outcome };
+          case "ready_human_merges":
+            return { outcome: res.outcome, reasons: res.reasons ?? [] };
+          default:
+            throw new Error("merge queue: gate answered an outcome this queue does not know");
+        }
+      },
+      startDeltaReview: deps.startDeltaReview ?? (async () => ({ started: true, runId: null })),
+      sleep: deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+    },
+    target,
+  );
+  if (out.steps.some((s) => s.step === "parked") || out.waiting.length > 0) await markWorkPending("merge-queue-sweep", { since: Date.now() + MERGE_QUEUE_RECHECK_MS });
+  return out;
+}
+
+export function sweepMergeQueue(deps: MergeQueueTickerDeps): Promise<mergeQueue.MergeQueueSweepResult> {
+  return mergeQueue.sweepMergeQueue({
+    listTargets: (now, limit) => mergeQueue.listMergeQueueSweepTargets(deps.pool, now, limit),
+    inTenant: (accountId, fn) => withTenant(deps.pool, accountId, fn),
+    tick: async (target) => void (await tickMergeQueueRepo(deps, target)),
+  });
+}
+
+export async function wakeMergeQueue(pool: Pool, event: { accountId: string; repoId: string; eventName: GithubWebhookEventName; payload: GithubWebhookPayload }): Promise<void> {
+  const live = await withTenant(pool, event.accountId, (c) => mergeQueue.applyQueueEvent(c, event));
+  if (live) await markWorkPending("merge-queue-sweep");
+}

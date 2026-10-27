@@ -275,6 +275,13 @@ export interface GithubPullRequestReviewPayload {
   action: string;
   review: { user: Actor; author_association: string | null };
 }
+/** `check_run` / `check_suite` / `status`: read by the merge queue's trigger only (`onRepoEvent`), never by `mapEvent`. */
+export interface GithubCiPayload {
+  action?: string;
+  sha?: string;
+  check_run?: { head_sha?: string; pull_requests?: Array<{ number?: number }> };
+  check_suite?: { head_sha?: string; pull_requests?: Array<{ number?: number }> };
+}
 export interface GithubInstallationPayload {
   action: string;
   /** Present on every `installation.*` delivery. `account.login` is the
@@ -307,7 +314,8 @@ export type GithubWebhookPayload =
   | GithubPullRequestReviewPayload
   | GithubInstallationPayload
   | GithubInstallationRepositoriesPayload
-  | GithubPushPayload;
+  | GithubPushPayload
+  | GithubCiPayload;
 
 function trustOf(
   author: WebhookAuthor,
@@ -494,6 +502,11 @@ export function mapEvent(
         reason: isDefaultBranchPush ? 'push: default branch, but no commit touches .mcp.json' : 'push: not the default branch',
       };
     }
+
+    case 'check_run':
+    case 'check_suite':
+    case 'status':
+      return { kind: 'ignored', reason: `${eventName}: a CI result, a wake-up signal for the merge queue only` };
   }
 }
 
@@ -976,6 +989,12 @@ export interface GithubWebhookDbDeps {
    * delivery. A throw here never fails the delivery.
    */
   onDiscoveryQueued?: (accountId: string, runs: readonly QueuedDiscovery[]) => Promise<unknown>;
+  /**
+   * D#519 MQ3-b: called after the delivery's transaction with the repository it concerned and the verified payload, for the events that can
+   * change what the merge queue should do (a pull request opened, pushed to, closed or retargeted; a check or status finished; a push to
+   * the default branch). It only wakes the queue; a throw here is logged as a fixed line and never fails the delivery.
+   */
+  onRepoEvent?: (event: { accountId: string; repoId: string; eventName: GithubWebhookEventName; payload: GithubWebhookPayload }) => Promise<unknown>;
 }
 
 export type HandleWebhookResult =
@@ -1103,6 +1122,15 @@ export async function handleGithubWebhookEvent(
   }
 
   await queueDiscoveryForDelivery(deps, tenant, eventName, payload, deliveryId);
+
+  if (deps.onRepoEvent) {
+    try {
+      await deps.onRepoEvent({ accountId: tenant.accountId, repoId: tenant.repoId, eventName, payload });
+    } catch {
+      // fx-swallow-ok: the delivery already committed; a fixed line is logged (no repository, no payload) and the sweep wakes the queue anyway
+      (deps.warn ?? console.warn)('github webhook: waking the merge queue failed');
+    }
+  }
 
   return { handled: true, result };
 }
