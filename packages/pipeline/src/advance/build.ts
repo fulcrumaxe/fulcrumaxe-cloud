@@ -487,8 +487,6 @@ export async function startBuildForItem(
   // without a head to record the publish step could not run, so the build does not start.
   let planeBase: { sha: string } | undefined;
   const pairedRepo = !prior && promptRuntimeOf(executionMode) === "sandbox" && facts.repo_id !== null && (await isPaired(pool, accountId, facts.repo_id));
-  // The platform's publish of a paired repository's change is keyed on the issue's own branch; a child's branch is not that, so a child does not start there (fail closed, nothing recorded).
-  if (isChild && pairedRepo) return { status: "refused", reason: "child_paired_repo_unsupported" };
   if (pairedRepo && facts.repo_id !== null) {
     let sha: string | null = stackBase?.sha ?? null;
     if (sha === null) {

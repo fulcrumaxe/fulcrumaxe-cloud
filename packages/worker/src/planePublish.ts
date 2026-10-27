@@ -1,16 +1,19 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { PLANE_REFUSAL_CODES, type PlaneRefusalCode } from "@fulcrumaxe/runner-protocol/planePush";
-import { buildPlanePushText, prFooterSkipReason } from "@fulcrumaxe/runner-protocol/planePushText";
+import { CHILD_BODY_CLOSING_CODE, buildPlanePushText, prFooterSkipReason } from "@fulcrumaxe/runner-protocol/planePushText";
+import { safeChildTitle } from "@fx/core/src/work-items/childTitle.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { PUBLISH_ATTEMPT_LIMIT, mayRetryPublish, pairingDigest, publicPullRequestUrlMatches, recordUpdatedHead, recordVerifiedOutcome, type PlanePushState, type RetryFacts, type VerifiedOutcome } from "@fx/core/src/repos/planePushRecord.js";
 import { REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE } from "@fx/core/src/work-items/baseSync.js";
 import { TERMINAL_WORK_ITEM_STAGES } from "@fx/core/src/work-items/stages.js";
+import { resolveBuildIdentity, type BuildIdentity, type BuildPurpose } from "@fx/core/src/work-items/buildIdentity.js";
+import { cleanWorkItemTitle } from "@fx/core/src/work-items/title.js";
 import { FIX_BASE_EVENT, recordRepublishRefusal } from "./fixRoundBase.js";
 
 // The retry predicate and the attempt limit live in @fx/core (the item view and the operator actions list themselves from them); re-exported so this module keeps its names.
 export { PUBLISH_ATTEMPT_LIMIT, mayRetryPublish, type RetryFacts };
-import { PLANE_PUBLISH_ROLE, PLANE_PUBLISH_VCPUS, insertAgentRun, insertRunEvent, runPublishSandbox, sandboxNameFor, writeRunStatus, writeRunStatusOn, type ExecutionRun, type LostRunOutcome, type NetworkPolicyRule, type PlanePublishInput, type PlanePublishLine, type SandboxPort } from "@fx/runner";
+import { PLANE_PUBLISH_ROLE, PLANE_PUBLISH_VCPUS, recordChildCodePullRequest, insertAgentRun, insertRunEvent, runPublishSandbox, sandboxNameFor, writeRunStatus, writeRunStatusOn, type ExecutionRun, type LostRunOutcome, type NetworkPolicyRule, type PlanePublishInput, type PlanePublishLine, type SandboxPort } from "@fx/runner";
 import { sandboxRunCost } from "@fx/spend";
 import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js";
 import { decideStackStart, markBuildNeedsHuman, type StackBasePort } from "@fx/pipeline";
@@ -36,7 +39,7 @@ export const PUBLIC_UNAVAILABLE_NOTE = "The public repository could not be reach
 
 /** The `run_events` kind the executor run carries once its private pull request is open: the per-run marker, so a replay opens nothing. */
 export const PRIVATE_PR_MARKER = "plane.private_pr";
-/** The notice an executor run carries when the pairing's PR footer was left off (the item has no issue number). */
+/** The notice an executor run carries when the pairing's PR footer was left off: the item has no issue number (`no_issue_number`), or it is a planned PR child and the footer would close its parent's issue (`child_closing_keyword`). */
 export const PR_FOOTER_SKIPPED = "plane.pr_footer_skipped";
 
 /** The worker's own refusal codes, next to the hook's (`PlaneRefusalCode`). They are stored as the item's code and the attempt's label. */
@@ -89,7 +92,6 @@ interface Facts {
   baseSha: string | null;
   workItemId: string;
   repo: { id: string; owner: string; name: string };
-  issue: string | null;
   title: string;
   pushId: string;
   codeRepo: string;
@@ -121,7 +123,7 @@ async function readFacts(client: PoolClient, accountId: string, which: { runId: 
   const byRun = "runId" in which;
   const { rows } = await client.query(
     `SELECT r.id AS run_id, r.status, r.job_signed IS NULL AND r.runtime = 'production' AS sandbox_side, r.head_sha, r.work_item_id, r.dispatch_repo_id,
-            rp.gh_owner, rp.gh_name, w.gh_number::text AS issue, COALESCE(w.title, '') AS title, w.stage AS item_stage
+            rp.gh_owner, rp.gh_name, COALESCE(w.title, '') AS title, w.stage AS item_stage
        FROM agent_runs r
        JOIN work_items w ON w.account_id = r.account_id AND w.id = r.work_item_id
        JOIN repos rp ON rp.account_id = r.account_id AND rp.id = r.dispatch_repo_id
@@ -167,7 +169,7 @@ async function readFacts(client: PoolClient, accountId: string, which: { runId: 
     itemStage: r.item_stage as string,
     stamp: typeof push.head_sha === "string" ? push.head_sha : null, fixBase, updateAttempts: updates[0]?.n ?? 0,
     runId: r.run_id, status: r.status, sandboxSide: r.sandbox_side === true, baseSha: r.head_sha, workItemId: r.work_item_id,
-    repo: { id: r.dispatch_repo_id, owner: r.gh_owner, name: r.gh_name }, issue: r.issue, title: r.title,
+    repo: { id: r.dispatch_repo_id, owner: r.gh_owner, name: r.gh_name }, title: r.title,
     pushId: push.id, codeRepo: push.code_repo, branch: push.branch, stampedDigest: push.pairing_digest, state: push.state, managedByPerson: push.managed === true,
     // An item refused before any sandbox was started has no attempt yet; its executor ran in the sandbox, so a retry is a sandbox retry.
     pushAttempts: stats[0]?.n ?? 0, runPushAttempts: own[0]?.pushes ?? 0, privatePrDone: own[0]?.marked === true, lastPushRuntime: stats[0]?.last ?? (r.sandbox_side === true ? "sandbox" : null),
@@ -225,13 +227,20 @@ async function attempt(deps: PlanePublishDeps, accountId: string, which: { runId
 
   // Everything the platform can check BEFORE it spends an attempt: a problem here is `public_unavailable` and leaves the retry available.
   const identity = deps.identity();
-  if (identity === null || facts.baseSha === null || !/^[0-9a-f]{40}$/.test(facts.baseSha) || facts.issue === null) return refuse("bad_input");
+  if (identity === null || facts.baseSha === null || !/^[0-9a-f]{40}$/.test(facts.baseSha)) return refuse("bad_input");
+  // D#483 S5-b2c-4 (R9): the issue number and the private branch are the build identity's, never `gh_number` or an `fx/issue-<n>` built here. A new publish starts something (`start`); a retry reads what already
+  // happened (`observe`). A refusal stores the resolver's code for a planned PR child; a top-level item keeps `bad_input`, as before.
+  const resolved = await resolveIdentity(deps.pool, accountId, facts.workItemId, mode === "first" ? "start" : "observe");
+  if (!resolved.ok) return refuse(resolved.code);
+  const build = resolved.identity;
+  // Final guard, before any attempt is spent: a child's finished body that would still close an issue is never published.
+  if (childTextRefused(facts.title, facts.runId, pairing.prFooter, build)) return refuse(CHILD_BODY_CLOSING_CODE);
   let policy: NetworkPolicyRule[];
   let head: string | null;
   let defaultTip: string | null;
   try {
     policy = await deps.networkPolicy();
-    head = await deps.privateHead({ repo: facts.repo, branch: `fx/issue-${facts.issue}` });
+    head = await deps.privateHead({ repo: facts.repo, branch: build.branch });
     defaultTip = await deps.privateDefaultHead({ repo: facts.repo });
   } catch {
     // fx-swallow-ok: the proxy host or GitHub could not be used; nothing was started, the item shows the fixed unavailable refusal
@@ -284,9 +293,8 @@ async function attempt(deps: PlanePublishDeps, accountId: string, which: { runId
   }
 
   // From here the attempt is real: whatever happens, it ends terminal and the sandbox ends deleted (runPublishSandbox's finally).
-  const issueNumber = facts.issue === null || facts.issue === undefined ? null : Number(facts.issue);
-  const text = buildPlanePushText({ itemTitle: facts.title, runId: facts.runId, prFooter: pairing.prFooter, issueNumber });
-  await noteFooterSkipped(deps.pool, accountId, facts.runId, pairing.prFooter, issueNumber);
+  const text = buildPlanePushText({ itemTitle: textTitle(facts.title, build), runId: facts.runId, prFooter: pairing.prFooter, issueNumber: build.issueNumber, child: build.isChild });
+  await noteFooterSkipped(deps.pool, accountId, facts.runId, pairing.prFooter, build);
   const input: PlanePublishInput = {
     own: { owner: facts.repo.owner, name: facts.repo.name }, codeRepo: facts.codeRepo, privateBase: facts.baseSha, privateHead: head, privateDefaultTip: defaultTip, branch: facts.branch, title: text.title, body: text.body,
     identity, commitTime: Math.floor(now() / 1000),
@@ -325,6 +333,8 @@ async function attempt(deps: PlanePublishDeps, accountId: string, which: { runId
   await finishAttempt(deps.pool, accountId, {
     pushId: facts.pushId, attemptId, runId: publishRunId, outcome, label, failed: crashed, usd: cost.usd,
     envelope: { publish: { attempt_no: attemptNo, outcome: label, seconds, vcpus: PLANE_PUBLISH_VCPUS, usd: cost.usd, basis: cost.basis, private_head: head } },
+    // R9: the hosted side confirmed the pull request, so a planned PR child's binding to it is written in the same transaction as the push row's outcome (set once).
+    ...(build.isChild && outcome.state === "pr_opened" && outcome.prNumber !== undefined ? { after: (client: PoolClient) => bindChildCodePullRequest(client, accountId, facts, outcome.prNumber!) } : {}),
   });
   if (outcome.state === "refused") return { kind: "refused", code: outcome.code!, attemptNo };
   return { kind: "published", state: outcome.state as "pr_opened" | "pushed_pr_not_opened" | "no_public_change", attemptNo };
@@ -461,7 +471,12 @@ async function republish(deps: PlanePublishDeps, accountId: string, facts: Facts
   if (facts.updateAttempts > 0) return { kind: "skipped", why: "busy" };
   if (facts.pairing === null || facts.pairing.codeRepo.toLowerCase() !== facts.codeRepo.toLowerCase()) return stopWith(REPUBLISH_FAILED);
   const identity = deps.identity();
-  if (identity === null || facts.issue === null) return stopWith(REPUBLISH_FAILED);
+  if (identity === null) return stopWith(REPUBLISH_FAILED);
+  // The round was started through the resolver already; reading it again (`observe`) keeps a parent deleted since from stranding a change that is built and ready to publish.
+  const resolved = await resolveIdentity(deps.pool, accountId, facts.workItemId, "observe");
+  if (!resolved.ok) return stopWith(REPUBLISH_FAILED);
+  const build = resolved.identity;
+  if (childTextRefused(facts.title, facts.runId, facts.pairing.prFooter, build)) return stopWith(REPUBLISH_FAILED);
   const pairing = facts.pairing;
   const stamp = facts.stamp;
   const givenDigest = digestOf(pairing);
@@ -513,9 +528,8 @@ async function republish(deps: PlanePublishDeps, accountId: string, facts: Facts
     throw err;
   }
 
-  const issueNumber = Number(facts.issue);
-  const text = buildPlanePushText({ itemTitle: facts.title, runId: facts.runId, prFooter: pairing.prFooter, issueNumber });
-  await noteFooterSkipped(deps.pool, accountId, facts.runId, pairing.prFooter, issueNumber);
+  const text = buildPlanePushText({ itemTitle: textTitle(facts.title, build), runId: facts.runId, prFooter: pairing.prFooter, issueNumber: build.issueNumber, child: build.isChild });
+  await noteFooterSkipped(deps.pool, accountId, facts.runId, pairing.prFooter, build);
   const input: PlanePublishInput = {
     own: { owner: facts.repo.owner, name: facts.repo.name }, codeRepo: facts.codeRepo, privateBase: fixBase.sha, privateHead: head, privateDefaultTip: defaultTip, branch: facts.branch, updateOf: stamp, title: text.title, body: text.body,
     identity, commitTime: Math.floor(now() / 1000),
@@ -600,8 +614,11 @@ export type PrivatePullRequest = "opened" | "reused" | "skipped" | "failed";
  */
 async function openPrivatePullRequest(deps: PlanePublishDeps, accountId: string, facts: Facts): Promise<PrivatePullRequest> {
   const port = deps.pullRequests;
-  if (!port || facts.issue === null) return "skipped";
+  if (!port) return "skipped";
   try {
+    // The private draft is opened on the build identity's branch: `fx/issue-<n>`, or a planned PR child's own `fx/<parent#>-<key>`. A refusal opens nothing.
+    const resolved = await resolveIdentity(deps.pool, accountId, facts.workItemId, "observe");
+    if (!resolved.ok) return "skipped";
     const { text, parent } = await withTenant(deps.pool, accountId, async (c) => ({ text: await loadRunPullRequestText(c, { accountId, runId: facts.runId }), parent: await readStackParentPull(c, facts.workItemId) }));
     if (text === null) return "failed";
     let base = await port.defaultBranch(facts.repo);
@@ -612,7 +629,7 @@ async function openPrivatePullRequest(deps: PlanePublishDeps, accountId: string,
       if (!decided.ok) return "failed";
       if (decided.base !== null) base = decided.base.branch;
     }
-    const pr = await port.openDraft({ repo: facts.repo, branch: `fx/issue-${facts.issue}`, base, run: text });
+    const pr = await port.openDraft({ repo: facts.repo, branch: resolved.identity.branch, base, run: text });
     if (pr.draft) {
       try {
         await port.markReady({ repo: facts.repo, pullRequest: pr });
@@ -640,19 +657,50 @@ export type OpenPublicResult =
   | { kind: "skipped"; why: "not_retryable" }
   | { kind: "not_configured" };
 
-/** A footer that needs an issue number the item lacks is left off; the run records a notice line so the person can see why the body has no footer. */
-async function noteFooterSkipped(pool: Pool, accountId: string, runId: string, footer: string | null, issueNumber: number | null): Promise<void> {
-  if (prFooterSkipReason(footer, issueNumber) === null) return;
-  await withTenant(pool, accountId, (c) => insertRunEvent(c, accountId, runId, PR_FOOTER_SKIPPED, { reason: "no_issue_number" }));
+/**
+ * The build identity of an item, in a short transaction of its own (`start` takes a planned PR child's launch lock). A refusal carries the code to store: the resolver's for a planned PR
+ * child, `bad_input` for a top-level item (its stored word for an item with no issue number, unchanged).
+ */
+async function resolveIdentity(pool: Pool, accountId: string, workItemId: string, purpose: BuildPurpose): Promise<{ ok: true; identity: BuildIdentity } | { ok: false; code: string }> {
+  const r = await withTenant(pool, accountId, (c) => resolveBuildIdentity(c, accountId, workItemId, purpose));
+  return r.ok ? r : { ok: false, code: r.isChild ? r.reason : "bad_input" };
+}
+
+/** The title the public text is built from: a child's goes through `cleanWorkItemTitle` first, as everything a person reads does (the text builder then cleans it again for the public plane). */
+const textTitle = (stored: string, build: TextIdentity): string => (build.isChild ? safeChildTitle(cleanWorkItemTitle(stored)) : stored);
+
+/** True when a planned PR child's finished public body would still close an issue (the final guard in `buildPlanePushText`). */
+export function childTextRefused(title: string, runId: string, prFooter: string | null, build: TextIdentity): boolean {
+  if (!build.isChild) return false;
+  try {
+    buildPlanePushText({ itemTitle: textTitle(title, build), runId, prFooter, issueNumber: build.issueNumber, child: true });
+    return false;
+  } catch (err) {
+    if (err instanceof Error && err.message === CHILD_BODY_CLOSING_CODE) return true;
+    throw err;
+  }
+}
+
+/** R9: records the code-plane pull request on the child's executor run, once: `{ branch: the push row's public branch, prNumber, plane: "code", codeRepo }`. A second record for the run adds nothing. */
+async function bindChildCodePullRequest(client: PoolClient, accountId: string, facts: Pick<Facts, "runId" | "branch" | "codeRepo">, prNumber: number): Promise<void> {
+  await recordChildCodePullRequest(client, accountId, facts.runId, { branch: facts.branch, prNumber, codeRepo: facts.codeRepo });
+}
+
+/** A footer that is left off the body (it needs an issue number the item lacks, or, for a planned PR child, it would close the parent's issue): the run records a notice line so the person can see why. */
+type TextIdentity = { issueNumber: number | null; isChild: boolean };
+async function noteFooterSkipped(pool: Pool, accountId: string, runId: string, footer: string | null, build: TextIdentity): Promise<void> {
+  const reason = prFooterSkipReason(footer, build.issueNumber, { child: build.isChild });
+  if (reason === null) return;
+  await withTenant(pool, accountId, (c) => insertRunEvent(c, accountId, runId, PR_FOOTER_SKIPPED, { reason }));
 }
 
 async function openPublicPullRequest(deps: PlanePublishDeps, accountId: string, workItemId: string): Promise<OpenPublicResult> {
   const { rows } = await withTenant(deps.pool, accountId, (c) =>
-    c.query<{ id: string; code_repo: string; branch: string; state: PlanePushState; head_sha: string | null; tip_sha: string | null; source_head: string | null; managed: boolean; title: string; run_id: string | null; pairing_repo: string | null; pr_footer: string | null; issue: string | null }>(
+    c.query<{ id: string; code_repo: string; branch: string; state: PlanePushState; head_sha: string | null; tip_sha: string | null; source_head: string | null; managed: boolean; title: string; run_id: string | null; pairing_repo: string | null; pr_footer: string | null }>(
       `SELECT p.id, p.code_repo, p.branch, p.state, p.head_sha, p.tip_sha, p.source_head, p.managed_by_person_at IS NOT NULL AS managed, COALESCE(w.title, '') AS title,
               (SELECT r.id FROM agent_runs r WHERE r.account_id = p.account_id AND r.work_item_id = p.work_item_id AND r.role = 'executor' ORDER BY r.created_at DESC, r.id LIMIT 1) AS run_id,
               (SELECT rp.code_repo FROM repo_pairing rp WHERE rp.account_id = p.account_id AND rp.repo_id = p.repo_id) AS pairing_repo,
-              (SELECT rp.pr_footer FROM repo_pairing rp WHERE rp.account_id = p.account_id AND rp.repo_id = p.repo_id) AS pr_footer, w.gh_number::text AS issue
+              (SELECT rp.pr_footer FROM repo_pairing rp WHERE rp.account_id = p.account_id AND rp.repo_id = p.repo_id) AS pr_footer
          FROM plane_pushes p JOIN work_items w ON w.account_id = p.account_id AND w.id = p.work_item_id
         WHERE p.account_id = $1 AND p.work_item_id = $2`,
       [accountId, workItemId],
@@ -664,6 +712,13 @@ async function openPublicPullRequest(deps: PlanePublishDeps, accountId: string, 
   if (p.pairing_repo === null) return { kind: "refused", code: PUBLISH_CODES.pairingOff, attemptNo: null };
   if (p.pairing_repo !== p.code_repo) return { kind: "refused", code: "pairing_changed", attemptNo: null };
 
+  // The issue number is the build identity's (a planned PR child's is its parent's). A top-level item with no number keeps the old behaviour: no footer that needs one.
+  // Resolved, and the child's final text guard run, BEFORE the attempt row exists: a refusal here leaves no attempt behind, as on the other paths.
+  const found = await withTenant(deps.pool, accountId, (c) => resolveBuildIdentity(c, accountId, workItemId, "observe"));
+  if (!found.ok && found.isChild) return { kind: "refused", code: found.reason, attemptNo: null };
+  const build: TextIdentity = found.ok ? found.identity : { issueNumber: null, isChild: false };
+  if (childTextRefused(p.title, p.run_id, p.pr_footer, build)) return { kind: "refused", code: CHILD_BODY_CLOSING_CODE, attemptNo: null };
+
   const attemptId = randomUUID();
   const attemptNo = await withTenant(deps.pool, accountId, async (c) => {
     await c.query("SELECT 1 FROM plane_pushes WHERE account_id = $1 AND id = $2 FOR UPDATE", [accountId, p.id]);
@@ -672,9 +727,10 @@ async function openPublicPullRequest(deps: PlanePublishDeps, accountId: string, 
     await c.query("INSERT INTO plane_push_attempts (id, account_id, plane_push_id, run_id, runtime, kind, attempt_no) VALUES ($1, $2, $3, NULL, 'hosted', 'pr_open', $4)", [attemptId, accountId, p.id, n[0]!.n]);
     return n[0]!.n;
   });
-  const end = async (outcome: string, record?: VerifiedOutcome): Promise<void> =>
+  const end = async (outcome: string, record?: VerifiedOutcome, after?: (c: PoolClient) => Promise<void>): Promise<void> =>
     withTenant(deps.pool, accountId, async (c) => {
       if (record) await recordVerifiedOutcome(c, { accountId, id: p.id, outcome: record });
+      if (after) await after(c);
       await c.query("UPDATE plane_push_attempts SET finished_at = now(), outcome = $3 WHERE account_id = $1 AND id = $2", [accountId, attemptId, outcome]);
     });
   const stop = async (code: string): Promise<OpenPublicResult> => {
@@ -685,13 +741,12 @@ async function openPublicPullRequest(deps: PlanePublishDeps, accountId: string, 
     // The branch must still hold exactly what was pushed, on the tip it was built on: nothing else is turned into a pull request.
     if (!(await deps.hosted.verifyPushed({ accountId, codeRepo: p.code_repo, branch: p.branch, headSha: p.head_sha, tipSha: p.tip_sha }))) return await stop(PUBLISH_CODES.reportMismatch);
     // The footer is validated when the pairing is written. This path pushes nothing and has no rule files to scan with; the push paths scan the body they send.
-    const issueNumber = p.issue === null ? null : Number(p.issue);
-    const text = buildPlanePushText({ itemTitle: p.title, runId: p.run_id, prFooter: p.pr_footer, issueNumber });
-    await noteFooterSkipped(deps.pool, accountId, p.run_id, p.pr_footer, issueNumber);
+    const text = buildPlanePushText({ itemTitle: textTitle(p.title, build), runId: p.run_id, prFooter: p.pr_footer, issueNumber: build.issueNumber, child: build.isChild });
+    await noteFooterSkipped(deps.pool, accountId, p.run_id, p.pr_footer, build);
     const opened = await deps.hosted.openPullRequest({ accountId, codeRepo: p.code_repo, branch: p.branch, title: text.title, body: text.body });
     const pr = await deps.hosted.verifyPullRequest({ accountId, codeRepo: p.code_repo, branch: p.branch, number: opened.number });
     if (pr === null || !publicPullRequestUrlMatches(p.code_repo, opened.number, pr.url)) return await stop(PUBLISH_CODES.reportMismatch);
-    await end("pr_opened", { state: "pr_opened", headSha: p.head_sha, tipSha: p.tip_sha, ...(p.source_head !== null ? { sourceHead: p.source_head } : {}), prNumber: opened.number, prUrl: pr.url });
+    await end("pr_opened", { state: "pr_opened", headSha: p.head_sha, tipSha: p.tip_sha, ...(p.source_head !== null ? { sourceHead: p.source_head } : {}), prNumber: opened.number, prUrl: pr.url }, build.isChild ? (c) => bindChildCodePullRequest(c, accountId, { runId: p.run_id!, branch: p.branch, codeRepo: p.code_repo }, opened.number) : undefined);
     return { kind: "opened", prNumber: opened.number, attemptNo };
   } catch (err) {
     // fx-swallow-ok: GitHub's answer becomes one of two fixed words; the item stays "pushed, pull request not opened" and can be tried again

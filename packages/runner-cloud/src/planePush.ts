@@ -114,7 +114,8 @@ export async function planePushTokenRun(deps: RunnerCloudDeps, req: RunnerHttpRe
     case "attempts_exhausted":
       throw new RunnerHttpError(409, "attempts_exhausted", "this change has used all its push attempts");
     case "refused":
-      // FIXROUND-REPUBLISH (R2-c1): the only code the grant refuses with is a fix round without a signed base.
+      // FIXROUND-REPUBLISH (R2-c1): a fix round without a signed base. D#483 S5-b2c-4: or a planned PR child whose build identity was refused; the resolver's fixed code is the status's code.
+      if (grant.code !== "republish_base_missing") throw new RunnerHttpError(409, grant.code, "this planned PR can no longer publish: its build identity was refused");
       throw new RunnerHttpError(409, "republish_base_missing", "this fix round has no signed base to update the public pull request from");
     case "granted":
       break;
@@ -124,7 +125,7 @@ export async function planePushTokenRun(deps: RunnerCloudDeps, req: RunnerHttpRe
   // can fail on the text, and a failure here finishes the attempt without a token ever existing.
   let pr: ReturnType<typeof buildPlanePushText>;
   try {
-    pr = buildPlanePushText({ itemTitle: grant.itemTitle, runId, prFooter: grant.prFooter, issueNumber: grant.issueNumber });
+    pr = buildPlanePushText({ itemTitle: grant.itemTitle, runId, prFooter: grant.prFooter, issueNumber: grant.issueNumber, child: grant.child });
   } catch (error) {
     await asRunner(() => ops.planePushSettleGrant({ ...lease, attemptId: grant.attemptId, issued: false, code: "text_failed" }));
     throw error;

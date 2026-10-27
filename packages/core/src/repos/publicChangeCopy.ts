@@ -41,6 +41,14 @@ export const PUBLIC_CHANGE_REFUSAL_REASON: Readonly<Record<string, string>> = {
   retry_limit: 'the push has already been tried three times',
   hook_crashed: 'the publish step stopped before it finished',
   report_mismatch: 'the public repository did not match what was reported',
+  // D#483 S5-b2c-4: a planned PR child whose build identity was refused when its change was published. The words are the launch rule's (`childLaunchSentence`), lower-cased for "Refused: ".
+  child_orphaned: 'the item this planned PR belonged to was deleted',
+  parent_closed: 'the item this planned PR belongs to is closed',
+  respec_needs_approval: 'the Spec changed and needs approval again',
+  key_not_in_approved_spec: 'this planned PR is no longer in the approved Spec',
+  no_issue_link: 'the item this planned PR belongs to has no GitHub issue',
+  not_found: 'the item could not be found',
+  child_body_closing_keyword: 'the pull request text would have closed an issue, so nothing was sent',
 };
 
 export const PUBLIC_CHANGE_UNKNOWN_REFUSAL = 'Refused: the change was not sent';

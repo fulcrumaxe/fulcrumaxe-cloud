@@ -1,0 +1,39 @@
+{
+  "stage": "in_progress",
+  "halted": false,
+  "waiting_on_answer": false,
+  "repo": {
+    "owner": "acme",
+    "name": "docs"
+  },
+  "issue_number": 595,
+  "pr_number": null,
+  "auto_merge": false,
+  "comments": [],
+  "comments_truncated": false,
+  "spec": null,
+  "runs": [],
+  "runs_truncated": false,
+  "steps": [],
+  "notice": null,
+  "actions": [
+    "close",
+    "retry_push"
+  ],
+  "close_on_github": false,
+  "request_changes_blocked": null,
+  "change_requests": [],
+  "public_change": {
+    "state": "refused",
+    "code": "child_body_closing_keyword",
+    "sentence": "Refused: the pull request text would have closed an issue, so nothing was sent",
+    "repo": "acme/docs-public",
+    "branch": "fx/p-0598a6a0-0000-4000-8000-300000000018",
+    "pr_number": null,
+    "pr_url": null,
+    "head_sha": null,
+    "actions": [
+      "retry_push"
+    ]
+  }
+}

@@ -45,6 +45,14 @@ const SEEDS: Seed[] = [
   { name: 'refused-pairing_off', state: 'refused', code: 'pairing_off', attempts: { runtime: 'sandbox', count: 2 }, expected: 'Refused: the pairing is off', actions: ['retry_push'] },
   { name: 'refused-unknown_code', state: 'refused', code: 'a_code_from_the_future', attempts: { runtime: 'sandbox', count: 1 }, expected: PUBLIC_CHANGE_UNKNOWN_REFUSAL, actions: ['retry_push'] },
   { name: 'refused-runner', state: 'refused', code: 'public_unavailable', attempts: { runtime: 'runner', count: 1 }, expected: 'Refused: the public repository could not be reached. Use Build again to try once more.' },
+  // D#483 S5-b2c-4: a planned PR child's publish refused with the build identity's code, or by the final text guard
+  { name: 'refused-child_orphaned', state: 'refused', code: 'child_orphaned', attempts: { runtime: 'sandbox', count: 1 }, expected: 'Refused: the item this planned PR belonged to was deleted', actions: ['retry_push'] },
+  { name: 'refused-parent_closed', state: 'refused', code: 'parent_closed', attempts: { runtime: 'sandbox', count: 1 }, expected: 'Refused: the item this planned PR belongs to is closed', actions: ['retry_push'] },
+  { name: 'refused-respec_needs_approval', state: 'refused', code: 'respec_needs_approval', attempts: { runtime: 'sandbox', count: 1 }, expected: 'Refused: the Spec changed and needs approval again', actions: ['retry_push'] },
+  { name: 'refused-key_not_in_approved_spec', state: 'refused', code: 'key_not_in_approved_spec', attempts: { runtime: 'sandbox', count: 1 }, expected: 'Refused: this planned PR is no longer in the approved Spec', actions: ['retry_push'] },
+  { name: 'refused-no_issue_link', state: 'refused', code: 'no_issue_link', attempts: { runtime: 'sandbox', count: 1 }, expected: 'Refused: the item this planned PR belongs to has no GitHub issue', actions: ['retry_push'] },
+  { name: 'refused-not_found', state: 'refused', code: 'not_found', attempts: { runtime: 'sandbox', count: 1 }, expected: 'Refused: the item could not be found', actions: ['retry_push'] },
+  { name: 'refused-child_body_closing_keyword', state: 'refused', code: 'child_body_closing_keyword', attempts: { runtime: 'sandbox', count: 1 }, expected: 'Refused: the pull request text would have closed an issue, so nothing was sent', actions: ['retry_push'] },
 ];
 
 /** D#598 P1f-6a against real Postgres: the activity read of every state of a change to a paired public repo, pinned as fixtures. */

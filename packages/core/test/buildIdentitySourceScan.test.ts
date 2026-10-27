@@ -126,7 +126,7 @@ describe('the build identity source scan (D#483 S5-b2c-3, R7)', () => {
   });
 
   describe('the tree', () => {
-    /** Every file named in the consumer rows of the correction, plus the build and the review reads. S5-b2c-4 adds the paired publish files (planePublish.ts, runnerPlanePush.ts) when it converts them. */
+    /** Every file named in the consumer rows of the correction, plus the build and the review reads. S5-b2c-4 adds the paired publish files (planePublish.ts, runnerPlanePush.ts). */
     const CONSUMERS = [
       'packages/core/src/decisions/fixRoundGate.ts',
       'packages/worker/src/fixGateStep.ts',
@@ -149,6 +149,9 @@ describe('the build identity source scan (D#483 S5-b2c-3, R7)', () => {
       'packages/worker/src/advance.ts',
       'apps/web/lib/advanceSteps.ts',
       'apps/web/workflows/workItemAdvance.ts',
+      // converted in S5-b2c-4 (paired publish): the sandbox publish step and the runner's plane push grant
+      'packages/worker/src/planePublish.ts',
+      'packages/worker/src/runnerPlanePush.ts',
     ];
     /** The exemptions: only the resolver itself, which is not a consumer. */
     const EXEMPT: ReadonlyArray<{ file: string; why: string }> = [{ file: 'packages/core/src/work-items/buildIdentity.ts', why: 'the resolver: the only definition of the branch builders' }];

@@ -2,8 +2,11 @@ import type { Pool, PoolClient } from "pg";
 import type { StopReason } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RESTAMPABLE, pairingDigest, readPlanePush, recordUpdatedHead, recordVerifiedOutcome, type PlaneRefusalEntry, type PlanePushOutcomeState, type PlanePushRow } from "@fx/core/src/repos/planePushRecord.js";
-import { insertRunEvent } from "@fx/runner";
-import { prFooterSkipReason } from "@fulcrumaxe/runner-protocol/planePushText";
+import { insertRunEvent, recordChildCodePullRequest } from "@fx/runner";
+import { CHILD_BODY_CLOSING_CODE, buildPlanePushText, prFooterSkipReason } from "@fulcrumaxe/runner-protocol/planePushText";
+import { safeChildTitle } from "@fx/core/src/work-items/childTitle.js";
+import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
+import { cleanWorkItemTitle } from "@fx/core/src/work-items/title.js";
 import { REPUBLISH_BASE_MISSING, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE } from "@fx/core/src/work-items/baseSync.js";
 import { recordRepublishRefusal } from "./fixRoundBase.js";
 import { guarded } from "./runActions.js";
@@ -61,12 +64,15 @@ export type PlanePushGrantResult =
   /** The pairing was removed, or its digest no longer matches the one stamped at build start. */
   | { kind: "pairing_changed" }
   | { kind: "already_issued" }
-  /** FIXROUND-REPUBLISH (R2-c1): a fix round that must update the public pull request has no signed base to rebuild it from. Named; the hook reports it and the item goes to a person. */
+  /**
+   * FIXROUND-REPUBLISH (R2-c1): a fix round that must update the public pull request has no signed base to rebuild it from. Named; the hook reports it and the item goes to a person.
+   * D#483 S5-b2c-4: also a planned PR child whose build identity the resolver refuses (its parent was deleted or closed, or re-specced and not approved again): the resolver's code.
+   */
   | { kind: "refused"; code: string }
   /** The row already has the three push attempts the schema allows. */
   | { kind: "attempts_exhausted" }
   /** `itemTitle` is the work item's title as stored: untrusted text that only `buildPlanePushText` may turn into public text. */
-  | ({ kind: "granted"; attemptId: string; itemTitle: string; /** The pairing's PR footer template and the item's issue number: inputs to the text builder only. */ prFooter: string | null; issueNumber: number | null; /** The head the platform last pushed, for a fix round that updates the open public pull request; null for a first push. */ updateOf: string | null } & PlanePushFacts);
+  | ({ kind: "granted"; attemptId: string; itemTitle: string; /** The pairing's PR footer template and the item's issue number: inputs to the text builder only. */ prFooter: string | null; issueNumber: number | null; /** True for a planned PR child: `issueNumber` is then its parent's. */ child: boolean; /** The head the platform last pushed, for a fix round that updates the open public pull request; null for a first push. */ updateOf: string | null } & PlanePushFacts);
 
 export type PlanePushReportContextResult =
   | { kind: "fenced"; reason: StopReason }
@@ -156,6 +162,9 @@ const hasOpenPublicPr = (r: PlanePushRow): boolean => r.state === "pr_opened" &&
 /** Nothing was published yet (the row is in a state a new attempt may replace) and no person has the branch: a fix round publishes it for the first time. */
 const mayFirstPublish = (r: PlanePushRow): boolean => r.managedByPersonAt === null && RESTAMPABLE.includes(r.state);
 
+const isPlannedChild = async (client: PoolClient, accountId: string, workItemId: string): Promise<boolean> =>
+  (await client.query("SELECT 1 FROM work_items WHERE account_id = $1 AND id = $2 AND planned_pr_key IS NOT NULL", [accountId, workItemId])).rows.length > 0;
+
 const facts = (row: PlanePushRow): PlanePushFacts => ({ id: row.id, codeRepo: row.codeRepo, branch: row.branch });
 
 /** Package-internal: `runnerPool` is the runner login's pool and is captured here, never exposed. */
@@ -184,6 +193,23 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           // The pairing as it is NOW, against the digest stamped at build start. A pairing that was removed or edited is `pairing_changed`.
           if (!(await livePairing(client, input.accountId, row))) return { kind: "pairing_changed" };
 
+          // D#483 S5-b2c-4 (R9): the issue number the text names comes from the build identity (a planned PR child's is its parent's), never from `gh_number`. A fix round reads what already happened
+          // (`observe`); a first push starts the publish (`start`). A top-level item with no number keeps its old outcome (a grant whose text has no footer that needs one); a child the resolver refuses gets no grant.
+          const identity = await resolveBuildIdentity(client, input.accountId, row.workItemId, found.continues ? "observe" : "start");
+          if (!identity.ok && identity.isChild) return { kind: "refused", code: identity.reason };
+          const build = identity.ok ? { issueNumber: identity.identity.issueNumber as number | null, child: identity.identity.isChild } : { issueNumber: null, child: false };
+
+          // Final guard, before an attempt row exists: a child's finished body that would still close an issue gets no grant.
+          if (build.child) {
+            const meta = (await client.query<{ title: string | null; pr_footer: string | null }>("SELECT w.title, (SELECT rp.pr_footer FROM repo_pairing rp WHERE rp.repo_id = $3 AND rp.account_id = $2) AS pr_footer FROM work_items w WHERE w.id = $1 AND w.account_id = $2", [row.workItemId, input.accountId, row.repoId])).rows[0];
+            try {
+              buildPlanePushText({ itemTitle: safeChildTitle(cleanWorkItemTitle(meta?.title ?? "")), runId: input.runId, prFooter: meta?.pr_footer ?? null, issueNumber: build.issueNumber, child: true });
+            } catch (err) {
+              if (err instanceof Error && err.message === CHILD_BODY_CLOSING_CODE) return { kind: "refused", code: CHILD_BODY_CLOSING_CODE };
+              throw err;
+            }
+          }
+
           // Serialise the attempts of one record, then look for this lease's grant before making one.
           await client.query("SELECT 1 FROM plane_pushes WHERE id = $1 AND account_id = $2 FOR UPDATE", [row.id, input.accountId]);
           // The row as it is under the lock: a person may have taken the branch over, or the state moved, since the read above.
@@ -203,13 +229,14 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           );
           // The item's title for the public pull request text. A missing row cannot happen under the run's own foreign key; it reads as an empty
           // title, which the text builder turns into its fixed run-id title.
-          const { rows: titles } = await client.query<{ title: string | null; gh_number: string | null }>("SELECT title, gh_number::text AS gh_number FROM work_items WHERE id = $1 AND account_id = $2", [row.workItemId, input.accountId]);
+          const { rows: titles } = await client.query<{ title: string | null }>("SELECT title FROM work_items WHERE id = $1 AND account_id = $2", [row.workItemId, input.accountId]);
           const { rows: footers } = await client.query<{ pr_footer: string | null }>("SELECT pr_footer FROM repo_pairing WHERE repo_id = $1 AND account_id = $2", [row.repoId, input.accountId]);
           const prFooter = footers[0]?.pr_footer ?? null;
-          const issueNumber = titles[0]?.gh_number == null ? null : Number(titles[0].gh_number);
-          // A footer that needs an issue number this item lacks is left off the body; the run says so.
-          if (prFooterSkipReason(prFooter, issueNumber) !== null) await insertRunEvent(client, input.accountId, input.runId, "plane.pr_footer_skipped", { reason: "no_issue_number" });
-          return { kind: "granted", attemptId: made[0]!.id, itemTitle: titles[0]?.title ?? "", prFooter, issueNumber, updateOf: update ? locked!.headSha : null, ...facts(row) };
+          // A footer that needs an issue number this item lacks, or that would close a planned PR child's parent, is left off the body; the run says why.
+          const skipped = prFooterSkipReason(prFooter, build.issueNumber, { child: build.child });
+          if (skipped !== null) await insertRunEvent(client, input.accountId, input.runId, "plane.pr_footer_skipped", { reason: skipped });
+          const stored = titles[0]?.title ?? "";
+          return { kind: "granted", attemptId: made[0]!.id, itemTitle: build.child ? safeChildTitle(cleanWorkItemTitle(stored)) : stored, prFooter, issueNumber: build.issueNumber, child: build.child, updateOf: update ? locked!.headSha : null, ...facts(row) };
         });
       }),
 
@@ -304,6 +331,10 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
               },
             });
             recorded = row !== null;
+            // R9: a planned PR child's code-plane pull request is bound to its run once the hosted side verified it (the route did, before this call), in the same transaction as the push row's outcome. Set once.
+            if (row !== null && o.state === "pr_opened" && o.prNumber !== undefined && (await isPlannedChild(client, input.accountId, found.row.workItemId))) {
+              await recordChildCodePullRequest(client, input.accountId, input.runId, { branch: found.row.branch, prNumber: o.prNumber, codeRepo: found.row.codeRepo });
+            }
           }
           // The attempt for this lease, if there is one: whether its token was revoked (a terminal report that does not say, did not confirm it) and how it ended.
           await client.query(
