@@ -44,9 +44,13 @@ function readPull(pr: Json, branch: string): FindPullRequestResult {
   return { ok: true, pr: { number: pr.number, headSha: head.sha, baseRef: base.ref, branch } };
 }
 
-/** The open pull request whose head is the executor's branch for `issue` (`fx/issue-<n>`), in this repository. The sandbox build's lookup. */
-export async function findOpenPullRequest(http: GitHubHttp, repo: { owner: string; name: string; issue: number }): Promise<FindPullRequestResult> {
-  const branch = branchFor(repo.issue);
+/**
+ * The open pull request whose head is the executor's branch for `issue` (`fx/issue-<n>`), in this repository. The sandbox build's lookup.
+ * D#483 S5-b2c-2: a planned PR child passes its own `branch` (`fx/<parent#>-<key>`) and the lookup is for that branch; `fx/issue-<n>` is never looked up for a child.
+ */
+export async function findOpenPullRequest(http: GitHubHttp, repo: { owner: string; name: string; issue: number; branch?: string }): Promise<FindPullRequestResult> {
+  const branch = repo.branch ?? branchFor(repo.issue);
+  if (!isSafeRef(branch)) return { ok: false, reason: "malformed" };
   const res = await http.request({
     method: "GET",
     path: `${repoPath(repo.owner, repo.name)}/pulls`,
@@ -106,7 +110,7 @@ export interface PullRequestSource {
  * The one switch: a `runner_local` repo's pull request is the one its run recorded, and none recorded is `no_open_pr`, never a lookup
  * by the issue's branch. Every other repo is a sandbox build and keeps the lookup by `fx/issue-<n>`.
  */
-export async function findPullRequestForItem(http: GitHubHttp, repo: { owner: string; name: string; issue: number } & PullRequestSource): Promise<FindPullRequestResult> {
+export async function findPullRequestForItem(http: GitHubHttp, repo: { owner: string; name: string; issue: number; branch?: string } & PullRequestSource): Promise<FindPullRequestResult> {
   if (isRunnerMode(repo.executionMode)) {
     // D#6 R3c: a runner repo's lookup uses only the allowlist's list call (A3); the composition root hands it the fenced client.
     return repo.recordedPr === null ? { ok: false, reason: "no_open_pr" } : findRecordedPullRequest(http, repo, repo.recordedPr, { local: repo.executionMode === "runner_local" });

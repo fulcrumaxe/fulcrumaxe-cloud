@@ -338,6 +338,21 @@ export function startDecisionLine(data) {
   return { state, text: (sentence !== "" ? sentence : START_DECISION_WORDS[state]) + (when !== "" ? " " + when + "." : "") };
 }
 
+/**
+ * D#483 S5-b2c-2: why a planned PR child does not start yet, for its card. The server derives `child_launch` on each read (nothing is stored on it, so it clears when
+ * the thing it names clears) and sends it only for a child that has not started, with a fixed sentence. `code` and `sentence` are null when the child may start and only
+ * the `warning` (it waits on a sibling; a person may still start it) is left. The line shows the sentence as sent; a missing or blank sentence shows nothing, and a code
+ * never reaches the screen.
+ */
+export function childLaunchLine(data) {
+  const c = data && data.child_launch;
+  if (!isObj(c)) return null;
+  const sentence = typeof c.sentence === "string" ? c.sentence.trim() : "";
+  const w = isObj(c.warning) && typeof c.warning.sentence === "string" ? c.warning.sentence.trim() : "";
+  if (sentence === "" && w === "") return null;
+  return { blocked: sentence !== "", text: sentence !== "" ? sentence : "", warning: w, offers: c.offers === "close" || c.offers === "parent" ? c.offers : null };
+}
+
 /** The "Ready to merge" banner, only at review_passed, with the repo's real auto-merge setting. */
 export function readyBanner(data) {
   if (!data || data.stage !== "review_passed") return null;
@@ -401,6 +416,7 @@ export function buildInsight(data) {
     notice: noticeBanner(data),
     setupPause: setupPauseLine(data),
     startDecision: startDecisionLine(data),
+    childLaunch: childLaunchLine(data),
     banner: readyBanner(data),
     runningText: running.length ? "Running now: " + running.map((r) => r.role).join(", ") : "Nothing is running right now.",
     waitingText: waiting.length ? waitingLine(waiting, waitingRaw) : null,
@@ -615,6 +631,8 @@ export function createInsightPanel(deps) {
       m.notice ? noticeView(m.notice) : [],
       m.setupPause ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-setup-pause", "data-state": m.setupPause.state }, m.setupPause.text) : [],
       m.startDecision ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-start-decision", "data-state": m.startDecision.state }, m.startDecision.text) : [],
+      m.childLaunch && m.childLaunch.text !== "" ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-child-launch", "data-offers": m.childLaunch.offers || "" }, m.childLaunch.text) : [],
+      m.childLaunch && m.childLaunch.warning !== "" ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-child-launch-warning" }, m.childLaunch.warning) : [],
       m.banner ? banner(m.banner) : [],
       h("p", { "data-testid": "pl-running" }, m.runningText),
       m.waitingText ? h("p", { role: "status", "data-testid": "pl-waiting-runner" }, m.waitingText) : [],

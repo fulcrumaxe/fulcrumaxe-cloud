@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
+import { setPendingHooks } from '@fx/core/src/pendingWork.js';
 import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
 import { plannedFixture } from '@fx/db/test/helpers/plannedChildren.js';
 import { approveSubItem } from '@fx/core/src/decisions/approveSubItem.js';
@@ -109,6 +110,22 @@ describe('D#483 S5-b2a: approval routes', () => {
   });
 
   describe('POST /work-items/{id}/reapprove', () => {
+    it('D#483 S5-b2c-2: a re-approval wakes the auto-start sweep (it moves not-started children forward); a refusal does not', async () => {
+      const sets: string[] = [];
+      setPendingHooks({ store: { get: async () => null, set: async (key) => { sets.push(key); }, delete: async () => {} } });
+      try {
+        const f = await fixture();
+        expect((await reapprove(f.owner, f.workItemId)).status).toBe(409);
+        expect(sets).not.toContain('pending:proposal-verify-sweep');
+        await admin.query(`INSERT INTO work_item_approvals (account_id, work_item_id, approved_by, spec_version_id, source) VALUES ($1, $2, $3, $4, 'work_item_approve')`, [f.t.accountId, f.workItemId, f.owner.userId, f.specId]);
+        await addSpec(f.t, f.workItemId, 2);
+        expect((await reapprove(f.owner, f.workItemId)).status).toBe(200);
+        expect(sets).toContain('pending:proposal-verify-sweep');
+      } finally {
+        setPendingHooks(null);
+      }
+    });
+
     it('refuses before an approval exists, and with the Spec unchanged', async () => {
       const f = await fixture();
       const res = await reapprove(f.owner, f.workItemId);

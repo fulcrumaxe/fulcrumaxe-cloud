@@ -6,6 +6,7 @@ import { FILE_LIST_NOTICE_COPY_KEY, REVIEW_STOP_COPY_KEY, getWorkItemActivity } 
 import { PUBLIC_CHANGE_STATES } from "@fx/core/src/repos/publicChangeCopy.js";
 import { OPERATOR_ACTIONS } from "@fx/core/src/work-items/operatorActions.js";
 import { statusSentence } from "@fx/core/src/setup-requests/copy.js";
+import { readChildLaunch } from "@fx/core/src/decisions/childLaunch.js";
 import { setupRequestDeps } from "./setupRequests.js";
 import type { RouteEntry } from "../registry.js";
 import { runnerUsageSchema } from "./runs.js";
@@ -79,6 +80,15 @@ export const activityResponseSchema = z.object({
     .optional(),
   // D#598 P8c-3: present only while a setup request holds the item. `sentence` is the request's status sentence (null when it has none: a withdrawn request, or one that closed meanwhile; the card then shows its own pause line).
   setup_pause: z.object({ state: z.enum(["open", "withdrawn"]), sentence: z.string().nullable() }).nullable().optional(),
+  // D#483 S5-b2c-2: present only for a planned PR child that has not started and has something to say: the reason it does not launch (a fixed sentence, derived on this read) and what the card offers with it, and/or the warning that it waits on a sibling (a person may still start it).
+  child_launch: z
+    .object({
+      code: z.string().nullable(),
+      sentence: z.string().nullable(),
+      offers: z.enum(["close", "parent"]).nullable(),
+      warning: z.object({ code: z.literal("waiting_on_planned_pr"), sentence: z.string() }).nullable(),
+    })
+    .optional(),
   // D#7 start gate (c): present only for an item that went through the start gate. `sentence` is fixed text; `name` is a person's display name (plain text); `at` is null while an ask is open.
   start_decision: z
     .object({
@@ -147,7 +157,13 @@ export const workItemActivityRoutes: RouteEntry[] = [
           sentence: pause.request === null ? null : statusSentence(pause.request, { checksAvailable: setupRequestDeps.getEnvSource().available }),
         },
       };
-      const activity = { ...rest, runs, ...(publicChange === null ? {} : { public_change: publicChange }), ...(startDecision === null ? {} : { start_decision: startDecision }), ...(recheck === null ? {} : { review_recheck: { kind: recheck.kind, sentence: COPY.reviewMergeOnlyRecheck } }), ...setupPause };
+      // A planned PR child that has not started: why it does not launch yet, read now from the rows (nothing stored). Read as a person's Approve reads it (the sibling hold is a warning).
+      const { accountId, userId, tokenId } = ctx.principal;
+      const launch = read.stage === "triaged"
+        ? await withTenant(ctx.pool, accountId, userId, tokenId, (client) => readChildLaunch(client, { accountId, childId: input.params.id!, person: true }))
+        : null;
+      const childLaunch = launch === null || launch.started || (launch.code === null && launch.warning === null) ? {} : { child_launch: { code: launch.code, sentence: launch.sentence, offers: launch.offers, warning: launch.warning } };
+      const activity = { ...rest, ...childLaunch, runs, ...(publicChange === null ? {} : { public_change: publicChange }), ...(startDecision === null ? {} : { start_decision: startDecision }), ...(recheck === null ? {} : { review_recheck: { kind: recheck.kind, sentence: COPY.reviewMergeOnlyRecheck } }), ...setupPause };
       // The Re-spec notices carry the KEY of their sentence out of @fx/core; the words are written once, in the runner protocol's copy.
       const n = activity.notice;
       if (n !== null && n.kind === "build_slot_wait") return { ...activity, notice: { kind: n.kind, reason: buildWaitSentence(n.reason, n.holder ?? null) } };

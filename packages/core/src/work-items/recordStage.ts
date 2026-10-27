@@ -155,6 +155,12 @@ export async function recordStage(
     void markWorkPending('reconcile');
   }
 
+  // D#483 S5-b2c-2: a planned PR that merged may release a sibling that waits on it (`depends_on`). Wake the auto-start sweep (a hint; the sweep reads the rows).
+  if (toStage === 'merged') {
+    const child = await client.query('SELECT 1 FROM work_items WHERE id = $1 AND planned_pr_key IS NOT NULL', [workItemId]);
+    if (child.rows.length > 0) void markWorkPending('proposal-verify-sweep');
+  }
+
   // A move out of a stage that holds a build slot frees it. An item waiting for that slot whose workflow is gone has nothing left that asks again, so this wakes
   // the parked-stage sweep (a hint, as above: the sweep reads the rows). A replay is a duplicate and returned before this line, so it wakes nothing.
   if (SLOT_HOLDING_STAGES.has(fromStage) && !SLOT_HOLDING_STAGES.has(toStage)) {

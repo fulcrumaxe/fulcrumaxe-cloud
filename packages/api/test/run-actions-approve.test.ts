@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
+import { setPendingHooks } from '@fx/core/src/pendingWork.js';
 import { insertApiToken, type Scope } from '@fx/core/src/tokens/service.js';
 import { createRecordingRunActionSignal } from '@fx/core/src/runActions/index.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
@@ -512,6 +513,23 @@ describe('D#483 P1: approve route', () => {
       expect(await approvalsOf(item)).toEqual([{ source: 'work_item_approve', approved_by: p.userId, spec_version_id: null }]);
       expect((await post(p, `/work-items/${item}/approve`)).status).toBe(202);
       expect(await approvalsOf(item)).toHaveLength(1);
+    });
+
+    it('D#483 S5-b2c-2: a successful approval wakes the auto-start sweep (it may have made planned PR children); a refusal does not', async () => {
+      const sets: string[] = [];
+      setPendingHooks({ store: { get: async () => null, set: async (key) => { sets.push(key); }, delete: async () => {} } });
+      try {
+        const member = await person('member');
+        const memberItem = await seedIssueItem(member.accountId);
+        expect((await post(member, `/work-items/${memberItem}/approve`)).status).toBe(403);
+        expect(sets).not.toContain('pending:proposal-verify-sweep');
+        const p = await person('admin');
+        const item = await seedIssueItem(p.accountId);
+        expect((await post(p, `/work-items/${item}/approve`)).status).toBe(202);
+        expect(sets).toContain('pending:proposal-verify-sweep');
+      } finally {
+        setPendingHooks(null);
+      }
     });
 
     it('every refusal writes no row', async () => {

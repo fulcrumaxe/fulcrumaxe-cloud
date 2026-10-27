@@ -41,6 +41,11 @@ export interface AdvanceFacts {
    * Absent or false: any other cause. Read by `readReviewHold` (reviewHold.ts); a caller that does not read it gets today's Build again.
    */
   no_verdict_hold?: boolean;
+  /**
+   * D#483 S5-b2c-2: the item is a planned PR child. Its entry is the build, straight from `triaged` (no triage, classify, panel or Spec of its own): `discussion_id` is not needed and
+   * `has_spec` means the Spec version it names exists. `kind` is its own. Absent or false: every other item, as before.
+   */
+  child?: boolean;
 }
 
 interface StageRule {
@@ -57,7 +62,15 @@ const reviewRule: StageRule = { action: 'review', unmet: (f) => (f.has_spec ? nu
 
 /** What a build needs: a published Spec of a kind that is built, behind a discussion. Shared by the Spec ready build and the Needs-a-person build again. */
 const buildUnmet = (f: AdvanceFacts): string | null => {
+  if (f.child === true) return childBuildUnmet(f);
   if (f.discussion_id === null || !f.has_spec) return 'work item has no published Spec';
+  if (f.kind === null || (ADVANCE_NON_BUILDABLE_KINDS as readonly string[]).includes(f.kind)) return `a ${f.kind ?? 'work item'} Spec is not built`;
+  return null;
+};
+
+/** A planned PR child builds from `triaged` when the Spec version it names exists and its kind is built. It has no discussion of its own. */
+const childBuildUnmet = (f: AdvanceFacts): string | null => {
+  if (!f.has_spec) return 'work item has no published Spec';
   if (f.kind === null || (ADVANCE_NON_BUILDABLE_KINDS as readonly string[]).includes(f.kind)) return `a ${f.kind ?? 'work item'} Spec is not built`;
   return null;
 };
@@ -67,8 +80,8 @@ const RULES: Readonly<Record<string, StageRule>> = Object.freeze({
   // Or, when it already did and the kind has no panel (small, bug, doc) and there is no Spec yet: the short Spec again. That is how
   // a request the project manager judged not feasible, or a short-Spec step that failed, is tried again after the issue was edited.
   triaged: {
-    action: (f) => (f.discussion_id !== null && isLight(f) ? 'light_spec' : 'triage'),
-    unmet: (f) => (f.discussion_id === null || isLight(f) ? null : 'work item is already triaged'),
+    action: (f) => (f.child === true ? 'build' : f.discussion_id !== null && isLight(f) ? 'light_spec' : 'triage'),
+    unmet: (f) => (f.child === true ? childBuildUnmet(f) : f.discussion_id === null || isLight(f) ? null : 'work item is already triaged'),
   },
   // Discussed by the pipeline but no Spec yet: a panel or a Spec step that failed (or was cut short) leaves the item
   // here, and approving it again runs the panel and the Spec once more. Only a kind with a panel qualifies. An item

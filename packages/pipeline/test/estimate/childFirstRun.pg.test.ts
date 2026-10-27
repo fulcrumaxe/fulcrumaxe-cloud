@@ -36,8 +36,8 @@ async function runs(accountId: string, role: string, n: number, spend: { model: 
 const inTenant = <T>(accountId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> => withTenant(h.pureAppUserPool, accountId, fn);
 
 describe("the child's first run is priced as one executor run", () => {
-  it("the pairing guard is false in code until the build supports a child", () => {
-    expect(CHILD_BUILD_SUPPORTED).toBe(false);
+  it("the pairing guard is true in code: the build supports a child", () => {
+    expect(CHILD_BUILD_SUPPORTED).toBe(true);
   });
 
   it("equals the executor's price in the estimate: a runner repo with 10 executor runs at $3 prices at $3", async () => {

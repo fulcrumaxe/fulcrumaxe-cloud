@@ -1,3 +1,4 @@
+import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { withTenant } from "@fx/db/src/withTenant.js";
@@ -247,6 +248,8 @@ async function approve(ctx: RouteContext, id: string) {
     // run starts always has the row; a repeat of an unchanged approval writes nothing.
     await client.query("SELECT 1 FROM work_item_approval_record($1::uuid, 'work_item_approve')", [id]);
   });
+  // D#483 S5-b2c-2: the approval may have made planned PR children (a hint: the auto-start sweep reads the rows).
+  void markWorkPending("proposal-verify-sweep");
 
   const requestHash = createHash("sha256").update(`advance_work_item:${id.toLowerCase()}`).digest("hex");
   const result = await requestRunAction(

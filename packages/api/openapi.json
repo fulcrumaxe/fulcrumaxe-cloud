@@ -3983,6 +3983,68 @@
                         }
                       ]
                     },
+                    "child_launch": {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "sentence": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "offers": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "close",
+                                "parent"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "warning": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "code": {
+                                  "type": "string",
+                                  "const": "waiting_on_planned_pr"
+                                },
+                                "sentence": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "code",
+                                "sentence"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "sentence",
+                        "offers",
+                        "warning"
+                      ],
+                      "additionalProperties": false
+                    },
                     "start_decision": {
                       "type": "object",
                       "properties": {

@@ -67,8 +67,10 @@ export interface ReviewCtx extends AdvancePrSource {
   repoId: string;
   owner: string;
   name: string;
-  /** The issue's number. */
+  /** The issue's number (a planned PR child's: its parent's). */
   issue: number;
+  /** A planned PR child's own branch (`fx/<parent#>-<key>`); absent for every other item. */
+  branch?: string;
   tier: string;
   /** The Spec version the person approved. */
   specVersion: number;
@@ -87,7 +89,7 @@ export async function reviewLoadBody(worker: ReviewWorker | null, who: StepWho, 
   if (!out.ok) return { ok: false, reason: out.reason };
   const c = out.ctx;
   if (pinned !== null && c.specVersion !== pinned) return { ok: false, reason: "spec_changed" };
-  return { ok: true, personRequestPending: c.personRequestPending === true, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, tier: c.tier, specVersion: c.specVersion, fixRoundsStarted: c.fixRoundsStarted ?? 0, debaterEnabled: c.debaterEnabled, executionMode: c.executionMode, recordedPr: c.recordedPr, prExecutionMode: c.prExecutionMode };
+  return { ok: true, personRequestPending: c.personRequestPending === true, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, ...(c.branch === undefined ? {} : { branch: c.branch }), tier: c.tier, specVersion: c.specVersion, fixRoundsStarted: c.fixRoundsStarted ?? 0, debaterEnabled: c.debaterEnabled, executionMode: c.executionMode, recordedPr: c.recordedPr, prExecutionMode: c.prExecutionMode };
 }
 
 export interface PrFound {
@@ -106,7 +108,7 @@ export type PrLookup = PrFound | { ok: false; reason: string };
  * The executor's open pull request, its head commit, and the security surfaces its diff touches. A sandbox build's is found by
  * `fx/issue-<n>`; a runner run's by the number and branch its `done` recorded, and none recorded is `no_open_pr` (D#6 C25 section 1.2).
  */
-export async function findPrBody(open: OpenHttp | null, ctx: Pick<ReviewCtx, "repoId" | "owner" | "name" | "issue" | "executionMode" | "prExecutionMode" | "recordedPr">): Promise<PrLookup> {
+export async function findPrBody(open: OpenHttp | null, ctx: Pick<ReviewCtx, "repoId" | "owner" | "name" | "issue" | "branch" | "executionMode" | "prExecutionMode" | "recordedPr">): Promise<PrLookup> {
   if (!open) return { ok: false, reason: "github_unavailable" };
   try {
     // D#599 PL-2: the pull request is looked up on the side that BUILT it (the newest executor run's), which is not the item's effective side
@@ -119,7 +121,7 @@ export async function findPrBody(open: OpenHttp | null, ctx: Pick<ReviewCtx, "re
     const found =
       promptRuntimeOf(lookupMode) === "sandbox" && ctx.recordedPr !== null && ctx.recordedPr.bound === true
         ? await findRecordedPullRequest(http, { owner: ctx.owner, name: ctx.name }, ctx.recordedPr, { local: false })
-        : await findPullRequestForItem(http, { owner: ctx.owner, name: ctx.name, issue: ctx.issue, executionMode: lookupMode, recordedPr: ctx.recordedPr });
+        : await findPullRequestForItem(http, { owner: ctx.owner, name: ctx.name, issue: ctx.issue, ...(ctx.branch === undefined ? {} : { branch: ctx.branch }), executionMode: lookupMode, recordedPr: ctx.recordedPr });
     if (!found.ok) return { ok: false, reason: found.reason };
     const files =
       lookupMode === "runner_local"
