@@ -22,6 +22,7 @@ import {
   roundIsCrossSide,
   securityTriggers,
   type AssembledPrompt,
+  type DeltaReviewInput,
   type FixFinding,
   type ReviewPromptRole,
 } from "@fx/pipeline";
@@ -245,9 +246,12 @@ export async function startReviewerBody(
   prior: ReadonlyArray<{ role: string; runId: string }>,
   rereview = 0,
   attempt = 0,
+  delta?: DeltaReviewInput,
 ): Promise<StartedReviewer> {
   if (!worker) return { role, runId: null, reason: "worker_unavailable" };
   if (!REVIEW_ROLES.includes(role)) return { role, runId: null, reason: "invalid_input" };
+  // D#519 MQ3-b-2: a delta review is a first look at one merge commit: no re-review round and no earlier reviewers' words.
+  if (delta !== undefined && (rereview !== 0 || prior.length > 0)) return { role, runId: null, reason: "invalid_input" };
   const spec = await worker.advanceLoadSpecText(who, ctx.specVersion);
   if (spec === null) return { role, runId: null, reason: "spec_changed" };
   const priorSummaries: Array<{ role: string; summary: string }> = [];
@@ -274,7 +278,7 @@ export async function startReviewerBody(
       spec: spec.body,
       runtime: promptRuntimeOf(ctx.executionMode, role),
       round: (ctx.fixRoundsStarted ?? 0) + 1,
-      ...(role === "debater" ? { prior: priorSummaries } : {}),
+      ...(delta !== undefined ? { delta } : role === "debater" ? { prior: priorSummaries } : {}),
     });
   } catch (err) {
     if (err instanceof ReviewPromptInputError) return { role, runId: null, reason: `bad_${err.field.toLowerCase()}` };
@@ -285,7 +289,8 @@ export async function startReviewerBody(
     accountId: who.accountId,
     workItemId: who.workItemId,
     haltEpoch: who.haltEpoch,
-    step: reviewStep(pr.headSha, role, rereview, attempt),
+    // A delta review has its own key: a full review of the same head later must not find it.
+    step: delta !== undefined ? `delta:${pr.headSha}:${role}${attempt > 0 ? `:s${attempt}` : ""}` : reviewStep(pr.headSha, role, rereview, attempt),
     role,
     prompt: assembled.prompt,
     contextSections: assembled.sections,
@@ -296,7 +301,7 @@ export async function startReviewerBody(
   }));
   if (!started.ok) return { role, runId: null, reason: started.reason };
   // A re-run of a reviewer whose run ended without a verdict is its own start on the activity (the attempt is in the key); a first start keeps the key it had.
-  await worker.advanceRecordEvent(who, { kind: "review_started", dedupeKey: `review:${pr.headSha}:${role}${rereview > 0 ? `:rr${rereview}` : ""}${attempt > 0 ? `:s${attempt}` : ""}`, reasons: [toCode(role)], headSha: pr.headSha, prNumber: pr.number, runId: started.runId });
+  await worker.advanceRecordEvent(who, { kind: "review_started", dedupeKey: `${delta !== undefined ? "delta" : "review"}:${pr.headSha}:${role}${rereview > 0 ? `:rr${rereview}` : ""}${attempt > 0 ? `:s${attempt}` : ""}`, reasons: [toCode(role)], headSha: pr.headSha, prNumber: pr.number, runId: started.runId });
   return { role, runId: started.runId, reason: null };
 }
 

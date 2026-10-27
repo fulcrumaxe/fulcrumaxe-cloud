@@ -101,3 +101,34 @@ describe("startReviewerBody", () => {
     for (const n of [2, 3]) expect(await promptFor(n)).toMatch(/Step back: check whether/);
   });
 });
+
+describe("D#519 MQ3-b-2: startReviewerBody with a delta", () => {
+  const MAIN_SIDE = "c".repeat(40);
+  const PR_SIDE = "d".repeat(40);
+  const DELTA = { mergeCommitSha: HEAD, parents: [PR_SIDE, MAIN_SIDE] as [string, string], parentRoles: ["pr_side", "main_side"] as ["pr_side", "main_side"], changedFiles: ["src/a.ts"], trigger: "refresh_overlap" as const };
+
+  it("4. a re-review round above zero is invalid_input and starts no run", async () => {
+    const f = fixture("sandbox");
+    expect(await startReviewerBody(f.worker, WHO, f.ctx, PR, "code-reviewer", [], 1, 0, DELTA)).toEqual({ role: "code-reviewer", runId: null, reason: "invalid_input" });
+    expect(f.started).not.toHaveBeenCalled();
+  });
+
+  it("4. earlier reviewers' passes (a debater's prior) are invalid_input and start no run", async () => {
+    const f = fixture("sandbox");
+    expect(await startReviewerBody(f.worker, WHO, f.ctx, PR, "debater", [{ role: "code-reviewer", runId: "x" }], 0, 0, DELTA)).toMatchObject({ runId: null, reason: "invalid_input" });
+    expect(f.started).not.toHaveBeenCalled();
+  });
+
+  it("passes the delta to the prompt unchanged, under a key of its own, and a bad delta is a fixed reason with no run", async () => {
+    const f = fixture("sandbox");
+    expect(await startReviewerBody(f.worker, WHO, f.ctx, PR, "code-reviewer", [], 0, 0, DELTA)).toEqual({ role: "code-reviewer", runId: "r1", reason: null });
+    const req = f.started.mock.calls[0]!.at(-1) as { prompt: string; step: string };
+    expect(req.prompt).toContain(`git diff ${PR_SIDE}..${HEAD}`);
+    expect(req.prompt).toContain(`git diff ${MAIN_SIDE}..${HEAD}`);
+    expect(req.step).toBe(`delta:${HEAD}:code-reviewer`);
+    const g = fixture("sandbox");
+    const out = await startReviewerBody(g.worker, WHO, g.ctx, PR, "code-reviewer", [], 0, 0, { ...DELTA, changedFiles: [] });
+    expect(out).toMatchObject({ runId: null, reason: "bad_delta.changedfiles" });
+    expect(g.started).not.toHaveBeenCalled();
+  });
+});

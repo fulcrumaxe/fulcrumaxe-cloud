@@ -604,6 +604,16 @@ export interface HeadRefreshRow {
   createdAt?: Date;
 }
 
+/**
+ * C4 2.4: the delta review of this refresh was skipped because the merge touched none of the PR's files. Written once, by the step that
+ * decided it; the gate then lets the reviewed head's passes carry across this hop (see `loadEffectiveRunsOnSha`).
+ */
+export async function markDeltaSkipped(client: Queryable, input: { accountId: string; entryId: string; toSha: string }): Promise<boolean> {
+  assertSha(input.toSha);
+  const r = await client.query(`UPDATE head_refreshes SET delta_review_skipped = 'main_side_only' WHERE account_id = $1 AND entry_id = $2 AND to_sha = $3`, [input.accountId, input.entryId, input.toSha]);
+  return r.rowCount === 1;
+}
+
 /** The refreshes recorded for one entry, oldest first. */
 export async function listHeadRefreshes(client: Queryable, accountId: string, entryId: string): Promise<HeadRefreshRow[]> {
   const { rows } = await client.query<{ from_sha: string; to_sha: string; base_sha: string; files_overlap: boolean; created_at: Date }>(

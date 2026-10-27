@@ -5,6 +5,8 @@ import { createGitHubMergeGatePort, mergeQueue, type GitHubHttp } from "@fx/pipe
 import type { AdvanceReviewDeps, RunnerPlaneMergeStore } from "@fx/worker";
 import type { GithubWebhookPayload, GithubWebhookEventName } from "@fx/github";
 import { createReviewDeps } from "./advanceReview";
+import { bindStartDeltaReview } from "./mergeQueueDeltaReview";
+import { getWorker } from "./worker";
 import { openInstallationHttp, readRepoAppLogin } from "./github/installationHttp";
 import { openForRepo } from "./github/localOnlyHttp";
 
@@ -32,7 +34,7 @@ export interface MergeQueueTickerDeps {
   open?: typeof openInstallationHttp;
   review?: AdvanceReviewDeps;
   appLogin?: (repoId: string) => Promise<string>;
-  /** MQ3-a's delta-review start, bound by the workflow's reviewer start. */
+  /** MQ3-a's delta-review start. Absent: the real one, bound to the reviewer start (mergeQueueDeltaReview.ts). */
   startDeltaReview?: mergeQueue.StartDeltaReview;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -71,7 +73,7 @@ export async function tickMergeQueueRepo(deps: MergeQueueTickerDeps, target: { a
             throw new Error("merge queue: gate answered an outcome this queue does not know");
         }
       },
-      startDeltaReview: deps.startDeltaReview ?? (async () => ({ started: true, runId: null })),
+      startDeltaReview: deps.startDeltaReview ?? bindStartDeltaReview({ pool, worker: await getWorker(), open, github }),
       sleep: deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
     },
     target,

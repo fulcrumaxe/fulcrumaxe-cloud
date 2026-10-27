@@ -647,7 +647,8 @@ export async function loadEffectiveRunsOnSha(pool: Pool, accountId: string, work
   const own = await loadRunsOnSha(pool, accountId, workItemId, headSha);
   const hops = await withTenant(pool, accountId, async (client) =>
     (await client.query<{ from_sha: string; to_sha: string; files_overlap: boolean }>(
-      `SELECT from_sha, to_sha, files_overlap FROM head_refreshes WHERE account_id = $1 AND work_item_id = $2`,
+      // A hop whose delta review was skipped because the merge touched none of the PR's files (C4 2.4) carries like a disjoint one.
+      `SELECT from_sha, to_sha, (files_overlap AND delta_review_skipped IS NULL) AS files_overlap FROM head_refreshes WHERE account_id = $1 AND work_item_id = $2`,
       [accountId, workItemId],
     )).rows,
   );
