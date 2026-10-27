@@ -6046,6 +6046,7 @@
                                         "start_failed",
                                         "not_set_up",
                                         "base_missing",
+                                        "agent_not_stopped",
                                         "other"
                                       ]
                                     },

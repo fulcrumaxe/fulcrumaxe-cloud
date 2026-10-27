@@ -71,6 +71,36 @@ export function readSmallRegular(file: string, cap: number): string {
   }
 }
 
+/**
+ * What a table name in `reftable/tables.list` looks like: git writes `0x<min update index>-0x<max update index>-<8 hex of a random suffix>.ref`
+ * (12 hex digits each). A name with a `/` or `..` is how a list reaches another repository's tables, so nothing but this shape is accepted.
+ */
+export const REFTABLE_NAME = /^0x[0-9a-f]{12}-0x[0-9a-f]{12}-[0-9a-f]{8}\.ref$/;
+/** A list of tables is a few dozen short lines (git compacts them); a megabyte is far past any real one. */
+const MAX_TABLES_LIST_BYTES = 1024 * 1024;
+
+/**
+ * With reftable ref storage the refs live in `<git dir>/reftable`, which git reads by the names in its `tables.list`. The agent can write there, so the folder
+ * must be a plain directory (not a link to another repository's), hold only plain single-link files, and list only table names of the exact shape. Absent is
+ * fine (files storage). Refuses with the closed code of the check it runs under.
+ */
+function assertReftableShape(gitDir: string): void {
+  const dir = path.join(gitDir, "reftable");
+  const kind = kindOf(dir);
+  if (kind === "none") return;
+  if (kind !== "dir") refuse();
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isFile() || entry.isSymbolicLink()) refuse();
+    if (lstatSync(path.join(dir, entry.name)).nlink !== 1) refuse();
+  }
+  const list = path.join(dir, "tables.list");
+  if (kindOf(list) === "none") return;
+  const text = readSmallRegular(list, MAX_TABLES_LIST_BYTES);
+  for (const line of text.split("\n")) {
+    if (line !== "" && !REFTABLE_NAME.test(line)) refuse();
+  }
+}
+
 /** Refuses a link, or an entry that is neither a file nor a directory, anywhere under `dir`. */
 function assertPlainTree(dir: string, budget: { left: number }): void {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -186,6 +216,7 @@ function checkGitDirShape(gitDir: string, mirrorObjects: string | null, requireA
       if (!entry.isFile() || entry.isSymbolicLink()) refuse();
     }
   }
+  closed(() => assertReftableShape(gitDir));
   const budget = { left: MAX_ENTRIES };
   closed(() => assertPlainTree(refs, budget));
   closed(() => assertPlainTree(objects, budget));

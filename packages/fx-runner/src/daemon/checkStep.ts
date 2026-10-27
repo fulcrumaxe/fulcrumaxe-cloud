@@ -35,7 +35,7 @@ import { CHECK_SUMMARY_MAX_BYTES, redactShapes, type Check, type CheckNotRunReas
 import type { InstallCapture } from "./engineKit.js";
 import { GitPathError, guardConfigEnv, type GitCapture } from "./git.js";
 import { gitEnv, type CleanEnvOptions } from "../job/cleanEnv.js";
-import { readWorkspaceGit } from "./hostRead.js";
+import { HostReadSession, hostGit, readWorkspaceGit } from "./hostRead.js";
 import { protectedRootNames, VCS_DIR } from "../sandbox/checkProtected.js";
 
 /** How much raw output is kept before redaction; the summary is cut to `CHECK_SUMMARY_MAX_BYTES` afterwards. */
@@ -169,8 +169,9 @@ export function createChangedFiles(capture: GitCapture, envOptions: CleanEnvOpti
   return async (workspace, base) => {
     // `--no-renames`: a rename names both paths. The untracked listing is the files the agent made and has not committed (ignored files are not changes).
     // Both reads go through `readWorkspaceGit`: the git folder's shape is checked first, and a shape it does not know throws `workspace_git_refused`.
-    const tracked = await readWorkspaceGit(capture, envOptions, workspace, ["diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", base, "--"], 30_000);
-    const fresh = await readWorkspaceGit(capture, envOptions, workspace, ["ls-files", "-z", "--others", "--exclude-standard"], 30_000);
+    const session = new HostReadSession(); // the two reads walk the worktree for nested repositories once
+    const tracked = await readWorkspaceGit(capture, envOptions, workspace, hostGit("diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", base, "--"), 30_000, session);
+    const fresh = await readWorkspaceGit(capture, envOptions, workspace, hostGit("ls-files", "-z", "--others", "--exclude-standard"), 30_000, session);
     if (tracked.code !== 0 || tracked.timedOut || fresh.code !== 0 || fresh.timedOut) return null;
     // A listing as long as the capture keeps could have been cut: the list is then not complete, and not offered.
     if (tracked.stdout.length >= LISTING_CAP_GUARD || fresh.stdout.length >= LISTING_CAP_GUARD) return null;
@@ -396,9 +397,9 @@ async function guardProtected(workspace: string, before: Snapshot, deps: CheckSt
 export function createVcsState(capture: GitCapture, envOptions: CleanEnvOptions): CheckStepDeps["vcsState"] {
   return async (workspace) => {
     // A refused shape throws here; the check step turns a throw from this read into `protected_unreadable` (the check is not run).
-    const refs = await readWorkspaceGit(capture, envOptions, workspace, ["for-each-ref", "--format=%(objectname) %(refname)"], 30_000);
-    const head = await readWorkspaceGit(capture, envOptions, workspace, ["rev-parse", "--verify", "HEAD"], 30_000);
-    const symbolic = await readWorkspaceGit(capture, envOptions, workspace, ["symbolic-ref", "-q", "HEAD"], 30_000);
+    const refs = await readWorkspaceGit(capture, envOptions, workspace, hostGit("for-each-ref", "--format=%(objectname) %(refname)"), 30_000);
+    const head = await readWorkspaceGit(capture, envOptions, workspace, hostGit("rev-parse", "--verify", "HEAD"), 30_000);
+    const symbolic = await readWorkspaceGit(capture, envOptions, workspace, hostGit("symbolic-ref", "-q", "HEAD"), 30_000);
     if (refs.code !== 0 || refs.timedOut || head.code !== 0 || head.timedOut) throw new Error("version-control state unreadable");
     return `${head.stdout.trim()}\n${symbolic.stdout.trim()}\n${refs.stdout}`;
   };

@@ -146,13 +146,35 @@ describe("cleanResumedWorkspace", () => {
     expect(cut.join("\n")).not.toContain("again");
   });
 
-  it("keeps a nested repository's working tree, nested .claude, CLAUDE.local.md, .envrc and .venv", async () => {
-    writeFileSync(path.join(ws, ".gitignore"), ".next/\nvend/\n*.local.md\n.envrc\n.venv/\n.claude/\n");
+  it("keeps the whole workspace when it holds a nested repository: the listing is refused, nothing is read or removed", async () => {
+    writeFileSync(path.join(ws, ".gitignore"), "vend/\n.next/\n");
     sh("-C", ws, "add", ".gitignore");
     sh("-C", ws, "commit", "-q", "-m", "ignores");
     mkdirSync(path.join(ws, "vend", "lib"), { recursive: true });
     sh("-C", path.join(ws, "vend", "lib"), "init", "-q");
     put("vend/lib/work.txt", "uncommitted work");
+    put("apps/web/.next/x.js");
+    expect(await clean(git(), ws)).toEqual({ files: 0, dirs: 0 });
+    expect(has("vend/lib/work.txt")).toBe(true);
+    expect(has("apps/web/.next/x.js")).toBe(true);
+  });
+
+  it("says once, with no counts and no paths, that the clean-up was skipped because the workspace was not read", async () => {
+    mkdirSync(path.join(ws, "lib"), { recursive: true });
+    sh("-C", path.join(ws, "lib"), "init", "-q");
+    const lines: string[] = [];
+    expect(await clean(git(), ws, (line) => lines.push(line))).toEqual({ files: 0, dirs: 0 });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/clean-up skipped/);
+    expect(lines[0]).not.toMatch(/\d/);
+    expect(lines[0]).not.toContain(ws);
+    expect(lines[0]).not.toContain("lib");
+  });
+
+  it("keeps nested .claude, CLAUDE.local.md, .envrc and .venv", async () => {
+    writeFileSync(path.join(ws, ".gitignore"), ".next/\nvend/\n*.local.md\n.envrc\n.venv/\n.claude/\n");
+    sh("-C", ws, "add", ".gitignore");
+    sh("-C", ws, "commit", "-q", "-m", "ignores");
     put("vend/build.log", "stale");
     put("apps/web/.claude/settings.local.json");
     put("CLAUDE.local.md");
@@ -160,9 +182,7 @@ describe("cleanResumedWorkspace", () => {
     put("tools/.venv/bin/python");
     put("apps/web/.next/x.js");
     await clean(git(), ws);
-    expect(has("vend/lib/work.txt")).toBe(true);
-    expect(has("vend/lib/.git")).toBe(true);
-    expect(has("vend/build.log")).toBe(false); // only the directory with the repository is kept whole; its stale sibling goes
+    expect(has("vend/build.log")).toBe(false);
     expect(has("apps/web/.claude/settings.local.json")).toBe(true);
     expect(has("CLAUDE.local.md")).toBe(true);
     expect(has("pkg/.envrc")).toBe(true);

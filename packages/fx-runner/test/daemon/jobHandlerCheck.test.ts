@@ -52,7 +52,7 @@ afterEach(async () => {
 const clock: Clock = { now: () => new Date(), sleep: (ms, signal) => new Promise<void>((resolve) => { if (signal.aborted) return resolve(); const t = setTimeout(resolve, Math.min(ms, 1)); signal.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true }); }) };
 const withShell: NixShellStep = { prepare: async () => ({ ok: true, env: { PATH: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-node/bin" } }) } as unknown as NixShellStep;
 
-function rig(over: { lockfile?: { outcome: LockSyncOutcome | "throws"; inputs: Array<{ base: string; registryHost: string | undefined }>; stubSeen?: boolean[]; stopFails?: boolean }; outcome?: CheckOutcome; shell?: boolean; wired?: boolean; onCheck?: () => void; pin?: string | null; skipHook?: boolean; steps?: string[]; hangUntilStopped?: { onStart: () => void; seen: { aborted?: boolean } }; heartbeatMs?: number } = {}) {
+function rig(over: { lockfile?: { outcome: LockSyncOutcome | "throws"; inputs: Array<{ base: string; registryHost: string | undefined }>; stubSeen?: boolean[]; stopFails?: boolean }; outcome?: CheckOutcome; shell?: boolean; wired?: boolean; onCheck?: () => void; pin?: string | null; skipHook?: boolean; steps?: string[]; hangUntilStopped?: { onStart: () => void; seen: { aborted?: boolean } }; heartbeatMs?: number; recordStop?: boolean } = {}) {
   const key = generateRunnerKey();
   cloud.trust(key.publicJwk);
   const client = createRunnerClient({ origin: cloud.origin, key, now: () => new Date(), fetchFn: fetch });
@@ -71,7 +71,7 @@ function rig(over: { lockfile?: { outcome: LockSyncOutcome | "throws"; inputs: A
       return { handle, hookFired: Promise.resolve(event) };
     },
     resume: () => { throw new Error("not used"); },
-    async extendTimeout() {}, async stop() { if (over.lockfile !== undefined) order.push("agent_stopped"); if (over.lockfile?.stopFails === true) throw new Error("group survived at /home/someone/x"); }, async deleteSandbox() { order.push("sandbox_deleted"); }, async measure() { return []; }, async readCounters() { return undefined; }, async writeFiles() {}, async runCommand(): Promise<never> { throw new Error("not used"); }, async sandboxExists() { return true; },
+    async extendTimeout() {}, async stop() { if (over.lockfile !== undefined || over.recordStop === true) order.push("agent_stopped"); if (over.lockfile?.stopFails === true) throw new Error("group survived at /home/someone/x"); }, async deleteSandbox() { order.push("sandbox_deleted"); }, async measure() { return []; }, async readCounters() { return undefined; }, async writeFiles() {}, async runCommand(): Promise<never> { throw new Error("not used"); }, async sandboxExists() { return true; },
   };
   const run: Omit<RunJobDeps, "sandbox" | "ledger"> = { workspaces: createWorkspaceStore(path.join(root, "work")), credentials: { mode: "subscription" }, planSession: () => ({ kind: "fresh", branch: null }), defaultModel: "sonnet" };
   const git = fakeGitPath({ prepare: async (_job, _claimed, workspace) => { held = workspace; return { base: BASE }; }, publish: async () => (order.push("publish"), { pushed: true, branch: BRANCH, sha: HEAD }) });
@@ -152,16 +152,26 @@ describe("a job with a check", () => {
     expect(steps.some((s) => s.includes("lockfile update ended (updated)"))).toBe(true);
   });
 
-  it("an agent that cannot be stopped is never followed by a host-side lockfile update; the check still runs and the run still ends cleanly", async () => {
+  it("an agent that cannot be stopped is never followed by a host-side lockfile update or a check: the check ends as not run (agent_not_stopped), the run still ends", async () => {
     const lockfile = { outcome: { kind: "updated" } as LockSyncOutcome, inputs: [] as Array<{ base: string; registryHost: string | undefined }>, stopFails: true };
     const steps: string[] = [];
     const r = rig({ lockfile, steps });
     await r.handle(await r.claim(withCheck()));
     expect(lockfile.inputs).toEqual([]);
     expect(r.order).not.toContain("lockfile");
-    expect(r.order).toContain("check");
+    expect(r.order).not.toContain("check");
+    expect(r.order).not.toContain("hook");
     expect(steps.some((l) => l.includes("lockfile update ended (not run: the agent could not be stopped)"))).toBe(true);
+    expect(steps.some((l) => l.includes("check not run (agent_not_stopped)"))).toBe(true);
+    expect(bodies("/done")[0]!.check).toMatchObject({ exit_code: null, timed_out: false, duration_ms: 0, reason: "agent_not_stopped" });
     expect(steps.join("\n")).not.toContain("someone");
+  });
+
+  it("the agent is stopped before the check's host reads even when no lockfile update is wired", async () => {
+    const r = rig({ recordStop: true });
+    expect(r.deps.lockfileSync).toBeUndefined();
+    await r.handle(await r.claim(withCheck()));
+    expect(r.order.slice(0, 3)).toEqual(["agent", "agent_stopped", "check"]);
   });
 
   it("runs after the agent's placeholders are cleared, so the update never sees them", async () => {

@@ -226,29 +226,39 @@ describe("a nested repository's own config is never reached by a host read", () 
     return listed;
   };
 
-  it("(a) a committed gitlink with a dirty nested file: plain git starts the nested repo's filter, the read does not", async () => {
+  const worktreeReadsRefused = async (): Promise<void> => {
+    await expect(createChangedFiles(capture, envOptions)(ws, baseSha)).rejects.toMatchObject({ code: "workspace_git_refused" });
+    expect(started.filter((args) => !args.includes("config"))).toEqual([]);
+    // The ref-only snapshot touches no worktree path and is not refused.
+    expect(await createVcsState(capture, envOptions)(ws)).toContain("refs/heads/work");
+    expect(existsSync(marker)).toBe(false);
+  };
+
+  it("(a) a committed gitlink with a dirty nested file: plain git starts the nested repo's filter, the worktree reads are refused and start nothing", async () => {
     nested(false);
     recordAndDirty();
     rawDiff();
-    expect(existsSync(marker)).toBe(true); // control: the attack is real without the neutral arguments
+    expect(existsSync(marker)).toBe(true); // control: the attack is real without the check
     rmSync(marker);
-    await hostReads();
+    await worktreeReadsRefused();
   });
 
-  it("(b) an uncommitted nested repository (untracked) is listed as a directory and never entered", async () => {
+  it("(b) an uncommitted nested repository (untracked) is refused too: a nested .git is never inspected", async () => {
     nested(false);
     writeFileSync(path.join(ws, "sub", "f"), "two\n");
-    const listed = await hostReads();
-    expect(listed).toContain("sub/");
+    await worktreeReadsRefused();
   });
 
-  it("(c) a submodule whose .git is a gitfile pointing elsewhere in the workspace", async () => {
+  it("(c) a submodule whose .git is a gitfile pointing elsewhere in the workspace: every nested gitfile is refused, nothing is started", async () => {
     nested(true);
     recordAndDirty();
     rawDiff();
     expect(existsSync(marker)).toBe(true);
     rmSync(marker);
-    await hostReads();
+    // The worktree reads are refused; the ref-only snapshot touches no worktree path and is not.
+    await expect(createChangedFiles(capture, envOptions)(ws, baseSha)).rejects.toMatchObject({ code: "workspace_git_refused" });
+    expect(started.filter((args) => !args.includes("config"))).toEqual([]);
+    expect(existsSync(marker)).toBe(false);
   });
 
   it("the neutral arguments ride on every read, from the shared list", async () => {

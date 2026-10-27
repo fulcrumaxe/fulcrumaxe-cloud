@@ -164,8 +164,8 @@ describe.skipIf(!usable)("the agent's Bash starts under the job's own file rules
         const run = spawnSync(command, [...args], { env: e, timeout: timeoutMs, encoding: "utf8" });
         resolve({ code: run.status, stdout: run.stdout, timedOut: false });
       });
-    const listed = await createChangedFiles(capture, {} as never)(ws, base);
-    expect(listed).not.toContain("sub/f");
+    // A nested .git is never inspected: the worktree read is refused before git starts.
+    await expect(createChangedFiles(capture, {} as never)(ws, base)).rejects.toMatchObject({ code: "workspace_git_refused" });
     await createVcsState(capture, {} as never)(ws);
     expect(existsSync(marker)).toBe(false);
   });

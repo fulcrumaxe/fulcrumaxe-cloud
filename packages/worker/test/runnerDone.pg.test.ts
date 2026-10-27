@@ -1,7 +1,7 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { DoneReply, DoneRetryReply, NOT_RECORDED_MEASURE, type Check, type DoneCheck, RUNNER_ELIGIBLE_ROLES, StopReply, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { CHECK_NOT_RUN_REASONS, DoneReply, DoneRetryReply, NOT_RECORDED_MEASURE, type Check, type DoneCheck, RUNNER_ELIGIBLE_ROLES, StopReply, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
@@ -606,6 +606,15 @@ describe("runner done [pg]", () => {
         const g = await claimed(id);
         await facade.finishRunnerDone({ ...lease(id, g), verdict: failedVerdict(`fx/${id}-g${g}`), check: result({ exit_code: null, ...(sent === undefined ? {} : { reason: sent }) }) });
         expect(await reasonOf(id), String(sent)).toBe(stored);
+      }
+    });
+
+    it("every code the runner protocol lists is stored as it is (the table's list cannot drift from the protocol's)", async () => {
+      for (const reason of CHECK_NOT_RUN_REASONS) {
+        const id = await pending();
+        const g = await claimed(id);
+        await facade.finishRunnerDone({ ...lease(id, g), verdict: failedVerdict(`fx/${id}-g${g}`), check: result({ exit_code: null, reason }) });
+        expect(await reasonOf(id), reason).toBe(reason);
       }
     });
 

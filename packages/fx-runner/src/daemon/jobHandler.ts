@@ -543,27 +543,39 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
           const allowed = deps.onStep === undefined ? spilled : narrated(spilled, step);
           usedPort = allowed;
           const afterAgent = async (sandboxHandle: SandboxHandle, workspace: string): Promise<void> => {
+            let agentStopFailed = false;
             // Before the check's before-and-after comparison of the protected files, so a placeholder is neither checked nor reported as a change.
             clearStubs(workspace);
             // The agent could not touch the lockfile; the runner does it, so the check's frozen install and the published change both see a lockfile that matches the manifests.
-            if (deps.lockfileSync !== undefined && started.base !== undefined) {
-              // The agent's process tree must be gone before the runner reads or writes the workspace on the host: its hook fires on the result event, and a tool call's background
-              // process may still be running (CWE-367). `stop` ends the whole group and waits; the sandbox itself stays, so the check below still launches under its rules.
+            // Note: `clearStubs(workspace)` above runs once BEFORE `stop()`. It is a host-side unlink of the sandbox's placeholders, not a git call; a second clear runs after the stop.
+            const syncsLockfile = deps.lockfileSync !== undefined && started.base !== undefined;
+            // The agent's process tree must be gone before the runner reads or writes the workspace on the host (the lockfile update, the check's reads): its hook fires on the
+            // result event, and a tool call's background process may still be running (CWE-367). `stop` ends the whole group and waits; the sandbox itself stays, so the check
+            // below still launches under its rules. It runs for the check whether or not a lockfile update is wired.
+            if (syncsLockfile || job.check !== undefined) {
               const ended = await allowed.stop(sandboxHandle).then(() => true, () => false);
               if (!ended) {
-                step("lockfile update ended (not run: the agent could not be stopped)");
+                agentStopFailed = true;
+                if (syncsLockfile) step("lockfile update ended (not run: the agent could not be stopped)");
               } else {
                 // A process of the stopped tree may have made a placeholder after the first clear.
                 clearStubs(workspace);
-                const domains = (job.sandbox_allowances?.entries ?? []).filter((entry) => entry.kind === "domain").map((entry) => entry.value);
-                const synced = await deps.lockfileSync.run({ workspace, base: started.base, registryHost: registryHostOf(domains), signal: stopRun }).catch(() => undefined);
-                if (synced === undefined) step("lockfile update ended (lockfile_sync_failed)");
-                else if (synced.kind !== "none") step(`lockfile update ended (${synced.kind}${synced.kind === "failed" ? `: ${synced.why}` : synced.kind === "refused" ? `: ${synced.reason}` : ""})`);
+                if (deps.lockfileSync !== undefined && started.base !== undefined) {
+                  const domains = (job.sandbox_allowances?.entries ?? []).filter((entry) => entry.kind === "domain").map((entry) => entry.value);
+                  const synced = await deps.lockfileSync.run({ workspace, base: started.base, registryHost: registryHostOf(domains), signal: stopRun }).catch(() => undefined);
+                  if (synced === undefined) step("lockfile update ended (lockfile_sync_failed)");
+                  else if (synced.kind !== "none") step(`lockfile update ended (${synced.kind}${synced.kind === "failed" ? `: ${synced.why}` : synced.kind === "refused" ? `: ${synced.reason}` : ""})`);
+                }
               }
             }
             const check = job.check;
             if (check === undefined) return;
             const closed = closedCheck;
+            // The agent may still be alive: the check's reads of the workspace on the host (and the check itself) are not run beside it.
+            if (agentStopFailed) {
+              checkHeld.outcome = closed("the check was not run: the agent could not be stopped", "agent_not_stopped"); step("check not run (agent_not_stopped)");
+              return;
+            }
             // A check that needs the dev shell is not run without one, and never passes by default.
             if (check.dev_shell && grant?.nixEnv === undefined) {
               checkHeld.outcome = closed("", undefined, { noDevShell: true }); step("check not run (check_no_dev_shell)");
