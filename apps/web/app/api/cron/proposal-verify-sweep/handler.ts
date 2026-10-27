@@ -54,7 +54,8 @@ export async function proposalVerifySweepHandler(req: NextRequest, deps: Proposa
       });
       // Proposals still waiting (held by a limit, a run in flight, or the pass budget) keep the next pass connecting. Proposals the weekly limit has no room for
       // wait for its renewal instead of polling: the gate cannot start them before then, and the backstop still looks now and then.
-      const moreToGate = autoStart !== null && (autoStart.started > 0 || autoStart.failed > 0);
+      // D#483 S5-b2c-1: the child pass counts the same way (a child it launched, or could not gate, keeps the next pass coming).
+      const moreToGate = autoStart !== null && (autoStart.started > 0 || autoStart.failed > 0 || (autoStart.children?.started ?? 0) > 0 || (autoStart.children?.failed ?? 0) > 0);
       const workFound = counts.listed > 0 || moreToGate;
       const renewsAt = autoStart?.renews_at !== undefined ? Date.parse(autoStart.renews_at) : Number.NaN;
       const nextDueAt = workFound ? now() + PROPOSAL_VERIFY_PASS_MS : Number.isFinite(renewsAt) ? renewsAt : null;

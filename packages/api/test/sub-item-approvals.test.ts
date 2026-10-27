@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
+import { plannedFixture } from '@fx/db/test/helpers/plannedChildren.js';
 import { approveSubItem } from '@fx/core/src/decisions/approveSubItem.js';
 import { insertApiToken } from '@fx/core/src/tokens/service.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
@@ -184,6 +185,19 @@ describe('D#483 S5-b2a: approval routes', () => {
         if (errorCode) expect(await code(res)).toBe(errorCode);
       }
       expect(Number((await admin.query('SELECT count(*) n FROM decision_receipts WHERE work_item_id = $1', [f.workItemId])).rows[0].n)).toBe(0);
+    });
+
+    it('D#483 S5-b2c-1: the key of a planned PR child answers 409 child_build_unsupported with its sentence while the build cannot build a child, and starts nothing', async () => {
+      const p = await plannedFixture(admin, appUserPool);
+      const owner: Identity = { accountId: p.t.accountId, userId: p.t.userId };
+      const res = await approveSub(owner, p.parent, 'api');
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as ErrorBody;
+      expect(body.error).toMatchObject({ code: 'child_build_unsupported', message: "Planned PRs can't start yet." });
+      expect(Number((await admin.query(`SELECT count(*) n FROM run_action_requests WHERE account_id = $1`, [p.t.accountId])).rows[0].n)).toBe(0);
+      expect(Number((await admin.query(`SELECT count(*) n FROM decision_receipts WHERE work_item_id = $1 AND sub_item_key = 'api'`, [p.parent])).rows[0].n)).toBe(0);
+      // A missing Idempotency-Key is still a 400 first, and a member or token is still refused before the guard.
+      expect((await approveSub(owner, p.parent, 'api', { key: null })).status).toBe(400);
     });
 
     it('is a 503 while no worker is available', async () => {

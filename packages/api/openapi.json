@@ -15933,7 +15933,7 @@
       "post": {
         "operationId": "approveSubItem",
         "summary": "Approve one sub-item of an approved work item",
-        "description": "Session only, owner or admin; a token is refused. `Idempotency-Key` is required. Takes no request body. Writes the `launch_sub_item` receipt in the person's name, keyed by the work item, the sub-item key (`fix-<round>` for a fix round) and the work item's current Spec version, and closes the matching open ask as superseded. The same key under the same Spec version answers the same receipt; a new Spec version makes an earlier approval stop counting. 404 for an unknown work item; 409 `parent_not_approved` (no person has approved the work item), `respec_needs_approval` (the Spec changed since: use reapprove), `no_spec`, `no_anchor_run` or `wrong_round` (a fix round other than the next one); 422 `invalid_key`; 503 `sub_item_approval_unavailable` while no worker is available.",
+        "description": "Session only, owner or admin; a token is refused. `Idempotency-Key` is required. Takes no request body. Writes the `launch_sub_item` receipt in the person's name, keyed by the work item, the sub-item key (`fix-<round>` for a fix round) and the work item's current Spec version, and closes the matching open ask as superseded. The same key under the same Spec version answers the same receipt; a new Spec version makes an earlier approval stop counting. For the key of a planned PR child it also starts that child, in the person's own name, once the parent's envelope has room for its first run; the sibling a planned PR waits for is a warning on its card, not a block. 404 for an unknown work item; 409 `parent_not_approved` (no person has approved the work item), `respec_needs_approval` (the Spec changed since: use reapprove), `no_spec`, `no_anchor_run` or `wrong_round` (a fix round other than the next one), and for a planned PR `child_build_unsupported`, `child_orphaned`, `parent_closed`, `key_not_in_approved_spec`, `parent_no_envelope`, `parent_envelope_reached` or `child_closed`; 422 `invalid_key`; 503 `sub_item_approval_unavailable` while no worker is available.",
         "security": [
           {
             "session": []
@@ -16028,7 +16028,7 @@
             }
           },
           "409": {
-            "description": "Error `parent_not_approved`, `respec_needs_approval`, `no_spec`, `no_anchor_run` or `wrong_round`.",
+            "description": "Error `parent_not_approved`, `respec_needs_approval`, `no_spec`, `no_anchor_run`, `wrong_round`, or for a planned PR `child_build_unsupported`, `child_orphaned`, `parent_closed`, `key_not_in_approved_spec`, `parent_no_envelope`, `parent_envelope_reached` or `child_closed`.",
             "content": {
               "application/json": {
                 "schema": {

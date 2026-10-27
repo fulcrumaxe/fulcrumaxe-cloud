@@ -4,6 +4,7 @@ import { withdrawSubItemAsk } from '@fx/db/src/decisionAsks.js';
 import { getCurrentDialSetting } from '@fx/db/src/decisions.js';
 import { DIAL_VERSION_CATALOGUE_DEFAULT, writeSubItemApprovalReceipt } from '@fx/db/src/receiptWriter.js';
 import { CHECK_KEY_RE, checkKeyOf } from './fixRoundGate.js';
+import { ChildLaunchRefusal, fileChildLaunch, findPlannedChild, prepareChildLaunch, type ChildLaunchCode, type ChildLaunchDeps } from './childLaunch.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { VERDICT_ROLES } from '../work-items/verdictRoles.js';
 
@@ -21,11 +22,14 @@ import { VERDICT_ROLES } from '../work-items/verdictRoles.js';
  */
 export type SubItemApprovalErrorCode =
   | 'session_required' | 'forbidden' | 'not_found' | 'invalid_key'
-  | 'parent_not_approved' | 'respec_needs_approval' | 'no_spec' | 'no_anchor_run' | 'wrong_round';
+  | 'parent_not_approved' | 'respec_needs_approval' | 'no_spec' | 'no_anchor_run' | 'wrong_round'
+  // A planned PR key (D#483 S5-b2c-1): why the child does not start. `child_build_unsupported` is the pairing guard: nothing starts until the build can build a child.
+  | 'child_build_unsupported' | 'child_orphaned' | 'parent_closed' | 'key_not_in_approved_spec' | 'parent_no_envelope' | 'parent_envelope_reached' | 'child_closed';
 
 const STATUS: Record<SubItemApprovalErrorCode, 403 | 404 | 409 | 422> = {
   session_required: 403, forbidden: 403, not_found: 404, invalid_key: 422,
   parent_not_approved: 409, respec_needs_approval: 409, no_spec: 409, no_anchor_run: 409, wrong_round: 409,
+  child_build_unsupported: 409, child_orphaned: 409, parent_closed: 409, key_not_in_approved_spec: 409, parent_no_envelope: 409, parent_envelope_reached: 409, child_closed: 409,
 };
 
 /** `status` is the HTTP status a route answers with. Branch on `code`, never on the message. */
@@ -42,6 +46,8 @@ export interface SubItemApprovalCtx {
   /** The receipt pool. A token principal (`tokenId`) can never approve. */
   pool: Pool;
   principal: { accountId: string; userId: string; tokenId?: string };
+  /** The planned PR launch's outside pieces (the build's readiness and the envelope's room). Absent: an Approve on a planned PR key answers `child_build_unsupported`. */
+  child?: ChildLaunchDeps;
 }
 export interface SubItemApprovalInput {
   workItemId: string;
@@ -56,6 +62,8 @@ export interface SubItemApprovalResult {
   withdrawnAsks: number;
   /** The advance request this approval filed to re-enter a workflow that was waiting on the ask (null when none was waiting, or it was already filed). */
   advanceActionId: string | null;
+  /** For a planned PR key: the child this approval launched (null when it was already started, or the key is not a planned PR's). */
+  childLaunchedId?: string | null;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -68,7 +76,7 @@ export async function approveSubItem(ctx: SubItemApprovalCtx, input: SubItemAppr
   if (typeof input.key !== 'string' || !KEY_RE.test(input.key)) throw new SubItemApprovalError('invalid_key');
   if (typeof input.workItemId !== 'string' || !UUID_RE.test(input.workItemId)) throw new SubItemApprovalError('not_found');
   try {
-    return await withTenant(ctx.pool, accountId, userId, tokenId, (client) => approveSubItemIn(client, { accountId, userId }, input));
+    return await withTenant(ctx.pool, accountId, userId, tokenId, (client) => approveSubItemIn(client, { accountId, userId }, input, ctx.child));
   } catch (err) {
     const message = (err as { message?: string } | null)?.message ?? '';
     if ((err as { code?: string } | null)?.code === '42501') {
@@ -82,7 +90,7 @@ export async function approveSubItem(ctx: SubItemApprovalCtx, input: SubItemAppr
  * The approval inside a transaction the caller owns (`withTenant` on the receipt pool with the person's user id set): the card's Approve and the answer to a
  * `launch_sub_item` ask in Needs you both run exactly this, so the two can never disagree.
  */
-export async function approveSubItemIn(client: PoolClient, who: { accountId: string; userId: string }, input: SubItemApprovalInput): Promise<SubItemApprovalResult> {
+export async function approveSubItemIn(client: PoolClient, who: { accountId: string; userId: string }, input: SubItemApprovalInput, childDeps?: ChildLaunchDeps): Promise<SubItemApprovalResult> {
   const { accountId, userId } = who;
   const member = await client.query<{ role: string }>('SELECT role FROM account_members WHERE account_id = $1 AND user_id = $2', [accountId, userId]);
   if (member.rows[0] === undefined) throw new SubItemApprovalError('session_required');
@@ -98,6 +106,18 @@ export async function approveSubItemIn(client: PoolClient, who: { accountId: str
   if (approval.spec_version_id !== spec.id) throw new SubItemApprovalError('respec_needs_approval');
   // A fix round is approved only for the NEXT round (rounds started + 1): an approval for any other number would hang on an unrelated run and
   // later count when that round arrives.
+  // A planned PR key names a child of this parent (migration 0919). Its launch is checked before anything is written: any refusal here throws, and the whole
+  // approval (the receipt included) rolls back, so a refused Approve leaves nothing. Check 5 (a sibling that has not merged) is not a block for a person.
+  const childId = input.key.startsWith('fix-') || input.key.startsWith('check-') ? null : await findPlannedChild(client, accountId, input.workItemId, input.key);
+  let childPlan: { launch: boolean } | null = null;
+  if (childId !== null) {
+    try {
+      childPlan = await prepareChildLaunch(client, { accountId, childId, deps: childDeps });
+    } catch (err) {
+      if (err instanceof ChildLaunchRefusal) throw new SubItemApprovalError(err.code as ChildLaunchCode & SubItemApprovalErrorCode);
+      throw err;
+    }
+  }
   const isFix = input.key.startsWith('fix-');
   if (isFix) {
     const m = FIX_KEY_RE.exec(input.key);
@@ -149,5 +169,11 @@ export async function approveSubItemIn(client: PoolClient, who: { accountId: str
       if (!req.rows[0]!.replayed) advanceActionId = req.rows[0]!.action_id;
     }
   }
-  return { receiptId: receipt.id, replayed: receipt.replayed, specVersionId: spec.id, withdrawnAsks: withdrawn, advanceActionId };
+  // A planned PR: the child draws on its parent's envelope and starts, filed in the person's own name (a person's click, never the dial's).
+  let childLaunchedId: string | null = null;
+  if (childId !== null && childPlan?.launch === true) {
+    advanceActionId = await fileChildLaunch(client, { accountId, childId });
+    childLaunchedId = childId;
+  }
+  return { receiptId: receipt.id, replayed: receipt.replayed, specVersionId: spec.id, withdrawnAsks: withdrawn, advanceActionId, childLaunchedId };
 }

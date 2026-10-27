@@ -7,6 +7,7 @@ import { attachStartGate, claimStartGate, writeStartReceipt } from "@fx/db/src/s
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { resolveStart, type StartCategory, type StartInput } from "@fx/core/src/autonomy/resolveStart.js";
 import { cleanWorkItemTitle } from "@fx/core/src/work-items/title.js";
+import { childGateOutcomeOfError, gateChildLaunch, type ChildGateOutcome, type ChildLaunchCode, type ChildLaunchDeps } from "@fx/core/src/decisions/childLaunch.js";
 import { autostartRoom, weekStartUtc } from "@fx/spend";
 import { reportError } from "@fx/telemetry";
 
@@ -25,6 +26,12 @@ import { reportError } from "@fx/telemetry";
  * `approve_proposal_by_dial` (0901: re-checks the hard rules, attaches the weekly envelope) and `run_action_request_by_dial` (files the start). Any refusal rolls
  * all of it back. A replay finds the proposal no longer `new` and writes nothing. Nothing here is a person's click: `personFiled` and the stage driver's
  * `person_click` origin are never set by this file.
+ *
+ * D#483 S5-b2c-1: after the proposals, in the same pass and the same time budget, a child pass looks at the planned PR children that wait to be launched
+ * (`planned_pr_child_list_due`; an orphan is never listed). Each child is one transaction on the same login: the launch rule (the database's `planned_pr_child_blocker`,
+ * which the definer `dial_launch_child` runs again), the repo's `launch_sub_item` dial, the parent's envelope, then the keyed policy receipt and the definer, or one
+ * ask per (parent, key). A start it files is keyed `dial:<receipt>`, so the driver reads it as the dial's (`dialFiled`) and never a person's click. Until the build
+ * supports a child (`CHILD_BUILD_SUPPORTED`, injected as `child.buildSupported`) the pass derives every reason and files nothing.
  *
  * Every number and state that is unknown fails closed to "no start". The proposal stays `new`, and the Inbox says why (the off sentence, or the person's own
  * Approve). Writes happen only inside the gate transaction, so a pass that stops half way leaves nothing half done.
@@ -58,16 +65,34 @@ export interface AutoStartCounts {
   replayed: number;
   failed: number;
   idle?: "not_configured";
+  /** D#483 S5-b2c-1: the child pass (absent when the proposal pass used the whole time budget). */
+  children?: ChildPassCounts;
   /** When some proposal waits only for room: the Monday 00:00 UTC the weekly limit renews. */
   renews_at?: string;
 }
 export type AutoStartOutcome = "started" | "asked" | "held_by_rule" | "no_room" | "not_ready" | "replayed";
+
+/** The child pass's counts. `held` says why, by the section 2 code, for the children a rule held or an envelope had no room for. */
+export interface ChildPassCounts {
+  listed: number;
+  started: number;
+  asked: number;
+  held_by_rule: number;
+  no_room: number;
+  not_ready: number;
+  replayed: number;
+  failed: number;
+  held: Partial<Record<ChildLaunchCode, number>>;
+}
+export const AUTOSTART_CHILD_LIST_PAGE = 50;
 
 export interface AutoStartDeps {
   /** The RECEIPT login's pool: the only login that can call the list and the two dial definers. */
   receiptPool: Pool;
   /** The price of an item's first run (pipeline's `firstRunReservationUsd`; this package cannot import @fx/pipeline). Must run inside the given tenant client. */
   firstRunUsd(client: PoolClient, input: { accountId: string; repoId: string }): Promise<number>;
+  /** D#483 S5-b2c-1: the child pass's outside pieces (pipeline's `CHILD_BUILD_SUPPORTED` and the parent envelope's room for p(executor)). Absent, the child pass files nothing (`not_ready`). */
+  child?: ChildLaunchDeps;
   now?(): Date;
   warn?(line: string): void;
 }
@@ -196,6 +221,45 @@ export function createAutoStartSweep(deps: AutoStartDeps) {
     }
   }
 
+  /** One planned PR child through the dial, in one transaction. Tests call it for children the lister would not name. */
+  async function gateChild(accountId: string, childId: string): Promise<{ outcome: ChildGateOutcome; code?: ChildLaunchCode }> {
+    try {
+      return await withTenant(deps.receiptPool, accountId, (client) => gateChildLaunch(client, { accountId, childId, deps: deps.child }));
+    } catch (err) { // fx-swallow-ok: a definer's fixed refusal is an outcome (rolled back, nothing left); anything else is rethrown by childGateOutcomeOfError
+      // The definers' fixed refusals leave nothing behind (the whole transaction rolled back); anything else is a fault and is rethrown. A refusal that means
+      // "not ready" is logged as a fixed line (its SQLSTATE and the definer's fixed code, never a value), so a missing grant shows up.
+      const result = childGateOutcomeOfError(err);
+      if (result.outcome === "not_ready") warn(JSON.stringify({ event: "auto_start.child_refused", sqlstate: (err as { code?: string } | null)?.code ?? null, reason: (err as { message?: string } | null)?.message?.slice(0, 64) ?? null }));
+      return result;
+    }
+  }
+
+  async function sweepChildren(counts: AutoStartCounts, startedAt: number): Promise<void> {
+    const c: ChildPassCounts = { listed: 0, started: 0, asked: 0, held_by_rule: 0, no_room: 0, not_ready: 0, replayed: 0, failed: 0, held: {} };
+    counts.children = c;
+    let after: [string | null, string | null] = [null, null];
+    for (;;) {
+      const { rows } = await deps.receiptPool.query<{ account_id: string; child_id: string; created_at: Date }>("SELECT account_id, child_id, created_at FROM planned_pr_child_list_due($1::integer, $2::timestamptz, $3::uuid)", [AUTOSTART_CHILD_LIST_PAGE, ...after]);
+      for (const r of rows) {
+        c.listed += 1;
+        if (now().getTime() - startedAt > AUTOSTART_PASS_BUDGET_MS) return;
+        try {
+          const res = await gateChild(r.account_id, r.child_id);
+          c[res.outcome] += 1;
+          if (res.code !== undefined) c.held[res.code] = (c.held[res.code] ?? 0) + 1;
+        } catch (err) {
+          // One child that cannot be gated never holds up the rest; it is listed again next pass.
+          reportError(err, { stage: "auto_start.child" });
+          warn(JSON.stringify({ event: "auto_start.child_failed" }));
+          c.failed += 1;
+        }
+      }
+      if (rows.length < AUTOSTART_CHILD_LIST_PAGE) return;
+      const last = rows[rows.length - 1]!;
+      after = [last.created_at.toISOString(), last.child_id];
+    }
+  }
+
   async function sweepAutoStart(): Promise<AutoStartCounts> {
     const counts: AutoStartCounts = { listed: 0, started: 0, asked: 0, held_by_rule: 0, no_room: 0, not_ready: 0, replayed: 0, failed: 0 };
     const startedAt = now().getTime();
@@ -225,6 +289,7 @@ export function createAutoStartSweep(deps: AutoStartDeps) {
       const last = rows[rows.length - 1]!;
       after = [last.verified_at.toISOString(), last.proposal_id];
     }
+    await sweepChildren(counts, startedAt);
     return finish(counts);
   }
 
@@ -233,5 +298,5 @@ export function createAutoStartSweep(deps: AutoStartDeps) {
     return counts;
   }
 
-  return { sweepAutoStart, gateProposal };
+  return { sweepAutoStart, gateProposal, gateChild };
 }
