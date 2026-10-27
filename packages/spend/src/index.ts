@@ -8,6 +8,7 @@ export * from './sandboxUsage.js';
 export * from './reserve.js';
 export * from './headroom.js';
 export * from './envelope.js';
+export * from './childRoom.js';
 export * from './envelopeWrite.js';
 export * from './settle.js';
 export { createPool, withTenant } from './pg.js';

@@ -63,6 +63,70 @@ export function priceRunPlan(runs: readonly PlannedRun[], priceOf: (role: string
   return { total_usd: total, slot_phase_usd: slot, basis: history ? "history" : "seed" };
 }
 
+interface RolePriceContext {
+  accountId: string;
+  runner: boolean;
+  modelOverride: ReadonlyMap<string, string | null>;
+  resolvers: RoleModelResolvers | undefined;
+  modelMedians: Awaited<ReturnType<typeof loadModelRunMedians>>;
+  computeMedians: Awaited<ReturnType<typeof loadComputeRunMedians>>;
+}
+
+async function rolePriceContext(
+  client: PoolClient,
+  input: { accountId: string; runner: boolean; modelOverride: ReadonlyMap<string, string | null>; resolvers?: RoleModelResolvers },
+): Promise<RolePriceContext> {
+  const { accountId, runner } = input;
+  return {
+    accountId,
+    runner,
+    modelOverride: input.modelOverride,
+    resolvers: input.resolvers,
+    modelMedians: await loadModelRunMedians(client, accountId),
+    computeMedians: runner ? new Map() : await loadComputeRunMedians(client, accountId),
+  };
+}
+
+/** The price of one run of `role` (the model part and the compute part described in the file header). */
+async function priceRole(client: PoolClient, ctx: RolePriceContext, role: string): Promise<RolePrice> {
+  const model = modelRunPrice(ctx.modelMedians, role, effectiveRoleModel(role, ctx.modelOverride.get(role), ctx.resolvers));
+  let computeUsd = 0;
+  let computeHistory = true;
+  if (!ctx.runner) {
+    const median = ctx.computeMedians.get(role);
+    if (median !== undefined && median.n >= MEDIAN_MIN_RUNS) computeUsd = median.median;
+    else {
+      computeHistory = false;
+      computeUsd = await roleRunComputeUpperBoundUsd(client, { accountId: ctx.accountId, role });
+    }
+  }
+  return { usd: clean(model.usd) + clean(computeUsd), history: model.source === "ledger" && computeHistory };
+}
+
+/**
+ * D#483 S5-b2c-1: p(role) for the repo, the same price `estimateItem` uses for that role's runs (no second formula). The child launch gate asks for p("executor"):
+ * the first run of a planned PR child is the executor build.
+ */
+export async function rolePriceUsd(client: PoolClient, input: { accountId: string; repoId: string; role: string; resolvers?: RoleModelResolvers }): Promise<RolePrice> {
+  const { accountId, repoId } = input;
+  const repo = (await client.query<{ execution_mode: string | null }>("SELECT execution_mode FROM repos WHERE id = $1 AND account_id = $2", [repoId, accountId])).rows[0];
+  if (repo === undefined) throw new Error("estimate: repo not found");
+  const settings = (await client.query<{ role: string; model: string | null }>("SELECT role, model FROM role_settings WHERE repo_id = $1", [repoId])).rows;
+  const ctx = await rolePriceContext(client, {
+    accountId,
+    runner: isRunnerMode(repo.execution_mode ?? "sandbox"),
+    modelOverride: new Map(settings.map((s) => [s.role, s.model])),
+    ...(input.resolvers !== undefined && { resolvers: input.resolvers }),
+  });
+  return priceRole(client, ctx, input.role);
+}
+
+/** The price of a planned PR child's first run: one executor run, rounded up to the unit the money columns hold (as `firstRunReservationUsd` rounds). */
+export async function childFirstRunUsd(client: PoolClient, input: { accountId: string; repoId: string }): Promise<number> {
+  const { usd } = await rolePriceUsd(client, { ...input, role: "executor" });
+  return Math.ceil(usd * 1e4 - 1e-9) / 1e4;
+}
+
 export interface EstimateItemInput {
   accountId: string;
   repoId: string;
@@ -92,24 +156,11 @@ export async function estimateItem(client: PoolClient, input: EstimateItemInput)
   });
   if (!plan.ok) return { total_usd: 0, slot_phase_usd: 0, basis: "none", reason: plan.reason, modelPartEstimated: false };
 
-  const modelMedians = await loadModelRunMedians(client, accountId);
-  const computeMedians = runner ? new Map() : await loadComputeRunMedians(client, accountId);
-
+  const ctx = await rolePriceContext(client, { accountId, runner, modelOverride, ...(input.resolvers !== undefined && { resolvers: input.resolvers }) });
   const prices = new Map<string, RolePrice>();
   for (const { role } of plan.runs) {
     if (prices.has(role)) continue;
-    const model = modelRunPrice(modelMedians, role, effectiveRoleModel(role, modelOverride.get(role), input.resolvers));
-    let computeUsd = 0;
-    let computeHistory = true;
-    if (!runner) {
-      const median = computeMedians.get(role);
-      if (median !== undefined && median.n >= MEDIAN_MIN_RUNS) computeUsd = median.median;
-      else {
-        computeHistory = false;
-        computeUsd = await roleRunComputeUpperBoundUsd(client, { accountId, role });
-      }
-    }
-    prices.set(role, { usd: clean(model.usd) + clean(computeUsd), history: model.source === "ledger" && computeHistory });
+    prices.set(role, await priceRole(client, ctx, role));
   }
   return { ...priceRunPlan(plan.runs, (role) => prices.get(role)), reason: null, modelPartEstimated: runner };
 }

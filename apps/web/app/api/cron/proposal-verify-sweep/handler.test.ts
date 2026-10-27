@@ -109,6 +109,20 @@ describe("GET /api/cron/proposal-verify-sweep", () => {
     expect(JSON.stringify(broken.log.mock.calls)).not.toContain("boom");
   });
 
+  it("S5-b2c-1: a child the pass launched, or could not gate, keeps the next pass coming just as a proposal does; a held child does not", async () => {
+    const CHILD_NONE = { listed: 1, started: 0, asked: 0, held_by_rule: 1, no_room: 0, not_ready: 0, replayed: 0, failed: 0, held: { waiting_on_planned_pr: 1 } };
+    for (const children of [{ ...CHILD_NONE, started: 1 }, { ...CHILD_NONE, failed: 1 }]) {
+      await markWorkPending("proposal-verify-sweep", { since: clock.value });
+      const s = setup(async () => NONE, {}, async () => ({ ...AUTO_NONE, children }));
+      await proposalVerifySweepHandler(req(`Bearer ${SECRET}`), s.deps);
+      expect(marker()).toBe(clock.value + PROPOSAL_VERIFY_PASS_MS);
+    }
+    await markWorkPending("proposal-verify-sweep", { since: clock.value });
+    const held = setup(async () => NONE, {}, async () => ({ ...AUTO_NONE, children: CHILD_NONE }));
+    await proposalVerifySweepHandler(req(`Bearer ${SECRET}`), held.deps);
+    expect(marker()).not.toBe(clock.value + PROPOSAL_VERIFY_PASS_MS);
+  });
+
   it("an unconfigured worker is reported, not an error", async () => {
     await markWorkPending("proposal-verify-sweep", { since: clock.value });
     const s = setup();

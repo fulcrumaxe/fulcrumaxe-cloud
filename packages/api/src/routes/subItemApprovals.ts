@@ -48,6 +48,13 @@ const MESSAGES: Record<string, string> = {
   no_spec: "the work item has no published Spec",
   no_anchor_run: "there is no finished run this approval can hang on",
   wrong_round: "only the next fix round can be approved",
+  child_build_unsupported: "Planned PRs can't start yet.",
+  child_orphaned: "The item this planned PR belonged to was deleted.",
+  parent_closed: "The item this planned PR belongs to is closed.",
+  key_not_in_approved_spec: "This planned PR is no longer in the approved Spec.",
+  parent_no_envelope: "This planned PR has no spending limit to draw on. Set one on the item it belongs to.",
+  parent_envelope_reached: "This item's spending limit is used up. Nothing more starts until you raise the limit or stop the item.",
+  child_closed: "This planned PR was closed.",
 };
 const REAPPROVE_MESSAGES: Record<string, string> = {
   parent_not_approved: MESSAGES.parent_not_approved!,
@@ -64,7 +71,10 @@ export const subItemApprovalRoutes: RouteEntry[] = [
     summary: "Approve one sub-item of an approved work item",
     description:
       "Session only, owner or admin; a token is refused. `Idempotency-Key` is required. Takes no request body. Writes the `launch_sub_item` receipt in the person's name, keyed by the work item, the sub-item key (`fix-<round>` for a fix round) and the work item's current Spec version, and closes the matching open ask as superseded. " +
-      "The same key under the same Spec version answers the same receipt; a new Spec version makes an earlier approval stop counting. 404 for an unknown work item; 409 `parent_not_approved` (no person has approved the work item), `respec_needs_approval` (the Spec changed since: use reapprove), `no_spec`, `no_anchor_run` or `wrong_round` (a fix round other than the next one); 422 `invalid_key`; 503 `sub_item_approval_unavailable` while no worker is available.",
+      "The same key under the same Spec version answers the same receipt; a new Spec version makes an earlier approval stop counting. " +
+      "For the key of a planned PR child it also starts that child, in the person's own name, once the parent's envelope has room for its first run; the sibling a planned PR waits for is a warning on its card, not a block. " +
+      "404 for an unknown work item; 409 `parent_not_approved` (no person has approved the work item), `respec_needs_approval` (the Spec changed since: use reapprove), `no_spec`, `no_anchor_run` or `wrong_round` (a fix round other than the next one), " +
+      "and for a planned PR `child_build_unsupported`, `child_orphaned`, `parent_closed`, `key_not_in_approved_spec`, `parent_no_envelope`, `parent_envelope_reached` or `child_closed`; 422 `invalid_key`; 503 `sub_item_approval_unavailable` while no worker is available.",
     principals: ["session"],
     minRole: "admin",
     idempotency: "required",
@@ -74,7 +84,7 @@ export const subItemApprovalRoutes: RouteEntry[] = [
     extraResponses: {
       "403": "Error `session_required` or `insufficient_role` (owner or admin only).",
       "404": "No such work item in this account.",
-      "409": "Error `parent_not_approved`, `respec_needs_approval`, `no_spec`, `no_anchor_run` or `wrong_round`.",
+      "409": "Error `parent_not_approved`, `respec_needs_approval`, `no_spec`, `no_anchor_run`, `wrong_round`, or for a planned PR `child_build_unsupported`, `child_orphaned`, `parent_closed`, `key_not_in_approved_spec`, `parent_no_envelope`, `parent_envelope_reached` or `child_closed`.",
       "422": "Error `invalid_key`.",
       "503": "Approvals are not available yet (`sub_item_approval_unavailable`).",
     },

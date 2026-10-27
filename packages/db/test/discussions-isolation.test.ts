@@ -175,8 +175,10 @@ describe('discussions isolation (D#71 DS-1)', () => {
 
         // 0906 (D#483 S5-b2a): work_item_approval_definer reads a work item's current Spec version through one SELECT policy of its own.
         // Like eraser_access it is for a NOLOGIN definer role only; the carve-out is that exact policy, by name and role.
-        const approvalRead = rows.filter((r) => table === 'spec_versions' && r.policyname === 'work_item_approval_definer_select');
-        for (const r of approvalRead) expect(r.roles).toEqual(['work_item_approval_definer']);
+        // 0920 (D#483 S5-b2c-1): dial_start_definer reads the same rows through one SELECT policy of its own, for the child launch rule.
+        const READERS: Record<string, string> = { work_item_approval_definer_select: 'work_item_approval_definer', dial_start_definer_select: 'dial_start_definer' };
+        const approvalRead = rows.filter((r) => table === 'spec_versions' && Object.hasOwn(READERS, r.policyname));
+        for (const r of approvalRead) expect(r.roles).toEqual([READERS[r.policyname]]);
         if (ERASER_ACCESS_TABLES.has(table)) {
           expect(rows).toHaveLength(2 + approvalRead.length);
           const eraser = rows.find((r) => r.policyname === 'eraser_access');

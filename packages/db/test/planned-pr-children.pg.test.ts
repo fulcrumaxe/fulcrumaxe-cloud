@@ -99,7 +99,7 @@ describe('migration 0919: planned PR children [pg]', () => {
     expect((await children(w2)).map((k) => k.planned_pr_key)).toEqual(['api', 'docs', 'ui']);
   });
 
-  it('children come only from the approved version: a newer version without a table creates none, and a re-approval adds only keys that do not exist yet', async () => {
+  it('children come only from the approved version: a newer version without a table creates none, and a re-approval adds the keys that do not exist yet and moves an unstarted child (b) to the new version (R6; a is absent from it and keeps v1)', async () => {
     const t = await seedAccount(admin, randomUUID());
     const w = await item(t);
     const v1 = await spec(t, w, 1, [row('a'), row('b')]);
@@ -108,7 +108,7 @@ describe('migration 0919: planned PR children [pg]', () => {
     const v2 = await spec(t, w, 2, [row('b'), row('c')]);
     await approve(t, t.userId, w, 'reapprove_after_respec');
     const kids = await children(w);
-    expect(kids.map((k) => [k.planned_pr_key, k.planned_pr_spec_version_id])).toEqual([['a', v1], ['b', v1], ['c', v2]]);
+    expect(kids.map((k) => [k.planned_pr_key, k.planned_pr_spec_version_id])).toEqual([['a', v1], ['b', v2], ['c', v2]]);
 
     const w2 = await item(t);
     await spec(t, w2, 1, [row('x'), row('y')]);

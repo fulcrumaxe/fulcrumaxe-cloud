@@ -8,6 +8,7 @@ import { withTenant } from '../tenancy/withTenant.js';
 import { answerStartAsk } from './startAnswer.js';
 import { approveSubItemIn, SubItemApprovalError } from './approveSubItem.js';
 import { FIX_ASK_START } from './fixRoundGate.js';
+import type { ChildLaunchDeps } from './childLaunch.js';
 import { startGateForAsk } from '@fx/db/src/startGate.js';
 
 /**
@@ -31,6 +32,8 @@ export interface AskAnswerCtx {
   principal: { accountId: string; userId: string; tokenId?: string };
   /** Kicks the resume request this answer makes (DP11c). Optional: the run-action sweep finds the request anyway. */
   signal?: RunActionSignal;
+  /** D#483 S5-b2c-1: the planned PR launch's outside pieces; an answer that starts a planned PR runs the same function as the card's Approve. */
+  child?: ChildLaunchDeps;
 }
 export interface AskAnswerInput {
   askId: string;
@@ -99,7 +102,7 @@ export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promi
         if (ask.sub_item_key === null) throw new AskAnswerError(409, 'ask_no_run');
         if (choice === FIX_ASK_START) {
           try {
-            const done = await approveSubItemIn(client, { accountId, userId }, { workItemId: ask.work_item_id, key: ask.sub_item_key });
+            const done = await approveSubItemIn(client, { accountId, userId }, { workItemId: ask.work_item_id, key: ask.sub_item_key }, ctx.child);
             startActionId = done.advanceActionId;
             return { askId: ask.id, receiptId: done.receiptId, answeredOption: choice };
           } catch (err) {
