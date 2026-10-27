@@ -3,7 +3,7 @@ import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { effectiveModeSql } from "@fx/runner";
 import type { WorkItemTier } from "../build/types.js";
 import { tierOfKind } from "./reviewPlan.js";
-import { childBranchFor } from "../advance/childBuild.js";
+import { resolveBuildIdentity, type BuildIdentityRefusal } from "@fx/core/src/work-items/buildIdentity.js";
 
 /**
  * D#483 P3: what the review stage reads about a work item before it starts anything, in one tenant-scoped read. Facts
@@ -25,8 +25,10 @@ export interface ReviewContext {
   name: string;
   /** The issue's number (names the executor's branch and sandbox). For a planned PR child it is the PARENT's. */
   issue: number;
-  /** D#483 S5-b2c-2: a planned PR child's own branch (`fx/<parent#>-<key>`), which its reviews and fix rounds use. Absent for every other item (`fx/issue-<n>`). */
-  branch?: string;
+  /** The branch the item's pull request is on: `fx/issue-<n>`, or a planned PR child's own `fx/<parent#>-<key>`. From the build identity (D#483 S5-b2c-3). */
+  branch: string;
+  /** A planned PR child (D#483 S5-b2c-3): `issue` is its parent's, and its pull request references that issue and never closes it. Absent for every other item. */
+  child?: true;
   tier: WorkItemTier;
   specVersion: number;
   /** Fix rounds already started for the item (the driver events): review round N is the one after N-1 fix rounds. */
@@ -43,7 +45,7 @@ export interface ReviewContext {
   personRequestPending: boolean;
 }
 
-export type ReviewContextRefusal = "not_found" | "external_requires_human" | "no_repo" | "no_issue_link" | "tier_unknown" | "no_spec";
+export type ReviewContextRefusal = BuildIdentityRefusal | "external_requires_human" | "no_repo" | "tier_unknown" | "no_spec";
 export type LoadReviewContextResult = { ok: true; ctx: ReviewContext } | { ok: false; reason: ReviewContextRefusal };
 
 interface Row {
@@ -52,7 +54,6 @@ interface Row {
   repo_id: string | null;
   gh_repo_id: string | null;
   execution_mode: string | null;
-  gh_number: string | null;
   gh_owner: string | null;
   gh_name: string | null;
   kind: string | null;
@@ -68,7 +69,7 @@ interface Row {
 export async function loadReviewContext(pool: Pool, accountId: string, workItemId: string): Promise<LoadReviewContextResult> {
   const row = await withTenant(pool, accountId, async (client) => {
     const { rows } = await client.query<Row>(
-      `SELECT w.stage, w.provenance, w.repo_id, r.gh_repo_id, ${effectiveModeSql("w", "r")} AS execution_mode, CASE WHEN w.planned_pr_key IS NULL THEN w.gh_number ELSE p.gh_number END AS gh_number, r.gh_owner, r.gh_name,
+      `SELECT w.stage, w.provenance, w.repo_id, r.gh_repo_id, ${effectiveModeSql("w", "r")} AS execution_mode, r.gh_owner, r.gh_name,
               CASE WHEN w.planned_pr_key IS NULL THEN d.kind ELSE w.kind END AS kind, s.version, w.planned_pr_key,
               (SELECT count(*)::text FROM work_item_driver_events e WHERE e.account_id = w.account_id AND e.work_item_id = w.id AND e.kind = 'fix_round_started') AS fix_rounds,
               (SELECT rs.mode FROM role_settings rs WHERE rs.account_id = w.account_id AND rs.repo_id = w.repo_id AND rs.role = 'debater') AS debater_mode,
@@ -78,7 +79,6 @@ export async function loadReviewContext(pool: Pool, accountId: string, workItemI
                        WHERE t.account_id = w.account_id AND t.work_item_id = w.id AND t.to_stage = 'changes_requested'
                          AND c.kind = 'run_note' AND c.status = 'accepted') AS person_request
          FROM work_items w
-         LEFT JOIN work_items p ON p.account_id = w.account_id AND p.id = w.parent_id AND w.planned_pr_key IS NOT NULL
          LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
          LEFT JOIN discussions d ON d.account_id = w.account_id AND d.id = w.discussion_id
          LEFT JOIN LATERAL (
@@ -90,36 +90,41 @@ export async function loadReviewContext(pool: Pool, accountId: string, workItemI
         WHERE w.id = $1 AND w.account_id = $2`,
       [workItemId, accountId],
     );
-    return rows[0] ?? null;
+    const found = rows[0];
+    if (found === undefined) return null;
+    // The issue number and the branch are the build identity's. This is a read of what exists (the reviews and the merge gate of a pull request already open), so it runs no launch check.
+    return { found, identity: await resolveBuildIdentity(client, accountId, workItemId, "observe") };
   });
   if (row === null) return { ok: false, reason: "not_found" };
+  const { found: item, identity } = row;
   // Fail closed, as the intake gate does: only the exact literal "internal" is internal.
-  if (row.provenance !== "internal") return { ok: false, reason: "external_requires_human" };
-  if (!row.repo_id || !row.gh_owner || !row.gh_name) return { ok: false, reason: "no_repo" };
-  if (row.gh_number === null) return { ok: false, reason: "no_issue_link" };
-  const tier = tierOfKind(row.kind);
+  if (item.provenance !== "internal") return { ok: false, reason: "external_requires_human" };
+  if (!item.repo_id || !item.gh_owner || !item.gh_name) return { ok: false, reason: "no_repo" };
+  if (!identity.ok) return { ok: false, reason: identity.reason };
+  const tier = tierOfKind(item.kind);
   if (tier === null) return { ok: false, reason: "tier_unknown" };
-  if (row.version === null) return { ok: false, reason: "no_spec" };
+  if (item.version === null) return { ok: false, reason: "no_spec" };
   return {
     ok: true,
     ctx: {
       workItemId,
-      stage: row.stage,
-      provenance: row.provenance,
-      repoId: row.repo_id,
-      ghRepoId: row.gh_repo_id === null || row.gh_repo_id === undefined ? null : String(row.gh_repo_id),
-      executionMode: row.execution_mode ?? "sandbox",
-      owner: row.gh_owner,
-      name: row.gh_name,
-      issue: Number(row.gh_number),
-      ...(row.planned_pr_key === null ? {} : { branch: childBranchFor(Number(row.gh_number), row.planned_pr_key) }),
+      stage: item.stage,
+      provenance: item.provenance,
+      repoId: item.repo_id,
+      ghRepoId: item.gh_repo_id === null || item.gh_repo_id === undefined ? null : String(item.gh_repo_id),
+      executionMode: item.execution_mode ?? "sandbox",
+      owner: item.gh_owner,
+      name: item.gh_name,
+      issue: identity.identity.issueNumber,
+      branch: identity.identity.branch,
+      ...(identity.identity.isChild ? { child: true as const } : {}),
       tier,
-      specVersion: Number(row.version),
-      fixRoundsStarted: Number(row.fix_rounds ?? "0"),
-      debaterMode: row.debater_mode,
-      autoMerge: row.auto_merge,
-      blockExternalAutoMerge: row.block_external,
-      personRequestPending: row.person_request === true,
+      specVersion: Number(item.version),
+      fixRoundsStarted: Number(item.fix_rounds ?? "0"),
+      debaterMode: item.debater_mode,
+      autoMerge: item.auto_merge,
+      blockExternalAutoMerge: item.block_external,
+      personRequestPending: item.person_request === true,
     },
   };
 }

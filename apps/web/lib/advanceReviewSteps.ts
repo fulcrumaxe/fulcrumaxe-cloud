@@ -69,8 +69,10 @@ export interface ReviewCtx extends AdvancePrSource {
   name: string;
   /** The issue's number (a planned PR child's: its parent's). */
   issue: number;
-  /** A planned PR child's own branch (`fx/<parent#>-<key>`); absent for every other item. */
-  branch?: string;
+  /** The item's branch, from its build identity: `fx/issue-<n>`, or a planned PR child's own `fx/<parent#>-<key>`. */
+  branch: string;
+  /** A planned PR child: `issue` is its parent's. */
+  child?: true;
   tier: string;
   /** The Spec version the person approved. */
   specVersion: number;
@@ -89,7 +91,7 @@ export async function reviewLoadBody(worker: ReviewWorker | null, who: StepWho, 
   if (!out.ok) return { ok: false, reason: out.reason };
   const c = out.ctx;
   if (pinned !== null && c.specVersion !== pinned) return { ok: false, reason: "spec_changed" };
-  return { ok: true, personRequestPending: c.personRequestPending === true, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, ...(c.branch === undefined ? {} : { branch: c.branch }), tier: c.tier, specVersion: c.specVersion, fixRoundsStarted: c.fixRoundsStarted ?? 0, debaterEnabled: c.debaterEnabled, executionMode: c.executionMode, recordedPr: c.recordedPr, prExecutionMode: c.prExecutionMode };
+  return { ok: true, personRequestPending: c.personRequestPending === true, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, branch: c.branch, ...(c.child ? { child: true as const } : {}), tier: c.tier, specVersion: c.specVersion, fixRoundsStarted: c.fixRoundsStarted ?? 0, debaterEnabled: c.debaterEnabled, executionMode: c.executionMode, recordedPr: c.recordedPr, prExecutionMode: c.prExecutionMode };
 }
 
 export interface PrFound {
@@ -108,7 +110,7 @@ export type PrLookup = PrFound | { ok: false; reason: string };
  * The executor's open pull request, its head commit, and the security surfaces its diff touches. A sandbox build's is found by
  * `fx/issue-<n>`; a runner run's by the number and branch its `done` recorded, and none recorded is `no_open_pr` (D#6 C25 section 1.2).
  */
-export async function findPrBody(open: OpenHttp | null, ctx: Pick<ReviewCtx, "repoId" | "owner" | "name" | "issue" | "branch" | "executionMode" | "prExecutionMode" | "recordedPr">): Promise<PrLookup> {
+export async function findPrBody(open: OpenHttp | null, ctx: Pick<ReviewCtx, "repoId" | "owner" | "name" | "branch" | "executionMode" | "prExecutionMode" | "recordedPr">): Promise<PrLookup> {
   if (!open) return { ok: false, reason: "github_unavailable" };
   try {
     // D#599 PL-2: the pull request is looked up on the side that BUILT it (the newest executor run's), which is not the item's effective side
@@ -121,7 +123,7 @@ export async function findPrBody(open: OpenHttp | null, ctx: Pick<ReviewCtx, "re
     const found =
       promptRuntimeOf(lookupMode) === "sandbox" && ctx.recordedPr !== null && ctx.recordedPr.bound === true
         ? await findRecordedPullRequest(http, { owner: ctx.owner, name: ctx.name }, ctx.recordedPr, { local: false })
-        : await findPullRequestForItem(http, { owner: ctx.owner, name: ctx.name, issue: ctx.issue, ...(ctx.branch === undefined ? {} : { branch: ctx.branch }), executionMode: lookupMode, recordedPr: ctx.recordedPr });
+        : await findPullRequestForItem(http, { owner: ctx.owner, name: ctx.name, branch: ctx.branch, executionMode: lookupMode, recordedPr: ctx.recordedPr });
     if (!found.ok) return { ok: false, reason: found.reason };
     const files =
       lookupMode === "runner_local"
@@ -427,7 +429,7 @@ export async function startFixBody(
     const runtime = promptRuntimeOf(ctx.executionMode);
     // D#600 CX-4a: the findings the caps cut are spilled and marked: a sandbox round reads /fx/context, a runner round the files its runner writes (CX-4b, from the signed job).
     const spillOptions = { spill: true };
-    const base = { owner: ctx.owner, name: ctx.name, issue: ctx.issue, pr: pr.number, headSha: pr.headSha, branch: pr.branch, version: spec.version, spec: spec.body, findings, runtime, ...(crossSide ? { crossSide } : {}), ...(person ? { person } : {}) };
+    const base = { owner: ctx.owner, name: ctx.name, issue: ctx.issue, pr: pr.number, headSha: pr.headSha, branch: pr.branch, version: spec.version, spec: spec.body, findings, runtime, ...(ctx.child ? { child: true } : {}), ...(crossSide ? { crossSide } : {}), ...(person ? { person } : {}) };
     // A sandbox fix round resumes the build's own session, so it sends only the unchanged line, and the worker checks that line against the Spec version pinned on
     // the run being continued before it goes out. A runner round may be a follow-up in a fresh session after a lost one, so it keeps the body.
     if (runtime === "sandbox" && spec.sha256 !== undefined) {

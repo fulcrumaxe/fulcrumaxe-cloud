@@ -167,7 +167,7 @@ describe("the findings caps (acceptance 5)", () => {
   const long = "F".repeat(2000);
   const verdictFindings = readVerdict("succeeded", { verdict: "needs-fix", findings: [long, "short"], summary: "s" });
   const fix = (over: Partial<FixPromptInput> = {}): FixPromptInput => ({
-    owner: "acme", name: "widgets", issue: 7, pr: 41, headSha: HEAD, version: 3, spec: SPEC,
+    owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", pr: 41, headSha: HEAD, version: 3, spec: SPEC,
     findings: [{ role: "code-reviewer", verdict: "needs-fix", findings: verdictFindings.findings, fullFindings: verdictFindings.fullFindings, summary: "s" }],
     ...over,
   });
@@ -201,7 +201,7 @@ describe("the findings caps (acceptance 5)", () => {
 
   it("the review prompt for every role still builds with spill on, and the uncut fallback of the fix prompt has the full finding", () => {
     for (const role of ["code-reviewer", "acceptance-tester", "security-reviewer", "debater"] as const) {
-      expect(assembleReviewPrompt({ role, owner: "acme", name: "widgets", issue: 7, pr: 41, headSha: HEAD, baseRef: "main", version: 3, spec: SPEC }, ).prompt).toContain(SPEC);
+      expect(assembleReviewPrompt({ role, owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", pr: 41, headSha: HEAD, baseRef: "main", version: 3, spec: SPEC }, ).prompt).toContain(SPEC);
     }
     expect(assembleFixPrompt(fix(), { spill: true }).spill!.uncut.prompt).toContain(long);
   });
@@ -247,7 +247,7 @@ describe("spill files are fixed names outside the checkout (acceptance 3)", () =
 
 describe("the builders with a budget", () => {
   it("an executor build over its budget spills its map, and a runner build never does", () => {
-    const input = { owner: "acme", name: "widgets", number: 7, version: 3, spec: SPEC, map: { version: "v1", text: MAP }, runNotes: NOTE };
+    const input = { owner: "acme", name: "widgets", number: 7, branch: "fx/issue-7", version: 3, spec: SPEC, map: { version: "v1", text: MAP }, runNotes: NOTE };
     const cut = assembleExecutorPrompt(input, { spill: true, budgetBytes: 4096 });
     expect(cut.prompt).toContain(trimmedMarker("map"));
     expect(file(cut, "map")).toContain("src/dir7/file7.ts");
@@ -264,9 +264,9 @@ describe("ROLE_CONTEXT_DEFAULTS (acceptance 6; provisional until CX-10 measures 
   const MEMORY = 4096;
   const NOTES = 4096;
   const fixture = {
-    executor: assembleExecutorPrompt({ owner: "acme", name: "widgets", number: 7, version: 3, spec: SPEC }),
-    fix: assembleFixPrompt({ owner: "acme", name: "widgets", issue: 7, pr: 41, headSha: HEAD, version: 3, spec: SPEC, findings: [{ role: "code-reviewer", verdict: "needs-fix", findings: ["x"], summary: "y" }] }),
-    reviewer: (role: "code-reviewer" | "acceptance-tester" | "security-reviewer" | "debater") => assembleReviewPrompt({ role, owner: "acme", name: "widgets", issue: 7, pr: 41, headSha: HEAD, baseRef: "main", version: 3, spec: SPEC }),
+    executor: assembleExecutorPrompt({ owner: "acme", name: "widgets", number: 7, branch: "fx/issue-7", version: 3, spec: SPEC }),
+    fix: assembleFixPrompt({ owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", pr: 41, headSha: HEAD, version: 3, spec: SPEC, findings: [{ role: "code-reviewer", verdict: "needs-fix", findings: ["x"], summary: "y" }] }),
+    reviewer: (role: "code-reviewer" | "acceptance-tester" | "security-reviewer" | "debater") => assembleReviewPrompt({ role, owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", pr: 41, headSha: HEAD, baseRef: "main", version: 3, spec: SPEC }),
   };
 
   it("each default is the fixture's fixed text rounded up to a KiB, plus a 16 KiB Spec, the memory slot, notes and the role's large part", () => {
@@ -338,7 +338,7 @@ describe("a runner prompt spills too (D#600 CX-4b)", () => {
   });
 
   it("the executor's runner builder passes the options on, so its cut notes spill", () => {
-    const input = { owner: "acme", name: "widgets", number: 41, version: 3, spec: SPEC, runtime: "runner" as const, runNotes: NOTE };
+    const input = { owner: "acme", name: "widgets", number: 41, branch: "fx/issue-41", version: 3, spec: SPEC, runtime: "runner" as const, runNotes: NOTE };
     const whole = assembleExecutorPrompt(input, { spill: true });
     expect(whole.spill).toBeUndefined();
     const cut = assembleExecutorPrompt(input, { spill: true, budgetBytes: bytes(whole.prompt) - 100 });

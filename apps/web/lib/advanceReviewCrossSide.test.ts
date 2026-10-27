@@ -16,6 +16,7 @@ const ctx = (over: Partial<ReviewCtx> = {}): ReviewCtx => ({
   owner: "acme",
   name: "widgets",
   issue: 12,
+  branch: "fx/issue-12",
   tier: "standard",
   specVersion: 3,
   debaterEnabled: false,

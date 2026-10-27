@@ -29,7 +29,7 @@ const WHO = { accountId: ACCOUNT, userId: ARGS.userId, workItemId: ITEM, haltEpo
 const H1 = "a".repeat(40);
 const H2 = "b".repeat(40);
 const H3 = "c".repeat(40);
-const AT_PR: AdvanceItem = { stage: "pr_opened", provenance: "internal", repoId: REPO, ghNumber: 7, ghOwner: "acme", ghName: "widgets", hasDiscussion: true, kind: "feature", hasSpec: true, specVersion: 3, executorRunId: null, executionMode: "sandbox", recordedPr: null };
+const AT_PR: AdvanceItem = { stage: "pr_opened", provenance: "internal", repoId: REPO, ghNumber: 7, branch: "fx/issue-7", ghOwner: "acme", ghName: "widgets", hasDiscussion: true, kind: "feature", hasSpec: true, specVersion: 3, executorRunId: null, executionMode: "sandbox", recordedPr: null };
 
 interface PrFile {
   filename: string;
@@ -119,7 +119,7 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
     advanceLoadItem: vi.fn(async () => item),
     advanceLoadReview: vi.fn(async () =>
       w.loadReview.ok
-        ? { ok: true as const, ctx: { workItemId: ITEM, stage: "pr_opened", repoId: REPO, owner: "acme", name: "widgets", issue: 7, tier: w.tier, specVersion: w.loadReview.specVersion ?? w.pinned, debaterEnabled: w.debaterEnabled, executionMode: w.mode ?? "sandbox", recordedPr: w.recorded ?? null, fixRoundsStarted: w.fixRoundsStarted ?? 0, ...(w.personRequest ? { personRequestPending: true } : {}) } }
+        ? { ok: true as const, ctx: { workItemId: ITEM, stage: "pr_opened", repoId: REPO, owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", tier: w.tier, specVersion: w.loadReview.specVersion ?? w.pinned, debaterEnabled: w.debaterEnabled, executionMode: w.mode ?? "sandbox", recordedPr: w.recorded ?? null, fixRoundsStarted: w.fixRoundsStarted ?? 0, ...(w.personRequest ? { personRequestPending: true } : {}) } }
         : { ok: false as const, reason: w.loadReview.reason ?? "no_spec" },
     ),
     advanceLoadSpecText: vi.fn(async (_who: unknown, v: number) => (v === w.pinned ? { version: v, body: "SPEC BODY: the footer shows the year." } : null)),

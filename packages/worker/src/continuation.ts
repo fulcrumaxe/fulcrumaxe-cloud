@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { PREVIEW_WORKDIR, EXECUTOR_ROLE } from "@fx/runner";
 import { assembleSeatPrompt, type ContinueAfterLimitInput } from "@fx/pipeline";
+import { resolveBuildIdentity, type BuildIdentityRefusal } from "@fx/core/src/work-items/buildIdentity.js";
 import type { SeatRefusal, SeatRequest, SeatResult } from "./seat.js";
 
 /**
@@ -35,7 +36,7 @@ export const SITE_RULES: Readonly<Record<ContinuationSite, { roles: readonly str
 
 export type ContinuationStartInput = ContinueAfterLimitInput["resumeInput"];
 /** `prompt_not_retained`: no intact stored prompt to run again. `spec_changed`: the Spec moved on since the run began. Both are refusals that take today's path. */
-export type ContinuationRefusal = SeatRefusal | "run_not_found" | "no_repo" | "prompt_not_retained" | "spec_changed";
+export type ContinuationRefusal = SeatRefusal | "run_not_found" | "no_repo" | "prompt_not_retained" | "spec_changed" | Exclude<BuildIdentityRefusal, "not_found" | "no_issue_link">;
 
 export interface ContinuationDeps {
   /** The runner login's pool. */
@@ -44,7 +45,7 @@ export interface ContinuationDeps {
 }
 
 interface EndedRow {
-  role: string; work_item_id: string | null; repo_id: string | null; gh_number: string | null; spec_version_id: string | null; run_mode: string | null;
+  role: string; work_item_id: string | null; repo_id: string | null; spec_version_id: string | null; run_mode: string | null;
   dispatch_repo_id: string | null; dispatch_pr_number: string | null; head_sha: string | null; gh_owner: string | null; gh_name: string | null;
 }
 interface StoredInput { prompt?: unknown; prompt_sha256?: unknown; meta?: { continuation_base_run_id?: unknown } | null }
@@ -95,7 +96,7 @@ export async function continuationStartInput(deps: ContinuationDeps, accountId: 
   if (!rule) return REFUSE("run_not_found");
   const ended = await withTenant(deps.pool, accountId, async (client) => {
     const run = await client.query<EndedRow>(
-      `SELECT ar.role, ar.work_item_id, w.repo_id, w.gh_number, ar.spec_version_id, ar.execution_mode AS run_mode,
+      `SELECT ar.role, ar.work_item_id, w.repo_id, ar.spec_version_id, ar.execution_mode AS run_mode,
               ar.dispatch_repo_id, ar.dispatch_pr_number, ar.head_sha, rp.gh_owner, rp.gh_name
          FROM agent_runs ar JOIN work_items w ON w.account_id = ar.account_id AND w.id = ar.work_item_id
          LEFT JOIN repos rp ON rp.account_id = ar.account_id AND rp.id = ar.dispatch_repo_id
@@ -113,7 +114,9 @@ export async function continuationStartInput(deps: ContinuationDeps, accountId: 
     // A seat's Spec pin must still be the newest version (the executor's pin is kept as it was, and the library refuses a missing one).
     const newest = row.role === EXECUTOR_ROLE || row.spec_version_id === null ? null
       : (await client.query<{ id: string }>(`SELECT id FROM spec_versions WHERE account_id = $1 AND work_item_id = $2 ORDER BY version DESC LIMIT 1`, [accountId, workItemId])).rows[0]?.id ?? null;
-    return { ...row, workItemId, summary: note.rows[0]?.summary ?? undefined, base, specMoved: row.role !== EXECUTOR_ROLE && row.spec_version_id !== null && newest !== row.spec_version_id };
+    // D#483 S5-b2c-3 (R7): the executor's issue number is the build identity's (a planned PR child's is its parent's, and its launch checks are run again now).
+    const identity = row.role === EXECUTOR_ROLE ? await resolveBuildIdentity(client, accountId, workItemId, "start") : null;
+    return { ...row, workItemId, identity, summary: note.rows[0]?.summary ?? undefined, base, specMoved: row.role !== EXECUTOR_ROLE && row.spec_version_id !== null && newest !== row.spec_version_id };
   });
   if (!ended) return REFUSE("run_not_found");
   const isExecutor = ended.role === EXECUTOR_ROLE;
@@ -121,7 +124,8 @@ export async function continuationStartInput(deps: ContinuationDeps, accountId: 
   if (!rule.roles.includes(ended.role)) return REFUSE("run_not_found");
   if (ended.base === undefined) return REFUSE("prompt_not_retained");
   if (ended.specMoved) return REFUSE("spec_changed");
-  const pr = isExecutor ? Number(ended.gh_number) : ended.dispatch_pr_number === null ? undefined : /^[1-9][0-9]*$/.test(ended.dispatch_pr_number) ? Number(ended.dispatch_pr_number) : Number.NaN;
+  if (isExecutor && ended.identity !== null && !ended.identity.ok && ended.identity.reason !== "no_issue_link" && ended.identity.reason !== "not_found") return REFUSE(ended.identity.reason);
+  const pr = isExecutor ? (ended.identity?.ok ? ended.identity.identity.issueNumber : Number.NaN) : ended.dispatch_pr_number === null ? undefined : /^[1-9][0-9]*$/.test(ended.dispatch_pr_number) ? Number(ended.dispatch_pr_number) : Number.NaN;
   const repoId = isExecutor ? ended.repo_id : ended.dispatch_repo_id;
   if (repoId === null || (pr !== undefined && !Number.isSafeInteger(pr)) || (isExecutor && (pr as number) < 1)) return REFUSE("no_repo");
   if (rule.clone && (ended.gh_owner === null || ended.gh_name === null)) return REFUSE("no_repo");

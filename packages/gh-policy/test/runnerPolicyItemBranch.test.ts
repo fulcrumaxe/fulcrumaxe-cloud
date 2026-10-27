@@ -65,3 +65,21 @@ describe("decideRunner with an item branch ticket", () => {
     }
   });
 });
+
+describe("a planned PR child's branch (D#483 S5-b2c-3)", () => {
+  const CHILD_REF = "fx/41-api";
+  const update = (ref: string) => ({ old: SHA_B, new: SHA_A, ref });
+
+  it("the ticket pattern takes it, and refuses the shapes the shared constant refuses", () => {
+    expect(RUNNER_TICKET_REF_RE.test(CHILD_REF)).toBe(true);
+    for (const ref of ["fx/12-", "fx/12-a/b", "fx/12-..", "fx/12-ABC", `fx/12-${"a".repeat(33)}`, "fx/012-a"]) expect(RUNNER_TICKET_REF_RE.test(ref), ref).toBe(false);
+    expect(RUNNER_TICKET_REF_RE.test("fx/12345678-1234-4234-8234-123456789012-g1")).toBe(true);
+  });
+
+  it("allows one fast-forward update of the child's own ref, and denies every other ref under that ticket (the parent's branch, a sibling's, another number)", () => {
+    expect(decideRunner(post(CHILD_REF, [update("refs/heads/fx/41-api")]))).toMatchObject({ allow: true, reason: "runner_push_allowed" });
+    for (const ref of ["refs/heads/fx/issue-41", "refs/heads/fx/41-ui", "refs/heads/fx/42-api", "refs/heads/main", "refs/heads/fx/41-api/x"]) {
+      expect(decideRunner(post(CHILD_REF, [update(ref)])), ref).toEqual({ allow: false, reason: "receive_pack_ref_not_ticket_ref" });
+    }
+  });
+});

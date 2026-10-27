@@ -5,6 +5,7 @@ import { catalogueClassOf, keySubItemAsk, raiseAsk, withdrawSubItemAsk } from '@
 import { getCurrentDialSetting } from '@fx/db/src/decisions.js';
 import { DIAL_VERSION_CATALOGUE_DEFAULT, writeSubItemApprovalReceipt, writeSubItemPolicyReceipt } from '@fx/db/src/receiptWriter.js';
 import { resolveSubItemLaunch } from '../autonomy/resolveSubItemLaunch.js';
+import { resolveBuildIdentity } from '../work-items/buildIdentity.js';
 import { VERDICT_ROLES } from '../work-items/verdictRoles.js';
 import { withTenant } from '../tenancy/withTenant.js';
 
@@ -30,6 +31,13 @@ import { withTenant } from '../tenancy/withTenant.js';
  * A failed run that is not this item's executor run, or did not fail its check, is never gated for (blocked, fail closed).
  *
  * The parent envelope is enforced by the reservation the round makes when it starts (the existing spending-limit pause), not here: the resolver is given room.
+ *
+ * A PLANNED PR CHILD (D#483 S5-b2c-3, R8) goes through the same steps, keyed on the CHILD's item id: its round count is its own `fix_round_started` events, its asks are raised on the
+ * child, and its anchor run is one of its own. What differs is only what a child is held to, and the build identity says it: the Spec version is the child's PINNED one (the one its
+ * pull request was built from), and the approval is the PARENT's newest (a child has none). The identity's launch checks run first (`start`): a parent deleted, closed or not approved
+ * again, or a key that left the approved Spec, stops the round with the identity's own code and writes nothing. After a re-approval a started child's rounds go on against its pinned
+ * version (R11), so the Spec comparison below is the parent's approval against itself for a child, and the child's pin is only ever the key under which receipts are written.
+ * A top-level item keeps its old reading exactly: its own newest Spec version and its own newest approval.
  */
 export interface FixGateCtx {
   pool: Pool;
@@ -113,20 +121,31 @@ type Decided = FixGateResult | { answer: { userId: string; anchor: string; specI
 
 async function decide(client: PoolClient, accountId: string, input: FixGateInput): Promise<Decided> {
   const { workItemId } = input;
-  const row = (await client.query<{ repo_id: string | null; provenance: string; title: string | null }>(
-    'SELECT repo_id, provenance, title FROM work_items WHERE id = $1::uuid AND account_id = $2::uuid', [workItemId, accountId])).rows[0];
+  const row = (await client.query<{ repo_id: string | null; provenance: string; title: string | null; parent_id: string | null }>(
+    'SELECT repo_id, provenance, title, parent_id FROM work_items WHERE id = $1::uuid AND account_id = $2::uuid', [workItemId, accountId])).rows[0];
   if (row === undefined) return stop('blocked', null, 'fix_launch_unreadable');
+  const identity = await resolveBuildIdentity(client, accountId, workItemId, 'start');
+  // A refusal of a top-level item (`no_issue_link`) is not this gate's business: the round has its own checks. A child's is: nothing is written and nothing starts.
+  if (!identity.ok && (identity.reason !== 'no_issue_link' || identity.isChild)) return stop('blocked', null, identity.reason);
+  const child = identity.ok && identity.identity.isChild;
   // The proposal's owner is read on its own (`workItemOrigin` stays the one path that joins a proposal to its item for provenance).
   const owner = await client.query<{ owner_process: string }>('SELECT owner_process FROM proposals WHERE account_id = $1::uuid AND work_item_id = $2::uuid LIMIT 1', [accountId, workItemId]);
   const item = { ...row, owner_process: owner.rows[0]?.owner_process ?? null };
 
+  // What the item is held to. A top-level item: its own newest Spec version and its own newest approval. A child: its pinned version (a version of its parent) and the parent's newest approval.
+  const pinned = child && identity.ok ? identity.identity.specVersionId : null;
   const spec = (await client.query<{ id: string; version: number }>(
-    'SELECT id, version FROM spec_versions WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND erased_at IS NULL ORDER BY version DESC LIMIT 1', [accountId, workItemId])).rows[0];
+    child
+      ? 'SELECT id, version FROM spec_versions WHERE account_id = $1::uuid AND id = $3::uuid AND work_item_id = $2::uuid AND erased_at IS NULL'
+      : 'SELECT id, version FROM spec_versions WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND erased_at IS NULL ORDER BY version DESC LIMIT 1',
+    child ? [accountId, row.parent_id, pinned] : [accountId, workItemId])).rows[0];
   const approval = (await client.query<{ id: string; spec_version_id: string | null; version: number | null }>(
     `SELECT a.id, a.spec_version_id, s.version FROM work_item_approvals a
        LEFT JOIN spec_versions s ON s.account_id = a.account_id AND s.id = a.spec_version_id
-      WHERE a.account_id = $1::uuid AND a.work_item_id = $2::uuid ORDER BY a.created_at DESC, a.id DESC LIMIT 1`, [accountId, workItemId])).rows[0];
+      WHERE a.account_id = $1::uuid AND a.work_item_id = $2::uuid ORDER BY a.created_at DESC, a.id DESC LIMIT 1`, [accountId, child ? row.parent_id : workItemId])).rows[0];
   if (approval === undefined || spec === undefined) return go('not_gated', null);
+  // The approval names the version the item is held to: for a top-level item that is its newest Spec; a child's pin is checked by the identity (R11), so the comparison holds by construction.
+  const approvalCurrent = child || approval.spec_version_id === spec.id;
 
   let key: string;
   if (input.checkFailedRunId !== undefined) {
@@ -162,7 +181,7 @@ async function decide(client: PoolClient, accountId: string, input: FixGateInput
       ORDER BY COALESCE(ended_at, created_at) DESC, id DESC LIMIT 1`, [accountId, workItemId, VERDICT_ROLES])).rows[0]?.id;
 
   // 5. A person's advance after a hold on this key is the answer. Decided here, written by gateFixRound in the person's own session.
-  if (input.personUserId !== null && anchor !== undefined && approval.spec_version_id === spec.id) {
+  if (input.personUserId !== null && anchor !== undefined && approvalCurrent) {
     const held = await client.query(
       `SELECT 1 FROM decision_asks WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND decision_type = 'launch_sub_item' AND sub_item_key = $3::text
           AND state = 'answered' AND answered_option = $4::text LIMIT 1`, [accountId, workItemId, key, FIX_ASK_HOLD]);
@@ -178,7 +197,7 @@ async function decide(client: PoolClient, accountId: string, input: FixGateInput
     preset,
     parent: {
       ownerProcess: 'product', engineLoopRepo: false, provenance: 'internal', hasPersonApproval: true,
-      approvedSpecVersion: approval.version, currentSpecVersion: spec.version,
+      approvedSpecVersion: approval.version, currentSpecVersion: child ? approval.version : spec.version,
       envelopeRemainingUsd: 0,
     },
     sub: { kind: 'fix_round', key: null, category: null },

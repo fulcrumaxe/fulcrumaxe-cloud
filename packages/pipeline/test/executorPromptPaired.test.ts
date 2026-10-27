@@ -11,7 +11,7 @@ import { expectOneGenuineEnvelope } from "./plan/helpers/panelFixtures.js";
  */
 const GOLDEN = path.join(path.dirname(fileURLToPath(import.meta.url)), "golden");
 const golden = (name: string): string => readFileSync(path.join(GOLDEN, name), "utf8");
-const BUILD = { owner: "acme", name: "widgets", number: 41, version: 3, spec: "1. Add a footer.\n2. Test it." };
+const BUILD = { owner: "acme", name: "widgets", number: 41, branch: "fx/issue-41", version: 3, spec: "1. Add a footer.\n2. Test it." };
 const SHA = "a".repeat(40);
 const PARENT = { branch: "fx/issue-40", sha: "b".repeat(40) };
 /** Anything that opens a pull request, or talks to the API that does. */

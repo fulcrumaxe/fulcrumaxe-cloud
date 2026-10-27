@@ -13,6 +13,7 @@ import type { ExtensionProgress } from "./runLimitDecision.js";
 import type { Role } from "./types.js";
 import { isRunnerMode } from "./runnerModes.js";
 import { ITEM_PR_BRANCH, RUNNER_RUN_BRANCH } from "@fulcrumaxe/runner-protocol";
+import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
 
 /**
  * D#2 H09b, correction C10, pass/fail 13: "Every write of
@@ -572,27 +573,33 @@ export async function writeRunnerJob(
 /**
  * D#599 PL-2b: the `run_events` kind that records which item pull request branch a continuation may push to. Written by the issuer in the
  * transaction that records the job, and only after it checked the pull request on GitHub. Every later check (the ticket route, `done`, the verdict
- * writer, the recorded-branch reads) re-reads it and demands that it, the signed job's `continues.branch` and `fx/issue-<item issue number>` agree.
+ * writer, the recorded-branch reads) re-reads it and demands that it, the signed job's `continues.branch` and the item's own branch from its build identity agree.
  */
 export const RUNNER_CONTINUES_BOUND_KIND = "runner.continues_bound";
 
 /**
  * The item pull request branch run `runId` is bound to, or null. It is non-null only when ALL THREE agree: the run's `runner.continues_bound` event,
- * the `continues.branch` of the run's own signed job, and `fx/issue-<issue number of the run's work item>`. Anything else (no event, an event for
+ * the `continues.branch` of the run's own signed job, and the branch of the run's work item from its build identity (`fx/issue-<n>`, or a planned PR child's `fx/<parent#>-<key>`). Anything else (no event, an event for
  * another branch, a job that names a different one, an item with another issue number) is null, never a fallback. `client` must be under the run's tenant.
  */
 export async function readBoundItemBranch(client: PoolClient, p: { accountId: string; runId: string }): Promise<{ branch: string; prNumber: number } | null> {
+  // D#483 S5-b2c-3 (R7): the item's own branch is its build identity's, computed here and handed to the query. Nothing builds `fx/issue-<n>` in SQL any more. This reads what the issuer bound
+  // at dispatch, so it runs no launch check (`observe`): a fix round already in flight keeps its binding after its parent was deleted, until the next start refuses.
+  const owner = await client.query<{ work_item_id: string | null }>("SELECT work_item_id FROM agent_runs WHERE account_id = $1 AND id = $2", [p.accountId, p.runId]);
+  const workItemId = owner.rows[0]?.work_item_id;
+  if (typeof workItemId !== "string") return null;
+  const identity = await resolveBuildIdentity(client, p.accountId, workItemId, "observe");
+  if (!identity.ok) return null;
   const { rows } = await client.query<{ branch: string | null; pr: string | null }>(
     `SELECT e.payload->>'branch' AS branch, e.payload->>'pr_number' AS pr
        FROM run_events e
        JOIN agent_runs a ON a.account_id = e.account_id AND a.id = e.run_id
-       JOIN work_items w ON w.account_id = a.account_id AND w.id = a.work_item_id
       WHERE e.account_id = $1 AND e.run_id = $2 AND e.kind = '${RUNNER_CONTINUES_BOUND_KIND}'
         AND e.payload->>'branch' = a.job_signed->'job'->'continues'->>'branch'
         AND e.payload->>'pr_number' = a.job_signed->'job'->'continues'->>'pr_number'
-        AND e.payload->>'branch' = 'fx/issue-' || w.gh_number::text
+        AND e.payload->>'branch' = $3::text
       ORDER BY e.seq DESC LIMIT 1`,
-    [p.accountId, p.runId],
+    [p.accountId, p.runId, identity.identity.branch],
   );
   const row = rows[0];
   if (!row || typeof row.branch !== "string" || !ITEM_PR_BRANCH.test(row.branch) || typeof row.pr !== "string" || !/^[1-9][0-9]{0,9}$/.test(row.pr)) return null;

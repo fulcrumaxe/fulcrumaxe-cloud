@@ -3,6 +3,8 @@ import type { KeyObject } from "node:crypto";
 import type { Pool } from "pg";
 import {
   CONTINUES_CROSS_SIDE_MIN_PROTOCOL,
+  CHILD_BRANCH_JOB_MIN_PROTOCOL,
+  isChildItemBranch,
   MEMORY_JOB_MIN_PROTOCOL,
   EXCLUDES_JOB_MIN_PROTOCOL,
   PINS_JOB_MIN_PROTOCOL,
@@ -29,6 +31,7 @@ import {
 import { effectiveContextBudget, readContextBudgetBytes } from "@fx/core/src/context/contextBudget.js";
 import { readItemRules } from "@fx/core/src/context/contextRules.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
+import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
 import { runnerToolsForRole } from "../agentConfig.js";
 import { RUNNER_RUN_BRANCH, SPEC_PINNED_RUNNER_ROLES, readRecordedRunnerBranch, recordRunnerDispatchBase, writeRunnerJob } from "../runStatusWriter.js";
 import type { ExecutionRun } from "../executionTarget.js";
@@ -67,6 +70,7 @@ export type JobIssueErrorCode =
   | "continues_base_invalid"
   | "continues_pr_not_open"
   | "continues_pr_mismatch"
+  | "continues_identity_refused"
   | "continues_branch_protected"
   | "continues_role_not_executor"
   | "review_without_head"
@@ -124,8 +128,13 @@ export interface JobContext {
    * fix round's branch comes from: it is never derived from the issue.
    */
   parentBranch: string | null;
-  /** D#599 PL-2b: the work item's own issue number (`work_items.gh_number`), the only `n` an `fx/issue-<n>` continuation branch may carry; null/absent when the item has none. */
-  issueNumber?: number | null;
+  /**
+   * D#599 PL-2b / D#483 S5-b2c-3 (R7): the work item's own pull request branch from its build identity (`fx/issue-<n>`, or a planned PR child's `fx/<parent#>-<key>`), the only item branch a
+   * continuation may carry; null/absent when the identity has none. Read for a continuation with the launch checks of a start (`load` option `start`), else without.
+   */
+  itemBranch?: string | null;
+  /** The build identity's refusal when it has one (a planned PR child whose parent was deleted, a Spec not approved again): a continuation on the item branch is then refused. */
+  identityRefusal?: string | null;
   /**
    * D#6 R7a (C35): the repo's approved sandbox allowances as stored (the newest approval, unless it was set aside), or null/absent when there
    * are none. Read from the database only: nothing here comes from the repository's contents.
@@ -138,7 +147,7 @@ export interface JobContextPort {
    * Throws `JobIssueError` when the repository is unknown. `parentRunId` names the run whose recorded branch to read into `parentBranch`;
    * without it, `parentBranch` is null.
    */
-  load(run: ExecutionRun, options?: { parentRunId?: string | null }): Promise<JobContext>;
+  load(run: ExecutionRun, options?: { parentRunId?: string | null; start?: boolean }): Promise<JobContext>;
 }
 
 /** Reads the job context from the database, under the run's tenant. */
@@ -154,9 +163,9 @@ export function createPgJobContext(pool: Pool): JobContextPort {
           body: string | null;
           body_sha256: string | null;
           discussion_number: string | null;
-          gh_number: string | null;
+          work_item_id: string | null;
         }>(
-          `SELECT r.gh_owner, r.gh_name, sv.version, sv.body, sv.body_sha256, d.number AS discussion_number, w.gh_number
+          `SELECT r.gh_owner, r.gh_name, sv.version, sv.body, sv.body_sha256, d.number AS discussion_number, ar.work_item_id
              FROM agent_runs ar
              LEFT JOIN repos r ON r.account_id = ar.account_id AND r.id = $3
              LEFT JOIN work_items w ON w.account_id = ar.account_id AND w.id = ar.work_item_id
@@ -188,8 +197,9 @@ export function createPgJobContext(pool: Pool): JobContextPort {
         // The approved check is part of the same row, so it is set aside with it (D#6 R-CHK-1). The three columns are all null or all set (a database CHECK).
         const check = latest?.check_argv ? { argv: latest.check_argv, dev_shell: latest.check_dev_shell, timeout_s: latest.check_timeout_s } : null;
         const sandboxAllowances = latest && !latest.set_aside ? ({ entries: latest.entries as AllowanceSet["entries"], ...(latest.command_timeout_s === null ? {} : { command_timeout_s: latest.command_timeout_s }), ...(check ? { check } : {}) } as AllowanceSet) : null;
-        const issueNumber = row.gh_number === null ? null : Number(row.gh_number);
-        return { repo: { owner: row.gh_owner, name: row.gh_name }, spec, parentBranch, issueNumber: issueNumber !== null && Number.isSafeInteger(issueNumber) && issueNumber >= 1 ? issueNumber : null, sandboxAllowances };
+        // The item's branch is the build identity's. A continuation (`start`) re-runs a planned PR child's launch checks now; every other job only reads what exists.
+        const identity = row.work_item_id === null ? null : await resolveBuildIdentity(client, run.accountId, row.work_item_id, options.start === true ? "start" : "observe");
+        return { repo: { owner: row.gh_owner, name: row.gh_name }, spec, parentBranch, itemBranch: identity?.ok ? identity.identity.branch : null, identityRefusal: identity !== null && !identity.ok && (identity.isChild || identity.reason !== "no_issue_link") ? identity.reason : null, sandboxAllowances };
       });
     },
   };
@@ -268,9 +278,6 @@ export interface JobIssuerDeps {
 const REVIEW_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 const MODEL_HINT = /^[A-Za-z0-9._:-]{1,100}$/;
-
-/** The prefix of an item pull request branch; `n` is appended. */
-const ITEM_BRANCH_PREFIX = "fx/issue-";
 
 /**
  * D#599 PL-2b security model 2 and 4: binds an item pull request branch to the item's open pull request in THIS repository, on GitHub, now, and
@@ -369,7 +376,7 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
 
       // A fix round the pipeline started has no branch of its own to carry: it continues the branch recorded for the run it fixes (C25 section 1.2).
       const needsRecordedBranch = input.continues !== undefined && input.continues.branch === undefined;
-      const context = await deps.context.load(run, { parentRunId: needsRecordedBranch ? (input.continues?.parentRunId ?? null) : null });
+      const context = await deps.context.load(run, { parentRunId: needsRecordedBranch ? (input.continues?.parentRunId ?? null) : null, ...(input.continues ? { start: true } : {}) });
 
       let continues: Job["continues"] = null;
       let continuationHead: { oid: string | null } | null = null;
@@ -388,8 +395,9 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         const itemBranch = sessionId === null && ITEM_PR_BRANCH.test(branch);
         if (!itemBranch && !RUNNER_RUN_BRANCH.test(branch)) throw new JobIssueError("continues_branch_mismatch");
         if (itemBranch) {
-          // `n` must be this item's own issue number.
-          if (context.issueNumber === undefined || context.issueNumber === null || branch !== `${ITEM_BRANCH_PREFIX}${context.issueNumber}`) throw new JobIssueError("continues_pr_mismatch");
+          // The branch must be this item's own, from its build identity (`fx/issue-<n>`, or a planned PR child's `fx/<parent#>-<key>`): never the parent's, never a sibling's, never another number.
+          if (context.identityRefusal) throw new JobIssueError("continues_identity_refused");
+          if (context.itemBranch === undefined || context.itemBranch === null || branch !== context.itemBranch) throw new JobIssueError("continues_pr_mismatch");
           const repoRef: BindingRepo = { id: run.repoId, owner: context.repo.owner, name: context.repo.name, local: input.jobMode !== "verified" };
           const prNumber = await bindItemPullRequest(deps.continuationBinding, repoRef, branch, input.continues.prNumber);
           boundPullRequest = { prNumber, branch };
@@ -517,7 +525,7 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         runId: run.id,
         job: signed as unknown as Record<string, unknown>,
         // A job that carries memory is also gated: an older runner's strict parse would refuse the `memory` key, so it waits for an updated runner instead. The same holds for excludes (CX-5c): a runner that ignored them would run the agent with nothing denied. And for pins (CX-5c2): the strict parse again. And for a spill (CX-4b): a cut prompt is never sent uncut to an older runner, it waits for an updated one. And for a window figure (CX-6b): the same strict-parse reason. And for a continuation's `base_sha` (R2-b): the strict parse again, and a runner that ignored it would pick its own diff base.
-        minProtocolVersion: Math.max(crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : 0, candidate.memory ? MEMORY_JOB_MIN_PROTOCOL : 0, candidate.excludes ? EXCLUDES_JOB_MIN_PROTOCOL : 0, candidate.pins ? PINS_JOB_MIN_PROTOCOL : 0, candidate.spill ? SPILL_JOB_MIN_PROTOCOL : 0, candidate.context_window !== undefined ? CONTEXT_WINDOW_JOB_MIN_PROTOCOL : 0, candidate.check ? CHECK_JOB_MIN_PROTOCOL : 0, continues?.base_sha === undefined ? 0 : continues.pr_number === undefined ? BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL : BASE_SHA_JOB_MIN_PROTOCOL) || null,
+        minProtocolVersion: Math.max(crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : 0, continues !== null && isChildItemBranch(continues.branch) ? CHILD_BRANCH_JOB_MIN_PROTOCOL : 0, candidate.memory ? MEMORY_JOB_MIN_PROTOCOL : 0, candidate.excludes ? EXCLUDES_JOB_MIN_PROTOCOL : 0, candidate.pins ? PINS_JOB_MIN_PROTOCOL : 0, candidate.spill ? SPILL_JOB_MIN_PROTOCOL : 0, candidate.context_window !== undefined ? CONTEXT_WINDOW_JOB_MIN_PROTOCOL : 0, candidate.check ? CHECK_JOB_MIN_PROTOCOL : 0, continues?.base_sha === undefined ? 0 : continues.pr_number === undefined ? BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL : BASE_SHA_JOB_MIN_PROTOCOL) || null,
         ...(boundPullRequest ? { continuesBound: boundPullRequest } : {}),
       });
       if (!recorded) throw new JobIssueError("job_not_recorded");

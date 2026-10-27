@@ -8,7 +8,7 @@ const LINES: DecisionLine[] = [
   { key: "d1", label: "How to restructure code without changing what it does", instruction: "ask" },
   { key: "d2", label: "How to test a change", instruction: "decide" },
 ];
-const BUILD = { owner: "acme", name: "widgets", number: 41, version: 3, spec: "1. Add a footer.\n2. Test it." };
+const BUILD = { owner: "acme", name: "widgets", number: 41, branch: "fx/issue-41", version: 3, spec: "1. Add a footer.\n2. Test it." };
 const HEAD = "DECISIONS YOU MAY MEET IN THIS WORK";
 /** Strings the agent must never be told (D#7 DP-C2b, extended to this block). */
 const LEAKS = ["nonbreaking_refactor_approach", "test_strategy_choice", "dependency_patch_bump", "decision_types", "Cautious", "Balanced", "Autonomous", "cautious", "balanced", "autonomous", "human_over_the_loop", "human_in_the_loop", "automated_with_monitoring", "dial", "preset"];

@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { listDueBranchCleanups, BRANCH_CLEANUP_LIST_LIMIT } from "@fx/db/src/branchCleanupLister.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
+import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
 import { deleteBranchWithToken, mintBranchDeleteToken, BranchDeleteTokenError, DELETABLE_BRANCH, InstallationHttpError, type BranchDeleteDeps, type BranchDeleteOutcome, type BranchDeleteGrant, type RunnerGitTicketSigner } from "@fx/github";
 import { PLANE_PUBLISH_ROLE } from "@fx/runner";
 import { closePrivateCopy, PrCloseError, PublicPrStillOpen, type PrCloseOpen, type PrCloseOutcome, type PublicPrState } from "./privatePrClose.js";
@@ -8,8 +9,8 @@ import { closePrivateCopy, PrCloseError, PublicPrStillOpen, type PrCloseOpen, ty
 /**
  * D#598 P1f-5d: the branch cleanup sweep, the cron's body. When a paired item reaches `merged`, `closed_unmerged` or `closed`, the private branches the
  * platform pushed for it are removed, if and only if each still points at the commit the platform recorded:
- *   - sandbox build: `fx/issue-<n>`, the commit is `publish.private_head` in the envelope of the item's publish run;
- *   - runner run: `fx/<run id>-g<generation>` (or the item's own `fx/issue-<n>` when the run continued it), the commit is the `headOid` the cloud read
+ *   - sandbox build: the item's own branch (its build identity's: `fx/issue-<n>`, or a planned PR child's `fx/<parent#>-<key>`), the commit is `publish.private_head` in the envelope of the item's publish run;
+ *   - runner run: `fx/<run id>-g<generation>` (or the item's own branch when the run continued it), the commit is the `headOid` the cloud read
  *     from GitHub when it judged the run (the `run.status_changed` row of the run's `done`).
  * The stage is read every time; nothing is stamped when an item closes. The cross-tenant list is the definer of migration 0886, and each item is then read,
  * deleted and recorded one at a time under its own tenant, with no database connection held while GitHub is asked.
@@ -100,16 +101,19 @@ const SHA = /^[0-9a-f]{40}$/;
 
 /** The branches of one item and the head recorded for each, newest record first, one per (repository, branch). Empty when the item is no longer paired and closed. */
 async function readState(client: PoolClient, accountId: string, workItemId: string): Promise<ItemState | null> {
-  const { rows: gate } = await client.query<{ issue: string }>(
-    `SELECT w.gh_number::text AS issue FROM work_items w
+  const { rows: gate } = await client.query<{ one: number }>(
+    `SELECT 1 AS one FROM work_items w
       WHERE w.account_id = $1 AND w.id = $2 AND w.stage = ANY ($3::text[])
         AND EXISTS (SELECT 1 FROM plane_pushes p WHERE p.account_id = w.account_id AND p.work_item_id = w.id)`,
     [accountId, workItemId, TERMINAL],
   );
   if (gate.length === 0) return null;
-  const issue = gate[0]!.issue;
+  // D#483 S5-b2c-3 (R7, R10): the item's own branch is the build identity's. This reads what already happened, so it runs no launch check: an orphan whose branch was recorded is still cleaned
+  // once its pull request has merged or closed, and one with no record has no item branch (only its runs' own branches are looked at). It is never the parent's `fx/issue-<n>` and never a sibling's.
+  const identity = await resolveBuildIdentity(client, accountId, workItemId, "observe");
+  const itemBranch = identity.ok ? identity.identity.branch : null;
   const { rows } = await client.query<{ run_id: string; repo_id: string; owner: string; name: string; branch: string; sha: string; at: Date; pr: string | null; mode: string }>(
-    `SELECT r.id AS run_id, rp.id AS repo_id, rp.gh_owner AS owner, rp.gh_name AS name, 'fx/issue-' || $3::text AS branch, r.envelope->'publish'->>'private_head' AS sha, r.created_at AS at, NULL::text AS pr, r.execution_mode AS mode
+    `SELECT r.id AS run_id, rp.id AS repo_id, rp.gh_owner AS owner, rp.gh_name AS name, $3::text AS branch, r.envelope->'publish'->>'private_head' AS sha, r.created_at AS at, NULL::text AS pr, r.execution_mode AS mode
        FROM agent_runs r JOIN repos rp ON rp.account_id = r.account_id AND rp.id = r.dispatch_repo_id
       WHERE r.account_id = $1 AND r.work_item_id = $2 AND r.role = $4 AND r.status = 'succeeded' AND r.envelope->'publish'->>'private_head' IS NOT NULL
      UNION ALL
@@ -117,7 +121,7 @@ async function readState(client: PoolClient, accountId: string, workItemId: stri
        FROM run_events e JOIN agent_runs r ON r.account_id = e.account_id AND r.id = e.run_id JOIN repos rp ON rp.account_id = r.account_id AND rp.id = r.dispatch_repo_id
       WHERE e.account_id = $1 AND r.work_item_id = $2 AND e.kind = 'run.status_changed' AND e.payload->>'viaRunnerDone' = 'true' AND e.payload->>'headOid' IS NOT NULL
       ORDER BY 7 DESC, 1 LIMIT 200`,
-    [accountId, workItemId, issue, PLANE_PUBLISH_ROLE],
+    [accountId, workItemId, itemBranch, PLANE_PUBLISH_ROLE],
   );
   const { rows: closes } = await client.query<{ id: string }>(
     `SELECT id FROM work_item_transitions WHERE account_id = $1 AND work_item_id = $2 AND to_stage = ANY ($3::text[]) ORDER BY created_at DESC, id DESC LIMIT 1`,
@@ -144,7 +148,7 @@ async function readState(client: PoolClient, accountId: string, workItemId: stri
   for (const r of rows) {
     const key = `${r.repo_id}/${r.branch}`;
     // Only the two shapes, and a run branch only for the run that recorded it; the item branch only for this item's own number.
-    const ok = typeof r.branch === "string" && DELETABLE_BRANCH.test(r.branch) && SHA.test(String(r.sha)) && (r.branch === `fx/issue-${issue}` || r.branch.startsWith(`fx/${r.run_id}-g`));
+    const ok = typeof r.branch === "string" && DELETABLE_BRANCH.test(r.branch) && SHA.test(String(r.sha)) && ((itemBranch !== null && r.branch === itemBranch) || r.branch.startsWith(`fx/${r.run_id}-g`));
     const pr = ok && typeof r.pr === "string" && /^[1-9][0-9]{0,9}$/.test(r.pr) && Number.isSafeInteger(Number(r.pr)) ? Number(r.pr) : null;
     const branchDone = done.has(r.branch);
     const prDone = pr === null || done.has(`pr:${pr}`);

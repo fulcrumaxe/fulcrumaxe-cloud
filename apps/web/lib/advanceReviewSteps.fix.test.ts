@@ -18,7 +18,7 @@ function fixture(executionMode: string) {
     advanceStartRun: started,
     advanceRecordEvent: async () => undefined,
   };
-  const ctx = { repoId: "r", owner: "acme", name: "widgets", issue: 7, tier: "t", specVersion: 3, debaterEnabled: false, executionMode } as unknown as ReviewCtx;
+  const ctx = { repoId: "r", owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", tier: "t", specVersion: 3, debaterEnabled: false, executionMode } as unknown as ReviewCtx;
   return { worker: worker as never, ctx, started };
 }
 

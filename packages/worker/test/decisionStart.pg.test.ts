@@ -82,7 +82,7 @@ describe("decision snapshot for a fix round [pg]", { timeout: 120_000 }, () => {
   }
   function module(resume: ReturnType<typeof resumeWith>["fn"], pool: Pool = writerPool) {
     const review: AdvanceReviewDeps = {
-      load: vi.fn(async () => ({ ok: true as const, ctx: { workItemId: "x", stage: "pr_opened", repoId: "r", owner: "acme", name: "widgets", issue: 7, tier: "feature", specVersion: 1, debaterEnabled: false } })),
+      load: vi.fn(async () => ({ ok: true as const, ctx: { workItemId: "x", stage: "pr_opened", repoId: "r", owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", tier: "feature", specVersion: 1, debaterEnabled: false } })),
       recordRound: vi.fn(async (_p, _r, input) => ({ decision: "all_passed", round: 0, recorded: input.verdicts.map((v: { role: string; runId: string; verdict: string }) => ({ ...v, outcome: "passed" })) })),
       resume,
       mergeGate: vi.fn(async () => ({ outcome: "merged", headSha: HEAD, reasons: [], status: "posted" })),

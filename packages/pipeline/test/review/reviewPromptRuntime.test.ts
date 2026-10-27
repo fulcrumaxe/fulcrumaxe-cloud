@@ -15,12 +15,12 @@ const GOLDEN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "go
 const golden = (name: string): string => readFileSync(path.join(GOLDEN, name), "utf8");
 
 const HEAD = "a".repeat(40);
-const BASE: ReviewPromptInput = { role: "code-reviewer", owner: "acme", name: "widgets", issue: 7, pr: 41, headSha: HEAD, baseRef: "main", version: 3, spec: "Acceptance: the footer shows the year." };
+const BASE: ReviewPromptInput = { role: "code-reviewer", owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", pr: 41, headSha: HEAD, baseRef: "main", version: 3, spec: "Acceptance: the footer shows the year." };
 const PRIOR = [
   { role: "code-reviewer", summary: "Looks right; tests cover the year." },
   { role: "security-reviewer", summary: "No untrusted input reaches a shell." },
 ];
-const FIX: FixPromptInput = { owner: "acme", name: "widgets", issue: 7, pr: 41, headSha: HEAD, version: 3, spec: "Acceptance: the footer shows the year.", findings: [{ role: "code-reviewer", verdict: "needs-fix", findings: ["src/a.ts:3 - off by one"], summary: "one problem" }] };
+const FIX: FixPromptInput = { owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", pr: 41, headSha: HEAD, version: 3, spec: "Acceptance: the footer shows the year.", findings: [{ role: "code-reviewer", verdict: "needs-fix", findings: ["src/a.ts:3 - off by one"], summary: "one problem" }] };
 
 const ROLES = ["code-reviewer", "acceptance-tester", "security-reviewer", "debater"] as const;
 

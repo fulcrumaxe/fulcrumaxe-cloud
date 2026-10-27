@@ -27,7 +27,7 @@ const ITEM = "22222222-2222-4222-8222-222222222222";
 const REPO = "33333333-3333-4333-8333-333333333333";
 const ROOT = "66666666-6666-4666-8666-666666666666";
 const ARGS: AdvanceStartArgs = { accountId: ACCOUNT, userId: "55555555-5555-4555-8555-555555555555", workItemId: ITEM, actionId: "44444444-4444-4444-8444-444444444444", haltEpoch: 0 };
-const TRIAGED: AdvanceItem = { stage: "triaged", provenance: "internal", repoId: REPO, ghNumber: 7, ghOwner: "acme", ghName: "widgets", hasDiscussion: false, kind: null, hasSpec: false, specVersion: null, executorRunId: null, executionMode: "sandbox", recordedPr: null };
+const TRIAGED: AdvanceItem = { stage: "triaged", provenance: "internal", repoId: REPO, ghNumber: 7, branch: "fx/issue-7", ghOwner: "acme", ghName: "widgets", hasDiscussion: false, kind: null, hasSpec: false, specVersion: null, executorRunId: null, executionMode: "sandbox", recordedPr: null };
 const AT_SPEC: AdvanceItem = { ...TRIAGED, stage: "spec_ready", hasDiscussion: true, kind: "feature", hasSpec: true, specVersion: 3 };
 /** What the build tests see once the pull request is open and the review starts: the review stops at once, so these tests stay about the build (the review has its own file). */
 const REVIEW_STOPS = { status: "failed", detail: "review_no_spec" };
@@ -533,7 +533,7 @@ describe("the build for an item at Spec ready", () => {
   it("a run that succeeded but opened no pull request is recorded after the grace period", async () => {
     const w = setup({ item: AT_SPEC, stages: ["in_progress"] });
     // D#6 C29: after the grace period the build looks for the pull request itself; GitHub answers that none is open.
-    w.advanceLoadReview.mockResolvedValue({ ok: true, ctx: { workItemId: ITEM, stage: "in_progress", repoId: REPO, owner: "acme", name: "widgets", issue: 7, tier: "feature", specVersion: 3, debaterEnabled: false, executionMode: "sandbox", recordedPr: null } });
+    w.advanceLoadReview.mockResolvedValue({ ok: true, ctx: { workItemId: ITEM, stage: "in_progress", repoId: REPO, owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", tier: "feature", specVersion: 3, debaterEnabled: false, executionMode: "sandbox", recordedPr: null } });
     const asked: string[] = [];
     setInstallationHttpForTests(async () => ({ request: async (req) => (asked.push(`${req.method} ${req.path}`), { status: 200, body: [] }) }));
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_no_pull_request" });

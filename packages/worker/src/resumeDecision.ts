@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
+import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
 import { reconcileResumeRequests, RESUME_RECONCILE_DEFAULT_LIMIT } from "@fx/db/src/decisionAsks.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { isResumeContext, type ResumeContext } from "@fx/roles/next-role-request";
@@ -157,7 +158,7 @@ interface PrincipalRow {
 }
 interface Facts {
   ask: (ResumeAsk & { run_id: string | null; work_item_id: string; answered_by: string | null }) | undefined;
-  item: { stage: string; halted: boolean; halt_epoch: number; gh_number: string | null; repo_id: string | null } | undefined;
+  item: { stage: string; halted: boolean; halt_epoch: number; repo_id: string | null } | undefined;
   /** The request's own row: the halt epoch it recorded, and how long ago it was made (on the database's clock). */
   request: { epoch: number | null; ageSeconds: number; attempts: number } | undefined;
   parked: { id: string; created_at: Date; execution_mode: string | null; spec_version_id: string | null; spec_version: number | null; prompt: string | null } | undefined;
@@ -190,7 +191,7 @@ export function createResumeModule(runnerPool: Pool, deps: ResumeModuleDeps): Re
       ).rows[0];
       const empty: Facts = { ask, item: undefined, request: undefined, parked: undefined, newerExecutor: false, started: undefined, deniedStarts: 0, liveOther: false, approver: null, fix: null };
       if (!ask) return empty;
-      const item = (await client.query<NonNullable<Facts["item"]>>("SELECT stage, halted_at IS NOT NULL AS halted, halt_epoch, gh_number, repo_id FROM work_items WHERE id = $1 AND account_id = $2", [ask.work_item_id, accountId])).rows[0];
+      const item = (await client.query<NonNullable<Facts["item"]>>("SELECT stage, halted_at IS NOT NULL AS halted, halt_epoch, repo_id FROM work_items WHERE id = $1 AND account_id = $2", [ask.work_item_id, accountId])).rows[0];
       const req = (
         await client.query<{ e: number | null; age: number; attempts: number }>(
           "SELECT resume_halt_epoch AS e, EXTRACT(EPOCH FROM (now() - created_at))::float8 AS age, attempts FROM run_action_requests WHERE id = $1 AND account_id = $2",
@@ -335,7 +336,11 @@ export function createResumeModule(runnerPool: Pool, deps: ResumeModuleDeps): Re
 
     if (f.item.halted || f.request?.epoch === null || f.request === undefined || f.item.halt_epoch !== f.request.epoch) return note("work_item_not_resumable");
     if (!RESUMABLE_STAGES.includes(f.item.stage) || f.newerExecutor) return note("work_item_not_resumable");
-    if (f.item.gh_number === null || !Number.isSafeInteger(Number(f.item.gh_number))) return note("work_item_not_resumable");
+    // D#483 S5-b2c-3 (R7): the issue number and the branch are the build identity's. A planned PR child's launch checks run again now; a refusal is named by the identity's own code
+    // (`child_orphaned`, `parent_closed`, `respec_needs_approval`, `key_not_in_approved_spec`), so the card says what is wrong and not a bare "not resumable".
+    const begin = await withTenant(runnerPool, accountId, (client) => resolveBuildIdentity(client, accountId, f.ask!.work_item_id, "start"));
+    if (!begin.ok) return note(begin.reason === "no_issue_link" || begin.reason === "not_found" ? "work_item_not_resumable" : begin.reason);
+    const identity = begin.identity;
     if (f.parked.prompt === null) return note("prompt_not_retained");
     const actor = await actorFor(accountId, [who.user_id, f.ask.answered_by, f.approver]);
     if (actor === null || (who.principal_kind === "session" && who.user_id !== actor)) return note("principal_not_authorised");
@@ -372,7 +377,7 @@ export function createResumeModule(runnerPool: Pool, deps: ResumeModuleDeps): Re
       const started = await deps.startFix(
         { accountId, userId: actor, workItemId, haltEpoch: f.item.halt_epoch },
         {
-          issue: Number(f.item.gh_number),
+          issue: identity.issueNumber,
           headSha: f.fix.headSha,
           prompt,
           round: f.fix.round,
@@ -381,7 +386,7 @@ export function createResumeModule(runnerPool: Pool, deps: ResumeModuleDeps): Re
           reviewer: f.fix.reviewer as AdvanceFixRequest["reviewer"],
           failingRunId: f.fix.failingRunId,
           // The pull request the round was first started with (the sandbox review step found it on GitHub), so a sandbox round that resumes is synced as it was.
-          ...(f.fix.prNumber !== null ? { pr: { number: f.fix.prNumber, branch: `fx/issue-${f.item.gh_number}` } } : {}),
+          ...(f.fix.prNumber !== null ? { pr: { number: f.fix.prNumber, branch: identity.branch } } : {}),
           ...(f.parked.execution_mode !== null && /^[a-z][a-z_]{0,31}$/.test(f.parked.execution_mode) ? { expectedExecutionMode: f.parked.execution_mode } : {}),
         },
       );
@@ -403,7 +408,7 @@ export function createResumeModule(runnerPool: Pool, deps: ResumeModuleDeps): Re
       role: "executor",
       prompt,
       clone: true,
-      pr: Number(f.item.gh_number),
+      pr: identity.issueNumber,
       exclusive: true,
       haltEpoch: f.item.halt_epoch,
       parentRunId: f.parked.id,

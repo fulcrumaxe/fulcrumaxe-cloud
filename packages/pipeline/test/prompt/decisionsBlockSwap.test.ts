@@ -10,7 +10,7 @@ const NEW: DecisionLine[] = [
 ];
 const oldBlock = decisionsBlock(OLD)!;
 const newBlock = decisionsBlock(NEW)!;
-const BUILD = { owner: "acme", name: "widgets", number: 41, version: 3, spec: "1. Add a footer." };
+const BUILD = { owner: "acme", name: "widgets", number: 41, branch: "fx/issue-41", version: 3, spec: "1. Add a footer." };
 
 describe("swapDecisionsBlock", () => {
   it("replaces the block a built prompt carries, and nothing else in it changes", () => {

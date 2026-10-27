@@ -24,6 +24,7 @@ describe("A8 and the two continuation branch shapes", () => {
   it.each([
     ["an item pull request branch", `${R}/branches/fx%2Fissue-12/protection`],
     ["a large issue number", `${R}/branches/fx%2Fissue-1234567890/protection`],
+    ["a planned PR child's branch (D#483 S5-b2c-3)", `${R}/branches/fx%2F41-api/protection`],
     ["a run branch", `${R}/branches/fx%2F${RUN}-g1/protection`],
     ["a run branch at generation 123456789", `${R}/branches/fx%2F${RUN}-g123456789/protection`],
   ])("lets %s through, as the encoded path it was sent, with the JSON Accept added", async (_name, path) => {
@@ -35,6 +36,10 @@ describe("A8 and the two continuation branch shapes", () => {
 
   it.each([
     ["another fx name", `${R}/branches/fx%2Fdocs-x/protection`],
+    ["a child branch with an upper-case key", `${R}/branches/fx%2F41-API/protection`],
+    ["a child branch with a leading zero", `${R}/branches/fx%2F041-api/protection`],
+    ["a child branch with a path under it", `${R}/branches/fx%2F41-api%2Fx/protection`],
+    ["a child branch with an empty key", `${R}/branches/fx%2F41-/protection`],
     ["fx with a path under it", `${R}/branches/fx%2Fdocs%2Fx/protection`],
     ["a branch named like an item branch with a suffix", `${R}/branches/fx%2Fissue-12-x/protection`],
     ["issues instead of issue", `${R}/branches/fx%2Fissues-12/protection`],
