@@ -572,7 +572,7 @@ export const CHECK_SKIPPED_MAX = 100_000_000;
  * cloud then records no reason. On the wire it is only a short lowercase word (a newer runner may name a reason this build does not know); the cloud maps any word outside this set
  * to `other` before it stores or shows anything, and a check that carries a reason never counts as passed. `other` is the generic code.
  */
-export const CHECK_NOT_RUN_REASONS = ["sandbox_unavailable", "sandbox_refused", "pin_failed", "protected_unreadable", "protected_changed", "not_restored", "start_failed", "not_set_up", "base_missing", "other"] as const;
+export const CHECK_NOT_RUN_REASONS = ["sandbox_unavailable", "sandbox_refused", "pin_failed", "protected_unreadable", "protected_changed", "not_restored", "start_failed", "not_set_up", "base_missing", "agent_not_stopped", "other"] as const;
 export type CheckNotRunReason = (typeof CHECK_NOT_RUN_REASONS)[number];
 /** The closed code for a word off the wire or out of a row: a known code as it is, anything else `other`. */
 export const checkNotRunReason = (word: unknown): CheckNotRunReason => (typeof word === "string" && (CHECK_NOT_RUN_REASONS as readonly string[]).includes(word) ? (word as CheckNotRunReason) : "other");

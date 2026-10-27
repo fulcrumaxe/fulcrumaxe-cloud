@@ -233,6 +233,7 @@ export const CHECK_NOT_RUN_LINES = {
   start_failed: "The runner could not start the check, so it was not run.",
   not_set_up: "The check is not set up on this runner, so it was not run.",
   base_missing: "The runner could not find the default branch's copy of the check's files, so it was not run.",
+  agent_not_stopped: "The runner could not stop the agent's processes before the check, so the check was not run.",
   other: "The runner reported that the check could not run safely, so it was not run.",
 } as const;
 export function checkNotRunText(reason: unknown): string {
