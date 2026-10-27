@@ -1,3 +1,4 @@
+import { HANDLED_EVENT_NAMES } from './handledEventNames.js';
 import { reportSyncFailure } from './syncFailureTag.js';
 import type { Pool, PoolClient } from 'pg';
 import {
@@ -26,18 +27,9 @@ import { applyIssueChange, fencedIssueSummary, proposalTitle, proposeFromIssue, 
  * D#2 H13a body criterion 2: the 8 events this webhook handles.
  * `installation` is acknowledged but produces no work_items/run mapping --
  * installation provisioning is H06's, not this task's.
+ * The list lives in a dependency-free module so bare node can import it.
  */
-export const HANDLED_EVENT_NAMES = [
-  'installation',
-  'installation_repositories',
-  'issues',
-  'issue_comment',
-  'discussion',
-  'discussion_comment',
-  'pull_request',
-  'pull_request_review',
-  'push',
-] as const;
+export { HANDLED_EVENT_NAMES };
 
 export type GithubWebhookEventName = (typeof HANDLED_EVENT_NAMES)[number];
 
