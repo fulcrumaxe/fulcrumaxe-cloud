@@ -2,9 +2,11 @@ import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import { hasBlockingRetryChild } from "@fx/core/src/runActions/retryChild.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { IdempotencyKeyTakenError, NoSpecVersionError, WorkItemHaltedError, cancelRun, acceptQueuedRunnerRun, checkRetryAuthor, startAgentRun, type AuthorCheckProvider, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { IdempotencyKeyTakenError, NoSpecVersionError, WorkItemHaltedError, cancelRun, acceptQueuedRunnerRun, checkRetryAuthor, EXECUTOR_ROLE, startAgentRun, type AuthorCheckProvider, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 // A relative import: @fx/model-router is not a dependency of this package and this change may not touch the lockfile.
 import { escalate, type PreviousRun } from "../../model-router/src/escalate.js";
+import { reportError } from "@fx/telemetry";
+import { decisionStartFor, type DecisionStart } from "./decisionStart.js";
 import { PREVIEW_SEAT_REFUSALS, type PreviewSeatConfig } from "./preview.js";
 import { RunActionInputError, RunActionRefusedError, RunActionUnavailableError, type PerformResult } from "./runActions.js";
 
@@ -46,7 +48,7 @@ export interface RetryFacade {
    * Performs a CLAIMED `retry_run` action. Takes the action id and nothing else. Outcome
    * `{ run_id, model, escalated_from_model }`; a replay returns the same run and starts nothing. Refusals:
    * principal_not_authorised, kind_mismatch, target_not_found, run_not_retryable (not finished, no work item, or already retried or continued),
-   * retry_unavailable (no seat source), prompt_not_retained, untrusted_author, a seat refusal, or the DenyReason of a denied start.
+   * retry_unavailable (no seat source), prompt_not_retained, decision_snapshot_unavailable (the decision offer could not be read, so nothing started), untrusted_author, a seat refusal, or the DenyReason of a denied start.
    * An author check that cannot answer THROWS AuthorCheckUnavailableError, so the action stays accepted with backoff.
    */
   performRetryRun(actionId: string): Promise<PerformResult>;
@@ -185,6 +187,20 @@ export function createRetryModule(runnerPool: Pool, registry: ExecutionTargetReg
     if (verdict === "untrusted") return refused("untrusted_author");
     if (verdict === "unavailable") throw new AuthorCheckUnavailableError();
 
+    // D#7 DP4b-3c: a retry is a new run, so it is offered what the dials and the catalogue say now, never the failed run's snapshot, and gets a snapshot of its own in its create
+    // transaction with the matching block in its prompt. Only an executor run may decide (the other seats declare nothing, so they get no block and no row). If the offer cannot be
+    // read, nothing starts: a run must never begin without a snapshot its prompt agrees with. This costs nothing, so it comes before the seat.
+    let dec: DecisionStart | null = null;
+    if (run.role === EXECUTOR_ROLE) {
+      try {
+        dec = await decisionStartFor(runnerPool, accountId, run.work_item_id);
+      } catch (err) {
+        // The cause goes to the error report only; the refusal carries the fixed code and nothing from the error.
+        reportError(err, { stage: "retry.decision_offer" });
+        return refused("decision_snapshot_unavailable");
+      }
+    }
+
     const seated = await deps.seats.retrySeat({ accountId, role: run.role, workItemId: run.work_item_id });
     if (!seated.ok) return refused(SEAT_REFUSALS.includes(seated.reason) ? seated.reason : "seat_refused");
     const seat = seated.seat;
@@ -204,12 +220,14 @@ export function createRetryModule(runnerPool: Pool, registry: ExecutionTargetReg
       pr: seat.pr ?? dispatchPr,
       headSha: seat.headSha ?? run.head_sha,
       model,
-      prompt: found.prompt,
+      prompt: dec ? dec.prompt(found.prompt) : found.prompt,
       startMeta: { model, escalated_from_model: up ? seat.model : null },
       // Under the work item's exposure lock: a racing performer's child, committed since the pre-check, is seen here and this attempt rolls back.
       inCreateTransaction: async (client, id) => {
         if (await hasBlockingRetryChild(client, accountId, run.id, id)) throw new RetryBlockedError();
         createdId = id;
+        // The snapshot goes in last: a failure here rolls the whole create back (no run, no claim).
+        if (dec) await dec.inCreateTransaction()(client, id);
       },
       idempotency: { key: key(actionId), requestHash: createHash("sha256").update(`retry_run:${run.id}`).digest("hex") },
     };

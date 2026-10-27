@@ -48,6 +48,7 @@ say("This work item has used up its fix attempts. A person needs to look at it."
 say("Access to the repository couldn't be checked right now. Nothing was started.", "author_check_unavailable");
 say("That request was already used. Close this and try again.", "idempotency_key_reused");
 say("Retrying isn't available yet.", "retry_unavailable");
+say("The decision settings for this work couldn't be read right now, so the retry was not started. Try again in a moment.", "decision_snapshot_unavailable");
 say("The original request isn't kept any more, so this run can't be repeated.", "prompt_not_retained");
 say("This account isn't set up to start a run for this work item.", "unknown_role", "no_card", "no_repo", "no_installation", "installation_not_writable", "no_model", "model_budget_unset", "limits_exceed_sandbox", "account_not_found", "seat_refused");
 say("A spending limit stopped this retry. Nothing was started.", "refused_spend", "model_budget_exceeded", "per_spawn_cap_exceeded", "limit_exceeded", "quota_exceeded", "work_item_cap_exceeded", "compute_cap_exceeded");

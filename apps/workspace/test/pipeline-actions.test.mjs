@@ -330,7 +330,7 @@ describe("refusals are sentences", () => {
   const CODES = [
     "network", "not_cancellable", "run_actions_unavailable", "session_required", "insufficient_role", "untrusted_author", "run_not_retryable",
     "escalate", "author_check_unavailable", "idempotency_key_reused", "account_not_active", "principal_not_authorised", "kind_mismatch",
-    "target_not_found", "retry_unavailable", "prompt_not_retained", "seat_refused", "refused_spend", "model_budget_exceeded",
+    "target_not_found", "retry_unavailable", "prompt_not_retained", "decision_snapshot_unavailable", "seat_refused", "refused_spend", "model_budget_exceeded",
   ];
 
   it("the table has a sentence for every code the routes and the performer answer, and none repeats its own code", () => {
