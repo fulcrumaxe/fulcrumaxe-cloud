@@ -119,7 +119,7 @@ describe("retry_run performer [pg]", { timeout: 60_000 }, () => {
     expect(out).toMatchObject({ result: "done", outcome: { model: "sonnet-5", escalated_from_model: "haiku-4.5" } });
     const runId = runIdOf(out);
     expect(t.admitted).toHaveLength(1);
-    expect(t.admitted[0]).toMatchObject({ id: runId, role: "executor", workItemId: w.id, parentRunId: failed, prompt: PROMPT, model: "sonnet-5" });
+    expect(t.admitted[0]).toMatchObject({ id: runId, role: "executor", workItemId: w.id, parentRunId: failed, prompt: expect.stringMatching(/^fix the flaky test in widgets(\n\nDECISIONS YOU MAY MEET IN THIS WORK.*)?$/s), model: "sonnet-5" });
     expect((await admin.query("SELECT parent_run_id, status FROM agent_runs WHERE id = $1", [runId])).rows[0]).toEqual({ parent_run_id: failed, status: "running" });
     expect(await keyRows(a, id)).toBe(1);
   });
