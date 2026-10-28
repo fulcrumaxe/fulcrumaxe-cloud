@@ -1,14 +1,17 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { isReservationPause, mergeQueue, reviewPlanFor } from "@fx/pipeline";
-import { findPrBody, reviewLoadBody, startReviewerBody, type OpenHttp, type PrFound, type ReviewCtx, type ReviewWorker } from "./advanceReviewSteps";
+import { findPrBody, reviewLoadBody, reviewerOutcomeBody, startReviewerBody, type OpenHttp, type PrFound, type ReviewCtx, type ReviewWorker } from "./advanceReviewSteps";
 import type { StepWho } from "./advanceStageSteps";
 
 /**
- * D#519 MQ3-b-2: binds `mergeQueue.createStartDeltaReview` to the real reviewer start. Everything about the item (who approved it, its halt
+ * D#519 MQ3-b-2: binds the merge queue's delta-review ports to the real reviewer start. Everything about the item (who approved it, its halt
  * epoch, its review context, the pull request and the roles the gate requires) is read from the stored rows and from GitHub here; the
  * queue's caller passes none of it. The delta prompt itself is `assembleReviewPrompt` with `delta` (reviewPrompts.ts), reached through the
  * same `startReviewerBody` every review uses, so spend metering, the envelope and the halt guard apply unchanged.
+ *
+ * `bindStartDeltaReview` is the tick's start. `bindCompleteDeltaReview` is what the workflow's wait step calls to move a running one on (the
+ * verdicts, the security reviewer a flag adds, the debater after the passes). Both read the same ports.
  */
 export interface DeltaReviewBinding {
   pool: Pool;
@@ -23,8 +26,8 @@ interface Loaded {
   pr: PrFound;
 }
 
-export function bindStartDeltaReview(deps: DeltaReviewBinding): mergeQueue.StartDeltaReview {
-  // One lookup per entry and head; the port is built per tick, so nothing outlives it.
+export function deltaReviewPorts(deps: DeltaReviewBinding): mergeQueue.DeltaCompletionPorts {
+  // One lookup per entry and head; the ports are built per tick or per wait step, so nothing outlives it.
   const loaded = new Map<string, Loaded | { reason: string }>();
 
   async function load(entry: mergeQueue.MergeQueueEntry): Promise<Loaded | { reason: string }> {
@@ -58,19 +61,25 @@ export function bindStartDeltaReview(deps: DeltaReviewBinding): mergeQueue.Start
     return pr.ok ? { who, ctx, pr } : { reason: "invalid_input" };
   }
 
-  return mergeQueue.createStartDeltaReview({
+  return {
     github: deps.github,
-    async plan({ entry }) {
+    inTenant: (accountId, fn) => withTenant(deps.pool, accountId, fn),
+    async plan({ entry, flagged }) {
       const l = await load(entry);
       if (!("who" in l)) return { ok: false, reason: l.reason };
       // The roles the merge gate will demand for this item's whole pull request, by the one rule it uses (not only for the merge commit's files).
-      const plan = reviewPlanFor({ tier: l.ctx.tier as Parameters<typeof reviewPlanFor>[0]["tier"], securityDiffTriggerFired: l.pr.securityCodes.length > 0, reviewerFlaggedSecurity: false, debaterEnabled: l.ctx.debaterEnabled });
+      // `flagged`: the delta code reviewer asked for a security review, as the full review's second look does.
+      const plan = reviewPlanFor({ tier: l.ctx.tier as Parameters<typeof reviewPlanFor>[0]["tier"], securityDiffTriggerFired: l.pr.securityCodes.length > 0, reviewerFlaggedSecurity: flagged === true, debaterEnabled: l.ctx.debaterEnabled });
       return { ok: true, roles: plan.roles };
     },
-    async startRole({ entry, role, delta }) {
+    async runs(entry, toSha) {
+      const l = await load(entry);
+      return "who" in l && deps.worker?.advanceDeltaRuns ? deps.worker.advanceDeltaRuns(l.who, { headSha: toSha }) : [];
+    },
+    async startRole({ entry, role, delta, attempt }) {
       const l = await load(entry);
       if (!("who" in l)) return { ok: false, reason: l.reason };
-      const started = await startReviewerBody(deps.worker, l.who, l.ctx, { number: l.pr.number, headSha: delta.mergeCommitSha, baseRef: l.pr.baseRef, branch: l.pr.branch }, role, [], 0, 0, delta);
+      const started = await startReviewerBody(deps.worker, l.who, l.ctx, { number: l.pr.number, headSha: delta.mergeCommitSha, baseRef: l.pr.baseRef, branch: l.pr.branch }, role, [], 0, attempt, delta);
       if (started.runId !== null) return { ok: true, runId: started.runId };
       // A spending limit (named pause) or an envelope denial is a refused spend; every other refusal keeps its own code.
       return { ok: false, reason: isReservationPause(started.reason) || started.reason === "refused_spend" ? "refused_spend" : (started.reason ?? "invalid_input") };
@@ -79,9 +88,23 @@ export function bindStartDeltaReview(deps: DeltaReviewBinding): mergeQueue.Start
       const l = await load(entry);
       if ("who" in l) await deps.worker?.advanceCancel(l.who, runId);
     },
-    async recordSkip({ entry, toSha }) {
+    async recordEvent({ entry, toSha, code }) {
       const l = await load(entry);
-      if ("who" in l) await deps.worker?.advanceRecordEvent(l.who, { kind: "head_refresh", dedupeKey: `refresh:${toSha}`, code: "main_side_only", headSha: toSha, prNumber: entry.prNumber });
+      if ("who" in l) await deps.worker?.advanceRecordEvent(l.who, { kind: "head_refresh", dedupeKey: `refresh:${toSha}:${code}`, code, headSha: toSha, prNumber: entry.prNumber });
     },
-  });
+    async outcome(entry, runId) {
+      const o = await reviewerOutcomeBody(deps.worker, entry.accountId, runId);
+      return { done: o.done, verdict: o.verdict, securityNeeded: o.securityNeeded, noVerdict: o.noVerdict };
+    },
+  };
+}
+
+export function bindStartDeltaReview(deps: DeltaReviewBinding): mergeQueue.StartDeltaReview {
+  return mergeQueue.createStartDeltaReview(deltaReviewPorts(deps));
+}
+
+/** One look at an entry whose delta review is running (see `completeDeltaReview`). */
+export function bindCompleteDeltaReview(deps: DeltaReviewBinding): (entry: mergeQueue.MergeQueueEntry) => Promise<mergeQueue.DeltaCompletion> {
+  const ports = deltaReviewPorts(deps);
+  return (entry) => mergeQueue.completeDeltaReview(ports, entry);
 }

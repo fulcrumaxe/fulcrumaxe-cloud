@@ -723,6 +723,11 @@ export interface AdvanceFacade {
    * item reaches it only through that escalation), so Approve starts the count again.
    */
   advanceReviewRuns(who: AdvanceStepWho, req: { headSha: string; rereview: number }): Promise<Array<{ role: string; runId: string; attempt: number; noVerdictEnds: number }>>;
+  /**
+   * D#519 MQ3-b-2b: the newest delta-review run of each role on one merge commit, found by key (`advance:<item>:delta:<head>:<role>[:s<n>]`). `attempt` is the
+   * highest `:s<n>` any run of the role has; `reusable` is false for a run that ended `cancelled` or `refused_spend` (its key cannot start the role again).
+   */
+  advanceDeltaRuns(who: AdvanceStepWho, req: { headSha: string }): Promise<Array<{ role: string; runId: string; attempt: number; reusable: boolean }>>;
   /** D#483 P3: the merge gate on the pull request's current head. */
   advanceMergeGate(who: AdvanceStepWho, prNumber: number): Promise<AdvanceMergeGateResult>;
   /**
@@ -2115,6 +2120,31 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return [...newest].map(([role, runId]) => ({ role, runId, attempt: highest.get(role) ?? 0, noVerdictEnds: ends.get(role) ?? 0 }));
   }
 
+  async function advanceDeltaRuns(who: AdvanceStepWho, req: { headSha: string }): Promise<Array<{ role: string; runId: string; attempt: number; reusable: boolean }>> {
+    if (!UUID_RE.test(who.accountId) || !UUID_RE.test(who.workItemId) || !SHA_RE.test(req.headSha)) return [];
+    const prefix = `advance:${who.workItemId}:delta:${req.headSha}:`;
+    const rows = await withTenant(runnerPool, who.accountId, async (client) =>
+      (
+        await client.query<{ idempotency_key: string; run_id: string; reusable: boolean }>(
+          `SELECT k.idempotency_key, k.run_id, (a.status NOT IN ('cancelled', 'refused_spend')) AS reusable
+             FROM agent_run_idempotency_keys k JOIN agent_runs a ON a.account_id = k.account_id AND a.id = k.run_id
+            WHERE k.account_id = $1 AND a.work_item_id = $2 AND starts_with(k.idempotency_key, $3)
+            ORDER BY k.created_at DESC, k.run_id DESC LIMIT 100`,
+          [who.accountId, who.workItemId, prefix],
+        )
+      ).rows,
+    );
+    const best = new Map<string, { runId: string; attempt: number; reusable: boolean }>();
+    for (const row of rows) {
+      const m = /^([a-z][a-z-]*)(?::s(\d{1,6}))?$/.exec(row.idempotency_key.slice(prefix.length));
+      if (!m) continue;
+      const attempt = Number(m[2] ?? 0);
+      // The newest attempt speaks for the role.
+      if (!best.has(m[1]!) || attempt > best.get(m[1]!)!.attempt) best.set(m[1]!, { runId: row.run_id, attempt, reusable: row.reusable });
+    }
+    return [...best].map(([role, v]) => ({ role, ...v }));
+  }
+
   async function advanceCancel(who: AdvanceStepWho, runId: string): Promise<void> {
     await cancelItemRun(who, runId);
   }
@@ -2185,6 +2215,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     advanceStartCheckFix,
     advanceContinue,
     advanceReviewRuns,
+    advanceDeltaRuns,
     advanceMergeGate,
     advanceMergeOrder,
     advanceVerifiedReviewGate,

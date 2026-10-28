@@ -59,7 +59,7 @@ export type ReviewWorker = Pick<
   | "advancePrFound"
 > &
   /** D#483 S5-k1d: optional so a worker built before it (and a test's fake) still works; absent reads as "no reviewer run is known". */
-  Partial<Pick<AdvanceFacade, "advanceReviewRuns">>;
+  Partial<Pick<AdvanceFacade, "advanceReviewRuns" | "advanceDeltaRuns">>;
 
 /** Opens the GitHub client for one repository (apps/web/lib/github/installationHttp.ts in production). */
 export type OpenHttp = (kind: InstallationHttpKind, target: InstallationHttpTarget) => Promise<InstallationHttp>;

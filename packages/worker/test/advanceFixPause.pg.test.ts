@@ -252,6 +252,47 @@ describe("advance: fix rounds and reviewer runs under a spending limit [pg]", { 
       for (const bad of [-1, 1.5, 101]) expect(await lookup(a, w, HEAD, bad)).toEqual([]);
     });
 
+    describe("advanceDeltaRuns (MQ3-b-2b)", () => {
+      const delta = (a: SeedRefs, w: string, headSha: string) => module(resumeWith().fn).advanceDeltaRuns(who(a, w), { headSha });
+
+      it("returns one run per role for the merge commit, the newest attempt speaking for the role, and says whether the run can still be used", async () => {
+        const a = await seedAccount(admin, randomUUID());
+        const w = await item(a, "pr_opened");
+        await runWithKey(a, w, `advance:${w}:delta:${HEAD}:code-reviewer`, "failed", "code-reviewer", "2026-01-01T00:00:00Z");
+        const retry = await runWithKey(a, w, `advance:${w}:delta:${HEAD}:code-reviewer:s1`, "running", "code-reviewer", "2026-01-02T00:00:00Z");
+        const cancelled = await runWithKey(a, w, `advance:${w}:delta:${HEAD}:debater`, "cancelled", "debater");
+        const refused = await runWithKey(a, w, `advance:${w}:delta:${HEAD}:security-reviewer`, "refused_spend", "security-reviewer");
+        const out = (await delta(a, w, HEAD)).sort((x, y) => x.role.localeCompare(y.role));
+        expect(out).toEqual([
+          { role: "code-reviewer", runId: retry, attempt: 1, reusable: true },
+          { role: "debater", runId: cancelled, attempt: 0, reusable: false },
+          { role: "security-reviewer", runId: refused, attempt: 0, reusable: false },
+        ]);
+      });
+
+      it("the head is exact, a full-review key for the same head is not a delta run, and keys that do not parse are skipped", async () => {
+        const a = await seedAccount(admin, randomUUID());
+        const w = await item(a, "pr_opened");
+        await runWithKey(a, w, `advance:${w}:delta:${OTHER}:code-reviewer`, "succeeded");
+        await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer`, "succeeded");
+        await runWithKey(a, w, `advance:${w}:delta:${HEAD}:code-reviewer:rr1`, "succeeded");
+        expect(await delta(a, w, HEAD)).toEqual([]);
+      });
+
+      it("another item's and another account's runs are never returned, and malformed input answers nothing", async () => {
+        const a = await seedAccount(admin, randomUUID());
+        const b = await seedAccount(admin, randomUUID());
+        const w = await item(a, "pr_opened");
+        const w2 = await item(a, "pr_opened");
+        const wb = await item(b, "pr_opened");
+        await runWithKey(a, w2, `advance:${w2}:delta:${HEAD}:code-reviewer`, "succeeded");
+        await runWithKey(b, wb, `advance:${wb}:delta:${HEAD}:code-reviewer`, "succeeded");
+        expect(await delta(a, w, HEAD)).toEqual([]);
+        expect(await delta(a, wb, HEAD)).toEqual([]);
+        for (const bad of ["", "zz", "A".repeat(40), `${HEAD}%`]) expect(await delta(a, w, bad)).toEqual([]);
+      });
+    });
+
     describe("noVerdictEnds (the re-run bound's count, from stored runs)", () => {
       const ends = async (a: SeedRefs, w: string, role = "code-reviewer") => (await lookup(a, w, HEAD, 0)).find((r) => r.role === role)?.noVerdictEnds;
       const escalate = (a: SeedRefs, w: string, key: string) =>

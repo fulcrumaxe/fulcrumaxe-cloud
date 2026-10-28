@@ -8,3 +8,4 @@ export * from "./refresh.js";
 export * from "./tick.js";
 export * from "./events.js";
 export * from "./deltaReview.js";
+export * from "./deltaComplete.js";

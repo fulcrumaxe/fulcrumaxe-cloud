@@ -16,6 +16,15 @@ vi.mock("workflow", () => ({
 }));
 vi.mock("workflow/api", () => ({ resumeHook: vi.fn(), start: vi.fn() }));
 
+// D#519 MQ3-b-2b: the merge queue's two steps are scripted here (their bodies are tested in lib/mergeQueueWait.test.ts). By default nothing is queued,
+// so every test below keeps the direct gate it always had.
+const queue = vi.hoisted(() => ({ queued: false, looks: [{ state: "waiting" }] as Array<Record<string, unknown>>, enqueues: [] as unknown[], waits: 0 }));
+vi.mock("../lib/mergeQueueWait", async (orig) => ({
+  ...(await orig<typeof import("../lib/mergeQueueWait")>()),
+  enqueueBody: async (_w: unknown, _who: unknown, input: unknown) => (queue.enqueues.push(input), { queued: queue.queued }),
+  waitBody: async () => (queue.waits++, queue.looks.length > 1 ? queue.looks.shift()! : queue.looks[0]!),
+}));
+
 import { setWorkerWiringForTests } from "../lib/worker";
 import { setInstallationHttpForTests } from "../lib/github/installationHttp";
 import { setIssueReaderForTests } from "../lib/github/issueRead";
@@ -219,6 +228,7 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
 let logs: Array<Record<string, unknown>>;
 beforeEach(() => {
   world.sleeps = 0;
+  Object.assign(queue, { queued: false, looks: [{ state: "waiting" }], enqueues: [], waits: 0 });
   logs = [];
   vi.spyOn(console, "info").mockImplementation((line: unknown) => void logs.push(JSON.parse(String(line))));
 });
@@ -1880,4 +1890,70 @@ describe("D#483 S5-b2a part 2: the fix-round gate (review fix rounds only)", () 
     await workItemAdvanceWorkflow(ARGS);
     expect(t.worker.advanceFixGate.mock.calls.length).toBe(t.worker.advanceStartFix.mock.calls.length);
   });
+// D#519 MQ3-b-2b: after every reviewer passed, a hosted unpaired item is enqueued and the workflow waits on its entry (C4 2.5).
+describe("the merge queue instead of the direct gate", () => {
+  it("queued: the gate is never called by the workflow; it waits durably (one look per poll) until the entry is merged", async () => {
+    queue.queued = true;
+    queue.looks = [{ state: "waiting" }, { state: "waiting" }, { state: "merged" }];
+    const t = setup(fresh());
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged" });
+    expect(queue.enqueues).toEqual([{ prNumber: 41, headSha: H1 }]);
+    expect(queue.waits).toBe(3);
+    expect(world.sleeps).toBe(2);
+    expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
+    expect(events()).toContain("advance.merge_queue");
+  });
+
+  it("a merge-only head is enqueued too, with no reviewer run", async () => {
+    queue.queued = true;
+    queue.looks = [{ state: "merged" }];
+    const t = setup(fresh({ mergeOnly: [{ decision: "all_passed" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged" });
+    expect(t.started).toEqual([]);
+    expect(queue.enqueues).toEqual([{ prNumber: 41, headSha: H1 }]);
+    expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
+  });
+
+  it("not queued (paired, runner_local, stacked, no pool): the direct gate is called exactly as before and the queue is never looked at", async () => {
+    const t = setup(fresh());
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged", detail: undefined });
+    expect(queue.enqueues).toHaveLength(1);
+    expect(queue.waits).toBe(0);
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledWith(WHO, 41);
+  });
+
+  it("the entry goes back to review (a delta review found a problem, or a person pushed): the head is reviewed again and enqueued again", async () => {
+    queue.queued = true;
+    queue.looks = [{ state: "in_review" }, { state: "merged" }];
+    const t = setup(fresh());
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged" });
+    expect(queue.enqueues).toHaveLength(2);
+    expect(t.worker.advanceRecordRound).toHaveBeenCalledTimes(2);
+    expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
+  });
+
+  it("a stopped entry ends the workflow at Needs a person with the entry's fixed code, and records it as a stop", async () => {
+    queue.queued = true;
+    queue.looks = [{ state: "stopped", reason: "refused_spend" }];
+    const t = setup(fresh());
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "refused_spend" });
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "refused_spend" }));
+  });
+
+  it.each(["closed", "cancelled", "missing"])("an entry that is %s ends the workflow with that word and merges nothing", async (state) => {
+    queue.queued = true;
+    queue.looks = [{ state }];
+    const t = setup(fresh());
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: state });
+    expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
+  });
+
+  it("a halt ends the workflow as a halt, once", async () => {
+    queue.queued = true;
+    queue.looks = [{ state: "halted" }];
+    const t = setup(fresh());
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "stopped", detail: "halted" });
+    expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
+  });
+});
 });

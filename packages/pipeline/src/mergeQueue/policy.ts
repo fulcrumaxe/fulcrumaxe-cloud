@@ -32,3 +32,9 @@ export const MERGE_QUEUE_SWEEP_LIMIT = 100;
  * many minutes since the platform first pushed its head (`approved_at`), it takes its turn by stamp like any other entry.
  */
 export const WRITEBACK_YIELD_MINUTES = 120;
+
+/**
+ * The longest an entry waits in `awaiting_work` for its delta review (MQ3-b-2b). Past it the runs are cancelled and the entry returns to
+ * `in_review` with the fixed event code `delta_review_timeout`: a review that never ends must not hold an approved entry out of the queue forever.
+ */
+export const MERGE_QUEUE_DELTA_REVIEW_MAX_MINUTES = 120;

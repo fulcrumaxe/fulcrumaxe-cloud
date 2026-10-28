@@ -138,14 +138,18 @@ const DELTA_FOCUS: Record<ReviewPromptRole, string> = {
 /** The delta review's boundary: the merge commit and its two parents, the two diffs to read, the two questions. No whole-PR diff, no memory, no whole-suite run. */
 function deltaBoundary(i: ReviewPromptInput, d: DeltaReviewInput): string[] {
   const [prSide, mainSide] = d.parents;
-  const listed = d.changedFiles.slice(0, MAX_DELTA_FILES_LISTED);
-  const more = d.changedFiles.length - listed.length;
   return [
     `This is a DELTA review of pull request #${i.pr} on ${i.owner}/${i.name}, issue #${i.issue}: the default branch was merged into the branch (${d.trigger}). Review exactly merge commit ${d.mergeCommitSha} and no other. The rest of the pull request was reviewed before.`,
     `Parents: ${prSide} (pr_side, the branch before the merge) and ${mainSide} (main_side, the default branch commit that was merged in).`,
-    i.runtime === "runner" ? `The repository is already checked out at ${d.mergeCommitSha} with a detached HEAD. Do not fetch, check out, switch branches, reset, push, change remotes or call the GitHub API.` : `Check the commit out first: git fetch origin ${i.branch} && git checkout ${d.mergeCommitSha}`,
+    ...(i.runtime === "runner"
+      ? [
+          `The repository is already checked out at ${d.mergeCommitSha} with a detached HEAD. Do not fetch, check out, switch branches, reset, push, change remotes or call the GitHub API.`,
+          `Confirm \`git rev-parse HEAD\` prints ${d.mergeCommitSha} before you review. If it does not, your verdict is \`fail\` and the summary says the workspace was at the wrong commit.`,
+          RUNNER_TESTS_LINE,
+        ]
+      : [`Check the commit out first: git fetch origin ${i.branch} && git checkout ${d.mergeCommitSha}`]),
     `Read only these two diffs: git diff ${prSide}..${d.mergeCommitSha} and git diff ${mainSide}..${d.mergeCommitSha}`,
-    `Files the merge commit changed (${d.changedFiles.length}):\n${listed.map((f) => `  ${f}`).join("\n")}${more > 0 ? `\n  ... and ${more} more` : ""}`,
+    `The merge commit changed ${d.changedFiles.length} files; their paths are listed after the Spec, fenced as data.`,
     "Answer two questions: did the merge keep both sides' intent, and did it add anything that neither parent contains?",
     DELTA_FOCUS[i.role],
     "Do not run the repository's whole check or full test suite. Do not push, comment on GitHub or change the repository: you only report.",
@@ -192,6 +196,8 @@ export function assembleReviewPrompt(input: ReviewPromptInput): AssembledPrompt 
       roleLine: `You are the ${role.replace("-", " ")}.`,
       boundary: deltaBoundary(input, input.delta).join("\n"),
       spec: { version, body: input.spec },
+      // Paths come from GitHub and a person chose them: data, fenced and sanitized like any other third-party text.
+      findings: { heading: "FILES THE MERGE COMMIT CHANGED (fenced):", items: [{ label: "changed files", text: input.delta.changedFiles.slice(0, MAX_DELTA_FILES_LISTED).join("\n") + (input.delta.changedFiles.length > MAX_DELTA_FILES_LISTED ? `\n... and ${input.delta.changedFiles.length - MAX_DELTA_FILES_LISTED} more` : "") }] },
       output: [
         'Your verdict is exactly one of these three words, in lower case: "pass" (ready to merge), "needs-fix" (fixable problems: list each one so the executor can fix it), "fail" (wrong approach, or you cannot review it).',
         "Put every problem in `findings`, one entry each, naming the file and line. `summary` is plain text.",
