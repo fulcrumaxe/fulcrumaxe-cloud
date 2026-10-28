@@ -396,6 +396,7 @@ export class SandboxTarget implements ExecutionTarget {
         sandboxName,
         retention,
         timeoutMs: run.timeoutMs ?? this.deps.defaultTimeoutMs ?? DEFAULT_SANDBOX_TIMEOUT_MS,
+        networkPolicy: networkPolicyRules,
         ...(run.limits && { limits: run.limits }),
       });
     } catch (err) {

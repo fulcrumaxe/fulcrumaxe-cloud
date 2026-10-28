@@ -295,16 +295,16 @@ const handleOf = (): SandboxHandle => ({ runId: "", sandboxName: NAME });
 describe("the real adapter on a fake SDK", () => {
   it("creates a pp- sandbox with resources.vcpus 1, non-persistent, no ports; an agent sandbox keeps 2", async () => {
     const f = sdkFake();
-    await adapter(f).createSandbox({ sandboxName: NAME, retention: { persistent: false }, timeoutMs: 4_500_000, vcpus: 1 });
+    await adapter(f).createSandbox({ sandboxName: NAME, retention: { persistent: false }, timeoutMs: 4_500_000, vcpus: 1, networkPolicy: POLICY });
     expect(f.seen.created[0]).toMatchObject({ name: NAME, persistent: false, resources: { vcpus: 1 } });
     expect(f.seen.created[0]).not.toHaveProperty("ports");
-    await expect(adapter(f).createSandbox({ sandboxName: NAME, retention: { persistent: false }, timeoutMs: 4_500_000 })).rejects.toThrow(/1 vCPU/);
+    await expect(adapter(f).createSandbox({ sandboxName: NAME, retention: { persistent: false }, timeoutMs: 4_500_000, networkPolicy: POLICY })).rejects.toThrow(/1 vCPU/);
   });
 
   it("a taken name (400 bad_request, and the name exists) is the busy error, not a reuse", async () => {
     const f = sdkFake();
     f.knobs.createStatus = 400;
-    await expect(adapter(f).createSandbox({ sandboxName: NAME, retention: { persistent: false }, timeoutMs: 4_500_000, vcpus: 1 })).rejects.toBeInstanceOf(SandboxNameConflictError);
+    await expect(adapter(f).createSandbox({ sandboxName: NAME, retention: { persistent: false }, timeoutMs: 4_500_000, vcpus: 1, networkPolicy: POLICY })).rejects.toBeInstanceOf(SandboxNameConflictError);
   });
 
   it("runCommand: policy first, then the program with its argv list; each argument is one literal element; both streams are read", async () => {

@@ -151,7 +151,7 @@ async function start(h: ReturnType<typeof harness>, overrides: Partial<StartDeta
     sdk: h.sdk,
     onInvalidEvent: (r) => void invalid.push(r),
   });
-  const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
+  const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
   const { hookFired } = port.startDetached(handle, startOpts({ onEvent: (e) => void delivered.push(e), ...overrides }));
   return { hookFired, invalid, delivered, port, handle };
 }
@@ -180,7 +180,7 @@ describe("EV-CMD: claude print mode, prompt on stdin, pinned version", () => {
 
     const h2 = harness();
     const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: h2.sdk });
-    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
+    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
     const resumed = port.resume(handle, "sess-9", "next", startOpts());
     h2.exit(0);
     await resumed.hookFired;
@@ -278,7 +278,7 @@ describe("C55 criterion 16: --model is an explicit table lookup, never the price
   it("a model missing from the table throws before any SDK command or file write", async () => {
     const h = harness();
     const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: h.sdk });
-    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
+    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
     for (const model of ["gpt-9", "toString", "haiku"]) {
       expect(() => port.startDetached(handle, startOpts({ model }))).toThrow(/CLI model name/);
     }
@@ -881,7 +881,7 @@ describe("H14c-5b-2a: the runner's own limits on the port (MP-TURNS, MP-CLOCK, M
     const h = harness();
     const delivered: NormalizedEvent[] = [];
     const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: h.sdk, limits });
-    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
+    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
     const { hookFired } = port.startDetached(handle, startOpts({ onEvent: (e) => void delivered.push(e) }));
     const settled = hookFired.then((value) => ({ value }), (error: unknown) => ({ error }));
     await tick(); // the agent command is running and the guard is armed
@@ -907,7 +907,7 @@ describe("H14c-5b-2a: the runner's own limits on the port (MP-TURNS, MP-CLOCK, M
     const h = harness();
     const create = vi.fn(h.sdk.create);
     const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: { ...h.sdk, create }, limits: { maxRunMs: 1000 } });
-    const opts = { sandboxName: NAME, retention: retentionPolicyFor("code-reviewer") };
+    const opts = { sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), networkPolicy: [] };
     await expect(port.createSandbox({ ...opts, timeoutMs: 1000 })).rejects.toThrow(/maxRunMs/);
     expect(create).not.toHaveBeenCalled();
     await expect(port.createSandbox({ ...opts, timeoutMs: 1001 })).resolves.toBeDefined();
@@ -951,7 +951,7 @@ describe("H14c-5b-2a: the runner's own limits on the port (MP-TURNS, MP-CLOCK, M
   it("MP-TURNS: the argv carries --max-turns from the limits and --max-budget-usd from the run's cap", async () => {
     const h = harness();
     const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: h.sdk, limits: { maxTurns: 7 } });
-    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
+    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
     const { hookFired } = port.startDetached(handle, startOpts({ capUsd: 2.5 }));
     h.exit(0);
     await hookFired;

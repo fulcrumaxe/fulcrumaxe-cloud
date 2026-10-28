@@ -19,7 +19,7 @@ import { keyedPolicy } from "./helpers/keyedPolicy.js";
 /** D#2 COMPUTE-SETTLE CS-1: the Vercel port's `measure`, `readCounters`, pinned resources and session report (fake SDK). */
 
 const NAME = "rn-8-reviewer-run-1";
-const createOpts = { sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 };
+const createOpts = { sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] };
 
 const full = (id: string, extra: Partial<SdkSession> = {}): SdkSession => ({
   id,

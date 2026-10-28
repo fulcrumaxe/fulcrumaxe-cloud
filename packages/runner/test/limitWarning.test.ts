@@ -93,7 +93,7 @@ function harness(lines: string[], hold?: Promise<void>) {
     (sandbox as { timeout?: number }).timeout = restarted?.sdkTimeoutMs;
     const handle = restarted
       ? { runId: "", sandboxName: NAME }
-      : await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 80_000_000 });
+      : await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 80_000_000, networkPolicy: [] });
     const o = { ...opts, extension, ...(restarted?.perRun && { limits: restarted.perRun }) };
     const started = resumeId ? port.resume(handle, resumeId, "next", o) : port.startDetached(handle, o);
     return started.hookFired;

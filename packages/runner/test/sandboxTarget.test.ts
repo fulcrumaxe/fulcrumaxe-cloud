@@ -210,6 +210,21 @@ describe("SandboxTarget", () => {
     expect(harness.fakeSandbox.state.stopped).toHaveLength(1);
   });
 
+  it("the sandbox is created with the run's network policy: the forwarding rule and the keyed model rule, never none", async () => {
+    const harness = createSandboxTargetHarness(db.runWriterPool);
+    const target = new SandboxTarget(harness.deps);
+    const run = await seedRun();
+
+    await target.admit(run, db.admin);
+    await target.dispatch(run);
+
+    const created = harness.fakeSandbox.state.created;
+    expect(created).toHaveLength(1);
+    const purposes = (created[0]!.networkPolicy ?? []).map((r) => r.purpose);
+    expect(purposes).toContain("github_proxy");
+    expect(purposes).toContain("model");
+  });
+
   it("cancel before dispatch: closes the reservation without ever calling createSandbox", async () => {
     const harness = createSandboxTargetHarness(db.runWriterPool);
     const target = new SandboxTarget(harness.deps);

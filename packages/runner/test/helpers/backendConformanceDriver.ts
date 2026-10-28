@@ -56,7 +56,7 @@ export const claudeCodeConformanceDriver: ConformanceDriver = {
     const delivered: NormalizedEvent[] = [];
     const invalid: string[] = [];
     const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: scriptedSdk(io), onInvalidEvent: (r) => void invalid.push(r) });
-    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
+    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
     const { hookFired } = port.startDetached(handle, {
       runId: CONFORMANCE_RUN_ID,
       role: CONFORMANCE_ROLE,

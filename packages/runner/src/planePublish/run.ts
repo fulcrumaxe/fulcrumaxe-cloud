@@ -30,7 +30,7 @@ export interface PublishSandboxRequest {
 }
 
 export async function runPublishSandbox(port: SandboxPort, req: PublishSandboxRequest): Promise<PublishRun> {
-  const handle = await port.createSandbox({ sandboxName: req.sandboxName, retention: { persistent: false }, timeoutMs: PUBLISH_SANDBOX_TIMEOUT_MS, vcpus: PLANE_PUBLISH_VCPUS });
+  const handle = await port.createSandbox({ sandboxName: req.sandboxName, retention: { persistent: false }, timeoutMs: PUBLISH_SANDBOX_TIMEOUT_MS, vcpus: PLANE_PUBLISH_VCPUS, networkPolicy: req.networkPolicy });
   try {
     await port.writeFiles(handle, [
       { path: PLANE_PUBLISH_HOOK_PATH, content: req.hook, mode: 0o555 },

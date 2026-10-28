@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Sandbox } from "@vercel/sandbox";
 import { reportError } from "@fx/telemetry";
 import type { NetworkPolicy, NetworkPolicyRule as SdkNetworkPolicyRule } from "@vercel/sandbox";
@@ -188,6 +188,14 @@ export class SandboxPortError extends Error {
   }
 }
 
+/** A sandbox create without a network policy. Thrown before any SDK call: no sandbox exists, so nothing is left to clean up. */
+export class SandboxPolicyRequiredError extends Error {
+  constructor() {
+    super("createVercelSandboxPort: a sandbox is never created without its network policy");
+    this.name = "SandboxPolicyRequiredError";
+  }
+}
+
 export interface VercelCredentials {
   teamId: string;
   projectId: string;
@@ -281,6 +289,8 @@ export interface SdkCreateParams extends VercelCredentials {
   resources: { vcpus: number };
   tags: Record<string, string>;
   keepLastSnapshots?: { count: number };
+  /** The SDK's create-time egress policy (`BaseCreateSandboxParams.networkPolicy`, 3.5.1). Always set: the platform default is allow-all. */
+  networkPolicy: NetworkPolicy;
   signal?: AbortSignal;
 }
 
@@ -562,6 +572,20 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
   const portLimits = resolveRunLimits(options.limits);
   /** Each sandbox's `timeoutMs` as created here; a launch is checked against it. */
   const sandboxTimeouts = new Map<string, number>();
+  /**
+   * A digest of the policy each sandbox is known to carry (set at create, or after a confirmed update). A policy that is already in
+   * force is not applied again: an update is a window the sandbox is not guaranteed to be enforcing in. A failed update clears the
+   * entry, so the next apply really runs. A digest, not the policy: it holds the tenant's key.
+   */
+  const appliedPolicy = new Map<string, string>();
+  const policyDigest = (policy: NetworkPolicy): string => createHash("sha256").update(JSON.stringify(policy)).digest("hex");
+  async function applyPolicy(sandbox: SdkSandbox, policy: NetworkPolicy, always = false): Promise<void> {
+    const digest = policyDigest(policy);
+    if (!always && appliedPolicy.get(sandbox.name) === digest) return;
+    appliedPolicy.delete(sandbox.name);
+    await guarded("updateNetworkPolicy", () => sandbox.updateNetworkPolicy(policy, { signal: signal() }));
+    appliedPolicy.set(sandbox.name, digest);
+  }
 
   const reportInvalid = (reason: InvalidEventReason): void => {
     try {
@@ -827,12 +851,11 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
       return { outcome: "failed", exitCode: null, tail: "" };
     }
     const applyRun = async (): Promise<void> => {
-      const runPolicy = sdkNetworkPolicy(opts.networkPolicy);
-      await guarded("updateNetworkPolicy", () => sandbox.updateNetworkPolicy(runPolicy, { signal: signal() }));
+      await applyPolicy(sandbox, sdkNetworkPolicy(opts.networkPolicy));
     };
     let result: { outcome: DepsOutcome; exitCode?: number | null; tail?: string };
     try {
-      await guarded("updateNetworkPolicy", () => sandbox.updateNetworkPolicy(sdkNetworkPolicy(installRules), { signal: signal() }));
+      await applyPolicy(sandbox, sdkNetworkPolicy(installRules));
       const ran = await runScript(sandbox, { name: "fx-deps-install", text: INSTALL_SCRIPT, args: [workdir, detected === DETECT_PNPM ? "pnpm" : "npm"] }, where, installTimeoutMs);
       result =
         ran.exitCode === 0
@@ -942,7 +965,8 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
       if (run.stopped) return undefined;
       // Egress is the SDK 3.5.1 `NetworkPolicy` shape (H14c-3-1, CARRY-12).
       const policy = sdkNetworkPolicy(opts.networkPolicy);
-      await guarded("updateNetworkPolicy", () => sandbox.updateNetworkPolicy(policy, { signal: signal() }));
+      // Re-applied even when it equals the create-time policy (a resumed or woken session starts from whatever the last one left).
+      await applyPolicy(sandbox, policy, true);
       if (run.stopped) return undefined;
       await checkCliPin(sandbox, opts.env, backend);
       if (run.stopped) return undefined;
@@ -1361,6 +1385,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         if (statusOf(err) === 409) throw new SandboxNameConflictError(name);
         throw new SandboxPortError("createSandbox", statusOf(err));
       }
+      appliedPolicy.set(recreated.name, policyDigest(params.networkPolicy));
       return handleOfCreated(opts, recreated);
     };
     if (!matches) return recreate(existing);
@@ -1383,6 +1408,9 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
     }
     // Reused only if it is now a running session of its own (any other status means someone else got there).
     if (woken.status !== "running") throw new SandboxBusyError(name);
+    // A woken sandbox carries whatever policy its last session left; put this run's in force, confirmed, before any caller gets the handle.
+    appliedPolicy.delete(name);
+    await applyPolicy(woken, params.networkPolicy);
     return handleOfCreated(opts, woken);
   }
 
@@ -1398,6 +1426,9 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
       if (opts.limits === undefined ? runLimits.maxRunMs >= opts.timeoutMs : runLimits.maxRunMs + SANDBOX_TIMEOUT_MARGIN_MS > opts.timeoutMs) {
         throw new Error("createVercelSandboxPort: maxRunMs must be less than the sandbox timeoutMs");
       }
+      // Before any SDK call (and before a token is fetched): the platform's default is allow-all, so a create carries its policy or does not happen.
+      if (opts.networkPolicy === undefined) throw new SandboxPolicyRequiredError();
+      const createPolicy = sdkNetworkPolicy(opts.networkPolicy);
       const vcpus = vcpusForCreate(opts);
       const creds = await credentials();
       const params: SdkCreateParams = {
@@ -1407,6 +1438,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         persistent: opts.retention.persistent,
         resources: { vcpus },
         tags: { "fx-sandbox": opts.sandboxName },
+        networkPolicy: createPolicy,
         signal: signal(),
         ...creds,
       };
@@ -1434,6 +1466,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         console.warn(JSON.stringify({ event: "sandbox.create_failed", status: statusOf(err) ?? null, code, persistent: opts.retention.persistent }));
         throw new SandboxPortError("createSandbox", statusOf(err));
       }
+      appliedPolicy.set(created.name, policyDigest(createPolicy));
       return handleOfCreated(opts, created);
     },
 
@@ -1455,7 +1488,8 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
       const sessionId = sandbox.currentSession().sessionId;
       if (typeof sessionId !== "string" || sessionId === "") throw new SandboxPortError("runCommand");
       await opts.onSession?.(sessionId);
-      await guarded("updateNetworkPolicy", () => sandbox.updateNetworkPolicy(sdkNetworkPolicy(opts.networkPolicy), { signal: signal() }));
+      // The sandbox was created with this policy, so normally nothing is applied here; a different one is applied and awaited first.
+      await applyPolicy(sandbox, sdkNetworkPolicy(opts.networkPolicy));
       const command = await guarded("runCommand", () => sandbox.runCommand({ cmd: opts.cmd, args: [...opts.args], env: opts.env, detached: true, signal: signal() }));
       const held = { stdout: "", stderr: "" };
       let truncated = false;

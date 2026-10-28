@@ -35,7 +35,7 @@ const dockerLines = dockerfile.split("\n").filter((l) => !l.trim().startsWith("#
 const DIGEST = `sha256:${"ab".repeat(32)}`;
 const NAME = "rn-8-reviewer-run-1";
 const handle: SandboxHandle = { runId: "", sandboxName: NAME };
-const createOpts = { sandboxName: NAME, retention: retentionPolicyFor("reviewer"), timeoutMs: 7_200_000 };
+const createOpts = { sandboxName: NAME, retention: retentionPolicyFor("reviewer"), timeoutMs: 7_200_000, networkPolicy: [] };
 
 const listError = (limit: number): Error =>
   Object.assign(new Error(`Bad Request: limit should be <= 50 (got ${limit})`), { response: { status: 400 } });

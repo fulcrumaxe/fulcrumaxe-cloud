@@ -80,7 +80,7 @@ const startOpts = (workdir: string | undefined = WORKDIR, excludes?: readonly st
 async function startAndResume(workdir: string | undefined = WORKDIR, excludes?: readonly string[]) {
   const { log, sdk } = recordingSdk();
   const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk });
-  const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
+  const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
   await port.startDetached(handle, startOpts(workdir, excludes)).hookFired.catch(() => undefined);
   await port.resume(handle, "sess-9", "next", startOpts(workdir, excludes)).hookFired.catch(() => undefined);
   return log;
@@ -242,7 +242,7 @@ describe("SS-PATH: the config directory and the workdir never overlap", () => {
     it(`refuses workdir ${workdir} before any SDK call, on start and resume`, async () => {
       const { log, sdk } = recordingSdk();
       const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk });
-      const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
+      const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
       expect(() => port.startDetached(handle, startOpts(workdir))).toThrow();
       expect(() => port.resume(handle, "sess-9", "next", startOpts(workdir))).toThrow();
       expect(log).toEqual([]);

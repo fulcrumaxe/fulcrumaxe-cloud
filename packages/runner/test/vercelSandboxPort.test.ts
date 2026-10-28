@@ -255,7 +255,13 @@ function event(seq: number, type: NormalizedEvent["type"] = "assistant"): Record
     : { type: "assistant", message: { content: [{ type: "text", text: `m${seq}` }] } };
 }
 
-const createOpts = { sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 };
+const createOpts = {
+  sandboxName: NAME,
+  retention: retentionPolicyFor("code-reviewer"),
+  timeoutMs: 7_200_000,
+  // A sandbox is created with its policy (never allow-all); the same one a launch of `startOpts()` applies.
+  networkPolicy: keyedPolicy(networkPolicy("code-reviewer", "team", { provider: "ai_gateway", githubForwardHost: "gh-proxy.fulcrumaxe.app" })),
+};
 
 const savedEnv: Record<string, string | undefined> = {};
 beforeEach(() => {
@@ -391,7 +397,7 @@ describe("name conflicts (C15-4)", () => {
 
   describe("a fresh executor build whose persistent sandbox name already exists", () => {
     const EX_NAME = "ex-11111111-1111-4111-8111-111111111111-22222222-2222-4222-8222-222222222222-64";
-    const exOpts = { sandboxName: EX_NAME, retention: retentionPolicyFor("executor"), timeoutMs: 7_200_000 };
+    const exOpts = { sandboxName: EX_NAME, retention: retentionPolicyFor("executor"), timeoutMs: 7_200_000, networkPolicy: createOpts.networkPolicy };
     const newPort = (fake: ReturnType<typeof createSdkFake>) => createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: fake.sdk });
     const entryOf = (fake: ReturnType<typeof createSdkFake>) => fake.store.get(`t/p/${EX_NAME}`)!;
 
@@ -403,7 +409,7 @@ describe("name conflicts (C15-4)", () => {
       fake.calls.length = 0;
       const handle = await port.createSandbox(exOpts);
       expect(handle).toEqual({ runId: "", sandboxName: EX_NAME, sessionId: "sess-resumed" });
-      expect(fake.calls.map((c) => c.op)).toEqual(["create", "get", "get", "get"]); // the refused create, the existence look, the look, the wake
+      expect(fake.calls.map((c) => c.op)).toEqual(["create", "get", "get", "get", "updateNetworkPolicy"]); // the refused create, the existence look, the look, the wake, then the run's policy put in force
       expect(fake.calls.filter((c) => c.op === "get").map((c) => c.params.resume)).toEqual([false, false, true]);
       expect(fake.calls.some((c) => c.op === "delete")).toBe(false);
       expect(fake.store.size).toBe(1);
@@ -551,7 +557,7 @@ describe("tenant binding", () => {
     const fake = createSdkFake();
     const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: fake.sdk });
     const name = "ex-11111111-1111-4111-8111-111111111111-22222222-2222-4222-8222-222222222222-7";
-    await port.createSandbox({ sandboxName: name, retention: retentionPolicyFor("executor"), timeoutMs: 7_200_000 });
+    await port.createSandbox({ sandboxName: name, retention: retentionPolicyFor("executor"), timeoutMs: 7_200_000, networkPolicy: [] });
     expect(fake.calls[0]?.params).toMatchObject({ persistent: true, keepLastSnapshots: { count: 1 } });
   });
 });
@@ -1019,8 +1025,11 @@ describe("H14c-3-1 CARRY-12: the tenant key is a header transform on the model h
     await port.startDetached(handle, startOpts()).hookFired;
     const run = fake.calls.find((c) => c.op === "runCommand");
     expect(run?.params.env).toStrictEqual(buildSandboxEnv("code-reviewer"));
-    const elsewhere = fake.calls.filter((c) => c.op !== "updateNetworkPolicy");
+    // The key travels only in a network policy: the create-time one and the update. Nothing else carries it (not even the create's other params).
+    const elsewhere = fake.calls.filter((c) => c.op !== "updateNetworkPolicy" && c.op !== "create");
     expect(JSON.stringify(elsewhere)).not.toContain("fake-key-for-tests");
+    const { networkPolicy: _carrier, ...createRest } = fake.calls.find((c) => c.op === "create")!.params;
+    expect(JSON.stringify(createRest)).not.toContain("fake-key-for-tests");
   });
 });
 
