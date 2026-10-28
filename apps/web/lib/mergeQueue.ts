@@ -5,7 +5,7 @@ import { createGitHubMergeGatePort, mergeQueue, type GitHubHttp } from "@fx/pipe
 import type { AdvanceReviewDeps, RunnerPlaneMergeStore } from "@fx/worker";
 import type { GithubWebhookPayload, GithubWebhookEventName } from "@fx/github";
 import { createReviewDeps } from "./advanceReview";
-import { bindStartDeltaReview } from "./mergeQueueDeltaReview";
+import { bindCompleteDeltaReview, bindStartDeltaReview } from "./mergeQueueDeltaReview";
 import { getWorker } from "./worker";
 import { openInstallationHttp, readRepoAppLogin } from "./github/installationHttp";
 import { openForRepo } from "./github/localOnlyHttp";
@@ -39,19 +39,25 @@ export interface MergeQueueTickerDeps {
   sleep?: (ms: number) => Promise<void>;
 }
 
-export async function tickMergeQueueRepo(deps: MergeQueueTickerDeps, target: { accountId: string; repoId: string }): Promise<mergeQueue.QueueTickResult | null> {
-  const { pool, orders } = deps;
-  const open = deps.open ?? openInstallationHttp;
-  const review = deps.review ?? createReviewDeps(open);
-  const inTenant: mergeQueue.QueueTickDeps["inTenant"] = (accountId, fn) => withTenant(pool, accountId, fn);
-  const repo = await inTenant(target.accountId, async (c) =>
+/** The merge gate's own GitHub client for the repository (the installation's `merge_gate` token). Null for a repository the cloud does not tick: no owner and name, or `runner_local`. */
+export async function openQueueGitHub(pool: Pool, open: typeof openInstallationHttp, target: { accountId: string; repoId: string }): Promise<ReturnType<typeof createGitHubMergeGatePort> | null> {
+  const repo = await withTenant(pool, target.accountId, async (c) =>
     (await c.query<{ gh_owner: string | null; gh_name: string | null; execution_mode: string }>(`SELECT gh_owner, gh_name, execution_mode FROM repos WHERE account_id = $1 AND id = $2`, [target.accountId, target.repoId])).rows[0],
   );
   if (!repo?.gh_owner || !repo.gh_name || repo.execution_mode === "runner_local") return null;
   const owner = repo.gh_owner;
   const name = repo.gh_name;
   const http = (await openForRepo(open, repo.execution_mode, "merge_gate", { repoId: target.repoId, owner, name })) as GitHubHttp;
-  const github = createGitHubMergeGatePort({ http, resolveRepo: async () => ({ owner, name }), markReadyForHumanMerge: async () => undefined, mergeMethod: "squash" });
+  return createGitHubMergeGatePort({ http, resolveRepo: async () => ({ owner, name }), markReadyForHumanMerge: async () => undefined, mergeMethod: "squash" });
+}
+
+export async function tickMergeQueueRepo(deps: MergeQueueTickerDeps, target: { accountId: string; repoId: string }): Promise<mergeQueue.QueueTickResult | null> {
+  const { pool, orders } = deps;
+  const open = deps.open ?? openInstallationHttp;
+  const review = deps.review ?? createReviewDeps(open);
+  const inTenant: mergeQueue.QueueTickDeps["inTenant"] = (accountId, fn) => withTenant(pool, accountId, fn);
+  const github = await openQueueGitHub(pool, open, target);
+  if (!github) return null;
   const out = await mergeQueue.runQueueTick(
     {
       github,
@@ -82,11 +88,29 @@ export async function tickMergeQueueRepo(deps: MergeQueueTickerDeps, target: { a
   return out;
 }
 
+/**
+ * The sweep's look at entries waiting on a delta review: when the workflow that drives the wait died, this is what moves them (a pass, or the
+ * `completeDeltaReview` timeout), so an entry cannot stay in `awaiting_work` for good. Idempotent with the workflow's own wait step.
+ */
+export async function completeWaitingDeltaReviews(deps: MergeQueueTickerDeps, target: { accountId: string; repoId: string }): Promise<void> {
+  const entries = await withTenant(deps.pool, target.accountId, (c) => mergeQueue.readQueue(c, target.accountId, target.repoId));
+  const waiting = entries.filter((e) => e.state === "awaiting_work" && e.workKind === "delta_review");
+  if (waiting.length === 0) return;
+  const open = deps.open ?? openInstallationHttp;
+  const github = await openQueueGitHub(deps.pool, open, target);
+  if (!github) return;
+  const complete = bindCompleteDeltaReview({ pool: deps.pool, worker: await getWorker(), open, github });
+  for (const entry of waiting) await complete(entry);
+}
+
 export function sweepMergeQueue(deps: MergeQueueTickerDeps): Promise<mergeQueue.MergeQueueSweepResult> {
   return mergeQueue.sweepMergeQueue({
     listTargets: (now, limit) => mergeQueue.listMergeQueueSweepTargets(deps.pool, now, limit),
     inTenant: (accountId, fn) => withTenant(deps.pool, accountId, fn),
-    tick: async (target) => void (await tickMergeQueueRepo(deps, target)),
+    tick: async (target) => {
+      await completeWaitingDeltaReviews(deps, target);
+      await tickMergeQueueRepo(deps, target);
+    },
   });
 }
 

@@ -85,7 +85,8 @@ describe("D#519 MQ3-b-2a delta-review port [pg]", () => {
         cancelled.push(runId);
         await db.admin.query(`UPDATE agent_runs SET status = 'cancelled' WHERE id = $1`, [runId]);
       },
-      recordSkip: async ({ toSha }) => void skips.push(toSha),
+      runs: async () => [],
+      recordEvent: async ({ toSha, code }) => void (code === "main_side_only" && skips.push(toSha)),
     };
     const port = createStartDeltaReview(ports);
     const entry = taken.taken!;

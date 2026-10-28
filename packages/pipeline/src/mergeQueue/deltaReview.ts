@@ -1,5 +1,6 @@
+import type { PoolClient } from "pg";
 import type { DeltaReviewInput } from "../review/reviewPrompts.js";
-import { listHeadRefreshes, markDeltaSkipped } from "./store.js";
+import { listHeadRefreshes, markDeltaSkipped, type HeadRefreshRow } from "./store.js";
 import type { RefreshGitHubPort, StartDeltaReview } from "./refresh.js";
 import type { MergeQueueEntry } from "./types.js";
 
@@ -14,62 +15,113 @@ import type { MergeQueueEntry } from "./types.js";
  *  - If no changed file is one of the pull request's own files, nothing is reviewed (`main_side_only`, C4 2.4): the skip is stored on the row and
  *    a `head_refresh` event is written. No run, no spend.
  *  - Otherwise EVERY role the merge gate requires for the head runs, in delta mode, code reviewer first (TL ruling on C4 2.3). A start refused for
- *    spend cancels the runs already started and answers `refused_spend`: no retry loop. The debater follows the others' passes, so it is the
- *    completion step's (it needs their summaries) and is not started here.
+ *    spend cancels the runs this call started and answers `refused_spend`: no retry loop. A thrown error cancels them too and is rethrown. The
+ *    debater is not started here: it follows the others' passes, so it is the completion step's (`completeDeltaReview`).
+ *  - A role whose run for this merge commit already exists (a replayed start) is reused. One that ended refused or cancelled is started again
+ *    under the next attempt (`:s<n>` on the run key), so a restart after a spend refusal never meets the refused run's key.
  */
+export interface DeltaRunRef {
+  role: string;
+  runId: string;
+  /** The highest `:s<n>` attempt any run of this role on this merge commit has. */
+  attempt: number;
+  /** False for a run that ended refused for spend or cancelled: it speaks for nothing and its key cannot be used again. */
+  reusable: boolean;
+}
+
 export interface DeltaReviewPorts {
   github: Pick<RefreshGitHubPort, "getMergeability" | "getCommit" | "compareToBase">;
-  /** The roles the gate requires on the entry's pull request at `headSha` (`reviewPlanFor` over the PR's whole diff), or why they cannot be known. */
-  plan(args: { entry: MergeQueueEntry; headSha: string }): Promise<{ ok: true; roles: readonly string[] } | { ok: false; reason: string }>;
-  /** Starts one delta-mode reviewer run (`startReviewerBody` with `delta`). A spend refusal is `reason: "refused_spend"`. */
-  startRole(args: { entry: MergeQueueEntry; role: string; delta: DeltaReviewInput }): Promise<{ ok: true; runId: string } | { ok: false; reason: string }>;
+  /** The roles the gate requires on the entry's pull request at `headSha` (`reviewPlanFor` over the PR's whole diff), or why they cannot be known. `flagged`: the delta code reviewer asked for a security review. */
+  plan(args: { entry: MergeQueueEntry; headSha: string; flagged?: boolean }): Promise<{ ok: true; roles: readonly string[] } | { ok: false; reason: string }>;
+  /** The newest delta run of each role on this merge commit. */
+  runs(entry: MergeQueueEntry, toSha: string): Promise<DeltaRunRef[]>;
+  /** Starts one delta-mode reviewer run (`startReviewerBody` with `delta`) under `attempt`. A spend refusal is `reason: "refused_spend"`. */
+  startRole(args: { entry: MergeQueueEntry; role: string; delta: DeltaReviewInput; attempt: number }): Promise<{ ok: true; runId: string } | { ok: false; reason: string }>;
   cancelRun(entry: MergeQueueEntry, runId: string): Promise<void>;
-  /** The `head_refresh` driver event for a skip. */
-  recordSkip(args: { entry: MergeQueueEntry; toSha: string }): Promise<void>;
+  /** A fixed-code `head_refresh` driver event on the item (`main_side_only`, `not_carried`, `delta_review_timeout`, ...). */
+  recordEvent(args: { entry: MergeQueueEntry; toSha: string; code: string }): Promise<void>;
 }
 
 type NotStarted = Extract<Awaited<ReturnType<StartDeltaReview>>, { started: false }>["reason"];
 const KNOWN: readonly NotStarted[] = ["spec_changed", "invalid_input", "worker_unavailable", "head_changed"];
-const fixed = (reason: string): NotStarted => ((KNOWN as readonly string[]).includes(reason) ? (reason as NotStarted) : "invalid_input");
+export const fixedReason = (reason: string): NotStarted => ((KNOWN as readonly string[]).includes(reason) ? (reason as NotStarted) : "invalid_input");
+
+/** The merge commit as GitHub has it now: the PR's head, with exactly the row's two parents, and its own file list. */
+export async function readMergeCommit(
+  github: DeltaReviewPorts["github"],
+  entry: MergeQueueEntry,
+  row: HeadRefreshRow,
+): Promise<{ ok: true; files: readonly string[] } | { ok: false; reason: "head_changed" | "invalid_input" }> {
+  const pr = { repoId: entry.repoId, prNumber: entry.prNumber };
+  const now = await github.getMergeability(pr, { gatedHeadSha: row.toSha });
+  if (now.state !== "open" || now.merged || now.headSha !== row.toSha) return { ok: false, reason: "head_changed" };
+  const commit = await github.getCommit(pr, row.toSha);
+  if (commit.parents.length !== 2 || commit.parents[0] !== row.fromSha || commit.parents[1] !== row.baseSha) return { ok: false, reason: "head_changed" };
+  if (commit.files === null || commit.files.length === 0) return { ok: false, reason: "invalid_input" };
+  return { ok: true, files: commit.files };
+}
+
+export const deltaInput = (row: HeadRefreshRow, files: readonly string[]): DeltaReviewInput => ({ mergeCommitSha: row.toSha, parents: [row.fromSha, row.baseSha], parentRoles: ["pr_side", "main_side"], changedFiles: files, trigger: "refresh_overlap" });
+
+/** Starts `roles` in order, reusing a role's run that already exists. On a refusal or a throw, cancels the runs THIS call started (never a reused one). */
+export async function startDeltaRoles(
+  ports: DeltaReviewPorts,
+  entry: MergeQueueEntry,
+  delta: DeltaReviewInput,
+  roles: readonly string[],
+): Promise<{ ok: true; runIds: string[] } | { ok: false; reason: string }> {
+  const existing = await ports.runs(entry, delta.mergeCommitSha);
+  const runIds: string[] = [];
+  const fresh: string[] = [];
+  const undo = async () => {
+    for (const id of fresh) await ports.cancelRun(entry, id).catch(() => undefined);
+  };
+  try {
+    for (const role of roles) {
+      const have = existing.find((r) => r.role === role);
+      if (have?.reusable) {
+        runIds.push(have.runId);
+        continue;
+      }
+      const started = await ports.startRole({ entry, role, delta, attempt: have ? have.attempt + 1 : 0 });
+      if (!started.ok) {
+        await undo();
+        return { ok: false, reason: started.reason };
+      }
+      fresh.push(started.runId);
+      runIds.push(started.runId);
+    }
+  } catch (err) {
+    await undo();
+    throw err;
+  }
+  return { ok: true, runIds };
+}
 
 export function createStartDeltaReview(ports: DeltaReviewPorts): StartDeltaReview {
-  return async (client, { entry, toSha }) => {
+  return async (client: PoolClient, { entry, toSha }) => {
     const row = (await listHeadRefreshes(client, entry.accountId, entry.id)).find((r) => r.toSha === toSha);
     if (!row) return { started: false, reason: "invalid_input" };
-    const pr = { repoId: entry.repoId, prNumber: entry.prNumber };
+    const read = await readMergeCommit(ports.github, entry, row);
+    if (!read.ok) return { started: false, reason: read.reason };
 
-    const now = await ports.github.getMergeability(pr, { gatedHeadSha: row.toSha });
-    if (now.state !== "open" || now.merged || now.headSha !== row.toSha) return { started: false, reason: "head_changed" };
-    const commit = await ports.github.getCommit(pr, row.toSha);
-    if (commit.parents.length !== 2 || commit.parents[0] !== row.fromSha || commit.parents[1] !== row.baseSha) return { started: false, reason: "head_changed" };
-    if (commit.files === null || commit.files.length === 0) return { started: false, reason: "invalid_input" };
-
-    const own = await ports.github.compareToBase(pr, row.toSha, { files: true });
+    const own = await ports.github.compareToBase({ repoId: entry.repoId, prNumber: entry.prNumber }, row.toSha, { files: true });
     if (own.files !== null) {
       const prFiles = new Set(own.files);
       // Every changed file came from the default branch and none is one of the PR's own: there is nothing of the PR's to re-review.
-      if (commit.files.every((f) => !prFiles.has(f))) {
+      if (read.files.every((f) => !prFiles.has(f))) {
         await markDeltaSkipped(client, { accountId: entry.accountId, entryId: entry.id, toSha: row.toSha });
-        await ports.recordSkip({ entry, toSha: row.toSha });
+        await ports.recordEvent({ entry, toSha: row.toSha, code: "main_side_only" });
         return { started: false, reason: "main_side_only" };
       }
     }
 
     const plan = await ports.plan({ entry, headSha: row.toSha });
-    if (!plan.ok) return { started: false, reason: fixed(plan.reason) };
+    if (!plan.ok) return { started: false, reason: fixedReason(plan.reason) };
     const roles = plan.roles.filter((r) => r !== "debater");
     if (!roles.includes("code-reviewer")) return { started: false, reason: "invalid_input" };
-    const delta: DeltaReviewInput = { mergeCommitSha: row.toSha, parents: [row.fromSha, row.baseSha], parentRoles: ["pr_side", "main_side"], changedFiles: commit.files, trigger: "refresh_overlap" };
-
-    const runs: string[] = [];
-    for (const role of ["code-reviewer", ...roles.filter((r) => r !== "code-reviewer")]) {
-      const started = await ports.startRole({ entry, role, delta });
-      if (!started.ok) {
-        for (const id of runs) await ports.cancelRun(entry, id);
-        return { started: false, reason: started.reason === "refused_spend" ? "refused_spend" : fixed(started.reason) };
-      }
-      runs.push(started.runId);
-    }
-    return { started: true, runId: runs[0]! };
+    const started = await startDeltaRoles(ports, entry, deltaInput(row, read.files), ["code-reviewer", ...roles.filter((r) => r !== "code-reviewer")]);
+    if (!started.ok) return { started: false, reason: started.reason === "refused_spend" ? "refused_spend" : fixedReason(started.reason) };
+    return { started: true, runId: started.runIds[0]! };
   };
 }

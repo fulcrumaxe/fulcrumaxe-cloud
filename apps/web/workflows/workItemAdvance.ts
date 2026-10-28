@@ -1,6 +1,7 @@
 import { sleep } from "workflow";
 import type { AdvanceContinueOut, ContinuationSite, AdvanceRunStart, AdvanceStartArgs, AdvanceTriageResult, DecisionStepCode, FixGateStepInput, FixGateStepOut, StartGateStepInput, StartGateStepOut } from "@fx/worker";
 import { getWorker } from "../lib/worker";
+import { enqueueBody, waitBody, type QueueWaitOut } from "../lib/mergeQueueWait";
 import { getIssueReader } from "../lib/github/issueRead";
 import { openInstallationHttp } from "../lib/github/installationHttp";
 import { publishLightSpecBody, startLightSpecBody, type LightPublished } from "../lib/advanceLightSteps";
@@ -90,6 +91,9 @@ import {
 
 /** Same value as `RUNNER_PENDING_CEILING_MS` in @fx/pipeline (a test pins it): the runner queue TTL of 72 hours plus a one hour margin. A workflow body imports no value from a package, so it is repeated here. */
 const RUNNER_PENDING_CEILING_MS = 73 * 3_600_000;
+/** How often, and for how long, the workflow looks at its merge queue entry. After the bound the entry stays in the queue and the tick still merges it. */
+const MERGE_QUEUE_WAIT_POLL_MS = 2 * 60_000;
+const MERGE_QUEUE_WAIT_MAX_MS = 24 * 60 * 60_000;
 
 /**
  * D#6 C29: the word a panel or Spec step answers with when it hands control back because its seats or the PM are queued on (or
@@ -446,6 +450,18 @@ export async function advanceMergeOrderStep(accountId: string, userId: string, w
 export async function advanceMergeGateStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, prNumber: number): Promise<GateOut> {
   "use step";
   return mergeGateBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, prNumber);
+}
+
+/** D#519 MQ3-b-2b: puts a hosted, unpaired item's approved pull request in its repo's merge queue (`queued: false`: the direct gate applies). */
+export async function advanceMergeQueueEnqueueStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, input: { prNumber: number; headSha: string }): Promise<{ queued: boolean }> {
+  "use step";
+  return enqueueBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, input);
+}
+
+/** D#519 MQ3-b-2b: one look at the item's queue entry (it also moves a running delta review on). */
+export async function advanceMergeQueueWaitStep(accountId: string, userId: string, workItemId: string, haltEpoch: number): Promise<QueueWaitOut> {
+  "use step";
+  return waitBody(await getWorker(), { accountId, userId, workItemId, haltEpoch });
 }
 
 type Result = { status: string; detail?: string };
@@ -1638,6 +1654,41 @@ async function waitForMergeOrder(args: AdvanceStartArgs, pr: { number: number; h
   return stop("runner_merge_timeout", true);
 }
 
+/**
+ * Every required reviewer passed on `pr`'s head. A hosted, unpaired repo's item goes into its repo's merge queue and this waits on the entry (D#519
+ * MQ3-b-2b); every other item calls the gate itself, as before. Null: review the (new) head. Otherwise the workflow's result.
+ */
+async function mergeAfterPass(args: AdvanceStartArgs, pr: { number: number; headSha: string }): Promise<Result | null> {
+  const { accountId, userId, workItemId } = args;
+  if ((await advanceMergeQueueEnqueueStep(accountId, userId, workItemId, args.haltEpoch, { prNumber: pr.number, headSha: pr.headSha })).queued) {
+    for (let waited = 0; waited < MERGE_QUEUE_WAIT_MAX_MS; waited += MERGE_QUEUE_WAIT_POLL_MS) {
+      const look = await advanceMergeQueueWaitStep(accountId, userId, workItemId, args.haltEpoch);
+      await advanceLogStep("advance.merge_queue", { work_item_id: workItemId, pr: pr.number, state: look.state });
+      if (look.state === "halted") return haltedEnd(args, "merge_queue");
+      // Back in review: a person pushed, or a delta review found a problem. The review loop reads the PR's head and goes on from there.
+      if (look.state === "in_review") return null;
+      if (look.state === "merged") return { status: "merged" };
+      if (look.state === "stopped") {
+        await stopped(args, "merge_queue", look.reason, { head: pr.headSha, pr: pr.number });
+        return { status: "needs_human", detail: look.reason };
+      }
+      if (look.state !== "waiting") return { status: look.state };
+      await sleep(MERGE_QUEUE_WAIT_POLL_MS);
+    }
+    return { status: "waiting", detail: "merge_queue_wait_ended" };
+  }
+  const gate = await advanceMergeGateStep(accountId, userId, workItemId, args.haltEpoch, pr.number);
+  await advanceLogStep("advance.merge_gate", { work_item_id: workItemId, pr: pr.number, outcome: gate.outcome, reasons: gate.reasons.join(","), status: gate.status });
+  // The head moved while the gate ran: review the new head.
+  if (gate.outcome === "head_moved") return null;
+  if (gate.outcome === "merge_delegated") {
+    const waited = await waitForMergeOrder(args, pr);
+    return waited.next === "continue" ? null : waited.result;
+  }
+  if (gate.outcome === "error" || gate.outcome === "refused") await stopped(args, "merge_gate", gate.reasons[0] ?? gate.outcome, { head: pr.headSha, pr: pr.number });
+  return { status: gate.outcome, detail: gate.reasons.join(",") || undefined };
+}
+
 async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promise<Result> {
   const { accountId, userId, workItemId, actionId } = args;
 
@@ -1691,16 +1742,9 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       if (delta.decision === "head_moved") continue;
       if (delta.decision === "all_passed") {
         await advanceLogStep("advance.reviewed", { work_item_id: workItemId, round: attempt, rereview, pr: pr.number, head: pr.headSha.slice(0, 12), decision: "merge_only", recorded: "" });
-        const gate = await advanceMergeGateStep(accountId, userId, workItemId, args.haltEpoch, pr.number);
-        await advanceLogStep("advance.merge_gate", { work_item_id: workItemId, pr: pr.number, outcome: gate.outcome, reasons: gate.reasons.join(","), status: gate.status });
-        if (gate.outcome === "head_moved") continue;
-        if (gate.outcome === "merge_delegated") {
-          const waited = await waitForMergeOrder(args, pr);
-          if (waited.next === "continue") continue;
-          return waited.result;
-        }
-        if (gate.outcome === "error" || gate.outcome === "refused") await stopped(args, "merge_gate", gate.reasons[0] ?? gate.outcome, { head: pr.headSha, pr: pr.number });
-        return { status: gate.outcome, detail: gate.reasons.join(",") || undefined };
+        const done = await mergeAfterPass(args, pr);
+        if (done !== null) return done;
+        continue;
       }
       if (delta.decision !== "full_review") {
         // CI never finished, or the step was refused: nothing is decided, nothing is merged.
@@ -1761,17 +1805,9 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     // D#598 P7b: the head moved while the round waited for CI (a push to the pull request): nothing was recorded; review the new head.
     if (round.decision === "head_moved") continue;
     if (round.decision === "all_passed") {
-      const gate = await advanceMergeGateStep(accountId, userId, workItemId, args.haltEpoch, pr.number);
-      await advanceLogStep("advance.merge_gate", { work_item_id: workItemId, pr: pr.number, outcome: gate.outcome, reasons: gate.reasons.join(","), status: gate.status });
-      // The head moved while the gate ran: review the new head.
-      if (gate.outcome === "head_moved") continue;
-      if (gate.outcome === "merge_delegated") {
-        const waited = await waitForMergeOrder(args, pr);
-        if (waited.next === "continue") continue;
-        return waited.result;
-      }
-      if (gate.outcome === "error" || gate.outcome === "refused") await stopped(args, "merge_gate", gate.reasons[0] ?? gate.outcome, { head: pr.headSha, pr: pr.number });
-      return { status: gate.outcome, detail: gate.reasons.join(",") || undefined };
+      const done = await mergeAfterPass(args, pr);
+      if (done !== null) return done;
+      continue;
     }
     if (round.decision === "escalated") {
       await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "review", reason: "max_fix_rounds" });

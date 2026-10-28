@@ -63,6 +63,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "advanceCancelStepRuns",
       "advanceContinue",
       "advanceDecision",
+      "advanceDeltaRuns",
       "advanceFixGate",
       "advanceLightSpec",
       "advanceLoadItem",
