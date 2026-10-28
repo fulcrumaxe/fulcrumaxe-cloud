@@ -4,6 +4,7 @@ import type { LiveSecretsSource } from "@fx/core/src/memory/index.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
+import { hasLivePlannedChildSql } from "@fx/core/src/work-items/stages.js";
 import { stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
 import { IllegalStageTransitionError, WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { isBuildableKind } from "@fx/discussions";
@@ -285,6 +286,8 @@ interface BuildFacts {
   child_title: string | null;
   /** D#483 S5-b2b: the number of rows in the Planned PRs table of the Spec version read (0 when there is none). */
   planned_count: number;
+  /** D#483 S5-b2b: the item (not itself a child) has a planned PR child that is not in a terminal stage. */
+  has_live_children: boolean;
 }
 
 async function readFacts(pool: Pool, accountId: string, workItemId: string): Promise<BuildFacts | null> {
@@ -296,6 +299,7 @@ async function readFacts(pool: Pool, accountId: string, workItemId: string): Pro
               CASE WHEN w.planned_pr_key IS NULL THEN d.kind ELSE w.kind END AS kind, s.version, s.body, s.id AS spec_version_id, s.acceptance_files, ${effectiveModeSql("w", "r")} AS execution_mode, w.repo_id, w.stack_parent_id,
               w.planned_pr_key,
               CASE WHEN jsonb_typeof(s.planned_prs) = 'array' THEN jsonb_array_length(s.planned_prs) ELSE 0 END AS planned_count,
+              (w.planned_pr_key IS NULL AND ${hasLivePlannedChildSql("w")}) AS has_live_children,
               CASE WHEN w.planned_pr_key IS NULL THEN NULL ELSE (SELECT e ->> 'title' FROM jsonb_array_elements(CASE WHEN jsonb_typeof(s.planned_prs) = 'array' THEN s.planned_prs ELSE '[]'::jsonb END) e WHERE e ->> 'key' = w.planned_pr_key LIMIT 1) END AS child_title
          FROM work_items w
          LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
@@ -436,6 +440,8 @@ export async function startBuildForItem(
   // D#483 S5-b2b / A-S5-8: an item whose pinned Spec plans two or more pull requests is a parent. Its approval makes the children, and each child builds its own planned PR;
   // the parent itself never runs an executor (that would build every file on one branch).
   if (!isChild && Number(facts.planned_count) >= 2) return { status: "refused", reason: "parent_splits" };
+  // A re-spec to a single pull request does not turn a parent that still has live children into a build: the children stay as they are, and the stop waits for a person. Children that are all merged or closed do not block it.
+  if (!isChild && facts.has_live_children) return { status: "refused", reason: "parent_has_children" };
   // `in_progress` is a replay of this very step (the run is keyed, so it is the same run). `needs_human` is Build again.
   // A child's entry is the build itself: it is launched from `triaged` (it has no triage, classify, panel or Spec of its own).
   if (facts.stage !== "spec_ready" && facts.stage !== "needs_human" && facts.stage !== "in_progress" && !(isChild && facts.stage === "triaged")) return { status: "refused", reason: `stage_${facts.stage}` };

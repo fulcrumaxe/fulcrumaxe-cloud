@@ -35,6 +35,7 @@
   },
   "devDependencies": {
     "@fulcrumaxe/fx-runner": "workspace:*",
+    "@fx/api": "workspace:*",
     "@fx/pipeline": "workspace:*",
     "@fx/plan-data": "workspace:*",
     "@fx/runner-cloud": "workspace:*",

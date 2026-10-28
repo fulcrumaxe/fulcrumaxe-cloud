@@ -33,7 +33,7 @@ export type LoadFailure =
 
 export type LoadedAdvance =
   /** An item at `spec_ready` with a published Spec: the build follows. No issue read (the Spec is in the database). `specVersion` is the Spec the person approved: the build is pinned to it. */
-  | { ok: true; mode: "build"; number: number; specVersion: number | null; splits?: true }
+  | { ok: true; mode: "build"; number: number; specVersion: number | null; splits?: true; hasChildren?: true }
   /** An item at `needs_human` that still has its Spec ("Build again"): a fresh build, after a look for a pull request that is still open for the issue's branch (the repository facts are for that lookup). */
   | ({ ok: true; mode: "rebuild"; number: number; specVersion: number | null; repoId: string; owner: string; name: string; reviewHold?: boolean; branch: string } & AdvancePrSource)
   /** A small, bug or doc item the pipeline triaged (no panel) that has no Spec yet: the project manager's short Spec, from the issue as it reads NOW (an edited issue is what a re-approval wants). */
@@ -101,7 +101,7 @@ export async function loadBody(worker: AdvanceWorker | null, reader: IssueReader
   // Build again looks for the pull request on the item's branch, which is its build identity's (the worker derives the number and the branch from the same read).
   if ((verdict.action === "rebuild" || (verdict.action === "review" && item.stage === "needs_human")) && item.branch === undefined) return { ok: false, reason: (item.identityRefusal === "child_orphaned" ? "child_orphaned" : "no_issue_link") };
   // The build: the Spec is in the database, so no issue is read.
-  if (verdict.action === "build") return { ok: true, mode: "build", number: ghNumber, specVersion: item.specVersion, ...(item.splits === true ? { splits: true as const } : {}) };
+  if (verdict.action === "build") return { ok: true, mode: "build", number: ghNumber, specVersion: item.specVersion, ...(item.splits === true ? { splits: true as const } : {}), ...(item.hasChildren === true ? { hasChildren: true as const } : {}) };
   if (verdict.action === "rebuild") return { ok: true, mode: "rebuild", number: ghNumber, specVersion: item.specVersion, repoId: item.repoId, owner: item.ghOwner, name: item.ghName, executionMode: item.executionMode, recordedPr: item.recordedPr, prExecutionMode: item.prExecutionMode, branch: item.branch! };
   // The panel and the Spec again, for the pipeline's own root item: no issue read either.
   if (verdict.action === "spec") return { ok: true, mode: "spec" };
