@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
-import { finishTick, gateLine, isStagingPaused, readTickGate } from "@fx/core/src/pendingWork";
+import { finishTick, gateLine, isStagingPaused, readTickGate, recordCronConnected, recordCronTick } from "@fx/core/src/pendingWork";
 import type { OpsAlertSink } from "@fx/reconcile";
 import type { InvariantSweepWorker } from "../../../../lib/worker";
 
@@ -46,8 +46,10 @@ export async function invariantSweepHandler(req: NextRequest, deps: InvariantSwe
   if (!isAuthorized(req.headers.get("authorization"), deps.cronSecret)) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
-  if ((deps.paused ?? isStagingPaused)()) return NextResponse.json({ skipped: true, reason: "paused" }, { status: 200 });
   const now = deps.now ?? Date.now;
+  // CRON-OBS-1: the call itself is recorded in the no-database store, paused or not, once per invocation (not per pass).
+  await recordCronTick(NAME, now());
+  if ((deps.paused ?? isStagingPaused)()) return NextResponse.json({ skipped: true, reason: "paused" }, { status: 200 });
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const passes: unknown[] = [];
   let configured = true;
@@ -72,6 +74,7 @@ export async function invariantSweepHandler(req: NextRequest, deps: InvariantSwe
     await announceRaised(deps, result.raised);
     const completedAt = gate.markerValue;
     await finishTick(gate, gate.reason === "marker" && completedAt !== null && now() - completedAt < COVER_MS ? completedAt : null, now());
+    await recordCronConnected(NAME, now());
   }
   return NextResponse.json({ configured, passes }, { status: 200 });
 }

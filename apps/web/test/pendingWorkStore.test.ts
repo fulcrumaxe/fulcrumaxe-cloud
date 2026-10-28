@@ -188,7 +188,8 @@ describe("gate error reporting stays off the database", () => {
 
     const reported = lines.map((l) => JSON.parse(l) as Record<string, unknown>).filter((l) => l.event === "error.reported");
     expect(reported.length).toBeGreaterThan(0);
-    expect(reported[0]).toMatchObject({ level: "error", service: "web", stage: "pending_work.read", error_code: "internal_error" });
+    expect(reported.find((l) => l.stage === "pending_work.read")).toMatchObject({ level: "error", service: "web", error_code: "internal_error" });
+    expect(reported.find((l) => l.stage === "pending_work.tick")).toMatchObject({ level: "error", service: "web", error_code: "internal_error" }); // CRON-OBS-1: the tick write fails the same way
     expect(record).not.toHaveBeenCalled();
     expect(createPool).not.toHaveBeenCalled();
   });
