@@ -43,6 +43,12 @@ describe('R6: what counts as stalled', () => {
     expect(classifyStall(facts({ stage: 'spec_ready', last: last(kind, 'no_model') }))).toMatchObject({ code: 'refused' });
   });
 
+  it('a parent whose Spec plans several pull requests is refused its own build (parent_splits) and the card says so in a fixed sentence, never the code', () => {
+    const s = classifyStall(facts({ stage: 'spec_ready', last: last('build_refused', 'parent_splits') }));
+    expect(s).toMatchObject({ code: 'refused' });
+    expect(s!.why).toBe('This Spec is split into several pull requests, so this item is not built itself. Each planned pull request is built as its own item once the Spec is approved.');
+  });
+
   it('an escalation to a person is a stop, in words', () => {
     const s = classifyStall(facts({ stage: 'needs_human', last: last('escalated', 'max_fix_rounds') }));
     expect(s).toMatchObject({ code: 'handed_over' });

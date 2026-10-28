@@ -557,6 +557,8 @@ export interface AdvanceItem extends AdvancePrSource {
   reviewHold?: boolean;
   /** D#483 S5-b2c-2: a planned PR child. `ghNumber`, `kind`, `hasSpec` and `specVersion` are then its parent's issue and the Spec version it names. */
   child?: true;
+  /** D#483 S5-b2b: set when the item is not a planned PR child and its newest Spec plans two or more pull requests: the item itself is never built, its children are. */
+  splits?: true;
   /** The item's branch from its build identity: `fx/issue-<n>`, or a planned PR child's own `fx/<parent#>-<key>`. Absent when the identity is refused. */
   branch?: string;
   /** Why the build identity was refused (`no_issue_link`, `child_orphaned`): the plan answers with it in place of a bare missing number. */
@@ -678,7 +680,8 @@ export interface AdvanceFacade {
    * `published` moves the item to spec_ready; `not_feasible` publishes nothing (the PM's reason stays in the run, as its
    * summary, for the card); `refused` carries a fixed code. A replay on an item that already has its Spec publishes nothing more.
    */
-  advanceLightSpec(who: AdvanceStepWho, runId: string, actionId: string): Promise<{ status: string; reason: string | null; version: number | null }>;
+  /** `split` is set (true) only when the published version plans two or more pull requests: the item then waits at Spec ready for a person's approval, which creates the children. */
+  advanceLightSpec(who: AdvanceStepWho, runId: string, actionId: string): Promise<{ status: string; reason: string | null; version: number | null; split?: true }>;
   /**
    * D#6 R4d-5b (C34 section 2.3): publishes the next Spec version from the finished project-manager run `runId` (file-list mode; the worker reads the run's
    * result itself). `expectedVersion` is the version its prompt was made from. `published` leaves the item at Spec ready (from Needs a person it moved there through
@@ -985,7 +988,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
 
   async function loadItemRow(accountId: string, workItemId: string): Promise<Omit<AdvanceItem, keyof AdvancePrSource> | null> {
     return withTenant(runnerPool, accountId, async (client) => {
-      const r = await client.query<{ child: boolean; planned_pr_key: string | null; stage: string; provenance: string; repo_id: string | null; discussion_id: string | null; gh_owner: string | null; gh_name: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; executor_run_id: string | null; check_failed_run_id: string | null; p_id: string | null; p_title: string | null; p_summary: string | null }>(
+      const r = await client.query<{ child: boolean; planned_pr_key: string | null; stage: string; provenance: string; repo_id: string | null; discussion_id: string | null; gh_owner: string | null; gh_name: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; executor_run_id: string | null; planned_count: number | null; check_failed_run_id: string | null; p_id: string | null; p_title: string | null; p_summary: string | null }>(
         `SELECT w.stage, w.provenance, w.repo_id, w.discussion_id, r.gh_owner, r.gh_name,
                 CASE WHEN w.planned_pr_key IS NULL THEN d.kind ELSE w.kind END AS kind, (w.planned_pr_key IS NOT NULL) AS child, w.planned_pr_key,
                 (SELECT ar.id FROM agent_runs ar WHERE ar.account_id = w.account_id AND ar.work_item_id = w.id AND ar.role = 'executor' ORDER BY ar.created_at DESC, ar.id DESC LIMIT 1) AS executor_run_id,
@@ -996,7 +999,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
                       OR EXISTS (SELECT 1 FROM decision_receipts k WHERE k.account_id = w.account_id AND k.work_item_id = w.id AND k.decision_type = 'launch_sub_item' AND k.sub_item_key = 'check-' || left(replace(x.id::text, '-', ''), 12)))) AS check_failed_run_id,
                 pr.id AS p_id, pr.title AS p_title, pr.summary AS p_summary,
                 EXISTS (SELECT 1 FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL}) AS has_spec,
-                (SELECT max(s.version) FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL}) AS spec_version
+                (SELECT max(s.version) FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL}) AS spec_version,
+                (SELECT CASE WHEN jsonb_typeof(s.frontmatter -> 'planned_prs') = 'array' THEN jsonb_array_length(s.frontmatter -> 'planned_prs') ELSE 0 END FROM spec_versions s
+                  WHERE w.planned_pr_key IS NULL AND s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL} ORDER BY s.version DESC LIMIT 1) AS planned_count
            FROM work_items w
            LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
            LEFT JOIN discussions d ON d.account_id = w.account_id AND d.id = w.discussion_id
@@ -1013,6 +1018,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         ? {
             reviewHold,
             ...(row.child ? { child: true } : {}),
+            ...(Number(row.planned_count ?? 0) >= 2 ? { splits: true as const } : {}),
             ...(identity?.ok ? { branch: identity.identity.branch } : {}),
             ...(identity !== null && !identity.ok ? { identityRefusal: identity.reason } : {}),
             stage: row.stage,
@@ -1942,7 +1948,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return started(out.id);
   }
 
-  async function advanceLightSpec(who: AdvanceStepWho, runId: string, actionId: string): Promise<{ status: string; reason: string | null; version: number | null }> {
+  async function advanceLightSpec(who: AdvanceStepWho, runId: string, actionId: string): Promise<{ status: string; reason: string | null; version: number | null; split?: true }> {
     const refusedWith = (reason: string) => ({ status: "refused", reason, version: null });
     if (!deps.lightSpec) return refusedWith("light_spec_unavailable");
     if (!UUID_RE.test(runId) || !UUID_RE.test(actionId)) return refusedWith("invalid_input");
@@ -1956,7 +1962,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     });
     if (!read.run || read.run.role !== "project-manager" || read.run.status !== "succeeded") return refusedWith("run_not_usable");
     // A replay after the Spec was published: nothing more is published (a second publish would add a version).
-    if (read.stage === "spec_ready" && read.version !== null) return { status: "published", reason: null, version: Number(read.version) };
+    if (read.stage === "spec_ready" && read.version !== null) return { status: "published", reason: null, version: Number(read.version), ...(await specPlansSplit(who, Number(read.version))) };
     if (read.stage !== "triaged") return refusedWith(`stage_${read.stage ?? "gone"}`.replace(/[^a-z0-9_]/g, "_"));
     const out = await deps.lightSpec(runnerPool, who.accountId, who.workItemId, read.run.envelope);
     const code = typeof out.reason === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(out.reason) ? out.reason : null;
@@ -1965,7 +1971,24 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       await writeEvent(who, { kind: "stopped", dedupeKey: `light:${actionId}`, code: out.status === "not_feasible" ? "not_feasible" : (code ?? "refused"), runId });
     }
     // The PM's own sentence for a not-feasible request is model text: it stays in the run (its summary), never returned.
-    return { status: out.status, reason: out.status === "refused" ? code : null, version: typeof out.version === "number" ? out.version : null };
+    const split = out.status === "published" && typeof out.version === "number" ? await specPlansSplit(who, out.version) : {};
+    return { status: out.status, reason: out.status === "refused" ? code : null, version: typeof out.version === "number" ? out.version : null, ...split };
+  }
+
+  /**
+   * D#483 S5-b2b: whether the stored table of Planned PRs of this Spec version has two or more rows (the pipeline stores a table only from rows its parser accepted,
+   * and a table of fewer than two rows is never stored). Read from the stored version, so a replay of the publish step answers the same.
+   */
+  async function specPlansSplit(who: AdvanceStepWho, version: number): Promise<{ split?: true }> {
+    const rows = await withTenant(runnerPool, who.accountId, async (client) =>
+      (
+        await client.query<{ n: number }>(
+          "SELECT CASE WHEN jsonb_typeof(frontmatter -> 'planned_prs') = 'array' THEN jsonb_array_length(frontmatter -> 'planned_prs') ELSE 0 END AS n FROM spec_versions WHERE account_id = $1 AND work_item_id = $2 AND version = $3 AND erased_at IS NULL",
+          [who.accountId, who.workItemId, version],
+        )
+      ).rows,
+    );
+    return Number(rows[0]?.n ?? 0) >= 2 ? { split: true } : {};
   }
 
   async function advanceRespec(who: AdvanceStepWho, runId: string, actionId: string, expectedVersion: number): Promise<{ status: string; reason: string | null; version: number | null }> {

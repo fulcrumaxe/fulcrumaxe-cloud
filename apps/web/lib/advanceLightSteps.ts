@@ -36,6 +36,8 @@ export interface LightPublished {
   status: string;
   reason: string | null;
   version: number | null;
+  /** D#483 S5-b2b: true when the published Spec plans two or more pull requests. Such an item stops at Spec ready until a person approves the Spec. */
+  split?: true;
 }
 
 export async function publishLightSpecBody(worker: LightPublishWorker | null, who: StepWho, runId: string, actionId: string): Promise<LightPublished> {

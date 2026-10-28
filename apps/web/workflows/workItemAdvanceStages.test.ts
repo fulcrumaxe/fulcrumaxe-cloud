@@ -48,7 +48,7 @@ interface SetupOptions {
   /** The item's stage on each read after the load (the last repeats). */
   stages?: string[];
   /** What publishing the short Spec answers. */
-  light?: { status: string; reason: string | null; version: number | null };
+  light?: { status: string; reason: string | null; version: number | null; split?: true };
   /** What the decision step answers (D#7 DP4b-2); `none` when absent. */
   decision?: DecisionStepCode;
   /** D#6 R-CHK-3: what the check fix start answers, one per call (the last repeats); a started run named `run-fix-<n>` when absent. */
@@ -669,6 +669,23 @@ describe("the build for an item at Spec ready", () => {
 });
 
 
+// D#483 S5-b2b / A-S5-8: the advance that follows a person's approval of a Spec that plans several pull requests ends without a build, and is not a failure.
+describe("an approved parent whose Spec plans several pull requests", () => {
+  it("ends as children_launched: no start gate, no build, no failure, no refusal, nothing logged as failed", async () => {
+    const w = setup({ item: { ...AT_SPEC, kind: "small", splits: true } });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "children_launched" });
+    expect(w.advanceBuild).not.toHaveBeenCalled();
+    expect(events()).not.toContain("advance.failed");
+    expect(events()).toContain("advance.children_launched");
+  });
+
+  it("an item whose Spec plans no split is built as before", async () => {
+    const w = setup({ item: AT_SPEC });
+    await workItemAdvanceWorkflow(ARGS);
+    expect(w.advanceBuild).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("the short Spec for a small, bug or doc item (no panel)", () => {
   const LIGHT = { status: "triaged", stage: "triaged", workItemId: ROOT, category: "bug" };
 
@@ -685,6 +702,21 @@ describe("the short Spec for a small, bug or doc item (no panel)", () => {
     expect(w.advanceLightSpec).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ROOT, haltEpoch: 0 }, "run-1", ARGS.actionId);
     // The build is of the pipeline's card for the issue, pinned to the version just published.
     expect(w.advanceBuild).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ROOT, haltEpoch: 0 }, ARGS.actionId, 4);
+  });
+
+  // D#483 S5-b2b / A-S5-8: a Spec that plans two or more pull requests waits for a person's approval (which makes the children); the item itself is never built.
+  it("a published Spec that plans several pull requests stops at Spec ready: no build is asked for, and the end result is spec_ready", async () => {
+    const w = setup({ triage: LIGHT, light: { status: "published", reason: null, version: 4, split: true } });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "spec_ready" });
+    expect(w.advanceLightSpec).toHaveBeenCalledTimes(1);
+    expect(w.advanceBuild).not.toHaveBeenCalled();
+    expect(w.advanceStartRun.mock.calls.map((c) => c[0]).filter((r) => r.role === "executor")).toEqual([]);
+  });
+
+  it("a published Spec with no split (no table, or one row) goes on to the build as before", async () => {
+    const w = setup({ triage: LIGHT, light: { status: "published", reason: null, version: 4 } });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual(REVIEW_STOPS);
+    expect(w.advanceBuild).toHaveBeenCalledTimes(1);
   });
 
   // D#483 S4-e4: the root of an approved Discussion-backed item has no issue number; the proposal is its input, and the issue reader must not run.

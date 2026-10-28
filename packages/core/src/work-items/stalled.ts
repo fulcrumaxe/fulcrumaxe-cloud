@@ -69,6 +69,7 @@ const STOP_WORDS: Readonly<Record<string, string>> = Object.freeze({
   reviewer_environment: 'A reviewer could not run the tests.',
   wait_timeout: 'A fix round ran out of time and was stopped.',
   halted: 'The work was halted.',
+  parent_splits: 'This Spec is split into several pull requests, so this item is not built itself. Each planned pull request is built as its own item once the Spec is approved.',
 });
 
 const humanise = (code: string): string => code.replace(/_/g, ' ');

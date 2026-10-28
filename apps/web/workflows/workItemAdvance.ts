@@ -563,6 +563,12 @@ export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promis
   // this load read. A newer version appearing since refuses the build and the review.
   const pinned = (read: number | null): number | null => (args.specVersion !== undefined ? args.specVersion : read);
   if (loaded.mode === "build") {
+    // D#483 S5-b2b / A-S5-8: the person's approval of a Spec that plans several pull requests made the children; the item itself is never built. It stays at Spec ready, the
+    // children are launched by their own gate, and nothing here is a failure or a refusal (the build start's `parent_splits` is only the backstop).
+    if (loaded.splits === true) {
+      await advanceLogStep("advance.children_launched", { work_item_id: workItemId, at: "build", version: loaded.specVersion });
+      return { status: "children_launched" };
+    }
     const gate = await startGatePhase(args, workItemId, { mode: "build", category: null, cameInAs: null });
     return gate ?? buildPhase(args, pinned(loaded.specVersion));
   }
@@ -762,6 +768,9 @@ async function lightPhase(args: AdvanceStartArgs, rootId: string, issue: { categ
     return { status: "light_spec_refused", detail: published.reason ?? undefined };
   }
   await advanceLogStep("advance.spec_ready", { work_item_id: rootId, at: "light_spec", version: published.version });
+  // D#483 S5-b2b / A-S5-8: a Spec that plans two or more pull requests is a split. It waits at Spec ready like a panel Spec does: a person's approval of the Spec makes the
+  // children (the only place they are made), and the item itself is never built.
+  if (published.split === true) return { status: "spec_ready" };
   // The Spec is published: the build, pinned to this version, then the review. The pipeline's card for the issue is the root.
   // The build asks from its own first attempt: a restart attempt of the short Spec's start is not the build's.
   const { startAttempt: _spent, ...forBuild } = args;
