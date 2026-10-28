@@ -67,7 +67,9 @@ describe("a tick with no pending work", () => {
     await tick();
     region.calls = { get: 0, set: 0, delete: 0 };
     await tick();
-    expect(region.calls).toEqual({ get: 2, set: 0, delete: 0 }); // marker + last run, nothing written
+    // marker + last run read; the only write is CRON-OBS-1's tick time for this call (no marker or last-run write on a skipped tick)
+    expect(region.calls).toEqual({ get: 2, set: 1, delete: 0 });
+    expect([...region.entries.keys()].filter((k) => k.startsWith("tick:"))).toEqual(["tick:api-sweep"]);
   });
 });
 

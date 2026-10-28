@@ -342,6 +342,42 @@ describe("installation deliveries mark the reconciler pending", () => {
   });
 });
 
+// CRON-OBS-1: repositories added to an installation wake the reconciler like an installation change does.
+describe("installation_repositories deliveries mark the reconciler pending", () => {
+  const added = JSON.stringify({ action: "added", installation: { id: 42 }, sender: { id: 7001 }, repositories_added: [{ id: 5, name: "r", full_name: "o/r" }] });
+  const removed = JSON.stringify({ action: "removed", installation: { id: 42 }, sender: { id: 7001 }, repositories_removed: [{ id: 5, name: "r", full_name: "o/r" }] });
+  const handle = () => vi.fn(async (): Promise<HandleWebhookResult> => ({ handled: false, reason: "inert_app_kind" }));
+  afterEach(() => setPendingHooks(null));
+
+  function install() {
+    const written = new Map<string, number>();
+    const kept: Array<Promise<unknown>> = [];
+    setPendingHooks({
+      store: { get: async (k) => written.get(k) ?? null, set: async (k, v) => void written.set(k, v), delete: async (k) => void written.delete(k) },
+      keepAlive: (p) => void kept.push(p),
+    });
+    return { written, settled: () => Promise.all(kept) };
+  }
+
+  it("a verified repositories-added delivery sets the reconcile marker and still reaches handle", async () => {
+    const { written, settled } = install();
+    const h = handle();
+    await githubWebhookHandler(requestWithBody(added, { event: "installation_repositories" }), fakeDeps(), h);
+    await settled();
+    expect(written.has("pending:reconcile")).toBe(true);
+    expect(h).toHaveBeenCalledTimes(1);
+  });
+
+  it("repositories-removed, a forged delivery and an unrelated event with the same body set nothing", async () => {
+    const { written, settled } = install();
+    await githubWebhookHandler(requestWithBody(removed, { event: "installation_repositories" }), fakeDeps(), handle());
+    await githubWebhookHandler(requestWithBody(added, { signature: sign(added, "wrong-secret"), event: "installation_repositories" }), fakeDeps(), neverCalled());
+    await githubWebhookHandler(requestWithBody(added, { event: "issues" }), fakeDeps(), handle());
+    await settled();
+    expect(written.size).toBe(0);
+  });
+});
+
 describe("the intake allowlist source (D#31 AUTHOR-CHECK-WIRE)", () => {
   it("is the shared one: no list configured means the deps carry none, a configured list is passed through", () => {
     vi.stubEnv("DATABASE_URL_APP_USER", "postgres://u:p@127.0.0.1:1/none");

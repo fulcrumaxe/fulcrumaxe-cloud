@@ -194,6 +194,11 @@ export async function githubWebhookHandler(
     // does not re-sync installations sooner by itself (that job is 6-hourly); it makes sure a tick is not skipped while one is due.
     void markWorkPending("reconcile");
   }
+  // CRON-OBS-1: repositories added to an installation wake the reconciler the same way. If this delivery's own repo sync is lost, the
+  // repo re-sync job (github_repos, on its own interval) must not then wait for the reconciler's slow slot grid to be allowed to connect.
+  if (eventName === "installation_repositories" && (payload as { action?: unknown } | null)?.action === "added") {
+    void markWorkPending("reconcile");
+  }
 
   const result: HandleWebhookResult = await handle(deps, eventName, payload as GithubWebhookPayload, deliveryId, app.kind);
   return NextResponse.json(result, { status: 200 });

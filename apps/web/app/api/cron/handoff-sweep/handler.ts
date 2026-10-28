@@ -56,6 +56,7 @@ export async function handoffSweepHandler(req: NextRequest, deps: HandoffSweepHa
       },
       deps.log,
       now,
+      { recordTick: i === 0 }, // one tick record per cron call, not per pass
     );
     passes.push(ran?.result ?? { skipped: true });
   }

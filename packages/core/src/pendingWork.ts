@@ -95,6 +95,12 @@ export interface PendingHooks {
   keepAlive?(work: Promise<unknown>): void;
   /** Reports a store failure or timeout (a coded, capped error report). Optional; must not throw. */
   reportError?(err: unknown, stage: string): void;
+  /**
+   * CRON-OBS-1: records in the database that a tick which ALREADY connected did so (one small upsert through the hook's own
+   * platform_ops pool: one extra connection per instance, opened on first use, and only by a connecting tick). Called only after a tick connected; a skipped tick never reaches it, so it can
+   * never be the reason a connection opens. Optional; a rejection is reported and swallowed.
+   */
+  recordConnected?(name: SweepName, at: number): Promise<void>;
 }
 
 // Next bundles the instrumentation hook and each route separately, so module state would not be shared; a global is.
@@ -509,6 +515,106 @@ export function gateLine(gate: TickGate, workFound?: boolean): string {
   return JSON.stringify(line);
 }
 
+/**
+ * CRON-OBS-1: how often Vercel calls each cron (apps/web/vercel.json; a test pins the two together). A tick older than twice this,
+ * or none at all, is the first half of "this cron is not running".
+ */
+export const SWEEP_SCHEDULE_MS: Readonly<Record<SweepName, number>> = {
+  "api-sweep": 5 * 60_000,
+  "run-action-sweep": 5 * 60_000,
+  "compute-settle-sweep": 10 * 60_000,
+  reconcile: 15 * 60_000,
+  "runner-sweeper": 5 * 60_000,
+  "invariant-sweep": 60_000,
+  "handoff-sweep": 60_000,
+  "stage-resume-sweep": 15 * 60_000,
+  "setup-request-check": 60_000,
+  "branch-cleanup": 60_000,
+  "proposal-verify-sweep": 15 * 60_000,
+  "merge-queue-sweep": 60_000,
+};
+
+/**
+ * Whether a sweep can connect while FX_STAGING_PAUSED=1. Only the invariant sweep cannot: its handler ends before reading the gate while paused,
+ * so it never refreshes its database row and the liveness check must judge it by the cache tick alone while paused. Defined next to the schedule
+ * so a new sweep cannot be added without saying (the record type is exhaustive).
+ */
+export const CONNECTS_WHILE_PAUSED: Readonly<Record<SweepName, boolean>> = {
+  "api-sweep": true,
+  "run-action-sweep": true,
+  "compute-settle-sweep": true,
+  reconcile: true,
+  "runner-sweeper": true,
+  "invariant-sweep": false,
+  "handoff-sweep": true,
+  "stage-resume-sweep": true,
+  "setup-request-check": true,
+  "branch-cleanup": true,
+  "proposal-verify-sweep": true,
+  "merge-queue-sweep": true,
+};
+
+/** How long a cron call's tick time stays in the store. A longer silence than this reads as a miss, which the check treats as "no tick". */
+export const CRON_TICK_TTL_SECONDS = 24 * 60 * 60;
+
+const cronTickKey = (name: SweepName): string => `tick:${name}`;
+
+/**
+ * Records that this cron was CALLED, whether the gate then opens or not: one Runtime Cache write, no database. Skipped when no store is
+ * installed. Bounded and never throws (a failed write is reported to stdout by the hook and the tick carries on).
+ */
+export async function recordCronTick(name: SweepName, now: number = Date.now()): Promise<void> {
+  const hooks = getPendingHooks();
+  if (!hooks) return;
+  try {
+    await bounded(Promise.resolve(hooks.store.set(cronTickKey(name), now, CRON_TICK_TTL_SECONDS)));
+  } catch (err) {
+    hooks.reportError?.(err, "pending_work.tick");
+  }
+}
+
+/** Records a tick that connected in the database through the hook. Never throws. */
+export async function recordCronConnected(name: SweepName, now: number = Date.now()): Promise<void> {
+  const hooks = getPendingHooks();
+  if (!hooks?.recordConnected) return;
+  try {
+    await hooks.recordConnected(name, now);
+  } catch (err) {
+    hooks.reportError?.(err, "pending_work.tick_db");
+  }
+}
+
+/**
+ * The backstop a sweep is judged against by the liveness check: the slot length the gate uses (30 minutes with recent work, 60 idle,
+ * times the sweep's own multiplier), or the flat 12 hours while paused.
+ */
+export function effectiveBackstopMs(name: SweepName, opts: { paused: boolean; idle: boolean }): number {
+  if (opts.paused) return PAUSED_BACKSTOP_MS;
+  return sweepSlotMs(name, opts.idle ? IDLE_BACKSTOP_MS : BACKSTOP_MS);
+}
+
+export interface CronCacheReading {
+  /** Per sweep, the cache tick time (epoch ms), or null on a miss or error. */
+  ticks: Record<SweepName, number | null>;
+  /** True when the activity key is missing or older than the window (the gate's own idle test). */
+  idle: boolean;
+  /** False when there is no store at all. */
+  store: boolean;
+}
+
+/** Reads every sweep's cache tick and the activity key, with NO database access. Never throws. */
+export async function readCronCache(now: number = Date.now()): Promise<CronCacheReading> {
+  const hooks = getPendingHooks();
+  const ticks = Object.fromEntries(SWEEP_NAMES.map((n) => [n, null])) as Record<SweepName, number | null>;
+  if (!hooks) return { ticks, idle: true, store: false };
+  const [reads, activity] = await Promise.all([Promise.all(SWEEP_NAMES.map((n) => read(hooks.store, cronTickKey(n)))), read(hooks.store, ACTIVITY_KEY)]);
+  SWEEP_NAMES.forEach((n, i) => {
+    const t = reads[i]!.value;
+    ticks[n] = t !== null && t <= now + CLOCK_SKEW_MS ? t : null;
+  });
+  return { ticks, idle: !(activity.value !== null && now - activity.value < ACTIVITY_WINDOW_MS) && activity.state !== "error", store: true };
+}
+
 export interface GatedOutcome<T> {
   result: T;
   workFound: boolean;
@@ -525,8 +631,10 @@ export async function runGatedTick<T>(
   run: () => Promise<GatedOutcome<T>>,
   log: (line: string) => void = (line) => console.log(line),
   now: () => number = Date.now,
-  opts: { force?: boolean } = {},
+  opts: { force?: boolean; /** false on the second pass of a two-pass cron call: the call is recorded once. */ recordTick?: boolean } = {},
 ): Promise<{ result: T } | null> {
+  // CRON-OBS-1: every cron call leaves its time in the no-database store, skipped or not. A signed kick is not a cron call.
+  if (!opts.force && opts.recordTick !== false) await recordCronTick(name, now());
   let gate = await readTickGate(name, now(), isStagingPaused());
   // A signed kick is itself the signal: it connects whatever the marker says, and still tidies the marker after.
   if (opts.force && !gate.connect) gate = { ...gate, connect: true, reason: "kick" };
@@ -539,5 +647,6 @@ export async function runGatedTick<T>(
   const hooks = getPendingHooks();
   if (outcome.workFound && hooks) await recordActivity(hooks.store, now()).catch((err: unknown) => hooks.reportError?.(err, "pending_work.finish"));
   await finishTick(gate, outcome.nextDueAt, now());
+  await recordCronConnected(name, now());
   return { result: outcome.result };
 }

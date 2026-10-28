@@ -52,6 +52,8 @@ export function installPendingWork(): void {
     store: runtimeCacheStore(),
     keepAlive,
     reportError,
+    // CRON-OBS-1: called only by a tick that already connected; loaded on demand so a skipped tick never builds a pool.
+    recordConnected: async (name, at) => (await import("./cronLiveness")).recordConnectedTick(name, at),
     kick: (name) => {
       if (name === "api-sweep" && kicker) keepAlive(kicker.kick());
     },

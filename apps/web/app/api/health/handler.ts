@@ -7,6 +7,7 @@ import { outsideMeterOn } from "@fx/spend";
 import { ENV_MANIFEST } from "../../../env-manifest";
 import { HUMAN_MERGE_ONLY_ENV, HUMAN_MERGE_ONLY_INVALID_CODE } from "@fx/db/src/humanMergeOnly";
 import { deployKindOf, evaluateEnv, type EnvLike, type EnvReport } from "../../../lib/env/check";
+import type { CronLiveness } from "../../../lib/cronLiveness";
 import { productionVercelEnvSource, VERCEL_ENV_SOURCE_UNCONFIGURED } from "../../../lib/setupRequestEnvSource";
 
 /**
@@ -36,7 +37,7 @@ import { productionVercelEnvSource, VERCEL_ENV_SOURCE_UNCONFIGURED } from "../..
  * included, discloses neither.
  */
 
-function isOperator(authHeader: string | null, secret: string | undefined): boolean {
+export function isOperator(authHeader: string | null, secret: string | undefined): boolean {
   if (!secret || !authHeader) return false;
   // Hash both sides so the comparison is constant-length whatever the header holds.
   const expected = createHash("sha256").update(`Bearer ${secret}`).digest();
@@ -111,10 +112,14 @@ function withHumanMergeOnlyProblem(report: EnvReport): EnvReport {
   };
 }
 
-export function healthResponse(env: EnvLike, authHeader: string | null, nowMs: number = Date.now()): NextResponse {
+/**
+ * CRON-OBS-1: `cron` (per-sweep cache tick age and last-connected age, see lib/cronLiveness.ts) is part of the OPERATOR branch only. The caller
+ * reads it (it may open one database connection) only for an operator who asked for it, and the public body is unchanged.
+ */
+export function healthResponse(env: EnvLike, authHeader: string | null, nowMs: number = Date.now(), cron?: CronLiveness): NextResponse {
   const report = withHumanMergeOnlyProblem(withSessionSecretProblems(evaluateEnv(ENV_MANIFEST, env, deployKindOf(env)), env, nowMs));
   const body = { ok: report.ok, config: report.ok ? "ok" : "incomplete", planData: planDataStatus(), outside_meter: outsideMeterOn(env.FX_OUTSIDE_METER) ? "on" : "off", partners: partnerLayerOn(env) ? "on" : "off", ...identity(env) };
   const init = { status: report.ok ? 200 : 503, headers: { "Cache-Control": "no-store" } };
-  if (isOperator(authHeader, env.CRON_SECRET)) return NextResponse.json({ ...body, ...detail(report) }, init);
+  if (isOperator(authHeader, env.CRON_SECRET)) return NextResponse.json({ ...body, ...detail(report), ...(cron ? { cron } : {}) }, init);
   return NextResponse.json(body, init);
 }
