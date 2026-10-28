@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  FLAG_WORDS, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, phaseOf, pullUrl, readyBanner, mergeBlockSentence, blockingSentence, BLOCKING_SENTENCES, PUBLIC_REFUSED_SENTENCE, REVIEW_BLOCK_SENTENCE, UNKNOWN_BLOCK_SENTENCE, reasonWord, roleWord, runView, statusWord, stepView, usdText,
+  FLAG_WORDS, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, SPEC_REFUSED_SENTENCES, SPEC_REFUSED_GENERIC, phaseOf, pullUrl, readyBanner, mergeBlockSentence, blockingSentence, BLOCKING_SENTENCES, PUBLIC_REFUSED_SENTENCE, REVIEW_BLOCK_SENTENCE, UNKNOWN_BLOCK_SENTENCE, reasonWord, roleWord, runView, statusWord, stepView, usdText,
 } from "../apps/pipeline/pipeline-insight.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
@@ -999,5 +999,31 @@ describe("the Public change block", () => {
     expect(buildInsight(OK).publicChange).toBeNull();
     const panel = await show(OK);
     expect(byId(panel.el, "pl-public-change")).toHaveLength(0);
+  });
+});
+
+describe("the short-Spec refusal notice (spec_refused)", () => {
+  const TAIL = " Nothing was saved. Edit the issue on GitHub and approve again, or close it.";
+  const banner = (reason) => noticeBanner({ notice: { kind: "spec_refused", reason } });
+  const SENTENCES_BY_CODE = {
+    invalid_spec_output: "The Spec writer's output was incomplete, so no Spec was published." + TAIL,
+    invalid_file_scope: "The Spec writer didn't give a readable list of the files the change may touch, so no Spec was published." + TAIL,
+    invalid_planned_prs: "The Spec writer's list of planned pull requests couldn't be read, so no Spec was published." + TAIL,
+    planned_prs_too_large: "The Spec writer planned more pull requests than one Spec may hold, so no Spec was published." + TAIL,
+    planned_split_missing: "The Spec writer said the work should be split into several pull requests but gave no list of them, so no Spec was published." + TAIL,
+    planned_split_unflagged: "The Spec writer listed several pull requests without saying the work should be split, so no Spec was published." + TAIL,
+    spec_too_large: "The Spec came out larger than a Spec may be, so it was not published." + TAIL,
+    item_halted: "This item is halted, so no Spec was published. Approve it again when you want it to continue, or close it.",
+    publish_failed: "The Spec couldn't be saved just now, so it was not published." + TAIL,
+  };
+  for (const [code, sentence] of Object.entries(SENTENCES_BY_CODE)) {
+    it(`${code} reads as its one fixed sentence`, () => {
+      expect(banner(code)).toEqual({ kind: "spec_refused", title: "Stopped before building. ", lead: "", tail: "", reason: sentence });
+    });
+  }
+  it("has exactly these sentences, and an unknown or hostile code reads as the generic one, never as the code's own text", () => {
+    expect(Object.keys(SPEC_REFUSED_SENTENCES).sort()).toEqual(Object.keys(SENTENCES_BY_CODE).sort());
+    for (const code of ["refused", "from_the_future", "constructor", "__proto__", "<b>x</b>"]) expect(banner(code).reason, code).toBe(SPEC_REFUSED_GENERIC);
+    expect(SPEC_REFUSED_GENERIC).toBe("The Spec step stopped before publishing a Spec." + TAIL);
   });
 });
