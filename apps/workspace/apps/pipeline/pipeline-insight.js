@@ -353,10 +353,95 @@ export function childLaunchLine(data) {
   return { blocked: sentence !== "", text: sentence !== "" ? sentence : "", warning: w, offers: c.offers === "close" || c.offers === "parent" ? c.offers : null };
 }
 
-/** The "Ready to merge" banner, only at review_passed, with the repo's real auto-merge setting. */
+/**
+ * The gate reasons that leave only a person's press on Merge. A copy of packages/core/src/work-items/mergeReadiness.ts (a core test pins the two equal).
+ * An answer with no reasons, or only these, is ready; any other reason, a code this list does not know included, still blocks the merge.
+ */
+export const PERSON_MERGES_REASONS = [
+  "auto_merge_not_allowed",
+  "human_merge_only",
+  "local_review_not_enabled",
+  "local_reviews_passed_advisory",
+  "runner_merge_unavailable",
+  "runner_merge_timeout",
+  "runner_merge_failed",
+  "runner_report_mismatch",
+  "public_branch_person_managed",
+  "review_round_cap",
+  "review_compute_cap",
+];
+
+/** One fixed sentence per blocking gate reason. Only the cloud's own words: never model text, GitHub text or a raw code. */
+export const BLOCKING_SENTENCES = {
+  public_pr_not_open: "The public pull request isn't open yet",
+  pr_draft: "The pull request is a draft",
+  ci_not_green: "Checks haven't passed yet",
+  repo_ci_missing: "The repository has no checks of its own yet",
+  no_branch_protection: "The base branch has no protection rules yet",
+  head_sha_malformed: "The pull request's latest commit could not be read",
+  run_timestamp_invalid: "A review has an invalid time, so it can't be counted yet",
+  public_head_unrecorded: "The public pull request's latest commit isn't the one the platform pushed",
+  public_head_not_reviewed: "The public pull request doesn't hold exactly what was reviewed",
+  stacked_on_open_pr: "It builds on a pull request that hasn't merged yet",
+  merge_call_refused: "GitHub refused the merge",
+  merge_conflict: "The pull request has a merge conflict",
+  branch_behind: "The branch is behind its base branch",
+  branch_protection_refused: "Branch protection refused the merge",
+  merge_queue_waiting: "The pull request is waiting in the merge queue",
+  ordered_resource_out_of_order: "Another change has to merge before this one",
+  merge_dependency_closed: "The pull request it builds on was closed without merging",
+  history_rewritten: "The branch history was rewritten after review",
+  pairing_changed: "The public repository's pairing changed",
+  no_pull_request: "There is no pull request on record to merge",
+  go_not_applicable: "The merge could not go through your runner",
+};
+export const REVIEW_BLOCK_SENTENCE = "A required review hasn't passed on the latest commit";
+export const UNKNOWN_BLOCK_SENTENCE = "Something still blocks the merge";
+export const PUBLIC_REFUSED_SENTENCE = "The public change was refused, so there is no pull request to merge";
+
+/** The one sentence for a blocking reason code. */
+export function blockingSentence(code) {
+  if (Object.hasOwn(BLOCKING_SENTENCES, code)) return BLOCKING_SENTENCES[code];
+  if (/^stacked_on_pr_/.test(String(code))) return BLOCKING_SENTENCES.stacked_on_open_pr;
+  if (/^(missing_run|run_not_succeeded|run_not_production|runner_not_trusted|verdict_not_pass)_/.test(String(code))) return REVIEW_BLOCK_SENTENCE;
+  return UNKNOWN_BLOCK_SENTENCE;
+}
+
+/** The reasons of the newest gate answer "a person decides" among the steps, or null when no step carries one. */
+function newestGateReasons(data) {
+  const steps = Array.isArray(data.steps) ? data.steps : [];
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const s = steps[i];
+    if (isObj(s) && s.result === "ready_human_merges") return Array.isArray(s.reasons) ? s.reasons.filter((r) => typeof r === "string") : [];
+  }
+  return null;
+}
+
+/**
+ * Why the merge is not a person's to press yet, as one fixed sentence, or null when it is. A paired item whose public change is refused or has no public pull
+ * request is never ready, whatever the gate's reasons. Otherwise the newest gate answer must hold no reasons, or only "a person presses merge" ones; the public
+ * pull request not being open is named before the rest, because the other reasons are about a pull request that is not there.
+ */
+export function mergeBlockSentence(data) {
+  const p = data && data.public_change;
+  if (isObj(p)) {
+    if (p.state === "refused") return PUBLIC_REFUSED_SENTENCE;
+    if (!(Number.isInteger(p.pr_number) && p.pr_number >= 1)) return BLOCKING_SENTENCES.public_pr_not_open;
+  }
+  const reasons = newestGateReasons(data);
+  if (reasons === null) return null;
+  const blocking = reasons.filter((r) => !PERSON_MERGES_REASONS.includes(r));
+  if (blocking.length === 0) return null;
+  return blockingSentence(blocking.includes("public_pr_not_open") ? "public_pr_not_open" : blocking[0]);
+}
+
+/** The "Ready to merge" banner, only at review_passed, with the repo's real auto-merge setting. When something still blocks the merge it says what, in fixed words, and offers no link. */
 export function readyBanner(data) {
   if (!data || data.stage !== "review_passed") return null;
+  const blocked = mergeBlockSentence(data);
+  if (blocked !== null) return { blocked: true, title: "Not ready to merge yet", detail: blocked + ".", autoMerge: false, autoMergeText: "", url: null };
   return {
+    blocked: false,
     title: "Ready to merge",
     detail: "Every required reviewer passed.",
     autoMerge: data.auto_merge === true,
@@ -506,6 +591,7 @@ export function createInsightPanel(deps) {
   }
 
   function banner(b) {
+    if (b.blocked) return h("div", { class: "pl-ins-ready", "data-testid": "pl-ready-blocked", role: "status" }, h("strong", null, b.title + ". "), b.detail);
     return h(
       "div",
       { class: "pl-ins-ready", "data-testid": "pl-ready", role: "status" },

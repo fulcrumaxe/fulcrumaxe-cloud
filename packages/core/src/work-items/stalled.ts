@@ -2,6 +2,7 @@ import type { Pool } from 'pg';
 import { assertActiveMembership } from '../tenancy/scopedAccess.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { advanceActionFor } from './advance.js';
+import { blockingReasons } from './mergeReadiness.js';
 import { readReviewHold } from './reviewHold.js';
 import { cleanWorkItemTitle } from './title.js';
 
@@ -13,8 +14,8 @@ import { cleanWorkItemTitle } from './title.js';
  * Three kinds of evidence, strongest first:
  *   1. The newest driver fact is one the workflow writes on its way out: it stopped (`stopped`), handed over (`escalated`), or a start was refused or failed
  *      (`build_refused`, `fix_round_refused`, `fix_round_failed`, `resume_refused`).
- *   2. The newest fact is a merge gate answer "ready, a person merges" whose reasons include one that time alone can clear (the pull request is a draft, its
- *      checks are not green yet, the public copy is not open yet). The workflow ended on that answer and nothing asks the gate again.
+ *   2. The newest fact is a merge gate answer "ready, a person merges" whose reasons include one that is not "a person presses merge" (the pull request is a draft, its
+ *      checks are not green yet, the public copy is not open yet, a review did not pass: mergeReadiness.ts). The workflow ended on that answer and nothing asks the gate again.
  *   3. The newest fact is a wait (`stage_waiting`) that stopped being refreshed: a live workflow refreshes it at every ask, and the parked-stage sweep does
  *      while a limit still denies the start, so a stale one means neither is looking.
  *   4. At a stage with a workflow in flight, nothing at all happened for longer than the longest wait a workflow makes silently (the two-hour CI wait).
@@ -124,7 +125,7 @@ export function classifyStall(f: StallFacts): Stall | null {
     return { code: 'refused', why: sentenceFor(last.code, base), since: last.at };
   }
   if (last !== null && last.kind === 'merge_gate' && last.code === 'ready_human_merges') {
-    const transient = last.reasons.filter((r) => TRANSIENT_GATE_REASONS.includes(r));
+    const transient = blockingReasons(last.reasons);
     if (transient.length > 0) {
       return {
         code: 'gate_not_ready',

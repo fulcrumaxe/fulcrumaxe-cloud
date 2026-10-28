@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  FLAG_WORDS, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, phaseOf, pullUrl, readyBanner, reasonWord, roleWord, runView, statusWord, stepView, usdText,
+  FLAG_WORDS, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, phaseOf, pullUrl, readyBanner, mergeBlockSentence, blockingSentence, BLOCKING_SENTENCES, PUBLIC_REFUSED_SENTENCE, REVIEW_BLOCK_SENTENCE, UNKNOWN_BLOCK_SENTENCE, reasonWord, roleWord, runView, statusWord, stepView, usdText,
 } from "../apps/pipeline/pipeline-insight.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
@@ -96,7 +96,7 @@ describe("recorded pipeline steps", () => {
     expect(merged.text).toBe("Continue request · done · Merge gate: merged");
     const held = stepView(REVIEW_PASSED.steps[1]);
     expect(held.text).toContain("Merge gate: not merged, a person merges");
-    expect(held.reasons).toEqual(["CI is not green", "auto-merge is not allowed"]);
+    expect(held.reasons).toEqual(["auto-merge is not allowed"]);
     expect(stepView({ kind: "continue_work_item", state: "refused", code: "advance_unavailable", result: null, reasons: [], at: "t" }).text).toBe("Continue request · refused · reason: advance unavailable");
     expect(stepView(null)).toBeNull();
   });
@@ -197,6 +197,80 @@ describe("the Ready to merge banner reads the real state", () => {
     const leaked = { ...REVIEW_PASSED, pr_number: 42 };
     expect(pullUrl(leaked)).toBe("https://github.com/acme/docs/pulls?q=is%3Apr+head%3Afx%2Fissue-42");
     expect(pullUrl(leaked)).not.toContain("/pull/42");
+  });
+});
+
+describe("the Ready to merge banner is honest about what still blocks the merge", () => {
+  const gateStep = (reasons) => ({ kind: "continue_work_item", state: "done", code: null, result: "ready_human_merges", reasons, at: "2026-10-27T10:00:00Z" });
+  const withGate = (reasons, extra = {}) => ({ ...REVIEW_PASSED, steps: [gateStep(reasons)], ...extra });
+
+  it("only auto_merge_not_allowed (or no reasons) keeps today's ready banner, unchanged", () => {
+    for (const reasons of [[], ["auto_merge_not_allowed"], ["auto_merge_not_allowed", "human_merge_only"]]) {
+      const b = readyBanner(withGate(reasons, { auto_merge: false }));
+      expect(b).toMatchObject({ blocked: false, title: "Ready to merge", detail: "Every required reviewer passed.", autoMerge: false, url: "https://github.com/acme/docs/pull/57" });
+      expect(b.autoMergeText).toBe("Auto-merge is off for this repo: a person merges the pull request on GitHub.");
+    }
+  });
+
+  it.each([
+    ["public_pr_not_open", "The public pull request isn't open yet"],
+    ["pr_draft", "The pull request is a draft"],
+    ["ci_not_green", "Checks haven't passed yet"],
+    ["repo_ci_missing", "The repository has no checks of its own yet"],
+    ["no_branch_protection", "The base branch has no protection rules yet"],
+    ["head_sha_malformed", "The pull request's latest commit could not be read"],
+    ["run_timestamp_invalid", "A review has an invalid time, so it can't be counted yet"],
+    ["public_head_unrecorded", "The public pull request's latest commit isn't the one the platform pushed"],
+    ["public_head_not_reviewed", "The public pull request doesn't hold exactly what was reviewed"],
+    ["stacked_on_open_pr", "It builds on a pull request that hasn't merged yet"],
+    ["stacked_on_pr_40", "It builds on a pull request that hasn't merged yet"],
+    ["merge_call_refused", "GitHub refused the merge"],
+    ["merge_conflict", "The pull request has a merge conflict"],
+    ["branch_behind", "The branch is behind its base branch"],
+    ["branch_protection_refused", "Branch protection refused the merge"],
+    ["merge_queue_waiting", "The pull request is waiting in the merge queue"],
+    ["ordered_resource_out_of_order", "Another change has to merge before this one"],
+    ["merge_dependency_closed", "The pull request it builds on was closed without merging"],
+    ["history_rewritten", "The branch history was rewritten after review"],
+    ["pairing_changed", "The public repository's pairing changed"],
+    ["no_pull_request", "There is no pull request on record to merge"],
+    ["go_not_applicable", "The merge could not go through your runner"],
+    ["verdict_not_pass_code_reviewer", REVIEW_BLOCK_SENTENCE],
+    ["missing_run_security_reviewer", REVIEW_BLOCK_SENTENCE],
+    ["run_not_succeeded_debater", REVIEW_BLOCK_SENTENCE],
+    ["something_new_the_card_has_never_seen", UNKNOWN_BLOCK_SENTENCE],
+  ])("%s blocks with one fixed sentence, no merge sentence and no link to GitHub", (code, sentence) => {
+    expect(blockingSentence(code)).toBe(sentence);
+    const b = readyBanner(withGate(["auto_merge_not_allowed", code]));
+    expect(b).toMatchObject({ blocked: true, title: "Not ready to merge yet", detail: sentence + ".", url: null, autoMergeText: "" });
+    expect(b.detail).not.toContain(code);
+  });
+
+  it("names the first blocking reason, leaving the person-merges ones out", () => {
+    expect(mergeBlockSentence(withGate(["auto_merge_not_allowed", "ci_not_green", "pr_draft"]))).toBe("Checks haven't passed yet");
+  });
+
+  it("the public pull request not being open is named before the reasons that are about a pull request that is not there", () => {
+    expect(mergeBlockSentence(withGate(["pr_draft", "ci_not_green", "auto_merge_not_allowed", "public_pr_not_open"]))).toBe("The public pull request isn't open yet");
+  });
+
+  it("the sentences are fixed: every one is in the table, none carries markup or a raw code", () => {
+    for (const v of [...Object.values(BLOCKING_SENTENCES), REVIEW_BLOCK_SENTENCE, UNKNOWN_BLOCK_SENTENCE, PUBLIC_REFUSED_SENTENCE]) expect(v).not.toMatch(/[_<>]|undefined|null/);
+  });
+
+  it("a paired item whose public change was refused never reads ready, whatever the gate's reasons (even none)", () => {
+    const refused = { state: "refused", code: "scan_refused", sentence: "Refused: the scan found something that must not be public", repo: "acme/docs-public", branch: "fx/issue-42", pr_number: null, pr_url: null, head_sha: null, actions: [] };
+    for (const steps of [[], [gateStep([])], [gateStep(["auto_merge_not_allowed"])]]) {
+      const b = readyBanner({ ...REVIEW_PASSED, steps, public_change: refused });
+      expect(b).toMatchObject({ blocked: true, detail: PUBLIC_REFUSED_SENTENCE + ".", url: null });
+    }
+  });
+
+  it("a paired item with no public pull request on record never reads ready", () => {
+    const pushed = { state: "pushed_pr_not_opened", code: null, sentence: "Pushed, PR not opened", repo: "acme/docs-public", branch: "fx/issue-42", pr_number: null, pr_url: null, head_sha: "a".repeat(40), actions: [] };
+    expect(readyBanner({ ...REVIEW_PASSED, steps: [], public_change: pushed })).toMatchObject({ blocked: true, detail: "The public pull request isn't open yet." });
+    const opened = { ...pushed, state: "pr_opened", pr_number: 9, pr_url: "https://github.com/acme/docs-public/pull/9" };
+    expect(readyBanner({ ...REVIEW_PASSED, steps: [gateStep(["auto_merge_not_allowed"])], public_change: opened })).toMatchObject({ blocked: false, title: "Ready to merge" });
   });
 });
 
@@ -392,6 +466,20 @@ describe("the view", () => {
     expect(byId(banner, "pl-ready-merge")[0].getAttribute("data-auto-merge")).toBe("on");
     expect(byId(banner, "pl-ready-link")[0].attrs.href).toBe("https://github.com/acme/docs/pull/57");
     expect(byId(banner, "pl-ready-link")[0].attrs.rel).toBe("noopener noreferrer");
+  });
+
+  it("renders the observed state (refused public change; draft, checks, no auto-merge, public pull request not open) without saying ready or offering the link", async () => {
+    const refused = { state: "refused", code: "scan_refused", sentence: "Refused: the scan found something that must not be public", repo: "acme/docs-public", branch: "fx/issue-42", pr_number: null, pr_url: null, head_sha: null, actions: [] };
+    const data = { ...REVIEW_PASSED, auto_merge: false, public_change: refused, steps: [{ kind: "continue_work_item", state: "done", code: null, result: "ready_human_merges", reasons: ["pr_draft", "ci_not_green", "auto_merge_not_allowed", "public_pr_not_open"], at: "2026-10-27T10:00:00Z" }] };
+    const { panel } = make(data);
+    panel.start("item-refused");
+    await flush();
+    expect(byId(panel.el, "pl-ready")).toHaveLength(0);
+    expect(byId(panel.el, "pl-ready-link")).toHaveLength(0);
+    expect(byId(panel.el, "pl-ready-merge")).toHaveLength(0);
+    const [banner] = byId(panel.el, "pl-ready-blocked");
+    expect(banner.textContent).toBe("Not ready to merge yet. " + PUBLIC_REFUSED_SENTENCE + ".");
+    expect(panel.el.textContent).not.toMatch(/Ready to merge|a person merges the pull request|Open the pull request on GitHub/);
   });
 
   it("shows the not-feasible notice with the project manager's reason as TEXT, and the needs-human notice with the executor's account as TEXT", async () => {

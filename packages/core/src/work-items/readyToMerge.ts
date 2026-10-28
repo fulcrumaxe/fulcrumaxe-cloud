@@ -2,15 +2,16 @@ import type { Pool } from 'pg';
 import { assertActiveMembership } from '../tenancy/scopedAccess.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { TERMINAL_WORK_ITEM_STAGES } from './stages.js';
-import { TRANSIENT_GATE_REASONS } from './stalled.js';
+import { PERSON_MERGES_REASONS } from './mergeReadiness.js';
 import { cleanWorkItemTitle } from './title.js';
 
 /**
  * D#598 P8c-2b: the work items whose merge gate ended with "ready, a person merges". Nothing is stored for this list: an item is on it while its
  * newest merge-gate event says `ready_human_merges` (a later gate outcome, such as a new head, replaces it) and its stage is not terminal. GitHub's
  * pull request webhook moves the stage to `merged` or `closed_unmerged`, so the item leaves the list by itself when its pull request is merged or closed.
- * An answer whose reasons include one that time can clear (a draft pull request, checks not green yet, the public copy not open yet) is not "ready": the gate
- * ended before it could pass. That item is on the stalled list instead (stalled.ts), with the button that asks the gate again.
+ * An answer is "ready" only when its reasons are empty or all mean "a person presses merge" (mergeReadiness.ts). An answer with any other reason (a draft pull
+ * request, checks not green, the public copy not open, a refused public change, a review that did not pass) is not ready: the gate ended before it could pass.
+ * That item is on the stalled list instead (stalled.ts), with the button that asks the gate again.
  */
 export interface ReadyToMergeItem {
   workItemId: string;
@@ -53,10 +54,10 @@ export async function listReadyToMerge(ctx: ReadyToMergeCtx, opts: { limit: numb
                         WHERE d.account_id = w.account_id AND d.work_item_id = w.id AND d.kind = 'merge_gate'
                         ORDER BY d.seq DESC LIMIT 1) e ON e.code = 'ready_human_merges' AND e.pr_number IS NOT NULL
          LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
-        WHERE w.account_id = $1::uuid AND NOT (w.stage = ANY($3::text[])) AND NOT (e.reasons && $4::text[])
+        WHERE w.account_id = $1::uuid AND NOT (w.stage = ANY($3::text[])) AND e.reasons <@ $4::text[]
         ORDER BY e.created_at DESC, w.id
         LIMIT $2::integer`,
-      [accountId, opts.limit, [...TERMINAL_WORK_ITEM_STAGES], [...TRANSIENT_GATE_REASONS]],
+      [accountId, opts.limit, [...TERMINAL_WORK_ITEM_STAGES], [...PERSON_MERGES_REASONS]],
     );
     return res.rows;
   });

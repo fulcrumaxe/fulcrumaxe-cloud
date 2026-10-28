@@ -154,7 +154,6 @@
       "code": null,
       "result": "ready_human_merges",
       "reasons": [
-        "ci_not_green",
         "auto_merge_not_allowed"
       ],
       "at": "2026-10-03T10:10:00.000Z",
