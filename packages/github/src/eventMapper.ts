@@ -238,12 +238,16 @@ type Actor = { login: string | null } | null;
  * regex-scanned for a bounded digit reference. */
 export interface GithubIssuePayload {
   action: string;
-  issue: { number: number; title?: unknown; body?: unknown; user: Actor; author_association: string | null };
+  issue: { number: number; title?: unknown; body?: unknown; user: Actor; author_association: string | null; state?: unknown; pull_request?: unknown; created_at?: unknown };
+  repository?: unknown;
+  installation?: unknown;
 }
 export interface GithubIssueCommentPayload {
   action: string;
   comment: { user: Actor; author_association: string | null };
-  issue: { number: number };
+  issue: { number: number; title?: unknown; body?: unknown; user?: Actor; author_association?: string | null; state?: unknown; pull_request?: unknown; created_at?: unknown };
+  repository?: unknown;
+  installation?: unknown;
 }
 export interface GithubDiscussionPayload {
   action: string;
@@ -792,6 +796,9 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
       // constraint on (repo_id, kind, gh_number), so this existence
       // check is H13a's own dedup for the creation path (a repeat is a
       // no-op, not an error).
+      // The check and the insert sit under one per-issue lock, so two deliveries for the same issue (an `opened` and a recovery
+      // from an `edited`, or the reconciler's import) cannot both pass the check.
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))', [`work_item_intake:${ctx.repoId}:${mapped.ghNumber}`]);
       const existing = await findLinkedWorkItem(client, ctx.accountId, ctx.repoId, mapped.ghNumber);
       if (existing) {
         return { applied: 'created', workItemId: existing };
@@ -1056,6 +1063,48 @@ async function resolveTenant(
   });
 }
 
+const RECOVERY_ISSUE_ACTIONS: readonly string[] = ['edited', 'labeled', 'reopened', 'assigned'];
+
+/**
+ * An `opened` delivery that GitHub never got through to us is not retried, so a later event for the same OPEN issue is the next chance to
+ * bring it in. This turns `issues` (edited, labeled, reopened, assigned) and `issue_comment` (created) for an open issue into the `issues.opened`
+ * payload the normal intake handles, so the trust check, the proposal rule and the work item rule are the opened path's own, not a copy.
+ * Pull requests (an `issue_comment` on one carries `issue.pull_request`), closed issues, and issues with no readable `created_at` give null.
+ * `issueNeedsIntake` then refuses an issue created before the repository's own row (CWE-863: an outsider's comment on an old maintainer issue
+ * must not start work nobody approved).
+ */
+export function missedOpenedCandidate(eventName: GithubWebhookEventName, payload: GithubWebhookPayload): GithubIssuePayload | null {
+  const p = payload as GithubIssuePayload & GithubIssueCommentPayload;
+  const issue = p?.issue;
+  if (!issue || typeof issue !== 'object') return null;
+  const ok = eventName === 'issues' ? RECOVERY_ISSUE_ACTIONS.includes(p.action) : eventName === 'issue_comment' && p.action === 'created';
+  if (!ok) return null;
+  if (issue.state !== 'open' || issue.pull_request != null) return null;
+  if (!Number.isSafeInteger(issue.number) || issue.number < 1 || issue.number > 2147483647) return null;
+  if (typeof issue.created_at !== 'string' || !Number.isFinite(Date.parse(issue.created_at))) return null;
+  return {
+    action: 'opened',
+    issue: { number: issue.number, title: issue.title, body: issue.body, user: issue.user ?? null, author_association: issue.author_association ?? null, state: 'open', created_at: issue.created_at },
+    repository: p.repository,
+    installation: p.installation,
+  } as GithubIssuePayload;
+}
+
+/**
+ * True when this repository is attached to an installation, the issue was created at or after the repository's own row, and there is neither a work
+ * item nor a proposal for the number. An unparseable date is false.
+ */
+export async function issueNeedsIntake(client: PoolClient, accountId: string, repoId: string, ghNumber: number, issueCreatedAt: string): Promise<boolean> {
+  if (!Number.isFinite(Date.parse(issueCreatedAt))) return false;
+  const { rows } = await client.query<{ needs: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM repos WHERE id = $2 AND installation_id IS NOT NULL AND created_at <= $5::timestamptz)
+        AND NOT EXISTS (SELECT 1 FROM work_items WHERE account_id = $1 AND repo_id = $2 AND gh_number = $3)
+        AND NOT EXISTS (SELECT 1 FROM proposals WHERE repo_id = $2 AND dedupe_key = $4) AS needs`,
+    [accountId, repoId, ghNumber, `gh:issue:${ghNumber}`, issueCreatedAt],
+  );
+  return rows[0]?.needs === true;
+}
+
 /**
  * D#2 H13a: the one function a verified webhook delivery drives end to
  * end -- resolve tenant, map the event, apply it inside one withTenant
@@ -1075,9 +1124,20 @@ export async function handleGithubWebhookEvent(
   }
 
   const [repoOwner, repoName] = (envelope.repoFullName ?? '').split('/');
+
+  // A later event for an open issue we never took in (its `opened` delivery was lost) is handled as the `opened` it stands in for.
+  // Issues we already know (a work item or a proposal) keep their usual handling, and cost no GitHub call.
+  let intakeName: GithubWebhookEventName = eventName;
+  let intakePayload: GithubWebhookPayload = payload;
+  const candidate = tenant.repoId ? missedOpenedCandidate(eventName, payload) : null;
+  if (candidate && (await withTenant(deps.appUserPool, tenant.accountId, (client) => issueNeedsIntake(client, tenant.accountId, tenant.repoId, candidate.issue.number, String(candidate.issue.created_at))))) {
+    intakeName = 'issues';
+    intakePayload = candidate;
+  }
+
   let authorPermission: LookedUpPermission | null | undefined;
-  if (eventName === 'issues' && deps.issueAuthorPermission) {
-    const p = payload as GithubIssuePayload;
+  if (intakeName === 'issues' && deps.issueAuthorPermission) {
+    const p = intakePayload as GithubIssuePayload;
     authorPermission = null;
     if (p.action === 'opened' && repoOwner && repoName && tenant.repoId && Number.isSafeInteger(p.issue?.number)) {
       try {
@@ -1090,7 +1150,7 @@ export async function handleGithubWebhookEvent(
     }
   }
 
-  let mapped = mapEvent(eventName, payload, { allowlist: deps.allowlist ?? [], allowWritePermission: deps.allowWritePermission, authorPermission });
+  let mapped = mapEvent(intakeName, intakePayload, { allowlist: deps.allowlist ?? [], allowWritePermission: deps.allowWritePermission, authorPermission });
   if (mapped.kind === 'propose_issue') mapped = await withProposalOwner(deps, tenant.repoId, repoOwner, repoName, mapped);
 
   const result = await withTenant(deps.appUserPool, tenant.accountId, (client) =>

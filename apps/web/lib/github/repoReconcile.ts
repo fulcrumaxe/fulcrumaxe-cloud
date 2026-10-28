@@ -1,7 +1,12 @@
 import type { Pool } from "pg";
 import { createPool } from "@fx/db/src/pool";
-import { loadAppCredentials, syncInstallationRepos, type AppCredentialsSource } from "@fx/github";
+import { resolveChecked } from "@fx/net-guard";
+import { importMissedIssues, InstallationTokenCache, loadAppCredentials, syncInstallationRepos, type AppCredentialsSource } from "@fx/github";
 import { createGithubReposJob, type ReconcileJob, type ReportError } from "@fx/reconcile";
+import { buildAccessTokenRequester, nodeHttpsPinnedRequester } from "../../app/api/gh-proxy/[...path]/handler";
+import { intakeAllowlist } from "./intakeTrust";
+import { issueAuthorPermission } from "./issueAuthorPermission";
+import { repoHasEngineLoop } from "./repoHasEngineLoop";
 import { buildRepoSyncDeps } from "./repoSync";
 
 /**
@@ -24,6 +29,8 @@ function appUserPool(): Pool {
   return cachedAppUserPool;
 }
 
+const issueImportCache = new InstallationTokenCache();
+
 export function githubReposJobFromEnv(
   platformOpsPool: Pool,
   report: ReportError,
@@ -40,6 +47,20 @@ export function githubReposJobFromEnv(
       const deps = buildRepoSyncDeps({ platformOpsPool, appUserPool: appUserPool(), appCredentials: credentials });
       const result = await syncInstallationRepos({ ...deps, conditional }, target.installationId);
       return result.status === "synced" ? { status: "synced", ...(result.etags ? { etags: result.etags } : {}) } : { status: "skipped", reason: result.reason };
+    },
+    // Open issues whose `opened` delivery was lost: the webhook's own intake, run from this job's reads (see `importMissedIssues`).
+    importIssues: async (target, gate) => {
+      const out = await importMissedIssues(
+        {
+          webhook: { appUserPool: appUserPool(), platformOpsPool, allowlist: intakeAllowlist() ?? undefined, issueAuthorPermission, repoHasEngineLoop },
+          appCredentials: credentials,
+          requester: buildAccessTokenRequester({ resolveUpstream: (host, lookupFn) => resolveChecked(host, lookupFn), forwardPinned: nodeHttpsPinnedRequester }),
+          cache: issueImportCache,
+        },
+        target.installationId,
+        gate,
+      );
+      return { failures: out.failures, ...(out.stop ? { stop: out.stop } : {}) };
     },
     reportError: report,
   });
