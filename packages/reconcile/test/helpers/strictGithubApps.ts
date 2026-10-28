@@ -24,6 +24,11 @@ import { startStrictGithubServer, type LocalTlsServer } from '../../../github/te
  *    page carries a weak `ETag` of its body, and `If-None-Match` answers 304 with no body, as GitHub does; a JWT is not
  *    accepted on the listing and an installation token is not accepted on `/app/...`.
  *
+ *  - the missed-issue import's three reads, with an installation token only (a JWT is 401): `GET /repos/{o}/{n}/issues` (open items,
+ *    newest created first by default, pull requests among them with a `pull_request` key, cut at `per_page`), `GET /repos/{o}/{n}/issues/{number}`
+ *    and `GET /repos/{o}/{n}/collaborators/{login}/permission` (404 for a login with no role). A repository the token's installation cannot
+ *    see answers 404, as the real service does.
+ *
  * Not faked faithfully (the PR says so): GitHub's real primary and secondary rate-limit thresholds, the full
  * installation and repository objects (only the fields our code reads), the exact wording of every message, and whether
  * real GitHub's ETags stay valid across two different installation tokens (here they do, as they hash the body only).
@@ -61,7 +66,24 @@ export interface FakeRepo {
   nodeId?: string | null;
 }
 
+export interface FakeIssue {
+  number: number;
+  title: string;
+  body: string | null;
+  state: 'open' | 'closed';
+  login: string;
+  /** What GitHub says about the author in the item; the code under test must never trust it on its own. */
+  association?: string;
+  createdAt: string;
+  /** True for a pull request, which the issues listing also returns. */
+  pull?: boolean;
+}
+
 export interface AppWorld {
+  /** Issues by "owner/name". */
+  issues: Record<string, FakeIssue[]>;
+  /** Repository roles by "owner/name", then login. */
+  roles: Record<string, Record<string, string>>;
   installations: FakeInstallation[];
   /** The repositories each installation (by GitHub installation id) can see. */
   repos: Record<number, FakeRepo[]>;
@@ -121,7 +143,7 @@ export async function startStrictGithubApps(): Promise<StrictGithubApps> {
     });
     keys[kind] = { appId: 1_000_001 + i, privateKeyPem: privateKey, publicKeyPem: publicKey };
   });
-  const world: AppWorld = { installations: [], repos: {}, failNext: [], slugs: { ...APP_SLUGS } };
+  const world: AppWorld = { installations: [], repos: {}, issues: {}, roles: {}, failNext: [], slugs: { ...APP_SLUGS } };
   const tokens = new Map<string, { id: number; kind: AppKind }>();
   const calls: SeenCall[] = [];
 
@@ -184,6 +206,44 @@ export async function startStrictGithubApps(): Promise<StrictGithubApps> {
       const headers: Record<string, string> = { 'content-type': 'application/json; charset=utf-8', etag };
       if (page < last) headers['link'] = `${link(page + 1, 'next')}, ${link(last, 'last')}`;
       return { status: 200, headers, body };
+    }
+    const repoRoute = /^\/repos\/([^/]+)\/([^/]+)(\/.*)?$/.exec(req.path);
+    if (repoRoute) {
+      if (!inst) return ghError(401, 'Bad credentials');
+      if (req.method !== 'GET') return ghError(404, 'Not Found');
+      const [, owner, name, rest = ''] = repoRoute;
+      const full = `${owner}/${name}`;
+      if (!(world.repos[inst.id] ?? []).some((r) => r.owner === owner && r.name === name)) return ghError(404, 'Not Found');
+      const item = (i: FakeIssue) => ({
+        number: i.number,
+        title: i.title,
+        body: i.body,
+        state: i.state,
+        created_at: i.createdAt,
+        updated_at: i.createdAt,
+        user: { login: i.login },
+        author_association: i.association ?? 'NONE',
+        ...(i.pull ? { pull_request: { url: `https://api.github.com/repos/${full}/pulls/${i.number}` } } : {}),
+      });
+      const all = world.issues[full] ?? [];
+      if (rest === '/issues') {
+        const q = new URLSearchParams(req.query ?? '');
+        const perPage = Math.min(100, Math.max(1, Number(q.get('per_page') ?? 30) || 30));
+        const open = q.get('state') === 'open' ? all.filter((i) => i.state === 'open') : all;
+        const sorted = [...open].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || b.number - a.number);
+        return json(200, sorted.slice(0, perPage).map(item));
+      }
+      const one = /^\/issues\/([0-9]+)$/.exec(rest);
+      if (one) {
+        const found = all.find((i) => i.number === Number(one[1]));
+        return found ? json(200, item(found)) : ghError(404, 'Not Found');
+      }
+      const perm = /^\/collaborators\/([^/]+)\/permission$/.exec(rest);
+      if (perm) {
+        const role = world.roles[full]?.[decodeURIComponent(perm[1]!)];
+        return role ? json(200, { permission: role === 'maintain' ? 'write' : role, role_name: role }) : ghError(404, 'Not Found');
+      }
+      return ghError(404, 'Not Found');
     }
     if (!as || inst) return ghError(401, 'A JSON web token could not be decoded');
 

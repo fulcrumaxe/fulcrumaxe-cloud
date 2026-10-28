@@ -24,6 +24,16 @@ export interface GithubReposDeps {
     target: { installationId: string; kind: InstallationKind; ghInstallationId: number },
     conditional: { priorEtags: readonly string[] | null; allowCall: () => boolean },
   ): Promise<RepoSyncOutcome>;
+  /**
+   * Optional: after an installation's repositories were synced, bring in its open issues whose `opened` delivery was lost
+   * (`importMissedIssues` in production). It runs inside this job's own GitHub reads: no job, schedule or wake of its own. `gate.take`
+   * draws on the same per-run call allowance as the sync. It may throw a rate limit (`rateLimited: true`), which ends the run like the
+   * sync's does; a returned `failures` count is reported once and does not stop the run.
+   */
+  importIssues?(
+    target: { installationId: string; kind: InstallationKind; ghInstallationId: number },
+    gate: { take(n: number): boolean; stopped(): boolean },
+  ): Promise<{ failures: number; stop?: 'budget' }>;
   reportError: ReportError;
   installationsPerRun?: number;
   /** Tests only: a smaller per-run call allowance than GITHUB_REPOS_CALLS_PER_RUN. */
@@ -59,7 +69,9 @@ function classify(err: unknown): 'budget' | 'limited' | 'failure' {
  *  - this job never decides that an installation or a repository is gone from a list or a failure. It repairs toward the
  *    source of truth through the sync (which detaches, never deletes, and only after a complete listing); an installation
  *    that stopped existing is the installation job's call, on a per-installation 404;
- *  - a rate limit saves the cursor and stops; so does the call or time budget. Three failures in a row end the run too.
+ *  - a rate limit saves the cursor and stops; so does the call or time budget. Three failures in a row end the run too;
+ *  - with `importIssues` wired, an installation whose repositories are current (just synced, or an unchanged list) then gets its open issues with a
+ *    lost `opened` delivery brought in, through the webhook's own intake, on this job's own call allowance (bounds in missedIssueImport.ts).
  */
 export function createGithubReposJob(deps: GithubReposDeps): ReconcileJob {
   const stage = `reconcile.${GITHUB_REPOS_JOB}`;
@@ -130,6 +142,34 @@ export function createGithubReposJob(deps: GithubReposDeps): ReconcileJob {
               WHERE gh_installation_id = $1 AND app_kind = $2 AND deleted_at IS NULL AND suspended_at IS NULL`,
             [row.gh, row.app_kind, outcome.etags && outcome.etags.length > 0 ? [...outcome.etags] : null],
           );
+        }
+        // Missed issues are looked for where the repositories are known to be current (just synced, or an unchanged list), and never on an installation of another kind.
+        if ((outcome.status === 'synced' || (outcome.status === 'skipped' && outcome.reason === 'unchanged')) && deps.importIssues && row.app_kind === 'team') {
+          try {
+            const imported = await deps.importIssues(target, { take: (n) => ctx.calls.take(n), stopped: () => ctx.signal.aborted || ctx.msLeft() <= 0 });
+            if (imported.failures > 0) {
+              report(new Error('missed issue import: some repositories failed'), 'issue_import');
+              failed = true;
+            }
+            if (imported.stop === 'budget') {
+              // The allowance ran out inside this installation's import. Its repositories are synced, so the place moves past it (an
+              // installation whose import alone outgrows a run must not hold the cursor); the import's window moves on by itself.
+              lastDone = row.id;
+              stop = 'budget';
+              break;
+            }
+          } catch (err) {
+            // fx-swallow-ok: both outcomes below report through the job's reporter (a fixed-text rate-limit line, or the error itself)
+            if (classify(err) === 'limited') {
+              report(new Error('github rate limit: the run stopped and kept its place'), 'rate_limited');
+              lastDone = row.id;
+              stop = 'limited';
+              failed = true;
+              break;
+            }
+            report(err);
+            failed = true;
+          }
         }
         lastDone = row.id;
       }
