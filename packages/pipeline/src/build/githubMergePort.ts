@@ -156,7 +156,12 @@ export interface CommitReaderPort {
   checkCleanMerge(pr: PullRequestRef, args: { from: string; other: string; head: string }): Promise<CleanMergeReading>;
 }
 
-export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateGitHubPort & CommitReaderPort {
+/** D#519 MQ-MAIN-RED-GUARD: the repository's default branch and the commit it points at now. */
+export interface DefaultBranchReaderPort {
+  getDefaultBranchTip(pr: PullRequestRef): Promise<{ branch: string; sha: string }>;
+}
+
+export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateGitHubPort & CommitReaderPort & DefaultBranchReaderPort {
   async function repoPath(pr: PullRequestRef): Promise<string> {
     if (!Number.isSafeInteger(pr.prNumber) || pr.prNumber <= 0) throw new Error("invalid PR number");
     const { owner, name } = await deps.resolveRepo(pr.repoId);
@@ -471,14 +476,25 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
       return (await readPr(pr)).state;
     },
 
-    async getCiSnapshot(pr, headSha) {
+    async getDefaultBranchTip(pr) {
+      if (deps.local) throw new Error(`GitHub default branch tip: ${LOCAL_REFUSED}`);
+      const repo = await repoPath(pr);
+      const branch = (await readPr(pr)).state.defaultBranch;
+      const path = `${repo}/git/ref/heads/${branch.split("/").map(encodeURIComponent).join("/")}`;
+      const body = await okBody(await get(path), "get default branch ref");
+      const sha = isObj(body.object) ? body.object.sha : undefined;
+      if (typeof sha !== "string" || !SHA_PATTERN.test(sha)) bad("ref.object.sha");
+      return { branch, sha: sha as string };
+    },
+
+    async getCiSnapshot(pr, headSha, opts) {
       if (!SHA_PATTERN.test(headSha)) throw new Error("getCiSnapshot: malformed head SHA");
       const repo = await repoPath(pr);
       const { baseRef } = await readPr(pr);
       if (deps.local) return localSnapshot(pr, baseRef);
 
       let attributedSha = headSha;
-      const checks = await collect<CheckRunState & { id: string }>(`${repo}/commits/${headSha}/check-runs`, "check_runs", { filter: "latest" }, (raw) => {
+      const checks = await collect<CheckRunState & { id: string }>(`${repo}/commits/${headSha}/check-runs`, "check_runs", { filter: opts?.allRuns ? "all" : "latest" }, (raw) => {
         if (!isObj(raw) || typeof raw.name !== "string" || typeof raw.status !== "string") bad("check_run");
         if (raw.conclusion !== null && typeof raw.conclusion !== "string") bad("check_run.conclusion");
         // A run GitHub attributes to another commit makes the snapshot
@@ -497,7 +513,7 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
       const required = await requiredContexts(pr, baseRef);
       const snapshot: CiSnapshot = {
         headSha: attributedSha,
-        checkRuns: checks.items.map(({ name, status, conclusion, appId }) => ({ name, status, conclusion, appId })),
+        checkRuns: checks.items.map(({ id, name, status, conclusion, appId }) => ({ id, name, status, conclusion, appId })),
         checkRunsTotalCount: checks.totalCount,
         statuses: statuses.items,
         statusesTotalCount: statuses.totalCount,

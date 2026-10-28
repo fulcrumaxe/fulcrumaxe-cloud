@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { reportError } from "@fx/telemetry";
-import { classifyCi, expectedSignalNames, type CiVerdict, type MergeBlockReason, type MergeGateGitHubPort, type PullRequestMergeability } from "../build/mergeGate.js";
+import { classifyCi, expectedSignalNames, type CiVerdict, type MergeBlockReason, type PullRequestMergeability } from "../build/mergeGate.js";
 import type { PullRequestRef } from "../build/types.js";
+import { guardMain, type MainGuardGitHubPort } from "./mainGuard.js";
 import { MERGE_QUEUE_CI_WAIT_MINUTES } from "./policy.js";
 import { runRefreshStep, refreshTip, type RefreshGitHubPort, type StartDeltaReview } from "./refresh.js";
 import { adoptParkedSlot, listHeadRefreshes, markMerged, PARKED_PHASE, readQueue, reclaimExpiredLeases, releaseToQueue, renewSlot, returnToReview, stopEntry, takeSlot } from "./store.js";
@@ -34,7 +35,7 @@ export type QueueGateResult =
   | { outcome: "head_moved" }
   | { outcome: "ready_human_merges"; reasons: readonly string[] };
 
-export type TickGitHubPort = RefreshGitHubPort & Pick<MergeGateGitHubPort, "getCiSnapshot">;
+export type TickGitHubPort = RefreshGitHubPort & MainGuardGitHubPort;
 
 export interface QueueTickDeps {
   github: TickGitHubPort;
@@ -61,7 +62,7 @@ export interface QueueTickDeps {
 export type TickStep =
   | { step: "idle"; why: "slot_busy" | "nothing_eligible" | "lost_race" | "waiting_mergeability" }
   | { step: "merged"; entryId: string; prNumber: number }
-  | { step: "parked"; entryId: string; why: "ci_pending" | "refresh_pending" }
+  | { step: "parked"; entryId: string; why: "ci_pending" | "refresh_pending" | "main_ci_unknown" }
   /** The holder's slot is gone and nothing more is done with it this pass. */
   | { step: "released"; entryId: string; why: string };
 
@@ -86,7 +87,8 @@ export async function runQueueTick(deps: QueueTickDeps, input: { accountId: stri
     const step = await takeAndRun(deps, input, facts);
     out.steps.push(step);
     // A merge moved main and a release let the next entry go: both recheck everyone and go on. Waiting ends the call.
-    if (step.step === "idle" || step.step === "parked") break;
+    // A red or unreadable default branch ends the call too: every entry would meet the same answer (MQ-MAIN-RED-GUARD).
+    if (step.step === "idle" || step.step === "parked" || (step.step === "released" && (step.why === "main_red" || step.why === "main_ci_unknown"))) break;
   }
   return out;
 }
@@ -138,6 +140,10 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
   const held = entry;
   const pr: PullRequestRef = { repoId, prNumber: held.prNumber };
   const release = async (why: string): Promise<TickStep> => ({ step: "released", entryId: held.id, why });
+
+  // D#519 MQ-MAIN-RED-GUARD: no refresh, CI wait or merge while the default branch's newest result is red.
+  const main = await guardMain({ github: deps.github, inTenant: deps.inTenant, ...(deps.now ? { now: deps.now } : {}) }, { accountId, entry: held, holder, pr });
+  if (main) return main;
 
   const refresh = await runRefreshStep<QueueGateResult | { outcome: "parked" | "ci_red" | "ci_timeout" }>(
     {

@@ -84,7 +84,9 @@ export async function tickMergeQueueRepo(deps: MergeQueueTickerDeps, target: { a
     },
     target,
   );
-  if (out.steps.some((s) => s.step === "parked") || out.waiting.length > 0) await markWorkPending("merge-queue-sweep", { since: Date.now() + MERGE_QUEUE_RECHECK_MS });
+  // A default branch that is red or has no result yet is read again by the next sweep, so a missed webhook costs minutes (MQ-MAIN-RED-GUARD).
+  const mainHeld = out.steps.some((s) => s.step === "released" && (s.why === "main_red" || s.why === "main_ci_unknown"));
+  if (out.steps.some((s) => s.step === "parked") || out.waiting.length > 0 || mainHeld) await markWorkPending("merge-queue-sweep", { since: Date.now() + MERGE_QUEUE_RECHECK_MS });
   return out;
 }
 

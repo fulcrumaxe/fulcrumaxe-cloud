@@ -46,6 +46,9 @@ function trace(calls: readonly RepoCall[]): string[] {
     let line: string | null = null;
     if (c.method === "PUT" && c.path.endsWith("/update-branch")) line = `PUT update-branch #${c.pr}`;
     else if (c.method === "PUT" && c.path.endsWith("/merge")) line = `PUT merge #${c.pr}`;
+    // MQ-MAIN-RED-GUARD: the default branch's tip is read once per slot taken (the ref, then every run of that sha, `filter=all`); one line stands for both.
+    else if (c.path.includes("/git/ref/heads/")) line = "GUARD main tip";
+    else if (c.path.endsWith("/check-runs") && c.query?.includes('"filter":"all"')) continue;
     else if (c.path.endsWith("/check-runs")) line = `GET check-runs #${c.pr}`;
     else if (c.path.includes("/compare/main...")) line = `GET compare #${c.pr}`;
     if (line === null) continue;
@@ -106,6 +109,8 @@ describe("D#519 MQ3-b three items end to end [pg]", () => {
     // (202, applied on a later read), its new head read and verified, and its CI read for the new head before the merge call.
     expect(trace(r.calls)).toEqual([
       "RECHECK 7,8,9",
+      "GUARD main tip",
+      "GET pull #7",
       "GET compare #7",
       "GET pull #7",
       "GET check-runs #7",
@@ -113,6 +118,8 @@ describe("D#519 MQ3-b three items end to end [pg]", () => {
       "GET check-runs #7",
       "PUT merge #7",
       "RECHECK 8,9",
+      "GUARD main tip",
+      "GET pull #8",
       "GET compare #8",
       "GET pull #8",
       "PUT update-branch #8",
@@ -127,6 +134,8 @@ describe("D#519 MQ3-b three items end to end [pg]", () => {
       "GET pull #8",
       "GET check-runs #8",
       "PUT merge #8",
+      "GET pull #9",
+      "GUARD main tip",
       "GET pull #9",
       "GET compare #9",
       "GET pull #9",
@@ -221,13 +230,15 @@ describe("D#519 MQ3-b three items end to end [pg]", () => {
     // The exact calls. Pass 1: A merges; B is compared, refreshed (update-branch), its new head read and verified, and the slot is released for the
     // delta review (no CI read, no merge call for B). Pass 2: B is gated on the merge commit with fresh CI and merges, then C is refreshed and merges.
     expect(trace(r.calls.slice(0, before))).toEqual([
-      "RECHECK 7,8", "GET compare #7", "GET pull #7", "GET check-runs #7", "GET pull #7", "GET check-runs #7", "PUT merge #7",
-      "GET pull #8", "GET compare #8", "GET pull #8", "PUT update-branch #8", "GET pull #8", "GET compare #8", "GET pull #8", "GET compare #8", "GET pull #8", "GET compare #8", "GET pull #8",
+      "RECHECK 7,8", "GUARD main tip", "GET pull #7", "GET compare #7", "GET pull #7", "GET check-runs #7", "GET pull #7", "GET check-runs #7", "PUT merge #7",
+      "GET pull #8", "GUARD main tip", "GET pull #8", "GET compare #8", "GET pull #8", "PUT update-branch #8", "GET pull #8", "GET compare #8", "GET pull #8",
+      "GET compare #8", "GET pull #8", "GET compare #8", "GET pull #8",
     ]);
     expect(trace(r.calls.slice(before))).toEqual([
-      "RECHECK 8,9", "GET compare #8", "GET pull #8", "GET check-runs #8", "GET pull #8", "GET check-runs #8", "GET pull #8", "GET check-runs #8", "PUT merge #8",
-      "GET pull #9", "GET compare #9", "GET pull #9", "PUT update-branch #9", "GET pull #9", "GET compare #9", "GET pull #9", "GET compare #9", "GET pull #9",
-      "GET check-runs #9", "GET pull #9", "GET check-runs #9", "GET pull #9", "GET check-runs #9", "PUT merge #9",
+      "RECHECK 8,9", "GUARD main tip", "GET pull #8", "GET compare #8", "GET pull #8", "GET check-runs #8", "GET pull #8", "GET check-runs #8", "GET pull #8",
+      "GET check-runs #8", "PUT merge #8", "GET pull #9", "GUARD main tip", "GET pull #9", "GET compare #9", "GET pull #9", "PUT update-branch #9", "GET pull #9",
+      "GET compare #9", "GET pull #9", "GET compare #9", "GET pull #9", "GET check-runs #9", "GET pull #9", "GET check-runs #9", "GET pull #9", "GET check-runs #9",
+      "PUT merge #9",
     ]);
     for (const pr of [A, B, C]) expect(await r.entry(pr)).toMatchObject({ state: "merged", mergedBy: "gate", slotHolder: null });
   });
