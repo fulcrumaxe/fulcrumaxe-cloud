@@ -42,6 +42,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "no_spec",
   "not_respecced",
   "parent_not_approved",
+  "parent_splits",
   "person_required",
   "respec_needs_approval",
   "sub_item_approval_unavailable",

@@ -16,6 +16,7 @@ import { ROUTES } from '../src/routes/index.js';
 import { DISCUSSION_KINDS, isBuildableKind } from '@fx/discussions';
 import { ADVANCE_NON_BUILDABLE_KINDS, ADVANCEABLE_STAGES } from '@fx/core/src/work-items/advance.js';
 import { TERMINAL_RUN_STATUSES, runActionDeps } from '../src/routes/run-actions.js';
+import { listStalledItems } from '@fx/core/src/work-items/stalled.js';
 import { seedAccountWithMember } from './helpers/seed.js';
 
 interface Identity {
@@ -240,6 +241,24 @@ describe('D#483 P1: approve route', () => {
     const { rows } = await admin.query('SELECT kind, target_id FROM run_action_requests WHERE id = $1', [body.action_id]);
     expect(rows[0]).toMatchObject({ kind: 'advance_work_item', target_id: item });
     expect(signal.sent).toEqual([{ actionId: body.action_id, accountId: p.accountId, kind: 'advance_work_item' }]);
+  });
+
+  // D#483 S5-b2b / A-S5-8: the approve route is what turns a Spec that plans several pull requests into children. Nothing that follows the click (the advance
+  // workflow ends without a build, `children_launched`) writes a refusal, so the parent is not in the stalled list.
+  it('approving a Spec that plans two pull requests through the route creates both children, writes no refusal fact, and leaves the parent out of the stalled list', async () => {
+    const p = await person('owner');
+    const item = await seedSpecReady(p.accountId, { kind: 'small' });
+    await admin.query(`UPDATE spec_versions SET frontmatter = $2::jsonb WHERE work_item_id = $1`, [
+      item,
+      JSON.stringify({ planned_prs: [{ key: 'page-a', title: 'Page A', depends_on: [] }, { key: 'page-b', title: 'Page B', depends_on: [] }] }),
+    ]);
+    expect((await post(p, `/work-items/${item}/approve`)).status).toBe(202);
+    const kids = await admin.query('SELECT planned_pr_key FROM work_items WHERE parent_id = $1 ORDER BY planned_pr_key', [item]);
+    expect(kids.rows.map((r) => r.planned_pr_key)).toEqual(['page-a', 'page-b']);
+    const facts = await admin.query(`SELECT kind FROM work_item_driver_events WHERE work_item_id = $1 AND kind IN ('build_refused', 'stopped')`, [item]);
+    expect(facts.rows).toEqual([]);
+    const stalled = await listStalledItems({ pool: appUserPool, principal: { accountId: p.accountId, userId: p.userId } }, { limit: 50, now: new Date(Date.now() + 3 * 3_600_000) });
+    expect(stalled.items.map((i) => i.workItemId)).not.toContain(item);
   });
 
   it.each([

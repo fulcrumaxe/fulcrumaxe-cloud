@@ -283,6 +283,8 @@ interface BuildFacts {
   /** D#483 S5-b2c-2: set for a planned PR child. Its issue number, kind and Spec are read from the parent (the Spec is the version the child names); `child_title` is the title the key has in THAT version (a re-approval can change it; the stored item title is not read). */
   planned_pr_key: string | null;
   child_title: string | null;
+  /** D#483 S5-b2b: the number of rows in the Planned PRs table of the Spec version read (0 when there is none). */
+  planned_count: number;
 }
 
 async function readFacts(pool: Pool, accountId: string, workItemId: string): Promise<BuildFacts | null> {
@@ -293,6 +295,7 @@ async function readFacts(pool: Pool, accountId: string, workItemId: string): Pro
       `SELECT w.stage, w.provenance, r.gh_owner, r.gh_name,
               CASE WHEN w.planned_pr_key IS NULL THEN d.kind ELSE w.kind END AS kind, s.version, s.body, s.id AS spec_version_id, s.acceptance_files, ${effectiveModeSql("w", "r")} AS execution_mode, w.repo_id, w.stack_parent_id,
               w.planned_pr_key,
+              CASE WHEN jsonb_typeof(s.planned_prs) = 'array' THEN jsonb_array_length(s.planned_prs) ELSE 0 END AS planned_count,
               CASE WHEN w.planned_pr_key IS NULL THEN NULL ELSE (SELECT e ->> 'title' FROM jsonb_array_elements(CASE WHEN jsonb_typeof(s.planned_prs) = 'array' THEN s.planned_prs ELSE '[]'::jsonb END) e WHERE e ->> 'key' = w.planned_pr_key LIMIT 1) END AS child_title
          FROM work_items w
          LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
@@ -430,6 +433,9 @@ export async function startBuildForItem(
   if (facts.kind !== null && !isBuildableKind(facts.kind)) return { status: "refused", reason: "kind_not_buildable" };
   if (facts.body === null || facts.version === null) return { status: "refused", reason: "no_spec" };
   if (options.expectedVersion !== undefined && Number(facts.version) !== options.expectedVersion) return { status: "refused", reason: "spec_changed" };
+  // D#483 S5-b2b / A-S5-8: an item whose pinned Spec plans two or more pull requests is a parent. Its approval makes the children, and each child builds its own planned PR;
+  // the parent itself never runs an executor (that would build every file on one branch).
+  if (!isChild && Number(facts.planned_count) >= 2) return { status: "refused", reason: "parent_splits" };
   // `in_progress` is a replay of this very step (the run is keyed, so it is the same run). `needs_human` is Build again.
   // A child's entry is the build itself: it is launched from `triaged` (it has no triage, classify, panel or Spec of its own).
   if (facts.stage !== "spec_ready" && facts.stage !== "needs_human" && facts.stage !== "in_progress" && !(isChild && facts.stage === "triaged")) return { status: "refused", reason: `stage_${facts.stage}` };
