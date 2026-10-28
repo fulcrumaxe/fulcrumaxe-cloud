@@ -151,4 +151,22 @@ describe('public_change through getWorkItemActivity (D#598 P1f-6a)', { timeout: 
     expect(Object.hasOwn(body, 'public_change')).toBe(false);
     expect(activityResponseSchema.safeParse(body).success).toBe(true);
   });
+
+  it('private_read_failed: an owner reads the closed class as fixed text after the sentence; a member reads the sentence alone; an unknown stored class shows nothing', async () => {
+    const cases: Array<[number, string, string]> = [[101, 'auth_denied', ' The private repository refused the read (access denied).'], [102, 'not_found', ' The private repository did not have the commit.'], [103, 'https://x.example/leak', '']];
+    for (const [n, cls, extra] of cases) {
+      const itemId = await seedItem(n);
+      await admin.query(
+        `INSERT INTO plane_pushes (id, account_id, work_item_id, repo_id, code_repo, pairing_digest, state, code, refusals)
+         VALUES ($1, $2, $3, $4, 'acme/docs-public', $5, 'refused', 'private_read_failed', $6::jsonb)`,
+        [uuid('3', n), me.accountId, itemId, repoId, 'c'.repeat(64), JSON.stringify([{ kind: 'private_read', place: '-', rule_key: cls }])],
+      );
+      const base = "Refused: the run's commits could not be read from the private repository";
+      const body = await getJson(itemId);
+      expect((body.public_change as { sentence: string }).sentence).toBe(`${base}${extra}`);
+      expect(JSON.stringify(body)).not.toContain('x.example');
+      const asMember = await getWorkItemActivity({ pool: appUserPool, principal: { ...me, role: 'member' } }, itemId);
+      expect(asMember.public_change?.sentence).toBe(base);
+    }
+  });
 });

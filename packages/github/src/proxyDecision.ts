@@ -16,7 +16,7 @@ import {
 } from "./installationToken.js";
 import { AppCredentialsError, type AppCredentialsSource } from "./appCredentials.js";
 import { InstallationNotWritableError } from "./writeInstallation.js";
-import { decidePlanePublishRequest, type PlanePublishDeps } from "./planePublishProxy.js";
+import { decidePlanePublishRequest, type PlanePublishDeps, type PlanePublishTrace } from "./planePublishProxy.js";
 
 /**
  * D#2 H13b: orchestrates one proxied request from a verified sandbox
@@ -126,6 +126,8 @@ export function normalizeQuery(query: ProxyDecisionQuery): Record<string, string
 
 export interface ProxyDecisionDeps extends Pick<PlanePublishDeps, "resolvePublishTarget" | "ownsPublishInstallation" | "planePublishApi"> {
   resolveSandboxRun: SandboxRunResolver;
+  /** Called once per `plane_publish` request, after the rule set and the mint have answered, with the facts the proxy's log line carries. */
+  onPublishTrace?: (trace: PlanePublishTrace) => void;
   appCredentials: AppCredentialsSource;
   tokenCache: InstallationTokenCache;
   accessTokenRequester: AccessTokenRequester;
@@ -544,6 +546,12 @@ export async function decideProxyRequest(
       },
       deps,
     );
+    // The result keeps its shape; the side and token facts go to the caller's one log line through this callback.
+    try {
+      deps.onPublishTrace?.(outcome.trace);
+    } catch {
+      // fx-swallow-ok: a log callback must never change or break the decision
+    }
     if (!outcome.allow) return deny(outcome.status, outcome.reason);
     return { allow: true, upstreamHost: upstream, installationToken: outcome.installationToken, query, forwardContentEncoding, revokeAfterUse: true };
   }

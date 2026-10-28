@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { createFakeSandbox } from "../src/fakeSandbox.js";
 import { runPublishSandbox } from "../src/planePublish/run.js";
-import { runPlanePublish, BROKERED } from "../src/planePublish/hook.js";
+import { runPlanePublish, BROKERED, classifyPrivateRead } from "../src/planePublish/hook.js";
 import { PLANE_PUBLISH_INPUT_PATH, parsePhaseLines, parsePlanePublishInput, phaseLine, terminalLine, type PlanePublishInput, type PlanePublishLine } from "../src/planePublish/protocol.js";
 import { startPublishProxy, type PublishProxyFake } from "./helpers/publishProxyFake.js";
 
@@ -227,7 +227,7 @@ describe("a stacked item: its recorded base is the parent's unmerged head, and t
     const head = runWith({ "src/c.ts": "export const c = 3;\n" });
     const before = branches();
     const { lines } = await runHook(inputFor(head, { privateDefaultTip: "e".repeat(40) }));
-    expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "bad_input" });
+    expect(terminalLine(lines)).toMatchObject({ phase: "refused", code: "private_read_failed", failure_class: "not_found" });
     expect(branches()).toBe(before);
   }, 60_000);
 });
@@ -310,14 +310,70 @@ describe("every refusal leaves the public branches as they were (item 27)", () =
     expect(world.proxy.log.filter((e) => e.method === "POST" && e.path.endsWith("git-receive-pack"))).toEqual([]);
   }, 60_000);
 
-  it("commits that are not in the private repository, or a base that is not an ancestor of the head, refuse as bad_input", async () => {
-    const head = runWith({ "src/c.ts": "export const c = 1;\n" });
+  it("a commit the private repository does not have refuses private_read_failed with class not_found, and nothing is pushed", async () => {
+    runWith({ "src/c.ts": "export const c = 1;\n" });
     const missing = await runHook(inputFor("e".repeat(40)));
-    expect(terminalLine(missing.lines)).toMatchObject({ phase: "refused", code: "bad_input" });
-    const swapped = await runHook(inputFor(world.base, { privateBase: head }));
-    expect(terminalLine(swapped.lines)).toMatchObject({ phase: "refused", code: "bad_input" });
+    expect(terminalLine(missing.lines)).toEqual({ phase: "refused", code: "private_read_failed", failure_class: "not_found" });
     expect(branches()).toBe(`refs/heads/main ${world.publicTip}`);
   }, 60_000);
+
+  it("a private upload-pack the proxy denies with 403 refuses private_read_failed with class auth_denied, and the output carries no address or tool text", async () => {
+    const head = runWith({ "src/c.ts": "export const c = 1;\n" });
+    // The same real rule set, told that the run's private repository is a different one: it answers its fixed 403 `denied` to every request for this one.
+    const other = await startPublishProxy({ root: path.join(world.root, "srv"), privateRepo: { owner: "acme", repo: "someone-elses" }, publishTarget: { codeRepo: "acme/widgets", branch: BRANCH }, env: cleanEnv() });
+    try {
+      const raw: string[] = [];
+      await runPlanePublish(inputFor(head), { gitOrigin: other.origin, apiOrigin: other.origin, say: (l) => raw.push(l), tmpRoot: world.tmp });
+      expect(terminalLine(parsePhaseLines(raw.join("\n")))).toEqual({ phase: "refused", code: "private_read_failed", failure_class: "auth_denied" });
+      expect(raw.join("\n")).not.toMatch(/127\.0\.0\.1|https?:|widgets|fatal|returned error|403/);
+    } finally {
+      await other.close();
+    }
+    expect(branches()).toBe(`refs/heads/main ${world.publicTip}`);
+  }, 60_000);
+
+  it("a base that is not an ancestor of the head refuses base_not_ancestor", async () => {
+    const head = runWith({ "src/c.ts": "export const c = 1;\n" });
+    const swapped = await runHook(inputFor(world.base, { privateBase: head }));
+    expect(terminalLine(swapped.lines)).toEqual({ phase: "refused", code: "base_not_ancestor" });
+    expect(branches()).toBe(`refs/heads/main ${world.publicTip}`);
+  }, 60_000);
+
+  it("a default tip that shares no history with the base is still bad_input (a genuine input error, from the route)", async () => {
+    const head = runWith({ "src/c.ts": "export const c = 1;\n" });
+    const lone = path.join(world.root, "lone");
+    mkdirSync(lone);
+    sh(lone, "init", "-q", "-b", "main");
+    put(lone, { "x.txt": "x\n" });
+    const unrelated = commitAll(lone, "unrelated root");
+    sh(lone, "push", "-q", world.privBare, "main:refs/heads/unrelated");
+    const res = await runHook(inputFor(head, { privateDefaultTip: unrelated }));
+    expect(terminalLine(res.lines)).toMatchObject({ phase: "refused", code: "bad_input" });
+    expect(branches()).toBe(`refs/heads/main ${world.publicTip}`);
+  }, 60_000);
+
+  it("a 1 MB stderr (one long line, or a repeated near-match) classifies in under 100 ms", () => {
+    const e = (stderr: string): Error => Object.assign(new Error("x"), { stderr });
+    for (const text of ["a".repeat(1_000_000), "object file ".repeat(100_000), `object file ${"x ".repeat(500_000)}`]) {
+      const t0 = performance.now();
+      expect(classifyPrivateRead(e(text))).toBe("other");
+      expect(performance.now() - t0).toBeLessThan(100);
+    }
+    // Only the head is read: a marker past 8 KB is not seen.
+    expect(classifyPrivateRead(e(`${"a".repeat(9000)} returned error: 403`))).toBe("other");
+  });
+
+  it("the failure class is a closed word: classified locally from stderr, anything else is other, and a class on another code or an unknown class is not printed", () => {
+    const e = (stderr: string): Error => Object.assign(new Error("x"), { stderr });
+    expect(classifyPrivateRead(e("fatal: unable to access 'https://h/o/r.git/': The requested URL returned error: 403"))).toBe("auth_denied");
+    expect(classifyPrivateRead(e("fatal: remote error: upload-pack: not our ref abc"))).toBe("not_found");
+    expect(classifyPrivateRead(e("error: object abc: fsck error in tree"))).toBe("object_check_failed");
+    expect(classifyPrivateRead(e("fatal: something new"))).toBe("other");
+    expect(classifyPrivateRead(new Error("spawn git ENOENT"))).toBe("other");
+    expect(phaseLine({ phase: "refused", code: "private_read_failed", failure_class: "auth_denied" })).toContain('"failure_class":"auth_denied"');
+    expect(() => phaseLine({ phase: "refused", code: "private_read_failed", failure_class: "https://h/o/r" } as never)).toThrow();
+    expect(() => phaseLine({ phase: "refused", code: "bad_input", failure_class: "other" })).toThrow();
+  });
 });
 
 describe("a failure that is not a decision about the change is a crash, not a refusal", () => {

@@ -43,11 +43,20 @@ export interface PlanePublishContext {
   pullRequestBody?: Record<string, unknown> | null;
 }
 
-export type PlanePublishOutcome =
-  | { allow: true; installationToken: string }
-  | { allow: false; status: 403 | 502; reason: string };
+/**
+ * What the proxy's one log line says about a publish request besides the reason: which repository side the rule set put it on (`unknown` when it was
+ * refused before the rule set judged it) and whether a token for that side was obtained (`missing`: none was asked for, `failed`: the mint was asked and failed).
+ */
+export interface PlanePublishTrace {
+  side: "private" | "public" | "unknown";
+  token: "ok" | "missing" | "failed";
+}
 
-const deny = (status: 403 | 502, reason: string): PlanePublishOutcome => ({ allow: false, status, reason });
+export type PlanePublishOutcome =
+  | { allow: true; installationToken: string; trace: PlanePublishTrace }
+  | { allow: false; status: 403 | 502; reason: string; trace: PlanePublishTrace };
+
+const deny = (status: 403 | 502, reason: string, trace: PlanePublishTrace = { side: "unknown", token: "missing" }): PlanePublishOutcome => ({ allow: false, status, reason, trace });
 
 export async function decidePlanePublishRequest(ctx: PlanePublishContext, deps: PlanePublishDeps): Promise<PlanePublishOutcome> {
   const { resolvePublishTarget, planePublishApi, ownsPublishInstallation } = deps;
@@ -65,7 +74,7 @@ export async function decidePlanePublishRequest(ctx: PlanePublishContext, deps: 
     ...(ctx.gitRefUpdates ? { gitRefUpdates: ctx.gitRefUpdates } : {}),
     ...(ctx.pullRequestBody !== undefined ? { pullRequestBody: ctx.pullRequestBody } : {}),
   });
-  if (!decision.allow) return deny(403, decision.reason);
+  if (!decision.allow) return deny(403, decision.reason, { side: "unknown", token: "missing" });
 
   try {
     const installationToken =
@@ -83,13 +92,13 @@ export async function decidePlanePublishRequest(ctx: PlanePublishContext, deps: 
             cache: deps.tokenCache,
             ...(deps.now ? { now: deps.now } : {}),
           });
-    return { allow: true, installationToken };
+    return { allow: true, installationToken, trace: { side: decision.side, token: "ok" } };
   } catch (err) {
     // A mint that timed out, or a GitHub that could not be reached, is an availability failure; everything else is a refused mint.
-    if (err instanceof MintTimeoutError || (err instanceof PlanePushApiError && err.code === "public_unavailable")) return deny(502, "upstream_unavailable");
+    if (err instanceof MintTimeoutError || (err instanceof PlanePushApiError && err.code === "public_unavailable")) return deny(502, "upstream_unavailable", { side: decision.side, token: "failed" });
     if (!(err instanceof PlanePushApiError)) reportError(err, { stage: "github.proxy_mint" });
     // Which side and which fixed code (app_not_installed, token_scope_mismatch, ...) is logged; never the error's text.
     console.warn("gh-proxy: publish token mint failed", { side: decision.side, code: err instanceof PlanePushApiError ? err.code : err instanceof InstallationTokenError ? err.reason : "mint_failed" });
-    return deny(403, "token_mint_failed");
+    return deny(403, "token_mint_failed", { side: decision.side, token: "failed" });
   }
 }

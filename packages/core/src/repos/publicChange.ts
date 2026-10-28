@@ -1,7 +1,7 @@
 import type { PoolClient } from 'pg';
 import { operatorVerdict, type OperatorFacts } from '../work-items/operatorActions.js';
 import { readPlanePush } from './planePushRecord.js';
-import { isPublicChangeState, publicChangeSentence, type PublicChangeState } from './publicChangeCopy.js';
+import { PRIVATE_READ_CLASS_SENTENCE, PRIVATE_READ_REFUSAL_KIND, isPublicChangeState, publicChangeSentence, type PublicChangeState } from './publicChangeCopy.js';
 
 /** What the caller may do to a public change. `build_again` is reserved for the runner-run refusal: the item's top-level `actions` already lists it. */
 export type PublicChangeAction = 'retry_push' | 'open_pr' | 'build_again';
@@ -26,6 +26,13 @@ export function publicChangeActions(facts: OperatorFacts | null): PublicChangeAc
   return (['retry_push', 'open_pr'] as const).filter((a) => operatorVerdict(a, facts).ok);
 }
 
+/** For `private_read_failed`, the stored class as fixed text, shown to an owner or admin only. Empty for anyone else or a class the copy does not know. */
+function failureClassSentence(push: { state: string; code: string | null; refusals: ReadonlyArray<{ kind: string; rule_key: string }> }, facts: OperatorFacts | null): string {
+  if (push.state !== 'refused' || push.code !== 'private_read_failed' || facts === null || (facts.role !== 'owner' && facts.role !== 'admin')) return '';
+  const cls = push.refusals.find((r) => r.kind === PRIVATE_READ_REFUSAL_KIND)?.rule_key;
+  return cls !== undefined && Object.hasOwn(PRIVATE_READ_CLASS_SENTENCE, cls) ? ` ${PRIVATE_READ_CLASS_SENTENCE[cls]}` : '';
+}
+
 /**
  * Reads `plane_pushes` and the latest attempt (only to word a refusal on a run on the person's machine). Null for an item with no push record,
  * so a single-repository item is unchanged. The record is a stamp: it is shown as recorded. `actions` come from the same table the action routes ask.
@@ -40,7 +47,7 @@ export async function readPublicChange(client: Pick<PoolClient, 'query'>, accoun
   return {
     state: push.state,
     code: push.state === 'refused' ? push.code : null,
-    sentence: publicChangeSentence(push.state, push.code, attempt.rows[0]?.runtime ?? null),
+    sentence: publicChangeSentence(push.state, push.code, attempt.rows[0]?.runtime ?? null) + failureClassSentence(push, facts),
     repo: push.codeRepo,
     branch: push.branch,
     pr_number: push.prNumber,

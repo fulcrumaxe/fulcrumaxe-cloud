@@ -70,6 +70,10 @@ export function parsePlanePublishInput(raw: string): PlanePublishInput | undefin
   return v as unknown as PlanePublishInput;
 }
 
+/** Why a fetch from the private repository failed, derived on the sandbox from the exit and stderr; only the word crosses. */
+export const PRIVATE_READ_CLASSES = ["auth_denied", "not_found", "object_check_failed", "other"] as const;
+export type PrivateReadClass = (typeof PRIVATE_READ_CLASSES)[number];
+
 export const PHASES = ["building", "scanning", "pushed", "pr_opened", "pr_failed", "refused", "no_change", "updated"] as const;
 export type PlanePublishPhase = (typeof PHASES)[number];
 export const TERMINAL_PHASES: readonly PlanePublishPhase[] = ["pr_opened", "pr_failed", "refused", "no_change", "updated"];
@@ -77,6 +81,8 @@ export const TERMINAL_PHASES: readonly PlanePublishPhase[] = ["pr_opened", "pr_f
 export interface PlanePublishLine {
   phase: PlanePublishPhase;
   code?: PlaneRefusalCode;
+  /** For `private_read_failed` only: why the private fetch failed, as a closed class. Derived locally; no tool text. */
+  failure_class?: PrivateReadClass;
   refusals?: Array<{ kind: string; place: string; rule_key: string }>;
   branch?: string;
   head_sha?: string;
@@ -85,12 +91,13 @@ export interface PlanePublishLine {
 }
 
 const MARK = '{"fx":"plane_publish",';
-const FIELDS = ["phase", "code", "refusals", "branch", "head_sha", "tip_sha", "pr_number"] as const;
+const FIELDS = ["phase", "code", "failure_class", "refusals", "branch", "head_sha", "tip_sha", "pr_number"] as const;
 
 /** True for a line whose every field is within its pattern. Used to print and to read, so the two cannot disagree. */
 function wellFormed(l: Record<string, unknown>): l is Record<string, unknown> & PlanePublishLine {
   if (!Object.keys(l).every((k) => (FIELDS as readonly string[]).includes(k)) || !(PHASES as readonly unknown[]).includes(l.phase)) return false;
   if (l.code !== undefined && !(PLANE_REFUSAL_CODES as readonly unknown[]).includes(l.code)) return false;
+  if (l.failure_class !== undefined && !((PRIVATE_READ_CLASSES as readonly unknown[]).includes(l.failure_class) && l.code === "private_read_failed")) return false;
   if (l.branch !== undefined && !(typeof l.branch === "string" && SHOWN.test(l.branch))) return false;
   for (const k of ["head_sha", "tip_sha"]) if (l[k] !== undefined && !(typeof l[k] === "string" && OBJECT_ID.test(l[k] as string))) return false;
   if (l.pr_number !== undefined && !(Number.isSafeInteger(l.pr_number) && (l.pr_number as number) > 0)) return false;
