@@ -112,7 +112,7 @@ describe("a runner follow-on run keeps its parent's Spec version [pg]", { timeou
     );
     if (t.status !== "triaged") throw new Error(`fixture: ${JSON.stringify(t)}`);
     await admin.query("UPDATE work_items SET gh_number = $2, repo_id = $3 WHERE id = $1", [t.workItemId, nextNumber++, a.repoId]);
-    const out = await publishLightSpec(writerPool, a.accountId, t.workItemId, { feasible: true, reason: "", summary: "Fix the year.", spec: "1. The footer shows the year.\n2. A test pins it.", acceptance_files: N_FILES });
+    const out = await publishLightSpec(writerPool, a.accountId, t.workItemId, { feasible: true, reason: "", split_proposed: false, summary: "Fix the year.", spec: "1. The footer shows the year.\n2. A test pins it.", acceptance_files: N_FILES });
     if (out.status !== "published") throw new Error(`fixture: ${JSON.stringify(out)}`);
     const row = (await admin.query<{ id: string; body: string }>("SELECT id, body FROM spec_versions WHERE work_item_id = $1", [t.workItemId])).rows[0]!;
     return { workItemId: t.workItemId, versionN: row.id, bodyN: row.body };

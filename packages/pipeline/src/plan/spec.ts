@@ -482,7 +482,7 @@ async function readSignedBodies(deps: Pick<PanelDeps, "pool" | "accountId">, dis
   });
 }
 
-const PLANNED_PRS_RULES = [
+export const PLANNED_PRS_RULES = [
   `Give \`planned_prs\` only when the change is too large for one pull request and splits into two or more that can each be built and merged on their own (at most ${MAX_PLANNED_PRS}). It is a list of rows: {"key":"api","title":"Add the API route","depends_on":[]}.`,
   `A \`key\` is 1 to 32 characters of lowercase letters, digits and hyphens and does not start with \`fix-\` or \`check-\`. A \`title\` is one line of at most ${MAX_PLANNED_PR_TITLE} characters with no \`|\` or backtick. \`depends_on\` lists the keys of other rows that must merge first (no cycles). Leave \`planned_prs\` out for a change that is one pull request. One unusable row makes the whole table unusable.`,
 ].join("\n");

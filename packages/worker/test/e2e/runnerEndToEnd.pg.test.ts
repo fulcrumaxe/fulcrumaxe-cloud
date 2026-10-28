@@ -94,7 +94,7 @@ describe("the runner build path, end to end [pg]", { timeout: 180_000 }, () => {
 
   const FILES = { "src/footer.ts": "export const year = (): number => new Date().getFullYear();", "src/footer.test.ts": "import { year } from './footer'; if (year() < 2026) throw new Error('year');" };
   const PM_FILES = Object.keys(FILES);
-  const PM_OUTPUT = { feasible: true, reason: "", summary: "Show the year in the footer.", spec: "1. The footer shows the year.\n2. A test pins it.", acceptance_files: PM_FILES };
+  const PM_OUTPUT = { feasible: true, reason: "", split_proposed: false, summary: "Show the year in the footer.", spec: "1. The footer shows the year.\n2. A test pins it.", acceptance_files: PM_FILES };
 
   beforeAll(async () => {
     adminPool = createPool(process.env.WORKER_DATABASE_URL!);
