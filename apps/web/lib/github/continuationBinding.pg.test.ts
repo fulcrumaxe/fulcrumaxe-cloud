@@ -2,9 +2,9 @@ import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { InstallationHttp } from "@fx/github";
-import { createPool } from "@fx/db/src/pool.js";
 import { runMigrations } from "@fx/db/src/migrate.js";
 import { provisionEphemeralPostgres, type EphemeralPostgres } from "@fx/db/test/support/ephemeral-pg.js";
+import { guardedPools } from "@fx/db/test/support/pool-teardown.js";
 import { createAppContinuationBinding } from "./continuationBinding";
 
 /**
@@ -14,6 +14,7 @@ import { createAppContinuationBinding } from "./continuationBinding";
  */
 describe("the default storedGhRepoId query [pg]", () => {
   let pg: EphemeralPostgres;
+  const pools = guardedPools();
   let adminPool: Pool;
   let opsPool: Pool;
   const GH_ID = 9_007_199_254; // above int4, so node-postgres answers a bigint string
@@ -21,9 +22,9 @@ describe("the default storedGhRepoId query [pg]", () => {
 
   beforeAll(async () => {
     pg = await provisionEphemeralPostgres({ database: "fx_web_binding_test", tmpPrefix: "fx-web-binding-" });
-    adminPool = createPool(pg.url);
+    adminPool = pools.create(pg.url);
     await runMigrations(adminPool);
-    opsPool = createPool(pg.platformOpsUrl);
+    opsPool = pools.create(pg.platformOpsUrl);
     const accountId = randomUUID();
     const installationId = randomUUID();
     repoId = randomUUID();
@@ -32,8 +33,8 @@ describe("the default storedGhRepoId query [pg]", () => {
     await adminPool.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, $3, $4, 'team', 'acme', 'widgets')`, [repoId, accountId, installationId, GH_ID]);
   }, 180_000);
   afterAll(async () => {
-    for (const p of [opsPool, adminPool]) await p?.end();
-    pg?.cleanup();
+    // Pools end and their sockets close before the cluster stops, so no pool is left to hear its 57P01.
+    await pools.stop(() => pg?.cleanup());
   });
 
   const open = async (): Promise<InstallationHttp> => ({

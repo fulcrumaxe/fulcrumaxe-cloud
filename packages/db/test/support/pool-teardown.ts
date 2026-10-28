@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from 'pg';
+import { createPool } from '../../src/pool.js';
 
 /**
  * Test-support: deterministic teardown for a `pg.Pool` whose Postgres
@@ -107,6 +108,48 @@ export function guardPoolTeardown(pool: TeardownPool, label = 'pool'): PoolTeard
         await Promise.race([closed, timeout]);
       } finally {
         clearTimeout(timer);
+      }
+    },
+  };
+}
+
+/**
+ * The shape every `*.pg.test.ts` that owns a cluster needs: each pool it opens is guarded from the moment it exists, and `stop()` ends
+ * every pool and waits for its sockets BEFORE the cluster is stopped. A 57P01 is absorbed only once `stop()` has begun; before that, or
+ * with any other code, the error still fails the run.
+ *
+ *   const pools = guardedPools();
+ *   admin = pools.create(pg.url, "admin");
+ *   afterAll(() => pools.stop(() => pg?.cleanup()));
+ */
+export interface GuardedPools {
+  create(connectionString: string, label?: string): Pool;
+  /** End every pool, wait for the sockets, then run `stopCluster` (always, even if a pool failed to end). Rethrows the first pool failure. */
+  stop(stopCluster: () => void): Promise<void>;
+}
+
+export function guardedPools(): GuardedPools {
+  const guards: PoolTeardownGuard[] = [];
+  return {
+    create(connectionString, label = `pool${guards.length}`) {
+      const pool = createPool(connectionString);
+      guards.push(guardPoolTeardown(pool, label));
+      return pool;
+    },
+    async stop(stopCluster) {
+      const failures: unknown[] = [];
+      for (const g of guards) g.beginTeardown();
+      for (const g of guards) {
+        try {
+          await g.endAndWaitForSockets();
+        } catch (err) {
+          failures.push(err);
+        }
+      }
+      try {
+        stopCluster();
+      } finally {
+        if (failures.length > 0) throw failures[0];
       }
     },
   };

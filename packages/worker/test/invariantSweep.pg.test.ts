@@ -269,11 +269,30 @@ describe("platform invariant sweep [pg]", () => {
       await admin.query("ANALYZE agent_runs, run_events, work_items, runner_run_usage, platform_invariant_alerts");
       await admin.query(`PREPARE inv_plan(int, int, int) AS ${body}`);
       const plan = (await admin.query<Record<string, string>>("EXPLAIN EXECUTE inv_plan(100, 60, 3600)")).rows.map((r) => r["QUERY PLAN"]).join("\n");
-      expect(plan).toMatch(/Index (Only )?Scan using agent_runs_ended_at_recent on agent_runs|Bitmap Index Scan on agent_runs_ended_at_recent/);
+      // Which index the planner starts the body from depends on table statistics, and this database is shared with other suites whose rows come and go
+      // (a flaky run planned the body with another agent_runs path). So the body is held only to what no cost estimate can flip: agent_runs is read
+      // through SOME index path and no table is read by a sequential scan. That the recent-ended index in particular is the usable one is pinned below.
+      expect(plan).toMatch(/Index (Only )?Scan using \S+ on agent_runs\b|Bitmap Index Scan on \S*agent_runs\S*/);
       expect(plan).not.toMatch(/Seq Scan on (agent_runs|run_events|work_items|runner_run_usage|platform_invariant_alerts)/);
     } finally {
       await admin.query("ROLLBACK");
       await admin.query("DEALLOCATE ALL");
+    }
+  });
+
+  it("agent_runs_ended_at_recent is the index every check's time-window predicate reads (EXPLAIN of that predicate alone)", async () => {
+    await admin.query("BEGIN");
+    try {
+      // Only the window predicate every body starts with, ordered the way the bodies order it. Nothing else competes, so an index on ended_at
+      // wins however many rows other suites left behind; with the index dropped, this falls back to another path and fails.
+      await admin.query("SET LOCAL enable_seqscan = off");
+      await admin.query("SET LOCAL enable_bitmapscan = off");
+      const plan = (await admin.query<Record<string, string>>(
+        "EXPLAIN SELECT id FROM agent_runs WHERE ended_at >= now() - interval '1 hour' AND ended_at <= now() - interval '1 minute' ORDER BY ended_at LIMIT 100",
+      )).rows.map((r) => r["QUERY PLAN"]).join("\n");
+      expect(plan).toMatch(/Index (Only )?Scan using agent_runs_ended_at_recent on agent_runs/);
+    } finally {
+      await admin.query("ROLLBACK");
     }
   });
 
