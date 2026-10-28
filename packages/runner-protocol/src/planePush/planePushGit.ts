@@ -72,7 +72,11 @@ export function git(repoDir: string, args: string[], input?: string | Buffer, ex
     child.on("error", reject);
     child.on("close", (code) => {
       if (code === 0 && size <= MAX_OUTPUT) resolve(Buffer.concat(out));
-      else reject(new Error(`git ${args[0] ?? ""} failed: ${Buffer.concat(err).toString("utf8").split("\n")[0] ?? ""}`));
+      else {
+        const stderr = Buffer.concat(err).toString("utf8");
+        // `stderr` and `exitCode` are for a caller that classifies the failure locally; they are never sent anywhere.
+        reject(Object.assign(new Error(`git ${args[0] ?? ""} failed: ${stderr.split("\n")[0] ?? ""}`), { stderr, exitCode: code }));
+      }
     });
     child.stdin.on("error", () => undefined);
     child.stdin.end(input ?? "");

@@ -144,6 +144,23 @@ describe("an executor-role run still cannot name the paired public repository (2
   });
 });
 
+describe("the publish trace callback cannot change the decision", () => {
+  it("a callback that throws leaves an allow and a deny exactly as they were, and a working one sees the trace", async () => {
+    const plain = harness(PRIVATE_RUN);
+    const allowed = await decideProxyRequest(discovery("acme/widgets"), plain.deps);
+    const plainDenied = await decideProxyRequest(discovery("acme/other"), harness(PRIVATE_RUN).deps);
+    const seen: unknown[] = [];
+    const ok = await decideProxyRequest(discovery("acme/widgets"), { ...harness(PRIVATE_RUN).deps, onPublishTrace: (t) => void seen.push(t) });
+    expect(ok).toEqual(allowed);
+    expect(seen).toEqual([{ side: "private", token: "ok" }]);
+    const boom = (): never => {
+      throw new Error("callback broke");
+    };
+    expect(await decideProxyRequest(discovery("acme/widgets"), { ...harness(PRIVATE_RUN).deps, onPublishTrace: boom })).toEqual(allowed);
+    expect(await decideProxyRequest(discovery("acme/other"), { ...harness(PRIVATE_RUN).deps, onPublishTrace: boom })).toEqual(plainDenied);
+  });
+});
+
 function writeHarness(): Harness {
   const h = harness(EXECUTOR_RUN);
   h.requester.mockImplementation(async () => ({ token: "ghs_exec", expiresAt: new Date(NOW + 3600_000).toISOString() }));

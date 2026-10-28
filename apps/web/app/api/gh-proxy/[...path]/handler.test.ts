@@ -1351,6 +1351,41 @@ describe("D#598 P1f-4b: the publish run's per-request mint, use and revoke", () 
     expect(fake.events).toEqual([]);
   });
 
+  describe("one plane.publish_proxy line per request", () => {
+    const lines = (info: { mock: { calls: unknown[][] } }): Array<Record<string, unknown>> =>
+      info.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("plane.publish_proxy")).map((l) => JSON.parse(l) as Record<string, unknown>);
+
+    it("a denied request: side unknown, the closed deny code, no upstream status, token missing; nothing else in the line", async () => {
+      const info = vi.spyOn(console, "info").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      expect((await call(publishDeps(fake), "/repos/acme/widgets/issues/5")).status).toBe(403);
+      expect(lines(info)).toEqual([{ event: "plane.publish_proxy", side: "unknown", reason: "publish_request_not_allowed", token: "missing" }]);
+    });
+
+    it("a forwarded private upload-pack: side private, allow, the upstream status and token ok; no path, query, repository name or token value", async () => {
+      const info = vi.spyOn(console, "info").mockImplementation(() => {});
+      expect((await call(publishDeps(fake), "/acme/widgets/info/refs?service=git-upload-pack")).status).toBe(200);
+      const got = lines(info);
+      expect(got).toEqual([{ event: "plane.publish_proxy", side: "private", reason: "allow", upstream_status: 200, token: "ok" }]);
+      expect(JSON.stringify(got)).not.toMatch(/acme|widgets|upload-pack|ghs_|service=/);
+    });
+
+    it("a token-mint failure: the side the rule set chose, token_mint_failed, token failed, no upstream status", async () => {
+      const info = vi.spyOn(console, "info").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const res = await call(publishDeps(fake, { accessTokenRequester: vi.fn(async () => { throw new Error("mint broke"); }) }), "/acme/widgets/info/refs?service=git-upload-pack");
+      expect(res.status).toBe(403);
+      expect(lines(info)).toEqual([{ event: "plane.publish_proxy", side: "private", reason: "token_mint_failed", token: "failed" }]);
+      expect(fake.events).toEqual([]);
+    });
+
+    it("a run that is not a publish run logs no such line", async () => {
+      const info = vi.spyOn(console, "info").mockImplementation(() => {});
+      await ghProxyHandler(req({ host: CONFIG_HOST, oidcToken: await signOidc(), path: "/repos/acme/widgets/issues/5" }), publishDeps(fake, {}, { ...PUBLISH_RUN, role: "executor" }), decideProxyRequest);
+      expect(lines(info)).toEqual([]);
+    });
+  });
+
   it("a run with no resolved target mints nothing and answers the generic 403 (the body does not say why)", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const res = await call(publishDeps(fake, { resolvePublishTarget: async () => null }), "/acme/widgets/info/refs?service=git-upload-pack");

@@ -4,6 +4,7 @@ import { PLANE_REFUSAL_CODES, type PlaneRefusalCode } from "@fulcrumaxe/runner-p
 import { CHILD_BODY_CLOSING_CODE, buildPlanePushText, prFooterSkipReason } from "@fulcrumaxe/runner-protocol/planePushText";
 import { safeChildTitle } from "@fx/core/src/work-items/childTitle.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
+import { PRIVATE_READ_CLASS_SENTENCE, PRIVATE_READ_REFUSAL_KIND } from "@fx/core/src/repos/publicChangeCopy.js";
 import { PUBLISH_ATTEMPT_LIMIT, mayRetryPublish, pairingDigest, publicPullRequestUrlMatches, recordUpdatedHead, recordVerifiedOutcome, type PlanePushState, type RetryFacts, type VerifiedOutcome } from "@fx/core/src/repos/planePushRecord.js";
 import { REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE } from "@fx/core/src/work-items/baseSync.js";
 import { TERMINAL_WORK_ITEM_STAGES } from "@fx/core/src/work-items/stages.js";
@@ -336,7 +337,11 @@ async function attempt(deps: PlanePublishDeps, accountId: string, which: { runId
     // R9: the hosted side confirmed the pull request, so a planned PR child's binding to it is written in the same transaction as the push row's outcome (set once).
     ...(build.isChild && outcome.state === "pr_opened" && outcome.prNumber !== undefined ? { after: (client: PoolClient) => bindChildCodePullRequest(client, accountId, facts, outcome.prNumber!) } : {}),
   });
-  if (outcome.state === "refused") return { kind: "refused", code: outcome.code!, attemptNo };
+  if (outcome.state === "refused") {
+    // One structured line per refused publish: the item, the code and (for a private read) the closed class. Nothing else.
+    logPublishRefused(facts.workItemId, outcome.code!, outcome.refusals?.find((r) => r.kind === PRIVATE_READ_REFUSAL_KIND)?.rule_key);
+    return { kind: "refused", code: outcome.code!, attemptNo };
+  }
   return { kind: "published", state: outcome.state as "pr_opened" | "pushed_pr_not_opened" | "no_public_change", attemptNo };
 }
 
@@ -422,14 +427,21 @@ export function createPublishSettler(deps: { pool: Pool; port: SandboxPort; now?
   };
 }
 
+/** One structured line per refused publish: the item, the code and (for a private read) the closed class. Nothing else; no tool text reaches this process. */
+function logPublishRefused(workItemId: string, code: string, failureClass?: string): void {
+  // A class is logged only for `private_read_failed` and only from the closed set: any other code's refusal entries are the sandbox's own text.
+  const cls = code === "private_read_failed" && failureClass !== undefined && Object.hasOwn(PRIVATE_READ_CLASS_SENTENCE, failureClass) ? failureClass : undefined;
+  console.info(JSON.stringify({ event: "plane.publish_refused", work_item_id: workItemId, code, ...(cls === undefined ? {} : { class: cls }) }));
+}
+
 const REFUSED = (code: string, refusals?: PlanePublishLine["refusals"]): { outcome: VerifiedOutcome; label: string } => ({ outcome: { state: "refused", code, ...(refusals ? { refusals } : {}) }, label: code });
 
 /** What an update attempt ends with: the stamp moves (`updated`), or the item goes to a person with the code the round's refusal is recorded under. */
-type UpdateEnd = { kind: "updated"; headSha: string; tipSha: string } | { kind: "refused"; code: string; label: string };
+type UpdateEnd = { kind: "updated"; headSha: string; tipSha: string } | { kind: "refused"; code: string; label: string; failureClass?: string };
 
 /** The hook's terminal line for an UPDATE, believed only after GitHub confirms it (the same read of the branch as a first push). Anything doubtful is a failed update. */
 async function verifyUpdate(deps: PlanePublishDeps, accountId: string, facts: Facts, line: PlanePublishLine): Promise<UpdateEnd> {
-  const failed = (label: string): UpdateEnd => ({ kind: "refused", code: REPUBLISH_FAILED, label });
+  const failed = (label: string): UpdateEnd => ({ kind: "refused", code: REPUBLISH_FAILED, label, ...(label === "private_read_failed" ? { failureClass: line.failure_class ?? "other" } : {}) });
   switch (line.phase) {
     case "no_change":
       return { kind: "refused", code: REPUBLISH_NO_CHANGE, label: "no_change" };
@@ -572,6 +584,7 @@ async function republish(deps: PlanePublishDeps, accountId: string, facts: Facts
     end = { kind: "refused", code: REPUBLISH_FAILED, label: PUBLISH_CODES.hookCrashed };
   }
   const seconds = Math.max(0, Math.round((now() - started) / 1000));
+  if (end.kind === "refused") logPublishRefused(facts.workItemId, end.label, end.failureClass);
   const cost = sandboxRunCost([{ ownDurationMs: seconds * 1000 }], { vcpus: PLANE_PUBLISH_VCPUS });
   await finish(end, { failed: crashed, usd: cost.usd, envelope: { publish: { attempt_no: attemptNo, kind: "fix_round", outcome: end.kind === "updated" ? "updated" : end.label, seconds, vcpus: PLANE_PUBLISH_VCPUS, usd: cost.usd, basis: cost.basis, private_head: head } } });
   return end.kind === "updated" ? { kind: "updated", attemptNo } : { kind: "refused", code: end.code, attemptNo };
@@ -584,7 +597,9 @@ async function verify(deps: PlanePublishDeps, accountId: string, facts: Facts, l
     case "no_change":
       return { outcome: { state: "no_public_change" }, label: "no_change" };
     case "refused":
-      return line.code !== undefined && (PLANE_REFUSAL_CODES as readonly string[]).includes(line.code) ? REFUSED(line.code as PlaneRefusalCode, line.refusals) : mismatch;
+      if (line.code === undefined || !(PLANE_REFUSAL_CODES as readonly string[]).includes(line.code)) return mismatch;
+      // The failure class of a private read is stored as one closed refusal entry (kind, no place, the class as the rule key): the existing column carries it.
+      return REFUSED(line.code as PlaneRefusalCode, line.code === "private_read_failed" ? [{ kind: PRIVATE_READ_REFUSAL_KIND, place: "-", rule_key: line.failure_class ?? "other" }] : line.refusals?.filter((r) => r.kind !== PRIVATE_READ_REFUSAL_KIND));
     case "pr_opened":
     case "pr_failed": {
       if (line.head_sha === undefined || line.tip_sha === undefined || (line.branch !== undefined && line.branch !== facts.branch)) return mismatch;

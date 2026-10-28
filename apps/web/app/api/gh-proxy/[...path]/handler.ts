@@ -644,6 +644,7 @@ export async function ghProxyHandler(
     queryEntries.push([key, value]);
   });
 
+  let publishTrace: { side: string; token: string } | undefined;
   const decision = await decide(
     {
       method: req.method,
@@ -653,10 +654,13 @@ export async function ghProxyHandler(
       sandboxName,
       contentEncoding: req.headers.get("content-encoding"),
     },
-    deps,
+    { ...deps, onPublishTrace: (t) => (publishTrace = t) },
   );
 
+  // A publish run is the one role with its own log line per request (`plane.publish_proxy`), so a refused or failed publish can be told from one that never arrived.
+  const publishRun = publishTrace !== undefined || sandboxName.startsWith("pp-");
   if (!decision.allow) {
+    if (publishRun) logPublishProxy(publishTrace, decision.reason, undefined);
     // Body criterion 3: "logs the reason" -- server-side only, never in
     // the response body (which carries a generic error code, not the
     // internal decide() reason string, so no policy detail or repo/role
@@ -677,7 +681,12 @@ export async function ghProxyHandler(
   }
 
   try {
-    return await forwardUpstream(req, deps, { path, rawBody, decision, target: path.startsWith("/repos/") ? "api" : "git" });
+    const forwarded = await forwardUpstream(req, deps, { path, rawBody, decision, target: path.startsWith("/repos/") ? "api" : "git" });
+    if (publishRun) logPublishProxy(publishTrace, "allow", forwarded.status);
+    return forwarded;
+  } catch (err) {
+    if (publishRun) logPublishProxy(publishTrace, "forward_failed", undefined);
+    throw err;
   } finally {
     // D#598 P1f-4b: a token minted for this one request is revoked as soon as the upstream call has been made, on every outcome (answered,
     // refused, timed out, thrown). It never leaves this process and is never reused. A revoke that fails is logged by a fixed line only; the
@@ -687,6 +696,14 @@ export async function ghProxyHandler(
       if (!revoked) console.warn("gh-proxy: publish token not revoked");
     }
   }
+}
+
+/**
+ * One structured line per request of a `plane_publish` run: the side, the closed reason (`allow` or the deny code), the upstream status when the request was forwarded
+ * and whether a token for the side was obtained. No path, query, header or token value, and no repository name, is in it.
+ */
+function logPublishProxy(trace: { side: string; token: string } | undefined, reason: string, upstreamStatus: number | undefined): void {
+  console.info(JSON.stringify({ event: "plane.publish_proxy", side: trace?.side ?? "unknown", reason, ...(upstreamStatus === undefined ? {} : { upstream_status: upstreamStatus }), token: trace?.token ?? "missing" }));
 }
 
 /** A runner-path refusal as an Error, so `reportError` has something to log; its message is the closed code and nothing else. */

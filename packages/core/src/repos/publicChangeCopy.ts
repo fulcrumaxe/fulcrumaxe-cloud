@@ -20,6 +20,8 @@ export const PUBLIC_CHANGE_STATE_SENTENCE: Record<Exclude<PublicChangeState, 're
 /** The reason after "Refused: ", per stored code: the push route's codes, then the worker's own (`retry_limit`, `pairing_off`, `hook_crashed`, `report_mismatch`). */
 export const PUBLIC_CHANGE_REFUSAL_REASON: Readonly<Record<string, string>> = {
   bad_input: 'the change could not be read',
+  private_read_failed: "the run's commits could not be read from the private repository",
+  base_not_ancestor: 'the recorded start of the run is not an ancestor of its last commit',
   pairing_self: 'the public repository is this repository',
   pairing_changed: 'the pairing changed while the change was being prepared',
   pairing_off: 'the pairing is off',
@@ -49,6 +51,16 @@ export const PUBLIC_CHANGE_REFUSAL_REASON: Readonly<Record<string, string>> = {
   no_issue_link: 'the item this planned PR belongs to has no GitHub issue',
   not_found: 'the item could not be found',
   child_body_closing_keyword: 'the pull request text would have closed an issue, so nothing was sent',
+};
+
+/** The refusal entry that carries a failed private read's closed class (`rule_key`). */
+export const PRIVATE_READ_REFUSAL_KIND = 'private_read';
+/** Fixed words for the class, shown to an account owner or admin after the refusal sentence. A class not listed shows nothing. */
+export const PRIVATE_READ_CLASS_SENTENCE: Readonly<Record<string, string>> = {
+  auth_denied: 'The private repository refused the read (access denied).',
+  not_found: 'The private repository did not have the commit.',
+  object_check_failed: 'The commits came across but failed their integrity check.',
+  other: 'The read failed for a reason that could not be classed.',
 };
 
 export const PUBLIC_CHANGE_UNKNOWN_REFUSAL = 'Refused: the change was not sent';

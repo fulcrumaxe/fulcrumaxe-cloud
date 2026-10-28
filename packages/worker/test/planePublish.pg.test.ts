@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
@@ -215,6 +215,41 @@ describe("the paired publish step [pg]", () => {
       output = () => say({ phase: "refused", code: "scan_refused", refusals: [{ kind: "path", place: "docs/ops/a.md", rule_key: "overlay" }] });
       expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId })).toEqual({ kind: "refused", code: "scan_refused", attemptNo: 1 });
       expect(await planeRow()).toMatchObject({ state: "refused", code: "scan_refused", refusals: [{ kind: "path", place: "docs/ops/a.md", rule_key: "overlay" }] });
+    });
+
+    it("a private read failure stores the closed class as one refusal entry and logs one plane.publish_refused line with the item, code and class only", async () => {
+      output = () => say({ phase: "refused", code: "private_read_failed", failure_class: "auth_denied" });
+      const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+      try {
+        expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId })).toEqual({ kind: "refused", code: "private_read_failed", attemptNo: 1 });
+        const lines = info.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("plane.publish_refused"));
+        expect(lines).toHaveLength(1);
+        expect(Object.keys(JSON.parse(lines[0]!)).sort()).toEqual(["class", "code", "event", "work_item_id"]);
+        expect(JSON.parse(lines[0]!)).toMatchObject({ event: "plane.publish_refused", code: "private_read_failed", class: "auth_denied" });
+      } finally {
+        info.mockRestore();
+      }
+      expect(await planeRow()).toMatchObject({ state: "refused", code: "private_read_failed", refusals: [{ kind: "private_read", place: "-", rule_key: "auth_denied" }] });
+    });
+
+    it("a crafted scan_refused line carrying a private_read entry with free text logs no class and stores nothing from that entry", async () => {
+      output = () => say({ phase: "refused", code: "scan_refused", refusals: [{ kind: "private_read", place: "-", rule_key: "FORGED line\\nwith free text" }, { kind: "path", place: "docs/ops/a.md", rule_key: "overlay" }] });
+      const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+      try {
+        expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId })).toMatchObject({ kind: "refused", code: "scan_refused" });
+        const lines = info.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("plane.publish_refused"));
+        expect(lines).toHaveLength(1);
+        expect(Object.keys(JSON.parse(lines[0]!)).sort()).toEqual(["code", "event", "work_item_id"]);
+        expect(lines[0]).not.toContain("FORGED");
+      } finally {
+        info.mockRestore();
+      }
+      expect(await planeRow()).toMatchObject({ state: "refused", code: "scan_refused", refusals: [{ kind: "path", place: "docs/ops/a.md", rule_key: "overlay" }] });
+    });
+
+    it("base_not_ancestor is recorded as its own code", async () => {
+      output = () => say({ phase: "refused", code: "base_not_ancestor" });
+      expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId })).toEqual({ kind: "refused", code: "base_not_ancestor", attemptNo: 1 });
     });
   });
 

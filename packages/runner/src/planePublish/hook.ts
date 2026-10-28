@@ -13,7 +13,7 @@ import {
   type PublicGitTransport,
   type Refusal,
 } from "@fulcrumaxe/runner-protocol/planePush";
-import { phaseLine, type PlanePublishInput, type PlanePublishLine } from "./protocol.js";
+import { phaseLine, type PlanePublishInput, type PlanePublishLine, type PrivateReadClass } from "./protocol.js";
 
 /**
  * D#598 P1f-5a: the publish hook that runs inside a `pp-` sandbox, built to `fx-plane-publish.mjs` and written there by the worker.
@@ -119,6 +119,19 @@ const codeOf = (error: unknown): PlaneRefusalCode | undefined => {
   return typeof code === "string" && (PLANE_REFUSAL_CODES as readonly string[]).includes(code) ? (code as PlaneRefusalCode) : undefined;
 };
 
+/**
+ * Sorts a failed fetch from the private repository into a closed class from its stderr. Only the class leaves this function: the text
+ * (which can carry an address) is read here and dropped. Anything unrecognised is `other`.
+ */
+export function classifyPrivateRead(error: unknown): PrivateReadClass {
+  // Only the head of stderr is read, and no pattern has an unbounded gap, so a hostile or huge message cannot make this slow.
+  const stderr = (typeof error === "object" && error !== null && typeof (error as { stderr?: unknown }).stderr === "string" ? (error as { stderr: string }).stderr : "").slice(0, 8192);
+  if (/returned error: (401|403)\b|authentication failed|permission denied|could not read (username|password)|access denied|forbidden/i.test(stderr)) return "auth_denied";
+  if (/not our ref|couldn't find remote ref|repository not found|returned error: 404\b|unadvertised object|no such remote ref|does not appear to be a git repository/i.test(stderr)) return "not_found";
+  if (/fsck|missing (blob|tree|commit|object)|bad object|did not receive expected object|unpack-objects|index-pack|object file [^\n]{0,512} is empty|corrupt|connectivity check/i.test(stderr)) return "object_check_failed";
+  return "other";
+}
+
 const shown = (s: string): string => s.replace(/[^\x20-\x7e]/g, "?").slice(0, 300) || "-";
 /** The route's refusals as the output carries them: a kind, a place (path and line) and a rule key. Matched text is never in a `Refusal`. */
 function closed(refusals: readonly Refusal[]): NonNullable<PlanePublishLine["refusals"]> {
@@ -160,6 +173,7 @@ export async function runPlanePublish(input: PlanePublishInput, deps: PlanePubli
   const pairing = { enabled: true as const, codeRepo: input.codeRepo, overlayGlobs: input.pairing.overlayGlobs, identifierRulesPath: input.pairing.identifierRulesPath, planDataRulesPath: input.pairing.planDataRulesPath };
   let work: string | undefined;
   let final: PlanePublishLine;
+  let failureClass: PrivateReadClass | undefined;
   try {
     work = mkdtempSync(path.join(deps.tmpRoot ?? tmpdir(), "fx-pp-"));
     await planePushGit(work, ["init", "--bare", "--quiet", "--template="]);
@@ -171,10 +185,16 @@ export async function runPlanePublish(input: PlanePublishInput, deps: PlanePubli
         undefined,
         NO_PROMPT,
       );
+    } catch (error) {
+      // fx-swallow-ok: replaced by the closed refusal and a closed class; the tool's text can carry an address and is dropped here
+      failureClass = classifyPrivateRead(error);
+      throw new PlaneRouteError("private_read_failed", "the run's commits could not be read from the private repository");
+    }
+    try {
       await planePushGit(work, ["merge-base", "--is-ancestor", input.privateBase, input.privateHead]);
     } catch {
-      // fx-swallow-ok: replaced by the closed refusal; the tool's text can carry an address
-      throw new PlaneRouteError("bad_input", "the run's commits could not be read from the private repository");
+      // fx-swallow-ok: replaced by the closed refusal; the tool's text is dropped
+      throw new PlaneRouteError("base_not_ancestor", "the recorded base is not an ancestor of the run's head");
     }
     const result = await routeAndPush(
       { repoDir: work, privateBase: input.privateBase, privateHead: input.privateHead, privateDefaultTip: input.privateDefaultTip, own: input.own, defaultBranch: "main", branch: input.branch, ...(input.updateOf === undefined ? {} : { updateOf: input.updateOf }), title: input.title, body: input.body, identity: input.identity, commitTime: input.commitTime },
@@ -196,7 +216,7 @@ export async function runPlanePublish(input: PlanePublishInput, deps: PlanePubli
       const code = codeOf(error);
       if (code === undefined) throw error;
       const refusals = error instanceof PlaneRouteError ? closed(error.refusals) : [];
-      final = { phase: "refused", code, ...(refusals.length > 0 && { refusals }) };
+      final = { phase: "refused", code, ...(code === "private_read_failed" && { failure_class: failureClass ?? "other" }), ...(refusals.length > 0 && { refusals }) };
     }
   } finally {
     // A detached `git gc --auto` can still be writing as the transfer ends; the retries cover it.
