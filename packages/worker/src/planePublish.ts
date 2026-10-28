@@ -75,11 +75,14 @@ export interface PlanePublishDeps {
   now?: () => number;
 }
 
+/** Why a publish was refused `bad_input` before any attempt: a closed set, so the log says which input was missing while the stored code stays one word. */
+export type BadInputReason = "no_identity" | "base_missing" | "head_missing" | "default_tip_missing";
+
 export type PublishResult =
   /** Nothing to do: the item is unpaired, the run is not a finished sandbox executor run, or the item may not retry now. No run row, no sandbox. */
   | { kind: "skipped"; why: "not_paired" | "not_done" | "not_retryable" | "busy" }
   /** The push was refused (or the platform could not start it); `attemptNo` is set when a sandbox attempt was made. */
-  | { kind: "refused"; code: string; attemptNo: number | null }
+  | { kind: "refused"; code: string; attemptNo: number | null; reason?: BadInputReason }
   | { kind: "published"; state: "pr_opened" | "pushed_pr_not_opened" | "no_public_change"; attemptNo: number }
   /** FIXROUND-REPUBLISH (R2-c2): a sandbox fix round's change replaced the head of the open public pull request's branch. */
   | { kind: "updated"; attemptNo: number }
@@ -134,6 +137,19 @@ async function readFacts(client: PoolClient, accountId: string, which: { runId: 
   );
   const r = rows[0];
   if (!r) return null;
+  // The base the build started from is the ORIGINAL build run's: fix rounds are executor runs that continue the chain (each one's parent is the previous executor run),
+  // and their head is where the round ended, never the build's base. Walk to the root of the chain.
+  const { rows: roots } = await client.query<{ head_sha: string | null }>(
+    `WITH RECURSIVE chain AS (
+       SELECT id, parent_run_id, head_sha, 0 AS depth FROM agent_runs WHERE account_id = $1 AND id = $2
+       UNION ALL
+       SELECT p.id, p.parent_run_id, p.head_sha, c.depth + 1 FROM chain c
+         JOIN agent_runs p ON p.account_id = $1 AND p.id = c.parent_run_id AND p.role = 'executor' AND p.work_item_id = $3
+        WHERE c.depth < 50
+     ) SELECT head_sha FROM chain ORDER BY depth DESC LIMIT 1`,
+    [accountId, r.run_id, r.work_item_id],
+  );
+  const buildBase = roots[0] ? roots[0].head_sha : r.head_sha;
   const { rows: pairs } = await client.query<{ code_repo: string; overlay_globs: string[]; identifier_rules_path: string | null; plan_data_rules_path: string | null; pr_footer: string | null }>(
     "SELECT code_repo, overlay_globs, identifier_rules_path, plan_data_rules_path, pr_footer FROM repo_pairing WHERE repo_id = $1 AND account_id = $2",
     [r.dispatch_repo_id, accountId],
@@ -169,7 +185,7 @@ async function readFacts(client: PoolClient, accountId: string, which: { runId: 
   return {
     itemStage: r.item_stage as string,
     stamp: typeof push.head_sha === "string" ? push.head_sha : null, fixBase, updateAttempts: updates[0]?.n ?? 0,
-    runId: r.run_id, status: r.status, sandboxSide: r.sandbox_side === true, baseSha: r.head_sha, workItemId: r.work_item_id,
+    runId: r.run_id, status: r.status, sandboxSide: r.sandbox_side === true, baseSha: buildBase, workItemId: r.work_item_id,
     repo: { id: r.dispatch_repo_id, owner: r.gh_owner, name: r.gh_name }, title: r.title,
     pushId: push.id, codeRepo: push.code_repo, branch: push.branch, stampedDigest: push.pairing_digest, state: push.state, managedByPerson: push.managed === true,
     // An item refused before any sandbox was started has no attempt yet; its executor ran in the sandbox, so a retry is a sandbox retry.
@@ -201,9 +217,11 @@ async function attempt(deps: PlanePublishDeps, accountId: string, which: { runId
   if (!facts || !facts.sandboxSide) return { kind: "skipped", why: "not_paired" };
   if (facts.status !== "succeeded") return { kind: "skipped", why: "not_done" };
   /** Records a refusal on the item with no attempt spent (nothing was started), e.g. a limit reached or a pairing now off. */
-  const refuse = async (code: string): Promise<PublishResult> => {
+  const refuse = async (code: string, reason?: BadInputReason): Promise<PublishResult> => {
     await withTenant(deps.pool, accountId, (c) => recordVerifiedOutcome(c, { accountId, id: facts.pushId, outcome: { state: "refused", code } }));
-    return { kind: "refused", code, attemptNo: null };
+    // A retry's reason is logged by the retry workflow's own line; a first publish has none, so it logs here.
+    if (reason !== undefined && mode === "first") console.info(JSON.stringify({ event: "plane.publish_refused", work_item_id: facts.workItemId, code, reason }));
+    return { kind: "refused", code, attemptNo: null, ...(reason === undefined ? {} : { reason }) };
   };
 
   if (mode === "retry") {
@@ -228,7 +246,8 @@ async function attempt(deps: PlanePublishDeps, accountId: string, which: { runId
 
   // Everything the platform can check BEFORE it spends an attempt: a problem here is `public_unavailable` and leaves the retry available.
   const identity = deps.identity();
-  if (identity === null || facts.baseSha === null || !/^[0-9a-f]{40}$/.test(facts.baseSha)) return refuse("bad_input");
+  if (identity === null) return refuse("bad_input", "no_identity");
+  if (facts.baseSha === null || !SHA.test(facts.baseSha)) return refuse("bad_input", "base_missing");
   // D#483 S5-b2c-4 (R9): the issue number and the private branch are the build identity's, never `gh_number` or an `fx/issue-<n>` built here. A new publish starts something (`start`); a retry reads what already
   // happened (`observe`). A refusal stores the resolver's code for a planned PR child; a top-level item keeps `bad_input`, as before.
   const resolved = await resolveIdentity(deps.pool, accountId, facts.workItemId, mode === "first" ? "start" : "observe");
@@ -247,7 +266,8 @@ async function attempt(deps: PlanePublishDeps, accountId: string, which: { runId
     // fx-swallow-ok: the proxy host or GitHub could not be used; nothing was started, the item shows the fixed unavailable refusal
     return refuse("public_unavailable");
   }
-  if (head === null || defaultTip === null || !/^[0-9a-f]{40}$/.test(defaultTip)) return refuse("bad_input");
+  if (head === null) return refuse("bad_input", "head_missing");
+  if (defaultTip === null || !SHA.test(defaultTip)) return refuse("bad_input", "default_tip_missing");
 
   // The attempt row and the run row commit TOGETHER, and BEFORE any sandbox exists. The name is `pp-` plus exactly this attempt's id.
   const attemptId = randomUUID();

@@ -284,7 +284,7 @@ describe("settling a paired sandbox build, and opening the public pull request a
     it("a replay of the same run opens nothing more, and a private pull request a person closed is never reopened", async () => {
       identityMissing = true;
       const first = await worker().settlePairedBuild({ accountId: A.accountId, executorRunId });
-      expect(first).toEqual({ privatePullRequest: "opened", publish: { kind: "refused", code: "bad_input", attemptNo: null } });
+      expect(first).toEqual({ privatePullRequest: "opened", publish: { kind: "refused", code: "bad_input", attemptNo: null, reason: "no_identity" } });
       expect(priv.opened).toHaveLength(1);
       // The person closes that pull request on GitHub. The workflow step is replayed: the run's marker is there, so nothing is opened and nothing asked of GitHub.
       identityMissing = false;

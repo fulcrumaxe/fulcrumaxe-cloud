@@ -316,17 +316,17 @@ describe("the paired publish step [pg]", () => {
       await pair(["docs/ops/", "moved/"]);
       expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId })).toEqual({ kind: "refused", code: "pairing_changed", attemptNo: null });
       expect(fake.state.created).toEqual([]);
-      for (const [arrange, code] of [
-        [() => void (policyError = true), "public_unavailable"],
-        [() => ((policyError = false), (identity = null)), "bad_input"],
-        [() => ((identity = { name: "B", email: "b@example.com" }), (github.head = null)), "bad_input"],
-        [() => ((github.head = PRIVATE_HEAD), (github.headError = true)), "public_unavailable"],
-        [() => ((github.headError = false), (github.defaultHead = null)), "bad_input"],
-        [() => (github.defaultHead = "main"), "bad_input"],
-        [() => ((github.defaultHead = DEFAULT_HEAD), (github.defaultError = true)), "public_unavailable"],
+      for (const [arrange, code, reason] of [
+        [() => void (policyError = true), "public_unavailable", undefined],
+        [() => ((policyError = false), (identity = null)), "bad_input", "no_identity"],
+        [() => ((identity = { name: "B", email: "b@example.com" }), (github.head = null)), "bad_input", "head_missing"],
+        [() => ((github.head = PRIVATE_HEAD), (github.headError = true)), "public_unavailable", undefined],
+        [() => ((github.headError = false), (github.defaultHead = null)), "bad_input", "default_tip_missing"],
+        [() => (github.defaultHead = "main"), "bad_input", "default_tip_missing"],
+        [() => ((github.defaultHead = DEFAULT_HEAD), (github.defaultError = true)), "public_unavailable", undefined],
       ] as const) {
         arrange();
-        expect(await publish().retryPublish({ accountId: A.accountId, workItemId: A.workItemId })).toEqual({ kind: "refused", code, attemptNo: null });
+        expect(await publish().retryPublish({ accountId: A.accountId, workItemId: A.workItemId })).toEqual({ kind: "refused", code, attemptNo: null, ...(reason === undefined ? {} : { reason }) });
       }
       expect(fake.state.created).toEqual([]);
       expect(await publishRuns()).toEqual([]);
@@ -338,6 +338,28 @@ describe("the paired publish step [pg]", () => {
     async function refuseOnce(): Promise<void> {
       output = () => say({ phase: "refused", code: "push_failed" });
     }
+
+    it("after fix rounds, a retry starts from the ORIGINAL build base and the branch's current head, not a fix round's head or a missing one", async () => {
+      await refuseOnce();
+      expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId })).toMatchObject({ code: "push_failed", attemptNo: 1 });
+      // Two fix rounds, each an executor run that continues the previous one: the first ended at a head, the newest recorded none.
+      let parent = executorRunId;
+      for (const fixHead of ["e".repeat(40), null]) {
+        const id = randomUUID();
+        await admin.query(
+          `INSERT INTO agent_runs (id, account_id, work_item_id, parent_run_id, role, runtime, status, execution_mode, dispatch_repo_id, head_sha, created_at)
+           VALUES ($1, $2, $3, $4, 'executor', 'production', 'succeeded', 'sandbox', $5, $6, now() + interval '1 hour' * $7)`,
+          [id, A.accountId, A.workItemId, parent, A.repoId, fixHead, fixHead === null ? 2 : 1],
+        );
+        parent = id;
+      }
+      github.head = "f".repeat(40);
+      output = () => say(prOpened());
+      const r = await publish().retryPublish({ accountId: A.accountId, workItemId: A.workItemId });
+      expect(r).toMatchObject({ kind: "published", state: "pr_opened", attemptNo: 2 });
+      const input = JSON.parse(fake.state.writtenFiles.filter((f) => f.path.endsWith("input.json")).pop()!.content);
+      expect(input).toMatchObject({ privateBase: BASE, privateHead: "f".repeat(40) });
+    });
 
     it("makes attempt 2 and then 3; a fourth is refused retry_limit and creates no sandbox and no run row", async () => {
       await refuseOnce();
