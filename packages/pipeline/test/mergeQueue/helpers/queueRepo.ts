@@ -46,7 +46,7 @@ export interface QueueRepo {
   items: Map<number, QueueItem>;
   /** Everything the fakes saw, one list, in order. */
   mergeCalls(): number[];
-  addItem(pr: number, opts?: { approvedAt?: Date; world?: Partial<MergeWorld>; state?: "queued" }): Promise<QueueItem>;
+  addItem(pr: number, opts?: { approvedAt?: Date; world?: Partial<MergeWorld>; state?: "queued"; existingWorkItemId?: string }): Promise<QueueItem>;
   entry(pr: number): Promise<MergeQueueEntry>;
   queue(): Promise<MergeQueueEntry[]>;
   deps(over?: Partial<QueueTickDeps> & { autoMerge?: boolean }): QueueTickDeps;
@@ -55,11 +55,13 @@ export interface QueueRepo {
   mainMoved(exceptPr: number): void;
 }
 
-export async function startQueueRepo(db: { admin: PoolClient; runWriterPool: Pool; pureAppUserPool: Pool }, opts: { onDeltaReview?: StartDeltaReview } = {}): Promise<QueueRepo> {
-  const accountId = randomUUID();
-  const repoId = randomUUID();
-  await seedAccount(db.admin, accountId);
-  await seedRepo(db.admin, accountId, repoId);
+export async function startQueueRepo(db: { admin: PoolClient; runWriterPool: Pool; pureAppUserPool: Pool }, opts: { onDeltaReview?: StartDeltaReview; existing?: { accountId: string; repoId: string } } = {}): Promise<QueueRepo> {
+  const accountId = opts.existing?.accountId ?? randomUUID();
+  const repoId = opts.existing?.repoId ?? randomUUID();
+  if (!opts.existing) {
+    await seedAccount(db.admin, accountId);
+    await seedRepo(db.admin, accountId, repoId);
+  }
   const items = new Map<number, QueueItem>();
   const calls: RepoCall[] = [];
   const byUnique = new Map<string, QueueItem>();
@@ -94,8 +96,8 @@ export async function startQueueRepo(db: { admin: PoolClient; runWriterPool: Poo
     items,
     mergeCalls: () => calls.filter((c) => c.method === "PUT" && c.path.endsWith("/merge")).map((c) => c.pr!),
     async addItem(pr, o = {}) {
-      const workItemId = randomUUID();
-      await seedWorkItem(db.admin, accountId, workItemId, repoId, { ghNumber: pr });
+      const workItemId = o.existingWorkItemId ?? randomUUID();
+      if (!o.existingWorkItemId) await seedWorkItem(db.admin, accountId, workItemId, repoId, { ghNumber: pr });
       const head = shaOf(pr, "head");
       const fresh = shaOf(pr, "fresh");
       for (const role of ["code-reviewer", "acceptance-tester"]) {

@@ -15,6 +15,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   'packages/worker/src/runActions.ts': "the halt's own park, a move INTO needs_human",
   'packages/github/src/eventMapper.ts': 'a webhook fact about GitHub (source: webhook), recorded while halted',
   'packages/worker/src/prSlotReconcile.ts': 'a fact about GitHub (a pull request closed or merged), recorded as source webhook, which recordStage never refuses for a halt, like the webhook mapper',
+  'packages/pipeline/src/mergeQueue/tick.ts': 'a fact about GitHub (the queue merged the pull request), recorded as source webhook, which recordStage never refuses for a halt, like the webhook mapper',
   'packages/api/scripts/seed-dev.ts': 'a developer seed script, never run against a customer item',
   'packages/discussions/src/stages.ts': "library setStage: passes the principal's actor and lets the refusal reach its caller (triage maps it)",
 };
