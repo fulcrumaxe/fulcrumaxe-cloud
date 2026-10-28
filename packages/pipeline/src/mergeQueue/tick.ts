@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
+import { recordStage } from "@fx/core/src/work-items/recordStage.js";
+import { IllegalStageTransitionError, StageInputError } from "@fx/core/src/work-items/stages.js";
 import { reportError } from "@fx/telemetry";
 import { classifyCi, expectedSignalNames, type CiVerdict, type MergeBlockReason, type PullRequestMergeability } from "../build/mergeGate.js";
 import type { PullRequestRef } from "../build/types.js";
@@ -183,7 +185,12 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
 
   switch (gate.outcome) {
     case "merged":
-      await deps.inTenant(accountId, (c) => markMerged(c, { accountId, entryId: held.id, mergedBy: "gate", holder }));
+      await deps.inTenant(accountId, async (c) => {
+        const merged = await markMerged(c, { accountId, entryId: held.id, mergedBy: "gate", holder });
+        // MQ-WIRE-1: the merge is a fact about GitHub, so the item records it now, in the same transaction, as the pull_request webhook would (same stage
+        // writer, same markers: build slot, planned-PR siblings, branch cleanup). A webhook that follows finds the item already merged and is a no-op.
+        if (merged?.entryKind === "work_item" && merged.workItemId) await recordQueueMerge(c, merged.workItemId, held.id, deps.now?.() ?? new Date());
+      });
       return { step: "merged", entryId: held.id, prNumber: held.prNumber };
     case "parked":
       return { step: "parked", entryId: held.id, why: "ci_pending" };
@@ -201,6 +208,16 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
     default:
       await deps.inTenant(accountId, (c) => stopEntry(c, { accountId, entryId: held.id, reason: "merge_call_refused", holder }));
       return release("merge_call_refused");
+  }
+}
+
+/** Moves the entry's item to `merged`. GitHub has already merged, so the entry's merged state never rolls back: an item that cannot legally move there (already merged, closed, not at a pull-request stage) or an `at` ahead of the database clock is refused by recordStage before it writes anything, and is left to the webhook and the slot sweep. */
+async function recordQueueMerge(client: PoolClient, workItemId: string, entryId: string, at: Date): Promise<void> {
+  try {
+    await recordStage(client, { workItemId, toStage: "merged", at, source: "webhook", sourceRef: `merge_queue:${entryId}` });
+  } catch (err) {
+    // fx-swallow-ok: the queue entry's own merge stands; the webhook and the slot sweep still look at an item that could not move here
+    if (!(err instanceof IllegalStageTransitionError || err instanceof StageInputError)) throw err;
   }
 }
 
