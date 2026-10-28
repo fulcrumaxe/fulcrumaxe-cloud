@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { PoolClient } from 'pg';
 import { DEFAULT_ASK_POLICY } from '@fx/db/src/decisionAsks.js';
-import { SWEEP_SCHEDULE_MS, readTickGate, setPendingHooks } from '../src/pendingWork.js';
+import { MARKER_HORIZON_MS, MAX_FUTURE_MARKER_TTL_SECONDS, SWEEP_SCHEDULE_MS, readTickGate, setPendingHooks } from '../src/pendingWork.js';
 import { raiseAskMarked } from '../src/decisions/raiseAskMarked.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -70,6 +70,20 @@ describe('raiseAskMarked', () => {
     await settle();
     const w = writes.find((x) => x.key === 'pending:invariant-sweep')!;
     expect(w.ttl).toBeGreaterThan(24 * 3600);
+  });
+
+  it('a 72 hour window (the class-3 default) is marked at the horizon, with a life that outlasts it; a window inside the horizon is marked exactly', async () => {
+    const now = Date.now();
+    await raiseAskMarked(fakeClient(now).client, { ...base, policy: { answerWindowMinutes: 72 * 60, onTimeout: 'stop_and_flag' } });
+    await settle();
+    const w = writes.find((x) => x.key === 'pending:invariant-sweep')!;
+    expect(w.value - now).toBe(MARKER_HORIZON_MS);
+    expect(w.ttl).toBeLessThanOrEqual(MAX_FUTURE_MARKER_TTL_SECONDS);
+    expect(w.ttl * 1000).toBeGreaterThan(w.value - now);
+    store.clear();
+    await raiseAskMarked(fakeClient(now).client, { ...base, policy: { answerWindowMinutes: 46 * 60, onTimeout: 'stop_and_flag' } });
+    await settle();
+    expect(store.get('pending:invariant-sweep')).toBe(now + 46 * 3_600_000);
   });
 
   it('with no hooks installed it raises and marks nothing', async () => {

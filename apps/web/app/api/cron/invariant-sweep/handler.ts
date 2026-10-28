@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
-import { finishTick, gateLine, isStagingPaused, readTickGate, recordCronConnected, recordCronTick } from "@fx/core/src/pendingWork";
+import { clampMarkerSince, finishTick, gateLine, isStagingPaused, readTickGate, recordCronConnected, recordCronTick } from "@fx/core/src/pendingWork";
 import type { OpsAlertSink } from "@fx/reconcile";
 import type { InvariantSweepWorker } from "../../../../lib/worker";
 
@@ -76,7 +76,8 @@ export async function invariantSweepHandler(req: NextRequest, deps: InvariantSwe
     const completedAt = gate.markerValue;
     const cover = gate.reason === "marker" && completedAt !== null && now() - completedAt < COVER_MS ? completedAt : null;
     // ASK-WIRE-1: with no run-completion cover left, the marker becomes the next ask window end, so the cron wakes when it passes.
-    await finishTick(gate, cover ?? result.nextAskDueAt ?? null, now());
+    const nextAsk = result.nextAskDueAt == null ? null : clampMarkerSince(result.nextAskDueAt, now()); // a far-off window is re-armed at the storable horizon
+    await finishTick(gate, cover ?? nextAsk, now());
     await recordCronConnected(NAME, now());
   }
   return NextResponse.json({ configured, passes }, { status: 200 });

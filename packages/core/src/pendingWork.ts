@@ -84,6 +84,18 @@ export function markerTtlSecondsFor(since: number, now: number, paused: boolean 
 }
 
 /**
+ * How far ahead a marker may be dated: the longest stored life (MAX_FUTURE_MARKER_TTL_SECONDS) less one ordinary marker life, so the entry always outlives
+ * its own due time by at least that. A due time beyond this (a 72 hour class-3 ask window) is stored AT this horizon instead: the tick that connects there
+ * re-derives the real due time from the rows and re-arms the marker (finishTick), costing one extra connecting tick per horizon crossed.
+ */
+export const MARKER_HORIZON_MS = MAX_FUTURE_MARKER_TTL_SECONDS * 1000 - 2 * BACKSTOP_MS;
+
+/** The marker time to store for a due time `since` (callers whose due time can be days away apply it; the rest are minutes out): the due time itself, or the horizon when it is further out. */
+export function clampMarkerSince(since: number, now: number): number {
+  return Math.min(since, now + MARKER_HORIZON_MS);
+}
+
+/**
  * The store lifetime for a last-connected time: it must outlive the longest slot a sweep can wait (the idle slot times the
  * slowest multiplier), or an idle sweep would read a miss and connect early. Paused keeps its 12 hour figure.
  */
