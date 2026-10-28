@@ -307,11 +307,14 @@ describe("git ticket: claim -> ticket -> verify [pg]", () => {
     it("the verifier's skew is the signed-request skew, the lifetimes agree, and the ref pattern is the cloud's run-branch shape", () => {
       expect(GIT_TICKET_CLOCK_TOLERANCE_SECONDS).toBe(MAX_CREATED_SKEW_SECONDS);
       expect(GIT_TICKET_LIFETIME_SECONDS).toBe(300);
-      for (const ok of [`fx/${randomUUID()}-g1`, `fx/${randomUUID()}-g42`]) {
+      // Fixed ids, never random ones: a v4 uuid whose first group is all decimal digits (about 2 in 100) also fits the item branch shape
+      // `fx/<n>-<slug>`, so `fx/<uuid>-g0` is then a legitimate item branch and a random "bad" value flaked.
+      const ids = ["3f2a9c1e-7b4d-4e8a-9c15-0a6d2b8e4f71", "c0ffee00-1234-4abc-8def-0123456789ab"];
+      for (const ok of [`fx/${ids[0]}-g1`, `fx/${ids[1]}-g42`, `fx/${ids[0]}-g999999999`]) {
         expect(GIT_TICKET_REF_PATTERN.test(ok)).toBe(true);
         expect(RUNNER_RUN_BRANCH.test(ok)).toBe(true);
       }
-      for (const bad of ["main", `fx/${randomUUID()}-g0`, `fx/${randomUUID()}`, `refs/heads/fx/${randomUUID()}-g1`]) {
+      for (const bad of ["main", `fx/${ids[0]}-g0`, `fx/${ids[1]}-g01`, `fx/${ids[0]}`, `refs/heads/fx/${ids[1]}-g1`, `fx/${ids[0].toUpperCase()}-g1`]) {
         expect(GIT_TICKET_REF_PATTERN.test(bad)).toBe(false);
         expect(RUNNER_RUN_BRANCH.test(bad)).toBe(false);
       }
