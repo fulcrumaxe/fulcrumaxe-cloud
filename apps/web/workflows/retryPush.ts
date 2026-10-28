@@ -10,17 +10,17 @@ export interface RetryPushArgs {
   workItemId: string;
 }
 
-export async function retryPushStep(accountId: string, workItemId: string): Promise<{ kind: string; code: string | null }> {
+export async function retryPushStep(accountId: string, workItemId: string): Promise<{ kind: string; code: string | null; reason?: string }> {
   "use step";
   const worker = await getWorker();
   if (worker === null) return { kind: "not_configured", code: null };
   const result = await worker.retryPublish({ accountId, workItemId });
-  const outcome = { kind: result.kind, code: result.kind === "refused" ? result.code : null };
+  const outcome = { kind: result.kind, code: result.kind === "refused" ? result.code : null, ...(result.kind === "refused" && result.reason !== undefined ? { reason: result.reason } : {}) };
   console.info(JSON.stringify({ event: "plane.retry_push", account_id: accountId, work_item_id: workItemId, ...outcome }));
   return outcome;
 }
 
-export async function retryPushWorkflow(args: RetryPushArgs): Promise<{ kind: string; code: string | null }> {
+export async function retryPushWorkflow(args: RetryPushArgs): Promise<{ kind: string; code: string | null; reason?: string }> {
   "use workflow";
   return retryPushStep(args.accountId, args.workItemId);
 }
