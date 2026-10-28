@@ -2,9 +2,9 @@ import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import { NextRequest } from "next/server";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createPool } from "@fx/db/src/pool.js";
 import { runMigrations } from "@fx/db/src/migrate.js";
 import { provisionEphemeralPostgres, type EphemeralPostgres } from "@fx/db/test/support/ephemeral-pg.js";
+import { guardedPools } from "@fx/db/test/support/pool-teardown.js";
 import { InstallationTokenCache, syncInstallationRepos, type AppCredentialsSource } from "@fx/github";
 import { createGithubReposJob, runTick, type ReconcileJob, type TickDeps } from "@fx/reconcile";
 import { ACTIVITY_KEY, markWorkPending, setPendingHooks } from "@fx/core/src/pendingWork";
@@ -29,6 +29,7 @@ const clock = { value: START };
 
 describe("a missed repositories-added webhook is repaired by a reconcile tick [pg]", () => {
   let pg: EphemeralPostgres;
+  const pools = guardedPools();
   let admin: Pool;
   let platformOps: Pool;
   let appUser: Pool;
@@ -43,14 +44,14 @@ describe("a missed repositories-added webhook is repaired by a reconcile tick [p
 
   beforeAll(async () => {
     pg = await provisionEphemeralPostgres({ database: "fx_web_repo_added_test", tmpPrefix: "fx-web-repo-added-" });
-    admin = createPool(pg.url);
+    admin = pools.create(pg.url);
     await runMigrations(admin);
-    platformOps = createPool(pg.platformOpsUrl);
-    appUser = createPool(pg.appUserUrl);
+    platformOps = pools.create(pg.platformOpsUrl);
+    appUser = pools.create(pg.appUserUrl);
   }, 180_000);
   afterAll(async () => {
-    for (const p of [platformOps, appUser, admin]) await p?.end();
-    pg?.cleanup();
+    // Pools end and their sockets close before the cluster stops, so no pool is left to hear its 57P01.
+    await pools.stop(() => pg?.cleanup());
   });
 
   beforeEach(async () => {

@@ -5,10 +5,10 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { NextRequest } from "next/server";
 import type { AdvanceItem, AdvanceStartArgs, DecisionStepCode, Worker } from "@fx/worker";
 import type { AppCredentialsSource, GithubPullRequestPayload, InstallationHttpRequest } from "@fx/github";
-import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { runMigrations } from "@fx/db/src/migrate.js";
 import { provisionEphemeralPostgres, type EphemeralPostgres } from "@fx/db/test/support/ephemeral-pg.js";
+import { guardedPools } from "@fx/db/test/support/pool-teardown.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { pullRequestBody } from "@fx/runner-cloud";
 
@@ -47,6 +47,7 @@ const credentials: AppCredentialsSource = (kind) => {
 
 describe("a runner run's pull request moves its item at once [pg]", () => {
   let pg: EphemeralPostgres;
+  const pools = guardedPools();
   let adminPool: Pool;
   let appPool: Pool;
   let opsPool: Pool;
@@ -57,14 +58,14 @@ describe("a runner run's pull request moves its item at once [pg]", () => {
 
   beforeAll(async () => {
     pg = await provisionEphemeralPostgres({ database: "fx_web_runner_pr_stage_test", tmpPrefix: "fx-web-pr-stage-" });
-    adminPool = createPool(pg.url);
+    adminPool = pools.create(pg.url);
     await runMigrations(adminPool);
-    appPool = createPool(pg.appUserUrl);
-    opsPool = createPool(pg.platformOpsUrl);
+    appPool = pools.create(pg.appUserUrl);
+    opsPool = pools.create(pg.platformOpsUrl);
   }, 180_000);
   afterAll(async () => {
-    for (const p of [appPool, opsPool, adminPool]) await p?.end();
-    pg?.cleanup();
+    // Pools end and their sockets close before the cluster stops, so no pool is left to hear its 57P01.
+    await pools.stop(() => pg?.cleanup());
   });
 
   let logs: Array<Record<string, unknown>>;
