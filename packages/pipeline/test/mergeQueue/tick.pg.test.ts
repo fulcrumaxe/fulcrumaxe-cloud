@@ -209,7 +209,8 @@ describe("D#519 MQ3-b queue tick [pg]", () => {
       const out = await runQueueTick(r.deps(), r);
       expect(out.steps.map((s) => s.step)).toEqual(["parked"]);
       expect(a.g.world.merges).toEqual([]);
-      const listed = r.calls.filter((c) => c.path.endsWith("/check-runs"));
+      // The head's CI is read as the newest run of each check; the default branch's tip (the guard) is read with every run of it.
+      const listed = r.calls.filter((c) => c.path.endsWith("/check-runs") && c.path.includes(a.head));
       expect(listed.length).toBeGreaterThan(0);
       expect(listed.every((c) => c.query?.includes('"filter":"latest"'))).toBe(true);
     });

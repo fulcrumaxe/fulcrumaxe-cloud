@@ -95,6 +95,8 @@ export interface CheckRunState {
   name: string;
   status: string;
   conclusion: string | null;
+  /** The run's GitHub id (a number as text). The production port fills it in; the main-branch guard orders reruns of one name by it. */
+  id?: string;
   /** The GitHub App that reported the run. Absent or null never satisfies an
    * app-bound required check. */
   appId?: number | null;
@@ -208,7 +210,8 @@ export interface MergeGateGitHubPort {
   compareToBase(pr: PullRequestRef, headSha: string, opts?: { files?: boolean }): Promise<BranchComparison>;
   /** D#519 MQ1: whether protection or a ruleset on the base branch requires branches to be up to date. A read that cannot be made throws; it is never "not required". */
   requiresUpToDateBranch(pr: PullRequestRef): Promise<boolean>;
-  getCiSnapshot(pr: PullRequestRef, headSha: string): Promise<CiSnapshot>;
+  /** `allRuns` (D#519 MQ-MAIN-RED-GUARD) lists EVERY run of the sha, reruns included, instead of the newest run of each check. Absent: the newest only. */
+  getCiSnapshot(pr: PullRequestRef, headSha: string, opts?: { allRuns?: boolean }): Promise<CiSnapshot>;
   /** Must send GitHub's `sha` parameter. */
   mergePullRequest(pr: PullRequestRef, args: { sha: string }): Promise<MergeCallOutcome>;
   /** The "ready, human merges" marking. Display only; `reasons` are
@@ -404,7 +407,7 @@ export const SHA_PATTERN =/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
  * timed_out, action_required, stale, null) is not green. */
 const GREEN_CONCLUSIONS: ReadonlySet<string> = new Set(["success", "neutral", "skipped"]);
 
-function isGreenCheck(c: CheckRunState): boolean {
+export function isGreenCheck(c: CheckRunState): boolean {
   return c.status === "completed" && c.conclusion !== null && GREEN_CONCLUSIONS.has(c.conclusion);
 }
 

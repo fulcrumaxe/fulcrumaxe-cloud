@@ -348,6 +348,13 @@ export function mergeRoute(w: MergeWorld): (req: GhRequest) => GhReply | Promise
       });
     }
 
+    // D#519 MQ-MAIN-RED-GUARD: one ref, exactly as GitHub's `GET /git/ref/{ref}` answers it (the singular route is an exact match; a ref that does not exist is a 404).
+    const ref = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/git/ref/(.+)$`).exec(req.path);
+    if (req.method === "GET" && ref) {
+      if (decodeURIComponent(ref[1]!) !== `heads/${w.baseRef}`) return err(404, "Not Found");
+      return json(200, { ref: `refs/heads/${w.baseRef}`, node_id: "REF_x", url: `https://api.github.com${base}/git/refs/heads/${w.baseRef}`, object: { sha: w.baseTipSha, type: "commit", url: `https://api.github.com${base}/git/commits/${w.baseTipSha}` } });
+    }
+
     // The data API for a commit's tree id, and the tree behind it. The tree id is the commit sha reversed: stable, unique and invertible, so
     // the fake needs no registry of commits (any well-formed sha has a tree; a commit with no `trees` entry has the empty one).
     const treeId = (commitSha: string): string => [...commitSha].reverse().join("");

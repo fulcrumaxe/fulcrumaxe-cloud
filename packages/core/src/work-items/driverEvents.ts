@@ -41,6 +41,8 @@ import type { PoolClient } from 'pg';
  *                         work_item_not_resumable, resume_pause_expired, resume_failed, or the start's own closed code). The item sits where the question left it; the
  *                         activity read shows the newest such code while no run of the item is live. Written by the resume performer alone.
  *   head_refresh          D#519 MQ3-b-2: the merge queue's refresh of the branch needed no delta review. code: main_side_only (the merge touched none of the pull request's files).
+ *   main_guard            D#519 MQ-MAIN-RED-GUARD: the merge queue did not merge because the default branch's tip is failing its checks (code: main_red) or has no
+ *                         CI result after the wait (code: main_ci_unknown). reasons: the failing check's name as a code, then `check_run_<id>` for the link. Nothing is stored as truth: the queue reads the tip again at each tick.
  *   platform_check        the invariant sweep found a platform defect on this item's run (D#597 CC-8; migration 0776). code: stage_not_moved | no_activity |
  *                         usage_not_recorded; run_id: the run. Written by the sweep alone, never by the driver.
  */
@@ -65,6 +67,7 @@ export const DRIVER_EVENT_KINDS = [
   'correction_applied',
   'resume_refused',
   'head_refresh',
+  'main_guard',
 ] as const;
 export type DriverEventKind = (typeof DRIVER_EVENT_KINDS)[number];
 
