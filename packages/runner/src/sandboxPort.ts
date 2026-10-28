@@ -78,6 +78,12 @@ export interface CreateSandboxOptions {
   limits?: Partial<RunLimits>;
   /** D#598 P1f-5a: set (to `PLANE_PUBLISH_VCPUS`) for a `pp-` sandbox and nowhere else; absent = `SANDBOX_VCPUS`. */
   vcpus?: number;
+  /**
+   * The egress policy the sandbox is CREATED with (the first phase's, when a later phase narrows it). A sandbox is never allow-all,
+   * not even for the moment between its creation and a policy update. Optional in the type only so test doubles that ignore egress
+   * keep compiling; the Vercel port refuses a create without it (`SandboxPolicyRequiredError`) before calling the SDK.
+   */
+  networkPolicy?: NetworkPolicyRule[];
 }
 
 export interface StartDetachedOptions extends Omit<StartOptions, "onEvent" | "sandboxSpec"> {

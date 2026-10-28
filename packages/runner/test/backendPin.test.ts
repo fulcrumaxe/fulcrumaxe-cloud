@@ -61,7 +61,7 @@ const startOpts = (over: Partial<StartDetachedOptions> = {}): StartDetachedOptio
 async function setup(pin?: Parameters<typeof harness>[0], backends = BACKENDS) {
   const h = harness(pin);
   const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: h.sdk, backends });
-  const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
+  const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
   return { ...h, port, handle };
 }
 

@@ -166,7 +166,7 @@ function startOpts(overrides: Partial<StartDetachedOptions> = {}): StartDetached
 
 async function launch(f: ReturnType<typeof fakeSdk>, overrides: Partial<StartDetachedOptions> = {}, installTimeoutMs?: number) {
   const port = newPort(f.sdk, installTimeoutMs);
-  const made = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
+  const made = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
   const stages: string[] = [];
   const installs: unknown[] = [];
   const run = port.startDetached(made as SandboxHandle, startOpts({ onStage: (s) => void stages.push(s), onInstall: (r) => void installs.push(r), ...overrides }));
@@ -198,7 +198,7 @@ describe("order of the install phase", () => {
 
   it("the fake itself refuses an agent under the install policy (it cannot be looser than the platform)", async () => {
     const f = fakeSdk();
-    const made = await newPort(f.sdk).createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
+    const made = await newPort(f.sdk).createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
     void made;
     const sandbox = await f.sdk.get({ name: NAME } as never);
     await sandbox.updateNetworkPolicy({ allow: { [REGISTRY]: [] } } as never);
@@ -225,7 +225,7 @@ describe("order of the install phase", () => {
   it("a resumed workspace already installed from the same lockfile skips the install and the policy change", async () => {
     const f = fakeSdk({ lock: "installed" });
     const port = newPort(f.sdk);
-    const made = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
+    const made = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
     const stages: string[] = [];
     const run = port.resume(made as SandboxHandle, "cc-session-1", "again", startOpts({ onStage: (s) => void stages.push(s) }));
     await run.launched;

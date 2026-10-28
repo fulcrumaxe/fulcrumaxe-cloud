@@ -88,7 +88,7 @@ describe("launched", () => {
   it("settles when the agent command exists, not when the agent ends", async () => {
     const f = fakeSdk();
     const port = newPort(f.sdk);
-    const made = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
+    const made = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
     const run = port.startDetached(made, startOpts());
     const ended = run.hookFired.then(() => "ended");
     await run.launched;
@@ -102,7 +102,7 @@ describe("launched", () => {
   it("rejects when the launch fails before a command exists, and the run's hook rejects with it", async () => {
     const f = fakeSdk({ agentCommandError: httpError(500) });
     const port = newPort(f.sdk);
-    const made = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
+    const made = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
     const run = port.startDetached(made, startOpts());
     await expect(run.launched).rejects.toBeTruthy();
     await expect(run.hookFired).rejects.toBeTruthy();
@@ -122,7 +122,7 @@ describe("a role with no tool list", () => {
     for (const sessionId of [undefined, "sess-1"]) {
       const f = fakeSdk();
       const port = newPort(f.sdk);
-      const made = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
+      const made = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000, networkPolicy: [] });
       const opts = startOpts({ role: "no-such-role" });
       // Thrown at the call, as the port's other launch checks are: no run object, nothing started.
       expect(() => (sessionId === undefined ? port.startDetached(made, opts) : port.resume(made, sessionId, "go", opts))).toThrow(UnknownRoleError);

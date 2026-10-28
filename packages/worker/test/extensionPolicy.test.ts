@@ -136,7 +136,7 @@ describe("extension policy: end to end on the fake SDK port (9)", () => {
     };
     const get = async () => sandbox as never;
     const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: { create: get, get }, limits });
-    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 80_000_000 });
+    const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 80_000_000, networkPolicy: [] });
     const onExtended = vi.fn();
     const extension: ExtensionPolicy = { ...policyFor(runOf({ role: role as never }))!, meteredUsd: () => 1, onExtended };
     const started = port.startDetached(handle, {

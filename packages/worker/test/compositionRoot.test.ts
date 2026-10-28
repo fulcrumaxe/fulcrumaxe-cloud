@@ -191,8 +191,8 @@ describe("buildWorker (C15 / C26 / C59 §5)", () => {
     );
     expect(worker.targetDeps.sandboxPort).toBe(worker.sandboxPort);
     const retention = { persistent: false } as never;
-    await worker.sandboxPort.createSandbox({ sandboxName: "rn-1-r1", retention, timeoutMs: 7_200_000 });
-    await worker.sandboxPort.createSandbox({ sandboxName: "rn-1-r2", retention, timeoutMs: 7_200_000 });
+    await worker.sandboxPort.createSandbox({ sandboxName: "rn-1-r1", retention, timeoutMs: 7_200_000, networkPolicy: [] });
+    await worker.sandboxPort.createSandbox({ sandboxName: "rn-1-r2", retention, timeoutMs: 7_200_000, networkPolicy: [] });
     expect(fake.created.map((p) => [p.teamId, p.projectId])).toEqual([
       ["team_1", "prj_1"],
       ["team_1", "prj_1"],
