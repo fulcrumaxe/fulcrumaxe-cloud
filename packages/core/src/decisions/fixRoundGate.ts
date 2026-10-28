@@ -1,7 +1,8 @@
 import type { Pool, PoolClient } from 'pg';
 import type { PresetName } from '@fx/decisions';
 import { sanitize } from '@fx/trust';
-import { catalogueClassOf, keySubItemAsk, raiseAsk, withdrawSubItemAsk } from '@fx/db/src/decisionAsks.js';
+import { catalogueClassOf, keySubItemAsk, withdrawSubItemAsk } from '@fx/db/src/decisionAsks.js';
+import { raiseAskMarked } from './raiseAskMarked.js';
 import { getCurrentDialSetting } from '@fx/db/src/decisions.js';
 import { DIAL_VERSION_CATALOGUE_DEFAULT, writeSubItemApprovalReceipt, writeSubItemPolicyReceipt } from '@fx/db/src/receiptWriter.js';
 import { resolveSubItemLaunch } from '../autonomy/resolveSubItemLaunch.js';
@@ -224,7 +225,7 @@ async function decide(client: PoolClient, accountId: string, input: FixGateInput
   const cls = catalogueClassOf('launch_sub_item');
   if (cls === null || cls === 'automated_with_monitoring') return stop('blocked', key, 'fix_launch_unreadable');
   const rationale = askRationale(item.title, key);
-  const askId = await raiseAsk(client, {
+  const askId = await raiseAskMarked(client, {
     class: cls, decisionType: 'launch_sub_item', workItemId, runId: anchor,
     options: [{ id: FIX_ASK_START, label: CHECK_KEY_RE.test(key) ? 'Start the check fix round' : 'Start the fix round' }, { id: FIX_ASK_HOLD, label: 'Hold it for now' }],
     proposed: FIX_ASK_START, rationale, quotedInputs: [{ trust: 'untrusted', storedBody: rationale }], preset,

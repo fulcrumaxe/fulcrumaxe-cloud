@@ -70,6 +70,19 @@ export function markerTtlSeconds(paused: boolean = isStagingPaused()): number {
   return 2 * (backstopMs(paused) / 1000);
 }
 
+/** The longest a marker for a time far ahead is kept (an ask window can end days from now); a connecting tick re-derives it long before. */
+export const MAX_FUTURE_MARKER_TTL_SECONDS = 48 * 60 * 60;
+
+/**
+ * The store lifetime for a marker dated `since`. A marker for a time further ahead than the usual lifetime (an ask whose answer window ends in a
+ * day) must live until then, plus the usual lifetime, or the store would drop it before it is due. Capped; a connecting tick rewrites it.
+ */
+export function markerTtlSecondsFor(since: number, now: number, paused: boolean = isStagingPaused()): number {
+  const base = markerTtlSeconds(paused);
+  const ahead = Math.max(0, Math.ceil((since - now) / 1000));
+  return Math.min(base + ahead, Math.max(base, MAX_FUTURE_MARKER_TTL_SECONDS));
+}
+
 /**
  * The store lifetime for a last-connected time: it must outlive the longest slot a sweep can wait (the idle slot times the
  * slowest multiplier), or an idle sweep would read a miss and connect early. Paused keeps its 12 hour figure.
@@ -159,7 +172,7 @@ export function markWorkPending(name: SweepName, opts: { since?: number; kick?: 
       const current = asTime(await bounded(Promise.resolve(hooks.store.get(markerKey(name)))));
       if (current !== null && current <= since) return;
     }
-    await bounded(Promise.resolve(hooks.store.set(markerKey(name), since, markerTtlSeconds())));
+    await bounded(Promise.resolve(hooks.store.set(markerKey(name), since, markerTtlSecondsFor(since, now))));
     await recordActivity(hooks.store, now);
   })().catch((err: unknown) => {
     // The marker is a hint; the row just written is the durable signal and the backstop tick finds it. Worth seeing, though.
@@ -479,7 +492,7 @@ export async function finishTick(gate: TickGate, nextDueAt: number | null, now: 
     const current = await read(store, markerKey(gate.name));
     if (current.value !== gate.markerValue) return; // a writer got there first
     if (nextDueAt !== null) {
-      await bounded(Promise.resolve(store.set(markerKey(gate.name), Math.max(nextDueAt, 1), markerTtlSeconds(gate.paused))));
+      await bounded(Promise.resolve(store.set(markerKey(gate.name), Math.max(nextDueAt, 1), markerTtlSecondsFor(nextDueAt, now, gate.paused))));
     } else if (current.value !== null && now - current.value >= MARKER_GRACE_MS) {
       await bounded(Promise.resolve(store.delete(markerKey(gate.name))));
     }

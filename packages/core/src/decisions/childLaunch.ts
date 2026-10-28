@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { PoolClient } from 'pg';
-import { catalogueClassOf, keySubItemAsk, raiseAsk } from '@fx/db/src/decisionAsks.js';
+import { catalogueClassOf, keySubItemAsk } from '@fx/db/src/decisionAsks.js';
+import { raiseAskMarked } from './raiseAskMarked.js';
 import { getCurrentDialSetting } from '@fx/db/src/decisions.js';
 import { DIAL_VERSION_CATALOGUE_DEFAULT, writeSubItemPolicyReceipt } from '@fx/db/src/receiptWriter.js';
 import { sanitize } from '@fx/trust';
@@ -352,7 +353,7 @@ async function askForChild(client: PoolClient, input: { accountId: string; paren
   if (cls === null || cls === 'automated_with_monitoring') return { outcome: 'not_ready' };
   const title = cleanWorkItemTitle(child.title) ?? child.planned_pr_key;
   const rationale = sanitize(`Start planned PR: ${title}? Your setting asks before a planned PR starts. Nothing starts until you answer: start it, or hold it.`);
-  const askId = await raiseAsk(client, {
+  const askId = await raiseAskMarked(client, {
     class: cls, decisionType: 'launch_sub_item', workItemId: parentId, runId: anchor,
     // The answer path is the sub-item one (answerAsk starts on `FIX_ASK_START`), so the option ids are shared with the fix rounds; only the words differ.
     options: [{ id: FIX_ASK_START, label: CHILD_ASK_START_LABEL }, { id: FIX_ASK_HOLD, label: CHILD_ASK_HOLD_LABEL }],
