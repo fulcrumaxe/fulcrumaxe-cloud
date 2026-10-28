@@ -398,6 +398,15 @@ export async function listDueAsks(pool: Pick<Pool, 'query'>, now: Date, limit: n
   return rows.map((r) => ({ askId: r.o_ask_id, accountId: r.o_account_id }));
 }
 
+/**
+ * The earliest answer window still ahead of `now` among open asks, across tenants (migration 0927), or null. A read only, for the
+ * invariant sweep's tick on the RECEIPT pool: it stores the answer as the sweep's marker so the next window end wakes the cron.
+ */
+export async function nextAskDueAt(pool: Pick<Pool, 'query'>, now: Date): Promise<Date | null> {
+  const { rows } = await pool.query<{ next: Date | null }>('SELECT decision_ask_next_due($1::timestamptz) AS next', [now]);
+  return rows[0]?.next ?? null;
+}
+
 /** The named exceptions decision_ask_time_out() raises (migration 0853). */
 export const ASK_TIMEOUT_EXCEPTIONS = [
   'ask_no_tenant', 'ask_sweep_system_only', 'ask_sweep_bad_time', 'ask_sweep_bad_outcome',

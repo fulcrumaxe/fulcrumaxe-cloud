@@ -67,8 +67,7 @@ import { createPlanePublish, createPublishSettler, type PlanePublish, type Plane
 import { createRunActionFacade, type RunActionFacade } from "./runActions.js";
 import { createRunnerLeaseFacade, type RunnerLeaseFacade } from "./runnerLeases.js";
 import { sweepInvariants, type InvariantSweeper } from "./invariantSweep.js";
-import { sweepAskWithdrawals } from "./askWithdrawSweep.js";
-import { SWEEP_REAL_CLOCK, sweepOverdueAsks } from "@fx/core/src/decisions/sweepOverdue.js";
+import { runAskWindowTick } from "./askWindowTick.js";
 import { purgeAap } from "./aapPurge.js";
 import { createRunnerNoticeSweeper, runnerNoticeReports, type RunnerNoticeSweeper } from "./runnerNotices.js";
 import { createRunnerQueueSweeper, type RunnerQueueSweeper } from "./runnerQueueSweep.js";
@@ -94,7 +93,7 @@ import { PREVIEW_ROLE, createPreviewModule, type PreviewFacade, type PreviewSeat
 import { createRetryModule, type RetryFacade, type RetrySeatSource } from "./retry.js";
 import { createAdvanceModule, type AdvanceFacade, type AdvanceModuleDeps } from "./advance.js";
 import type { FixRoundHeadPorts } from "./fixRoundHeads.js";
-import { createResumeModule, reconcileResumes, type ResumeFacade } from "./resumeDecision.js";
+import { createResumeModule, type ResumeFacade } from "./resumeDecision.js";
 import { createContinueModule, type ContinueFacade } from "./continueAction.js";
 import { createEnvelopeAsk } from "./envelopeAsk.js";
 import { createStartGate } from "./startGateStep.js";
@@ -468,13 +467,9 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     // D#7 DP4b-1: the ask-withdrawal sweep rides the invariant sweep's tick (the same cron, the same cross-tenant shape) on the RECEIPT pool; it never throws, so it cannot fail the invariant result.
     const runInvariantTick = async (): Promise<Awaited<ReturnType<typeof sweepInvariants>>> => {
       const result = await sweepInvariants({ pool: pools.runnerPool, report: reportError, warn: (line) => console.warn(line) });
-      await sweepAskWithdrawals({ pool: pools.receiptPool, warn: (line) => console.warn(line) });
-      await reconcileResumes({ pool: pools.receiptPool, warn: (line) => console.warn(line) });
-      // D#7 DP12a-2: asks whose answer window ended move to overdue or proceeded. Never throws; counts only, no ids or text.
-      const ended = await sweepOverdueAsks(pools.receiptPool, SWEEP_REAL_CLOCK);
-      if (ended.overdue + ended.proceeded + ended.failed > 0) console.warn(JSON.stringify({ event: "decision.ask_window_sweep", overdue: ended.overdue, proceeded: ended.proceeded, failed: ended.failed }));
+      const { nextAskDueAt } = await runAskWindowTick({ pool: pools.receiptPool, warn: (line) => console.warn(line) });
       await purgeAap({ pool: pools.receiptPool, ready: pools.aapReady, warn: (line) => console.warn(line) });
-      return result;
+      return { ...result, nextAskDueAt };
     };
     const runSandboxInventory = (input: SandboxInventoryInput): Promise<SandboxInventoryResult> => sandboxInventory({ pool: pools.runnerPool, port: sandboxPort }, input);
     return { ...planePublish, ...runActions, ...runnerLeases, ...runnerClaims, ...runnerDone, ...runnerGitTickets, ...runnerPlanePush, ...runnerLeaseSweep, sweepRunHandoffs: runHandoffs.sweepRunHandoffs, sweepParkedStages: stageResume.sweepParkedStages, sweepSetupRequestChecks: (input) => runSetupRequestCheckSweep({ pool: pools.runnerPool, envSource: input.envSource }), approveSubItem: (input) => approveSubItem({ pool: pools.receiptPool, principal: input.principal, ...(options.autoStart?.child ? { child: options.autoStart.child } : {}) }, { workItemId: input.workItemId, key: input.key }), answerDecisionAsk: (input) => answerAsk({ pool: pools.receiptPool, principal: input.principal, ...(input.signal ? { signal: input.signal } : {}), ...(options.autoStart?.child ? { child: options.autoStart.child } : {}) }, { askId: input.askId, choice: input.choice }), sweepBranchCleanups: (input) => runBranchCleanupSweep({ pool: pools.runnerPool, signer: gitTicketSigner, github: input.github, ...(input.closePr ? { closePr: input.closePr } : {}) }), sweepPrSlotHolders: (input) => runPrSlotSweep({ pool: pools.runnerPool, openClient: input.github }), reconcilePrHolder: (input) => reconcileHolder(pools.runnerPool, input.github, input.accountId, input.workItemId), planeMerge, withRunnerPool: (fn) => fn(pools.runnerPool), sweepProposalVerification: verifySweep, sweepAutoStart: autoStart, completeRunHandoff: runHandoffs.completeRunHandoff, completeHandoffOnDone: runHandoffs.completeHandoffOnDone, ...runnerQueue, ...runnerNotices, sweepInvariants: runInvariantTick, ...preview, ...retry, ...advance, ...resume, ...continuation, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, sandboxInventory: runSandboxInventory, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };

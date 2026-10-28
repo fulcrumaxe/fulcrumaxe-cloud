@@ -35,6 +35,8 @@ export interface InvariantSweepResult {
   /** New alerts raised in this sweep, per rule code. */
   raised: Record<string, number>;
   failed: number;
+  /** ASK-WIRE-1: epoch ms of the soonest open ask's window end still ahead, null when none; set by the composition root's tick, absent from the bare sweep. */
+  nextAskDueAt?: number | null;
 }
 
 export interface InvariantSweepDeps {

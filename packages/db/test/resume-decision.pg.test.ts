@@ -276,11 +276,11 @@ describe('resume_decision (0860)', () => {
     const policy = async (table: string, name: string) =>
       (await admin.query(`SELECT cmd, roles::text AS roles, qual, with_check FROM pg_policies WHERE schemaname = 'public' AND tablename = $1 AND policyname = $2`, [table, name])).rows;
 
-    it('decision_asks: six columns, SELECT only, no table-wide privilege, and one read policy with exactly this text', async () => {
-      expect(await columnPrivileges('decision_asks', 'SELECT')).toEqual(['account_id', 'answered_at', 'id', 'run_id', 'state', 'work_item_id']);
+    it('decision_asks: seven columns (0860 six plus 0927 answer_due_at), SELECT only, no table-wide privilege, and one read policy with exactly this text', async () => {
+      expect(await columnPrivileges('decision_asks', 'SELECT')).toEqual(['account_id', 'answer_due_at', 'answered_at', 'id', 'run_id', 'state', 'work_item_id']);
       for (const privilege of ['INSERT', 'UPDATE', 'REFERENCES']) expect(await columnPrivileges('decision_asks', privilege), privilege).toEqual([]);
       expect(await tablePrivileges('decision_asks')).toEqual([]);
-      expect(await q(`SELECT policyname AS x FROM pg_policies WHERE schemaname = 'public' AND tablename = 'decision_asks' AND 'platform_ops' = ANY(roles) ORDER BY 1`)).toEqual(['platform_ops_resume_select']);
+      expect(await q(`SELECT policyname AS x FROM pg_policies WHERE schemaname = 'public' AND tablename = 'decision_asks' AND 'platform_ops' = ANY(roles) ORDER BY 1`)).toEqual(['platform_ops_ask_next_due_select', 'platform_ops_resume_select']);
       expect(await policy('decision_asks', 'platform_ops_resume_select')).toEqual([
         {
           cmd: 'SELECT',
@@ -289,6 +289,32 @@ describe('resume_decision (0860)', () => {
           with_check: null,
         },
       ]);
+    });
+
+    it('0927 decision_ask_next_due: the one added policy has exactly this text, and who may call the function', async () => {
+      expect(await policy('decision_asks', 'platform_ops_ask_next_due_select')).toEqual([
+        {
+          cmd: 'SELECT',
+          roles: '{platform_ops}',
+          qual: "((SESSION_USER <> 'platform_ops'::name) AND (state = 'open'::text))",
+          with_check: null,
+        },
+      ]);
+      await ask(refs, 'open');
+      const call = (pool: Pool) => pool.query<{ t: Date | null }>(`SELECT decision_ask_next_due(now() - interval '1 day') AS t`);
+      // the receipt login gets the timestamp
+      expect((await call(invokerPool)).rows[0]!.t).toBeInstanceOf(Date);
+      // a platform_ops login is refused by the function itself (and its row policy would show it nothing)
+      const opsPool = createPool(process.env.DATABASE_URL_PLATFORM_OPS!);
+      try {
+        await expect(call(opsPool)).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+        const rows = await opsPool.query(`SELECT count(*)::int AS n FROM decision_asks WHERE state = 'open'`);
+        expect(rows.rows[0].n).toBe(0);
+      } finally {
+        await opsPool.end();
+      }
+      // app_user holds no EXECUTE
+      await expect(call(appUserPool)).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
     });
 
     it('work_items: halt_epoch is SELECT only (no INSERT, UPDATE or REFERENCES), and the reconcile read policy has exactly this text', async () => {

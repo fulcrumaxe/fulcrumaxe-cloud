@@ -2,7 +2,8 @@ import type { Pool, PoolClient } from "pg";
 import { PRESETS, getCatalogueEntry, type CatalogueEntry, type PresetName, type TimeoutOutcome } from "@fx/decisions";
 import { FIXED_INVARIANT_KEYS } from "@fx/db/src/dialInventory.js";
 import { getDialSettingAt, type DecisionSetting } from "@fx/db/src/decisions.js";
-import { AskRaiseError, raiseAsk, type AskPolicy } from "@fx/db/src/decisionAsks.js";
+import { AskRaiseError, type AskPolicy } from "@fx/db/src/decisionAsks.js";
+import { raiseAskMarked } from "@fx/core/src/decisions/raiseAskMarked.js";
 import { resolveAskPolicyForWorkItem } from "@fx/db/src/decisionAskSettings.js";
 import { ReceiptWriteError, writeReceipt } from "@fx/db/src/receiptWriter.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
@@ -218,7 +219,7 @@ export function createDecisionIntake(deps: DecisionIntakeDeps): DecisionIntake {
       }
       for (const a of p.asks) {
         const policy = askPolicyFor(a.entry, await resolveAskPolicyForWorkItem(client, { decisionType: a.entry.id, workItemId, preset: a.preset }));
-        ids.set(a.entry.id, await raiseAsk(client, { class: a.entry.class, decisionType: a.entry.id, workItemId, runId, options: a.options, proposed: a.proposed, rationale: a.rationale, quotedInputs: [{ trust: "untrusted", storedBody: sanitize(a.rationale) }], policy }));
+        ids.set(a.entry.id, await raiseAskMarked(client, { class: a.entry.class, decisionType: a.entry.id, workItemId, runId, options: a.options, proposed: a.proposed, rationale: a.rationale, quotedInputs: [{ trust: "untrusted", storedBody: sanitize(a.rationale) }], policy }));
       }
       return ids;
     });

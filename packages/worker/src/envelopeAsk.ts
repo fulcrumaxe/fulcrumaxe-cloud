@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 import { clampRuleOutcome, evaluateRules, platformAskRequest, tightenAskDisposition, usdCeilCents } from "@fx/decisions";
 import { resolveActionRules } from "@fx/db/src/actionRules.js";
-import { raiseAsk } from "@fx/db/src/decisionAsks.js";
+import { raiseAskMarked } from "@fx/core/src/decisions/raiseAskMarked.js";
 import { getCurrentDialSetting } from "@fx/db/src/decisions.js";
 import { DIAL_VERSION_CATALOGUE_DEFAULT, writeReceipt } from "@fx/db/src/receiptWriter.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
@@ -87,7 +87,7 @@ export function createEnvelopeAsk(receiptPool: Pool) {
         await recordEnvelopePauseReceipt(client, { workItemId, envelopeId, version: envelope.version, receiptId: receipt.id });
         return "denied_by_rule";
       }
-      const askId = await raiseAsk(client, {
+      const askId = await raiseAskMarked(client, {
         class: "human_in_the_loop",
         decisionType: "spend_past_envelope",
         workItemId,

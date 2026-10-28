@@ -1,7 +1,8 @@
 import type { Pool, PoolClient } from 'pg';
 import type { PresetName } from '@fx/decisions';
 import { sanitize } from '@fx/trust';
-import { catalogueClassOf, raiseAsk } from '@fx/db/src/decisionAsks.js';
+import { catalogueClassOf } from '@fx/db/src/decisionAsks.js';
+import { raiseAskMarked } from './raiseAskMarked.js';
 import { getCurrentDialSetting } from '@fx/db/src/decisions.js';
 import { DIAL_VERSION_CATALOGUE_DEFAULT } from '@fx/db/src/receiptWriter.js';
 import {
@@ -72,7 +73,7 @@ async function openAsk(client: PoolClient, gateId: string, input: StartGateInput
   if (cls === null || cls === 'automated_with_monitoring') throw new Error('raiseStartAsk: not an askable decision');
   const title = (await client.query<{ title: string | null }>('SELECT title FROM work_items WHERE id = $1::uuid', [input.workItemId])).rows[0]?.title ?? null;
   const rationale = askRationale(title, input.preset);
-  const askId = await raiseAsk(client, {
+  const askId = await raiseAskMarked(client, {
     class: cls,
     decisionType: input.decisionType,
     workItemId: input.workItemId,

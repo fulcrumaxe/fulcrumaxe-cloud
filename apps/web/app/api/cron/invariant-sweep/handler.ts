@@ -13,7 +13,8 @@ import type { InvariantSweepWorker } from "../../../../lib/worker";
  * completion: any run that reaches succeeded, failed or timed_out marks `invariant-sweep` pending (packages/runner runStatusWriter.ts). A pass that
  * connects because of that marker keeps the marker alive until `COVER_MS` after the completion time it holds (it rewrites it to the same value, so
  * the age keeps counting), which covers the grace period and a few passes after it; then the marker is cleared. A newer completion restarts the
- * cover. The half-hour backstop still connects once in a while, as for the other sweeps. While the staging project is paused
+ * cover. ASK-WIRE-1: raising an ask marks it too, dated at the ask's `answer_due_at`, and a connecting pass stores the soonest window still ahead as
+ * the next marker (once the completion cover has lapsed), so an answer window that ends on a quiet account is acted on by the next tick. The half-hour backstop still connects once in a while, as for the other sweeps. While the staging project is paused
  * (FX_STAGING_PAUSED=1) the handler ends before reading anything. The reply carries counts only.
  */
 
@@ -73,7 +74,9 @@ export async function invariantSweepHandler(req: NextRequest, deps: InvariantSwe
     deps.log(gateLine(gate, Object.values(result.raised).some((n) => n > 0)));
     await announceRaised(deps, result.raised);
     const completedAt = gate.markerValue;
-    await finishTick(gate, gate.reason === "marker" && completedAt !== null && now() - completedAt < COVER_MS ? completedAt : null, now());
+    const cover = gate.reason === "marker" && completedAt !== null && now() - completedAt < COVER_MS ? completedAt : null;
+    // ASK-WIRE-1: with no run-completion cover left, the marker becomes the next ask window end, so the cron wakes when it passes.
+    await finishTick(gate, cover ?? result.nextAskDueAt ?? null, now());
     await recordCronConnected(NAME, now());
   }
   return NextResponse.json({ configured, passes }, { status: 200 });
