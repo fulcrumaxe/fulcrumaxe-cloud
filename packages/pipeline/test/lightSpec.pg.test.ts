@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { UNTRUSTED_DELIMITER_START } from "@fx/trust";
 import { ADVANCE_LIGHT_KINDS, ADVANCE_PANEL_KINDS } from "@fx/core/src/work-items/advance.js";
+import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { LIGHT_SPEC_CATEGORIES, buildLightSpecPrompt, isLightCategory, publishLightSpec } from "../src/advance/lightSpec.js";
 import { runTriageStep } from "../src/plan/step.js";
 import { OWNER, fixtureClassifier, expectOneGenuineEnvelope } from "./plan/helpers/panelFixtures.js";
@@ -25,7 +26,7 @@ async function triagedItem(category: "small" | "bug" | "doc" = "bug") {
 }
 const stageOf = async (id: string) => (await h.admin.query<{ stage: string }>("SELECT stage FROM work_items WHERE id = $1", [id])).rows[0]!.stage;
 const specs = async (id: string) => (await h.admin.query<{ version: number; body: string }>("SELECT version, body FROM spec_versions WHERE work_item_id = $1 ORDER BY version", [id])).rows;
-const GOOD = { feasible: true, reason: "", summary: "Fix the year in the footer.", spec: "1. The footer shows the current year.\n2. A test pins it.", acceptance_files: ["src/a.ts"] };
+const GOOD = { feasible: true, reason: "", split_proposed: false, summary: "Fix the year in the footer.", spec: "1. The footer shows the current year.\n2. A test pins it.", acceptance_files: ["src/a.ts"] };
 
 describe("categories", () => {
   it("the light categories are exactly the kinds the stage table sends to the short Spec, and none of them runs a panel", () => {
@@ -143,5 +144,94 @@ describe("publishLightSpec", () => {
     expect(await stageOf(t.workItemId)).toBe("triaged");
     const gone = await publishLightSpec(h.runWriterPool, t.accountId, randomUUID(), GOOD);
     expect(gone.status === "refused" && gone.reason).toMatch(/^[a-z][a-z0-9_]{0,63}$/);
+  });
+});
+
+// D#483 S5-b2b: the short Spec carries the Planned PRs table too, so a doc/small/bug item the PM splits is built as its planned children.
+describe("planned PRs on the short Spec", () => {
+  const ROWS = [
+    { key: "page-a", title: "Docs page A", depends_on: [] },
+    { key: "page-b", title: "Docs page B", depends_on: [] },
+  ];
+  const SPLIT = { ...GOOD, summary: "Two independent pages.", acceptance_files: ["docs/a.md", "docs/b.md"], split_proposed: true, planned_prs: ROWS };
+
+  it("the prompt teaches the table and the rule that a claimed split needs it", () => {
+    const p = buildLightSpecPrompt({ category: "doc", title: "T", body: "B" });
+    expect(p).toContain("planned_prs");
+    expect(p).toMatch(/refused/);
+    expectOneGenuineEnvelope(p);
+  });
+
+  it("two independent parts: the Spec stores the table and renders it, and a person's approval creates one child per row from that version", async () => {
+    const t = await triagedItem("doc");
+    expect(await publishLightSpec(h.runWriterPool, t.accountId, t.workItemId, SPLIT)).toEqual({ status: "published", version: 1 });
+    const { rows } = await h.admin.query<{ id: string; frontmatter: unknown; body: string }>("SELECT id, frontmatter, body FROM spec_versions WHERE work_item_id = $1", [t.workItemId]);
+    expect(rows[0]!.frontmatter).toEqual({ acceptance_files: ["docs/a.md", "docs/b.md"], planned_prs: ROWS });
+    expect(rows[0]!.body).toContain("### Planned PRs");
+    const userId = randomUUID();
+    await h.admin.query("INSERT INTO users (id, email) VALUES ($1, $2)", [userId, `${userId}@example.test`]);
+    await h.admin.query("INSERT INTO account_members (account_id, user_id, role) VALUES ($1, $2, 'owner')", [t.accountId, userId]);
+    await withTenant(h.pureAppUserPool, t.accountId, userId, (c) => c.query("SELECT * FROM work_item_approval_record($1, 'work_item_approve')", [t.workItemId]));
+    const kids = await h.admin.query("SELECT planned_pr_key, title, planned_pr_spec_version_id FROM work_items WHERE parent_id = $1 ORDER BY planned_pr_key", [t.workItemId]);
+    expect(kids.rows).toEqual([
+      { planned_pr_key: "page-a", title: "Docs page A", planned_pr_spec_version_id: rows[0]!.id },
+      { planned_pr_key: "page-b", title: "Docs page B", planned_pr_spec_version_id: rows[0]!.id },
+    ]);
+  });
+
+  it.each([
+    ["no table", undefined],
+    ["an empty table", []],
+    ["a one-row table", [ROWS[0]]],
+  ])("split_proposed true with %s is refused planned_split_missing: nothing published, stage unchanged", async (_n, planned_prs) => {
+    const t = await triagedItem("doc");
+    const out = { ...SPLIT, ...(planned_prs === undefined ? {} : { planned_prs }) };
+    if (planned_prs === undefined) delete (out as { planned_prs?: unknown }).planned_prs;
+    expect(await publishLightSpec(h.runWriterPool, t.accountId, t.workItemId, out)).toEqual({ status: "refused", reason: "planned_split_missing" });
+    expect(await stageOf(t.workItemId)).toBe("triaged");
+    expect(await specs(t.workItemId)).toEqual([]);
+  });
+
+  it("split_proposed false with two or more rows is refused planned_split_unflagged: nothing published", async () => {
+    const t = await triagedItem("doc");
+    expect(await publishLightSpec(h.runWriterPool, t.accountId, t.workItemId, { ...SPLIT, split_proposed: false })).toEqual({ status: "refused", reason: "planned_split_unflagged" });
+    expect(await stageOf(t.workItemId)).toBe("triaged");
+    expect(await specs(t.workItemId)).toEqual([]);
+  });
+
+  it.each([["missing", undefined], ["a string", "true"], ["a number", 1], ["null", null]])("split_proposed %s is refused invalid_spec_output: nothing published", async (_n, v) => {
+    const t = await triagedItem("doc");
+    const out = { ...SPLIT, ...(v === undefined ? {} : { split_proposed: v }) };
+    if (v === undefined) delete (out as { split_proposed?: unknown }).split_proposed;
+    expect(await publishLightSpec(h.runWriterPool, t.accountId, t.workItemId, out)).toEqual({ status: "refused", reason: "invalid_spec_output" });
+    expect(await specs(t.workItemId)).toEqual([]);
+  });
+
+  it.each([
+    ["an unreadable table", [{ key: "fix-1", title: "T" }, ROWS[0]], "invalid_planned_prs"],
+    ["a table that is not a list", "a, b", "invalid_planned_prs"],
+    ["thirteen rows", Array.from({ length: 13 }, (_, i) => ({ key: `k${i}`, title: "T", depends_on: [] })), "planned_prs_too_large"],
+  ])("%s is refused with a fixed code and publishes nothing", async (_n, planned_prs, reason) => {
+    const t = await triagedItem("doc");
+    expect(await publishLightSpec(h.runWriterPool, t.accountId, t.workItemId, { ...GOOD, planned_prs })).toEqual({ status: "refused", reason });
+    expect(await specs(t.workItemId)).toEqual([]);
+  });
+
+  it("an existing single-PR Spec is unchanged: no table, no frontmatter key, no Planned PRs section, no children", async () => {
+    for (const planned_prs of [undefined, [], [ROWS[0]]]) {
+      const t = await triagedItem("bug");
+      const out = { ...GOOD, ...(planned_prs === undefined ? {} : { planned_prs }) };
+      expect(await publishLightSpec(h.runWriterPool, t.accountId, t.workItemId, out)).toEqual({ status: "published", version: 1 });
+      const { rows } = await h.admin.query<{ frontmatter: unknown; body: string }>("SELECT frontmatter, body FROM spec_versions WHERE work_item_id = $1", [t.workItemId]);
+      expect(rows[0]!.frontmatter).toEqual({ acceptance_files: ["src/a.ts"] });
+      expect(rows[0]!.body).not.toContain("Planned PRs");
+    }
+  });
+
+  it("an inherited planned_prs is not read", async () => {
+    const t = await triagedItem("doc");
+    const { planned_prs, ...rest } = SPLIT;
+    const out = Object.assign(Object.create({ planned_prs }), rest);
+    expect(await publishLightSpec(h.runWriterPool, t.accountId, t.workItemId, out)).toEqual({ status: "refused", reason: "planned_split_missing" });
   });
 });

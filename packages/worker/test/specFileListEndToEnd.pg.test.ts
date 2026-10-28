@@ -108,7 +108,7 @@ describe("a Spec the product wrote is a scope the done check reads [pg]", { time
   }
 
   const PANEL_OUTPUT = { summary: "**technical-architect**: agrees.", spec: "1. The footer shows the year.\n2. A test pins it.", acceptance_files: PM_FILES };
-  const LIGHT_OUTPUT = { feasible: true, reason: "", summary: "Fix the year.", spec: "1. The footer shows the year.\n2. A test pins it.", acceptance_files: PM_FILES };
+  const LIGHT_OUTPUT = { feasible: true, reason: "", split_proposed: false, summary: "Fix the year.", spec: "1. The footer shows the year.\n2. A test pins it.", acceptance_files: PM_FILES };
 
   /** Starts the real build, claims the run through the real claim route, and returns what the done route needs. */
   async function startAndClaim(a: SeedRefs, workItemId: string) {
