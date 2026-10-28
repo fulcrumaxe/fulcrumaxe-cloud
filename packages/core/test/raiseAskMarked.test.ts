@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PoolClient } from 'pg';
 import { DEFAULT_ASK_POLICY } from '@fx/db/src/decisionAsks.js';
 import { MARKER_HORIZON_MS, MAX_FUTURE_MARKER_TTL_SECONDS, SWEEP_SCHEDULE_MS, readTickGate, setPendingHooks } from '../src/pendingWork.js';
@@ -36,6 +36,9 @@ describe('raiseAskMarked', () => {
   const store = new Map<string, number>();
   let writes: Array<{ key: string; value: number; ttl: number }>;
   beforeEach(() => {
+    // Only Date is frozen (settle() needs the real timers): the test's `now` and the clock raiseAskMarked reads are the same instant.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-10T12:00:17.000Z'));
     store.clear();
     writes = [];
     setPendingHooks({
@@ -46,7 +49,10 @@ describe('raiseAskMarked', () => {
       },
     });
   });
-  afterEach(() => setPendingHooks(null));
+  afterEach(() => {
+    setPendingHooks(null);
+    vi.useRealTimers();
+  });
 
   it('marks invariant-sweep with since = answer_due_at (a future time, not now)', async () => {
     const now = Date.now();
