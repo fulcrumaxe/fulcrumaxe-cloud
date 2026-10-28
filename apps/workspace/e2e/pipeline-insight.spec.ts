@@ -232,7 +232,7 @@ test.describe("D#483 P4: what the pipeline is doing (mocked API)", () => {
     // The recorded merge-gate step is shown with its fixed reason codes, in words.
     await expect(tid(page, "pl-step")).toHaveCount(2);
     await expect(tid(page, "pl-step").nth(1)).toContainText("Merge gate: not merged, a person merges");
-    await expect(tid(page, "pl-step").nth(1)).toContainText("CI is not green; auto-merge is not allowed");
+    await expect(tid(page, "pl-step").nth(1)).toContainText("auto-merge is not allowed");
     // Any other stage: no banner.
     mock.activity = { status: 200, json: { ...REVIEW_PASSED, stage: "merged" } };
     await page.clock.runFor(10_000);
@@ -607,6 +607,17 @@ test.describe("D#483 live parity: the notice, Check the build, the board's polli
     mock.activity = { status: 200, json: { ...REVIEW_PASSED, pr_number: null } };
     await page.clock.runFor(10_000);
     await expect(link).toHaveAttribute("href", `https://github.com/acme/docs/pulls?q=is%3Apr+head%3Afx%2Fissue-${REVIEW_PASSED.issue_number}`);
+  });
+
+  test("a review-passed item whose public change was refused says what blocks the merge, not that it is ready, and offers no link", async ({ page }) => {
+    const refused = { state: "refused", code: "scan_refused", sentence: "Refused: the scan found something that must not be public", repo: "acme/docs-public", branch: "fx/issue-42", pr_number: null, pr_url: null, head_sha: null, actions: [] };
+    const gate = { kind: "continue_work_item", state: "done", code: null, result: "ready_human_merges", reasons: ["pr_draft", "ci_not_green", "auto_merge_not_allowed", "public_pr_not_open"], at: "2026-10-27T10:00:00.000Z", finished_at: "2026-10-27T10:00:03.000Z" };
+    await setup(page, { status: 200, json: { ...REVIEW_PASSED, auto_merge: false, public_change: refused, steps: [gate] } }, "review_passed");
+    await openDetail(page);
+    await expect(tid(page, "pl-ready-blocked")).toContainText("Not ready to merge yet. The public change was refused, so there is no pull request to merge.");
+    await expect(tid(page, "pl-ready")).toHaveCount(0);
+    await expect(tid(page, "pl-ready-link")).toHaveCount(0);
+    await expect(page.locator("body")).not.toContainText("Ready to merge");
   });
 
   test("the board re-reads itself every 20 s while an item is mid-pipeline: with no live event, a stage change on the next read moves the card", async ({ page }) => {

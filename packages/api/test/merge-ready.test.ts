@@ -171,9 +171,9 @@ describe('D#598 P8c-2b: merge-ready list', () => {
 
   // Live 2026-10-25 (cloud#673): the gate answered "ready, a person merges" while the pull request was still a draft with no public copy open and its checks
   // not green. That is not a pull request for a person to merge; it is an answer the gate gave too early (the stalled list shows it, with the button that asks again).
-  it('does not list a gate answer whose reasons time can clear (draft, checks not green, public copy not open): it is not ready yet', async () => {
+  it('does not list a gate answer that holds any reason other than a person pressing merge (draft, checks not green, public copy not open, a review that did not pass, an unknown code): it is not ready yet', async () => {
     const f = await fixture();
-    for (const reason of ['pr_draft', 'ci_not_green', 'public_pr_not_open', 'public_head_unrecorded']) {
+    for (const reason of ['pr_draft', 'ci_not_green', 'public_pr_not_open', 'public_head_unrecorded', 'verdict_not_pass_code_reviewer', 'merge_conflict', 'a_code_nobody_has_heard_of']) {
       const id = await item(f.refs, `Not ready: ${reason}`);
       await gate(f.refs, id, { reasons: ['local_review_not_enabled', reason] });
     }
