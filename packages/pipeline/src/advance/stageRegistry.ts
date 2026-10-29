@@ -3,6 +3,7 @@ import { attemptOfKey } from "./attemptKeys.js";
 import { WAITING_STAGES, WAITING_STAGE_POSITIONS, type WaitingStage } from "./waitingStages.js";
 import { stageKeyLikes } from "./stageStarts.js";
 import { fixKeyLikes, reviewKeyLikes } from "./reviewStarts.js";
+import { BUILD_STAGE_GATE } from "@fx/core/src/work-items/stageApprovalGate.js";
 import { nextPanelAttempt, panelKeyLikes } from "./panelStarts.js";
 
 /**
@@ -69,9 +70,6 @@ export interface ParkedStageEntry {
 /** One more than the highest attempt among the keys (0 when there are none). Shared by every entry whose runs are keyed `<base>[:s<n>]`. */
 const nextAfterHighest = (keys: readonly string[]): number => (keys.length === 0 ? 0 : Math.max(...keys.map(attemptOfKey)) + 1);
 
-/** Characters that mean something in a LIKE pattern, escaped with a backslash (the pattern is used with ESCAPE '\'). */
-const likeEscape = (text: string): string => text.replace(/[\\%_]/g, (c) => `\\${c}`);
-
 /** The seat of every stage that writes before the build: the project manager. The headroom check of a restart meets that seat's limits. */
 const PM_ROLE = "project-manager";
 
@@ -101,16 +99,13 @@ export const PANEL_WHOLE_CODE = "panel_whole";
 export const PANEL_PROGRESS_KINDS: readonly string[] = Object.freeze(["build_refused", "stopped"]);
 
 export const PARKED_STAGE_REGISTRY: Readonly<Partial<Record<WaitingStage, ParkedStageEntry>>> = Object.freeze({
+  // The gate part (stages, approval, Spec, run keys) is @fx/core's BUILD_STAGE_GATE: the build card's "starts by itself" sentence reads the same one.
   build: {
     stage: "build",
-    itemStages: Object.freeze(["spec_ready"]),
+    ...BUILD_STAGE_GATE,
     pauses: RESERVATION_PAUSE_REASONS,
     role: "executor",
-    approval: { kind: "advance_work_item", from: "self" },
-    needsSpec: true,
     respec: false,
-    // `advance:<item>:build:v<spec version>:<approval>[:s<n>][:n<pin>]` (startBuildForItem; the worker prefixes the item).
-    runKeyLikes: (workItemId, actionId) => [`advance:${likeEscape(workItemId)}:build:v%:${likeEscape(actionId)}%`],
     nextAttempt: nextAfterHighest,
     pauseForDenial,
   },

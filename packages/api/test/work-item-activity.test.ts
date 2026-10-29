@@ -296,13 +296,33 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       // The holder: another item of the repository at pr_opened (issue 65), as in the staging case.
       await admin.query(`INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number) VALUES ($1, $2, $3, 'feature', 'internal', 'pr_opened', 65)`, [randomUUID(), accountId, repoId]);
       await wait('one_build_per_repo_until_d598', 'w1');
-      expect(await noticeOf(accountId, userId, itemId)).toEqual({
-        kind: 'build_slot_wait',
-        reason: "Waiting for a build slot. Issue #65 is holding this repository's only build slot, and keeps it until its pull request is merged or closed. This build starts by itself after that.",
-      });
+      // No standing approval: the sentence says a person has to start the build once the slot is free (nothing will start it).
+      const manual = "Waiting for a build slot. Issue #65 is holding this repository's only build slot, and keeps it until its pull request is merged or closed. This build does not start by itself: a person has to press Approve the Spec and build once the slot is free.";
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'build_slot_wait', reason: manual });
+
+      // A performed approval by a session of a plain member does not count; by an owner it does, and the build starts by itself.
+      await admin.query(
+        `INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind) VALUES ($1, $2, 1, 'spec', encode(sha256(convert_to('spec', 'UTF8')), 'hex'), 'system')`,
+        [accountId, itemId],
+      );
+      await admin.query(`UPDATE spec_versions SET created_at = now() - interval '2 days' WHERE work_item_id = $1`, [itemId]);
+      await admin.query(
+        `INSERT INTO run_action_requests (id, account_id, kind, target_id, requested_by, principal_kind, request_hash, state, finished_at, outcome)
+         VALUES ($1, $2, 'advance_work_item', $3, $4, 'session', $5, 'done', now() - interval '1 day', $6::jsonb)`,
+        [randomUUID(), accountId, itemId, `session:${userId}`, 'h'.repeat(64), JSON.stringify({ work_item_id: itemId, advance: 'started' })],
+      );
+      expect((await noticeOf(accountId, userId, itemId))!.reason).toBe(manual);
+      await admin.query(`UPDATE account_members SET role = 'owner' WHERE account_id = $1 AND user_id = $2`, [accountId, userId]);
+      const auto = "Waiting for a build slot. Issue #65 is holding this repository's only build slot, and keeps it until its pull request is merged or closed. This build starts by itself after that.";
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'build_slot_wait', reason: auto });
+      // A Spec written after the approval is a different Spec: the person decides about it again.
+      await admin.query(`INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind) VALUES ($1, $2, 2, 'spec2', encode(sha256(convert_to('spec2', 'UTF8')), 'hex'), 'system')`, [accountId, itemId]);
+      expect((await noticeOf(accountId, userId, itemId))!.reason).toBe(manual);
+      await admin.query('DELETE FROM spec_versions WHERE work_item_id = $1 AND version = 2', [itemId]);
+      expect((await noticeOf(accountId, userId, itemId))!.reason).toBe(auto);
 
       await wait('waiting_for_build_slot_account', 'w2');
-      expect((await noticeOf(accountId, userId, itemId))!.reason).toMatch(/Your account is already building as many items at once as its limit allows/);
+      expect((await noticeOf(accountId, userId, itemId))!.reason).toBe('Waiting for a build slot. Your account is already building as many items at once as its limit allows. This build starts by itself when one of them is done.');
 
       // A wait for another stage, a spend pause and a stale fact are not a slot wait (a second item, so the facts above do not count).
       const other = (await seedItem(accountId, { stage: 'spec_ready' })).itemId;

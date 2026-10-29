@@ -109,10 +109,12 @@ export const activityResponseSchema = z.object({
 });
 
 /** D#483: the sentence for a build that waits for a slot. Fixed words around a wait code and an issue number; nothing from the item's own text. */
-export function buildWaitSentence(code: string, holder: { issue_number: number | null; stage: string } | null): string {
-  if (code === "waiting_for_build_slot_account") return "Waiting for a build slot. Your account is already building as many items at once as its limit allows. This build starts by itself when one of them is done.";
+export function buildWaitSentence(code: string, holder: { issue_number: number | null; stage: string } | null, autoStart = true): string {
+  // What happens once the slot is free depends on the item: with a person's approval standing the build starts by itself; without it a person has to start it.
+  const after = autoStart ? "starts by itself" : "does not start by itself: a person has to press Approve the Spec and build once the slot is free";
+  if (code === "waiting_for_build_slot_account") return `Waiting for a build slot. Your account is already building as many items at once as its limit allows. This build ${after}${autoStart ? " when one of them is done" : ""}.`;
   const who = holder !== null && holder.issue_number !== null ? `Issue #${holder.issue_number}` : "Another item in this repository";
-  return `Waiting for a build slot. ${who} is holding this repository's only build slot, and keeps it until its pull request is merged or closed. This build starts by itself after that.`;
+  return `Waiting for a build slot. ${who} is holding this repository's only build slot, and keeps it until its pull request is merged or closed. This build ${after}${autoStart ? " after that" : ""}.`;
 }
 
 /** The reason the runner gave for a check it could not run safely, as the run_checks row recorded it; a result with no reason (or no row yet) carries none. */
@@ -166,7 +168,7 @@ export const workItemActivityRoutes: RouteEntry[] = [
       const activity = { ...rest, ...childLaunch, runs, ...(publicChange === null ? {} : { public_change: publicChange }), ...(startDecision === null ? {} : { start_decision: startDecision }), ...(recheck === null ? {} : { review_recheck: { kind: recheck.kind, sentence: COPY.reviewMergeOnlyRecheck } }), ...setupPause };
       // The Re-spec notices carry the KEY of their sentence out of @fx/core; the words are written once, in the runner protocol's copy.
       const n = activity.notice;
-      if (n !== null && n.kind === "build_slot_wait") return { ...activity, notice: { kind: n.kind, reason: buildWaitSentence(n.reason, n.holder ?? null) } };
+      if (n !== null && n.kind === "build_slot_wait") return { ...activity, notice: { kind: n.kind, reason: buildWaitSentence(n.reason, n.holder ?? null, n.autoStart !== false) } };
       if (n !== null && (n.kind === "no_file_list" || n.kind === "respec_failed")) return { ...activity, notice: { kind: n.kind, reason: COPY[FILE_LIST_NOTICE_COPY_KEY[n.kind]] } };
       // The review stops of a cloud-verified item do the same (D#6 R5b-2b-i).
       const key = (Object.values(REVIEW_STOP_COPY_KEY) as string[]).find((k) => n !== null && n.kind === "check_failed" && n.reason === k);

@@ -15,6 +15,7 @@ import { BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, BASE_SYNC_UNAVAILABLE_SENTEN
 import { PUBLIC_BRANCH_MOVED, PUBLIC_BRANCH_MOVED_SENTENCE, PUBLIC_HEAD_UNAVAILABLE, PUBLIC_HEAD_UNAVAILABLE_SENTENCE } from '../repos/planePushRecord.js';
 import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_FAILED_OUTSIDE_CHANGE_SENTENCE } from './checkFailure.js';
 import { UNVERIFIABLE_ESCALATION_CODE } from './reviewHold.js';
+import { buildStartsByItself } from './stageApprovalGate.js';
 import { readUnverifiable } from './unverifiable.js';
 import { BACK_TO_DISCUSSION_REF_PREFIX, REQUEST_CHANGES_NOTE_MAX, REQUEST_CHANGES_REF_PREFIX, closeOnGithub, operatorActionsFor, operatorVerdict, readOperatorFacts, type OperatorAction } from './operatorActions.js';
 
@@ -126,6 +127,12 @@ export interface ActivityNotice {
    * (null when it has none) and its stage. Null when no such item is found, and always null for the account wait.
    */
   holder?: { issue_number: number | null; stage: string } | null;
+  /**
+   * `build_slot_wait` only: whether the build starts by itself when the slot frees. True only when the worker's slot wake would start it: the build stage's gate in
+   * stageApprovalGate.ts, which the worker's own decision calls too.
+   * False: a person has to press the card's button once the slot is free, and the sentence says so.
+   */
+  autoStart?: boolean;
 }
 
 /**
@@ -501,7 +508,8 @@ async function readBuildWaitNotice(client: PoolClient, workItemId: string, stage
     )
   ).rows[0];
   if (!fact || !fact.fresh || fact.code === null || !BUILD_WAIT_NOTICE_CODES.includes(fact.code)) return null;
-  if (fact.code === 'waiting_for_build_slot_account' || repoId === null) return { kind: 'build_slot_wait', reason: fact.code, holder: null };
+  const autoStart = await buildStartsByItself(client, workItemId);
+  if (fact.code === 'waiting_for_build_slot_account' || repoId === null) return { kind: 'build_slot_wait', reason: fact.code, holder: null, autoStart };
   const holder = (
     await client.query<{ gh_number: string | null; stage: string }>(
       `SELECT h.gh_number, h.stage FROM work_items h
@@ -511,7 +519,7 @@ async function readBuildWaitNotice(client: PoolClient, workItemId: string, stage
       [workItemId, repoId, [...BUILD_SLOT_HOLDING_STAGES]],
     )
   ).rows[0];
-  return { kind: 'build_slot_wait', reason: fact.code, holder: holder ? { issue_number: holder.gh_number === null ? null : Number(holder.gh_number), stage: holder.stage } : null };
+  return { kind: 'build_slot_wait', reason: fact.code, holder: holder ? { issue_number: holder.gh_number === null ? null : Number(holder.gh_number), stage: holder.stage } : null, autoStart };
 }
 
 /**
