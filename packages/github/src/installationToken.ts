@@ -224,7 +224,7 @@ export class InstallationTokenCache {
  * permission set no other purpose may ask for (see MERGE_GATE_PERMISSIONS). It exists so the check-run, status and
  * branch-protection reads, and the commit-status write, are NOT in the allowlist of every other purpose.
  */
-export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push", "plane_merge", "plane_publish_read", "branch_delete", "branch_sync", "pairing_read", "receipt_block", "retraction"] as const;
+export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push", "plane_merge", "plane_publish_read", "branch_delete", "branch_sync", "pairing_read", "receipt_block", "retraction", "revert_pr"] as const;
 export type MintPurpose = (typeof MINT_PURPOSES)[number];
 
 /**
@@ -286,6 +286,25 @@ export const BRANCH_SYNC_PERMISSIONS: Readonly<Record<string, "read" | "write">>
  * One repository.
  */
 export const RECEIPT_BLOCK_PERMISSIONS: Readonly<Record<string, "read" | "write">> = Object.freeze({ metadata: "read", checks: "read", pull_requests: "write" });
+
+/**
+ * D#7 DP7-2w: the only permissions a `revert_pr` token ever asks for: `contents: write` (the revert's new branch and commit) and `pull_requests: write`
+ * (the revert's pull request), of ONE repository. The purpose accepts exactly this set (anything else is `purpose_not_allowed`) and no other purpose may use the
+ * role name `revert_pr`. What narrows the token further is the client built on it (`installationHttp.ts` kind `revert_pr`: one merged pull request, one mutation).
+ * Minted fresh and revoked by the client's `close()`.
+ */
+export const REVERT_PR_PERMISSIONS: Readonly<Record<string, "write">> = Object.freeze({ contents: "write", pull_requests: "write" });
+
+/** D#7 DP7-2w: a `revert_pr` mint must cover exactly the one repository, hold `contents: write` and `pull_requests: write`, and nothing else but `metadata: read`. */
+export function assertRevertPrToken(minted: Pick<MintedAccessToken, "permissions" | "repositories">, repo: string): void {
+  const perms = minted.permissions;
+  if (perms === undefined || perms === null || typeof perms !== "object" || Array.isArray(perms)) throw new InstallationTokenError("token_scope_mismatch");
+  const exact = Object.entries(perms).filter(([k]) => k !== "metadata");
+  const repos = minted.repositories;
+  const coversOnly = Array.isArray(repos) && repos.length === 1 && repos[0]!.toLowerCase() === repo.toLowerCase();
+  const exactOk = exact.length === 2 && exact.every(([k, v]) => REVERT_PR_PERMISSIONS[k] === v);
+  if ((perms.metadata !== undefined && perms.metadata !== "read") || !exactOk || !coversOnly) throw new InstallationTokenError("token_scope_mismatch");
+}
 
 /** D#7 DP6a: a `receipt_block` mint must cover exactly the one repository and hold `pull_requests: write` and `checks: read`, and nothing else but `metadata: read`. */
 export function assertReceiptBlockToken(minted: Pick<MintedAccessToken, "permissions" | "repositories">, repo: string): void {
@@ -477,6 +496,8 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
 
   // The purpose check runs before the cache and before any credential is
   // read, so a refused kind gets no token and no GitHub call.
+  // D#7 DP7-2w: the role name `revert_pr` belongs to the `revert_pr` purpose alone.
+  if (params.role === "revert_pr" && params.purpose !== "revert_pr") throw new InstallationTokenError("purpose_not_allowed");
   let scope: TokenScope | WideScope | MergeGateScope = params.scope;
   let appKind: string;
   let allowed: readonly string[] = ALLOWED_TOKEN_PERMISSIONS;
@@ -547,6 +568,16 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     allowed = Object.keys(scope.permissions);
     appKind = params.appKind;
     namespace = "retraction:";
+  } else if (params.purpose === "revert_pr") {
+    // D#7 DP7-2w: the write App, ONE repository and exactly the fixed set. A caller that asks for any other set is refused, not narrowed. Fresh every time.
+    assertWriteInstallation(params.appKind);
+    if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
+    const asked = Object.entries(params.scope.permissions as Record<string, unknown>);
+    if (asked.length !== 2 || !asked.every(([k, v]) => REVERT_PR_PERMISSIONS[k] === v)) throw new InstallationTokenError("purpose_not_allowed");
+    scope = { repositories: params.scope.repositories, permissions: REVERT_PR_PERMISSIONS };
+    allowed = Object.keys(REVERT_PR_PERMISSIONS);
+    appKind = params.appKind;
+    namespace = "revert_pr:";
   } else if (params.purpose === "pairing_read" && (params.appKind === "team" || params.appKind === "team_readonly")) {
     // D#598 PAIR-PICKER-API: one repository, metadata read. Minted per read, never cached.
     if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
@@ -582,7 +613,7 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     throw new InstallationTokenError("permission_not_allowed");
   }
 
-  const neverCached = params.purpose === "plane_push" || params.purpose === "plane_merge" || params.purpose === "plane_publish_read" || params.purpose === "branch_delete" || params.purpose === "branch_sync" || params.purpose === "pairing_read" || params.purpose === "retraction";
+  const neverCached = params.purpose === "plane_push" || params.purpose === "plane_merge" || params.purpose === "plane_publish_read" || params.purpose === "branch_delete" || params.purpose === "branch_sync" || params.purpose === "pairing_read" || params.purpose === "retraction" || params.purpose === "revert_pr";
   if (params.fresh === true && !neverCached) throw new InstallationTokenError("purpose_not_allowed");
   // D#598 C4: a plane_push token is never cached on any path, so it is fresh whatever the caller passes. Nothing is read from or written to the cache for it.
   // The same holds for a plane_publish_read token, which is minted and revoked for one proxied request.
@@ -662,6 +693,14 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     }
   }
   if (params.purpose === "receipt_block") assertReceiptBlockToken(minted, (scope as MergeGateScope).repositories[0]);
+  if (params.purpose === "revert_pr") {
+    try {
+      assertRevertPrToken(minted, (scope as MergeGateScope).repositories[0]);
+    } catch (error) {
+      await params.revoke?.(minted.token).catch(() => undefined);
+      throw error;
+    }
+  }
   if (fresh) {
     noteLiveInstallationToken(minted.token, expiresAtMs);
     params.onExpiry?.(expiresAtMs);
