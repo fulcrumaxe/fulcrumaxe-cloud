@@ -118,7 +118,7 @@ export interface ActivityStep {
  * (`specHasNoFileList`, `respecListUnreadable`), not the sentence: @fx/core has no dependency on that package, so the API route puts the words in.
  */
 export interface ActivityNotice {
-  kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed' | 'build_slot_wait' | 'resume_refused';
+  kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed' | 'build_slot_wait' | 'resume_refused' | 'spec_refused';
   reason: string;
   /**
    * `build_slot_wait` only (D#483): `reason` is the fixed wait code (`one_build_per_repo_until_d598`, `waiting_for_build_slot_repo` or `waiting_for_build_slot_account`;
@@ -145,6 +145,22 @@ export const FILE_LIST_NOTICE_COPY_KEY = Object.freeze({ no_file_list: 'specHasN
  * to approve (D#7 C22 A6 assigns the per-code sentences to DP8-f1), and the code is all this read carries until they are. Shown only while the item sits at the stage
  * the question parked it at, nothing of it is running, and no executor run is newer than the refusal.
  */
+/**
+ * The fixed codes the short-Spec step (packages/pipeline/src/advance/lightSpec.ts) refuses with; the worker records one as a `stopped` driver event. A
+ * `spec_refused` notice carries the code (never a sentence) and the Pipeline app owns the words; a test fails when lightSpec.ts can refuse with a code missing here,
+ * from the app's sentences or from the telemetry allowlist.
+ */
+export const LIGHT_SPEC_REFUSAL_CODES: readonly string[] = Object.freeze([
+  'invalid_spec_output',
+  'invalid_file_scope',
+  'invalid_planned_prs',
+  'planned_prs_too_large',
+  'planned_split_missing',
+  'planned_split_unflagged',
+  'spec_too_large',
+  'item_halted',
+  'publish_failed',
+]);
 export const RESUME_REFUSAL_STAGES: readonly string[] = Object.freeze(['in_progress', 'changes_requested']);
 
 export interface WorkItemActivity {
@@ -451,6 +467,25 @@ async function readResumeRefusal(client: PoolClient, workItemId: string): Promis
 }
 
 /**
+ * The newest short-Spec refusal code of an item still at Triaged: a `stopped` event recorded after its latest move into Triaged, with no run live. A code outside
+ * LIGHT_SPEC_REFUSAL_CODES reads as `refused` (the app then shows its generic sentence). Null when there is none.
+ */
+async function readSpecRefusal(client: PoolClient, workItemId: string): Promise<string | null> {
+  const row = (
+    await client.query<{ code: string | null }>(
+      `SELECT e.code FROM work_item_driver_events e
+        WHERE e.work_item_id = $1::uuid AND e.kind = 'stopped' AND e.code IS NOT NULL AND e.code <> 'not_feasible' AND e.dedupe_key LIKE 'light:%'
+          AND e.created_at > COALESCE((SELECT max(t.created_at) FROM work_item_transitions t WHERE t.work_item_id = $1::uuid AND t.to_stage = 'triaged'), '-infinity'::timestamptz)
+          AND NOT EXISTS (SELECT 1 FROM agent_runs r WHERE r.work_item_id = $1::uuid AND r.status NOT IN ('succeeded', 'failed', 'timed_out', 'killed_spend', 'refused_spend', 'cancelled'))
+        ORDER BY e.seq DESC LIMIT 1`,
+      [workItemId],
+    )
+  ).rows[0];
+  if (row?.code == null) return null;
+  return LIGHT_SPEC_REFUSAL_CODES.includes(row.code) ? row.code : 'refused';
+}
+
+/**
  * D#483: an item at Spec ready or Needs a person whose build is waiting for a slot. The worker leaves one waiting fact (`stage_waiting`, stage `build`; `build_waiting`
  * before D#483 S5-k1b) on every ask of the wait, so the item is waiting while its LATEST such fact names a slot reason and is younger than three polls. A halted item
  * is not waiting. For a repository wait the holder is the oldest other item that holds a slot on the repository. Fixed codes and numbers only.
@@ -610,6 +645,7 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
     // buildable counts only while no Spec was published after it (an edited issue approved again supersedes it).
     let notice: ActivityNotice | null = null;
     let resumeCode: string | null = null;
+    let refusalCode: string | null = null;
     const pm = (
       await client.query<{ reason: string | null }>(
         `SELECT left(envelope->>'reason', $2::int) AS reason FROM agent_runs
@@ -629,6 +665,8 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       notice = waitNotice;
     } else if (RESUME_REFUSAL_STAGES.includes(item.stage) && (resumeCode = await readResumeRefusal(client, workItemId)) !== null) {
       notice = { kind: 'resume_refused', reason: resumeCode };
+    } else if (item.stage === 'triaged' && (refusalCode = await readSpecRefusal(client, workItemId)) !== null) {
+      notice = { kind: 'spec_refused', reason: refusalCode };
     } else if (item.stage === 'needs_human') {
       // Build again was pressed and the driver stopped before starting anything (an open pull request, or GitHub could not be asked):
       // the newest such stop since the item reached Needs a person, by a fixed code.

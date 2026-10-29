@@ -556,3 +556,24 @@ test.describe("D#6 R4d-5b: Re-spec (mocked API)", () => {
     await expect(tid(page, "pl-op-respec")).toHaveAttribute("aria-disabled", "true");
   });
 });
+
+// D#483: a short Spec the pipeline refused (the item stays at Triaged) shows the app's fixed sentence for the code the server sends, never the code itself.
+test.describe("D#483: short-Spec refusal (mocked API)", () => {
+  const TAIL = " Nothing was saved. Edit the issue on GitHub and approve again, or close it.";
+  for (const [code, sentence] of [
+    ["planned_split_unflagged", "The Spec writer listed several pull requests without saying the work should be split, so no Spec was published." + TAIL],
+    ["from_the_future", "The Spec step stopped before publishing a Spec." + TAIL],
+  ] as const) {
+    test(`triaged / ${code}: the card shows the fixed sentence`, async ({ page }) => {
+      const activity = { ...activityFor(EMPTY, "triaged", ["close"]), notice: { kind: "spec_refused", reason: code } };
+      const { errors, browserDialogs, tt } = await setup(page, { stage: "triaged", kind: "feature", activity: { status: 200, json: activity } });
+      await openDetail(page);
+      await expect(tid(page, "pl-spec-refused")).toContainText(sentence);
+      await expect(tid(page, "pl-spec-refused")).not.toContainText(code);
+      await expectNoOverflow(page);
+      expect(browserDialogs).toEqual([]);
+      expect(await tt()).toEqual([]);
+      expect(errors).toEqual([]);
+    });
+  }
+});

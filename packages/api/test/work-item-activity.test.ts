@@ -27,7 +27,7 @@ interface Activity {
   runs: Array<{ id: string; role: string; status: string; usd: number | null; created_at: string; summary: string | null; lines: Array<{ at: string; text: string }> }>;
   runs_truncated: boolean;
   steps: Array<{ kind: string; state: string; code: string | null; result: string | null; reasons: string[]; at: string; finished_at: string | null }>;
-  notice: { kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed' | 'build_slot_wait' | 'resume_refused'; reason: string } | null;
+  notice: { kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed' | 'build_slot_wait' | 'resume_refused' | 'spec_refused'; reason: string } | null;
   actions: string[];
   close_on_github: boolean;
   request_changes_blocked: 'live' | 'rounds' | null;
@@ -359,6 +359,28 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       // a person pressed Build again (or a resume went through): an executor run newer than the refusal ends it
       await seedRun(accountId, itemId, { role: 'executor', status: 'succeeded' });
       expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+    });
+
+    it('spec_refused (D#483): a short Spec the pipeline refused shows its fixed CODE at Triaged (an unknown code reads as refused); not_feasible, a live run, another stage or a stop that is not the Spec step shows none', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const { itemId } = await seedItem(accountId, { stage: 'triaged' });
+      const stop = (code: string, key: string) =>
+        admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'stopped', $3, $4)`, [accountId, itemId, code, key]);
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+      await stop('planned_split_unflagged', 'light:a1');
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'spec_refused', reason: 'planned_split_unflagged' });
+      await stop('from_the_future', 'light:a2');
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'spec_refused', reason: 'refused' });
+      // a stop from another step is not the Spec step's
+      await stop('check_build_unavailable', 'other:a3');
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'spec_refused', reason: 'refused' });
+      await admin.query(`UPDATE work_items SET stage = 'spec_ready' WHERE id = $1`, [itemId]);
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+      await admin.query(`UPDATE work_items SET stage = 'triaged' WHERE id = $1`, [itemId]);
+      const live = await seedRun(accountId, itemId, { role: 'project-manager', status: 'running' });
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+      await admin.query(`UPDATE agent_runs SET status = 'succeeded' WHERE id = $1`, [live]);
+      expect((await noticeOf(accountId, userId, itemId))!.kind).toBe('spec_refused');
     });
 
     it('check_failed: at in_progress, the newest recorded stop of Check the build gives a fixed sentence; any other code, or a later stage, gives none', async () => {

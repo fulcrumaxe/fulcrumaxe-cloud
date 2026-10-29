@@ -269,6 +269,24 @@ export function publicChangeView(data) {
 }
 
 /**
+ * The short-Spec step's refusal codes, each with its fixed sentence (the notice kind `spec_refused` carries the code, never text). Nothing was published in any of
+ * these cases, and a person's way forward is the same: fix the request on GitHub and approve again, or close it. An unknown code reads as SPEC_REFUSED_GENERIC.
+ */
+export const SPEC_REFUSED_TAIL = " Nothing was saved. Edit the issue on GitHub and approve again, or close it.";
+export const SPEC_REFUSED_SENTENCES = Object.freeze({
+  invalid_spec_output: "The Spec writer's output was incomplete, so no Spec was published." + SPEC_REFUSED_TAIL,
+  invalid_file_scope: "The Spec writer didn't give a readable list of the files the change may touch, so no Spec was published." + SPEC_REFUSED_TAIL,
+  invalid_planned_prs: "The Spec writer's list of planned pull requests couldn't be read, so no Spec was published." + SPEC_REFUSED_TAIL,
+  planned_prs_too_large: "The Spec writer planned more pull requests than one Spec may hold, so no Spec was published." + SPEC_REFUSED_TAIL,
+  planned_split_missing: "The Spec writer said the work should be split into several pull requests but gave no list of them, so no Spec was published." + SPEC_REFUSED_TAIL,
+  planned_split_unflagged: "The Spec writer listed several pull requests without saying the work should be split, so no Spec was published." + SPEC_REFUSED_TAIL,
+  spec_too_large: "The Spec came out larger than a Spec may be, so it was not published." + SPEC_REFUSED_TAIL,
+  item_halted: "This item is halted, so no Spec was published. Approve it again when you want it to continue, or close it.",
+  publish_failed: "The Spec couldn't be saved just now, so it was not published." + SPEC_REFUSED_TAIL,
+});
+export const SPEC_REFUSED_GENERIC = "The Spec step stopped before publishing a Spec." + SPEC_REFUSED_TAIL;
+
+/**
  * The notice banner: why the pipeline stopped and wants a person. `reason` is model text, returned as plain text and drawn
  * as a text node or a <pre> only, never markup. Any other kind, or a malformed notice, draws nothing.
  */
@@ -280,6 +298,7 @@ export function noticeBanner(data) {
   if (n.kind === "needs_human") return { kind: "needs_human", title: "Needs a person. ", lead: "The build stopped without a pull request. The executor's own account: ", tail: "", reason: n.reason };
   // D#6 R4d-5b: the server sends the whole sentence (the runner protocol's copy); the card adds no words of its own around it.
   if (n.kind === "no_file_list" || n.kind === "respec_failed" || n.kind === "build_slot_wait") return { kind: n.kind, title: "", lead: "", tail: "", reason: n.reason };
+  if (n.kind === "spec_refused") return { kind: "spec_refused", title: "Stopped before building. ", lead: "", tail: "", reason: Object.hasOwn(SPEC_REFUSED_SENTENCES, n.reason) ? SPEC_REFUSED_SENTENCES[n.reason] : SPEC_REFUSED_GENERIC };
   return null;
 }
 
@@ -619,7 +638,7 @@ export function createInsightPanel(deps) {
     const needsHuman = n.kind === "needs_human";
     return h(
       "div",
-      { class: "pl-ins-notice", "data-testid": needsHuman ? "pl-needs-human" : n.kind === "check_failed" ? "pl-check-failed" : n.kind === "no_file_list" ? "pl-no-file-list" : n.kind === "respec_failed" ? "pl-respec-failed" : "pl-not-feasible", "data-kind": n.kind, role: "status" },
+      { class: "pl-ins-notice", "data-testid": needsHuman ? "pl-needs-human" : n.kind === "check_failed" ? "pl-check-failed" : n.kind === "no_file_list" ? "pl-no-file-list" : n.kind === "respec_failed" ? "pl-respec-failed" : n.kind === "spec_refused" ? "pl-spec-refused" : "pl-not-feasible", "data-kind": n.kind, role: "status" },
       h("strong", null, n.title),
       n.lead,
       needsHuman ? text(n.reason) : h("span", { "data-testid": "pl-notice-reason" }, n.reason),
