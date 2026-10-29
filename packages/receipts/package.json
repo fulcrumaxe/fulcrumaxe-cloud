@@ -15,7 +15,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@fx/decisions": "workspace:*"
+    "@fx/db": "workspace:*",
+    "@fx/decisions": "workspace:*",
+    "@fx/spend": "workspace:*"
   },
   "devDependencies": {
     "@fx/github": "workspace:*",

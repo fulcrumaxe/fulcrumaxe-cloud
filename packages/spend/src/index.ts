@@ -16,3 +16,4 @@ export * from './usage.js';
 export * from './computeNotice.js';
 export * from './gatewayMeter.js';
 export * from './envelopeSettings.js';
+export * from './workItemSpend.js';
