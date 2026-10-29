@@ -592,6 +592,7 @@ const FAILURE_TEXT = {
   agent_start_timeout: "The agent did not start in time.",
   clone_failed: "The repository could not be cloned into the sandbox.",
   clone_too_large: "The repository is too large to clone.",
+  empty_agent_output: "The agent finished without giving an answer.",
   model_key_broken: "The model key was refused or is no longer valid.",
   sandbox_stopped: "The sandbox was stopped before the run finished.",
   runner_lost: "The runner running this was lost.",

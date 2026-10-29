@@ -283,7 +283,14 @@ export const SPEC_REFUSED_SENTENCES = Object.freeze({
   spec_too_large: "The Spec came out larger than a Spec may be, so it was not published." + SPEC_REFUSED_TAIL,
   item_halted: "This item is halted, so no Spec was published. Approve it again when you want it to continue, or close it.",
   publish_failed: "The Spec couldn't be saved just now, so it was not published." + SPEC_REFUSED_TAIL,
+  // The Spec writer's own run failed before it could answer. Approving again starts a fresh run, so nothing needs editing first.
+  empty_agent_output: "The Spec writer finished without giving an answer, so no Spec was published. Approve again to try once more, or close it.",
+  clone_failed: "The Spec writer couldn't get a copy of the repository, so no Spec was published. Approve again to try once more, or close it.",
 });
+/** A request the pipeline retired in favour of its tracked item: the one fixed sentence, and the label of the link to that item. */
+export const SUPERSEDED_SENTENCE = "This request moved to its tracked item, which carries the work from here.";
+export const SUPERSEDED_LINK_LABEL = "Open the tracked item";
+const ITEM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const SPEC_REFUSED_GENERIC = "The Spec step stopped before publishing a Spec." + SPEC_REFUSED_TAIL;
 
 /**
@@ -298,6 +305,8 @@ export function noticeBanner(data) {
   if (n.kind === "needs_human") return { kind: "needs_human", title: "Needs a person. ", lead: "The build stopped without a pull request. The executor's own account: ", tail: "", reason: n.reason };
   // D#6 R4d-5b: the server sends the whole sentence (the runner protocol's copy); the card adds no words of its own around it.
   if (n.kind === "no_file_list" || n.kind === "respec_failed" || n.kind === "build_slot_wait") return { kind: n.kind, title: "", lead: "", tail: "", reason: n.reason };
+  // `reason` is the tracked item's id (same account, checked by the server) or empty: the link is drawn only for a well-formed id, and the sentence never carries it.
+  if (n.kind === "superseded") return { kind: "superseded", title: "", lead: "", tail: "", reason: SUPERSEDED_SENTENCE, rootId: ITEM_ID.test(n.reason) ? n.reason.toLowerCase() : null };
   if (n.kind === "spec_refused") return { kind: "spec_refused", title: "Stopped before building. ", lead: "", tail: "", reason: Object.hasOwn(SPEC_REFUSED_SENTENCES, n.reason) ? SPEC_REFUSED_SENTENCES[n.reason] : SPEC_REFUSED_GENERIC };
   return null;
 }
@@ -638,11 +647,12 @@ export function createInsightPanel(deps) {
     const needsHuman = n.kind === "needs_human";
     return h(
       "div",
-      { class: "pl-ins-notice", "data-testid": needsHuman ? "pl-needs-human" : n.kind === "check_failed" ? "pl-check-failed" : n.kind === "no_file_list" ? "pl-no-file-list" : n.kind === "respec_failed" ? "pl-respec-failed" : n.kind === "spec_refused" ? "pl-spec-refused" : "pl-not-feasible", "data-kind": n.kind, role: "status" },
+      { class: "pl-ins-notice", "data-testid": needsHuman ? "pl-needs-human" : n.kind === "check_failed" ? "pl-check-failed" : n.kind === "no_file_list" ? "pl-no-file-list" : n.kind === "respec_failed" ? "pl-respec-failed" : n.kind === "spec_refused" ? "pl-spec-refused" : n.kind === "superseded" ? "pl-superseded" : "pl-not-feasible", "data-kind": n.kind, role: "status" },
       h("strong", null, n.title),
       n.lead,
       needsHuman ? text(n.reason) : h("span", { "data-testid": "pl-notice-reason" }, n.reason),
-      n.tail
+      n.tail,
+      n.rootId && deps.onOpenItem ? [" ", h("button", { type: "button", class: "pl-act", "data-testid": "pl-superseded-link", onClick: () => deps.onOpenItem(n.rootId) }, SUPERSEDED_LINK_LABEL)] : null
     );
   }
 

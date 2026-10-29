@@ -90,6 +90,9 @@ const SHA_RE = /^[0-9a-f]{40}$/;
  * Shallow (depth 1), single branch (the remote's default branch, since no branch is named), no tags, no submodules,
  * symlinks written as plain files (so a link in the repository cannot point the agent outside it), never a prompt.
  */
+/** The clone script's exit code for "the clone finished but holds no commit". Any non-zero code other than too-large reads as `clone_failed`. */
+export const CLONE_EXIT_EMPTY = 89;
+
 export const CLONE_SCRIPT = [
   // A persistent sandbox (the executor's, named for the issue) keeps the checkout of an earlier attempt. "Build again" is a
   // fresh start in that same sandbox, and a clone refuses a directory that is not empty, so a leftover CHECKOUT (a directory
@@ -105,6 +108,8 @@ export const CLONE_SCRIPT = [
   'wait "$pid" || exit $?',
   'kb=$(du -sk "$2" 2>/dev/null | cut -f1)',
   `if [ "\${kb:-0}" -gt "$3" ]; then rm -rf "$2"; exit ${CLONE_EXIT_TOO_LARGE}; fi`,
+  // A clone that exits 0 can still hold no commit (an empty advertisement, an empty repository). That is a failed clone, never a run on nothing.
+  `git -C "$2" rev-parse --verify --quiet HEAD >/dev/null || { rm -rf "$2"; exit ${CLONE_EXIT_EMPTY}; }`,
 ].join("\n");
 
 /** The script's exit code for "the checkout is not the pinned commit". */

@@ -119,7 +119,8 @@ export interface ActivityStep {
  * (`specHasNoFileList`, `respecListUnreadable`), not the sentence: @fx/core has no dependency on that package, so the API route puts the words in.
  */
 export interface ActivityNotice {
-  kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed' | 'build_slot_wait' | 'resume_refused' | 'spec_refused';
+  kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed' | 'build_slot_wait' | 'resume_refused' | 'spec_refused' | 'superseded';
+  /** `superseded` only: the id of the tracked item this request moved to, or '' when that item is not one of this account's (the card then shows the sentence with no link). */
   reason: string;
   /**
    * `build_slot_wait` only (D#483): `reason` is the fixed wait code (`one_build_per_repo_until_d598`, `waiting_for_build_slot_repo` or `waiting_for_build_slot_account`;
@@ -156,6 +157,7 @@ export const FILE_LIST_NOTICE_COPY_KEY = Object.freeze({ no_file_list: 'specHasN
  * The fixed codes the short-Spec step (packages/pipeline/src/advance/lightSpec.ts) refuses with; the worker records one as a `stopped` driver event. A
  * `spec_refused` notice carries the code (never a sentence) and the Pipeline app owns the words; a test fails when lightSpec.ts can refuse with a code missing here,
  * from the app's sentences or from the telemetry allowlist.
+ * `empty_agent_output` and `clone_failed` are not Spec-step refusals: they are the run layer's failure codes for the Spec writer's own run (see LIGHT_SPEC_RUN_FAILURE_CODES).
  */
 export const LIGHT_SPEC_REFUSAL_CODES: readonly string[] = Object.freeze([
   'invalid_spec_output',
@@ -167,7 +169,11 @@ export const LIGHT_SPEC_REFUSAL_CODES: readonly string[] = Object.freeze([
   'spec_too_large',
   'item_halted',
   'publish_failed',
+  'empty_agent_output',
+  'clone_failed',
 ]);
+/** The run layer's failure codes that end the Spec writer's own run before any Spec step can refuse; `readSpecRefusal` reads them from the run's failed move. */
+export const LIGHT_SPEC_RUN_FAILURE_CODES: readonly string[] = Object.freeze(['empty_agent_output', 'clone_failed']);
 export const RESUME_REFUSAL_STAGES: readonly string[] = Object.freeze(['in_progress', 'changes_requested']);
 
 export interface WorkItemActivity {
@@ -480,16 +486,47 @@ async function readResumeRefusal(client: PoolClient, workItemId: string): Promis
 async function readSpecRefusal(client: PoolClient, workItemId: string): Promise<string | null> {
   const row = (
     await client.query<{ code: string | null }>(
-      `SELECT e.code FROM work_item_driver_events e
-        WHERE e.work_item_id = $1::uuid AND e.kind = 'stopped' AND e.code IS NOT NULL AND e.code <> 'not_feasible' AND e.dedupe_key LIKE 'light:%'
-          AND e.created_at > COALESCE((SELECT max(t.created_at) FROM work_item_transitions t WHERE t.work_item_id = $1::uuid AND t.to_stage = 'triaged'), '-infinity'::timestamptz)
+      `SELECT x.code FROM (
+          SELECT e.code, e.created_at FROM work_item_driver_events e
+           WHERE e.work_item_id = $1::uuid AND e.kind = 'stopped' AND e.code IS NOT NULL AND e.code <> 'not_feasible' AND e.dedupe_key LIKE 'light:%'
+          UNION ALL
+          -- The Spec writer's run itself failed with a fixed code of the run layer (no output, or the repository could not be copied): no step wrote a stop for it.
+          SELECT v.payload->>'failureReason' AS code, v.created_at FROM agent_runs a
+            JOIN run_events v ON v.account_id = a.account_id AND v.run_id = a.id AND v.kind = 'run.status_changed' AND v.payload->>'to' = 'failed'
+           WHERE a.work_item_id = $1::uuid AND a.role = 'project-manager' AND a.status = 'failed' AND v.payload->>'failureReason' = ANY($2::text[])
+        ) x
+        WHERE x.created_at > COALESCE((SELECT max(t.created_at) FROM work_item_transitions t WHERE t.work_item_id = $1::uuid AND t.to_stage = 'triaged'), '-infinity'::timestamptz)
           AND NOT EXISTS (SELECT 1 FROM agent_runs r WHERE r.work_item_id = $1::uuid AND r.status NOT IN ('succeeded', 'failed', 'timed_out', 'killed_spend', 'refused_spend', 'cancelled'))
-        ORDER BY e.seq DESC LIMIT 1`,
-      [workItemId],
+        ORDER BY x.created_at DESC LIMIT 1`,
+      [workItemId, [...LIGHT_SPEC_RUN_FAILURE_CODES]],
     )
   ).rows[0];
   if (row?.code == null) return null;
   return LIGHT_SPEC_REFUSAL_CODES.includes(row.code) ? row.code : 'refused';
+}
+
+/**
+ * A request the pipeline retired in favour of its tracked item (a closed move sourced `superseded:<root>`). Returns the root's id when it is a work item of the
+ * SAME account as this one, '' when the record names none that is (a malformed id, or one of another account: never linked), and null when the item was not retired so.
+ */
+async function readSupersededRoot(client: PoolClient, workItemId: string): Promise<string | null> {
+  const t = (
+    await client.query<{ root: string }>(
+      `SELECT substr(source_ref, length('superseded:') + 1) AS root FROM work_item_transitions
+        WHERE work_item_id = $1::uuid AND to_stage = 'closed' AND starts_with(source_ref, 'superseded:')
+        ORDER BY created_at DESC, id DESC LIMIT 1`,
+      [workItemId],
+    )
+  ).rows[0];
+  if (!t) return null;
+  if (!UUID_RE.test(t.root)) return '';
+  const root = (
+    await client.query<{ id: string }>(
+      `SELECT r.id FROM work_items r JOIN work_items me ON me.account_id = r.account_id WHERE r.id = $1::uuid AND me.id = $2::uuid AND r.id <> me.id`,
+      [t.root.toLowerCase(), workItemId],
+    )
+  ).rows[0];
+  return root?.id ?? '';
 }
 
 /**
@@ -665,7 +702,10 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
     ).rows[0];
     const fileListNotice = await readFileListNotice(client, workItemId, item.stage, specRow);
     const waitNotice = pm || fileListNotice ? null : await readBuildWaitNotice(client, workItemId, item.stage, item.halted, item.repo_id);
-    if (pm) {
+    const supersededRoot = item.stage === 'closed' ? await readSupersededRoot(client, workItemId) : null;
+    if (supersededRoot !== null) {
+      notice = { kind: 'superseded', reason: supersededRoot };
+    } else if (pm) {
       notice = { kind: 'not_feasible', reason: safeModelText(pm.reason, ACTIVITY_LIMITS.maxNoticeChars) };
     } else if (fileListNotice) {
       notice = fileListNotice;

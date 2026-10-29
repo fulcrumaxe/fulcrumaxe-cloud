@@ -46,7 +46,7 @@ describe("SandboxTarget", () => {
 
   it("resumes the hook exactly once, with dispatch's own hookToken and a succeeded report", async () => {
     const harness = createSandboxTargetHarness(db.runWriterPool, [
-      { runId: "ignored", role: "code-reviewer", seq: 1, type: "result", ts: new Date().toISOString(), text: "ok" },
+      { runId: "ignored", role: "code-reviewer", seq: 1, type: "result", ts: new Date().toISOString(), text: "ok", agentOutput: { verdict: "pass" } },
     ]);
     const target = new SandboxTarget(harness.deps);
     const run = await seedRun();
@@ -62,6 +62,21 @@ describe("SandboxTarget", () => {
     expect(harness.hooks.calls).toHaveLength(1);
     expect(harness.hooks.calls[0]!.hookToken).toBe(hookToken);
     expect(harness.hooks.calls[0]!.report.status).toBe("succeeded");
+  });
+
+  it("a run whose last event carries no agent output is reported failed with empty_agent_output", async () => {
+    const harness = createSandboxTargetHarness(db.runWriterPool, [
+      { runId: "ignored", role: "code-reviewer", seq: 1, type: "result", ts: new Date().toISOString(), text: "ok" },
+    ]);
+    const target = new SandboxTarget(harness.deps);
+    const run = await seedRun();
+
+    await target.admit(run, db.admin);
+    await target.dispatch(run);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(harness.hooks.calls).toHaveLength(1);
+    expect(harness.hooks.calls[0]!.report).toMatchObject({ status: "failed", failureReason: "empty_agent_output" });
   });
 
   it("resumes the hook exactly once with a failed report when the sandbox produces no terminal event", async () => {

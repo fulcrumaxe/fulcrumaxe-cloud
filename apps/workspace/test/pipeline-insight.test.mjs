@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  FLAG_WORDS, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, SPEC_REFUSED_SENTENCES, SPEC_REFUSED_GENERIC, phaseOf, pullUrl, readyBanner, mergeBlockSentence, blockingSentence, BLOCKING_SENTENCES, PUBLIC_REFUSED_SENTENCE, REVIEW_BLOCK_SENTENCE, UNKNOWN_BLOCK_SENTENCE, reasonWord, roleWord, runView, statusWord, stepView, usdText,
+  FLAG_WORDS, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, SPEC_REFUSED_SENTENCES, SPEC_REFUSED_GENERIC, SUPERSEDED_SENTENCE, SUPERSEDED_LINK_LABEL, phaseOf, pullUrl, readyBanner, mergeBlockSentence, blockingSentence, BLOCKING_SENTENCES, PUBLIC_REFUSED_SENTENCE, REVIEW_BLOCK_SENTENCE, UNKNOWN_BLOCK_SENTENCE, reasonWord, roleWord, runView, statusWord, stepView, usdText,
 } from "../apps/pipeline/pipeline-insight.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
@@ -1015,6 +1015,8 @@ describe("the short-Spec refusal notice (spec_refused)", () => {
     spec_too_large: "The Spec came out larger than a Spec may be, so it was not published." + TAIL,
     item_halted: "This item is halted, so no Spec was published. Approve it again when you want it to continue, or close it.",
     publish_failed: "The Spec couldn't be saved just now, so it was not published." + TAIL,
+    empty_agent_output: "The Spec writer finished without giving an answer, so no Spec was published. Approve again to try once more, or close it.",
+    clone_failed: "The Spec writer couldn't get a copy of the repository, so no Spec was published. Approve again to try once more, or close it.",
   };
   for (const [code, sentence] of Object.entries(SENTENCES_BY_CODE)) {
     it(`${code} reads as its one fixed sentence`, () => {
@@ -1025,5 +1027,50 @@ describe("the short-Spec refusal notice (spec_refused)", () => {
     expect(Object.keys(SPEC_REFUSED_SENTENCES).sort()).toEqual(Object.keys(SENTENCES_BY_CODE).sort());
     for (const code of ["refused", "from_the_future", "constructor", "__proto__", "<b>x</b>"]) expect(banner(code).reason, code).toBe(SPEC_REFUSED_GENERIC);
     expect(SPEC_REFUSED_GENERIC).toBe("The Spec step stopped before publishing a Spec." + TAIL);
+  });
+});
+
+describe("a request retired for its tracked item (superseded)", () => {
+  const ROOT = "3a1f9a52-7a43-4c1e-9b0e-0c5d9a2b7e11";
+  const banner = (reason) => noticeBanner({ notice: { kind: "superseded", reason } });
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal("Node", FakeNode);
+    vi.stubGlobal("document", { hidden: false, activeElement: null, createElement: (t) => new FakeEl(t), createTextNode: (text) => ({ text }) });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+  async function show(reason, onOpenItem) {
+    const data = { ...structuredClone(OK), stage: "closed", notice: { kind: "superseded", reason } };
+    const panel = createInsightPanel({ call: vi.fn(async () => structuredClone(data)), setInterval: () => 1, clearInterval: () => {}, onOpenItem });
+    panel.start("item-1");
+    await flush();
+    return panel;
+  }
+
+  it("reads as its one fixed sentence, never the id, and carries the root id only when it is well formed", () => {
+    expect(banner(ROOT)).toEqual({ kind: "superseded", title: "", lead: "", tail: "", reason: SUPERSEDED_SENTENCE, rootId: ROOT });
+    expect(SUPERSEDED_SENTENCE).toBe("This request moved to its tracked item, which carries the work from here.");
+    for (const bad of ["", "not-an-id", "<b>x</b>", ROOT + "x", "__proto__"]) expect(banner(bad), bad).toMatchObject({ reason: SUPERSEDED_SENTENCE, rootId: null });
+  });
+
+  it("the card shows the sentence and a link that opens the root item", async () => {
+    const open = vi.fn();
+    const panel = await show(ROOT, open);
+    expect(byId(panel.el, "pl-superseded")).toHaveLength(1);
+    expect(byId(panel.el, "pl-notice-reason")[0].textContent).toBe(SUPERSEDED_SENTENCE);
+    const link = byId(panel.el, "pl-superseded-link");
+    expect(link).toHaveLength(1);
+    expect(link[0].textContent).toBe(SUPERSEDED_LINK_LABEL);
+    link[0].on.click();
+    expect(open).toHaveBeenCalledWith(ROOT);
+  });
+
+  it("with no root the sentence shows and no link is drawn (an item of another account is never linked)", async () => {
+    const panel = await show("", vi.fn());
+    expect(byId(panel.el, "pl-notice-reason")[0].textContent).toBe(SUPERSEDED_SENTENCE);
+    expect(byId(panel.el, "pl-superseded-link")).toHaveLength(0);
   });
 });

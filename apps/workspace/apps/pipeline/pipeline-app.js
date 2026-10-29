@@ -54,6 +54,7 @@ function mountApp(contentEl, launchArg) {
   // What the pipeline is doing for the open item (pipeline-insight.js). Every answer also feeds the action buttons.
   const insight = createInsightPanel({
     call: api,
+    onOpenItem: (id) => select(id),
     onData: (data, id) => {
       if (id === openId) {
         activity = data;
