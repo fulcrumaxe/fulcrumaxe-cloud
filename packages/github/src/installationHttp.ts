@@ -1,6 +1,7 @@
 import type { AppCredentialsSource } from "./appCredentials.js";
+import { ADD_DISCUSSION_COMMENT_DOCUMENT, type RetractionSurface } from "./retraction.js";
 import { GH_OWNER_LOGIN_RE, GH_REPO_NAME_RE } from "./eventMapper.js";
-import { getInstallationToken, RECEIPT_BLOCK_PERMISSIONS, type AccessTokenRequester, type InstallationTokenCache } from "./installationToken.js";
+import { getInstallationToken, RECEIPT_BLOCK_PERMISSIONS, RETRACTION_PERMISSIONS, type AccessTokenRequester, type InstallationTokenCache } from "./installationToken.js";
 
 /**
  * D#483 P3: an HTTP client for ONE repository's GitHub API, authenticated as the write App's installation, for the stage
@@ -38,6 +39,11 @@ import { getInstallationToken, RECEIPT_BLOCK_PERMISSIONS, type AccessTokenReques
  *                  body), `PATCH` it with a JSON body whose only key is `body` (a string), and `GET /commits/<sha>/check-runs`. Every other method, path and body key is
  *                  refused before a request is sent.
  *
+ *   - `retraction` D#7 DP7b-w: a correction on the ONE surface a deprecation notice was recorded on. Token: the `retraction` purpose (one key, by surface: `contents: write` for a
+ *                  release, `issues: write` for a comment, `discussions: write` for a Discussion; one repository, minted fresh and revoked by `close()`). The client is pinned to
+ *                  the surface it was opened for and allows exactly: a release, `GET` it and `PATCH` it once with a body whose only key is `body`; a comment, `POST /issues/<n>/comments`
+ *                  once with a body whose only key is `body`; a Discussion, `POST /graphql` once with exactly the pinned discussion-comment mutation document and the pinned node id.
+ *
  * What it keeps, so a bug in a caller cannot widen it:
  *   - the host is api.github.com and the path must start with `/repos/<owner>/<name>/` for the repository the client was
  *     opened for: any other path throws before a token is used;
@@ -47,7 +53,7 @@ import { getInstallationToken, RECEIPT_BLOCK_PERMISSIONS, type AccessTokenReques
  *     GitHub's own `message` cut short. It never hears a token, a header or a request body.
  */
 
-export type InstallationHttpKind = "read" | "merge_gate" | "runner_pr" | "repo_map" | "branch_delete" | "branch_sync" | "receipt_block";
+export type InstallationHttpKind = "read" | "merge_gate" | "runner_pr" | "repo_map" | "branch_delete" | "branch_sync" | "receipt_block" | "retraction";
 
 export interface InstallationHttpRequest {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -97,6 +103,8 @@ export interface InstallationHttpTarget {
   branch?: string;
   /** `branch_sync` and `receipt_block` only: the one pull request the client may read (and, for `receipt_block`, update). Required for those kinds, refused for every other. */
   prNumber?: number;
+  /** `retraction` only: the one surface the client may write to. Required for that kind, refused for every other. */
+  retraction?: RetractionSurface;
 }
 
 /**
@@ -112,6 +120,13 @@ const GRAPHQL_PATH = "/graphql";
 const PATH_RE = /^\/repos\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.~%:/@+=-]*$/;
 /** A branch ref read for `branch_sync`: `git/ref/heads/<name>`, the name made of the characters a branch the platform follows can hold. */
 const BRANCH_REF_PATH = /^git\/ref\/heads\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+){0,5}$/;
+/** The longest comment or release body a `retraction` client sends (GitHub's own cap is 65536). */
+export const RETRACTION_BODY_MAX = 20_000;
+const NODE_ID_RE = /^[A-Za-z0-9_=-]{1,200}$/;
+const validRetractionSurface = (s: RetractionSurface): boolean =>
+  s.kind === "release" ? Number.isSafeInteger(s.releaseId) && s.releaseId >= 1 : s.kind === "comment" ? Number.isSafeInteger(s.number) && s.number >= 1 : s.kind === "discussion" && NODE_ID_RE.test(s.discussionId);
+/** Kinds whose log line never carries GitHub's own `message` (method, masked path and status only). */
+const UNLOGGED_MESSAGE_KINDS: ReadonlySet<InstallationHttpKind> = new Set(["retraction"]);
 const MESSAGE_RE = /[^\x20-\x7e]/g;
 
 export class InstallationHttpError extends Error {
@@ -160,18 +175,19 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
     if (!GH_OWNER_LOGIN_RE.test(target.owner) || !GH_REPO_NAME_RE.test(target.name)) throw new InstallationHttpError("invalid_coordinates");
     if ((kind === "branch_sync" || kind === "receipt_block") !== (target.prNumber !== undefined) || (target.prNumber !== undefined && !(Number.isSafeInteger(target.prNumber) && target.prNumber >= 1))) throw new InstallationHttpError("invalid_coordinates");
     if ((kind === "branch_delete" || kind === "branch_sync") !== (target.branch !== undefined) || (target.branch !== undefined && !DELETABLE_BRANCH.test(target.branch))) throw new InstallationHttpError("invalid_coordinates");
+    if ((kind === "retraction") !== (target.retraction !== undefined) || (target.retraction !== undefined && !validRetractionSurface(target.retraction))) throw new InstallationHttpError("invalid_coordinates");
     const installation = await deps.resolveInstallation(target.repoId);
     if (!installation) throw new InstallationHttpError("no_installation");
     const token = await getInstallationToken({
       installationId: installation.installationId,
       appKind: installation.appKind,
-      purpose: kind === "merge_gate" ? "merge_gate" : kind === "branch_delete" ? "branch_delete" : kind === "branch_sync" ? "branch_sync" : kind === "receipt_block" ? "receipt_block" : "run",
-      role: kind === "merge_gate" ? "merge_gate" : kind === "branch_delete" ? "branch_delete" : kind === "branch_sync" ? "branch_sync" : kind === "receipt_block" ? "receipt_block" : kind === "runner_pr" ? "runner_pr" : kind === "repo_map" ? "repo_map" : "pr_read",
-      scope: { repositories: [target.name], permissions: kind === "merge_gate" ? {} : kind === "receipt_block" ? RECEIPT_BLOCK_PERMISSIONS : kind === "runner_pr" ? RUNNER_PR_PERMISSIONS : kind === "repo_map" ? REPO_MAP_PERMISSIONS : { metadata: "read", pull_requests: "read" } },
+      purpose: kind === "retraction" ? "retraction" : kind === "merge_gate" ? "merge_gate" : kind === "branch_delete" ? "branch_delete" : kind === "branch_sync" ? "branch_sync" : kind === "receipt_block" ? "receipt_block" : "run",
+      role: kind === "retraction" ? "retraction" : kind === "merge_gate" ? "merge_gate" : kind === "branch_delete" ? "branch_delete" : kind === "branch_sync" ? "branch_sync" : kind === "receipt_block" ? "receipt_block" : kind === "runner_pr" ? "runner_pr" : kind === "repo_map" ? "repo_map" : "pr_read",
+      scope: { repositories: [target.name], permissions: kind === "retraction" ? RETRACTION_PERMISSIONS[target.retraction!.kind] : kind === "merge_gate" ? {} : kind === "receipt_block" ? RECEIPT_BLOCK_PERMISSIONS : kind === "runner_pr" ? RUNNER_PR_PERMISSIONS : kind === "repo_map" ? REPO_MAP_PERMISSIONS : { metadata: "read", pull_requests: "read" } },
       appCredentials: deps.appCredentials,
       requester: deps.requester,
       cache: deps.cache,
-      ...(kind === "branch_delete" || kind === "branch_sync" ? { revoke: revokeInstallationToken } : {}),
+      ...(kind === "branch_delete" || kind === "branch_sync" || kind === "retraction" ? { revoke: revokeInstallationToken } : {}),
     });
     const prefix = `/repos/${target.owner}/${target.name}/`;
     // The repository itself (`GET /repos/<owner>/<name>`, no trailing slash) is also allowed, for GET only: D#6 R3b reads its `private` flag.
@@ -180,10 +196,10 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
 
     return {
       async close() {
-        if (kind === "branch_delete" || kind === "branch_sync") await revokeInstallationToken(token);
+        if (kind === "branch_delete" || kind === "branch_sync" || kind === "retraction") await revokeInstallationToken(token);
       },
       async request(req) {
-        const graphql = (kind === "runner_pr" || target.allowGraphql === true) && req.method === "POST" && req.path === GRAPHQL_PATH;
+        const graphql = (kind === "runner_pr" || kind === "retraction" || target.allowGraphql === true) && req.method === "POST" && req.path === GRAPHQL_PATH;
         const allowed = graphql || (req.method === "GET" && req.path === repoRoot) || (req.path.startsWith(prefix) && PATH_RE.test(req.path));
         if (!allowed || req.path.includes("..")) throw new InstallationHttpError("path_refused");
         // `runner_pr` holds contents:read, so it gets its own EXACT list rather than the prefix rule above (CWE-284): a caller that
@@ -219,9 +235,27 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
           const runs = req.method === "GET" && b === undefined && req.path.startsWith(`${prefix}commits/`) && /^[0-9a-f]{40}\/check-runs$/.test(req.path.slice(prefix.length + "commits/".length));
           if (!readPr && !writePr && !runs) throw new InstallationHttpError("path_refused");
         }
+        // `retraction` holds a write on ONE surface, so it gets an exact list for that surface alone (see the header): everything else, and a second write, is refused.
+        if (kind === "retraction") {
+          const s = target.retraction!;
+          const b = req.body as Record<string, unknown> | undefined;
+          const obj = typeof b === "object" && b !== null && !Array.isArray(b);
+          const bodyOnly = obj && Object.keys(b).join() === "body" && typeof b["body"] === "string" && b["body"].length <= RETRACTION_BODY_MAX;
+          const v = obj ? (b["variables"] as Record<string, unknown> | null | undefined) : undefined;
+          const read = s.kind === "release" && req.method === "GET" && req.path === `${prefix}releases/${s.releaseId}` && req.query === undefined && b === undefined;
+          const write =
+            req.query === undefined &&
+            ((s.kind === "release" && req.method === "PATCH" && req.path === `${prefix}releases/${s.releaseId}` && bodyOnly) ||
+              (s.kind === "comment" && req.method === "POST" && req.path === `${prefix}issues/${s.number}/comments` && bodyOnly) ||
+              (s.kind === "discussion" && req.method === "POST" && req.path === GRAPHQL_PATH && obj && Object.keys(b).sort().join() === "query,variables" && b["query"] === ADD_DISCUSSION_COMMENT_DOCUMENT &&
+                typeof v === "object" && v !== null && Object.keys(v).sort().join() === "body,discussionId" && v["discussionId"] === s.discussionId && typeof v["body"] === "string" && v["body"].length <= RETRACTION_BODY_MAX));
+          if (!read && !write) throw new InstallationHttpError("path_refused");
+          if (write && deleted) throw new InstallationHttpError("already_used");
+          if (write) deleted = true;
+        }
         if (kind === "read" && req.method !== "GET" && !graphql) throw new InstallationHttpError("method_refused");
         // PATCH is for `runner_pr` alone (closing a pull request); the other kinds never needed it and never get it.
-        if (req.method === "PATCH" && kind !== "runner_pr" && kind !== "receipt_block") throw new InstallationHttpError("method_refused");
+        if (req.method === "PATCH" && kind !== "runner_pr" && kind !== "receipt_block" && kind !== "retraction") throw new InstallationHttpError("method_refused");
         // DELETE is for `branch_delete` alone, and only on its pinned ref (checked above).
         if (req.method === "DELETE" && kind !== "branch_delete") throw new InstallationHttpError("method_refused");
         if (kind === "runner_pr" && req.method === "PUT") throw new InstallationHttpError("method_refused");
@@ -234,7 +268,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
             headers: {
               accept: "application/vnd.github+json",
               authorization: `Bearer ${token}`,
-              ...(kind === "branch_delete" || kind === "receipt_block" ? { "user-agent": "fulcrumaxe-cloud" } : {}),
+              ...(kind === "branch_delete" || kind === "receipt_block" || kind === "retraction" ? { "user-agent": "fulcrumaxe-cloud" } : {}),
               "x-github-api-version": "2022-11-28",
               ...(req.body !== undefined ? { "content-type": "application/json" } : {}),
             },
@@ -254,7 +288,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
           // fx-swallow-ok: a body that is not JSON reads as null, which every caller treats as "not the shape expected"
           body = null;
         }
-        const message = res.status >= 400 && body !== null && typeof body === "object" && "message" in body && typeof (body as { message: unknown }).message === "string" ? (body as { message: string }).message.replace(MESSAGE_RE, "").slice(0, 120) : null;
+        const message = res.status >= 400 && !UNLOGGED_MESSAGE_KINDS.has(kind) && body !== null && typeof body === "object" && "message" in body && typeof (body as { message: unknown }).message === "string" ? (body as { message: string }).message.replace(MESSAGE_RE, "").slice(0, 120) : null;
         deps.log?.({ method: req.method, path: req.path.replace(/^\/repos\/[^/]+\/[^/]+/, "/repos/:o/:r"), status: res.status, message });
         return { status: res.status, body };
       },

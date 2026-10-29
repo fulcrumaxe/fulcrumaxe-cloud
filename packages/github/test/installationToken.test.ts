@@ -11,6 +11,7 @@ import {
   InstallationTokenError,
   MintTimeoutError,
   getInstallationToken,
+  assertRetractionToken,
   mintAppJwt,
   type AccessTokenRequester,
 } from "../src/installationToken.js";
@@ -306,7 +307,7 @@ describe("installation-wide token (WideScope)", () => {
 
 describe("no purpose ever requests repository administration (D#2 RC-1a, C64 section 3)", () => {
   // A Record keyed by MintPurpose: a new purpose fails typecheck until it is listed here.
-  const KIND: Record<MintPurpose, string> = { run: "team", preview_read: "team_readonly", sitekit_read: "sitekit", merge_gate: "team", plan_read: "team_readonly", runner_git: "team", plane_push: "team", plane_merge: "team", plane_publish_read: "team", branch_delete: "team", branch_sync: "team", pairing_read: "team_readonly", receipt_block: "team" };
+  const KIND: Record<MintPurpose, string> = { run: "team", preview_read: "team_readonly", sitekit_read: "sitekit", merge_gate: "team", plan_read: "team_readonly", runner_git: "team", plane_push: "team", plane_merge: "team", plane_publish_read: "team", branch_delete: "team", branch_sync: "team", pairing_read: "team_readonly", receipt_block: "team", retraction: "team" };
   const scopes = [
     { repositories: ["r"] as [string], permissions: { metadata: "write", contents: "write", issues: "write", pull_requests: "write", discussions: "write" } as const },
     { installationWide: true as const, permissions: { metadata: "read" } as const },
@@ -316,6 +317,7 @@ describe("no purpose ever requests repository administration (D#2 RC-1a, C64 sec
     for (const scope of scopes) {
       // runner_git takes only metadata and contents, so both generic scopes here are refused outright: runnerProxyDecision.test.ts covers it.
       if (purpose === "runner_git") continue;
+      if (purpose === "retraction") continue; // takes exactly one single-key set, not these generic scopes: retraction.test.ts covers it
       if ((purpose === "merge_gate" || purpose === "plan_read" || purpose === "plane_push" || purpose === "plane_merge" || purpose === "plane_publish_read" || purpose === "branch_delete" || purpose === "branch_sync" || purpose === "pairing_read" || purpose === "receipt_block") && "installationWide" in scope) continue; // refused outright: see the merge_gate, plan_read, plane_push, plane_publish_read and branch_delete tests
       // A plan_read mint is refused unless GitHub's answer says the token is read-only, so the answer says so.
       const answer: { permissions: Record<string, string>; repositories?: string[] } =
@@ -733,5 +735,27 @@ describe("pairing_read (D#598 PAIR-PICKER-API)", () => {
     const m = mint(answer);
     await expect(m.run()).rejects.toThrow("token_scope_mismatch");
     expect(m.revoke).toHaveBeenCalledWith("ghs_pairingread");
+  });
+});
+
+describe("assertRetractionToken (D#7 DP7b-w)", () => {
+  const ok = { permissions: { metadata: "read", contents: "write" }, repositories: ["site"] };
+  const asked = { contents: "write" };
+  it("accepts exactly the one asked write key on exactly the one repository", () => {
+    expect(() => assertRetractionToken(ok, "site", asked)).not.toThrow();
+    expect(() => assertRetractionToken({ ...ok, repositories: ["Site"] }, "site", asked)).not.toThrow();
+  });
+  it.each([
+    ["another repository", { ...ok, repositories: ["other"] }],
+    ["two repositories", { ...ok, repositories: ["site", "other"] }],
+    ["no repositories", { ...ok, repositories: [] }],
+    ["no repository list", { permissions: ok.permissions }],
+    ["metadata: write", { ...ok, permissions: { metadata: "write", contents: "write" } }],
+    ["read instead of write", { ...ok, permissions: { metadata: "read", contents: "read" } }],
+    ["a second write key", { ...ok, permissions: { metadata: "read", contents: "write", issues: "write" } }],
+    ["a different write key", { ...ok, permissions: { metadata: "read", issues: "write" } }],
+    ["no permissions object", { repositories: ok.repositories }],
+  ])("refuses a mint answering %s", (_n, minted) => {
+    expect(() => assertRetractionToken(minted as never, "site", asked)).toThrow("token_scope_mismatch");
   });
 });
