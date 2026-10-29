@@ -232,12 +232,12 @@ const token = (v: string | null): string | null => (v !== null && REASON_RE.test
 const LIVE_RUN_STATUSES = new Set(['pending', 'running', 'paused']);
 
 /**
- * The void reasons that mean "the free preview was handed back" (migration 0705 sets them, within a bound of 3 per
+ * The void reasons that mean "the free preview was handed back" (migrations 0705 and 0934 set them, within a bound of 3 per
  * GitHub installation and owner per day). Whether a slot was freed is READ from the preview row (void plus one of these),
  * never worked out from the run's failure: a failure of this kind that the trigger could not or would not void
  * (over the bound, a skipped write) leaves the preview used up, and the panel must say so.
  */
-export const FREEING_REASONS: ReadonlySet<string> = new Set(['agent_start_timeout', 'clone_failed']);
+export const FREEING_REASONS: ReadonlySet<string> = new Set(['agent_start_timeout', 'clone_failed', 'empty_agent_output']);
 
 export function deriveProgress(f: ProgressFacts): Derived {
   const terminalRun = f.endedAt !== null || (f.runStatus !== null && !LIVE_RUN_STATUSES.has(f.runStatus));

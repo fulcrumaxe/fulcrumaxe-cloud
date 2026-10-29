@@ -214,6 +214,7 @@ describe('getPreviewProgress (pg)', () => {
     const cases: Array<[string, number, boolean]> = [
       ['agent_start_timeout', 0, true],
       ['clone_failed', 0, true],
+      ['empty_agent_output', 0, true],
       ['sandbox_error', 0, false], // also the mid-run implausible-usage kill, so not a proof that no work happened
       ['sandbox_error', 25, false], // 25 file reads and no text message: real work
       ['clone_too_large', 0, false], // the repository is the cause; trying it again fails the same way
@@ -226,6 +227,16 @@ describe('getPreviewProgress (pg)', () => {
       expect((await stateOf(previewId)).state, `${reason} after ${activity} reads`).toBe(freed ? 'void' : 'running');
       expect((await getPreviewProgress(ctx(), previewId, deps())).slot_freed, reason).toBe(freed);
     }
+  });
+
+  it('an empty-output failure voids the preview with that reason and frees the slot; an unrelated code does not void it', async () => {
+    const empty = await startOn(a, await makeRepo(a, owner()));
+    await failAsRunner(a, empty.runId, 'empty_agent_output');
+    expect(await stateOf(empty.previewId)).toMatchObject({ state: 'void', void_reason: 'empty_agent_output' });
+    expect((await getPreviewProgress(ctx(), empty.previewId, deps())).slot_freed).toBe(true);
+    const other = await startOn(a, await makeRepo(a, owner()));
+    await failAsRunner(a, other.runId, 'model_output_filtered');
+    expect(await stateOf(other.previewId)).toMatchObject({ state: 'running', void_reason: null });
   });
 
   it('slot_freed is read from the row: a freeing reason the trigger did not act on reads as used up', async () => {
@@ -283,6 +294,60 @@ describe('getPreviewProgress (pg)', () => {
     await failAsRunner(b, runId, 'agent_start_timeout');
     expect((await stateOf(previewId)).state).toBe('running');
     expect((await getPreviewProgress(ctx(b), previewId, deps())).slot_freed).toBe(false);
+  });
+
+  it('the bound counts empty_agent_output: attempts 1-3 on one installation void the preview, the 4th stays running', async () => {
+    const repo = await makeRepo(a, owner());
+    for (let i = 1; i <= 4; i++) {
+      const { previewId, runId } = await startOn(a, repo);
+      await failAsRunner(a, runId, 'empty_agent_output');
+      expect((await stateOf(previewId)).state, `attempt ${i}`).toBe(i <= 3 ? 'void' : 'running');
+      expect((await getPreviewProgress(ctx(), previewId, deps())).slot_freed, `attempt ${i}`).toBe(i <= 3);
+    }
+  });
+
+  it('the bound counts empty_agent_output per GitHub owner across accounts', async () => {
+    await admin.query(`UPDATE model_connections SET status = 'ok' WHERE account_id = $1`, [b.accountId]);
+    const shared = owner();
+    for (let i = 0; i < 3; i++) {
+      const { runId } = await startOn(a, await makeRepo(a, shared)); // a different installation each time, the same owner
+      await failAsRunner(a, runId, 'empty_agent_output');
+    }
+    const { previewId, runId } = await startOn(b, await makeRepo(b, shared));
+    await failAsRunner(b, runId, 'empty_agent_output');
+    expect((await stateOf(previewId)).state).toBe('running');
+    expect((await getPreviewProgress(ctx(b), previewId, deps())).slot_freed).toBe(false);
+  });
+
+  it('empty_agent_output and clone_failed count together toward the same 3 (installation and owner)', async () => {
+    const repo = await makeRepo(a, owner());
+    for (const [i, reason] of ['empty_agent_output', 'clone_failed', 'empty_agent_output', 'clone_failed'].entries()) {
+      const { previewId, runId } = await startOn(a, repo);
+      await failAsRunner(a, runId, reason);
+      expect((await stateOf(previewId)).state, `installation attempt ${i + 1} (${reason})`).toBe(i < 3 ? 'void' : 'running');
+    }
+    await admin.query(`UPDATE model_connections SET status = 'ok' WHERE account_id = $1`, [b.accountId]);
+    const shared = owner();
+    for (const [i, reason] of ['clone_failed', 'empty_agent_output', 'clone_failed', 'empty_agent_output'].entries()) {
+      const { previewId, runId } = await startOn(i < 3 ? a : b, await makeRepo(i < 3 ? a : b, shared));
+      await failAsRunner(i < 3 ? a : b, runId, reason);
+      expect((await stateOf(previewId)).state, `owner attempt ${i + 1} (${reason})`).toBe(i < 3 ? 'void' : 'running');
+    }
+  });
+
+  it('the counting definer sees empty_agent_output rows even with no run attached (the row policy, not the run_id policy): same count as clone_failed', async () => {
+    // A void row with no run is not covered by platform_ops_read_started, so only platform_ops_read_freed lets the
+    // definer see it. Three such rows per reason, grouped on one installation and one owner.
+    for (const reason of ['clone_failed', 'empty_agent_output']) {
+      const ids = [await requested(), await requested(), await requested()];
+      const gh = nextGhInstallationId();
+      const own = owner();
+      await admin.query(`UPDATE onboarding_previews SET state = 'void', void_reason = $2, gh_installation_id = $3, gh_owner = $4 WHERE id = ANY($1::uuid[])`, [ids, reason, gh, own]);
+      const n = (await appPool.query(`SELECT onboarding_preview_frees_in_window($1, $2) AS n`, [gh, own])).rows[0].n;
+      expect(n, reason).toBe(3);
+      const byOwner = (await appPool.query(`SELECT onboarding_preview_frees_in_window($1, $2) AS n`, [nextGhInstallationId(), own])).rows[0].n;
+      expect(byOwner, `${reason} by owner`).toBe(3);
+    }
   });
 
   it('the day\'s compute cap counts what a pre-agent failure MEASURED once settled, not its $1 reservation: ten of them from one account leave room for another', async () => {
