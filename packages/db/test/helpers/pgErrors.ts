@@ -26,6 +26,8 @@ export const PG_ERROR = {
   // same reasoning as the codes above -- a free-text message match could
   // pass for the wrong constraint.
   CHECK_VIOLATION: '23514',
+  // plpgsql `no_data_found` (a definer saying the row it needs is not there for the caller)
+  NO_DATA_FOUND: 'P0002',
   // PR #75 review fix round (D#64, MUST 1): the SQLSTATE Postgres itself
   // raises for a REPEATABLE READ / SERIALIZABLE `SELECT ... FOR UPDATE`
   // whose target row was changed by another transaction that committed
