@@ -93,6 +93,11 @@ export interface CatalogueEntry {
    * default and every customer override to this list. Empty for class 1, which is never asked. Every other entry lists `stop_and_flag`.
    */
   readonly timeoutOutcomes: readonly TimeoutOutcome[];
+  /**
+   * How many hours a decision of this type is free to reverse (D#7 C23, default 24, every preset). A reviewed, static field, never a tenant setting.
+   * Read through `reversalWindowFor`; stamped on the receipt when it is written, so a later change never moves a promise already made.
+   */
+  readonly reversalWindowHours: number;
 }
 
 /** The three preset names (DP-OD1). Renaming them is rejected as churn. */

@@ -103,6 +103,7 @@ describe('decision_settings / decision_receipts schema (DP2 items 1, 3, 7)', () 
         'id',
         'input_trust_classes',
         'rejected_alternative',
+        'reversal_free_until',
         'reversal_state',
         'rule_id',
         'rule_set_version',

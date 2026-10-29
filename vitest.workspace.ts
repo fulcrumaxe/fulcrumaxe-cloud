@@ -63,6 +63,7 @@ export default defineWorkspace([
   "packages/core",
   "packages/db",
   "packages/decisions",
+  "packages/receipts",
   "packages/design",
   "packages/discussions",
   "packages/env-build",

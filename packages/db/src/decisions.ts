@@ -42,6 +42,8 @@ export interface DecisionReceipt {
   inputTrustClasses: unknown;
   actor: string | null;
   reversalState: string | null;
+  /** The time up to which this decision is free to reverse, stamped at write (migration 0928); null when none was recorded. */
+  reversalFreeUntil: Date | null;
   createdAt: Date;
 }
 
@@ -92,6 +94,7 @@ interface DecisionReceiptRow {
   input_trust_classes: unknown;
   actor: string | null;
   reversal_state: string | null;
+  reversal_free_until: Date | null;
   created_at: Date;
 }
 
@@ -109,6 +112,7 @@ function mapDecisionReceiptRow(row: DecisionReceiptRow): DecisionReceipt {
     inputTrustClasses: row.input_trust_classes,
     actor: row.actor,
     reversalState: row.reversal_state,
+    reversalFreeUntil: row.reversal_free_until,
     createdAt: row.created_at,
   };
 }

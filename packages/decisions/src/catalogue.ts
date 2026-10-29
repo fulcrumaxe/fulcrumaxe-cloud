@@ -31,7 +31,13 @@ import type { CatalogueEntry } from "./types.js";
  * three presets next to this number: changing either without bumping it
  * (and updating the pin) fails that test.
  */
-export const CATALOGUE_VERSION = 6;
+export const CATALOGUE_VERSION = 7;
+
+/**
+ * How long a class-2 or class-3 decision stays free to reverse, in hours (D#7 C23: a per-entry catalogue field, 24 h, the same on every
+ * preset including Autonomous; it is a catalogue field, not a setting). Entries that cannot be reversed carry it too and ignore it.
+ */
+export const DEFAULT_REVERSAL_WINDOW_HOURS = 24;
 
 export const CATALOGUE: readonly CatalogueEntry[] = [
   // --- class 1: automated_with_monitoring -- never asked ---
@@ -44,6 +50,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     customerProximity: "internal_only",
     dataSensitivity: "none",
     timeoutOutcomes: [],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
   },
   {
     id: "retry_transient_step_failure",
@@ -58,6 +65,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     customerProximity: "internal_only",
     dataSensitivity: "none",
     timeoutOutcomes: [],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
   },
 
   // --- class 2: human_over_the_loop -- ask, announce, or act, per preset ---
@@ -70,6 +78,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     customerProximity: "internal_only",
     dataSensitivity: "none",
     timeoutOutcomes: ["stop_and_flag", "proceed_recommended"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
   },
   {
     id: "test_strategy_choice",
@@ -80,6 +89,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     customerProximity: "internal_only",
     dataSensitivity: "none",
     timeoutOutcomes: ["stop_and_flag", "proceed_recommended"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
   },
   {
     // D#6 R2b-4a (C31): a runner run uses the Claude plan of the member whose subscription runner takes it. Cautious asks for each
@@ -96,6 +106,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     dataSensitivity: "none",
     // Stop-and-flag only: going ahead on silence would spend a member's plan without that member's consent (D#7 DP12a-1).
     timeoutOutcomes: ["stop_and_flag"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
   },
   // D#483 S5-a: starting work. The three small kinds share one shape: the person's dial moves them (Cautious asks, Balanced
   // starts and says so, Autonomous starts). With no dial row the default is `ask`: starting work is a person's approval until they
@@ -111,6 +122,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     dataSensitivity: "none",
     // Ruling R-7-DP12a1-4: starting work belongs to the person or the auto-start toggle, never to a timeout, so stop-and-flag only.
     timeoutOutcomes: ["stop_and_flag"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
   },
   {
     id: "start_work_bug",
@@ -122,6 +134,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     dataSensitivity: "none",
     // Ruling R-7-DP12a1-4: starting work belongs to the person or the auto-start toggle, never to a timeout, so stop-and-flag only.
     timeoutOutcomes: ["stop_and_flag"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
   },
   {
     id: "start_work_doc",
@@ -133,6 +146,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     dataSensitivity: "none",
     // Ruling R-7-DP12a1-4: starting work belongs to the person or the auto-start toggle, never to a timeout, so stop-and-flag only.
     timeoutOutcomes: ["stop_and_flag"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
   },
   {
     // Launching a sub-item of a parent a person already approved: a planned PR or task of its approved Spec, a fix round, or a
@@ -147,6 +161,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     dataSensitivity: "none",
     // Ruling R-7-DP12a1-4: starting work belongs to the person or the auto-start toggle, never to a timeout, so stop-and-flag only.
     timeoutOutcomes: ["stop_and_flag"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
   },
   {
     // D#7 AAP-a1: an agent asks to run one tool call (a customer's own approval service or our gateway raises it). Unlike a decision
@@ -164,6 +179,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     customerProximity: "internal_only",
     dataSensitivity: "customer_data",
     timeoutOutcomes: ["stop_and_flag"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
   },
   {
     // D#7 DP13: a run reaches its limit and the platform (not a role card or tool) asks whether to extend it. The extension rules always
@@ -180,6 +196,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     customerProximity: "internal_only",
     dataSensitivity: "none",
     timeoutOutcomes: ["stop_and_flag", "proceed_recommended"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
   },
   {
     id: "publish_deprecation_notice",
@@ -194,6 +211,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     customerProximity: "customer_facing",
     dataSensitivity: "none",
     timeoutOutcomes: ["stop_and_flag"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
   },
 
   // --- class 3: human_in_the_loop -- always asked ---
@@ -210,6 +228,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     customerProximity: "customer_facing",
     dataSensitivity: "none",
     timeoutOutcomes: ["stop_and_flag"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
   },
   {
     id: "external_paid_api_call",
@@ -223,6 +242,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     customerProximity: "internal_only",
     dataSensitivity: "none",
     timeoutOutcomes: ["stop_and_flag"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
   },
   {
     // The first start of a feature, project or critical item. Always asked, at every preset.
@@ -235,6 +255,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     dataSensitivity: "none",
     // Class 3 added after v1: stop-and-flag only (D#7 R2 v1 clamps).
     timeoutOutcomes: ["stop_and_flag"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
   },
   {
     // An item reached its spend envelope and would go past it.
@@ -250,6 +271,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     dataSensitivity: "none",
     // Going past a spend envelope on silence is never allowed: stop-and-flag only.
     timeoutOutcomes: ["stop_and_flag"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
   },
   {
     // An item that started as small, doc or bug and that triage then classifies higher.
@@ -262,6 +284,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     dataSensitivity: "none",
     // Class 3 added after v1: stop-and-flag only (D#7 R2 v1 clamps).
     timeoutOutcomes: ["stop_and_flag"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
   },
 ] as const;
 

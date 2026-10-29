@@ -5,6 +5,8 @@ import { CATALOGUE_VERSION } from '@fx/decisions';
 import { UNTRUSTED_DELIMITER_END, UNTRUSTED_DELIMITER_START, storeWorkEvent, type WorkEvent } from '@fx/trust';
 import { createPool } from '../src/pool.js';
 import { withTenant } from '../src/withTenant.js';
+import { listReceiptsForWorkItem } from '../src/decisions.js';
+import { writeStartReceipt } from '../src/startGate.js';
 import {
   DIAL_VERSION_CATALOGUE_DEFAULT,
   RECEIPT_FENCE_END,
@@ -274,6 +276,95 @@ describe('writeReceipt (DP3b)', () => {
       const r = await write(valid());
       if (r.store !== 'decision_receipts') throw new Error('expected the durable store');
       expect(await durableRow(r.id)).toMatchObject({ chosen: 'unit_tests', rejected_alternative: 'end_to_end_tests' });
+    });
+  });
+
+  describe('DP6a: reversal_free_until is stamped at write time (migration 0928)', () => {
+    const HOUR_MS = 3_600_000;
+    const hoursAfterCreate = async (id: string) =>
+      (await admin.query(`SELECT (reversal_free_until - created_at) AS span, reversal_free_until FROM decision_receipts WHERE id = $1`, [id])).rows[0];
+
+    it('a reversible entry gets created_at plus its catalogue window (24 hours), as an absolute time', async () => {
+      const r = await write(valid());
+      if (r.store !== 'decision_receipts') throw new Error('expected the durable store');
+      const row = await hoursAfterCreate(r.id);
+      expect(row.span).toEqual({ days: 1 });
+      expect(row.reversal_free_until).toBeInstanceOf(Date);
+    });
+
+    it('a ruled receipt is stamped too', async () => {
+      const r = await write(valid({ ruleSetVersion: 0 }));
+      if (r.store !== 'decision_receipts') throw new Error('expected the durable store');
+      expect((await hoursAfterCreate(r.id)).span).toEqual({ days: 1 });
+    });
+
+    it('a not-reversible entry gets no deadline, and a reversible one after it in the same transaction is not left without one', async () => {
+      const ids = await withTenant(receiptPool, refs.accountId, refs.userId, async (c) => {
+        const a = await writeReceipt(c, valid({ decisionType: 'run_extension' }));
+        const b = await writeReceipt(c, valid());
+        const d = await writeReceipt(c, valid({ decisionType: 'run_extension' }));
+        return [a, b, d].map((x) => (x.store === 'decision_receipts' ? x.id : ''));
+      });
+      const spans = await Promise.all(ids.map(async (id) => (await hoursAfterCreate(id)).reversal_free_until));
+      expect(spans[0]).toBeNull();
+      expect(spans[1]).toBeInstanceOf(Date);
+      expect(spans[2]).toBeNull();
+    });
+
+    it('the stamp does not leak to a later transaction on the same connection, and a stray or out-of-range setting stamps nothing', async () => {
+      await write(valid());
+      const direct = async (hours: string | null) =>
+        withTenant(receiptPool, refs.accountId, refs.userId, async (c) => {
+          if (hours !== null) await c.query("SELECT set_config('app.reversal_window_hours', $1, true)", [hours]);
+          const { rows } = await c.query<{ id: string }>(
+            `SELECT decision_receipt_write('human_over_the_loop', 'test_strategy_choice', 'unit_tests', 'end_to_end_tests', 4, '["trusted"]'::jsonb, $1::uuid, $2::uuid, $3::integer) AS id`,
+            [refs.workItemId, refs.runId, CATALOGUE_VERSION],
+          );
+          return rows[0]!.id;
+        });
+      for (const hours of [null, '', '0', '-3', '99999', 'abc', '2 hours']) {
+        expect((await hoursAfterCreate(await direct(hours))).reversal_free_until, String(hours)).toBeNull();
+      }
+      expect((await hoursAfterCreate(await direct('48'))).span).toEqual({ days: 2 });
+    });
+
+    it('the setting is one-shot: a start receipt written after writeReceipt in the same transaction has no deadline', async () => {
+      const out = await withTenant(receiptPool, refs.accountId, refs.userId, async (c) => {
+        const first = await writeReceipt(c, valid());
+        const left = (await c.query<{ v: string }>("SELECT current_setting('app.reversal_window_hours', true) AS v")).rows[0]!.v;
+        const startId = await writeStartReceipt(c, { workItemId: refs.workItemId, decisionType: 'start_work_small', chosen: 'start', dialVersion: 1 });
+        return { first: first.store === 'decision_receipts' ? first.id : '', left, startId };
+      });
+      expect(out.left).toBe('');
+      expect((await hoursAfterCreate(out.first)).reversal_free_until).toBeInstanceOf(Date);
+      expect((await hoursAfterCreate(out.startId)).reversal_free_until).toBeNull();
+    });
+
+    it('no role can move a stamped deadline: UPDATE is refused for the receipt login and the tenant login', async () => {
+      const r = await write(valid());
+      if (r.store !== 'decision_receipts') throw new Error('expected the durable store');
+      for (const pool of [receiptPool, appUserPool]) {
+        await expect(
+          withTenant(pool, refs.accountId, refs.userId, (c) => c.query(`UPDATE decision_receipts SET reversal_free_until = now() + interval '1 year' WHERE id = $1`, [r.id])),
+        ).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+      }
+    });
+
+    it('the check refuses a deadline that is not after the write', async () => {
+      await expect(
+        admin.query(
+          `INSERT INTO decision_receipts (account_id, decision_type, class, reversal_free_until, created_at) VALUES ($1, 'test_strategy_choice', 'human_over_the_loop', now() - interval '1 hour', now())`,
+          [refs.accountId],
+        ),
+      ).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });
+    });
+
+    it('the deadline is read back as reversalFreeUntil', async () => {
+      const r = await write(valid());
+      if (r.store !== 'decision_receipts') throw new Error('expected the durable store');
+      const list = await withTenant(appUserPool, refs.accountId, refs.userId, (c) => listReceiptsForWorkItem(c, refs.workItemId));
+      const mine = list.find((x) => x.id === r.id)!;
+      expect(mine.reversalFreeUntil!.getTime() - mine.createdAt.getTime()).toBe(24 * HOUR_MS);
     });
   });
 });
