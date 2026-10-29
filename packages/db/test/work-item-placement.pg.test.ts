@@ -484,7 +484,7 @@ describe('migration 0781 gives platform_ops nothing', () => {
       // proposal definers. Those two exact signatures are the only difference allowed (reject_proposal compared by name, resurface_proposals
       // left out); any other change to what platform_ops owns still fails this test.
       ownedFunctions: await q(`SELECT CASE WHEN p.proname = 'reject_proposal' THEN 'reject_proposal(...)' ELSE p.oid::regprocedure::text END AS x FROM pg_proc p
-         WHERE p.proowner = 'platform_ops'::regrole AND p.oid::regprocedure::text NOT IN ('resurface_proposals(uuid,uuid)', 'decision_ask_next_due(timestamp with time zone)', 'resume_decision_reconcile(integer)', 'run_action_defer_resume(uuid,integer)') ORDER BY 1`),
+         WHERE p.proowner = 'platform_ops'::regrole AND p.oid::regprocedure::text NOT IN ('resurface_proposals(uuid,uuid)', 'decision_ask_next_due(timestamp with time zone)', 'resume_decision_reconcile(integer)', 'run_action_defer_resume(uuid,integer)', 'ask_notify_due(integer)', 'ask_stamp_notified(uuid)', 'ask_stamp_renotified(uuid)', 'account_notify_recipients(uuid)') ORDER BY 1`),
       memberships: await q(`SELECT pg_get_userbyid(roleid) || ' ' || admin_option::text || ' ' || coalesce(inherit_option::text, '') || ' ' || coalesce(set_option::text, '') AS x FROM pg_auth_members WHERE member = 'platform_ops'::regrole ORDER BY 1`),
       newDefinersOwnedByPlatformOps: await q(`SELECT p.proname AS x FROM pg_proc p WHERE p.proowner = 'platform_ops'::regrole AND p.proname IN ('work_item_cancel_pending_runs', 'work_item_placement_audit') ORDER BY 1`),
     };
