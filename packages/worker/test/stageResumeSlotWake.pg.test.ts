@@ -5,11 +5,13 @@ import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { setPendingHooks } from "@fx/core/src/pendingWork.js";
+import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
+import { buildWaitSentence } from "@fx/api/src/routes/work-item-activity.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { applyMappedEvent, type MappedEvent } from "@fx/github";
 import { BUILD_SLOT_STAGES, BUILD_WAIT_REASONS, PARKED_STAGE_REGISTRY, readBuildWaitReason } from "@fx/pipeline";
 import { SLOT_HOLDING_STAGES } from "@fx/core/src/work-items/recordStage.js";
-import { createStageResume, SLOT_WAIT_REASONS } from "../src/stageResume.js";
+import { createStageResume, SLOT_WAIT_REASONS, STAGE_RESUME_ORPHAN_AFTER_SECONDS } from "../src/stageResume.js";
 import type { AdvanceStartArgs } from "../src/advance.js";
 
 /**
@@ -203,6 +205,41 @@ describe("the slot wake [pg]", { timeout: 60_000 }, () => {
     expect(mine(started, a)).toEqual([]);
   });
 
+  it("a waiter whose workflow died inside the orphan window is looked at once more, then started once; a second slot-free event adds no second start", async () => {
+    const a = await account();
+    const h = await holder(a);
+    const w = await waiter(a, { ageSeconds: 120 }); // looks alive: its fact is two minutes old
+    expect((await move(a, h, "merged")).recorded).toBe(true);
+    const started: AdvanceStartArgs[] = [];
+    const out = await sweeper(started).sweepParkedStages([entry]);
+    // Not orphaned yet, so nothing starts; the pass asks to be run again when the fact would be old enough.
+    expect(mine(started, a)).toEqual([]);
+    expect(out.nextDueAt).not.toBeNull();
+    expect(out.nextDueAt!).toBeGreaterThan(Date.now());
+    expect(out.nextDueAt!).toBeLessThanOrEqual(Date.now() + (STAGE_RESUME_ORPHAN_AFTER_SECONDS + 60) * 1000);
+    // That time comes (the fact ages) and the workflow never took the slot: it starts, once.
+    await admin.query("UPDATE work_item_driver_events SET created_at = now() - interval '11 minutes' WHERE work_item_id = $1", [w.id]);
+    await sweeper(started).sweepParkedStages([entry]);
+    expect(mine(started, a)).toHaveLength(1);
+    // A second slot-free event (another holder closes): the claim is fresh, so nothing starts twice.
+    const h2 = await holder(a);
+    await move(a, h2, "closed_unmerged");
+    await sweeper(started).sweepParkedStages([entry]);
+    expect(mine(started, a)).toHaveLength(1);
+  });
+
+  it("a fresh waiter with no approval starts nothing and writes nothing", async () => {
+    const a = await account();
+    await waiter(a, { ageSeconds: 60, approved: false });
+    const old = await waiter(a, { ageSeconds: 3600, approved: false, createdDaysAgo: 1 });
+    const started: AdvanceStartArgs[] = [];
+    await sweeper(started).sweepParkedStages([entry]);
+    expect(mine(started, a)).toEqual([]);
+    const facts = await admin.query("SELECT count(*) AS n FROM work_item_driver_events WHERE account_id = $1", [a.accountId]);
+    expect(Number(facts.rows[0].n)).toBe(2);
+    expect(await stageOf(old.id)).toBe("spec_ready");
+  });
+
   it("a halted waiter is not started", async () => {
     const a = await account();
     const h = await holder(a);
@@ -212,5 +249,83 @@ describe("the slot wake [pg]", { timeout: 60_000 }, () => {
     const started: AdvanceStartArgs[] = [];
     await sweeper(started).sweepParkedStages([entry]);
     expect(mine(started, a)).toEqual([]);
+  });
+  it("a fresh waiter with no approval asks for no follow-up; with an approval it does", async () => {
+    const a = await account();
+    // The sweep sees every account: age the other accounts' facts so only this account's waiter is fresh.
+    await admin.query("UPDATE work_item_driver_events SET created_at = now() - interval '1 day' WHERE kind = 'stage_waiting' AND account_id <> $1", [a.accountId]);
+    const w = await waiter(a, { ageSeconds: 60, approved: false });
+    expect((await sweeper([]).sweepSlotWaiters(entry)).recheckAt).toBeNull();
+    await admin.query(
+      `INSERT INTO run_action_requests (id, account_id, kind, target_id, requested_by, principal_kind, request_hash, state, finished_at, outcome)
+       VALUES ($1, $2, 'advance_work_item', $3, $4, 'session', $5, 'done', now() - interval '1 day', $6::jsonb)`,
+      [randomUUID(), a.accountId, w.id, `session:${a.userId}`, "h".repeat(64), JSON.stringify({ work_item_id: w.id, advance: "started" })],
+    );
+    expect((await sweeper([]).sweepSlotWaiters(entry)).recheckAt).not.toBeNull();
+  });
+
+  /**
+   * The card's "starts by itself" sentence against a real sweep. Each case seeds one reason the sweep skips a waiter (or none), reads the sentence the route would
+   * show while the wait fact is fresh, then ages the fact, frees the slot (there is no holder) and runs the real sweep twice.
+   */
+  describe("the card's sentence agrees with the sweep", () => {
+    const run = async (mutate: (a: SeedRefs, w: { id: string; approval: string }) => Promise<void>) => {
+      const a = await account();
+      const w = await waiter(a, { ageSeconds: 30 });
+      await mutate(a, w);
+      const act = await getWorkItemActivity({ pool: appPool, principal: { accountId: a.accountId, userId: a.userId, role: "owner" } }, w.id);
+      expect(act.notice?.kind).toBe("build_slot_wait");
+      const n = act.notice!;
+      const sentence = buildWaitSentence(n.reason, n.holder ?? null, n.autoStart !== false);
+      await admin.query("UPDATE work_item_driver_events SET created_at = now() - interval '1 hour' WHERE work_item_id = $1 AND kind = 'stage_waiting'", [w.id]);
+      const started: AdvanceStartArgs[] = [];
+      await sweeper(started).sweepParkedStages([entry]);
+      await sweeper(started).sweepParkedStages([entry]);
+      return { sentence, starts: mine(started, a).filter((s) => s.workItemId === w.id).length };
+    };
+    const runRow = async (a: SeedRefs, w: { id: string }, status: string) => {
+      const id = randomUUID();
+      await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'production', $4)", [id, a.accountId, w.id, status]);
+      return id;
+    };
+
+    it("approved: it starts by itself, and the sweep starts it exactly once", async () => {
+      const r = await run(async () => undefined);
+      expect(r.sentence).toContain("starts by itself");
+      expect(r.starts).toBe(1);
+    });
+
+    const skips: [string, (a: SeedRefs, w: { id: string; approval: string }) => Promise<void>][] = [
+      [
+        "the only approval sits on the card this one replaced (the build entry looks at the item itself)",
+        async (a, w) => {
+          const card = randomUUID();
+          await admin.query("INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number) VALUES ($1, $2, $3, 'feature', 'internal', 'closed', $4)", [card, a.accountId, a.repoId, n++]);
+          await admin.query("UPDATE run_action_requests SET target_id = $2 WHERE id = $1", [w.approval, card]);
+          await admin.query("INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'spec_ready', 'closed', now(), 'control_plane', $3)", [a.accountId, card, `superseded:${w.id}`]);
+        },
+      ],
+      ["the item is at Needs a person (the build parks at Spec ready only)", async (_a, w) => void (await admin.query("UPDATE work_items SET stage = 'needs_human' WHERE id = $1", [w.id]))],
+      ["the approval was not made by a session", async (_a, w) => void (await admin.query("UPDATE run_action_requests SET principal_kind = 'token' WHERE id = $1", [w.approval]))],
+      ["a run of the item is live", async (a, w) => void (await runRow(a, w, "running"))],
+      [
+        "the build was refused after the wait",
+        async (a, w) => void (await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'build_refused', 'other', $3)", [a.accountId, w.id, randomUUID()])),
+      ],
+      [
+        "a run already started under this approval",
+        async (a, w) => {
+          const id = await runRow(a, w, "succeeded");
+          await admin.query("INSERT INTO agent_run_idempotency_keys (account_id, idempotency_key, run_id, request_hash) VALUES ($1, $2, $3, $4)", [a.accountId, `advance:${w.id}:build:v1:${w.approval}`, id, "0".repeat(64)]);
+        },
+      ],
+    ];
+    for (const [name, mutate] of skips) {
+      it(`${name}: it does not start by itself, and the sweep does not start it`, async () => {
+        const r = await run(mutate);
+        expect(r.sentence).toContain("does not start by itself");
+        expect(r.starts).toBe(0);
+      });
+    }
   });
 });

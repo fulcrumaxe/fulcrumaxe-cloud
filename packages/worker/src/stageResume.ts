@@ -2,7 +2,7 @@ import type { Pool } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { recordDriverEvent, type WaitingStage } from "@fx/core/src/work-items/driverEvents.js";
 import { checkHeadroom } from "@fx/spend";
-import { readReviewHold } from "@fx/core/src/work-items/reviewHold.js";
+import { STAGE_TERMINAL_STATUSES, stageApprovalGate } from "@fx/core/src/work-items/stageApprovalGate.js";
 import { reportError } from "@fx/telemetry";
 import type { SeatRequest, SeatResult } from "./seat.js";
 import type { AdvanceStartArgs } from "./advance.js";
@@ -94,115 +94,52 @@ export interface StageResumeCounts {
   slotStarted?: number;
 }
 
+/** What the slot wake reports: the counts, and when to look once more (see `sweepSlotWaiters`), or null. */
+type SlotWakeCounts = { listed: number; started: number; failed: number; recheckAt: number | null };
+
 /** Same value as RESERVATION_SWEEP_SECONDS and RESERVATION_ORPHAN_AFTER_SECONDS in @fx/pipeline (a test pins them). */
 export const STAGE_RESUME_PASS_SECONDS = 900;
 export const STAGE_RESUME_ORPHAN_AFTER_SECONDS = 600;
 const LIST_LIMIT = 200;
-/** Run statuses a run cannot leave (advance.ts ADVANCE_TERMINAL_STATUSES, which imports this file, so the list is repeated and a test holds the two equal). */
-export const STAGE_RESUME_TERMINAL_STATUSES: readonly string[] = Object.freeze(["succeeded", "failed", "timed_out", "killed_spend", "refused_spend", "cancelled"]);
-const SESSION_RE = /^session:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+/** Run statuses a run cannot leave (advance.ts ADVANCE_TERMINAL_STATUSES repeats the list and a test holds the two equal). */
+export const STAGE_RESUME_TERMINAL_STATUSES: readonly string[] = STAGE_TERMINAL_STATUSES;
 
 type Plan = { userId: string; actionId: string; haltEpoch: number; specVersion: number | null; attempt: number; head: { sha: string; prNumber: number | null; rereview: number } | null };
-/** What a stage that has no `progressKinds` of its own treats as "it ended in a refusal that is not a limit". */
-const DEFAULT_PROGRESS_KINDS: readonly string[] = Object.freeze(["build_refused", "stopped"]);
 type PlanOrSkip = { plan: Plan } | { skip: string };
 
 export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
   const now = deps.now ?? Date.now;
   const log = deps.log ?? ((line: string) => console.info(line));
 
-  /** Everything the restart depends on, read under the item's own tenant. */
+  /** Everything the restart depends on, read under the item's own tenant. The decision is @fx/core's `stageApprovalGate`, which the build card's sentence calls too. */
   async function planFor(entry: ParkedStageEntryInput, accountId: string, workItemId: string): Promise<PlanOrSkip> {
     return withTenant(runnerPool, accountId, async (client) => {
-      const item = (
-        await client.query<{ stage: string; provenance: string; halted: boolean; halt_epoch: number; version: number | null; spec_at: Date | null }>(
-          `SELECT w.stage, w.provenance, w.halted_at IS NOT NULL AS halted, w.halt_epoch,
-                  (SELECT max(s.version) FROM spec_versions s WHERE s.account_id = w.account_id AND s.work_item_id = w.id AND s.erased_at IS NULL) AS version,
-                  (SELECT max(s.created_at) FROM spec_versions s WHERE s.account_id = w.account_id AND s.work_item_id = w.id) AS spec_at
-             FROM work_items w WHERE w.id = $1 AND w.account_id = $2`,
-          [workItemId, accountId],
-        )
-      ).rows[0];
-      if (!item) return { skip: "item_gone" };
-      if (item.halted) return { skip: "halted" };
-      if (item.provenance !== "internal" || !entry.itemStages.includes(item.stage)) return { skip: "not_parked_here" };
-      // A review re-entered from Needs a person parks there. Only an item still held for a missing verdict is that review: any other cause of Needs a person is a build to
-      // run again, and the workflow would start that instead of the review the old waiting fact was for.
-      if (entry.stage === "review" && item.stage === "needs_human" && !(await readReviewHold(client, workItemId))) return { skip: "not_parked_here" };
-      if (entry.needsSpec && (item.version === null || item.spec_at === null)) return { skip: "no_spec" };
-
-      // The cards an approval of this stage may sit on: the item itself and, where the entry says so, the card this one replaced (retired with `superseded:<this item>`).
-      const targets = [workItemId];
-      if (entry.approval.from === "origin") {
-        const origin = await client.query<{ work_item_id: string }>("SELECT DISTINCT work_item_id FROM work_item_transitions WHERE account_id = $1 AND to_stage = 'closed' AND source_ref = $2", [accountId, `superseded:${workItemId}`]);
-        targets.push(...origin.rows.map((r) => r.work_item_id));
-      }
-      // Any request of this kind that is still waiting to be performed means a person is acting right now: leave it to them.
-      const open = await client.query("SELECT 1 FROM run_action_requests WHERE account_id = $1 AND target_id = ANY($2::uuid[]) AND kind IN ('advance_work_item', 'respec_work_item') AND state IN ('accepted', 'claimed') LIMIT 1", [accountId, targets]);
-      if (open.rows.length > 0) return { skip: "approval_in_flight" };
-      const approval = (
-        await client.query<{ id: string; requested_by: string; principal_kind: string; finished_at: Date }>(
-          `SELECT id, requested_by, principal_kind, finished_at FROM run_action_requests
-            WHERE account_id = $1 AND target_id = ANY($2::uuid[]) AND kind = $3 AND state = 'done' AND outcome ->> 'advance' = 'started'
-            ORDER BY finished_at DESC, id DESC LIMIT 1`,
-          [accountId, targets, entry.approval.kind],
-        )
-      ).rows[0];
-      if (!approval) return { skip: "no_approval" };
-      const who = SESSION_RE.exec(approval.requested_by);
-      if (!who || approval.principal_kind !== "session") return { skip: "no_approval" };
-      // The Spec the person approved is the newest one: one written after the approval was performed is a different Spec, and the person decides about it.
-      if (entry.needsSpec && item.spec_at !== null && item.spec_at.getTime() > approval.finished_at.getTime()) return { skip: "spec_changed" };
-      const member = await client.query<{ role: string }>("SELECT role FROM account_members WHERE account_id = $1 AND user_id = $2", [accountId, who[1]]);
-      const role = member.rows[0]?.role;
-      if (role !== "owner" && role !== "admin") return { skip: "approver_gone" };
-      // A live workflow or run is working on the item: nothing to resume.
-      const live = await client.query<{ n: string }>("SELECT count(*) AS n FROM agent_runs WHERE account_id = $1 AND work_item_id = $2 AND NOT (status = ANY($3::text[]))", [accountId, workItemId, [...STAGE_RESUME_TERMINAL_STATUSES]]);
-      if (Number(live.rows[0]?.n ?? 0) > 0) return { skip: "run_live" };
-
-      // A restart that ended in a refusal that is not a limit (or a stop) left a newer fact than the waiting one: that is not this sweep's to retry every pass.
-      // Only a new waiting fact (a later limit pause) or a person's new approval makes the item this sweep's again. A review or a fix round also leaves its own
-      // progress facts (the reviewers started, a verdict, a fix round), and any of them after the wait means the stage has moved on.
-      const refusedAfterWait = await client.query(
-        `SELECT 1 FROM work_item_driver_events e
-          WHERE e.account_id = $1 AND e.work_item_id = $2 AND e.kind = ANY($3::text[])
-            AND e.seq > COALESCE((SELECT max(w.seq) FROM work_item_driver_events w WHERE w.account_id = $1 AND w.work_item_id = $2 AND w.kind IN ('stage_waiting', 'build_waiting')), 0)
-          LIMIT 1`,
-        [accountId, workItemId, [...(entry.progressKinds ?? DEFAULT_PROGRESS_KINDS)]],
-      );
-      if (refusedAfterWait.rows.length > 0) return { skip: entry.progressKinds === undefined ? "refused_after_wait" : "moved_on_after_wait" };
-
       // A stage that waits on one head of an open change resumes only for that head. The head, the pull request and the re-review round are on the waiting fact
       // (the workflow and every refresh write them); a push seen since the wait began, to a different head, ends the parking: the review of a new head is a new ask.
-      let head: Plan["head"] = null;
-      if (entry.headBound === true) {
-        const latest = (
-          await client.query<{ head_sha: string | null; pr_number: number | null; round: number | null }>(
-            "SELECT head_sha, pr_number, round FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind IN ('stage_waiting', 'build_waiting') ORDER BY seq DESC LIMIT 1",
-            [accountId, workItemId],
-          )
-        ).rows[0];
-        if (!latest || latest.head_sha === null) return { skip: "no_head" };
-        const moved = await client.query(
-          `SELECT 1 FROM work_item_driver_events p
-            WHERE p.account_id = $1 AND p.work_item_id = $2 AND p.kind = 'pr_head_pushed' AND p.head_sha IS DISTINCT FROM $3
-              AND p.seq > COALESCE((SELECT min(w.seq) FROM work_item_driver_events w WHERE w.account_id = $1 AND w.work_item_id = $2 AND w.kind = 'stage_waiting' AND w.stage = $4 AND w.head_sha = $3), 0)
-            LIMIT 1`,
-          [accountId, workItemId, latest.head_sha, entry.stage],
-        );
-        if (moved.rows.length > 0) return { skip: "head_moved" };
-        head = { sha: latest.head_sha, prNumber: latest.pr_number, rereview: latest.round ?? 0 };
-      }
-
-      const keys = await client.query<{ idempotency_key: string; status: string | null }>(
-        `SELECT k.idempotency_key, r.status FROM agent_run_idempotency_keys k LEFT JOIN agent_runs r ON r.account_id = k.account_id AND r.id = k.run_id
-          WHERE k.account_id = $1 AND k.idempotency_key LIKE ANY($2::text[])`,
-        [accountId, entry.runKeyLikes(workItemId, approval.id, head?.sha ?? null)],
-      );
-      // A run of this stage that really started (it did not end `refused_spend`) means the stage was allowed once: what came of it is the workflow's own outcome.
-      // (A review starts several reviewers; a started one beside a denied one is the normal partial start, and the restart finds it by its key.)
-      if (entry.startedRunsOk !== true && keys.rows.some((r) => r.status !== "refused_spend")) return { skip: "stage_already_ran" };
-      let attempt = entry.nextAttempt(keys.rows.map((r) => r.idempotency_key));
+      const readHead =
+        entry.headBound !== true
+          ? undefined
+          : async (): Promise<{ skip: string } | { head: NonNullable<Plan["head"]> }> => {
+              const latest = (
+                await client.query<{ head_sha: string | null; pr_number: number | null; round: number | null }>(
+                  "SELECT head_sha, pr_number, round FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind IN ('stage_waiting', 'build_waiting') ORDER BY seq DESC LIMIT 1",
+                  [accountId, workItemId],
+                )
+              ).rows[0];
+              if (!latest || latest.head_sha === null) return { skip: "no_head" };
+              const moved = await client.query(
+                `SELECT 1 FROM work_item_driver_events p
+                  WHERE p.account_id = $1 AND p.work_item_id = $2 AND p.kind = 'pr_head_pushed' AND p.head_sha IS DISTINCT FROM $3
+                    AND p.seq > COALESCE((SELECT min(w.seq) FROM work_item_driver_events w WHERE w.account_id = $1 AND w.work_item_id = $2 AND w.kind = 'stage_waiting' AND w.stage = $4 AND w.head_sha = $3), 0)
+                  LIMIT 1`,
+                [accountId, workItemId, latest.head_sha, entry.stage],
+              );
+              if (moved.rows.length > 0) return { skip: "head_moved" };
+              return { head: { sha: latest.head_sha, prNumber: latest.pr_number, rereview: latest.round ?? 0 } };
+            };
+      const gate = await stageApprovalGate(client, accountId, workItemId, entry, readHead);
+      if ("skip" in gate) return gate;
+      let attempt = entry.nextAttempt(gate.keys);
       if (entry.attemptAfterFacts === true) {
         // Only the facts the workflow wrote (`wait:...`); the sweep's own refreshes and claims are not counted, so a pass does not move the number it will use.
         const written = await client.query<{ top: number | null }>(
@@ -212,7 +149,7 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
         const top = written.rows[0]?.top;
         if (top !== null && top !== undefined) attempt = Math.max(attempt, Number(top) + 1);
       }
-      return { plan: { userId: who[1]!, actionId: approval.id, haltEpoch: item.halt_epoch, specVersion: item.version === null ? null : Number(item.version), attempt, head } };
+      return { plan: { userId: gate.approval.userId, actionId: gate.approval.id, haltEpoch: gate.haltEpoch, specVersion: gate.specVersion, attempt, head: gate.head } };
     });
   }
 
@@ -305,15 +242,18 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
       }
     }
     // The slot wake runs on the same tick but never schedules another one (see sweepSlotWaiters).
+    let slotRecheckAt: number | null = null;
     for (const entry of entries) {
       if (entry.stage !== "build") continue;
       const slots = await sweepSlotWaiters(entry);
       counts.slotListed = slots.listed;
       counts.slotStarted = slots.started;
       counts.failed += slots.failed;
+      if (slots.recheckAt !== null) slotRecheckAt = slotRecheckAt === null ? slots.recheckAt : Math.min(slotRecheckAt, slots.recheckAt);
     }
     // Something is parked (or was just refreshed): look again in a pass. Otherwise the marker is cleared and the next writer sets it.
-    return { ...counts, nextDueAt: counts.listed > 0 ? now() + STAGE_RESUME_PASS_SECONDS * 1000 : null };
+    const parkedDue = counts.listed > 0 ? now() + STAGE_RESUME_PASS_SECONDS * 1000 : null;
+    return { ...counts, nextDueAt: parkedDue === null ? slotRecheckAt : slotRecheckAt === null ? parkedDue : Math.min(parkedDue, slotRecheckAt) };
   }
 
   /**
@@ -324,14 +264,19 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
    * holds (a performed approval by an owner or admin, the Spec as approved, no live run, no refusal since): an item that needs a person's approval is left as it is.
    * It schedules no pass of its own: a pass that finds the slot still held leaves the waiters for the next slot that frees.
    */
-  async function sweepSlotWaiters(entry: ParkedStageEntryInput): Promise<{ listed: number; started: number; failed: number }> {
-    const out = { listed: 0, started: 0, failed: 0 };
+  async function sweepSlotWaiters(entry: ParkedStageEntryInput): Promise<SlotWakeCounts> {
+    const out: SlotWakeCounts = { listed: 0, started: 0, failed: 0, recheckAt: null };
     if (entry.stage !== "build" || !deps.buildWaitReason || deps.startAdvance === null) return out;
     const wait = deps.buildWaitReason;
     const bucket = Math.floor(now() / (STAGE_RESUME_PASS_SECONDS * 1000));
     let listed: { account_id: string; work_item_id: string; pause: string }[];
+    // Fresh waiters are listed too (minimum age 0): one whose workflow died less than the orphan age ago looks alive, and the slot may free in that window.
+    let fresh: { account_id: string; work_item_id: string; waited_at: Date }[] = [];
     try {
-      listed = (await runnerPool.query<{ account_id: string; work_item_id: string; pause: string }>("SELECT account_id, work_item_id, pause FROM work_item_list_parked_stage($1, $2::text[], $3::text[], $4, $5)", [entry.stage, [...entry.itemStages], [...SLOT_WAIT_REASONS], STAGE_RESUME_ORPHAN_AFTER_SECONDS, LIST_LIMIT])).rows;
+      const all = (await runnerPool.query<{ account_id: string; work_item_id: string; pause: string; waited_at: Date }>("SELECT account_id, work_item_id, pause, waited_at FROM work_item_list_parked_stage($1, $2::text[], $3::text[], $4, $5)", [entry.stage, [...entry.itemStages], [...SLOT_WAIT_REASONS], 0, LIST_LIMIT])).rows;
+      const orphanBefore = now() - STAGE_RESUME_ORPHAN_AFTER_SECONDS * 1000;
+      listed = all.filter((r) => r.waited_at.getTime() <= orphanBefore);
+      fresh = all.filter((r) => r.waited_at.getTime() > orphanBefore);
     } catch (err) {
       out.failed += 1;
       reportError(err, { stage: "advance.slot_wake_list" });
@@ -339,6 +284,19 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
       return out;
     }
     out.listed = listed.length;
+    // A fresh waiter that could get a slot right now is either being started by its live workflow (it leaves Spec ready within a minute) or its workflow is gone.
+    // One look at the moment its fact turns old enough settles it; this is a single follow-up from the slot-free event, not a poll (a waiter still blocked adds none).
+    for (const f of fresh) {
+      try {
+        if ((await wait(f.account_id, f.work_item_id)) !== null) continue;
+        if ("skip" in (await planFor(entry, f.account_id, f.work_item_id))) continue;
+        const due = f.waited_at.getTime() + STAGE_RESUME_ORPHAN_AFTER_SECONDS * 1000 + 30_000;
+        out.recheckAt = out.recheckAt === null ? due : Math.min(out.recheckAt, due);
+      } catch (err) {
+        out.failed += 1;
+        reportError(err, { stage: "advance.slot_wake_item" });
+      }
+    }
     // Queue order inside a repository: the first item of the queue takes the slot.
     const keyed: { c: (typeof listed)[number]; repoId: string | null; key: { id: string; priority: number; queueRank: number | bigint | null; createdAt: Date } }[] = [];
     for (const c of listed) {
