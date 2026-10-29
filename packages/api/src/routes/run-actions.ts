@@ -246,7 +246,13 @@ async function approve(ctx: RouteContext, id: string) {
     if (Number(live.rows[0]!.n) > 0) throw new AlreadyRunningError();
     // D#483 S5-b2a: the person's click is a record (migration 0906). Written after every refusal above and before the request, so an item whose
     // run starts always has the row; a repeat of an unchanged approval writes nothing.
-    await client.query("SELECT 1 FROM work_item_approval_record($1::uuid, 'work_item_approve')", [id]);
+    const { rows: recorded } = await client.query<{ o_replayed: boolean }>("SELECT o_replayed FROM work_item_approval_record($1::uuid, 'work_item_approve')", [id]);
+    // A split parent with no spend limit gets one in this same transaction, or its children stay held. A repeat of the click writes nothing. Loaded here, not at
+    // the top: the envelope routes import this file's UNAVAILABLE_TEXT.
+    if (recorded[0]?.o_replayed === false) {
+      const { attachSplitParentEnvelope } = await import("./split-parent-envelope.js");
+      await attachSplitParentEnvelope(client, { accountId, workItemId: id });
+    }
   });
   // D#483 S5-b2c-2: the approval may have made planned PR children (a hint: the auto-start sweep reads the rows).
   void markWorkPending("proposal-verify-sweep");

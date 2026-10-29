@@ -248,6 +248,8 @@ describe('D#483 P1: approve route', () => {
   it('approving a Spec that plans two pull requests through the route creates both children, writes no refusal fact, and leaves the parent out of the stalled list', async () => {
     const p = await person('owner');
     const item = await seedSpecReady(p.accountId, { kind: 'small' });
+    // The click also gives the split parent its spend limit, priced against what the account can still spend this month.
+    await admin.query('UPDATE accounts SET model_budget_usd_month = 600 WHERE id = $1', [p.accountId]);
     await admin.query(`UPDATE spec_versions SET frontmatter = $2::jsonb WHERE work_item_id = $1`, [
       item,
       JSON.stringify({ planned_prs: [{ key: 'page-a', title: 'Page A', depends_on: [] }, { key: 'page-b', title: 'Page B', depends_on: [] }] }),
@@ -255,6 +257,7 @@ describe('D#483 P1: approve route', () => {
     expect((await post(p, `/work-items/${item}/approve`)).status).toBe(202);
     const kids = await admin.query('SELECT planned_pr_key FROM work_items WHERE parent_id = $1 ORDER BY planned_pr_key', [item]);
     expect(kids.rows.map((r) => r.planned_pr_key)).toEqual(['page-a', 'page-b']);
+    expect((await admin.query('SELECT envelope_id FROM work_items WHERE id = $1', [item])).rows[0].envelope_id).not.toBeNull();
     const facts = await admin.query(`SELECT kind FROM work_item_driver_events WHERE work_item_id = $1 AND kind IN ('build_refused', 'stopped')`, [item]);
     expect(facts.rows).toEqual([]);
     const stalled = await listStalledItems({ pool: appUserPool, principal: { accountId: p.accountId, userId: p.userId } }, { limit: 50, now: new Date(Date.now() + 3 * 3_600_000) });

@@ -98,7 +98,7 @@ describe("a short Spec that plans two pull requests launches both children after
   }
 
   /** A triaged doc item that an owner approved with an item envelope, then its short Spec published with `output`. */
-  async function specReady(output: unknown): Promise<{ a: SeedRefs; workItemId: string; pmRun: string }> {
+  async function specReady(output: unknown, opts: { envelope?: boolean } = {}): Promise<{ a: SeedRefs; workItemId: string; pmRun: string }> {
     const a = await account();
     const t = await runTriageStep(
       { pool: writerPool, accountId: a.accountId, classifier: fixtureClassifier("doc") },
@@ -107,7 +107,7 @@ describe("a short Spec that plans two pull requests launches both children after
     if (t.status !== "triaged") throw new Error(`fixture: ${JSON.stringify(t)}`);
     const workItemId = t.workItemId;
     await admin.query("UPDATE work_items SET gh_number = $2, repo_id = $3 WHERE id = $1", [workItemId, nextNumber++, a.repoId]);
-    await envelopeFor(a, workItemId);
+    if (opts.envelope !== false) await envelopeFor(a, workItemId);
     // The PM's finished run, as the workflow leaves it before the publish step.
     const pmRun = randomUUID();
     await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, envelope) VALUES ($1, $2, $3, 'project-manager', 'production', 'succeeded', $4::jsonb)", [pmRun, a.accountId, workItemId, JSON.stringify(output)]);
@@ -160,6 +160,75 @@ describe("a short Spec that plans two pull requests launches both children after
       expect((await admin.query("SELECT envelope_id FROM work_items WHERE id = $1", [k.id])).rows[0]!.envelope_id).toBe(parentEnvelope);
       expect((await admin.query("SELECT 1 FROM run_action_requests WHERE target_id = $1 AND kind = 'advance_work_item'", [k.id])).rows).toHaveLength(1);
     }
+  });
+
+  const envelopeRows = async (accountId: string) => (await admin.query<{ id: string; scope: string; amount_usd: string }>("SELECT id, scope, amount_usd FROM approval_envelopes WHERE account_id = $1 AND scope <> 'weekly_autostart' ORDER BY created_at", [accountId])).rows;
+  const envelopeOf = async (id: string) => (await admin.query<{ envelope_id: string | null }>("SELECT envelope_id FROM work_items WHERE id = $1", [id])).rows[0]!.envelope_id;
+
+  it("a split parent approved from the card with NO envelope gets an item envelope in the approval, and both children reach started", async () => {
+    // The parent was never given an envelope (no proposal approval): nothing here attaches one by hand.
+    const { a, workItemId } = await specReady(SPLIT, { envelope: false });
+    expect(await envelopeOf(workItemId)).toBeNull();
+    expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    const envelopeId = await envelopeOf(workItemId);
+    expect(envelopeId).not.toBeNull();
+    const rows = await envelopeRows(a.accountId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: envelopeId, scope: "item" });
+    expect(Number(rows[0]!.amount_usd)).toBeGreaterThan(0);
+    const kids = await kidsOf(workItemId);
+    const sweep = sweepOf();
+    expect(await sweep.gateChild(a.accountId, kids[0]!.id)).toEqual({ outcome: "started" });
+    expect(await sweep.gateChild(a.accountId, kids[1]!.id)).toEqual({ outcome: "started" });
+    for (const k of kids) expect(await envelopeOf(k.id)).toBe(envelopeId);
+    // A second click is a repeat: no second envelope.
+    expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    expect(await envelopeRows(a.accountId)).toHaveLength(1);
+  });
+
+  it("room still holds under the attached envelope: a child that does not fit is held", async () => {
+    const { a, workItemId } = await specReady(SPLIT, { envelope: false });
+    expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    const kids = await kidsOf(workItemId);
+    const tight: ChildLaunchDeps = { buildSupported: true, room: async () => ({ fits: false, remainingUsd: 0, priceUsd: PRICE }) };
+    expect(await sweepOf(tight).gateChild(a.accountId, kids[0]!.id)).toMatchObject({ outcome: "no_room", code: "parent_envelope_reached" });
+  });
+
+  it("a parent that already has an envelope keeps it unchanged, and no second one is written", async () => {
+    const { a, workItemId } = await specReady(SPLIT);
+    const before = await envelopeOf(workItemId);
+    const rowsBefore = await envelopeRows(a.accountId);
+    expect(before).not.toBeNull();
+    expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    expect(await envelopeOf(workItemId)).toBe(before);
+    expect(await envelopeRows(a.accountId)).toEqual(rowsBefore);
+  });
+
+  it("an account with nothing left to spend refuses the split approval like a proposal's, and the approval is rolled back with it", async () => {
+    const { a, workItemId } = await specReady(SPLIT, { envelope: false });
+    await admin.query("UPDATE accounts SET model_budget_usd_month = 0 WHERE id = $1", [a.accountId]);
+    const res = await approveByRoute(a, workItemId);
+    expect(res.status).toBe(409);
+    expect(await kidsOf(workItemId)).toEqual([]);
+    expect((await admin.query("SELECT 1 FROM work_item_approvals WHERE work_item_id = $1", [workItemId])).rows).toEqual([]);
+    expect(await envelopeOf(workItemId)).toBeNull();
+  });
+
+  it("a Spec that plans one pull request is approved as before: no envelope is attached", async () => {
+    const { a, workItemId } = await specReady(ONE, { envelope: false });
+    expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    expect(await envelopeOf(workItemId)).toBeNull();
+    expect(await envelopeRows(a.accountId)).toEqual([]);
+  });
+
+  it("the setter still refuses a started item outside the approval's own transaction, split parent or not", async () => {
+    const { a, workItemId } = await specReady(SPLIT, { envelope: false });
+    expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    // Undo the attach as the superuser, then try again later as a person: the approval row is no longer from this transaction.
+    const envelopeId = (await envelopeOf(workItemId))!;
+    await admin.query("UPDATE work_items SET envelope_id = NULL WHERE id = $1", [workItemId]);
+    await expect(withTenant(appPool, a.accountId, a.userId, (c) => setWorkItemEnvelope(c, workItemId, envelopeId))).rejects.toMatchObject({ code: "work_started" });
+    expect(await envelopeOf(workItemId)).toBeNull();
   });
 
   it("the envelope limit still holds: with no room under the parent's envelope the child is held, and nothing is written", async () => {
