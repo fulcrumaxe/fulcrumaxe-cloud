@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPool } from "@fx/db/src/pool.js";
 import { runMigrations } from "@fx/db/src/migrate.js";
 import { provisionEphemeralPostgres, type EphemeralPostgres } from "@fx/db/test/support/ephemeral-pg.js";
+import { guardPoolTeardown, type PoolTeardownGuard } from "@fx/db/test/support/pool-teardown.js";
 import {
   APP_USER_ENV,
   EVENTS_LISTEN_ENV,
@@ -41,13 +42,13 @@ const RECEIPT = "fx_receipt";
 const DB = "fx_neon_guard";
 
 /**
- * A pool with an error listener. When the throwaway cluster is stopped at the end, a backend can
- * still report the shutdown (57P01) to a client whose close has not finished; without a listener
- * that surfaces as an unhandled error in the test run.
+ * Every pool this file opens (including the ones createWorkerPools makes through `makePool`) carries the shared teardown guard: a 57P01
+ * from the throwaway cluster being stopped is absorbed only once afterAll has begun, and each pool's sockets are awaited before the stop.
  */
+const guards: PoolTeardownGuard[] = [];
 const quietPool = (connectionString: string): Pool => {
   const p = createPool(connectionString);
-  p.on("error", () => undefined);
+  guards.push(guardPoolTeardown(p, `neon-shape-pool${guards.length}`));
   return p;
 };
 
@@ -114,9 +115,12 @@ describe("startup guards on the hosted owner shape [pg]", () => {
   }, 180_000);
 
   afterAll(async () => {
-    await Promise.all(pools.map((p) => p.end()));
-    await superPool?.end();
+    for (const g of guards) g.beginTeardown();
+    const failures: unknown[] = [];
+    // A pool a test already closed (worker.close()) rejects a second end(); its guard still absorbs a late 57P01.
+    await Promise.all(guards.map((g) => g.endAndWaitForSockets().catch((e: unknown) => { if (!/more than once/.test(String(e))) failures.push(e); })));
     cluster?.cleanup();
+    if (failures.length > 0) throw failures[0];
   });
 
   it("really has the hosted shape: a non-superuser owner holding exactly the two membership rows", async () => {

@@ -267,12 +267,20 @@ describe("platform invariant sweep [pg]", () => {
       // The fixture tables are tiny, so the planner is told not to prefer a sequential scan; what is checked is that an index path EXISTS for each read.
       await admin.query("SET LOCAL enable_seqscan = off");
       await admin.query("ANALYZE agent_runs, run_events, work_items, runner_run_usage, platform_invariant_alerts");
+      // Drop (inside this rolled-back transaction) every agent_runs index that is not a constraint's and is not the one under test. Which of the
+      // others the planner prefers is what flipped the earlier flaky run; with them gone, the only non-constraint path left to the time window is
+      // agent_runs_ended_at_recent, so the body must name it, and dropping that index from the migration fails every body.
+      const others = (await admin.query<{ indexname: string }>(
+        `SELECT i.indexname FROM pg_indexes i WHERE i.tablename = 'agent_runs' AND i.indexname <> 'agent_runs_ended_at_recent'
+            AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = (quote_ident(i.schemaname) || '.' || quote_ident(i.indexname))::regclass)`,
+      )).rows;
+      for (const o of others) await admin.query(`DROP INDEX "${o.indexname}"`);
       await admin.query(`PREPARE inv_plan(int, int, int) AS ${body}`);
       const plan = (await admin.query<Record<string, string>>("EXPLAIN EXECUTE inv_plan(100, 60, 3600)")).rows.map((r) => r["QUERY PLAN"]).join("\n");
       // Which index the planner starts the body from depends on table statistics, and this database is shared with other suites whose rows come and go
       // (a flaky run planned the body with another agent_runs path). So the body is held only to what no cost estimate can flip: agent_runs is read
       // through SOME index path and no table is read by a sequential scan. That the recent-ended index in particular is the usable one is pinned below.
-      expect(plan).toMatch(/Index (Only )?Scan using \S+ on agent_runs\b|Bitmap Index Scan on \S*agent_runs\S*/);
+      expect(plan).toMatch(/Index (Only )?Scan using agent_runs_ended_at_recent on agent_runs\b|Bitmap Index Scan on agent_runs_ended_at_recent\b/);
       expect(plan).not.toMatch(/Seq Scan on (agent_runs|run_events|work_items|runner_run_usage|platform_invariant_alerts)/);
     } finally {
       await admin.query("ROLLBACK");
