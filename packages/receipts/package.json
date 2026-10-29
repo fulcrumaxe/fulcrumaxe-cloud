@@ -1,0 +1,26 @@
+{
+  "name": "@fx/receipts",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "D#7 DP6a: the decision-receipt block in a pull request's body -- the fixed-text renderer, the reversal price port, the marker writer and the writer that puts the block on an open pull request.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fx/decisions": "workspace:*"
+  },
+  "devDependencies": {
+    "@fx/github": "workspace:*",
+    "@types/node": "^24.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.8"
+  }
+}

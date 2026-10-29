@@ -224,7 +224,7 @@ export class InstallationTokenCache {
  * permission set no other purpose may ask for (see MERGE_GATE_PERMISSIONS). It exists so the check-run, status and
  * branch-protection reads, and the commit-status write, are NOT in the allowlist of every other purpose.
  */
-export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push", "plane_merge", "plane_publish_read", "branch_delete", "branch_sync", "pairing_read"] as const;
+export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push", "plane_merge", "plane_publish_read", "branch_delete", "branch_sync", "pairing_read", "receipt_block"] as const;
 export type MintPurpose = (typeof MINT_PURPOSES)[number];
 
 /**
@@ -279,6 +279,24 @@ export const BRANCH_DELETE_PERMISSIONS: Readonly<Record<string, "write">> = Obje
  * pull request, the base branch's ref, and ONE merge into the pinned branch). One repository, never cached.
  */
 export const BRANCH_SYNC_PERMISSIONS: Readonly<Record<string, "read" | "write">> = Object.freeze({ contents: "write", pull_requests: "read" });
+
+/**
+ * D#7 DP6a (C22 B4): the only permissions a `receipt_block` token ever asks for: `pull_requests: write` (to update the pull request's body, the one
+ * write it makes) and `checks: read` (a head's check runs, to measure the block against CI). Nothing else, and not `contents`. GitHub's answer to the mint is checked (`assertReceiptBlockToken`, as for `branch_sync`), and what narrows the token further is the client built on it (`installationHttp.ts` kind `receipt_block`: the one pull request, body only, and the check-run list).
+ * One repository.
+ */
+export const RECEIPT_BLOCK_PERMISSIONS: Readonly<Record<string, "read" | "write">> = Object.freeze({ metadata: "read", checks: "read", pull_requests: "write" });
+
+/** D#7 DP6a: a `receipt_block` mint must cover exactly the one repository and hold `pull_requests: write` and `checks: read`, and nothing else but `metadata: read`. */
+export function assertReceiptBlockToken(minted: Pick<MintedAccessToken, "permissions" | "repositories">, repo: string): void {
+  const perms = minted.permissions;
+  if (perms === undefined || perms === null || typeof perms !== "object" || Array.isArray(perms)) throw new InstallationTokenError("token_scope_mismatch");
+  const exact = Object.entries(perms).filter(([k]) => k !== "metadata");
+  const repos = minted.repositories;
+  const coversOnly = Array.isArray(repos) && repos.length === 1 && repos[0]!.toLowerCase() === repo.toLowerCase();
+  const exactOk = exact.length === 2 && exact.every(([k, v]) => RECEIPT_BLOCK_PERMISSIONS[k] === v);
+  if ((perms.metadata !== undefined && perms.metadata !== "read") || !exactOk || !coversOnly) throw new InstallationTokenError("token_scope_mismatch");
+}
 
 /**
  * D#598 P1f-4b: the only permissions a `plane_publish_read` token ever asks for: reads of the contents of ONE private repository, for the publish
@@ -484,6 +502,14 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     allowed = Object.keys(BRANCH_SYNC_PERMISSIONS);
     appKind = params.appKind;
     namespace = "branch_sync:";
+  } else if (params.purpose === "receipt_block") {
+    // D#7 DP6a: the write App, ONE repository and a fixed set; cached apart from every other purpose (a `run` token holds more).
+    assertWriteInstallation(params.appKind);
+    if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
+    scope = { repositories: params.scope.repositories, permissions: RECEIPT_BLOCK_PERMISSIONS };
+    allowed = Object.keys(RECEIPT_BLOCK_PERMISSIONS);
+    appKind = params.appKind;
+    namespace = "receipt_block:";
   } else if (params.purpose === "pairing_read" && (params.appKind === "team" || params.appKind === "team_readonly")) {
     // D#598 PAIR-PICKER-API: one repository, metadata read. Minted per read, never cached.
     if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
@@ -590,6 +616,7 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
       throw error;
     }
   }
+  if (params.purpose === "receipt_block") assertReceiptBlockToken(minted, (scope as MergeGateScope).repositories[0]);
   if (fresh) {
     noteLiveInstallationToken(minted.token, expiresAtMs);
     params.onExpiry?.(expiresAtMs);

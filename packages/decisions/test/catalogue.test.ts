@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CATALOGUE, CATALOGUE_IDS, getCatalogueEntry } from "../src/catalogue.js";
+import { reversalWindowFor } from "../src/reversalWindow.js";
 import { decide } from "../src/decide.js";
 import { PRESETS } from "../src/presets.js";
 import type { DecisionClass } from "../src/types.js";
@@ -18,6 +19,7 @@ const EXPECTED_ENTRY_KEYS = [
   "customerProximity",
   "dataSensitivity",
   "timeoutOutcomes",
+  "reversalWindowHours",
 ].sort();
 
 const VALID_CLASSES: readonly DecisionClass[] = [
@@ -144,7 +146,17 @@ describe("DP12a-1: timeoutOutcomes (DP-C5 R2)", () => {
       customerProximity: "internal_only",
       dataSensitivity: "none",
       timeoutOutcomes: ["stop_and_flag", "proceed_recommended"],
+      reversalWindowHours: 24,
     });
+  });
+
+  it("DP6a: every entry carries a reversal window of 24 hours (C23), the same whatever the preset", () => {
+    for (const e of CATALOGUE) {
+      expect(e.reversalWindowHours, e.id).toBe(24);
+      for (const p of PRESETS) expect(reversalWindowFor(e, p.name), `${e.id}/${p.name}`).toBe(24);
+    }
+    expect(() => reversalWindowFor({ ...CATALOGUE[0]!, reversalWindowHours: 0 })).toThrow(RangeError);
+    expect(() => reversalWindowFor({ ...CATALOGUE[0]!, reversalWindowHours: 1.5 })).toThrow(RangeError);
   });
 
   it("class 1 is never asked, so it lists none; every asked entry can always stop and flag", () => {

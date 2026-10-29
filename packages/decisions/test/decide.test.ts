@@ -31,6 +31,7 @@ function entryOf(
     customerProximity: "internal_only",
     dataSensitivity: "none",
     timeoutOutcomes: cls === "automated_with_monitoring" ? [] : ["stop_and_flag"],
+    reversalWindowHours: 24,
   };
 }
 
@@ -137,6 +138,7 @@ describe("criterion 4 (clamp): a disallowed proposal degrades toward the more co
       customerProximity: "internal_only",
       dataSensitivity: "none",
       timeoutOutcomes: ["stop_and_flag"],
+      reversalWindowHours: 24,
     };
     // Cautious proposes "ask", which is not allowed, and neither "announce"
     // nor "ask" are in allowedDispositions -- decide() falls back to

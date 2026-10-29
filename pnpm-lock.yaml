@@ -1046,6 +1046,25 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@24.19.0)(supports-color@10.2.2)
 
+  packages/receipts:
+    dependencies:
+      '@fx/decisions':
+        specifier: workspace:*
+        version: link:../decisions
+    devDependencies:
+      '@fx/github':
+        specifier: workspace:*
+        version: link:../github
+      '@types/node':
+        specifier: ^24.19.0
+        version: 24.19.0
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@24.19.0)(supports-color@10.2.2)
+
   packages/reconcile:
     dependencies:
       '@fx/db':

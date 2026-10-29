@@ -20,7 +20,7 @@ function setup(route: (url: URL, init: RequestInit | undefined) => Response | un
   const log: InstallationHttpLogEntry[] = [];
   const requester: AccessTokenRequester = async (p) => {
     minted.push(p);
-    return { token: "ghs_faketoken", expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
+    return { token: "ghs_faketoken", expiresAt: new Date(Date.now() + 3_600_000).toISOString(), permissions: p.permissions as Record<string, string>, ...(p.repositories ? { repositories: p.repositories } : {}) };
   };
   const fetchImpl = strictGithubFetch((async (input: string | URL, init?: RequestInit) => {
     const url = new URL(String(input));
@@ -217,6 +217,69 @@ describe("createInstallationHttp", () => {
 
     it("needs the write App: a read-only installation cannot open it", async () => {
       await expect(setup(() => undefined, { appKind: "team_readonly" }).open("runner_pr", TARGET)).rejects.toThrow();
+    });
+  });
+
+  describe("receipt_block (D#7 DP6a, C22 B4)", () => {
+    const SHA = "c".repeat(40);
+    const PR = { ...TARGET, prNumber: 7 };
+
+    it("mints pull_requests write and checks read for one repository, and allows the pull request read, the body-only PATCH and the check-run list", async () => {
+      const t = setup((u) => (u.pathname === "/repos/acme/widgets/pulls/7" ? json(200, { number: 7 }) : u.pathname === `/repos/acme/widgets/commits/${SHA}/check-runs` ? json(200, { total_count: 0, check_runs: [] }) : undefined));
+      const http = await t.open("receipt_block", PR);
+      expect(t.minted[0]).toMatchObject({ repositories: ["widgets"], permissions: { metadata: "read", checks: "read", pull_requests: "write" } });
+      expect(await http.request({ method: "GET", path: "/repos/acme/widgets/pulls/7" })).toEqual({ status: 200, body: { number: 7 } });
+      expect((await http.request({ method: "PATCH", path: "/repos/acme/widgets/pulls/7", body: { body: "text" } })).status).toBe(200);
+      expect((await http.request({ method: "GET", path: `/repos/acme/widgets/commits/${SHA}/check-runs`, query: { per_page: 100, page: 1 } })).status).toBe(200);
+      expect(t.calls.map((c) => c.method)).toEqual(["GET", "PATCH", "GET"]);
+      expect(t.calls[1]!.body).toBe(JSON.stringify({ body: "text" }));
+    });
+
+    it.each([
+      ["PATCH", "/repos/acme/widgets/pulls/7", { body: "x", state: "closed" }],
+      ["PATCH", "/repos/acme/widgets/pulls/7", { title: "x" }],
+      ["PATCH", "/repos/acme/widgets/pulls/7", { body: 5 }],
+      ["PATCH", "/repos/acme/widgets/pulls/7", {}],
+      ["PATCH", "/repos/acme/widgets/pulls/7", ["body"]],
+      ["PATCH", "/repos/acme/widgets/pulls/7", undefined],
+      ["PATCH", "/repos/acme/widgets/pulls/8", { body: "x" }],
+      ["PATCH", "/repos/acme/widgets/issues/7", { body: "x" }],
+      ["GET", "/repos/acme/widgets/pulls/8", undefined],
+      ["GET", "/repos/acme/widgets/pulls/7/files", undefined],
+      ["GET", "/repos/acme/widgets/pulls", undefined],
+      ["GET", "/repos/acme/widgets", undefined],
+      ["GET", "/repos/acme/widgets/contents/README.md", undefined],
+      ["GET", "/repos/acme/widgets/commits/main/check-runs", undefined],
+      ["GET", `/repos/acme/widgets/commits/${SHA}`, undefined],
+      ["GET", `/repos/acme/widgets/commits/${SHA}/statuses`, undefined],
+      ["POST", "/repos/acme/widgets/pulls/7", { body: "x" }],
+      ["POST", "/repos/acme/widgets/pulls", { title: "t", head: "h", base: "b" }],
+      ["POST", "/graphql", { query: "{ viewer { login } }" }],
+      ["PUT", "/repos/acme/widgets/pulls/7/files", {}],
+      ["DELETE", "/repos/acme/widgets/git/refs/heads/x", undefined],
+    ] as const)("refuses %s %s %j before any request is sent", async (method, path, body) => {
+      const t = setup(() => undefined);
+      const http = await t.open("receipt_block", PR);
+      await expect(http.request({ method, path, ...(body === undefined ? {} : { body }) })).rejects.toBeInstanceOf(InstallationHttpError);
+      expect(t.calls).toEqual([]);
+    });
+
+    it("is refused a query on the pull request itself, and the other kinds still cannot PATCH", async () => {
+      const t = setup(() => undefined);
+      const http = await t.open("receipt_block", PR);
+      await expect(http.request({ method: "GET", path: "/repos/acme/widgets/pulls/7", query: { x: 1 } })).rejects.toThrow("path_refused");
+      for (const kind of ["read", "merge_gate", "repo_map"] as const) {
+        const other = await t.open(kind, TARGET);
+        await expect(other.request({ method: "PATCH", path: "/repos/acme/widgets/pulls/7", body: { body: "x" } })).rejects.toThrow();
+      }
+      expect(t.calls).toEqual([]);
+    });
+
+    it("needs the pull request number and the write App, and no other kind accepts a pull request number", async () => {
+      await expect(setup(() => undefined).open("receipt_block", TARGET)).rejects.toThrow("invalid_coordinates");
+      await expect(setup(() => undefined).open("read", PR)).rejects.toThrow("invalid_coordinates");
+      await expect(setup(() => undefined).open("receipt_block", { ...TARGET, prNumber: 0 })).rejects.toThrow("invalid_coordinates");
+      await expect(setup(() => undefined, { appKind: "team_readonly" }).open("receipt_block", PR)).rejects.toThrow();
     });
   });
 });

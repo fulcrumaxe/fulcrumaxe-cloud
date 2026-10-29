@@ -1,5 +1,5 @@
 import type { PoolClient } from 'pg';
-import { CATALOGUE, CATALOGUE_VERSION, type DecisionClass } from '@fx/decisions';
+import { CATALOGUE, CATALOGUE_VERSION, reversalWindowFor, type DecisionClass } from '@fx/decisions';
 
 /**
  * The TypeScript half of the decision-receipt writer (D#7 DP3b; the
@@ -134,6 +134,17 @@ function validate(input: WriteReceiptInput): ReceiptTrustClass[] {
   return (quoted as ReceiptQuotedInput[]).map((q) => q.trust);
 }
 
+/**
+ * D#7 DP6a: tells the insert trigger (migration 0928) how many hours this decision is free to reverse, for the next receipt row of this
+ * transaction. The window comes from the catalogue entry only, never from a caller; an entry that cannot be reversed gets none, so its
+ * receipt has no deadline. Transaction-local, and set again by the next call, so a second receipt never inherits the first one's window.
+ */
+async function stampReversalWindow(client: PoolClient, decisionType: string): Promise<void> {
+  const entry = CATALOGUE.find((e) => e.id === decisionType);
+  const hours = entry && entry.reversal.availability !== 'not_reversible' ? String(reversalWindowFor(entry)) : '';
+  await client.query("SELECT set_config('app.reversal_window_hours', $1, true)", [hours]);
+}
+
 export async function writeReceipt(client: PoolClient, input: WriteReceiptInput): Promise<WriteReceiptResult> {
   const trustClasses = JSON.stringify(validate(input));
   const workItemId = input.workItemId ?? null;
@@ -146,6 +157,7 @@ export async function writeReceipt(client: PoolClient, input: WriteReceiptInput)
     );
     return { store: 'run_events', outcome: rows[0]!.outcome };
   }
+  await stampReversalWindow(client, input.decisionType);
   if (input.ruleSetVersion !== undefined && input.ruleSetVersion >= 1) {
     const ruled = await client.query<{ id: string }>(
       `SELECT decision_receipt_write_ruled($1::text, $2::text, $3::text, $4::text, $5::integer, $6::jsonb,

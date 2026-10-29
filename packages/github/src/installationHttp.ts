@@ -1,6 +1,6 @@
 import type { AppCredentialsSource } from "./appCredentials.js";
 import { GH_OWNER_LOGIN_RE, GH_REPO_NAME_RE } from "./eventMapper.js";
-import { getInstallationToken, type AccessTokenRequester, type InstallationTokenCache } from "./installationToken.js";
+import { getInstallationToken, RECEIPT_BLOCK_PERMISSIONS, type AccessTokenRequester, type InstallationTokenCache } from "./installationToken.js";
 
 /**
  * D#483 P3: an HTTP client for ONE repository's GitHub API, authenticated as the write App's installation, for the stage
@@ -33,6 +33,11 @@ import { getInstallationToken, type AccessTokenRequester, type InstallationToken
  *                  platform pushes) and the pull request number it was opened for, and allows exactly: `GET` the repository, `GET` that pull request, `GET` a
  *                  branch ref, and `POST /merges` ONCE, whose body is exactly `base` = the pinned branch, `head` = a commit id and `commit_message`.
  *
+ *   - `receipt_block` D#7 DP6a (C22 B4): the decision-receipt block in ONE pull request's body. Token: the `receipt_block` purpose (`pull_requests: write`, `checks: read`,
+ *                  one repository). The client is pinned to the pull request number it was opened for, and allows exactly: `GET` that pull request (to read the current
+ *                  body), `PATCH` it with a JSON body whose only key is `body` (a string), and `GET /commits/<sha>/check-runs`. Every other method, path and body key is
+ *                  refused before a request is sent.
+ *
  * What it keeps, so a bug in a caller cannot widen it:
  *   - the host is api.github.com and the path must start with `/repos/<owner>/<name>/` for the repository the client was
  *     opened for: any other path throws before a token is used;
@@ -42,7 +47,7 @@ import { getInstallationToken, type AccessTokenRequester, type InstallationToken
  *     GitHub's own `message` cut short. It never hears a token, a header or a request body.
  */
 
-export type InstallationHttpKind = "read" | "merge_gate" | "runner_pr" | "repo_map" | "branch_delete" | "branch_sync";
+export type InstallationHttpKind = "read" | "merge_gate" | "runner_pr" | "repo_map" | "branch_delete" | "branch_sync" | "receipt_block";
 
 export interface InstallationHttpRequest {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -90,7 +95,7 @@ export interface InstallationHttpTarget {
   allowGraphql?: boolean;
   /** `branch_delete` only: the one branch the client may read and delete. Required for that kind, refused for every other. */
   branch?: string;
-  /** `branch_sync` only: the one pull request the client may read. Required for that kind, refused for every other. */
+  /** `branch_sync` and `receipt_block` only: the one pull request the client may read (and, for `receipt_block`, update). Required for those kinds, refused for every other. */
   prNumber?: number;
 }
 
@@ -153,16 +158,16 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
 
   return async (kind, target) => {
     if (!GH_OWNER_LOGIN_RE.test(target.owner) || !GH_REPO_NAME_RE.test(target.name)) throw new InstallationHttpError("invalid_coordinates");
-    if ((kind === "branch_sync") !== (target.prNumber !== undefined) || (target.prNumber !== undefined && !(Number.isSafeInteger(target.prNumber) && target.prNumber >= 1))) throw new InstallationHttpError("invalid_coordinates");
+    if ((kind === "branch_sync" || kind === "receipt_block") !== (target.prNumber !== undefined) || (target.prNumber !== undefined && !(Number.isSafeInteger(target.prNumber) && target.prNumber >= 1))) throw new InstallationHttpError("invalid_coordinates");
     if ((kind === "branch_delete" || kind === "branch_sync") !== (target.branch !== undefined) || (target.branch !== undefined && !DELETABLE_BRANCH.test(target.branch))) throw new InstallationHttpError("invalid_coordinates");
     const installation = await deps.resolveInstallation(target.repoId);
     if (!installation) throw new InstallationHttpError("no_installation");
     const token = await getInstallationToken({
       installationId: installation.installationId,
       appKind: installation.appKind,
-      purpose: kind === "merge_gate" ? "merge_gate" : kind === "branch_delete" ? "branch_delete" : kind === "branch_sync" ? "branch_sync" : "run",
-      role: kind === "merge_gate" ? "merge_gate" : kind === "branch_delete" ? "branch_delete" : kind === "branch_sync" ? "branch_sync" : kind === "runner_pr" ? "runner_pr" : kind === "repo_map" ? "repo_map" : "pr_read",
-      scope: { repositories: [target.name], permissions: kind === "merge_gate" ? {} : kind === "runner_pr" ? RUNNER_PR_PERMISSIONS : kind === "repo_map" ? REPO_MAP_PERMISSIONS : { metadata: "read", pull_requests: "read" } },
+      purpose: kind === "merge_gate" ? "merge_gate" : kind === "branch_delete" ? "branch_delete" : kind === "branch_sync" ? "branch_sync" : kind === "receipt_block" ? "receipt_block" : "run",
+      role: kind === "merge_gate" ? "merge_gate" : kind === "branch_delete" ? "branch_delete" : kind === "branch_sync" ? "branch_sync" : kind === "receipt_block" ? "receipt_block" : kind === "runner_pr" ? "runner_pr" : kind === "repo_map" ? "repo_map" : "pr_read",
+      scope: { repositories: [target.name], permissions: kind === "merge_gate" ? {} : kind === "receipt_block" ? RECEIPT_BLOCK_PERMISSIONS : kind === "runner_pr" ? RUNNER_PR_PERMISSIONS : kind === "repo_map" ? REPO_MAP_PERMISSIONS : { metadata: "read", pull_requests: "read" } },
       appCredentials: deps.appCredentials,
       requester: deps.requester,
       cache: deps.cache,
@@ -205,9 +210,18 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
           if (merge && deleted) throw new InstallationHttpError("already_used");
           if (merge) deleted = true;
         }
+        // `receipt_block` holds pull_requests:write, so it gets an exact list: the one pull request (read, and a PATCH whose only key is `body`) and a commit's check runs.
+        if (kind === "receipt_block") {
+          const b = req.body as Record<string, unknown> | undefined;
+          const pr = req.path === `${prefix}pulls/${target.prNumber}` && req.query === undefined;
+          const readPr = req.method === "GET" && pr && b === undefined;
+          const writePr = req.method === "PATCH" && pr && typeof b === "object" && b !== null && !Array.isArray(b) && Object.keys(b).join() === "body" && typeof b["body"] === "string";
+          const runs = req.method === "GET" && b === undefined && req.path.startsWith(`${prefix}commits/`) && /^[0-9a-f]{40}\/check-runs$/.test(req.path.slice(prefix.length + "commits/".length));
+          if (!readPr && !writePr && !runs) throw new InstallationHttpError("path_refused");
+        }
         if (kind === "read" && req.method !== "GET" && !graphql) throw new InstallationHttpError("method_refused");
         // PATCH is for `runner_pr` alone (closing a pull request); the other kinds never needed it and never get it.
-        if (req.method === "PATCH" && kind !== "runner_pr") throw new InstallationHttpError("method_refused");
+        if (req.method === "PATCH" && kind !== "runner_pr" && kind !== "receipt_block") throw new InstallationHttpError("method_refused");
         // DELETE is for `branch_delete` alone, and only on its pinned ref (checked above).
         if (req.method === "DELETE" && kind !== "branch_delete") throw new InstallationHttpError("method_refused");
         if (kind === "runner_pr" && req.method === "PUT") throw new InstallationHttpError("method_refused");
@@ -220,7 +234,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
             headers: {
               accept: "application/vnd.github+json",
               authorization: `Bearer ${token}`,
-              ...(kind === "branch_delete" ? { "user-agent": "fulcrumaxe-cloud" } : {}),
+              ...(kind === "branch_delete" || kind === "receipt_block" ? { "user-agent": "fulcrumaxe-cloud" } : {}),
               "x-github-api-version": "2022-11-28",
               ...(req.body !== undefined ? { "content-type": "application/json" } : {}),
             },
