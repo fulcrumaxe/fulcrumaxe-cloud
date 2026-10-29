@@ -268,10 +268,13 @@ async function startWithRetry(dataDir: string, logFile: string): Promise<number>
 export async function provisionEphemeralPostgres(options: {
   database: string;
   tmpPrefix: string;
+  /** Directory to create the scratch dir in; defaults to the shared os tmpdir. A test that counts its own dirs passes a private root. */
+  tmpRoot?: string;
 }): Promise<EphemeralPostgres> {
   const { database, tmpPrefix } = options;
-  reapStaleEphemeralPostgres();
-  const tmpDir = mkdtempSync(path.join(tmpdir(), tmpPrefix));
+  const tmpRoot = options.tmpRoot ?? tmpdir();
+  reapStaleEphemeralPostgres([tmpRoot]);
+  const tmpDir = mkdtempSync(path.join(tmpRoot, tmpPrefix));
   writeFileSync(path.join(tmpDir, OWNER_PIDFILE), String(process.pid));
   const dataDir = path.join(tmpDir, 'data');
   const logFile = path.join(tmpDir, 'postgres.log');
