@@ -194,9 +194,11 @@ describe('ephemeral-pg cleanup', () => {
   });
 
   it('script keeps an ownerless cluster younger than 6 h', async () => {
-    const pg = await provisionEphemeralPostgres({ database: 'fx_ownerless', tmpPrefix: 'fx-leakchild-pg-' });
+    // Private root: the script's --root scan must see only this test's cluster, not other agents' young ones.
+    const root = mkdtempSync(path.join(tmpdir(), 'ownerless-root-'));
+    const pg = await provisionEphemeralPostgres({ database: 'fx_ownerless', tmpPrefix: 'fx-leakchild-pg-', tmpRoot: root });
     try {
-      const dir = clusterDirs().find((d) => readFileSync(path.join(d, 'owner.pid'), 'utf8') === String(process.pid))!;
+      const dir = clusterDirs(root).find((d) => readFileSync(path.join(d, 'owner.pid'), 'utf8') === String(process.pid))!;
       rmSync(path.join(dir, 'owner.pid'));
       const out = execFileSync(
         'bash',
@@ -207,6 +209,7 @@ describe('ephemeral-pg cleanup', () => {
       expect(postmasterAlive(dir)).toBe(true);
     } finally {
       pg.cleanup();
+      rmSync(root, { recursive: true, force: true });
     }
   }, 60_000);
 
