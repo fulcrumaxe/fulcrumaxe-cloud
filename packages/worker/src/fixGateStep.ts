@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import { gateFixRound } from "@fx/core/src/decisions/fixRoundGate.js";
+import { runAfterReceipt, type AfterReceiptHook } from "@fx/core/src/decisions/receiptHook.js";
 
 /**
  * D#483 S5-b2a part 2: the stage driver's call into the fix-round gate, on the RECEIPT login's pool (the only login that can call the definers). It gates a REVIEW
@@ -22,9 +23,11 @@ export type FixGatePort = (who: { accountId: string; userId: string; workItemId:
 const WORD = /^[a-z][a-z0-9_]{0,63}$/;
 const word = (v: string | null): string | null => (v !== null && WORD.test(v) ? v : null);
 
-export function createFixGate(receiptPool: Pool): FixGatePort {
+export function createFixGate(receiptPool: Pool, afterReceipt?: AfterReceiptHook): FixGatePort {
   return async (who, input) => {
     const r = await gateFixRound({ pool: receiptPool, accountId: who.accountId }, { workItemId: who.workItemId, personUserId: input.personFiled === true ? who.userId : null, ...(input.checkFailedRunId === undefined ? {} : { checkFailedRunId: input.checkFailedRunId }) });
+    // D#7 DP6a-WIRING: a fix round's launch receipt is on the item's open pull request, so its block is brought up to date (after the commit, best-effort).
+    await runAfterReceipt(afterReceipt, who.accountId, who.workItemId);
     return r.proceed ? { proceed: true, how: r.how, announce: r.announce } : { proceed: false, reason: r.reason, blockedBy: word(r.blockedBy) };
   };
 }

@@ -1513,6 +1513,9 @@ importers:
       '@fx/net-guard':
         specifier: workspace:*
         version: link:../net-guard
+      '@fx/receipts':
+        specifier: workspace:*
+        version: link:../receipts
       '@fx/roles':
         specifier: workspace:*
         version: link:../roles

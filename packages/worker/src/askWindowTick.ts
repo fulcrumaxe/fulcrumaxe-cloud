@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import { SWEEP_REAL_CLOCK, sweepOverdueAsks, type SweepClock } from "@fx/core/src/decisions/sweepOverdue.js";
+import type { AfterReceiptHook } from "@fx/core/src/decisions/receiptHook.js";
 import { nextAskDueAt } from "@fx/db/src/decisionAsks.js";
 import { sweepAskWithdrawals } from "./askWithdrawSweep.js";
 import { reconcileResumes } from "./resumeDecision.js";
@@ -10,11 +11,11 @@ import { reconcileResumes } from "./resumeDecision.js";
  * proceeded in this tick waited for the next one (30 to 60 minutes when the cron is idle). Last, the soonest window still ahead is read so the
  * cron can store it as its next marker. Never throws; counts and fixed lines only.
  */
-export async function runAskWindowTick(deps: { pool: Pool; warn: (line: string) => void; clock?: SweepClock }): Promise<{ nextAskDueAt: number | null }> {
+export async function runAskWindowTick(deps: { pool: Pool; warn: (line: string) => void; clock?: SweepClock; afterReceipt?: AfterReceiptHook }): Promise<{ nextAskDueAt: number | null }> {
   const clock = deps.clock ?? SWEEP_REAL_CLOCK;
   await sweepAskWithdrawals({ pool: deps.pool, warn: deps.warn });
   // D#7 DP12a-2: counts only, no ids or text.
-  const ended = await sweepOverdueAsks(deps.pool, clock);
+  const ended = await sweepOverdueAsks(deps.pool, clock, undefined, deps.afterReceipt);
   if (ended.overdue + ended.proceeded + ended.failed > 0) deps.warn(JSON.stringify({ event: "decision.ask_window_sweep", overdue: ended.overdue, proceeded: ended.proceeded, failed: ended.failed }));
   await reconcileResumes({ pool: deps.pool, warn: deps.warn });
 

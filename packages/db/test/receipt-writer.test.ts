@@ -328,16 +328,34 @@ describe('writeReceipt (DP3b)', () => {
       expect((await hoursAfterCreate(await direct('48'))).span).toEqual({ days: 2 });
     });
 
-    it('the setting is one-shot: a start receipt written after writeReceipt in the same transaction has no deadline', async () => {
+    it('the setting is one-shot: a receipt another definer writes after writeReceipt in the same transaction has no deadline', async () => {
       const out = await withTenant(receiptPool, refs.accountId, refs.userId, async (c) => {
         const first = await writeReceipt(c, valid());
         const left = (await c.query<{ v: string }>("SELECT current_setting('app.reversal_window_hours', true) AS v")).rows[0]!.v;
-        const startId = await writeStartReceipt(c, { workItemId: refs.workItemId, decisionType: 'start_work_small', chosen: 'start', dialVersion: 1 });
-        return { first: first.store === 'decision_receipts' ? first.id : '', left, startId };
+        const { rows } = await c.query<{ id: string }>(
+          `SELECT decision_receipt_write('human_over_the_loop', 'test_strategy_choice', 'unit_tests', 'end_to_end_tests', 4, '["trusted"]'::jsonb, $1::uuid, $2::uuid, $3::integer) AS id`,
+          [refs.workItemId, refs.runId, CATALOGUE_VERSION],
+        );
+        return { first: first.store === 'decision_receipts' ? first.id : '', left, other: rows[0]!.id };
       });
       expect(out.left).toBe('');
       expect((await hoursAfterCreate(out.first)).reversal_free_until).toBeInstanceOf(Date);
-      expect((await hoursAfterCreate(out.startId)).reversal_free_until).toBeNull();
+      expect((await hoursAfterCreate(out.other)).reversal_free_until).toBeNull();
+    });
+
+    it('DP6a-WIRING: a start receipt gets the deadline too, and its window is spent so nothing after it inherits one', async () => {
+      const out = await withTenant(receiptPool, refs.accountId, refs.userId, async (c) => {
+        const startId = await writeStartReceipt(c, { workItemId: refs.workItemId, decisionType: 'start_work_small', chosen: 'start', dialVersion: 1 });
+        const left = (await c.query<{ v: string }>("SELECT current_setting('app.reversal_window_hours', true) AS v")).rows[0]!.v;
+        const { rows } = await c.query<{ id: string }>(
+          `SELECT decision_receipt_write('human_over_the_loop', 'test_strategy_choice', 'unit_tests', 'end_to_end_tests', 4, '["trusted"]'::jsonb, $1::uuid, $2::uuid, $3::integer) AS id`,
+          [refs.workItemId, refs.runId, CATALOGUE_VERSION],
+        );
+        return { startId, left, other: rows[0]!.id };
+      });
+      expect(out.left).toBe('');
+      expect((await hoursAfterCreate(out.startId)).span).toEqual({ days: 1 });
+      expect((await hoursAfterCreate(out.other)).reversal_free_until).toBeNull();
     });
 
     it('no role can move a stamped deadline: UPDATE is refused for the receipt login and the tenant login', async () => {

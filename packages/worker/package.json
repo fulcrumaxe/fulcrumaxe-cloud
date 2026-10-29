@@ -25,6 +25,7 @@
     "@fx/model-connection": "workspace:*",
     "@fx/model-router": "workspace:*",
     "@fx/net-guard": "workspace:*",
+    "@fx/receipts": "workspace:*",
     "@fx/roles": "workspace:*",
     "@fx/runner": "workspace:*",
     "@fx/spend": "workspace:*",

@@ -40,7 +40,7 @@ function setup(over: Partial<World> = {}) {
     const u = new URL(String(input));
     w.paths.push(`${init?.method ?? "GET"} ${u.pathname}${u.search}`);
     if (u.pathname === "/repos/acme/widgets/pulls/7") {
-      if ((init?.method ?? "GET") === "GET") return json(200, { number: 7, state: w.state, body: w.body });
+      if ((init?.method ?? "GET") === "GET") return json(200, { number: 7, state: w.state, body: w.body, head: { sha: SHA } });
       const sent = JSON.parse(String(init?.body)) as Record<string, unknown>;
       w.patches.push(sent);
       w.body = sent["body"] as string;
@@ -96,6 +96,13 @@ describe("writeReceiptBlock", () => {
     expect(t.w.body).toContain(BLOCK_START);
     expect(t.w.body).toContain("How to test a change");
     expect(t.w.body!.startsWith("Adds a thing.\n\nCloses nothing.")).toBe(true);
+  });
+
+  it("without a head of its own, it measures against the head GitHub reports for the pinned pull request", async () => {
+    const t = setup({ runs: { [SHA]: [{ started_at: iso(1_000), completed_at: null }] } });
+    const r = await write(t, { headSha: undefined });
+    expect(r).toMatchObject({ written: true, measurement: { headSha: SHA, checkRuns: 1 } });
+    expect(t.w.paths).toContain(`GET /repos/acme/widgets/commits/${SHA}/check-runs?per_page=100&page=1`);
   });
 
   it("a head whose checks all finished before the write is counted as a miss, and the block is still written", async () => {

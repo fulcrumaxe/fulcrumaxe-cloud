@@ -148,6 +148,30 @@ async function stampReversalWindow(client: PoolClient, decisionType: string): Pr
   await client.query("SELECT set_config('app.reversal_window_hours', $1, true)", [hours]);
 }
 
+/**
+ * D#7 DP6a-WIRING: runs one definer call that inserts a `decision_receipts` row without going through `writeReceipt` (the start gate's and the sub-item
+ * definers) with the same one-shot window set before it, so its row is stamped exactly as `writeReceipt`'s are. The setting is cleared afterwards: a
+ * replay writes no row, and an unspent window must not stamp the next receipt another definer writes in the same transaction. If `fn` throws the
+ * transaction is rolled back by the caller, which takes the setting with it.
+ */
+export async function withReversalWindow<T>(client: PoolClient, decisionType: string, fn: () => Promise<T>): Promise<T> {
+  await stampReversalWindow(client, decisionType);
+  let ok = false;
+  try {
+    const out = await fn();
+    ok = true;
+    return out;
+  } finally {
+    // On a throw the transaction may already be aborted (the clear would fail and hide the real error); the rollback takes the setting with it. A throw from a
+    // definer that left the transaction usable still gets the clear.
+    try {
+      await client.query("SELECT set_config('app.reversal_window_hours', '', true)");
+    } catch (err) {
+      if (ok) throw err;
+    }
+  }
+}
+
 export async function writeReceipt(client: PoolClient, input: WriteReceiptInput): Promise<WriteReceiptResult> {
   const trustClasses = JSON.stringify(validate(input));
   const workItemId = input.workItemId ?? null;
@@ -202,10 +226,10 @@ export async function writeSubItemApprovalReceipt(client: PoolClient, input: Sub
   if (!Number.isInteger(input.dialVersion) || input.dialVersion < DIAL_VERSION_CATALOGUE_DEFAULT || input.dialVersion > INT4_MAX) throw new ReceiptWriteError('receipt_invalid_dial_version');
   const entry = CATALOGUE.find((e) => e.id === 'launch_sub_item');
   if (!entry || entry.class !== 'human_over_the_loop') throw new ReceiptWriteError('receipt_unknown_decision_type');
-  const { rows } = await client.query<{ o_id: string; o_replayed: boolean }>(
+  const { rows } = await withReversalWindow(client, 'launch_sub_item', () => client.query<{ o_id: string; o_replayed: boolean }>(
     'SELECT o_id, o_replayed FROM sub_item_approval_receipt_write($1::uuid, $2::text, $3::uuid, $4::uuid, $5::integer, $6::integer)',
     [input.workItemId, input.key, input.specVersionId, input.runId, input.dialVersion, CATALOGUE_VERSION],
-  );
+  ));
   return { id: rows[0]!.o_id, replayed: rows[0]!.o_replayed };
 }
 
@@ -226,10 +250,10 @@ export async function writeSubItemPolicyReceipt(client: PoolClient, input: SubIt
   if (!isText(input.runId) || !isText(input.workItemId) || !isText(input.specVersionId) || !isText(input.approvalId)) throw new ReceiptWriteError('receipt_missing_run_id');
   if (!SUB_ITEM_KEY.test(input.key) || (input.chosen !== 'launch' && input.chosen !== 'announce')) throw new ReceiptWriteError('receipt_chosen_invalid');
   if (!Number.isInteger(input.dialVersion) || input.dialVersion < DIAL_VERSION_CATALOGUE_DEFAULT || input.dialVersion > INT4_MAX) throw new ReceiptWriteError('receipt_invalid_dial_version');
-  const { rows } = await client.query<{ o_id: string; o_replayed: boolean }>(
+  const { rows } = await withReversalWindow(client, 'launch_sub_item', () => client.query<{ o_id: string; o_replayed: boolean }>(
     'SELECT o_id, o_replayed FROM sub_item_policy_receipt_write($1::uuid, $2::text, $3::uuid, $4::uuid, $5::uuid, $6::text, $7::integer, $8::integer)',
     [input.workItemId, input.key, input.specVersionId, input.runId, input.approvalId, input.chosen, input.dialVersion, CATALOGUE_VERSION],
-  );
+  ));
   return { id: rows[0]!.o_id, replayed: rows[0]!.o_replayed };
 }
 

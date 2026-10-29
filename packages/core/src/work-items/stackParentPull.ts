@@ -24,13 +24,22 @@ export async function readStackParentPull(client: PoolClient, workItemId: string
   );
   if (parent.rows.length === 0) return null;
   const p = parent.rows[0]!;
+  const prNumber = await readItemPullNumber(client, p.id);
+  return { parentId: p.id, parentRepoId: p.repo_id, prNumber };
+}
+
+/**
+ * The number of the pull request an item's own records name, or null: the newest run that recorded one (the rule above). It is read from the item's runs
+ * only, never from a receipt, a comment or any text a model wrote. D#7 DP6a-WIRING uses it to pin the receipt block's client to one pull request.
+ */
+export async function readItemPullNumber(client: PoolClient, workItemId: string): Promise<number | null> {
   const runs = await client.query<{ pr_number: string | null }>(
     `SELECT COALESCE(CASE WHEN role <> 'executor' THEN dispatch_pr_number::text END,
                      ${RUNNER_VERDICT_PR_SQL},
                      CASE WHEN envelope->>'pr_number' ~ '^[0-9]{1,9}$' THEN envelope->>'pr_number' END) AS pr_number
        FROM agent_runs WHERE work_item_id = $1::uuid ORDER BY created_at DESC, id DESC LIMIT 100`,
-    [p.id],
+    [workItemId],
   );
   const hit = runs.rows.find((r) => r.pr_number !== null && Number(r.pr_number) > 0);
-  return { parentId: p.id, parentRepoId: p.repo_id, prNumber: hit ? Number(hit.pr_number) : null };
+  return hit ? Number(hit.pr_number) : null;
 }

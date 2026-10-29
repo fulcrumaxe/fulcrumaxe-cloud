@@ -8,5 +8,7 @@ export { checkStartPair, decideStart, settleStartClick } from './startDecide.js'
 export type { DecideStartInput, DecideStartResult, StartHeld, StartHow, StartOrigin } from './startDecide.js';
 export { raiseStartAsk, recordStartReceipt } from './startGate.js';
 export type { StartGateCtx, StartGateInput, StartGateResult } from './startGate.js';
+export { runAfterReceipt } from './receiptHook.js';
+export type { AfterReceiptHook } from './receiptHook.js';
 export { REVERSAL_ASK_ALLOW, REVERSAL_ASK_KEEP, recordReversal } from './reversalOverCap.js';
 export type { ReversalCtx, ReversalResult } from './reversalOverCap.js';
