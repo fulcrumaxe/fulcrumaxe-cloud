@@ -569,6 +569,9 @@ export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promis
       await advanceLogStep("advance.children_launched", { work_item_id: workItemId, at: "build", version: loaded.specVersion });
       return { status: "children_launched" };
     }
+    // D#483 S5-b2b: a re-spec to a single pull request on a parent that already has children is not started as a build. The build start refuses it with a fixed stop
+    // (`parent_has_children`, a card sentence); the start gate is skipped because it would only ask or reserve for a build that cannot happen.
+    if (loaded.hasChildren === true) return buildPhase(args, pinned(loaded.specVersion));
     const gate = await startGatePhase(args, workItemId, { mode: "build", category: null, cameInAs: null });
     return gate ?? buildPhase(args, pinned(loaded.specVersion));
   }

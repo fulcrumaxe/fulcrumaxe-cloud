@@ -43,6 +43,13 @@ export type WorkItemStage = (typeof WORK_ITEM_STAGES)[number];
  */
 export const TERMINAL_WORK_ITEM_STAGES: readonly WorkItemStage[] = Object.freeze(['merged', 'closed_unmerged', 'closed'] as const);
 
+/**
+ * SQL for "this work item (alias `parent`) has a planned PR child that is still LIVE": a child in none of the terminal stages above. A merged, closed or closed-unmerged
+ * child does not count, so a parent whose children are all done can be built again. The pipeline's build start and the worker's load both use this one text.
+ */
+export const hasLivePlannedChildSql = (parent: string): string =>
+  `EXISTS (SELECT 1 FROM work_items k WHERE k.account_id = ${parent}.account_id AND k.parent_id = ${parent}.id AND k.planned_pr_key IS NOT NULL AND k.stage NOT IN (${TERMINAL_WORK_ITEM_STAGES.map((s) => `'${s}'`).join(', ')}))`;
+
 /** The 3 legal values of `work_item_transitions.reviewer`. */
 export const WORK_ITEM_TRANSITION_REVIEWERS = ['code', 'security', 'acceptance'] as const;
 

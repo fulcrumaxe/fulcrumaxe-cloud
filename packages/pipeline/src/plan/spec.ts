@@ -7,6 +7,7 @@ import { WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { DiscussionsError, MAX_BODY_BYTES, MAX_PLANNED_PRS, MAX_PLANNED_PR_TITLE, isBuildableKind, parsePlannedPrs, plannedPrsSection, publishSpec, utf8ByteLength, type DiscussionsContext, type PlannedPr } from "@fx/discussions";
 import { systemPrincipal } from "@fx/discussions/server";
 import { sanitize } from "@fx/trust";
+import { ensureSpecAnchorRun } from "@fx/runner";
 import { ownData } from "./ownData.js";
 import { toWellFormedString } from "./unicode.js";
 import { PANEL_ROLES, type PanelRole } from "./panelRoles.js";
@@ -609,10 +610,19 @@ async function withPublishLock<T>(pool: Pool, workItemId: string, fn: () => Prom
   }
 }
 
+/** D#483 S5-b2c: a replay of the publish also finds (or makes) the anchor run of a Spec that plans two or more pull requests, so a crash between the publish and the anchor heals. */
+async function anchorIfSplit(deps: SpecStepDeps, wi: string, specVersionId: string): Promise<void> {
+  const n = await withTenant(deps.pool, deps.accountId, async (client) =>
+    Number((await client.query<{ n: number }>("SELECT CASE WHEN jsonb_typeof(frontmatter -> 'planned_prs') = 'array' THEN jsonb_array_length(frontmatter -> 'planned_prs') ELSE 0 END AS n FROM spec_versions WHERE account_id = $1 AND work_item_id = $2 AND id = $3", [deps.accountId, wi, specVersionId])).rows[0]?.n ?? 0),
+  );
+  if (n >= 2) await ensureSpecAnchorRun(deps.pool, { accountId: deps.accountId, workItemId: wi, specVersionId });
+}
+
 /** The outcome for an item that is already at `spec_ready`: nothing is written; the (idempotent) trigger fires again. */
 async function replayOutcome(deps: SpecStepDeps, wi: string): Promise<SpecStepOutcome> {
   const row = await readSpecReady(deps, wi);
   if (row === null || row.spec_version_id === null || row.version === null) return { status: "refused", reason: "not_discussing" };
+  await anchorIfSplit(deps, wi, row.spec_version_id);
   const { triggered } = await triggerBuildIfSpecReady(deps, wi);
   return { status: "published", workItemId: wi, specVersionId: row.spec_version_id, version: row.version, stage: "spec_ready", replayed: true, triggered };
 }
@@ -738,6 +748,7 @@ export async function runSpecStep(deps: SpecStepDeps, input: { workItemId: strin
   if (result === "halted") return { status: "refused", reason: "item_halted" };
   if (result === "not_discussing") return { status: "refused", reason: "not_discussing" };
 
+  if (plannedPrs !== undefined && plannedPrs.length >= 2) await ensureSpecAnchorRun(deps.pool, { accountId: deps.accountId, workItemId: wi, specVersionId: result.id });
   const { triggered } = await triggerBuildIfSpecReady(deps, wi);
   return { status: "published", workItemId: wi, specVersionId: result.id, version: result.version, stage: "spec_ready", replayed: false, triggered };
 }

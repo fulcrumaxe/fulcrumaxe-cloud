@@ -1519,6 +1519,9 @@ importers:
       '@fulcrumaxe/fx-runner':
         specifier: workspace:*
         version: link:../fx-runner
+      '@fx/api':
+        specifier: workspace:*
+        version: link:../api
       '@fx/pipeline':
         specifier: workspace:*
         version: link:../pipeline

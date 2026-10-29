@@ -1,0 +1,252 @@
+import { randomUUID } from "node:crypto";
+import type { Pool, PoolClient } from "pg";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createPool } from "@fx/db/src/pool.js";
+import { withTenant } from "@fx/db/src/withTenant.js";
+import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
+import { createRecordingRunActionSignal } from "@fx/core/src/runActions/index.js";
+import { SESSION_COOKIE_NAME, signSession } from "@fx/core/src/auth/session.js";
+import type { ChildLaunchDeps } from "@fx/core/src/decisions/childLaunch.js";
+import { childEnvelopeRoom, setWorkItemEnvelope, writeEnvelopeVersion } from "@fx/spend";
+import { startBuildForItem } from "@fx/pipeline/testing/build";
+import { publishLightSpec } from "../../pipeline/src/advance/lightSpec.js";
+import type { AdvanceRunPorts } from "../../pipeline/src/advance/runPorts.js";
+import { runTriageStep } from "../../pipeline/src/plan/step.js";
+import { runSpecStep } from "../../pipeline/src/plan/spec.js";
+import { FixtureRunner, FixtureWriter, OWNER, discussingItem, fixtureClassifier } from "../../pipeline/test/plan/helpers/panelFixtures.js";
+import { handleApiRequest } from "../../api/src/handler.js";
+import { ROUTES } from "../../api/src/routes/index.js";
+import { runActionDeps } from "../../api/src/routes/run-actions.js";
+import { createAdvanceModule } from "../src/advance.js";
+import { createAutoStartSweep } from "../src/autoStartSweep.js";
+
+/**
+ * D#483 S5-b2b/S5-b2c [pg]: the whole path of a short Spec that plans two pull requests. The Spec is published by the real `publishLightSpec` through the worker's real
+ * `advanceLightSpec`; the person's approval is the real `POST /work-items/{id}/approve` route; the children are launched by the real auto-start sweep through the real
+ * `gateChildLaunch`. No run, approval, receipt or child row is inserted by hand. The parent's item envelope is attached the way a proposal's approval attaches it
+ * (the real writer and the real definer, at Triaged, before any work); the dial setting is plain tenant configuration.
+ */
+const LOGIN = "fx_light_split_launch";
+const PRICE = 1;
+
+describe("a short Spec that plans two pull requests launches both children after the person's approval [pg]", { timeout: 90_000 }, () => {
+  let adminPool: Pool;
+  let admin: PoolClient;
+  let writerPool: Pool;
+  let appPool: Pool;
+  let opsPool: Pool;
+  let receiptPool: Pool;
+  const signal = createRecordingRunActionSignal();
+  let nextNumber = 9800;
+
+  const room: ChildLaunchDeps["room"] = async (client, input) => {
+    const r = await childEnvelopeRoom(client, { accountId: input.accountId, envelopeId: input.envelopeId, childId: input.childId, firstRunUsd: PRICE });
+    return { fits: r.fits, remainingUsd: r.remainingUsd, priceUsd: PRICE };
+  };
+  const child: ChildLaunchDeps = { buildSupported: true, room };
+
+  beforeAll(async () => {
+    process.env.FX_SESSION_SECRET = "s".repeat(32);
+    adminPool = createPool(process.env.WORKER_DATABASE_URL!);
+    admin = await adminPool.connect();
+    await admin.query(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${LOGIN}') THEN CREATE ROLE ${LOGIN} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; END IF; END $$`);
+    await admin.query(`GRANT app_user, receipt_writer_invoker TO ${LOGIN}`);
+    const u = new URL(process.env.WORKER_DATABASE_URL_APP_USER!);
+    u.username = LOGIN;
+    u.password = "";
+    receiptPool = createPool(u.toString());
+    writerPool = createPool(process.env.WORKER_DATABASE_URL_RUN_WRITER!);
+    appPool = createPool(process.env.WORKER_DATABASE_URL_APP_USER!);
+    opsPool = createPool(process.env.WORKER_DATABASE_URL_PLATFORM_OPS!);
+  });
+  afterAll(async () => {
+    delete process.env.FX_SESSION_SECRET;
+    admin.release();
+    for (const p of [adminPool, writerPool, appPool, opsPool, receiptPool]) await p.end();
+  });
+  beforeEach(() => {
+    runActionDeps.getRunActionSignal = () => signal;
+  });
+  afterEach(() => {
+    runActionDeps.getRunActionSignal = () => null;
+  });
+
+  const ROWS = [
+    { key: "page-a", title: "Docs page A", depends_on: [] },
+    { key: "page-b", title: "Docs page B", depends_on: [] },
+  ];
+  const SPLIT = { feasible: true, reason: "", split_proposed: true, summary: "Two independent pages.", spec: "1. Page A exists.\n2. Page B exists.", acceptance_files: ["docs/a.md", "docs/b.md"], planned_prs: ROWS };
+  const ONE = { feasible: true, reason: "", split_proposed: false, summary: "Fix the year.", spec: "1. The footer shows the year.", acceptance_files: ["docs/a.md"] };
+  const moduleOf = () => createAdvanceModule(writerPool, { starter: null as never, resolveRunSeat: null as never, startAdvance: async () => undefined, triage: null, registry: {} as never, lightSpec: publishLightSpec });
+
+  /** An account with a connected repo, a budget, the weekly auto-start limit and the launch dial at `act` (plain tenant configuration). */
+  async function account(): Promise<SeedRefs> {
+    const a = await seedAccount(admin, randomUUID());
+    await admin.query("UPDATE repos SET gh_owner = 'acme', gh_name = 'widgets' WHERE id = $1", [a.repoId]);
+    await admin.query("UPDATE accounts SET model_budget_usd_month = 600 WHERE id = $1", [a.accountId]);
+    await admin.query(`INSERT INTO approval_envelopes (id, account_id, repo_id, scope, amount_usd, version, created_by) VALUES ($1, $2, NULL, 'weekly_autostart', 50, 1, $3)`, [randomUUID(), a.accountId, a.userId]);
+    await admin.query(`INSERT INTO decision_settings (account_id, repo_id, decision_type, disposition, preset, version, changed_by) VALUES ($1, $2, 'launch_sub_item', 'act', 'autonomous', 1, $3)`, [a.accountId, a.repoId, a.userId]);
+    return a;
+  }
+
+  /** What a proposal's approval does at Triaged, before any work: an item envelope through the real writer and the real definer. */
+  async function envelopeFor(a: SeedRefs, workItemId: string): Promise<void> {
+    await withTenant(appPool, a.accountId, a.userId, async (c) => {
+      const { envelopeId } = await writeEnvelopeVersion(c, { accountId: a.accountId, scope: "item", repoId: a.repoId, amountUsd: 20, estimateUsd: null, marginPct: null, minAmountUsd: PRICE });
+      await setWorkItemEnvelope(c, workItemId, envelopeId);
+    });
+  }
+
+  /** A triaged doc item that an owner approved with an item envelope, then its short Spec published with `output`. */
+  async function specReady(output: unknown): Promise<{ a: SeedRefs; workItemId: string; pmRun: string }> {
+    const a = await account();
+    const t = await runTriageStep(
+      { pool: writerPool, accountId: a.accountId, classifier: fixtureClassifier("doc") },
+      { mode: "new", event: { ...OWNER, body: "Document both pages." }, title: "Docs pages", sourceEventId: randomUUID(), repoId: a.repoId },
+    );
+    if (t.status !== "triaged") throw new Error(`fixture: ${JSON.stringify(t)}`);
+    const workItemId = t.workItemId;
+    await admin.query("UPDATE work_items SET gh_number = $2, repo_id = $3 WHERE id = $1", [workItemId, nextNumber++, a.repoId]);
+    await envelopeFor(a, workItemId);
+    // The PM's finished run, as the workflow leaves it before the publish step.
+    const pmRun = randomUUID();
+    await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, envelope) VALUES ($1, $2, $3, 'project-manager', 'production', 'succeeded', $4::jsonb)", [pmRun, a.accountId, workItemId, JSON.stringify(output)]);
+    const out = await moduleOf().advanceLightSpec({ accountId: a.accountId, userId: a.userId, workItemId, haltEpoch: 0 }, pmRun, randomUUID());
+    expect(out).toMatchObject({ status: "published", version: 1 });
+    return { a, workItemId, pmRun };
+  }
+
+  async function approveByRoute(a: SeedRefs, workItemId: string): Promise<Response> {
+    const h = new Headers({ cookie: `${SESSION_COOKIE_NAME}=${await signSession({ accountId: a.accountId, userId: a.userId })}` });
+    return handleApiRequest(new Request(`http://localhost/api/v1/work-items/${workItemId}/approve`, { method: "POST", headers: h }), appPool, opsPool, ROUTES);
+  }
+  const kidsOf = async (id: string) => (await admin.query<{ id: string; planned_pr_key: string }>("SELECT id, planned_pr_key FROM work_items WHERE parent_id = $1 ORDER BY planned_pr_key", [id])).rows;
+  const executorRuns = async (id: string) => Number((await admin.query<{ n: string }>("SELECT count(*) AS n FROM agent_runs WHERE work_item_id = $1 AND role = 'executor'", [id])).rows[0]!.n);
+  const pinnedRuns = async (id: string) => (await admin.query("SELECT 1 FROM agent_runs WHERE work_item_id = $1 AND spec_version_id IS NOT NULL", [id])).rows.length;
+  const noStart: AdvanceRunPorts = {
+    startRun: async () => {
+      throw new Error("an executor run was started");
+    },
+    outcome: async () => {
+      throw new Error("unused");
+    },
+    cancel: async () => undefined,
+  };
+  const sweepOf = (c: ChildLaunchDeps = child) => createAutoStartSweep({ receiptPool, firstRunUsd: async () => PRICE, child: c, warn: (m: string) => console.error("WARN", m) });
+
+  it("publish (split), the person's approval through the route, then the sweep: both children reach started, with a receipt each naming the parent and its approval", async () => {
+    const { a, workItemId } = await specReady(SPLIT);
+    expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    const kids = await kidsOf(workItemId);
+    expect(kids.map((k) => k.planned_pr_key)).toEqual(["page-a", "page-b"]);
+
+    const sweep = sweepOf();
+    expect(await sweep.gateChild(a.accountId, kids[0]!.id)).toEqual({ outcome: "started" });
+    expect(await sweep.gateChild(a.accountId, kids[1]!.id)).toEqual({ outcome: "started" });
+
+    const receipts = (await admin.query(`SELECT sub_item_key, actor, class, chosen, approval_id, run_id, spec_version_id FROM decision_receipts WHERE work_item_id = $1 AND decision_type = 'launch_sub_item' ORDER BY sub_item_key`, [workItemId])).rows;
+    expect(receipts.map((r) => r.sub_item_key)).toEqual(["page-a", "page-b"]);
+    const approval = (await admin.query<{ id: string; spec_version_id: string }>("SELECT id, spec_version_id FROM work_item_approvals WHERE work_item_id = $1", [workItemId])).rows;
+    expect(approval).toHaveLength(1);
+    for (const r of receipts) expect(r).toMatchObject({ actor: "policy", class: "human_over_the_loop", approval_id: approval[0]!.id, spec_version_id: approval[0]!.spec_version_id });
+    // The anchor is a run of the parent that is pinned to the approved version; the parent itself built nothing.
+    const anchor = (await admin.query<{ role: string; spec_version_id: string; status: string }>("SELECT role, spec_version_id, status FROM agent_runs WHERE id = $1", [receipts[0]!.run_id])).rows[0]!;
+    expect(anchor).toMatchObject({ role: "project-manager", spec_version_id: approval[0]!.spec_version_id, status: "succeeded" });
+    expect((await admin.query("SELECT envelope->>'summary' AS summary, usd FROM agent_runs WHERE id = $1", [receipts[0]!.run_id])).rows[0]).toMatchObject({ summary: "Recorded the approved Spec version so its planned pull requests can start. No work was run." });
+    expect(await executorRuns(workItemId)).toBe(0);
+    // Each child's start is filed, and the parent's envelope is what it runs under.
+    const parentEnvelope = (await admin.query<{ envelope_id: string }>("SELECT envelope_id FROM work_items WHERE id = $1", [workItemId])).rows[0]!.envelope_id;
+    for (const k of kids) {
+      expect((await admin.query("SELECT envelope_id FROM work_items WHERE id = $1", [k.id])).rows[0]!.envelope_id).toBe(parentEnvelope);
+      expect((await admin.query("SELECT 1 FROM run_action_requests WHERE target_id = $1 AND kind = 'advance_work_item'", [k.id])).rows).toHaveLength(1);
+    }
+  });
+
+  it("the envelope limit still holds: with no room under the parent's envelope the child is held, and nothing is written", async () => {
+    const { a, workItemId } = await specReady(SPLIT);
+    expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    const kids = await kidsOf(workItemId);
+    const tight: ChildLaunchDeps = { buildSupported: true, room: async () => ({ fits: false, remainingUsd: 0, priceUsd: PRICE }) };
+    expect(await sweepOf(tight).gateChild(a.accountId, kids[0]!.id)).toMatchObject({ outcome: "no_room", code: "parent_envelope_reached" });
+    expect((await admin.query("SELECT 1 FROM decision_receipts WHERE work_item_id = $1 AND decision_type = 'launch_sub_item'", [workItemId])).rows).toEqual([]);
+  });
+
+  it("a replay of the publish step adds no second anchor, and a single-PR Spec gets none", async () => {
+    const { a, workItemId, pmRun } = await specReady(SPLIT);
+    expect(await pinnedRuns(workItemId)).toBe(1);
+    await moduleOf().advanceLightSpec({ accountId: a.accountId, userId: a.userId, workItemId, haltEpoch: 0 }, pmRun, randomUUID());
+    expect(await pinnedRuns(workItemId)).toBe(1);
+    const single = await specReady(ONE);
+    expect(await pinnedRuns(single.workItemId)).toBe(0);
+  });
+
+  it("a re-spec of a split parent to a single pull request does not build the parent: the load says it has children, the build start is refused with a fixed stop, and the children are untouched", async () => {
+    const { a, workItemId } = await specReady(SPLIT);
+    expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    const before = await kidsOf(workItemId);
+    // A newer Spec version that plans one pull request (a table is stored only from two rows, so the newest version has none).
+    await admin.query(
+      `INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind, frontmatter) VALUES ($1, $2, 2, 'v2', encode(sha256(convert_to('v2', 'UTF8')), 'hex'), 'agent', '{}'::jsonb)`,
+      [a.accountId, workItemId],
+    );
+    const loaded = await moduleOf().advanceLoadItem(a.accountId, workItemId);
+    expect(loaded).toMatchObject({ stage: "spec_ready", hasChildren: true });
+    expect(loaded).not.toHaveProperty("splits");
+    expect(await startBuildForItem(writerPool, a.accountId, workItemId, randomUUID(), noStart)).toMatchObject({ status: "refused", reason: "parent_has_children" });
+    expect(await executorRuns(workItemId)).toBe(0);
+    expect(await kidsOf(workItemId)).toEqual(before);
+    expect((await admin.query("SELECT stage FROM work_items WHERE id = $1", [workItemId])).rows[0]!.stage).toBe("spec_ready");
+  });
+
+  /** A split parent, approved (children made), then re-specced to a single pull request (version 2 has no table). */
+  async function respecced(): Promise<{ a: SeedRefs; workItemId: string; kids: { id: string; planned_pr_key: string }[] }> {
+    const { a, workItemId } = await specReady(SPLIT);
+    expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    await admin.query(
+      `INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind, frontmatter) VALUES ($1, $2, 2, 'v2', encode(sha256(convert_to('v2', 'UTF8')), 'hex'), 'agent', '{}'::jsonb)`,
+      [a.accountId, workItemId],
+    );
+    return { a, workItemId, kids: await kidsOf(workItemId) };
+  }
+
+  it.each(["merged", "closed_unmerged", "closed"])("a re-spec to one pull request when every child is %s is not refused for its children: the load does not flag them and the build start goes on", async (stage) => {
+    const { a, workItemId, kids } = await respecced();
+    await admin.query("UPDATE work_items SET stage = $2 WHERE parent_id = $1", [workItemId, stage]);
+    expect(await moduleOf().advanceLoadItem(a.accountId, workItemId)).not.toHaveProperty("hasChildren");
+    const out = await startBuildForItem(writerPool, a.accountId, workItemId, randomUUID(), noStart).catch((e: unknown) => ({ status: "threw", reason: String(e) }));
+    expect(out).not.toMatchObject({ reason: "parent_has_children" });
+    expect(await kidsOf(workItemId)).toEqual(kids);
+  });
+
+  it("a re-spec with one child still live is refused for its children, even when the other child is closed", async () => {
+    const { a, workItemId } = await respecced();
+    await admin.query("UPDATE work_items SET stage = 'closed' WHERE parent_id = $1 AND planned_pr_key = 'page-a'", [workItemId]);
+    expect(await moduleOf().advanceLoadItem(a.accountId, workItemId)).toMatchObject({ hasChildren: true });
+    expect(await startBuildForItem(writerPool, a.accountId, workItemId, randomUUID(), noStart)).toMatchObject({ status: "refused", reason: "parent_has_children" });
+  });
+
+  it("the panel path: publish through the real panel step (split), the person's approval through the route, then the sweep: both children reach started", async () => {
+    const a = await account();
+    const { workItemId } = await discussingItem(writerPool, a.accountId, { title: "Two pages", body: "Document both pages.", category: "feature", repoId: a.repoId });
+    await admin.query("UPDATE work_items SET gh_number = $2, repo_id = $3 WHERE id = $1", [workItemId, nextNumber++, a.repoId]);
+    // The triage step takes a panel item straight to Discussing, so the definer (Triaged only) cannot attach the envelope here: the envelope is written by the real writer and linked by the fixture.
+    const envelopeId = await withTenant(appPool, a.accountId, a.userId, async (c) => (await writeEnvelopeVersion(c, { accountId: a.accountId, scope: "item", repoId: a.repoId, amountUsd: 20, estimateUsd: null, marginPct: null, minAmountUsd: PRICE })).envelopeId);
+    await admin.query("UPDATE work_items SET envelope_id = $2 WHERE id = $1", [workItemId, envelopeId]);
+    const writer = new FixtureWriter(admin, a.accountId);
+    writer.output = () => ({ summary: "s", spec: "1. Page A exists.\n2. Page B exists.", acceptance_files: ["docs/a.md", "docs/b.md"], planned_prs: ROWS });
+    const deps = { pool: writerPool, accountId: a.accountId, runner: new FixtureRunner(admin, a.accountId), writer, trigger: async () => undefined };
+    expect(await runSpecStep(deps, { workItemId })).toMatchObject({ status: "published", version: 1 });
+    // A replay of the publish step makes no second anchor.
+    await runSpecStep(deps, { workItemId });
+    expect(await pinnedRuns(workItemId)).toBe(1);
+
+    const res = await approveByRoute(a, workItemId);
+    expect([res.status, res.status === 202 ? "" : await res.text(), (await admin.query("SELECT role, status FROM agent_runs WHERE work_item_id = $1", [workItemId])).rows]).toEqual([202, "", expect.anything()]);
+    const kids = await kidsOf(workItemId);
+    expect(kids.map((k) => k.planned_pr_key)).toEqual(["page-a", "page-b"]);
+    const sweep = sweepOf();
+    expect(await sweep.gateChild(a.accountId, kids[0]!.id)).toEqual({ outcome: "started" });
+    expect(await sweep.gateChild(a.accountId, kids[1]!.id)).toEqual({ outcome: "started" });
+    expect(await executorRuns(workItemId)).toBe(0);
+  });
+});

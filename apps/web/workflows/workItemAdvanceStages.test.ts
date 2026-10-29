@@ -679,6 +679,16 @@ describe("an approved parent whose Spec plans several pull requests", () => {
     expect(events()).toContain("advance.children_launched");
   });
 
+  // A re-spec to one pull request on a parent that already has children: the build start (which refuses it with the fixed stop `parent_has_children`) is asked for
+  // without the start gate, and nothing here treats it as a launch of children.
+  it("a parent that already has planned PR children, re-specced to one pull request, goes to the build start (which refuses it) and not to the start gate", async () => {
+    const w = setup({ item: { ...AT_SPEC, kind: "small", hasChildren: true } });
+    const out = await workItemAdvanceWorkflow(ARGS);
+    expect(out).not.toEqual({ status: "children_launched" });
+    expect(w.advanceBuild).toHaveBeenCalledTimes(1);
+    expect(events()).not.toContain("advance.children_launched");
+  });
+
   it("an item whose Spec plans no split is built as before", async () => {
     const w = setup({ item: AT_SPEC });
     await workItemAdvanceWorkflow(ARGS);

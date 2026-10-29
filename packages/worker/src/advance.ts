@@ -7,7 +7,7 @@ import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
 import { NO_VERDICT_ESCALATION_CODE, readReviewHold } from "@fx/core/src/work-items/reviewHold.js";
 import { VERDICT_ROLES } from "@fx/core/src/work-items/verdictRoles.js";
-import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError } from "@fx/core/src/work-items/stages.js";
+import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError, hasLivePlannedChildSql } from "@fx/core/src/work-items/stages.js";
 import { MAX_WAITING_ATTEMPT, assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
 import { markRunnerWork, markWorkPending } from "@fx/core/src/pendingWork.js";
 import { createRunnerPlaneMergeStore, PLANE_MERGE_OPEN_STATES, type PlaneMergeOrder, type RunnerPlaneMergeStore } from "./runnerPlaneMerge.js";
@@ -15,7 +15,7 @@ import { setupHoldFor } from "@fx/core/src/setup-requests/store.js";
 import { markCorrectionApplied } from "@fx/core/src/corrections/index.js";
 import { ITEM_PR_BRANCH, JobMemorySchema, type JobMemory } from "@fulcrumaxe/runner-protocol";
 import { attachRunNotes, correctionReasonCode, listRunNoteIds, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
-import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readSandboxBoundPullRequest, recordSandboxContinuesBound, recordRunStage, insertRunEvent, recordChildPullRequestForItem, readChildBoundPullRequest, DispatchFailedError, JobIssueError, RUNNER_RUN_BRANCH, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { cancelRun, ensureSpecAnchorRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readSandboxBoundPullRequest, recordSandboxContinuesBound, recordRunStage, insertRunEvent, recordChildPullRequestForItem, readChildBoundPullRequest, DispatchFailedError, JobIssueError, RUNNER_RUN_BRANCH, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { reportError } from "@fx/telemetry";
 import { checkFixRound, envelopeRunUsd } from "@fx/spend";
 import { checkRoundHeadroom } from "./panelHeadroom.js";
@@ -559,6 +559,8 @@ export interface AdvanceItem extends AdvancePrSource {
   child?: true;
   /** D#483 S5-b2b: set when the item is not a planned PR child and its newest Spec plans two or more pull requests: the item itself is never built, its children are. */
   splits?: true;
+  /** D#483 S5-b2b: set when the item is not a planned PR child and already has planned PR children. A re-spec to a single pull request must not turn such a parent into a build: its children stay, and a person decides. */
+  hasChildren?: true;
   /** The item's branch from its build identity: `fx/issue-<n>`, or a planned PR child's own `fx/<parent#>-<key>`. Absent when the identity is refused. */
   branch?: string;
   /** Why the build identity was refused (`no_issue_link`, `child_orphaned`): the plan answers with it in place of a bare missing number. */
@@ -988,7 +990,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
 
   async function loadItemRow(accountId: string, workItemId: string): Promise<Omit<AdvanceItem, keyof AdvancePrSource> | null> {
     return withTenant(runnerPool, accountId, async (client) => {
-      const r = await client.query<{ child: boolean; planned_pr_key: string | null; stage: string; provenance: string; repo_id: string | null; discussion_id: string | null; gh_owner: string | null; gh_name: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; executor_run_id: string | null; planned_count: number | null; check_failed_run_id: string | null; p_id: string | null; p_title: string | null; p_summary: string | null }>(
+      const r = await client.query<{ child: boolean; planned_pr_key: string | null; stage: string; provenance: string; repo_id: string | null; discussion_id: string | null; gh_owner: string | null; gh_name: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; executor_run_id: string | null; planned_count: number | null; has_children: boolean; check_failed_run_id: string | null; p_id: string | null; p_title: string | null; p_summary: string | null }>(
         `SELECT w.stage, w.provenance, w.repo_id, w.discussion_id, r.gh_owner, r.gh_name,
                 CASE WHEN w.planned_pr_key IS NULL THEN d.kind ELSE w.kind END AS kind, (w.planned_pr_key IS NOT NULL) AS child, w.planned_pr_key,
                 (SELECT ar.id FROM agent_runs ar WHERE ar.account_id = w.account_id AND ar.work_item_id = w.id AND ar.role = 'executor' ORDER BY ar.created_at DESC, ar.id DESC LIMIT 1) AS executor_run_id,
@@ -1001,7 +1003,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
                 EXISTS (SELECT 1 FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL}) AS has_spec,
                 (SELECT max(s.version) FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL}) AS spec_version,
                 (SELECT CASE WHEN jsonb_typeof(s.frontmatter -> 'planned_prs') = 'array' THEN jsonb_array_length(s.frontmatter -> 'planned_prs') ELSE 0 END FROM spec_versions s
-                  WHERE w.planned_pr_key IS NULL AND s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL} ORDER BY s.version DESC LIMIT 1) AS planned_count
+                  WHERE w.planned_pr_key IS NULL AND s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL} ORDER BY s.version DESC LIMIT 1) AS planned_count,
+                (w.planned_pr_key IS NULL AND ${hasLivePlannedChildSql("w")}) AS has_children
            FROM work_items w
            LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
            LEFT JOIN discussions d ON d.account_id = w.account_id AND d.id = w.discussion_id
@@ -1019,6 +1022,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
             reviewHold,
             ...(row.child ? { child: true } : {}),
             ...(Number(row.planned_count ?? 0) >= 2 ? { splits: true as const } : {}),
+            ...(row.has_children ? { hasChildren: true as const } : {}),
             ...(identity?.ok ? { branch: identity.identity.branch } : {}),
             ...(identity !== null && !identity.ok ? { identityRefusal: identity.reason } : {}),
             stage: row.stage,
@@ -1982,13 +1986,15 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
   async function specPlansSplit(who: AdvanceStepWho, version: number): Promise<{ split?: true }> {
     const rows = await withTenant(runnerPool, who.accountId, async (client) =>
       (
-        await client.query<{ n: number }>(
-          "SELECT CASE WHEN jsonb_typeof(frontmatter -> 'planned_prs') = 'array' THEN jsonb_array_length(frontmatter -> 'planned_prs') ELSE 0 END AS n FROM spec_versions WHERE account_id = $1 AND work_item_id = $2 AND version = $3 AND erased_at IS NULL",
+        await client.query<{ id: string; n: number }>(
+          "SELECT id, CASE WHEN jsonb_typeof(frontmatter -> 'planned_prs') = 'array' THEN jsonb_array_length(frontmatter -> 'planned_prs') ELSE 0 END AS n FROM spec_versions WHERE account_id = $1 AND work_item_id = $2 AND version = $3 AND erased_at IS NULL",
           [who.accountId, who.workItemId, version],
         )
       ).rows,
     );
-    return Number(rows[0]?.n ?? 0) >= 2 ? { split: true } : {};
+    if (Number(rows[0]?.n ?? 0) < 2) return {};
+    await ensureSpecAnchorRun(runnerPool, { accountId: who.accountId, workItemId: who.workItemId, specVersionId: rows[0]!.id });
+    return { split: true };
   }
 
   async function advanceRespec(who: AdvanceStepWho, runId: string, actionId: string, expectedVersion: number): Promise<{ status: string; reason: string | null; version: number | null }> {
