@@ -43,3 +43,9 @@ export async function listAccountNotifyRecipients(pool: Pick<Pool, 'query'>, acc
   const { rows } = await pool.query<{ o_email: string }>('SELECT o_email FROM account_notify_recipients($1::uuid)', [accountId]);
   return rows.map((r) => r.o_email);
 }
+
+/** The per-account email window (migration 0932): true when no ask of the account was stamped (first email or reminder) inside the last `windowSeconds`. Read from the database, never from memory. */
+export async function isAccountNotifyWindowOpen(pool: Pick<Pool, 'query'>, accountId: string, windowSeconds: number): Promise<boolean> {
+  const { rows } = await pool.query<{ open: boolean }>('SELECT account_notify_window_open($1::uuid, $2::integer) AS open', [accountId, windowSeconds]);
+  return rows[0]?.open === true;
+}

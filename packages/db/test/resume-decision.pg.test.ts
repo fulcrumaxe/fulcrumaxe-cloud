@@ -276,12 +276,12 @@ describe('resume_decision (0860)', () => {
     const policy = async (table: string, name: string) =>
       (await admin.query(`SELECT cmd, roles::text AS roles, qual, with_check FROM pg_policies WHERE schemaname = 'public' AND tablename = $1 AND policyname = $2`, [table, name])).rows;
 
-    it('decision_asks: ten SELECT columns (0860 six, 0927 answer_due_at, 0930 notified_at, renotified_at, timeout_outcome), UPDATE only on the two stamp columns (0930), no table-wide privilege, and the 0860 read policy with exactly this text', async () => {
+    it('decision_asks: ten SELECT columns (0860 six, 0927 answer_due_at, 0930 notified_at, renotified_at, timeout_outcome; 0932 adds a policy, no column), UPDATE only on the two stamp columns (0930), no table-wide privilege, and the 0860 read policy with exactly this text', async () => {
       expect(await columnPrivileges('decision_asks', 'SELECT')).toEqual(['account_id', 'answer_due_at', 'answered_at', 'id', 'notified_at', 'renotified_at', 'run_id', 'state', 'timeout_outcome', 'work_item_id']);
       expect(await columnPrivileges('decision_asks', 'UPDATE')).toEqual(['notified_at', 'renotified_at']);
       for (const privilege of ['INSERT', 'REFERENCES']) expect(await columnPrivileges('decision_asks', privilege), privilege).toEqual([]);
       expect(await tablePrivileges('decision_asks')).toEqual([]);
-      expect(await q(`SELECT policyname AS x FROM pg_policies WHERE schemaname = 'public' AND tablename = 'decision_asks' AND 'platform_ops' = ANY(roles) ORDER BY 1`)).toEqual(['platform_ops_ask_next_due_select', 'platform_ops_ask_notify_select', 'platform_ops_ask_notify_update', 'platform_ops_resume_select']);
+      expect(await q(`SELECT policyname AS x FROM pg_policies WHERE schemaname = 'public' AND tablename = 'decision_asks' AND 'platform_ops' = ANY(roles) ORDER BY 1`)).toEqual(['platform_ops_ask_next_due_select', 'platform_ops_ask_notify_select', 'platform_ops_ask_notify_update', 'platform_ops_ask_notify_window_select', 'platform_ops_resume_select']);
       expect(await policy('decision_asks', 'platform_ops_resume_select')).toEqual([
         {
           cmd: 'SELECT',
