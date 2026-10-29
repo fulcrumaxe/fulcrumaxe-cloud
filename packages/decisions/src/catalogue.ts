@@ -31,7 +31,7 @@ import type { CatalogueEntry } from "./types.js";
  * three presets next to this number: changing either without bumping it
  * (and updating the pin) fails that test.
  */
-export const CATALOGUE_VERSION = 7;
+export const CATALOGUE_VERSION = 8;
 
 /**
  * How long a class-2 or class-3 decision stays free to reverse, in hours (D#7 C23: a per-entry catalogue field, 24 h, the same on every
@@ -199,6 +199,23 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
   },
   {
+    // D#7 DP7-1: the receipt a reversal leaves, pointing at the receipt it reverses (`reverses_receipt_id`). `chosen` is `reversed` or
+    // `reverse_refused`, never free text. The reversal itself can't be un-reversed: a second attempt on the same receipt replays the first.
+    id: "reversal_recorded",
+    class: "human_over_the_loop",
+    // A record of an undo a person already made, not a choice to make: locked to `act` so no preset or setting turns it into a question.
+    defaultDisposition: "act",
+    allowedDispositions: ["act"],
+    reversal: {
+      availability: "not_reversible",
+      reason: "a reversal is a record of what a person already undid; to change course, make a new decision",
+    },
+    customerProximity: "internal_only",
+    dataSensitivity: "none",
+    timeoutOutcomes: ["stop_and_flag"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
+  },
+  {
     id: "publish_deprecation_notice",
     class: "human_over_the_loop",
     defaultDisposition: "ask",
@@ -215,6 +232,22 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
   },
 
   // --- class 3: human_in_the_loop -- always asked ---
+  {
+    // D#7 DP7-1: the third reversal on one work item. The first two are `reversal_recorded`; from the third on a person is asked, at
+    // every preset (the cap is 2 per work item). Written by the reversal definer itself, which counts the earlier reversals.
+    id: "reversal_over_cap",
+    class: "human_in_the_loop",
+    defaultDisposition: "ask",
+    allowedDispositions: ["ask"],
+    reversal: {
+      availability: "not_reversible",
+      reason: "the extra reversal waits for a person's answer; once answered it is a record, not something to undo",
+    },
+    customerProximity: "internal_only",
+    dataSensitivity: "none",
+    timeoutOutcomes: ["stop_and_flag"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
+  },
   {
     id: "publish_release_artifact",
     class: "human_in_the_loop",

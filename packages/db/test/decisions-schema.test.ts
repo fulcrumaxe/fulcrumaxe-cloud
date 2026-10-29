@@ -105,6 +105,7 @@ describe('decision_settings / decision_receipts schema (DP2 items 1, 3, 7)', () 
         'rejected_alternative',
         'reversal_free_until',
         'reversal_state',
+        'reverses_receipt_id',
         'rule_id',
         'rule_set_version',
         'run_id',

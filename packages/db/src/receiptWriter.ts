@@ -64,7 +64,10 @@ export type ReceiptErrorCode =
   | 'receipt_chosen_invalid'
   | 'receipt_rejected_alternative_invalid'
   | 'receipt_untrusted_input_not_stored_body'
-  | 'receipt_rule_invalid';
+  | 'receipt_rule_invalid'
+  | 'receipt_reversal_invalid'
+  | 'reversal_original_not_found'
+  | 'reversal_of_reversal';
 
 /** Thrown before any query is sent. `code` is the named error; branch on it, not on the message. */
 export class ReceiptWriteError extends Error {
@@ -228,4 +231,60 @@ export async function writeSubItemPolicyReceipt(client: PoolClient, input: SubIt
     [input.workItemId, input.key, input.specVersionId, input.runId, input.approvalId, input.chosen, input.dialVersion, CATALOGUE_VERSION],
   );
   return { id: rows[0]!.o_id, replayed: rows[0]!.o_replayed };
+}
+
+export type ReversalChoice = 'reversed' | 'reverse_refused';
+
+export interface WriteReversalReceiptInput {
+  /** The receipt being reversed. It must be this account's own, carry a work item, and not itself be a reversal. */
+  reversesReceiptId: string;
+  runId: string;
+  /** What happened to the reversal. A refused one is a record only: it takes no slot and does not count toward the cap. */
+  chosen: ReversalChoice;
+  /** The other reversal path (the enum value that is not `chosen`). Enum values only; no receipt text carries free text from a person. */
+  rejectedAlternative: ReversalChoice;
+  dialVersion: number;
+}
+
+export interface WriteReversalReceiptResult {
+  id: string;
+  decisionType: 'reversal_recorded' | 'reversal_over_cap';
+  /** `needs_ask` when the receipt is the class 3 `reversal_over_cap` (the third reversal on a work item); raising that ask is DP7-2. */
+  outcome: 'recorded' | 'needs_ask';
+  /** True when this reversal was already recorded: the first receipt is returned and nothing was written. */
+  replayed: boolean;
+}
+
+const REVERSAL_CHOICES: readonly string[] = ['reversed', 'reverse_refused'];
+
+/**
+ * D#7 DP7-1 (migration 0931): writes the receipt a reversal leaves, pointing at the receipt it reverses. The definer picks the type from the
+ * count of reversals already standing on the original's work item: `reversal_recorded` (class 2) for the first two, `reversal_over_cap`
+ * (class 3, outcome `needs_ask`) from the third. A retry answers the first receipt (`replayed`). `writeReceipt` is untouched and never sets
+ * the pointer; the actor and the account come from the session, as for every receipt.
+ */
+export async function writeReversalReceipt(client: PoolClient, input: WriteReversalReceiptInput): Promise<WriteReversalReceiptResult> {
+  if (!isText(input.reversesReceiptId) || !isText(input.runId)) throw new ReceiptWriteError('receipt_reversal_invalid');
+  if (!REVERSAL_CHOICES.includes(input.chosen) || !REVERSAL_CHOICES.includes(input.rejectedAlternative) || input.chosen === input.rejectedAlternative) {
+    throw new ReceiptWriteError('receipt_reversal_invalid');
+  }
+  if (!Number.isInteger(input.dialVersion) || input.dialVersion < DIAL_VERSION_CATALOGUE_DEFAULT || input.dialVersion > INT4_MAX) throw new ReceiptWriteError('receipt_invalid_dial_version');
+  const recorded = CATALOGUE.find((e) => e.id === 'reversal_recorded');
+  const overCap = CATALOGUE.find((e) => e.id === 'reversal_over_cap');
+  if (!recorded || recorded.class !== 'human_over_the_loop' || !overCap || overCap.class !== 'human_in_the_loop') throw new ReceiptWriteError('receipt_unknown_decision_type');
+  // Neither type can be reversed, so no deadline is stamped; setting it keeps a window left by an earlier write in this transaction from landing here.
+  await stampReversalWindow(client, 'reversal_recorded');
+  try {
+    const { rows } = await client.query<{ o_id: string; o_decision_type: 'reversal_recorded' | 'reversal_over_cap'; o_replayed: boolean }>(
+      'SELECT o_id, o_decision_type, o_replayed FROM decision_receipt_write_reversal($1::uuid, $2::text, $3::text, $4::integer, $5::uuid, $6::integer)',
+      [input.reversesReceiptId, input.chosen, input.rejectedAlternative, input.dialVersion, input.runId, CATALOGUE_VERSION],
+    );
+    const row = rows[0]!;
+    return { id: row.o_id, decisionType: row.o_decision_type, outcome: row.o_decision_type === 'reversal_over_cap' ? 'needs_ask' : 'recorded', replayed: row.o_replayed };
+  } catch (err) {
+    const message = (err as { message?: string }).message ?? '';
+    if (message === 'reversal_original_not_found') throw new ReceiptWriteError('reversal_original_not_found');
+    if (message === 'reversal_of_reversal') throw new ReceiptWriteError('reversal_of_reversal');
+    throw err;
+  }
 }
