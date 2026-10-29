@@ -783,12 +783,14 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const read = await withTenant(runnerPool, accountId, userId, async (client) => {
       const role = await client.query<{ role: string }>("SELECT role FROM account_members WHERE account_id = $1 AND user_id = $2", [accountId, userId]);
       // D#483 S5-b2c-2: a planned PR child reads its PARENT's issue number and the Spec version it names (its kind is its own, it has no discussion); `child` routes it straight to the build.
-      const item = await client.query<{ stage: string; provenance: string; repo_id: string | null; discussion_id: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; acceptance_files: unknown; child: boolean }>(
+      const item = await client.query<{ stage: string; provenance: string; repo_id: string | null; discussion_id: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; acceptance_files: unknown; child: boolean; planned_count: number | null }>(
         `SELECT w.stage, w.provenance, w.repo_id, w.discussion_id,
                 CASE WHEN w.planned_pr_key IS NULL THEN d.kind ELSE w.kind END AS kind, (w.planned_pr_key IS NOT NULL) AS child,
                 EXISTS (SELECT 1 FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL}) AS has_spec,
                 (SELECT max(s.version) FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL}) AS spec_version,
-                (SELECT s.frontmatter -> 'acceptance_files' FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL} ORDER BY s.version DESC LIMIT 1) AS acceptance_files
+                (SELECT s.frontmatter -> 'acceptance_files' FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL} ORDER BY s.version DESC LIMIT 1) AS acceptance_files,
+                (SELECT CASE WHEN jsonb_typeof(s.frontmatter -> 'planned_prs') = 'array' THEN jsonb_array_length(s.frontmatter -> 'planned_prs') ELSE 0 END FROM spec_versions s
+                  WHERE w.planned_pr_key IS NULL AND s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL} ORDER BY s.version DESC LIMIT 1) AS planned_count
            FROM work_items w LEFT JOIN discussions d ON d.account_id = w.account_id AND d.id = w.discussion_id
           WHERE w.id = $1 AND w.account_id = $2`,
         [workItemId, accountId],
@@ -863,8 +865,11 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
 
     // D#483: a build that cannot take a slot yet is not "started". The wait is recorded now as the item's own waiting fact (the card reads it; the workflow's polls
     // keep it fresh) and the outcome says so, with the reason. A check that fails decides nothing: the workflow's start is the authority, and the answer stays "started".
+    // A parent whose newest Spec plans two or more pull requests never builds itself (its workflow answers `children_launched`, and the build start refuses `parent_splits`), so it
+    // takes no slot and has none to wait for: no wait fact, and the approval settles `started` like any other performed approval. Its children are launched by their own gate.
+    const splitsParent = !item.child && Number(item.planned_count ?? 0) >= 2;
     let waitReason: string | null = null;
-    if (!respec && (verdict.action === "build" || verdict.action === "rebuild") && deps.buildWaitReason) {
+    if (!respec && !splitsParent && (verdict.action === "build" || verdict.action === "rebuild") && deps.buildWaitReason) {
       try {
         waitReason = await deps.buildWaitReason(runnerPool, accountId, workItemId);
       } catch (err) {
