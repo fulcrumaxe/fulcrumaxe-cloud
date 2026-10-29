@@ -38,6 +38,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "cross_site_refused",
   "decision_answers_unavailable",
   "invalid_key",
+  "clone_failed",
+  "empty_agent_output",
   "invalid_spec_output",
   "planned_prs_too_large",
   "planned_split_missing",

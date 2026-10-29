@@ -51,7 +51,7 @@ describe("D#2 H09b2, H09.9: resume [pg]", () => {
   it("cc_session_id is persisted on finalize, and a later resume uses the SAME sandbox name plus --resume <cc_session_id>", async () => {
     const { accountId, repoId, workItemId } = await seedExecutorFixture();
     const events: NormalizedEvent[] = [
-      { runId: "placeholder", role: "executor", seq: 1, type: "assistant", ts: new Date().toISOString(), sessionId: "cc-session-42" },
+      { runId: "placeholder", role: "executor", seq: 1, type: "assistant", ts: new Date().toISOString(), sessionId: "cc-session-42", agentOutput: { verdict: "done" } },
     ];
     const harness = createSandboxTargetHarness(db.runWriterPool, events);
     const target = new SandboxTarget(harness.deps);

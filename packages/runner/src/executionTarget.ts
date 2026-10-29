@@ -56,6 +56,8 @@ export type FailureReason =
   | "sandbox_stopped"
   /** A preview's repository could not be cloned before the agent started (failed, or took too long). */
   | "clone_failed"
+  /** The agent ended cleanly but wrote no AGENT_OUTPUT, so there is no result to act on. A retry can produce one. */
+  | "empty_agent_output"
   /** A preview's repository is over the clone size limit. */
   | "clone_too_large"
   /** An executor build found its persistent sandbox in use by another session, and refused to touch it. */

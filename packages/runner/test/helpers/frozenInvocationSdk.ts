@@ -28,7 +28,7 @@ export const LATENCY_MS = 30;
 /** The agent prints its result this long after its command starts (a launch is a handful of provider calls; this is a model run). */
 export const AGENT_OUTPUT_DELAY_MS = 250;
 
-export const RESULT_LINE = JSON.stringify({ type: "result", is_error: false, result: "done", session_id: "s1" });
+export const RESULT_LINE = JSON.stringify({ type: "result", is_error: false, result: "done\n<!-- AGENT_OUTPUT -->\n```json\n{\"verdict\":\"pass\"}\n```\n<!-- /AGENT_OUTPUT -->", session_id: "s1" });
 
 function httpError(status: number): Error {
   return Object.assign(new Error("fake provider error"), { response: { status } });

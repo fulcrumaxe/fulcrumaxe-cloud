@@ -2019,6 +2019,10 @@ export function buildTerminalReport(
   if (out?.verdict === "checkpoint" && typeof out.summary === "string") {
     return { status: "timed_out", envelope: { verdict: "checkpoint" }, agentCheckpoint: { summary: out.summary }, ...common };
   }
+  // A run that ends cleanly with no AGENT_OUTPUT produced nothing a step can read. It is a failure with a fixed code (the item stays retryable), never a success on an empty result.
+  if (out === undefined || out === null || typeof out !== "object") {
+    return { status: "failed", failureReason: "empty_agent_output", envelope: null, ...common };
+  }
   return { status: "succeeded", envelope: lastEvent.agentOutput ?? null, ...common };
 }
 

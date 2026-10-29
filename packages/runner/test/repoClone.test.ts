@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, sy
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { CLONE_EXIT_TOO_LARGE, CLONE_PINNED_SCRIPT, CLONE_SCRIPT, MAX_CLONE_KB, PREVIEW_WORKDIR, buildCloneCommand } from "../src/repoClone.js";
+import { CLONE_EXIT_EMPTY, CLONE_EXIT_TOO_LARGE, CLONE_PINNED_SCRIPT, CLONE_SCRIPT, MAX_CLONE_KB, PREVIEW_WORKDIR, buildCloneCommand } from "../src/repoClone.js";
 import { overlapsAgentConfigDir } from "../src/agentConfig.js";
 
 /** D#2 PREVIEW-RUNNER-EVENTS: the clone command is built safely, and the script it runs does what it says on a real shell. */
@@ -114,6 +114,16 @@ describe("the clone script on a real shell (local repository standing in for the
       expect(st.isFile()).toBe(true);
       expect(readFileSync(path.join(dir, "up"), "utf8")).toBe("../../etc/passwd");
     }
+  });
+
+  it("a clone that finishes with no commit (an empty repository) exits CLONE_EXIT_EMPTY and leaves no checkout", () => {
+    const empty = path.join(base, "empty-origin");
+    mkdirSync(empty);
+    execFileSync("git", ["-C", empty, "init", "-q", "-b", "trunk"], { stdio: "pipe" });
+    const dir = path.join(base, "empty-clone");
+    const r = run(`file://${empty}`, dir, MAX_CLONE_KB);
+    expect(r.status).toBe(CLONE_EXIT_EMPTY);
+    expect(existsSync(dir)).toBe(false);
   });
 
   it("pinned: checks out exactly the pinned commit (not the branch tip), shallow, and HEAD is that commit", () => {

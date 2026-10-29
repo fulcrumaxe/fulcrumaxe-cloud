@@ -110,7 +110,7 @@ describe("operator subscription at the sandbox target [pg]", () => {
     return { runId: result.id, report, started: true };
   }
 
-  const result = (): NormalizedEvent => ({ runId: "x", role: "project-manager", seq: 1, type: "result", ts: new Date().toISOString(), text: "ok" });
+  const result = (): NormalizedEvent => ({ runId: "x", role: "project-manager", seq: 1, type: "result", ts: new Date().toISOString(), text: "ok", agentOutput: { verdict: "pass" } });
   /** A little real usage (100k input tokens, about $0.10 at API rates) so the run has a metered figure to settle. */
   const usage = (): NormalizedEvent => ({ runId: "x", role: "project-manager", seq: 1, type: "assistant", ts: new Date().toISOString(), messageId: "m1", usage: { inputTokens: 100_000, outputTokens: 0 } });
 

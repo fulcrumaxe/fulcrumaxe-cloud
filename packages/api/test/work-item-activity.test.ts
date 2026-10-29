@@ -383,6 +383,53 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       expect((await noticeOf(accountId, userId, itemId))!.kind).toBe('spec_refused');
     });
 
+    it('spec_refused: a Spec writer run that failed with empty_agent_output or clone_failed shows that code at Triaged; another code, another role or a live run shows none', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const { itemId } = await seedItem(accountId, { stage: 'triaged' });
+      const failWith = async (role: string, reason: string) => {
+        const runId = await seedRun(accountId, itemId, { role, status: 'failed' });
+        await admin.query(
+          `INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.status_changed', $3::jsonb)`,
+          [accountId, runId, JSON.stringify({ from: 'running', to: 'failed', failureReason: reason })],
+        );
+        return runId;
+      };
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+      await failWith('project-manager', 'sandbox_error'); // not one of the two codes
+      await failWith('executor', 'empty_agent_output'); // not the Spec writer
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+      await failWith('project-manager', 'empty_agent_output');
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'spec_refused', reason: 'empty_agent_output' });
+      await failWith('project-manager', 'clone_failed');
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'spec_refused', reason: 'clone_failed' });
+      await seedRun(accountId, itemId, { role: 'project-manager', status: 'running' });
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+    });
+
+    it('superseded: a closed request retired for a tracked item carries that item\'s id when it is the same account\'s; another account\'s, a malformed id, an item that is not closed and one never retired this way carry none', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const other = await seedAccountWithMember(admin);
+      const { itemId } = await seedItem(accountId, { stage: 'closed' });
+      const root = await seedItem(accountId, { stage: 'discussing' });
+      const foreign = await seedItem(other.accountId, { stage: 'discussing' });
+      const retire = (ref: string) =>
+        admin.query(`INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'triaged', 'closed', now(), 'control_plane', $3)`, [accountId, itemId, ref]);
+      // closed by a person, not retired: no notice
+      await admin.query(`INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'triaged', 'closed', now(), 'control_plane', 'closed-by-person')`, [accountId, itemId]);
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+      await retire(`superseded:${foreign.itemId}`);
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'superseded', reason: '' }); // never linked across accounts
+      await admin.query(`DELETE FROM work_item_transitions WHERE work_item_id = $1 AND starts_with(source_ref, 'superseded:')`, [itemId]);
+      await retire('superseded:not-an-id');
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'superseded', reason: '' });
+      await admin.query(`DELETE FROM work_item_transitions WHERE work_item_id = $1 AND starts_with(source_ref, 'superseded:')`, [itemId]);
+      await retire(`superseded:${root.itemId}`);
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'superseded', reason: root.itemId });
+      // reopened: the old retirement is not this stage's story
+      await admin.query(`UPDATE work_items SET stage = 'triaged' WHERE id = $1`, [itemId]);
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+    });
+
     it('check_failed: at in_progress, the newest recorded stop of Check the build gives a fixed sentence; any other code, or a later stage, gives none', async () => {
       const { accountId, userId } = await seedAccountWithMember(admin);
       const { itemId } = await seedItem(accountId, { stage: 'in_progress' });

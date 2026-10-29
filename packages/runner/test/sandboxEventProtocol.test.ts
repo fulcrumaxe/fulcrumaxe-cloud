@@ -739,7 +739,7 @@ describe("H14c-5b-1 over SandboxTarget and the real port [pg]", () => {
   const RICH = { ...SPEND, perSpawnCapUsd: 100 };
   const claimed = (id: string, model: string, usage: Record<string, number>) =>
     JSON.stringify({ type: "assistant", session_id: "cc-sess-1", message: { id, model, content: text(id), usage } });
-  const done = () => result("done");
+  const done = () => result(envelope("pass"));
 
   it("MP-PLAUS 10d: a message over the per-line ceiling is killed under the cap: failed, the clamped total settles, the reservation is not released, nothing after it is metered", async () => {
     const r = await endedBy({}, (h) => h.print(usageMsg("m1", 100_000), usageMsg("forged", 50_000_000), usageMsg("m3")), RICH);
@@ -753,7 +753,7 @@ describe("H14c-5b-1 over SandboxTarget and the real port [pg]", () => {
   });
 
   it("MP-PLAUS 10d: a forged result carrying 100M input tokens raises the total by at most the ceiling and the run ends normally", async () => {
-    const forged = result("done", { usage: { input_tokens: 100_000_000 } });
+    const forged = result(envelope("pass"), { usage: { input_tokens: 100_000_000 } });
     const r = await endedBy({}, (h) => (h.print(usageMsg("m1", 100_000), forged), h.exit(0)), RICH);
     expect(r.report).toMatchObject({ status: "succeeded", usd: usdOf("haiku-4.5", 1_100_000), tokensIn: 1_100_000 });
     expect(r.report.metering!.flags).toEqual(["implausible_usage"]);
@@ -761,7 +761,7 @@ describe("H14c-5b-1 over SandboxTarget and the real port [pg]", () => {
   });
 
   it("MP-PLAUS 10e: a forged total_cost_usd of $9,999 settles at most one maximal message above the metered total, and is flagged", async () => {
-    const forged = result("done", { total_cost_usd: 9999 });
+    const forged = result(envelope("pass"), { total_cost_usd: 9999 });
     const r = await endedBy({}, (h) => (h.print(usageMsg("m1"), usageMsg("m2"), forged), h.exit(0)), RICH);
     // The dearest maximal message: 1M cache-write tokens plus 128k output tokens on the dearest model.
     expect(maxLineUsd()).toBeCloseTo(computeModelUsd("opus-5", { inputTokens: 0, outputTokens: 128_000, cacheWriteTokens: 1_000_000 }), 4);
@@ -787,14 +787,14 @@ describe("H14c-5b-1 over SandboxTarget and the real port [pg]", () => {
   });
 
   it("MP-PLAUS: a final cost more than 5% below the metered total is flagged, nothing is killed, and the metered total settles", async () => {
-    const r = await endedBy({}, (h) => (h.print(usageMsg("m1"), usageMsg("m2"), result("done", { total_cost_usd: 0.5 })), h.exit(0)), RICH);
+    const r = await endedBy({}, (h) => (h.print(usageMsg("m1"), usageMsg("m2"), result(envelope("pass"), { total_cost_usd: 0.5 })), h.exit(0)), RICH);
     expect(r.report).toMatchObject({ status: "succeeded", usd: 2 * ONE_M });
     expect(r.report.metering).toEqual({ meteredUsd: 2 * ONE_M, reportedUsd: 0.5, flags: ["reported_below_metered"], modelCalls: 2 });
     expect(r.ledger).toEqual([2 * ONE_M]);
   });
 
   it("MP-PLAUS: a clean run's terminal report carries the metering block with no flags", async () => {
-    const r = await endedBy({}, (h) => (h.print(usageMsg("m1"), result("done", { total_cost_usd: ONE_M })), h.exit(0)), RICH);
+    const r = await endedBy({}, (h) => (h.print(usageMsg("m1"), result(envelope("pass"), { total_cost_usd: ONE_M })), h.exit(0)), RICH);
     expect(r.report.metering).toEqual({ meteredUsd: ONE_M, reportedUsd: ONE_M, flags: [], modelCalls: 1 });
   });
 
@@ -818,7 +818,7 @@ describe("H14c-5b-1 over SandboxTarget and the real port [pg]", () => {
   });
 
   it("W3: tokensIn and tokensOut on the report are the metered figures, not the VM's last result", async () => {
-    const lying = result("done", { usage: { input_tokens: 5, output_tokens: 7 } });
+    const lying = result(envelope("pass"), { usage: { input_tokens: 5, output_tokens: 7 } });
     const line = msg({ id: "m1", content: text("m1"), usage: { input_tokens: 1_000_000, output_tokens: 100 } });
     const r = await endedBy({}, (h) => (h.print(line, lying), h.exit(0)), RICH);
     expect(r.report).toMatchObject({ status: "succeeded", tokensIn: 1_000_000, tokensOut: 100 });
