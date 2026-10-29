@@ -224,7 +224,7 @@ export class InstallationTokenCache {
  * permission set no other purpose may ask for (see MERGE_GATE_PERMISSIONS). It exists so the check-run, status and
  * branch-protection reads, and the commit-status write, are NOT in the allowlist of every other purpose.
  */
-export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push", "plane_merge", "plane_publish_read", "branch_delete", "branch_sync", "pairing_read", "receipt_block"] as const;
+export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push", "plane_merge", "plane_publish_read", "branch_delete", "branch_sync", "pairing_read", "receipt_block", "retraction"] as const;
 export type MintPurpose = (typeof MINT_PURPOSES)[number];
 
 /**
@@ -355,6 +355,35 @@ export function assertPlanePushToken(minted: Pick<MintedAccessToken, "permission
   const repos = minted.repositories;
   const coversOnly = Array.isArray(repos) && repos.length === 1 && repos[0]!.toLowerCase() === repo.toLowerCase();
   if (!metadataOk || !writes || !coversOnly) throw new InstallationTokenError("token_scope_mismatch");
+}
+
+/**
+ * D#7 DP7b-w: the only permission sets a `retraction` token ever asks for, one per surface a deprecation notice can sit on: a GitHub release (`contents: write`),
+ * an issue or pull request comment (`issues: write`) or a Discussion (`discussions: write`). Each is a single key. The client built on the token (`installationHttp.ts`
+ * kind `retraction`) is pinned to one surface and one write, and a mint response that holds anything but the asked-for key (and `metadata: read`) is refused.
+ * One repository, never cached.
+ */
+export const RETRACTION_PERMISSIONS = Object.freeze({
+  release: Object.freeze({ contents: "write" }),
+  comment: Object.freeze({ issues: "write" }),
+  discussion: Object.freeze({ discussions: "write" }),
+} as const);
+
+/** D#7 DP7b-w: a `retraction` scope must be exactly one of the three sets above. */
+export function isRetractionPermissionSet(perms: Readonly<Record<string, unknown>>): boolean {
+  const keys = Object.keys(perms);
+  return keys.length === 1 && perms[keys[0]!] === "write" && Object.values(RETRACTION_PERMISSIONS).some((set) => keys[0]! in set);
+}
+
+/** D#7 DP7b-w: a `retraction` mint must cover exactly the one repository, hold exactly the one asked-for `write` key, and nothing else but `metadata: read`. */
+export function assertRetractionToken(minted: Pick<MintedAccessToken, "permissions" | "repositories">, repo: string, asked: Readonly<Record<string, string>>): void {
+  const perms = minted.permissions;
+  if (perms === undefined || perms === null || typeof perms !== "object" || Array.isArray(perms)) throw new InstallationTokenError("token_scope_mismatch");
+  const exact = Object.entries(perms).filter(([k]) => k !== "metadata");
+  const repos = minted.repositories;
+  const coversOnly = Array.isArray(repos) && repos.length === 1 && repos[0]!.toLowerCase() === repo.toLowerCase();
+  const exactOk = exact.length === 1 && Object.keys(asked).length === 1 && asked[exact[0]![0]] === "write" && exact[0]![1] === "write";
+  if ((perms.metadata !== undefined && perms.metadata !== "read") || !exactOk || !coversOnly) throw new InstallationTokenError("token_scope_mismatch");
 }
 
 /** D#6 PUBLIC-MERGE: a `plane_merge` mint must cover exactly the one repository asked for and hold `contents: write` and nothing else but `metadata: read`. */
@@ -510,6 +539,14 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     allowed = Object.keys(RECEIPT_BLOCK_PERMISSIONS);
     appKind = params.appKind;
     namespace = "receipt_block:";
+  } else if (params.purpose === "retraction") {
+    // D#7 DP7b-w: the write App, ONE repository and exactly one of the three retraction sets. Fresh every time.
+    assertWriteInstallation(params.appKind);
+    if (isWide(params.scope) || !isRetractionPermissionSet(params.scope.permissions)) throw new InstallationTokenError("purpose_not_allowed");
+    scope = { repositories: params.scope.repositories, permissions: params.scope.permissions as Record<string, "write"> };
+    allowed = Object.keys(scope.permissions);
+    appKind = params.appKind;
+    namespace = "retraction:";
   } else if (params.purpose === "pairing_read" && (params.appKind === "team" || params.appKind === "team_readonly")) {
     // D#598 PAIR-PICKER-API: one repository, metadata read. Minted per read, never cached.
     if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
@@ -545,7 +582,7 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     throw new InstallationTokenError("permission_not_allowed");
   }
 
-  const neverCached = params.purpose === "plane_push" || params.purpose === "plane_merge" || params.purpose === "plane_publish_read" || params.purpose === "branch_delete" || params.purpose === "branch_sync" || params.purpose === "pairing_read";
+  const neverCached = params.purpose === "plane_push" || params.purpose === "plane_merge" || params.purpose === "plane_publish_read" || params.purpose === "branch_delete" || params.purpose === "branch_sync" || params.purpose === "pairing_read" || params.purpose === "retraction";
   if (params.fresh === true && !neverCached) throw new InstallationTokenError("purpose_not_allowed");
   // D#598 C4: a plane_push token is never cached on any path, so it is fresh whatever the caller passes. Nothing is read from or written to the cache for it.
   // The same holds for a plane_publish_read token, which is minted and revoked for one proxied request.
@@ -611,6 +648,14 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
   if (params.purpose === "branch_sync") {
     try {
       assertBranchSyncToken(minted, (scope as MergeGateScope).repositories[0]);
+    } catch (error) {
+      await params.revoke?.(minted.token).catch(() => undefined);
+      throw error;
+    }
+  }
+  if (params.purpose === "retraction") {
+    try {
+      assertRetractionToken(minted, (scope as MergeGateScope).repositories[0], scope.permissions as Record<string, string>);
     } catch (error) {
       await params.revoke?.(minted.token).catch(() => undefined);
       throw error;
