@@ -610,7 +610,11 @@ check_receipt_writer_role_shape() {
             OR (p.proname = 'start_gate_release'
               AND p.proargtypes = array_to_string('{uuid}'::regtype[]::oid[], ' ')::oidvector)
             OR (p.proname = 'start_gate_reopen'
-              AND p.proargtypes = array_to_string('{uuid,text}'::regtype[]::oid[], ' ')::oidvector)))
+              AND p.proargtypes = array_to_string('{uuid,text}'::regtype[]::oid[], ' ')::oidvector)
+            OR (p.proname = 'decision_receipt_write_reversal'
+              AND p.proargtypes = array_to_string('{uuid,text,text,integer,uuid,integer}'::regtype[]::oid[], ' ')::oidvector)
+            OR (p.proname = 'reversal_count'
+              AND p.proargtypes = array_to_string('{uuid}'::regtype[]::oid[], ' ')::oidvector)))
         UNION ALL SELECT 'relation ' || c.relname FROM pg_class c WHERE c.relowner = r.oid
         UNION ALL SELECT 'schema ' || n.nspname FROM pg_namespace n WHERE n.nspowner = r.oid
         UNION ALL SELECT 'type ' || t.typname FROM pg_type t WHERE t.typowner = r.oid) x), ''),

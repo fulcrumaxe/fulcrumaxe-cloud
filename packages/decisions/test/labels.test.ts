@@ -23,6 +23,8 @@ const APPROVED: Record<string, string> = {
   spend_past_envelope: "Spending past an item's budget",
   run_extension: "Extending a run past its limit",
   start_after_reclassify: "Starting an item that was later judged larger",
+  reversal_recorded: "Undoing an earlier decision",
+  reversal_over_cap: "Undoing a decision again after two undos",
 };
 
 describe("decision labels", () => {

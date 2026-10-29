@@ -143,7 +143,7 @@ describe('D#7 DP10a: decision settings routes', () => {
     expect(s.presets.map((p) => p.name)).toEqual(['cautious', 'balanced', 'autonomous']);
     expect(new Set(s.presets.map((p) => p.customer_role)).size).toBe(3);
     const dials = dialsByType(s);
-    expect(s.dials).toHaveLength(17);
+    expect(s.dials).toHaveLength(19);
     for (const type of CLASS_2) expect(dials[type], type).toMatchObject({ adjustable: true, source: 'default', preset: null, version: null });
     expect(dials.runner_run_on_member_plan!.disposition).toBe('announce');
     expect(dials.nonbreaking_refactor_approach!.disposition).toBe('ask');
@@ -152,6 +152,9 @@ describe('D#7 DP10a: decision settings routes', () => {
     for (const type of ['start_parent_item', 'spend_past_envelope', 'start_after_reclassify']) {
       expect(dials[type], type).toMatchObject({ adjustable: false, disposition: 'ask', allowed_dispositions: ['ask'] });
     }
+    // D#7 DP7-1: the reversal records are not choices: a class 2 record whose only allowed disposition is `act`, and a class 3 that is always asked.
+    expect(dials.reversal_recorded).toMatchObject({ disposition: 'act', allowed_dispositions: ['act'] });
+    expect(dials.reversal_over_cap).toMatchObject({ adjustable: false, disposition: 'ask', allowed_dispositions: ['ask'] });
     expect(dials.dependency_patch_bump).toMatchObject({ adjustable: false, disposition: 'act' });
     expect(dials.publish_release_artifact).toMatchObject({ adjustable: false, disposition: 'ask' });
     // The invariants are exactly the list DP5's inventory test reads, and none is a dial.

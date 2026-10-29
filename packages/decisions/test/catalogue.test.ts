@@ -36,6 +36,8 @@ const EXPECTED_V1_IDS = [
   "nonbreaking_refactor_approach",
   "publish_deprecation_notice",
   "publish_release_artifact",
+  "reversal_over_cap",
+  "reversal_recorded",
   "retry_transient_step_failure",
   "run_extension",
   "runner_run_on_member_plan",
