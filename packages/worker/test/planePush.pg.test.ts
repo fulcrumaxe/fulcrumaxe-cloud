@@ -108,7 +108,9 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
   /** The build-start stamp, through the real module, as the build step writes it. */
   const stamp = () => withTenant(appPool, A.accountId, (c) => stampPlanePush(c, { accountId: A.accountId, workItemId: A.workItemId, repoId: A.repoId }));
   const planeRow = async () => (await admin.query("SELECT * FROM plane_pushes WHERE work_item_id = $1", [A.workItemId])).rows[0];
-  const attempts = async () => (await admin.query("SELECT * FROM plane_push_attempts WHERE account_id = $1 ORDER BY attempt_no", [A.accountId])).rows;
+  // attempt_no counts from 1 per kind (migration 0882), so a push and a fix_round can both be 1: order by creation,
+  // with attempt_no then id as tiebreaks so rows created in one instant still come back in a fixed order.
+  const attempts = async () => (await admin.query("SELECT * FROM plane_push_attempts WHERE account_id = $1 ORDER BY created_at, attempt_no, id", [A.accountId])).rows;
 
   /** A pending executor runner run with a real signed job, claimed. */
   async function claimedRun(o: { role?: string; continues?: { baseSha?: string } } = {}): Promise<{ id: string; generation: number }> {
