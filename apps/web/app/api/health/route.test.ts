@@ -147,6 +147,22 @@ describe("GET /api/health", () => {
     expect(res.body.missing).toEqual([]);
   });
 
+  it("names the decision email settings to the operator while they are unset, and stays 200 (the email is off, nothing else is)", async () => {
+    const env = { ...completeEnv("production"), CRON_SECRET: OPERATOR_SECRET };
+    const off = await call(env, bearer(OPERATOR_SECRET));
+    expect(off.status).toBe(200);
+    expect(off.body.disabled).toEqual(expect.arrayContaining([{ name: "RESEND_API_KEY", feature: "Decision email" }, { name: "NOTIFY_FROM", feature: "Decision email" }]));
+    const on = await call({ ...env, RESEND_API_KEY: "re_fixed", NOTIFY_FROM: "ask@verified.example" }, bearer(OPERATOR_SECRET));
+    expect(JSON.stringify(on.body.disabled)).not.toMatch(/RESEND_API_KEY|NOTIFY_FROM/);
+  });
+
+  it("names FX_APP_ORIGIN to the operator when it is missing (the email needs it for its link)", async () => {
+    const rest: Env = { ...completeEnv("production"), CRON_SECRET: OPERATOR_SECRET, FX_APP_ORIGIN: undefined };
+    const res = await call(rest, bearer(OPERATOR_SECRET));
+    expect(res.status).toBe(503);
+    expect(res.body.missing).toEqual(expect.arrayContaining(["FX_APP_ORIGIN"]));
+  });
+
   it("never puts a value in the response, for anyone", async () => {
     const wrongKey = "wrong-key-value-should-never-appear-0123456789";
     const env: Env = { ...completeEnv("production"), CRON_SECRET: OPERATOR_SECRET, FX_CURSOR_KEY_V1: wrongKey, FX_SESSION_SECRET: "short-session-value" };
