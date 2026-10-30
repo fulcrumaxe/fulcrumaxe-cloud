@@ -252,6 +252,10 @@ describe('migration 0906: work_item_approvals and the sub-item approval [pg]', (
         actor: admin2, decision_type: 'launch_sub_item', class: 'human_over_the_loop', work_item_id: w, run_id: runs.get(w),
         sub_item_key: 'fix-1', spec_version_id: s1, chosen: 'launch', rejected_alternative: 'wait_for_approval',
       });
+      // D#7 DP6a-WIRING: the definer's row carries the 24-hour reversal deadline, and a replay leaves no unspent window behind.
+      expect((await admin.query(`SELECT (reversal_free_until - created_at) AS span FROM decision_receipts WHERE id = $1`, [r1.id])).rows[0].span).toEqual({ days: 1 });
+      const left = await asPerson(t, t.userId, async (c) => { await write(c, t, w, s1); return (await c.query<{ v: string }>("SELECT current_setting('app.reversal_window_hours', true) AS v")).rows[0]!.v; });
+      expect(left).toBe('');
       // The same key under the same Spec version is the same receipt, from either person.
       expect(await asPerson(t, t.userId, (c) => write(c, t, w, s1))).toEqual({ id: r1.id, replayed: true });
       // Another key, or another Spec version, is a new receipt.

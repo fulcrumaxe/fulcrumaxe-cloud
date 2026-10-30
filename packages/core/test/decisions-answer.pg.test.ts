@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { RECEIPT_HOOK_DEADLINE_MS } from '../src/decisions/receiptHook.js';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { raiseAsk, type RaiseAskInput } from '@fx/db/src/decisionAsks.js';
@@ -115,6 +116,21 @@ describe('answerAsk (DP11b)', () => {
       expect(await nReceipts(a)).toBe(before);
       expect((await readAsk(id)).state).toBe('open');
     });
+
+    it('D#7 DP6a-WIRING: a receipt hook that never resolves holds the answer for the deadline at most; the answer is committed and the resume is announced', async () => {
+      const sent: unknown[] = [];
+      const signal = { signal: async (m: unknown) => void sent.push(m) };
+      const hook = vi.fn(() => new Promise<void>(() => undefined));
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const id = await raise(a);
+      const t0 = Date.now();
+      await expect(answerAsk({ ...as(a), signal, afterReceipt: hook }, { askId: id, choice: 'skip' })).resolves.toMatchObject({ askId: id });
+      expect(Date.now() - t0).toBeLessThan(RECEIPT_HOOK_DEADLINE_MS + 4000);
+      warn.mockRestore();
+      expect(hook).toHaveBeenCalledTimes(1);
+      expect((await readAsk(id)).state).toBe('answered');
+      expect(sent).toHaveLength(1);
+    }, 20_000);
 
     it('kicks the run-action workflow after the commit, for a new request only; a signal that fails changes nothing', async () => {
       const sent: unknown[] = [];

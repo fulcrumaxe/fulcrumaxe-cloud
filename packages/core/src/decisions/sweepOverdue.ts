@@ -5,6 +5,7 @@ import { getCurrentDialSetting } from '@fx/db/src/decisions.js';
 import { DIAL_VERSION_CATALOGUE_DEFAULT, writeReceipt } from '@fx/db/src/receiptWriter.js';
 import { emitDomainEvent } from '../domain-events/emit.js';
 import { withTenant } from '../tenancy/withTenant.js';
+import { runAfterReceipts, type AfterReceiptHook } from './receiptHook.js';
 
 /**
  * D#7 DP12a-2 (DP-C5 section 4, DP-C9 section 6): what happens when an ask's answer window ends. Nothing is denied
@@ -68,7 +69,7 @@ class NothingMoved extends Error {}
 
 type Moved = 'overdue' | 'proceeded' | 'skipped';
 
-async function timeOutOne(pool: Pool, accountId: string, askId: string, now: Date): Promise<Moved> {
+async function timeOutOne(pool: Pool, accountId: string, askId: string, now: Date, touched: { workItemId: string | null }): Promise<Moved> {
   try {
     return await withTenant(pool, accountId, async (client): Promise<Moved> => {
       const found = await client.query<DueRow>(
@@ -102,6 +103,7 @@ async function timeOutOne(pool: Pool, accountId: string, askId: string, now: Dat
         });
         if (receipt.store !== 'decision_receipts') throw new NothingMoved();
         if (!await timeOutAskIn(client, { askId: ask.id, now, to: 'proceeded', receiptId: receipt.id })) throw new NothingMoved();
+        touched.workItemId = ask.work_item_id;
         return 'proceeded';
       }
 
@@ -125,7 +127,7 @@ async function timeOutOne(pool: Pool, accountId: string, askId: string, now: Dat
  * Ends the answer window of up to `limit` open asks that are due at `clock.now()`, across tenants. Never throws: a
  * failed list or a failed ask is counted and the next tick looks again (the caller logs a fixed line).
  */
-export async function sweepOverdueAsks(pool: Pool, clock: SweepClock, limit: number = ASK_DUE_DEFAULT_LIMIT): Promise<OverdueSweepResult> {
+export async function sweepOverdueAsks(pool: Pool, clock: SweepClock, limit: number = ASK_DUE_DEFAULT_LIMIT, afterReceipt?: AfterReceiptHook): Promise<OverdueSweepResult> {
   const out: OverdueSweepResult = { overdue: 0, proceeded: 0, skipped: 0, failed: 0, proceededAskIds: [] };
   const now = clock.now();
   let due;
@@ -136,19 +138,24 @@ export async function sweepOverdueAsks(pool: Pool, clock: SweepClock, limit: num
     out.failed++;
     return out;
   }
+  const refresh: Array<{ accountId: string; workItemId: string | null }> = [];
   for (const d of due) {
     try {
-      const moved = await timeOutOne(pool, d.accountId, d.askId, now);
+      const touched: { workItemId: string | null } = { workItemId: null };
+      const moved = await timeOutOne(pool, d.accountId, d.askId, now, touched);
       if (moved === 'skipped') out.skipped++;
       else if (moved === 'overdue') out.overdue++;
       else {
         out.proceeded++;
         out.proceededAskIds.push(d.askId);
+        refresh.push({ accountId: d.accountId, workItemId: touched.workItemId });
       }
     } catch {
       // fx-swallow-ok: counted as failed and the ask stays open; never the error's text, which can carry a host or a user
       out.failed++;
     }
   }
+  // After every commit, once, under one deadline for the whole batch: the policy receipts reach the items' pull request blocks without the tick queueing behind GitHub.
+  await runAfterReceipts(afterReceipt, refresh);
   return out;
 }

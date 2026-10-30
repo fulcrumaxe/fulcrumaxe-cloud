@@ -4,6 +4,7 @@ import { withdrawSubItemAsk } from '@fx/db/src/decisionAsks.js';
 import { getCurrentDialSetting } from '@fx/db/src/decisions.js';
 import { DIAL_VERSION_CATALOGUE_DEFAULT, writeSubItemApprovalReceipt } from '@fx/db/src/receiptWriter.js';
 import { CHECK_KEY_RE, checkKeyOf } from './fixRoundGate.js';
+import { runAfterReceipt, type AfterReceiptHook } from './receiptHook.js';
 import { ChildLaunchRefusal, fileChildLaunch, findPlannedChild, prepareChildLaunch, type ChildLaunchCode, type ChildLaunchDeps } from './childLaunch.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { VERDICT_ROLES } from '../work-items/verdictRoles.js';
@@ -49,6 +50,8 @@ export interface SubItemApprovalCtx {
   principal: { accountId: string; userId: string; tokenId?: string };
   /** The planned PR launch's outside pieces (the build's readiness and the envelope's room). Absent: an Approve on a planned PR key answers `child_build_unsupported`. */
   child?: ChildLaunchDeps;
+  /** D#7 DP6a-WIRING: told after the approval has committed, so the receipt block on the item's pull request is refreshed. Best-effort. */
+  afterReceipt?: AfterReceiptHook;
 }
 export interface SubItemApprovalInput {
   workItemId: string;
@@ -77,7 +80,9 @@ export async function approveSubItem(ctx: SubItemApprovalCtx, input: SubItemAppr
   if (typeof input.key !== 'string' || !KEY_RE.test(input.key)) throw new SubItemApprovalError('invalid_key');
   if (typeof input.workItemId !== 'string' || !UUID_RE.test(input.workItemId)) throw new SubItemApprovalError('not_found');
   try {
-    return await withTenant(ctx.pool, accountId, userId, tokenId, (client) => approveSubItemIn(client, { accountId, userId }, input, ctx.child));
+    const done = await withTenant(ctx.pool, accountId, userId, tokenId, (client) => approveSubItemIn(client, { accountId, userId }, input, ctx.child));
+    await runAfterReceipt(ctx.afterReceipt, accountId, input.workItemId);
+    return done;
   } catch (err) {
     const message = (err as { message?: string } | null)?.message ?? '';
     if ((err as { code?: string } | null)?.code === '42501') {

@@ -6,6 +6,7 @@ const gateFixRound = vi.fn();
 vi.mock("@fx/core/src/decisions/fixRoundGate.js", () => ({ gateFixRound: (...a: unknown[]) => gateFixRound(...a) }));
 
 import { createAdvanceModule } from "../src/advance.js";
+import { RECEIPT_HOOK_DEADLINE_MS } from "@fx/core/src/decisions/receiptHook.js";
 import { createFixGate } from "../src/fixGateStep.js";
 
 /**
@@ -47,6 +48,23 @@ describe("createFixGate", () => {
     expect(await createFixGate(POOL)(WHO, { personFiled: false })).toEqual({ proceed: false, reason: "blocked", blockedBy: null });
   });
 
+  it("D#7 DP6a-WIRING: tells the receipt hook after the gate, and a hook that never resolves cannot hold the gate's answer past the deadline", async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const hook = vi.fn(() => new Promise<void>(() => undefined));
+      let answer: unknown = null;
+      const p = createFixGate(POOL, hook)(WHO, { personFiled: false }).then((r) => { answer = r; });
+      await vi.advanceTimersByTimeAsync(RECEIPT_HOOK_DEADLINE_MS);
+      await p;
+      expect(hook).toHaveBeenCalledWith({ accountId: WHO.accountId, workItemId: WHO.workItemId });
+      expect(answer).toEqual({ proceed: true, how: "policy_receipt", announce: true });
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("does not swallow an error: a gate that cannot answer does not start the round, because the step fails", async () => {
     gateFixRound.mockImplementation(async () => { throw new Error("boom"); });
     await expect(createFixGate(POOL)(WHO, { personFiled: false })).rejects.toThrow("boom");
@@ -71,7 +89,7 @@ describe("advanceFixGate", () => {
 describe("the composition root wires the gate", () => {
   it("passes fixGate: createFixGate(<the receipt pool>) to the advance module, so the missing-gate branch is unreachable in production", () => {
     const source = readFileSync(new URL("../src/compositionRoot.ts", import.meta.url), "utf8");
-    expect(source).toMatch(/createAdvanceModule\(pools\.runnerPool, \{[^\n]*fixGate: createFixGate\(pools\.receiptPool\)/);
+    expect(source).toMatch(/createAdvanceModule\(pools\.runnerPool, \{[^\n]*fixGate: createFixGate\(pools\.receiptPool, afterReceipt\)/);
   });
 
   it("the fix start steps (review fix, check fix) never call the gate themselves: the workflow does, so a continuation can never pass through it", () => {

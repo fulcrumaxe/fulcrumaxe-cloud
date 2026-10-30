@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { RECEIPT_HOOK_DEADLINE_MS } from "@fx/core/src/decisions/receiptHook.js";
 import { CATALOGUE } from "@fx/decisions";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
@@ -207,6 +208,42 @@ describe("decision intake: the call site [pg]", { timeout: 120_000 }, () => {
       expect(await w.step()).toBe("resolved");
       expect(await class1(w.runId)).toBe(1);
     });
+  });
+
+  describe("D#7 DP6a-WIRING: the receipt block hook", () => {
+    it("is told after the class-2 receipts are durable, not for a class-1 only run, and a hook that throws changes nothing", async () => {
+      const seen: number[] = [];
+      let wi = "";
+      const intakeWith = (hook: () => Promise<void>) =>
+        createDecisionIntake({
+          runnerPool,
+          receiptPool,
+          declared: () => [CLASS2, CLASS1],
+          afterReceipt: async () => {
+            seen.push(Number((await admin.query(`SELECT count(*) AS n FROM decision_receipts WHERE work_item_id = $1`, [wi])).rows[0].n));
+            await hook();
+          },
+        });
+      const w = await world({ declared: [CLASS2], dials: { [CLASS2]: { disposition: "act" } }, envelope: { decisions_taken: [taken("d1")] } });
+      wi = w.itemId;
+      expect(await intakeWith(async () => { throw new Error("boom"); })({ accountId: w.a.accountId, workItemId: w.itemId, haltEpoch: 0, runId: w.runId })).toBe("resolved");
+      expect(seen).toEqual([1]);
+      const c1 = await world({ declared: [CLASS1], envelope: { decisions_taken: [taken("d1", { options: opts(["yes", "no"]), chosen: "yes" })] } });
+      wi = c1.itemId;
+      expect(await intakeWith(async () => undefined)({ accountId: c1.a.accountId, workItemId: c1.itemId, haltEpoch: 0, runId: c1.runId })).toBe("resolved");
+      expect(seen).toEqual([1]);
+    });
+
+    it("a hook that never resolves holds the run's decision events for the deadline at most, and the receipts and the verdict stand", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const w = await world({ declared: [CLASS2], dials: { [CLASS2]: { disposition: "act" } }, envelope: { decisions_taken: [taken("d1")] } });
+      const intake = createDecisionIntake({ runnerPool, receiptPool, declared: () => [CLASS2, CLASS1], afterReceipt: () => new Promise<void>(() => undefined) });
+      const t0 = Date.now();
+      expect(await intake({ accountId: w.a.accountId, workItemId: w.itemId, haltEpoch: 0, runId: w.runId })).toBe("resolved");
+      expect(Date.now() - t0).toBeLessThan(RECEIPT_HOOK_DEADLINE_MS + 4000);
+      warn.mockRestore();
+      expect(Number((await admin.query(`SELECT count(*) AS n FROM decision_receipts WHERE work_item_id = $1`, [w.itemId])).rows[0].n)).toBe(1);
+    }, 20_000);
   });
 
   describe("a halt between the phases", () => {

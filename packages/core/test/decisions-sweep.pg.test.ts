@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { RECEIPT_HOOK_DEADLINE_MS } from '../src/decisions/receiptHook.js';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { raiseAsk, type RaiseAskInput } from '@fx/db/src/decisionAsks.js';
@@ -83,6 +84,21 @@ describe('sweepOverdueAsks (DP12a-2)', () => {
     const answered = await answerAsk({ pool: receiptPool, principal: { accountId: a.accountId, userId: a.userId } }, { askId: id, choice: 'skip' });
     expect(await readAsk(id)).toMatchObject({ state: 'answered', answered_option: 'skip', receipt_id: answered.receiptId });
   });
+
+  it('D#7 DP6a-WIRING: receipt hooks that never resolve cost the sweep one deadline in total, and every ask still proceeded', async () => {
+    const ids = [await dueAsk(a, 'proceed_recommended'), await dueAsk(a, 'proceed_recommended'), await dueAsk(a, 'proceed_recommended')];
+    const hook = vi.fn(() => new Promise<void>(() => undefined));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const t0 = Date.now();
+    const res = await sweepOverdueAsks(receiptPool, clock, 500, hook);
+    expect(Date.now() - t0).toBeLessThan(RECEIPT_HOOK_DEADLINE_MS + 4000);
+    warn.mockRestore();
+    for (const id of ids) {
+      expect(res.proceededAskIds).toContain(id);
+      expect((await readAsk(id)).state).toBe('proceeded');
+    }
+    expect(hook).toHaveBeenCalled();
+  }, 20_000);
 
   it('proceed_recommended: open -> proceeded on the proposal, one policy receipt, no run-action request, no overdue event', async () => {
     const id = await dueAsk(a, 'proceed_recommended');

@@ -10,6 +10,7 @@ import { approveSubItemIn, SubItemApprovalError } from './approveSubItem.js';
 import { FIX_ASK_START } from './fixRoundGate.js';
 import type { ChildLaunchDeps } from './childLaunch.js';
 import { startGateForAsk } from '@fx/db/src/startGate.js';
+import { runAfterReceipt, type AfterReceiptHook } from './receiptHook.js';
 
 /**
  * D#7 DP11b (DP-C9): the answer service. One transaction on the RECEIPT pool, under `withTenant` with the
@@ -34,6 +35,8 @@ export interface AskAnswerCtx {
   signal?: RunActionSignal;
   /** D#483 S5-b2c-1: the planned PR launch's outside pieces; an answer that starts a planned PR runs the same function as the card's Approve. */
   child?: ChildLaunchDeps;
+  /** D#7 DP6a-WIRING: told after the answer has committed, so the receipt block on the item's pull request is refreshed. Best-effort. */
+  afterReceipt?: AfterReceiptHook;
 }
 export interface AskAnswerInput {
   askId: string;
@@ -78,6 +81,7 @@ export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promi
   const choice = input.choice;
   let resumeActionId: string | null = null;
   let startActionId: string | null = null;
+  let receiptWorkItemId: string | null = null;
   // 1. Principal checks.
   if (tokenId !== undefined) throw new AskAnswerError(403, 'session_required');
   try {
@@ -93,6 +97,7 @@ export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promi
         : { rows: [] as AskRow[] };
       const ask = found.rows[0];
       if (ask === undefined) throw new AskAnswerError(404, 'not_found');
+      receiptWorkItemId = ask.work_item_id;
       // 3-5. Only a pending ask; a choice of this ask's or 'deny'; a run to hang the receipt on (DP-C3 3b-2).
       if (ask.state !== 'open' && ask.state !== 'overdue') throw new AskAnswerError(409, 'already_answered');
       if (typeof choice !== 'string' || (choice !== 'deny' && !ask.options.some((o) => o.id === choice))) throw new AskAnswerError(422, 'invalid_choice');
@@ -155,6 +160,7 @@ export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promi
       });
       return { askId: ask.id, receiptId: receipt.id, answeredOption: choice };
     });
+    await runAfterReceipt(ctx.afterReceipt, accountId, receiptWorkItemId);
     if (resumeActionId !== null && ctx.signal) await announceNewRunAction({ signal: ctx.signal }, { actionId: resumeActionId, accountId, kind: 'resume_decision' });
     if (startActionId !== null && ctx.signal) await announceNewRunAction({ signal: ctx.signal }, { actionId: startActionId, accountId, kind: 'advance_work_item' });
     return result;

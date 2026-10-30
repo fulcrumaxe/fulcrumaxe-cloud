@@ -1,3 +1,4 @@
+import { runAfterReceipt, type AfterReceiptHook } from "@fx/core/src/decisions/receiptHook.js";
 import type { Pool, PoolClient } from "pg";
 import { PRESETS, getCatalogueEntry, type CatalogueEntry, type PresetName, type TimeoutOutcome } from "@fx/decisions";
 import { FIXED_INVARIANT_KEYS } from "@fx/db/src/dialInventory.js";
@@ -44,6 +45,8 @@ export interface DecisionIntakeDeps {
   declared?: (role: string) => readonly string[];
   /** Test seam: runs between phase 1 and phase 2, where a halt can land. */
   afterPlan?: () => Promise<void>;
+  /** D#7 DP6a-WIRING: told after the receipts have committed, so the receipt block on the item's pull request is refreshed. Best-effort, never throws. */
+  afterReceipt?: AfterReceiptHook;
 }
 
 interface Refusal {
@@ -258,6 +261,8 @@ export function createDecisionIntake(deps: DecisionIntakeDeps): DecisionIntake {
       if (!(err instanceof AskRaiseError || err instanceof ReceiptWriteError)) throw err;
       p = { refusals: [...p.refusals, { code: "decision_fields_malformed" }], receipts: [], asks: [] };
     }
+    // The receipts above are committed. A class-2 one reaches the item's pull request block now; the run's own events are written after, and a failure of the block changes nothing.
+    if (p.receipts.some((r) => r.entry.class === "human_over_the_loop")) await runAfterReceipt(deps.afterReceipt, input.accountId, input.workItemId);
     await events(input, p, askIds);
     return codeOf(p);
   };

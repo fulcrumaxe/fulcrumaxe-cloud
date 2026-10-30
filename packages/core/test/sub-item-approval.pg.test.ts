@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { RECEIPT_HOOK_DEADLINE_MS } from '../src/decisions/receiptHook.js';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
@@ -101,6 +102,18 @@ describe('approveSubItem (D#483 S5-b2a)', () => {
     }]);
     expect(await askState(ask)).toEqual({ state: 'withdrawn', withdrawn_reason: 'superseded' });
   });
+
+  it('D#7 DP6a-WIRING: a receipt hook that never resolves holds the approval for the deadline at most; the receipt is committed', async () => {
+    const f = await fixture();
+    const hook = vi.fn(() => new Promise<void>(() => undefined));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const t0 = Date.now();
+    const done = await approveSubItem({ pool: receiptPool, principal: { accountId: f.t.accountId, userId: f.approver }, afterReceipt: hook }, { workItemId: f.workItemId, key: 'fix-1' });
+    expect(Date.now() - t0).toBeLessThan(RECEIPT_HOOK_DEADLINE_MS + 4000);
+    warn.mockRestore();
+    expect(hook).toHaveBeenCalledWith({ accountId: f.t.accountId, workItemId: f.workItemId });
+    expect(await receiptsOf(f)).toMatchObject([{ id: done.receiptId }]);
+  }, 20_000);
 
   it('is idempotent: the same key under the same Spec is the same receipt, and no second ask is touched', async () => {
     const f = await fixture();

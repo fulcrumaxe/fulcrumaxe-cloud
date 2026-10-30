@@ -1,7 +1,7 @@
 import type { PoolClient } from 'pg';
 import { CATALOGUE, CATALOGUE_VERSION, type PresetName } from '@fx/decisions';
 import { ASK_ANSWER_EXCEPTIONS, AskAnswerDefinerError } from './decisionAsks.js';
-import { ReceiptWriteError } from './receiptWriter.js';
+import { ReceiptWriteError, withReversalWindow } from './receiptWriter.js';
 
 /**
  * D#7 start gate, part (a) (migration 0913): the TypeScript half of the work-item-anchored start ask and start receipt. Every function takes a
@@ -72,10 +72,10 @@ export async function writeStartReceipt(client: PoolClient, input: StartReceiptI
   checkType(input.decisionType);
   checkDial(input.dialVersion);
   if (input.chosen !== 'start' && input.chosen !== 'hold' && input.chosen !== 'deny') throw new ReceiptWriteError('receipt_chosen_invalid');
-  const { rows } = await client.query<{ id: string }>(
+  const { rows } = await withReversalWindow(client, input.decisionType, () => client.query<{ id: string }>(
     'SELECT start_receipt_write($1::uuid, $2::text, $3::text, $4::text, $5::integer, $6::integer) AS id',
     [input.workItemId, input.decisionType, input.chosen, input.chosen === 'start' ? 'wait_for_approval' : 'start', input.dialVersion, CATALOGUE_VERSION],
-  );
+  ));
   return rows[0]!.id;
 }
 

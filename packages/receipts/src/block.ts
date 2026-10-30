@@ -16,8 +16,11 @@ export interface WriteBlockInput {
    * never from a receipt, a run's prompt or model text; the client is pinned to this number, so it cannot reach another.
    */
   prNumber: number;
-  /** The head this block is written for: its check runs are what the write is measured against. */
-  headSha: string;
+  /**
+   * The head this block is written for: its check runs are what the write is measured against. Absent, it is the head of the pinned pull request
+   * as GitHub answers the read the writer makes anyway, so a caller never has to keep a head of its own.
+   */
+  headSha?: string;
   receipts: readonly BlockReceipt[];
   price: ReversalPricePort;
   now: () => Date;
@@ -44,6 +47,8 @@ export type WriteBlockResult =
   | { written: false; reason: "pr_not_open" | "block_unplaceable" | "pr_unreadable" | "pr_write_refused" | "check_runs_unreadable"; status?: number };
 
 const MAX_PAGES = 10;
+const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 
 interface CheckRun {
   started_at?: unknown;
@@ -79,10 +84,12 @@ export async function writeReceiptBlock(input: WriteBlockInput): Promise<WriteBl
   const base = `/repos/${input.owner}/${input.name}`;
   const prPath = `${base}/pulls/${input.prNumber}`;
   const pr = await input.http.request({ method: "GET", path: prPath });
-  const prBody = pr.body as { state?: unknown; merged?: unknown; body?: unknown; updated_at?: unknown } | null;
+  const prBody = pr.body as { state?: unknown; merged?: unknown; body?: unknown; updated_at?: unknown; head?: unknown } | null;
   if (pr.status !== 200 || prBody === null || typeof prBody !== "object") return { written: false, reason: "pr_unreadable", status: pr.status };
   if (prBody.state !== "open") return { written: false, reason: "pr_not_open" };
   const current = typeof prBody.body === "string" ? prBody.body : "";
+  const headSha = input.headSha ?? (isObject(prBody.head) ? prBody.head.sha : undefined);
+  if (typeof headSha !== "string" || !SHA.test(headSha)) return { written: false, reason: "pr_unreadable", status: pr.status };
   let next: string;
   try {
     next = replaceBlock(current, renderReceiptBlock(input.receipts, { price: input.price, merged: false }));
@@ -99,7 +106,7 @@ export async function writeReceiptBlock(input: WriteBlockInput): Promise<WriteBl
     writtenAt = time((res.body as { updated_at?: unknown } | null)?.updated_at) ?? input.now();
   }
   // Read after the write: a run that completed before the write is then a fact, not a guess.
-  const runs = await listCheckRuns(input.http, base, input.headSha);
+  const runs = await listCheckRuns(input.http, base, headSha);
   if (runs === null) return { written: false, reason: "check_runs_unreadable" };
   const starts = runs.map((r) => time(r.started_at)).filter((d): d is Date => d !== null);
   const first = starts.length > 0 ? new Date(Math.min(...starts.map((d) => d.getTime()))) : null;
@@ -111,7 +118,7 @@ export async function writeReceiptBlock(input: WriteBlockInput): Promise<WriteBl
     written: true,
     changed,
     measurement: {
-      headSha: input.headSha,
+      headSha,
       blockWrittenAt: writtenAt,
       checkRuns: runs.length,
       firstCheckStartedAt: first,
