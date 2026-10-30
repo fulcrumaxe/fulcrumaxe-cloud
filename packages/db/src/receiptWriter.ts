@@ -211,6 +211,12 @@ export interface SubItemApprovalReceiptInput {
   /** The item's current Spec version: a re-spec makes this approval stop counting. */
   specVersionId: string;
   dialVersion: number;
+  /**
+   * The person's approval of THIS work item that the launch came from (migration 0935), for a planned PR started by "Approve the Spec and build" on its parent.
+   * Recorded as the receipt's `approval_id`; the definer refuses one that is not the item's newest approval, for this Spec version, by this person. Absent for a
+   * click on the sub-item itself, whose receipt keeps `approval_id` NULL.
+   */
+  viaApprovalId?: string;
 }
 
 const SUB_ITEM_KEY = /^[a-z0-9-]{1,32}$/;
@@ -226,10 +232,16 @@ export async function writeSubItemApprovalReceipt(client: PoolClient, input: Sub
   if (!Number.isInteger(input.dialVersion) || input.dialVersion < DIAL_VERSION_CATALOGUE_DEFAULT || input.dialVersion > INT4_MAX) throw new ReceiptWriteError('receipt_invalid_dial_version');
   const entry = CATALOGUE.find((e) => e.id === 'launch_sub_item');
   if (!entry || entry.class !== 'human_over_the_loop') throw new ReceiptWriteError('receipt_unknown_decision_type');
-  const { rows } = await withReversalWindow(client, 'launch_sub_item', () => client.query<{ o_id: string; o_replayed: boolean }>(
-    'SELECT o_id, o_replayed FROM sub_item_approval_receipt_write($1::uuid, $2::text, $3::uuid, $4::uuid, $5::integer, $6::integer)',
-    [input.workItemId, input.key, input.specVersionId, input.runId, input.dialVersion, CATALOGUE_VERSION],
-  ));
+  if (input.viaApprovalId !== undefined && !isText(input.viaApprovalId)) throw new ReceiptWriteError('receipt_missing_run_id');
+  const { rows } = await withReversalWindow(client, 'launch_sub_item', () => input.viaApprovalId === undefined
+    ? client.query<{ o_id: string; o_replayed: boolean }>(
+      'SELECT o_id, o_replayed FROM sub_item_approval_receipt_write($1::uuid, $2::text, $3::uuid, $4::uuid, $5::integer, $6::integer)',
+      [input.workItemId, input.key, input.specVersionId, input.runId, input.dialVersion, CATALOGUE_VERSION],
+    )
+    : client.query<{ o_id: string; o_replayed: boolean }>(
+      'SELECT o_id, o_replayed FROM sub_item_approval_receipt_write($1::uuid, $2::text, $3::uuid, $4::uuid, $5::integer, $6::integer, $7::uuid)',
+      [input.workItemId, input.key, input.specVersionId, input.runId, input.dialVersion, CATALOGUE_VERSION, input.viaApprovalId],
+    ));
   return { id: rows[0]!.o_id, replayed: rows[0]!.o_replayed };
 }
 

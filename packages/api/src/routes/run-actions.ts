@@ -1,4 +1,5 @@
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
+import { reportError } from "@fx/telemetry";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { withTenant } from "@fx/db/src/withTenant.js";
@@ -264,6 +265,16 @@ async function approve(ctx: RouteContext, id: string) {
     { signal },
   ).catch(mapDbError);
   if (result.replayed) ctx.markReplayed?.();
+  // A split parent's approval starts its planned PRs that can start now, in this person's name (the parent never builds). Best-effort: the approval has
+  // committed and stands whatever this does, so every step of it (the imports, the approver, the launches) is inside this one try. Loaded here:
+  // subItemApprovals.ts imports this file. The approver is asked for only once a ready planned PR is found.
+  try {
+    const { startSplitParentChildren } = await import("./split-parent-children.js");
+    await startSplitParentChildren(ctx, id, { getApprover: async () => (await import("./subItemApprovals.js")).subItemApprovalDeps.getApprover(), signal });
+  } catch (err) {
+    reportError(err, { stage: "approve.split_children" });
+    console.log(JSON.stringify({ event: "approve.children_failed", work_item_id: id, code: "split_children_failed" }));
+  }
   return { action_id: result.actionId, state: result.state as (typeof STATES)[number] };
 }
 

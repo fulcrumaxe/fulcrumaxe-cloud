@@ -237,6 +237,8 @@ describe('migration 0906: work_item_approvals and the sub-item approval [pg]', (
       expect(rows).toEqual([
         { proname: 'decision_ask_withdraw_by_id', owner: 'receipt_writer', prosecdef: true, grantees: ['receipt_writer_invoker'] },
         { proname: 'sub_item_approval_receipt_write', owner: 'receipt_writer', prosecdef: true, grantees: ['receipt_writer_invoker'] },
+        // Migration 0935's overload (the launch that came from the person's approval of the parent) is held to the same owner and grant.
+        { proname: 'sub_item_approval_receipt_write', owner: 'receipt_writer', prosecdef: true, grantees: ['receipt_writer_invoker'] },
       ]);
     });
 

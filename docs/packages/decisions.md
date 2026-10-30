@@ -110,6 +110,10 @@ uses, not for this resolution step.
 - `external_needs_approval` — the parent came from someone without write access; ask.
 - `dial` — every guardrail passed and the `launch_sub_item` dial gave the answer.
 
+### A person's approval of a split parent
+
+A person's "Approve the Spec and build" on a split parent (a Spec that plans two or more pull requests) starts its planned PRs that are ready now, even when `launch_sub_item` is set to ask. "Ready" means no launch blocker, and a planned PR that waits on a sibling is not ready. Each start is that person's own launch of the planned PR: the same checks and the same `launch_sub_item` receipt as an Approve on the child's card. The receipt also carries `approval_id`, which names the parent's approval it came from, so the two kinds of launch can be told apart. The dial still governs every start that happens without a click, including a planned PR that becomes ready later.
+
 ## The declared-classes guard
 
 `declared.ts`'s `resolveDeclaredEntry(declaration, catalogue?)` resolves one static declaration (`{ source, decisionType }`, e.g. a tool or role card naming a catalogue id) to its `CatalogueEntry`, or `undefined` when the id isn't in the catalogue. `findUnresolvedDeclarations` returns every declaration that fails to resolve, and `assertDeclarationsResolve` throws `UndeclaredCatalogueEntryError` if that list is non-empty — a declaration naming no catalogue entry is a build/test-time failure, never a silent runtime default (`#144`). This module only resolves a declaration once handed one; the scan that finds real declarations in `packages/roles/src/tools.ts` (an own `decisionType` property on a `ToolRegistryEntry`) and `packages/roles/cards/*.md` (a `decision_types:` frontmatter key) lives in `packages/roles/test/declared-classes.test.ts` instead, since `@fx/roles` owns those files. No tool or card declares a decision type yet, so that real-tree scan currently passes over an empty set — proven non-vacuous by fixtures that use the declaration convention directly.

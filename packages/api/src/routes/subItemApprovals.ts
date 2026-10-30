@@ -12,6 +12,8 @@ export type SubItemApprover = (input: {
   principal: { accountId: string; userId: string; tokenId?: string };
   workItemId: string;
   key: string;
+  /** Set only by a split parent's own approval (split-parent-children.ts); the sub-item route never sets it. */
+  viaParentApproval?: boolean;
 }) => Promise<SubItemApprovalResult>;
 
 /** The seam apps/web's catch-all installs, like `decisionAskDeps`. Until a worker can be built the approve route is a 503. */
