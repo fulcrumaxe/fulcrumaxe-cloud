@@ -81,7 +81,7 @@ describe('answerAsk (DP11b)', () => {
     });
     expect([await nReceipts(a), await nEvents(a), await nActions(a)]).toEqual([r0 + 1, e0 + 1, q0 + 1]);
     const ev = (await admin.query(`SELECT payload FROM domain_events WHERE account_id = $1 AND type = 'decision.ask_answered' AND subject_id = $2`, [a.accountId, id])).rows[0].payload;
-    expect(ev).toEqual({ ask_id: id, work_item_id: a.workItemId, run_id: a.runId, receipt_id: res.receiptId, decision_type: 'test_strategy_choice', answered_option: 'skip' });
+    expect(ev).toEqual({ askId: id, workItemId: a.workItemId, runId: a.runId, receiptId: res.receiptId, decisionType: 'test_strategy_choice', answeredOption: 'skip' });
   });
 
   describe('the resume request (D#7 DP11c, DP-C9 section 5 criterion 6)', () => {

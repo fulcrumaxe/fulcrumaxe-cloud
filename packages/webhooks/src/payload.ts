@@ -30,6 +30,9 @@ export const WEBHOOK_EVENT_TYPES = [
   'endpoint.test',
   'webhook_endpoint.disabled',
   'pr.ready_to_merge',
+  'decision.ask_raised',
+  'decision.ask_answered',
+  'decision.ask_overdue',
 ] as const;
 
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
@@ -76,6 +79,12 @@ const FIELD_RULES: Record<string, (value: unknown) => string | number | boolean 
   decision: (v) => (typeof v === 'string' && ENUM_LIKE_RE.test(v) ? v : null),
   errorClass: (v) => (typeof v === 'string' && ENUM_LIKE_RE.test(v) ? v : null),
   budget: (v) => (typeof v === 'string' && BUDGETS.has(v) ? v : null),
+  // D#7 DP12b-2: the decision.ask_* events. Ids and enums only; the producers never put question or option text in a payload.
+  askId: (v) => (typeof v === 'string' && UUID_RE.test(v) ? v : null),
+  receiptId: (v) => (typeof v === 'string' && UUID_RE.test(v) ? v : null),
+  decisionType: (v) => (typeof v === 'string' && ENUM_LIKE_RE.test(v) ? v : null),
+  timeoutOutcome: (v) => (typeof v === 'string' && ENUM_LIKE_RE.test(v) ? v : null),
+  answeredOption: (v) => (typeof v === 'string' && ENUM_LIKE_RE.test(v) ? v : null),
   createdBy: (v) => (typeof v === 'string' && UUID_RE.test(v) ? v : null),
 };
 

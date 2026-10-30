@@ -22,7 +22,9 @@ function fakeClient(now: number) {
         seen.windowMinutes = params[8] as number;
         return { rows: [{ id: ASK_ID }] };
       }
-      if (sql.includes('answer_due_at')) return { rows: [{ due: new Date(now + (seen.windowMinutes ?? 0) * 60_000) }] };
+      if (sql.includes('FROM domain_events')) return { rows: [] };
+      if (sql.includes('INSERT INTO domain_events')) return { rows: [{ id: 'evt_fake' }] };
+      if (sql.includes('answer_due_at')) return { rows: [{ due: new Date(now + (seen.windowMinutes ?? 0) * 60_000), account_id: ASK_ID, work_item_id: ASK_ID, run_id: null, decision_type: 'test_strategy_choice', timeout_outcome: 'stop_and_flag' }] };
       throw new Error('unexpected query');
     },
   } as unknown as PoolClient;
@@ -90,6 +92,28 @@ describe('raiseAskMarked', () => {
     await raiseAskMarked(fakeClient(now).client, { ...base, policy: { answerWindowMinutes: 46 * 60, onTimeout: 'stop_and_flag' } });
     await settle();
     expect(store.get('pending:invariant-sweep')).toBe(now + 46 * 3_600_000);
+  });
+
+  it('emits one decision.ask_raised event for a new ask, and none when one already exists for that ask (the once-per-ask gate)', async () => {
+    const now = Date.now();
+    const sqls: string[] = [];
+    const wrap = (existing: boolean): PoolClient => {
+      const inner = fakeClient(now).client;
+      return {
+        async query(sql: string, params: unknown[] = []) {
+          sqls.push(sql);
+          if (sql.includes('FROM domain_events')) return { rows: existing ? [{ '?column?': 1 }] : [] };
+          return (inner as unknown as { query: (s: string, p: unknown[]) => Promise<unknown> }).query(sql, params);
+        },
+      } as unknown as PoolClient;
+    };
+    const policy = { answerWindowMinutes: 15, onTimeout: 'stop_and_flag' as const };
+    const inserts = () => sqls.filter((q) => q.includes('INSERT INTO domain_events')).length;
+    await raiseAskMarked(wrap(false), { ...base, policy });
+    expect(inserts()).toBe(1);
+    sqls.length = 0;
+    await expect(raiseAskMarked(wrap(true), { ...base, policy })).resolves.toBe(ASK_ID);
+    expect(inserts()).toBe(0);
   });
 
   it('with no hooks installed it raises and marks nothing', async () => {

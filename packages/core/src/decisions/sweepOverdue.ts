@@ -113,7 +113,7 @@ async function timeOutOne(pool: Pool, accountId: string, askId: string, now: Dat
         type: 'decision.ask_overdue',
         accountId,
         subjectId: ask.id,
-        payload: { ask_id: ask.id, work_item_id: ask.work_item_id, run_id: ask.run_id, decision_type: ask.decision_type, timeout_outcome: ask.timeout_outcome },
+        payload: { askId: ask.id, workItemId: ask.work_item_id, runId: ask.run_id, decisionType: ask.decision_type, timeoutOutcome: ask.timeout_outcome },
       });
       return 'overdue';
     });

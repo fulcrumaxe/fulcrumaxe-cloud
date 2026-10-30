@@ -100,8 +100,21 @@ describe('payload: ids/enums-only allowlist', () => {
   });
 });
 
+describe('payload: the decision.ask_* fields (D#7 DP12b-2)', () => {
+  const ID = '0b8f1c52-3d1e-4a55-9f21-7c1b2f3a4d5e';
+  it('keeps the camelCase id and enum keys with their values', () => {
+    expect(sanitizeWebhookPayload({ askId: ID, workItemId: ID, runId: ID, decisionType: 'test_strategy_choice', timeoutOutcome: 'stop_and_flag' })).toEqual({
+      askId: ID, workItemId: ID, runId: ID, decisionType: 'test_strategy_choice', timeoutOutcome: 'stop_and_flag',
+    });
+    expect(sanitizeWebhookPayload({ receiptId: ID, answeredOption: 'skip' })).toEqual({ receiptId: ID, answeredOption: 'skip' });
+  });
+  it('drops the snake_case spellings, a free-text key, and a value that breaks its rule', () => {
+    expect(sanitizeWebhookPayload({ ask_id: ID, decision_type: 'x', question: 'Should we apply the change?', askId: 'not-a-uuid', decisionType: 'has spaces and punctuation!' })).toEqual({});
+  });
+});
+
 describe('payload: the v1 webhook event catalogue', () => {
-  it('includes the original five plus webhook_endpoint.disabled and C11\'s pr.ready_to_merge', () => {
+  it('includes the original five plus webhook_endpoint.disabled, C11\'s pr.ready_to_merge and the three decision.ask_* events', () => {
     expect(WEBHOOK_EVENT_TYPES).toEqual([
       'pr.opened',
       'work_item.needs_human',
@@ -110,6 +123,9 @@ describe('payload: the v1 webhook event catalogue', () => {
       'endpoint.test',
       'webhook_endpoint.disabled',
       'pr.ready_to_merge',
+      'decision.ask_raised',
+      'decision.ask_answered',
+      'decision.ask_overdue',
     ]);
   });
 
