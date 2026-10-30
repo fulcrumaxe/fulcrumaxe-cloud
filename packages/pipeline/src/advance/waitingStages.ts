@@ -11,7 +11,8 @@ export { WAITING_STAGES, type WaitingStage };
 
 /** The item stages at which a wait of each kind counts. A record, so a new waiting stage fails tsc until its positions are written. */
 export const WAITING_STAGE_POSITIONS: Readonly<Record<WaitingStage, readonly string[]>> = Object.freeze({
-  build: Object.freeze(["spec_ready", "needs_human"]),
+  // triaged: a planned PR child waits for the slot there (the launch gate starts it at Triaged); the slot wake covers it as it covers a Spec-ready build.
+  build: Object.freeze(["spec_ready", "needs_human", "triaged"]),
   classify: Object.freeze(["triaged"]),
   spec: Object.freeze(["triaged", "discussing"]),
   respec: Object.freeze(["spec_ready", "needs_human"]),

@@ -12,12 +12,18 @@ export const STAGE_TERMINAL_STATUSES: readonly string[] = Object.freeze(['succee
 const SESSION_RE = /^session:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 /** What a stage that has no `progressKinds` of its own treats as "it ended in a refusal that is not a limit". */
 const DEFAULT_PROGRESS_KINDS: readonly string[] = Object.freeze(['build_refused', 'stopped']);
+const SPEC_OF_ITEM = '(CASE WHEN w.planned_pr_key IS NULL THEN s.work_item_id = w.id ELSE s.id = w.planned_pr_spec_version_id AND s.work_item_id = w.parent_id END)';
 const likeEscape = (text: string): string => text.replace(/[\\%_]/g, (c) => `\\${c}`);
 
 /** The parts of a registry entry the decision reads. */
 export interface StageGateEntry {
   stage: string;
   itemStages: readonly string[];
+  /**
+   * Item stages at which a planned PR child (an item with a planned key under a parent) may be parked, besides `itemStages`. A child waits at Triaged, and its Spec is the
+   * one its parent planned for it, not one of its own. Also lets the child's waiting launch request count as its approval (see the approval query). Absent: no child.
+   */
+  childItemStages?: readonly string[];
   approval: { kind: 'advance_work_item' | 'respec_work_item'; from: 'self' | 'origin' };
   needsSpec: boolean;
   runKeyLikes(workItemId: string, actionId: string, headSha?: string | null): string[];
@@ -28,6 +34,8 @@ export interface StageGateEntry {
 /** The build stage's part of its registry entry; the pipeline's entry spreads this, so the registry and the build card's sentence read one definition. */
 export const BUILD_STAGE_GATE = Object.freeze({
   itemStages: Object.freeze(['spec_ready']) as readonly string[],
+  // A planned PR child waits for the slot at Triaged (the launch gate starts it there); the slot wake covers it under the launch it already has.
+  childItemStages: Object.freeze(['triaged']) as readonly string[],
   approval: Object.freeze({ kind: 'advance_work_item', from: 'self' }) as { kind: 'advance_work_item'; from: 'self' },
   needsSpec: true,
   // `advance:<item>:build:v<spec version>:<approval>[:s<n>][:n<pin>]` (startBuildForItem; the worker prefixes the item).
@@ -47,17 +55,19 @@ export async function stageApprovalGate<H extends { sha: string }>(
   head?: () => Promise<{ skip: string } | { head: H }>,
 ): Promise<StageGateResult<H>> {
   const item = (
-    await client.query<{ stage: string; provenance: string; halted: boolean; halt_epoch: number; version: number | null; spec_at: Date | null }>(
-      `SELECT w.stage, w.provenance, w.halted_at IS NOT NULL AS halted, w.halt_epoch,
-              (SELECT max(s.version) FROM spec_versions s WHERE s.account_id = w.account_id AND s.work_item_id = w.id AND s.erased_at IS NULL) AS version,
-              (SELECT max(s.created_at) FROM spec_versions s WHERE s.account_id = w.account_id AND s.work_item_id = w.id) AS spec_at
+    await client.query<{ stage: string; provenance: string; halted: boolean; halt_epoch: number; version: number | null; spec_at: Date | null; is_child: boolean }>(
+      // A planned PR child's Spec is the version its parent planned for it (the worker's SPEC_OF_ITEM_SQL); any other item's is its own.
+      `SELECT w.stage, w.provenance, w.halted_at IS NOT NULL AS halted, w.halt_epoch, (w.planned_pr_key IS NOT NULL AND w.parent_id IS NOT NULL) AS is_child,
+              (SELECT max(s.version) FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM}) AS version,
+              (SELECT max(s.created_at) FROM spec_versions s WHERE s.account_id = w.account_id AND ${SPEC_OF_ITEM}) AS spec_at
          FROM work_items w WHERE w.id = $1 AND w.account_id = $2`,
       [workItemId, accountId],
     )
   ).rows[0];
   if (!item) return { skip: 'item_gone' };
   if (item.halted) return { skip: 'halted' };
-  if (item.provenance !== 'internal' || !entry.itemStages.includes(item.stage)) return { skip: 'not_parked_here' };
+  const childHere = item.is_child && (entry.childItemStages ?? []).includes(item.stage);
+  if (item.provenance !== 'internal' || !(entry.itemStages.includes(item.stage) || childHere)) return { skip: 'not_parked_here' };
   // A review re-entered from Needs a person parks there. Only an item still held for a missing verdict is that review: any other cause of Needs a person is a build to
   // run again, and the workflow would start that instead of the review the old waiting fact was for.
   if (entry.stage === 'review' && item.stage === 'needs_human' && !(await readReviewHold(client, workItemId))) return { skip: 'not_parked_here' };
@@ -74,10 +84,13 @@ export async function stageApprovalGate<H extends { sha: string }>(
   if (open.rows.length > 0) return { skip: 'approval_in_flight' };
   const approval = (
     await client.query<{ id: string; requested_by: string; principal_kind: string; finished_at: Date }>(
+      // A child that is parked at its stage accepts a launch that settled `waiting` for the slot as its approval: the launch gate's dial request (key `dial:<receipt>`) or a
+      // person's own launch, both filed by a session. Nothing else is an approval of a child, and no item but a child gets this.
       `SELECT id, requested_by, principal_kind, finished_at FROM run_action_requests
-        WHERE account_id = $1 AND target_id = ANY($2::uuid[]) AND kind = $3 AND state = 'done' AND outcome ->> 'advance' = 'started'
+        WHERE account_id = $1 AND target_id = ANY($2::uuid[]) AND kind = $3 AND state = 'done'
+          AND (outcome ->> 'advance' = 'started' OR ($4::boolean AND outcome ->> 'advance' = 'waiting' AND principal_kind = 'session'))
         ORDER BY finished_at DESC, id DESC LIMIT 1`,
-      [accountId, targets, entry.approval.kind],
+      [accountId, targets, entry.approval.kind, childHere],
     )
   ).rows[0];
   if (!approval) return { skip: 'no_approval' };

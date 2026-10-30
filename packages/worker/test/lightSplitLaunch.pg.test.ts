@@ -9,6 +9,7 @@ import { SESSION_COOKIE_NAME, signSession } from "@fx/core/src/auth/session.js";
 import type { ChildLaunchDeps } from "@fx/core/src/decisions/childLaunch.js";
 import { childEnvelopeRoom, setWorkItemEnvelope, writeEnvelopeVersion } from "@fx/spend";
 import { startBuildForItem } from "@fx/pipeline/testing/build";
+import { readBuildWaitReason } from "@fx/pipeline";
 import { publishLightSpec } from "../../pipeline/src/advance/lightSpec.js";
 import type { AdvanceRunPorts } from "../../pipeline/src/advance/runPorts.js";
 import { runTriageStep } from "../../pipeline/src/plan/step.js";
@@ -17,7 +18,13 @@ import { FixtureRunner, FixtureWriter, OWNER, discussingItem, fixtureClassifier 
 import { handleApiRequest } from "../../api/src/handler.js";
 import { ROUTES } from "../../api/src/routes/index.js";
 import { runActionDeps } from "../../api/src/routes/run-actions.js";
-import { createAdvanceModule } from "../src/advance.js";
+import { createAdvanceModule, type AdvanceStartArgs } from "../src/advance.js";
+import { createRunActionFacade } from "../src/runActions.js";
+import { createStageResume } from "../src/stageResume.js";
+import { recordStage } from "@fx/core/src/work-items/recordStage.js";
+import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
+import { buildWaitSentence } from "@fx/api/src/routes/work-item-activity.js";
+import { PARKED_STAGE_REGISTRY } from "@fx/pipeline";
 import { createAutoStartSweep } from "../src/autoStartSweep.js";
 
 /**
@@ -317,5 +324,196 @@ describe("a short Spec that plans two pull requests launches both children after
     expect(await sweep.gateChild(a.accountId, kids[0]!.id)).toEqual({ outcome: "started" });
     expect(await sweep.gateChild(a.accountId, kids[1]!.id)).toEqual({ outcome: "started" });
     expect(await executorRuns(workItemId)).toBe(0);
+  });
+
+  // ---- the repository's build slot is held ------------------------------------------------------------------------------------------------------
+  /** Another item holding the repository's only build slot (a pull request open for it). */
+  async function occupySlot(a: SeedRefs): Promise<string> {
+    const id = randomUUID();
+    await admin.query("INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number) VALUES ($1, $2, $3, 'feature', 'internal', 'pr_opened', $4)", [id, a.accountId, a.repoId, nextNumber++]);
+    return id;
+  }
+  /** The real perform of the approval the route filed for `workItemId`, with the real slot reading; only the workflow starter is recorded. */
+  async function performFiled(_a: SeedRefs, workItemId: string): Promise<{ outcome: unknown; started: AdvanceStartArgs[] }> {
+    const started: AdvanceStartArgs[] = [];
+    const m = createAdvanceModule(writerPool, {
+      starter: null as never, resolveRunSeat: async () => ({ ok: true }) as never, startAdvance: async (args) => void started.push(args), triage: null, registry: {} as never,
+      buildWaitReason: readBuildWaitReason,
+    });
+    const filed = (await admin.query<{ id: string }>("SELECT id FROM run_action_requests WHERE target_id = $1 AND kind = 'advance_work_item' AND state = 'accepted' ORDER BY created_at DESC LIMIT 1", [workItemId])).rows[0]!;
+    const facade = createRunActionFacade(writerPool, {} as never);
+    expect(await facade.claimRunAction(filed.id, 600)).not.toBeNull();
+    const outcome = (await m.performAdvanceWorkItem(filed.id) as { outcome: unknown }).outcome;
+    await facade.settleRunAction(filed.id, { state: "done", outcome: outcome as never }); // the request is performed, as the worker's loop leaves it
+    return { outcome, started };
+  }
+  const waitFacts = async (id: string) => (await admin.query("SELECT code FROM work_item_driver_events WHERE work_item_id = $1 AND kind IN ('stage_waiting', 'build_waiting')", [id])).rows;
+
+  it("slot held: a split parent's approval settles started with no wait fact (it takes no slot), and the children are launched by the sweep as they are with a free slot", async () => {
+    const { a, workItemId } = await specReady(SPLIT);
+    await occupySlot(a);
+    // The slot reading itself says the parent would wait, so only the split guard keeps the false wait off the card.
+    expect(await readBuildWaitReason(writerPool, a.accountId, workItemId)).not.toBeNull();
+    expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    const { outcome, started } = await performFiled(a, workItemId);
+    expect(outcome).toEqual({ work_item_id: workItemId, advance: "started" });
+    expect(started).toHaveLength(1);
+    expect(await waitFacts(workItemId)).toEqual([]);
+    expect(await executorRuns(workItemId)).toBe(0);
+
+    // The launch gate does not look at the slot: both children are launched (a request each), and each takes its turn at the slot inside its own workflow.
+    const kids = await kidsOf(workItemId);
+    const sweep = sweepOf();
+    for (const k of kids) expect(await sweep.gateChild(a.accountId, k.id)).toEqual({ outcome: "started" });
+    for (const k of kids) {
+      const r = await performFiled(a, k.id);
+      expect(r.outcome).toMatchObject({ work_item_id: k.id, advance: "waiting" });
+      expect(r.started).toHaveLength(1);
+      expect(await executorRuns(k.id)).toBe(0);
+    }
+    // A repeat pass launches nothing new: one request each.
+    for (const k of kids) {
+      expect(await sweep.gateChild(a.accountId, k.id)).toEqual({ outcome: "replayed" });
+      expect((await admin.query("SELECT 1 FROM run_action_requests WHERE target_id = $1 AND kind = 'advance_work_item'", [k.id])).rows).toHaveLength(1);
+    }
+  });
+
+  it("slot held: a Spec that plans one pull request still waits for the slot, so the split guard skips only a parent", async () => {
+    const { a, workItemId } = await specReady(ONE);
+    await occupySlot(a);
+    expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    const { outcome } = await performFiled(a, workItemId);
+    expect(outcome).toMatchObject({ advance: "waiting" });
+    expect(await waitFacts(workItemId)).toHaveLength(1);
+  });
+
+  it("slot free: a split parent settles started, as before", async () => {
+    const { a, workItemId } = await specReady(SPLIT);
+    expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    expect((await performFiled(a, workItemId)).outcome).toEqual({ work_item_id: workItemId, advance: "started" });
+    expect(await waitFacts(workItemId)).toEqual([]);
+  });
+
+  // ---- the slot wake covers a planned child whose workflow ended ----------------------------------------------------------------------------------
+  /** A held slot, the split parent approved through the route, both children launched by the real sweep and settled `waiting` by the real perform. */
+  async function waitingChildren(): Promise<{ a: SeedRefs; workItemId: string; holder: string; kids: { id: string; planned_pr_key: string }[] }> {
+    const { a, workItemId } = await specReady(SPLIT);
+    const holder = await occupySlot(a);
+    expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    await performFiled(a, workItemId);
+    const kids = await kidsOf(workItemId);
+    for (const k of kids) {
+      expect(await sweepOf().gateChild(a.accountId, k.id)).toEqual({ outcome: "started" });
+      expect((await performFiled(a, k.id)).outcome).toMatchObject({ advance: "waiting" });
+    }
+    return { a, workItemId, holder, kids };
+  }
+  /** The child workflows ended (timeout or crash): their waiting facts are old and no run lives. */
+  const orphan = (ids: string[]) => admin.query("UPDATE work_item_driver_events SET created_at = now() - interval '1 hour' WHERE work_item_id = ANY($1::uuid[]) AND kind = 'stage_waiting'", [ids]);
+  const wakeEntry = PARKED_STAGE_REGISTRY.build!;
+  /** The real stage-resume sweep. `takesSlot`: a started workflow moves its item to PR opened, the way the real one takes the slot. */
+  function wake(started: AdvanceStartArgs[], takesSlot: boolean) {
+    return createStageResume(writerPool, {
+      resolveRunSeat: async () => {
+        throw new Error("the slot wake never asks for a seat");
+      },
+      startAdvance: async (args) => {
+        started.push(args);
+        if (takesSlot) await admin.query("UPDATE work_items SET stage = 'pr_opened' WHERE id = $1", [args.workItemId]);
+      },
+      buildWaitReason: (accountId, id) => readBuildWaitReason(writerPool, accountId, id),
+      log: () => undefined,
+    });
+  }
+  const freeSlot = async (a: SeedRefs, id: string) => void (await withTenant(appPool, a.accountId, (c) => recordStage(c, { workItemId: id, toStage: "merged", at: new Date(), source: "webhook", sourceRef: `t:${randomUUID()}` })));
+  const mineOf = (started: AdvanceStartArgs[], a: SeedRefs) => started.filter((s) => s.accountId === a.accountId);
+  const cardOf = (a: SeedRefs, id: string) => getWorkItemActivity({ pool: appPool, principal: { accountId: a.accountId, userId: a.userId, role: "owner" } }, id);
+
+  it("slot held, parent approved, child workflows gone: a freed slot starts exactly one child, a repeat pass none, and the second child when the first leaves the slot", async () => {
+    const { a, holder, kids } = await waitingChildren();
+    await orphan(kids.map((k) => k.id));
+    const started: AdvanceStartArgs[] = [];
+    await wake(started, true).sweepParkedStages([wakeEntry]);
+    expect(mineOf(started, a)).toEqual([]); // still held: nothing starts
+    await freeSlot(a, holder);
+    await wake(started, true).sweepParkedStages([wakeEntry]);
+    expect(mineOf(started, a)).toHaveLength(1);
+    const first = mineOf(started, a)[0]!;
+    expect(kids.map((k) => k.id)).toContain(first.workItemId);
+    const approval = (await admin.query<{ id: string }>("SELECT id FROM run_action_requests WHERE target_id = $1 AND kind = 'advance_work_item'", [first.workItemId])).rows[0]!.id;
+    expect(first).toMatchObject({ userId: a.userId, actionId: approval, specVersion: 1 });
+    // A repeat pass: the first child holds the slot, the second is not started beside it.
+    await wake(started, true).sweepParkedStages([wakeEntry]);
+    expect(mineOf(started, a)).toHaveLength(1);
+    expect(Number((await admin.query("SELECT count(*) AS n FROM work_item_driver_events WHERE work_item_id = $1 AND dedupe_key LIKE 'slotwake:%'", [first.workItemId])).rows[0].n)).toBe(1);
+    // The first child's pull request merges: the slot frees and the second child starts, once.
+    await freeSlot(a, first.workItemId);
+    await wake(started, true).sweepParkedStages([wakeEntry]);
+    await wake(started, true).sweepParkedStages([wakeEntry]);
+    const all = mineOf(started, a).map((s) => s.workItemId);
+    expect(all).toHaveLength(2);
+    expect(new Set(all)).toEqual(new Set(kids.map((k) => k.id)));
+  });
+
+  it("one start per repository per pass, even when the slot looks free for the second child", async () => {
+    const { a, holder, kids } = await waitingChildren();
+    await orphan(kids.map((k) => k.id));
+    await freeSlot(a, holder);
+    const started: AdvanceStartArgs[] = [];
+    await wake(started, false).sweepParkedStages([wakeEntry]); // this starter takes no slot, so only the repository rule holds the second child back
+    expect(mineOf(started, a)).toHaveLength(1);
+  });
+
+  it("two passes at the same moment start the child once: the once-only claim", async () => {
+    const { a, holder, kids } = await waitingChildren();
+    await orphan(kids.map((k) => k.id));
+    await freeSlot(a, holder);
+    const started: AdvanceStartArgs[] = [];
+    await Promise.all([wake(started, false).sweepParkedStages([wakeEntry]), wake(started, false).sweepParkedStages([wakeEntry])]);
+    expect(mineOf(started, a)).toHaveLength(1);
+  });
+
+  it("the card says a waiting child starts by itself, and the wake does it", async () => {
+    const { a, kids } = await waitingChildren();
+    const n = (await cardOf(a, kids[0]!.id)).notice!;
+    expect(n).toMatchObject({ kind: "build_slot_wait", autoStart: true });
+    expect(buildWaitSentence(n.reason!, n.holder ?? null, n.autoStart !== false)).toContain("starts by itself");
+  });
+
+  it("a child with no launch request never starts, and its card says a person has to act", async () => {
+    const { a, workItemId } = await specReady(SPLIT);
+    const holder = await occupySlot(a);
+    expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    const [kid] = await kidsOf(workItemId);
+    // Its waiting fact exists, with no launch behind it.
+    await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, stage, code, attempt, dedupe_key) VALUES ($1, $2, 'stage_waiting', 'build', 'one_build_per_repo_until_d598', 0, $3)", [a.accountId, kid!.id, randomUUID()]);
+    expect((await cardOf(a, kid!.id)).notice).toMatchObject({ kind: "build_slot_wait", autoStart: false });
+    await orphan([kid!.id]);
+    await freeSlot(a, holder);
+    const started: AdvanceStartArgs[] = [];
+    await wake(started, true).sweepParkedStages([wakeEntry]);
+    expect(mineOf(started, a)).toEqual([]);
+  });
+
+  it("only a child counts a waiting launch as its approval: an ordinary item at Spec ready whose request settled waiting is not started", async () => {
+    const { a, workItemId } = await specReady(ONE);
+    const holder = await occupySlot(a);
+    expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    expect((await performFiled(a, workItemId)).outcome).toMatchObject({ advance: "waiting" });
+    await orphan([workItemId]);
+    await freeSlot(a, holder);
+    const started: AdvanceStartArgs[] = [];
+    await wake(started, true).sweepParkedStages([wakeEntry]);
+    expect(mineOf(started, a)).toEqual([]);
+  });
+
+  it("a child whose parent planned a newer Spec version after the launch is not started under the old launch", async () => {
+    const { a, kids, holder } = await waitingChildren();
+    await orphan(kids.map((k) => k.id));
+    await admin.query("UPDATE spec_versions SET created_at = now() + interval '1 minute' WHERE id IN (SELECT planned_pr_spec_version_id FROM work_items WHERE id = ANY($1::uuid[]))", [kids.map((k) => k.id)]);
+    await freeSlot(a, holder);
+    const started: AdvanceStartArgs[] = [];
+    await wake(started, true).sweepParkedStages([wakeEntry]);
+    expect(mineOf(started, a)).toEqual([]);
   });
 });

@@ -20,6 +20,8 @@ export interface ParkedStageEntry {
   stage: WaitingStage;
   /** The item stages at which this stage parks (the sweep lists items there). */
   itemStages: readonly string[];
+  /** Besides `itemStages`, the stages at which a planned PR child parks (the slot wake lists them; the core gate reads the same field). */
+  childItemStages?: readonly string[];
   /** The pauses that park here: a fact with any other code is a different wait (a build slot) and is not resumed by this sweep. */
   pauses: readonly ReservationPause[];
   /** The role whose seat (and so whose limits and estimate) the restarted start will meet: the headroom check asks for exactly that reservation. */
