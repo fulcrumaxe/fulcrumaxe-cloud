@@ -15,6 +15,7 @@
  * What it cannot fake: the database transactions, audit rows and the rate classes behind these routes, role checks
  * (the session is always an admin), and the real shape of the 26-role list (a handful of real role names are used).
  */
+import { ghError, type GhReply, type GhRequest } from "../../../packages/github/test/helpers/strictGithub.js";
 import { signSession, FakeApp, BYPASS_VALUE } from "./session-helpers.js";
 
 export const ORG = "test-org";
@@ -285,3 +286,79 @@ export function snapshot(s: State): string {
 }
 
 export const nonGets = (app: FakeApp): { method: string; url: string }[] => app.seen.filter((r) => r.method !== "GET");
+
+// A strict GitHub stand-in for the fixture-repo janitor (T6b), served over real TLS by startStrictGithubServer (which
+// already refuses a request with no User-Agent). Also strict about: Bearer token (else 401), only the one repo (else 404),
+// lists cut at 100 a page and open items only, no deleting the default branch (422), a force move onto a protected branch
+// is the real 422. Cannot fake: rate limits and the full object shapes (only the fields the janitor reads).
+export const GH_TOKEN = ["fixture", "repo", "token", "not", "real", "0001"].join("-"); // gitleaks:allow
+export const GH_REPO = "test-org/fixture";
+export const BASE_SHA = "b".repeat(40);
+export const OLD_SHA = "a".repeat(40);
+export const RUN_TAG = "e2e-20261016t184837z-a1b2c3-smoke";
+const TAG_OBJ = "d".repeat(40);
+const ok = (body: unknown, status = 200): GhReply => ({ status, headers: { "content-type": "application/json; charset=utf-8" }, body: JSON.stringify(body) });
+
+export class FakeRepo {
+  defaultBranch = "main";
+  branches = new Map<string, string>([["main", OLD_SHA]]);
+  /** The commit `e2e-baseline` names; null means the tag does not exist. */
+  baseline: string | null = BASE_SHA;
+  /** Name the tag through an annotated tag object instead of directly. */
+  annotated = false;
+  protectedDefault = false;
+  items: { number: number; title: string; pr?: { ref: string; repo: string }; state: "open" | "closed" }[] = [];
+  /** Every request that was not a GET. */
+  writes: { method: string; path: string; body: string }[] = [];
+
+  issue(number: number, title: string): void {
+    this.items.push({ number, title, state: "open" });
+  }
+  pull(number: number, title: string, ref: string, repo = GH_REPO): void {
+    this.items.push({ number, title, state: "open", pr: { ref, repo } });
+  }
+
+  route = (req: GhRequest): GhReply => {
+    if (req.headers["authorization"] !== `Bearer ${GH_TOKEN}`) return ghError(401, "Bad credentials");
+    if (req.method !== "GET") this.writes.push({ method: req.method, path: req.path, body: req.body });
+    const m = new RegExp(`^/repos/${GH_REPO}(/.*)?$`).exec(req.path);
+    if (m === null) return ghError(404, "Not Found");
+    const sub = m[1] ?? "";
+    const q = new URLSearchParams(req.query ?? "");
+    const [per, pg] = [Math.min(100, Number(q.get("per_page") ?? 30)), Number(q.get("page") ?? 1)];
+    const page = (rows: unknown[]): GhReply => ok(rows.slice((pg - 1) * per, pg * per));
+    const body = req.body === "" ? {} : (JSON.parse(req.body) as Record<string, unknown>);
+    const open = this.items.filter((i) => i.state === "open");
+    if (sub === "" && req.method === "GET") return ok({ full_name: GH_REPO, default_branch: this.defaultBranch });
+    if (sub === "/git/ref/tags/e2e-baseline") return this.baseline === null ? ghError(404, "Not Found") : ok({ object: this.annotated ? { type: "tag", sha: TAG_OBJ } : { type: "commit", sha: this.baseline } });
+    if (sub === `/git/tags/${TAG_OBJ}` && this.annotated) return ok({ object: { type: "commit", sha: this.baseline } });
+    if (sub === "/issues" && req.method === "GET") return page(open.map((i) => ({ number: i.number, title: i.title, ...(i.pr ? { pull_request: {} } : {}) })));
+    if (sub === "/pulls" && req.method === "GET") return page(open.filter((i) => i.pr).map((i) => ({ number: i.number, title: i.title, head: { ref: i.pr?.ref, repo: { full_name: i.pr?.repo } } })));
+    if (sub === "/branches" && req.method === "GET") return page([...this.branches].map(([name, sha]) => ({ name, commit: { sha } })));
+    const item = /^\/(issues|pulls)\/(\d+)$/.exec(sub);
+    if (item !== null && req.method === "PATCH") {
+      const found = open.find((i) => i.number === Number(item[2]) && (item[1] === "issues" || i.pr));
+      if (found === undefined) return ghError(404, "Not Found");
+      if (body["state"] !== "closed") return ghError(422, "Validation Failed");
+      found.state = "closed";
+      return ok({ number: found.number });
+    }
+    const ref = /^\/git\/refs\/heads\/(.+)$/.exec(sub);
+    if (ref !== null) {
+      const branch = decodeURIComponent(ref[1] as string);
+      if (!this.branches.has(branch)) return ghError(422, "Reference does not exist");
+      if (req.method === "DELETE") {
+        if (branch === this.defaultBranch) return ghError(422, "Cannot delete the default branch");
+        this.branches.delete(branch);
+        return { status: 204, headers: {}, body: "" };
+      }
+      if (req.method === "PATCH") {
+        if (body["force"] !== true || typeof body["sha"] !== "string") return ghError(422, "Update is not a fast forward");
+        if (this.protectedDefault && branch === this.defaultBranch) return ghError(422, "Cannot force-push to a protected branch");
+        this.branches.set(branch, body["sha"]);
+        return ok({ ref: `refs/heads/${branch}` });
+      }
+    }
+    return ghError(405, "Method Not Allowed");
+  };
+}
