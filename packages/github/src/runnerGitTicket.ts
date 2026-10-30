@@ -1,5 +1,5 @@
 import { randomUUID, type KeyObject } from "node:crypto";
-import { ITEM_PR_BRANCH } from "@fulcrumaxe/runner-protocol";
+import { ITEM_PR_BRANCH, RUNNER_RUN_BRANCH } from "@fulcrumaxe/runner-protocol";
 import { SignJWT, createLocalJWKSet, decodeProtectedHeader, jwtVerify, type JWK, type JWTVerifyGetKey } from "jose";
 
 /**
@@ -26,8 +26,8 @@ export const GIT_TICKET_MAX_AGE_SECONDS = 360;
 /** The most keys a ticket JWKS may hold: the current one and the one being retired. Old tickets die within their 5 minutes. */
 export const GIT_TICKET_MAX_JWKS_KEYS = 2;
 
-/** A run branch: `fx/<run id>-g<generation>`. The same shape the cloud's `RUNNER_RUN_BRANCH` pins. */
-const RUN_BRANCH_SOURCE = "fx\\/[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}-g[1-9][0-9]*";
+/** A run branch: `fx/<run id>-g<generation>`, taken from the one shared `RUNNER_RUN_BRANCH` (generation of at most nine places), never a copy. */
+const RUN_BRANCH_SOURCE = RUNNER_RUN_BRANCH.source.replace(/^\^/, "").replace(/\$$/, "");
 /** The anchors of the shared item pull request branch pattern, taken off so it can sit inside one alternation (the one constant, never a copy). */
 const ITEM_BRANCH_SOURCE = ITEM_PR_BRANCH.source.replace(/^\^/, "").replace(/\$$/, "");
 

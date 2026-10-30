@@ -1,5 +1,6 @@
 import { generateKeyPairSync, type KeyObject } from "node:crypto";
 import { SignJWT } from "jose";
+import { RUNNER_RUN_BRANCH } from "@fulcrumaxe/runner-protocol";
 import { describe, expect, it } from "vitest";
 import {
   GIT_TICKET_LIFETIME_SECONDS,
@@ -203,6 +204,14 @@ describe("the verifier refuses", () => {
       expect(await refusal(await forge(wire({ ref }))), JSON.stringify(ref)).toBe("claims");
     }
     expect(GIT_TICKET_REF_PATTERN.test(`fx/${RUN}-g12`)).toBe(true);
+  });
+
+  it("bounds the generation at nine places, as the cloud's RUNNER_RUN_BRANCH does", () => {
+    expect(GIT_TICKET_REF_PATTERN.test(`fx/${RUN}-g999999999`)).toBe(true);
+    expect(GIT_TICKET_REF_PATTERN.test(`fx/${RUN}-g1000000000`)).toBe(false);
+    for (const gen of ["g1", "g999999999", "g1000000000"]) {
+      expect(GIT_TICKET_REF_PATTERN.test(`fx/${RUN}-${gen}`), gen).toBe(RUNNER_RUN_BRANCH.test(`fx/${RUN}-${gen}`));
+    }
   });
 });
 
