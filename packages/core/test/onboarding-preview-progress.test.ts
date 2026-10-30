@@ -209,7 +209,7 @@ describe('deriveProgress', () => {
     const end = new Date(T0.getTime() + 100_000);
     const row = (previewState: 'finished' | 'void', voidReason: string | null, failureReason: string | null, runStatus = 'failed') =>
       deriveProgress(facts({ previewState, voidReason, runStatus, failureReason, endedAt: end }));
-    for (const r of ['agent_start_timeout', 'clone_failed']) {
+    for (const r of ['agent_start_timeout', 'clone_failed', 'empty_agent_output']) {
       expect(row('void', r, r).slotFreed).toBe(true);
       // the same failure on a preview that was NOT voided (over the daily bound, a skipped write): still used up
       expect(row('finished', null, r).slotFreed).toBe(false);
