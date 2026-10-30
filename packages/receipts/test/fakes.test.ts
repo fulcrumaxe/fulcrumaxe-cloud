@@ -66,6 +66,12 @@ describe("fakeGit", () => {
     expect(await g.rerunAfterBuild({ repo, number: 5, headSha: SHA2 })).toEqual({ ok: false, code: "stale_head" });
     expect(g.writes).toEqual([]);
   });
+  it("leaves a pull request a person took over, at any head, and writes nothing", async () => {
+    const g = fakeGit({ open: { [`${repo}#5`]: SHA1 }, merged: [], personManaged: [`${repo}#5`] });
+    expect(await g.rerunAfterBuild({ repo, number: 5, headSha: SHA1 })).toEqual({ ok: false, code: "person_managed" });
+    expect(await g.rerunAfterBuild({ repo, number: 5, headSha: SHA2 })).toEqual({ ok: false, code: "person_managed" });
+    expect(g.writes).toEqual([]);
+  });
   it("opens a revert only for a merged pull request, and relays a refusal as a fixed code", async () => {
     const g = fresh();
     expect(await g.openRevertPr({ repo, number: 5 })).toEqual({ ok: false, code: "not_merged" });

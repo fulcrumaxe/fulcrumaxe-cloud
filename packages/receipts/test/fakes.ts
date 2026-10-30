@@ -1,4 +1,4 @@
-import type { BuildPr, BuildState, BuildStatePort, GitPort, GitResult, LedgerPort, PullRequestRef, RetractionPort } from "../src/ports.js";
+import type { BuildPr, BuildState, BuildStatePort, GitPort, GitResult, LedgerPort, PullRequestRef, RebuildPort, RetractionPort } from "../src/ports.js";
 
 /** Test fakes for the reversal ports (D#7 DP7-2b). Each one rejects a call its real counterpart would reject; the shapes are listed in fakes.test.ts. */
 
@@ -54,6 +54,8 @@ export interface FakeGitState {
   merged: string[];
   /** Pull requests the fake's GitHub would refuse to revert (a conflict). */
   conflicts?: string[];
+  /** Pull requests whose public branch a person took over: left whole, never closed. */
+  personManaged?: string[];
 }
 
 /** A GitPort. Records every write; never deletes a branch (there is no such method); refuses what GitHub would. */
@@ -65,6 +67,7 @@ export function fakeGit(state: FakeGitState): GitPort & { writes: string[] } {
     async rerunAfterBuild(input): Promise<GitResult<{ closed: true }>> {
       pullRequest(input);
       if (!SHA.test(input.headSha)) throw new TypeError("headSha is not a 40 character sha");
+      if (state.personManaged?.includes(key(input))) return { ok: false, code: "person_managed" };
       const head = state.open[key(input)];
       if (head === undefined) return { ok: false, code: "not_open" };
       if (head !== input.headSha) return { ok: false, code: "stale_head" };
@@ -78,6 +81,29 @@ export function fakeGit(state: FakeGitState): GitPort & { writes: string[] } {
       if (state.conflicts?.includes(key(input))) return { ok: false, code: "revert_refused" };
       writes.push(`revert ${key(input)}`);
       return { ok: true, number: 9000 + input.number };
+    },
+  };
+}
+
+/**
+ * A RebuildPort. Like the real one it files Build again only for an owner or admin of the account, only while nothing of the item is running, and only
+ * from a stage the move to Needs a person is legal from (or from Needs a person itself); it rejects a malformed id. Records every filing.
+ */
+export function fakeRebuild(world: { roles: Record<string, string>; stage: string; live?: boolean }): RebuildPort & { filed: Array<{ workItemId: string; userId: string }> } {
+  const filed: Array<{ workItemId: string; userId: string }> = [];
+  return {
+    filed,
+    async buildAgain(input) {
+      uuid("accountId", input.accountId);
+      uuid("workItemId", input.workItemId);
+      uuid("userId", input.userId);
+      const role = world.roles[`${input.accountId}:${input.userId}`];
+      if (role !== "owner" && role !== "admin") return { ok: false, code: "refused" };
+      if (world.live === true) return { ok: false, code: "refused" };
+      if (!["pr_opened", "changes_requested", "review_passed", "needs_human"].includes(world.stage)) return { ok: false, code: "state_changed" };
+      world.stage = "needs_human";
+      filed.push({ workItemId: input.workItemId, userId: input.userId });
+      return { ok: true, runActionId: `00000000-0000-4000-8000-${String(filed.length).padStart(12, "0")}` };
     },
   };
 }

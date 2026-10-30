@@ -29,8 +29,11 @@ export interface BuildStatePort {
   stateOf(accountId: string, workItemId: string): Promise<BuildState>;
 }
 
-/** Fixed result codes: no text from GitHub ever crosses a port. */
-export type GitRefusal = "not_open" | "stale_head" | "not_merged" | "revert_refused" | "unavailable";
+/**
+ * Fixed result codes: no text from GitHub ever crosses a port. `person_managed`: a person took the item's public branch over (its newest push
+ * record says so), so its pull request is left as it is.
+ */
+export type GitRefusal = "not_open" | "stale_head" | "not_merged" | "revert_refused" | "person_managed" | "unavailable";
 export type GitResult<T> = ({ ok: true } & T) | { ok: false; code: GitRefusal };
 
 export interface PullRequestRef {
@@ -41,12 +44,21 @@ export interface PullRequestRef {
 
 /**
  * The two GitHub writes a reversal makes. Neither deletes a branch: the original is kept.
- *  - `rerunAfterBuild`: R-S1-1, after the build and before merge. Closes the open PR at exactly the recorded head and starts a fresh build.
+ *  - `rerunAfterBuild`: R-S1-1, after the build and before merge. Closes the open PR at exactly the recorded head; the fresh build is `RebuildPort`'s.
  *  - `openRevertPr`: R-S1-3, after merge. Opens a draft revert pull request for the customer to review and merge.
  */
 export interface GitPort {
   rerunAfterBuild(input: PullRequestRef & { headSha: string }): Promise<GitResult<{ closed: true }>>;
   openRevertPr(input: PullRequestRef): Promise<GitResult<{ number: number }>>;
+}
+
+/**
+ * The second half of R-S1-1, after the original pull request is closed: the item moves to Needs a person on the legal edge and Build again is filed in
+ * the name of the person who asked for the reversal, checked against the same table their own click is (owner or admin, nothing running). Not a GitHub
+ * write. `refused`: that table said no. `state_changed`: the item is no longer where a rebuild can start from.
+ */
+export interface RebuildPort {
+  buildAgain(input: { accountId: string; workItemId: string; userId: string }): Promise<{ ok: true; runActionId: string } | { ok: false; code: "refused" | "state_changed" }>;
 }
 
 /** Correcting a published notice (DP7b). Kept apart from GitPort: it needs write access this row does not ask for. */
