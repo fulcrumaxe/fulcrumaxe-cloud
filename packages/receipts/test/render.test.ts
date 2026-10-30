@@ -193,11 +193,12 @@ describe("the price port (C22 B2)", () => {
     expect(render([receipt()], priced)).toContain("reversing this now costs an estimated $1.50");
   });
 
-  it("this package computes no price: its sources import no ledger, spend or billing code and name no rate", () => {
+  it("the rendering files compute no price: they import no ledger, spend or billing code and name no rate", () => {
     const dir = fileURLToPath(new URL("../src", import.meta.url));
-    // The port interface named LedgerPort (ports.ts, DP7-2b) is the one allowed use of the word; any other mention still fails.
-    for (const f of readdirSync(dir)) {
-      const src = readFileSync(`${dir}/${f}`, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\bLedgerPort\b/g, "").replace(/\/\/.*$/gm, "");
+    // The reversal files (ports.ts, price.ts's live loader, reverse.ts, adapters/) read the ledger on purpose (DP7-2c); the files that render and write the block never do.
+    const reversalFiles = new Set(["ports.ts", "price.ts", "reverse.ts", "adapters", "index.ts"]);
+    for (const f of readdirSync(dir).filter((n) => !reversalFiles.has(n))) {
+      const src = readFileSync(`${dir}/${f}`, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
       expect(src, f).not.toMatch(/@fx\/(spend|billing|model-router|model-call)|ledger|rate_card|per_token|tokensPer/i);
     }
   });

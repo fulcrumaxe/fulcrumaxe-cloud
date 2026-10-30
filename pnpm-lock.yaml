@@ -1048,9 +1048,15 @@ importers:
 
   packages/receipts:
     dependencies:
+      '@fx/db':
+        specifier: workspace:*
+        version: link:../db
       '@fx/decisions':
         specifier: workspace:*
         version: link:../decisions
+      '@fx/spend':
+        specifier: workspace:*
+        version: link:../spend
     devDependencies:
       '@fx/github':
         specifier: workspace:*
