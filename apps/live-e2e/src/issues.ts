@@ -97,6 +97,18 @@ export function request(opts: Pick<IssueOptions, "token" | "apiBase" | "ca">, me
   });
 }
 
+/** Every row of a GitHub listing, 100 a page. A listing past the page cap throws (it is not silently cut short), so a caller that acts on the rows never acts on a part. */
+export async function pagedGet(opts: Pick<IssueOptions, "token" | "apiBase" | "ca">, path: string): Promise<unknown[]> {
+  const all: unknown[] = [];
+  for (let page = 1; page <= MAX_LIST_PAGES; page += 1) {
+    const rows = (await request(opts, "GET", `${path}${path.includes("?") ? "&" : "?"}per_page=100&page=${page}`)) as unknown[];
+    if (!Array.isArray(rows)) throw new GithubError(`GitHub sent a listing that is not an array for ${path.split("?")[0]}`, 0);
+    all.push(...rows);
+    if (rows.length < 100) return all;
+  }
+  throw new GithubError(`more than ${MAX_LIST_PAGES * 100} rows for ${path.split("?")[0]}`, 0);
+}
+
 async function openIssues(opts: Pick<IssueOptions, "repo" | "token" | "apiBase" | "ca">): Promise<IssueRow[]> {
   const all: IssueRow[] = [];
   for (let page = 1; page <= MAX_LIST_PAGES; page += 1) {
