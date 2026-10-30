@@ -43,4 +43,12 @@ describe("decision labels", () => {
   it("a type with no label reads as its id with spaces, never blank", () => {
     expect(decisionLabel("some_new_type")).toBe("some new type");
   });
+
+  it("an id that names an Object.prototype member gets the fallback string, never a function or object", () => {
+    for (const id of ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf"]) {
+      const label = decisionLabel(id);
+      expect(typeof label, id).toBe("string");
+      expect(label, id).toBe(id.replace(/_/g, " "));
+    }
+  });
 });

@@ -25,5 +25,8 @@ export const DECISION_LABELS: Readonly<Record<string, string>> = {
   reversal_over_cap: "Undoing a decision again after two undos",
 };
 
-/** The name to show: the mapped one, else the id with its underscores read as spaces (never blank, never "undefined"). */
-export const decisionLabel = (id: string): string => DECISION_LABELS[id] ?? id.replace(/_/g, " ");
+/**
+ * The name to show: the mapped one, else the id with its underscores read as spaces (never blank, never "undefined"). Only own keys count, so an id such
+ * as `constructor`, `__proto__` or `toString` falls through to the readable id instead of returning a function or object from the prototype chain.
+ */
+export const decisionLabel = (id: string): string => (Object.hasOwn(DECISION_LABELS, id) ? DECISION_LABELS[id]! : id.replace(/_/g, " "));
