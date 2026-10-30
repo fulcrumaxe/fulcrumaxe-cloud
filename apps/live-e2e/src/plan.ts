@@ -43,7 +43,7 @@ export interface Plan {
    * janitor runs only when a selected pack is destructive; the dry-run that shows its changes is
    * `live-e2e janitor account --target <name>`.
    */
-  janitors: { account: { needed: boolean; packs: string[]; pending: string[]; baseline: AccountBaseline } };
+  janitors: { account: { needed: boolean; packs: string[]; pending: string[]; baseline: AccountBaseline }; repo: { needed: boolean; packs: string[]; pending: string[] } };
 }
 
 export interface PlanInput extends Omit<SelectInput, "routed"> {
@@ -117,7 +117,7 @@ export function buildPlan(input: PlanInput): Plan {
     routing: input.routing?.files ?? [],
     routing_fallback: input.routing?.fallback ?? null,
     estimated_cost_usd: selected.reduce((sum, s) => sum + s.est_usd, 0),
-    janitors: { account: janitorForPlan(outcomes, byId) },
+    janitors: { account: janitorForPlan(outcomes, byId), repo: repoJanitorForPlan(outcomes, byId) },
   };
 }
 
@@ -133,8 +133,22 @@ function janitorForPlan(outcomes: PackOutcome[], byId: Map<string, Pack>): Plan[
   return { needed: packs.length > 0, packs, pending, baseline: accountBaseline() };
 }
 
+/** The fixture-repo janitor (T6b) runs before a destructive pack that needs `test-repo`; a pack that waits on a need `plan` cannot check offline is `pending`. */
+function repoJanitorForPlan(outcomes: PackOutcome[], byId: Map<string, Pack>): Plan["janitors"]["repo"] {
+  const wanted = (o: PackOutcome): boolean => byId.get(o.id)?.destructive === true && byId.get(o.id)?.needs.includes("test-repo") === true;
+  const packs = outcomes.filter((o) => o.outcome === "RUN" && wanted(o)).map((o) => o.id);
+  const pending = outcomes.filter((o) => o.outcome === "SKIPPED-NEED" && wanted(o)).map((o) => o.id);
+  return { needed: packs.length > 0, packs, pending };
+}
+
 /** The line(s) `plan` prints for the janitors. */
 export function describeJanitors(plan: Plan): string[] {
+  const r = plan.janitors.repo;
+  const repoLine = r.needed ? `janitor repo: runs before ${r.packs.join(", ")}` : r.pending.length > 0 ? `janitor repo: runs before ${r.pending.join(", ")} once their needs are met` : "janitor repo: not needed";
+  return [...describeAccountJanitor(plan), repoLine];
+}
+
+function describeAccountJanitor(plan: Plan): string[] {
   const a = plan.janitors.account;
   const b = a.baseline;
   const baseline = `janitor account: baseline ${Object.entries(b.limits).map(([k, v]) => `${k} ${v}`).join(", ")}; model_usd_month ${b.model_usd_month}; role model ${b.role_model} (${b.floored_roles.join(", ")} ${b.floor_model}); lowers only`;
