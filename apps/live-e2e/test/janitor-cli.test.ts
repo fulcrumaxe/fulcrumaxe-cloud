@@ -93,7 +93,7 @@ describe("janitor account", () => {
   });
 
   it("usage errors are exit 2 and send nothing", async () => {
-    for (const argv of [["janitor"], ["janitor", "account"], ["janitor", "repo", "--target", "staging"], ["janitor", "account", "--target"], ["janitor", "account", "--target", "staging", "--apply", "--apply"], ["janitor", "account", "--target", "staging", "--force"], ["janitor", "account", "--target", "nowhere"]]) {
+    for (const argv of [["janitor"], ["janitor", "account"], ["janitor", "account", "--target"], ["janitor", "account", "--target", "staging", "--apply", "--apply"], ["janitor", "account", "--target", "staging", "--force"], ["janitor", "account", "--target", "nowhere"]]) {
       const r = await rig();
       expect(await main(argv, r.io), argv.join(" ")).toBe(2);
       expect(r.app.seen).toEqual([]);

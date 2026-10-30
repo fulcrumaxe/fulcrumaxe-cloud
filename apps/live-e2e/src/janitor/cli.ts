@@ -1,5 +1,5 @@
 /**
- * `live-e2e janitor account --target staging [--apply]` (T6a), and the same janitor as `run` calls it.
+ * `live-e2e janitor account|repo --target staging [--apply]` (T6a, T6b), and the same janitors as `run` calls them.
  *
  * Dry-run is the default: without `--apply` the command only reads the account and prints what it would set. With
  * `--apply` it writes the spend baseline (account.ts). Either way it first asks the origin who it is (layer 2) and
@@ -13,8 +13,21 @@ import { BYPASS_ENV } from "../needs.js";
 import { FIXTURE_REPO_ENV } from "../needs-network.js";
 import { identityGuard, loadTarget, readDeploymentIdentity, TargetError, type Target } from "../targets.js";
 import { openOwnerSession, runAccountJanitor, type JanitorResult } from "./account.js";
+import { runRepoJanitor } from "./repo.js";
 
-const USAGE = "usage: live-e2e janitor account --target <name> [--apply]";
+const USAGE = "usage: live-e2e janitor <account|repo> --target <name> [--apply]";
+
+/**
+ * The fixture-repo janitor (T6b) once, for `janitor repo` and for `run`. It talks to GitHub only (never the app), so
+ * there is no layer 2 or session here. Exit code: 0 done or `SKIPPED-NEED test-repo`, 1 refused, 2 usage.
+ */
+export async function repoJanitorOnce(io: Io, target: string, apply: boolean): Promise<number> {
+  const result = await runRepoJanitor({ target, env: io.env, apply, say: io.stdout, ...(io.githubCa !== undefined ? { ca: io.githubCa } : {}) });
+  if (result.status === "skipped") io.stdout(result.need);
+  if (result.status === "usage") io.stderr(result.message);
+  if (result.status === "refused") io.stderr(describeRefusal(result));
+  return result.status === "usage" ? 2 : result.status === "refused" ? 1 : 0;
+}
 
 /** One janitor run for `target`: layer 2, the owner session, the janitor, then the cookie write-back. */
 export async function janitorOnce(io: Io, target: Target, apply: boolean): Promise<JanitorResult | { ok: false; reason: string; detail?: string; written: number }> {
@@ -58,12 +71,14 @@ export async function janitorCommand(argv: string[], io: Io): Promise<number> {
       return 2;
     }
   }
-  if (which !== "account" || target === undefined) {
+  if ((which !== "account" && which !== "repo") || target === undefined) {
     io.stderr(USAGE);
     return 2;
   }
   try {
-    const result = await janitorOnce(io, loadTarget(join(io.root, "targets"), target, io.env), apply);
+    const loaded = loadTarget(join(io.root, "targets"), target, io.env);
+    if (which === "repo") return await repoJanitorOnce(io, loaded.name, apply);
+    const result = await janitorOnce(io, loaded, apply);
     if (!result.ok) {
       io.stderr(describeRefusal(result));
       return 1;
