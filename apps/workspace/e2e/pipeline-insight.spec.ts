@@ -544,6 +544,35 @@ test.describe("D#483 live parity: the notice, Check the build, the board's polli
     expect(errors).toEqual([]);
   });
 
+  test("D#7 DW-R5: the card lists the decisions recorded for the item, follows the server on refresh, draws nothing without any, and fits at 375px", async ({ page }) => {
+    const R = fx("getWorkItemActivity", "200-receipts.json");
+    const { mock, errors } = await setup(page, { status: 200, json: R }, "in_progress");
+    await page.setViewportSize({ width: 375, height: 800 });
+    await openDetail(page);
+    await expect(tid(page, "pl-receipts-heading")).toHaveText("Decisions recorded for this item");
+    const rows = tid(page, "pl-receipt");
+    await expect(rows).toHaveCount(3);
+    await expect(rows.nth(0)).toContainText("Undoing an earlier decision. Chosen: undo. Not chosen: keep. Decided by a person");
+    await expect(rows.nth(1)).toContainText("Decided by your setting");
+    await expect(tid(page, "pl-receipts-more")).toHaveText("Showing the newest 3 of 52.");
+    await expect(tid(page, "pl-receipts")).not.toContainText(/null|undefined|_|[0-9a-f]{8}-[0-9a-f]{4}/);
+    await expectNoOverflow(page);
+    const w = await tid(page, "pl-detail").evaluate((el) => ({ s: el.scrollWidth, c: el.clientWidth, d: document.documentElement.scrollWidth - document.documentElement.clientWidth }));
+    expect(w.s).toBeLessThanOrEqual(w.c);
+    expect(w.d).toBeLessThanOrEqual(0);
+    // A new decision on the server shows on the next refresh; an item with none draws no section at all.
+    mock.activity = { status: 200, json: { ...R, receipts: [{ ...R.receipts[0], id: "6b1f6c1e-3f5a-4e0e-9a55-0a7b1c2d3e09", label: "Undoing a decision again after two undos" }, ...R.receipts], receipts_total: undefined } };
+    await page.clock.runFor(10_000);
+    await expect(rows).toHaveCount(4);
+    await expect(rows.first()).toContainText("Undoing a decision again after two undos.");
+    await expect(tid(page, "pl-receipts-more")).toHaveCount(0);
+    mock.activity = { status: 200, json: OK };
+    await page.clock.runFor(10_000);
+    await expect(tid(page, "pl-receipts-heading")).toHaveCount(0);
+    await expect(tid(page, "pl-receipts")).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+
   // D#483 S5-b2c-2: the planned PR child's card shows the reason it does not launch yet, in the server's fixed sentence, and the sibling warning; neither shows a code.
   test("a planned PR child shows why it does not launch, and clears when the reason does", async ({ page }) => {
     const held = { ...OK, child_launch: { code: "key_not_in_approved_spec", sentence: "This planned PR is no longer in the approved Spec.", offers: "close", warning: null } };

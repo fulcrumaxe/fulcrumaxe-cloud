@@ -528,6 +528,16 @@ export interface Operations {
         at: string | null;
         sentence: string;
       };
+      receipts?: Array<{
+        id: string;
+        label: string;
+        class: (2) | (3);
+        at: string;
+        by: "policy" | "person";
+        chosen: string;
+        rejected: string;
+      }>;
+      receipts_total?: number;
       actions: Array<"request_changes" | "build_again" | "respec" | "back_to_discussion" | "treat_as_feature" | "close" | "reopen" | "retry_push" | "open_pr">;
       close_on_github: boolean;
       request_changes_blocked: ("live" | "rounds") | (null);

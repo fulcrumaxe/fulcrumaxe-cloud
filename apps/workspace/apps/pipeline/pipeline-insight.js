@@ -367,6 +367,37 @@ export function startDecisionLine(data) {
 }
 
 /**
+ * D#7 DW-R5: the decisions recorded for the item (class 2 and 3 receipts), for the card. The server sends `receipts` only when the item has some: each entry has a
+ * fixed `label`, `at`, `by` (`policy` or `person`) and two option ids. A line is always words: a missing label reads "A decision", a missing or bad time and a `by` this
+ * build does not know are left out, an option id that is missing or not shown is left out, and anything that is not an object is skipped. Two receipts of the same
+ * type are told apart by their times. No code, id or database value is added to what the server sent.
+ */
+export const RECEIPTS_HEADING = "Decisions recorded for this item";
+export function receiptsSection(data) {
+  const list = data && data.receipts;
+  if (!Array.isArray(list)) return null;
+  const items = [];
+  for (const r of list) {
+    if (!isObj(r)) continue;
+    const plain = (v) => (typeof v === "string" && v.trim() !== "" && v.trim() !== "(not shown)" ? v.trim() : "");
+    const label = plain(r.label) || "A decision";
+    const by = r.by === "policy" ? "your setting" : r.by === "person" ? "a person" : "";
+    const when = typeof r.at === "string" ? formatWhen(r.at) : "";
+    const chosen = plain(r.chosen);
+    const rejected = plain(r.rejected);
+    const text =
+      label + "." +
+      (chosen ? " Chosen: " + chosen + "." : "") +
+      (rejected ? " Not chosen: " + rejected + "." : "") +
+      (by ? " Decided by " + by + (when ? ", " + when : "") + "." : when ? " " + when + "." : "");
+    items.push({ text, class: r.class === 3 ? 3 : r.class === 2 ? 2 : 0 });
+  }
+  if (items.length === 0) return null;
+  const total = Number.isInteger(data.receipts_total) ? data.receipts_total : 0;
+  return { heading: RECEIPTS_HEADING, items, more: total > items.length ? "Showing the newest " + items.length + " of " + total + "." : null };
+}
+
+/**
  * D#483 S5-b2c-2: why a planned PR child does not start yet, for its card. The server derives `child_launch` on each read (nothing is stored on it, so it clears when
  * the thing it names clears) and sends it only for a child that has not started, with a fixed sentence. `code` and `sentence` are null when the child may start and only
  * the `warning` (it waits on a sibling; a person may still start it) is left. The line shows the sentence as sent; a missing or blank sentence shows nothing, and a code
@@ -529,6 +560,7 @@ export function buildInsight(data) {
     notice: noticeBanner(data),
     setupPause: setupPauseLine(data),
     startDecision: startDecisionLine(data),
+    receipts: receiptsSection(data),
     childLaunch: childLaunchLine(data),
     banner: readyBanner(data),
     runningText: running.length ? "Running now: " + running.map((r) => r.role).join(", ") : "Nothing is running right now.",
@@ -757,6 +789,13 @@ export function createInsightPanel(deps) {
       m.runsTruncated ? h("p", { class: "pl-muted" }, SENTENCES.olderRuns) : [],
       m.recheck ? h("p", { class: "pl-muted", role: "status", "data-testid": "pl-review-recheck" }, m.recheck) : [],
       m.publicChange ? publicChangeBlock(m.publicChange) : [],
+      m.receipts
+        ? [
+            h("h3", { class: "pl-detail-sub", "data-testid": "pl-receipts-heading" }, m.receipts.heading),
+            h("ul", { class: "pl-ins-feed", "data-testid": "pl-receipts" }, m.receipts.items.map((i) => h("li", { "data-testid": "pl-receipt", "data-class": String(i.class) }, i.text))),
+            m.receipts.more ? h("p", { class: "pl-muted", "data-testid": "pl-receipts-more" }, m.receipts.more) : [],
+          ]
+        : [],
       m.steps.length
         ? [
             h("h3", { class: "pl-detail-sub" }, "Pipeline steps"),

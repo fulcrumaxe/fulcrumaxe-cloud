@@ -1,0 +1,55 @@
+{
+  "stage": "in_progress",
+  "halted": false,
+  "waiting_on_answer": false,
+  "repo": {
+    "owner": "acme",
+    "name": "docs"
+  },
+  "issue_number": 42,
+  "pr_number": null,
+  "auto_merge": false,
+  "comments": [],
+  "comments_truncated": false,
+  "spec": null,
+  "runs": [],
+  "runs_truncated": false,
+  "steps": [],
+  "notice": null,
+  "actions": [
+    "close"
+  ],
+  "close_on_github": false,
+  "request_changes_blocked": null,
+  "change_requests": [],
+  "receipts": [
+    {
+      "id": "6b1f6c1e-3f5a-4e0e-9a55-0a7b1c2d3e01",
+      "label": "Undoing an earlier decision",
+      "class": 3,
+      "at": "2026-10-23T10:00:00.000Z",
+      "by": "person",
+      "chosen": "undo",
+      "rejected": "keep"
+    },
+    {
+      "id": "6b1f6c1e-3f5a-4e0e-9a55-0a7b1c2d3e02",
+      "label": "Starting a small piece of work",
+      "class": 2,
+      "at": "2026-10-22T10:00:00.000Z",
+      "by": "policy",
+      "chosen": "start",
+      "rejected": "hold"
+    },
+    {
+      "id": "6b1f6c1e-3f5a-4e0e-9a55-0a7b1c2d3e03",
+      "label": "Starting a small piece of work",
+      "class": 2,
+      "at": "2026-10-20T09:30:00.000Z",
+      "by": "policy",
+      "chosen": "start",
+      "rejected": "hold"
+    }
+  ],
+  "receipts_total": 52
+}
