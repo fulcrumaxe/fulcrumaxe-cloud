@@ -55,11 +55,13 @@ export async function stageApprovalGate<H extends { sha: string }>(
   head?: () => Promise<{ skip: string } | { head: H }>,
 ): Promise<StageGateResult<H>> {
   const item = (
-    await client.query<{ stage: string; provenance: string; halted: boolean; halt_epoch: number; version: number | null; spec_at: Date | null; is_child: boolean }>(
+    await client.query<{ stage: string; provenance: string; halted: boolean; halt_epoch: number; version: number | null; spec_at: Date | null; is_child: boolean; planned_count: number | null }>(
       // A planned PR child's Spec is the version its parent planned for it (the worker's SPEC_OF_ITEM_SQL); any other item's is its own.
       `SELECT w.stage, w.provenance, w.halted_at IS NOT NULL AS halted, w.halt_epoch, (w.planned_pr_key IS NOT NULL AND w.parent_id IS NOT NULL) AS is_child,
               (SELECT max(s.version) FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM}) AS version,
-              (SELECT max(s.created_at) FROM spec_versions s WHERE s.account_id = w.account_id AND ${SPEC_OF_ITEM}) AS spec_at
+              (SELECT max(s.created_at) FROM spec_versions s WHERE s.account_id = w.account_id AND ${SPEC_OF_ITEM}) AS spec_at,
+              (SELECT CASE WHEN jsonb_typeof(s.frontmatter -> 'planned_prs') = 'array' THEN jsonb_array_length(s.frontmatter -> 'planned_prs') ELSE 0 END FROM spec_versions s
+                WHERE w.planned_pr_key IS NULL AND s.account_id = w.account_id AND s.work_item_id = w.id AND s.erased_at IS NULL ORDER BY s.version DESC LIMIT 1) AS planned_count
          FROM work_items w WHERE w.id = $1 AND w.account_id = $2`,
       [workItemId, accountId],
     )
@@ -68,6 +70,10 @@ export async function stageApprovalGate<H extends { sha: string }>(
   if (item.halted) return { skip: 'halted' };
   const childHere = item.is_child && (entry.childItemStages ?? []).includes(item.stage);
   if (item.provenance !== 'internal' || !(entry.itemStages.includes(item.stage) || childHere)) return { skip: 'not_parked_here' };
+  // A parent whose newest Spec plans two or more pull requests never builds (its workflow answers `children_launched`), so it has no build to restart. A waiting
+  // fact it left before it stopped waiting would otherwise wake it every pass, and as the older item in the queue it would take the repository's one start each
+  // time, ahead of the children that do wait for the slot.
+  if (entry.stage === 'build' && !item.is_child && Number(item.planned_count ?? 0) >= 2) return { skip: 'parent_splits' };
   // A review re-entered from Needs a person parks there. Only an item still held for a missing verdict is that review: any other cause of Needs a person is a build to
   // run again, and the workflow would start that instead of the review the old waiting fact was for.
   if (entry.stage === 'review' && item.stage === 'needs_human' && !(await readReviewHold(client, workItemId))) return { skip: 'not_parked_here' };

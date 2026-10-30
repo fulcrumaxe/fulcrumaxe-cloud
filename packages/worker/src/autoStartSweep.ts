@@ -10,6 +10,7 @@ import { cleanWorkItemTitle } from "@fx/core/src/work-items/title.js";
 import { childGateOutcomeOfError, gateChildLaunch, type ChildGateOutcome, type ChildLaunchCode, type ChildLaunchDeps } from "@fx/core/src/decisions/childLaunch.js";
 import { autostartRoom, weekStartUtc } from "@fx/spend";
 import { reportError } from "@fx/telemetry";
+import { markWorkPending } from "@fx/core/src/pendingWork.js";
 
 /**
  * D#483 S5-b1a-2 (also D#7 R1b): the auto-start sweep. A verified proposal of a small, bug or doc item starts with no click, only while ALL of these hold:
@@ -294,6 +295,9 @@ export function createAutoStartSweep(deps: AutoStartDeps) {
   }
 
   function finish(counts: AutoStartCounts): AutoStartCounts {
+    // A start the dial filed is an advance request row written by a definer, which sends no kick: without the marker the gated run-action cron would leave it
+    // for its half-hour backstop.
+    if (counts.started > 0 || (counts.children?.started ?? 0) > 0) void markWorkPending("run-action-sweep");
     if (counts.no_room > 0) counts.renews_at = new Date(weekStartUtc(now()).getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
     return counts;
   }

@@ -593,6 +593,8 @@ check_receipt_writer_role_shape() {
               AND p.proargtypes = array_to_string('{uuid,timestamptz,text,uuid}'::regtype[]::oid[], ' ')::oidvector)
             OR (p.proname = 'sub_item_approval_receipt_write'
               AND p.proargtypes = array_to_string('{uuid,text,uuid,uuid,integer,integer}'::regtype[]::oid[], ' ')::oidvector)
+            OR (p.proname = 'sub_item_approval_receipt_write'
+              AND p.proargtypes = array_to_string('{uuid,text,uuid,uuid,integer,integer,uuid}'::regtype[]::oid[], ' ')::oidvector)
             OR (p.proname = 'decision_ask_withdraw_by_id'
               AND p.proargtypes = array_to_string('{uuid,text}'::regtype[]::oid[], ' ')::oidvector)
             OR (p.proname = 'sub_item_ask_key'

@@ -26,6 +26,9 @@ import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
 import { buildWaitSentence } from "@fx/api/src/routes/work-item-activity.js";
 import { PARKED_STAGE_REGISTRY } from "@fx/pipeline";
 import { createAutoStartSweep } from "../src/autoStartSweep.js";
+import { approveSubItem } from "@fx/core/src/decisions/approveSubItem.js";
+import { subItemApprovalDeps } from "../../api/src/routes/subItemApprovals.js";
+import { setPendingHooks } from "@fx/core/src/pendingWork.js";
 
 /**
  * D#483 S5-b2b/S5-b2c [pg]: the whole path of a short Spec that plans two pull requests. The Spec is published by the real `publishLightSpec` through the worker's real
@@ -515,5 +518,333 @@ describe("a short Spec that plans two pull requests launches both children after
     const started: AdvanceStartArgs[] = [];
     await wake(started, true).sweepParkedStages([wakeEntry]);
     expect(mineOf(started, a)).toEqual([]);
+  });
+
+  // ---- the person's approval of a split parent starts its children (the live switchover blocker) ---------------------------------------------------
+  /**
+   * The live order on staging: automatic starts are off (no weekly auto-start limit) and the repo has no `launch_sub_item` dial row. The person clicks
+   * "Approve the Spec and build"; the parent's request is performed (its workflow answers `children_launched`); the cron's auto-start pass runs; then every
+   * advance request a child has is performed. Each child must reach the build's start (`advance: started`, the workflow started for the child).
+   * The approval route runs with the real sub-item approver on the receipt login, the way apps/web installs it.
+   */
+  async function liveAccount(): Promise<SeedRefs> {
+    const a = await seedAccount(admin, randomUUID());
+    await admin.query("UPDATE repos SET gh_owner = 'acme', gh_name = 'widgets' WHERE id = $1", [a.repoId]);
+    await admin.query("UPDATE accounts SET model_budget_usd_month = 600 WHERE id = $1", [a.accountId]);
+    return a;
+  }
+  async function liveSpecReady(output: unknown): Promise<{ a: SeedRefs; workItemId: string }> {
+    const a = await liveAccount();
+    const t = await runTriageStep(
+      { pool: writerPool, accountId: a.accountId, classifier: fixtureClassifier("doc") },
+      { mode: "new", event: { ...OWNER, body: "Document both pages." }, title: "Docs pages", sourceEventId: randomUUID(), repoId: a.repoId },
+    );
+    if (t.status !== "triaged") throw new Error(`fixture: ${JSON.stringify(t)}`);
+    await admin.query("UPDATE work_items SET gh_number = $2, repo_id = $3 WHERE id = $1", [t.workItemId, nextNumber++, a.repoId]);
+    const pmRun = randomUUID();
+    await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, envelope) VALUES ($1, $2, $3, 'project-manager', 'production', 'succeeded', $4::jsonb)", [pmRun, a.accountId, t.workItemId, JSON.stringify(output)]);
+    expect(await moduleOf().advanceLightSpec({ accountId: a.accountId, userId: a.userId, workItemId: t.workItemId, haltEpoch: 0 }, pmRun, randomUUID())).toMatchObject({ status: "published", version: 1 });
+    return { a, workItemId: t.workItemId };
+  }
+  const withApprover = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const prev = subItemApprovalDeps.getApprover;
+    subItemApprovalDeps.getApprover = async () => (input) => approveSubItem({ pool: receiptPool, principal: input.principal, child }, { workItemId: input.workItemId, key: input.key, ...(input.viaParentApproval === true ? { viaParentApproval: true } : {}) });
+    try {
+      return await fn();
+    } finally {
+      subItemApprovalDeps.getApprover = prev;
+    }
+  };
+  const acceptedFor = async (id: string) => (await admin.query("SELECT id FROM run_action_requests WHERE target_id = $1 AND kind = 'advance_work_item' AND state = 'accepted'", [id])).rows;
+
+  it("automatic starts off: approve the split parent, its workflow answers children_launched, the cron's pass runs, and each child's build starts, with a person's receipt naming the parent's approval", async () => {
+    const { a, workItemId } = await liveSpecReady(SPLIT);
+    signal.sent.length = 0;
+    expect((await withApprover(() => approveByRoute(a, workItemId))).status).toBe(202);
+    const parent = await performFiled(a, workItemId);
+    expect(parent.outcome).toEqual({ work_item_id: workItemId, advance: "started" });
+    expect(await moduleOf().advanceLoadItem(a.accountId, workItemId)).toMatchObject({ splits: true });
+    await sweepOf().sweepAutoStart();
+
+    const kids = await kidsOf(workItemId);
+    expect(kids.map((k) => k.planned_pr_key)).toEqual(["page-a", "page-b"]);
+    for (const k of kids) {
+      expect(await acceptedFor(k.id)).toHaveLength(1);
+      const r = await performFiled(a, k.id);
+      expect(r.outcome).toEqual({ work_item_id: k.id, advance: "started" });
+      expect(r.started.map((s) => s.workItemId)).toEqual([k.id]);
+      expect(r.started[0]).toMatchObject({ userId: a.userId, personFiled: true });
+    }
+    // Each launch is the person's own (a receipt each, in their name, naming the parent's approval), and the worker was told at once.
+    const receipts = (await admin.query("SELECT sub_item_key, actor, approval_id FROM decision_receipts WHERE work_item_id = $1 AND decision_type = 'launch_sub_item' ORDER BY sub_item_key", [workItemId])).rows;
+    expect(receipts.map((r) => r.sub_item_key)).toEqual(["page-a", "page-b"]);
+    // The receipt names the parent's approval it came from (the approval row names the parent and who approved it), so it is told apart from a card click.
+    const parentApproval = (await admin.query<{ id: string; work_item_id: string; approved_by: string }>("SELECT id, work_item_id, approved_by FROM work_item_approvals WHERE work_item_id = $1", [workItemId])).rows;
+    expect(parentApproval).toHaveLength(1);
+    expect(parentApproval[0]).toMatchObject({ work_item_id: workItemId, approved_by: a.userId });
+    for (const r of receipts) expect(r).toMatchObject({ actor: a.userId, approval_id: parentApproval[0]!.id });
+    const kicked = signal.sent.filter((m) => m.kind === "advance_work_item").map((m) => m.accountId);
+    expect(kicked.filter((x) => x === a.accountId).length).toBeGreaterThanOrEqual(3);
+    expect(await executorRuns(workItemId)).toBe(0);
+  });
+
+  it("automatic starts off: a repeat click starts nothing twice", async () => {
+    const { a, workItemId } = await liveSpecReady(SPLIT);
+    expect((await withApprover(() => approveByRoute(a, workItemId))).status).toBe(202);
+    const kids = await kidsOf(workItemId);
+    for (const k of kids) expect(await acceptedFor(k.id)).toHaveLength(1);
+    expect((await withApprover(() => approveByRoute(a, workItemId))).status).toBe(202);
+    for (const k of kids) expect((await admin.query("SELECT 1 FROM run_action_requests WHERE target_id = $1 AND kind = 'advance_work_item'", [k.id])).rows).toHaveLength(1);
+  });
+
+  it("the parent's approval keeps the planned order: a child that waits on a sibling is not started by it", async () => {
+    const ORDERED = { ...SPLIT, planned_prs: [{ key: "page-a", title: "Docs page A", depends_on: [] }, { key: "page-b", title: "Docs page B", depends_on: ["page-a"] }] };
+    const { a, workItemId } = await liveSpecReady(ORDERED);
+    expect((await withApprover(() => approveByRoute(a, workItemId))).status).toBe(202);
+    const kids = await kidsOf(workItemId);
+    expect(await acceptedFor(kids[0]!.id)).toHaveLength(1);
+    expect(await acceptedFor(kids[1]!.id)).toHaveLength(0);
+  });
+
+  it("a launch that is refused (no room under the parent's envelope) does not fail the approval, and nothing is started", async () => {
+    const { a, workItemId } = await liveSpecReady(SPLIT);
+    const prev = subItemApprovalDeps.getApprover;
+    const tight: ChildLaunchDeps = { buildSupported: true, room: async () => ({ fits: false, remainingUsd: 0, priceUsd: PRICE }) };
+    subItemApprovalDeps.getApprover = async () => (input) => approveSubItem({ pool: receiptPool, principal: input.principal, child: tight }, { workItemId: input.workItemId, key: input.key, ...(input.viaParentApproval === true ? { viaParentApproval: true } : {}) });
+    try {
+      expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    } finally {
+      subItemApprovalDeps.getApprover = prev;
+    }
+    for (const k of await kidsOf(workItemId)) expect(await acceptedFor(k.id)).toHaveLength(0);
+    expect(await acceptedFor(workItemId)).toHaveLength(1);
+  });
+
+  it("one child's refused launch does not stop the next child from starting", async () => {
+    const { a, workItemId } = await liveSpecReady(SPLIT);
+    const prev = subItemApprovalDeps.getApprover;
+    // The room refuses the first child offered, whichever it is, and has room for the next.
+    let refusedChild: string | null = null;
+    const firstFull: ChildLaunchDeps = {
+      buildSupported: true,
+      room: async (c, input) => {
+        if (refusedChild === null || refusedChild === input.childId) {
+          refusedChild = input.childId;
+          return { fits: false, remainingUsd: 0, priceUsd: PRICE };
+        }
+        return room(c, input);
+      },
+    };
+    subItemApprovalDeps.getApprover = async () => (input) => approveSubItem({ pool: receiptPool, principal: input.principal, child: firstFull }, { workItemId: input.workItemId, key: input.key, ...(input.viaParentApproval === true ? { viaParentApproval: true } : {}) });
+    try {
+      expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    } finally {
+      subItemApprovalDeps.getApprover = prev;
+    }
+    const kids = await kidsOf(workItemId);
+    expect(refusedChild).not.toBeNull();
+    for (const k of kids) expect(await acceptedFor(k.id)).toHaveLength(k.id === refusedChild ? 0 : 1);
+  });
+
+  it("the slot wake never restarts a split parent: its old waiting fact is skipped, and the waiting child takes the freed slot", async () => {
+    const { a, workItemId, holder, kids } = await waitingChildren();
+    // The parent's own old waiting fact, from before a split parent stopped waiting for the slot.
+    await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, stage, code, attempt, dedupe_key) VALUES ($1, $2, 'stage_waiting', 'build', 'one_build_per_repo_until_d598', 0, $3)", [a.accountId, workItemId, randomUUID()]);
+    await orphan([workItemId, ...kids.map((k) => k.id)]);
+    await freeSlot(a, holder);
+    const started: AdvanceStartArgs[] = [];
+    await wake(started, true).sweepParkedStages([wakeEntry]);
+    const mine = mineOf(started, a).map((s) => s.workItemId);
+    expect(mine).not.toContain(workItemId);
+    expect(mine).toHaveLength(1);
+    expect(kids.map((k) => k.id)).toContain(mine[0]);
+  });
+
+  it("the dial's launch marks the run-action sweep, so the child's request is performed on the next tick and not at the half-hour backstop", async () => {
+    const { a, workItemId } = await specReady(SPLIT);
+    expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    const marks = new Map<string, number>();
+    setPendingHooks({ store: { get: async (k) => marks.get(k) ?? null, set: async (k, v) => void marks.set(k, v), delete: async (k) => void marks.delete(k) } });
+    try {
+      const counts = await sweepOf().sweepAutoStart();
+      expect(counts.children?.started ?? 0).toBeGreaterThanOrEqual(2);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(marks.has("pending:run-action-sweep")).toBe(true);
+    } finally {
+      setPendingHooks(null);
+    }
+    for (const k of await kidsOf(workItemId)) expect(await acceptedFor(k.id)).toHaveLength(1);
+  });
+
+  // ---- the parent approval's own guards ----------------------------------------------------------------------------------------------------------------
+  it("a card click on a planned PR leaves no approval on its receipt: only the parent's approval writes one", async () => {
+    const { a, workItemId } = await liveSpecReady(SPLIT);
+    expect((await approveByRoute(a, workItemId)).status).toBe(202); // no approver installed: the parent's click starts nothing here
+    const done = await approveSubItem({ pool: receiptPool, principal: { accountId: a.accountId, userId: a.userId }, child }, { workItemId, key: "page-a" });
+    expect(done.childLaunchedId).not.toBeNull();
+    const r = (await admin.query("SELECT actor, approval_id FROM decision_receipts WHERE work_item_id = $1 AND decision_type = 'launch_sub_item' AND sub_item_key = 'page-a'", [workItemId])).rows;
+    expect(r).toEqual([{ actor: a.userId, approval_id: null }]);
+  });
+
+  it("the receipt writer refuses a parent approval that is not this person's newest one", async () => {
+    const { a, workItemId } = await liveSpecReady(SPLIT);
+    expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    const spec = (await admin.query<{ id: string }>("SELECT id FROM spec_versions WHERE work_item_id = $1", [workItemId])).rows[0]!.id;
+    const anchor = (await admin.query<{ id: string }>("SELECT id FROM agent_runs WHERE work_item_id = $1 AND spec_version_id = $2", [workItemId, spec])).rows[0]!.id;
+    const { writeSubItemApprovalReceipt } = await import("@fx/db/src/receiptWriter.js");
+    await expect(withTenant(receiptPool, a.accountId, a.userId, (c) => writeSubItemApprovalReceipt(c, { runId: anchor, workItemId, key: "page-a", specVersionId: spec, dialVersion: 0, viaApprovalId: randomUUID() }))).rejects.toMatchObject({ code: "22023", message: expect.stringContaining("not this person's newest") });
+    const approvalId = (await admin.query<{ id: string }>("SELECT id FROM work_item_approvals WHERE work_item_id = $1", [workItemId])).rows[0]!.id;
+    // Another admin of the account cannot claim the first person's approval as theirs.
+    const second = randomUUID();
+    await admin.query("INSERT INTO users (id, email) VALUES ($1, $2)", [second, `second-${second}@example.test`]);
+    await admin.query("INSERT INTO account_members (account_id, user_id, role) VALUES ($1, $2, 'admin')", [a.accountId, second]);
+    await expect(withTenant(receiptPool, a.accountId, second, (c) => writeSubItemApprovalReceipt(c, { runId: anchor, workItemId, key: "page-a", specVersionId: spec, dialVersion: 0, viaApprovalId: approvalId }))).rejects.toMatchObject({ code: "22023", message: expect.stringContaining("not this person's newest") });
+    // The same call by the person who approved, naming the real approval, is written with the approval on it.
+    const ok = await withTenant(receiptPool, a.accountId, a.userId, (c) => writeSubItemApprovalReceipt(c, { runId: anchor, workItemId, key: "page-a", specVersionId: spec, dialVersion: 0, viaApprovalId: approvalId }));
+    expect((await admin.query("SELECT approval_id FROM decision_receipts WHERE id = $1", [ok.id])).rows[0]).toEqual({ approval_id: approvalId });
+  });
+
+  /** The parent's Spec version, the run pinned to it, and the receipt writer as the approving person. */
+  async function receiptFixture(): Promise<{ a: SeedRefs; workItemId: string; spec: string; anchor: string; approvalId: string; write: (input: { specVersionId: string; runId: string; viaApprovalId: string; workItemId?: string }) => Promise<{ id: string }> }> {
+    const { a, workItemId } = await liveSpecReady(SPLIT);
+    expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    const spec = (await admin.query<{ id: string }>("SELECT id FROM spec_versions WHERE work_item_id = $1", [workItemId])).rows[0]!.id;
+    const anchor = (await admin.query<{ id: string }>("SELECT id FROM agent_runs WHERE work_item_id = $1 AND spec_version_id = $2", [workItemId, spec])).rows[0]!.id;
+    const approvalId = (await admin.query<{ id: string }>("SELECT id FROM work_item_approvals WHERE work_item_id = $1", [workItemId])).rows[0]!.id;
+    const { writeSubItemApprovalReceipt } = await import("@fx/db/src/receiptWriter.js");
+    const write = (input: { specVersionId: string; runId: string; viaApprovalId: string; workItemId?: string }) =>
+      withTenant(receiptPool, a.accountId, a.userId, (c) => writeSubItemApprovalReceipt(c, { runId: input.runId, workItemId: input.workItemId ?? workItemId, key: "page-a", specVersionId: input.specVersionId, dialVersion: 0, viaApprovalId: input.viaApprovalId }));
+    return { a, workItemId, spec, anchor, approvalId, write };
+  }
+  const refusedAsNotNewest = { code: "22023", message: expect.stringContaining("not this person's newest") };
+
+  it("the receipt writer refuses an approval made for an older Spec version once the item was re-specced", async () => {
+    const { a, workItemId, approvalId, write } = await receiptFixture();
+    // Version 2 is published and a run is pinned to it; the newest approval still names version 1.
+    const v2 = (await admin.query<{ id: string }>(
+      `INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind, frontmatter) VALUES ($1, $2, 2, 'v2', encode(sha256(convert_to('v2', 'UTF8')), 'hex'), 'agent', $3::jsonb) RETURNING id`,
+      [a.accountId, workItemId, JSON.stringify({ planned_prs: SPLIT.planned_prs })],
+    )).rows[0]!.id;
+    const run2 = randomUUID();
+    await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, spec_version_id) VALUES ($1, $2, $3, 'project-manager', 'production', 'succeeded', $4)", [run2, a.accountId, workItemId, v2]);
+    await expect(write({ specVersionId: v2, runId: run2, viaApprovalId: approvalId })).rejects.toMatchObject(refusedAsNotNewest);
+    expect((await admin.query("SELECT 1 FROM decision_receipts WHERE work_item_id = $1 AND spec_version_id = $2", [workItemId, v2])).rows).toEqual([]);
+  });
+
+  it("the receipt writer refuses an older approval of the same item, and takes the newest", async () => {
+    const { a, workItemId, spec, anchor, approvalId: older, write } = await receiptFixture();
+    // A later approval of the same Spec version by the same person (the row the definer would write on a new click).
+    const newer = (await admin.query<{ id: string }>(
+      "INSERT INTO work_item_approvals (account_id, work_item_id, approved_by, spec_version_id, source, created_at) VALUES ($1, $2, $3, $4, 'work_item_approve', now() + interval '1 second') RETURNING id",
+      [a.accountId, workItemId, a.userId, spec],
+    )).rows[0]!.id;
+    await expect(write({ specVersionId: spec, runId: anchor, viaApprovalId: older })).rejects.toMatchObject(refusedAsNotNewest);
+    const ok = await write({ specVersionId: spec, runId: anchor, viaApprovalId: newer });
+    expect((await admin.query("SELECT approval_id FROM decision_receipts WHERE id = $1", [ok.id])).rows[0]).toEqual({ approval_id: newer });
+  });
+
+  it("the receipt writer refuses an approval of another work item, in this account or another one", async () => {
+    const { spec, anchor, write } = await receiptFixture();
+    // Another approved split parent of another account, and another approved split parent of the same account.
+    const elsewhere = await receiptFixture();
+    await expect(write({ specVersionId: spec, runId: anchor, viaApprovalId: elsewhere.approvalId })).rejects.toMatchObject(refusedAsNotNewest);
+    const { a } = elsewhere;
+    const sibling = await (async () => {
+      const t = await runTriageStep(
+        { pool: writerPool, accountId: a.accountId, classifier: fixtureClassifier("doc") },
+        { mode: "new", event: { ...OWNER, body: "Document more pages." }, title: "More pages", sourceEventId: randomUUID(), repoId: a.repoId },
+      );
+      if (t.status !== "triaged") throw new Error("fixture");
+      await admin.query("UPDATE work_items SET gh_number = $2, repo_id = $3 WHERE id = $1", [t.workItemId, nextNumber++, a.repoId]);
+      const pmRun = randomUUID();
+      await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, envelope) VALUES ($1, $2, $3, 'project-manager', 'production', 'succeeded', $4::jsonb)", [pmRun, a.accountId, t.workItemId, JSON.stringify(SPLIT)]);
+      await moduleOf().advanceLightSpec({ accountId: a.accountId, userId: a.userId, workItemId: t.workItemId, haltEpoch: 0 }, pmRun, randomUUID());
+      expect((await approveByRoute(a, t.workItemId)).status).toBe(202);
+      return (await admin.query<{ id: string }>("SELECT id FROM work_item_approvals WHERE work_item_id = $1", [t.workItemId])).rows[0]!.id;
+    })();
+    await expect(elsewhere.write({ specVersionId: elsewhere.spec, runId: elsewhere.anchor, viaApprovalId: sibling })).rejects.toMatchObject(refusedAsNotNewest);
+  });
+
+  it("a getApprover that throws still answers 202: the approval and the parent's request stand, and no child is started", async () => {
+    const { a, workItemId } = await liveSpecReady(SPLIT);
+    const prev = subItemApprovalDeps.getApprover;
+    subItemApprovalDeps.getApprover = async () => {
+      throw new Error("approver unavailable");
+    };
+    try {
+      expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    } finally {
+      subItemApprovalDeps.getApprover = prev;
+    }
+    expect(await acceptedFor(workItemId)).toHaveLength(1);
+    expect((await admin.query("SELECT 1 FROM work_item_approvals WHERE work_item_id = $1", [workItemId])).rows).toHaveLength(1);
+    for (const k of await kidsOf(workItemId)) expect(await acceptedFor(k.id)).toHaveLength(0);
+  });
+
+  it("an approval of an item that is not a split parent never asks for the approver", async () => {
+    const { a, workItemId } = await liveSpecReady(ONE);
+    const prev = subItemApprovalDeps.getApprover;
+    let asked = 0;
+    subItemApprovalDeps.getApprover = async () => {
+      asked += 1;
+      return null;
+    };
+    try {
+      expect((await approveByRoute(a, workItemId)).status).toBe(202);
+    } finally {
+      subItemApprovalDeps.getApprover = prev;
+    }
+    expect(asked).toBe(0);
+  });
+
+  it("another split parent's ready children are left alone by this parent's approval", async () => {
+    const a = await liveAccount();
+    const mk = async (rows: typeof ROWS) => {
+      const t = await runTriageStep(
+        { pool: writerPool, accountId: a.accountId, classifier: fixtureClassifier("doc") },
+        { mode: "new", event: { ...OWNER, body: "Document the pages." }, title: "Docs pages", sourceEventId: randomUUID(), repoId: a.repoId },
+      );
+      if (t.status !== "triaged") throw new Error(`fixture: ${JSON.stringify(t)}`);
+      await admin.query("UPDATE work_items SET gh_number = $2, repo_id = $3 WHERE id = $1", [t.workItemId, nextNumber++, a.repoId]);
+      const pmRun = randomUUID();
+      await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, envelope) VALUES ($1, $2, $3, 'project-manager', 'production', 'succeeded', $4::jsonb)", [pmRun, a.accountId, t.workItemId, JSON.stringify({ ...SPLIT, planned_prs: rows })]);
+      await moduleOf().advanceLightSpec({ accountId: a.accountId, userId: a.userId, workItemId: t.workItemId, haltEpoch: 0 }, pmRun, randomUUID());
+      return t.workItemId;
+    };
+    const other = await mk([{ key: "page-c", title: "Docs page C", depends_on: [] }, { key: "page-d", title: "Docs page D", depends_on: [] }]);
+    // The other parent is approved with no approver installed: its children are ready and not started.
+    expect((await approveByRoute(a, other)).status).toBe(202);
+    const otherKids = await kidsOf(other);
+    expect(otherKids).toHaveLength(2);
+    const mine = await mk(ROWS);
+    const offered: string[] = [];
+    const prev = subItemApprovalDeps.getApprover;
+    subItemApprovalDeps.getApprover = async () => (input) => {
+      offered.push(`${input.workItemId}:${input.key}`);
+      return approveSubItem({ pool: receiptPool, principal: input.principal, child }, { workItemId: input.workItemId, key: input.key, ...(input.viaParentApproval === true ? { viaParentApproval: true } : {}) });
+    };
+    try {
+      expect((await approveByRoute(a, mine)).status).toBe(202);
+    } finally {
+      subItemApprovalDeps.getApprover = prev;
+    }
+    expect(offered.sort()).toEqual([`${mine}:page-a`, `${mine}:page-b`]);
+    for (const k of otherKids) expect(await acceptedFor(k.id)).toHaveLength(0);
+    for (const k of await kidsOf(mine)) expect(await acceptedFor(k.id)).toHaveLength(1);
+  });
+
+  it("a token principal starts no children, and never asks for the approver", async () => {
+    const { a, workItemId } = await liveSpecReady(SPLIT);
+    expect((await approveByRoute(a, workItemId)).status).toBe(202); // the approval itself, by the person, with no approver installed
+    const { startSplitParentChildren } = await import("../../api/src/routes/split-parent-children.js");
+    let asked = 0;
+    const counts = await startSplitParentChildren(
+      { pool: appPool, principal: { accountId: a.accountId, userId: a.userId, tokenId: randomUUID(), role: "owner" } as never },
+      workItemId,
+      { getApprover: async () => { asked += 1; return (input) => approveSubItem({ pool: receiptPool, principal: input.principal, child }, { workItemId: input.workItemId, key: input.key }); }, signal },
+    );
+    expect(counts).toEqual({ offered: 0, started: 0, refused: 0 });
+    expect(asked).toBe(0);
+    for (const k of await kidsOf(workItemId)) expect(await acceptedFor(k.id)).toHaveLength(0);
   });
 });

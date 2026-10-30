@@ -57,6 +57,11 @@ export interface SubItemApprovalInput {
   workItemId: string;
   /** `fix-<round>` for a fix round; a planned PR's key otherwise. */
   key: string;
+  /**
+   * The launch comes from the person's approval of the parent itself ("Approve the Spec and build" on a split parent), not a click on the planned PR. Only for a
+   * planned PR key: the receipt then names that approval (`approval_id`), so it is told apart from a card click.
+   */
+  viaParentApproval?: boolean;
 }
 export interface SubItemApprovalResult {
   receiptId: string;
@@ -120,8 +125,8 @@ export async function approveSubItemIn(client: PoolClient, who: { accountId: str
       : 'SELECT id FROM spec_versions WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND erased_at IS NULL ORDER BY version DESC LIMIT 1',
     isChildRound ? [accountId, item.parent_id, childSpecId] : [accountId, input.workItemId])).rows[0];
   if (spec === undefined) throw new SubItemApprovalError('no_spec');
-  const approval = (await client.query<{ spec_version_id: string | null }>(
-    'SELECT spec_version_id FROM work_item_approvals WHERE account_id = $1::uuid AND work_item_id = $2::uuid ORDER BY created_at DESC, id DESC LIMIT 1', [accountId, isChildRound ? item.parent_id : input.workItemId])).rows[0];
+  const approval = (await client.query<{ id: string; spec_version_id: string | null }>(
+    'SELECT id, spec_version_id FROM work_item_approvals WHERE account_id = $1::uuid AND work_item_id = $2::uuid ORDER BY created_at DESC, id DESC LIMIT 1', [accountId, isChildRound ? item.parent_id : input.workItemId])).rows[0];
   if (approval === undefined) throw new SubItemApprovalError('parent_not_approved');
   // For a child the identity already held the approval to the parent's newest Spec (a started child stays on its pin after a re-approval, R11), so the comparison is the top-level item's alone.
   if (!isChildRound && approval.spec_version_id !== spec.id) throw new SubItemApprovalError('respec_needs_approval');
@@ -177,6 +182,7 @@ export async function approveSubItemIn(client: PoolClient, who: { accountId: str
   const dial = item.repo_id === null ? null : await getCurrentDialSetting(client, item.repo_id, 'launch_sub_item');
   const receipt = await writeSubItemApprovalReceipt(client, {
     runId: anchorId, workItemId: input.workItemId, key: input.key, specVersionId: spec.id, dialVersion: dial?.version ?? DIAL_VERSION_CATALOGUE_DEFAULT,
+    ...(input.viaParentApproval === true && childId !== null ? { viaApprovalId: approval.id } : {}),
   });
   let withdrawn = 0;
   let advanceActionId: string | null = null;
