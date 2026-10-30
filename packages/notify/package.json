@@ -1,0 +1,28 @@
+{
+  "name": "@fx/notify",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "D#7 DP12b-2: email for decision asks. The Resend transport (HTTPS to the net-guard validated address, fixed timeout, errors reduced to a fixed code), the email text (fixed copy, counts and an Inbox link, never question text) and notifyAsks, which batches due asks into one email per account per 15-minute window. Ships OFF until RESEND_API_KEY and NOTIFY_FROM are set.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fx/db": "workspace:*",
+    "@fx/net-guard": "workspace:*",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@fx/test-guard": "workspace:*",
+    "@fx/webhooks": "workspace:*",
+    "@types/node": "^24.19.0",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

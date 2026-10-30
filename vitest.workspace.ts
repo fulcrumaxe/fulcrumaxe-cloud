@@ -79,6 +79,7 @@ export default defineWorkspace([
   "packages/model-connection",
   "packages/model-router",
   "packages/net-guard",
+  "packages/notify",
   "packages/partners",
   "packages/pipeline",
   "packages/plan-data",
