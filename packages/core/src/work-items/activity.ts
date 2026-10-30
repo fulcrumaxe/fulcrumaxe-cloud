@@ -535,7 +535,7 @@ async function readSupersededRoot(client: PoolClient, workItemId: string): Promi
  * is not waiting. For a repository wait the holder is the oldest other item that holds a slot on the repository. Fixed codes and numbers only.
  */
 async function readBuildWaitNotice(client: PoolClient, workItemId: string, stage: string, halted: boolean, repoId: string | null): Promise<ActivityNotice | null> {
-  if ((stage !== 'spec_ready' && stage !== 'needs_human') || halted) return null;
+  if ((stage !== 'spec_ready' && stage !== 'needs_human' && stage !== 'triaged') || halted) return null;
   const fact = (
     await client.query<{ code: string | null; fresh: boolean }>(
       `SELECT e.code, (e.created_at > now() - make_interval(secs => $2::int)) AS fresh FROM work_item_driver_events e

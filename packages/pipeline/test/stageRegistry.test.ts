@@ -41,13 +41,14 @@ describe("the parked-stage registry", () => {
       expect(PARKED_STAGE_REGISTRY[e.stage]).toBe(e);
       expect(e.pauses.length).toBeGreaterThan(0);
       for (const p of e.pauses) expect(RESERVATION_PAUSE_REASONS).toContain(p);
-      for (const s of e.itemStages) expect(WAITING_STAGE_POSITIONS[e.stage]).toContain(s);
+      for (const s of [...e.itemStages, ...(e.childItemStages ?? [])]) expect(WAITING_STAGE_POSITIONS[e.stage]).toContain(s);
     }
   });
 
   it("the build entry: Spec ready only, and the run-key pattern matches its keys (bare, attempt, attempt with a note pin) and no one else's", () => {
     const e = PARKED_STAGE_REGISTRY.build!;
     expect(e.itemStages).toEqual(["spec_ready"]);
+    expect(e.childItemStages).toEqual(["triaged"]); // a planned PR child waits at Triaged
     const item = "11111111-2222-4333-8444-555555555555";
     const approval = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
     const likes = e.runKeyLikes(item, approval);

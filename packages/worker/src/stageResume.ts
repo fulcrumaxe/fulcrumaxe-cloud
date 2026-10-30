@@ -38,6 +38,8 @@ import { toQueueRank } from "@fx/core/src/work-items/priority.js";
 export interface ParkedStageEntryInput {
   stage: WaitingStage;
   itemStages: readonly string[];
+  /** The slot wake also lists these stages, for a planned PR child only (@fx/core's `StageGateEntry.childItemStages`). */
+  childItemStages?: readonly string[];
   pauses: readonly string[];
   role: string;
   /** The approval the restart runs under: its kind, and whether one on the card this one replaced counts (the pipeline's card for an issue replaces the webhook's). */
@@ -273,7 +275,7 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
     // Fresh waiters are listed too (minimum age 0): one whose workflow died less than the orphan age ago looks alive, and the slot may free in that window.
     let fresh: { account_id: string; work_item_id: string; waited_at: Date }[] = [];
     try {
-      const all = (await runnerPool.query<{ account_id: string; work_item_id: string; pause: string; waited_at: Date }>("SELECT account_id, work_item_id, pause, waited_at FROM work_item_list_parked_stage($1, $2::text[], $3::text[], $4, $5)", [entry.stage, [...entry.itemStages], [...SLOT_WAIT_REASONS], 0, LIST_LIMIT])).rows;
+      const all = (await runnerPool.query<{ account_id: string; work_item_id: string; pause: string; waited_at: Date }>("SELECT account_id, work_item_id, pause, waited_at FROM work_item_list_parked_stage($1, $2::text[], $3::text[], $4, $5)", [entry.stage, [...entry.itemStages, ...(entry.childItemStages ?? [])], [...SLOT_WAIT_REASONS], 0, LIST_LIMIT])).rows;
       const orphanBefore = now() - STAGE_RESUME_ORPHAN_AFTER_SECONDS * 1000;
       listed = all.filter((r) => r.waited_at.getTime() <= orphanBefore);
       fresh = all.filter((r) => r.waited_at.getTime() > orphanBefore);
