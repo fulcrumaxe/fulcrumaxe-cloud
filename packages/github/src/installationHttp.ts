@@ -1,7 +1,8 @@
 import type { AppCredentialsSource } from "./appCredentials.js";
 import { ADD_DISCUSSION_COMMENT_DOCUMENT, type RetractionSurface } from "./retraction.js";
 import { GH_OWNER_LOGIN_RE, GH_REPO_NAME_RE } from "./eventMapper.js";
-import { getInstallationToken, RECEIPT_BLOCK_PERMISSIONS, RETRACTION_PERMISSIONS, type AccessTokenRequester, type InstallationTokenCache } from "./installationToken.js";
+import { getInstallationToken, RECEIPT_BLOCK_PERMISSIONS, RETRACTION_PERMISSIONS, REVERT_PR_PERMISSIONS, type AccessTokenRequester, type InstallationTokenCache } from "./installationToken.js";
+import { REVERT_PR_DOCUMENT, revertPrVariables } from "./revertPr.js";
 
 /**
  * D#483 P3: an HTTP client for ONE repository's GitHub API, authenticated as the write App's installation, for the stage
@@ -38,6 +39,9 @@ import { getInstallationToken, RECEIPT_BLOCK_PERMISSIONS, RETRACTION_PERMISSIONS
  *                  one repository). The client is pinned to the pull request number it was opened for, and allows exactly: `GET` that pull request (to read the current
  *                  body), `PATCH` it with a JSON body whose only key is `body` (a string), and `GET /commits/<sha>/check-runs`. Every other method, path and body key is
  *                  refused before a request is sent.
+ *   - `revert_pr`  D#7 DP7-2w: a draft revert of ONE merged pull request. Token: the `revert_pr` purpose (`contents: write`, `pull_requests: write`, one repository, fresh, revoked by `close()`).
+ *                  Pinned to the pull request number it was opened for; allows exactly `GET` that pull request (its node id is read from the answer) and `POST /graphql` ONCE,
+ *                  whose body is the pinned document (revertPr.ts) with that node id, `draft` true and the fixed title and body. Anything else is `path_refused` before a request is sent.
  *
  *   - `retraction` D#7 DP7b-w: a correction on the ONE surface a deprecation notice was recorded on. Token: the `retraction` purpose (one key, by surface: `contents: write` for a
  *                  release, `issues: write` for a comment, `discussions: write` for a Discussion; one repository, minted fresh and revoked by `close()`). The client is pinned to
@@ -53,7 +57,7 @@ import { getInstallationToken, RECEIPT_BLOCK_PERMISSIONS, RETRACTION_PERMISSIONS
  *     GitHub's own `message` cut short. It never hears a token, a header or a request body.
  */
 
-export type InstallationHttpKind = "read" | "merge_gate" | "runner_pr" | "repo_map" | "branch_delete" | "branch_sync" | "receipt_block" | "retraction";
+export type InstallationHttpKind = "read" | "merge_gate" | "runner_pr" | "repo_map" | "branch_delete" | "branch_sync" | "receipt_block" | "retraction" | "revert_pr";
 
 export interface InstallationHttpRequest {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -125,9 +129,12 @@ export const RETRACTION_BODY_MAX = 20_000;
 const NODE_ID_RE = /^[A-Za-z0-9_=-]{1,200}$/;
 const validRetractionSurface = (s: RetractionSurface): boolean =>
   s.kind === "release" ? Number.isSafeInteger(s.releaseId) && s.releaseId >= 1 : s.kind === "comment" ? Number.isSafeInteger(s.number) && s.number >= 1 : s.kind === "discussion" && NODE_ID_RE.test(s.discussionId);
-/** Kinds whose log line never carries GitHub's own `message` (method, masked path and status only). */
-const UNLOGGED_MESSAGE_KINDS: ReadonlySet<InstallationHttpKind> = new Set(["retraction"]);
 const MESSAGE_RE = /[^\x20-\x7e]/g;
+
+/** Kinds whose log line never carries GitHub's own `message` (method, masked path and status only). Per kind, so each new write kind opts in. Shared by `revert_pr` and `retraction`. */
+const QUIET_ERROR_KINDS: ReadonlySet<InstallationHttpKind> = new Set<InstallationHttpKind>(["revert_pr", "retraction"]);
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 export class InstallationHttpError extends Error {
   readonly reason: string;
@@ -173,7 +180,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
 
   return async (kind, target) => {
     if (!GH_OWNER_LOGIN_RE.test(target.owner) || !GH_REPO_NAME_RE.test(target.name)) throw new InstallationHttpError("invalid_coordinates");
-    if ((kind === "branch_sync" || kind === "receipt_block") !== (target.prNumber !== undefined) || (target.prNumber !== undefined && !(Number.isSafeInteger(target.prNumber) && target.prNumber >= 1))) throw new InstallationHttpError("invalid_coordinates");
+    if ((kind === "branch_sync" || kind === "receipt_block" || kind === "revert_pr") !==(target.prNumber !== undefined) || (target.prNumber !== undefined && !(Number.isSafeInteger(target.prNumber) && target.prNumber >= 1))) throw new InstallationHttpError("invalid_coordinates");
     if ((kind === "branch_delete" || kind === "branch_sync") !== (target.branch !== undefined) || (target.branch !== undefined && !DELETABLE_BRANCH.test(target.branch))) throw new InstallationHttpError("invalid_coordinates");
     if ((kind === "retraction") !== (target.retraction !== undefined) || (target.retraction !== undefined && !validRetractionSurface(target.retraction))) throw new InstallationHttpError("invalid_coordinates");
     const installation = await deps.resolveInstallation(target.repoId);
@@ -188,19 +195,25 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
       requester: deps.requester,
       cache: deps.cache,
       ...(kind === "branch_delete" || kind === "branch_sync" || kind === "retraction" ? { revoke: revokeInstallationToken } : {}),
+      // D#7 DP7-2w: the `revert_pr` purpose, its fixed permission set and its revoke (these override the generic choices above).
+      ...(kind === "revert_pr" ? { purpose: "revert_pr" as const, role: "revert_pr", scope: { repositories: [target.name] as [string], permissions: REVERT_PR_PERMISSIONS }, revoke: revokeInstallationToken } : {}),
     });
     const prefix = `/repos/${target.owner}/${target.name}/`;
     // The repository itself (`GET /repos/<owner>/<name>`, no trailing slash) is also allowed, for GET only: D#6 R3b reads its `private` flag.
     const repoRoot = prefix.slice(0, -1);
     let deleted = false;
+    /** `revert_pr` only: the pinned pull request's node id, read from the answer to the one GET; the mutation may name nothing else. */
+    let revertNodeId: string | undefined;
+    let revertSent = false;
 
     return {
       async close() {
-        if (kind === "branch_delete" || kind === "branch_sync" || kind === "retraction") await revokeInstallationToken(token);
+        if (kind === "branch_delete" || kind === "branch_sync" || kind === "retraction" || kind === "revert_pr") await revokeInstallationToken(token);
       },
       async request(req) {
         const graphql = (kind === "runner_pr" || kind === "retraction" || target.allowGraphql === true) && req.method === "POST" && req.path === GRAPHQL_PATH;
-        const allowed = graphql || (req.method === "GET" && req.path === repoRoot) || (req.path.startsWith(prefix) && PATH_RE.test(req.path));
+        // `revert_pr` may name `/graphql` too, but only the one exact mutation checked below.
+        const allowed = graphql || (kind === "revert_pr" && req.method === "POST" && req.path === GRAPHQL_PATH) || (req.method === "GET" && req.path === repoRoot) || (req.path.startsWith(prefix) && PATH_RE.test(req.path));
         if (!allowed || req.path.includes("..")) throw new InstallationHttpError("path_refused");
         // `runner_pr` holds contents:read, so it gets its own EXACT list rather than the prefix rule above (CWE-284): a caller that
         // names this kind must not be able to read file contents, patches or commits. Everything else is refused here, PUT included.
@@ -253,6 +266,18 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
           if (write && deleted) throw new InstallationHttpError("already_used");
           if (write) deleted = true;
         }
+        // `revert_pr` holds contents:write and pull_requests:write, so it gets the narrowest list there is: read the one pull request, then send the one pinned mutation, once.
+        if (kind === "revert_pr") {
+          const b = req.body as Record<string, unknown> | undefined;
+          const v = isRecord(b) ? b["variables"] : undefined;
+          const readPr = req.method === "GET" && req.path === `${prefix}pulls/${target.prNumber}` && req.query === undefined && b === undefined;
+          const mutate =
+            req.method === "POST" && req.path === GRAPHQL_PATH && req.query === undefined && isRecord(b) && Object.keys(b).sort().join() === "query,variables" && b["query"] === REVERT_PR_DOCUMENT &&
+            revertNodeId !== undefined && isRecord(v) && JSON.stringify(v) === JSON.stringify(revertPrVariables(revertNodeId));
+          if (!readPr && !mutate) throw new InstallationHttpError("path_refused");
+          if (mutate && revertSent) throw new InstallationHttpError("path_refused");
+          if (mutate) revertSent = true;
+        }
         if (kind === "read" && req.method !== "GET" && !graphql) throw new InstallationHttpError("method_refused");
         // PATCH is for `runner_pr` alone (closing a pull request); the other kinds never needed it and never get it.
         if (req.method === "PATCH" && kind !== "runner_pr" && kind !== "receipt_block" && kind !== "retraction") throw new InstallationHttpError("method_refused");
@@ -268,7 +293,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
             headers: {
               accept: "application/vnd.github+json",
               authorization: `Bearer ${token}`,
-              ...(kind === "branch_delete" || kind === "receipt_block" || kind === "retraction" ? { "user-agent": "fulcrumaxe-cloud" } : {}),
+              ...(kind === "branch_delete" || kind === "receipt_block" || kind === "retraction" || kind === "revert_pr" ? { "user-agent": "fulcrumaxe-cloud" } : {}),
               "x-github-api-version": "2022-11-28",
               ...(req.body !== undefined ? { "content-type": "application/json" } : {}),
             },
@@ -288,7 +313,8 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
           // fx-swallow-ok: a body that is not JSON reads as null, which every caller treats as "not the shape expected"
           body = null;
         }
-        const message = res.status >= 400 && !UNLOGGED_MESSAGE_KINDS.has(kind) && body !== null && typeof body === "object" && "message" in body && typeof (body as { message: unknown }).message === "string" ? (body as { message: string }).message.replace(MESSAGE_RE, "").slice(0, 120) : null;
+        const message = !QUIET_ERROR_KINDS.has(kind) && res.status >= 400 && body !== null && typeof body === "object" && "message" in body && typeof (body as { message: unknown }).message === "string" ? (body as { message: string }).message.replace(MESSAGE_RE, "").slice(0, 120) : null;
+        if (kind === "revert_pr" && req.method === "GET" && res.status === 200 && isRecord(body) && typeof body["node_id"] === "string" && /^[A-Za-z0-9_=-]{4,100}$/.test(body["node_id"])) revertNodeId = body["node_id"];
         deps.log?.({ method: req.method, path: req.path.replace(/^\/repos\/[^/]+\/[^/]+/, "/repos/:o/:r"), status: res.status, message });
         return { status: res.status, body };
       },

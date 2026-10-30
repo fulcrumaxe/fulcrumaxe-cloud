@@ -307,7 +307,7 @@ describe("installation-wide token (WideScope)", () => {
 
 describe("no purpose ever requests repository administration (D#2 RC-1a, C64 section 3)", () => {
   // A Record keyed by MintPurpose: a new purpose fails typecheck until it is listed here.
-  const KIND: Record<MintPurpose, string> = { run: "team", preview_read: "team_readonly", sitekit_read: "sitekit", merge_gate: "team", plan_read: "team_readonly", runner_git: "team", plane_push: "team", plane_merge: "team", plane_publish_read: "team", branch_delete: "team", branch_sync: "team", pairing_read: "team_readonly", receipt_block: "team", retraction: "team" };
+  const KIND: Record<MintPurpose, string> = { run: "team", preview_read: "team_readonly", sitekit_read: "sitekit", merge_gate: "team", plan_read: "team_readonly", runner_git: "team", plane_push: "team", plane_merge: "team", plane_publish_read: "team", branch_delete: "team", branch_sync: "team", pairing_read: "team_readonly", receipt_block: "team", retraction: "team", revert_pr: "team" };
   const scopes = [
     { repositories: ["r"] as [string], permissions: { metadata: "write", contents: "write", issues: "write", pull_requests: "write", discussions: "write" } as const },
     { installationWide: true as const, permissions: { metadata: "read" } as const },
@@ -318,7 +318,7 @@ describe("no purpose ever requests repository administration (D#2 RC-1a, C64 sec
       // runner_git takes only metadata and contents, so both generic scopes here are refused outright: runnerProxyDecision.test.ts covers it.
       if (purpose === "runner_git") continue;
       if (purpose === "retraction") continue; // takes exactly one single-key set, not these generic scopes: retraction.test.ts covers it
-      if ((purpose === "merge_gate" || purpose === "plan_read" || purpose === "plane_push" || purpose === "plane_merge" || purpose === "plane_publish_read" || purpose === "branch_delete" || purpose === "branch_sync" || purpose === "pairing_read" || purpose === "receipt_block") && "installationWide" in scope) continue; // refused outright: see the merge_gate, plan_read, plane_push, plane_publish_read and branch_delete tests
+      if ((purpose === "merge_gate" || purpose === "plan_read" || purpose === "plane_push" || purpose === "plane_merge" || purpose === "plane_publish_read" || purpose === "branch_delete" || purpose === "branch_sync" || purpose === "pairing_read" || purpose === "receipt_block" || purpose === "revert_pr") && "installationWide" in scope) continue; // refused outright: see the merge_gate, plan_read, plane_push, plane_publish_read and branch_delete tests
       // A plan_read mint is refused unless GitHub's answer says the token is read-only, so the answer says so.
       const answer: { permissions: Record<string, string>; repositories?: string[] } =
         purpose === "plane_push"
@@ -329,6 +329,8 @@ describe("no purpose ever requests repository administration (D#2 RC-1a, C64 sec
             ? { permissions: { metadata: "read", contents: "read" }, repositories: ["r"] }
             : purpose === "plane_merge" || purpose === "branch_delete"
               ? { permissions: { metadata: "read", contents: "write" }, repositories: ["r"] }
+              : purpose === "revert_pr"
+                ? { permissions: { metadata: "read", contents: "write", pull_requests: "write" }, repositories: ["r"] }
               : purpose === "receipt_block"
                 ? { permissions: { metadata: "read", checks: "read", pull_requests: "write" }, repositories: ["r"] }
               : purpose === "branch_sync"
@@ -336,7 +338,7 @@ describe("no purpose ever requests repository administration (D#2 RC-1a, C64 sec
                 : { permissions: { metadata: "read" } };
       const requester = vi.fn(async () => ({ token: "ghs_x", expiresAt: new Date(Date.now() + 3600_000).toISOString(), ...answer }));
       await getInstallationToken({
-        installationId: 1, appKind: KIND[purpose], purpose, role: "any", scope, appCredentials: creds(privateKeyPem), requester, cache: new InstallationTokenCache(),
+        installationId: 1, appKind: KIND[purpose], purpose, role: "any", scope: purpose === "revert_pr" ? { repositories: ["r"] as [string], permissions: { contents: "write", pull_requests: "write" } as const } : scope, appCredentials: creds(privateKeyPem), requester, cache: new InstallationTokenCache(),
       });
       const granted = (requester.mock.calls[0] as unknown as [{ permissions: Record<string, string> }])[0].permissions;
       const keys = Object.keys(granted);
@@ -355,6 +357,9 @@ describe("no purpose ever requests repository administration (D#2 RC-1a, C64 sec
         expect(granted).toEqual({ contents: "write" });
       } else if (purpose === "pairing_read") {
         expect(granted).toEqual({ metadata: "read" });
+      } else if (purpose === "revert_pr") {
+        // D#7 DP7-2w: whatever the caller asked for, exactly contents write and pull requests write of the one repository.
+        expect(granted).toEqual({ contents: "write", pull_requests: "write" });
       } else if (purpose === "receipt_block") {
         // D#7 DP6a: whatever the caller asked for, exactly the pull request write and the check-run read of the one repository (no contents).
         expect(granted).toEqual({ metadata: "read", checks: "read", pull_requests: "write" });
