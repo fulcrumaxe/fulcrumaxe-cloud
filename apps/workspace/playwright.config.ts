@@ -30,7 +30,10 @@ const BASE_URL = `http://127.0.0.1:${PORT}`;
 
 export default defineConfig({
   testDir: "./e2e",
-  fullyParallel: true,
+  // Wall-clock perf budgets (tests tagged @perf) are only meaningful on a machine doing nothing else, so the default run
+  // leaves them out and `E2E_PERF=1` (the e2e:perf script) runs only them, one at a time.
+  ...(process.env.E2E_PERF ? { grep: /@perf/, workers: 1 } : { grepInvert: /@perf/ }),
+  fullyParallel: !process.env.E2E_PERF,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
   reporter: [["list"]],

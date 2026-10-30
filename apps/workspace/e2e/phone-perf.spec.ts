@@ -39,14 +39,13 @@ async function throttleCpu(page: Page) {
 }
 
 test.describe("D#37 WS-E criterion 7: low-end phone, real input", () => {
-  test("no long task over 50ms while idle 30s with Themes open", async ({ page }) => {
-    // Quarantined on the shared 2-vCPU hosted runner only: a wall-clock long-task
-    // budget under a 4x CPU throttle measures the runner as much as the app. It
-    // failed 2 of 2 attempts there (a 53ms task against the 50ms budget) and
-    // passed only 1 of 3 on a loaded workstation (140ms). It still runs locally.
-    // Needs a look at which task it is (the Themes window opening is inside the
-    // observed window) and a quiet runner to set the budget against.
-    test.fixme(!!process.env.CI, "long-task budget is CPU-bound and fails on the shared hosted runner");
+  test("no long task over 50ms while idle 30s with Themes open @perf", async ({ page }) => {
+    // Tagged @perf: a wall-clock long-task budget under a 4x CPU throttle measures the machine as much as the app. With
+    // 12 Chromium workers on 12 cores the one task that opens the Themes window ran 51-259ms (2 of 20 runs passed), and
+    // on the shared 2-vCPU hosted runner 2 of 2 failed, while on a quiet machine the same page shows no long task at
+    // all. A fixed-CPU calibration in the page did not track it (the samples stayed at ~30ms while the task took 200ms:
+    // the stall is not CPU time), so no budget scaling is trustworthy under load. The honest fix is where it runs: the
+    // default suite skips @perf (playwright.config.ts), and `pnpm --filter workspace e2e:perf` runs it alone, serially.
     test.slow(); // real 30s wait plus a 4x-CPU-throttled boot -- give this one more headroom than the 90s default
     await bootToDesktop(page);
     await throttleCpu(page);

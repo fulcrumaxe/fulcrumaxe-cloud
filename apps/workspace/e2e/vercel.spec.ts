@@ -89,6 +89,16 @@ async function openApp(page: Page) {
   await expect(page.locator(VC)).not.toHaveClass(/opening/);
 }
 
+// After a reload the shell restores the windows the saved layout lists. That layout is written by a 500 ms debounce, so
+// whether the Vercel window was in it when the page reloaded depends on how fast the machine ran, and a dock click on
+// a window that was restored toggles it away (minimizes the active one). bootToDesktop returns only after the 200 ms
+// restore timer has fired, so at this point the window is either restored or it never will be: look, then act.
+async function openAppAfterReload(page: Page) {
+  if ((await page.locator(VC).count()) === 0) await page.locator('.dock-icon[data-app-id="vercel"]').click();
+  await expect(page.locator(VC)).toBeVisible();
+  await expect(page.locator(VC)).not.toHaveClass(/opening/);
+}
+
 async function expectNoToken(page: Page, urls: string[]) {
   const held = await page.evaluate(() => {
     const parts = [document.documentElement.outerHTML, location.href, JSON.stringify(localStorage), JSON.stringify(sessionStorage)];
@@ -193,7 +203,7 @@ test.describe("D#598 P8d-3b: Vercel connection app (mocked API)", () => {
     await expectNoToken(page, urls);
     await page.reload();
     await bootToDesktop(page);
-    await openApp(page);
+    await openAppAfterReload(page);
     await expect(tid(page, "vc-team-name")).toHaveText("Acme Studio");
     await page.evaluate(() => { (window as unknown as { fulcConfirm: () => Promise<boolean> }).fulcConfirm = async () => true; });
     await tid(page, "vc-disconnect").click();
@@ -201,7 +211,7 @@ test.describe("D#598 P8d-3b: Vercel connection app (mocked API)", () => {
     await expect(tid(page, "vc-none")).toBeVisible();
     await page.reload();
     await bootToDesktop(page);
-    await openApp(page);
+    await openAppAfterReload(page);
     await expect(tid(page, "vc-none")).toBeVisible();
     expect(mock.sent.map((s) => s.method)).toEqual(["POST", "DELETE"]);
   });
