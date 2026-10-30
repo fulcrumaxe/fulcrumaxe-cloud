@@ -48,8 +48,8 @@ describe("the two environment manifests (OPS-C2-14)", () => {
     // (Written as a pattern so this file does not spell the names scan.test.ts forbids under apps/ops.)
     const web = /PLATFORM_OPS|APP_USER|^FX_(SESSION|KEK|WEBHOOK_KEK)|^STRIPE_/;
     expect(OPS_ENV_MANIFEST.map((v) => v.name).filter((n) => web.test(n))).toEqual([]);
-    // CRON_SECRET and FX_OPERATOR_ACCOUNT_IDS (the runtime's own list format) are the names both projects read, each with its own value.
-    expect(OPS_ENV_MANIFEST.map((v) => v.name).filter((n) => webNames.includes(n))).toEqual(["CRON_SECRET", "FX_OPERATOR_ACCOUNT_IDS"]);
+    // CRON_SECRET, RESEND_API_KEY (the decision email in the web app has its own key) and FX_OPERATOR_ACCOUNT_IDS (the runtime's own list format) are the names both projects read, each with its own value.
+    expect(OPS_ENV_MANIFEST.map((v) => v.name).filter((n) => webNames.includes(n))).toEqual(["CRON_SECRET", "RESEND_API_KEY", "FX_OPERATOR_ACCOUNT_IDS"]);
   });
 });
 
