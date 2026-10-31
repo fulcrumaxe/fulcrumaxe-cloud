@@ -196,7 +196,7 @@ describe("the price port (C22 B2)", () => {
   it("the rendering files compute no price: they import no ledger, spend or billing code and name no rate", () => {
     const dir = fileURLToPath(new URL("../src", import.meta.url));
     // The reversal files (ports.ts, price.ts's live loader, reverse.ts, adapters/) read the ledger on purpose (DP7-2c); the files that render and write the block never do.
-    const reversalFiles = new Set(["ports.ts", "price.ts", "reverse.ts", "adapters", "index.ts"]);
+    const reversalFiles = new Set(["ports.ts", "price.ts", "reverse.ts", "adapters", "index.ts", "planner.ts"]); // planner.ts: the reversal planner wires the ledger port to the price loader (DP7-2e)
     for (const f of readdirSync(dir).filter((n) => !reversalFiles.has(n))) {
       const src = readFileSync(`${dir}/${f}`, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
       expect(src, f).not.toMatch(/@fx\/(spend|billing|model-router|model-call)|ledger|rate_card|per_token|tokensPer/i);

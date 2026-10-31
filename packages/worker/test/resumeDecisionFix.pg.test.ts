@@ -25,7 +25,8 @@ import { createResumeModule } from "../src/resumeDecision.js";
  *     sandbox), the PARKED run as the session it continues, a working directory with NO clone, and a prompt with the Spec body.
  */
 const INVOKER_LOGIN = "fx_resume_fix_invoker_test";
-const CLASS3 = CATALOGUE.find((e) => e.class === "human_in_the_loop")!.id;
+// Not reversal_over_cap: an answer to that ask is never a resume (D#7 DP7-2e, R4), so it cannot stand in for an ordinary class 3 ask here.
+const CLASS3 = CATALOGUE.find((e) => e.class === "human_in_the_loop" && e.id !== "reversal_over_cap")!.id;
 const OPTIONS = [
   { id: "keep", label: "Keep the current shape" },
   { id: "split", label: "Split it in two" },

@@ -11,6 +11,8 @@ import { FIX_ASK_START } from './fixRoundGate.js';
 import type { ChildLaunchDeps } from './childLaunch.js';
 import { startGateForAsk } from '@fx/db/src/startGate.js';
 import { runAfterReceipt, type AfterReceiptHook } from './receiptHook.js';
+import { fileAllowedReversal, type AllowedReversalPlanner } from './reversalRequest.js';
+import { REVERSAL_ASK_ALLOW } from './reversalOverCap.js';
 
 /**
  * D#7 DP11b (DP-C9): the answer service. One transaction on the RECEIPT pool, under `withTenant` with the
@@ -37,6 +39,8 @@ export interface AskAnswerCtx {
   child?: ChildLaunchDeps;
   /** D#7 DP6a-WIRING: told after the answer has committed, so the receipt block on the item's pull request is refreshed. Best-effort. */
   afterReceipt?: AfterReceiptHook;
+  /** D#7 DP7-2e (R4): decides the compensation row an "Allow another reversal" answer inserts. The worker's composition root supplies it. */
+  reversal?: AllowedReversalPlanner;
 }
 export interface AskAnswerInput {
   askId: string;
@@ -142,8 +146,13 @@ export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promi
       if (receipt.store !== 'decision_receipts') throw new AskAnswerError(409, 'ask_receipt_mismatch');
       // 8. The compare-and-set, linking the receipt in the same UPDATE.
       await answerAskIn(client, { askId: ask.id, choice, receiptId: receipt.id });
-      // 8b. The resume request (DP11c), in this same transaction: the person's own request, one per ask, so a replay gets the same action. A held fix round has no run to resume.
-      if (ask.decision_type !== 'launch_sub_item') {
+      // 8b. A reversal_over_cap answer is never a resume (R4). "Allow another reversal" inserts one compensation row keyed on the ask; keep_as_is and deny insert nothing.
+      if (ask.decision_type === 'reversal_over_cap') {
+        if (choice === REVERSAL_ASK_ALLOW && await fileAllowedReversal(client, ctx.reversal, { id: ask.id, accountId, workItemId: ask.work_item_id }) === null) {
+          throw new AskAnswerError(409, 'ask_receipt_mismatch');
+        }
+      } else if (ask.decision_type !== 'launch_sub_item') {
+        // The resume request (DP11c), in this same transaction: the person's own request, one per ask, so a replay gets the same action. A held fix round has no run to resume.
         const resume = await client.query<{ action_id: string; replayed: boolean }>('SELECT action_id, replayed FROM run_action_request($1, $2, $3, $4)',
           ['resume_decision', ask.id, `ask:${ask.id}`, `resume:${ask.id}`]);
         if (!resume.rows[0]!.replayed) resumeActionId = resume.rows[0]!.action_id;
