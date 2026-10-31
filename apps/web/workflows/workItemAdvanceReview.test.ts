@@ -74,6 +74,8 @@ interface World {
   refuseStart: Set<string>;
   /** The worker's reason for a refused reviewer start; "no_model" when absent. */
   refuseReason?: string;
+  /** Per role, overriding `refuseReason` for that role. */
+  refuseReasons?: Record<string, string>;
   pinned: number;
   loadReview: { ok: boolean; reason?: string; specVersion?: number };
   /** `runner_local`: the repository's agents run on a runner; `recorded` is what its run's `done` recorded (null: nothing). */
@@ -134,7 +136,7 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
     advanceLoadSpecText: vi.fn(async (_who: unknown, v: number) => (v === w.pinned ? { version: v, body: "SPEC BODY: the footer shows the year." } : null)),
     advanceStartRun: vi.fn(async (req: AdvanceRunRequest) => {
       started.push(req);
-      if (w.refuseStart.has(req.role)) return { ok: false as const, reason: w.refuseReason ?? "no_model" };
+      if (w.refuseStart.has(req.role)) return { ok: false as const, reason: w.refuseReasons?.[req.role] ?? w.refuseReason ?? "no_model" };
       const id = `run-${++n}-${req.role}`;
       runs.set(id, { role: req.role, head: req.headSha ?? "", step: req.step });
       keyed.push({ step: req.step, runId: id });
@@ -738,14 +740,74 @@ describe("what happens after the verdicts are recorded", () => {
     expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "not_started_no_model" }));
   });
 
-  // Live 2026-10-25 (cloud#673): the security reviewer was refused for the runner's daily limit, the round ended incomplete and the item sat at pull request open with
-  // nothing running. The stop names the cause, not only the role, so the card and the Needs you row can say what happened.
-  it("a reviewer refused for the runner's daily limit stops with that reason in its code, and nothing merges", async () => {
+  // Live 2026-10-25 (cloud#673): the security reviewer was refused for the runner's daily limit, the round ended incomplete and the workflow stopped. The limit only
+  // clears when the UTC day rolls over, so the round now waits: one waiting fact on the head, no re-asking, the workflow ends paused, nothing stopped, nothing merged.
+  it("a reviewer refused for the runner's daily limit parks the round: a waiting fact, review_paused, no stop, no re-ask, nothing merges", async () => {
     const t = setup(fresh({ refuseStart: new Set(["acceptance-tester"]), refuseReason: "runner_daily_limit", rounds: [{ decision: "incomplete" }] }));
     const out = await workItemAdvanceWorkflow(ARGS);
-    expect(out).toEqual({ status: "needs_human", detail: "reviewer_not_started:acceptance-tester" });
+    expect(out).toEqual({ status: "paused", detail: "review_paused:runner_daily_limit" });
     expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
-    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "not_started_runner_daily_limit" }));
+    expect(t.worker.advanceRecordRound).not.toHaveBeenCalled();
+    expect(world.sleeps).toBe(0);
+    const events = t.worker.advanceRecordEvent.mock.calls.map((c) => c[1]);
+    expect(events).toContainEqual(expect.objectContaining({ kind: "stage_waiting", stage: "review", code: "runner_daily_limit", headSha: H1 }));
+    expect(events.some((e) => e.kind === "stopped")).toBe(false);
+  });
+
+  // Every other not-started refusal keeps today's stop.
+  it("a reviewer refused for a permanent reason still stops the round", async () => {
+    const t = setup(fresh({ refuseStart: new Set(["acceptance-tester"]), refuseReason: "public_repo", rounds: [{ decision: "incomplete" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "reviewer_not_started:acceptance-tester" });
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "not_started_public_repo" }));
+    expect(t.worker.advanceRecordEvent.mock.calls.some((c) => c[1].kind === "stage_waiting")).toBe(false);
+  });
+
+  // One role refused for the limit and another for a permanent reason: the permanent one decides, the round stops (a `some` instead of `every` would park it).
+  it("a limit refusal mixed with a permanent refusal stops the round and records no waiting fact", async () => {
+    const t = setup(fresh({ refuseStart: new Set(["code-reviewer", "acceptance-tester"]), refuseReasons: { "code-reviewer": "runner_daily_limit", "acceptance-tester": "public_repo" }, rounds: [{ decision: "incomplete" }] }));
+    const out = await workItemAdvanceWorkflow(ARGS);
+    expect(out.status).toBe("needs_human");
+    const events = t.worker.advanceRecordEvent.mock.calls.map((c) => c[1]);
+    expect(events.some((e) => e.kind === "stopped")).toBe(true);
+    expect(events.some((e) => e.kind === "stage_waiting")).toBe(false);
+    expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
+  });
+
+  // The code reviewer started and passes; the acceptance tester is refused for the limit. The wait is written at the refusal (before the started sibling is followed, so a
+  // sibling that runs past UTC midnight cannot push the sweep's reset a day out), carries the refused role's attempt, and the workflow still awaits the sibling before it ends.
+  it("the wait is written when the refusal happens, with the refused role's attempt, and the started sibling is still awaited before the workflow ends", async () => {
+    const t = setup(fresh({ refuseStart: new Set(["acceptance-tester"]), refuseReason: "runner_daily_limit", rounds: [{ decision: "incomplete" }] }));
+    const out = await workItemAdvanceWorkflow({ ...ARGS, startAttempt: 3 });
+    expect(out).toEqual({ status: "paused", detail: "review_paused:runner_daily_limit" });
+    const waitIdx = t.worker.advanceRecordEvent.mock.calls.findIndex((c) => c[1].kind === "stage_waiting");
+    expect(waitIdx).toBeGreaterThanOrEqual(0);
+    expect(t.worker.advanceRecordEvent.mock.calls[waitIdx]![1]).toMatchObject({ kind: "stage_waiting", stage: "review", code: "runner_daily_limit", attempt: 3, headSha: H1 });
+    // The code reviewer's run was awaited (its outcome read), and only after the wait fact was written.
+    expect(t.worker.advanceRunOutcome).toHaveBeenCalledWith(ACCOUNT, "run-1-code-reviewer");
+    const waitOrder = t.worker.advanceRecordEvent.mock.invocationCallOrder[waitIdx]!;
+    const outcomeOrder = t.worker.advanceRunOutcome.mock.invocationCallOrder[0]!;
+    expect(waitOrder).toBeLessThan(outcomeOrder);
+    // Nothing was recorded for the round and the sibling's pass was not merged on.
+    expect(t.worker.advanceRecordRound).not.toHaveBeenCalled();
+    expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
+  });
+
+  // A real replay: the same workflow run twice against ONE recorder that keeps the first fact per key, as the store does. One waiting fact exists afterwards, no stop,
+  // and the code reviewer that started the first time is found again by its key, not started a second time.
+  it("a replay of the parked round leaves one waiting fact, no stop, and starts the started reviewer only once", async () => {
+    const t = setup(fresh({ listRuns: true, refuseStart: new Set(["acceptance-tester"]), refuseReason: "runner_daily_limit", rounds: [{ decision: "incomplete" }] }));
+    const stored = new Map<string, { kind: string }>();
+    t.worker.advanceRecordEvent.mockImplementation(async (_who: unknown, e: { kind: string }) => {
+      const key = (e as { dedupeKey?: string }).dedupeKey ?? `${e.kind}:${stored.size}`;
+      if (stored.has(key)) return { recorded: false };
+      stored.set(key, e);
+      return { recorded: true };
+    });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "paused", detail: "review_paused:runner_daily_limit" });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "paused", detail: "review_paused:runner_daily_limit" });
+    expect([...stored.keys()].filter((k) => k.startsWith("wait:"))).toEqual([`wait:review:${H1}:0:0`]);
+    expect([...stored.values()].some((e) => e.kind === "stopped")).toBe(false);
+    expect(t.started.filter((r) => r.role === "code-reviewer")).toHaveLength(1);
   });
 
   // D#598 P7b: the recording step answers `ci_pending` (and records nothing) while the head's CI or a repo-wide guard runs; the workflow asks again every minute.

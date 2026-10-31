@@ -102,6 +102,11 @@ type SlotWakeCounts = { listed: number; started: number; failed: number; recheck
 /** Same value as RESERVATION_SWEEP_SECONDS and RESERVATION_ORPHAN_AFTER_SECONDS in @fx/pipeline (a test pins them). */
 export const STAGE_RESUME_PASS_SECONDS = 900;
 export const STAGE_RESUME_ORPHAN_AFTER_SECONDS = 600;
+/**
+ * A review parked for the runner's daily run limit (the pause code the review start answers; apps/web and @fx/pipeline's `RUNNER_DAILY_LIMIT_PAUSE` repeat it and a
+ * test holds them equal). It is resumed by the clock: once a UTC midnight has passed since the wait the workflow itself recorded. The spend headroom is not read for it.
+ */
+export const RUNNER_DAILY_LIMIT_WAIT = "runner_daily_limit";
 const LIST_LIMIT = 200;
 /** Run statuses a run cannot leave (advance.ts ADVANCE_TERMINAL_STATUSES repeats the list and a test holds the two equal). */
 export const STAGE_RESUME_TERMINAL_STATUSES: readonly string[] = STAGE_TERMINAL_STATUSES;
@@ -155,11 +160,58 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
     });
   }
 
+  /** Whether a UTC midnight has passed since the newest wait the workflow itself recorded for this stage (`wait:` keys), by the clock the sweep was given. */
+  async function runnerLimitReset(entry: ParkedStageEntryInput, accountId: string, workItemId: string): Promise<boolean> {
+    const at = await withTenant(runnerPool, accountId, async (client) => {
+      const r = await client.query<{ at: Date | null }>(
+        "SELECT max(created_at) AS at FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'stage_waiting' AND stage = $3 AND code = $4 AND dedupe_key LIKE 'wait:%'",
+        [accountId, workItemId, entry.stage, RUNNER_DAILY_LIMIT_WAIT],
+      );
+      return r.rows[0]?.at ?? null;
+    });
+    if (at === null) return false;
+    const next = Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate() + 1);
+    return next <= now();
+  }
+
   /** One waiting fact on the item (a refresh, or the claim). Deduped by `key`; answers whether this call wrote it. */
   async function fact(entry: ParkedStageEntryInput, accountId: string, workItemId: string, pause: string, attempt: number, key: string, head: Plan["head"] = null): Promise<boolean> {
     // A head-bound stage's refresh and claim carry the head, the pull request and the re-review round the wait was for, so the next pass reads the same wait.
     const onHead = head === null ? {} : { headSha: head.sha, ...(head.prNumber !== null ? { prNumber: head.prNumber } : {}), round: head.rereview };
     return withTenant(runnerPool, accountId, async (client) => (await recordDriverEvent(client, accountId, { workItemId, kind: "stage_waiting", stage: entry.stage, code: pause, attempt, dedupeKey: key, ...onHead })).recorded);
+  }
+
+  /**
+   * Whether the limit that parked an item no longer holds, counting a pass that decides "not yet" (a refresh, or a skip) in `counts`.
+   * The runner's daily limit is resumed by the clock only: before the reset the fact is refreshed (the card keeps saying so), after it the claim below starts the review.
+   * The reset is read from the wait the WORKFLOW recorded, not from this sweep's own refreshes or claims, so a claim never pushes the next resume a day out.
+   * Every spend pause is resumed by the read-only headroom check for the very reservation the restart will ask for.
+   */
+  async function mayResume(entry: ParkedStageEntryInput, c: { account_id: string; work_item_id: string; pause: string }, plan: Plan, bucket: number, counts: StageResumeCounts): Promise<boolean> {
+    if (c.pause === RUNNER_DAILY_LIMIT_WAIT) {
+      if (await runnerLimitReset(entry, c.account_id, c.work_item_id)) return true;
+      await fact(entry, c.account_id, c.work_item_id, c.pause, plan.attempt, `sweep:${plan.actionId}:${bucket}`, plan.head);
+      counts.refreshed += 1;
+      return false;
+    }
+    const seat = await deps.resolveRunSeat({ accountId: c.account_id, role: entry.role, workItemId: c.work_item_id });
+    if (!seat.ok) {
+      counts.skipped += 1;
+      log(JSON.stringify({ event: "stage_resume.skipped", stage: entry.stage, work_item_id: c.work_item_id, reason: `seat_${seat.reason}` }));
+      return false;
+    }
+    const answer = await checkHeadroom(runnerPool, { accountId: c.account_id, ...seat.seat.spend });
+    if (answer.decision !== "deny") return true;
+    const pause = entry.pauseForDenial(answer.reason);
+    if (pause === null) {
+      counts.skipped += 1;
+      log(JSON.stringify({ event: "stage_resume.skipped", stage: entry.stage, work_item_id: c.work_item_id, reason: `not_a_pause_${answer.reason}` }));
+      return false;
+    }
+    // Still denied: no run row. The fact is refreshed so the card keeps naming the limit (and the pause window, three passes, does not run out).
+    await fact(entry, c.account_id, c.work_item_id, pause, plan.attempt, `sweep:${plan.actionId}:${bucket}`, plan.head);
+    counts.refreshed += 1;
+    return false;
   }
 
   async function sweepParkedStages(entries: readonly ParkedStageEntryInput[]): Promise<StageResumeCounts & { nextDueAt: number | null }> {
@@ -193,25 +245,7 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
             continue;
           }
           const { plan } = planned;
-          const seat = await deps.resolveRunSeat({ accountId: c.account_id, role: entry.role, workItemId: c.work_item_id });
-          if (!seat.ok) {
-            counts.skipped += 1;
-            log(JSON.stringify({ event: "stage_resume.skipped", stage: entry.stage, work_item_id: c.work_item_id, reason: `seat_${seat.reason}` }));
-            continue;
-          }
-          const answer = await checkHeadroom(runnerPool, { accountId: c.account_id, ...seat.seat.spend });
-          if (answer.decision === "deny") {
-            const pause = entry.pauseForDenial(answer.reason);
-            if (pause === null) {
-              counts.skipped += 1;
-              log(JSON.stringify({ event: "stage_resume.skipped", stage: entry.stage, work_item_id: c.work_item_id, reason: `not_a_pause_${answer.reason}` }));
-              continue;
-            }
-            // Still denied: no run row. The fact is refreshed so the card keeps naming the limit (and the pause window, three passes, does not run out).
-            await fact(entry, c.account_id, c.work_item_id, pause, plan.attempt, `sweep:${plan.actionId}:${bucket}`, plan.head);
-            counts.refreshed += 1;
-            continue;
-          }
+          if (!(await mayResume(entry, c, plan, bucket, counts))) continue;
           if (deps.startAdvance === null) {
             counts.skipped += 1;
             continue;

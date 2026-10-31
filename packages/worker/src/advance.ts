@@ -38,6 +38,7 @@ import { startCheckFixRound } from "./checkFix.js";
 import { BASE_SYNCED_PROMPT_LINE, BASE_SYNCED_STAGE, FIX_BASE_EVENT, checkFixBeforeStart, hasPublicCopy, recordBaseSyncUnavailable, republishGate, syncRunBranch } from "./fixRoundBase.js";
 import { BRANCH_MOVED_STAGE, checkPrivateHead, checkPublicBranch, type FixRoundHeadPorts } from "./fixRoundHeads.js";
 import { RunActionInputError, type PerformResult } from "./runActions.js";
+import { STAGE_RESUME_PASS_SECONDS } from "./stageResume.js";
 
 /**
  * D#483 P1: the worker side of `advance_work_item`, the stage driver's run action.
@@ -2132,6 +2133,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     // D#483 S5-k1c: a start before the build that a limit denied leaves its waiting fact through here. Like the build's, a limit pause may outlast the workflow
     // that is asking (it parks after four hours), so the sweep is told there is work to look at.
     if (out.recorded && event.kind === "stage_waiting" && event.code != null && RESERVATION_PAUSE_REASONS.includes(event.code)) void markWorkPending("stage-resume-sweep", { since: Date.now() + STAGE_RESUME_FIRST_LOOK_MS });
+    // A review parked for the runner's daily limit: its workflow has already ended, so the sweep looks at the next pass, not in four hours.
+    else if (out.recorded && event.kind === "stage_waiting" && event.stage === "review" && event.code === "runner_daily_limit") void markWorkPending("stage-resume-sweep", { since: Date.now() + STAGE_RESUME_PASS_SECONDS * 1000 });
     return out;
   }
 

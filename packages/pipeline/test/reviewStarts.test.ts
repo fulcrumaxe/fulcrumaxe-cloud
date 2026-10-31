@@ -91,10 +91,10 @@ describe("S5k1d-8: the registry entries for the review and the fix round", () =>
     expect([...UNREGISTERED_STAGES]).toEqual([]);
   });
 
-  it("they park at the positions the table lists, for the spend pauses only, under the build's approval, on a head", () => {
+  it("they park at the positions the table lists, for the spend pauses (the review also for the runner's daily limit), under the build's approval, on a head", () => {
     for (const e of [review, fix]) {
       expect(e.itemStages).toEqual(WAITING_STAGE_POSITIONS[e.stage]);
-      expect([...e.pauses]).toEqual([...RESERVATION_PAUSE_REASONS]);
+      expect([...e.pauses]).toEqual(e.stage === "review" ? [...RESERVATION_PAUSE_REASONS, "runner_daily_limit"] : [...RESERVATION_PAUSE_REASONS]);
       expect(e.approval).toEqual({ kind: "advance_work_item", from: "self" });
       expect(e.needsSpec).toBe(true);
       expect(e.respec).toBe(false);
