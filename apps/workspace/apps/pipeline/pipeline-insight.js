@@ -294,6 +294,16 @@ const ITEM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 export const SPEC_REFUSED_GENERIC = "The Spec step stopped before publishing a Spec." + SPEC_REFUSED_TAIL;
 
 /**
+ * D#6: a review parked for the runner's daily run limit. The server sends the fixed sentence and the instant the limit starts again (`resets_at`, an ISO instant);
+ * the card adds that instant in the VIEWER's zone (`timeZone` undefined: the browser's own; a test passes one). A missing or malformed instant adds nothing.
+ */
+export function limitResetTail(iso, timeZone) {
+  const t = typeof iso === "string" ? new Date(iso) : null;
+  if (t === null || Number.isNaN(t.getTime())) return "";
+  return ` The limit resets at ${t.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short", ...(timeZone === undefined ? {} : { timeZone }) })}.`;
+}
+
+/**
  * The notice banner: why the pipeline stopped and wants a person. `reason` is model text, returned as plain text and drawn
  * as a text node or a <pre> only, never markup. Any other kind, or a malformed notice, draws nothing.
  */
@@ -305,6 +315,7 @@ export function noticeBanner(data) {
   if (n.kind === "needs_human") return { kind: "needs_human", title: "Needs a person. ", lead: "The build stopped without a pull request. The executor's own account: ", tail: "", reason: n.reason };
   // D#6 R4d-5b: the server sends the whole sentence (the runner protocol's copy); the card adds no words of its own around it.
   if (n.kind === "no_file_list" || n.kind === "respec_failed" || n.kind === "build_slot_wait") return { kind: n.kind, title: "", lead: "", tail: "", reason: n.reason };
+  if (n.kind === "review_limit_wait") return { kind: n.kind, title: "", lead: "", tail: limitResetTail(n.resets_at), reason: n.reason };
   // `reason` is the tracked item's id (same account, checked by the server) or empty: the link is drawn only for a well-formed id, and the sentence never carries it.
   if (n.kind === "superseded") return { kind: "superseded", title: "", lead: "", tail: "", reason: SUPERSEDED_SENTENCE, rootId: ITEM_ID.test(n.reason) ? n.reason.toLowerCase() : null };
   if (n.kind === "spec_refused") return { kind: "spec_refused", title: "Stopped before building. ", lead: "", tail: "", reason: Object.hasOwn(SPEC_REFUSED_SENTENCES, n.reason) ? SPEC_REFUSED_SENTENCES[n.reason] : SPEC_REFUSED_GENERIC };
