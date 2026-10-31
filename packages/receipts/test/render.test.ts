@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { CATALOGUE, decisionLabel } from "@fx/decisions";
@@ -201,6 +201,47 @@ describe("the price port (C22 B2)", () => {
       const src = readFileSync(`${dir}/${f}`, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
       expect(src, f).not.toMatch(/@fx\/(spend|billing|model-router|model-call)|ledger|rate_card|per_token|tokensPer/i);
     }
+  });
+});
+
+describe("the block, render and marker files import no reversal or adapter module at runtime", () => {
+  const srcDir = fileURLToPath(new URL("../src", import.meta.url));
+  const scanned = ["block.ts", "render.ts", "markers.ts"];
+  // Reversal wiring and the adapters may reach the ledger; the rendering and writing files must not reach them.
+  const isExcluded = (rel: string) => rel === "" || rel === "price" || rel === "index" || rel === "adapters" || rel.startsWith("adapters/");
+  // Static `import`/`export ... from` (type-only forms are the first group), side-effect imports, dynamic import() and require().
+  const STATIC = /\b(import|export)\s+(type\s+)?(?:[^'"`;]*?\bfrom\s*)?["']([^"'\n]+)["']/g;
+  const DYNAMIC = /\b(?:import|require)\s*\(\s*["']([^"'\n]+)["']\s*\)/g;
+  const runtimeSpecifiers = (src: string): string[] => {
+    const stripped = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    const out: string[] = [];
+    for (const m of stripped.matchAll(STATIC)) if (!m[2] && m[3] !== undefined) out.push(m[3]);
+    for (const m of stripped.matchAll(DYNAMIC)) if (m[1] !== undefined) out.push(m[1]);
+    return out;
+  };
+  // Relative specifiers resolve to a path under src; bare package names cannot reach a file in this src tree.
+  const target = (from: string, spec: string): string | null => {
+    if (!spec.startsWith(".")) return null;
+    return relative(srcDir, join(dirname(from), spec).replace(/\.(js|ts|mjs)$/, "")).split(sep).join("/");
+  };
+
+  it("the excluded files exist, so the guard is not checking nothing", () => {
+    for (const f of ["price.ts", "index.ts", "adapters"]) expect(existsSync(join(srcDir, f)), f).toBe(true);
+  });
+
+  it.each(scanned)("%s imports no excluded module at runtime", (f) => {
+    const from = join(srcDir, f);
+    const specs = runtimeSpecifiers(readFileSync(from, "utf8"));
+    const hits = specs.filter((s) => {
+      const t = target(from, s);
+      return t !== null && isExcluded(t);
+    });
+    expect(hits, f).toEqual([]);
+  });
+
+  it("the scan sees real runtime imports (the guard is not vacuous)", () => {
+    const specs = runtimeSpecifiers(readFileSync(join(srcDir, "render.ts"), "utf8"));
+    expect(specs).toContain("@fx/decisions");
   });
 });
 
