@@ -119,6 +119,8 @@ export interface Io {
   headless?: boolean;
   run?: CommandRunner;
   now?: () => number;
+  /** Test seam: what an unhandled rejection during `capture-session` does before the cookie is found (default: SIGTERM to this process). */
+  abort?: () => void;
   cwd: string;
   env: Record<string, string | undefined>;
   host: HostProbe;
