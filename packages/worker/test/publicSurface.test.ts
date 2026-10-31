@@ -141,6 +141,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "sweepRunnerQueue",
       "sweepSandboxReap",
       "sweepSetupRequestChecks",
+      "wakeMergeGate",
       "withRunnerPool",
     ]);
     // With no follower and no prompt builder given, a request is refused up front.
