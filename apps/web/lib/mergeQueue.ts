@@ -70,6 +70,8 @@ export async function tickMergeQueueRepo(deps: MergeQueueTickerDeps, target: { a
         switch (res.outcome) {
           case "merged":
           case "merge_delegated":
+          // D#694 B5: in the host's queue; the tick holds the entry settled and does not ask the gate again.
+          case "merge_enqueued":
           case "pr_not_open":
           case "head_moved":
             return { outcome: res.outcome };

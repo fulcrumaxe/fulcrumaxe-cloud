@@ -359,6 +359,10 @@ export type MergeBlockReason =
   // D#519: the merge queue's distinct stops. `merge_conflict`, `branch_behind` and `branch_protection_refused` are what the gate
   // itself answers after a refused merge (MQ1); the rest are produced by the queue and the ordered-resource check (MQ2 to MQ5).
   | "merge_queue_waiting"
+  /** D#694 B5: GitHub's merge queue state could not be read (or the read and the rules disagree): nothing was enqueued or merged; a person decides or tries again. */
+  | "merge_queue_unreadable"
+  /** D#694 B5: the base branch is behind GitHub's merge queue and the app may neither enqueue nor switch on auto-merge; a person merges. */
+  | "merge_queue_unavailable"
   | "branch_behind"
   | "merge_conflict"
   | "branch_protection_refused"
@@ -370,6 +374,8 @@ export type MergeGateResult =
   | { outcome: "merged"; headSha: string }
   /** Two planes, `runner_local`: every condition was met and the merge was handed to the customer's runner (see `MergeCallOutcome`). Nothing merged, nothing marked. */
   | { outcome: "merge_delegated"; headSha: string }
+  /** D#694 B5: the base branch is behind GitHub's merge queue and the pull request was put in it (bound to `headSha`). The merge itself is GitHub's, seen later. `entryId` and `position` are null for `via: "auto_merge"`. */
+  | { outcome: "merge_enqueued"; headSha: string; entryId: string | null; position: number | null; via: "queue" | "auto_merge" }
   | { outcome: "ready_human_merges"; headSha: string; reasons: MergeBlockReason[] }
   /** The PR is closed or already merged: nothing to gate, nothing marked
    * (a merged PR must never be labelled "ready, human merges"). */
@@ -787,6 +793,11 @@ export async function runMergeGate(deps: MergeGateDeps, input: MergeGateInput): 
   // The caller says this pull request is never merged by the cloud: stop before the one merge call below.
   if (input.mergeUnavailableReason !== undefined) return markHuman(deps, input.pr, headSha, [input.mergeUnavailableReason]);
 
+  // D#694 B5: a base branch behind GitHub's merge queue is never merged directly, even where the app could bypass the queue. An unreadable queue state stops here.
+  const queue = await readQueueMode(deps.github, input.pr, pr.baseRef);
+  if (queue === "unknown") return markHuman(deps, input.pr, headSha, ["merge_queue_unreadable"]);
+  if (queue === "queue") return enqueueIntoQueue(deps, input.pr, headSha);
+
   const outcome = await deps.github.mergePullRequest(input.pr, { sha: headSha });
   if (outcome.merged === true) {
     return { outcome: "merged", headSha };
@@ -811,6 +822,34 @@ export async function runMergeGate(deps: MergeGateDeps, input: MergeGateInput): 
   // A 409 with an unmoved head, or any refusal on a head other than the one gated, is not explained by what was read.
   if (status === 409 || after.headSha !== headSha) return markHuman(deps, input.pr, headSha, ["merge_call_refused"]);
   return markHuman(deps, input.pr, headSha, [await classifyRefusal(deps.github, input.pr, headSha, after)]);
+}
+
+/** D#694 B5: the port's answer, or `direct` when it has no queue; anything but a well-formed answer (or a throw) is `unknown`, never `direct`. */
+async function readQueueMode(github: MergeGateGitHubPort, pr: PullRequestRef, baseRef: string): Promise<MergeQueueMode["mode"]> {
+  if (github.getMergeQueueMode === undefined) return "direct";
+  try {
+    const m = await github.getMergeQueueMode(pr, baseRef);
+    return m.mode === "queue" || m.mode === "direct" ? m.mode : "unknown";
+  } catch {
+    // fx-swallow-ok: an unreadable queue state is a stop for a person (merge_queue_unreadable); nothing is enqueued or merged
+    return "unknown";
+  }
+}
+
+/** D#694 B5: the one enqueue call, bound to the gated head. A moved head is classified from a re-read, as for the direct merge. */
+async function enqueueIntoQueue(deps: MergeGateDeps, pr: PullRequestRef, headSha: string): Promise<MergeGateResult> {
+  if (deps.github.enqueuePullRequest === undefined) return markHuman(deps, pr, headSha, ["merge_queue_unavailable"]);
+  const out = await deps.github.enqueuePullRequest(pr, { expectedHeadOid: headSha });
+  if (out.enqueued) return { outcome: "merge_enqueued", headSha, entryId: out.entryId, position: out.position, via: out.via };
+  if (out.reason === "unavailable") return markHuman(deps, pr, headSha, ["merge_queue_unavailable"]);
+  const after = await deps.github.getMergeability(pr, { gatedHeadSha: headSha });
+  if (after.headSha !== headSha) {
+    if (typeof after.headSha !== "string" || !SHA_PATTERN.test(after.headSha)) return markHuman(deps, pr, headSha, ["head_sha_malformed"]);
+    await deps.requestReviews(pr, after.headSha);
+    return { outcome: "head_moved", staleHeadSha: headSha, newHeadSha: after.headSha };
+  }
+  // GitHub said the head differs and a re-read says it does not: not explained by what was read.
+  return markHuman(deps, pr, headSha, ["merge_call_refused"]);
 }
 
 /**
