@@ -5,6 +5,7 @@ import { nextAskDueAt } from "@fx/db/src/decisionAsks.js";
 import { sweepAskWithdrawals } from "./askWithdrawSweep.js";
 import { notifyAsks, type NotifyAsksDeps } from "@fx/notify";
 import { reconcileResumes } from "./resumeDecision.js";
+import { runReversalCompensations, type ReversalCompensateDeps } from "./reversalCompensate.js";
 
 /**
  * ASK-WIRE-1: the ask half of the invariant sweep's tick, on the RECEIPT pool. The order matters: withdrawals first, then asks whose answer window
@@ -12,7 +13,7 @@ import { reconcileResumes } from "./resumeDecision.js";
  * proceeded in this tick waited for the next one (30 to 60 minutes when the cron is idle). Last, the soonest window still ahead is read so the
  * cron can store it as its next marker. Never throws; counts and fixed lines only.
  */
-export async function runAskWindowTick(deps: { pool: Pool; warn: (line: string) => void; clock?: SweepClock; afterReceipt?: AfterReceiptHook; notify?: Pick<NotifyAsksDeps, "env" | "makeTransport" | "windowSeconds" | "sendBoundMs"> }): Promise<{ nextAskDueAt: number | null }> {
+export async function runAskWindowTick(deps: { pool: Pool; warn: (line: string) => void; clock?: SweepClock; afterReceipt?: AfterReceiptHook; notify?: Pick<NotifyAsksDeps, "env" | "makeTransport" | "windowSeconds" | "sendBoundMs">; reversals?: Omit<ReversalCompensateDeps, "pool" | "warn"> }): Promise<{ nextAskDueAt: number | null }> {
   const clock = deps.clock ?? SWEEP_REAL_CLOCK;
   await sweepAskWithdrawals({ pool: deps.pool, warn: deps.warn });
   // D#7 DP12a-2: counts only, no ids or text.
@@ -26,6 +27,8 @@ export async function runAskWindowTick(deps: { pool: Pool; warn: (line: string) 
     deps.warn(JSON.stringify({ event: "notify.failed", code: "error" }));
   }
   await reconcileResumes({ pool: deps.pool, warn: deps.warn });
+  // D#7 DP7-2d: the reversals waiting to be carried out (and failed ones retried, up to the cap). Off until the web app supplies the GitHub openers; never throws.
+  if (deps.reversals) await runReversalCompensations({ pool: deps.pool, warn: deps.warn, ...deps.reversals });
 
   let next: number | null = null;
   try {

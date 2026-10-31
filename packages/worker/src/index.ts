@@ -45,3 +45,4 @@ export type { FixGateStepInput, FixGateStepOut } from "./fixGateStep.js";
 export type { AdvanceFacade, AdvanceStartArgs, AdvanceTriageInput, AdvanceTriageResult, AdvanceRunRequest, AdvanceRunStart, AdvanceRunOutcome, AdvanceItem, AdvanceProposal, AdvancePrSource, AdvanceStepPorts, AdvanceStepResult, AdvanceStepWho, AdvanceReviewContext, AdvanceReviewLoad, AdvanceReviewDeps, AdvanceRoundInput, AdvanceRoundResult, AdvanceMergeOnlyInput, AdvanceMergeOnlyResult, AdvanceVerdictInput, AdvanceFixRequest, AdvanceMergeGateResult, AdvanceMergeOrderResult } from "./advance.js";
 export type { PrStateOpen, PrStateHttp, PrSlotSweepCounts } from "./prSlotReconcile.js";
 export type { PrCloseOpen, PrCloseHttp } from "./privatePrClose.js";
+export type { ReversalGitOpeners } from "./reversalCompensate.js";
