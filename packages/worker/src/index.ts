@@ -37,6 +37,7 @@ export { createGithubRepoVisibility, type RepoReadHttp } from "@fx/runner";
 export { runnerLimitsFor } from "@fx/spend";
 export { createVercelKeepAlive } from "./keepAlive.js";
 export type { ParkedStageEntryInput, StageResumeCounts } from "./stageResume.js";
+export type { GateWake } from "./gateReask.js";
 // D#7 DP4b-2: the one fixed word the decision step answers with.
 export type { DecisionStepCode } from "./decisionIntake.js";
 export type { OpenReceiptBlockHttp, ReceiptBlockCode, ReceiptBlockOutcome } from "./receiptBlock.js";
