@@ -1,18 +1,23 @@
 import { GH_OWNER_LOGIN_RE } from "./eventMapper.js";
 
 /**
- * D#694 B5a: the three GraphQL documents the hosted `merge_gate` client may send, and the shape check for each one's variables.
+ * D#694 B5a and B6-1: the five GraphQL documents the hosted `merge_gate` client may send, and the shape check for each one's variables.
  *
  * Threat model: a compromised or buggy caller of the hosted merge client tries to send an arbitrary GraphQL document with the
  * installation's write token. So the client (installationHttp.ts) lets `POST /graphql` through only when the `query` is `===` one of
  * these literal strings (no trimming, no parsing) and the variables pass that document's check below, with no extra keys.
- * Changing a document is a visible edit: the snapshot test pins all three.
+ * Changing a document is a visible edit: the snapshot test pins all five.
  */
 export const MERGE_QUEUE_READ_DOCUMENT = "query($owner: String!, $name: String!, $branch: String!) { repository(owner: $owner, name: $name) { mergeQueue(branch: $branch) { id } } }";
 export const ENQUEUE_PULL_REQUEST_DOCUMENT =
   "mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!) { enqueuePullRequest(input: { pullRequestId: $pullRequestId, expectedHeadOid: $expectedHeadOid }) { mergeQueueEntry { id position } } }";
 export const ENABLE_AUTO_MERGE_DOCUMENT =
   "mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!, $mergeMethod: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId, expectedHeadOid: $expectedHeadOid, mergeMethod: $mergeMethod }) { pullRequest { id } } }";
+/** D#694 B6-1: take one pull request out of the merge queue (`DequeuePullRequestInput.id` is the pull request's node id). Nothing calls it yet. */
+export const DEQUEUE_PULL_REQUEST_DOCUMENT = "mutation($pullRequestId: ID!) { dequeuePullRequest(input: { id: $pullRequestId }) { mergeQueueEntry { id } } }";
+/** D#694 B6-1: one pull request's state and its queue entry (null when it is not queued), read by number inside the pinned repository. */
+export const MERGE_QUEUE_ENTRY_DOCUMENT =
+  "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { state merged headRefOid mergeQueueEntry { id state position } } } }";
 
 /** The largest request body the allowance accepts, measured on the JSON the client would send. */
 export const MERGE_GATE_GRAPHQL_MAX_BYTES = 4096;
@@ -33,6 +38,8 @@ const keysAre = (v: Record<string, unknown>, keys: string): boolean => {
 const CHECKS: ReadonlyMap<string, (v: Record<string, unknown>) => boolean> = new Map([
   [MERGE_QUEUE_READ_DOCUMENT, (v) => keysAre(v, "branch,name,owner") && str(v["owner"], GH_OWNER_LOGIN_RE) && str(v["name"], NAME_RE) && typeof v["branch"] === "string" && v["branch"].length >= 1 && v["branch"].length <= 255 && !CONTROL_RE.test(v["branch"])],
   [ENQUEUE_PULL_REQUEST_DOCUMENT, (v) => keysAre(v, "expectedHeadOid,pullRequestId") && str(v["pullRequestId"], NODE_ID_RE) && str(v["expectedHeadOid"], OID_RE)],
+  [DEQUEUE_PULL_REQUEST_DOCUMENT, (v) => keysAre(v, "pullRequestId") && str(v["pullRequestId"], NODE_ID_RE)],
+  [MERGE_QUEUE_ENTRY_DOCUMENT, (v) => keysAre(v, "name,number,owner") && str(v["owner"], GH_OWNER_LOGIN_RE) && str(v["name"], NAME_RE) && typeof v["number"] === "number" && Number.isSafeInteger(v["number"]) && v["number"] >= 1],
   [ENABLE_AUTO_MERGE_DOCUMENT, (v) => keysAre(v, "expectedHeadOid,mergeMethod,pullRequestId") && str(v["pullRequestId"], NODE_ID_RE) && str(v["expectedHeadOid"], OID_RE) && v["mergeMethod"] === "SQUASH"],
 ]);
 
@@ -56,7 +63,7 @@ export function pinnedMergeGateBody(body: unknown, repo: { owner: string; name: 
   const variables = copy["variables"];
   if (typeof query !== "string" || !isRecord(variables)) return undefined;
   const check = CHECKS.get(query);
-  // The queue read names the repository: it must be the one this client is pinned to.
-  if (query === MERGE_QUEUE_READ_DOCUMENT && (variables["owner"] !== repo.owner || variables["name"] !== repo.name)) return undefined;
+  // The queue reads name the repository: it must be the one this client is pinned to.
+  if ((query === MERGE_QUEUE_READ_DOCUMENT || query === MERGE_QUEUE_ENTRY_DOCUMENT) && (variables["owner"] !== repo.owner || variables["name"] !== repo.name)) return undefined;
   return check !== undefined && check(variables) ? copy : undefined;
 }

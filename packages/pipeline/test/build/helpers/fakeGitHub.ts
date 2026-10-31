@@ -1,6 +1,7 @@
 import type {
   BranchComparison,
   CiSnapshot,
+  DequeueOutcome,
   EnqueueOutcome,
   MergeBlockReason,
   MergeCallOutcome,
@@ -8,6 +9,7 @@ import type {
   MergeQueueMode,
   PullRequestMergeability,
   PullRequestState,
+  QueueEntryReading,
   UpdateBranchOutcome,
 } from "../../../src/build/mergeGate.js";
 import type { PullRequestRef } from "../../../src/build/types.js";
@@ -52,6 +54,10 @@ export interface FakeGitHubOptions {
   queueMode?: MergeQueueMode["mode"] | "throw";
   /** What the enqueue call answers (default: accepted, entry `MQE_kwDOtest1`, position 1). May move the head (a push racing the call). */
   enqueue?: EnqueueOutcome | ((fake: FakeGitHub, args: { expectedHeadOid: string }) => EnqueueOutcome);
+  /** D#694 B6-1: what the dequeue call answers (default: the entry `MQE_kwDOtest1` removed). Present with `queueMode`; absent otherwise. */
+  dequeue?: DequeueOutcome;
+  /** D#694 B6-1: what the queue-entry read answers (default: open, queued at position 1 on the PR's own head). A function reads the fake's CURRENT head. */
+  queueEntry?: QueueEntryReading | ((fake: FakeGitHub) => QueueEntryReading);
 }
 
 export class FakeGitHub implements MergeGateGitHubPort {
@@ -62,8 +68,12 @@ export class FakeGitHub implements MergeGateGitHubPort {
   readonly updateCalls: { expectedHeadSha: string }[] = [];
   readonly queueModeCalls: string[] = [];
   readonly enqueueCalls: { expectedHeadOid: string }[] = [];
+  readonly dequeueCalls: number[] = [];
+  readonly entryReads: number[] = [];
   getMergeQueueMode?: (pr: PullRequestRef, baseRef: string) => Promise<MergeQueueMode>;
   enqueuePullRequest?: (pr: PullRequestRef, args: { expectedHeadOid: string }) => Promise<EnqueueOutcome>;
+  dequeuePullRequest?: (pr: PullRequestRef) => Promise<DequeueOutcome>;
+  getQueueEntry?: (pr: PullRequestRef) => Promise<QueueEntryReading>;
   mergeability: Pick<PullRequestMergeability, "mergeable" | "mergeableState">;
   private readonly opts: FakeGitHubOptions;
 
@@ -82,6 +92,16 @@ export class FakeGitHub implements MergeGateGitHubPort {
         this.enqueueCalls.push({ expectedHeadOid: args.expectedHeadOid });
         const e = opts.enqueue ?? { enqueued: true as const, via: "queue" as const, entryId: "MQE_kwDOtest1", position: 1 };
         return typeof e === "function" ? e(this, args) : e;
+      };
+      this.dequeuePullRequest = async (pr) => {
+        this.dequeueCalls.push(pr.prNumber);
+        return opts.dequeue ?? { dequeued: true, entryId: "MQE_kwDOtest1" };
+      };
+      this.getQueueEntry = async (pr) => {
+        this.entryReads.push(pr.prNumber);
+        const e = opts.queueEntry;
+        if (typeof e === "function") return e(this);
+        return e ?? { state: this.pr.state, merged: this.pr.merged, headSha: this.pr.headSha, entry: { id: "MQE_kwDOtest1", state: "queued", position: 1 } };
       };
     }
   }
