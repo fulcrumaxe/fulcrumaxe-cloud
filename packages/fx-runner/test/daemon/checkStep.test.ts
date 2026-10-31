@@ -194,6 +194,41 @@ describe("the failed test files the summary names", () => {
   });
 });
 
+describe("the failed test files as a list for done (protocol 13)", () => {
+  it("names at most 20, repo-relative, and counts the rest; a path over 200 characters, an absolute one and a credential shape are not named", () => {
+    const found = createFailedFiles("/w/space");
+    for (let i = 0; i < 25; i += 1) found.line(` FAIL  packages/p/test/file-${String(i)}.test.ts > t`);
+    found.line(` FAIL  /w/space/pkg/in-workspace.test.ts > x`);
+    found.line(` FAIL  ${"d/".repeat(110)}long.test.ts > x`);
+    const { files, more } = found.list();
+    expect(files).toHaveLength(20);
+    expect(files[0]).toBe("packages/p/test/file-0.test.ts");
+    expect(files).not.toContain(`${"d/".repeat(110)}long.test.ts`);
+    expect(more).toBe(27 - 20);
+  });
+
+  it("a name that holds a credential shape is never listed (the cloud's reader accepts such a name, so this is the only defence) and is counted in the rest", () => {
+    // Built at run time from short repeats that match the runner's patterns (redact.ts), so no long random-looking literal sits in the source.
+    const ghp = `ghp_${"a1".repeat(18)}`;
+    const ant = `sk-ant-api03-${"ab".repeat(8)}`;
+    const aws = `AKIA${"1A".repeat(8)}`;
+    const found = createFailedFiles("/w/space");
+    found.line(" FAIL  pkg/ok.test.ts > t");
+    for (const secret of [ghp, ant, aws]) found.line(` FAIL  pkg/${secret}/leak.test.ts > t`);
+    const { files, more } = found.list();
+    expect(files).toEqual(["pkg/ok.test.ts"]);
+    expect(more).toBe(3);
+  });
+
+  it("a failing check sends them in the body; a passing check, and a failure that printed no test file, send none", async () => {
+    const failed = await run([script("names-fail.sh", `echo ' FAIL  apps/ops/test/scan.test.ts > a'\necho ' FAIL  apps/ops/test/scan.test.ts > b'\necho ' FAIL  pkg/c.spec.ts > c'\nexit 1`)]);
+    expect(failed.body).toMatchObject({ exit_code: 1, failed_files: ["apps/ops/test/scan.test.ts", "pkg/c.spec.ts"] });
+    expect("failed_files_more" in failed.body).toBe(false);
+    expect("failed_files" in (await run([script("names-pass.sh", `echo ' FAIL  pkg/c.spec.ts > c'\nexit 0`)])).body).toBe(false);
+    expect("failed_files" in (await run([script("names-none.sh", `echo boom\nexit 1`)])).body).toBe(false);
+  });
+});
+
 describe("the files the branch changed, named in the summary's header of a failed check", () => {
   const gitCapture = (command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number) => runCapture(spawn, testLaunch(), command, args, env, timeoutMs, 1024 * 1024, 2048);
   const changedFiles = createChangedFiles(gitCapture, {});

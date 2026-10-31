@@ -5506,7 +5506,7 @@
       "get": {
         "operationId": "getRunInsight",
         "summary": "What one agent run did, what it cost and who pays",
-        "description": "Session only, member. The run's facts (model, head commit, limits now in effect for its role), its work item and PR, the agent's outcome read from its envelope (summary, verdict, findings, branch; null when it recorded none), model usage and sandbox compute shown separately with the source that pays each, the run's activity lines, and the runs it continues or that continue it. For a run on the person's runner whose job carried the repository's approved check: that check (the command as approved, a dev-shell flag, a time cap), its recorded result (exit status, duration, skipped tests, the last output as plain text) and a closed reason code when the runner could not run it safely (null when it sent none), and whether the runner had no dev shell to run it in. Model text and check output are plain text: show them as text only.",
+        "description": "Session only, member. The run's facts (model, head commit, limits now in effect for its role), its work item and PR, the agent's outcome read from its envelope (summary, verdict, findings, branch; null when it recorded none), model usage and sandbox compute shown separately with the source that pays each, the run's activity lines, and the runs it continues or that continue it. For a run on the person's runner whose job carried the repository's approved check: that check (the command as approved, a dev-shell flag, a time cap), its recorded result (exit status, duration, skipped tests, the names of the failing test files when the runner sent them (at most 20, plus a count of the rest), the last output as plain text) and a closed reason code when the runner could not run it safely (null when it sent none), and whether the runner had no dev shell to run it in. Model text and check output are plain text: show them as text only.",
         "security": [
           {
             "session": []
@@ -6181,6 +6181,18 @@
                                       "type": "null"
                                     }
                                   ]
+                                },
+                                "failed_files": {
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string"
+                                  }
+                                },
+                                "failed_files_more": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 9007199254740991
                                 }
                               },
                               "required": [

@@ -1,6 +1,6 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { CHECK_NOT_RUN_REASONS, DoneReply, DoneRetryReply, NOT_RECORDED_MEASURE, type Check, type DoneCheck, RUNNER_ELIGIBLE_ROLES, StopReply, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
@@ -8,6 +8,7 @@ import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { RUNNER_DISPATCH_BASE_KIND, readRecordedRunnerBranch, recordContextLedger } from "@fx/runner";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { CLAIM_PATH, DISPATCH_BASE_KIND, claimRun, createRunPullRequestPort, donePath, doneRun, eventsPath, heartbeatRun, HEARTBEAT_PATH, ingestEvents, toResponse, type RunnerCloudDeps } from "@fx/runner-cloud";
+import { getRunInsight } from "@fx/core/src/runs/insight.js";
 import { RunActionInputError } from "../src/index.js";
 import { createRunnerClaimFacade } from "../src/runnerClaims.js";
 import { createRunnerGitTicketFacade } from "../src/runnerGitTicket.js";
@@ -506,6 +507,31 @@ describe("runner done [pg]", () => {
       expect(await checkRows(id)).toHaveLength(1);
     });
 
+    it("every shape of malformed list is dropped whole by the finish, and a list on a passing or timed-out check is dropped too; the verdict stands", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      try {
+        const bad: Array<Partial<DoneCheck> & Record<string, unknown>> = [
+          { failed_files: ["a/../b.test.ts"] },
+          { failed_files: "a.test.ts" },
+          { failed_files: ["a.test.ts"], failed_files_more: -1 },
+          { failed_files: ["a.test.ts", "a.test.ts"] },
+          { failed_files: Array.from({ length: 21 }, (_, i) => `t/${String(i)}.test.ts`) },
+          { failed_files: ["a.test.ts"], exit_code: 0 },
+          { failed_files: ["a.test.ts"], exit_code: null, timed_out: true },
+        ];
+        for (const over of bad) {
+          const id = await pending();
+          const g = await claimed(id);
+          const verdict = failedVerdict(`fx/${id}-g${g}`);
+          expect((await facade.finishRunnerDone({ ...lease(id, g), verdict, check: { ...result(), ...over } as DoneCheck })).kind, JSON.stringify(over).slice(0, 50)).toBe("recorded");
+          expect((await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'run.check_ended'", [id])).rows[0]!.payload).not.toHaveProperty("failed_files");
+        }
+        expect(warn.mock.calls.filter(([line]) => String(line).includes("check_failed_files_dropped"))).toHaveLength(bad.length);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
     it("a check killed at its cap has no exit status and says so; one that never started records exit null, 0 ms and an empty summary", async () => {
       const killed = await pending();
       const gk = await claimed(killed);
@@ -833,6 +859,36 @@ describe("runner done [pg]", () => {
         // The repeat replays the stored verdict and writes nothing more.
         expect(await done(id, g, { check: { exit_code: 0, duration_ms: 1, timed_out: false, skipped_tests: null, summary: "" } })).toEqual(res);
         expect(await checkRow(id)).toHaveLength(1);
+      });
+
+      const checkEnded = async (id: string) => (await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'run.check_ended'", [id])).rows.map((r) => r.payload);
+
+      it("D#6 CHECK-FAILFILES-TO-CLOUD: the failing test files a runner names reach the check's end event with the count of the rest, and the card reads them back", async () => {
+        const id = await pending({ specVersion: await spec(["src/**"]), check: CHECK });
+        const g = await claimRoute(id);
+        const files = ["apps/ops/test/scan.test.ts", "packages/db/test/a.pg.test.ts"];
+        const res = await done(id, g, { check: { exit_code: 1, duration_ms: 5000, timed_out: false, skipped_tests: null, summary: "FAIL x", failed_files: files, failed_files_more: 3 } });
+        expect(DoneReply.parse(res.body).failure_reason).toBe("check_failed");
+        expect(await checkEnded(id)).toEqual([{ exit_code: 1, timed_out: false, duration_ms: 5000, failed_files: files, failed_files_more: 3 }]);
+        const insight = await getRunInsight({ pool: appPool, principal: { accountId: A.accountId, userId: A.userId } } as never, id);
+        expect(insight.check?.result).toMatchObject({ failed_files: files, failed_files_more: 3 });
+      });
+
+      it("a malformed list is dropped with the fixed log code; the event, the row and the verdict are exactly as without it", async () => {
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+        try {
+          const id = await pending({ specVersion: await spec(["src/**"]), check: CHECK });
+          const g = await claimRoute(id);
+          const res = await done(id, g, { check: { exit_code: 1, duration_ms: 5000, timed_out: false, skipped_tests: null, summary: "FAIL x", failed_files: ["/abs/a.test.ts"] } });
+          expect(res.status).toBe(200);
+          expect(DoneReply.parse(res.body)).toEqual({ continue: false, outcome: "failed", failure_reason: "check_failed", pr_number: null });
+          expect(await checkEnded(id)).toEqual([{ exit_code: 1, timed_out: false, duration_ms: 5000 }]);
+          expect(await checkRow(id)).toEqual([{ exit_code: 1, duration_ms: "5000", timed_out: false, skipped_tests: null, summary: "FAIL x" }]);
+          const logged = warn.mock.calls.map(([line]) => String(line)).filter((line) => line.includes("check_failed_files_dropped"));
+          expect(logged).toEqual([JSON.stringify({ event: "check_failed_files_dropped", run_id: id })]);
+        } finally {
+          warn.mockRestore();
+        }
       });
 
       it("no dev shell: run_ended(check_failed, check_no_dev_shell), then done with exit null, 0 ms and an empty summary: failed check_failed, the detail kept on the event", async () => {

@@ -1,5 +1,5 @@
 import type { PoolClient } from 'pg';
-import { checkNotRunReason, type CheckNotRunReason } from '@fulcrumaxe/runner-protocol';
+import { checkNotRunReason, readCheckFailedFiles, type CheckNotRunReason } from '@fulcrumaxe/runner-protocol';
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { resolveRunLimits } from '../run-limits/resolve.js';
@@ -101,7 +101,7 @@ export interface RunCheck {
   timeout_s: number;
   no_dev_shell: boolean;
   /** `reason` is the runner's closed code for a check it could not run safely (D#6 R-CHK-3d); null when it sent none (an older runner, or an ordinary pass or failure). */
-  result: { exit_code: number | null; duration_ms: number; timed_out: boolean; skipped_tests: number | null; summary: string; reason: CheckNotRunReason | null } | null;
+  result: { exit_code: number | null; duration_ms: number; timed_out: boolean; skipped_tests: number | null; summary: string; reason: CheckNotRunReason | null; /** D#6 CHECK-FAILFILES-TO-CLOUD: the failing test files the runner named (at most 20, names only) and how many more it counted; absent when it named none. */ failed_files?: string[]; failed_files_more?: number } | null;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -160,6 +160,18 @@ const costSource = (s: string): CostSource | null => (COST_SOURCES.includes(s) ?
 const isStr = (v: unknown): v is string => typeof v === 'string';
 const CHECK_SUMMARY_CHARS = 4096;
 
+/** The `run_events` kind the runner's check end is logged under (packages/worker runnerDone `CHECK_ENDED_EVENT`; a pg test reads it back through the real route). */
+const CHECK_ENDED_EVENT = 'run.check_ended';
+
+/** The failing test files the cloud recorded in the check's end event, read again through the same strict reader (the payload is a jsonb the cloud wrote, but a row is never trusted unread). */
+async function readFailedFiles(client: Pick<PoolClient, 'query'>, id: string): Promise<{ files: string[]; more: number } | null> {
+  const { rows } = await client.query<{ files: unknown; more: unknown }>(`SELECT payload->'failed_files' AS files, payload->'failed_files_more' AS more FROM run_events WHERE run_id = $1::uuid AND kind = $2::text ORDER BY seq DESC LIMIT 1`, [id, CHECK_ENDED_EVENT]);
+  const row = rows[0];
+  if (!row) return null;
+  const read = readCheckFailedFiles(row.files ?? undefined, row.more ?? undefined);
+  return read.ok ? read.value : null;
+}
+
 /** The run's check, read from facts the cloud itself recorded: the signed job's `check`, the `run_checks` row and the runner's `check_no_dev_shell` run_ended event. Null when the job carried none. */
 async function readRunCheck(client: Pick<PoolClient, 'query'>, id: string, job: unknown): Promise<RunCheck | null> {
   const j = job !== null && typeof job === 'object' && !Array.isArray(job) ? (job as Record<string, unknown>) : null;
@@ -177,12 +189,13 @@ async function readRunCheck(client: Pick<PoolClient, 'query'>, id: string, job: 
         [id, RUNNER_EVENT_KIND],
       )
     ).rowCount === 1;
+  const named = row ? await readFailedFiles(client, id) : null;
   return {
     argv: j.argv as string[],
     dev_shell: j.dev_shell,
     timeout_s: j.timeout_s as number,
     no_dev_shell: noDevShell,
-    result: row ? { exit_code: row.exit_code, duration_ms: Number(row.duration_ms), timed_out: row.timed_out, skipped_tests: row.skipped_tests, summary: row.summary, reason: row.reason === null ? null : checkNotRunReason(row.reason) } : null,
+    result: row ? { exit_code: row.exit_code, duration_ms: Number(row.duration_ms), timed_out: row.timed_out, skipped_tests: row.skipped_tests, summary: row.summary, reason: row.reason === null ? null : checkNotRunReason(row.reason), ...(named === null ? {} : { failed_files: named.files, ...(named.more === 0 ? {} : { failed_files_more: named.more }) }) } : null,
   };
 }
 

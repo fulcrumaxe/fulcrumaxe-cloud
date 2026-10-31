@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "pg";
-import { ITEM_PR_BRANCH, MAX_ENVELOPE_INPUT_BYTES, redactText, NOT_RECORDED_MEASURE, RUNNER_LEASE_SECONDS, SESSION_ID_PATTERN, contextLedgerFromWire, redactDeep, type ContextLedgerBody, type ContextSection, type DoneCheck, type StopReason, checkNotRunReason } from "@fulcrumaxe/runner-protocol";
+import { ITEM_PR_BRANCH, MAX_ENVELOPE_INPUT_BYTES, redactText, NOT_RECORDED_MEASURE, RUNNER_LEASE_SECONDS, SESSION_ID_PATTERN, contextLedgerFromWire, redactDeep, type ContextLedgerBody, type ContextSection, type DoneCheck, type StopReason, checkNotRunReason, readCheckFailedFiles, CHECK_FAILED_FILES_DROPPED } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RUNNER_RUN_BRANCH, insertRunEvent, noteRunnerActivityCap, readBoundItemBranch, recordContextLedger, writeRunStatusOn, type FailureReason } from "@fx/runner";
 import { normaliseCheck } from "@fx/runner-cloud";
@@ -192,7 +192,14 @@ async function recordRunnerCheck(client: PoolClient, input: FinishRunnerDoneInpu
     `INSERT INTO run_checks (account_id, run_id, exit_code, duration_ms, timed_out, skipped_tests, summary, reason) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
     [input.accountId, input.runId, check.exit_code, check.duration_ms, check.timed_out, check.skipped_tests, summary, check.reason === undefined ? null : checkNotRunReason(check.reason)],
   );
-  await insertRunEvent(client, input.accountId, input.runId, CHECK_ENDED_EVENT, { exit_code: check.exit_code, timed_out: check.timed_out, duration_ms: check.duration_ms });
+  // D#6 CHECK-FAILFILES-TO-CLOUD: the failing test files `normaliseCheck` kept (names only, bounded), for the card and the fix round to read back.
+  const files = readCheckFailedFiles(check.failed_files, check.failed_files_more);
+  await insertRunEvent(client, input.accountId, input.runId, CHECK_ENDED_EVENT, {
+    exit_code: check.exit_code,
+    timed_out: check.timed_out,
+    duration_ms: check.duration_ms,
+    ...(files.ok && files.value !== null ? { failed_files: files.value.files, ...(files.value.more === 0 ? {} : { failed_files_more: files.value.more }) } : {}),
+  });
 }
 
 /** Package-internal: `runnerPool` is the runner login's pool and is captured here, never exposed. */
@@ -222,6 +229,7 @@ export function createRunnerDoneFacade(runnerPool: Pool, deps: RunnerDoneDeps = 
         requireVerdict(input.verdict);
         // D#6 R-CHK-3: a check result that cannot be stored is stored in its nearest storable form and fails the check, whatever verdict came with it; it never aborts the finish below.
         const norm = input.check === undefined ? null : normaliseCheck(input.check);
+        if (norm?.failedFilesDropped === true) console.warn(JSON.stringify({ event: CHECK_FAILED_FILES_DROPPED, run_id: input.runId }));
         const forced = norm !== null && norm.outOfContract !== null && input.verdict.failureReason !== "taken_over" && input.verdict.failureReason !== "check_failed";
         const rec: FinishRunnerDoneInput = {
           ...input,

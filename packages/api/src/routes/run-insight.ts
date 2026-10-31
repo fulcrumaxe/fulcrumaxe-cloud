@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { getRunInsight } from "@fx/core/src/runs/insight.js";
 import { outsideMeterLabel, type EndReason } from "@fx/spend";
-import { CHECK_NOT_RUN_REASONS } from "@fulcrumaxe/runner-protocol";
+import { CHECK_FAILED_FILES_MAX, CHECK_NOT_RUN_REASONS } from "@fulcrumaxe/runner-protocol";
 import type { RouteEntry } from "../registry.js";
 import { runnerUsageSchema } from "./runs.js";
 import { withRunnerWords } from "./runnerLineWords.js";
@@ -83,7 +83,7 @@ export const runInsightResponseSchema = z.object({
       timeout_s: z.number().int(),
       no_dev_shell: z.boolean(),
       result: z
-        .object({ exit_code: z.number().int().nullable(), duration_ms: z.number().int(), timed_out: z.boolean(), skipped_tests: z.number().int().nullable(), summary: z.string(), reason: z.enum(CHECK_NOT_RUN_REASONS).nullable() })
+        .object({ exit_code: z.number().int().nullable(), duration_ms: z.number().int(), timed_out: z.boolean(), skipped_tests: z.number().int().nullable(), summary: z.string(), reason: z.enum(CHECK_NOT_RUN_REASONS).nullable(), failed_files: z.array(z.string()).max(CHECK_FAILED_FILES_MAX).optional(), failed_files_more: z.number().int().min(1).optional() })
         .nullable(),
     })
     .optional(),
@@ -96,7 +96,7 @@ export const runInsightRoutes: RouteEntry[] = [
     operationId: "getRunInsight",
     summary: "What one agent run did, what it cost and who pays",
     description:
-      "Session only, member. The run's facts (model, head commit, limits now in effect for its role), its work item and PR, the agent's outcome read from its envelope (summary, verdict, findings, branch; null when it recorded none), model usage and sandbox compute shown separately with the source that pays each, the run's activity lines, and the runs it continues or that continue it. For a run on the person's runner whose job carried the repository's approved check: that check (the command as approved, a dev-shell flag, a time cap), its recorded result (exit status, duration, skipped tests, the last output as plain text) and a closed reason code when the runner could not run it safely (null when it sent none), and whether the runner had no dev shell to run it in. Model text and check output are plain text: show them as text only.",
+      "Session only, member. The run's facts (model, head commit, limits now in effect for its role), its work item and PR, the agent's outcome read from its envelope (summary, verdict, findings, branch; null when it recorded none), model usage and sandbox compute shown separately with the source that pays each, the run's activity lines, and the runs it continues or that continue it. For a run on the person's runner whose job carried the repository's approved check: that check (the command as approved, a dev-shell flag, a time cap), its recorded result (exit status, duration, skipped tests, the names of the failing test files when the runner sent them (at most 20, plus a count of the rest), the last output as plain text) and a closed reason code when the runner could not run it safely (null when it sent none), and whether the runner had no dev shell to run it in. Model text and check output are plain text: show them as text only.",
     principals: ["session"],
     minRole: "member",
     idempotency: "never",

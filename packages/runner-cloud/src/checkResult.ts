@@ -1,4 +1,4 @@
-import { checkNotRunReason, CHECK_DURATION_MS_MAX, CHECK_EXIT_CODE_MAX, CHECK_SKIPPED_MAX, CHECK_SUMMARY_MAX_BYTES, type DoneCheck } from "@fulcrumaxe/runner-protocol";
+import { checkNotRunReason, readCheckFailedFiles, CHECK_DURATION_MS_MAX, CHECK_EXIT_CODE_MAX, CHECK_SKIPPED_MAX, CHECK_SUMMARY_MAX_BYTES, type DoneCheck } from "@fulcrumaxe/runner-protocol";
 
 /**
  * D#6 R-CHK-3: what a runner's check result may hold for the cloud to store it. The bounds are the ones `run_checks` (migration 0888) enforces. The protocol schema refuses most of
@@ -10,7 +10,7 @@ export const CHECK_BOUNDS = { exitCode: CHECK_EXIT_CODE_MAX, durationMs: CHECK_D
 const clampInt = (value: unknown, min: number, max: number): number => (typeof value === "number" && Number.isFinite(value) ? Math.min(max, Math.max(min, Math.trunc(value))) : min);
 const inRange = (value: unknown, min: number, max: number): boolean => typeof value === "number" && Number.isSafeInteger(value) && value >= min && value <= max;
 
-export function normaliseCheck(check: DoneCheck): { check: DoneCheck; outOfContract: string | null } {
+export function normaliseCheck(check: DoneCheck): { check: DoneCheck; outOfContract: string | null; failedFilesDropped: boolean } {
   let bad: string | null = null;
   const flag = (field: string): void => {
     bad ??= field;
@@ -51,5 +51,10 @@ export function normaliseCheck(check: DoneCheck): { check: DoneCheck; outOfContr
   }
   // D#6 R-CHK-3d: a reason is stored as one of the closed codes (any other word is `other`); free text never goes further. Absent stays absent (an older runner).
   const reason = check.reason === undefined ? {} : { reason: checkNotRunReason(check.reason) };
-  return { check: { exit_code: exit, duration_ms: duration, timed_out: check.timed_out === true, skipped_tests: skipped, summary, ...reason }, outOfContract: bad };
+  // D#6 CHECK-FAILFILES-TO-CLOUD: the failing test files are advice for the card and the fix round, never part of the verdict. A malformed list, or one on a check that did not fail, is dropped
+  // whole (the caller logs the fixed code) and nothing else about the result changes.
+  const read = readCheckFailedFiles(check.failed_files, check.failed_files_more);
+  const failedFilesDropped = !read.ok || (read.value !== null && (exit === 0 || check.timed_out === true));
+  const files = read.ok && !failedFilesDropped && read.value !== null ? { failed_files: read.value.files, ...(read.value.more === 0 ? {} : { failed_files_more: read.value.more }) } : {};
+  return { check: { exit_code: exit, duration_ms: duration, timed_out: check.timed_out === true, skipped_tests: skipped, summary, ...reason, ...files }, outOfContract: bad, failedFilesDropped };
 }

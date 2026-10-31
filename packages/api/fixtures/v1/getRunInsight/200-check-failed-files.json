@@ -1,0 +1,87 @@
+{
+  "server_time": "2026-10-03T12:00:00.000Z",
+  "run": {
+    "id": "00000000-0000-4000-8000-900000000013",
+    "role": "executor",
+    "status": "failed",
+    "runtime": "runner",
+    "execution_mode": "runner_local",
+    "model": null,
+    "head_sha": null,
+    "created_at": "2026-10-03T10:00:00.000Z",
+    "started_at": null,
+    "ended_at": "2026-10-03T10:01:00.000Z"
+  },
+  "work_item": null,
+  "pr_number": null,
+  "failure_reason": null,
+  "outcome": null,
+  "cost": {
+    "model": {
+      "usd": null,
+      "source": null,
+      "tokens_in": null,
+      "tokens_out": null
+    },
+    "compute": {
+      "usd": null,
+      "source": null
+    }
+  },
+  "lines": [
+    {
+      "at": "2026-10-03T10:00:02.000Z",
+      "text": "The approved check (pnpm run check -- a  b) failed, so this run ended without a pull request."
+    }
+  ],
+  "lines_truncated": false,
+  "limits": {
+    "max_run_minutes": 60,
+    "max_model_calls": 300,
+    "per_run_usd": 40,
+    "max_turns": 100,
+    "silence_minutes": 15,
+    "max_extensions": 2,
+    "max_resumes": 2,
+    "auto_resume": true
+  },
+  "parent": null,
+  "escalated_from": null,
+  "children": [],
+  "outside_meter": {
+    "state": "off",
+    "reason": null,
+    "added_usd": null,
+    "text": "Outside check off"
+  },
+  "runner_usage": null,
+  "runner_usage_state": "not_recorded",
+  "runner_usage_note": "This run ended without reporting how many tokens it used, so there is no cost estimate. That is not the same as $0.",
+  "runner_checked_in_at": null,
+  "check": {
+    "argv": [
+      "pnpm",
+      "run",
+      "check",
+      "--",
+      "a  b"
+    ],
+    "dev_shell": true,
+    "timeout_s": 1800,
+    "no_dev_shell": false,
+    "result": {
+      "exit_code": 1,
+      "duration_ms": 61000,
+      "timed_out": false,
+      "skipped_tests": null,
+      "summary": "failed test files (5): apps/ops/test/scan.test.ts, packages/db/test/a.pg.test.ts (and 3 more)\nFAIL x",
+      "reason": null,
+      "failed_files": [
+        "apps/ops/test/scan.test.ts",
+        "packages/db/test/a.pg.test.ts"
+      ],
+      "failed_files_more": 3
+    }
+  },
+  "wait": null
+}

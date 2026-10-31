@@ -31,7 +31,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, constants, lstatSync, mkdirSync, openSync, readFileSync, rmdirSync, rmSync, unlinkSync, writeSync, type Stats } from "node:fs";
 import path from "node:path";
-import { CHECK_SUMMARY_MAX_BYTES, redactShapes, type Check, type CheckNotRunReason, type DoneCheck } from "@fulcrumaxe/runner-protocol";
+import { CHECK_FAILED_FILE_CHARS, CHECK_FAILED_FILES_MAX, CHECK_SUMMARY_MAX_BYTES, redactShapes, type Check, type CheckNotRunReason, type DoneCheck } from "@fulcrumaxe/runner-protocol";
 import type { InstallCapture } from "./engineKit.js";
 import { GitPathError, guardConfigEnv, type GitCapture } from "./git.js";
 import { gitEnv, type CleanEnvOptions } from "../job/cleanEnv.js";
@@ -108,7 +108,7 @@ const FAILED_FILES_BYTES = 1500;
  * are printed far above it). Closed shape: only a plain relative file name (`NAMED_FILE`, the workspace prefix removed first) is ever kept, first-seen order, at most
  * `FAILED_FILES_MAX` of them; the rest are counted.
  */
-export function createFailedFiles(workspace: string): { line: (text: string) => void; summary: () => string } {
+export function createFailedFiles(workspace: string): { line: (text: string) => void; summary: () => string; list: () => { files: string[]; more: number } } {
   const seen = new Set<string>();
   let more = 0;
   return {
@@ -120,6 +120,18 @@ export function createFailedFiles(workspace: string): { line: (text: string) => 
       if (!NAMED_FILE.test(file) || seen.has(file)) return;
       if (seen.size < FAILED_FILES_MAX) seen.add(file);
       else more += 1;
+    },
+    /**
+     * D#6 CHECK-FAILFILES-TO-CLOUD: the names for `done`'s `check.failed_files`: the first 20 that are plain repo-relative paths of at most 200 characters and carry no credential shape (`normalised` refuses an
+     * option, an absolute path and `..`), and how many more were seen. 20 is what a card can list without becoming the output; the full count is still in the summary header. Names only, never output.
+     */
+    list() {
+      const files: string[] = [];
+      for (const file of seen) {
+        const name = normalised(file);
+        if (name !== undefined && name === file && name.length <= CHECK_FAILED_FILE_CHARS && redactShapes(name) === name && files.length < CHECK_FAILED_FILES_MAX) files.push(name);
+      }
+      return { files, more: seen.size + more - files.length };
     },
     /** The line for the summary's header (with its newline), or "" when no failed test file was seen. */
     summary() {
@@ -501,6 +513,9 @@ export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) =>
         changedLine = "";
       }
     }
+    // A failed check names its failing test files on `done` (protocol 13); a pass, a timeout or an abort names none, and nothing is sent when none were seen.
+    const named = out.code !== 0 && !out.timedOut && !out.aborted ? failedFiles.list() : { files: [], more: 0 };
+    const failedList = named.files.length === 0 ? {} : { failed_files: named.files, ...(named.more === 0 ? {} : { failed_files_more: named.more }) };
     const header = [
       out.code !== 0 ? failedFiles.summary() : "",
       changedLine,
@@ -514,7 +529,7 @@ export function createCheckStep(deps: CheckStepDeps): (input: CheckStepInput) =>
     const summary = `${header}${lastBytes(shown, CHECK_SUMMARY_MAX_BYTES - Buffer.byteLength(header))}`;
     // The check ran, but it touched protected paths or its files could not be given back: its result does not count, and the reason says so (a plain failing exit carries none).
     const reason: CheckNotRunReason | undefined = guard.changed.length > 0 || guard.unrestored.length > 0 ? "protected_changed" : lost.length > 0 ? "not_restored" : undefined;
-    const body: DoneCheck = { exit_code: out.timedOut || out.aborted ? null : out.code, duration_ms: Math.max(0, deps.now().getTime() - started), timed_out: out.timedOut, skipped_tests: skipped, summary: lastBytes(summary, CHECK_SUMMARY_MAX_BYTES).replace(/\u0000/g, ""), ...(reason === undefined ? {} : { reason }) };
+    const body: DoneCheck = { exit_code: out.timedOut || out.aborted ? null : out.code, duration_ms: Math.max(0, deps.now().getTime() - started), timed_out: out.timedOut, skipped_tests: skipped, summary: lastBytes(summary, CHECK_SUMMARY_MAX_BYTES).replace(/\u0000/g, ""), ...(reason === undefined ? {} : { reason }), ...failedList };
     return { passed: out.code === 0 && !out.timedOut && !out.aborted && lost.length === 0 && guard.changed.length === 0, body };
   };
 }
