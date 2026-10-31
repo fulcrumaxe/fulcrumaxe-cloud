@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { insertAgentRun, recordBuildBranch, writeRunStatus, type CancelResult, type ExecutionRun, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { RUNNER_RUN_BRANCH } from "@fulcrumaxe/runner-protocol";
+import { sandboxRunBranch } from "@fx/core/src/work-items/buildIdentity.js";
 import { SANDBOX_RERUN_BRANCH_SCHEME } from "@fx/pipeline";
 import { startBuildForItem } from "@fx/pipeline/testing/build";
 import { createPool } from "@fx/db/src/pool.js";
@@ -49,11 +50,21 @@ describe("sandbox rerun branch [pg]", { timeout: 120_000 }, () => {
   let nextNumber = 9800;
   let nextDiscussion = 980;
 
-  function module(opts: { mode?: string } = {}) {
+  function module(opts: { mode?: string; race?: boolean } = {}) {
     const started: StartAgentRunInput[] = [];
+    let raced = false;
     const starter: RunStarter = {
       async start(input) {
         started.push(input);
+        if (opts.race && !raced) {
+          // A racing replay of the same step: another caller's start wins between this caller's look for its run and its start. The winner chose its own id, so its branch is `fx/<its id>-g1`.
+          raced = true;
+          const { id: winner } = await insertAgentRun(writerPool, {
+            id: randomUUID(), accountId: input.accountId, workItemId: input.workItemId, role: "executor", runtime: "production", executionMode: "sandbox", dispatchRepoId: input.repoId, dispatchPrNumber: input.pr ?? null, idempotency: input.idempotency,
+            inCreateTransaction: async (client, runId) => void (await recordBuildBranch(client, input.accountId, runId, sandboxRunBranch(runId))),
+          });
+          await writeRunStatus(writerPool, { accountId: input.accountId, runId: winner, from: "pending", to: "running" });
+        }
         const known = await admin.query<{ run_id: string }>("SELECT run_id FROM agent_run_idempotency_keys WHERE account_id = $1 AND idempotency_key = $2", [input.accountId, input.idempotency!.key]);
         if (known.rows[0]) return { runId: known.rows[0].run_id };
         const mode = opts.mode ?? "sandbox";
@@ -209,6 +220,22 @@ describe("sandbox rerun branch [pg]", { timeout: 120_000 }, () => {
     expect(github.remove(first.out.branch)).toBe("refused");
     expect(github.refs.get(first.out.branch)).toBe("sha-run-1");
     expect(github.log).toEqual([`push ${again.out.branch}`, `FORCE push ${first.out.branch}`, `delete ${first.out.branch}`]);
+  });
+
+  it("a racing replay of one step: the loser's call returns the winner's run and the winner's branch, not the branch named after its own random id", async () => {
+    const t = await setup();
+    const m = module({ race: true });
+    const first = await build(t, module());
+    await failBuild(t, first.out.runId);
+    const again = await build(t, m);
+    const input = again.input;
+    const winnerRun = again.out.runId;
+    expect(input.runId).toBeDefined();
+    expect(winnerRun).not.toBe(input.runId); // the keyed start gave the winner's run, not the id this call chose
+    expect(again.out.branch).toBe(`fx/${winnerRun}-g1`);
+    expect(again.out.branch).not.toBe(`fx/${input.runId}-g1`);
+    expect(await recordsOf(winnerRun)).toEqual([again.out.branch]);
+    expect((await admin.query("SELECT 1 FROM agent_runs WHERE work_item_id = $1", [t.w])).rowCount).toBe(2);
   });
 
   it("a runner build names no run branch and records nothing: its branch is its own", async () => {

@@ -27,9 +27,9 @@ describe('the build identity after a sandbox re-run (SANDBOX-RERUN-BRANCH-a)', (
 
   let clock = 0;
   /** An executor run of `itemId`, newer than every run made before it. */
-  async function run(accountId: string, itemId: string, record?: { kind?: string; branch: string | ((runId: string) => string) }, role = 'executor'): Promise<string> {
+  async function run(accountId: string, itemId: string, record?: { kind?: string; branch: string | ((runId: string) => string) }, role = 'executor', runtime = 'production'): Promise<string> {
     const id = randomUUID();
-    await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, created_at) VALUES ($1, $2, $3, $4, 'production', 'succeeded', now() + make_interval(secs => $5))`, [id, accountId, itemId, role, ++clock]);
+    await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, created_at) VALUES ($1, $2, $3, $4, $6, 'succeeded', now() + make_interval(secs => $5))`, [id, accountId, itemId, role, ++clock, runtime]);
     if (record) {
       const branch = typeof record.branch === 'function' ? record.branch(id) : record.branch;
       await admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, $3, $4::jsonb)`, [accountId, id, record.kind ?? BUILD_BRANCH_KIND, JSON.stringify({ branch })]);
@@ -92,6 +92,17 @@ describe('the build identity after a sandbox re-run (SANDBOX-RERUN-BRANCH-a)', (
       for (const purpose of ['start', 'observe'] as const) expect(await branchOf(t.accountId, item, purpose)).toBe('fx/issue-77');
     });
 
+    it('mixed mode: a sandbox rebuild followed by a runner run is not on the sandbox run branch; a sandbox run after that is again', async () => {
+      const { t, item } = await top();
+      await run(t.accountId, item, { branch: 'fx/issue-77' });
+      const second = await run(t.accountId, item, { branch: (id) => sandboxRunBranch(id) });
+      for (const purpose of ['start', 'observe'] as const) expect(await branchOf(t.accountId, item, purpose)).toBe(sandboxRunBranch(second));
+      await run(t.accountId, item, undefined, 'executor', 'runner'); // the item was switched to a runner, which built next
+      for (const purpose of ['start', 'observe'] as const) expect(await branchOf(t.accountId, item, purpose)).toBe('fx/issue-77');
+      const fourth = await run(t.accountId, item, { branch: (id) => sandboxRunBranch(id) }); // switched back; this run's own record is read again
+      for (const purpose of ['start', 'observe'] as const) expect(await branchOf(t.accountId, item, purpose)).toBe(sandboxRunBranch(fourth));
+    });
+
     it('a record for the item\'s fixed name is read only for the item\'s own number', async () => {
       const { t, item } = await top(5);
       await run(t.accountId, item, { branch: 'fx/issue-77' });
@@ -125,6 +136,13 @@ describe('the build identity after a sandbox re-run (SANDBOX-RERUN-BRANCH-a)', (
       await run(f.t.accountId, f.kids.docs!, { kind: 'child.binding', branch: 'fx/41-ui' });
       expect(await branchOf(f.t.accountId, f.kids.api!, 'observe')).toBe(sandboxRunBranch(second));
       expect(await branchOf(f.t.accountId, f.kids.docs!, 'observe')).toBe('fx/41-docs');
+    });
+
+    it('mixed mode: a child whose newest executor run is a runner run ignores the earlier sandbox run branch', async () => {
+      const f = await planned();
+      await run(f.t.accountId, f.kids.api!, { branch: (id) => sandboxRunBranch(id) });
+      await run(f.t.accountId, f.kids.api!, undefined, 'executor', 'runner');
+      for (const purpose of ['start', 'observe'] as const) expect(await branchOf(f.t.accountId, f.kids.api!, purpose)).toBe('fx/41-api');
     });
 
     it('the issue number of a run-branch child is its parent\'s; an orphan whose newest record is a run branch has no number to give (child_orphaned)', async () => {

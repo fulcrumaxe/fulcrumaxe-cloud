@@ -77,6 +77,27 @@ describe("createGitPort: rerunAfterBuild closes at exactly the recorded head", (
     noBranchWrites(pf);
   });
 
+  it("SANDBOX-RERUN-BRANCH-b: an item with two sandbox runs closes by the branch its run recorded: run 2 by its run branch, run 1 by the fixed name, and never one for the other", async () => {
+    const FIXED = "fx/issue-41";
+    const world = () => [openPr({ number: 6, ref: FIXED }), openPr({ number: 7, ref: BRANCH, sha: MOVED })];
+    // Run 2's pull request is closed through run 2's branch, at run 2's head; run 1's open pull request on the fixed name is not touched.
+    const two = await setup(world(), { branch: BRANCH });
+    expect(await two.git.rerunAfterBuild({ repo: "acme/widgets", number: 7, headSha: MOVED })).toEqual({ ok: true, closed: true });
+    expect(two.pf.pulls.map((p) => `${p.number}:${p.state}`)).toEqual(["6:open", "7:closed"]);
+    expect(new URLSearchParams(two.pf.requests[0]!.query).get("head")).toBe(`acme:${BRANCH}`);
+    noBranchWrites(two.pf);
+    // The fixed name does not find run 2's pull request (it is another head), so a lookup by the item's fixed name leaves it open.
+    const fixedForTwo = await setup(world(), { branch: FIXED });
+    expect(await fixedForTwo.git.rerunAfterBuild({ repo: "acme/widgets", number: 7, headSha: MOVED })).toEqual({ ok: false, code: "not_open" });
+    expect(fixedForTwo.pf.pulls.map((p) => p.state)).toEqual(["open", "open"]);
+    // A first-run pull request is closed by the fixed name; a head that moved on run 2's branch is left.
+    const one = await setup(world(), { branch: FIXED });
+    expect(await one.git.rerunAfterBuild({ repo: "acme/widgets", number: 6, headSha: SHA })).toEqual({ ok: true, closed: true });
+    const moved = await setup(world(), { branch: BRANCH });
+    expect(await moved.git.rerunAfterBuild({ repo: "acme/widgets", number: 7, headSha: SHA })).toEqual({ ok: false, code: "stale_head" });
+    expect(moved.pf.pulls.map((p) => p.state)).toEqual(["open", "open"]);
+  });
+
   it("a head that moved is stale_head and nothing is closed", async () => {
     const { git, pf } = await setup([openPr({ sha: MOVED })]);
     expect(await git.rerunAfterBuild({ repo: "acme/widgets", number: 7, headSha: SHA })).toEqual({ ok: false, code: "stale_head" });

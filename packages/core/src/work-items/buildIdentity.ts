@@ -170,10 +170,20 @@ async function recordedBranch(client: Pick<PoolClient, "query">, accountId: stri
       ORDER BY r.created_at DESC, r.id DESC, e.seq DESC LIMIT 50`,
     [accountId, itemId, own.key === null ? [BUILD_BRANCH_KIND] : [BUILD_BRANCH_KIND, "child.binding"]],
   );
+  // Mixed mode: an item rebuilt in the sandbox and then switched to a runner has a runner run as its newest executor run. A sandbox run's branch is not where that run is, so a run-shaped record is skipped (the
+  // fixed name answers, and a runner continuation is checked against it); the fixed-name records are the same name either way.
+  const newest = (await client.query<{ runner: boolean }>(
+    "SELECT (runtime = 'runner' OR job_signed IS NOT NULL) AS runner FROM agent_runs WHERE account_id = $1 AND work_item_id = $2 AND role = 'executor' ORDER BY created_at DESC, id DESC LIMIT 1",
+    [accountId, itemId],
+  )).rows[0];
+  const newestIsRunner = newest?.runner === true;
   for (const r of rows) {
     const b = r.branch;
     if (typeof b !== "string") continue;
-    if (b === sandboxRunBranch(r.run_id)) return { branch: b, runShaped: true };
+    if (b === sandboxRunBranch(r.run_id)) {
+      if (newestIsRunner) continue;
+      return { branch: b, runShaped: true };
+    }
     if (own.key === null ? b === own.fixed : RECORDED_CHILD_BRANCH.exec(b)?.[2] === own.key) return { branch: b, runShaped: false };
   }
   return null;

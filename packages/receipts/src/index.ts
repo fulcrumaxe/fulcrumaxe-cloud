@@ -11,7 +11,7 @@ export { planReversal, NO_MERGED_PR_REASON, UNKNOWN_TYPE_REASON } from "./revers
 export type { ReversalPlan } from "./reverse.js";
 export { createLedgerPort } from "./adapters/ledger.js";
 export { createBuildStatePort } from "./adapters/buildState.js";
-export { compensate, compensationSentence, COMPENSATE_REASONS, COMPENSATION_COPY } from "./compensate.js";
+export { compensate, compensationSentence, sandboxRerunHasOwnBranch, COMPENSATE_REASONS, COMPENSATION_COPY } from "./compensate.js";
 export type { CompensateOutcome, CompensatePorts, CompensateReason, CompensateSubject } from "./compensate.js";
 export { createGitPort, readPersonManaged, PERSON_MANAGED_SQL } from "./adapters/git.js";
 export type { GitPortDeps, PullsHttp } from "./adapters/git.js";
