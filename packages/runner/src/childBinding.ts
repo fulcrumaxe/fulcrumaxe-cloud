@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { BUILD_BRANCH_KIND, sandboxRunBranch } from "@fx/core/src/work-items/buildIdentity.js";
 import { RUN_EVENTS_SEQ_LOCK_SQL, insertRunEvent, runEventsSeqLockKey } from "./runStatusWriter.js";
 
 /**
@@ -24,15 +25,27 @@ async function writeOnce(client: PoolClient, accountId: string, runId: string, k
   return true;
 }
 
-/** Records the branch a child's build run will use. A second record for the run is a no-op (`false`). */
+/**
+ * Records the branch a child's build run will use. A second record for the run is a no-op (`false`). SANDBOX-RERUN-BRANCH-a: a run-shaped branch is accepted only when it is THIS run's own
+ * (`fx/<this run's id>-g1`), so a pull request on any other run-shaped name maps to nothing.
+ */
 export async function recordChildBranch(client: PoolClient, accountId: string, runId: string, branch: string): Promise<boolean> {
-  if (!SAFE_BRANCH.test(branch)) throw new Error("recordChildBranch: not a child branch");
+  if (!SAFE_BRANCH.test(branch) && branch !== sandboxRunBranch(runId)) throw new Error("recordChildBranch: not a child branch");
   return writeOnce(client, accountId, runId, CHILD_BINDING_KIND, { branch });
+}
+
+/**
+ * SANDBOX-RERUN-BRANCH-a: the branch a sandbox executor run pushes, written once in the run's create transaction (`build.branch`, `{ branch }`): the item's fixed name, or this run's own `fx/<id>-g1`.
+ * Nothing else is recorded. A second write for the run is a no-op (`false`).
+ */
+export async function recordBuildBranch(client: PoolClient, accountId: string, runId: string, branch: string): Promise<boolean> {
+  if (branch !== sandboxRunBranch(runId) && !SAFE_BRANCH.test(branch) && !/^fx\/issue-[1-9][0-9]{0,9}$/.test(branch)) throw new Error("recordBuildBranch: not a build branch");
+  return writeOnce(client, accountId, runId, BUILD_BRANCH_KIND, { branch });
 }
 
 /** Records the pull request number of the branch a child's run recorded. Set once: a run that already has a number keeps it (`false`). */
 export async function recordChildPullRequest(client: PoolClient, accountId: string, runId: string, branch: string, prNumber: number): Promise<boolean> {
-  if (!SAFE_BRANCH.test(branch) || !Number.isSafeInteger(prNumber) || prNumber <= 0) throw new Error("recordChildPullRequest: invalid input");
+  if ((!SAFE_BRANCH.test(branch) && branch !== sandboxRunBranch(runId)) || !Number.isSafeInteger(prNumber) || prNumber <= 0) throw new Error("recordChildPullRequest: invalid input");
   return writeOnce(client, accountId, runId, CHILD_BINDING_PR_KIND, { branch, prNumber });
 }
 

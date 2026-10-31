@@ -27,6 +27,22 @@ export const branchFor = (number: number): string => `fx/issue-${number}`;
 /** The branch of a planned PR child. The key's pattern (`^[a-z0-9-]{1,32}$`, never `fix-` or `check-`) keeps it a safe ref; a run branch is `fx/<uuid>-g<n>`. */
 export const childBranchFor = (parentNumber: number, key: string): string => `fx/${parentNumber}-${key}`;
 
+/**
+ * SANDBOX-RERUN-BRANCH-a: the branch a sandbox "Build again" pushes: the run's own `agent_runs.id`, lower-case, and the generation fixed at 1 (a sandbox has no lease generation). It has the
+ * runner run shape (`RUNNER_RUN_BRANCH`), so every run-branch check already accepts it. A first build keeps the fixed name above. The only place this name is made.
+ */
+export const sandboxRunBranch = (runId: string): string => `fx/${runId.toLowerCase()}-g1`;
+
+/**
+ * The branch a build STARTED now pushes (the one place build.ts asks). A first build, and every build on a runner, is the item's fixed name (`key` is the child's planned PR key, null for a
+ * top-level item); a sandbox Build again passes the id its new run will have and gets that run's own branch. Never the newest recorded branch: that is where an earlier attempt's pull request is.
+ */
+export const startBuildBranch = (identity: Pick<BuildIdentity, "issueNumber">, key: string | null, rerunRunId: string | null): string =>
+  rerunRunId !== null ? sandboxRunBranch(rerunRunId) : key === null ? branchFor(identity.issueNumber) : childBranchFor(identity.issueNumber, key);
+
+/** The run event a sandbox executor run's create transaction writes once: `{ branch }`, the branch the run pushes (the fixed name for a first build, the run branch for a rebuild). */
+export const BUILD_BRANCH_KIND = "build.branch";
+
 export const BUILD_PURPOSES = ["start", "observe"] as const;
 export type BuildPurpose = (typeof BUILD_PURPOSES)[number];
 
@@ -142,30 +158,35 @@ const positiveInt = (value: string | null): number | null => {
 };
 
 /**
- * The branch the child's newest executor run that recorded one (`child.binding`, written by the build in the run's create transaction) used, or null. Valid only when it is exactly
- * `fx/<n>-<this child's key>`: a record that names another key is not read.
+ * The branch the item's newest executor run that recorded one used, or null (SANDBOX-RERUN-BRANCH-a). A record is read only when it is this item's own: the run branch of the run that wrote it
+ * (`fx/<that run's id>-g1`), the fixed top-level name for this item's number, or a child's `fx/<n>-<this child's key>` (also what an earlier `child.binding` holds). Anything else (another
+ * item's number, another key, a malformed uuid, another run's id) is skipped, never read. Nothing is stamped on the item; no record means the caller computes the fixed name.
  */
-async function recordedChildBranch(client: Pick<PoolClient, "query">, accountId: string, childId: string, key: string): Promise<{ branch: string; issueNumber: number } | null> {
-  const { rows } = await client.query<{ branch: string | null }>(
-    `SELECT e.payload ->> 'branch' AS branch
-       FROM agent_runs r JOIN run_events e ON e.account_id = r.account_id AND e.run_id = r.id AND e.kind = 'child.binding'
+async function recordedBranch(client: Pick<PoolClient, "query">, accountId: string, itemId: string, own: { fixed: string | null; key: string | null }): Promise<{ branch: string; runShaped: boolean } | null> {
+  const { rows } = await client.query<{ run_id: string; branch: string | null }>(
+    `SELECT r.id AS run_id, e.payload ->> 'branch' AS branch
+       FROM agent_runs r JOIN run_events e ON e.account_id = r.account_id AND e.run_id = r.id AND e.kind = ANY ($3::text[])
       WHERE r.account_id = $1 AND r.work_item_id = $2 AND r.role = 'executor'
-      ORDER BY r.created_at DESC, r.id DESC, e.seq DESC LIMIT 1`,
-    [accountId, childId],
+      ORDER BY r.created_at DESC, r.id DESC, e.seq DESC LIMIT 50`,
+    [accountId, itemId, own.key === null ? [BUILD_BRANCH_KIND] : [BUILD_BRANCH_KIND, "child.binding"]],
   );
-  const branch = rows[0]?.branch;
-  if (typeof branch !== "string") return null;
-  const m = RECORDED_CHILD_BRANCH.exec(branch);
-  if (m === null || m[2] !== key) return null;
-  const issueNumber = positiveInt(m[1]!);
-  return issueNumber === null ? null : { branch, issueNumber };
+  for (const r of rows) {
+    const b = r.branch;
+    if (typeof b !== "string") continue;
+    if (b === sandboxRunBranch(r.run_id)) return { branch: b, runShaped: true };
+    if (own.key === null ? b === own.fixed : RECORDED_CHILD_BRANCH.exec(b)?.[2] === own.key) return { branch: b, runShaped: false };
+  }
+  return null;
 }
 
 /**
  * The identity of one work item. `client` must be under the item's tenant (`withTenant`). For a child with `purpose: "start"` it takes the child's launch lock (see `childBuildBlocker`),
  * so call it in a short transaction of its own, not inside a long one.
+ *
+ * `out.fixed` (optional) is set to the item's fixed branch name (`fx/issue-<n>`, or the child's), whatever the newest run recorded: a reader that pairs EACH run with its own branch (the branch
+ * cleanup) needs the name of the runs that have no record. It is not part of the identity.
  */
-export async function resolveBuildIdentity(client: Pick<PoolClient, "query">, accountId: string, workItemId: string, purpose: BuildPurpose): Promise<BuildIdentityResult> {
+export async function resolveBuildIdentity(client: Pick<PoolClient, "query">, accountId: string, workItemId: string, purpose: BuildPurpose, out?: { fixed?: string }): Promise<BuildIdentityResult> {
   const found = await client.query<ItemRow>(
     `SELECT w.planned_pr_key, w.gh_number::text AS gh_number, w.parent_id, p.id IS NOT NULL AS parent_found, p.gh_number::text AS parent_number, w.planned_pr_spec_version_id AS pinned,
             (SELECT a.spec_version_id FROM work_item_approvals a WHERE a.account_id = w.account_id AND a.work_item_id = w.id ORDER BY a.created_at DESC, a.id DESC LIMIT 1) AS approved
@@ -179,7 +200,9 @@ export async function resolveBuildIdentity(client: Pick<PoolClient, "query">, ac
   if (row.planned_pr_key === null) {
     const n = positiveInt(row.gh_number);
     if (n === null) return { ok: false, reason: "no_issue_link", isChild: false };
-    return { ok: true, identity: { issueNumber: n, branch: branchFor(n), specVersionId: row.approved, isChild: false } };
+    if (out) out.fixed = branchFor(n);
+    const rec = await recordedBranch(client, accountId, workItemId, { fixed: branchFor(n), key: null });
+    return { ok: true, identity: { issueNumber: n, branch: rec?.branch ?? branchFor(n), specVersionId: row.approved, isChild: false } };
   }
 
   const key = row.planned_pr_key;
@@ -189,14 +212,19 @@ export async function resolveBuildIdentity(client: Pick<PoolClient, "query">, ac
     const n = positiveInt(row.parent_number);
     if (n === null) return { ok: false, reason: "no_issue_link", isChild: true };
     if (row.pinned === null) return { ok: false, reason: "key_not_in_approved_spec", isChild: true };
-    return { ok: true, identity: { issueNumber: n, branch: childBranchFor(n, key), specVersionId: row.pinned, isChild: true } };
+    // A start pushes to the pull request already open: the newest run branch if a rebuild made one, else the fixed name computed from the live parent.
+    if (out) out.fixed = childBranchFor(n, key);
+    const rec = await recordedBranch(client, accountId, workItemId, { fixed: null, key });
+    return { ok: true, identity: { issueNumber: n, branch: rec?.runShaped ? rec.branch : childBranchFor(n, key), specVersionId: row.pinned, isChild: true } };
   }
 
   // observe: no launch checks. What was recorded wins; the live parent is the fallback.
-  const recorded = await recordedChildBranch(client, accountId, workItemId, key);
-  if (recorded !== null) return { ok: true, identity: { issueNumber: recorded.issueNumber, branch: recorded.branch, specVersionId: row.pinned, isChild: true } };
-  if (row.parent_id === null || !row.parent_found) return { ok: false, reason: "child_orphaned", isChild: true };
-  const n = positiveInt(row.parent_number);
-  if (n === null) return { ok: false, reason: "no_issue_link", isChild: true };
-  return { ok: true, identity: { issueNumber: n, branch: childBranchFor(n, key), specVersionId: row.pinned, isChild: true } };
+  const recorded = await recordedBranch(client, accountId, workItemId, { fixed: null, key });
+  const live = row.parent_id === null || !row.parent_found ? null : positiveInt(row.parent_number);
+  const fromRecord = recorded !== null && !recorded.runShaped ? positiveInt(RECORDED_CHILD_BRANCH.exec(recorded.branch)![1]!) : null;
+  if (out) out.fixed = live !== null ? childBranchFor(live, key) : recorded !== null && !recorded.runShaped ? recorded.branch : undefined;
+  if (recorded !== null && (fromRecord !== null || live !== null)) return { ok: true, identity: { issueNumber: (fromRecord ?? live)!, branch: recorded.branch, specVersionId: row.pinned, isChild: true } };
+  if (row.parent_id === null || !row.parent_found || recorded !== null) return { ok: false, reason: "child_orphaned", isChild: true };
+  if (live === null) return { ok: false, reason: "no_issue_link", isChild: true };
+  return { ok: true, identity: { issueNumber: live, branch: childBranchFor(live, key), specVersionId: row.pinned, isChild: true } };
 }

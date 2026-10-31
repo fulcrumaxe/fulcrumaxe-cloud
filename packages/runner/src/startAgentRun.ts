@@ -145,6 +145,8 @@ export interface StartAgentRunInput {
   /** D#2 H17c-2b (R-ATOMIC): handed to `insertAgentRun`; runs inside the create
    * transaction, right after the run row exists. See `InsertAgentRunParams`. */
   inCreateTransaction?: InsertAgentRunParams["inCreateTransaction"];
+  /** SANDBOX-RERUN-BRANCH-a: the run's id, when the caller needs it before the run exists (a sandbox rebuild's branch is named from it, and its prompt is built first). Absent: a fresh `randomUUID()`. */
+  runId?: string;
   /** D#31 API-6b-2: platform-only start facts kept with the run's `run.input` row; see `InsertAgentRunParams.startMeta`. */
   startMeta?: InsertAgentRunParams["startMeta"];
   /**
@@ -432,7 +434,7 @@ export async function startAgentRun(
   // to reconstruct later via a `work_items`/`repos` join that can go
   // stale (a deleted repo, a `gh_number` edited after dispatch) -- see
   // 0605_execution_mode.sql's header and cancelRun.ts.
-  const runId = randomUUID();
+  const runId = input.runId ?? randomUUID();
   const { id } = await insertAgentRun(pool, {
     id: runId,
     accountId: input.accountId,

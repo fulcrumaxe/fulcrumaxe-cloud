@@ -83,7 +83,7 @@ describe("decision snapshot at spawn [pg]", { timeout: 120_000 }, () => {
         const mode = opts.mode ?? "sandbox";
         const hook = input.inCreateTransaction;
         const { id } = await insertAgentRun(writerPool, {
-          id: randomUUID(),
+          id: input.runId ?? randomUUID(), // the platform starter honours the id the build step chose (SANDBOX-RERUN-BRANCH-a)
           accountId: input.accountId,
           workItemId: input.workItemId,
           ...(input.specVersionId ? { specVersionId: input.specVersionId } : {}),

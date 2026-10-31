@@ -1,3 +1,4 @@
+import { sandboxRunBranch } from "@fx/core/src/work-items/buildIdentity.js";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { Pool, PoolClient } from "pg";
@@ -179,6 +180,37 @@ describe("stale pull-request slot reconcile [pg]", { timeout: 60_000 }, () => {
     gh.calls.length = 0;
     expect(await sweepPrSlotHolders({ pool: writerPool, openClient: open })).toEqual({ listed: 0, moved: 0, unchanged: 0, failed: 0 });
     expect(gh.calls).toEqual([]);
+  });
+
+  /** SANDBOX-RERUN-BRANCH-a: the holder was built twice in the sandbox: run 1 on the fixed name, run 2 on its own run branch (each run recorded its branch). Returns run 2's branch. */
+  async function builtTwice(a: SeedRefs, holder: { id: string; number: number }): Promise<string> {
+    let second = "";
+    for (const [i, branch] of [(_id: string) => `fx/issue-${holder.number}`, (id: string) => sandboxRunBranch(id)].entries()) {
+      const id = randomUUID();
+      await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, created_at) VALUES ($1, $2, $3, 'executor', 'production', 'succeeded', now() + make_interval(secs => $4))", [id, a.accountId, holder.id, i + 1]);
+      await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'build.branch', $3::jsonb)", [a.accountId, id, JSON.stringify({ branch: branch(id) })]);
+      second = branch(id);
+    }
+    return second;
+  }
+
+  it("SANDBOX-RERUN-BRANCH-a criterion 6: a holder built twice is reconciled against run 2's branch: run 1's closed pull request on the fixed name does not free the slot while run 2's is open", async () => {
+    const holder = await item(A, "pr_opened");
+    const runBranch = await builtTwice(A, holder);
+    gh.pulls.push({ repo: "acme/widgets", number: 3, branch: `fx/issue-${holder.number}`, state: "closed", merged_at: null, closed_at: "2026-10-05T00:00:00Z" });
+    gh.pulls.push({ repo: "acme/widgets", number: 4, branch: runBranch, state: "open", merged_at: null, closed_at: null });
+    expect(await reconcileHolder(writerPool, open, A.accountId, holder.id)).toBe("open");
+    expect(await stageOf(holder.id)).toBe("pr_opened");
+    expect(gh.calls).toEqual([`GET /repos/acme/widgets/pulls?state=all&head=acme%3A${encodeURIComponent(runBranch)}&per_page=30`]);
+  });
+
+  it("SANDBOX-RERUN-BRANCH-a criterion 6: when run 2's pull request is the one closed, the holder moves on it, by the run branch", async () => {
+    const holder = await item(A, "pr_opened");
+    const runBranch = await builtTwice(A, holder);
+    gh.pulls.push({ repo: "acme/widgets", number: 4, branch: runBranch, state: "closed", merged_at: null, closed_at: "2026-10-10T09:00:00Z" });
+    expect(await reconcileHolder(writerPool, open, A.accountId, holder.id)).not.toBe("open");
+    expect(await stageOf(holder.id)).toBe("closed_unmerged");
+    expect((await movesOf(holder.id)).map((m) => m.source_ref)).toEqual(["pr_reconcile:4"]);
   });
 
   it("an open pull request leaves the holder where it is, the waiter keeps waiting, and the holder is read at most once in the window", async () => {

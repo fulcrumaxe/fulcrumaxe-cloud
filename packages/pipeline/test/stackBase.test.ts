@@ -75,9 +75,10 @@ describe("the executor prompt for a stacked child", () => {
     expect(p).not.toContain("BASE=$(git rev-parse --abbrev-ref HEAD)");
   });
 
-  it("a rebuild of a stacked child replaces its earlier branch from the parent's branch, not from the default branch", () => {
+  it("a rebuild of a stacked child creates its own fresh branch from the parent's branch, not from the default branch, and forces nothing", () => {
     const p = buildExecutorPrompt({ ...base, rebuild: true, stackBase: { branch: "fx/issue-41", sha: HEAD } });
-    expect(p).toContain('git checkout -B fx/issue-42 "origin/$BASE"');
+    expect(p).toContain('git checkout -b fx/issue-42 "origin/$BASE"');
+    expect(p).not.toMatch(/checkout -B|--force/);
     expect(p).not.toContain("Start from the default branch");
   });
 

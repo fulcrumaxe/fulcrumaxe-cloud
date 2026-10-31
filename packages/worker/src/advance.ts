@@ -15,7 +15,7 @@ import { setupHoldFor } from "@fx/core/src/setup-requests/store.js";
 import { markCorrectionApplied } from "@fx/core/src/corrections/index.js";
 import { ITEM_PR_BRANCH, JobMemorySchema, type JobMemory } from "@fulcrumaxe/runner-protocol";
 import { attachRunNotes, correctionReasonCode, listRunNoteIds, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
-import { cancelRun, ensureSpecAnchorRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readSandboxBoundPullRequest, recordSandboxContinuesBound, recordRunStage, insertRunEvent, recordChildPullRequestForItem, readChildBoundPullRequest, DispatchFailedError, JobIssueError, RUNNER_RUN_BRANCH, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { cancelRun, ensureSpecAnchorRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readSandboxBoundPullRequest, recordSandboxContinuesBound, recordRunStage, insertRunEvent, recordChildPullRequestForItem, readChildBoundPullRequest, recordBuildBranch, DispatchFailedError, JobIssueError, RUNNER_RUN_BRANCH, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { reportError } from "@fx/telemetry";
 import { checkFixRound, envelopeRunUsd } from "@fx/spend";
 import { checkRoundHeadroom } from "./panelHeadroom.js";
@@ -454,6 +454,10 @@ export interface AdvanceRunRequest {
   clone?: boolean;
   /** Executor runs: the number that names the sandbox. The pull request does not exist yet, so the driver passes the issue's number. */
   pr?: number;
+  /** SANDBOX-RERUN-BRANCH-a: the id the new run gets, chosen by the build step before its prompt (which names the rebuild's branch from it). A step that already has a run keeps that run's id; this one is then unused. */
+  runId?: string;
+  /** SANDBOX-RERUN-BRANCH-a: the branch a sandbox build pushes, recorded once as the run's `build.branch` event in its create transaction. Executor builds only. */
+  buildBranch?: string;
   /** Start only if no OTHER run of the item is live (a run already claimed under this step's key is always returned). The executor uses it so two approvals cannot build twice. */
   exclusive?: boolean;
   /** Reviewer runs: the pull request head the review is for. Stored on the run (`head_sha`), which is what the merge gate reads. */
@@ -1061,6 +1065,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     // D#7 DP4b-3: only an executor run has a decision snapshot, and it must be exactly the snapshot's schema (checked again when it is written).
     const snapshotOf = req.decisionSnapshot === undefined ? undefined : parseDecisionSnapshot(req.decisionSnapshot);
     if (req.decisionSnapshot !== undefined && (req.role !== "executor" || snapshotOf === null)) return { ok: false, reason: "invalid_input" };
+    if (req.runId !== undefined && !UUID_RE.test(req.runId)) return { ok: false, reason: "invalid_input" };
+    if (req.buildBranch !== undefined && (req.role !== "executor" || typeof req.buildBranch !== "string" || req.buildBranch.length > 80)) return { ok: false, reason: "invalid_input" };
     const baseKey = `advance:${req.workItemId}:${req.step}`;
     let key = baseKey;
     const found = await withTenant(runnerPool, req.accountId, async (client) => {
@@ -1129,7 +1135,16 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       // The runner clones this repository (shallow, default branch) into the workdir before the agent starts.
       ...(cloneFrom ? { workdir: PREVIEW_WORKDIR, cloneRepo: cloneFrom } : {}),
       // D#7 DP4b-3: the snapshot is written in the run's create transaction, on its client; a write that fails rolls the run back (no run, no key, no sandbox call).
-      ...(snapshotOf ? { inCreateTransaction: (client: PoolClient, runId: string) => writeDecisionSnapshot(client, runId, snapshotOf) } : {}),
+      ...(req.runId !== undefined ? { runId: req.runId } : {}),
+      ...(snapshotOf || req.buildBranch !== undefined
+        ? {
+            inCreateTransaction: async (client: PoolClient, runId: string) => {
+              if (snapshotOf) await writeDecisionSnapshot(client, runId, snapshotOf);
+              // SANDBOX-RERUN-BRANCH-a: the branch record shares the run's create transaction, so a run that has a pull request always has its record.
+              if (req.buildBranch !== undefined) await recordBuildBranch(client, req.accountId, runId, req.buildBranch);
+            },
+          }
+        : {}),
       idempotency: { key, requestHash: createHash("sha256").update(`${key}:${req.role}`).digest("hex") },
     };
     let started: Awaited<ReturnType<RunStarter["start"]>>;

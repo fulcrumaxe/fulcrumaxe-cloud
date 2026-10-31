@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import { sanitize } from "@fx/trust";
 import type { LiveSecretsSource } from "@fx/core/src/memory/index.js";
@@ -28,7 +29,7 @@ import { pinLedgerNotes, pinnedBody, pinnedLabel, splitPinsByExcludes } from "@f
 import { mapIdentityOf, recalledEntriesOf, recordRunContextInputs, recordRunItemSources, type ItemSourceRecord } from "../prompt/runContextInputs.js";
 import type { AdvanceRunPorts } from "./runPorts.js";
 import { childPromptTitle } from "./childBuild.js";
-import { childEnvelopeBlocker, resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
+import { BUILD_BRANCH_KIND, childEnvelopeBlocker, resolveBuildIdentity, startBuildBranch } from "@fx/core/src/work-items/buildIdentity.js";
 import { recordChildBranch } from "@fx/runner";
 
 /**
@@ -47,6 +48,12 @@ import { recordChildBranch } from "@fx/runner";
  * Refusals are data with a fixed reason. Nothing is spent on a refusal. The one write is the stage move, and it is made
  * only AFTER the run exists: a run that cannot be started leaves the item at `spec_ready`, where it can be approved again.
  */
+
+/**
+ * SANDBOX-RERUN-BRANCH-a: which branch rule this build path carries. Version 1: a sandbox Build again pushes `fx/<run id>-g1` (a plain push, never forced); a first build keeps the item's fixed name.
+ * The reversal's re-run reads this before it lifts its refusal to re-run a sandbox build, so it cannot run ahead of this rule. Changing it needs the rule test (`build.rerunBranch.test.ts`) to change with it.
+ */
+export const SANDBOX_RERUN_BRANCH_SCHEME = 1;
 
 /** The identity the executor commits as. */
 export const BOT_NAME = "fulcrumaxe-bot";
@@ -178,23 +185,12 @@ export function assembleExecutorPrompt(input: ExecutorPromptInput, options?: Ass
             `   Then: BASE=${paired.sha}`,
           ]
         : ["1. Note the default branch you are on: BASE=$(git rev-parse --abbrev-ref HEAD)"]),
-    stack
-      ? input.rebuild === true
-        ? `2. An earlier attempt at this issue may have left the branch ${branch}. Start from the branch you build on, not from it: git checkout -B ${branch} "origin/$BASE"`
-        : `2. Create the branch from it: git checkout -b ${branch} "origin/$BASE"`
-      : paired
-        ? input.rebuild === true
-          ? `2. An earlier attempt at this issue may have left the branch ${branch}. Start from the commit above, not from it: git checkout -B ${branch} "$BASE"`
-          : `2. Create the branch from it: git checkout -b ${branch} "$BASE"`
-      : input.rebuild === true
-        ? `2. An earlier attempt at this issue may have left the branch ${branch}. Start from the default branch, not from it: git checkout -B ${branch} "$BASE"`
-        : `2. Create the branch: git checkout -b ${branch}`,
+    // SANDBOX-RERUN-BRANCH-a: a sandbox rebuild pushes a branch named for its own run, which is new: nothing is created over an earlier attempt's branch and nothing is forced.
+    stack ? `2. Create the branch from it: git checkout -b ${branch} "origin/$BASE"` : paired ? `2. Create the branch from it: git checkout -b ${branch} "$BASE"` : `2. Create the branch: git checkout -b ${branch}`,
     "3. Implement the change with tests. Keep it small and in the project's existing style.",
     "4. Run the project's tests until they pass (see package.json or the project's own README for the command).",
     `5. Commit as the bot (add new files first): git -c user.name="${BOT_NAME}" -c user.email="${BOT_EMAIL}" commit -am "<message>"`,
-    input.rebuild === true
-      ? `6. Push, replacing the earlier attempt's branch (no pull request is open for it): git push --force origin ${branch}   (git authentication is handled for you; do not set or print any token)`
-      : `6. Push: git push origin ${branch}   (git authentication is handled for you; do not set or print any token)`,
+    `6. Push: git push origin ${branch}   (git authentication is handled for you; do not set or print any token)`,
     ...(paired
       ? ["7. Do not call the GitHub API and do not push anywhere but origin. When you finish, the platform takes your branch from there."]
       : [
@@ -447,7 +443,6 @@ export async function startBuildForItem(
   if (facts.stage !== "spec_ready" && facts.stage !== "needs_human" && facts.stage !== "in_progress" && !(isChild && facts.stage === "triaged")) return { status: "refused", reason: `stage_${facts.stage}` };
 
   const number = identity.issueNumber;
-  const branch = identity.branch;
   // The prompt is built for the item's EFFECTIVE mode (its placement, else the repository's; D#599 PL-2); the start refuses `execution_mode_changed` if that is different by then.
   const executionMode = facts.execution_mode ?? "sandbox";
   // D#6 R4d-5a (C34 section 2.1): a runner build is checked against the Spec's own file list at done, so a Spec with no readable list is refused HERE, before any
@@ -462,6 +457,11 @@ export async function startBuildForItem(
   // approval (the workflow's poll while the item is paused for a limit) is a new attempt with its own key (`:s<n>`); the first ask keeps the key it always had.
   const baseStep = attemptKey(`build:v${facts.version}:${approvalId}`, options.spendAttempt ?? 0);
   const prior = (await ports.findStep?.(baseStep)) ?? null;
+  // SANDBOX-RERUN-BRANCH-a (R1): the run's id is chosen here, before the prompt, so a Build again can name its branch after it. A replay of the step has its run already: its id and branch are read
+  // back below, and the prompt built here is not used. A first build, and a runner run, keep the fixed name.
+  const sandboxRun = promptRuntimeOf(executionMode) === "sandbox";
+  const newRunId = prior || !sandboxRun ? undefined : randomUUID();
+  const branch = startBuildBranch(identity, facts.planned_pr_key, facts.stage === "needs_human" && sandboxRun ? (newRunId ?? null) : null);
   // A replay whose earlier run was cancelled (a failed record cancels the run it just started; a person may cancel one) must not move the item to in_progress
   // pointing at that cancelled run: it is refused, and a fresh approval starts a fresh run.
   if (prior && (facts.stage === "spec_ready" || facts.stage === "needs_human") && (await ports.outcome(prior.runId)).status === "cancelled") return { status: "refused", reason: "prior_run_cancelled" };
@@ -555,7 +555,7 @@ export async function startBuildForItem(
       accountId,
       workItemId,
       async (client): Promise<BuildStartResult> => {
-        const started = await ports.startRun({ step, role: "executor", prompt, ...(offer ? { decisionSnapshot: offer.snapshot } : {}), contextSections: sections, contextAssembly, ...(spill ? { contextSpill: spill } : {}), ...(memoryAside ? { jobMemory: memoryAside } : {}), memoryTokens: memoryTokensOf(memory?.stable, memory?.item), clone: true, pr: number, exclusive: true, ...(planeBase ? { headSha: planeBase.sha } : {}), expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
+        const started = await ports.startRun({ step, role: "executor", prompt, ...(newRunId ? { runId: newRunId, buildBranch: branch } : {}), ...(offer ? { decisionSnapshot: offer.snapshot } : {}), contextSections: sections, contextAssembly, ...(spill ? { contextSpill: spill } : {}), ...(memoryAside ? { jobMemory: memoryAside } : {}), memoryTokens: memoryTokensOf(memory?.stable, memory?.item), clone: true, pr: number, exclusive: true, ...(planeBase ? { headSha: planeBase.sha } : {}), expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
         // A halt refuses the start itself (the database, not the stage): say so plainly so the workflow ends instead of retrying.
         // D#483 S5-k1: a spend denial is a named pause, not a failure: the item stays where it is and the workflow asks again.
         const pause = started.ok ? null : pauseForDenial(started.reason);
@@ -564,7 +564,9 @@ export async function startBuildForItem(
         startedRunId = started.runId;
         // D#483 S5-b2c-2 (R1): a child's sandbox build records the branch it will use ON THE RUN, in this transaction, so the webhook can map the pull request it opens to the child. Set
         // once per run (a replay finds its row). A runner run's branch is its own and its done record binds the number.
-        if (isChild && promptRuntimeOf(executionMode) === "sandbox") await recordChildBranch(client, accountId, started.runId, branch);
+        // A replay reads the branch its run recorded (a rebuild's is the run's own); a run with no record (started before this rule) is on the fixed name.
+        const pushed = !prior || !sandboxRun ? branch : ((await client.query<{ b: string | null }>("SELECT payload->>'branch' AS b FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 LIMIT 1", [accountId, started.runId, BUILD_BRANCH_KIND])).rows[0]?.b ?? branch);
+        if (isChild && promptRuntimeOf(executionMode) === "sandbox") await recordChildBranch(client, accountId, started.runId, pushed);
 
         // D#600 CX-8b: which memory entries and which map this prompt carried, for the context panel. A replay of a started step keeps the first record
         // (it built no map this time and may have recalled something else). Fails closed: a failed insert rolls the start back (D#601 C2).
@@ -583,7 +585,7 @@ export async function startBuildForItem(
         if (facts.repo_id !== null) await stampPlanePush(client, { accountId, workItemId, repoId: facts.repo_id, ...(prior ? { replay: true } : {}) });
 
         if (movesToInProgress) await recordStage(client, { workItemId, toStage: "in_progress", at: new Date(), source: "control_plane", sourceRef: `build:${started.runId}`, runId: started.runId });
-        return { status: "started", runId: started.runId, branch };
+        return { status: "started", runId: started.runId, branch: pushed };
       },
       { needsSlot: movesToInProgress },
     );

@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { listDueBranchCleanups, BRANCH_CLEANUP_LIST_LIMIT } from "@fx/db/src/branchCleanupLister.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
+import { BUILD_BRANCH_KIND, resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
 import { deleteBranchWithToken, mintBranchDeleteToken, BranchDeleteTokenError, DELETABLE_BRANCH, InstallationHttpError, type BranchDeleteDeps, type BranchDeleteOutcome, type BranchDeleteGrant, type RunnerGitTicketSigner } from "@fx/github";
 import { PLANE_PUBLISH_ROLE } from "@fx/runner";
 import { closePrivateCopy, PrCloseError, PublicPrStillOpen, type PrCloseOpen, type PrCloseOutcome, type PublicPrState } from "./privatePrClose.js";
@@ -110,14 +110,22 @@ async function readState(client: PoolClient, accountId: string, workItemId: stri
   if (gate.length === 0) return null;
   // D#483 S5-b2c-3 (R7, R10): the item's own branch is the build identity's. This reads what already happened, so it runs no launch check: an orphan whose branch was recorded is still cleaned
   // once its pull request has merged or closed, and one with no record has no item branch (only its runs' own branches are looked at). It is never the parent's `fx/issue-<n>` and never a sibling's.
-  const identity = await resolveBuildIdentity(client, accountId, workItemId, "observe");
-  const itemBranch = identity.ok ? identity.identity.branch : null;
-  const { rows } = await client.query<{ run_id: string; repo_id: string; owner: string; name: string; branch: string; sha: string; at: Date; pr: string | null; mode: string }>(
-    `SELECT r.id AS run_id, rp.id AS repo_id, rp.gh_owner AS owner, rp.gh_name AS name, $3::text AS branch, r.envelope->'publish'->>'private_head' AS sha, r.created_at AS at, NULL::text AS pr, r.execution_mode AS mode
+  // SANDBOX-RERUN-BRANCH-a: an item re-run in the sandbox has more than one branch. Each succeeded publish run is paired with the branch of the executor run it came from (the run's own recorded
+  // `build.branch`, found up its parent chain, and read only when it is that run's own branch or the fixed name) and with ITS head; a run with no record is on the fixed name.
+  const named: { fixed?: string } = {};
+  const identity = await resolveBuildIdentity(client, accountId, workItemId, "observe", named);
+  const itemBranch = identity.ok ? (named.fixed ?? null) : null;
+  const { rows } = await client.query<{ run_id: string; repo_id: string; owner: string; name: string; branch: string; sha: string; at: Date; pr: string | null; mode: string; own_run: boolean }>(
+    `SELECT COALESCE(own.owner, r.id) AS run_id, rp.id AS repo_id, rp.gh_owner AS owner, rp.gh_name AS name, COALESCE(own.b, $3::text) AS branch, r.envelope->'publish'->>'private_head' AS sha, r.created_at AS at, NULL::text AS pr, r.execution_mode AS mode,
+            starts_with(COALESCE(own.b, $3::text), 'fx/' || COALESCE(own.owner, r.id)::text || '-g') AS own_run
        FROM agent_runs r JOIN repos rp ON rp.account_id = r.account_id AND rp.id = r.dispatch_repo_id
+       LEFT JOIN LATERAL (
+         WITH RECURSIVE chain AS (SELECT r.id, r.parent_run_id, 0 AS d UNION ALL SELECT p.id, p.parent_run_id, c.d + 1 FROM chain c JOIN agent_runs p ON p.account_id = r.account_id AND p.id = c.parent_run_id AND p.work_item_id = r.work_item_id WHERE c.d < 8)
+         SELECT e.run_id AS owner, e.payload->>'branch' AS b FROM chain c JOIN run_events e ON e.account_id = r.account_id AND e.run_id = c.id AND e.kind = '${BUILD_BRANCH_KIND}'
+          WHERE e.payload->>'branch' = 'fx/' || e.run_id::text || '-g1' OR e.payload->>'branch' = $3::text ORDER BY c.d, e.seq DESC LIMIT 1) own ON true
       WHERE r.account_id = $1 AND r.work_item_id = $2 AND r.role = $4 AND r.status = 'succeeded' AND r.envelope->'publish'->>'private_head' IS NOT NULL
      UNION ALL
-     SELECT r.id, rp.id, rp.gh_owner, rp.gh_name, e.payload->>'branch', e.payload->>'headOid', e.created_at, e.payload->>'prNumber', r.execution_mode
+     SELECT r.id, rp.id, rp.gh_owner, rp.gh_name, e.payload->>'branch', e.payload->>'headOid', e.created_at, e.payload->>'prNumber', r.execution_mode, starts_with(e.payload->>'branch', 'fx/' || r.id::text || '-g')
        FROM run_events e JOIN agent_runs r ON r.account_id = e.account_id AND r.id = e.run_id JOIN repos rp ON rp.account_id = r.account_id AND rp.id = r.dispatch_repo_id
       WHERE e.account_id = $1 AND r.work_item_id = $2 AND e.kind = 'run.status_changed' AND e.payload->>'viaRunnerDone' = 'true' AND e.payload->>'headOid' IS NOT NULL
       ORDER BY 7 DESC, 1 LIMIT 200`,
@@ -148,7 +156,7 @@ async function readState(client: PoolClient, accountId: string, workItemId: stri
   for (const r of rows) {
     const key = `${r.repo_id}/${r.branch}`;
     // Only the two shapes, and a run branch only for the run that recorded it; the item branch only for this item's own number.
-    const ok = typeof r.branch === "string" && DELETABLE_BRANCH.test(r.branch) && SHA.test(String(r.sha)) && ((itemBranch !== null && r.branch === itemBranch) || r.branch.startsWith(`fx/${r.run_id}-g`));
+    const ok = typeof r.branch === "string" && DELETABLE_BRANCH.test(r.branch) && SHA.test(String(r.sha)) && ((itemBranch !== null && r.branch === itemBranch) || r.own_run);
     const pr = ok && typeof r.pr === "string" && /^[1-9][0-9]{0,9}$/.test(r.pr) && Number.isSafeInteger(Number(r.pr)) ? Number(r.pr) : null;
     const branchDone = done.has(r.branch);
     const prDone = pr === null || done.has(`pr:${pr}`);

@@ -1,3 +1,4 @@
+import { sandboxRunBranch } from "@fx/core/src/work-items/buildIdentity.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -75,6 +76,18 @@ describe("continuationStartInput [pg]", () => {
     expect(input).not.toHaveProperty("specVersionId"); // the ended run had none pinned
     // C89: a fresh session (its sandbox is gone) is told the build task with the note; the stored bytes go in unchanged.
     expect(input.fallbackPrompt).toBe(assembleSeatPrompt(BASE_PROMPT, "NOTES-OF-THE-ENDED-RUN").prompt);
+  });
+
+  it("SANDBOX-RERUN-BRANCH-a criterion 6: a continuation of run 2 on an item built twice resumes its own session on the issue number; run 2's run branch is a branch of the item, not a refusal", async () => {
+    const a = await team();
+    const first = await endedRun(a, "executor");
+    await admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 2, 'build.branch', $3::jsonb)`, [a.accountId, first, JSON.stringify({ branch: "fx/issue-7" })]);
+    const second = await endedRun(a, "executor");
+    await admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 2, 'build.branch', $3::jsonb)`, [a.accountId, second, JSON.stringify({ branch: sandboxRunBranch(second) })]);
+    const input = await continuationStartInput(deps(), a.accountId, second);
+    if ("refused" in input) throw new Error(`refused: ${input.refused}`);
+    expect(input).toMatchObject({ pr: 7, prompt: CONTINUE_PROMPT, expectedExecutionMode: "sandbox" });
+    expect(input.prompt).not.toMatch(/--force/);
   });
 
   it("carries the ended run's pinned Spec version", async () => {

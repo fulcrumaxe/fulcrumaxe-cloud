@@ -184,6 +184,40 @@ describe('a planned PR child maps from its pull request by the run\'s recorded b
     });
   });
 
+  it('SANDBOX-RERUN-BRANCH-a criterion 8: a rebuilt child maps from a run-shaped branch only when that same run recorded it; any other run-shaped name, or a fork on the recorded one, maps to nothing', async () => {
+    const f2 = await plannedFixture(admin, appUserPool, { dial: null, weeklyUsd: null });
+    const child = f2.kids['api']!;
+    await admin.query('UPDATE work_items SET gh_number = 41 WHERE id = $1', [f2.parent]);
+    const run = async (branch: (id: string) => string): Promise<{ id: string; branch: string }> => {
+      const id = randomUUID();
+      await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'production', 'running')`, [id, f2.t.accountId, child]);
+      await withTenant(appUserPool, f2.t.accountId, (c) => recordChildBranch(c, f2.t.accountId, id, branch(id)));
+      return { id, branch: branch(id) };
+    };
+    await admin.query(`UPDATE work_items SET stage = 'in_progress' WHERE id = $1`, [child]);
+    const first = await run(() => 'fx/41-api');
+    const second = await run((id) => `fx/${id}-g1`);
+    // The writer refuses a run-shaped branch that is not the run's own: another run's, another generation, a malformed uuid.
+    const write = (runId: string, branch: string) => withTenant(appUserPool, f2.t.accountId, (c) => recordChildBranch(c, f2.t.accountId, runId, branch));
+    const third = randomUUID();
+    await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'production', 'cancelled')`, [third, f2.t.accountId, child]);
+    await expect(write(third, second.branch)).rejects.toThrow(/not a child branch/);
+    await expect(write(third, `fx/${third}-g2`)).rejects.toThrow(/not a child branch/);
+    await expect(write(third, 'fx/not-a-uuid-g1')).rejects.toThrow(/not a child branch/);
+    const go = (p: GithubPullRequestPayload) => deliver(p, f2.t.accountId, f2.t.repoId);
+    // A pull request on a run-shaped name no run of the child recorded, and a fork on the recorded run branch: nothing.
+    expect(await go(pull({ action: 'opened', number: 700, ref: `fx/${randomUUID()}-g1` }))).toMatchObject({ applied: 'skipped' });
+    expect(await go(pull({ action: 'opened', number: 701, ref: second.branch, headRepoId: 77 }))).toMatchObject({ applied: 'skipped' });
+    expect(await go(pull({ action: 'opened', number: 702, ref: second.branch, association: 'NONE', login: 'stranger' }))).toMatchObject({ applied: 'skipped' });
+    expect(await stageOf(child)).toBe('in_progress');
+    expect((await bindings(second.id)).map((b) => b.kind)).toEqual(['child.binding']);
+    // The run that recorded it: its pull request maps to the child, and the number is recorded on that run, not on run 1.
+    expect(await go(pull({ action: 'opened', number: 703, ref: second.branch, body: 'Refs #41' }))).toMatchObject({ applied: 'transitioned', workItemId: child, recorded: true });
+    expect(await bindings(second.id)).toEqual([{ kind: 'child.binding', payload: { branch: second.branch } }, { kind: 'child.binding_pr', payload: { branch: second.branch, prNumber: 703 } }]);
+    expect((await bindings(first.id)).map((b) => b.kind)).toEqual(['child.binding']);
+    expect(await stageOf(child)).toBe('pr_opened');
+  });
+
   it('S5b2c2-7: the number on a binding is set once: a second record, from any writer, is a no-op and adds no row', async () => {
     const g = await plannedFixture(admin, appUserPool, { dial: null, weeklyUsd: null });
     const run = randomUUID();
