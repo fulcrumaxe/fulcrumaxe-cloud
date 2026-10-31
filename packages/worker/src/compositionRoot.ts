@@ -100,6 +100,7 @@ import { createStartGate } from "./startGateStep.js";
 import { createFixGate } from "./fixGateStep.js";
 import { createDecisionIntake } from "./decisionIntake.js";
 import { createReceiptBlockRefresher, type OpenReceiptBlockHttp } from "./receiptBlock.js";
+import type { ReversalGitOpeners } from "./reversalCompensate.js";
 import { createSeatResolver, retrySeatSourceOf, type SeatRequest, type SeatResult } from "./seat.js";
 import { createRunStarter, type RunFollower } from "./starter.js";
 import { reportError } from "@fx/telemetry";
@@ -179,6 +180,8 @@ export interface CreateWorkerOptions {
    * written and nothing else changes.
    */
   receiptBlock?: { connect: OpenReceiptBlockHttp };
+  /** D#7 DP7-2d: the GitHub clients a reversal closes a pull request or opens a revert with (apps/web/lib/github/reversalGit.ts). Absent, no reversal is carried out. */
+  reversal?: ReversalGitOpeners;
   /** D#483 P1: the stage driver's injected pieces (apps/web owns the workflow and the pipeline). Absent, `advance_work_item` is refused `advance_unavailable`. */
   advance?: Pick<AdvanceModuleDeps, "startAdvance" | "triage" | "panel" | "spec" | "build" | "buildFailed" | "buildWaitReason" | "prState" | "review" | "lightSpec" | "respec" | "amendSpec">;
 }
@@ -403,7 +406,8 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     // queued for a runner; a preview waits on its run's end and is sandbox-only, so it refuses one (D#6 C29).
     const previewStarter = options.ports.follow ? createRunStarter({ pool: pools.runnerPool, registry, follow: options.ports.follow, queued: "refuse" }) : null;
     // D#7 DP6a-WIRING: the receipt block's refresher, read on the receipt login's pool (a member of app_user, so RLS scopes every read to the tenant).
-    const afterReceipt = options.receiptBlock ? createReceiptBlockRefresher({ pool: pools.receiptPool, connect: options.receiptBlock.connect, log: (line) => console.info(line) }).hook : undefined;
+    const receiptBlock = options.receiptBlock ? createReceiptBlockRefresher({ pool: pools.receiptPool, connect: options.receiptBlock.connect, log: (line) => console.info(line) }) : undefined;
+    const afterReceipt = receiptBlock?.hook;
     const advanceStarter = options.ports.follow ? createRunStarter({ pool: pools.runnerPool, registry, follow: options.ports.follow, queued: "accept" }) : null;
     const preview = createPreviewModule(pools.runnerPool, { seats: previewSeatSourceOf(resolveRunSeat), starter: previewStarter, promptFor: options.previewPrompt ?? null, isOperatorAccount: (accountId) => operatorMode(env, accountId).active });
     const retry = createRetryModule(pools.runnerPool, registry, { seats: options.retrySeats ?? retrySeatSourceOf(resolveRunSeat), authorCheck });
@@ -475,7 +479,8 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     // D#7 DP4b-1: the ask-withdrawal sweep rides the invariant sweep's tick (the same cron, the same cross-tenant shape) on the RECEIPT pool; it never throws, so it cannot fail the invariant result.
     const runInvariantTick = async (): Promise<Awaited<ReturnType<typeof sweepInvariants>>> => {
       const result = await sweepInvariants({ pool: pools.runnerPool, report: reportError, warn: (line) => console.warn(line) });
-      const { nextAskDueAt } = await runAskWindowTick({ pool: pools.receiptPool, warn: (line) => console.warn(line), ...(afterReceipt ? { afterReceipt } : {}) });
+      const reversals = options.reversal ? { git: options.reversal, ...(receiptBlock ? { refreshBlock: receiptBlock.refresh } : {}) } : undefined;
+      const { nextAskDueAt } = await runAskWindowTick({ pool: pools.receiptPool, warn: (line) => console.warn(line), ...(afterReceipt ? { afterReceipt } : {}), ...(reversals ? { reversals } : {}) });
       await purgeAap({ pool: pools.receiptPool, ready: pools.aapReady, warn: (line) => console.warn(line) });
       return { ...result, nextAskDueAt };
     };

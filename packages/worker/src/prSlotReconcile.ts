@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { listDuePrSlotReconciles, PR_SLOT_RECONCILE_LIST_LIMIT } from "@fx/db/src/prSlotReconcileLister.js";
+import { reversalHoldsClose } from "@fx/db/src/reversalCompensation.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
 import { IllegalStageTransitionError } from "@fx/core/src/work-items/stages.js";
@@ -205,6 +206,8 @@ export async function reconcileHolder(pool: Pool, open: PrStateOpen, accountId: 
     if (typeof now === "string") return now;
     const same = now.owner.toLowerCase() === holder.owner.toLowerCase() && now.name.toLowerCase() === holder.name.toLowerCase() && now.target.branch === holder.target.branch && now.target.number === holder.target.number && (now.target.number === null || now.target.number === decidingNumber) && now.enteredAt.getTime() === holder.enteredAt.getTime();
     if (!same) return "not_held";
+    // D#7 DP7-2d: a close a reversal made is recorded by the reversal itself (eventMapper holds back the webhook the same way).
+    if (toStage === "closed_unmerged" && (await reversalHoldsClose(client, workItemId, decidingNumber))) return "not_held";
     try {
       await recordStage(client, { workItemId, toStage, at, source: "webhook", sourceRef });
     } catch (err) {

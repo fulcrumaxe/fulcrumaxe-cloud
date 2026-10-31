@@ -15,6 +15,7 @@ import { recordDriverEvent } from '@fx/core/src/work-items/driverEvents.js';
 import { IllegalStageTransitionError } from '@fx/core/src/work-items/stages.js';
 import { withTenant } from '@fx/db/src/withTenant.js';
 import { queueDiscoveries, type QueuedDiscovery } from '@fx/db/src/discoveryRuns.js';
+import { reversalHoldsClose } from '@fx/db/src/reversalCompensation.js';
 import { withPlatformOps } from '@fx/core/src/tenancy/withPlatformOps.js';
 import { syncFailureTag } from './syncFailureTag.js';
 import { installationDiscoveryRef } from './installDiscovery.js';
@@ -833,6 +834,11 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
       const child = await findChildPullRequestItem(client, ctx.accountId, ctx.repoId, ctx.repo.fullName, mapped.prNumber, mapped.headRef ?? null, { isFork: mapped.isFork, trusted: mapped.trust === 'trusted', baseIsDefault: mapped.baseIsDefault === true });
       const workItemId = child ? child : closing ? await findPullRequestItem(client, ctx.accountId, ctx.repoId, mapped.prNumber, mapped.linkedIssueNumber, { repoFullName: ctx.repo.fullName, headRef: mapped.headRef ?? null }) : await findBodyLinkedItem(client, ctx.accountId, ctx.repoId, mapped.linkedIssueNumber);
       if (!workItemId) return { applied: 'skipped', reason: unlinkedReason(mapped.linkedIssueNumber) };
+      // D#7 DP7-2d: a close a reversal made is the worker's to record (it moves the item to Needs a person and files Build again), whether this
+      // delivery lands before that move or after it. Read under the same tenant; a running row stops holding after a fixed time.
+      if (mapped.toStage === 'closed_unmerged' && !child && (await reversalHoldsClose(client, workItemId, mapped.prNumber))) {
+        return { applied: 'skipped', reason: 'pull_request.closed: closed by a reversal, which records the move itself' };
+      }
 
       let result;
       try {

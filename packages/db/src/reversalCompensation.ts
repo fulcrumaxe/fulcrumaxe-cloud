@@ -21,7 +21,12 @@ export type CompensationReason =
   | 'head_moved'
   | 'person_managed'
   | 'cap_allowed'
-  | 'tooling_error';
+  | 'tooling_error'
+  // Migration 0936: the codes the worker step (packages/worker/src/reversalCompensate.ts) also ends with.
+  | 'no_installation'
+  | 'repo_gone'
+  | 'rerun_would_overwrite_branch'
+  | 'no_person_actor';
 
 export interface InsertCompensationInput {
   reversalReceiptId: string;
@@ -89,4 +94,30 @@ export async function finishCompensation(
     outcome.runActionId ?? null,
   ]);
   return rows[0]?.ok === true;
+}
+
+/** The most ids one `listDueCompensations` call returns (migration 0936 refuses more). */
+export const COMPENSATION_DUE_LIMIT = 25;
+
+/** The ids the worker may claim now, across tenants (0936): pending rows, and rows that failed with `tooling_error` below the attempts cap. */
+export async function listDueCompensations(pool: Pick<PoolClient, 'query'>, limit: number = COMPENSATION_DUE_LIMIT): Promise<string[]> {
+  const { rows } = await pool.query<{ o_id: string }>('SELECT o_id FROM reversal_compensation_due($1::integer)', [limit]);
+  return rows.map((r) => r.o_id);
+}
+
+/** How long a `running` re-run row holds back a close from the webhook. A worker that died mid-row stops holding after this. */
+export const REVERSAL_CLOSE_HOLD_SECONDS = 600;
+
+/**
+ * True when the close of pull request `prNumber` is a reversal's own: the item has a re-run row that is running now, or that finished `done` having
+ * closed exactly this pull request. The worker moves such an item to Needs a person itself, so the webhook (and the stale pull-request sweep) must not
+ * record `closed_unmerged` for it, in whichever order the close and the move arrive. `client` is a `withTenant` client of the item's account.
+ */
+export async function reversalHoldsClose(client: Pick<PoolClient, 'query'>, workItemId: string, prNumber: number): Promise<boolean> {
+  const { rows } = await client.query<{ held: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM reversal_compensations c WHERE c.work_item_id = $1::uuid AND c.kind = 'rerun'
+       AND ((c.state = 'running' AND c.updated_at > now() - make_interval(secs => $3)) OR (c.state = 'done' AND c.pr_number = $2::integer))) AS held`,
+    [workItemId, prNumber, REVERSAL_CLOSE_HOLD_SECONDS],
+  );
+  return rows[0]?.held === true;
 }
