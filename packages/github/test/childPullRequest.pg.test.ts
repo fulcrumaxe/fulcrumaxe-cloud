@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createPool } from '@fx/db/src/pool.js';
 import { withTenant } from '@fx/db/src/withTenant.js';
 import { plannedFixture, type PlannedFixture } from '@fx/db/test/helpers/plannedChildren.js';
+import { nonChildUuid } from '@fx/db/test/helpers/branchIds.js';
 import { recordChildBranch, recordChildPullRequest } from '@fx/runner';
 import { applyMappedEvent, mapEvent, type ApplyEventCtx, type ApplyResult, type GithubPullRequestPayload } from '../src/eventMapper.js';
 import { seedAccountWithRepo, type SeedRefs } from './helpers/seed.js';
@@ -189,7 +190,7 @@ describe('a planned PR child maps from its pull request by the run\'s recorded b
     const child = f2.kids['api']!;
     await admin.query('UPDATE work_items SET gh_number = 41 WHERE id = $1', [f2.parent]);
     const run = async (branch: (id: string) => string): Promise<{ id: string; branch: string }> => {
-      const id = randomUUID();
+      const id = nonChildUuid();
       await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'production', 'running')`, [id, f2.t.accountId, child]);
       await withTenant(appUserPool, f2.t.accountId, (c) => recordChildBranch(c, f2.t.accountId, id, branch(id)));
       return { id, branch: branch(id) };
@@ -199,14 +200,14 @@ describe('a planned PR child maps from its pull request by the run\'s recorded b
     const second = await run((id) => `fx/${id}-g1`);
     // The writer refuses a run-shaped branch that is not the run's own: another run's, another generation, a malformed uuid.
     const write = (runId: string, branch: string) => withTenant(appUserPool, f2.t.accountId, (c) => recordChildBranch(c, f2.t.accountId, runId, branch));
-    const third = randomUUID();
+    const third = nonChildUuid();
     await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'production', 'cancelled')`, [third, f2.t.accountId, child]);
     await expect(write(third, second.branch)).rejects.toThrow(/not a child branch/);
     await expect(write(third, `fx/${third}-g2`)).rejects.toThrow(/not a child branch/);
     await expect(write(third, 'fx/not-a-uuid-g1')).rejects.toThrow(/not a child branch/);
     const go = (p: GithubPullRequestPayload) => deliver(p, f2.t.accountId, f2.t.repoId);
     // A pull request on a run-shaped name no run of the child recorded, and a fork on the recorded run branch: nothing.
-    expect(await go(pull({ action: 'opened', number: 700, ref: `fx/${randomUUID()}-g1` }))).toMatchObject({ applied: 'skipped' });
+    expect(await go(pull({ action: 'opened', number: 700, ref: `fx/${nonChildUuid()}-g1` }))).toMatchObject({ applied: 'skipped' });
     expect(await go(pull({ action: 'opened', number: 701, ref: second.branch, headRepoId: 77 }))).toMatchObject({ applied: 'skipped' });
     expect(await go(pull({ action: 'opened', number: 702, ref: second.branch, association: 'NONE', login: 'stranger' }))).toMatchObject({ applied: 'skipped' });
     expect(await stageOf(child)).toBe('in_progress');
@@ -249,7 +250,7 @@ describe('a planned PR child maps from its pull request by the run\'s recorded b
   it('S5b2c2-8: a runner repo\'s child records its pull request on done as for any item, and that pull request maps to the child, not the parent', async () => {
     const g = await plannedFixture(admin, appUserPool, { dial: null, weeklyUsd: null });
     const runnerChild = g.kids.ui!;
-    const runId = randomUUID();
+    const runId = nonChildUuid();
     await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'runner', 'succeeded')`, [runId, g.t.accountId, runnerChild]);
     await admin.query(`UPDATE work_items SET stage = 'pr_opened', gh_number = NULL WHERE id = $1`, [runnerChild]);
     await admin.query('UPDATE work_items SET gh_number = 41 WHERE id = $1', [g.parent]);
