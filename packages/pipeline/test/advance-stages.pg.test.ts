@@ -70,9 +70,11 @@ class World implements AdvanceRunPorts {
       if (known) return { ok: true as const, runId: known };
       const s = this.script(req);
       if (s.refuse) return { ok: false as const, reason: s.refuse };
-      const id = randomUUID();
+      // The worker honours the id the step chose (SANDBOX-RERUN-BRANCH-a) and writes the branch record in the run's create transaction.
+      const id = req.runId ?? randomUUID();
       const status = s.status ?? "succeeded";
       await h.admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, $4, 'production', $5)`, [id, this.accountId, this.workItemId, req.role, status]);
+      if (req.buildBranch) await h.admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'build.branch', $3::jsonb)`, [this.accountId, id, JSON.stringify({ branch: req.buildBranch })]);
       this.byStep.set(req.step, id);
       this.runs.set(id, { status, envelope: s.envelope === undefined ? this.defaultEnvelope(req) : s.envelope });
       if (this.afterRow) await this.afterRow();
@@ -1171,23 +1173,23 @@ describe("Build again: the same build step from needs_human", () => {
     return { ...t, firstApproval, firstRun: first.runId };
   }
 
-  it("starts a FRESH executor run under a key of its own (never the failed run), records needs_human -> in_progress once the run exists, and tells the executor to replace the earlier attempt's branch", async () => {
+  it("starts a FRESH executor run under a key of its own (never the failed run), records needs_human -> in_progress once the run exists, and gives the executor a branch of its own to create and push plainly", async () => {
     const t = await stuck();
     const approval = randomUUID();
     let stageWhenRunExisted = "";
     t.world.afterRow = async () => void (stageWhenRunExisted = await stageOf(t.workItemId));
     const out = await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, approval, t.world);
-    expect(out).toMatchObject({ status: "started", branch: "fx/issue-41" });
     const runId = (out as { runId: string }).runId;
+    expect(out).toMatchObject({ status: "started", branch: `fx/${runId}-g1` });
     expect(runId).not.toBe(t.firstRun);
     expect(stageWhenRunExisted).toBe("needs_human");
     expect(await stageOf(t.workItemId)).toBe("in_progress");
     const req = t.world.requests[0]!;
     expect(req).toMatchObject({ step: `build:v1:${approval}`, role: "executor", clone: true, pr: 41, exclusive: true });
     expect(req.step).not.toBe(`build:v1:${t.firstApproval}`);
-    expect(req.prompt).toContain('checkout -B fx/issue-41 "$BASE"');
-    expect(req.prompt).toContain("push --force origin fx/issue-41");
-    expect(req.prompt).not.toContain("checkout -b ");
+    expect(req.prompt).toContain(`git checkout -b fx/${runId}-g1`);
+    expect(req.prompt).toContain(`git push origin fx/${runId}-g1`);
+    expect(req.prompt).not.toMatch(/--force|checkout -B|earlier attempt/);
     expectOneGenuineEnvelope(req.prompt);
     const row = await h.admin.query("SELECT from_stage, to_stage, source, source_ref, run_id FROM work_item_transitions WHERE work_item_id = $1 AND to_stage = 'in_progress' ORDER BY created_at, id", [t.workItemId]);
     expect(row.rows.at(-1)).toEqual({ from_stage: "needs_human", to_stage: "in_progress", source: "control_plane", source_ref: `build:${runId}`, run_id: runId });
@@ -1333,12 +1335,13 @@ describe("buildExecutorPrompt", () => {
     expect(PROMPT).toMatch(/do not paste the Spec/);
   });
 
-  it("the first build creates the branch and pushes it plainly; Build again replaces an earlier attempt's branch and says so", () => {
+  it("the first build creates the branch and pushes it plainly; Build again does the same on the branch it is given, and forces nothing", () => {
     expect(PROMPT).toContain("checkout -b fx/issue-41");
     expect(PROMPT).not.toContain("--force");
     const again = buildExecutorPrompt({ owner: "acme", name: "widgets", number: 41, branch: "fx/issue-41", version: 3, spec: "1. Add a footer.", rebuild: true });
-    expect(again).toContain('checkout -B fx/issue-41 "$BASE"');
-    expect(again).toContain("push --force origin fx/issue-41");
+    // SANDBOX-RERUN-BRANCH-a: Build again is given a branch of its own (see build.rerunBranch.pg.test.ts), so the prompt creates it and pushes plainly.
+    expect(again).toContain("checkout -b fx/issue-41");
+    expect(again).not.toMatch(/--force|checkout -B|earlier attempt at this issue may have left/);
     expect(again).toContain("Closes #41");
     expect(again).toContain("SPEC (version 3):");
     expectOneGenuineEnvelope(again);

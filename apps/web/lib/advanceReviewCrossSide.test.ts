@@ -150,3 +150,40 @@ describe("fixDescentBody", () => {
     expect(await fixDescentBody(throwing, ctx(), HEAD, NEXT)).toEqual({ state: "unavailable" });
   });
 });
+
+/**
+ * SANDBOX-RERUN-BRANCH-a, criterion 5 (the web side): after a sandbox Build again the item's branch is run 2's `fx/<run>-g1` (the review context builder is tested against Postgres in the
+ * pipeline package). Run 1 is on `fx/issue-12` with its pull request closed; run 2's is open. The fake answers the head- and state-filtered pulls list the way GitHub does.
+ */
+describe("findPrBody after a sandbox re-run", () => {
+  const RUN2 = "fx/7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f-g1";
+  const entry = (number: number, ref: string, state: "open" | "closed") => ({ number, state, head: { sha: NEXT, ref, repo: { full_name: "acme/widgets" } }, base: { ref: "main" } });
+  const world = (pulls: Array<ReturnType<typeof entry>>) =>
+    github((r) => {
+      if (r.path === "/repos/acme/widgets/pulls") return { status: 200, body: pulls.filter((p) => p.state === (r.query?.state ?? "open") && r.query?.head === `acme:${p.head.ref}`) };
+      const one = /^\/repos\/acme\/widgets\/pulls\/(\d+)$/.exec(r.path);
+      if (one) return { status: 200, body: pulls.find((p) => p.number === Number(one[1])) ?? {} };
+      if (r.path.endsWith("/files")) return { status: 200, body: [{ filename: "a.ts", changes: 1 }] };
+      return { status: 404, body: {} };
+    });
+  const both = [entry(40, "fx/issue-12", "closed"), entry(41, RUN2, "open")];
+
+  it("with no recorded pair, run 2's pull request is found by the run branch the context names", async () => {
+    const gh = world(both);
+    expect(await findPrBody(gh.open, ctx({ branch: RUN2, prExecutionMode: "sandbox", recordedPr: null }))).toMatchObject({ ok: true, number: 41, branch: RUN2 });
+    expect(gh.calls[0]!.query).toMatchObject({ head: `acme:${RUN2}` });
+  });
+
+  it("with a bound pair (a cross-side round), the pair's pull request is followed by number and branch, and run 1's closed pull request on the fixed name is never returned", async () => {
+    const gh = world(both);
+    expect(await findPrBody(gh.open, ctx({ branch: RUN2, prExecutionMode: "sandbox", recordedPr: { number: 41, branch: RUN2, bound: true } }))).toMatchObject({ ok: true, number: 41, branch: RUN2 });
+    const stale = world(both);
+    expect(await findPrBody(stale.open, ctx({ branch: RUN2, prExecutionMode: "sandbox", recordedPr: { number: 40, branch: "fx/issue-12", bound: true } }))).toEqual({ ok: false, reason: "no_open_pr" });
+  });
+
+  it("a head list that holds only run 1's closed pull request is no_open_pr, bound pair or none", async () => {
+    const onlyFirst = world([entry(40, "fx/issue-12", "closed")]);
+    expect(await findPrBody(onlyFirst.open, ctx({ branch: RUN2, prExecutionMode: "sandbox", recordedPr: null }))).toEqual({ ok: false, reason: "no_open_pr" });
+    expect(await findPrBody(onlyFirst.open, ctx({ branch: RUN2, prExecutionMode: "sandbox", recordedPr: { number: 40, branch: "fx/issue-12", bound: true } }))).toEqual({ ok: false, reason: "no_open_pr" });
+  });
+});

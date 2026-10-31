@@ -34,6 +34,7 @@ describe("buildExecutorPrompt by runtime", () => {
   it("A2: the sandbox prompt is byte-identical to the one before this change, with or without an explicit runtime, plain and rebuild", () => {
     expect(buildExecutorPrompt(BUILD)).toBe(golden("executor-prompt.sandbox.txt"));
     expect(buildExecutorPrompt({ ...BUILD, runtime: "sandbox" })).toBe(golden("executor-prompt.sandbox.txt"));
+    // SANDBOX-RERUN-BRANCH-a: a sandbox rebuild's prompt no longer forces or replaces a branch; with the same branch it is the first build's prompt.
     expect(buildExecutorPrompt({ ...BUILD, rebuild: true })).toBe(golden("executor-prompt.sandbox-rebuild.txt"));
     expect(buildExecutorPrompt({ ...BUILD, rebuild: true, runtime: "sandbox" })).toBe(golden("executor-prompt.sandbox-rebuild.txt"));
   });

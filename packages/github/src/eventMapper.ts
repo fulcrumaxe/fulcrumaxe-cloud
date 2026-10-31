@@ -662,8 +662,11 @@ const unlinkedReason = (linkedIssueNumber: number | null): string =>
     ? 'pull_request: no Closes/Fixes/Resolves #N reference in body, and no run recorded this pull request'
     : `pull_request: no work item linked to issue #${linkedIssueNumber}`;
 
-/** A planned PR child's branch: `fx/<parent#>-<key>`. Nothing else is ever looked up as a child's. */
-const CHILD_BRANCH_RE = /^fx\/[0-9]{1,12}-[a-z0-9-]{1,32}$/;
+/**
+ * A planned PR child's branch: `fx/<parent#>-<key>`, or (SANDBOX-RERUN-BRANCH-a) a sandbox rebuild's `fx/<run id>-g1`. Nothing else is ever looked up as a child's. The run shape only gets this far: the lookups
+ * below find the child by the branch a run of it recorded itself (`child.binding`), and the writer records a run-shaped branch only as that run's own, so a run-shaped name no run of the child recorded finds no child.
+ */
+const CHILD_BRANCH_RE = /^fx\/(?:[0-9]{1,12}-[a-z0-9-]{1,32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-g1)$/;
 
 /**
  * D#483 S5-b2c-4 (R9): the planned PR child whose PUBLIC pull request this is, or null. A paired child's pull request is on the code plane: it maps only when the child's executor run holds the

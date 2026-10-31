@@ -1,3 +1,4 @@
+import { sandboxRunBranch } from "@fx/core/src/work-items/buildIdentity.js";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -98,6 +99,20 @@ describe("a planned PR child's runner plane push [pg]", { timeout: 60_000 }, () 
     expect(reply.pr.body).not.toMatch(/(?:^|[^\w])#\d/);
     expect(reply.pr.body).toContain("Part of the Acme roadmap");
     expect(reply.pr.body).not.toMatch(/(closes|fixes|resolves) #/i);
+    expect(await notices(k.run.id)).toEqual([]);
+  });
+
+  it("SANDBOX-RERUN-BRANCH-a criterion 7: the runner's plane push grant is unchanged by an earlier sandbox run on a run branch: the same answers as the first test above, the push row's public branch, one attempt row", async () => {
+    const k = await runnerChild("Part of the Acme roadmap");
+    const earlier = randomUUID();
+    await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, created_at) VALUES ($1, $2, $3, 'executor', 'production', 'failed', to_timestamp($4 / 1000.0))`, [earlier, k.f.t.accountId, k.child, T0 - 60_000]);
+    await admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'build.branch', $3::jsonb)`, [k.f.t.accountId, earlier, JSON.stringify({ branch: sandboxRunBranch(earlier) })]);
+    const res = await askToken(k.run);
+    expect(res.status).toBe(200);
+    const reply = PlanePushTokenReply.parse(res.body);
+    expect(reply.branch).toBe(k.row.branch);
+    expect(reply.pr.body).toContain("Part of the Acme roadmap");
+    expect(reply.pr.body).not.toMatch(/(?:^|[^\w])#\d/);
     expect(await notices(k.run.id)).toEqual([]);
   });
 

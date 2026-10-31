@@ -13,14 +13,17 @@ import { describe, expect, it } from 'vitest';
  *   - the child shape built by hand: a template of the form `fx/${a}-${b}`;
  *   - a call whose callee RESOLVES (through imports, aliases and re-exports) to `branchFor` or `childBranchFor` declared in work-items/buildIdentity.ts.
  *
+ * SANDBOX-RERUN-BRANCH-a adds the run shape: a template `fx/${id}-g...` (the name a sandbox Build again pushes) and a call of `sandboxRunBranch` fail in a consumer too, so the run-shaped name
+ * is made only in the resolver module. build.ts reaches it through `startBuildBranch`, which is not a builder.
+ *
  * Comments are not code and are not read. The resolver module is the only exempt file, and it is not a consumer. The shape validators of the runner protocol only match a pattern
  * and build nothing, and are not in the consumer list. The scanner itself is tested on virtual files below, so a new consumer that builds a branch fails.
  */
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const RESOLVER_SUFFIX = 'work-items/buildIdentity.ts';
-const BUILDERS = new Set(['branchFor', 'childBranchFor']);
+const BUILDERS = new Set(['branchFor', 'childBranchFor', 'sandboxRunBranch']);
 
-export interface Finding { file: string; line: number; rule: 'gh_number' | 'fx/issue-' | 'child_template' | 'builder_call'; text: string }
+export interface Finding { file: string; line: number; rule: 'gh_number' | 'fx/issue-' | 'child_template' | 'run_template' | 'builder_call'; text: string }
 
 const lineOf = (sf: ts.SourceFile, node: ts.Node): number => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
 
@@ -50,6 +53,8 @@ export function scanSourceFile(sf: ts.SourceFile, checker: ts.TypeChecker, displ
     }
     // `fx/${a}-${b}`: the head ends in the branch prefix, the one text between the two substitutions is exactly the dash.
     if (ts.isTemplateExpression(node) && node.head.text.endsWith('fx/') && node.templateSpans.length === 2 && node.templateSpans[0]!.literal.text === '-') add(node, 'child_template', node.getText(sf));
+    // `fx/${id}-g...`: the head ends in the branch prefix and the text right after the first substitution starts the generation (`-g`).
+    if (ts.isTemplateExpression(node) && node.head.text.endsWith('fx/') && node.templateSpans[0]!.literal.text.startsWith('-g')) add(node, 'run_template', node.getText(sf));
     if (ts.isCallExpression(node) && resolvesToBuilder(node.expression)) add(node, 'builder_call', node.expression.getText(sf));
     ts.forEachChild(node, visit);
   };
@@ -76,7 +81,7 @@ function virtualProgram(files: Record<string, string>): { program: ts.Program; c
 }
 
 const V = '/virtual/packages/core/src/work-items/buildIdentity.ts';
-const resolverText = 'export const branchFor = (n: number): string => `fx/issue-${n}`;\nexport const childBranchFor = (n: number, k: string): string => `fx/${n}-${k}`;\n';
+const resolverText = 'export const branchFor = (n: number): string => `fx/issue-${n}`;\nexport const childBranchFor = (n: number, k: string): string => `fx/${n}-${k}`;\nexport const sandboxRunBranch = (id: string): string => `fx/${id}-g1`;\n';
 const scanVirtual = (consumer: string, extra: Record<string, string> = {}): Finding[] => {
   const file = '/virtual/packages/worker/src/checkFix.ts';
   const { program, checker } = virtualProgram({ [V]: resolverText, [file]: consumer, ...extra });
@@ -104,8 +109,14 @@ describe('the build identity source scan (D#483 S5-b2c-3, R7)', () => {
 
     it('a hand-built child branch fails', () => {
       expect(scanVirtual('export const b = (n: number, k: string) => `fx/${n}-${k}`;\n')).toMatchObject([{ rule: 'child_template', line: 1 }]);
-      // a run branch prefix is not the child shape
-      expect(scanVirtual('export const b = (r: string, g: number) => `fx/${r}-g${g}`;\n')).toEqual([]);
+      // a run branch prefix is not the child shape (it is the run shape, below)
+      expect(scanVirtual('export const b = (r: string, g: number) => `fx/${r}-g${g}`;\n')).toMatchObject([{ rule: 'run_template', line: 1 }]);
+    });
+
+    it('SANDBOX-RERUN-BRANCH-a: a hand-built run-shaped name fails, and so does a call of sandboxRunBranch, however it is imported; a plain fx/ template does not', () => {
+      expect(scanVirtual('export const b = (id: string) => `fx/${id}-g1`;\n')).toMatchObject([{ rule: 'run_template', line: 1 }]);
+      expect(scanVirtual('import { sandboxRunBranch as mk } from "../../core/src/work-items/buildIdentity.js";\nexport const b = mk("x");\n')).toMatchObject([{ rule: 'builder_call', line: 2 }]);
+      expect(scanVirtual('export const b = (id: string) => `fx/${id}`;\nexport const c = (id: string) => `fx/${id}-p`;\n')).toEqual([]);
     });
 
     it('a call of branchFor or childBranchFor fails whatever the callee is called: the symbol is followed through imports, aliases and re-exports', () => {
@@ -185,8 +196,9 @@ describe('the build identity source scan (D#483 S5-b2c-3, R7)', () => {
       const text = readFileSync(path.join(ROOT, 'packages/core/src/work-items/buildIdentity.ts'), 'utf8');
       expect(text).toMatch(/export const branchFor =/);
       expect(text).toMatch(/export const childBranchFor =/);
+      expect(text).toMatch(/export const sandboxRunBranch =/);
       for (const f of [...CONSUMERS, 'packages/pipeline/src/advance/childBuild.ts']) {
-        expect(readFileSync(path.join(ROOT, f), 'utf8'), f).not.toMatch(/(?:const|function)\s+(?:branchFor|childBranchFor)\b/);
+        expect(readFileSync(path.join(ROOT, f), 'utf8'), f).not.toMatch(/(?:const|function)\s+(?:branchFor|childBranchFor|sandboxRunBranch)\b/);
       }
     });
   });

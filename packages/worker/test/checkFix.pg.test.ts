@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { ITEM_PR_BRANCH, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
+import { sandboxRunBranch } from "@fx/core/src/work-items/buildIdentity.js";
 import { DispatchFailedError, ExecutionModeChangedError, IdempotencyKeyTakenError, JobIssueError, RUNNER_CONTINUES_BOUND_KIND, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { maxFixRounds } from "@fx/spend";
 import type { BranchSyncOutcome } from "@fx/github";
@@ -450,6 +451,22 @@ describe("check fix round [pg]", () => {
       expect(sync).toHaveBeenCalledWith({ repo: { id: A.repoId, owner: "acme", name: "widgets" }, branch: "fx/issue-42", prNumber: 7, publicCopy: true });
       const newRun = (out as { runId: string }).runId;
       expect((await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'plane.fix_base'", [newRun])).rows.map((r) => r.payload)).toEqual([{ base_sha: B, branch: "fx/issue-42" }]);
+    });
+
+    it("SANDBOX-RERUN-BRANCH-a criterion 6: on a sandbox item built twice, the check fix round syncs and records the base on run 2's branch (the open pull request's), never the fixed name, and forces nothing", async () => {
+      await publicCopy();
+      const earlier = await ended({ reason: "check_failed", sandbox: true });
+      await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 8, 'build.branch', $3::jsonb)", [A.accountId, earlier, JSON.stringify({ branch: "fx/issue-42" })]);
+      const failed = await ended({ reason: "check_failed", sandbox: true });
+      const runBranch = sandboxRunBranch(failed);
+      await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 8, 'build.branch', $3::jsonb)", [A.accountId, failed, JSON.stringify({ branch: runBranch })]);
+      await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 9, 'plane.private_pr', $3::jsonb)", [A.accountId, failed, JSON.stringify({ outcome: "opened", pr: 7 })]);
+      const { out, sync } = await round(async () => ({ kind: "merged", sha: M, parents: [L, B], baseSha: B, baseRef: "main", stacked: false }), failed);
+      expect(out.ok).toBe(true);
+      expect(sync).toHaveBeenCalledWith({ repo: { id: A.repoId, owner: "acme", name: "widgets" }, branch: runBranch, prNumber: 7, publicCopy: true });
+      const newRun = (out as { runId: string }).runId;
+      expect((await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'plane.fix_base'", [newRun])).rows.map((r) => r.payload)).toEqual([{ base_sha: B, branch: runBranch }]);
+      expect(resumed[0]!.prompt).not.toMatch(/git push (?:-f|--force)/);
     });
 
     it("a sandbox check fix round with a public copy and no recorded private pull request is refused republish_base_missing, never started unrecorded", async () => {

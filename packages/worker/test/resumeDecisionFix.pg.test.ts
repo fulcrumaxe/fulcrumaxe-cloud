@@ -1,3 +1,4 @@
+import { sandboxRunBranch } from "@fx/core/src/work-items/buildIdentity.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -227,6 +228,25 @@ describe("a parked fix round resumes through the real fix start [pg]", { timeout
     // performing again starts nothing more
     expect(await module.performResumeDecision(actionId)).toEqual(out);
     expect(second.inputs).toHaveLength(1);
+  });
+
+  it("SANDBOX-RERUN-BRANCH-a criterion 6: resuming a parked fix round on an item built twice continues the pull request on run 2's branch (the open one), not the fixed name", async () => {
+    const a = await seedAccount(admin, randomUUID());
+    const w = await parkedFixRound(a);
+    // Run 1 (older) was on the fixed name; the build that opened the pull request is run 2, on its own run branch. Both recorded it when they started.
+    const older = randomUUID();
+    await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, created_at) VALUES ($1, $2, $3, 'executor', 'production', 'failed', now() - interval '1 hour')", [older, a.accountId, w.id]);
+    await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'build.branch', $3::jsonb)", [a.accountId, older, JSON.stringify({ branch: `fx/issue-${w.ghNumber}` })]);
+    const runBranch = sandboxRunBranch(w.buildId);
+    await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 90, 'build.branch', $3::jsonb)", [a.accountId, w.buildId, JSON.stringify({ branch: runBranch })]);
+    await answer(a, w.askId, "split");
+    const sent: Array<{ pr?: { number: number; branch: string } }> = [];
+    const advance = advanceWith(resumeFake().fn);
+    const module = createResumeModule(runnerPool, { startRun: advance.advanceStartRun, startFix: (who, req) => (sent.push(req as never), advance.advanceStartFix(who, req)), startAdvance: async () => undefined });
+    const out = await module.performResumeDecision(await claimed(w.askId));
+    expect(out).toMatchObject({ result: "done" });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.pr).toEqual({ number: 41, branch: runBranch });
   });
 
   it("a second resume of the same round does not stack the first one's block", async () => {

@@ -233,6 +233,20 @@ describe("cross-side continuation: the issuer's binding [pg] (D#599 PL-2b-1)", (
       expect(await eventsOf(run.id, RUNNER_CONTINUES_BOUND_KIND)).toEqual([]);
     });
 
+    it("SANDBOX-RERUN-BRANCH-a criterion 11: once the item's newest sandbox run is on its own run branch, a runner continuation onto fx/issue-<n>, or onto that run branch with a pull request number, is refused with its existing code, before GitHub is asked", async () => {
+      const w = await world();
+      const { parent, run } = await pair(w);
+      const sandbox = randomUUID();
+      await db.admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id) VALUES ($1, $2, $3, 'executor', 'production', 'succeeded', 'sandbox', $4)`, [sandbox, w.accountId, w.workItemId, w.repoId]);
+      await db.admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'build.branch', $3::jsonb)`, [w.accountId, sandbox, JSON.stringify({ branch: `fx/${sandbox}-g1` })]);
+      const binding = createFakeContinuationBinding({ pulls: [openPull(), openPull({ headRef: `fx/${sandbox}-g1`, number: 42 })] });
+      expect(await codeOf(issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH, prNumber: 41 } }))).toBe("continues_pr_mismatch");
+      expect(await codeOf(issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: `fx/${sandbox}-g1`, prNumber: 42 } }))).toBe("continues_pr_mismatch");
+      expect(binding.calls).toEqual([]);
+      expect((await row(run.id)).job_signed).toBeNull();
+      expect(await eventsOf(run.id, RUNNER_CONTINUES_BOUND_KIND)).toEqual([]);
+    });
+
     it("an item with no issue number has no pull request branch", async () => {
       const w = await world(null);
       const { parent, run } = await pair(w);

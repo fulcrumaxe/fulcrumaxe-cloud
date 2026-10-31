@@ -16,6 +16,10 @@ export interface AdvanceRunRequest {
   prompt: string;
   /** Clone the item's repository into the run's working directory before the agent starts. */
   clone: boolean;
+  /** SANDBOX-RERUN-BRANCH-a: the id the new run gets (a sandbox rebuild names its branch from it before the prompt). A step that already has a run keeps that run's id. */
+  runId?: string;
+  /** SANDBOX-RERUN-BRANCH-a: the branch a sandbox build pushes, recorded once as the run's `build.branch` event in its create transaction. */
+  buildBranch?: string;
   /** Executor runs only: names the sandbox. The pull request does not exist yet, so this is the issue's number. */
   pr?: number;
   /** Start only if no OTHER run of the item is live (this step's own keyed run is always returned). Refused as `already_running`. */

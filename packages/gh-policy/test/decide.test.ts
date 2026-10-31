@@ -314,6 +314,13 @@ describe("criterion 5: pushes restricted to refs/heads/fx/*, each push-capable r
     expect(decision.allow).toBe(true);
   });
 
+  // SANDBOX-RERUN-BRANCH-a (real contract): a sandbox Build again pushes fx/<run id>-g1, a plain create of a new branch. The proxy already lets the executor push any fx/* branch outside the
+  // reserved role prefixes, so no rule changes; this pins that with the real decide function. A forced update of a branch (old is not zero) is a different request shape and is not what the prompt sends.
+  it.each(["refs/heads/fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1", "refs/heads/fx/00000000-0000-4000-8000-000000000000-g1"])("SANDBOX-RERUN-BRANCH-a: executor may push the rebuild's run branch %s", (ref) => {
+    expect(pushDecisionFor("executor", [{ old: ZERO_SHA, new: SHA_A, ref }]).allow).toBe(true);
+    expect(pushDecisionFor("code-reviewer", [{ old: ZERO_SHA, new: SHA_A, ref }]).allow).toBe(false);
+  });
+
   // [H03 fix round 4, item 3] Superseded again: round 3's LOOSER plain
   // string-prefix exclusion over-reached (it blocked plausible unrelated
   // branch names like "fx/release-2.0" for no reason — only the EXACT bare

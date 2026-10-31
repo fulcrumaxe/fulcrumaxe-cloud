@@ -1,3 +1,4 @@
+import { sandboxRunBranch } from "@fx/core/src/work-items/buildIdentity.js";
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -169,6 +170,21 @@ describe("settling a paired sandbox build, and opening the public pull request a
       // The run is marked for the lost-run settle: without a requested time the settler could never list it.
       expect(runs[0].sandbox_requested_at).toBeInstanceOf(Date);
       expect(runs[0].sandbox_name).toMatch(/^pp-[0-9a-f-]{36}$/);
+    });
+
+    it("SANDBOX-RERUN-BRANCH-a criterion 7: with a two-run item, run 2's draft is on its run branch and run 1's draft (on the fixed name) is not touched", async () => {
+      const record = (runId: string, branch: string) => admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 90, 'build.branch', $3::jsonb)", [A.accountId, runId, JSON.stringify({ branch })]);
+      await record(executorRunId, "fx/issue-42");
+      expect((await worker().settlePairedBuild({ accountId: A.accountId, executorRunId })).privatePullRequest).toBe("opened");
+      // Build again: the first publish is done, the item is building again, and run 2 starts on its own branch.
+      await admin.query("DELETE FROM plane_push_attempts WHERE account_id = $1", [A.accountId]);
+      await admin.query("DELETE FROM agent_runs WHERE account_id = $1 AND role = 'plane_publish'", [A.accountId]);
+      await admin.query("UPDATE plane_pushes SET state = 'building' WHERE work_item_id = $1", [A.workItemId]);
+      const second = await executorRun();
+      await record(second, sandboxRunBranch(second));
+      expect((await worker().settlePairedBuild({ accountId: A.accountId, executorRunId: second })).privatePullRequest).toBe("opened");
+      expect(priv.opened.map((o) => o.branch)).toEqual(["fx/issue-42", sandboxRunBranch(second)]);
+      expect(priv.opened[1]).toMatchObject({ run: { runId: second, issueNumber: 42 } });
     });
 
     it("an open pull request on the branch is reused, not duplicated, and a second call opens nothing at all", async () => {

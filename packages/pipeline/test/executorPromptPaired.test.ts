@@ -33,12 +33,14 @@ describe("the paired sandbox prompt", () => {
     expectOneGenuineEnvelope(p);
   });
 
-  it("builds on the recorded commit: fetches exactly it, checks it, and branches from it (replacing an earlier branch on a rebuild)", () => {
+  it("builds on the recorded commit: fetches exactly it, checks it, and branches from it (a rebuild creates its own fresh branch)", () => {
     const p = buildExecutorPrompt(variants.plain);
     expect(p).toContain(`git fetch --depth 1 origin ${SHA} && test "$(git rev-parse FETCH_HEAD)" = "${SHA}"`);
     expect(p).toContain(`checkout -b fx/issue-41 "$BASE"`);
     expect(p).toContain(`BASE=${SHA}`);
-    expect(buildExecutorPrompt(variants.rebuild)).toContain(`checkout -B fx/issue-41 "$BASE"`);
+    // SANDBOX-RERUN-BRANCH-a: a rebuild names a branch of its own, so it creates it fresh and never replaces one.
+    expect(buildExecutorPrompt(variants.rebuild)).toContain(`checkout -b fx/issue-41 "$BASE"`);
+    expect(buildExecutorPrompt(variants.rebuild)).not.toContain("checkout -B");
   });
 
   it("a stacked item still builds on its parent's verified branch, with the parent check kept and no pull request step", () => {

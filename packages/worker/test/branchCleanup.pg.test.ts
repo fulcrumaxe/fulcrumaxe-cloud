@@ -212,6 +212,41 @@ describe("branch cleanup sweep [pg]", () => {
     expect(gh.refs.has(`acme/widgets/fx/${run}-g1`)).toBe(true);
   });
 
+  /** SANDBOX-RERUN-BRANCH-a: a sandbox executor run that recorded its branch (as its create transaction does), and the publish run that came from it, with that run's own head. */
+  async function builtAndPublished(t: SeedRefs, branch: (runId: string) => string, privateHead: string): Promise<string> {
+    const id = randomUUID();
+    await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id) VALUES ($1, $2, $3, 'executor', 'production', 'succeeded', 'sandbox', $4)`, [id, t.accountId, t.workItemId, t.repoId]);
+    await admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'build.branch', $3::jsonb)`, [t.accountId, id, JSON.stringify({ branch: branch(id) })]);
+    await admin.query(
+      `INSERT INTO agent_runs (id, account_id, work_item_id, parent_run_id, role, runtime, status, execution_mode, dispatch_repo_id, envelope) VALUES ($1, $2, $3, $4, 'plane_publish', 'production', 'succeeded', 'sandbox', $5, $6::jsonb)`,
+      [randomUUID(), t.accountId, t.workItemId, id, t.repoId, JSON.stringify({ publish: { attempt_no: 1, outcome: "pr_opened", private_head: privateHead } })],
+    );
+    return id;
+  }
+
+  it("SANDBOX-RERUN-BRANCH-a criterion 9: an item closed after two sandbox runs has both branches deleted, each at its own run's recorded head; the original is deleted only by this sweep", async () => {
+    await setItem(A, 46, "merged");
+    await builtAndPublished(A, () => "fx/issue-46", HEAD);
+    const second = await builtAndPublished(A, (id) => `fx/${id}-g1`, MOVED);
+    gh.refs.set("acme/widgets/fx/issue-46", HEAD);
+    gh.refs.set(`acme/widgets/fx/${second}-g1`, MOVED);
+    expect(await sweep()).toMatchObject({ listed: 1, deleted: 2, left: 0, failed: 0 });
+    expect(gh.refs.size).toBe(0);
+    expect((await cleanup(A))!.map((o) => o.branch).sort()).toEqual(["fx/issue-46", `fx/${second}-g1`].sort());
+  });
+
+  it("SANDBOX-RERUN-BRANCH-a criterion 9: a moved head is left, per branch (run 2's branch moved, run 1's still at its head), and the pairing is never one branch with every run's head", async () => {
+    await setItem(A, 47, "closed_unmerged");
+    await builtAndPublished(A, () => "fx/issue-47", HEAD);
+    const second = await builtAndPublished(A, (id) => `fx/${id}-g1`, MOVED);
+    // If the sweep paired the newest branch with run 1's head (or the fixed name with run 2's), one of these two would be deleted or left the wrong way round.
+    gh.refs.set("acme/widgets/fx/issue-47", HEAD);
+    gh.refs.set(`acme/widgets/fx/${second}-g1`, "c".repeat(40));
+    expect(await sweep()).toMatchObject({ listed: 1, deleted: 1, left: 1 });
+    expect([...gh.refs.keys()]).toEqual([`acme/widgets/fx/${second}-g1`]);
+    expect(await cleanup(A)).toEqual(expect.arrayContaining([{ branch: "fx/issue-47", outcome: "deleted" }, { branch: `fx/${second}-g1`, outcome: "head_changed" }]));
+  });
+
   it("only the two shapes, and only for the run or item that recorded them: a recorded main, another run's branch and another item's number are never deleted", async () => {
     await setItem(A, 46, "merged");
     await runnerRun(A, () => "main", HEAD);
