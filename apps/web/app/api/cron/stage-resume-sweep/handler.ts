@@ -1,9 +1,9 @@
-import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { runGatedTick } from "@fx/core/src/pendingWork";
 import { registeredStages } from "@fx/pipeline";
 import type { ParkedStageEntryInput } from "@fx/worker";
 import type { StageResumeSweepWorker } from "../../../../lib/worker";
+import { cronAuthorized } from "../../../../lib/cronAuth";
 
 /**
  * D#483 S5-k1b: the parked-stage sweep. A start that a spending limit denied waits inside its workflow for four hours and then the workflow ends
@@ -28,16 +28,8 @@ export interface StageResumeSweepHandlerDeps {
   now?(): number;
 }
 
-function isAuthorized(authHeader: string | null, cronSecret: string): boolean {
-  if (!cronSecret || !authHeader) return false;
-  const expected = Buffer.from(`Bearer ${cronSecret}`, "utf8");
-  const actual = Buffer.from(authHeader, "utf8");
-  if (expected.length !== actual.length) return false;
-  return timingSafeEqual(expected, actual);
-}
-
 export async function stageResumeSweepHandler(req: NextRequest, deps: StageResumeSweepHandlerDeps): Promise<NextResponse> {
-  if (!isAuthorized(req.headers.get("authorization"), deps.cronSecret)) {
+  if (!cronAuthorized("/api/cron/stage-resume-sweep", req.headers.get("authorization"), deps.cronSecret)) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
   const ran = await runGatedTick(

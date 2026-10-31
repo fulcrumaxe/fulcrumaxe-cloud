@@ -1,7 +1,7 @@
-import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { runGatedTick } from "@fx/core/src/pendingWork";
 import type { ComputeSettleSweepWorker } from "../../../../lib/worker";
+import { cronAuthorized } from "../../../../lib/cronAuth";
 
 /**
  * D#2 COMPUTE-SETTLE CS-2b-2: the deferred compute-settle cron (every 10 minutes since D#454 H3c, behind the pending-work marker). Same auth as
@@ -20,17 +20,8 @@ export interface ComputeSettleSweepHandlerDeps {
   log(line: string): void;
 }
 
-/** Constant-time comparison; rejects outright when either side is empty. */
-function isAuthorized(authHeader: string | null, cronSecret: string): boolean {
-  if (!cronSecret || !authHeader) return false;
-  const expected = Buffer.from(`Bearer ${cronSecret}`, "utf8");
-  const actual = Buffer.from(authHeader, "utf8");
-  if (expected.length !== actual.length) return false;
-  return timingSafeEqual(expected, actual);
-}
-
 export async function computeSettleSweepHandler(req: NextRequest, deps: ComputeSettleSweepHandlerDeps): Promise<NextResponse> {
-  if (!isAuthorized(req.headers.get("authorization"), deps.cronSecret)) {
+  if (!cronAuthorized("/api/cron/compute-settle-sweep", req.headers.get("authorization"), deps.cronSecret)) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
   // D#454 H3c: the marker is read before the worker is built (building it is what opens the database). A run that was
