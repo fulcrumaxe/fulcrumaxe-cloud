@@ -92,11 +92,11 @@ describe('reversal_compensations (0933) [pg]', () => {
       expect(priv).toEqual({ w: false, inv: false, rw: false, ops_del: false });
     });
 
-    it('platform_ops holds INSERT on eight columns, UPDATE on six, and SELECT on four receipt columns', async () => {
+    it('platform_ops holds INSERT on eight columns, UPDATE on seven (estimate_usd since 0939), and SELECT on four receipt columns', async () => {
       const cols = async (priv: string, table: string) => (await admin.query<{ c: string }>(
         `SELECT a.attname AS c FROM pg_attribute a WHERE a.attrelid = $2::regclass AND a.attnum > 0 AND NOT a.attisdropped AND has_column_privilege('platform_ops', a.attrelid, a.attnum, $1) ORDER BY 1`, [priv, table])).rows.map((r) => r.c);
       expect(await cols('INSERT', 'reversal_compensations')).toEqual(['account_id', 'ask_id', 'estimate_usd', 'kind', 'reason_code', 'reversal_receipt_id', 'state', 'work_item_id']);
-      expect(await cols('UPDATE', 'reversal_compensations')).toEqual(['attempts', 'pr_number', 'reason_code', 'run_action_id', 'state', 'updated_at']);
+      expect(await cols('UPDATE', 'reversal_compensations')).toEqual(['attempts', 'estimate_usd', 'pr_number', 'reason_code', 'run_action_id', 'state', 'updated_at']);
       const receiptCols = await cols('SELECT', 'decision_receipts');
       for (const c of ['id', 'account_id', 'work_item_id', 'reverses_receipt_id']) expect(receiptCols).toContain(c);
     });

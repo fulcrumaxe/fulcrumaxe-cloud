@@ -12,3 +12,5 @@ export { runAfterReceipt } from './receiptHook.js';
 export type { AfterReceiptHook } from './receiptHook.js';
 export { REVERSAL_ASK_ALLOW, REVERSAL_ASK_KEEP, recordReversal } from './reversalOverCap.js';
 export type { ReversalCtx, ReversalResult } from './reversalOverCap.js';
+export { ReversalRequestError, confirmReversal, fileAllowedReversal, requestReversal } from './reversalRequest.js';
+export type { AllowedReversalFacts, AllowedReversalPlan, AllowedReversalPlanner, ReversalOutcome, ReversalPrincipal, ReversalRequestCtx, ReversalRequestErrorCode, ReversalStatus } from './reversalRequest.js';

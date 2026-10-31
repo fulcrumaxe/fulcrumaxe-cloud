@@ -16363,6 +16363,647 @@
         }
       }
     },
+    "/api/v1/work-items/{id}/receipts": {
+      "get": {
+        "operationId": "listWorkItemReceipts",
+        "summary": "The decision receipts of a work item, with each one's free deadline, live reversal price and reversal state",
+        "description": "Session only; any member. Newest first, at most 50. Each receipt is named by its owner-approved label and its time to the second. `price_*` is the live price: free until the deadline, then the model spend so far on this item (shown for transparency on your own key, never billed). A receipt that reverses another names it by `reverses_text`, or `removed item` when the original is gone. 404 for an unknown work item.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The decision receipts of a work item, with each one's free deadline, live reversal price and reversal state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "receipts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "label": {
+                            "type": "string"
+                          },
+                          "class": {
+                            "type": "number"
+                          },
+                          "at": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "by": {
+                            "type": "string",
+                            "enum": [
+                              "policy",
+                              "person"
+                            ]
+                          },
+                          "chosen": {
+                            "type": "string"
+                          },
+                          "rejected": {
+                            "type": "string"
+                          },
+                          "reverses_receipt_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "reverses_text": {
+                            "type": "string"
+                          },
+                          "free_until": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "deadline_text": {
+                            "type": "string"
+                          },
+                          "price_kind": {
+                            "type": "string",
+                            "enum": [
+                              "free_until",
+                              "estimate",
+                              "unavailable",
+                              "not_yet_priced"
+                            ]
+                          },
+                          "price_usd": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "price_text": {
+                            "type": "string"
+                          },
+                          "can_reverse": {
+                            "type": "boolean"
+                          },
+                          "reversal": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "id": {
+                                    "type": "string"
+                                  },
+                                  "state": {
+                                    "type": "string",
+                                    "enum": [
+                                      "pending",
+                                      "awaiting_confirm",
+                                      "running",
+                                      "done",
+                                      "failed"
+                                    ]
+                                  },
+                                  "kind": {
+                                    "type": "string"
+                                  },
+                                  "reason_code": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "estimate_usd": {
+                                    "type": [
+                                      "number",
+                                      "null"
+                                    ]
+                                  },
+                                  "pr_number": {
+                                    "type": [
+                                      "number",
+                                      "null"
+                                    ]
+                                  },
+                                  "text": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "id",
+                                  "state",
+                                  "kind",
+                                  "reason_code",
+                                  "estimate_usd",
+                                  "pr_number",
+                                  "text"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "label",
+                          "class",
+                          "at",
+                          "name",
+                          "by",
+                          "chosen",
+                          "rejected",
+                          "reverses_receipt_id",
+                          "reverses_text",
+                          "free_until",
+                          "deadline_text",
+                          "price_kind",
+                          "price_usd",
+                          "price_text",
+                          "can_reverse",
+                          "reversal"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "total": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "receipts",
+                    "total"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/receipts/{id}/reverse": {
+      "post": {
+        "operationId": "reverseReceipt",
+        "summary": "Reverse a decision: the plan, the estimate to confirm, or a fixed refusal",
+        "description": "Session only, owner or admin; a token is 403 `session_required`. Body `{ confirmEstimateUsd? }`. Records the reversal receipt and plans from where the build stands now: free before the build or inside the free window, a new build after it (priced: the answer is `awaiting_confirm` with `estimate_usd`, and nothing is spent until the estimate is confirmed), or a revert pull request after merge. A repeat answers the first reversal. The third reversal on one work item raises a question instead (`needs_ask`, with `ask_id`). 404 for an unknown receipt or one of another account; 409 `estimate_changed` when `confirmEstimateUsd` is below the live estimate (the new figure is in `data.current_estimate_usd`); 422 `not_reversible` for a receipt that is itself a reversal or has no run; 503 `reversal_unavailable` while no worker is available.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "x-fx-idempotency": "optional",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "default": {},
+                "type": "object",
+                "properties": {
+                  "confirmEstimateUsd": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1000000
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reverse a decision: the plan, the estimate to confirm, or a fixed refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "done",
+                        "started",
+                        "awaiting_confirm",
+                        "refused",
+                        "failed",
+                        "needs_ask"
+                      ]
+                    },
+                    "reversal_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "receipt_id": {
+                      "type": "string"
+                    },
+                    "kind": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "reason_code": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "estimate_usd": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "ask_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "reversal_id",
+                    "receipt_id",
+                    "kind",
+                    "reason_code",
+                    "estimate_usd",
+                    "ask_id",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error `session_required` or `forbidden` (owner or admin only).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `estimate_changed`: the live estimate is now above the figure confirmed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/reversals/{id}/confirm": {
+      "post": {
+        "operationId": "confirmReversal",
+        "summary": "Confirm the estimate of a priced reversal, so it can start",
+        "description": "Session only, owner or admin; a token is 403 `session_required`. Body `{ confirmEstimateUsd }`: the figure shown to the person. A figure below the live estimate is 409 `estimate_changed` and nothing changes; the new figure is in `data.current_estimate_usd`. Confirming a reversal that already started answers its state and changes nothing. 404 for an unknown reversal or one of another account; 503 `reversal_unavailable` while no worker is available.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "x-fx-idempotency": "optional",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "confirmEstimateUsd": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1000000
+                  }
+                },
+                "required": [
+                  "confirmEstimateUsd"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Confirm the estimate of a priced reversal, so it can start",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "done",
+                        "started",
+                        "awaiting_confirm",
+                        "refused",
+                        "failed",
+                        "needs_ask"
+                      ]
+                    },
+                    "reversal_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "receipt_id": {
+                      "type": "string"
+                    },
+                    "kind": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "reason_code": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "estimate_usd": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "ask_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "reversal_id",
+                    "receipt_id",
+                    "kind",
+                    "reason_code",
+                    "estimate_usd",
+                    "ask_id",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error `session_required` or `forbidden` (owner or admin only).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `estimate_changed`: the live estimate is now above the figure confirmed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/merge-ready": {
       "get": {
         "operationId": "listMergeReady",

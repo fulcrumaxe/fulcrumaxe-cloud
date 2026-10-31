@@ -341,6 +341,9 @@ importers:
       '@fx/plan-data':
         specifier: workspace:*
         version: link:../plan-data
+      '@fx/receipts':
+        specifier: workspace:*
+        version: link:../receipts
       '@fx/runner-cloud':
         specifier: workspace:*
         version: link:../runner-cloud

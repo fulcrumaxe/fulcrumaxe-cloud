@@ -1881,6 +1881,81 @@ export interface Operations {
       spec_version_id: string;
     };
   };
+  listWorkItemReceipts: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      receipts: Array<{
+        id: string;
+        label: string;
+        class: number;
+        at: string;
+        name: string;
+        by: "policy" | "person";
+        chosen: string;
+        rejected: string;
+        reverses_receipt_id: string | null;
+        reverses_text: string;
+        free_until: string | null;
+        deadline_text: string;
+        price_kind: "free_until" | "estimate" | "unavailable" | "not_yet_priced";
+        price_usd: number | null;
+        price_text: string;
+        can_reverse: boolean;
+        reversal: ({
+          id: string;
+          state: "pending" | "awaiting_confirm" | "running" | "done" | "failed";
+          kind: string;
+          reason_code: string | null;
+          estimate_usd: number | null;
+          pr_number: number | null;
+          text: string;
+        }) | (null);
+      }>;
+      total: number;
+    };
+  };
+  reverseReceipt: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      confirmEstimateUsd?: number;
+    };
+    response: {
+      status: "done" | "started" | "awaiting_confirm" | "refused" | "failed" | "needs_ask";
+      reversal_id: string | null;
+      receipt_id: string;
+      kind: string | null;
+      reason_code: string | null;
+      estimate_usd: number | null;
+      ask_id: string | null;
+      message: string;
+    };
+  };
+  confirmReversal: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      confirmEstimateUsd: number;
+    };
+    response: {
+      status: "done" | "started" | "awaiting_confirm" | "refused" | "failed" | "needs_ask";
+      reversal_id: string | null;
+      receipt_id: string;
+      kind: string | null;
+      reason_code: string | null;
+      estimate_usd: number | null;
+      ask_id: string | null;
+      message: string;
+    };
+  };
   listMergeReady: {
     path: undefined;
     query: undefined;
@@ -5015,6 +5090,39 @@ export const operations = {
     pathParams: ["id"],
     queryParams: [],
     hasBody: false,
+  },
+  listWorkItemReceipts: {
+    method: "GET",
+    path: "/api/v1/work-items/{id}/receipts",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  reverseReceipt: {
+    method: "POST",
+    path: "/api/v1/receipts/{id}/reverse",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  confirmReversal: {
+    method: "POST",
+    path: "/api/v1/reversals/{id}/confirm",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
   },
   listMergeReady: {
     method: "GET",

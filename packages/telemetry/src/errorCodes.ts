@@ -57,6 +57,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "respec_needs_approval",
   "sub_item_approval_unavailable",
   "wrong_round",
+  "estimate_changed",
+  "reversal_unavailable",
   "endpoint_limit_reached",
   "environment_failed",
   "escalate",

@@ -80,6 +80,12 @@ export async function claimCompensation(client: Pick<PoolClient, 'query'>, id: s
   return { id: r.o_id, accountId: r.o_account_id, workItemId: r.o_work_item_id, reversalReceiptId: r.o_reversal_receipt_id, kind: r.o_kind, attempts: r.o_attempts };
 }
 
+/** The person's confirmation of a priced row (migration 0939): `awaiting_confirm` to `pending`, once. False when the row is not waiting (a repeat, or another account's). `client` is a `withTenant` client. */
+export async function confirmCompensation(client: Pick<PoolClient, 'query'>, id: string, estimateUsd: number): Promise<boolean> {
+  const { rows } = await client.query<{ ok: boolean }>('SELECT reversal_compensation_confirm($1::uuid, $2::numeric) AS ok', [id, estimateUsd]);
+  return rows[0]?.ok === true;
+}
+
 /** Record the end of a claimed row. True only for a row that was `running`; false on a repeat. */
 export async function finishCompensation(
   client: Pick<PoolClient, 'query'>,
