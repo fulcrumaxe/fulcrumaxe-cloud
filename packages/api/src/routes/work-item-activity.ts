@@ -7,6 +7,7 @@ import { PUBLIC_CHANGE_STATES } from "@fx/core/src/repos/publicChangeCopy.js";
 import { OPERATOR_ACTIONS } from "@fx/core/src/work-items/operatorActions.js";
 import { statusSentence } from "@fx/core/src/setup-requests/copy.js";
 import { readChildLaunch } from "@fx/core/src/decisions/childLaunch.js";
+import { RUNNER_DAILY_LIMIT_SENTENCE } from "@fx/pipeline";
 import { setupRequestDeps } from "./setupRequests.js";
 import type { RouteEntry } from "../registry.js";
 import { runnerUsageSchema } from "./runs.js";
@@ -60,7 +61,7 @@ export const activityResponseSchema = z.object({
       finished_at: z.string().nullable(),
     }),
   ),
-  notice: z.object({ kind: z.enum(["not_feasible", "needs_human", "check_failed", "no_file_list", "respec_failed", "build_slot_wait", "resume_refused", "spec_refused", "superseded"]), reason: z.string() }).nullable(),
+  notice: z.object({ kind: z.enum(["not_feasible", "needs_human", "check_failed", "no_file_list", "respec_failed", "build_slot_wait", "resume_refused", "spec_refused", "superseded", "review_limit_wait"]), reason: z.string(), resets_at: z.string().optional() }).nullable(),
   // D#598 P7c: present only while the newest review round was a merge-only re-check; `sentence` is the approved line.
   review_recheck: z.object({ kind: z.literal("merge_only"), sentence: z.string() }).nullable().optional(),
   // D#598 P1f-6a: the item's change to its paired public repo; absent when the item has none. `sentence` is fixed words; `actions` is empty until the actions ship.
@@ -183,6 +184,7 @@ export const workItemActivityRoutes: RouteEntry[] = [
       const activity = { ...rest, ...childLaunch, runs, ...(publicChange === null ? {} : { public_change: publicChange }), ...(startDecision === null ? {} : { start_decision: startDecision }), ...(receipts === null ? {} : { receipts: receipts.receipts, ...(receipts.total > receipts.receipts.length ? { receipts_total: receipts.total } : {}) }), ...(recheck === null ? {} : { review_recheck: { kind: recheck.kind, sentence: COPY.reviewMergeOnlyRecheck } }), ...setupPause };
       // The Re-spec notices carry the KEY of their sentence out of @fx/core; the words are written once, in the runner protocol's copy.
       const n = activity.notice;
+      if (n !== null && n.kind === "review_limit_wait") return { ...activity, notice: { kind: n.kind, reason: RUNNER_DAILY_LIMIT_SENTENCE, ...(n.resetsAt === undefined ? {} : { resets_at: n.resetsAt }) } };
       if (n !== null && n.kind === "build_slot_wait") return { ...activity, notice: { kind: n.kind, reason: buildWaitSentence(n.reason, n.holder ?? null, n.autoStart !== false) } };
       if (n !== null && (n.kind === "no_file_list" || n.kind === "respec_failed")) return { ...activity, notice: { kind: n.kind, reason: COPY[FILE_LIST_NOTICE_COPY_KEY[n.kind]] } };
       // The review stops of a cloud-verified item do the same (D#6 R5b-2b-i).

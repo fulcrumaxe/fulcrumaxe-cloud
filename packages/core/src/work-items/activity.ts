@@ -120,7 +120,9 @@ export interface ActivityStep {
  * (`specHasNoFileList`, `respecListUnreadable`), not the sentence: @fx/core has no dependency on that package, so the API route puts the words in.
  */
 export interface ActivityNotice {
-  kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed' | 'build_slot_wait' | 'resume_refused' | 'spec_refused' | 'superseded';
+  kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed' | 'build_slot_wait' | 'resume_refused' | 'spec_refused' | 'superseded' | 'review_limit_wait';
+  /** `review_limit_wait` only: when the runner's daily run limit starts again, an ISO instant (the next UTC midnight after the wait fact). The API route puts the sentence in `reason`; the card shows this instant in the viewer's zone. */
+  resetsAt?: string;
   /** `superseded` only: the id of the tracked item this request moved to, or '' when that item is not one of this account's (the card then shows the sentence with no link). */
   reason: string;
   /**
@@ -144,6 +146,13 @@ export interface ActivityNotice {
 export const BUILD_WAIT_NOTICE_CODES: readonly string[] = Object.freeze(['one_build_per_repo_until_d598', 'waiting_for_build_slot_repo', 'waiting_for_build_slot_account']);
 export const BUILD_SLOT_HOLDING_STAGES: readonly string[] = Object.freeze(['in_progress', 'pr_opened', 'changes_requested', 'review_passed']);
 export const BUILD_WAIT_FRESH_SECONDS = 180;
+/**
+ * A review parked for the runner's daily run limit (packages/pipeline reservationPauses.ts RUNNER_DAILY_LIMIT_PAUSE; a test holds the copies equal). The parked-stage
+ * sweep refreshes the waiting fact every pass (15 minutes), so the wait is current while that fact is the item's newest and younger than three passes.
+ */
+export const REVIEW_LIMIT_WAIT_CODE = 'runner_daily_limit';
+export const REVIEW_LIMIT_WAIT_STAGES: readonly string[] = Object.freeze(['pr_opened', 'changes_requested', 'review_passed', 'needs_human']);
+export const REVIEW_LIMIT_WAIT_FRESH_SECONDS = 2700;
 
 /** The `COPY` key each Re-spec notice carries as its `reason` until the API route replaces it with the sentence. */
 export const FILE_LIST_NOTICE_COPY_KEY = Object.freeze({ no_file_list: 'specHasNoFileList', respec_failed: 'respecListUnreadable' } as const);
@@ -533,6 +542,24 @@ async function readSupersededRoot(client: PoolClient, workItemId: string): Promi
 }
 
 /**
+ * The item's review is parked for the runner's daily run limit: its newest driver fact of any kind is the review's waiting fact with that code, and it is current.
+ * Anything written after it (the reviewers started, a stop) ends the notice. `resetsAt` is the next UTC midnight after the fact, the boundary the runner counts days by.
+ */
+async function readReviewLimitWait(client: PoolClient, workItemId: string, stage: string, halted: boolean): Promise<ActivityNotice | null> {
+  if (halted || !REVIEW_LIMIT_WAIT_STAGES.includes(stage)) return null;
+  const fact = (
+    await client.query<{ kind: string; stage: string | null; code: string | null; fresh: boolean; resets_at: Date }>(
+      `SELECT e.kind, e.stage, e.code, (e.created_at > now() - make_interval(secs => $2::int)) AS fresh,
+              ((date_trunc('day', e.created_at AT TIME ZONE 'UTC') + interval '1 day') AT TIME ZONE 'UTC') AS resets_at
+         FROM work_item_driver_events e WHERE e.work_item_id = $1::uuid ORDER BY e.seq DESC LIMIT 1`,
+      [workItemId, REVIEW_LIMIT_WAIT_FRESH_SECONDS],
+    )
+  ).rows[0];
+  if (!fact || !fact.fresh || fact.kind !== 'stage_waiting' || fact.stage !== 'review' || fact.code !== REVIEW_LIMIT_WAIT_CODE) return null;
+  return { kind: 'review_limit_wait', reason: '', resetsAt: fact.resets_at.toISOString() };
+}
+
+/**
  * D#483: an item at Spec ready or Needs a person whose build is waiting for a slot. The worker leaves one waiting fact (`stage_waiting`, stage `build`; `build_waiting`
  * before D#483 S5-k1b) on every ask of the wait, so the item is waiting while its LATEST such fact names a slot reason and is younger than three polls. A halted item
  * is not waiting. For a repository wait the holder is the oldest other item that holds a slot on the repository. Fixed codes and numbers only.
@@ -705,6 +732,7 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
     ).rows[0];
     const fileListNotice = await readFileListNotice(client, workItemId, item.stage, specRow);
     const waitNotice = pm || fileListNotice ? null : await readBuildWaitNotice(client, workItemId, item.stage, item.halted, item.repo_id);
+    const reviewWait = pm || fileListNotice || waitNotice ? null : await readReviewLimitWait(client, workItemId, item.stage, item.halted);
     const supersededRoot = item.stage === 'closed' ? await readSupersededRoot(client, workItemId) : null;
     if (supersededRoot !== null) {
       notice = { kind: 'superseded', reason: supersededRoot };
@@ -714,6 +742,8 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       notice = fileListNotice;
     } else if (waitNotice) {
       notice = waitNotice;
+    } else if (reviewWait) {
+      notice = reviewWait;
     } else if (RESUME_REFUSAL_STAGES.includes(item.stage) && (resumeCode = await readResumeRefusal(client, workItemId)) !== null) {
       notice = { kind: 'resume_refused', reason: resumeCode };
     } else if (item.stage === 'triaged' && (refusalCode = await readSpecRefusal(client, workItemId)) !== null) {

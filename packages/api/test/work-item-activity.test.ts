@@ -4,10 +4,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
-import { ACTIVITY_LIMITS, readOutcomeCodes } from '@fx/core/src/work-items/activity.js';
+import { ACTIVITY_LIMITS, REVIEW_LIMIT_WAIT_CODE, readOutcomeCodes } from '@fx/core/src/work-items/activity.js';
 import { requestChanges } from '@fx/core/src/work-items/operatorMoves.js';
 import { maxFixRounds } from '@fx/spend';
-import { markBuildNeedsHuman } from '@fx/pipeline';
+import { RUNNER_DAILY_LIMIT_PAUSE, RUNNER_DAILY_LIMIT_SENTENCE, markBuildNeedsHuman } from '@fx/pipeline';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
 import { activityResponseSchema, workItemActivityRoutes } from '../src/routes/work-item-activity.js';
@@ -27,7 +27,7 @@ interface Activity {
   runs: Array<{ id: string; role: string; status: string; usd: number | null; created_at: string; summary: string | null; lines: Array<{ at: string; text: string }> }>;
   runs_truncated: boolean;
   steps: Array<{ kind: string; state: string; code: string | null; result: string | null; reasons: string[]; at: string; finished_at: string | null }>;
-  notice: { kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed' | 'build_slot_wait' | 'resume_refused' | 'spec_refused'; reason: string } | null;
+  notice: { kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed' | 'build_slot_wait' | 'resume_refused' | 'spec_refused' | 'review_limit_wait'; reason: string; resets_at?: string } | null;
   actions: string[];
   close_on_github: boolean;
   request_changes_blocked: 'live' | 'rounds' | null;
@@ -281,6 +281,41 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       // An escalation from before the item last reached Needs a person does not count.
       await admin.query(`INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'changes_requested', 'needs_human', now(), 'control_plane', 'later')`, [accountId, itemId]);
       expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'needs_human', reason: 'Opened the pull request.' });
+    });
+
+    it('review_limit_wait (D#6): a fresh review wait for the runner daily limit that is the newest fact says so with the fixed sentence and the next UTC midnight; later facts, a stale fact, a halt or another stage say nothing', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const { itemId } = await seedItem(accountId, { stage: 'pr_opened' });
+      const fact = async (kind: string, code: string | null, key: string, stage: string | null = 'review', agoSeconds = 0) => {
+        await admin.query(
+          `INSERT INTO work_item_driver_events (account_id, work_item_id, kind, stage, attempt, code, dedupe_key) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [accountId, itemId, kind, stage, stage === null ? null : 0, code, key],
+        );
+        if (agoSeconds > 0) await admin.query(`UPDATE work_item_driver_events SET created_at = now() - make_interval(secs => $2::int) WHERE work_item_id = $1 AND dedupe_key = $3`, [itemId, agoSeconds, key]);
+      };
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+      await fact('stage_waiting', 'runner_daily_limit', 'r1');
+      const notice = await noticeOf(accountId, userId, itemId);
+      const created = (await admin.query<{ at: Date }>(`SELECT created_at AS at FROM work_item_driver_events WHERE work_item_id = $1 AND dedupe_key = 'r1'`, [itemId])).rows[0]!.at;
+      const midnight = new Date(Date.UTC(created.getUTCFullYear(), created.getUTCMonth(), created.getUTCDate() + 1)).toISOString();
+      expect(notice).toEqual({ kind: 'review_limit_wait', reason: RUNNER_DAILY_LIMIT_SENTENCE, resets_at: midnight });
+      expect(REVIEW_LIMIT_WAIT_CODE).toBe(RUNNER_DAILY_LIMIT_PAUSE);
+      expect(RUNNER_DAILY_LIMIT_SENTENCE).toBe("This review is waiting for the runner's daily run limit. It starts again on its own after the limit resets at midnight UTC.");
+      // A spend pause for the review, or the same code at another stage, is not this wait.
+      const other = (await seedItem(accountId, { stage: 'pr_opened' })).itemId;
+      await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, stage, attempt, code, dedupe_key) VALUES ($1, $2, 'stage_waiting', 'build', 0, 'runner_daily_limit', 'o1')`, [accountId, other]);
+      expect(await noticeOf(accountId, userId, other)).toBeNull();
+      // Anything written after the wait ends it (the reviewers started).
+      await fact('review_started', null, 'r2', null);
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+      // Fresh again, then stale (the sweep stopped refreshing it), then halted.
+      await fact('stage_waiting', 'runner_daily_limit', 'r3');
+      expect((await noticeOf(accountId, userId, itemId))!.kind).toBe('review_limit_wait');
+      await admin.query(`UPDATE work_item_driver_events SET created_at = now() - interval '2 hours' WHERE work_item_id = $1 AND dedupe_key = 'r3'`, [itemId]);
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+      await fact('stage_waiting', 'runner_daily_limit', 'r4');
+      await admin.query('UPDATE work_items SET halted_at = now(), halt_action_id = $2, halt_epoch = 1 WHERE id = $1', [itemId, randomUUID()]);
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
     });
 
     it('build_slot_wait (D#483): a fresh slot-wait fact at spec_ready says so, and for the repository names the item that holds the slot; stale, halted or another stage says nothing', async () => {

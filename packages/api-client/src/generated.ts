@@ -490,8 +490,9 @@ export interface Operations {
         finished_at: string | null;
       }>;
       notice: ({
-        kind: "not_feasible" | "needs_human" | "check_failed" | "no_file_list" | "respec_failed" | "build_slot_wait" | "resume_refused" | "spec_refused" | "superseded";
+        kind: "not_feasible" | "needs_human" | "check_failed" | "no_file_list" | "respec_failed" | "build_slot_wait" | "resume_refused" | "spec_refused" | "superseded" | "review_limit_wait";
         reason: string;
+        resets_at?: string;
       }) | (null);
       review_recheck?: ({
         kind: "merge_only";

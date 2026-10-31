@@ -3827,10 +3827,14 @@
                                 "build_slot_wait",
                                 "resume_refused",
                                 "spec_refused",
-                                "superseded"
+                                "superseded",
+                                "review_limit_wait"
                               ]
                             },
                             "reason": {
+                              "type": "string"
+                            },
+                            "resets_at": {
                               "type": "string"
                             }
                           },

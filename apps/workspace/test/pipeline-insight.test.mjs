@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  FLAG_WORDS, RECEIPTS_HEADING, receiptsSection, formatWhen, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, SPEC_REFUSED_SENTENCES, SPEC_REFUSED_GENERIC, SUPERSEDED_SENTENCE, SUPERSEDED_LINK_LABEL, phaseOf, pullUrl, readyBanner, mergeBlockSentence, blockingSentence, BLOCKING_SENTENCES, PUBLIC_REFUSED_SENTENCE, REVIEW_BLOCK_SENTENCE, UNKNOWN_BLOCK_SENTENCE, reasonWord, roleWord, runView, statusWord, stepView, usdText,
+  FLAG_WORDS, limitResetTail, RECEIPTS_HEADING, receiptsSection, formatWhen, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, SPEC_REFUSED_SENTENCES, SPEC_REFUSED_GENERIC, SUPERSEDED_SENTENCE, SUPERSEDED_LINK_LABEL, phaseOf, pullUrl, readyBanner, mergeBlockSentence, blockingSentence, BLOCKING_SENTENCES, PUBLIC_REFUSED_SENTENCE, REVIEW_BLOCK_SENTENCE, UNKNOWN_BLOCK_SENTENCE, reasonWord, roleWord, runView, statusWord, stepView, usdText,
 } from "../apps/pipeline/pipeline-insight.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
@@ -271,6 +271,28 @@ describe("the Ready to merge banner is honest about what still blocks the merge"
     expect(readyBanner({ ...REVIEW_PASSED, steps: [], public_change: pushed })).toMatchObject({ blocked: true, detail: "The public pull request isn't open yet." });
     const opened = { ...pushed, state: "pr_opened", pr_number: 9, pr_url: "https://github.com/acme/docs-public/pull/9" };
     expect(readyBanner({ ...REVIEW_PASSED, steps: [gateStep(["auto_merge_not_allowed"])], public_change: opened })).toMatchObject({ blocked: false, title: "Ready to merge" });
+  });
+});
+
+describe("D#6: a review waiting for the runner's daily limit", () => {
+  const SENTENCE = "This review is waiting for the runner's daily run limit. It starts again on its own after the limit resets at midnight UTC.";
+  const WAIT = { notice: { kind: "review_limit_wait", reason: SENTENCE, resets_at: "2026-11-01T00:00:00.000Z" } };
+  it("the banner is the server's sentence plus the reset instant in the viewer's zone, not UTC", () => {
+    const b = noticeBanner(WAIT);
+    expect(b).toMatchObject({ kind: "review_limit_wait", title: "", lead: "", reason: SENTENCE });
+    expect(b.tail).toBe(limitResetTail("2026-11-01T00:00:00.000Z"));
+    // The same instant reads differently in different zones, and never as the UTC midnight in a zone that is not UTC.
+    const ny = limitResetTail("2026-11-01T00:00:00.000Z", "America/New_York");
+    const nz = limitResetTail("2026-11-01T00:00:00.000Z", "Pacific/Auckland");
+    expect(ny).toContain("Oct 31, 2026");
+    expect(ny).toMatch(/8:00\s?PM/);
+    expect(nz).toContain("Nov 1, 2026");
+    expect(nz).toMatch(/1:00\s?PM/);
+    expect(ny).not.toBe(nz);
+  });
+  it("a missing or malformed instant adds nothing to the sentence", () => {
+    for (const bad of [undefined, null, "", "not a date", 5]) expect(limitResetTail(bad)).toBe("");
+    expect(noticeBanner({ notice: { kind: "review_limit_wait", reason: SENTENCE } })).toMatchObject({ tail: "", reason: SENTENCE });
   });
 });
 
