@@ -3,6 +3,7 @@ import { ADD_DISCUSSION_COMMENT_DOCUMENT, type RetractionSurface } from "./retra
 import { GH_OWNER_LOGIN_RE, GH_REPO_NAME_RE } from "./eventMapper.js";
 import { getInstallationToken, RECEIPT_BLOCK_PERMISSIONS, RETRACTION_PERMISSIONS, REVERT_PR_PERMISSIONS, type AccessTokenRequester, type InstallationTokenCache } from "./installationToken.js";
 import { REVERT_PR_DOCUMENT, revertPrVariables } from "./revertPr.js";
+import { pinnedMergeGateBody } from "./mergeGateGraphql.js";
 
 /**
  * D#483 P3: an HTTP client for ONE repository's GitHub API, authenticated as the write App's installation, for the stage
@@ -210,10 +211,29 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
       async close() {
         if (kind === "branch_delete" || kind === "branch_sync" || kind === "retraction" || kind === "revert_pr") await revokeInstallationToken(token);
       },
-      async request(req) {
+      async request(raw) {
+        // Snapshot every field of the request exactly once; from here on only the snapshot is used (checks, URL, body, log), so a caller's accessor
+        // or `toJSON` cannot answer one thing to a check and another to the send. The body is a JSON round trip: the checked value IS the sent bytes.
+        const method: unknown = raw.method;
+        const path: unknown = raw.path;
+        const rawQuery: unknown = raw.query;
+        const rawBody: unknown = raw.body;
+        if (typeof method !== "string" || typeof path !== "string" || !["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) throw new InstallationHttpError("path_refused");
+        let snapBody: unknown;
+        try {
+          const text = rawBody === undefined ? undefined : JSON.stringify(rawBody);
+          snapBody = text === undefined ? undefined : JSON.parse(text);
+        } catch {
+          // fx-swallow-ok: a body that cannot be serialized is refused before anything is sent
+          throw new InstallationHttpError("path_refused");
+        }
+        const req = { method: method as typeof raw.method, path, query: rawQuery === undefined || rawQuery === null ? undefined : { ...(rawQuery as Record<string, string | number>) }, body: snapBody };
         const graphql = (kind === "runner_pr" || kind === "retraction" || target.allowGraphql === true) && req.method === "POST" && req.path === GRAPHQL_PATH;
         // `revert_pr` may name `/graphql` too, but only the one exact mutation checked below.
-        const allowed = graphql || (kind === "revert_pr" && req.method === "POST" && req.path === GRAPHQL_PATH) || (req.method === "GET" && req.path === repoRoot) || (req.path.startsWith(prefix) && PATH_RE.test(req.path));
+        // D#694 B5a: the hosted `merge_gate` client may send `POST /graphql` only for one of three pinned documents (mergeGateGraphql.ts); never a blanket flag.
+        const pinnedBody = kind === "merge_gate" && req.method === "POST" && req.path === GRAPHQL_PATH && req.query === undefined ? pinnedMergeGateBody(req.body, { owner: target.owner, name: target.name }) : undefined;
+        const pinnedGate = pinnedBody !== undefined;
+        const allowed = graphql || pinnedGate || (kind === "revert_pr" && req.method === "POST" && req.path === GRAPHQL_PATH) || (req.method === "GET" && req.path === repoRoot) || (req.path.startsWith(prefix) && PATH_RE.test(req.path));
         if (!allowed || req.path.includes("..")) throw new InstallationHttpError("path_refused");
         // `runner_pr` holds contents:read, so it gets its own EXACT list rather than the prefix rule above (CWE-284): a caller that
         // names this kind must not be able to read file contents, patches or commits. Everything else is refused here, PUT included.
@@ -284,6 +304,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
         // DELETE is for `branch_delete` alone, and only on its pinned ref (checked above).
         if (req.method === "DELETE" && kind !== "branch_delete") throw new InstallationHttpError("method_refused");
         if (kind === "runner_pr" && req.method === "PUT") throw new InstallationHttpError("method_refused");
+        const sendBody = pinnedBody ?? req.body; // a pinned body is the checked copy, so the bytes sent are the bytes checked
         const url = new URL(`https://api.github.com${req.path}`);
         for (const [k, v] of Object.entries(req.query ?? {})) url.searchParams.set(k, String(v));
         let res: Response;
@@ -295,9 +316,9 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
               authorization: `Bearer ${token}`,
               ...(kind === "branch_delete" || kind === "receipt_block" || kind === "retraction" || kind === "revert_pr" ? { "user-agent": "fulcrumaxe-cloud" } : {}),
               "x-github-api-version": "2022-11-28",
-              ...(req.body !== undefined ? { "content-type": "application/json" } : {}),
+              ...(sendBody !== undefined ? { "content-type": "application/json" } : {}),
             },
-            body: req.body === undefined ? undefined : JSON.stringify(req.body),
+            body: sendBody === undefined ? undefined : JSON.stringify(sendBody),
             redirect: "error",
             signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
           });
