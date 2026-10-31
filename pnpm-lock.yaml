@@ -1085,13 +1085,13 @@ importers:
       '@fx/decisions':
         specifier: workspace:*
         version: link:../decisions
+      '@fx/github':
+        specifier: workspace:*
+        version: link:../github
       '@fx/spend':
         specifier: workspace:*
         version: link:../spend
     devDependencies:
-      '@fx/github':
-        specifier: workspace:*
-        version: link:../github
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
