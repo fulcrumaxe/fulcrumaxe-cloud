@@ -40,9 +40,13 @@ describe("the parked-stage registry", () => {
     for (const e of registeredStages()) {
       expect(PARKED_STAGE_REGISTRY[e.stage]).toBe(e);
       expect(e.pauses.length).toBeGreaterThan(0);
-      for (const p of e.pauses) expect(RESERVATION_PAUSE_REASONS).toContain(p);
+      // The one wait that is not a spend pause: a review parked for the runner's daily limit (resumed by the clock, and only at the review stage).
+      for (const p of e.pauses) expect(e.stage === "review" && p === "runner_daily_limit" ? RESERVATION_PAUSE_REASONS.concat(p as never) : RESERVATION_PAUSE_REASONS).toContain(p);
       for (const s of [...e.itemStages, ...(e.childItemStages ?? [])]) expect(WAITING_STAGE_POSITIONS[e.stage]).toContain(s);
     }
+    expect(PARKED_STAGE_REGISTRY.review!.pauses).toEqual([...RESERVATION_PAUSE_REASONS, "runner_daily_limit"]);
+    // migration 0845's lister accepts at most eight pauses.
+    for (const e of registeredStages()) expect(e.pauses.length).toBeLessThanOrEqual(8);
   });
 
   it("the build entry: Spec ready only, and the run-key pattern matches its keys (bare, attempt, attempt with a note pin) and no one else's", () => {

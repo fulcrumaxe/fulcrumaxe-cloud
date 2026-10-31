@@ -181,6 +181,11 @@ const BUILD_SLOT_WAIT_MS = 4 * 3_600_000;
  * keyed `refused_spend` run that a replay of the same key would find again; five minutes keeps those rows to 48 in the wait.
  */
 const RESERVATION_PAUSE_REASONS: readonly string[] = ["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate", "envelope_reached", "model_credits_exhausted"];
+/**
+ * A reviewer the runner refused for its daily run limit (packages/pipeline reservationPauses.ts RUNNER_DAILY_LIMIT_PAUSE; a test holds the two equal). Not a spend pause:
+ * the round records one waiting fact and ends `review_paused:runner_daily_limit` with no re-asking, and the parked-stage sweep starts it again after the next UTC midnight.
+ */
+const RUNNER_DAILY_LIMIT_PAUSE = "runner_daily_limit";
 const BUILD_SPEND_POLL_MS = 300_000;
 const BUILD_SPEND_WAIT_MS = 4 * 3_600_000;
 /** C44-7: the fixed reason when a second fix on one head also changed nothing. */
@@ -1359,6 +1364,17 @@ async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number
     started: started.filter((s) => s.runId !== null).map((s) => s.role).join(","),
     refused: started.filter((s) => s.runId === null).map((s) => `${s.role}:${s.reason ?? "none"}`).join(","),
   });
+  // The runner's daily limit refused every reviewer that did not start: the round waits for the day to roll over (one fact, then the workflow ends; the sweep resumes it).
+  // The fact is written NOW, when the refusal happened, not after the started reviewers reach their verdicts: the sweep measures the reset from it, so a sibling that runs past
+  // UTC midnight must not push the resume a day out. The started reviewers are still followed to their verdicts below; the restart finds them by their keys.
+  // Any other refusal in the mix keeps the stop.
+  const refusedStarts = started.filter((s) => s.runId === null);
+  const limitParked = refusedStarts.length > 0 && refusedStarts.every((s) => s.reason === RUNNER_DAILY_LIMIT_PAUSE);
+  const waitAttempt = Math.max(0, ...refusedStarts.map((s) => attemptOf.get(s.role) ?? attempt));
+  if (limitParked) {
+    await waitOnHead(args, "review", RUNNER_DAILY_LIMIT_PAUSE, waitAttempt, pr, rereview);
+    await advanceLogStep("advance.stage_waiting", { work_item_id: workItemId, at: "review_start", reason: RUNNER_DAILY_LIMIT_PAUSE });
+  }
   const verdicts: Verdict[] = [];
   for (const s of started) {
     if (s.runId !== null) {
@@ -1368,6 +1384,7 @@ async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number
       verdicts.push(got.verdict);
     }
   }
+  if (limitParked) return { verdicts: [], refused: [], refusedWhy: {}, paused: { pause: RUNNER_DAILY_LIMIT_PAUSE, attempt: waitAttempt } };
   // Who was refused, and the worker's closed reason for each (a role setting, the runner's daily limit, ...): the stop's code names the reason, so the card and Needs you can say it.
   const refusedWhy: Record<string, string> = {};
   for (const s of started) if (s.runId === null && s.reason !== null && s.reason !== undefined) refusedWhy[s.role] = s.reason;

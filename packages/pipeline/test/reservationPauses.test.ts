@@ -14,6 +14,10 @@ import {
   isReservationPause,
   pauseForDenial,
   envelopeReachedSentence,
+  RUNNER_DAILY_LIMIT_PAUSE,
+  RUNNER_DAILY_LIMIT_SENTENCE,
+  runnerLimitHasReset,
+  runnerLimitResetAt,
 } from "../src/advance/reservationPauses.js";
 import { BUILD_WAIT_REASONS } from "../src/advance/buildSlots.js";
 
@@ -119,5 +123,32 @@ describe("S5-d: the envelope sentence", () => {
       expect(envelopeReachedSentence(bad)).toBe(RESERVATION_PAUSE_SENTENCES.envelope_reached);
     }
     expect(envelopeReachedSentence(Number.NaN)).not.toMatch(/NaN|undefined|null/);
+  });
+});
+
+/** The runner's daily run limit: a review wait of its own, resumed by the clock. Not a spend pause. */
+describe("a review waiting for the runner's daily limit", () => {
+  it("is not a spend pause, so the workflow never polls for it and the sweep never reads headroom for it", () => {
+    expect(isReservationPause(RUNNER_DAILY_LIMIT_PAUSE)).toBe(false);
+    expect(RESERVATION_PAUSE_REASONS).not.toContain(RUNNER_DAILY_LIMIT_PAUSE);
+    expect(pauseForDenial("runner_daily_limit")).toBeNull();
+    expect(isAdmitDenyReason(RUNNER_DAILY_LIMIT_PAUSE)).toBe(true);
+  });
+
+  it("shows one fixed sentence", () => {
+    expect(RUNNER_DAILY_LIMIT_SENTENCE).toBe("This review is waiting for the runner's daily run limit. It starts again on its own after the limit resets at midnight UTC.");
+  });
+
+  it("resets at the next UTC midnight, the day boundary the runner's own count uses", () => {
+    expect(runnerLimitResetAt(new Date("2026-10-31T23:59:59Z")).toISOString()).toBe("2026-11-01T00:00:00.000Z");
+    expect(runnerLimitResetAt(new Date("2026-10-31T00:00:00Z")).toISOString()).toBe("2026-11-01T00:00:00.000Z");
+    expect(runnerLimitHasReset(new Date("2026-10-31T23:00:00Z"), new Date("2026-10-31T23:59:59Z"))).toBe(false);
+    expect(runnerLimitHasReset(new Date("2026-10-31T23:00:00Z"), new Date("2026-11-01T00:00:00Z"))).toBe(true);
+    expect(read("../../runner/src/targets/runnerTarget.ts")).toContain("date_trunc('day', now() AT TIME ZONE 'UTC')");
+  });
+
+  it("is the same word in the workflow bundle and the worker", () => {
+    expect(read("../../../apps/web/workflows/workItemAdvance.ts")).toContain(`const RUNNER_DAILY_LIMIT_PAUSE = "${RUNNER_DAILY_LIMIT_PAUSE}";`);
+    expect(read("../../worker/src/stageResume.ts")).toContain(`RUNNER_DAILY_LIMIT_WAIT = "${RUNNER_DAILY_LIMIT_PAUSE}";`);
   });
 });

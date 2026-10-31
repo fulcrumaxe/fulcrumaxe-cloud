@@ -134,6 +134,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "envelope_exceeded",
   "model_budget_exceeded",
   "compute_cap_exceeded",
+  // The runner's daily run limit (the admit refusal of RunnerTarget; also the code of the waiting fact a review parked for it leaves).
+  "runner_daily_limit",
   // Run handoff (D#599 HO-2a): the refusals of POST /runs/{id}/handoff and its cancel, thrown through a variable (the runner-cloud service's code), so the scan cannot see them.
   "run_not_movable",
   "already_on_that_side",

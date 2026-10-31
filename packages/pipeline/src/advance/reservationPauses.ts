@@ -60,6 +60,27 @@ export const RESERVATION_PAUSE_SENTENCES: Readonly<Record<ReservationPause, stri
   model_credits_exhausted: "Your model credits ran out. Top up, and work resumes on its own.",
 });
 
+/**
+ * A reviewer the runner refused for its daily run limit is a wait of its own, not a spend pause: the limit counts runs since the last UTC midnight
+ * (runnerTarget.ts `runsToday`), so nothing a reviewer or a person does frees it before the day rolls over. It is deliberately NOT in `RESERVATION_PAUSE_REASONS`:
+ * the workflow does not re-ask every five minutes for it and the sweep does not read the spend headroom for it. The workflow records one waiting fact and ends
+ * `review_paused:runner_daily_limit`; the existing 15-minute sweep resumes the review once a UTC midnight has passed since that fact (a plain time comparison).
+ * Only the review stage uses it. Every other not-started refusal keeps stopping the round.
+ */
+export const RUNNER_DAILY_LIMIT_PAUSE = "runner_daily_limit" as const;
+export type ReviewLimitWait = typeof RUNNER_DAILY_LIMIT_PAUSE;
+
+/** The one sentence a person reads while a review waits for the runner's daily limit. Fixed text. */
+export const RUNNER_DAILY_LIMIT_SENTENCE = "This review is waiting for the runner's daily run limit. It starts again on its own after the limit resets at midnight UTC.";
+
+/** The next UTC midnight after `from`: when the runner's daily count starts again at zero. */
+export function runnerLimitResetAt(from: Date): Date {
+  return new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate() + 1));
+}
+
+/** Whether a wait recorded at `waitedAt` has seen its reset by `now`. Pure; the sweep's whole decision for this wait. */
+export const runnerLimitHasReset = (waitedAt: Date, now: Date): boolean => runnerLimitResetAt(waitedAt).getTime() <= now.getTime();
+
 /** The envelope pause with the person's own figure in it. Fixed text and a number; a non-finite or negative amount falls back to the figureless sentence. */
 export function envelopeReachedSentence(amountUsd: number): string {
   return Number.isFinite(amountUsd) && amountUsd >= 0 ? `Paused: this item reached its $${amountUsd.toFixed(2)} limit. Raise the limit to continue, or stop the item.` : RESERVATION_PAUSE_SENTENCES.envelope_reached;
