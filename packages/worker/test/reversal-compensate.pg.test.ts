@@ -182,15 +182,12 @@ describe("reversal compensation worker step [pg]", { timeout: 120_000 }, () => {
       expect(await rowOf(i)).toMatchObject({ state: "failed", reason_code: "rerun_refused" });
     });
 
-    it("a sandbox item and a policy actor end with the 0936 codes and call nothing", async () => {
-      const sandbox = await seed({ mode: "sandbox" });
+    it("a policy actor ends with no_person_actor and calls nothing (a sandbox item is re-run on a branch of its own: sandboxRerunReversal.pg.test.ts)", async () => {
       const policy = await seed({ actor: "policy" });
-      for (const [i, code] of [[sandbox, "rerun_would_overwrite_branch"], [policy, "no_person_actor"]] as const) {
-        const { pf, git } = await github(i);
-        await runReversalCompensations(deps(git));
-        expect(pf.requests).toEqual([]);
-        expect(await rowOf(i)).toMatchObject({ state: "failed", reason_code: code });
-      }
+      const { pf, git } = await github(policy);
+      await runReversalCompensations(deps(git));
+      expect(pf.requests).toEqual([]);
+      expect(await rowOf(policy)).toMatchObject({ state: "failed", reason_code: "no_person_actor" });
     });
   });
 

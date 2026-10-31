@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import { compensate, createBuildStatePort, createGitPort, planReversal, readPersonManaged, type CompensateOutcome, type CompensateSubject, type PullsHttp, type RebuildPort, type ReversalPlan } from "@fx/receipts";
+import { compensate, createBuildStatePort, createGitPort, planReversal, readPersonManaged, sandboxRerunHasOwnBranch, type CompensateOutcome, type CompensateSubject, type PullsHttp, type RebuildPort, type ReversalPlan } from "@fx/receipts";
 import { claimCompensation, finishCompensation, listDueCompensations, type ClaimedCompensation, type CompensationReason } from "@fx/db/src/reversalCompensation.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
+import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
+import { SANDBOX_RERUN_BRANCH_SCHEME } from "@fx/pipeline";
 import { operatorVerdict, readOperatorFacts } from "@fx/core/src/work-items/operatorActions.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { isLegalStageTransition } from "@fx/core/src/work-items/stages.js";
@@ -59,6 +61,8 @@ interface RowFacts {
   repo: { id: string; owner: string; name: string } | null;
   side: "runner" | "cloud";
   branch: string | null;
+  /** A cloud item only: false for a planned PR child whose build identity does not resolve for a start (C27 R4 case 2). */
+  identityResolved: boolean;
 }
 
 async function readFacts(client: PoolClient, row: ClaimedCompensation): Promise<RowFacts | null> {
@@ -72,13 +76,26 @@ async function readFacts(client: PoolClient, row: ClaimedCompensation): Promise<
     [row.workItemId, row.accountId])).rows[0];
   if (!item) return null;
   const repo = item.repo_id !== null && item.owner !== null && item.name !== null ? { id: item.repo_id, owner: item.owner, name: item.name } : null;
-  const recorded = await readRecordedRunnerPullRequest(client, { accountId: row.accountId, workItemId: row.workItemId });
+  const side = sideOfMode(item.mode);
+  // A runner run's branch is the one its done record bound. A sandbox run's is derived on read from the item's run records (SANDBOX-RERUN-BRANCH-a): the newest `build.branch`, else the fixed
+  // name, so a run-2 pull request is closed by run 2's branch and never by the item's fixed name. An identity that does not resolve leaves no branch: the port answers `unavailable`.
+  let branch: string | null = null;
+  let identityResolved = true;
+  if (side === "cloud") {
+    const seen = await resolveBuildIdentity(client, row.accountId, row.workItemId, "observe");
+    branch = seen.ok ? seen.identity.branch : null;
+    const start = await resolveBuildIdentity(client, row.accountId, row.workItemId, "start");
+    identityResolved = start.ok || !start.isChild;
+  } else {
+    branch = (await readRecordedRunnerPullRequest(client, { accountId: row.accountId, workItemId: row.workItemId }))?.branch ?? null;
+  }
   return {
     actor: r.actor ?? "",
     receipt: { decisionType: r.decision_type, createdAt: new Date(r.created_at), reversalFreeUntil: r.reversal_free_until === null ? null : new Date(r.reversal_free_until) },
     repo,
-    side: sideOfMode(item.mode),
-    branch: recorded?.branch ?? null,
+    side,
+    branch,
+    identityResolved,
   };
 }
 
@@ -124,9 +141,9 @@ async function runRow(deps: ReversalCompensateDeps, row: ClaimedCompensation, no
   if (facts === null) return failed("state_changed");
   if (facts.repo === null) return failed("repo_gone");
   const plan: ReversalPlan = planReversal(facts.receipt, await createBuildStatePort(pool).stateOf(row.accountId, row.workItemId), now);
-  const subject: CompensateSubject = { accountId: row.accountId, workItemId: row.workItemId, repo: `${facts.repo.owner}/${facts.repo.name}`, side: facts.side, actor: facts.actor };
-  // Refuse before anything is closed when Build again could not be filed anyway (compensate itself refuses the other side and a policy actor first).
-  if (plan.kind === "rerun" && facts.side === "runner" && UUID.test(facts.actor)) {
+  const subject: CompensateSubject = { accountId: row.accountId, workItemId: row.workItemId, repo: `${facts.repo.owner}/${facts.repo.name}`, side: facts.side, actor: facts.actor, rerunBranch: { scheme: SANDBOX_RERUN_BRANCH_SCHEME, identityResolved: facts.identityResolved } };
+  // Refuse before anything is closed when Build again could not be filed anyway (compensate itself refuses a cloud item without its own branch and a policy actor first).
+  if (plan.kind === "rerun" && (facts.side === "runner" || sandboxRerunHasOwnBranch(subject.rerunBranch)) && UUID.test(facts.actor)) {
     const v = await withTenant(pool, row.accountId, facts.actor, (c) => verdictFor(c, row.workItemId, row.accountId, facts.actor, false));
     if (v.refusal !== null) return { ...failed(v.refusal === "refused" ? "rerun_refused" : "state_changed"), prNumber: plan.pr?.number ?? null };
   }

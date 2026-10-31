@@ -10,11 +10,11 @@ import type { ReversalPlan } from "./reverse.js";
  *  - `free_redecide` (inside the window, or before the build): no port is called. The row is `none_before_build`.
  *  - `compensating_work`: the retraction is DP7b's, and its port answers the unavailable state today, so the row is `unavailable`,
  *    `retraction_unavailable`, and no port is called.
- *  - `rerun` (R-S1-1): only where the fresh build gets its own branch, which is the runner's `fx/<run>-g<n>`. A sandbox build force-pushes the item's
- *    one branch, and a paired sandbox build opens its private pull request on that same branch, so a rebuild there would overwrite the original:
- *    refused with `rerun_would_overwrite_branch` before any port is called. A reversal recorded by policy has no person to act for: refused with
- *    `no_person_actor`, and nothing is filed in the orchestrator's name. Otherwise the open pull request is closed at exactly its recorded head (the
- *    branch is kept), then Build again is filed in the person's name.
+ *  - `rerun` (R-S1-1): the fresh build gets its own branch. The runner's is `fx/<run>-g<n>`; a sandbox Build again pushes `fx/<run id>-g1` and never forces
+ *    (SANDBOX-RERUN-BRANCH-a), so a cloud item (sandbox or paired sandbox, top-level or child) is re-run too. The refusal `rerun_would_overwrite_branch`, before any port is
+ *    called, stays for two cases only: the running build path does not carry that rule (`rerunBranch.scheme` absent), or a planned PR child's build identity does not resolve
+ *    (`rerunBranch.identityResolved` false). A reversal recorded by policy has no person to act for: refused with `no_person_actor`, and nothing is filed in the orchestrator's
+ *    name. Otherwise the open pull request is closed at exactly its recorded head (the branch is kept, never deleted or rewritten), then Build again is filed in the person's name.
  *  - `revert_pr` (R-S1-3): one draft revert pull request for the customer to review. The merged change stays until they merge it.
  *
  * A port that refuses, or throws, ends the row `failed` with a fixed code. The receipt already stands and its row stays with it; the next tick
@@ -48,6 +48,11 @@ export interface CompensateSubject {
   side: "runner" | "cloud";
   /** The reversal receipt's `actor`: the session user id of the person who asked, or the literal `policy`. */
   actor: string;
+  /**
+   * SANDBOX-RERUN-BRANCH-b (C27 R4), read only for `side: "cloud"`. `scheme` is the running deployment's `SANDBOX_RERUN_BRANCH_SCHEME` (null: its build path has no per-run branch rule);
+   * `identityResolved` is false for a planned PR child whose build identity does not resolve for a start. Absent: the refusal stands.
+   */
+  rerunBranch?: { scheme: number | null; identityResolved: boolean };
 }
 
 export interface CompensatePorts {
@@ -94,6 +99,9 @@ async function attempt<T>(call: () => Promise<T>): Promise<T | null> {
   }
 }
 
+/** True when a cloud re-run's new build would push a branch of its own: the deployment carries the rule, and a child's identity resolves. */
+export const sandboxRerunHasOwnBranch = (r: CompensateSubject["rerunBranch"]): boolean => r !== undefined && r.scheme !== null && Number.isInteger(r.scheme) && r.scheme >= 1 && r.identityResolved;
+
 export async function compensate(plan: ReversalPlan, subject: CompensateSubject, ports: CompensatePorts): Promise<CompensateOutcome> {
   switch (plan.kind) {
     case "refused":
@@ -111,7 +119,7 @@ export async function compensate(plan: ReversalPlan, subject: CompensateSubject,
     case "rerun": {
       const pr = plan.pr;
       const prNumber = pr?.number ?? null;
-      if (subject.side !== "runner") return row("rerun", "failed", "rerun_would_overwrite_branch", prNumber);
+      if (subject.side === "cloud" && !sandboxRerunHasOwnBranch(subject.rerunBranch)) return row("rerun", "failed", "rerun_would_overwrite_branch", prNumber);
       if (!PERSON.test(subject.actor)) return row("rerun", "failed", "no_person_actor", prNumber);
       if (pr !== null) {
         const closed = await attempt(() => ports.git.rerunAfterBuild({ repo: subject.repo, number: pr.number, headSha: pr.headSha }));
@@ -139,7 +147,7 @@ export const COMPENSATION_COPY = {
   failed: {
     not_reversible: "This decision cannot be reversed.",
     retraction_unavailable: "This cannot be corrected automatically yet, so nothing was changed.",
-    rerun_would_overwrite_branch: "A fresh build here would replace the original branch, so we did not start one. Nothing was changed.",
+    rerun_would_overwrite_branch: "A fresh build here could not be given a branch of its own, so we did not start one and the original is untouched. Nothing was changed.",
     no_person_actor: "Only a person can ask for a fresh build, so we did not start one. Nothing was changed.",
     head_moved: "The pull request has new commits since it was built, so we left it as it is.",
     person_managed: "A person has taken this change over, so we left its pull request as it is.",

@@ -462,6 +462,8 @@ export async function startBuildForItem(
   const sandboxRun = promptRuntimeOf(executionMode) === "sandbox";
   const newRunId = prior || !sandboxRun ? undefined : randomUUID();
   const branch = startBuildBranch(identity, facts.planned_pr_key, facts.stage === "needs_human" && sandboxRun ? (newRunId ?? null) : null);
+  // The fixed name is the same whichever of two racing calls names it; only a rebuild's branch (named after a random run id) can differ between them.
+  const fixedBranch = startBuildBranch(identity, facts.planned_pr_key, null);
   // A replay whose earlier run was cancelled (a failed record cancels the run it just started; a person may cancel one) must not move the item to in_progress
   // pointing at that cancelled run: it is refused, and a fresh approval starts a fresh run.
   if (prior && (facts.stage === "spec_ready" || facts.stage === "needs_human") && (await ports.outcome(prior.runId)).status === "cancelled") return { status: "refused", reason: "prior_run_cancelled" };
@@ -565,7 +567,9 @@ export async function startBuildForItem(
         // D#483 S5-b2c-2 (R1): a child's sandbox build records the branch it will use ON THE RUN, in this transaction, so the webhook can map the pull request it opens to the child. Set
         // once per run (a replay finds its row). A runner run's branch is its own and its done record binds the number.
         // A replay reads the branch its run recorded (a rebuild's is the run's own); a run with no record (started before this rule) is on the fixed name.
-        const pushed = !prior || !sandboxRun ? branch : ((await client.query<{ b: string | null }>("SELECT payload->>'branch' AS b FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 LIMIT 1", [accountId, started.runId, BUILD_BRANCH_KIND])).rows[0]?.b ?? branch);
+        // A racing replay: both callers found no run, each chose its own id, and the keyed start returned the winner's run. The loser's `branch` is named after ITS id, so a run that is not the one this call
+        // named is read back like a replay is.
+        const pushed = !sandboxRun || (!prior && (branch === fixedBranch || started.runId === newRunId)) ? branch : ((await client.query<{ b: string | null }>("SELECT payload->>'branch' AS b FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 LIMIT 1", [accountId, started.runId, BUILD_BRANCH_KIND])).rows[0]?.b ?? branch);
         if (isChild && promptRuntimeOf(executionMode) === "sandbox") await recordChildBranch(client, accountId, started.runId, pushed);
 
         // D#600 CX-8b: which memory entries and which map this prompt carried, for the context panel. A replay of a started step keeps the first record

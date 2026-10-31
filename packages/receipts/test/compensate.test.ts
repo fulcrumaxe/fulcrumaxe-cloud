@@ -8,6 +8,7 @@ import {
   planReversal,
   type BuildState,
   type CompensateOutcome,
+  type CompensatePorts,
   type CompensateSubject,
   type GitPort,
   type PricedReceipt,
@@ -121,12 +122,75 @@ describe("compensate: criterion 1, the four build states", () => {
   });
 });
 
-describe("compensate: the re-run only where the rebuild gets its own branch, and only for a person", () => {
-  it("a cloud (sandbox, or paired sandbox) item is refused with rerun_would_overwrite_branch before any port is called", async () => {
-    const plan = planReversal(receipt(reversible), { stage: "built", pr: PR }, now);
+const OWN_BRANCH = { scheme: 1, identityResolved: true } as const;
+
+describe("compensate: the re-run, and when a cloud item is refused (C27 R4)", () => {
+  const plan = () => planReversal(receipt(reversible), { stage: "built", pr: PR }, now);
+
+  it.each([
+    ["no scheme in the running deployment (absent)", undefined],
+    ["a scheme of null", { scheme: null, identityResolved: true }],
+    ["a scheme of 0", { scheme: 0, identityResolved: true }],
+    ["a child whose build identity does not resolve", { scheme: 1, identityResolved: false }],
+  ] as const)("a cloud item with %s is refused with rerun_would_overwrite_branch before any port is called", async (_label, rerunBranch) => {
     const ports = counted(untouchable());
-    expect(await compensate(plan, subject({ side: "cloud" }), { git: ports, rebuild: ports })).toEqual({ kind: "rerun", state: "failed", reasonCode: "rerun_would_overwrite_branch", prNumber: 7, runActionId: null });
+    const over = rerunBranch === undefined ? subject({ side: "cloud" }) : subject({ side: "cloud", rerunBranch });
+    expect(await compensate(plan(), over, { git: ports, rebuild: ports })).toEqual({ kind: "rerun", state: "failed", reasonCode: "rerun_would_overwrite_branch", prNumber: 7, runActionId: null });
     expect(ports.count).toBe(0);
+  });
+
+  /** One shared log, so the order of the two ports' calls across them is shown. */
+  function ordered() {
+    const log: string[] = [];
+    const inner = fakeGit({ open: { [`${REPO}#7`]: SHA }, merged: [] });
+    const rebuild = fakeRebuild({ roles, stage: "pr_opened" });
+    const ports: CompensatePorts = {
+      git: {
+        rerunAfterBuild: async (i) => (log.push(`rerunAfterBuild ${i.repo}#${i.number}@${i.headSha === SHA ? "recorded-head" : i.headSha}`), inner.rerunAfterBuild(i)),
+        openRevertPr: async (i) => (log.push("openRevertPr"), inner.openRevertPr(i)),
+      },
+      rebuild: { buildAgain: async (i) => (log.push(`buildAgain ${i.userId === OWNER ? "person" : i.userId}`), rebuild.buildAgain(i)) },
+    };
+    return { log, ports, rebuild };
+  }
+
+  // A paired item is the same side for compensate (its public branch is not a per-run branch and is not read here), so both kinds must give the same answer.
+  const rows = (["runner", "cloud"] as const).flatMap((side) =>
+    (["sandbox", "paired sandbox"] as const).flatMap((kind) =>
+      (["top-level", "child"] as const).flatMap((item) =>
+        ([OWNER, "policy"] as const).flatMap((actor) =>
+          (["present", "scheme_absent", "identity_unresolved"] as const).filter((how) => item === "child" || how !== "identity_unresolved").map((how) => ({ side, kind, item, actor, how })),
+        ),
+      ),
+    ),
+  );
+
+  it("the table has every cell: 2 sides x 2 kinds x (top-level 2 actors x 2 build paths + child 2 actors x 3)", () => {
+    expect(rows).toHaveLength(2 * 2 * (4 + 6));
+  });
+
+  it.each(rows)("side $side, kind $kind, item $item, actor $actor, build path $how", async ({ side, actor, how }) => {
+    const { log, ports, rebuild } = ordered();
+    const rerunBranch = how === "present" ? OWN_BRANCH : how === "scheme_absent" ? { scheme: null, identityResolved: true } : { scheme: 1, identityResolved: false };
+    const outcome = await compensate(plan(), subject({ side, actor, rerunBranch }), ports);
+    if (side === "cloud" && how !== "present") {
+      expect(outcome).toMatchObject({ state: "failed", reasonCode: "rerun_would_overwrite_branch" });
+      expect(log).toEqual([]);
+    } else if (actor === "policy") {
+      expect(outcome).toMatchObject({ state: "failed", reasonCode: "no_person_actor" });
+      expect(log).toEqual([]);
+    } else {
+      expect(outcome).toMatchObject({ kind: "rerun", state: "done", reasonCode: null, prNumber: 7 });
+      expect(log).toEqual([`rerunAfterBuild ${REPO}#7@recorded-head`, "buildAgain person"]);
+      expect(rebuild.filed).toEqual([{ workItemId: ITEM, userId: OWNER }]);
+    }
+  });
+
+  it("a cloud item with its own branch goes ahead: the pull request is closed at its recorded head, then Build again is filed", async () => {
+    const { outcome, git, rebuild } = await run({ stage: "built", pr: PR }, reversible, { side: "cloud", rerunBranch: OWN_BRANCH });
+    expect(outcome).toMatchObject({ kind: "rerun", state: "done" });
+    expect(git.writes).toEqual([`close ${REPO}#7`]);
+    expect(rebuild.filed).toEqual([{ workItemId: ITEM, userId: OWNER }]);
   });
 
   it("a runner item with the same plan goes ahead", async () => {
