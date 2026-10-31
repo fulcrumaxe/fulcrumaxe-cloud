@@ -1,3 +1,4 @@
+import { pinnedMergeGateBody } from "../../../../github/src/mergeGateGraphql.js";
 import type { GitHubHttp, GitHubHttpRequest, GitHubHttpResponse } from "../../../src/build/githubMergePort.js";
 
 /**
@@ -89,6 +90,13 @@ export interface FakeRepoState {
   compareFails?: number;
   /** D#6 R3c: the pull request's head branch as the local-only fake lists it (a runner run's `fx/<run>-g<n>`). */
   runBranch?: string;
+  /**
+   * D#694 B5: a merge queue on the base branch. `exists` is what `Repository.mergeQueue` answers (the branch rules come from `rulesetRules`). Unset: no queue and no GraphQL
+   * endpoint at all. `POST /graphql` refuses, as the hosted `merge_gate` client does, anything but a pinned document with well-formed variables (it throws; nothing is
+   * recorded). `enqueue`/`autoMerge` choose the mutation's answer: `ok`, `forbidden` ("Resource not accessible by integration") or, for `enqueue`, `head_moved`
+   * ("Head branch was modified"; GitHub checks `expectedHeadOid` against the real head either way). Every mutation that reached GitHub is in `mutations`.
+   */
+  mergeQueue?: { exists: boolean; enqueue?: "ok" | "forbidden" | "head_moved"; autoMerge?: "ok" | "forbidden"; mutations: Array<{ kind: "enqueue" | "auto_merge"; variables: Record<string, unknown> }>; readFails?: boolean };
   /** The repository's GitHub id as `GET /repos/{owner}/{repo}` reports it (default: `defaultGhId(owner, name)`, different for every repository). */
   ghId?: number;
 }
@@ -145,7 +153,7 @@ export function fakeGitHubRest(s: FakeRepoState): GitHubHttp {
       s.requests.push(req);
       const path = req.path;
       if (req.method === "GET" && path === `${base}/pulls/${s.prNumber}`) {
-        return json(200, { number: s.prNumber, state: s.state, merged: s.merged, draft: s.draft, mergeable: s.mergeable === undefined ? true : s.mergeable, mergeable_state: s.mergeableState ?? "clean", head: { sha: s.headSha, ref: `fx/issue-7`, repo: { full_name: `${s.owner}/${s.name}` } }, base: { ref: s.baseRef, repo: { full_name: `${s.owner}/${s.name}`, default_branch: s.defaultBranch ?? "main" } } });
+        return json(200, { node_id: `PR_kwDOfake${s.prNumber}`, number: s.prNumber, state: s.state, merged: s.merged, draft: s.draft, mergeable: s.mergeable === undefined ? true : s.mergeable, mergeable_state: s.mergeableState ?? "clean", head: { sha: s.headSha, ref: `fx/issue-7`, repo: { full_name: `${s.owner}/${s.name}` } }, base: { ref: s.baseRef, repo: { full_name: `${s.owner}/${s.name}`, default_branch: s.defaultBranch ?? "main" } } });
       }
       if (req.method === "GET" && path === `${base}/pulls/${s.prNumber}/files`) {
         if (s.filesFail) return json(s.filesFail, { message: "Server Error" });
@@ -170,6 +178,21 @@ export function fakeGitHubRest(s: FakeRepoState): GitHubHttp {
         return s.requiredContexts.length === 0 ? json(404, { message: "Branch not protected" }) : json(200, { contexts: s.requiredContexts, checks: s.requiredContexts.map((context) => ({ context, app_id: null })) });
       }
       if (req.method === "GET" && path === `${base}/rules/branches/${s.baseRef}`) return json(200, s.rulesetRules ?? []);
+      if (req.method === "POST" && path === "/graphql" && s.mergeQueue !== undefined) {
+        const q = s.mergeQueue;
+        const accepted = pinnedMergeGateBody(req.body, { owner: s.owner, name: s.name });
+        if (accepted === undefined) throw new Error("path_refused");
+        if (q.readFails) return json(502, { message: "Bad Gateway" });
+        const query = accepted["query"] as string;
+        const variables = accepted["variables"] as Record<string, unknown>;
+        if (query.startsWith("query")) return json(200, { data: { repository: { mergeQueue: q.exists ? { id: "MQ_kwDOfake" } : null } } });
+        const auto = query.includes("enablePullRequestAutoMerge");
+        q.mutations.push({ kind: auto ? "auto_merge" : "enqueue", variables });
+        const mode = auto ? (q.autoMerge ?? "ok") : (q.enqueue ?? "ok");
+        if (mode === "forbidden") return json(200, { data: null, errors: [{ type: "FORBIDDEN", message: "Resource not accessible by integration" }] });
+        if (variables["expectedHeadOid"] !== s.headSha || mode === "head_moved") return json(200, { data: null, errors: [{ type: "UNPROCESSABLE", message: "Head branch was modified. Review and try the merge again." }] });
+        return json(200, { data: auto ? { enablePullRequestAutoMerge: { pullRequest: { id: `PR_kwDOfake${s.prNumber}` } } } : { enqueuePullRequest: { mergeQueueEntry: { id: "MQE_kwDOfake1", position: 1 } } } });
+      }
       const post = /^\/repos\/[^/]+\/[^/]+\/statuses\/(.+)$/.exec(path);
       if (req.method === "POST" && post) {
         const sha = post[1]!;

@@ -1,9 +1,11 @@
 import type {
   BranchComparison,
   CiSnapshot,
+  EnqueueOutcome,
   MergeBlockReason,
   MergeCallOutcome,
   MergeGateGitHubPort,
+  MergeQueueMode,
   PullRequestMergeability,
   PullRequestState,
   UpdateBranchOutcome,
@@ -42,6 +44,14 @@ export interface FakeGitHubOptions {
   /** Whether protection requires up-to-date branches (default false), or a function that throws to model an unreadable rule. */
   requiresUpToDate?: boolean | (() => boolean);
   updateBranchOutcome?: UpdateBranchOutcome;
+  /**
+   * D#694 B5: give the fake a merge queue. Absent: the fake has no queue methods at all (a port from before the queue, which the gate reads as `direct`).
+   * `"throw"` models a read that fails. The fake still merges directly when asked and the head matches, so a test that expects NO direct call proves the gate chose
+   * the queue over a bypass the app could have used.
+   */
+  queueMode?: MergeQueueMode["mode"] | "throw";
+  /** What the enqueue call answers (default: accepted, entry `MQE_kwDOtest1`, position 1). May move the head (a push racing the call). */
+  enqueue?: EnqueueOutcome | ((fake: FakeGitHub, args: { expectedHeadOid: string }) => EnqueueOutcome);
 }
 
 export class FakeGitHub implements MergeGateGitHubPort {
@@ -50,6 +60,10 @@ export class FakeGitHub implements MergeGateGitHubPort {
   readonly humanMarks: { headSha: string; reasons: readonly MergeBlockReason[] }[] = [];
   readonly ciQueries: string[] = [];
   readonly updateCalls: { expectedHeadSha: string }[] = [];
+  readonly queueModeCalls: string[] = [];
+  readonly enqueueCalls: { expectedHeadOid: string }[] = [];
+  getMergeQueueMode?: (pr: PullRequestRef, baseRef: string) => Promise<MergeQueueMode>;
+  enqueuePullRequest?: (pr: PullRequestRef, args: { expectedHeadOid: string }) => Promise<EnqueueOutcome>;
   mergeability: Pick<PullRequestMergeability, "mergeable" | "mergeableState">;
   private readonly opts: FakeGitHubOptions;
 
@@ -57,6 +71,19 @@ export class FakeGitHub implements MergeGateGitHubPort {
     this.opts = opts;
     this.pr = opts.pr;
     this.mergeability = opts.mergeability ?? { mergeable: true, mergeableState: "clean" };
+    const mode = opts.queueMode;
+    if (mode !== undefined) {
+      this.getMergeQueueMode = async (_pr, baseRef) => {
+        this.queueModeCalls.push(baseRef);
+        if (mode === "throw") throw new Error("queue read failed");
+        return { mode, source: "fake" };
+      };
+      this.enqueuePullRequest = async (_pr, args) => {
+        this.enqueueCalls.push({ expectedHeadOid: args.expectedHeadOid });
+        const e = opts.enqueue ?? { enqueued: true as const, via: "queue" as const, entryId: "MQE_kwDOtest1", position: 1 };
+        return typeof e === "function" ? e(this, args) : e;
+      };
+    }
   }
 
   async getMergeability(_pr: PullRequestRef): Promise<PullRequestMergeability> {

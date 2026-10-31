@@ -33,9 +33,15 @@ import type { MergeQueueEntry, PrFacts } from "./types.js";
 export type QueueGateResult =
   | { outcome: "merged" }
   | { outcome: "merge_delegated" }
+  /** D#694 B5: the gate put the pull request in the merge queue of the host. The entry keeps the slot, settled, until the webhook (B6) records the end. */
+  | { outcome: "merge_enqueued" }
   | { outcome: "pr_not_open" }
   | { outcome: "head_moved" }
   | { outcome: "ready_human_merges"; reasons: readonly string[] };
+
+/** D#694 B5: the phase of an entry whose pull request waits in the host's merge queue, and how long its slot is held (the store's longest lease). */
+export const HOST_QUEUE_PHASE = "host_queue";
+export const HOST_QUEUE_LEASE_SECONDS = 3600;
 
 export type TickGitHubPort = RefreshGitHubPort & MainGuardGitHubPort;
 
@@ -64,7 +70,7 @@ export interface QueueTickDeps {
 export type TickStep =
   | { step: "idle"; why: "slot_busy" | "nothing_eligible" | "lost_race" | "waiting_mergeability" }
   | { step: "merged"; entryId: string; prNumber: number }
-  | { step: "parked"; entryId: string; why: "ci_pending" | "refresh_pending" | "main_ci_unknown" }
+  | { step: "parked"; entryId: string; why: "ci_pending" | "refresh_pending" | "main_ci_unknown" | "host_queued" }
   /** The holder's slot is gone and nothing more is done with it this pass. */
   | { step: "released"; entryId: string; why: string };
 
@@ -194,6 +200,12 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
       return { step: "merged", entryId: held.id, prNumber: held.prNumber };
     case "parked":
       return { step: "parked", entryId: held.id, why: "ci_pending" };
+    case "merge_enqueued":
+      // D#694 B5: the host's queue owns the merge now. The entry keeps the slot in its own phase, which no tick adopts (only `parked` is adopted), so the gate is not
+      // asked again and nothing is enqueued twice; the webhook that records the queue's end (a later row) settles the entry. The longest lease the store allows
+      // bounds how long a lost webhook can hold it.
+      await deps.inTenant(accountId, (c) => renewSlot(c, { accountId, entryId: held.id, holder, phase: HOST_QUEUE_PHASE, leaseSeconds: HOST_QUEUE_LEASE_SECONDS }));
+      return { step: "parked", entryId: held.id, why: "host_queued" };
     case "ci_red":
     case "ci_timeout":
       return release("ci_not_green");

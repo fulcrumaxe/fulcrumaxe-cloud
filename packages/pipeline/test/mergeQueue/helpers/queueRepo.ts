@@ -121,11 +121,15 @@ export async function startQueueRepo(db: { admin: PoolClient; runWriterPool: Poo
         github: port,
         inTenant: tenant,
         ourLogin: BOT,
-        gate: async ({ entry, headSha, expectedSignals }) =>
-          runMergeGate(
+        gate: async ({ entry, headSha, expectedSignals }) => {
+          const out = await runMergeGate(
             { pool: db.runWriterPool, github: port, isAutoMergeAllowed: async () => autoMerge, requestReviews: async () => undefined },
             { accountId, workItemId: entry.workItemId!, pr: { repoId, prNumber: entry.prNumber }, tier: "small", securityDiffTriggerFired: false, debaterEnabled: false, expectedSignals, expectedHeadSha: headSha },
-          ),
+          );
+          // This fake port has no GitHub merge queue (D#694), so the gate never enqueues here.
+          if (out.outcome === "merge_enqueued") throw new Error("queue test: the fake port does not queue");
+          return out;
+        },
         startDeltaReview: opts.onDeltaReview ?? (async () => ({ started: true, runId: randomUUID() })),
         sleep: async () => undefined,
         pollIntervalMs: 0,
