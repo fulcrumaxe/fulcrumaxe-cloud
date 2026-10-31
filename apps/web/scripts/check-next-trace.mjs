@@ -14,7 +14,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const webDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+// NEXT_APP_DIR points the same check at another Next app (apps/live-sink/test/built.test.ts does); unset means apps/web.
+const webDir = process.env.NEXT_APP_DIR ? path.resolve(process.env.NEXT_APP_DIR) : path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const nextDir = path.join(webDir, ".next");
 const failures = [];
 
