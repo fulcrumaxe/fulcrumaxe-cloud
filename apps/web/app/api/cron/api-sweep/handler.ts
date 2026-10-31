@@ -1,5 +1,4 @@
 import { reportError } from "@fx/telemetry";
-import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { createPool } from "@fx/db/src/pool";
 import { runGatedTick } from "@fx/core/src/pendingWork";
@@ -13,6 +12,7 @@ import {
   type DeliverySender,
   type SweepSummary,
 } from "@fx/webhooks";
+import { cronAuthorized } from "../../../../lib/cronAuth";
 
 /**
  * D#31 API-4a criterion 12: the sweep cron. Matches
@@ -76,22 +76,6 @@ export function defaultApiSweepDeps(): ApiSweepHandlerDeps {
   };
 }
 
-/** Constant-time comparison against the configured secret. Rejects
- * outright (no comparison at all) when either side is empty, so an unset
- * `CRON_SECRET` fails closed rather than matching an empty Authorization
- * header. */
-function isAuthorized(authHeader: string | null, cronSecret: string): boolean {
-  if (!cronSecret || !authHeader) {
-    return false;
-  }
-  const expected = Buffer.from(`Bearer ${cronSecret}`, "utf8");
-  const actual = Buffer.from(authHeader, "utf8");
-  if (expected.length !== actual.length) {
-    return false;
-  }
-  return timingSafeEqual(expected, actual);
-}
-
 type RunSweepFn = (pool: ApiSweepHandlerDeps["platformOpsPool"], sender: DeliverySender) => Promise<SweepSummary>;
 type NextDueFn = (pool: ApiSweepHandlerDeps["platformOpsPool"]) => Promise<number | null>;
 
@@ -129,7 +113,7 @@ export async function apiSweepHandler(
   runSweepFn: RunSweepFn = (pool, sender) => runSweep(pool, sender),
   nextDueFn: NextDueFn = (pool) => nextApiSweepDueAt(pool),
 ): Promise<NextResponse> {
-  if (!isAuthorized(req.headers.get("authorization"), deps.cronSecret)) {
+  if (!cronAuthorized("/api/cron/api-sweep", req.headers.get("authorization"), deps.cronSecret)) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
 

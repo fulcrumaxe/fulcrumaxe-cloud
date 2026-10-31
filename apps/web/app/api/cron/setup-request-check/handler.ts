@@ -1,8 +1,8 @@
-import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { runGatedTick } from "@fx/core/src/pendingWork";
 import type { VercelEnvSource } from "@fx/core/src/setup-requests/checks";
 import type { SetupRequestCheckWorker } from "../../../../lib/worker";
+import { cronAuthorized } from "../../../../lib/cronAuth";
 
 /**
  * D#598 P8b: the setup-request check sweep. A request that names an automatic check (is this environment variable set on that project) is
@@ -26,16 +26,8 @@ export interface SetupRequestCheckHandlerDeps {
   now?(): number;
 }
 
-function isAuthorized(authHeader: string | null, cronSecret: string): boolean {
-  if (!cronSecret || !authHeader) return false;
-  const expected = Buffer.from(`Bearer ${cronSecret}`, "utf8");
-  const actual = Buffer.from(authHeader, "utf8");
-  if (expected.length !== actual.length) return false;
-  return timingSafeEqual(expected, actual);
-}
-
 export async function setupRequestCheckHandler(req: NextRequest, deps: SetupRequestCheckHandlerDeps): Promise<NextResponse> {
-  if (!isAuthorized(req.headers.get("authorization"), deps.cronSecret)) {
+  if (!cronAuthorized("/api/cron/setup-request-check", req.headers.get("authorization"), deps.cronSecret)) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
   const ran = await runGatedTick(

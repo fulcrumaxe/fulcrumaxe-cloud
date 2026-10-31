@@ -1,7 +1,7 @@
-import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { runGatedTick } from "@fx/core/src/pendingWork";
 import type { HandoffSweepWorker } from "../../../../lib/worker";
+import { cronAuthorized } from "../../../../lib/cronAuth";
 
 /**
  * D#599 HO-2b: the run handoff sweep. Vercel cannot schedule under a minute, so the cron fires every minute and one invocation makes two
@@ -26,16 +26,8 @@ export interface HandoffSweepHandlerDeps {
   now?(): number;
 }
 
-function isAuthorized(authHeader: string | null, cronSecret: string): boolean {
-  if (!cronSecret || !authHeader) return false;
-  const expected = Buffer.from(`Bearer ${cronSecret}`, "utf8");
-  const actual = Buffer.from(authHeader, "utf8");
-  if (expected.length !== actual.length) return false;
-  return timingSafeEqual(expected, actual);
-}
-
 export async function handoffSweepHandler(req: NextRequest, deps: HandoffSweepHandlerDeps): Promise<NextResponse> {
-  if (!isAuthorized(req.headers.get("authorization"), deps.cronSecret)) {
+  if (!cronAuthorized("/api/cron/handoff-sweep", req.headers.get("authorization"), deps.cronSecret)) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
   const now = deps.now ?? Date.now;

@@ -1,8 +1,8 @@
-import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { clampMarkerSince, finishTick, gateLine, isStagingPaused, readTickGate, recordCronConnected, recordCronTick } from "@fx/core/src/pendingWork";
 import type { OpsAlertSink } from "@fx/reconcile";
 import type { InvariantSweepWorker } from "../../../../lib/worker";
+import { cronAuthorized } from "../../../../lib/cronAuth";
 
 /**
  * D#597 CC-8: the platform invariant sweep. Vercel cannot schedule under a minute, so the cron fires every minute and one invocation makes two
@@ -35,16 +35,8 @@ export interface InvariantSweepHandlerDeps {
   alertSink?: OpsAlertSink | null;
 }
 
-function isAuthorized(authHeader: string | null, cronSecret: string): boolean {
-  if (!cronSecret || !authHeader) return false;
-  const expected = Buffer.from(`Bearer ${cronSecret}`, "utf8");
-  const actual = Buffer.from(authHeader, "utf8");
-  if (expected.length !== actual.length) return false;
-  return timingSafeEqual(expected, actual);
-}
-
 export async function invariantSweepHandler(req: NextRequest, deps: InvariantSweepHandlerDeps): Promise<NextResponse> {
-  if (!isAuthorized(req.headers.get("authorization"), deps.cronSecret)) {
+  if (!cronAuthorized("/api/cron/invariant-sweep", req.headers.get("authorization"), deps.cronSecret)) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
   const now = deps.now ?? Date.now;

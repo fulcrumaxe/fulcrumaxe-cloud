@@ -1,7 +1,7 @@
-import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { runGatedTick } from "@fx/core/src/pendingWork";
 import type { mergeQueue } from "@fx/pipeline";
+import { cronAuthorized } from "../../../../lib/cronAuth";
 
 /**
  * D#519 MQ3-b: the merge queue's sweep. It frees the slot of a holder whose step crashed (an expired lease) and gives every repo with
@@ -24,16 +24,8 @@ export interface MergeQueueSweepHandlerDeps {
   now?(): number;
 }
 
-function isAuthorized(authHeader: string | null, cronSecret: string): boolean {
-  if (!cronSecret || !authHeader) return false;
-  const expected = Buffer.from(`Bearer ${cronSecret}`, "utf8");
-  const actual = Buffer.from(authHeader, "utf8");
-  if (expected.length !== actual.length) return false;
-  return timingSafeEqual(expected, actual);
-}
-
 export async function mergeQueueSweepHandler(req: NextRequest, deps: MergeQueueSweepHandlerDeps): Promise<NextResponse> {
-  if (!isAuthorized(req.headers.get("authorization"), deps.cronSecret)) {
+  if (!cronAuthorized("/api/cron/merge-queue-sweep", req.headers.get("authorization"), deps.cronSecret)) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
   const now = deps.now ?? Date.now;

@@ -1,4 +1,3 @@
-import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { isStagingPaused, runGatedTick } from "@fx/core/src/pendingWork";
 import { createPool } from "@fx/db/src/pool";
@@ -34,6 +33,7 @@ import {
   type TickSummary,
 } from "@fx/reconcile";
 import { getWorker } from "../../../../lib/worker";
+import { cronAuthorized } from "../../../../lib/cronAuth";
 
 const [TERMINAL_JOB, CREDITS_JOB] = FAST_RECONCILE_JOBS;
 
@@ -244,19 +244,6 @@ export function defaultReconcileDeps(): ReconcileHandlerDeps {
   };
 }
 
-/** Constant-time comparison against the configured secret; an unset secret fails closed. */
-function isAuthorized(authHeader: string | null, cronSecret: string): boolean {
-  if (!cronSecret || !authHeader) {
-    return false;
-  }
-  const expected = Buffer.from(`Bearer ${cronSecret}`, "utf8");
-  const actual = Buffer.from(authHeader, "utf8");
-  if (expected.length !== actual.length) {
-    return false;
-  }
-  return timingSafeEqual(expected, actual);
-}
-
 export async function reconcileHandler(
   req: NextRequest,
   injected?: ReconcileHandlerDeps,
@@ -264,7 +251,7 @@ export async function reconcileHandler(
 ): Promise<NextResponse> {
   // Check the secret before building the real deps, so an unauthenticated call never opens a database pool.
   const cronSecret = injected ? injected.cronSecret : (process.env.CRON_SECRET ?? "");
-  if (!isAuthorized(req.headers.get("authorization"), cronSecret)) {
+  if (!cronAuthorized("/api/cron/reconcile", req.headers.get("authorization"), cronSecret)) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
   let nextDueAt: number | null = null;

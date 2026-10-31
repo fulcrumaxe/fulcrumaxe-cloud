@@ -1,7 +1,7 @@
-import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { runGatedTick } from "@fx/core/src/pendingWork";
 import type { ProposalVerifySweepWorker } from "../../../../lib/worker";
+import { cronAuthorized } from "../../../../lib/cronAuth";
 
 /**
  * D#483 S4-b2b: the claim verifier cron (every 15 minutes). One pass of the worker's verifier sweep: proposals waiting to be checked are
@@ -25,16 +25,8 @@ export interface ProposalVerifySweepHandlerDeps {
   now?(): number;
 }
 
-function isAuthorized(authHeader: string | null, cronSecret: string): boolean {
-  if (!cronSecret || !authHeader) return false;
-  const expected = Buffer.from(`Bearer ${cronSecret}`, "utf8");
-  const actual = Buffer.from(authHeader, "utf8");
-  if (expected.length !== actual.length) return false;
-  return timingSafeEqual(expected, actual);
-}
-
 export async function proposalVerifySweepHandler(req: NextRequest, deps: ProposalVerifySweepHandlerDeps): Promise<NextResponse> {
-  if (!isAuthorized(req.headers.get("authorization"), deps.cronSecret)) {
+  if (!cronAuthorized("/api/cron/proposal-verify-sweep", req.headers.get("authorization"), deps.cronSecret)) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
   const now = deps.now ?? Date.now;

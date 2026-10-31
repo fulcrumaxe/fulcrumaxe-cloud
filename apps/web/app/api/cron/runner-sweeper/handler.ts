@@ -1,7 +1,7 @@
-import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { runGatedTick } from "@fx/core/src/pendingWork";
 import type { RunnerSweepWorker } from "../../../../lib/worker";
+import { cronAuthorized } from "../../../../lib/cronAuth";
 
 /**
  * D#6 R2b: the runner sweeper cron (every 5 minutes, vercel.json), behind the pending-work marker gate (D#454 H3c). Same auth as ../compute-settle-sweep/
@@ -26,17 +26,8 @@ export interface RunnerSweeperHandlerDeps {
 /** How soon the tick comes back when one of its halves threw. */
 const SWEEP_FAILURE_RETRY_MS = 5 * 60_000;
 
-/** Constant-time comparison; rejects outright when either side is empty. */
-function isAuthorized(authHeader: string | null, cronSecret: string): boolean {
-  if (!cronSecret || !authHeader) return false;
-  const expected = Buffer.from(`Bearer ${cronSecret}`, "utf8");
-  const actual = Buffer.from(authHeader, "utf8");
-  if (expected.length !== actual.length) return false;
-  return timingSafeEqual(expected, actual);
-}
-
 export async function runnerSweeperHandler(req: NextRequest, deps: RunnerSweeperHandlerDeps): Promise<NextResponse> {
-  if (!isAuthorized(req.headers.get("authorization"), deps.cronSecret)) {
+  if (!cronAuthorized("/api/cron/runner-sweeper", req.headers.get("authorization"), deps.cronSecret)) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
   const ran = await runGatedTick("runner-sweeper", async () => {
