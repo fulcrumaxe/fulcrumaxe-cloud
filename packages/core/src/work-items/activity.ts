@@ -10,6 +10,7 @@ import { setupPauseFor, type SetupHold, type SetupRequest } from '../setup-reque
 import { parseAcceptanceScope } from '../specs/acceptanceScope.js';
 import { readPublicChange, type PublicChange } from '../repos/publicChange.js';
 import { readStartDecision, type StartDecision } from './startDecision.js';
+import { readItemReceipts, type ItemReceipts } from './itemReceipts.js';
 import { MONTHLY_BUDGET_PARKED_STOP, RUN_LIMIT_PARKED_STOP, continuationStopSentence } from './continuationStops.js';
 import { BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, BASE_SYNC_UNAVAILABLE_SENTENCE, FIX_ROUND_STOP_SENTENCE, REPUBLISH_BASE_MISSING, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE, REPUBLISH_STACKED_UNSUPPORTED } from './baseSync.js';
 import { PUBLIC_BRANCH_MOVED, PUBLIC_BRANCH_MOVED_SENTENCE, PUBLIC_HEAD_UNAVAILABLE, PUBLIC_HEAD_UNAVAILABLE_SENTENCE } from '../repos/planePushRecord.js';
@@ -210,6 +211,8 @@ export interface WorkItemActivity {
   public_change: PublicChange | null;
   /** D#7 start gate (c): how the item's start was decided (asked, started by a person or by the dial, held, withdrawn), in fixed sentences. Null for an item that never went through the gate. */
   start_decision: StartDecision | null;
+  /** D#7 DW-R5: the item's class 2 and class 3 receipts, newest first (at most 50), or null when it has none. */
+  receipts: ItemReceipts | null;
   /** D#598 P8c-3: the setup request the item is paused on, read in this same call (no extra request). Null when no request holds it; the API words it. */
   setup_pause: { hold: SetupHold; request: SetupRequest | null } | null;
   /**
@@ -885,6 +888,7 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       review_recheck: reviewRecheck,
       public_change: await readPublicChange(client, accountId, workItemId, facts),
       start_decision: await readStartDecision(client, workItemId),
+      receipts: await readItemReceipts(client, workItemId),
       setup_pause: await setupPauseFor(client, workItemId),
       actions: facts ? operatorActionsFor(facts) : [],
       close_on_github: facts ? closeOnGithub(facts) : false,

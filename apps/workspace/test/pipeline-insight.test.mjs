@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  FLAG_WORDS, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, SPEC_REFUSED_SENTENCES, SPEC_REFUSED_GENERIC, SUPERSEDED_SENTENCE, SUPERSEDED_LINK_LABEL, phaseOf, pullUrl, readyBanner, mergeBlockSentence, blockingSentence, BLOCKING_SENTENCES, PUBLIC_REFUSED_SENTENCE, REVIEW_BLOCK_SENTENCE, UNKNOWN_BLOCK_SENTENCE, reasonWord, roleWord, runView, statusWord, stepView, usdText,
+  FLAG_WORDS, RECEIPTS_HEADING, receiptsSection, formatWhen, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, SPEC_REFUSED_SENTENCES, SPEC_REFUSED_GENERIC, SUPERSEDED_SENTENCE, SUPERSEDED_LINK_LABEL, phaseOf, pullUrl, readyBanner, mergeBlockSentence, blockingSentence, BLOCKING_SENTENCES, PUBLIC_REFUSED_SENTENCE, REVIEW_BLOCK_SENTENCE, UNKNOWN_BLOCK_SENTENCE, reasonWord, roleWord, runView, statusWord, stepView, usdText,
 } from "../apps/pipeline/pipeline-insight.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
@@ -646,6 +646,67 @@ describe("the view", () => {
       panel.start("item-sd-xss");
       await flush();
       expect(lineOf(panel)).toEqual(["Started by " + hostile + "."]);
+      expect(findAll(panel.el, (e) => e.tag === "img")).toHaveLength(0);
+    });
+  });
+
+  describe("D#7 DW-R5: the decisions recorded for the item", () => {
+    const R = fx("200-receipts.json");
+    const one = (over) => ({ id: "r1", label: "Starting a small piece of work", class: 2, at: "2026-10-20T09:30:00.000Z", by: "policy", chosen: "start", rejected: "hold", ...over });
+    const texts = (data) => (receiptsSection(data) ? receiptsSection(data).items.map((i) => i.text) : null);
+
+    it("has the fixed heading and one line per receipt, newest first as sent, from the activity read alone", async () => {
+      const m = buildInsight(R).receipts;
+      expect(m.heading).toBe("Decisions recorded for this item");
+      expect(RECEIPTS_HEADING).toBe(m.heading);
+      expect(m.items).toHaveLength(3);
+      expect(m.items[0].text).toMatch(/^Undoing an earlier decision\. Chosen: undo\. Not chosen: keep\. Decided by a person, /);
+      expect(m.items[1].text).toMatch(/^Starting a small piece of work\. Chosen: start\. Not chosen: hold\. Decided by your setting, /);
+      expect(m.more).toBe("Showing the newest 3 of 52.");
+      const { panel } = make(R);
+      panel.start("item-rc");
+      await flush();
+      expect(byId(panel.el, "pl-receipt")).toHaveLength(3);
+      expect(byId(panel.el, "pl-receipts-heading").map((e) => e.textContent)).toEqual([RECEIPTS_HEADING]);
+    });
+
+    it("tells two receipts of the same type apart by their times", () => {
+      const [a, b] = texts({ receipts: [one({ at: "2026-10-22T10:00:00.000Z" }), one({ at: "2026-10-20T09:30:00.000Z" })] });
+      expect(a).not.toBe(b);
+    });
+
+    it("never makes an empty, null or undefined line, whatever it is given", () => {
+      const cases = [
+        [one({ label: undefined }), /^A decision\./],
+        [one({ label: "  " }), /^A decision\./],
+        [one({ at: undefined }), /^Starting a small piece of work\. Chosen: start\. Not chosen: hold\. Decided by your setting\.$/],
+        [one({ at: "not a date" }), /Decided by your setting\.$/],
+        [one({ by: "robot" }), /^Starting a small piece of work\. Chosen: start\. Not chosen: hold\. \S/],
+        [one({ by: undefined, at: undefined }), /^Starting a small piece of work\. Chosen: start\. Not chosen: hold\.$/],
+        [one({ chosen: "(not shown)", rejected: 7 }), /^Starting a small piece of work\. Decided by your setting, /],
+        [one({ label: "Undoing a decision again after two undos", by: "person" }), /^Undoing a decision again after two undos\. /],
+      ];
+      for (const [r, re] of cases) {
+        const [line] = texts({ receipts: [r] });
+        expect(line).toMatch(re);
+        expect(line).not.toMatch(/null|undefined|NaN|\[object|Invalid/);
+      }
+    });
+
+    it("draws nothing for no receipts, a missing list, or entries that are not objects; one good entry among bad ones still shows", () => {
+      for (const receipts of [undefined, null, [], "x", 3, {}, [null, 5, "s", []]]) expect(receiptsSection({ receipts })).toBeNull();
+      expect(texts({ receipts: [null, one(), 7] })).toHaveLength(1);
+      expect(receiptsSection({ receipts: [one()] }).more).toBeNull();
+      expect(receiptsSection({ receipts: [one()], receipts_total: "9" }).more).toBeNull();
+      expect(buildInsight({ ...OK }).receipts).toBeNull();
+    });
+
+    it("shows hostile text as text only", async () => {
+      const hostile = "<img src=x onerror=alert(1)>";
+      const { panel } = make({ ...OK, receipts: [one({ label: hostile })] });
+      panel.start("item-rc-xss");
+      await flush();
+      expect(byId(panel.el, "pl-receipt").map((e) => e.textContent)).toEqual([hostile + ". Chosen: start. Not chosen: hold. Decided by your setting, " + formatWhen("2026-10-20T09:30:00.000Z") + "."]);
       expect(findAll(panel.el, (e) => e.tag === "img")).toHaveLength(0);
     });
   });
