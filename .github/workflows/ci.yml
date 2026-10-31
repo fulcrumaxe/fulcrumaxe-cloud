@@ -10,6 +10,8 @@ on:
   # re-runs this workflow's latest run for the head; the scope step below reads the label from the API.
   pull_request:
     types: [opened, synchronize, reopened]
+  merge_group:
+    types: [checks_requested]
 
 # Group on head_ref (set for pull_request, unset for push) falling back to
 # ref, so a branch's push run and its PR run collapse into ONE group instead
@@ -434,7 +436,7 @@ jobs:
   workspace-e2e:
     # Explicit so the check name stays `workspace-e2e (<project>)`.
     name: workspace-e2e (${{ matrix.project }})
-    if: vars.CI_DISABLED != 'true' && github.event_name == 'pull_request'
+    if: vars.CI_DISABLED != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
     runs-on: ${{ github.event.repository.private && (vars.CI_RUNS_ON || 'self-hosted') || 'ubuntu-latest' }}
     permissions:
       contents: read

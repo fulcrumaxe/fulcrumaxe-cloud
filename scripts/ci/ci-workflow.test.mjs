@@ -82,6 +82,8 @@ test("ci.yml: pull_request runs on opened, synchronize and reopened, and NOT on 
   assert.ok(!types.includes("labeled"), "ci.yml must not listen to labeled");
   assert.doesNotMatch(noComments(on), /labeled|unlabeled/, "no label trigger of any kind in ci.yml");
   assert.match(on, /push:\s*\n\s+branches: \[main\]/);
+  // The merge queue trigger: inert until a ruleset turns the queue on.
+  assert.match(noComments(on), /merge_group:\s*\n\s+types: \[checks_requested\]/);
 });
 
 // ---- the ci:full label: its own small workflow ----------------------------------------------
@@ -450,7 +452,7 @@ test("check job: nothing is narrowed outside Run checks and the Node 22 step", (
 test("e2e job: the job-level if (pull requests only, any head repo, CI_DISABLED stands it down) and the matrix", () => {
   const head = e2eJob.slice(0, e2eJob.indexOf("\n    steps:"));
   assert.match(head, /\n    name: workspace-e2e \(\$\{\{ matrix\.project \}\}\)\n/);
-  assert.match(head, /\n    if: vars\.CI_DISABLED != 'true' && github\.event_name == 'pull_request'\n/);
+  assert.match(head, /\n    if: vars\.CI_DISABLED != 'true' && \(github\.event_name == 'pull_request' \|\| github\.event_name == 'merge_group'\)\n/);
   assert.match(head, /\n        project: \[desktop, phone, tablet\](\n|$)/);
   assert.match(head, /\n      fail-fast: false\n/);
 });
