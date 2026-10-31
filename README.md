@@ -149,9 +149,9 @@ Numbering blocks with files at HEAD:
 number is free and higher than everything already on `main`, so the order
 files sort in on disk always matches the order they actually landed in.
 `packages/db/migrations/0605_execution_mode.sql`'s header shows this in
-practice: the file was renamed twice, most recently up to `0605`, once
-`0604_session_epoch.sql` merged ahead of it — keeping its filename from
-sorting earlier than a file that landed first.
+practice: the file was renamed twice (from `0007`, then `0603`). By the time it
+rebased, `0604_session_epoch.sql` had merged, so `0605` was the next free
+number, which keeps its filename sorting after a file that landed first.
 
 Migrations that landed out of strict numeric order relative to when they were
 first written are exercised by `LATE_MIGRATIONS` in
