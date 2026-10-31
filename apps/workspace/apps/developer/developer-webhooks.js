@@ -34,6 +34,9 @@ const EVENTS = [
   { id: "budget.exhausted", help: "A budget ran out." },
   { id: "model_connection.broken", help: "The model connection stopped working." },
   { id: "webhook_endpoint.disabled", help: "An endpoint was switched off after repeated failures." },
+  { id: "decision.ask_raised", help: "A decision is waiting for an answer." },
+  { id: "decision.ask_answered", help: "A decision was answered." },
+  { id: "decision.ask_overdue", help: "A decision passed its answer window." },
   { id: "endpoint.test", help: "The test event sent by Send test event." },
 ];
 

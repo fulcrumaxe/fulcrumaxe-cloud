@@ -80,7 +80,7 @@ describe('sweepOverdueAsks (DP12a-2)', () => {
     expect(await readAsk(id)).toMatchObject({ state: 'overdue', answered_option: null, answered_by: null, receipt_id: null });
     expect([await nReceipts(a), await nActions(a), await nEvents(a, 'decision.ask_overdue', id)]).toEqual([r0, q0, 1]);
     const ev = (await admin.query(`SELECT payload FROM domain_events WHERE account_id = $1 AND type = 'decision.ask_overdue' AND subject_id = $2`, [a.accountId, id])).rows[0].payload;
-    expect(ev).toEqual({ ask_id: id, work_item_id: a.workItemId, run_id: a.runId, decision_type: 'test_strategy_choice', timeout_outcome: 'stop_and_flag' });
+    expect(ev).toEqual({ askId: id, workItemId: a.workItemId, runId: a.runId, decisionType: 'test_strategy_choice', timeoutOutcome: 'stop_and_flag' });
     const answered = await answerAsk({ pool: receiptPool, principal: { accountId: a.accountId, userId: a.userId } }, { askId: id, choice: 'skip' });
     expect(await readAsk(id)).toMatchObject({ state: 'answered', answered_option: 'skip', receipt_id: answered.receiptId });
   });

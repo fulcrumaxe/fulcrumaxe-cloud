@@ -47,8 +47,8 @@ export async function answerStartAsk(client: PoolClient, a: StartAnswerArgs): Pr
     accountId: a.accountId,
     subjectId: ask.id,
     payload: {
-      ask_id: ask.id, work_item_id: ask.work_item_id, run_id: null, receipt_id: receiptId,
-      decision_type: ask.decision_type, answered_option: choice,
+      askId: ask.id, workItemId: ask.work_item_id, runId: null, receiptId,
+      decisionType: ask.decision_type, answeredOption: choice,
     },
   });
   return { askId: ask.id, receiptId, answeredOption: choice };
