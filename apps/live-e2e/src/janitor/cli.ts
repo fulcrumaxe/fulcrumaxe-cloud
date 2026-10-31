@@ -14,8 +14,9 @@ import { FIXTURE_REPO_ENV } from "../needs-network.js";
 import { identityGuard, loadTarget, readDeploymentIdentity, TargetError, type Target } from "../targets.js";
 import { openOwnerSession, runAccountJanitor, type JanitorResult } from "./account.js";
 import { runRepoJanitor } from "./repo.js";
+import { runReposJanitor } from "./repos.js";
 
-const USAGE = "usage: live-e2e janitor <account|repo> --target <name> [--apply]";
+const USAGE = "usage: live-e2e janitor <account|repo> --target <name> [--apply] | janitor repos --org <name> [--apply]";
 
 /**
  * The fixture-repo janitor (T6b) once, for `janitor repo` and for `run`. It talks to GitHub only (never the app), so
@@ -58,8 +59,27 @@ export async function janitorOnce(io: Io, target: Target, apply: boolean): Promi
 
 export const describeRefusal = (r: { reason: string; detail?: string }): string => `REFUSED ${r.reason}${r.detail === undefined ? "" : ` (${r.detail})`}`;
 
+/** `janitor repos --org <name> [--apply]` (D#441 C2, D1): GitHub through `gh` only, no target and no app session. Exit 0 done, 1 refused, 2 usage (org missing or malformed included). */
+async function reposCommand(rest: string[], io: Io): Promise<number> {
+  let org: string | undefined;
+  let apply = false;
+  for (let i = 0; i < rest.length; i += 1) {
+    if (rest[i] === "--apply" && !apply) apply = true;
+    else if (rest[i] === "--org" && org === undefined && rest[i + 1] !== undefined && !(rest[i + 1] as string).startsWith("--")) org = rest[(i += 1)];
+    else {
+      io.stderr(USAGE);
+      return 2;
+    }
+  }
+  const result = await runReposJanitor({ org, apply, env: io.env, now: (io.now ?? Date.now)(), say: io.stdout, ...(io.gh !== undefined ? { gh: io.gh } : {}), ...(io.confirm !== undefined ? { confirm: io.confirm } : {}) });
+  if (result.status === "done") return 0;
+  io.stderr(describeRefusal(result));
+  return result.reason === "janitor-repos-org-missing" || result.reason === "janitor-repos-org-malformed" ? 2 : 1;
+}
+
 export async function janitorCommand(argv: string[], io: Io): Promise<number> {
   const [which, ...rest] = argv;
+  if (which === "repos") return reposCommand(rest, io);
   let target: string | undefined;
   let apply = false;
   for (let i = 0; i < rest.length; i += 1) {

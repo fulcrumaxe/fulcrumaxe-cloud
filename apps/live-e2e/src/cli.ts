@@ -1,5 +1,5 @@
 /**
- * The `live-e2e` command line. Commands: `plan`, `run` (the same selection, then Playwright per pack), `scrub` (the upload gate), `issues` and `last-tested` (the workflow's reporting and store), `workflow-routes` (the Workflow SDK route list), `capture-session` and `sessions` (sessions-cli.ts), and `janitor account|repo` (janitor/cli.ts).
+ * The `live-e2e` command line. Commands: `plan`, `run` (the same selection, then Playwright per pack), `scrub` (the upload gate), `issues` and `last-tested` (the workflow's reporting and store), `workflow-routes` (the Workflow SDK route list), `capture-session` and `sessions` (sessions-cli.ts), and `janitor account|repo|repos` (janitor/cli.ts).
  *
  *   live-e2e plan --target <staging|production> [--tier smoke|standard|full] [--pack a,b] [--tag @x]
  *                 [--changed-from <base>..<head>] [--trigger dispatch|deploy|nightly|weekly|poll] [--out <file>]
@@ -20,6 +20,7 @@ import { LAST_TESTED_OUTCOMES, LastTestedError, readLastTested, recordLastTested
 import { MASK_FILE_ENV, MaskError, MaskRegistry } from "./mask.js";
 import { BYPASS_ENV, readHostProbe, type HostProbe, type NeedsContext } from "./needs.js";
 import { FIXTURE_REPO_ENV, FIXTURE_REPO_PATTERN, resolveNetworkNeeds } from "./needs-network.js";
+import type { Confirm, GhRunner } from "./janitor/repos.js";
 import { janitorCommand, janitorOnce, describeRefusal, repoJanitorOnce } from "./janitor/cli.js";
 import { buildPlan, describeJanitors, describeOutcome, wantedNetworkNeeds } from "./plan.js";
 import type { Results } from "./report.js";
@@ -110,6 +111,9 @@ export interface Io {
   fetch?: typeof fetch;
   /** Test seam: the extra trust root for the GitHub API address (a local TLS fake). */
   githubCa?: string;
+  /** Test seams for `janitor repos`: the `gh` runner and the typed confirmation. */
+  gh?: GhRunner;
+  confirm?: Confirm;
   /** Test seams for the session commands (sessions-cli.ts): the browser, whether it is headless, `sudo`, and the clock. */
   launcher?: Launcher;
   headless?: boolean;
