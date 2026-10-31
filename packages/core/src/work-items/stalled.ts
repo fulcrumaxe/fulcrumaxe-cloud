@@ -39,7 +39,12 @@ export const SILENT_MS = 150 * 60_000;
  * Gate reasons that time or a later step can clear: the pull request is still a draft, its checks have not finished, or the public copy is not open yet.
  * A gate answer with one of these is not "ready": it ended before it could pass, and it is asked again by the event that clears the reason (packages/worker gateReask.ts), or by pressing the card's button.
  */
-export const TRANSIENT_GATE_REASONS: readonly string[] = Object.freeze(['pr_draft', 'ci_not_green', 'public_pr_not_open', 'public_head_unrecorded']);
+export const TRANSIENT_GATE_REASONS: readonly string[] = Object.freeze(['pr_draft', 'ci_not_green', 'public_pr_not_open', 'public_head_unrecorded', 'merge_queue_unreadable']);
+
+/** D#694 B5: gate reasons with a sentence of their own (every other code is shown with its underscores as spaces). */
+const GATE_REASON_WORDS: Readonly<Record<string, string>> = Object.freeze({
+  merge_queue_unreadable: "GitHub's merge queue state could not be read; try again or merge by hand",
+});
 
 /** The label of the card's top button, per stage (the Pipeline app's own words; a test pins the two lists equal). */
 export const STALL_ACTION_LABELS: Readonly<Record<string, string>> = Object.freeze({
@@ -131,14 +136,14 @@ export function classifyStall(f: StallFacts): Stall | null {
     if (transient.length > 0) {
       return {
         code: 'gate_not_ready',
-        why: `The merge check ran before the pull request was ready (${transient.map(humanise).join(', ')}) and it was not asked again.`,
+        why: `The merge check ran before the pull request was ready (${transient.map((r) => GATE_REASON_WORDS[r] ?? humanise(r)).join(', ')}) and it was not asked again.`,
         since: last.at,
       };
     }
   }
   // Any other merge gate answer is a legitimate place to sit, however long: a pull request ready for a person (it has its own row in the merge-ready list),
-  // a merge handed to the runner or waiting in the merge queue, a merge order the runner has not finished. None of them is silence.
-  if (last !== null && last.kind === 'merge_gate') return null;
+  // a merge handed to the runner or waiting in the merge queue (ours, or GitHub's: `merge_enqueued`), a merge order the runner has not finished. None of them is silence.
+  if (last !== null && (last.kind === 'merge_gate' || last.kind === 'merge_enqueued')) return null;
   if (last !== null && last.kind === 'stage_waiting' && f.now.getTime() - last.at.getTime() > STALE_WAIT_MS) {
     return { code: 'wait_stale', why: `This was waiting for a limit or a free slot, but nothing has asked again for ${minutes(f.now.getTime() - last.at.getTime())}.`, since: last.at };
   }

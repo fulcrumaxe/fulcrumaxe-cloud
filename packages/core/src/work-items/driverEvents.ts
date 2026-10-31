@@ -45,6 +45,10 @@ import type { PoolClient } from 'pg';
  *                         CI result after the wait (code: main_ci_unknown). reasons: the failing check's name as a code, then `check_run_<id>` for the link. Nothing is stored as truth: the queue reads the tip again at each tick.
  *   platform_check        the invariant sweep found a platform defect on this item's run (D#597 CC-8; migration 0776). code: stage_not_moved | no_activity |
  *                         usage_not_recorded; run_id: the run. Written by the sweep alone, never by the driver.
+ *   merge_enqueued        D#694 B5: the merge gate put the pull request into GitHub's merge queue (code: queue | auto_merge, how it was accepted). head_sha, pr_number and the queue
+ *                         entry id GitHub answered with (queue_entry_id; none for auto_merge). Ids only.
+ *   merge_dequeued        D#694: GitHub took the queue entry out without merging it. What GitHub said and when: ids only; queue_entry_id names the entry.
+ *   merged_via_queue      D#694: the merge queue merged the pull request. Ids only; queue_entry_id names the entry.
  */
 export const DRIVER_EVENT_KINDS = [
   'build_refused',
@@ -68,7 +72,14 @@ export const DRIVER_EVENT_KINDS = [
   'resume_refused',
   'head_refresh',
   'main_guard',
+  'merge_enqueued',
+  'merge_dequeued',
+  'merged_via_queue',
 ] as const;
+
+/** D#694 B5 (migration 0938): the kinds that may carry a queue entry id. */
+export const QUEUE_EVENT_KINDS: readonly DriverEventKind[] = ['merge_enqueued', 'merge_dequeued', 'merged_via_queue'];
+const QUEUE_ENTRY_RE = /^[A-Za-z0-9_=-]{1,100}$/;
 export type DriverEventKind = (typeof DRIVER_EVENT_KINDS)[number];
 
 /** D#483 S5-k1b: the starts that can wait on a limit (migration 0845's check lists the same seven; a test holds the two equal). */
@@ -95,6 +106,8 @@ export interface DriverEventInput {
   stage?: WaitingStage | null;
   /** `stage_waiting` only: the attempt number of the ask. */
   attempt?: number | null;
+  /** The three queue kinds only: GitHub's node id of the queue entry (migration 0938). */
+  queueEntryId?: string | null;
 }
 
 /** A code made safe for the store: lower-cased, anything outside [a-z0-9_] to `_`, leading digit prefixed. For turning a hyphenated role or verdict into a code. */
@@ -119,6 +132,10 @@ export function assertDriverEvent(e: DriverEventInput): void {
   } else if (e.stage != null || e.attempt != null) {
     throw new Error('driver event: only a stage_waiting fact carries a stage or an attempt');
   }
+  if (e.queueEntryId != null) {
+    if (!QUEUE_EVENT_KINDS.includes(e.kind)) throw new Error('driver event: only a queue fact carries a queue entry id');
+    if (typeof e.queueEntryId !== 'string' || !QUEUE_ENTRY_RE.test(e.queueEntryId)) throw new Error('driver event: queue entry id is not a node id');
+  }
   if (e.attempt != null && !(Number.isInteger(e.attempt) && e.attempt >= 0 && e.attempt <= MAX_WAITING_ATTEMPT)) throw new Error('driver event: bad attempt');
 }
 
@@ -129,10 +146,10 @@ export function assertDriverEvent(e: DriverEventInput): void {
 export async function recordDriverEvent(client: PoolClient, accountId: string, e: DriverEventInput): Promise<{ recorded: boolean }> {
   assertDriverEvent(e);
   const r = await client.query(
-    `INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, reasons, head_sha, pr_number, round, run_id, dedupe_key, stage, attempt)
-     VALUES ($1, $2, $3, $4, $5::text[], $6, $7, $8, $9, $10, $11, $12)
+    `INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, reasons, head_sha, pr_number, round, run_id, dedupe_key, stage, attempt, queue_entry_id)
+     VALUES ($1, $2, $3, $4, $5::text[], $6, $7, $8, $9, $10, $11, $12, $13)
      ON CONFLICT (account_id, work_item_id, kind, dedupe_key) DO NOTHING`,
-    [accountId, e.workItemId, e.kind, e.code ?? null, [...(e.reasons ?? [])], e.headSha ?? null, e.prNumber ?? null, e.round ?? null, e.runId ?? null, e.dedupeKey, e.stage ?? null, e.attempt ?? null],
+    [accountId, e.workItemId, e.kind, e.code ?? null, [...(e.reasons ?? [])], e.headSha ?? null, e.prNumber ?? null, e.round ?? null, e.runId ?? null, e.dedupeKey, e.stage ?? null, e.attempt ?? null, e.queueEntryId ?? null],
   );
   return { recorded: r.rowCount === 1 };
 }

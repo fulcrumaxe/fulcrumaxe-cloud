@@ -34,6 +34,16 @@ describe('R6: what counts as stalled', () => {
     expect(s!.why).toContain('pr draft, ci not green, public pr not open');
   });
 
+  it('D#694 B5: a pull request the merge queue of GitHub holds (the newest fact is merge_enqueued) is not silent, however long the queue takes', () => {
+    expect(classifyStall(facts({ stage: 'review_passed', last: last('merge_enqueued', 'queue', [], 3 * 60 * MIN), lastActivity: ago(3 * 60 * MIN) }))).toBeNull();
+  });
+
+  it('D#694 B5: a merge queue state that could not be read is a stop that asks to try again, in its own words', () => {
+    const s = classifyStall(facts({ stage: 'review_passed', last: last('merge_gate', 'ready_human_merges', ['merge_queue_unreadable']) }));
+    expect(s).toMatchObject({ code: 'gate_not_ready' });
+    expect(s!.why).toContain("GitHub's merge queue state could not be read; try again or merge by hand");
+  });
+
   it('a gate answer that is really ready (only reasons no waiting clears) is not stalled: it is a pull request for a person to merge', () => {
     expect(classifyStall(facts({ stage: 'review_passed', last: last('merge_gate', 'ready_human_merges', ['local_review_not_enabled', 'local_reviews_passed_advisory']) }))).toBeNull();
     expect(classifyStall(facts({ stage: 'review_passed', last: last('merge_gate', 'ready_human_merges', ['auto_merge_not_allowed']) }))).toBeNull();

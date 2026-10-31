@@ -98,6 +98,53 @@ describe('work item driver events', () => {
     expect(out.row).toEqual([{ stage: 'panel', attempt: 2, code: 'compute_cap_reached' }]);
   });
 
+  it('D#694 B5 (migration 0938): each queue kind is recorded with its queue entry id and read back from a real table; a replay writes nothing', async () => {
+    const head = 'd'.repeat(40);
+    const out = await withTenant(appUserPool, refs.accountId, async (c) => {
+      const written: boolean[] = [];
+      for (const kind of ['merge_enqueued', 'merge_dequeued', 'merged_via_queue'] as const) {
+        written.push((await recordDriverEvent(c, refs.accountId, { workItemId: refs.workItemId, kind, dedupeKey: `q:${kind}`, code: 'queue', headSha: head, prNumber: 12, queueEntryId: 'MQE_kwDOabc-123=' })).recorded);
+      }
+      const again = await recordDriverEvent(c, refs.accountId, { workItemId: refs.workItemId, kind: 'merge_enqueued', dedupeKey: 'q:merge_enqueued', queueEntryId: 'MQE_kwDOabc-123=' });
+      const none = await recordDriverEvent(c, refs.accountId, { workItemId: refs.workItemId, kind: 'merge_enqueued', dedupeKey: 'q:none', code: 'auto_merge', headSha: head });
+      const rows = await c.query("SELECT kind, code, head_sha, pr_number, queue_entry_id FROM work_item_driver_events WHERE work_item_id = $1 AND dedupe_key LIKE 'q:%' ORDER BY seq", [refs.workItemId]);
+      return { written, again, none, rows: rows.rows };
+    });
+    expect(out.written).toEqual([true, true, true]);
+    expect(out.again.recorded).toBe(false);
+    expect(out.none.recorded).toBe(true);
+    expect(out.rows.map((r) => [r.kind, r.queue_entry_id])).toEqual([
+      ['merge_enqueued', 'MQE_kwDOabc-123='],
+      ['merge_dequeued', 'MQE_kwDOabc-123='],
+      ['merged_via_queue', 'MQE_kwDOabc-123='],
+      ['merge_enqueued', null],
+    ]);
+    expect(out.rows[0]).toMatchObject({ code: 'queue', head_sha: head, pr_number: 12 });
+  });
+
+  it('D#694 B5: a queue entry id is refused on any other kind and when malformed, by the function and (for a malformed id) by the column CHECK; a fourth unknown kind is refused by both', async () => {
+    const base = { workItemId: refs.workItemId, dedupeKey: 'qk' };
+    expect(() => assertDriverEvent({ ...base, kind: 'merge_gate', queueEntryId: 'MQE_ok' })).toThrow('only a queue fact');
+    for (const bad of ['', 'has space', 'MQE/slash', 'x'.repeat(101), 'MQE;DROP']) {
+      expect(() => assertDriverEvent({ ...base, kind: 'merge_enqueued', queueEntryId: bad })).toThrow();
+    }
+    expect(() => assertDriverEvent({ ...base, kind: 'merge_enqueued', queueEntryId: 'x'.repeat(100) })).not.toThrow();
+    expect(() => assertDriverEvent({ ...base, kind: 'merge_requeued' as 'merge_enqueued' })).toThrow('unknown kind');
+    const insert = (kind: string, entry: string | null) =>
+      admin.query(
+        `INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key, queue_entry_id) VALUES ($1, $2, $3, $4, $5)`,
+        [refs.accountId, refs.workItemId, kind, `raw:${kind}:${entry}`, entry],
+      );
+    await expect(insert('merge_requeued', null)).rejects.toThrow(/work_item_driver_events_kind_check/);
+    await expect(insert('merge_enqueued', 'has space')).rejects.toThrow(/work_item_driver_events_queue_entry_check/);
+    await expect(insert('merge_enqueued', '')).rejects.toThrow(/work_item_driver_events_queue_entry_check/);
+    await insert('merge_enqueued', 'MQE_raw_ok');
+  });
+
+  it('D#694 B5: the table stays append-only for the app role, new column included', async () => {
+    await expect(withTenant(appUserPool, refs.accountId, (c) => c.query("UPDATE work_item_driver_events SET queue_entry_id = 'MQE_x' WHERE work_item_id = $1", [refs.workItemId]))).rejects.toThrow(/permission denied/);
+  });
+
   it('toCode turns a role or verdict word into a plain code', () => {
     expect(toCode('code-reviewer')).toBe('code_reviewer');
     expect(toCode('needs-fix')).toBe('needs_fix');
