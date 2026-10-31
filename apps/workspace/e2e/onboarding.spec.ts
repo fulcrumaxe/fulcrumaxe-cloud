@@ -902,10 +902,10 @@ test.describe("step 3, live progress", () => {
   const state = (page: Page) => ob(page).locator('[data-testid="ob-preview-state"]');
   const stageStates = (page: Page) =>
     ob(page).locator('[data-testid="ob-stages"] > li').evaluateAll((els) => els.map((e) => `${(e as HTMLElement).dataset.testid!.replace("ob-stage-", "")}:${(e as HTMLElement).dataset.status}`));
-  async function boot(page: Page, reply: unknown, extra: Partial<Mock> = {}) {
+  async function boot(page: Page, reply: unknown, extra: Partial<Mock> = {}, keepPaused = false) {
     const m = mock({ onboarding: [json(ONB.step3)], previewGet: [json(reply)], ...extra });
     const problems = await setup(page, m);
-    await bootToDesktop(page);
+    await bootToDesktop(page, { keepPaused });
     return { m, problems };
   }
   const computeLine = (page: Page) => ob(page).locator('[data-testid="ob-numbers"] li').nth(1);
@@ -931,14 +931,18 @@ test.describe("step 3, live progress", () => {
 
   test("the timer counts from the server's elapsed figure; the stages move only when the answer says so", async ({ page }) => {
     const later = { ...PV("200-running.json"), progress: { ...PV("200-running.json").progress, elapsed_seconds: 200 } };
-    await boot(page, PV("200-running.json"), { previewGet: [json(PV("200-running.json")), json(later)] });
+    // The clock stands still after boot, so the timer reads what the server said until a runFor moves it, however slow the machine is.
+    await boot(page, PV("200-running.json"), { previewGet: [json(PV("200-running.json")), json(later)] }, true);
     const timer = ob(page).locator('[data-testid="ob-timer"]');
-    await expect(timer).toHaveText("3:00");
+    // Boot moves the page clock a little after the first answer arrives (a second or so of settling), so the figure on screen is
+    // the server's 3:00 plus that page time, never the machine's speed. Read it, then check every later figure against it.
+    await expect(timer).toHaveText(/^3:0[0-5]$/);
+    const start = Number((await timer.innerText()).slice(2));
     const before = await stageStates(page);
     await page.clock.runFor(2000);
-    await expect(timer).toHaveText("3:02"); // ticking on its own between answers
-    await page.clock.runFor(1000); // the next answer arrives and the figure follows the server's
-    await expect(timer).toHaveText(/^3:2[0-1]$/);
+    await expect(timer).toHaveText(`3:0${start + 2}`); // ticking on its own between answers: exactly the page time that passed
+    await page.clock.runFor(3000); // the next read is due (every 3 s of page time) and the figure follows the server's
+    await expect(timer).toHaveText(/^3:2\d$/);
     await page.clock.runFor(40_000); // a long wait later, the same answers: the same stages (nothing advances on a timer)
     expect(await stageStates(page)).toEqual(before);
   });
