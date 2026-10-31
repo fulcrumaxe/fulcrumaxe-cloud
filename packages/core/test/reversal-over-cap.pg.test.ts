@@ -38,7 +38,7 @@ describe('recordReversal (DP7-2)', () => {
   });
 
   const ctx = () => ({ pool: receiptPool, accountId: t.accountId, userId: t.userId });
-  const as = () => ({ pool: receiptPool, principal: { accountId: t.accountId, userId: t.userId } });
+  const as = () => ({ pool: receiptPool, principal: { accountId: t.accountId, userId: t.userId }, reversal: async () => ({ kind: 'revert_pr' as const, state: 'pending' as const }) });
   async function item(): Promise<{ workItemId: string; runId: string }> {
     const workItemId = (await admin.query<{ id: string }>(`INSERT INTO work_items (account_id, repo_id, kind, provenance, title) VALUES ($1, $2, 'issue', 'internal', 'Fix it') RETURNING id`, [t.accountId, t.repoId])).rows[0]!.id;
     const runId = randomUUID();

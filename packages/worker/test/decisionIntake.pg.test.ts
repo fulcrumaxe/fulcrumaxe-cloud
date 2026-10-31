@@ -21,7 +21,8 @@ const CLASS1 = "dependency_patch_bump";
 const CLASS2 = "test_strategy_choice";
 const CLASS2_NO_PROCEED = "runner_run_on_member_plan";
 const OTHER = "nonbreaking_refactor_approach";
-const CLASS3 = CATALOGUE.find((e) => e.class === "human_in_the_loop")!.id;
+// Not reversal_over_cap: an answer to that ask is never a resume (D#7 DP7-2e, R4), so it cannot stand in for an ordinary class 3 ask here.
+const CLASS3 = CATALOGUE.find((e) => e.class === "human_in_the_loop" && e.id !== "reversal_over_cap")!.id;
 
 const opts = (ids: string[]) => ids.map((id, i) => ({ id, label: `Option ${i + 1} of ${id}` }));
 const OPTIONS = [

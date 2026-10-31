@@ -20,7 +20,8 @@ import { createSeatResolver, type SeatRequest, type SeatResult } from "../src/se
  * key left the approved Spec. The rows are made by the real definers (approval, children); the run starts are keyed stand-ins that write the rows the real ones write.
  */
 const INVOKER_LOGIN = "fx_child_round_starts_invoker_test";
-const CLASS3 = CATALOGUE.find((e) => e.class === "human_in_the_loop")!.id;
+// Not reversal_over_cap: an answer to that ask is never a resume (D#7 DP7-2e, R4), so it cannot stand in for an ordinary class 3 ask here.
+const CLASS3 = CATALOGUE.find((e) => e.class === "human_in_the_loop" && e.id !== "reversal_over_cap")!.id;
 const OPTIONS = [{ id: "keep", label: "Keep the current shape" }, { id: "split", label: "Split it in two" }];
 const PROMPT = "You are the executor. Build the planned PR.\n\nAGENT_OUTPUT-instructions-here";
 const PARENT_NUMBER = 41;
