@@ -3,7 +3,9 @@ import {
   type CheckRunState,
   type CiSnapshot,
   type CommitStatusState,
+  type EnqueueOutcome,
   type MergeBlockReason,
+  type MergeQueueMode,
   type MergeCallOutcome,
   type BranchComparison,
   type CompareStatus,
@@ -62,8 +64,23 @@ export interface LocalGitHubHttp extends GitHubHttp {
 }
 export const isLocalGitHubHttp = (http: GitHubHttp): http is LocalGitHubHttp => typeof (http as Partial<LocalGitHubHttp>).graphql === "function";
 
+/**
+ * D#694 B5: the three GraphQL documents the hosted `merge_gate` client lets through (`@fx/github`'s mergeGateGraphql.ts, pinned there byte for byte).
+ * The composition root hands them in, because this package does not depend on @fx/github; the port never writes a document of its own, so a document the
+ * client has not pinned cannot be sent from here.
+ */
+export interface MergeQueueDocuments {
+  read: string;
+  enqueue: string;
+  autoMerge: string;
+}
+
 export interface GitHubMergePortDeps {
   http: GitHubHttp;
+  /** D#694 B5: absent, the port has no queue and every base branch is `direct` (today's behaviour). */
+  queueDocuments?: MergeQueueDocuments;
+  /** The clock for the queue-mode cache (milliseconds); defaults to `Date.now`. */
+  now?: () => number;
   /** `repos.id` -> the GitHub owner and repository name. */
   resolveRepo(repoId: string): Promise<{ owner: string; name: string }>;
   /** The "ready, human merges" marking is display only (C11); how it is
@@ -93,6 +110,15 @@ const MERGEABLE_STATES: ReadonlySet<string> = new Set(["clean", "behind", "dirty
 const COMPARE_STATUSES: ReadonlySet<string> = new Set(["ahead", "behind", "diverged", "identical"]);
 /** GitHub's own 404 messages for "no classic rule" and "a rule that requires no status checks". */
 const NO_RULE_MESSAGES: ReadonlySet<string> = new Set(["Branch not protected", "Required status checks not enabled"]);
+/** D#694 B5: one queue answer per (repository, base branch), for five minutes, in this process; the oldest goes out past 500. */
+export const MERGE_QUEUE_MODE_TTL_MS = 5 * 60_000;
+export const MERGE_QUEUE_MODE_CACHE_MAX = 500;
+const queueModeCache = new Map<string, { at: number; value: MergeQueueMode }>();
+/** Empties the queue-mode cache (a test, or a caller that must read afresh). */
+export function clearMergeQueueModeCache(): void {
+  queueModeCache.clear();
+}
+const NODE_ID = /^[A-Za-z0-9_=-]{1,100}$/;
 const LOCAL_REFUSED = "not available on a runner_local repository's allowlist";
 
 /** GitHub returns at most this many files for one comparison, on its first response only. */
@@ -471,9 +497,111 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
     };
   }
 
+  const queueKey = async (pr: PullRequestRef, baseRef: string): Promise<string> => {
+    const { owner, name } = await deps.resolveRepo(pr.repoId);
+    return `${owner.toLowerCase()}/${name.toLowerCase()}#${baseRef}`;
+  };
+
+  async function graphql(document: string, variables: Record<string, unknown>): Promise<Json> {
+    const res = await deps.http.request({ method: "POST", path: "/graphql", body: { query: document, variables } });
+    if (res.status !== 200 || !isObj(res.body)) throw new Error(`GitHub graphql: unexpected status ${res.status}`);
+    return res.body;
+  }
+
+  /** The error kinds of a GraphQL answer, from structured fields first and GitHub's message only to tell two refusals apart. */
+  function classifyGraphqlErrors(body: Json): "none" | "permission" | "head_moved" | "other" {
+    if (body.errors === undefined) return "none";
+    if (!Array.isArray(body.errors) || body.errors.length === 0) return "other";
+    let kind: "permission" | "head_moved" | "other" = "other";
+    for (const e of body.errors) {
+      const message = isObj(e) && typeof e.message === "string" ? e.message : "";
+      const type = isObj(e) && typeof e.type === "string" ? e.type : "";
+      if (type === "FORBIDDEN" || /resource not accessible by integration/i.test(message)) return "permission";
+      if (/head (branch|commit|sha|oid|ref)\b.*(modified|differ|changed|match|moved)|expected.*head|head.*expected/i.test(message)) kind = "head_moved";
+    }
+    return kind;
+  }
+
+  /** The pull request's GraphQL node id, from the same single-PR read the rest of the port uses. */
+  async function pullRequestNodeId(pr: PullRequestRef): Promise<string> {
+    const body = await readPrBody(pr);
+    return typeof body.node_id === "string" && NODE_ID.test(body.node_id) ? body.node_id : bad("pull.node_id");
+  }
+
   return {
     async getPullRequest(pr) {
       return (await readPr(pr)).state;
+    },
+
+    async getMergeQueueMode(pr, baseRef): Promise<MergeQueueMode> {
+      // A runner_local repo is unchanged by this feature: its merge belongs to the runner (the gate stops before any merge call there).
+      if (deps.local) return { mode: "direct", source: "runner_local" };
+      const docs = deps.queueDocuments;
+      if (docs === undefined) return { mode: "direct", source: "queue_not_configured" };
+      try {
+        if (typeof baseRef !== "string" || baseRef === "") return { mode: "unknown", source: "base_ref_missing" };
+        const key = await queueKey(pr, baseRef);
+        const now = (deps.now ?? Date.now)();
+        const hit = queueModeCache.get(key);
+        if (hit !== undefined && now - hit.at < MERGE_QUEUE_MODE_TTL_MS && now >= hit.at) return hit.value;
+        queueModeCache.delete(key);
+        const { owner, name } = await deps.resolveRepo(pr.repoId);
+        const body = await graphql(docs.read, { owner, name, branch: baseRef });
+        if (body.errors !== undefined) return { mode: "unknown", source: "graphql_error" };
+        const repository = dig(body, ["data", "repository"]);
+        if (!isObj(repository) || !("mergeQueue" in repository)) return { mode: "unknown", source: "graphql_shape" };
+        const queue = repository.mergeQueue;
+        if (queue !== null && !isObj(queue)) return { mode: "unknown", source: "graphql_shape" };
+        const rules = await listRules(await repoPath(pr), baseRef);
+        const ruleQueue = rules.some((r) => r.type === "merge_queue" && !(typeof r.enforcement === "string" && r.enforcement !== "active"));
+        const value: MergeQueueMode = queue !== null && ruleQueue ? { mode: "queue", source: "graphql_and_rules" } : queue === null && !ruleQueue ? { mode: "direct", source: "graphql_and_rules" } : { mode: "unknown", source: "graphql_rules_disagree" };
+        if (value.mode !== "unknown") {
+          if (queueModeCache.size >= MERGE_QUEUE_MODE_CACHE_MAX) queueModeCache.delete(queueModeCache.keys().next().value as string);
+          queueModeCache.set(key, { at: now, value });
+        }
+        return value;
+      } catch {
+        // fx-swallow-ok: a failed read (the hosted client's refusal included) is `unknown`, which stops the gate; it is never read as `direct`, and nothing is cached
+        return { mode: "unknown", source: "read_failed" };
+      }
+    },
+
+    async enqueuePullRequest(pr, args): Promise<EnqueueOutcome> {
+      if (deps.local) throw new Error(`GitHub enqueue: ${LOCAL_REFUSED}`);
+      const docs = deps.queueDocuments;
+      if (docs === undefined) throw new Error("GitHub enqueue: no queue documents");
+      // Never call the mutation without a well-formed head to hold GitHub to.
+      if (!SHA_PATTERN.test(args.expectedHeadOid)) throw new Error("enqueuePullRequest: malformed expected head");
+      const evict = async () => {
+        queueModeCache.delete(await queueKey(pr, (await readPr(pr)).baseRef));
+      };
+      const pullRequestId = await pullRequestNodeId(pr);
+      const queued = await graphql(docs.enqueue, { pullRequestId, expectedHeadOid: args.expectedHeadOid });
+      const kind = classifyGraphqlErrors(queued);
+      if (kind === "none") {
+        const entry = dig(queued, ["data", "enqueuePullRequest", "mergeQueueEntry"]);
+        if (!isObj(entry) || typeof entry.id !== "string" || !NODE_ID.test(entry.id)) bad("mergeQueueEntry.id");
+        const position = entry.position;
+        if (position !== undefined && position !== null && !Number.isSafeInteger(position)) bad("mergeQueueEntry.position");
+        return { enqueued: true, via: "queue", entryId: entry.id, position: typeof position === "number" ? position : null };
+      }
+      if (kind === "head_moved") {
+        await evict();
+        return { enqueued: false, reason: "head_moved" };
+      }
+      if (kind === "other") throw new Error("GitHub enqueue: GraphQL error");
+      // The app may not use the queue: auto-merge is the only fallback, and only for this refusal.
+      await evict();
+      const auto = await graphql(docs.autoMerge, { pullRequestId, expectedHeadOid: args.expectedHeadOid, mergeMethod: "SQUASH" });
+      const autoKind = classifyGraphqlErrors(auto);
+      if (autoKind === "none") {
+        const target = dig(auto, ["data", "enablePullRequestAutoMerge", "pullRequest"]);
+        if (!isObj(target) || typeof target.id !== "string") bad("enablePullRequestAutoMerge.pullRequest");
+        return { enqueued: true, via: "auto_merge", entryId: null, position: null };
+      }
+      if (autoKind === "head_moved") return { enqueued: false, reason: "head_moved" };
+      if (autoKind === "permission") return { enqueued: false, reason: "unavailable" };
+      throw new Error("GitHub auto-merge: GraphQL error");
     },
 
     async getDefaultBranchTip(pr) {

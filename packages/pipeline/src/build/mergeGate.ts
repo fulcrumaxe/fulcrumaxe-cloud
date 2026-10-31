@@ -200,6 +200,22 @@ export interface BranchComparison {
  */
 export type UpdateBranchOutcome = { outcome: "accepted" } | { outcome: "conflict" } | { outcome: "head_moved"; newHeadSha: string };
 
+/**
+ * D#694 B5: what the base branch does with a merge. `queue`: GitHub's merge queue is on (the GraphQL read and the branch rules agree). `direct`: both say there is none.
+ * `unknown`: the read failed or the two disagree; the gate never enqueues and never merges then. `source` is a closed code for the log, never GitHub's text.
+ */
+export type MergeQueueMode = { mode: "queue" | "direct" | "unknown"; source: string };
+
+/**
+ * D#694 B5: what the enqueue call answered. `via: "queue"` carries the entry GitHub made; `via: "auto_merge"` is the fallback taken only when the queue call itself was
+ * refused for the app's permissions (GitHub names no entry then). `head_moved`: GitHub said the head is not the one sent. `unavailable`: the app may not enqueue and
+ * may not switch on auto-merge either. Any other failure throws (the workflow step retries).
+ */
+export type EnqueueOutcome =
+  | { enqueued: true; via: "queue"; entryId: string; position: number | null }
+  | { enqueued: true; via: "auto_merge"; entryId: null; position: null }
+  | { enqueued: false; reason: "head_moved" | "unavailable" };
+
 export interface MergeGateGitHubPort {
   getPullRequest(pr: PullRequestRef): Promise<PullRequestState>;
   /** D#519 MQ1: the pull request's mergeability, with `mergeable: null` already polled (see `PullRequestMergeability`). With `gatedHeadSha`, polling stops as soon as the head differs from it (a moved head needs no mergeability). */
@@ -217,6 +233,13 @@ export interface MergeGateGitHubPort {
   /** The "ready, human merges" marking. Display only; `reasons` are
    * closed-vocabulary codes, never free text. */
   markReadyForHumanMerge(pr: PullRequestRef, args: { headSha: string; reasons: readonly MergeBlockReason[] }): Promise<void>;
+  /**
+   * D#694 B5: whether the pull request's base branch (`baseRef`, the base the gate just read) is behind GitHub's merge queue. Absent: a port that has no queue
+   * (a test double, a fence that offers none) is `direct`, which is today's behaviour. A throw is read as `unknown`.
+   */
+  getMergeQueueMode?(pr: PullRequestRef, baseRef: string): Promise<MergeQueueMode>;
+  /** D#694 B5: puts the pull request in the merge queue, bound to `expectedHeadOid` (GitHub refuses if the head is any other commit). Only called when the mode is `queue`. */
+  enqueuePullRequest?(pr: PullRequestRef, args: { expectedHeadOid: string }): Promise<EnqueueOutcome>;
 }
 
 export interface MergeGateDeps {
