@@ -126,7 +126,7 @@ describe("LocalOnlyEvent", () => {
   });
 
   it("has only the Spec's fields, and reset_at (D#6 R2b-3, comment 27 item 7)", () => {
-    expect(Object.keys(LocalOnlyEvent.innerType().shape).sort()).toEqual(["activity", "detail", "duration_ms", "engine_version", "exit_code", "file_path", "reason", "reset_at", "seq", "size_mb", "stage", "tool_name", "ts", "type", "usage"]);
+    expect(Object.keys(LocalOnlyEvent.innerType().shape).sort()).toEqual(["activity", "detail", "duration_ms", "engine_version", "exit_code", "file_path", "memory_limit_bytes", "reason", "reset_at", "seq", "size_mb", "stage", "tool_name", "ts", "type", "usage"]);
   });
 
   it("takes a reset time on usage_limit_reached only, as an ISO timestamp", () => {
@@ -169,6 +169,16 @@ describe("LocalOnlyEvent", () => {
         expect(LocalOnlyEvent.safeParse({ ...ended, reason, detail: "other" }).success, reason).toBe(false);
         expect(LocalOnlyEvent.safeParse({ ...ended, reason, detail: "duplicate_job" }).success, reason).toBe(false);
       }
+    });
+
+    it("memory_limit_bytes (CARD-OOM-CAUSE-WORDS) is a positive whole number within a TiB, on run_ended resource_limit only", () => {
+      const limited = { ...ended, reason: "resource_limit" };
+      for (const ok of [1, 6 * 1024 ** 3, 2 ** 40]) expect(LocalOnlyEvent.safeParse({ ...limited, memory_limit_bytes: ok }).success, String(ok)).toBe(true);
+      expect(LocalOnlyEvent.safeParse(limited).success).toBe(true);
+      for (const bad of [0, -1, 1.5, 2 ** 40 + 1, Number.NaN, "6442450944", null]) expect(LocalOnlyEvent.safeParse({ ...limited, memory_limit_bytes: bad }).success, String(bad)).toBe(false);
+      for (const reason of ["agent_failed", "wall_clock", "runner_shutdown", "push_rejected", "job_refused"]) expect(LocalOnlyEvent.safeParse({ ...ended, reason, memory_limit_bytes: 6 * 1024 ** 3 }).success, reason).toBe(false);
+      expect(LocalOnlyEvent.safeParse({ ...ended, reason: "runner_setup", detail: "other", memory_limit_bytes: 6 * 1024 ** 3 }).success).toBe(false);
+      expect(LocalOnlyEvent.safeParse({ ...EVENT, type: "usage", memory_limit_bytes: 6 * 1024 ** 3 }).success).toBe(false);
     });
 
     it("push_rejected and continuation_branch_missing (C25 section 1.4): the first takes no detail, the second only under runner_setup", () => {

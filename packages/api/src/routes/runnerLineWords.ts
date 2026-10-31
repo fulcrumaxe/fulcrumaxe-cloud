@@ -1,4 +1,4 @@
-import { COPY, checkFailedText, handedOffText, jobRefusedText, runnerSetupText } from "@fulcrumaxe/runner-protocol";
+import { COPY, checkFailedText, handedOffText, jobRefusedText, resourceLimitText, runnerSetupText } from "@fulcrumaxe/runner-protocol";
 import type { ActivityLine } from "@fx/core/src/work-items/activity.js";
 
 /**
@@ -7,14 +7,14 @@ import type { ActivityLine } from "@fx/core/src/work-items/activity.js";
  * app has always shown), then drops the codes. The Pipeline detail and the Runs detail both call it, so the two cannot word a run's end differently.
  * A reason with no sentence in the protocol (`wall_clock`, `runner_shutdown`, `repo_not_private`) keeps core's plain form.
  */
-export function runEndedSentence(why: { reason: string; detail: string | null; size_mb: number | null }, check?: RunEndedCheck): string | null {
+export function runEndedSentence(why: { reason: string; detail: string | null; size_mb: number | null; memory_limit_bytes?: number | null }, check?: RunEndedCheck): string | null {
   switch (why.reason) {
     case "job_refused":
       return jobRefusedText(why.detail ?? "other");
     case "agent_failed":
       return COPY.agentFailed;
     case "resource_limit":
-      return COPY.resourceLimit;
+      return resourceLimitText(why.memory_limit_bytes ?? undefined);
     case "push_rejected":
       return COPY.pushRejected;
     case "handed_off":

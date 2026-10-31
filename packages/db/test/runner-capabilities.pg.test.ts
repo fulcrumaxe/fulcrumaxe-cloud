@@ -91,6 +91,21 @@ describe('migration 0893: runner_capabilities and runner_capabilities_record [pg
     await record(['proposal_verifier']);
   });
 
+  // D#6 CARD-OOM-CAUSE-WORDS (0940): memory_limit_v1 is the fourth closed code, through the definer and under the CHECK alike.
+  it('0940: stores memory_limit_v1, alone or with the others, and still refuses a repeat or a near miss', async () => {
+    await record(['memory_limit_v1']);
+    expect(await stored()).toEqual(['memory_limit_v1']);
+    await record(['proposal_verifier', 'wake_v1', 'plane_merge_v1', 'memory_limit_v1']);
+    expect(await stored()).toEqual(['proposal_verifier', 'wake_v1', 'plane_merge_v1', 'memory_limit_v1']);
+    for (const bad of [['memory_limit_v1', 'memory_limit_v1'], ['memory_limit_v2'], ['Memory_limit_v1'], ['memory_limit_v1', 'shell']]) {
+      await expect(record(bad), JSON.stringify(bad)).rejects.toMatchObject({ code: '22023' });
+    }
+    const other = await insertRunner(admin, a.accountId, a.userId);
+    await admin.query(`INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, '{memory_limit_v1,wake_v1}')`, [other, a.accountId]);
+    await expect(admin.query(`UPDATE runner_capabilities SET capabilities = '{memory_limit_v1,memory_limit_v2}' WHERE runner_id = $1`, [other])).rejects.toMatchObject({ code: '23514' });
+    await record(['proposal_verifier']);
+  });
+
   it('names the runner from the session only: none, a malformed one, an unknown one, a revoked one or another account’s is refused (42501)', async () => {
     const before = await stored();
     for (const runnerId of [null, 'not-a-uuid', randomUUID()]) await expect(record(['proposal_verifier'], { runnerId }), String(runnerId)).rejects.toMatchObject({ code: '42501' });

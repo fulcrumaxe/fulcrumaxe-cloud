@@ -141,3 +141,47 @@ describe("whether scopes work here", () => {
     expect(seen[0]).toEqual(expect.arrayContaining(["--user", "--scope", "MemoryMax=64M", "TasksMax=64"]));
   });
 });
+
+describe("the cap the scope was started with (D#6 CARD-OOM-CAUSE-WORDS)", () => {
+  const OOM = "ActiveState=failed\nResult=oom-kill\n";
+  function started(budgets: () => ReturnType<typeof budgetsOf>, replies: string[]) {
+    const capture = async (_command: string, args: readonly string[]): Promise<GitCaptured> => ({ code: 0, stdout: args.includes("show") ? (replies.shift() ?? "ActiveState=inactive\nResult=success\n") : "", timedOut: false });
+    return createScopeLimits({ tools: TOOLS, runtimeDir: "/run/user/1000", budgets, capture, sleep: async () => undefined });
+  }
+
+  it("is the MemoryMax the scope was given, taken once after the kernel killed the job", async () => {
+    const l = started(() => budgetsOf(settings()), [OOM]);
+    l.wrap({ runId: RUN, role: "executor" }, "c", [], {});
+    expect(await l.exceeded(RUN)).toBe(true);
+    expect(l.memoryCap?.(RUN)).toBe(6 * GIB);
+    expect(l.memoryCap?.(RUN)).toBeUndefined();
+  });
+
+  it("is the figure the scope used, not today's setting, and a light job's own cap", async () => {
+    let current = budgetsOf(settings());
+    const l = started(() => current, [OOM, OOM]);
+    l.wrap({ runId: RUN, role: "executor" }, "c", [], {});
+    const lowered = settings();
+    lowered.budget.heavy.memoryGb = 3;
+    current = budgetsOf(lowered);
+    await l.exceeded(RUN);
+    expect(l.memoryCap?.(RUN)).toBe(6 * GIB);
+    const other = "7a1c1a52-8d0e-4b7a-9c14-0a5e6d2b7f38";
+    l.wrap({ runId: other, role: "docs-writer" }, "c", [], {});
+    await l.exceeded(other);
+    expect(l.memoryCap?.(other)).toBe(2 * GIB);
+  });
+
+  it("is gone when the job did not hit its limit, when the run is released, and for a run with no scope", async () => {
+    const ok = started(() => budgetsOf(settings()), ["ActiveState=inactive\nResult=success\n"]);
+    ok.wrap({ runId: RUN, role: "executor" }, "c", [], {});
+    expect(await ok.exceeded(RUN)).toBe(false);
+    expect(ok.memoryCap?.(RUN)).toBeUndefined();
+    const released = started(() => budgetsOf(settings()), [OOM]);
+    released.wrap({ runId: RUN, role: "executor" }, "c", [], {});
+    await released.exceeded(RUN);
+    released.release?.(RUN);
+    expect(released.memoryCap?.(RUN)).toBeUndefined();
+    expect(released.memoryCap?.("00000000-0000-4000-8000-000000000000")).toBeUndefined();
+  });
+});

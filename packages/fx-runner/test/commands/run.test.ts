@@ -176,7 +176,7 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
   });
 
   it("keeps claiming when the cloud refuses the hello (a cloud that predates facts answers 400, an older still 404)", async () => {
-    // A 400 invalid_message is taken as a cloud from before a newer capability: the hello goes again without plane_merge_v1, then, if still refused, without wake_v1 too (three hellos in all).
+    // A 400 invalid_message is taken as a cloud from before a newer capability: the hello goes again without memory_limit_v1, then plane_merge_v1, then, if still refused, wake_v1 too (the first two refusals here, so three hellos in all).
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     const run = start();
@@ -196,7 +196,7 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
     const run = start();
     await until(() => claims() >= 1);
     const sent = hellos().map((h) => HelloMessage.parse(h.body).capabilities);
-    expect(sent).toEqual([["proposal_verifier", "wake_v1", "plane_merge_v1"], ["proposal_verifier", "wake_v1"], ["proposal_verifier"]]);
+    expect(sent).toEqual([["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1"], ["proposal_verifier", "wake_v1"], ["proposal_verifier"]]);
     expect(cloud.seen.some((s) => s.path === "/api/runner/wake")).toBe(false);
     expect(await stop(run)).toMatchObject({ code: 0 });
   });
@@ -871,5 +871,51 @@ describe("7. an api_key runner in the composed daemon (D#6 R5b-3)", () => {
     expect((await stop(run)).code).toBe(0);
     expect(fake.envText()).not.toContain("COMPOSEDKEY");
     expect(fake.envText()).not.toContain("ANTHROPIC_API_KEY");
+  }, 60_000);
+});
+
+// D#6 CARD-OOM-CAUSE-WORDS: the composed daemon sends the scope's memory cap on a resource_limit end only to a cloud whose hello kept memory_limit_v1.
+describe("7. the memory cap on a resource_limit end follows the hello (D#6 CARD-OOM-CAUSE-WORDS)", () => {
+  const CAP = 6 * GB;
+  /** A scope that wraps nothing, says the kernel killed the job, and remembers a cap of 6 GB for it. */
+  const killedScope = {
+    wrap: (_job: { runId: string; role: string }, command: string, args: readonly string[], env: Record<string, string>) => ({ command, args: [...args], env }),
+    exceeded: async () => true,
+    memoryCap: () => CAP,
+  };
+
+  async function endOfKilledJob(prepare: () => void): Promise<Record<string, unknown>> {
+    const remote = path.join(root, "remote.git");
+    git("init", "--bare", "-b", "main", remote);
+    const seed = path.join(root, "seed");
+    git("init", "-b", "main", seed);
+    writeFileSync(path.join(seed, "README.md"), "hello\n");
+    git("-C", seed, "add", "README.md");
+    git("-C", seed, "commit", "-m", "first");
+    git("-C", seed, "push", remote, "main");
+    fake.set("exit-code", "137");
+    prepare();
+    const job = signedJob({ issued_at: new Date(Date.now() - 60_000).toISOString(), expires_at: new Date(Date.now() + 3_600_000).toISOString() });
+    cloud.enqueue(job);
+    const run = start({ hooks: { jobLimits: { enforced: true, limits: killedScope }, remoteUrl: () => pathToFileURL(remote).href } });
+    await until(() => cloud.runs.get(job.job.run_id)?.endedBy !== undefined, 20_000);
+    await stop(run);
+    return cloud.runs.get(job.job.run_id)!.endedBy as unknown as Record<string, unknown>;
+  }
+
+  it.skipIf(process.platform !== "linux")("a cloud that kept memory_limit_v1 gets the cap", async () => {
+    expect(await endOfKilledJob(() => undefined)).toMatchObject({ type: "run_ended", reason: "resource_limit", memory_limit_bytes: CAP });
+  }, 60_000);
+
+  it.skipIf(process.platform !== "linux")("a cloud that refused memory_limit_v1 on the hello (but took the rest) gets no cap", async () => {
+    const ended = await endOfKilledJob(() => cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } }));
+    expect(ended).toMatchObject({ type: "run_ended", reason: "resource_limit" });
+    expect(ended).not.toHaveProperty("memory_limit_bytes");
+  }, 60_000);
+
+  it.skipIf(process.platform !== "linux")("a hello that failed leaves it unsent too", async () => {
+    const ended = await endOfKilledJob(() => cloud.force.hello.push({ status: 404, body: { error: { code: "not_found", message: "not_found" } } }));
+    expect(ended).toMatchObject({ type: "run_ended", reason: "resource_limit" });
+    expect(ended).not.toHaveProperty("memory_limit_bytes");
   }, 60_000);
 });

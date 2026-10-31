@@ -127,6 +127,12 @@ export type RunEndedDetail = (typeof RUN_ENDED_DETAILS)[number];
 /** D#6 R5a-2b (C27 section 4.5): the size of the largest commit, in whole MB, rounded up. Over the proxy's 4 MB push limit, so it starts at 5. */
 export const PUSH_TOO_LARGE_SIZE_MB = { min: 5, max: 10_000 } as const;
 
+/**
+ * D#6 CARD-OOM-CAUSE-WORDS (additive under C8 section 6): the memory cap, in bytes, the job's scope ran under, on a `run_ended` `resource_limit` only. A positive whole number up to one TiB.
+ * The runner sends it only to a cloud whose hello kept the `memory_limit_v1` capability (an older cloud's strict parse would refuse the key); an older runner sends none and the card keeps its plain sentence.
+ */
+export const MEMORY_LIMIT_BYTES = { min: 1, max: 2 ** 40 } as const;
+
 export const DETAILS_OF_RUN_ENDED: Record<RunEndedReason, readonly RunEndedDetail[]> = {
   job_refused: JOB_REFUSED_DETAILS,
   repo_not_private: [],
@@ -184,6 +190,8 @@ export const LocalOnlyEvent = z
     detail: z.enum(RUN_ENDED_DETAILS).optional(),
     // D#6 R5a-2b (C27 section 4.5), on a `run_ended` event with detail `push_too_large` only: the largest commit's size in whole MB.
     size_mb: safeInt.min(PUSH_TOO_LARGE_SIZE_MB.min).max(PUSH_TOO_LARGE_SIZE_MB.max).optional(),
+    // D#6 CARD-OOM-CAUSE-WORDS, on a `run_ended` `resource_limit` event only: the job's memory cap in bytes (see `MEMORY_LIMIT_BYTES`).
+    memory_limit_bytes: safeInt.min(MEMORY_LIMIT_BYTES.min).max(MEMORY_LIMIT_BYTES.max).optional(),
     // D#6 C42-1 (additive under C8 section 6): what a tool use did (`tool_use` only) and which stage a `stage` event marks (that type only).
     activity: ActivityField.optional(),
     stage: RunnerStage.optional(),
@@ -197,6 +205,8 @@ export const LocalOnlyEvent = z
     } else if (event.stage !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "stage belongs to the stage event only", path: ["stage"] });
     if (event.size_mb !== undefined && !(event.type === "run_ended" && event.reason === "runner_setup" && event.detail === "push_too_large"))
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "size_mb belongs to run_ended push_too_large only", path: ["size_mb"] });
+    if (event.memory_limit_bytes !== undefined && !(event.type === "run_ended" && event.reason === "resource_limit"))
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "memory_limit_bytes belongs to run_ended resource_limit only", path: ["memory_limit_bytes"] });
     // D#6 R4a-7 (additive under C8 section 6): `taken_over` is a timestamp and nothing else. The owner took the run over on the machine; no other field fits.
     if (event.type === "taken_over") {
       for (const field of TAKEN_OVER_FORBIDDEN) if (event[field] !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "taken_over carries no field but seq and ts", path: [field] });

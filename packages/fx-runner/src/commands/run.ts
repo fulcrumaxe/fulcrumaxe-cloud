@@ -44,7 +44,7 @@ import { createJobHandler } from "../daemon/jobHandler.js";
 import { createPlaneBaseLedger, createPlanePushHook } from "../daemon/planePush.js";
 import { createPlanePushGithub } from "../daemon/planePushGithub.js";
 import { createPlaneMergeHandler } from "../daemon/planeMerge.js";
-import type { LimitedBy } from "@fulcrumaxe/runner-protocol";
+import { MEMORY_LIMIT_CAPABILITY, type LimitedBy } from "@fulcrumaxe/runner-protocol";
 import { createGitTransport, createPublicHeadsReader } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
@@ -291,6 +291,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     // Claim gating on the plan's usage limit (D#6 C43-6): reads every job's metadata events, so one job's limit holds back the claims of all. A runner on an API key has no plan window.
     const usage = createUsageGate({ credentialMode: registration.credential_mode === "subscription" ? "subscription" : "api_key", now: () => clock.now().getTime() });
     const stopped = new AbortController();
+    let memoryLimitAccepted = false;
     const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) });
     // macOS: a resumed workspace's ignored build output is purged in a child under sandbox-exec that can write below the workspace only (D#6 RESUME-CLEAN-MAC).
     const sandboxedPurge = host.platform === "darwin" && host.selfCommand !== undefined ? createSandboxedPurge({ capture: host.engine.capture, selfCommand: host.selfCommand, stateDir, isFile: host.sandbox.isFile }) : undefined;
@@ -350,6 +351,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     });
     const handle = createJobHandler({
       planePush,
+      // D#6 CARD-OOM-CAUSE-WORDS: the scope's own cap goes on a `resource_limit` end, to a cloud whose hello kept `memory_limit_v1` (set below, once the hello is answered).
+      ...(limits?.memoryCap === undefined ? {} : { memoryLimitBytes: (runId: string) => limits.memoryCap?.(runId), sendMemoryLimit: () => memoryLimitAccepted }),
       ...(depsInstall === undefined ? {} : { depsInstall, packageStoreRoot }),
       // D#6 BUILD-LOCKFILE-ON-DEP-ADD: the offline lockfile update after the agent's turn; needs the process-group capture and the guarded git listing.
       ...lockfileSyncFor(host.engine, envOptions, (line) => ctx.out(line), path.join(ctx.stateDir, "lock-sync")),
@@ -437,6 +440,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         .catch(() => undefined);
       // D#6 RUNNER-WAKE: the hello's grant, if the cloud sent one, seeds the wake state; every claim reply refreshes it.
       const wake = new WakeTracker(hello?.kind === "ok" ? hello.wake : undefined);
+      // An answer that failed, or one that dropped the capability, leaves the field unsent: the card then keeps its plain sentence.
+      memoryLimitAccepted = hello?.kind === "ok" && !(hello.dropped ?? []).includes(MEMORY_LIMIT_CAPABILITY);
       const end = await pollLoop({
         client,
         wake,

@@ -23,6 +23,8 @@ export interface RunEnd {
   detail?: RunEndedDetail;
   /** Only with `push_too_large` (C27 section 4.5): the largest commit, in whole MB. */
   sizeMb?: number;
+  /** Only with `resource_limit` (D#6 CARD-OOM-CAUSE-WORDS): the memory cap, in bytes, the job's scope ran under. Set only for a cloud that kept `memory_limit_v1`. */
+  memoryLimitBytes?: number;
 }
 
 /**
@@ -42,13 +44,13 @@ const AGENT_CODES: ReadonlySet<string> = new Set(["agent_error", "no_result", "a
  * its own event (the engine sends it), and `run_ended` is never sent for it. The set of codes `runJob` can return is open; anything
  * not listed here is a setup failure of an unknown kind.
  */
-export function endOfFailure(code: string, sizeMb?: number): RunEnd | null {
+export function endOfFailure(code: string, sizeMb?: number, memoryLimitBytes?: number): RunEnd | null {
   if (code === "credential_mismatch") return null;
   if (code === "wall_clock") return { reason: "wall_clock" };
   if (code === "push_rejected") return { reason: "push_rejected" };
   // `resource_limit` (D#6 C43-5): the kernel ended the job in its own scope for going past its memory budget. It has its own reason on the wire (it used to be sent as
   // `agent_failed`, which reads as the agent giving up), so the run view can say the job hit its memory limit. A retry would hit the same limit: the cloud makes none.
-  if (code === "resource_limit") return { reason: "resource_limit" };
+  if (code === "resource_limit") return { reason: "resource_limit", ...(memoryLimitBytes === undefined ? {} : { memoryLimitBytes }) };
   if (AGENT_CODES.has(code)) return { reason: "agent_failed" };
   if (code === "push_too_large") return { reason: "runner_setup", detail: "push_too_large", ...(sizeMb === undefined ? {} : { sizeMb }) };
   if (SETUP_CODES.has(code)) return { reason: "runner_setup", detail: code as RunEndedDetail };
@@ -57,7 +59,7 @@ export function endOfFailure(code: string, sizeMb?: number): RunEnd | null {
 
 /** The event for an end. Throws if the protocol would not accept it, which would be a bug in this file. */
 export function runEndedEvent(seq: number, now: Date, end: RunEnd): LocalOnlyEvent {
-  return LocalOnlyEvent.parse({ seq, ts: now.toISOString(), type: "run_ended", reason: end.reason, ...(end.detail === undefined ? {} : { detail: end.detail }), ...(end.sizeMb === undefined ? {} : { size_mb: end.sizeMb }) });
+  return LocalOnlyEvent.parse({ seq, ts: now.toISOString(), type: "run_ended", reason: end.reason, ...(end.detail === undefined ? {} : { detail: end.detail }), ...(end.sizeMb === undefined ? {} : { size_mb: end.sizeMb }), ...(end.memoryLimitBytes === undefined ? {} : { memory_limit_bytes: end.memoryLimitBytes }) });
 }
 
 /**

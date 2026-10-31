@@ -19,6 +19,6 @@ export const RUNNER_PROTOCOL_VERSION: number = CURRENT_PROTOCOL_VERSION;
 /**
  * D#483 S4-b2c: the capability-gated job kinds this build runs, sent on `hello` (`HelloMessage.capabilities`). The cloud offers the claim
  * verifier's job only to a runner whose latest hello listed `proposal_verifier`; the protocol version does not move for it. D#6 RUNNER-WAKE:
- * `wake_v1` asks for a wake grant on the hello and claim replies (daemon/wake.ts); an older cloud refuses it and the hello goes again without it. D#6 PUBLIC-MERGE: `plane_merge_v1` says this build can claim and execute a merge order (daemon/planeMerge.ts); the same fallback.
+ * `wake_v1` asks for a wake grant on the hello and claim replies (daemon/wake.ts); an older cloud refuses it and the hello goes again without it. D#6 PUBLIC-MERGE: `plane_merge_v1` says this build can claim and execute a merge order (daemon/planeMerge.ts); the same fallback. D#6 CARD-OOM-CAUSE-WORDS: `memory_limit_v1` says the cloud may be sent the job's memory cap on a `resource_limit` end; the same fallback, and a hello that dropped it means the field is never sent.
  */
-export const RUNNER_BUILD_CAPABILITIES: Array<"proposal_verifier" | "wake_v1" | "plane_merge_v1"> = ["proposal_verifier", "wake_v1", "plane_merge_v1"];
+export const RUNNER_BUILD_CAPABILITIES: Array<"proposal_verifier" | "wake_v1" | "plane_merge_v1" | "memory_limit_v1"> = ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1"];

@@ -11,7 +11,7 @@ import { RUNNER_DAILY_LIMIT_SENTENCE } from "@fx/pipeline";
 import { setupRequestDeps } from "./setupRequests.js";
 import type { RouteEntry } from "../registry.js";
 import { runnerUsageSchema } from "./runs.js";
-import { withRunnerWords, type RunEndedCheck } from "./runnerLineWords.js";
+import { runEndedSentence, withRunnerWords, type RunEndedCheck } from "./runnerLineWords.js";
 import { readRunWait, runWaitSchema } from "./runnerWait.js";
 
 /**
@@ -184,6 +184,8 @@ export const workItemActivityRoutes: RouteEntry[] = [
       const activity = { ...rest, ...childLaunch, runs, ...(publicChange === null ? {} : { public_change: publicChange }), ...(startDecision === null ? {} : { start_decision: startDecision }), ...(receipts === null ? {} : { receipts: receipts.receipts, ...(receipts.total > receipts.receipts.length ? { receipts_total: receipts.total } : {}) }), ...(recheck === null ? {} : { review_recheck: { kind: recheck.kind, sentence: COPY.reviewMergeOnlyRecheck } }), ...setupPause };
       // The Re-spec notices carry the KEY of their sentence out of @fx/core; the words are written once, in the runner protocol's copy.
       const n = activity.notice;
+      // A build the runner ended at its memory limit: the same sentence the run's own line has, naming the cap when the runner sent one. The raw end never leaves.
+      if (n !== null && n.kind === "needs_human" && n.ended !== undefined) return { ...activity, notice: { kind: n.kind, reason: runEndedSentence(n.ended) ?? n.reason } };
       if (n !== null && n.kind === "review_limit_wait") return { ...activity, notice: { kind: n.kind, reason: RUNNER_DAILY_LIMIT_SENTENCE, ...(n.resetsAt === undefined ? {} : { resets_at: n.resetsAt }) } };
       if (n !== null && n.kind === "build_slot_wait") return { ...activity, notice: { kind: n.kind, reason: buildWaitSentence(n.reason, n.holder ?? null, n.autoStart !== false) } };
       if (n !== null && (n.kind === "no_file_list" || n.kind === "respec_failed")) return { ...activity, notice: { kind: n.kind, reason: COPY[FILE_LIST_NOTICE_COPY_KEY[n.kind]] } };

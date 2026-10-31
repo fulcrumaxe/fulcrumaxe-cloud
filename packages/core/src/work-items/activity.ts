@@ -53,6 +53,8 @@ export interface RunEndedWhy {
   reason: string;
   detail: string | null;
   size_mb: number | null;
+  /** D#6 CARD-OOM-CAUSE-WORDS: on a `resource_limit` end, the memory cap in bytes the runner sent, when it sent a whole number (the protocol's words check its bounds). */
+  memory_limit_bytes?: number | null;
 }
 export interface ActivityLine {
   at: string;
@@ -120,6 +122,8 @@ export interface ActivityStep {
  * (`specHasNoFileList`, `respecListUnreadable`), not the sentence: @fx/core has no dependency on that package, so the API route puts the words in.
  */
 export interface ActivityNotice {
+  /** `needs_human` only, and only for an executor run the runner ended `resource_limit`: how it ended. The API route puts the memory-limit sentence in `reason` and drops this; it never leaves the API. */
+  ended?: RunEndedWhy;
   kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed' | 'build_slot_wait' | 'resume_refused' | 'spec_refused' | 'superseded' | 'review_limit_wait';
   /** `review_limit_wait` only: when the runner's daily run limit starts again, an ISO instant (the next UTC midnight after the wait fact). The API route puts the sentence in `reason`; the card shows this instant in the viewer's zone. */
   resetsAt?: string;
@@ -337,6 +341,8 @@ export function reviewerUnverifiableSentence(reasons: readonly string[], stored:
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
+/** A stored `memory_limit_bytes` as a number: digits only (no sign, point or exponent), at most 13 of them, so it is a safe integer. Anything else is null; the protocol's words check the range. */
+const memoryLimitOf = (raw: string | null): number | null => (raw !== null && /^[1-9][0-9]{0,12}$/.test(raw) ? Number(raw) : null);
 /** A shell command line as stored: printable, one line, no control characters. */
 const COMMAND_RE = /^[^\u0000-\u001f\u007f]{1,200}$/;
 
@@ -424,13 +430,14 @@ export async function readRunLines(
     reason: string | null;
     detail: string | null;
     size_mb: string | null;
+    memory_limit_bytes: string | null;
     reset_at: string | null;
     handoff_state: string | null;
     handoff_branch: string | null;
   }>(
     // D#6 C42-3: besides the progress kinds, a runner run's own states: the `runner.waiting` notice and the three `runner.event` types that say
     // where the run stands. A `runner.event` of any other type (a tool use can be 2,000 per run) is not selected, so it cannot crowd the newest rows out.
-    `SELECT e.run_id, e.seq, e.kind, e.created_at, e.tool, e.path, e.pattern, e.stage, e."to", e.command, e.type, e.reason, e.detail, e.size_mb, e.reset_at, e.handoff_state, e.handoff_branch
+    `SELECT e.run_id, e.seq, e.kind, e.created_at, e.tool, e.path, e.pattern, e.stage, e."to", e.command, e.type, e.reason, e.detail, e.size_mb, e.memory_limit_bytes, e.reset_at, e.handoff_state, e.handoff_branch
        FROM unnest($1::uuid[]) AS r(id)
       CROSS JOIN LATERAL (
         SELECT run_id, seq, kind, created_at,
@@ -438,6 +445,7 @@ export async function readRunLines(
                left(payload->>'stage', 32) AS stage, left(payload->>'to', 32) AS "to", left(payload->>'command', 201) AS command,
                CASE WHEN kind = $5::text THEN left(payload->>'type', 32) END AS type, CASE WHEN kind = $5::text THEN left(payload->>'reason', 64) END AS reason,
                CASE WHEN kind = $5::text THEN left(payload->>'detail', 64) END AS detail, CASE WHEN kind = $5::text THEN left(payload->>'size_mb', 6) END AS size_mb,
+               CASE WHEN kind = $5::text THEN left(payload->>'memory_limit_bytes', 14) END AS memory_limit_bytes,
                CASE WHEN kind = $5::text THEN left(payload->>'reset_at', 40) END AS reset_at,
                CASE WHEN kind = $7::text THEN left(payload->>'state', 32) END AS handoff_state, CASE WHEN kind = $7::text THEN left(payload->>'branch', 80) END AS handoff_branch
           FROM run_events
@@ -452,7 +460,7 @@ export async function readRunLines(
     list.push({ seq: Number(e.seq), kind: e.kind, at: e.created_at, fields: { tool: e.tool, path: e.path, pattern: e.pattern, stage: e.stage, to: e.to, type: e.type, reason: e.reason, detail: e.detail, size_mb: e.size_mb, reset_at: e.reset_at, handoff_state: e.handoff_state, handoff_branch: e.handoff_branch } });
     if (e.kind === RUNNER_EVENT_KIND && e.type === 'run_ended' && e.reason !== null && CODE_RE.test(e.reason)) {
       const size = e.size_mb !== null && /^[0-9]{1,6}$/.test(e.size_mb) ? Number(e.size_mb) : null;
-      endedBySeq.set(`${e.run_id}:${Number(e.seq)}`, { reason: e.reason, detail: e.detail !== null && CODE_RE.test(e.detail) ? e.detail : null, size_mb: size });
+      endedBySeq.set(`${e.run_id}:${Number(e.seq)}`, { reason: e.reason, detail: e.detail !== null && CODE_RE.test(e.detail) ? e.detail : null, size_mb: size, memory_limit_bytes: memoryLimitOf(e.memory_limit_bytes) });
     }
     eventsByRun.set(e.run_id, list);
     if (e.command !== null && e.kind === 'agent.activity' && COMMAND_RE.test(e.command) && commandIsClean(e.command)) {
@@ -797,12 +805,23 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       const unverifiableSentence = newestEscalation?.code === UNVERIFIABLE_ESCALATION_CODE ? reviewerUnverifiableSentence(newestEscalation.reasons, newestEscalation.stored) : null;
       // The newest executor run's own summary says why the build ended without a pull request.
       const ex = (
-        await client.query<{ summary: string | null; status: string }>(
-          `SELECT left(envelope->>'summary', $2::int) AS summary, status FROM agent_runs
+        await client.query<{ id: string; summary: string | null; status: string }>(
+          `SELECT id, left(envelope->>'summary', $2::int) AS summary, status FROM agent_runs
             WHERE work_item_id = $1::uuid AND role = 'executor' ORDER BY created_at DESC, id DESC LIMIT 1`,
           [workItemId, ACTIVITY_LIMITS.maxNoticeChars],
         )
       ).rows[0];
+      // D#6 CARD-OOM-CAUSE-WORDS: an executor run the runner ended at its memory limit says so, with the cap when the runner sent one; a model summary (there is none for a killed agent) never outranks it.
+      const exEnd = ex
+        ? (
+            await client.query<{ reason: string | null; memory_limit_bytes: string | null }>(
+              `SELECT left(payload->>'reason', 64) AS reason, left(payload->>'memory_limit_bytes', 14) AS memory_limit_bytes FROM run_events
+                WHERE run_id = $1::uuid AND kind = $2::text AND payload->>'type' = 'run_ended' ORDER BY seq DESC LIMIT 1`,
+              [ex.id, RUNNER_EVENT_KIND],
+            )
+          ).rows[0]
+        : undefined;
+      const memoryEnd: RunEndedWhy | undefined = exEnd?.reason === 'resource_limit' ? { reason: 'resource_limit', detail: null, size_mb: null, memory_limit_bytes: memoryLimitOf(exEnd.memory_limit_bytes) } : undefined;
       const summary = ex?.summary?.trim() ? safeModelText(ex.summary, ACTIVITY_LIMITS.maxNoticeChars) : null;
       notice = rebuildSentence
         ? { kind: 'check_failed', reason: rebuildSentence }
@@ -814,6 +833,8 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
           ? { kind: 'needs_human', reason: unverifiableSentence }
           : noVerdictSentence
           ? { kind: 'needs_human', reason: noVerdictSentence }
+          : memoryEnd
+          ? { kind: 'needs_human', reason: `The executor run ${ex!.status.replace(/_/g, ' ')} without a pull request.`, ended: memoryEnd }
           : {
             kind: 'needs_human',
             reason: summary ?? (ex ? `The executor run ${ex.status.replace(/_/g, ' ')} without a pull request.` : 'The pipeline stopped and needs a person.'),

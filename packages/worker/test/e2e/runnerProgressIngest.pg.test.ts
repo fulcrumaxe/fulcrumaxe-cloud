@@ -228,6 +228,58 @@ describe("runner progress at ingest [pg]", { timeout: 120_000 }, () => {
     });
   });
 
+  // D#6 CARD-OOM-CAUSE-WORDS: the memory cap on a resource_limit end, through the real signed route.
+  describe("memory_limit_bytes on run_ended resource_limit", () => {
+    const GIB = 1024 ** 3;
+    const ended = (id: string, extra: object = {}): LocalOnlyEvent => ({ seq: nextSeq(id), ts: ts(0), type: "run_ended", reason: "resource_limit", ...extra }) as LocalOnlyEvent;
+    const storedEnd = async (id: string) => (await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'runner.event' AND payload->>'type' = 'run_ended'", [id])).rows.map((r) => r.payload);
+    const status = async (id: string) => (await admin.query("SELECT status FROM agent_runs WHERE id = $1", [id])).rows[0].status;
+    const raw = (id: string, g: number, event: object) => {
+      const payload = JSON.stringify({ run_id: id, lease_generation: g, events: [event] });
+      const url = `${cloud.origin}/api/runner/runs/${id}/events`;
+      const headers = signRequest({ method: "POST", url, body: Buffer.from(payload), privateKey: key.privateKey, keyid: key.jkt, nonce: randomBytes(16).toString("base64url"), created: Math.floor(Date.now() / 1000) }) as unknown as Record<string, string>;
+      return fetch(url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: payload });
+    };
+
+    it("a valid cap is stored with the run's end, and the run is failed with resource_limit", async () => {
+      const { id, g } = await claimed();
+      expect((await client.events(id, g, [ended(id, { memory_limit_bytes: 6 * GIB })])).kind).toBe("ok");
+      expect(await storedEnd(id)).toEqual([expect.objectContaining({ type: "run_ended", reason: "resource_limit", memory_limit_bytes: 6 * GIB })]);
+      expect(await status(id)).toBe("failed");
+    });
+
+    it("an older runner's end with no cap is accepted as before and stores none", async () => {
+      const { id, g } = await claimed();
+      expect((await client.events(id, g, [ended(id)])).kind).toBe("ok");
+      const [payload] = await storedEnd(id);
+      expect(payload).toMatchObject({ type: "run_ended", reason: "resource_limit" });
+      expect(payload).not.toHaveProperty("memory_limit_bytes");
+      expect(await status(id)).toBe("failed");
+    });
+
+    it("an invalid cap (zero, negative, fractional, a string, over a TiB, or on another end) is a 400 that stores nothing and ends nothing", async () => {
+      const bad: Array<[string, object]> = [
+        ["zero", { memory_limit_bytes: 0 }],
+        ["negative", { memory_limit_bytes: -1 }],
+        ["fractional", { memory_limit_bytes: 1.5 }],
+        ["string", { memory_limit_bytes: "6442450944" }],
+        ["over a TiB", { memory_limit_bytes: 2 ** 40 + 1 }],
+        ["null", { memory_limit_bytes: null }],
+        ["on agent_failed", { reason: "agent_failed", memory_limit_bytes: 6 * GIB }],
+      ];
+      // One run for all of them: each refusal leaves it running and untouched, which is also what is asserted.
+      const { id, g } = await claimed();
+      for (const [name, extra] of bad) {
+        const before = await accountRows(A.accountId);
+        const res = await raw(id, g, { ...ended(id), ...extra });
+        expect(res.status, name).toBe(400);
+        expect(await accountRows(A.accountId), name).toBe(before);
+        expect(await storedEnd(id), name).toEqual([]);
+        expect(await status(id), name).toBe("running");
+      }
+    });
+  });
+
   describe("bounds", () => {
     it("300 events one second apart give 200 activity rows, and run_ended leaves one capped row that counts the rest", async () => {
       const { id, g } = await claimed();
