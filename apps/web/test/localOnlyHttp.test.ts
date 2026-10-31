@@ -79,6 +79,14 @@ describe("openForRepo", () => {
     expect(open).toHaveBeenCalledWith("merge_gate", TARGET);
   });
 
+  it("D#694 B5a: a sandbox merge_gate client is never opened with allowGraphql (the pinned allowance lives in the client, not a flag)", async () => {
+    const { http } = inner();
+    const open = vi.fn(async () => http);
+    await openForRepo(open, "sandbox", "merge_gate", TARGET);
+    await openForRepo(open, "sandbox", "merge_gate", TARGET, { withoutMerge: true });
+    for (const call of open.mock.calls as unknown as Array<[string, Record<string, unknown>]>) expect("allowGraphql" in call[1]).toBe(false);
+  });
+
   it("a runner_local repo gets a client opened with GraphQL allowed and put behind the fence", async () => {
     const { http, seen } = inner();
     const open = vi.fn(async () => http);

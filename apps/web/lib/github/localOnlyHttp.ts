@@ -57,6 +57,8 @@ const isListOrClose = (req: { method: string; path: string }): boolean =>
 
 /**
  * Opens the `read` or `merge_gate` client for a repository, as the plain client for a sandbox repo and the fenced one for a `runner_local` repo.
+ * D#694 B5a: a sandbox (hosted) `merge_gate` client is never opened with `allowGraphql`; its GraphQL reach is the three pinned documents the client
+ * itself enforces (mergeGateGraphql.ts in the GitHub package). Only the `runner_local` branch below sets the flag, behind the fence, as before.
  * `withoutMerge` (the paired code repository of a `runner_local` item) takes the merge call out of the fence: the cloud never merges there.
  */
 export async function openForRepo(open: Open, executionMode: string, kind: "read" | "merge_gate", target: InstallationHttpTarget, options: { withoutMerge?: boolean } = {}): Promise<InstallationHttp | LocalGitHubHttp> {

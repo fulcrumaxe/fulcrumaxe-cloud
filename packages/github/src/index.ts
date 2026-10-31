@@ -55,3 +55,4 @@ export * from './planePushHosted.js';
 export * from './publicRepoInspect.js';
 export * from './missedIssueImport.js';
 export * from './retraction.js';
+export * from './mergeGateGraphql.js';
