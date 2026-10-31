@@ -7,14 +7,14 @@ import { listSourcePaths } from "../../../../packages/test-guard/src/sourceFiles
  * D#7 DP7-2d: the `revert_pr` installation-client kind holds contents write and pull requests write, so the only thing that may open it is
  * `openRevertPullRequest`, which pins it to one merged pull request and one mutation. The web app's reversal opener hands the generic installation
  * opener to that function and never names the kind. This guard keeps a later caller from naming it anywhere else. The same word is also the name of a
- * reversal plan and of a compensation row's kind (plain data, no client), in the four files listed second.
+ * reversal plan and of a compensation row's kind (plain data, no client), in the five files listed second.
  */
 const ROOT = path.join(__dirname, "..", "..", "..", "..");
 const SKIP_DIRS = new Set(["node_modules", ".next", "dist", "build", "coverage", ".turbo", "test", "tests", "__tests__"]);
 const SOURCE = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
 const TEST_FILE = /\.(?:test|spec)\.[a-z]+$/;
 const CLIENT = ["packages/github/src/installationHttp.ts", "packages/github/src/installationToken.ts", "packages/github/src/revertPr.ts"];
-const DATA = ["packages/db/src/reversalCompensation.ts", "packages/receipts/src/compensate.ts", "packages/receipts/src/reverse.ts", "packages/receipts/src/rowFor.ts"]; // rowFor.ts: maps a reversal plan to a compensation row (plain data, opens no client)
+const DATA = ["packages/api/src/routes/receipts.ts", "packages/db/src/reversalCompensation.ts", "packages/receipts/src/compensate.ts", "packages/receipts/src/reverse.ts", "packages/receipts/src/rowFor.ts"]; // rowFor.ts: maps a reversal plan to a compensation row (plain data, opens no client); api receipts.ts: reads the plan kind to word the answer (plain data, opens no client)
 
 /** The kind as a whole token. A longer identifier such as `revert_pr_extra` does not count. */
 const KIND = /\brevert_pr\b/;
