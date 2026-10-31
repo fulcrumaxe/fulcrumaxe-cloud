@@ -216,6 +216,26 @@ export type EnqueueOutcome =
   | { enqueued: true; via: "auto_merge"; entryId: null; position: null }
   | { enqueued: false; reason: "head_moved" | "unavailable" };
 
+/**
+ * D#694 B6-1: what the dequeue call answered. `not_queued`: GitHub holds no entry for the pull request, so nothing changed. `unavailable`: the app may not dequeue.
+ * Any other failure throws (the workflow step retries). Nothing calls it yet.
+ */
+export type DequeueOutcome = { dequeued: true; entryId: string } | { dequeued: false; reason: "not_queued" | "unavailable" };
+
+/** D#694 B6-1: GitHub's own states of a queue entry, lower-cased. */
+export type QueueEntryState = "awaiting_checks" | "locked" | "mergeable" | "queued" | "unmergeable";
+
+/**
+ * D#694 B6-1: one read of a pull request and its queue entry. `entry` is null when the pull request is not in the queue. Structured fields only; the head is the
+ * pull request's current head (B6-2 compares it with the gated head).
+ */
+export interface QueueEntryReading {
+  state: "open" | "closed";
+  merged: boolean;
+  headSha: string;
+  entry: { id: string; state: QueueEntryState; position: number | null } | null;
+}
+
 export interface MergeGateGitHubPort {
   getPullRequest(pr: PullRequestRef): Promise<PullRequestState>;
   /** D#519 MQ1: the pull request's mergeability, with `mergeable: null` already polled (see `PullRequestMergeability`). With `gatedHeadSha`, polling stops as soon as the head differs from it (a moved head needs no mergeability). */
@@ -240,6 +260,10 @@ export interface MergeGateGitHubPort {
   getMergeQueueMode?(pr: PullRequestRef, baseRef: string): Promise<MergeQueueMode>;
   /** D#694 B5: puts the pull request in the merge queue, bound to `expectedHeadOid` (GitHub refuses if the head is any other commit). Only called when the mode is `queue`. */
   enqueuePullRequest?(pr: PullRequestRef, args: { expectedHeadOid: string }): Promise<EnqueueOutcome>;
+  /** D#694 B6-1 (inert): takes the pull request out of the merge queue. Not called by the gate. */
+  dequeuePullRequest?(pr: PullRequestRef): Promise<DequeueOutcome>;
+  /** D#694 B6-1 (inert): the pull request and its queue entry now. Not called by the gate. */
+  getQueueEntry?(pr: PullRequestRef): Promise<QueueEntryReading>;
 }
 
 export interface MergeGateDeps {

@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { InstallationTokenCache, type AccessTokenRequester } from "../src/installationToken.js";
 import { createInstallationHttp, InstallationHttpError, type InstallationHttpKind } from "../src/installationHttp.js";
-import { ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_GATE_GRAPHQL_MAX_BYTES, MERGE_QUEUE_READ_DOCUMENT, pinnedMergeGateBody } from "../src/mergeGateGraphql.js";
+import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_GATE_GRAPHQL_MAX_BYTES, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, pinnedMergeGateBody } from "../src/mergeGateGraphql.js";
 
 /** D#694 B5a: the pinned-document GraphQL allowance, through the real client and a local HTTP server (the call log is the server's own). */
 const TARGET = { repoId: "11111111-1111-4111-8111-111111111111", owner: "acme", name: "widgets" };
@@ -49,6 +49,8 @@ type Doc = { query: string; variables: Record<string, unknown> };
 const read: Doc = { query: MERGE_QUEUE_READ_DOCUMENT, variables: { owner: "acme", name: "widgets", branch: "main" } };
 const enqueue: Doc = { query: ENQUEUE_PULL_REQUEST_DOCUMENT, variables: { pullRequestId: "PR_kwDOAAAAAc4AAAAH", expectedHeadOid: OID } };
 const auto: Doc = { query: ENABLE_AUTO_MERGE_DOCUMENT, variables: { pullRequestId: "PR_kwDOAAAAAc4AAAAH", expectedHeadOid: OID, mergeMethod: "SQUASH" } };
+const dequeue: Doc = { query: DEQUEUE_PULL_REQUEST_DOCUMENT, variables: { pullRequestId: "PR_kwDOAAAAAc4AAAAH" } };
+const entry: Doc = { query: MERGE_QUEUE_ENTRY_DOCUMENT, variables: { owner: "acme", name: "widgets", number: 7 } };
 const withVars = (d: Doc, over: Record<string, unknown>): Doc => ({ query: d.query, variables: { ...d.variables, ...over } });
 const without = (d: Doc, key: string): Doc => {
   const variables = { ...d.variables };
@@ -56,13 +58,15 @@ const without = (d: Doc, key: string): Doc => {
   return { query: d.query, variables };
 };
 
-describe("the three pinned documents (snapshot: changing one is a reviewed edit)", () => {
+describe("the five pinned documents (snapshot: changing one is a reviewed edit)", () => {
   it("are exactly these strings", () => {
-    expect([MERGE_QUEUE_READ_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT]).toMatchInlineSnapshot(`
+    expect([MERGE_QUEUE_READ_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, DEQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT]).toMatchInlineSnapshot(`
       [
         "query($owner: String!, $name: String!, $branch: String!) { repository(owner: $owner, name: $name) { mergeQueue(branch: $branch) { id } } }",
         "mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!) { enqueuePullRequest(input: { pullRequestId: $pullRequestId, expectedHeadOid: $expectedHeadOid }) { mergeQueueEntry { id position } } }",
         "mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!, $mergeMethod: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId, expectedHeadOid: $expectedHeadOid, mergeMethod: $mergeMethod }) { pullRequest { id } } }",
+        "mutation($pullRequestId: ID!) { dequeuePullRequest(input: { id: $pullRequestId }) { mergeQueueEntry { id } } }",
+        "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { state merged headRefOid mergeQueueEntry { id state position } } } }",
       ]
     `);
   });
@@ -83,7 +87,7 @@ describe("the size cap", () => {
 });
 
 describe("merge_gate POST /graphql allowance", () => {
-  it.each([["mergeQueue read", read], ["enqueuePullRequest", enqueue], ["enablePullRequestAutoMerge", auto]])("lets %s through to the server unchanged", async (_n, body) => {
+  it.each([["mergeQueue read", read], ["enqueuePullRequest", enqueue], ["enablePullRequestAutoMerge", auto], ["dequeuePullRequest", dequeue], ["mergeQueueEntry read", entry]])("lets %s through to the server unchanged", async (_n, body) => {
     const { open, calls } = await setup();
     const http = await open("merge_gate", TARGET);
     const res = await http.request({ method: "POST", path: "/graphql", body });
@@ -133,6 +137,26 @@ describe("merge_gate POST /graphql allowance", () => {
     ["an empty branch", { body: withVars(read, { branch: "" }) }],
     ["a branch over 255 characters", { body: withVars(read, { branch: "b".repeat(256) }) }],
     ["a branch with a control character", { body: withVars(read, { branch: "ma\nin" }) }],
+    ["an unknown variable (dequeue)", { body: withVars(dequeue, { extra: "x" }) }],
+    ["a dequeue with the head variable of an enqueue", { body: withVars(dequeue, { expectedHeadOid: OID }) }],
+    ["a missing pullRequestId (dequeue)", { body: without(dequeue, "pullRequestId") }],
+    ["a dequeue by a malformed node id", { body: withVars(dequeue, { pullRequestId: "PR kw" }) }],
+    ["a dequeue by an over-long node id", { body: withVars(dequeue, { pullRequestId: "P".repeat(101) }) }],
+    ["a dequeue with a non-string id", { body: withVars(dequeue, { pullRequestId: 7 }) }],
+    ["a dequeue document plus a second operation", { body: { ...dequeue, query: dequeue.query + ' mutation { mergePullRequest(input:{pullRequestId:"x"}) { clientMutationId } }' } }],
+    ["a dequeue with a trailing space", { body: { ...dequeue, query: dequeue.query + " " } }],
+    ["an unknown variable (entry)", { body: withVars(entry, { extra: "x" }) }],
+    ["an entry read without a number", { body: without(entry, "number") }],
+    ["an entry read for another owner", { body: withVars(entry, { owner: "other" }) }],
+    ["an entry read for another repository", { body: withVars(entry, { name: "gadgets" }) }],
+    ["an entry read with a bad owner", { body: withVars(entry, { owner: "-acme" }) }],
+    ["an entry read with a bad repository name", { body: withVars(entry, { name: "a/b" }) }],
+    ["an entry read with the number as a string", { body: withVars(entry, { number: "7" }) }],
+    ["an entry read with number 0", { body: withVars(entry, { number: 0 }) }],
+    ["an entry read with a negative number", { body: withVars(entry, { number: -1 }) }],
+    ["an entry read with a fractional number", { body: withVars(entry, { number: 1.5 }) }],
+    ["an entry read with a number past the safe integers", { body: withVars(entry, { number: 2 ** 53 }) }],
+    ["an entry read with a leading space", { body: { ...entry, query: " " + entry.query } }],
     ["a body over 4 KiB", { body: withVars(read, { pad: "p".repeat(MERGE_GATE_GRAPHQL_MAX_BYTES) }) }],
     ["GET /graphql", { method: "GET", body: undefined }],
     ["GET /graphql with the body", { method: "GET" }],
@@ -183,7 +207,7 @@ describe("merge_gate POST /graphql allowance", () => {
     for (const [kind, extra] of kinds) {
       const { open, calls } = await setup();
       const http = await open(kind, { ...TARGET, ...extra } as never);
-      for (const body of [read, enqueue, auto]) {
+      for (const body of [read, enqueue, auto, dequeue, entry]) {
         await expect(http.request({ method: "POST", path: "/graphql", body }), kind).rejects.toBeInstanceOf(InstallationHttpError);
       }
       expect(calls, kind).toEqual([]);

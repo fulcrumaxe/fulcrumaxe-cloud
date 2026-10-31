@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { listDriverEvents } from "@fx/core/src/work-items/driverEvents.js";
-import { ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "../../../github/src/mergeGateGraphql.js";
+import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "../../../github/src/mergeGateGraphql.js";
 import { clearMergeQueueModeCache } from "../../src/build/githubMergePort.js";
 import { runMergeGateForItem } from "../../src/review/mergeGateRun.js";
 import { loadReviewContext, loadSpecText } from "../../src/review/context.js";
@@ -462,7 +462,7 @@ describe("D#598 P3b: a stacked child's pull request is never merged by the gate 
 });
 
 describe("D#694 B5: a base branch behind GitHub's merge queue", () => {
-  const queueDocuments = { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT };
+  const queueDocuments = { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT };
   const queued = (w: World) => runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(w.gh), queueDocuments }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
   const withQueue = (q: Partial<NonNullable<FakeRepoState["mergeQueue"]>> = {}, rules: FakeRepoState["rulesetRules"] = [{ type: "merge_queue", enforcement: "active" }]): Partial<FakeRepoState> => ({
     mergeQueue: { exists: true, mutations: [], ...q },
