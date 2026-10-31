@@ -175,6 +175,8 @@ export interface CaptureOptions {
   timeoutMs?: number;
   pollMs?: number;
   now?: () => number;
+  /** Called the moment the poll sees a valid cookie, before the browser is closed: from then on the cookie is in hand. */
+  onCookie?: () => void;
   /** Where the throw-away profile is made. */
   profileRoot?: string;
   /** Test seam: what a handled signal ends the process with. */
@@ -270,7 +272,10 @@ export async function captureSession(opts: CaptureOptions): Promise<string> {
     const deadline = now() + (opts.timeoutMs ?? 10 * 60_000);
     for (;;) {
       const cookie = await browser.cookie();
-      if (cookie !== undefined && sessionStatus(cookie, now()).state === "ok") return cookie;
+      if (cookie !== undefined && sessionStatus(cookie, now()).state === "ok") {
+        opts.onCookie?.();
+        return cookie;
+      }
       if (now() >= deadline) throw new Error("no session cookie appeared before the deadline; nothing was stored");
       await new Promise((r) => setTimeout(r, opts.pollMs ?? 1000));
     }

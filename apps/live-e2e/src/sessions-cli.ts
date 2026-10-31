@@ -22,6 +22,7 @@ import type { Io } from "./cli.js";
 import { GithubError, postTeamLog, syncSessionIssues, syncStoreIssue } from "./issues.js";
 import { MASK_FILE_ENV, MaskRegistry } from "./mask.js";
 import { BYPASS_ENV } from "./needs.js";
+import { guardRejections, unexpectedFailure } from "./safe-error.js";
 import { captureSession, isLapsed, keepAlive, sessionStatus } from "./sessions.js";
 import { decryptRoles, encryptRoles, isRole, mergeNewest, parseKey, putRole, readStore, removeRole, roleAllowedOn, StoreError, storePath, type Roles } from "./store.js";
 import { loadTarget, TargetError, type Target } from "./targets.js";
@@ -193,6 +194,15 @@ export async function captureCommand(argv: string[], io: Io): Promise<number> {
     io.stderr("usage: live-e2e capture-session --target <name> --role <role> [--live-user <unix user>]");
     return 2;
   }
+  // A rejection nobody handled (a browser callback after the window closed) must never reach Node's default printer:
+  // Playwright's text carries request headers. Before the cookie is found it ends the capture through the signal path
+  // (browser closed, profile removed); after, the cookie is still stored and the command then reports failure.
+  let captured = false;
+  let rejected = false;
+  const guard = guardRejections("capture-session", io.stderr, () => {
+    rejected = true;
+    if (!captured) (io.abort ?? ((): void => void process.kill(process.pid, "SIGTERM")))();
+  });
   try {
     const role = f["--role"];
     if (!isRole(role)) throw new StoreError(`"${role.slice(0, 32)}" is not a role`);
@@ -213,10 +223,15 @@ export async function captureCommand(argv: string[], io: Io): Promise<number> {
     const cookie = await captureSession({
       target,
       bypassSecret: io.env[BYPASS_ENV],
+      // The cookie counts as found when the poll sees it: the browser close that follows runs inside captureSession.
+      onCookie: () => {
+        captured = true;
+      },
       launcher: io.launcher ?? (await import("../fixtures/capture-browser.js")).chromiumLauncher,
       ...(io.headless === true ? { headless: true } : {}),
       ...(io.now !== undefined ? { now: io.now } : {}),
     });
+    captured = true;
     registryFor(io, false).register(cookie);
     if (user === undefined || existing === undefined) {
       await putRole(storePath(home as string, target.name), target.name, key, role, cookie);
@@ -230,14 +245,17 @@ export async function captureCommand(argv: string[], io: Io): Promise<number> {
       });
     }
     io.stdout(`captured ${role} for ${target.name}; only the app cookie was kept`);
-    return 0;
+    return rejected ? 1 : 0;
   } catch (err) {
     if (err instanceof StoreError || err instanceof TargetError) {
       io.stderr(err.message);
       return err instanceof TargetError ? 2 : 1;
     }
-    io.stderr(`capture-session: ${err instanceof Error ? err.message : "failed"}`);
+    // Not err.message: if it came from Playwright it embeds the request headers (bypass secret, session cookie).
+    io.stderr(unexpectedFailure("capture-session", err));
     return 1;
+  } finally {
+    guard.dispose();
   }
 }
 

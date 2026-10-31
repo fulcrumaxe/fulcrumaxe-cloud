@@ -66,30 +66,43 @@ function isRedirect(response: FenceResponse): boolean {
  */
 export function fenceRouteHandler<R extends FenceResponse = FenceResponse>(config: FenceConfig, options: FenceOptions = {}): (route: FenceRoute<R>) => Promise<void> {
   return async (route) => {
-    const req = route.request();
-    const url = req.url();
-    const method = req.method();
-    if (fenceVerdict({ method, url, shell: true }, config) !== null) {
+    try {
+      await fenceRoute(route, config, options);
+    } catch {
+      // Never rethrow (see bypassRouteHandler): a failure while the context closes carries the request's headers.
+      try {
+        await route.abort(BLOCKED_CODE);
+      } catch {
+        // The context is already gone.
+      }
+    }
+  };
+}
+
+async function fenceRoute<R extends FenceResponse>(route: FenceRoute<R>, config: FenceConfig, options: FenceOptions): Promise<void> {
+  const req = route.request();
+  const url = req.url();
+  const method = req.method();
+  if (fenceVerdict({ method, url, shell: true }, config) !== null) {
+    await route.abort(BLOCKED_CODE);
+    return;
+  }
+  if (config.target === "staging" && !isReadMethod(method)) {
+    let response: R;
+    try {
+      response = await route.fetch({ headers: { ...req.headers(), ...(options.extraHeaders?.(url) ?? {}) }, maxRedirects: 0 });
+    } catch {
       await route.abort(BLOCKED_CODE);
       return;
     }
-    if (config.target === "staging" && !isReadMethod(method)) {
-      let response: R;
-      try {
-        response = await route.fetch({ headers: { ...req.headers(), ...(options.extraHeaders?.(url) ?? {}) }, maxRedirects: 0 });
-      } catch {
-        await route.abort(BLOCKED_CODE);
-        return;
-      }
-      if (isRedirect(response)) {
-        await route.abort(BLOCKED_CODE);
-        return;
-      }
-      await route.fulfill({ response });
+    if (isRedirect(response)) {
+      await route.abort(BLOCKED_CODE);
       return;
     }
-    await route.fallback();
-  };
+    await route.fulfill({ response });
+    return;
+  }
+  await route.fallback();
 }
 
 /** The host a WebSocket must not reach: the production host (on a production run, the target itself). */

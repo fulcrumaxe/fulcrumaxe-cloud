@@ -25,7 +25,12 @@ export const chromiumLauncher: Launcher = async (o) => {
   await page.goto(new URL(o.startPath, o.origin).href).catch(() => undefined);
   return {
     cookie: async () => (await context.cookies(o.origin)).find((c) => c.name === SESSION_COOKIE_NAME)?.value,
-    close: () => context.close(),
+    close: async () => {
+      // Route handlers still in flight (a stylesheet fetch) must not reject into the process once the context goes:
+      // drop them first, and never let a close failure carry Playwright's call log (it embeds request headers).
+      await context.unrouteAll({ behavior: "ignoreErrors" }).catch(() => undefined);
+      await context.close().catch(() => undefined);
+    },
   };
 };
 

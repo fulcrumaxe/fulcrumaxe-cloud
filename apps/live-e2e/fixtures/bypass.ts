@@ -14,7 +14,7 @@
  * only; test/pack-lint.test.ts fails any pack that builds its own context or request path.
  */
 import { join } from "node:path";
-import { test as base } from "@playwright/test";
+import { test as base, type BrowserContext, type Route } from "@playwright/test";
 import { BYPASS_HEADER, bypassHeadersFor, createClient, SET_COOKIE_HEADER, type ApiClient, type ProbeSend } from "../src/client.js";
 import { packageRoot, TARGET_ENV_NAME } from "../src/limits.js";
 import { BYPASS_ENV } from "../src/needs.js";
@@ -27,6 +27,7 @@ export interface RouteLike<R = unknown> {
   continue(options?: { headers?: Record<string, string> }): Promise<void>;
   fetch(options: { headers: Record<string, string>; maxRedirects: number }): Promise<R>;
   fulfill(options: { response: R }): Promise<void>;
+  abort?(errorCode?: string): Promise<void>;
 }
 
 /**
@@ -42,13 +43,24 @@ export interface RouteLike<R = unknown> {
  */
 export function bypassRouteHandler<R>(origin: string, secret: string | undefined): (route: RouteLike<R>) => Promise<void> {
   return async (route) => {
-    const req = route.request();
-    const extra = bypassFetchHeaders(req.url(), origin, secret);
-    if (BYPASS_HEADER in extra) {
-      const response = await route.fetch({ headers: { ...req.headers(), ...extra }, maxRedirects: 0 });
-      await route.fulfill({ response });
-    } else {
-      await route.continue();
+    try {
+      const req = route.request();
+      const extra = bypassFetchHeaders(req.url(), origin, secret);
+      if (BYPASS_HEADER in extra) {
+        const response = await route.fetch({ headers: { ...req.headers(), ...extra }, maxRedirects: 0 });
+        await route.fulfill({ response });
+      } else {
+        await route.continue();
+      }
+    } catch {
+      // Never rethrow: a handler that fails because its context is closing (or a fetch that fails) would otherwise
+      // surface as an unhandled rejection, and Playwright's message for it embeds the request's headers (the bypass
+      // secret and any cookie). The request is aborted if it still can be; the error itself is dropped.
+      try {
+        await route.abort?.();
+      } catch {
+        // The context is already gone.
+      }
     }
   };
 }
@@ -60,6 +72,17 @@ export function bypassRouteHandler<R>(origin: string, secret: string | undefined
 export function bypassFetchHeaders(url: string, origin: string, secret: string | undefined): Record<string, string> {
   const extra = bypassHeadersFor(url, origin, secret);
   return BYPASS_HEADER in extra ? { ...extra, [SET_COOKIE_HEADER]: "true" } : {};
+}
+
+/**
+ * Registers the bypass handler for the life of `body`. It never calls `unrouteAll` on teardown: that would also remove
+ * the write fence (fixtures/fence.ts) from the same context while the page is still alive (trace and screenshot saving
+ * happen in that gap), leaving requests unfenced. The handlers swallow their own errors instead, so an in-flight one
+ * cannot reject when the context closes.
+ */
+export async function withBypass(context: Pick<BrowserContext, "route">, origin: string, secret: string | undefined, body: () => Promise<void>): Promise<void> {
+  await context.route("**/*", bypassRouteHandler<Awaited<ReturnType<Route["fetch"]>>>(origin, secret));
+  await body();
 }
 
 /** The secret is sent only to a deployment that declares protection; an unprotected target never sees it. */
@@ -120,8 +143,7 @@ export const test = base.extend<Fixtures, WorkerFixtures>({
   },
   bypass: [
     async ({ context, target }, use) => {
-      await context.route("**/*", bypassRouteHandler(target.origin, secretFor(target)));
-      await use(undefined);
+      await withBypass(context, target.origin, secretFor(target), () => use(undefined));
     },
     { auto: true },
   ],
