@@ -99,6 +99,31 @@ importers:
         specifier: workspace:*
         version: link:../workspace
 
+  apps/live-sink:
+    dependencies:
+      next:
+        specifier: ^15.1.0
+        version: 15.5.26(@playwright/test@1.63.0)(@types/node@24.19.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
+      react:
+        specifier: ^19.0.0
+        version: 19.3.0
+      react-dom:
+        specifier: ^19.0.0
+        version: 19.3.0(react@19.3.0)
+    devDependencies:
+      '@types/node':
+        specifier: ^24.19.0
+        version: 24.19.0
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@24.19.0)(supports-color@10.2.2)
+      web:
+        specifier: workspace:*
+        version: link:../web
+
   apps/ops:
     dependencies:
       '@fx/db':

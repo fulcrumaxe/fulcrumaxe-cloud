@@ -1,0 +1,25 @@
+{
+  "name": "live-sink",
+  "private": true,
+  "license": "UNLICENSED",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Webhook sink for the live end-to-end suite: keeps what a test webhook delivered for up to an hour, in an expiring key-value store.",
+  "scripts": {
+    "build": "next build",
+    "start": "next start",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "^15.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8",
+    "web": "workspace:*"
+  }
+}

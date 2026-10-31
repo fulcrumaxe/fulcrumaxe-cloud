@@ -234,4 +234,5 @@ export const ENV_MANIFEST: readonly EnvVar[] = [
   { name: "BENCH_DATABASE_URL", scope: "tooling", requiredIn: NONE, secret: true, feature: "SSE benchmark", validation: pg, whenMissing: "tool_refuses", note: "The benchmark exits" },
   { name: "BENCH_DATABASE_URL_APP_USER", scope: "tooling", requiredIn: NONE, secret: true, feature: "SSE benchmark", validation: pg, whenMissing: "tool_refuses", note: "The benchmark exits" },
   { name: "BENCH_DATABASE_URL_PLATFORM_OPS", scope: "tooling", requiredIn: NONE, secret: true, feature: "SSE benchmark", validation: pg, whenMissing: "tool_refuses", note: "The benchmark exits" },
+  { name: "NEXT_APP_DIR", scope: "tooling", requiredIn: NONE, secret: false, feature: "Build trace check", validation: any, whenMissing: "default_used", note: "Unset: the trace check looks at apps/web. The live-sink built test sets it to check that app's own standalone output" },
 ];
