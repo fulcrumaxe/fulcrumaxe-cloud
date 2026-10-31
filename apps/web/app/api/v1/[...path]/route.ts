@@ -9,6 +9,7 @@ import { setupRequestDeps } from "@fx/api/src/routes/setupRequests.js";
 import { repoPairingDeps } from "@fx/api/src/routes/repoPairing.js";
 import { decisionAskDeps } from "@fx/api/src/routes/decisionAsks.js";
 import { subItemApprovalDeps } from "@fx/api/src/routes/subItemApprovals.js";
+import { receiptReversalDeps } from "@fx/api/src/routes/receipts.js";
 import { vercelConnectionDeps } from "@fx/api/src/routes/vercel-connection.js";
 import { createVercelTokenValidator } from "@fx/model-connection";
 import { createPinnedVercelFetch } from "../../../../lib/vercelPinnedFetch";
@@ -69,6 +70,11 @@ decisionAskDeps.getAnswerer = async () => {
 subItemApprovalDeps.getApprover = async () => {
   const worker = await getWorker();
   return worker === null ? null : (input) => worker.approveSubItem(input);
+};
+// D#7 DP7-2e: reversing a decision and confirming its estimate write receipts and compensation rows on the worker (the receipt login); null (a 503) until a worker can be built.
+receiptReversalDeps.getService = async () => {
+  const worker = await getWorker();
+  return worker === null ? null : { request: (input) => worker.requestReversal(input), confirm: (input) => worker.confirmReversal(input) };
 };
 vercelConnectionDeps.getNames = () => productionVercelNames;
 // D#601 MEM-4a2b: an edited memory is scanned against this process's live installation tokens, the same source the worker's intake uses.
