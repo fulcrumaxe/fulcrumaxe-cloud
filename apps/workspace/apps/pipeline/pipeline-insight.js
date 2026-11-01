@@ -12,7 +12,7 @@
 // share one file because the Pipeline app has a per-app boot-file ceiling (build/budget.mjs).
 import { clockText, h, timeNode } from "../_lib/dom.js";
 import { api, createRetryGate, isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
-import { sayLive, stageWords } from "./pipeline-actions.js";
+import { APPROVE_SENTENCES, sayLive, stageWords } from "./pipeline-actions.js";
 
 
 /** Agent roles by the phase they belong to. A role not listed is labelled "Run". */
@@ -304,6 +304,33 @@ export function limitResetTail(iso, timeZone) {
 }
 
 /**
+ * D#7 DP8-f2: a decision step (an answered question whose resume did not happen) left a fixed code on the item. The card shows one sentence per code, built from the
+ * code alone, never from model text or the ask's text. A start's own closed code with a start sentence reads "it didn't continue: " plus that sentence (the Approve
+ * table); any other code reads as RESUME_REFUSED_GENERIC. Words approved in D#7 C22 A6, C23 and C28.
+ */
+export const RESUME_REFUSED_SENTENCES = Object.freeze({
+  work_item_not_resumable: "Your answer was saved, but this item was stopped or closed, so it didn't continue.",
+  already_answered: "Someone already answered this question. Their answer was used.",
+  ask_no_run: "This question can't be answered here because its run has ended. Use Build again to start a new run.",
+  prompt_not_retained: "Your answer was saved, but the original request isn't kept any more, so the work didn't continue. Use Build again to start a new run.",
+  principal_not_authorised: "Your answer was saved, but only an owner or an admin can start this, so it didn't continue.",
+  fix_round_context_missing: "Your answer was saved, but the fix round's details weren't kept, so it didn't continue. Use Build again to start a new run.",
+  spec_unavailable: "Your answer was saved, but the Spec this work follows couldn't be read, so it didn't continue. Check the Spec, then use Build again.",
+  execution_mode_changed: "Your answer was saved, but this repository now builds in a different place, so it didn't continue. Use Build again to start it there.",
+  resume_pause_expired: "Your answer came after this item's 14-day pause ended, so it didn't continue. Use Build again to start a new run.",
+  resume_failed: "Your answer was saved, but the work couldn't continue just now. Use Build again to try again.",
+});
+export const RESUME_REFUSED_GENERIC = "This step was refused. Open the item to see what happened.";
+export const RESUME_REFUSED_START_LEAD = "Your answer was saved, but it didn't continue: ";
+/** Keys of the Approve table that are outcomes of a click, not refusal codes. */
+const NOT_START_CODES = new Set(["started", "started_build", "started_spec", "started_check", "started_review", "waiting_for_slot"]);
+export function resumeRefusedSentence(code) {
+  if (Object.hasOwn(RESUME_REFUSED_SENTENCES, code)) return RESUME_REFUSED_SENTENCES[code];
+  if (Object.hasOwn(APPROVE_SENTENCES, code) && !NOT_START_CODES.has(code)) return RESUME_REFUSED_START_LEAD + APPROVE_SENTENCES[code];
+  return RESUME_REFUSED_GENERIC;
+}
+
+/**
  * The notice banner: why the pipeline stopped and wants a person. `reason` is model text, returned as plain text and drawn
  * as a text node or a <pre> only, never markup. Any other kind, or a malformed notice, draws nothing.
  */
@@ -319,6 +346,7 @@ export function noticeBanner(data) {
   // `reason` is the tracked item's id (same account, checked by the server) or empty: the link is drawn only for a well-formed id, and the sentence never carries it.
   if (n.kind === "superseded") return { kind: "superseded", title: "", lead: "", tail: "", reason: SUPERSEDED_SENTENCE, rootId: ITEM_ID.test(n.reason) ? n.reason.toLowerCase() : null };
   if (n.kind === "spec_refused") return { kind: "spec_refused", title: "Stopped before building. ", lead: "", tail: "", reason: Object.hasOwn(SPEC_REFUSED_SENTENCES, n.reason) ? SPEC_REFUSED_SENTENCES[n.reason] : SPEC_REFUSED_GENERIC };
+  if (n.kind === "resume_refused") return { kind: "resume_refused", title: "", lead: "", tail: "", reason: resumeRefusedSentence(n.reason) };
   return null;
 }
 
@@ -690,7 +718,7 @@ export function createInsightPanel(deps) {
     const needsHuman = n.kind === "needs_human";
     return h(
       "div",
-      { class: "pl-ins-notice", "data-testid": needsHuman ? "pl-needs-human" : n.kind === "check_failed" ? "pl-check-failed" : n.kind === "no_file_list" ? "pl-no-file-list" : n.kind === "respec_failed" ? "pl-respec-failed" : n.kind === "spec_refused" ? "pl-spec-refused" : n.kind === "superseded" ? "pl-superseded" : "pl-not-feasible", "data-kind": n.kind, role: "status" },
+      { class: "pl-ins-notice", "data-testid": needsHuman ? "pl-needs-human" : n.kind === "check_failed" ? "pl-check-failed" : n.kind === "no_file_list" ? "pl-no-file-list" : n.kind === "respec_failed" ? "pl-respec-failed" : n.kind === "spec_refused" ? "pl-spec-refused" : n.kind === "resume_refused" ? "pl-resume-refused" : n.kind === "superseded" ? "pl-superseded" : "pl-not-feasible", "data-kind": n.kind, role: "status" },
       h("strong", null, n.title),
       n.lead,
       needsHuman ? text(n.reason) : h("span", { "data-testid": "pl-notice-reason" }, n.reason),

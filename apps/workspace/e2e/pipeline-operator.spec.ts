@@ -577,3 +577,35 @@ test.describe("D#483: short-Spec refusal (mocked API)", () => {
     });
   }
 });
+
+// D#7 DP8-f2: a refused decision step shows the app's fixed sentence for the code, as text and never as markup, and never the code itself.
+test.describe("D#7 DP8-f2: resume refusal (mocked API)", () => {
+  const cases = [
+    ["ask_no_run", "This question can't be answered here because its run has ended. Use Build again to start a new run."],
+    ["work_item_not_resumable", "Your answer was saved, but this item was stopped or closed, so it didn't continue."],
+    ["prompt_not_retained", "Your answer was saved, but the original request isn't kept any more, so the work didn't continue. Use Build again to start a new run."],
+    ["principal_not_authorised", "Your answer was saved, but only an owner or an admin can start this, so it didn't continue."],
+    ["fix_round_context_missing", "Your answer was saved, but the fix round's details weren't kept, so it didn't continue. Use Build again to start a new run."],
+    ["spec_unavailable", "Your answer was saved, but the Spec this work follows couldn't be read, so it didn't continue. Check the Spec, then use Build again."],
+    ["execution_mode_changed", "Your answer was saved, but this repository now builds in a different place, so it didn't continue. Use Build again to start it there."],
+    ["resume_pause_expired", "Your answer came after this item's 14-day pause ended, so it didn't continue. Use Build again to start a new run."],
+    ["resume_failed", "Your answer was saved, but the work couldn't continue just now. Use Build again to try again."],
+    ["no_repo", "Your answer was saved, but it didn't continue: This item isn't linked to a repository, so nothing can be started."],
+    ["<b>from_the_future</b>", "This step was refused. Open the item to see what happened."],
+  ] as const;
+  for (const [code, sentence] of cases) {
+    test(`in progress / ${code}: the card shows the fixed sentence`, async ({ page }) => {
+      const activity = { ...activityFor(EMPTY, "in_progress", []), notice: { kind: "resume_refused", reason: code } };
+      const { errors, browserDialogs, tt } = await setup(page, { stage: "in_progress", kind: "feature", activity: { status: 200, json: activity } });
+      await openDetail(page);
+      await expect(tid(page, "pl-resume-refused")).toContainText(sentence);
+      await expect(tid(page, "pl-resume-refused")).not.toContainText(code);
+      await expect(tid(page, "pl-resume-refused")).not.toContainText(/null|undefined/);
+      await expect(tid(page, "pl-resume-refused").locator("b")).toHaveCount(0);
+      await expectNoOverflow(page);
+      expect(browserDialogs).toEqual([]);
+      expect(await tt()).toEqual([]);
+      expect(errors).toEqual([]);
+    });
+  }
+});
