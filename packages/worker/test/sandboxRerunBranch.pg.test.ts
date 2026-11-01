@@ -8,6 +8,7 @@ import { SANDBOX_RERUN_BRANCH_SCHEME } from "@fx/pipeline";
 import { startBuildForItem } from "@fx/pipeline/testing/build";
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
+import { nonChildUuid } from "@fx/db/test/helpers/branchIds.js";
 import { createAdvanceModule } from "../src/advance.js";
 import type { RunStarter } from "../src/preview.js";
 import type { SeatResult } from "../src/seat.js";
@@ -171,7 +172,7 @@ describe("sandbox rerun branch [pg]", { timeout: 120_000 }, () => {
     expect(await recordBuildBranch(admin, t.a.accountId, out.runId, out.branch)).toBe(false);
     expect(await recordBuildBranch(admin, t.a.accountId, out.runId, `fx/issue-${t.n}`)).toBe(false);
     expect(await recordsOf(out.runId)).toEqual(before);
-    await expect(recordBuildBranch(admin, t.a.accountId, out.runId, `fx/${randomUUID()}-g1`)).rejects.toThrow(/not a build branch/);
+    await expect(recordBuildBranch(admin, t.a.accountId, out.runId, `fx/${nonChildUuid()}-g1`)).rejects.toThrow(/not a build branch/);
     await expect(recordBuildBranch(admin, t.a.accountId, out.runId, "main")).rejects.toThrow(/not a build branch/);
   });
 
