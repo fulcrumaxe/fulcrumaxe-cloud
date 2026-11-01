@@ -47,6 +47,7 @@ export {
   setSharePublicFigures,
 } from './accountSettings.js';
 export {
+  type AccountBillingBoundaries,
   type AccountBillingFacts,
   type AccountBillingSummary,
   type ReadAccountBillingSummaryInput,

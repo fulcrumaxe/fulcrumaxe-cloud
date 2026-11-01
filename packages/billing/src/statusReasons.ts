@@ -56,13 +56,46 @@ export interface AccountBillingFacts {
   partnerName: string | null;
   /** The clock the grace period is judged against (the database's `now()`). */
   now: Date;
+  /**
+   * The grace and retention boundaries as the database counts them (calendar-day `interval`s in its session zone). Absent, they are
+   * counted in UTC calendar days, which is the same thing for a database running in UTC.
+   */
+  boundaries?: AccountBillingBoundaries;
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+/** The dates the copy names and the grace decision, taken from the same query that read the facts. */
+export interface AccountBillingBoundaries {
+  /** `past_due_since + interval '7 days'`, or null. */
+  graceEndsAt: Date | null;
+  /** `NOT (past_due_since > now() - interval '7 days')`: the database's own grace-expired test. */
+  graceExpired: boolean;
+  /** `subscription_ended_at + interval '30 days'`, or null. */
+  endedPurgeAt: Date | null;
+  /** `past_due_since + interval '7 days' + interval '30 days'`, or null. */
+  gracePurgeAt: Date | null;
+}
+
 /** Owner decision 18504921: 7 days of grace after the first failed payment. */
-const GRACE_MS = 7 * DAY_MS;
+const GRACE_DAYS = 7;
 /** Owner decision 18504921: a cancelled account's data is kept this long, then deleted. */
-const RETENTION_MS = 30 * DAY_MS;
+const RETENTION_DAYS = 30;
+
+const addUtcDays = (d: Date, n: number): Date => {
+  const out = new Date(d.getTime());
+  out.setUTCDate(out.getUTCDate() + n);
+  return out;
+};
+
+/** The boundaries for facts that did not come from the database: calendar days in UTC. */
+function utcBoundaries(f: AccountBillingFacts): AccountBillingBoundaries {
+  const graceEndsAt = f.pastDueSince === null ? null : addUtcDays(f.pastDueSince, GRACE_DAYS);
+  return {
+    graceEndsAt,
+    graceExpired: graceEndsAt !== null && f.now.getTime() >= graceEndsAt.getTime(),
+    endedPurgeAt: f.subscriptionEndedAt === null ? null : addUtcDays(f.subscriptionEndedAt, RETENTION_DAYS),
+    gracePurgeAt: graceEndsAt === null ? null : addUtcDays(graceEndsAt, RETENTION_DAYS),
+  };
+}
 
 const isoDate = (d: Date): string => d.toISOString().slice(0, 10);
 const capitalize = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
@@ -75,11 +108,9 @@ const capitalize = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1)
  */
 export function accountStatusReasons(facts: AccountBillingFacts): StatusReason[] {
   const reasons: StatusReason[] = [];
-  const graceExpiredAt =
-    facts.pastDueSince !== null && facts.now.getTime() - facts.pastDueSince.getTime() >= GRACE_MS
-      ? new Date(facts.pastDueSince.getTime() + GRACE_MS)
-      : null;
-  const ended = facts.subscriptionEndedAt !== null || graceExpiredAt !== null;
+  const b = facts.boundaries ?? utcBoundaries(facts);
+  const graceExpired = b.graceExpired && b.graceEndsAt !== null;
+  const ended = facts.subscriptionEndedAt !== null || graceExpired;
 
   if (facts.stripeSubscriptionStatus === 'unpaid' && ended) {
     // Row 10 replaces row 9 for an unpaid subscription.
@@ -90,8 +121,10 @@ export function accountStatusReasons(facts: AccountBillingFacts): StatusReason[]
     });
   } else if (ended) {
     // The purge keys on the earlier of the two ends, so the date shown is that one.
-    const ends = [facts.subscriptionEndedAt, graceExpiredAt].filter((d): d is Date => d !== null);
-    const purgeOn = new Date(Math.min(...ends.map((d) => d.getTime())) + RETENTION_MS);
+    const purges = [facts.subscriptionEndedAt !== null ? b.endedPurgeAt : null, graceExpired ? b.gracePurgeAt : null].filter(
+      (d): d is Date => d !== null,
+    );
+    const purgeOn = new Date(Math.min(...purges.map((d) => d.getTime())));
     reasons.push({
       code: 'cancelled',
       message: `Your subscription has ended. Your repos, runs and settings are saved until ${isoDate(purgeOn)}, then permanently deleted.`,
@@ -124,9 +157,9 @@ export function accountStatusReasons(facts: AccountBillingFacts): StatusReason[]
       action: 'resume',
     });
   }
-  if (facts.pastDueSince !== null && graceExpiredAt === null) {
+  if (facts.pastDueSince !== null && !graceExpired) {
     // C3c: runs continue through the 7-day grace, so the copy names the day they stop.
-    const runsUntil = new Date(facts.pastDueSince.getTime() + GRACE_MS);
+    const runsUntil = b.graceEndsAt ?? addUtcDays(facts.pastDueSince, GRACE_DAYS);
     reasons.push({
       code: 'past_due',
       message: `Your last payment failed. Agents keep running until ${isoDate(runsUntil)}. Update your payment method before then to avoid an interruption.`,
@@ -178,6 +211,10 @@ interface SummaryRow {
   key_broken_at: Date | null;
   partner_name: string | null;
   now: Date;
+  grace_ends_at: Date | null;
+  grace_expired: boolean;
+  ended_purge_at: Date | null;
+  grace_purge_at: Date | null;
 }
 
 /**
@@ -196,7 +233,11 @@ export async function readAccountBillingSummary(
       `SELECT a.status, a.plan, a.stripe_customer_id IS NOT NULL AS has_customer,
               a.stripe_subscription_status, a.stripe_cancel_at_period_end, a.stripe_current_period_end,
               a.subscription_ended_at, a.past_due_since, a.owner_paused_at, a.partner_suspended_at,
-              a.platform_hold_at, a.key_broken_at, p.name AS partner_name, now() AS now
+              a.platform_hold_at, a.key_broken_at, p.name AS partner_name, now() AS now,
+              a.past_due_since + interval '7 days' AS grace_ends_at,
+              COALESCE(NOT (a.past_due_since > now() - interval '7 days'), false) AS grace_expired,
+              a.subscription_ended_at + interval '30 days' AS ended_purge_at,
+              a.past_due_since + interval '7 days' + interval '30 days' AS grace_purge_at
          FROM accounts a LEFT JOIN partners p ON p.id = a.partner_id
         WHERE a.id = $1 AND a.deleted_at IS NULL`,
       [input.accountId],
@@ -220,6 +261,12 @@ export async function readAccountBillingSummary(
         keyBrokenAt: r.key_broken_at,
         partnerName: r.partner_name,
         now: r.now,
+        boundaries: {
+          graceEndsAt: r.grace_ends_at,
+          graceExpired: r.grace_expired,
+          endedPurgeAt: r.ended_purge_at,
+          gracePurgeAt: r.grace_purge_at,
+        },
       }),
     };
   });
