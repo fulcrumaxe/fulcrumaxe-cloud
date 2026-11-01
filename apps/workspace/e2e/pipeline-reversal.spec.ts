@@ -19,9 +19,9 @@ const ACTIVITY = fx("getWorkItemActivity", "200-receipts.json");
 const ITEM = LIST.data[0].id as string;
 const WIN = `#windows-container .fulc-window[data-app-id="pipeline"]`;
 const tid = (page: Page, id: string) => page.locator(`${WIN} [data-testid="${id}"]`);
-const [FREE, PRICED, STUCK, FAILED, WAITING, RETRY] = ["01", "02", "03", "04", "05", "06"].map((n) => `6b1f6c1e-3f5a-4e0e-9a55-0a7b1c2d3e${n}`);
+const [FREE, PRICED, STUCK, FAILED, WAITING, RETRY, CLOSED] = ["01", "02", "03", "04", "05", "06", "07"].map((n) => `6b1f6c1e-3f5a-4e0e-9a55-0a7b1c2d3e${n}`);
 
-type Reversal = { id: string; state: string; kind: string; reason_code: string | null; estimate_usd: number | null; pr_number: number | null; can_retry?: boolean; text: string };
+type Reversal = { id: string; state: string; kind: string; reason_code: string | null; estimate_usd: number | null; pr_number: number | null; pr_state?: string | null; can_retry?: boolean; text: string };
 interface Rx { id: string; label: string; price_kind: string; price_usd: number | null; price_text: string; deadline_text: string; can_reverse: boolean; reversal: Reversal | null }
 interface Mock {
   receipts: Rx[];
@@ -49,6 +49,10 @@ const seed = (): Rx[] => [
   row(RETRY, "A decision whose revert could not start", {
     can_reverse: false,
     reversal: { id: "c-retry", state: "failed", kind: "revert_pr", reason_code: "no_installation", can_retry: true, estimate_usd: null, pr_number: null, text: "The GitHub App is no longer installed on this repository, so nothing was changed. Install it again, then try again." },
+  }),
+  row(CLOSED, "A decision whose revert was closed", {
+    can_reverse: false,
+    reversal: { id: "c-closed", state: "done", kind: "revert_pr", reason_code: null, estimate_usd: null, pr_number: 9, pr_state: "closed_unmerged", can_retry: false, text: "The revert pull request was closed without being merged, so the change is still in place." },
   }),
 ];
 
@@ -218,6 +222,17 @@ test.describe("D#7 DP7-2f: the Reverse control (mocked API)", () => {
     await expect(failed).toContainText("Reversal failed. GitHub could not open a revert for this pull request");
     await expect(failed.getByRole("button")).toHaveCount(0);
     await expect(tid(page, "pl-receipts")).not.toContainText(/null|undefined|revert_refused|[0-9a-f]{8}-[0-9a-f]{4}/);
+    expect(errors).toEqual([]);
+  });
+
+  test("a revert closed without merging says the change is still in place: not struck through, no control, no raw words", async ({ page }) => {
+    const { errors } = await setup(page);
+    const closed = line(page, "A decision whose revert was closed");
+    await expect(closed).toContainText("The revert pull request was closed without being merged, so the change is still in place.");
+    await expect(closed).not.toContainText("Reversed");
+    await expect(closed.getByTestId("pl-receipt-struck")).toHaveCount(0);
+    await expect(closed.getByRole("button")).toHaveCount(0);
+    await expect(tid(page, "pl-receipts")).not.toContainText(/closed_unmerged|null|undefined/);
     expect(errors).toEqual([]);
   });
 

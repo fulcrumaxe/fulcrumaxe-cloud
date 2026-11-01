@@ -6,6 +6,7 @@ import { COMPENSATION_COPY, compensationSentence, createLedgerPort, loadReversal
 import { ApiError } from "../errors.js";
 import type { RouteEntry } from "../registry.js";
 import { UUID_RE, idParamsSchema, notFound } from "./run-actions.js";
+import { boundedPrState, type PrStateReader, type RevertPrState } from "./reversalPrState.js";
 
 /** What a reversal needs from the worker: it writes receipts and compensation rows through definers only the receipt login may call, a pool this package never holds. */
 export interface ReversalService {
@@ -15,7 +16,7 @@ export interface ReversalService {
   retry(input: { principal: ReversalPrincipal; reversalId: string }): Promise<ReversalOutcome>;
 }
 /** The seam apps/web's catch-all installs, like `decisionAskDeps`. Until a worker can be built the two writes are a 503. */
-export const receiptReversalDeps: { getService: () => Promise<ReversalService | null> } = { getService: async () => null };
+export const receiptReversalDeps: { getService: () => Promise<ReversalService | null>; getPrStateReader: () => PrStateReader | null } = { getService: async () => null, getPrStateReader: () => null };
 
 /**
  * D#7 DP7-2e: the person's entry to a reversal. Session only, never a token. Reading is any member; reversing and confirming are owner or admin (a re-run
@@ -28,6 +29,7 @@ export const receiptReversalDeps: { getService: () => Promise<ReversalService | 
  *    with the new figure. The third reversal on an item raises the question instead (`needs_ask`).
  *  - `POST /reversals/{id}/confirm` confirms a priced reversal.
  *  - `POST /reversals/{id}/retry` (DP7-2g) puts a failed compensation back to waiting, on the same row. No new reversal, so the count does not move.
+ *    `pr_state` on a revert row is read from GitHub on each list (one bounded read per such row) and never stored; a read that fails is `unknown`.
  *
  * Undo: a reversal is a receipt and is never edited or undone; the person asks for the work again. Cancelling a priced reversal is simply not confirming it.
  */
@@ -43,6 +45,8 @@ const reversalSchema = z.object({
   reason_code: z.string().nullable(),
   estimate_usd: z.number().nullable(),
   pr_number: z.number().nullable(),
+  /** Where the revert pull request stands on GitHub now, read at list time and never stored. Null unless the row is a revert with a pull request; `unknown` when GitHub could not be asked. */
+  pr_state: z.enum(["open", "merged", "closed_unmerged", "unknown"]).nullable(),
   /** True when a person may press Try again: a failed re-run or revert the worker will not retry by itself. */
   can_retry: z.boolean(),
   /** Fixed words for the state; never GitHub text. */
@@ -192,7 +196,8 @@ export const receiptRoutes: RouteEntry[] = [
       const now = new Date();
       const prices = await loadReversalPricePort(createLedgerPort(ctx.pool), accountId, id, () => now);
       return withTenant(ctx.pool, accountId, userId, async (client) => {
-        if ((await client.query("SELECT 1 FROM work_items WHERE id = $1::uuid AND account_id = $2::uuid", [id, accountId])).rows.length === 0) throw notFound();
+        const item = (await client.query<{ repo_id: string }>("SELECT repo_id FROM work_items WHERE id = $1::uuid AND account_id = $2::uuid", [id, accountId])).rows[0];
+        if (item === undefined) throw notFound();
         const list = await readItemReceipts(client, id);
         if (list === null) return { receipts: [], total: 0 };
         const extra = new Map((await client.query<ExtraRow>(
@@ -204,6 +209,13 @@ export const receiptRoutes: RouteEntry[] = [
              LEFT JOIN reversal_compensations c ON c.reversal_receipt_id = rr.id
             WHERE o.id = ANY($1::uuid[]) AND o.account_id = $2::uuid`, [list.receipts.map((r) => r.id), accountId])).rows.map((r) => [r.id, r]));
         const labels = new Map(list.receipts.map((r) => [r.id, r.label]));
+        // One bounded GitHub read per revert row, all in parallel, after the database work is done. A reader that is not installed or a read that fails reads `unknown`.
+        const reader = receiptReversalDeps.getPrStateReader();
+        const prStates = new Map<string, RevertPrState>();
+        await Promise.all([...extra.values()].map(async (x) => {
+          if (x.comp_id == null || x.comp_kind !== "revert_pr" || x.comp_pr == null) return;
+          prStates.set(x.comp_id, reader === null ? "unknown" : await boundedPrState(() => reader.stateOf({ accountId, repoId: item.repo_id, prNumber: x.comp_pr! })));
+        }));
         return {
           total: list.total,
           receipts: list.receipts.map((r) => {
@@ -214,10 +226,15 @@ export const receiptRoutes: RouteEntry[] = [
               ? { kind: "unavailable" }
               : prices.priceFor({ decisionType: x.decision_type, createdAt: x.created_at, reversalFreeUntil: x.reversal_free_until });
             const origLabel = x?.reverses_receipt_id == null ? null : (labels.get(x.reverses_receipt_id) ?? null);
+            const prState = x?.comp_id == null ? null : (prStates.get(x.comp_id) ?? null);
             const reversal = x?.comp_id == null || x.comp_state == null || x.comp_kind == null ? null : {
               id: x.comp_id, state: x.comp_state, kind: x.comp_kind, reason_code: x.comp_reason, estimate_usd: x.comp_estimate === null ? null : Number(x.comp_estimate), pr_number: x.comp_pr,
+              pr_state: prState,
               can_retry: isRetryable({ kind: x.comp_kind, state: x.comp_state, reason: x.comp_reason, attempts: x.comp_attempts ?? 0 }),
-              text: x.comp_state === "done" || x.comp_state === "failed" ? compensationSentence({ kind: x.comp_kind as never, state: x.comp_state, reasonCode: x.comp_reason as never }) : REVERSAL_TEXT[x.comp_state],
+              // The row stays `done`; only the words follow where the revert stands now.
+              text: x.comp_state === "done" && x.comp_kind === "revert_pr" && prState === "closed_unmerged"
+                ? COMPENSATION_COPY.revert_pr_closed_unmerged
+                : x.comp_state === "done" || x.comp_state === "failed" ? compensationSentence({ kind: x.comp_kind as never, state: x.comp_state, reasonCode: x.comp_reason as never }) : REVERSAL_TEXT[x.comp_state],
             };
             return {
               id: r.id,

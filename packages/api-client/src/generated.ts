@@ -1944,6 +1944,7 @@ export interface Operations {
           reason_code: string | null;
           estimate_usd: number | null;
           pr_number: number | null;
+          pr_state: ("open" | "merged" | "closed_unmerged" | "unknown") | (null);
           can_retry: boolean;
           text: string;
         }) | (null);

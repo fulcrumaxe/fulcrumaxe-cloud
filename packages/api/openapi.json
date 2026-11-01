@@ -16847,6 +16847,22 @@
                                       "null"
                                     ]
                                   },
+                                  "pr_state": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string",
+                                        "enum": [
+                                          "open",
+                                          "merged",
+                                          "closed_unmerged",
+                                          "unknown"
+                                        ]
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
                                   "can_retry": {
                                     "type": "boolean"
                                   },
@@ -16861,6 +16877,7 @@
                                   "reason_code",
                                   "estimate_usd",
                                   "pr_number",
+                                  "pr_state",
                                   "can_retry",
                                   "text"
                                 ],

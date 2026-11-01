@@ -506,7 +506,10 @@ export function reversalRows(data) {
     } else if (rv) {
       const st = REVERSAL_STATES.has(rv.state) ? rv.state : "unknown";
       it.state = st;
-      if (st === "done") {
+      if (st === "done" && rv.pr_state === "closed_unmerged" && rvText) {
+        // D#7 DP7-2h: the revert was closed unmerged, so nothing was reversed: the server's sentence stands alone and the row is not struck through.
+        it.hint = rvText;
+      } else if (st === "done") {
         it.struck = true;
         it.hint = REVERSE_WORDS.reversed + (rvText ? " " + rvText : "");
       } else if (st === "failed") {

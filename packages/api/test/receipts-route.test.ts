@@ -16,6 +16,7 @@ import { hashToken } from '../src/tokens/resolve.js';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
 import { receiptReversalDeps, type ReversalService } from '../src/routes/receipts.js';
+import type { PrStateReader, RevertPrState } from '../src/routes/reversalPrState.js';
 
 /**
  * [pg] D#7 DP7-2e: the three receipt routes, called through the real `handleApiRequest` against real Postgres (RLS, the owner/admin check, the receipt
@@ -31,7 +32,7 @@ interface ErrorBody { error: { code: string; message: string }; data?: { current
 interface ReceiptDto {
   id: string; label: string; name: string; at: string; by: string; reverses_receipt_id: string | null; reverses_text: string; free_until: string | null; deadline_text: string;
   price_kind: string; price_usd: number | null; price_text: string; can_reverse: boolean;
-  reversal: { id: string; state: string; kind: string; reason_code: string | null; estimate_usd: number | null; pr_number: number | null; can_retry: boolean; text: string } | null;
+  reversal: { id: string; state: string; kind: string; reason_code: string | null; estimate_usd: number | null; pr_number: number | null; pr_state: string | null; can_retry: boolean; text: string } | null;
 }
 
 describe('D#7 DP7-2e: receipts and reversals', () => {
@@ -69,6 +70,7 @@ describe('D#7 DP7-2e: receipts and reversals', () => {
   afterAll(async () => {
     delete process.env.FX_SESSION_SECRET;
     receiptReversalDeps.getService = async () => null;
+    receiptReversalDeps.getPrStateReader = () => null;
     // The files of this package share one database; a row keeps its ask and receipt alive.
     await admin.query('DELETE FROM reversal_compensations');
     admin.release();
@@ -483,6 +485,92 @@ describe('D#7 DP7-2e: receipts and reversals', () => {
         const body = (await (await list(f.member, itemId)).json()) as { receipts: ReceiptDto[] };
         expect(body.receipts.find((r) => r.reversal?.id === id)!.reversal!.can_retry, id).toBe(can);
       }
+    });
+
+    it('reads pr_state only for a revert row with a pull request, one read each, never stored', async () => {
+      const f = await fixture();
+      const asked: Array<{ prNumber: number; repoId: string }> = [];
+      const answers: Record<number, RevertPrState | 'throw'> = { 11: 'open', 12: 'merged', 13: 'closed_unmerged', 14: 'throw', 15: 'unknown' };
+      const reader: PrStateReader = {
+        stateOf: async ({ prNumber, repoId }) => {
+          asked.push({ prNumber, repoId });
+          const a = answers[prNumber];
+          if (a === 'throw') throw new Error('boom');
+          return a as RevertPrState;
+        },
+      };
+      receiptReversalDeps.getPrStateReader = () => reader;
+      try {
+        const rows = new Map<number, Awaited<ReturnType<typeof revertRow>>>();
+        for (const n of [11, 12, 13, 14, 15]) rows.set(n, await revertRow(f, { state: 'done', pr: n }));
+        const noPr = await revertRow(f, { state: 'done', pr: null });
+        const failedRetryable = await revertRow(f, { state: 'failed', reason: 'repo_gone' });
+        const failedTick = await revertRow(f, { state: 'failed', reason: 'tooling_error', attempts: 1 });
+        const pending = await revertRow(f, { state: 'pending' });
+        // A re-run row carries the ORIGINAL pull request's number: it is not a revert, so nothing is read for it.
+        const rerun = await revertRow(f, { state: 'done', pr: 31 });
+        await admin.query("UPDATE reversal_compensations SET kind = 'rerun' WHERE id = $1", [rerun.id]);
+        const seen = new Map<string, NonNullable<ReceiptDto['reversal']>>();
+        for (const x of [...rows.values(), noPr, failedRetryable, failedTick, pending, rerun]) {
+          const body = (await (await list(f.member, x.itemId)).json()) as { receipts: ReceiptDto[] };
+          const rev = body.receipts.find((r) => r.reversal?.id === x.id)!.reversal!;
+          seen.set(x.id, rev);
+          expect(rev.text.length).toBeGreaterThan(0);
+          expect(rev.text).not.toMatch(/null|undefined/);
+        }
+        expect([11, 12, 13, 14, 15].map((n) => seen.get(rows.get(n)!.id)!.pr_state)).toEqual(['open', 'merged', 'closed_unmerged', 'unknown', 'unknown']);
+        expect(seen.get(rows.get(13)!.id)).toMatchObject({ state: 'done', text: 'The revert pull request was closed without being merged, so the change is still in place.' });
+        expect(seen.get(rows.get(11)!.id)!.text).toBe('We opened a revert for you to review. Nothing changes until you merge it.');
+        expect(seen.get(rows.get(14)!.id)!.text).toBe('We opened a revert for you to review. Nothing changes until you merge it.');
+        for (const x of [noPr, failedRetryable, failedTick, pending, rerun]) expect(seen.get(x.id)!.pr_state, x.id).toBeNull();
+        expect(asked.map((a) => a.prNumber).sort()).toEqual([11, 12, 13, 14, 15]);
+        expect(asked.every((a) => a.repoId === f.refs.repoId)).toBe(true);
+        expect(seen.get(failedRetryable.id)).toMatchObject({ can_retry: true, state: 'failed' });
+        for (const x of [failedTick, pending, noPr, rows.get(11)!]) expect(seen.get(x.id)!.can_retry, x.id).toBe(false);
+        // Never stored: the row still says done with the same pull request number.
+        expect((await rowFor(rows.get(13)!.itemId))[0]).toMatchObject({ state: 'done', pr_number: 13 });
+      } finally {
+        receiptReversalDeps.getPrStateReader = () => null;
+      }
+    });
+
+    it('the reads for one list run in parallel, not one after another', async () => {
+      const f = await fixture();
+      let inFlight = 0;
+      let peak = 0;
+      receiptReversalDeps.getPrStateReader = () => ({
+        stateOf: async () => {
+          inFlight += 1;
+          peak = Math.max(peak, inFlight);
+          await new Promise((r) => setTimeout(r, 50));
+          inFlight -= 1;
+          return 'open';
+        },
+      });
+      try {
+        const w = await item(f, 'merged');
+        const ids: string[] = [];
+        for (const n of [41, 42, 43]) {
+          const dto = (await (await reverse(f.admin, await receipt(f, w))).json()) as Dto;
+          await admin.query('UPDATE reversal_compensations SET state = $2, attempts = 1, pr_number = $3 WHERE id = $1', [dto.reversal_id, 'done', n]);
+          ids.push(dto.reversal_id!);
+        }
+        const body = (await (await list(f.member, w.itemId)).json()) as { receipts: ReceiptDto[] };
+        // The same decision written twice at one instant is one receipt, so the list may show fewer rows than were made: what matters is that every row read at once.
+        const read = body.receipts.filter((r) => r.reversal?.pr_state === 'open').length;
+        expect(read).toBeGreaterThanOrEqual(2);
+        expect(peak).toBe(read);
+      } finally {
+        receiptReversalDeps.getPrStateReader = () => null;
+      }
+    });
+
+    it('with no GitHub reader installed a revert row reads unknown and keeps the done sentence', async () => {
+      const f = await fixture();
+      const r = await revertRow(f, { state: 'done', pr: 21 });
+      const body = (await (await list(f.member, r.itemId)).json()) as { receipts: ReceiptDto[] };
+      const rev = body.receipts.find((x) => x.reversal?.id === r.id)!.reversal!;
+      expect(rev).toMatchObject({ pr_state: 'unknown', text: 'We opened a revert for you to review. Nothing changes until you merge it.' });
     });
 
     it('every reversal state and reason reads as a sentence, never empty, null or undefined', async () => {

@@ -145,6 +145,7 @@ export const COMPENSATION_COPY = {
   none_before_build: "Reversed before the build started. Nothing on GitHub was changed; decide again when you are ready.",
   rerun: "We closed the pull request and started a fresh build on a new branch. The original branch is kept.",
   revert_pr: "We opened a revert for you to review. Nothing changes until you merge it.",
+  revert_pr_closed_unmerged: "The revert pull request was closed without being merged, so the change is still in place.",
   refused: "This decision cannot be reversed.",
   unavailable: "This cannot be corrected automatically yet, so nothing was changed.",
   failed: {
