@@ -332,6 +332,17 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
     expect(rows.rows.every((r) => r.kind === "stage_waiting" && r.code === "one_build_per_repo_until_d598")).toBe(true);
   });
 
+  it("C23-3 (worker): a build start that met a capacity wait leaves a stage_waiting fact (stage build) with that name, never a build_refused, and keeps its attempt", async () => {
+    const a = await seedAccount(admin, randomUUID());
+    const w = await item(a);
+    const t = build({ build: (async () => ({ status: "refused", reason: "waiting_for_capacity" })) as never });
+    const who = { accountId: a.accountId, userId: a.userId, workItemId: w, haltEpoch: 0 };
+    const approval = randomUUID();
+    expect(await t.module.advanceBuild(who, approval, undefined, 2)).toEqual({ status: "refused", reason: "waiting_for_capacity" });
+    const rows = await admin.query("SELECT kind, code, stage, attempt FROM work_item_driver_events WHERE work_item_id = $1", [w]);
+    expect(rows.rows).toEqual([{ kind: "stage_waiting", code: "waiting_for_capacity", stage: "build", attempt: 2 }]);
+  });
+
   it.each(["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate", "envelope_reached", "model_credits_exhausted"])("S5-k1: a start a spending limit denied (%s) leaves a stage_waiting fact (stage build) with that name, not a build_refused, and the attempt reaches the pipeline", async (pause) => {
     const a = await seedAccount(admin, randomUUID());
     const w = await item(a);

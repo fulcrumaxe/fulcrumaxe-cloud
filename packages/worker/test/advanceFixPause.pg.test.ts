@@ -75,7 +75,7 @@ describe("advance: fix rounds and reviewer runs under a spending limit [pg]", { 
     });
     return { fn, inputs };
   }
-  function module(resume: ReturnType<typeof resumeWith>["fn"]) {
+  function module(resume: ReturnType<typeof resumeWith>["fn"], seat: SeatResult = SEAT) {
     const review: AdvanceReviewDeps = {
       load: vi.fn(async () => ({ ok: true as const, ctx: { workItemId: "x", stage: "pr_opened", repoId: "r", owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", tier: "feature", specVersion: 1, debaterEnabled: false } })),
       recordRound: vi.fn(async (_p, _r, input) => ({ decision: "all_passed", round: 0, recorded: input.verdicts.map((v: { role: string; runId: string; verdict: string }) => ({ ...v, outcome: "passed" })) })),
@@ -83,7 +83,7 @@ describe("advance: fix rounds and reviewer runs under a spending limit [pg]", { 
       mergeGate: vi.fn(async () => ({ outcome: "merged", headSha: HEAD, reasons: [], status: "posted" })),
     };
     const starter: RunStarter = { async start() { return { runId: randomUUID() }; } };
-    const deps: AdvanceModuleDeps = { starter, resolveRunSeat: vi.fn(async () => SEAT), startAdvance: async () => undefined, triage: null, registry, review, fixHeads: { privateHead: async () => HEAD, syncBase: async () => ({ kind: "up_to_date", baseSha: "f".repeat(40), baseRef: "main", stacked: false }) } };
+    const deps: AdvanceModuleDeps = { starter, resolveRunSeat: vi.fn(async () => seat), startAdvance: async () => undefined, triage: null, registry, review, fixHeads: { privateHead: async () => HEAD, syncBase: async () => ({ kind: "up_to_date", baseSha: "f".repeat(40), baseRef: "main", stacked: false }) } };
     return createAdvanceModule(writerPool, deps);
   }
 
@@ -116,6 +116,19 @@ describe("advance: fix rounds and reviewer runs under a spending limit [pg]", { 
       expect((await events(w)).map((e) => e.kind)).not.toContain("fix_round_started");
       const run = await admin.query("SELECT status FROM agent_runs WHERE work_item_id = $1 AND role = 'executor' ORDER BY created_at DESC LIMIT 1", [w]);
       expect(run.rows[0].status).toBe("refused_spend");
+    });
+
+    it("C23-3 (worker): a wait for capacity is answered as the wait, with no refusal fact; any other refusal still writes one", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a);
+      const resume = resumeWith();
+      const waiting = await module(resume.fn, { ok: false, reason: "waiting_for_capacity" } as never).advanceStartFix(who(a, w), await fixRequest(w));
+      expect(waiting).toEqual({ ok: false, reason: "waiting_for_capacity" });
+      expect((await events(w)).map((e) => e.kind)).toEqual([]);
+      const other = await module(resume.fn, { ok: false, reason: "no_model" } as never).advanceStartFix(who(a, w), await fixRequest(w));
+      expect(other).toEqual({ ok: false, reason: "no_model" });
+      expect((await events(w)).filter((e) => e.kind === "fix_round_refused").map((e) => e.code)).toEqual(["no_model"]);
+      expect(resume.inputs).toEqual([]);
     });
 
     it("S5k1d-6: a denial that is not a spending limit ends as it ends today: the code `refused_spend` and one refusal fact", async () => {
@@ -219,6 +232,13 @@ describe("advance: fix rounds and reviewer runs under a spending limit [pg]", { 
       const run = await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer:rr1:s3:p1`, "succeeded");
       expect(await lookup(a, w, HEAD, 1)).toMatchObject([{ role: "code-reviewer", runId: run, attempt: 3 }]);
       expect(await lookup(a, w, HEAD, 0)).toEqual([]);
+    });
+
+    it("a placement generation past 99 reads through: `:rr1:s3:p100` is still the round-1 reviewer at attempt 3", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a, "pr_opened");
+      const run = await runWithKey(a, w, `advance:${w}:review:${HEAD}:code-reviewer:rr1:s3:p100`, "succeeded");
+      expect(await lookup(a, w, HEAD, 1)).toMatchObject([{ role: "code-reviewer", runId: run, attempt: 3 }]);
     });
 
     it("the newest run of a role wins", async () => {

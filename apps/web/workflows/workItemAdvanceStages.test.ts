@@ -419,6 +419,26 @@ describe("the build for an item at Spec ready", () => {
       expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-b", "run_failed");
     });
 
+    it("C23-3: a check fix round answering waiting_for_capacity waits by the minute, then starts; it is never recorded as a failed build", async () => {
+      const cap = { ok: false as const, reason: "waiting_for_capacity" };
+      const w = setup({ item: AT_SPEC, buildOutcomes: [checkFailed("run-b")], checkFix: [cap, cap, cap, { ok: true, runId: "run-fix-1" }], outcomeFor: (id) => (id === "run-fix-1" ? { status: "succeeded", done: true, envelope: { summary: "Fixed." } } : undefined) });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual(REVIEW_STOPS);
+      expect(w.advanceStartCheckFix).toHaveBeenCalledTimes(4);
+      expect(w.advanceBuildFailed).not.toHaveBeenCalled();
+      const waits = w.advanceRecordEvent.mock.calls.map((c) => (c as unknown[])[1] as Record<string, unknown>).filter((e) => e.kind === "stage_waiting");
+      expect(waits.map((e) => e.code)).toEqual(["waiting_for_capacity", "waiting_for_capacity", "waiting_for_capacity"]);
+      expect(new Set(waits.map((e) => e.dedupeKey)).size).toBe(3);
+    });
+
+    it("C23-3: after four hours of capacity answers it ends fix_round_paused:waiting_for_capacity: not a failure, no build_failed record, no stop fact", async () => {
+      const w = setup({ item: AT_SPEC, buildOutcomes: [checkFailed("run-b")], checkFix: [{ ok: false, reason: "waiting_for_capacity" }] });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "paused", detail: "fix_round_paused:waiting_for_capacity" });
+      expect(w.advanceStartCheckFix).toHaveBeenCalledTimes(241);
+      expect(w.advanceBuildFailed).not.toHaveBeenCalled();
+      expect(w.advanceRecordEvent.mock.calls.map((c) => ((c as unknown[])[1] as { kind: string }).kind).filter((k) => k !== "stage_waiting")).toEqual([]);
+      expect(events()).not.toContain("advance.failed");
+    });
+
     it("a fix round that cannot tell which branch to continue ends in Needs human under its own code, with the stopped fact, not as a generic failed run", async () => {
       const w = setup({ item: AT_SPEC, buildOutcomes: [checkFailed("run-b")], checkFix: [{ ok: false, reason: "check_fix_branch_unknown" }] });
       expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_check_fix_branch_unknown" });

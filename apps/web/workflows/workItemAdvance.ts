@@ -188,6 +188,14 @@ const RESERVATION_PAUSE_REASONS: readonly string[] = ["account_budget_reached", 
 const RUNNER_DAILY_LIMIT_PAUSE = "runner_daily_limit";
 const BUILD_SPEND_POLL_MS = 300_000;
 const BUILD_SPEND_WAIT_MS = 4 * 3_600_000;
+/**
+ * D#483 S5-k3b-2b: the start answered that the provider has no room (packages/pipeline reservationPauses.ts CAPACITY_WAIT_REASONS; a test holds the two lists equal).
+ * Not a spend pause: the workflow asks again every minute on its own four-hour clock, keeps the attempt (a capacity answer writes no run row), and never adds to the
+ * spend clock. The wait fact is written on every ask with a per-minute key, so it stays fresh. After four hours it ends `<stage>_paused:waiting_for_capacity`.
+ */
+const CAPACITY_WAIT_REASONS: readonly string[] = ["waiting_for_capacity"];
+const CAPACITY_POLL_MS = 60_000;
+const CAPACITY_WAIT_MS = 4 * 3_600_000;
 /** C44-7: the fixed reason when a second fix on one head also changed nothing. */
 const NO_CHANGE_REPEATED = "fix_no_change_repeated";
 /** The short-Spec PM run: one run reading a repository, like the classify run. */
@@ -507,8 +515,31 @@ type EarlyWaitStage = "classify" | "spec" | "respec" | "panel";
 /** D#483 S5-k1d: and the two after it, which wait on one head of the open pull request. */
 type WaitStage = EarlyWaitStage | "review" | "fix_round";
 
-/** The wait reason when an answer is a spending-limit denial (a named pause), else null: a start, a halt and every other refusal end the wait. */
-const pauseOf = (reason: string | null | undefined): string | null => (typeof reason === "string" && RESERVATION_PAUSE_REASONS.includes(reason) ? reason : null);
+/** The wait reason when an answer is a spending-limit denial (a named pause) or a wait for capacity, else null: a start, a halt and every other refusal end the wait. */
+const pauseOf = (reason: string | null | undefined): string | null => (typeof reason === "string" && (RESERVATION_PAUSE_REASONS.includes(reason) || CAPACITY_WAIT_REASONS.includes(reason)) ? reason : null);
+const isCapacityWait = (reason: string | null | undefined): boolean => typeof reason === "string" && CAPACITY_WAIT_REASONS.includes(reason);
+
+/** The two clocks of a start's wait. A capacity wait adds only to `capacity` and a spend pause only to `spend`, so neither runs the other's four hours down. */
+interface WaitClocks {
+  spend: number;
+  capacity: number;
+}
+const newClocks = (): WaitClocks => ({ spend: 0, capacity: 0 });
+const waitedOn = (clocks: WaitClocks, pause: string): number => (isCapacityWait(pause) ? clocks.capacity : clocks.spend);
+const outOfTime = (clocks: WaitClocks, pause: string): boolean => waitedOn(clocks, pause) >= (isCapacityWait(pause) ? CAPACITY_WAIT_MS : BUILD_SPEND_WAIT_MS);
+/** The dedupe tail of a wait fact: a capacity ask keeps its attempt, so the minute it was asked in keeps the fact fresh; a spend ask is told apart by its attempt. */
+const waitTail = (clocks: WaitClocks, pause: string): string => (isCapacityWait(pause) ? `:c${clocks.capacity / CAPACITY_POLL_MS}` : "");
+/** Sleeps the wait's own poll and adds it to the wait's own clock. Answers whether the next ask is a new attempt (a spend ask is; a capacity ask is not). */
+async function sleepOn(clocks: WaitClocks, pause: string): Promise<boolean> {
+  if (isCapacityWait(pause)) {
+    await sleep(CAPACITY_POLL_MS);
+    clocks.capacity += CAPACITY_POLL_MS;
+    return false;
+  }
+  await sleep(BUILD_SPEND_POLL_MS);
+  clocks.spend += BUILD_SPEND_POLL_MS;
+  return true;
+}
 
 /** The attempt number a restart by the parked-stage sweep begins at (0 on every start a person's approval makes). */
 const firstAttemptOf = (args: AdvanceStartArgs): number => (Number.isSafeInteger(args.startAttempt) && args.startAttempt! > 0 ? args.startAttempt! : 0);
@@ -521,7 +552,7 @@ const firstAttemptOf = (args: AdvanceStartArgs): number => (Number.isSafeInteger
  */
 async function askUntilAllowed<T>(args: AdvanceStartArgs, stage: EarlyWaitStage, itemId: string, first: number, ask: (attempt: number) => Promise<T>, reasonOf: (answer: T) => string | null | undefined): Promise<{ answer: T; attempt: number; pause: string | null }> {
   let attempt = first;
-  let waited = 0;
+  const clocks = newClocks();
   let answer = await ask(attempt);
   for (;;) {
     const reason = reasonOf(answer);
@@ -532,12 +563,10 @@ async function askUntilAllowed<T>(args: AdvanceStartArgs, stage: EarlyWaitStage,
       if (first > 0 && typeof reason === "string" && !isHaltReason(reason)) await advanceEventStep(args.accountId, args.userId, itemId, { kind: "stopped", dedupeKey: `refused:${stage}:${args.actionId}:${attempt}`, code: `${stage}_refused` });
       return { answer, attempt, pause: null };
     }
-    await advanceEventStep(args.accountId, args.userId, itemId, { kind: "stage_waiting", stage, code: pause, attempt, dedupeKey: `wait:${stage}:${args.actionId}:${attempt}` });
-    if (waited >= BUILD_SPEND_WAIT_MS) return { answer, attempt, pause };
-    if (attempt === first) await advanceLogStep("advance.stage_waiting", { work_item_id: itemId, at: `${stage}_start`, reason: pause });
-    await sleep(BUILD_SPEND_POLL_MS);
-    waited += BUILD_SPEND_POLL_MS;
-    attempt += 1;
+    await advanceEventStep(args.accountId, args.userId, itemId, { kind: "stage_waiting", stage, code: pause, attempt, dedupeKey: `wait:${stage}:${args.actionId}:${attempt}${waitTail(clocks, pause)}` });
+    if (outOfTime(clocks, pause)) return { answer, attempt, pause };
+    if (waitedOn(clocks, pause) === 0) await advanceLogStep("advance.stage_waiting", { work_item_id: itemId, at: `${stage}_start`, reason: pause });
+    if (await sleepOn(clocks, pause)) attempt += 1;
     answer = await ask(attempt);
   }
 }
@@ -866,6 +895,9 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
   // S5-k1: a spending limit denied the run. The item stays at Spec ready; every ask after the first is attempt 1, 2, ... (the run key).
   let spendWaitedMs = 0;
   let lastSpendReason: string | null = null;
+  // S5-k3b-2b: the provider had no room. Its own minute poll and four hours; the attempt stays (no run row exists to collide with).
+  let capacityWaitedMs = 0;
+  let lastCapacityReason: string | null = null;
   for (;;) {
     if (started.reason === BUILD_REAPING_REASON && reapingTries < BUILD_REAPING_BACKOFF_MS.length) {
       await advanceLogStep("advance.build_waiting", { work_item_id: workItemId, at: "build_start", reason: "sandbox_reaping", attempt: reapingTries + 1 });
@@ -883,13 +915,18 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
       await sleep(BUILD_SPEND_POLL_MS);
       spendWaitedMs += BUILD_SPEND_POLL_MS;
       spendAttempt++;
+    } else if (isCapacityWait(started.reason) && capacityWaitedMs < CAPACITY_WAIT_MS) {
+      if (started.reason !== lastCapacityReason) await advanceLogStep("advance.build_waiting", { work_item_id: workItemId, at: "build_start", reason: started.reason });
+      lastCapacityReason = started.reason;
+      await sleep(CAPACITY_POLL_MS);
+      capacityWaitedMs += CAPACITY_POLL_MS;
     } else break;
     started = await advanceBuildStep(accountId, userId, workItemId, args.haltEpoch, actionId, pinned, spendAttempt > 0 ? spendAttempt : undefined);
   }
   if (isHaltReason(started.reason)) return haltedEnd(args, "build_start");
   // D#483 S5-k1b: the four hours are up and a spending limit still denies the start. That is not a failure: the item stays at Spec ready with its approval, nothing is
   // stamped, and the parked-stage sweep (every 15 minutes) starts the build again, with no person, when the limit allows it. Any other refusal ends as it did.
-  if (started.status !== "started" && started.reason !== null && RESERVATION_PAUSE_REASONS.includes(started.reason)) {
+  if (started.status !== "started" && pauseOf(started.reason) !== null) {
     await advanceLogStep("advance.paused", { work_item_id: workItemId, at: "build_start", reason: started.reason, attempt: spendAttempt });
     return { status: "paused", detail: `build_paused:${started.reason}` };
   }
@@ -938,7 +975,16 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
     // D#483 S5-b2a part 3: the dial decides whether THIS check fix round (the failed run it resumes) starts. An ask ends the workflow waiting; the answer files an advance that comes back here.
     const checkGate = await fixGatePhase(args, outcome.tailRunId);
     if (checkGate !== null) return checkGate;
-    const fix = await advanceCheckFixStep(accountId, userId, workItemId, args.haltEpoch, outcome.tailRunId);
+    let fix = await advanceCheckFixStep(accountId, userId, workItemId, args.haltEpoch, outcome.tailRunId);
+    // D#483 S5-k3b-2b: the provider had no room for this round. It waits like the other starts (a minute poll, the same call, its own four-hour clock) and is never a failure; no
+    // spend pause is read here today, so nothing else changes. After four hours the workflow ends `fix_round_paused:waiting_for_capacity`.
+    for (let waitedCap = 0; isCapacityWait(fix.reason); waitedCap += CAPACITY_POLL_MS) {
+      await advanceEventStep(accountId, userId, workItemId, { kind: "stage_waiting", stage: "fix_round", code: fix.reason as string, attempt: 0, dedupeKey: `wait:check_fix:${outcome.tailRunId}:c${waitedCap / CAPACITY_POLL_MS}` });
+      if (waitedCap >= CAPACITY_WAIT_MS) return pausedEnd(workItemId, "fix_round", fix.reason as string, 0);
+      if (waitedCap === 0) await advanceLogStep("advance.stage_waiting", { work_item_id: workItemId, at: "check_fix_start", reason: fix.reason });
+      await sleep(CAPACITY_POLL_MS);
+      fix = await advanceCheckFixStep(accountId, userId, workItemId, args.haltEpoch, outcome.tailRunId);
+    }
     if (fix.status === "escalated") {
       const recorded = await advanceBuildFailedStep(accountId, workItemId, outcome.tailRunId, "check_rounds_used");
       await buildStopped(args, outcome.tailRunId, "build_check_rounds_used");
@@ -1306,13 +1352,13 @@ async function reviewUntilVerdict(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { 
  * D#483 S5-k1d: a wait fact of a review or a fix round. Besides the pause and the attempt it carries the head, the pull request and the re-review round the ask was
  * for, so the sweep resumes only while that head is still the head, and restarts the review at the round it was in.
  */
-async function waitOnHead(args: AdvanceStartArgs, stage: "review" | "fix_round", pause: string, attempt: number, pr: { number: number; headSha: string }, rereview: number): Promise<void> {
+async function waitOnHead(args: AdvanceStartArgs, stage: "review" | "fix_round", pause: string, attempt: number, pr: { number: number; headSha: string }, rereview: number, tail = ""): Promise<void> {
   await advanceEventStep(args.accountId, args.userId, args.workItemId, {
     kind: "stage_waiting",
     stage,
     code: pause,
     attempt,
-    dedupeKey: `wait:${stage}:${pr.headSha}:${rereview}:${attempt}`,
+    dedupeKey: `wait:${stage}:${pr.headSha}:${rereview}:${attempt}${tail}`,
     headSha: pr.headSha,
     prNumber: pr.number,
     round: rereview,
@@ -1333,7 +1379,7 @@ async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number
   const attemptOf = new Map<string, number>();
   for (const k of await advanceReviewRunsStep(accountId, userId, workItemId, args.haltEpoch, pr.headSha, rereview)) if (roles.includes(k.role)) answers.set(k.role, { role: k.role, runId: k.runId, reason: null });
   let attempt = firstAttemptOf(args);
-  let waited = 0;
+  const clocks = newClocks();
   let pending = roles.filter((r) => !answers.has(r));
   for (;;) {
     const asked = await Promise.all(
@@ -1345,13 +1391,12 @@ async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number
     for (const a of asked) answers.set(a.role, a);
     const denied = asked.filter((a) => a.runId === null && pauseOf(a.reason) !== null);
     if (denied.length === 0) break;
-    const pause = pauseOf(denied[0]!.reason) as string;
-    await waitOnHead(args, "review", pause, attempt, pr, rereview);
-    if (waited >= BUILD_SPEND_WAIT_MS) return { verdicts: [], refused: [], refusedWhy: {}, paused: { pause, attempt } };
-    if (waited === 0) await advanceLogStep("advance.stage_waiting", { work_item_id: workItemId, at: "review_start", reason: pause });
-    await sleep(BUILD_SPEND_POLL_MS);
-    waited += BUILD_SPEND_POLL_MS;
-    attempt += 1;
+    // A spend denial left a keyed run row, so it decides (clock and attempt) when it is in the mix; an all-capacity round keeps its attempt.
+    const pause = (denied.find((d) => !isCapacityWait(d.reason)) ?? denied[0]!).reason as string;
+    await waitOnHead(args, "review", pause, attempt, pr, rereview, waitTail(clocks, pause));
+    if (outOfTime(clocks, pause)) return { verdicts: [], refused: [], refusedWhy: {}, paused: { pause, attempt } };
+    if (waitedOn(clocks, pause) === 0) await advanceLogStep("advance.stage_waiting", { work_item_id: workItemId, at: "review_start", reason: pause });
+    if (await sleepOn(clocks, pause)) attempt += 1;
     pending = denied.map((d) => d.role);
   }
   const started = roles.map((role) => answers.get(role) as StartedReviewer);
@@ -1399,17 +1444,15 @@ async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number
 async function askFixUntilAllowed(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; branch: string }, round: number, failing: Array<{ role: string; runId: string }>, rereview: number, person = false): Promise<{ fix: FixOut; attempt: number; pause: string | null }> {
   const { accountId, userId, workItemId, actionId } = args;
   let attempt = firstAttemptOf(args);
-  let waited = 0;
+  const clocks = newClocks();
   for (;;) {
     const fix = await advanceStartFixStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, actionId, round, failing, rereview, attempt > 0 ? attempt : undefined, person);
     const pause = fix.ok ? null : pauseOf(fix.reason);
     if (pause === null) return { fix, attempt, pause: null };
-    await waitOnHead(args, "fix_round", pause, attempt, pr, rereview);
-    if (waited >= BUILD_SPEND_WAIT_MS) return { fix, attempt, pause };
-    if (waited === 0) await advanceLogStep("advance.stage_waiting", { work_item_id: workItemId, at: "fix_start", reason: pause });
-    await sleep(BUILD_SPEND_POLL_MS);
-    waited += BUILD_SPEND_POLL_MS;
-    attempt += 1;
+    await waitOnHead(args, "fix_round", pause, attempt, pr, rereview, waitTail(clocks, pause));
+    if (outOfTime(clocks, pause)) return { fix, attempt, pause };
+    if (waitedOn(clocks, pause) === 0) await advanceLogStep("advance.stage_waiting", { work_item_id: workItemId, at: "fix_start", reason: pause });
+    if (await sleepOn(clocks, pause)) attempt += 1;
   }
 }
 

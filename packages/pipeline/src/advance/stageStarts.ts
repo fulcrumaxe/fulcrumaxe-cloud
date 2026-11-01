@@ -1,5 +1,5 @@
 import { attemptKey } from "./attemptKeys.js";
-import { pauseForDenial, type ReservationPause } from "./reservationPauses.js";
+import { startWaitFor, type StartWait } from "./reservationPauses.js";
 import type { WaitingStage } from "./waitingStages.js";
 
 /**
@@ -60,9 +60,9 @@ export function stageKeyLikes(stage: "classify" | "spec" | "respec", workItemId:
  * A start's answer with a spend denial turned into its named pause. Anything else (including `account_not_active`, and a start that worked) is returned as it
  * was, so a refusal that is not a pause ends as it always did.
  */
-export function pauseOnDenial<T extends { ok: boolean; reason?: string }>(start: T): T | { ok: false; reason: ReservationPause } {
+export function pauseOnDenial<T extends { ok: boolean; reason?: string }>(start: T): T | { ok: false; reason: StartWait } {
   if (start.ok || start.reason === undefined) return start;
-  const pause = pauseForDenial(start.reason);
+  const pause = startWaitFor(start.reason);
   return pause === null ? start : { ok: false, reason: pause };
 }
 
@@ -71,7 +71,7 @@ export function pauseOnDenial<T extends { ok: boolean; reason?: string }>(start:
  * which answers the pause as its refusal instead of the `pm_failed` a lost run gets.
  */
 export class SpecWriterPausedError extends Error {
-  constructor(public readonly pause: ReservationPause) {
+  constructor(public readonly pause: StartWait) {
     super(`the Spec writer's start was denied: ${pause}`);
     this.name = "SpecWriterPausedError";
   }

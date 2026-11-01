@@ -50,6 +50,21 @@ export function pauseForDenial(denial: unknown): ReservationPause | null {
   return typeof denial === "string" && Object.hasOwn(RESERVATION_DENIAL_PAUSES, denial) ? RESERVATION_DENIAL_PAUSES[denial as ReservationDenial] : null;
 }
 
+/**
+ * D#483 S5-k3b-2b: a start the provider's capacity queue holds back is a wait of its own, beside the spend pauses and NOT inside `RESERVATION_DENIAL_PAUSES`. That table
+ * drives spend-only things (the limit sentences, the sweep's headroom read, the four-hour first look, the merge queue's `refused_spend`), none of which apply to a wait for
+ * room on our servers, so `readReservationPause` stays null for it. A start's answer is read through `startWaitFor`; a headroom check keeps `pauseForDenial`.
+ * Nothing returns this reason until the gate is switched on (S5-k3b-2c).
+ */
+export const CAPACITY_WAIT = "waiting_for_capacity" as const;
+export const CAPACITY_WAIT_REASONS: readonly (typeof CAPACITY_WAIT)[] = Object.freeze([CAPACITY_WAIT]);
+export type StartWait = ReservationPause | typeof CAPACITY_WAIT;
+
+/** The wait a START's answer becomes: the spend pause, or the capacity wait, or null for anything else (which keeps its own handling). */
+export function startWaitFor(reason: unknown): StartWait | null {
+  return reason === CAPACITY_WAIT ? CAPACITY_WAIT : pauseForDenial(reason);
+}
+
 /** The one sentence a person reads for each pause. Fixed text: nothing a model or an author wrote reaches it. */
 export const RESERVATION_PAUSE_SENTENCES: Readonly<Record<ReservationPause, string>> = Object.freeze({
   account_budget_reached: "Your monthly model budget is used up. This item starts again on its own when you raise the budget or the month resets.",

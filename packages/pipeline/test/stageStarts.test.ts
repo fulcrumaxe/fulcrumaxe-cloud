@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { PanelSeatFailedError } from "../src/plan/sandboxPanelRunner.js";
 import { createFollowedRunner } from "../src/advance/followedRunner.js";
 import { attemptKey } from "../src/advance/attemptKeys.js";
-import { RESERVATION_DENIAL_PAUSES, RESERVATION_PAUSE_REASONS, RESERVATION_PAUSE_SENTENCES } from "../src/advance/reservationPauses.js";
+import { CAPACITY_WAIT, RESERVATION_DENIAL_PAUSES, RESERVATION_PAUSE_REASONS, RESERVATION_PAUSE_SENTENCES } from "../src/advance/reservationPauses.js";
 import { PARKED_STAGE_REGISTRY } from "../src/advance/stageRegistry.js";
 import { START_SITES, START_SITE_STAGE, SpecWriterPausedError, pauseOnDenial, siteStep, specPmAttempt, stageKeyLikes } from "../src/advance/stageStarts.js";
 import { STAGE_WORDS, STAGE_WORD_PHRASES, stageWords } from "../src/advance/stageWords.js";
@@ -84,7 +84,7 @@ describe("S5-k1c: the registry entries", () => {
       expect(e).toBeDefined();
       expect(e.stage).toBe(stage);
       expect(e.role).toBe("project-manager");
-      expect([...e.pauses]).toEqual([...RESERVATION_PAUSE_REASONS]);
+      expect([...e.pauses]).toEqual([...RESERVATION_PAUSE_REASONS, CAPACITY_WAIT]);
     }
     expect([...PARKED_STAGE_REGISTRY.classify!.itemStages]).toEqual(["triaged"]);
     expect([...PARKED_STAGE_REGISTRY.spec!.itemStages].sort()).toEqual(["discussing", "triaged"]);

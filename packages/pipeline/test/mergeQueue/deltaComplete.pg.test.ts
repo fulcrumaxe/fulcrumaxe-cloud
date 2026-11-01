@@ -38,6 +38,7 @@ describe("D#519 MQ3-b-2b delta-review completion [pg]", () => {
     events: string[];
     started: string[];
     refuse: Set<string>;
+    refuseWith: { reason: string };
     plan: { roles: string[]; flaggedRoles: string[] };
     complete(now?: Date): Promise<DeltaCompletion>;
     finish(role: string, envelope: Record<string, unknown>, status?: string): Promise<void>;
@@ -60,6 +61,7 @@ describe("D#519 MQ3-b-2b delta-review completion [pg]", () => {
     const events: string[] = [];
     const started: string[] = [];
     const refuse = new Set<string>();
+    const refuseWith = { reason: "refused_spend" };
     const plan = { roles: o.roles ?? ["code-reviewer", "acceptance-tester"], flaggedRoles: o.flaggedRoles ?? [] };
     const toSha = () => g.world.refreshedHeadSha;
     const ports: DeltaCompletionPorts = {
@@ -69,7 +71,7 @@ describe("D#519 MQ3-b-2b delta-review completion [pg]", () => {
       runs: async (_e, sha) =>
         (await db.admin.query(`SELECT DISTINCT ON (role) id, role, status FROM agent_runs WHERE account_id = $1 AND head_sha = $2 ORDER BY role, created_at DESC`, [accountId, sha])).rows.map((r) => ({ role: r.role as string, runId: r.id as string, attempt: 0, reusable: r.status !== "cancelled" })),
       startRole: async ({ role, delta }: { role: string; delta: DeltaReviewInput }) => {
-        if (refuse.has(role)) return { ok: false, reason: "refused_spend" };
+        if (refuse.has(role)) return { ok: false, reason: refuseWith.reason };
         started.push(role);
         const id = randomUUID();
         await db.admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, head_sha) VALUES ($1, $2, $3, $4, 'production', 'running', $5)`, [id, accountId, workItemId, role, delta.mergeCommitSha]);
@@ -94,7 +96,7 @@ describe("D#519 MQ3-b-2b delta-review completion [pg]", () => {
     started.length = 0;
     const row = async () => (await db.admin.query(`SELECT * FROM merge_queue_entries WHERE id = $1`, [entry.id])).rows[0] as Record<string, unknown>;
     return {
-      accountId, repoId, workItemId, entry, g, events, started, refuse, plan,
+      accountId, repoId, workItemId, entry, g, events, started, refuse, refuseWith, plan,
       complete: async (now) => completeDeltaReview({ ...ports, ...(now ? { now: () => now } : {}) }, (await tenant(accountId, (c) => getEntry(c, accountId, entry.id)))!),
       finish: async (role, envelope, status = "succeeded") => void (await db.admin.query(`UPDATE agent_runs SET status = $3, envelope = $4 WHERE account_id = $1 AND role = $2 AND head_sha = $5 AND status = 'running'`, [accountId, role, status, JSON.stringify(envelope), toSha()])),
       statuses: async () => Object.fromEntries((await db.admin.query(`SELECT role, status FROM agent_runs WHERE account_id = $1 ORDER BY created_at`, [accountId])).rows.map((r) => [r.role, r.status])),
@@ -183,6 +185,16 @@ describe("D#519 MQ3-b-2b delta-review completion [pg]", () => {
     expect(await s.complete()).toEqual({ outcome: "refused_spend" });
     expect(await s.row()).toMatchObject({ state: "stopped", reason: "refused_spend", slot_holder: null, approved_at: T0 });
     expect(await s.complete()).toEqual({ outcome: "not_waiting" });
+  });
+
+  it("C23: a follow-up start that meets a capacity wait does not stop the entry: it goes back to review with approved_at kept, to be asked again", async () => {
+    const s = await setup({ roles: ["code-reviewer", "acceptance-tester", "debater"] });
+    s.refuse.add("debater");
+    s.refuseWith.reason = "waiting_for_capacity";
+    await s.finish("code-reviewer", pass);
+    await s.finish("acceptance-tester", pass);
+    expect(await s.complete()).toEqual({ outcome: "returned", reason: "waiting_for_capacity" });
+    expect(await s.row()).toMatchObject({ state: "in_review", slot_holder: null, approved_at: T0 });
   });
 
   it("the head moved before the verdicts (a person pushed): head_changed, runs cancelled, back in review with approved_at kept", async () => {

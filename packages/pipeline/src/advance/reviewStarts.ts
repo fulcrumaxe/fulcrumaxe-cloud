@@ -42,7 +42,7 @@ export function fixKeyLikes(workItemId: string, headSha: string | null, actionId
 
 /** The role and the re-review round a reviewer run's key names, or null when it is not a reviewer key. Reads through an attempt, a placement generation and a note pin. */
 export function parseReviewKey(key: string): { headSha: string; role: string; rereview: number } | null {
-  const m = /:review:([0-9a-f]{40}|[0-9a-f]{64}):([a-z][a-z-]*)(?::rr(\d{1,3}))?(?::s\d{1,6})?(?::p\d{1,2})?(?::n[0-9a-f]{16})?$/.exec(key);
+  const m = /:review:([0-9a-f]{40}|[0-9a-f]{64}):([a-z][a-z-]*)(?::rr(\d{1,3}))?(?::s\d{1,6})?(?::p\d{1,6})?(?::n[0-9a-f]{16})?$/.exec(key);
   if (!m || !ROLE.test(m[2]!)) return null;
   return { headSha: m[1]!, role: m[2]!, rereview: m[3] === undefined ? 0 : Number(m[3]) };
 }

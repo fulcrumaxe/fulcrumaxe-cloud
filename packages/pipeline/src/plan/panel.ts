@@ -10,7 +10,7 @@ import { ownData } from "./ownData.js";
 import { selectPanel, type PanelRole } from "./panelRoles.js";
 import { agentOutputBlock, READ_ONLY_CHECKOUT_LINE } from "./envelope.js";
 import { WaitBudget, type WaitClock } from "./waitBudget.js";
-import type { ReservationPause } from "../advance/reservationPauses.js";
+import type { ReservationPause, StartWait } from "../advance/reservationPauses.js";
 
 /**
  * D#2 H15b-2: panel orchestration, the challenge round and signed comments
@@ -75,7 +75,7 @@ export interface PanelSeatResult {
  */
 export interface PanelSeatDenied {
   denied: true;
-  pause: ReservationPause;
+  pause: StartWait;
 }
 
 export const isSeatDenied = (value: unknown): value is PanelSeatDenied =>
@@ -144,7 +144,7 @@ export type SeatFailure = "runner_failed" | "invalid_output" | "post_refused" | 
  * seat claim `posted` while the database has no row) `no_signed_comment`. */
 export type MissingReason = SeatFailure | "no_signed_comment";
 
-export type SeatStatus = { role: PanelRole; status: "posted" } | { role: PanelRole; status: "missing"; reason: SeatFailure } | { role: PanelRole; status: "paused"; pause: ReservationPause };
+export type SeatStatus = { role: PanelRole; status: "posted" } | { role: PanelRole; status: "missing"; reason: SeatFailure } | { role: PanelRole; status: "paused"; pause: StartWait };
 
 export type ChallengeTrigger = "requested" | "disagreement";
 
@@ -161,7 +161,7 @@ export type PanelOutcome =
    * D#483 S5-k1e: a spending limit denied the round (the whole round before it started, or some seats after it did). Seats that posted stay posted; `deniedRoles` are
    * the seats still to ask, and nothing here is a failure. No challenge round runs and no Spec is written from a panel that is not whole.
    */
-  | { status: "paused"; reason: ReservationPause; round: 1 | 2; deniedRoles: PanelRole[] }
+  | { status: "paused"; reason: StartWait; round: 1 | 2; deniedRoles: PanelRole[] }
   | {
       status: "completed";
       workItemId: string;

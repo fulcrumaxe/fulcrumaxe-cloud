@@ -32,6 +32,7 @@ describe("S5-k1e: the seat key of an attempt", () => {
   it("the attempt of a key reads through a placement generation, and the restart is one above the highest (0 with no run)", () => {
     expect(seatAttemptOfKey(BASE)).toBe(0);
     expect(seatAttemptOfKey(`panel:${DISC}:s7:r2:cost-analyst`)).toBe(7);
+    expect(seatAttemptOfKey(`panel:${DISC}:s7:r2:cost-analyst:p100`)).toBe(7); // a generation past 99 reads through
     expect(seatAttemptOfKey(`panel:${DISC}:g1:s7:r1:cost-analyst:p2`)).toBe(7);
     expect(nextPanelAttempt([])).toBe(0);
     expect(nextPanelAttempt([BASE, `panel:${DISC}:s1:r1:a`, `panel:${DISC}:s5:r1:b`])).toBe(6);
@@ -131,7 +132,7 @@ describe("S5k1e: the panel's registry entry", () => {
 
   it("parks at Discussing for every approved pause, under the approval that started the workflow, and expects runs that started beside the denied ones", () => {
     expect(e.itemStages).toEqual(["discussing"]);
-    expect(e.pauses).toHaveLength(Object.keys(RESERVATION_DENIAL_PAUSES).length);
+    expect(e.pauses).toHaveLength(Object.keys(RESERVATION_DENIAL_PAUSES).length + 1);
     expect(e.approval).toEqual({ kind: "advance_work_item", from: "origin" });
     expect(e.startedRunsOk).toBe(true);
     expect(e.attemptAfterFacts).toBe(true);

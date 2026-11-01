@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { WAITING_STAGES as CORE_WAITING_STAGES } from "@fx/core/src/work-items/driverEvents.js";
 import { PANEL_PROGRESS_KINDS, PANEL_WHOLE_CODE, PARKED_STAGE_REGISTRY, UNREGISTERED_STAGES, registeredStages } from "../src/advance/stageRegistry.js";
 import { WAITING_STAGES, WAITING_STAGE_POSITIONS, isWaitingStage, stageOfFact } from "../src/advance/waitingStages.js";
-import { RESERVATION_PAUSE_REASONS } from "../src/advance/reservationPauses.js";
+import { CAPACITY_WAIT, RESERVATION_PAUSE_REASONS } from "../src/advance/reservationPauses.js";
 import { attemptOfKey } from "../src/advance/attemptKeys.js";
 import { likeToRegex } from "./helpers/likeToRegex.js";
 
@@ -41,10 +41,10 @@ describe("the parked-stage registry", () => {
       expect(PARKED_STAGE_REGISTRY[e.stage]).toBe(e);
       expect(e.pauses.length).toBeGreaterThan(0);
       // The one wait that is not a spend pause: a review parked for the runner's daily limit (resumed by the clock, and only at the review stage).
-      for (const p of e.pauses) expect(e.stage === "review" && p === "runner_daily_limit" ? RESERVATION_PAUSE_REASONS.concat(p as never) : RESERVATION_PAUSE_REASONS).toContain(p);
+      for (const p of e.pauses) expect(e.stage === "review" && p === "runner_daily_limit" ? [...RESERVATION_PAUSE_REASONS, CAPACITY_WAIT, p] : [...RESERVATION_PAUSE_REASONS, CAPACITY_WAIT]).toContain(p);
       for (const s of [...e.itemStages, ...(e.childItemStages ?? [])]) expect(WAITING_STAGE_POSITIONS[e.stage]).toContain(s);
     }
-    expect(PARKED_STAGE_REGISTRY.review!.pauses).toEqual([...RESERVATION_PAUSE_REASONS, "runner_daily_limit"]);
+    expect(PARKED_STAGE_REGISTRY.review!.pauses).toEqual([...RESERVATION_PAUSE_REASONS, CAPACITY_WAIT, "runner_daily_limit"]);
     // migration 0845's lister accepts at most eight pauses.
     for (const e of registeredStages()) expect(e.pauses.length).toBeLessThanOrEqual(8);
   });

@@ -118,6 +118,32 @@ describe("the parked-stage sweep [pg]", { timeout: 60_000 }, () => {
     expect(last.rows[0]).toEqual({ code: "account_budget_reached", stage: "build" });
   });
 
+  it("C23-5: an item parked waiting_for_capacity resumes at once without reading spend headroom, and an earlier attempt that ended cancelled / provider_capacity is not 'the stage already ran'", async () => {
+    const { a, w, approval } = await parked({ pause: "waiting_for_capacity" });
+    // The attempt our servers had no room for: cancelled, with the provider_capacity reason on its status event.
+    const run = randomUUID();
+    await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'production', 'cancelled')", [run, a.accountId, w]);
+    await admin.query("INSERT INTO agent_run_idempotency_keys (account_id, idempotency_key, run_id, request_hash) VALUES ($1, $2, $3, $4)", [a.accountId, keyOf(w, approval), run, "0".repeat(64)]);
+    await admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.status_changed', '{"to":"cancelled","failureReason":"provider_capacity"}')`, [a.accountId, run]);
+    const capEntry: ParkedStageEntryInput = { ...entry, pauses: [...PAUSES, "waiting_for_capacity"] };
+    // A spend check would deny this account (the budget is below the estimate): a headroom read would refresh the fact and start nothing.
+    const l = limits(1);
+    const seat = vi.fn(seatFor(l));
+    const started: AdvanceStartArgs[] = [];
+    const sweep = createStageResume(writerPool, { resolveRunSeat: seat as never, startAdvance: async (args) => void started.push(args), now: () => Date.now(), log: () => undefined });
+    await sweep.sweepParkedStages([capEntry]);
+    expect(mine(started, w)).toHaveLength(1);
+    expect(seat.mock.calls.filter((c) => c[0].workItemId === w)).toHaveLength(0);
+    // The same item with an attempt another reason cancelled is still skipped as already run.
+    const { a: a2, w: w2, approval: approval2 } = await parked({ pause: "waiting_for_capacity" });
+    const other = randomUUID();
+    await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'production', 'cancelled')", [other, a2.accountId, w2]);
+    await admin.query("INSERT INTO agent_run_idempotency_keys (account_id, idempotency_key, run_id, request_hash) VALUES ($1, $2, $3, $4)", [a2.accountId, keyOf(w2, approval2), other, "0".repeat(64)]);
+    await admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.status_changed', '{"to":"cancelled","failureReason":"placement_changed"}')`, [a2.accountId, other]);
+    await sweep.sweepParkedStages([capEntry]);
+    expect(mine(started, w2)).toEqual([]);
+  });
+
   it("S5-d: an item parked on its spend envelope is refreshed while the envelope denies the run, and resumes the pass after a new envelope version covers it (no run row from the sweep)", async () => {
     const { a, w, approval } = await parked({ pause: "envelope_reached" });
     await earlierAsk(a, w, keyOf(w, approval));

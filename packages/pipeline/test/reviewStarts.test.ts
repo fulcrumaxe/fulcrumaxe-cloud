@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { attemptBase, attemptOfKey, nextAttempt } from "../src/advance/attemptKeys.js";
 import { fixKeyLikes, parseReviewKey, reviewKeyLikes, reviewStep } from "../src/advance/reviewStarts.js";
 import { PARKED_STAGE_REGISTRY, REVIEW_PROGRESS_KINDS, UNREGISTERED_STAGES } from "../src/advance/stageRegistry.js";
-import { RESERVATION_PAUSE_REASONS } from "../src/advance/reservationPauses.js";
+import { CAPACITY_WAIT, RESERVATION_PAUSE_REASONS } from "../src/advance/reservationPauses.js";
 import { WAITING_STAGE_POSITIONS } from "../src/advance/waitingStages.js";
 import { STAGE_WORDS } from "../src/advance/stageWords.js";
 import { likeToRegex } from "./helpers/likeToRegex.js";
@@ -49,6 +49,8 @@ describe("the reviewer run key", () => {
   it("parseReviewKey reads the head, the role and the round through an attempt, a generation and a pin; anything else is null", () => {
     expect(parseReviewKey(`advance:${ITEM}:review:${HEAD}:code-reviewer`)).toEqual({ headSha: HEAD, role: "code-reviewer", rereview: 0 });
     expect(parseReviewKey(`advance:${ITEM}:review:${HEAD}:acceptance-tester:rr2:s7:p1:n0123456789abcdef`)).toEqual({ headSha: HEAD, role: "acceptance-tester", rereview: 2 });
+    // A generation past 99 (provider answers are not capped like placement changes) still reads.
+    expect(parseReviewKey(`advance:${ITEM}:review:${HEAD}:code-reviewer:rr1:s2:p100`)).toEqual({ headSha: HEAD, role: "code-reviewer", rereview: 1 });
     for (const bad of [`advance:${ITEM}:fix:${HEAD}:${APPROVAL}`, `advance:${ITEM}:review:nothead:code-reviewer`, `advance:${ITEM}:review:${HEAD}:`, `advance:${ITEM}:review:${HEAD}:Code`]) expect(parseReviewKey(bad), bad).toBeNull();
   });
 });
@@ -94,7 +96,7 @@ describe("S5k1d-8: the registry entries for the review and the fix round", () =>
   it("they park at the positions the table lists, for the spend pauses (the review also for the runner's daily limit), under the build's approval, on a head", () => {
     for (const e of [review, fix]) {
       expect(e.itemStages).toEqual(WAITING_STAGE_POSITIONS[e.stage]);
-      expect([...e.pauses]).toEqual(e.stage === "review" ? [...RESERVATION_PAUSE_REASONS, "runner_daily_limit"] : [...RESERVATION_PAUSE_REASONS]);
+      expect([...e.pauses]).toEqual(e.stage === "review" ? [...RESERVATION_PAUSE_REASONS, CAPACITY_WAIT, "runner_daily_limit"] : [...RESERVATION_PAUSE_REASONS, CAPACITY_WAIT]);
       expect(e.approval).toEqual({ kind: "advance_work_item", from: "self" });
       expect(e.needsSpec).toBe(true);
       expect(e.respec).toBe(false);

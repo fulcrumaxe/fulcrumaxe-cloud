@@ -38,7 +38,7 @@ const likeEscape = (text: string): string => text.replace(/[\\%_]/g, (c) => `\\$
 /** The SQL LIKE pattern (`ESCAPE '\'`) of the idempotency keys of every panel seat run of one item (any generation, round, role or attempt). */
 export const panelKeyLikes = (workItemId: string): string[] => [`advance:${likeEscape(workItemId)}:panel:%`];
 
-const SEAT_ATTEMPT = /:s(\d{1,6}):r[12]:[a-z][a-z-]*(?::p\d{1,2})?$/;
+const SEAT_ATTEMPT = /:s(\d{1,6}):r[12]:[a-z][a-z-]*(?::p\d{1,6})?$/;
 
 /** The attempt a seat's key is: 0 for the key as first built, n for `...:s<n>:r<round>:<role>` (a placement generation after the role is read through). */
 export function seatAttemptOfKey(key: string): number {

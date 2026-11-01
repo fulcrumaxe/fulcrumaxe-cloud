@@ -13,7 +13,7 @@ import {
   maxFixRounds,
   listChangedFiles,
   listChangedFilesLocal,
-  pauseForDenial,
+  startWaitFor,
   pauseOnDenial,
   promptRuntimeOf,
   readVerdict,
@@ -471,7 +471,7 @@ export async function startFixBody(
     ...(crossSide || promptRuntimeOf(ctx.executionMode) === "sandbox" ? { pr: { number: pr.number, branch: pr.branch } } : {}),
   });
   // A spending-limit denial comes back as its named pause (the driver waits and asks again); every other refusal keeps the code it came with.
-  return started.ok ? { ok: true, runId: started.runId, reason: null } : { ok: false, runId: null, reason: pauseForDenial(started.reason) ?? started.reason };
+  return started.ok ? { ok: true, runId: started.runId, reason: null } : { ok: false, runId: null, reason: startWaitFor(started.reason) ?? started.reason };
 }
 
 export interface DescentOut {
