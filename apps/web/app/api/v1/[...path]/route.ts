@@ -21,6 +21,7 @@ import { httpRunActionSignalFromEnv } from "@fx/api/src/runActions/httpSignal.js
 import { getWorker, previewEnabled, workerConfigured } from "../../../../lib/worker";
 import { createStartRetryPush, openPublicPullRequestViaWorker } from "../../../../lib/retryPush";
 import { dequeueQueuedItem } from "../../../../lib/mergeQueue";
+import { createAppPrStateReader } from "../../../../lib/github/revertPrState";
 import { getAuthorCheck } from "../../../../lib/github/authorCheck";
 import { getPairingInspector } from "../../../../lib/github/pairingInspector";
 
@@ -79,6 +80,8 @@ receiptReversalDeps.getService = async () => {
   const worker = await getWorker();
   return worker === null ? null : { request: (input) => worker.requestReversal(input), confirm: (input) => worker.confirmReversal(input), retry: (input) => worker.retryReversal(input) };
 };
+// D#7 DP7-2h: a revert row's pr_state is one live read-only GET per row at list time, never stored.
+receiptReversalDeps.getPrStateReader = () => createAppPrStateReader();
 vercelConnectionDeps.getNames = () => productionVercelNames;
 // D#601 MEM-4a2b: an edited memory is scanned against this process's live installation tokens, the same source the worker's intake uses.
 memoryEditDeps.liveSecrets = () => liveInstallationTokens();
