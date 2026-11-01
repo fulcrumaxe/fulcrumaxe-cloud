@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  FLAG_WORDS, limitResetTail, RECEIPTS_HEADING, receiptsSection, formatWhen, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, SPEC_REFUSED_SENTENCES, SPEC_REFUSED_GENERIC, SUPERSEDED_SENTENCE, SUPERSEDED_LINK_LABEL, phaseOf, pullUrl, readyBanner, mergeBlockSentence, blockingSentence, BLOCKING_SENTENCES, PUBLIC_REFUSED_SENTENCE, REVIEW_BLOCK_SENTENCE, UNKNOWN_BLOCK_SENTENCE, reasonWord, roleWord, runView, statusWord, stepView, usdText,
+  FLAG_WORDS, limitResetTail, RECEIPTS_HEADING, receiptsSection, formatWhen, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, SPEC_REFUSED_SENTENCES, SPEC_REFUSED_GENERIC, SUPERSEDED_SENTENCE, SUPERSEDED_LINK_LABEL, phaseOf, pullUrl, queueLine, queuedToMerge, QUEUE_SENTENCES, zoneTime, readyBanner, mergeBlockSentence, blockingSentence, BLOCKING_SENTENCES, PUBLIC_REFUSED_SENTENCE, REVIEW_BLOCK_SENTENCE, UNKNOWN_BLOCK_SENTENCE, reasonWord, roleWord, runView, statusWord, stepView, usdText,
 } from "../apps/pipeline/pipeline-insight.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
@@ -1157,5 +1157,70 @@ describe("a request retired for its tracked item (superseded)", () => {
     const panel = await show("", vi.fn());
     expect(byId(panel.el, "pl-notice-reason")[0].textContent).toBe(SUPERSEDED_SENTENCE);
     expect(byId(panel.el, "pl-superseded-link")).toHaveLength(0);
+  });
+});
+
+describe("D#694 B6-5: the merge-queue line and the banner read the derived merge_queue, not the steps", () => {
+  const AT = "2026-10-31T23:30:00.000Z";
+  const queued = (q) => ({ ...REVIEW_PASSED, merge_queue: { at: AT, ...q } });
+
+  it("the banner says Queued to merge only while merge_queue.state is queued; a removal ends it with no new step", () => {
+    const steps = [{ kind: "merge_gate", state: "done", code: null, result: "merge_enqueued", reasons: [], at: AT, finished_at: AT }];
+    expect(queuedToMerge({ ...queued({ state: "queued" }), steps })).toBe(true);
+    expect(readyBanner({ ...queued({ state: "queued" }), steps })).toMatchObject({ queued: true, title: "Queued to merge" });
+    // The same steps, the queue took it out: the newest step still says enqueued, but the banner no longer does.
+    for (const q of [{ state: "removed", removed_by: "you" }, { state: "removed", removed_by: "github" }, { state: "not_in_queue" }]) {
+      expect(queuedToMerge({ ...queued(q), steps }), q.state).toBe(false);
+      expect(readyBanner({ ...queued(q), steps })).not.toMatchObject({ queued: true });
+    }
+    // A step alone, with no derived state, is not enough; and never without a pull request link.
+    expect(queuedToMerge({ ...REVIEW_PASSED, steps })).toBe(false);
+    expect(queuedToMerge({ ...queued({ state: "queued" }), pr_number: null, repo: null })).toBe(false);
+  });
+
+  it.each([
+    [{ state: "queued" }, "queued", /^In GitHub's merge queue since Oct 31, 2026, 7:30 PM\.$/],
+    [{ state: "queued", position: 3 }, "queued", /^In GitHub's merge queue, position 3 since /],
+    [{ state: "removed", removed_by: "you" }, "removed_you", /^Removed from the merge queue by you at Oct 31, 2026, 7:30 PM\.$/],
+    [{ state: "removed", removed_by: "person" }, "removed_person", /^Removed from the merge queue by a person on GitHub at /],
+    [{ state: "removed", removed_by: "github", reason: "merge_conflict" }, "removed_by_host", /^GitHub removed it from the merge queue at Oct 31, 2026, 7:30 PM: merge conflict\.$/],
+    [{ state: "removed", removed_by: "github" }, "removed_by_host", /^GitHub removed it from the merge queue at Oct 31, 2026, 7:30 PM\.$/],
+    [{ state: "removed", removed_by: "github", reason: "not_in_queue_reconciled" }, "reconciled", /^GitHub's merge queue no longer lists it \(found on a later check\) at /],
+    [{ state: "no_answer" }, "no_answer", /^GitHub hasn't said where this pull request is in the merge queue for 6 hours, so a person needs to look at it\.$/],
+    [{ state: "not_in_queue" }, "head_moved", /^Waiting for review of the new commit\.$/],
+  ])("the line for %j", (q, kind, text) => {
+    const line = queueLine(queued(q), "America/New_York");
+    expect(line.kind).toBe(kind);
+    expect(line.text).toMatch(text);
+    expect(line.text).not.toMatch(/null|undefined|NaN|\[object|: \.|:\s*$/);
+  });
+
+  it("times are shown in the viewer's zone, never UTC: the same instant reads differently in two zones, and the zone is a parameter the browser fills", () => {
+    expect(zoneTime(AT, "America/New_York")).toBe("Oct 31, 2026, 7:30 PM");
+    expect(zoneTime(AT, "Asia/Tokyo")).toBe("Nov 1, 2026, 8:30 AM");
+    expect(queueLine(queued({ state: "removed", removed_by: "you" }), "Asia/Tokyo").text).toContain("Nov 1, 2026, 8:30 AM");
+    expect(queueLine(queued({ state: "removed", removed_by: "you" }), "America/New_York").text).not.toContain("23:30");
+    expect(buildInsight(queued({ state: "removed", removed_by: "you" }), "Asia/Tokyo").queueLine.text).toContain("8:30 AM");
+  });
+
+  it("a missing or malformed instant drops the time instead of printing it; a reason that is not a plain code (markup, spaces, empty) is dropped, never drawn", () => {
+    for (const at of [undefined, null, "", "not a date", 7]) {
+      const line = queueLine({ ...REVIEW_PASSED, merge_queue: { state: "removed", removed_by: "you", at } });
+      expect(line.text).toBe("Removed from the merge queue by you.");
+    }
+    for (const reason of ["<img src=x onerror=alert(1)>", "two words", "", "A_B", 5, null, "x".repeat(80)]) {
+      const line = queueLine(queued({ state: "removed", removed_by: "github", reason }), "UTC");
+      expect(line.text, String(reason)).toBe("GitHub removed it from the merge queue at Oct 31, 2026, 11:30 PM.");
+    }
+    expect(queueLine(queued({ state: "queued" }), "UTC").text).toMatch(/since Oct 31/);
+    expect(queueLine({ ...REVIEW_PASSED, merge_queue: { state: "queued" } }).text).toBe("In GitHub's merge queue since a moment ago.");
+  });
+
+  it("nothing to say: no merge_queue, an unknown state, and a state the table does not know all draw no line", () => {
+    for (const data of [REVIEW_PASSED, EMPTY, null, undefined, { merge_queue: null }, queued({ state: "sideways" }), { ...REVIEW_PASSED, merge_queue: "queued" }]) expect(queueLine(data), JSON.stringify(data)).toBeNull();
+  });
+
+  it("every sentence of the table is fixed text with no placeholder", () => {
+    expect(Object.values(QUEUE_SENTENCES).every((v) => typeof v === "string" && v.length > 10 && !/undefined|null|\$\{/.test(v))).toBe(true);
   });
 });

@@ -648,15 +648,51 @@ export function mergeBlockSentence(data) {
 export const QUEUED_TO_MERGE_LABEL = "Queued to merge";
 export const QUEUED_TO_MERGE_SUBTITLE = "Waiting for GitHub's merge queue to build and merge it";
 
-/** Whether the newest gate answer among the steps put the pull request in GitHub's merge queue. A later "a person decides" answer replaces it. Never true without a pull request link. */
+/**
+ * Whether the item waits in GitHub's merge queue, from the server's derived `merge_queue` (the same function the ready-to-merge list, Inbox and the stalled list use), never from the
+ * newest step result: a removal writes no step, so the steps alone would go on saying "Queued to merge". Never true without a pull request link.
+ */
 export function queuedToMerge(data) {
-  const steps = data && Array.isArray(data.steps) ? data.steps : [];
-  for (let i = steps.length - 1; i >= 0; i--) {
-    const r = isObj(steps[i]) ? steps[i].result : null;
-    if (r === "merge_enqueued") return pullUrl(data) !== null;
-    if (r === "ready_human_merges" || r === "merged" || r === "merge_delegated") return false;
-  }
-  return false;
+  const q = data && isObj(data.merge_queue) ? data.merge_queue : null;
+  return q !== null && q.state === "queued" && pullUrl(data) !== null;
+}
+
+/**
+ * D#694 B6-5: the card's merge-queue line. Every sentence is fixed text in this one table; the only record text is a removal reason, a plain code from the server that is
+ * spelled out as words and drawn as a text node. Nothing here ever prints null, undefined or an empty reason.
+ */
+export const QUEUE_SENTENCES = Object.freeze({
+  queued: "In GitHub's merge queue",
+  removed_you: "Removed from the merge queue by you",
+  removed_person: "Removed from the merge queue by a person on GitHub",
+  removed_by_host: "GitHub removed it from the merge queue",
+  reconciled: "GitHub's merge queue no longer lists it (found on a later check)",
+  head_moved: "Waiting for review of the new commit",
+  no_answer: "GitHub hasn't said where this pull request is in the merge queue for 6 hours, so a person needs to look at it.",
+});
+const RECONCILED_CODE = "not_in_queue_reconciled";
+
+/** A server instant in the VIEWER's zone (`timeZone` undefined: the browser's own; a test passes one); "" for a missing or malformed instant. */
+export function zoneTime(iso, timeZone) {
+  const t = typeof iso === "string" ? new Date(iso) : null;
+  return t === null || Number.isNaN(t.getTime()) ? "" : t.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short", ...(timeZone === undefined ? {} : { timeZone }) });
+}
+
+/** The line for the item's `merge_queue`, or null when there is nothing to say. */
+export function queueLine(data, timeZone) {
+  const q = data && isObj(data.merge_queue) ? data.merge_queue : null;
+  if (q === null) return null;
+  const when = zoneTime(q.at, timeZone);
+  const at = when === "" ? "" : " at " + when;
+  if (q.state === "queued") return { kind: "queued", text: QUEUE_SENTENCES.queued + (Number.isInteger(q.position) && q.position >= 1 ? ", position " + q.position : "") + " since" + (when === "" ? " a moment ago" : " " + when) + "." };
+  if (q.state === "no_answer") return { kind: "no_answer", text: QUEUE_SENTENCES.no_answer };
+  if (q.state === "not_in_queue") return { kind: "head_moved", text: QUEUE_SENTENCES.head_moved + "." };
+  if (q.state !== "removed") return null;
+  const reason = typeof q.reason === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(q.reason) ? q.reason : "";
+  if (q.removed_by === "you") return { kind: "removed_you", text: QUEUE_SENTENCES.removed_you + at + "." };
+  if (q.removed_by === "person") return { kind: "removed_person", text: QUEUE_SENTENCES.removed_person + at + "." };
+  if (reason === RECONCILED_CODE) return { kind: "reconciled", text: QUEUE_SENTENCES.reconciled + at + "." };
+  return { kind: "removed_by_host", text: QUEUE_SENTENCES.removed_by_host + at + (reason === "" ? "" : ": " + reason.replace(/_/g, " ")) + "." };
 }
 
 /** The "Ready to merge" banner, only at review_passed, with the repo's real auto-merge setting. When something still blocks the merge it says what, in fixed words, and offers no link. */
@@ -704,7 +740,7 @@ export function waitingLine(views, raw) {
 }
 
 /** Everything the panel draws, from one response. */
-export function buildInsight(data) {
+export function buildInsight(data, timeZone) {
   const runs = (Array.isArray(data.runs) ? data.runs : []).map((r) => runView(r));
   // The context button's accessible name is unique per run: runs of one role (a build and its fix rounds) are told apart by their place among them.
   const sameRole = new Map();
@@ -730,6 +766,7 @@ export function buildInsight(data) {
     receipts: receiptsSection(data),
     childLaunch: childLaunchLine(data),
     banner: readyBanner(data),
+    queueLine: queueLine(data, timeZone),
     runningText: running.length ? "Running now: " + running.map((r) => r.role).join(", ") : "Nothing is running right now.",
     waitingText: waiting.length ? waitingLine(waiting, waitingRaw) : null,
     totalsText: finished.length + " agent run" + (finished.length === 1 ? "" : "s") + " finished" + (finished.length ? " · $" + spent.toFixed(2) + " so far" : ""),
@@ -1030,6 +1067,7 @@ export function createInsightPanel(deps) {
       m.childLaunch && m.childLaunch.text !== "" ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-child-launch", "data-offers": m.childLaunch.offers || "" }, m.childLaunch.text) : [],
       m.childLaunch && m.childLaunch.warning !== "" ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-child-launch-warning" }, m.childLaunch.warning) : [],
       m.banner ? banner(m.banner) : [],
+      m.queueLine ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-queue-line", "data-kind": m.queueLine.kind }, m.queueLine.text) : [],
       h("p", { "data-testid": "pl-running" }, m.runningText),
       m.waitingText ? h("p", { role: "status", "data-testid": "pl-waiting-runner" }, m.waitingText) : [],
       h("p", { class: "pl-muted", "data-testid": "pl-totals" }, m.totalsText),

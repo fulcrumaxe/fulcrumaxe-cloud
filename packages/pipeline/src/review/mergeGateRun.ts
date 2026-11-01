@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { enqueueDedupeKey, listHeadRemovals, recordDriverEvent, toCode } from "@fx/core/src/work-items/driverEvents.js";
+import { PERSON_REQUEUE_REASON, queueAgainPending } from "@fx/core/src/work-items/queueIntent.js";
 import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js";
 import { humanMergeOnly } from "@fx/db/src/humanMergeOnly.js";
 import { autoMergeAllowed } from "@fx/trust";
@@ -384,8 +385,10 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
         workItemId,
         kind: "merge_enqueued",
         // A head the queue took out and the gate put back is a new fact (the retry's), not the first one again.
-        dedupeKey: enqueueDedupeKey(out.headSha, (await listHeadRemovals(client, accountId, workItemId, out.headSha, prNumber)).length),
+        dedupeKey: enqueueDedupeKey(out.headSha, (await listHeadRemovals(client, accountId, workItemId, out.headSha, prNumber, { all: true })).length),
         code: out.via,
+        // D#694 B6-5: an enqueue that answers a person's Queue again says so; the retry rule then counts only the removals after it.
+        ...(headForRow !== null && (await queueAgainPending(client, accountId, workItemId, prNumber, headForRow)) ? { reasons: [PERSON_REQUEUE_REASON] } : {}),
         headSha: headForRow,
         prNumber,
         ...(out.entryId !== null ? { queueEntryId: out.entryId } : {}),

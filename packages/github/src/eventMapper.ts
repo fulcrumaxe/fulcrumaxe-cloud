@@ -11,7 +11,8 @@ import {
 import { classifyAuthor } from '@fx/trust';
 import { recordStage } from '@fx/core/src/work-items/recordStage.js';
 import { cleanWorkItemTitle } from '@fx/core/src/work-items/title.js';
-import { dequeueReasonCode, recordDriverEvent } from '@fx/core/src/work-items/driverEvents.js';
+import { DEQUEUE_SUCCESS_CODES, dequeueReasonCode, recordDriverEvent } from '@fx/core/src/work-items/driverEvents.js';
+import { ACTOR_YOU, removeIntentRecent } from '@fx/core/src/work-items/queueIntent.js';
 import { reportError } from '@fx/telemetry';
 import { IllegalStageTransitionError } from '@fx/core/src/work-items/stages.js';
 import { withTenant } from '@fx/db/src/withTenant.js';
@@ -1011,12 +1012,14 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
       }
       // One row per delivery: a second removal of the same head is a second row (the retry rule counts them), a redelivery is not.
       const entry = await latestEnqueue(client, ctx.accountId, workItemId);
+      // D#694 B6-5: a removal that follows the Remove button's recorded intent (an audit row for this head, within minutes) is the person's own, "you"; the queue's success reasons are never a removal.
+      const byYou = !DEQUEUE_SUCCESS_CODES.includes(mapped.reason ?? 'unspecified') && (await removeIntentRecent(client, ctx.accountId, workItemId, mapped.prNumber, mapped.headSha));
       const { recorded } = await recordDriverEvent(client, ctx.accountId, {
         workItemId,
         kind: 'merge_dequeued',
         dedupeKey: `dequeued:${ctx.deliveryId}`,
         code: mapped.reason ?? 'unspecified',
-        reasons: [`actor_${mapped.actor}`],
+        reasons: [byYou ? ACTOR_YOU : `actor_${mapped.actor}`],
         headSha: mapped.headSha,
         prNumber: mapped.prNumber,
         ...(entry !== null && entry.headSha === mapped.headSha && entry.queueEntryId !== null ? { queueEntryId: entry.queueEntryId } : {}),

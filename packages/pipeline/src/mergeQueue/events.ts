@@ -1,5 +1,5 @@
 import type { PoolClient } from "pg";
-import { DEQUEUE_SUCCESS_CODES, dequeueReasonCode, recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
+import { DEQUEUE_SUCCESS_CODES, dequeueReasonCode, personRequeueCycle, queueEscalationKey, recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, StageInputError } from "@fx/core/src/work-items/stages.js";
 import { HOST_RETRY_USED_REASON, requeueCiStopped, settleHostDequeue, settlePullRequest } from "./store.js";
@@ -64,9 +64,11 @@ export async function applyQueueEvent(client: PoolClient, input: { accountId: st
 
 /** The one automatic retry is used: a fixed `escalated` fact (once per head), and the item moves to `needs_human`. A stage that cannot take the move is left as it is. */
 export async function handToPerson(client: PoolClient, accountId: string, workItemId: string, headSha: string): Promise<void> {
-  await recordDriverEvent(client, accountId, { workItemId, kind: "escalated", dedupeKey: `queue_retry_used:${headSha}`, code: HOST_RETRY_USED_REASON, headSha });
+  // One row per cycle: after a person's Queue again, the next used-up retry is a new escalation, not the first one found again.
+  const key = queueEscalationKey("queue_retry_used", headSha, await personRequeueCycle(client, accountId, workItemId, headSha));
+  await recordDriverEvent(client, accountId, { workItemId, kind: "escalated", dedupeKey: key, code: HOST_RETRY_USED_REASON, headSha });
   try {
-    await recordStage(client, { workItemId, toStage: "needs_human", at: new Date(), source: "webhook", sourceRef: `merge_queue_retry_used:${headSha}` });
+    await recordStage(client, { workItemId, toStage: "needs_human", at: new Date(), source: "webhook", sourceRef: `merge_${key}` });
   } catch (err) {
     // fx-swallow-ok: GitHub's removal is a fact already recorded; an item that cannot legally move (already merged or closed) keeps its stage
     if (!(err instanceof IllegalStageTransitionError || err instanceof StageInputError)) throw err;

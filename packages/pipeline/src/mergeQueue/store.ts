@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
 import { listHeadRemovals } from "@fx/core/src/work-items/driverEvents.js";
-import { isQueuedSql, removalRetryAllowed } from "@fx/core/src/work-items/mergeReadiness.js";
+import { isQueuedSql, removalRetryAllowed, removedByPerson } from "@fx/core/src/work-items/mergeReadiness.js";
 import { MAX_CONFLICT_ROUNDS, MERGE_QUEUE_LEASE_SECONDS } from "./policy.js";
 import { eligibilityContext, pickNext } from "./eligibility.js";
 import { MergeQueueError, type EntryKind, type MergeQueueEntry, type MergedBy, type PrFacts, type QueueState, type WorkKind } from "./types.js";
@@ -581,7 +581,7 @@ export async function removalVerdict(client: Queryable, entry: Pick<MergeQueueEn
   const removals = await listHeadRemovals(client, entry.accountId, entry.workItemId, headSha, entry.prNumber);
   if (removals.length === 0) return { verdict: "none" };
   if (removalRetryAllowed(removals)) return { verdict: "retry", headSha };
-  return { verdict: removals[removals.length - 1]!.reasons.includes("actor_user") ? "removed" : "exhausted", headSha };
+  return { verdict: removedByPerson(removals[removals.length - 1]!.reasons) ? "removed" : "exhausted", headSha };
 }
 
 const removalStopReason = (v: "removed" | "exhausted"): string => (v === "removed" ? HOST_DEQUEUED_REASON : HOST_RETRY_USED_REASON);

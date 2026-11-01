@@ -45,6 +45,8 @@ describe('R6: what counts as stalled', () => {
   it('D#694 B6-3: a removal nothing answered is stalled at once when a person made it, and after the stale-wait time when GitHub did (its retry is due)', () => {
     const person = classifyStall(facts({ stage: 'review_passed', last: last('merge_dequeued', 'manual', ['actor_user'], MIN) }));
     expect(person).toMatchObject({ code: 'dequeued', why: DEQUEUED_SENTENCE });
+    // D#694 B6-5: your own removal from the card is a person's too: stalled at once, because nothing queues it again but you.
+    expect(classifyStall(facts({ stage: 'review_passed', last: last('merge_dequeued', 'manual', ['actor_you'], MIN) }))).toMatchObject({ code: 'dequeued' });
     expect(DEQUEUED_SENTENCE).toBe("GitHub's merge queue removed this pull request and it has not been put back in the queue.");
     expect(classifyStall(facts({ stage: 'review_passed', last: last('merge_dequeued', 'ci_failure', ['actor_app'], MIN) }))).toBeNull();
     expect(classifyStall(facts({ stage: 'review_passed', last: last('merge_dequeued', 'ci_failure', ['actor_app'], STALE_WAIT_MS + MIN) }))).toMatchObject({ code: 'dequeued' });

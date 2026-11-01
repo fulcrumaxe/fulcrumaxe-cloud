@@ -2,7 +2,7 @@ import type { Pool } from 'pg';
 import { assertActiveMembership } from '../tenancy/scopedAccess.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { advanceActionFor } from './advance.js';
-import { blockingReasons, isQueuedSql } from './mergeReadiness.js';
+import { blockingReasons, isQueuedSql, removedByPerson } from './mergeReadiness.js';
 import { readReviewHold } from './reviewHold.js';
 import { cleanWorkItemTitle } from './title.js';
 
@@ -140,7 +140,7 @@ export function classifyStall(f: StallFacts): Stall | null {
   // D#694 B6-3: waiting in GitHub's merge queue is active work, however many other facts were written after the enqueue (B6-4 bounds how long).
   if (f.queued === true) return null;
   // A removal nothing has answered: a person's is a stop at once; GitHub's own is the pipeline's turn to queue it again (one automatic retry), so it is given the stale-wait time first.
-  if (last !== null && last.kind === 'merge_dequeued' && (last.reasons.includes('actor_user') || f.now.getTime() - last.at.getTime() > STALE_WAIT_MS)) {
+  if (last !== null && last.kind === 'merge_dequeued' && (removedByPerson(last.reasons) || f.now.getTime() - last.at.getTime() > STALE_WAIT_MS)) {
     return { code: 'dequeued', why: DEQUEUED_SENTENCE, since: last.at };
   }
   if (last !== null && last.kind === 'merge_gate' && last.code === 'ready_human_merges') {

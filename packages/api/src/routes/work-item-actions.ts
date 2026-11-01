@@ -8,6 +8,7 @@ import type { OperatorVerdict } from "@fx/core/src/work-items/operatorActions.js
 import type { RouteContext, RouteEntry } from "../registry.js";
 import { ActionNotAvailableError, AlreadyRunningError, ApiError, EscalateError, ExternalRequiresHumanError, NoRepoError, RunActionsUnavailableError } from "../errors.js";
 import { ForbiddenError } from "@fx/core/src/tenancy/errors.js";
+import { NotInQueueError, markRemoveNoop, queueAgain, removeFromQueue } from "../queueMoves.js";
 import { UNAVAILABLE_TEXT, STATES, UUID_RE, acceptedSchema, idParamsSchema, mapDbError, notFound, runActionDeps } from "./run-actions.js";
 
 /**
@@ -133,6 +134,35 @@ async function openPr(ctx: RouteContext, id: string) {
   if (r.kind === "not_configured") throw new RunActionsUnavailableError();
   if (r.kind === "skipped") throw new ActionNotAvailableError("work item moved on; open it again");
   return r.kind === "opened" ? { work_item_id: id, result: "opened" as const, code: null, pr_number: r.prNumber } : { work_item_id: id, result: "refused" as const, code: r.code, pr_number: null };
+}
+
+/**
+ * D#694 B6-5: the host's dequeue, reached the way the other worker-side calls are (this package never opens a GitHub client). `null` until apps/web registers it; the route then
+ * answers 503 before anything is written. `not_queued`: the host says the pull request is not in its queue.
+ */
+export const queueActionDeps: { dequeue: ((args: { accountId: string; workItemId: string; prNumber: number }) => Promise<"dequeued" | "not_queued">) | null } = { dequeue: null };
+
+const removedSchema = z.object({ work_item_id: z.string().uuid(), result: z.literal("removed") });
+
+/** Remove from queue: the table's verdict and the audit row (the recorded intent) commit first; then one call to the host. A pull request that is not in the queue is `not_in_queue` and nothing changes. */
+async function removeFromQueueRoute(ctx: RouteContext, id: string) {
+  if (!UUID_RE.test(id)) throw notFound();
+  const dequeue = queueActionDeps.dequeue;
+  if (!dequeue) throw new RunActionsUnavailableError();
+  const target = await guarded(() => removeFromQueue({ pool: ctx.pool, principal: ctx.principal }, id)).catch((err: unknown) => {
+    if (err instanceof NotInQueueError) throw new ApiError(409, "not_in_queue", "the pull request is not in the merge queue");
+    throw err;
+  });
+  // fx-swallow-ok: the host could not be asked; nothing was removed, the item still reads as queued, and the answer is the usual 503
+  const out = await dequeue({ accountId: ctx.principal.accountId, workItemId: id, prNumber: target.prNumber }).catch(() => {
+    throw new RunActionsUnavailableError();
+  });
+  if (out === "not_queued") {
+    // The press removed nothing: say so on record, so a removal GitHub makes soon after is not read as this press's.
+    await markRemoveNoop({ pool: ctx.pool, principal: ctx.principal }, id, target);
+    throw new ApiError(409, "not_in_queue", "the pull request is not in the merge queue");
+  }
+  return { work_item_id: id, result: "removed" as const };
 }
 
 /** The note: the person's own words, at least one character that is not a space and at most REQUEST_CHANGES_NOTE_MAX characters (code points, as the store counts). */
@@ -320,5 +350,38 @@ export const workItemActionRoutes: RouteEntry[] = [
       "503": UNAVAILABLE_TEXT,
     },
     handler: (ctx, input) => openPr(ctx, input.params.id!),
+  },
+  {
+    ...common,
+    path: "/api/v1/work-items/{id}/remove-from-queue",
+    operationId: "removeFromQueueWorkItem",
+    summary: "Take a pull request out of the merge queue",
+    description:
+      "Session only, owner or admin; a token is refused. Takes no request body. `Idempotency-Key` is optional. Records an audit row (the item, the pull request number and its head: this is how the removal that follows is known to be yours), then asks the host to take the pull request out of its merge queue. Answers 200 `{ work_item_id, result: 'removed' }`; the card reads 'Removed from the merge queue by you' once the host's removal arrives. After your removal nothing queues it again by itself: Queue again does. " +
+      "Allowed only while the item waits in the merge queue (`actions` lists `remove_from_queue`). A pull request that is not in the queue answers 409 `not_in_queue` and nothing changes.",
+    responseSchema: removedSchema,
+    extraResponses: {
+      "403": SHARED_ERRORS,
+      "409": "Error `not_in_queue` (the pull request is not in the merge queue), `action_not_available` or `already_running` (agents are working on it).",
+      "503": UNAVAILABLE_TEXT,
+    },
+    handler: (ctx, input) => removeFromQueueRoute(ctx, input.params.id!),
+  },
+  {
+    ...common,
+    path: "/api/v1/work-items/{id}/queue-again",
+    operationId: "queueAgainWorkItem",
+    summary: "Put a removed pull request back in the merge queue",
+    description:
+      "Session only, owner or admin; a token is refused. Takes no request body. `Idempotency-Key` is optional. Records an audit row and asks the pipeline to run the whole merge check again on the pull request's current head: it is queued only if the check is clear, and refuses with the check's reasons otherwise, exactly as a first attempt would. Answers 202 `{ action_id, state }`; the outcome arrives through `GET /api/v1/run-actions/{id}` and the item's `merge_queue`. The queue's one automatic retry starts afresh after it. " +
+      "Allowed only while `actions` lists `queue_again`: the merge queue took the pull request out and it has not been queued since.",
+    responseSchema: acceptedSchema,
+    successStatus: 202,
+    extraResponses: {
+      "403": SHARED_ERRORS,
+      "409": "Error `action_not_available` (the queue has not taken the pull request out), `no_repo` or `already_running` (agents are working on it).",
+      "503": UNAVAILABLE_TEXT,
+    },
+    handler: (ctx, input) => driven(ctx, input.params.id!, (move, id) => queueAgain({ pool: move.pool, principal: move.principal }, id)),
   },
 ];

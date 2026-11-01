@@ -1,4 +1,5 @@
 import type { PoolClient } from 'pg';
+import { PERSON_REQUEUE_REASON, QUEUE_AGAIN_ACTION, queueAuditAtSql } from './queueIntent.js';
 
 /**
  * D#483 P3: the stage driver's recorded decisions (work_item_driver_events, migration 0709), as facts a read route can
@@ -99,17 +100,38 @@ export function dequeueReasonCode(reason: unknown): string {
 }
 
 /**
- * D#694 B6-3: the removals of one head of one pull request, oldest first, as `reasons` (`actor_user` | `actor_app`). GitHub's success reasons are left out, so the count of these is the count of
+ * D#694 B6-3: the removals of one head of one pull request, oldest first, as `reasons` (`actor_user` | `actor_app` | `actor_you`). GitHub's success reasons are left out, so the count of these is the count of
  * times the queue took the head out WITHOUT merging it: the number the one-automatic-retry rule is derived from (never a stored counter).
+ * B6-5: the rule counts only the removals NEWER than a person's Queue again (the newest `merge_enqueued` of the head that carries `person_requeue`, or, until the gate has
+ * made that enqueue, the Queue again audit row), so earlier removals no longer block the retry. `all: true` lists every removal (the enqueue facts' dedupe keys count those).
  */
-export async function listHeadRemovals(client: Pick<PoolClient, 'query'>, accountId: string, workItemId: string, headSha: string, prNumber: number): Promise<Array<{ reasons: string[] }>> {
+export async function listHeadRemovals(client: Pick<PoolClient, 'query'>, accountId: string, workItemId: string, headSha: string, prNumber: number, opts: { all?: boolean } = {}): Promise<Array<{ reasons: string[] }>> {
   const { rows } = await client.query<{ reasons: string[] }>(
-    `SELECT reasons FROM work_item_driver_events
-      WHERE account_id = $1 AND work_item_id = $2 AND kind = 'merge_dequeued' AND head_sha = $3 AND pr_number = $5 AND NOT (COALESCE(code, '') = ANY($4::text[])) ORDER BY seq`,
-    [accountId, workItemId, headSha, [...DEQUEUE_SUCCESS_CODES], prNumber],
+    `SELECT r.reasons FROM work_item_driver_events r
+      WHERE r.account_id = $1 AND r.work_item_id = $2 AND r.kind = 'merge_dequeued' AND r.head_sha = $3 AND r.pr_number = $5 AND NOT (COALESCE(r.code, '') = ANY($4::text[]))
+        AND ($6::boolean
+             OR (r.seq > COALESCE((SELECT max(q.seq) FROM work_item_driver_events q WHERE q.account_id = $1 AND q.work_item_id = $2 AND q.kind = 'merge_enqueued' AND q.head_sha = $3 AND q.pr_number = $5 AND $7 = ANY(q.reasons)), 0)
+                 AND r.created_at > COALESCE(${queueAuditAtSql(QUEUE_AGAIN_ACTION, '$2', '$5', '$3')}, '-infinity'::timestamptz)))
+      ORDER BY r.seq`,
+    [accountId, workItemId, headSha, [...DEQUEUE_SUCCESS_CODES], prNumber, opts.all === true, PERSON_REQUEUE_REASON],
   );
   return rows;
 }
+
+/**
+ * D#694 B6-5: the cycle a merge-queue escalation of this head belongs to: how many of its enqueues answered a person's Queue again. Each exhaustion (a used-up retry,
+ * or the host's silence) after another Queue again is a new escalation row, so the key carries the cycle; the first keeps the plain per-head key.
+ */
+export async function personRequeueCycle(client: Pick<PoolClient, 'query'>, accountId: string, workItemId: string, headSha: string): Promise<number> {
+  const { rows } = await client.query<{ n: string }>(
+    `SELECT count(*) AS n FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'merge_enqueued' AND head_sha = $3 AND $4 = ANY(reasons)`,
+    [accountId, workItemId, headSha, PERSON_REQUEUE_REASON],
+  );
+  return Number(rows[0]?.n ?? 0);
+}
+
+/** The dedupe key of a merge-queue escalation (`queue_retry_used`, `queue_no_answer`) of one head in one cycle (`personRequeueCycle`). */
+export const queueEscalationKey = (prefix: 'queue_retry_used' | 'queue_no_answer', headSha: string, cycle: number): string => (cycle === 0 ? `${prefix}:${headSha}` : `${prefix}:${headSha}:c${cycle}`);
 
 /**
  * D#694 B6-3: the dedupe key of an enqueue fact. The first enqueue of a head is `enqueued:<head>`; one made after `removals` removals of that head is a new fact

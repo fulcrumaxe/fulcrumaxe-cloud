@@ -58,6 +58,21 @@ export async function openQueueGitHub(pool: Pool, open: typeof openInstallationH
   });
 }
 
+/**
+ * D#694 B6-5: Remove from queue's call to the host. The repository is the item's own; the pull request number is the one the route took from the item's newest enqueue fact.
+ * A refusal to remove (`unavailable`: the app may not) is a throw, so the route answers 503 and the item still reads as queued.
+ */
+export async function dequeueQueuedItem(pool: Pool, input: { accountId: string; workItemId: string; prNumber: number }, open: typeof openInstallationHttp = openInstallationHttp): Promise<"dequeued" | "not_queued"> {
+  const repoId = await withTenant(pool, input.accountId, async (c) => (await c.query<{ repo_id: string | null }>(`SELECT repo_id FROM work_items WHERE account_id = $1 AND id = $2`, [input.accountId, input.workItemId])).rows[0]?.repo_id ?? null);
+  if (repoId === null) throw new Error("dequeue: the work item has no repository");
+  const github = await openQueueGitHub(pool, open, { accountId: input.accountId, repoId });
+  if (!github?.dequeuePullRequest) throw new Error("dequeue: the repository is not read by the cloud");
+  const out = await github.dequeuePullRequest({ repoId, prNumber: input.prNumber });
+  if (out.dequeued) return "dequeued";
+  if (out.reason === "not_queued") return "not_queued";
+  throw new Error("dequeue: the host refused");
+}
+
 export async function tickMergeQueueRepo(deps: MergeQueueTickerDeps, target: { accountId: string; repoId: string }): Promise<mergeQueue.QueueTickResult | null> {
   const { pool, orders } = deps;
   const open = deps.open ?? openInstallationHttp;

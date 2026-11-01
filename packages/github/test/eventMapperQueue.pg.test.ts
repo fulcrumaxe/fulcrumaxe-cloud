@@ -140,6 +140,65 @@ describe('merge-queue deliveries [pg]', () => {
     expect(reportError).toHaveBeenCalledTimes(1);
   });
 
+  it('B6-5: a removal within ten minutes of a Remove press of that head is the person\'s own (actor_you); no press, an older press, a press of another head or another pull request, a Queue again press, and the queue\'s success reason are not', async () => {
+    const press = (it1: { gh: number; workItemId: string }, over: { minutesAgo?: number; head?: string; pr?: number; action?: string } = {}) =>
+      admin.query(`INSERT INTO audit_log (account_id, actor, action, payload, created_at) VALUES ($1, 'tester', 'work_item.sent_back', $2::jsonb, now() - make_interval(mins => $3))`, [
+        refs.accountId,
+        JSON.stringify({ action: over.action ?? 'queue_remove', work_item_id: it1.workItemId, pr_number: over.pr ?? 800 + it1.gh, head_sha: over.head ?? GATED }),
+        over.minutesAgo ?? 1,
+      ]);
+    const removed = async (it1: { gh: number; workItemId: string }, reason = 'MANUAL') => {
+      await apply(payload('dequeued', it1.gh, { reason, sender: { type: 'User' } }), `d-${randomUUID()}`);
+      return (await events(it1.workItemId, 'merge_dequeued')).map((e: { reasons: string[] }) => e.reasons[0]);
+    };
+    const pressed = await item();
+    await press(pressed);
+    expect(await removed(pressed)).toEqual(['actor_you']);
+    const none = await item();
+    expect(await removed(none)).toEqual(['actor_user']);
+    const old = await item();
+    await press(old, { minutesAgo: 11 });
+    expect(await removed(old)).toEqual(['actor_user']);
+    const other = await item();
+    await press(other, { head: OTHER });
+    await press(other, { pr: 1 });
+    await press(other, { action: 'queue_again' });
+    expect(await removed(other, 'CI_FAILURE')).toEqual(['actor_app']);
+    const merged = await item();
+    await press(merged);
+    expect(await removed(merged, 'MERGE')).toEqual(['actor_app']);
+  });
+
+  it('B6-5: Remove, GitHub answers not queued (the no-op row naming that press), GitHub then removes within ten minutes: the removal reads as GitHub\'s, not yours; a later Remove press counts again', async () => {
+    const audit = async (it1: { gh: number; workItemId: string }, action: string, minutesAgo: number, answers?: string): Promise<string> =>
+      (
+        await admin.query<{ id: string }>(`INSERT INTO audit_log (account_id, actor, action, payload, created_at) VALUES ($1, 'tester', 'work_item.sent_back', $2::jsonb, now() - make_interval(mins => $3)) RETURNING id`, [
+          refs.accountId,
+          JSON.stringify({ action, work_item_id: it1.workItemId, pr_number: 800 + it1.gh, head_sha: GATED, ...(answers ? { answers } : {}) }),
+          minutesAgo,
+        ])
+      ).rows[0]!.id;
+    const first = async (it1: { gh: number; workItemId: string }, reason: string) => {
+      await apply(payload('dequeued', it1.gh, { reason, sender: { type: 'App' } }), `d-${randomUUID()}`);
+      return (await events(it1.workItemId, 'merge_dequeued')).map((e: { reasons: string[] }) => e.reasons[0]);
+    };
+    const noop = await item();
+    await audit(noop, 'queue_remove_noop', 2, await audit(noop, 'queue_remove', 3));
+    expect(await first(noop, 'CI_FAILURE')).toEqual(['actor_app']);
+    const again = await item();
+    await audit(again, 'queue_remove_noop', 3, await audit(again, 'queue_remove', 4));
+    await audit(again, 'queue_remove', 1);
+    expect(await first(again, 'CI_FAILURE')).toEqual(['actor_you']);
+    // The double press: A's Remove dequeued it, B's Remove a moment later was told "not queued". B's no-op names B's row, so A's press still stands and
+    // GitHub's removal is yours (a no-op that names nobody, or another item's press, answers nothing either).
+    const double = await item();
+    await audit(double, 'queue_remove', 3);
+    await audit(double, 'queue_remove_noop', 1, await audit(double, 'queue_remove', 2));
+    await audit(double, 'queue_remove_noop', 1);
+    await audit(double, 'queue_remove_noop', 1, randomUUID());
+    expect(await first(double, 'CI_FAILURE')).toEqual(['actor_you']);
+  });
+
   it('a fork from an untrusted author, and a pull request naming no work item, record nothing', async () => {
     const it1 = await item();
     const fork = payload('dequeued', it1.gh);

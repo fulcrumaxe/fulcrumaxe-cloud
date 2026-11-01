@@ -3959,6 +3959,44 @@
                         }
                       ]
                     },
+                    "merge_queue": {
+                      "type": "object",
+                      "properties": {
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "queued",
+                            "removed",
+                            "not_in_queue",
+                            "no_answer"
+                          ]
+                        },
+                        "position": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "removed_by": {
+                          "type": "string",
+                          "enum": [
+                            "you",
+                            "person",
+                            "github"
+                          ]
+                        },
+                        "reason": {
+                          "type": "string"
+                        },
+                        "at": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "state",
+                        "at"
+                      ],
+                      "additionalProperties": false
+                    },
                     "setup_pause": {
                       "anyOf": [
                         {
@@ -4175,7 +4213,9 @@
                           "close",
                           "reopen",
                           "retry_push",
-                          "open_pr"
+                          "open_pr",
+                          "remove_from_queue",
+                          "queue_again"
                         ]
                       }
                     },
@@ -5442,6 +5482,294 @@
           },
           "409": {
             "description": "Error `action_not_available` (the item has no pushed branch waiting for a pull request) or `already_running` (an agent run of the item is live).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error `run_actions_unavailable`: no worker is registered to process run actions yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/work-items/{id}/remove-from-queue": {
+      "post": {
+        "operationId": "removeFromQueueWorkItem",
+        "summary": "Take a pull request out of the merge queue",
+        "description": "Session only, owner or admin; a token is refused. Takes no request body. `Idempotency-Key` is optional. Records an audit row (the item, the pull request number and its head: this is how the removal that follows is known to be yours), then asks the host to take the pull request out of its merge queue. Answers 200 `{ work_item_id, result: 'removed' }`; the card reads 'Removed from the merge queue by you' once the host's removal arrives. After your removal nothing queues it again by itself: Queue again does. Allowed only while the item waits in the merge queue (`actions` lists `remove_from_queue`). A pull request that is not in the queue answers 409 `not_in_queue` and nothing changes.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "x-fx-idempotency": "optional",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Take a pull request out of the merge queue",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "work_item_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "result": {
+                      "type": "string",
+                      "const": "removed"
+                    }
+                  },
+                  "required": [
+                    "work_item_id",
+                    "result"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error `session_required` or `insufficient_role` (owner or admin only), or `external_requires_human` (only an internal work item can be moved from here; there is no override).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `not_in_queue` (the pull request is not in the merge queue), `action_not_available` or `already_running` (agents are working on it).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error `run_actions_unavailable`: no worker is registered to process run actions yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/work-items/{id}/queue-again": {
+      "post": {
+        "operationId": "queueAgainWorkItem",
+        "summary": "Put a removed pull request back in the merge queue",
+        "description": "Session only, owner or admin; a token is refused. Takes no request body. `Idempotency-Key` is optional. Records an audit row and asks the pipeline to run the whole merge check again on the pull request's current head: it is queued only if the check is clear, and refuses with the check's reasons otherwise, exactly as a first attempt would. Answers 202 `{ action_id, state }`; the outcome arrives through `GET /api/v1/run-actions/{id}` and the item's `merge_queue`. The queue's one automatic retry starts afresh after it. Allowed only while `actions` lists `queue_again`: the merge queue took the pull request out and it has not been queued since.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "x-fx-idempotency": "optional",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Put a removed pull request back in the merge queue",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "action_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "accepted",
+                        "claimed",
+                        "done",
+                        "refused",
+                        "failed"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "action_id",
+                    "state"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error `session_required` or `insufficient_role` (owner or admin only), or `external_requires_human` (only an internal work item can be moved from here; there is no override).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `action_not_available` (the queue has not taken the pull request out), `no_repo` or `already_running` (agents are working on it).",
             "content": {
               "application/json": {
                 "schema": {

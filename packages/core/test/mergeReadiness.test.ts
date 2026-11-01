@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { PERSON_MERGES_REASONS, QUEUED_TO_MERGE_LABEL, QUEUED_TO_MERGE_SUBTITLE, blockingReasons, onlyPersonMerges, removalRetryAllowed } from '../src/work-items/mergeReadiness.js';
+import { PERSON_MERGES_REASONS, QUEUED_TO_MERGE_LABEL, QUEUED_TO_MERGE_SUBTITLE, blockingReasons, onlyPersonMerges, removalRetryAllowed, removedByPerson } from '../src/work-items/mergeReadiness.js';
 import { classifyStall, type StallFacts } from '../src/work-items/stalled.js';
 
 const NOW = new Date('2026-10-27T12:00:00.000Z');
@@ -57,6 +57,11 @@ describe('which gate reasons leave an item ready for a person to merge', () => {
     expect(removalRetryAllowed([])).toBe(false);
     expect(removalRetryAllowed([{ reasons: ['actor_app'] }])).toBe(true);
     expect(removalRetryAllowed([{ reasons: ['actor_user'] }])).toBe(false);
+    expect(removalRetryAllowed([{ reasons: ['actor_you'] }])).toBe(false);
+    expect(removedByPerson(['actor_you'])).toBe(true);
+    expect(removedByPerson(['actor_user'])).toBe(true);
+    expect(removedByPerson(['actor_app'])).toBe(false);
+    expect(removedByPerson([])).toBe(false);
     expect(removalRetryAllowed([{ reasons: ['actor_app'] }, { reasons: ['actor_app'] }])).toBe(false);
   });
 });

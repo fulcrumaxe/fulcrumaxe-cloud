@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { listDriverEvents } from "@fx/core/src/work-items/driverEvents.js";
+import { listDriverEvents, listHeadRemovals } from "@fx/core/src/work-items/driverEvents.js";
+import { queueAgainPending } from "@fx/core/src/work-items/queueIntent.js";
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "../../../github/src/mergeGateGraphql.js";
 import { clearMergeQueueModeCache } from "../../src/build/githubMergePort.js";
 import { runMergeGateForItem } from "../../src/review/mergeGateRun.js";
@@ -568,4 +569,51 @@ describe("D#694 B5: a base branch behind GitHub's merge queue", () => {
     expect(await gate(w)).toMatchObject({ outcome: "merged" });
     expect(w.gh.mergeQueue!.mutations).toEqual([]);
   });
+
+  it("D#694 B6-5: an enqueue that answers a person's Queue again carries person_requeue and a key of its own; the retry rule then counts only the removals after it", async () => {
+    const w = await world({ repo: withQueue() });
+    await passBoth(w);
+    await queued(w);
+    const removal = (i: number) =>
+      h.admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key, code, reasons, head_sha, pr_number) VALUES ($1, $2, 'merge_dequeued', $3, 'ci_failure', ARRAY['actor_app'], $4, $5)`, [w.accountId, w.workItemId, `d${i}`, HEAD, w.gh.prNumber]);
+    await removal(1);
+    await removal(2);
+    const pressed = () =>
+      h.admin.query(`INSERT INTO audit_log (account_id, actor, action, payload) VALUES ($1, 'tester', 'work_item.sent_back', $2::jsonb)`, [w.accountId, JSON.stringify({ action: "queue_again", work_item_id: w.workItemId, pr_number: w.gh.prNumber, head_sha: HEAD })]);
+    const enqueues = async () => (await h.admin.query<{ dedupe_key: string; reasons: string[] }>(`SELECT dedupe_key, reasons FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'merge_enqueued' ORDER BY seq`, [w.workItemId])).rows;
+    const counted = (opts: { all?: boolean } = {}) => withTenant(h.runWriterPool, w.accountId, (c) => listHeadRemovals(c, w.accountId, w.workItemId, HEAD, w.gh.prNumber, opts));
+    // Before the press: a gate run on the same head is not a person's, and both removals still count.
+    expect(await counted()).toHaveLength(2);
+    await pressed();
+    // The press alone already resets the count (the take guard decides before the gate has enqueued), but only for removals before it.
+    expect(await counted()).toHaveLength(0);
+    expect(await counted({ all: true })).toHaveLength(2);
+    expect(await queueAgainPendingFor(w)).toBe(true);
+    await queued(w);
+    expect(await enqueues()).toEqual([
+      { dedupe_key: `enqueued:${HEAD}`, reasons: [] },
+      { dedupe_key: `enqueued:${HEAD}:r2`, reasons: ["person_requeue"] },
+    ]);
+    // The enqueue consumed the press: it is not pending any more, and a replay writes nothing.
+    expect(await queueAgainPendingFor(w)).toBe(false);
+    await queued(w);
+    expect(await enqueues()).toHaveLength(2);
+    // GitHub's next removal is the first since the person queued it again: it gets its one retry.
+    await removal(3);
+    expect(await counted()).toHaveLength(1);
+    expect(await counted({ all: true })).toHaveLength(3);
+  });
+
+  it("D#694 B6-5: the person_requeue enqueue fact alone (no audit row) also resets the retry count, for removals before it only", async () => {
+    const w = await world({ repo: withQueue() });
+    const ev = (kind: string, key: string, reasons: string[]) =>
+      h.admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key, code, reasons, head_sha, pr_number) VALUES ($1, $2, $3, $4, 'x', $5, $6, $7)`, [w.accountId, w.workItemId, kind, key, reasons, HEAD, w.gh.prNumber]);
+    await ev("merge_dequeued", "a", ["actor_app"]);
+    await ev("merge_dequeued", "b", ["actor_app"]);
+    await ev("merge_enqueued", "e", ["person_requeue"]);
+    await ev("merge_dequeued", "c", ["actor_app"]);
+    expect(await withTenant(h.runWriterPool, w.accountId, (c) => listHeadRemovals(c, w.accountId, w.workItemId, HEAD, w.gh.prNumber))).toHaveLength(1);
+  });
 });
+
+const queueAgainPendingFor = (w: World) => withTenant(h.runWriterPool, w.accountId, (c) => queueAgainPending(c, w.accountId, w.workItemId, w.gh.prNumber, HEAD));
