@@ -10,3 +10,4 @@ export * from "./events.js";
 export * from "./deltaReview.js";
 export * from "./deltaComplete.js";
 export * from "./mainGuard.js";
+export * from "./reconcile.js";

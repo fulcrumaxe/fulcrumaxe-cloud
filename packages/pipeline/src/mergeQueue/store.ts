@@ -625,7 +625,9 @@ export async function settleHostDequeue(client: Queryable, input: { accountId: s
  */
 export async function stopOnRemovals(client: Queryable, input: { entry: MergeQueueEntry; holder: string }): Promise<{ verdict: "removed" | "exhausted"; entry: MergeQueueEntry; headSha: string } | null> {
   const v = await removalVerdict(client, input.entry);
-  if ((v.verdict !== "removed" && v.verdict !== "exhausted") || v.headSha !== input.entry.headSha) return null;
+  // The head the entry is gated on (and so the one enqueued) is the reviewed head followed through its verified refreshes.
+  const tip = refreshTip(input.entry.headSha, await listHeadRefreshes(client, input.entry.accountId, input.entry.id));
+  if ((v.verdict !== "removed" && v.verdict !== "exhausted") || v.headSha !== tip) return null;
   const stopped = await stopEntry(client, { accountId: input.entry.accountId, entryId: input.entry.id, reason: removalStopReason(v.verdict), holder: input.holder });
   return stopped ? { verdict: v.verdict, entry: stopped, headSha: v.headSha } : null;
 }
@@ -725,6 +727,18 @@ export async function markDeltaSkipped(client: Queryable, input: { accountId: st
 }
 
 /** The refreshes recorded for one entry, oldest first. */
+/** The head the entry has reached through verified refreshes: from the reviewed head, follow `from -> to` rows. */
+export function refreshTip(reviewedHead: string, refreshes: readonly HeadRefreshRow[]): string {
+  let cur = reviewedHead;
+  const seen = new Set([cur]);
+  for (;;) {
+    const next = refreshes.find((r) => r.fromSha === cur);
+    if (!next || seen.has(next.toSha)) return cur;
+    seen.add(next.toSha);
+    cur = next.toSha;
+  }
+}
+
 export async function listHeadRefreshes(client: Queryable, accountId: string, entryId: string): Promise<HeadRefreshRow[]> {
   const { rows } = await client.query<{ from_sha: string; to_sha: string; base_sha: string; files_overlap: boolean; created_at: Date }>(
     `SELECT from_sha, to_sha, base_sha, files_overlap, created_at FROM head_refreshes WHERE account_id = $1 AND entry_id = $2 ORDER BY created_at, id`,
