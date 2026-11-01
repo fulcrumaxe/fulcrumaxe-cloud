@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 import { sessionSecretProblems } from "@fx/core/src/auth/session";
-import { envelopeDefaultMarginPct, hostedSandboxCapacityStatus, planDataStatus } from "@fx/plan-data";
+import { analysisSettings, envelopeDefaultMarginPct, hostedSandboxCapacityStatus, planDataStatus } from "@fx/plan-data";
 import { partnerLayerOn } from "@fx/partners/host";
 import { outsideMeterOn } from "@fx/spend";
 import { ENV_MANIFEST } from "../../../env-manifest";
@@ -64,7 +64,7 @@ function detail(report: EnvReport) {
     disabled: report.disabled,
     // D#483 S5-e1: a plan-data figure that is absent is named by a fixed code, never a value. Approval still works; the envelope pre-fill is the bare estimate.
     // D#598 P8b: the setup-request env-var check has no credential source bound yet, so it answers "unavailable" and Mark done is the way on.
-    unconfigured: [...(envelopeDefaultMarginPct() === null ? ["envelope_margin_unconfigured"] : []), ...(hostedSandboxCapacityStatus() === "ok" ? [] : ["hosted_sandbox_capacity_unconfigured"]), ...(productionVercelEnvSource.available ? [] : [VERCEL_ENV_SOURCE_UNCONFIGURED]), ...(report.disabled.some((d) => SIGNER_SETTINGS.has(d.name)) ? [BRANCH_CLEANUP_SIGNER_UNCONFIGURED] : [])],
+    unconfigured: [...(envelopeDefaultMarginPct() === null ? ["envelope_margin_unconfigured"] : []), ...(hostedSandboxCapacityStatus() === "ok" ? [] : ["hosted_sandbox_capacity_unconfigured"]), ...(analysisSettings().on ? [] : ["analysis_unconfigured"]), ...(productionVercelEnvSource.available ? [] : [VERCEL_ENV_SOURCE_UNCONFIGURED]), ...(report.disabled.some((d) => SIGNER_SETTINGS.has(d.name)) ? [BRANCH_CLEANUP_SIGNER_UNCONFIGURED] : [])],
   };
 }
 

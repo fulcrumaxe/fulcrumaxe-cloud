@@ -93,7 +93,7 @@ export function envelopeDefaultMarginPct(): number | null {
 }
 
 export type DiscoverySettings =
-  | { on: true; perRepoDailyUsd: number; verifyPerProposalUsd: number; externalVerifiesPerRepoPerDay: number }
+  | { on: true; perRepoDailyUsd: number; verifyPerProposalUsd: number; externalVerifiesPerRepoPerDay: number; analysisPerRunUsd?: number }
   | { on: false; code: 'discovery_unconfigured' };
 
 /**
@@ -109,6 +109,19 @@ export function discoverySettings(): DiscoverySettings {
     if (error instanceof PlanDataMissingError) return { on: false, code: 'discovery_unconfigured' };
     throw error;
   }
+}
+
+export type AnalysisSettings = { on: true; perRepoDailyUsd: number; analysisPerRunUsd: number } | { on: false; code: 'analysis_unconfigured' };
+
+/**
+ * D#483 S4-f3: the docs-and-code analysis figures. Analysis is on only when the `discovery` block carries `analysisPerRunUsd`; otherwise
+ * `{ on: false, code: 'analysis_unconfigured' }`, reported by the health check on its own line. Verification does not read this, so a missing
+ * figure never turns it off. There is no default figure. Never throws on missing data.
+ */
+export function analysisSettings(): AnalysisSettings {
+  const d = discoverySettings();
+  if (!d.on || d.analysisPerRunUsd === undefined) return { on: false, code: 'analysis_unconfigured' };
+  return { on: true, perRepoDailyUsd: d.perRepoDailyUsd, analysisPerRunUsd: d.analysisPerRunUsd };
 }
 
 /**

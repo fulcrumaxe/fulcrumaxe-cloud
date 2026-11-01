@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { markWorkPending, setPendingHooks } from "@fx/core/src/pendingWork";
-import type { AutoStartCounts, DiscoveryDrainCounts, ProposalVerifyCounts } from "@fx/worker";
+import type { AutoStartCounts, DiscoveryDrainCounts, DocsCodeAnalysisCounts, ProposalVerifyCounts } from "@fx/worker";
 import { makeRegion, storeOf, type FakeRegion } from "../../../../test/support/runtimeCacheFake";
 import { PROPOSAL_VERIFY_PASS_MS, proposalVerifySweepHandler, type ProposalVerifySweepHandlerDeps } from "./handler";
 
@@ -11,19 +11,21 @@ import { PROPOSAL_VERIFY_PASS_MS, proposalVerifySweepHandler, type ProposalVerif
  */
 const SECRET = "test-cron-secret";
 const NONE: ProposalVerifyCounts = { listed: 0, started: 0, waiting: 0, recorded: 0, daily_limit: 0, daily_cap: 0, skipped: 0, failed: 0 };
+const ANALYSIS_NONE: DocsCodeAnalysisCounts = { listed: 0, started: 0, waiting: 0, recorded: 0, daily_cap: 0, skipped: 0, failed: 0 };
 const AUTO_NONE: AutoStartCounts = { listed: 0, started: 0, asked: 0, held_by_rule: 0, no_room: 0, not_ready: 0, replayed: 0, failed: 0 };
 const DRAIN_NONE: DiscoveryDrainCounts = { accounts: 0, succeeded: 0, skipped: 0, failed: 0, errors: 0, more: false };
 const KEY = "pending:proposal-verify-sweep";
 const clock = { value: Date.parse("2026-10-22T12:00:00Z") };
 let region: FakeRegion;
 
-function setup(sweep: () => Promise<ProposalVerifyCounts> = async () => NONE, over: Partial<ProposalVerifySweepHandlerDeps> = {}, auto: () => Promise<AutoStartCounts> = async () => AUTO_NONE, drain: () => Promise<DiscoveryDrainCounts> = async () => DRAIN_NONE) {
+function setup(sweep: () => Promise<ProposalVerifyCounts> = async () => NONE, over: Partial<ProposalVerifySweepHandlerDeps> = {}, auto: () => Promise<AutoStartCounts> = async () => AUTO_NONE, drain: () => Promise<DiscoveryDrainCounts> = async () => DRAIN_NONE, analysis: () => Promise<DocsCodeAnalysisCounts> = async () => ANALYSIS_NONE) {
   const sweepDiscoveryQueue = vi.fn(drain);
   const sweepProposalVerification = vi.fn(sweep);
+  const sweepDocsCodeAnalysis = vi.fn(analysis);
   const sweepAutoStart = vi.fn(auto);
-  const getWorker = vi.fn(async (): Promise<{ sweepDiscoveryQueue: typeof sweepDiscoveryQueue; sweepProposalVerification: typeof sweepProposalVerification; sweepAutoStart: typeof sweepAutoStart } | null> => ({ sweepDiscoveryQueue, sweepProposalVerification, sweepAutoStart }));
+  const getWorker = vi.fn(async (): Promise<{ sweepDiscoveryQueue: typeof sweepDiscoveryQueue; sweepProposalVerification: typeof sweepProposalVerification; sweepDocsCodeAnalysis: typeof sweepDocsCodeAnalysis; sweepAutoStart: typeof sweepAutoStart } | null> => ({ sweepDiscoveryQueue, sweepProposalVerification, sweepDocsCodeAnalysis, sweepAutoStart }));
   const log = vi.fn();
-  return { sweepDiscoveryQueue, sweepProposalVerification, sweepAutoStart, getWorker, log, deps: { cronSecret: SECRET, getWorker, log, now: () => clock.value, ...over } satisfies ProposalVerifySweepHandlerDeps };
+  return { sweepDiscoveryQueue, sweepProposalVerification, sweepDocsCodeAnalysis, sweepAutoStart, getWorker, log, deps: { cronSecret: SECRET, getWorker, log, now: () => clock.value, ...over } satisfies ProposalVerifySweepHandlerDeps };
 }
 const req = (authorization: string | null, method = "GET") =>
   new NextRequest("https://example.test/api/cron/proposal-verify-sweep", { method, headers: authorization === null ? {} : { authorization } });
@@ -68,7 +70,7 @@ describe("GET /api/cron/proposal-verify-sweep", () => {
     const s = setup(async () => ({ ...NONE, listed: 3, started: 2, daily_limit: 1 }));
     const res = await proposalVerifySweepHandler(req(`Bearer ${SECRET}`), s.deps);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ configured: true, ...NONE, listed: 3, started: 2, daily_limit: 1, discovery: DRAIN_NONE, auto_start: AUTO_NONE });
+    expect(await res.json()).toEqual({ configured: true, ...NONE, listed: 3, started: 2, daily_limit: 1, discovery: DRAIN_NONE, analysis: ANALYSIS_NONE, auto_start: AUTO_NONE });
     expect(s.sweepProposalVerification).toHaveBeenCalledTimes(1);
     expect(marker()).toBe(clock.value + PROPOSAL_VERIFY_PASS_MS);
   });
@@ -123,6 +125,23 @@ describe("GET /api/cron/proposal-verify-sweep", () => {
     const held = setup(async () => NONE, {}, async () => ({ ...AUTO_NONE, children: CHILD_NONE }));
     await proposalVerifySweepHandler(req(`Bearer ${SECRET}`), held.deps);
     expect(marker()).not.toBe(clock.value + PROPOSAL_VERIFY_PASS_MS);
+  });
+
+  it("S4-f3: the analysis pass runs once, after the check pass and before the auto-start pass; waiting analyses keep the next pass coming; a fault in it never hides the check pass's counts", async () => {
+    await markWorkPending("proposal-verify-sweep", { since: clock.value });
+    const order: string[] = [];
+    const s = setup(async () => { order.push("verify"); return NONE; }, {}, async () => { order.push("auto"); return AUTO_NONE; }, undefined, async () => { order.push("analysis"); return { ...ANALYSIS_NONE, listed: 2, daily_cap: 2 }; });
+    const res = await proposalVerifySweepHandler(req(`Bearer ${SECRET}`), s.deps);
+    expect(await res.json()).toMatchObject({ configured: true, analysis: { listed: 2, daily_cap: 2 } });
+    expect(order).toEqual(["verify", "analysis", "auto"]);
+    expect(marker()).toBe(clock.value + PROPOSAL_VERIFY_PASS_MS);
+    await markWorkPending("proposal-verify-sweep", { since: clock.value });
+    const broken = setup(async () => ({ ...NONE, listed: 1 }), {}, undefined, undefined, async () => { throw new Error("boom"); });
+    const out = await proposalVerifySweepHandler(req(`Bearer ${SECRET}`), broken.deps);
+    expect(out.status).toBe(200);
+    expect(await out.json()).toMatchObject({ configured: true, listed: 1, analysis: null });
+    expect(broken.sweepAutoStart).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(broken.log.mock.calls)).not.toContain("boom");
   });
 
   it("an unconfigured worker is reported, not an error", async () => {

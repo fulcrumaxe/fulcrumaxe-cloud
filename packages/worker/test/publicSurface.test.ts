@@ -136,6 +136,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "sweepBranchCleanups",
       "sweepComputeSettle",
       "sweepDiscoveryQueue",
+      "sweepDocsCodeAnalysis",
       "sweepInvariants",
       "sweepParkedStages",
       "sweepPrSlotHolders",
@@ -155,6 +156,8 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
     expect(await worker.sweepProposalVerification()).toMatchObject({ idle: "not_configured", listed: 0, started: 0 });
     // With no discovery pieces given, the discovery drain runs nothing and says so (D#483 S4-c2).
     expect(await worker.sweepDiscoveryQueue()).toMatchObject({ idle: "not_configured", accounts: 0 });
+    // D#483 S4-f3: with no analysis pieces given, the analysis pass starts nothing and says so.
+    expect(await worker.sweepDocsCodeAnalysis()).toMatchObject({ idle: "not_configured", listed: 0, started: 0 });
     const everything = reachable(worker);
     expect(everything).not.toContain(poolA);
     expect(everything).not.toContain(poolB);
@@ -196,7 +199,13 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       // The same pieces with a follower: the real sweep runs, and without plan data it is idle for that reason, not "not_configured".
       const wired = await createWorker({ ...OPTIONS, verify, ports: { ...OPTIONS.ports, follow: async (): Promise<void> => undefined } });
       expect(await wired.sweepProposalVerification()).toMatchObject({ idle: "discovery_unconfigured", listed: 0, started: 0 });
+      // D#483 S4-f3: the analysis pass, wired the same way, is idle for its own reason.
+      expect(await wired.sweepDocsCodeAnalysis()).toMatchObject({ idle: "not_configured" });
       await wired.close();
+      forgetWorkerForTests();
+      const analysing = await createWorker({ ...OPTIONS, verify, analysis: { prompt: () => "p", parse: () => ({ ok: false, reason: "output_rejected" }) }, ports: { ...OPTIONS.ports, follow: async (): Promise<void> => undefined } });
+      expect(await analysing.sweepDocsCodeAnalysis()).toMatchObject({ idle: "analysis_unconfigured", listed: 0, started: 0 });
+      await analysing.close();
     } finally {
       if (saved !== undefined) process.env.FX_PLAN_DATA = saved;
       resetPlanDataCache();
