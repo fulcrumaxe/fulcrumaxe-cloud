@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
+import { CHECK_FIX_PARK } from "@fx/pipeline";
 import { createStageResume, type ParkedStageEntryInput } from "../src/stageResume.js";
 import type { AdvanceStartArgs } from "../src/advance.js";
 import type { SeatResult } from "../src/seat.js";
@@ -55,7 +56,7 @@ describe("the parked-stage sweep [pg]", { timeout: 60_000 }, () => {
 
   let n = 7000;
   /** A Spec-ready item with a Spec, a performed approval by the account's owner, and a limit-pause fact `ageSeconds` old. */
-  async function parked(o: { ageSeconds?: number; pause?: string; stage?: string; halted?: boolean; specAfterApproval?: boolean; provenance?: string } = {}) {
+  async function parked(o: { factStage?: string; ageSeconds?: number; pause?: string; stage?: string; halted?: boolean; specAfterApproval?: boolean; provenance?: string } = {}) {
     const a: SeedRefs = await seedAccount(admin, randomUUID());
     const w = randomUUID();
     await admin.query("INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number) VALUES ($1, $2, $3, 'feature', $4, $5, $6)", [w, a.accountId, a.repoId, o.provenance ?? "internal", o.stage ?? "spec_ready", n++]);
@@ -68,7 +69,7 @@ describe("the parked-stage sweep [pg]", { timeout: 60_000 }, () => {
       [approval, a.accountId, w, `session:${a.userId}`, "h".repeat(64), JSON.stringify({ work_item_id: w, advance: "started" })],
     );
     if (o.specAfterApproval) await admin.query("INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind) VALUES ($1, $2, 2, 'spec 2', encode(sha256(convert_to('spec 2', 'UTF8')), 'hex'), 'system')", [a.accountId, w]);
-    await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, stage, code, attempt, dedupe_key) VALUES ($1, $2, 'stage_waiting', 'build', $3, 0, $4)", [a.accountId, w, o.pause ?? "account_budget_reached", randomUUID()]);
+    await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, stage, code, attempt, dedupe_key) VALUES ($1, $2, 'stage_waiting', $5, $3, 0, $4)", [a.accountId, w, o.pause ?? "account_budget_reached", randomUUID(), o.factStage ?? "build"]);
     await admin.query("UPDATE work_item_driver_events SET created_at = now() - make_interval(secs => $2::int) WHERE work_item_id = $1", [w, o.ageSeconds ?? 3 * 3600]);
     if (o.halted) await admin.query("UPDATE work_items SET halted_at = now(), halt_action_id = $2 WHERE id = $1", [w, randomUUID()]);
     return { a, w, approval };
@@ -388,6 +389,28 @@ describe("the parked-stage sweep [pg]", { timeout: 60_000 }, () => {
     const out = await sweep.sweepParkedStages([entry]);
     expect(out.failed).toBeGreaterThanOrEqual(1);
     expect(mine(started, good.w)).toHaveLength(1);
+  });
+
+  it("C24 item 2: a check-fix round parked for capacity (in_progress, a fix_round fact, waiting_for_capacity) is restarted by the sweep without a person; another in_progress item is untouched", async () => {
+    const mineOf = (started: AdvanceStartArgs[], w: string) => started.filter((s) => s.workItemId === w);
+    // The parked check fix: the build run that failed its check is expected beside it (startedRunsOk), and the approval is the build's.
+    const park = await parked({ stage: "in_progress", factStage: "fix_round", pause: "waiting_for_capacity" });
+    await earlierAsk(park.a, park.w, keyOf(park.w, park.approval));
+    await admin.query("UPDATE agent_runs SET status = 'failed' WHERE work_item_id = $1", [park.w]);
+    // Not the park reason: an in_progress item whose fact is a spend pause at the fix_round stage, one whose fact is a build wait, and one with a capacity wait at another stage.
+    const spend = await parked({ stage: "in_progress", factStage: "fix_round", pause: "account_budget_reached" });
+    const buildWait = await parked({ stage: "in_progress", factStage: "build", pause: "waiting_for_capacity" });
+    // A review-position item with the same fact is the review fix round's entry, not this one.
+    const review = await parked({ stage: "pr_opened", factStage: "fix_round", pause: "waiting_for_capacity" });
+    const started: AdvanceStartArgs[] = [];
+    // The budget is ample here, so a spend-paused item WOULD be restarted if this entry listed it: it must not (the entry is the capacity park only). C23-5 above covers a denying budget.
+    const sweep = createStageResume(writerPool, { resolveRunSeat: seatFor(limits(1000)) as never, startAdvance: async (args) => void started.push(args), now: () => Date.now(), log: () => undefined });
+    await sweep.sweepParkedStages([CHECK_FIX_PARK]);
+    expect(mineOf(started, park.w)).toEqual([expect.objectContaining({ workItemId: park.w, actionId: park.approval, userId: park.a.userId })]);
+    for (const other of [spend, buildWait, review]) expect(mineOf(started, other.w)).toEqual([]);
+    // A second pass in the same window claims nothing more (the claim fact is deduped per attempt per pass).
+    await sweep.sweepParkedStages([CHECK_FIX_PARK]);
+    expect(mineOf(started, park.w)).toHaveLength(1);
   });
 
   it("the definer list is refused arguments outside its bounds and is not callable by the web login", async () => {

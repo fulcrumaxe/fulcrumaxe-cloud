@@ -598,6 +598,8 @@ const FAILURE_TEXT = {
   runner_lost: "The runner running this was lost.",
   runner_revoked: "The runner running this was revoked.",
   internal_error: "The run failed because of an internal error before the agent started.",
+  // D#483 S5-k3b-2c: the attempt the provider had no room for. It ended `cancelled` by the platform, not by a person; the item waits and starts again.
+  provider_capacity: "Ended before it started: our servers were full. The item is waiting for room.",
 };
 
 /** One plain sentence saying why the run failed, or null when it did not fail or recorded no reason. Text only. */

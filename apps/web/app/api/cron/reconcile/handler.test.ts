@@ -94,6 +94,27 @@ describe("GET /api/cron/reconcile: the tick", () => {
   });
 });
 
+describe("D#483 S5-k3b-2c: the capacity queue's backstop on the 15-minute tick", () => {
+  it("runs one claim pass per enabled tick, reports a failure without failing the tick, and runs none when the reconciler is switched off", async () => {
+    const runTickFn = vi.fn(async (_deps: TickDeps) => summary);
+    const capacityPass = vi.fn(async () => 1);
+    await reconcileHandler(requestWithAuth(`Bearer ${SECRET}`), fakeDeps({ capacityPass }), runTickFn);
+    expect(capacityPass).toHaveBeenCalledTimes(1);
+
+    const reported = vi.fn();
+    const failing = vi.fn(async () => {
+      throw new Error("db down");
+    });
+    const res = await reconcileHandler(requestWithAuth(`Bearer ${SECRET}`), fakeDeps({ capacityPass: failing, reportError: reported }), runTickFn);
+    expect(res.status).toBe(200);
+    expect(reported).toHaveBeenCalledWith(expect.any(Error), expect.objectContaining({ stage: "reconcile.capacity_pass" }));
+
+    const off = vi.fn(async () => 0);
+    await reconcileHandler(requestWithAuth(`Bearer ${SECRET}`), fakeDeps({ enabled: false, capacityPass: off }), async () => ({ enabled: false, results: [] }));
+    expect(off).not.toHaveBeenCalled();
+  });
+});
+
 describe("the real dependencies", () => {
   it("report failures through the shared reportError, and the kill switch reads FX_RECONCILE_ENABLED", () => {
     const saved = { url: process.env.DATABASE_URL_PLATFORM_OPS, on: process.env.FX_RECONCILE_ENABLED };

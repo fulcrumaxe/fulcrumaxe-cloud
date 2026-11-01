@@ -109,6 +109,11 @@ export interface ReconcileHandlerDeps {
   readSandboxReapDbMode?(): Promise<SandboxReapDbSetting>;
   /** The ops alert sink for a stalled job. Absent: built from the environment (null while not configured, which turns the alerts off). A test double passes its own or null. */
   opsAlertSink?: OpsAlertSink | null;
+  /**
+   * D#483 S5-k3b-2c: the capacity queue's backstop, one claim pass on this 15-minute tick (the other triggers are a waiting item's own ask and a followed sandbox run reaching its end).
+   * Absent (a test double): none. defaultReconcileDeps supplies it over the worker, which answers null while it is not configured.
+   */
+  capacityPass?(): Promise<unknown>;
 }
 
 const stdoutOnly = createErrorReporter({ service: "web" });
@@ -241,6 +246,7 @@ export function defaultReconcileDeps(): ReconcileHandlerDeps {
     sandboxReapMode: process.env.FX_SANDBOX_REAP_MODE,
     getWorker,
     readSandboxReapDbMode: () => readSandboxReapDbMode(cachedPlatformOpsPool!),
+    capacityPass: async () => (await getWorker())?.capacityClaimPass(),
   };
 }
 
@@ -291,6 +297,14 @@ export async function reconcileHandler(
       // Unknown means "maybe work": look again at the jobs' own cadence rather than letting the slow cadence sit on it.
       nextDueAt = Date.now() + FAST_JOB_RETRY_MS;
       deps.reportError(err, { stage: "reconcile.next_due", route: RECONCILE_ROUTE });
+    }
+    // D#483 S5-k3b-2c: the capacity queue's backstop. A failure is reported and never fails the tick.
+    if (summary.enabled && deps.capacityPass) {
+      try {
+        await deps.capacityPass();
+      } catch (err) {
+        deps.reportError(err, { stage: "reconcile.capacity_pass", route: RECONCILE_ROUTE });
+      }
     }
     // D#6 STALL-ALERT-FAST: on this connection, announce a job that has work and has stopped passing (and its recovery). It never fails the tick,
     // never writes error_events (a sink failure is one stdout line), and keeps the tick connecting while a notice is outstanding so recovery is noticed.

@@ -247,7 +247,8 @@ export function deriveProgress(f: ProgressFacts): Derived {
   const slotFreed = f.previewState === 'void' && f.voidReason !== null && FREEING_REASONS.has(f.voidReason);
   if (terminalRun) {
     if (f.runStatus === 'succeeded') outcome = 'finished';
-    else if (f.runStatus === 'cancelled') outcome = 'cancelled';
+    // D#483 S5-k3b-2c: a preview the provider had no room for also ends `cancelled`, but the platform ended it, not the person: it reads as the failure it always did.
+    else if (f.runStatus === 'cancelled' && f.failureReason !== 'provider_capacity') outcome = 'cancelled';
     else {
       reason = token(f.failureReason) ?? (f.runStatus !== null && FAILED_STATUSES.has(f.runStatus) ? f.runStatus : null);
       outcome =

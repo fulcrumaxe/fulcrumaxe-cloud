@@ -107,6 +107,8 @@ describe("failure reason", () => {
   it("says why a run failed in a fixed sentence per known code, and names an unknown code safely", () => {
     expect(failureText({ failure_reason: "sandbox_busy" })).toMatch(/still using this item's sandbox/);
     expect(failureText({ failure_reason: "sandbox_error" })).toMatch(/sandbox could not be created or started/);
+    // D#483 S5-k3b-2c: an attempt our servers had room for is not a failure and not the person's cancel; the approved fixed line.
+    expect(failureText({ failure_reason: "provider_capacity" })).toBe("Ended before it started: our servers were full. The item is waiting for room.");
     expect(failureText({ failure_reason: "brand_new_code" })).toBe("The run failed (reason code: brand_new_code).");
     expect(failureText({ failure_reason: "<b>x</b>" })).toBe("The run failed (reason code: bxb).");
   });

@@ -36,6 +36,7 @@ export * from "./startAgentRun.js";
 export * from "./cancelRun.js";
 export * from "./workflows/agentRun.js";
 export * from "./vercelSandboxPort.js";
+export { providerCapacityOf } from "./providerCapacity.js";
 export { recordStage, type RecordStageInput, type RecordStageResult } from "@fx/core/src/work-items/recordStage.js";
 export { checkRetryAuthor, type AuthorCheckProvider, type IssueAuthorLookup, type RetryAuthorVerdict } from "@fx/core/src/runActions/authorCheck.js";
 export * from "./computeSettleSweep.js";

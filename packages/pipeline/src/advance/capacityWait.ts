@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { CAPACITY_SKIP_SENTENCES, capacityWaitSentence } from "./capacitySentences.js";
+import { readReservationPause, type ReservationPause } from "./reservationPauses.js";
 
 /**
  * D#483 S5-k3b-2a: what the card shows while an item waits for room. Derived on read from the item's own queue entry (`capacity_queue_place`, migration 0943, on
@@ -38,4 +39,18 @@ export async function readCapacityWait(pool: Pool, accountId: string, workItemId
   if (row.o_skip !== null || row.o_place === null) return null;
   const sentence = capacityWaitSentence({ place: Number(row.o_place), recentStarts: row.o_recent_starts === null ? null : Number(row.o_recent_starts), medianWaitSeconds: row.o_median_wait_seconds });
   return sentence === null ? null : { sentence, place: Number(row.o_place), skip: null };
+}
+
+/** What the card shows for an item whose start is held: the customer's own limit, or our capacity. Never both. */
+export type StartWaitNotice = { kind: "limit"; pause: ReservationPause } | { kind: "capacity"; wait: CapacityWait };
+
+/**
+ * D#483 S5-k3b-2c (S5k3-5, S5k3b-8): the card's choice. The customer's limit comes first: capacity is read only when `readReservationPause` gives null, so an item at its own
+ * limit shows the limit whatever our servers are doing, and never holds a place in line.
+ */
+export async function readStartWaitNotice(pool: Pool, accountId: string, workItemId: string): Promise<StartWaitNotice | null> {
+  const pause = await readReservationPause(pool, accountId, workItemId);
+  if (pause !== null) return { kind: "limit", pause };
+  const wait = await readCapacityWait(pool, accountId, workItemId);
+  return wait === null ? null : { kind: "capacity", wait };
 }

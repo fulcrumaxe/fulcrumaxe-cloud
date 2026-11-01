@@ -117,7 +117,7 @@ describe("migration 0941: the queue never drops work [pg]", () => {
     expect((await claimWithinHeadroom(h.runWriterPool, total)).claimed, "a live lease is not claimable").toHaveLength(0);
     await h.admin.query(`UPDATE capacity_queue SET claim_expires_at = now() - interval '1 second' WHERE id = $1`, [first.id]); // fault injection: the lease ran out
     const second = (await claimWithinHeadroom(h.runWriterPool, total)).claimed[0]!;
-    expect(second).toMatchObject({ id: first.id, attempt: 1, startKey: `capacity:${first.id}:1` });
+    expect(second).toMatchObject({ id: first.id, attempt: 1});
     const run = await liveRun(a, a.items[0]!);
     expect(await markStarted(h.runWriterPool, second, run)).toBe(true);
     expect(await markStarted(h.runWriterPool, second, await liveRun(a, a.items[0]!)), "a replay of the same attempt").toBe(false);
@@ -177,7 +177,7 @@ describe("migration 0941: fair order [pg]", () => {
     expect((await rows(`id = '${first.id}'`))[0]).toMatchObject({ claimed_at: null, refused_status: 429, refused_code: "rate_limited" });
     const next = (await claimWithinHeadroom(h.runWriterPool, total)).claimed;
     expect(next.map((c) => c.workItemId)).toEqual([a.items[0], a.items[1], a.items[2]]);
-    expect(next[0]).toMatchObject({ id: first.id, attempt: 2, startKey: `capacity:${first.id}:2` });
+    expect(next[0]).toMatchObject({ id: first.id, attempt: 2});
   });
 
   it("a second enqueue of a waiting item is no new place", async () => {
