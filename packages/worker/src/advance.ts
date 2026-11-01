@@ -459,6 +459,8 @@ export interface AdvanceRunRequest {
   runId?: string;
   /** SANDBOX-RERUN-BRANCH-a: the branch a sandbox build pushes, recorded once as the run's `build.branch` event in its create transaction. Executor builds only. */
   buildBranch?: string;
+  /** The item's fixed branch name; see `RunPorts.startRun`. */
+  fixedBranch?: string;
   /** Start only if no OTHER run of the item is live (a run already claimed under this step's key is always returned). The executor uses it so two approvals cannot build twice. */
   exclusive?: boolean;
   /** Reviewer runs: the pull request head the review is for. Stored on the run (`head_sha`), which is what the merge gate reads. */
@@ -1068,6 +1070,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (req.decisionSnapshot !== undefined && (req.role !== "executor" || snapshotOf === null)) return { ok: false, reason: "invalid_input" };
     if (req.runId !== undefined && !UUID_RE.test(req.runId)) return { ok: false, reason: "invalid_input" };
     if (req.buildBranch !== undefined && (req.role !== "executor" || typeof req.buildBranch !== "string" || req.buildBranch.length > 80)) return { ok: false, reason: "invalid_input" };
+    if (req.fixedBranch !== undefined && (req.buildBranch === undefined || typeof req.fixedBranch !== "string" || req.fixedBranch.length > 80)) return { ok: false, reason: "invalid_input" };
     const baseKey = `advance:${req.workItemId}:${req.step}`;
     let key = baseKey;
     const found = await withTenant(runnerPool, req.accountId, async (client) => {
@@ -1142,7 +1145,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
             inCreateTransaction: async (client: PoolClient, runId: string) => {
               if (snapshotOf) await writeDecisionSnapshot(client, runId, snapshotOf);
               // SANDBOX-RERUN-BRANCH-a: the branch record shares the run's create transaction, so a run that has a pull request always has its record.
-              if (req.buildBranch !== undefined) await recordBuildBranch(client, req.accountId, runId, req.buildBranch);
+              if (req.buildBranch !== undefined) await recordBuildBranch(client, req.accountId, runId, req.buildBranch, req.fixedBranch);
             },
           }
         : {}),

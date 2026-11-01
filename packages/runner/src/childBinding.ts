@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { RUNNER_RUN_BRANCH } from "@fulcrumaxe/runner-protocol";
 import { BUILD_BRANCH_KIND, sandboxRunBranch } from "@fx/core/src/work-items/buildIdentity.js";
 import { RUN_EVENTS_SEQ_LOCK_SQL, insertRunEvent, runEventsSeqLockKey } from "./runStatusWriter.js";
 
@@ -38,8 +39,11 @@ export async function recordChildBranch(client: PoolClient, accountId: string, r
  * SANDBOX-RERUN-BRANCH-a: the branch a sandbox executor run pushes, written once in the run's create transaction (`build.branch`, `{ branch }`): the item's fixed name, or this run's own `fx/<id>-g1`.
  * Nothing else is recorded. A second write for the run is a no-op (`false`).
  */
-export async function recordBuildBranch(client: PoolClient, accountId: string, runId: string, branch: string): Promise<boolean> {
-  if (branch !== sandboxRunBranch(runId) && !SAFE_BRANCH.test(branch) && !/^fx\/issue-[1-9][0-9]{0,9}$/.test(branch)) throw new Error("recordBuildBranch: not a build branch");
+export async function recordBuildBranch(client: PoolClient, accountId: string, runId: string, branch: string, fixedBranch?: string): Promise<boolean> {
+  // Only exact names: this run's own, the item's `fx/issue-<n>`, or the fixed name the caller says the item builds on (a planned PR child's `fx/<parent#>-<key>`, which is the caller's to name: never accepted by shape,
+  // so another run's `fx/<uuid>-g1` whose id begins with digits is refused). The caller's name must itself be a fixed-name shape, so it cannot whitelist `main` or a run branch.
+  const fixedOk = fixedBranch !== undefined && branch === fixedBranch && (SAFE_BRANCH.test(fixedBranch) || /^fx\/issue-[1-9][0-9]{0,9}$/.test(fixedBranch)) && !RUNNER_RUN_BRANCH.test(fixedBranch);
+  if (branch !== sandboxRunBranch(runId) && !/^fx\/issue-[1-9][0-9]{0,9}$/.test(branch) && !fixedOk) throw new Error("recordBuildBranch: not a build branch");
   return writeOnce(client, accountId, runId, BUILD_BRANCH_KIND, { branch });
 }
 
