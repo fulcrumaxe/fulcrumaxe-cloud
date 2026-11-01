@@ -8,7 +8,8 @@ import type { PullRequestRef } from "../build/types.js";
 import { guardMain, type MainGuardGitHubPort } from "./mainGuard.js";
 import { MERGE_QUEUE_CI_WAIT_MINUTES } from "./policy.js";
 import { runRefreshStep, refreshTip, type RefreshGitHubPort, type StartDeltaReview } from "./refresh.js";
-import { adoptParkedSlot, HOST_QUEUE_PHASE, listHeadRefreshes, markMerged, PARKED_PHASE, readQueue, reclaimExpiredLeases, releaseToQueue, renewSlot, returnToReview, stopEntry, takeSlot } from "./store.js";
+import { adoptParkedSlot, listHeadRefreshes, markMerged, PARKED_PHASE, readHaltedEntries, readHostQueued, readQueue, reclaimExpiredLeases, releaseToQueue, renewSlot, returnToReview, stopEntry, stopOnRemovals, takeSlot } from "./store.js";
+import { handToPerson } from "./events.js";
 import type { MergeQueueEntry, PrFacts } from "./types.js";
 
 /**
@@ -33,17 +34,11 @@ import type { MergeQueueEntry, PrFacts } from "./types.js";
 export type QueueGateResult =
   | { outcome: "merged" }
   | { outcome: "merge_delegated" }
-  /** D#694 B5: the gate put the pull request in the merge queue of the host. The entry keeps the slot, settled, until the webhook (B6) records the end. */
+  /** D#694 B5: the gate put the pull request in the merge queue of the host. B6-3: the entry gives the slot back and reads as "queued to merge" from its facts until the webhook records the end. */
   | { outcome: "merge_enqueued" }
   | { outcome: "pr_not_open" }
   | { outcome: "head_moved" }
   | { outcome: "ready_human_merges"; reasons: readonly string[] };
-
-/**
- * D#694 B5: how long a slot is held for an entry whose pull request waits in the host's merge queue (the store's longest lease). B6-2: this is only the bound for
- * a lost delivery. The webhook ends the hold itself (`settlePullRequest` for a merge or a close, `settleHostDequeue` for a removal), so the usual wait is the queue's.
- */
-export const HOST_QUEUE_LEASE_SECONDS = 3600;
 
 export type TickGitHubPort = RefreshGitHubPort & MainGuardGitHubPort;
 
@@ -54,6 +49,12 @@ export interface QueueTickDeps {
   ourLogin: string;
   /** The merge gate on `headSha` (production: `runMergeGateForItem`), given the signals that were green on the reviewed head. */
   gate(args: { entry: MergeQueueEntry; headSha: string; expectedSignals: readonly string[] }): Promise<QueueGateResult>;
+  /**
+   * D#694 B6-3: how the pull request's base branch merges and, in a queue, how many entries the rule builds at once (`max_entries_to_build`; 1 when it cannot be read).
+   * Absent, or a mode other than `queue`: today's behaviour. In `queue` mode the tick never runs update-branch (GitHub builds its own group tip) and puts at most
+   * `maxEntries` entries of the repository in the host's queue at a time.
+   */
+  queueInfo?(pr: PullRequestRef): Promise<{ mode: "queue" | "direct" | "unknown"; maxEntries: number }>;
   /** MQ3-a's port, bound by the caller to the real reviewer start. */
   startDeltaReview: StartDeltaReview;
   /**
@@ -70,9 +71,9 @@ export interface QueueTickDeps {
 }
 
 export type TickStep =
-  | { step: "idle"; why: "slot_busy" | "nothing_eligible" | "lost_race" | "waiting_mergeability" }
+  | { step: "idle"; why: "slot_busy" | "nothing_eligible" | "lost_race" | "waiting_mergeability" | "host_queue_full" }
   | { step: "merged"; entryId: string; prNumber: number }
-  | { step: "parked"; entryId: string; why: "ci_pending" | "refresh_pending" | "main_ci_unknown" | "host_queued" }
+  | { step: "parked"; entryId: string; why: "ci_pending" | "refresh_pending" | "main_ci_unknown" }
   /** The holder's slot is gone and nothing more is done with it this pass. */
   | { step: "released"; entryId: string; why: string };
 
@@ -108,7 +109,11 @@ async function recheck(deps: QueueTickDeps, input: { accountId: string; repoId: 
   // A holder whose lease lapsed goes back to the queue FIRST, so it is rechecked with the rest and keeps its place ahead of later entries.
   const now = deps.now?.();
   await deps.inTenant(accountId, (c) => reclaimExpiredLeases(c, { accountId, repoId, ...(now ? { now } : {}) }));
-  const queued = (await deps.inTenant(accountId, (c) => readQueue(c, accountId, repoId))).filter((e) => e.state === "queued" && e.entryKind === "work_item");
+  // D#694 B6-3: an entry waiting in the host's queue is read from its facts and left out: no GitHub read, no facts, so it is never eligible while it waits.
+  // A halted item (a person stopped it) is left out too: nothing is enqueued, retried or merged for it.
+  const skipped = new Set((await deps.inTenant(accountId, (c) => readHostQueued(c, accountId, repoId))).map((h) => h.entryId));
+  for (const id of await deps.inTenant(accountId, (c) => readHaltedEntries(c, accountId, repoId))) skipped.add(id);
+  const queued = (await deps.inTenant(accountId, (c) => readQueue(c, accountId, repoId))).filter((e) => e.state === "queued" && e.entryKind === "work_item" && !skipped.has(e.id));
   const facts = new Map<string, PrFacts>();
   const conflicted: MergeQueueEntry[] = [];
   out.waiting = [];
@@ -151,10 +156,28 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
   const pr: PullRequestRef = { repoId, prNumber: held.prNumber };
   const release = async (why: string): Promise<TickStep> => ({ step: "released", entryId: held.id, why });
 
+  // D#694 B6-3: decided from the facts, not from whether the webhook's settle ran: a person's removal, or the second removal of the head, stops the entry instead of
+  // enqueueing it again (the second also hands the item to a person).
+  const stopped = await deps.inTenant(accountId, async (c) => {
+    const st = await stopOnRemovals(c, { entry: held, holder });
+    if (st?.verdict === "exhausted") await handToPerson(c, accountId, held.workItemId!, st.headSha);
+    return st;
+  });
+  if (stopped) return release(stopped.verdict === "removed" ? "removed_from_merge_queue" : "merge_queue_retry_used");
+
   // D#519 MQ-MAIN-RED-GUARD: no refresh, CI wait or merge while the default branch's newest result is red.
   const main = await guardMain({ github: deps.github, inTenant: deps.inTenant, ...(deps.now ? { now: deps.now } : {}) }, { accountId, entry: held, holder, pr });
   if (main) return main;
 
+  // One read of the base branch per take. The repository's entries already in the host's queue count against the rule's batch size (read now, while this entry holds
+  // the slot); at the bound this one goes back to its place and waits. An unreadable or non-queue answer is a bound of 1.
+  const info = await queueInfoOf(deps, pr);
+  const inHost = await deps.inTenant(accountId, (c) => readHostQueued(c, accountId, repoId));
+  if (inHost.length > 0 && inHost.length >= (info.mode === "queue" ? Math.max(1, info.maxEntries) : 1)) {
+    await deps.inTenant(accountId, (c) => releaseToQueue(c, { accountId, entryId: held.id, holder }));
+    return { step: "idle", why: "host_queue_full" };
+  }
+  const queueMode = info.mode === "queue";
   const refresh = await runRefreshStep<QueueGateResult | { outcome: "parked" | "ci_red" | "ci_timeout" }>(
     {
       github: deps.github,
@@ -163,6 +186,7 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
       gate: ({ headSha }) => ciThenGate(deps, accountId, held, holder, pr, headSha),
       startDeltaReview: deps.startDeltaReview,
       sleep: deps.sleep,
+      ...(queueMode ? { skipBehindRefresh: true } : {}),
       ...(deps.pollIntervalMs !== undefined ? { pollIntervalMs: deps.pollIntervalMs } : {}),
       ...(deps.pollLimit !== undefined ? { pollLimit: deps.pollLimit } : {}),
     },
@@ -203,11 +227,10 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
     case "parked":
       return { step: "parked", entryId: held.id, why: "ci_pending" };
     case "merge_enqueued":
-      // D#694 B5: the host's queue owns the merge now. The entry keeps the slot in its own phase, which no tick adopts (only `parked` is adopted), so the gate is not
-      // asked again and nothing is enqueued twice; the webhook that records the queue's end (a later row) settles the entry. The longest lease the store allows
-      // bounds how long a lost webhook can hold it.
-      await deps.inTenant(accountId, (c) => renewSlot(c, { accountId, entryId: held.id, holder, phase: HOST_QUEUE_PHASE, leaseSeconds: HOST_QUEUE_LEASE_SECONDS }));
-      return { step: "parked", entryId: held.id, why: "host_queued" };
+      // D#694 B6-3: the host's queue owns the merge now. The entry gives the slot back and stays `queued`; its facts (the enqueue the gate just wrote) keep it out of every
+      // take until an outcome arrives, so the gate is not asked again and nothing is enqueued twice, and the next entry can go while the bound allows.
+      await deps.inTenant(accountId, (c) => releaseToQueue(c, { accountId, entryId: held.id, holder }));
+      return release("host_queued");
     case "ci_red":
     case "ci_timeout":
       return release("ci_not_green");
@@ -223,6 +246,15 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
       await deps.inTenant(accountId, (c) => stopEntry(c, { accountId, entryId: held.id, reason: "merge_call_refused", holder }));
       return release("merge_call_refused");
   }
+}
+
+/** The queue answer for a pull request; absent, or a failed read, is `unknown` with a bound of 1 (nothing is skipped and no second entry goes in). */
+async function queueInfoOf(deps: QueueTickDeps, pr: PullRequestRef): Promise<{ mode: "queue" | "direct" | "unknown"; maxEntries: number }> {
+  if (!deps.queueInfo) return { mode: "direct", maxEntries: 1 };
+  return deps.queueInfo(pr).catch((err) => {
+    reportError(err, { stage: "merge_queue.queue_info" });
+    return { mode: "unknown" as const, maxEntries: 1 };
+  });
 }
 
 /** Moves the entry's item to `merged`. GitHub has already merged, so the entry's merged state never rolls back: an item that cannot legally move there (already merged, closed, not at a pull-request stage) or an `at` ahead of the database clock is refused by recordStage before it writes anything, and is left to the webhook and the slot sweep. */

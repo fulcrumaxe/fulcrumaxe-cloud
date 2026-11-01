@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { PERSON_MERGES_REASONS, blockingReasons, onlyPersonMerges } from '../src/work-items/mergeReadiness.js';
+import { PERSON_MERGES_REASONS, QUEUED_TO_MERGE_LABEL, QUEUED_TO_MERGE_SUBTITLE, blockingReasons, onlyPersonMerges, removalRetryAllowed } from '../src/work-items/mergeReadiness.js';
 import { classifyStall, type StallFacts } from '../src/work-items/stalled.js';
 
 const NOW = new Date('2026-10-27T12:00:00.000Z');
@@ -42,5 +42,21 @@ describe('which gate reasons leave an item ready for a person to merge', () => {
     expect(block).not.toBeNull();
     const names = [...block![1]!.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
     expect(names).toEqual([...PERSON_MERGES_REASONS]);
+  });
+
+  it("D#694 B6-3: the label and subtitle are fixed words, and the Pipeline app's banner shows the same ones, pinned", () => {
+    expect(QUEUED_TO_MERGE_LABEL).toBe('Queued to merge');
+    expect(QUEUED_TO_MERGE_SUBTITLE).toBe("Waiting for GitHub's merge queue to build and merge it");
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(here, '..', '..', '..', 'apps', 'workspace', 'apps', 'pipeline', 'pipeline-insight.js'), 'utf8');
+    expect(src).toContain(`export const QUEUED_TO_MERGE_LABEL = "${QUEUED_TO_MERGE_LABEL}";`);
+    expect(src).toContain(`export const QUEUED_TO_MERGE_SUBTITLE = "${QUEUED_TO_MERGE_SUBTITLE}";`);
+  });
+
+  it('D#694 B6-3: one automatic retry per head, derived from the removals: the first removal by GitHub only', () => {
+    expect(removalRetryAllowed([])).toBe(false);
+    expect(removalRetryAllowed([{ reasons: ['actor_app'] }])).toBe(true);
+    expect(removalRetryAllowed([{ reasons: ['actor_user'] }])).toBe(false);
+    expect(removalRetryAllowed([{ reasons: ['actor_app'] }, { reasons: ['actor_app'] }])).toBe(false);
   });
 });

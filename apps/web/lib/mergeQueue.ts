@@ -3,7 +3,7 @@ import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { createGitHubMergeGatePort, mergeQueue, type GitHubHttp } from "@fx/pipeline";
 import type { AdvanceReviewDeps, RunnerPlaneMergeStore } from "@fx/worker";
-import type { GithubWebhookPayload, GithubWebhookEventName } from "@fx/github";
+import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, type GithubWebhookPayload, type GithubWebhookEventName } from "@fx/github";
 import { createReviewDeps } from "./advanceReview";
 import { bindCompleteDeltaReview, bindStartDeltaReview } from "./mergeQueueDeltaReview";
 import { getWorker } from "./worker";
@@ -48,7 +48,14 @@ export async function openQueueGitHub(pool: Pool, open: typeof openInstallationH
   const owner = repo.gh_owner;
   const name = repo.gh_name;
   const http = (await openForRepo(open, repo.execution_mode, "merge_gate", { repoId: target.repoId, owner, name })) as GitHubHttp;
-  return createGitHubMergeGatePort({ http, resolveRepo: async () => ({ owner, name }), markReadyForHumanMerge: async () => undefined, mergeMethod: "squash" });
+  return createGitHubMergeGatePort({
+    http,
+    resolveRepo: async () => ({ owner, name }),
+    markReadyForHumanMerge: async () => undefined,
+    mergeMethod: "squash",
+    // D#694 B6-3: without the pinned documents the port answers `direct` before any read, so the tick would update queue-mode branches and never see the rule's batch size.
+    queueDocuments: { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT },
+  });
 }
 
 export async function tickMergeQueueRepo(deps: MergeQueueTickerDeps, target: { accountId: string; repoId: string }): Promise<mergeQueue.QueueTickResult | null> {
@@ -81,6 +88,8 @@ export async function tickMergeQueueRepo(deps: MergeQueueTickerDeps, target: { a
             throw new Error("merge queue: gate answered an outcome this queue does not know");
         }
       },
+      // D#694 B6-3: the rule's batch size bounds how many entries wait in the host's queue, and a queue branch is never updated by the product.
+      queueInfo: (pr) => github.getMergeQueueInfo!(pr),
       startDeltaReview: deps.startDeltaReview ?? bindStartDeltaReview({ pool, worker: await getWorker(), open, github }),
       sleep: deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
     },

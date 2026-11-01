@@ -157,6 +157,16 @@ export interface TransitionPrEvent {
 }
 
 /**
+ * D#694 B6-3: who removed a pull request from the merge queue. The host's own reason is the primary signal: `manual` is a person. Only when the host gave no reason does the
+ * sender's type decide (a `User`). Any other reason is the queue's own doing, whoever the sender is. (GitHub's documented reason values could not be confirmed from its docs
+ * when this was written, so `manual` is the one value relied on; the product's own removal, B6-5, will be told apart by the intent it records itself.)
+ */
+export function queueActor(reasonCode: string | null, senderType: unknown): 'user' | 'app' {
+  if (reasonCode === 'manual') return 'user';
+  return (reasonCode === null || reasonCode === 'unspecified') && senderType === 'User' ? 'user' : 'app';
+}
+
+/**
  * D#694 B6-2: `pull_request.enqueued` / `.dequeued`, the host's merge queue taking a pull request in or out. Recorded as a fact of the linked work item (`merge_enqueued`,
  * `merge_dequeued`) and guarded exactly as `transition_pr` is. `reason` is the host's dequeue reason as a plain code (never text), null for `enqueued`; `actor` is `user` when a
  * person removed it and `app` for anything else.
@@ -478,7 +488,7 @@ export function mapEvent(
         if (typeof queuedHead !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(queuedHead)) {
           return { kind: 'ignored', reason: `pull_request.${p.action}: no head commit id` };
         }
-        return { kind: 'record_queue_event', action: p.action, prNumber, headSha: queuedHead, reason: p.action === 'dequeued' ? dequeueReasonCode(p.reason) : null, actor: p.sender?.type === 'User' ? 'user' : 'app', linkedIssueNumber, trust, isFork, headRef, baseIsDefault };
+        return { kind: 'record_queue_event', action: p.action, prNumber, headSha: queuedHead, reason: p.action === 'dequeued' ? dequeueReasonCode(p.reason) : null, actor: queueActor(p.action === 'dequeued' ? dequeueReasonCode(p.reason) : null, p.sender?.type), linkedIssueNumber, trust, isFork, headRef, baseIsDefault };
       }
       return { kind: 'ignored', reason: `pull_request.${p.action}: not opened/closed/synchronize/enqueued/dequeued, no stage change` };
     }

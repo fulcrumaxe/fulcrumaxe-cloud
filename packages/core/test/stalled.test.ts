@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { SILENT_MS, STALE_WAIT_MS, STALL_ACTION_LABELS, STALL_STAGES, TRANSIENT_GATE_REASONS, classifyStall, stallActionLabel, type StallFacts } from '../src/work-items/stalled.js';
+import { SILENT_MS, STALE_WAIT_MS, STALL_ACTION_LABELS, STALL_STAGES, TRANSIENT_GATE_REASONS, DEQUEUED_SENTENCE, classifyStall, stallActionLabel, type StallFacts } from '../src/work-items/stalled.js';
 
 /**
  * R6: the pure half of the stalled-items list. Every kind of evidence, and every reason NOT to list an item (something is running, a question is open, a
@@ -36,6 +36,23 @@ describe('R6: what counts as stalled', () => {
 
   it('D#694 B5: a pull request the merge queue of GitHub holds (the newest fact is merge_enqueued) is not silent, however long the queue takes', () => {
     expect(classifyStall(facts({ stage: 'review_passed', last: last('merge_enqueued', 'queue', [], 3 * 60 * MIN), lastActivity: ago(3 * 60 * MIN) }))).toBeNull();
+  });
+
+  it('D#694 B6-3: queued to merge is active work even when other facts followed the enqueue; the age bound is B6-4\'s', () => {
+    expect(classifyStall(facts({ stage: 'review_passed', queued: true, last: last('review_status', 'posted', [], 5 * 60 * MIN), lastActivity: ago(5 * 60 * MIN) }))).toBeNull();
+  });
+
+  it('D#694 B6-3: a removal nothing answered is stalled at once when a person made it, and after the stale-wait time when GitHub did (its retry is due)', () => {
+    const person = classifyStall(facts({ stage: 'review_passed', last: last('merge_dequeued', 'manual', ['actor_user'], MIN) }));
+    expect(person).toMatchObject({ code: 'dequeued', why: DEQUEUED_SENTENCE });
+    expect(DEQUEUED_SENTENCE).toBe("GitHub's merge queue removed this pull request and it has not been put back in the queue.");
+    expect(classifyStall(facts({ stage: 'review_passed', last: last('merge_dequeued', 'ci_failure', ['actor_app'], MIN) }))).toBeNull();
+    expect(classifyStall(facts({ stage: 'review_passed', last: last('merge_dequeued', 'ci_failure', ['actor_app'], STALE_WAIT_MS + MIN) }))).toMatchObject({ code: 'dequeued' });
+  });
+
+  it('D#694 B6-3: the retry used up is handed over in fixed words, with no text from GitHub', () => {
+    const s = classifyStall(facts({ stage: 'needs_human', last: last('escalated', 'merge_queue_retry_used') }));
+    expect(s).toMatchObject({ code: 'handed_over', why: "GitHub's merge queue removed this pull request again after the one automatic retry, so the pipeline stopped for a person." });
   });
 
   it('D#694 B5: a merge queue state that could not be read is a stop that asks to try again, in its own words', () => {

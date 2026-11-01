@@ -2,7 +2,7 @@ import type { Pool } from 'pg';
 import { assertActiveMembership } from '../tenancy/scopedAccess.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { TERMINAL_WORK_ITEM_STAGES } from './stages.js';
-import { PERSON_MERGES_REASONS } from './mergeReadiness.js';
+import { isQueuedSql, PERSON_MERGES_REASONS } from './mergeReadiness.js';
 import { cleanWorkItemTitle } from './title.js';
 
 /**
@@ -12,6 +12,7 @@ import { cleanWorkItemTitle } from './title.js';
  * An answer is "ready" only when its reasons are empty or all mean "a person presses merge" (mergeReadiness.ts). An answer with any other reason (a draft pull
  * request, checks not green, the public copy not open, a refused public change, a review that did not pass) is not ready: the gate ended before it could pass.
  * That item is on the stalled list instead (stalled.ts), with the button that asks the gate again.
+ * D#694 B6-3: an item waiting in GitHub's merge queue (mergeReadiness.ts `isQueuedSql`) is not on this list, whatever its older gate answer says: nothing is left for a person to press.
  */
 export interface ReadyToMergeItem {
   workItemId: string;
@@ -55,6 +56,7 @@ export async function listReadyToMerge(ctx: ReadyToMergeCtx, opts: { limit: numb
                         ORDER BY d.seq DESC LIMIT 1) e ON e.code = 'ready_human_merges' AND e.pr_number IS NOT NULL
          LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
         WHERE w.account_id = $1::uuid AND NOT (w.stage = ANY($3::text[])) AND e.reasons <@ $4::text[]
+          AND NOT ${isQueuedSql('w.account_id', 'w.id', 'e.pr_number')}
         ORDER BY e.created_at DESC, w.id
         LIMIT $2::integer`,
       [accountId, opts.limit, [...TERMINAL_WORK_ITEM_STAGES], [...PERSON_MERGES_REASONS]],

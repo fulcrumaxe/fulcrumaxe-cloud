@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { recordDriverEvent, toCode } from "@fx/core/src/work-items/driverEvents.js";
+import { enqueueDedupeKey, listHeadRemovals, recordDriverEvent, toCode } from "@fx/core/src/work-items/driverEvents.js";
 import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js";
 import { humanMergeOnly } from "@fx/db/src/humanMergeOnly.js";
 import { autoMergeAllowed } from "@fx/trust";
@@ -383,7 +383,8 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
       await recordDriverEvent(client, accountId, {
         workItemId,
         kind: "merge_enqueued",
-        dedupeKey: `enqueued:${out.headSha}`,
+        // A head the queue took out and the gate put back is a new fact (the retry's), not the first one again.
+        dedupeKey: enqueueDedupeKey(out.headSha, (await listHeadRemovals(client, accountId, workItemId, out.headSha, prNumber)).length),
         code: out.via,
         headSha: headForRow,
         prNumber,

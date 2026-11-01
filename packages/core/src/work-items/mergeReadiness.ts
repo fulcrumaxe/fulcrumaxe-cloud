@@ -1,3 +1,6 @@
+import type { PoolClient } from 'pg';
+import { DEQUEUE_SUCCESS_CODES } from './driverEvents.js';
+
 /**
  * Which merge-gate reasons leave an item "ready to merge", that is, only a person's press on Merge is missing. The gate files every stop where a person decides
  * under one outcome (`ready_human_merges`) and attaches the reasons; the outcome alone does not say that a pull request exists, is open, is green or is
@@ -32,4 +35,54 @@ export function onlyPersonMerges(reasons: readonly string[]): boolean {
 /** The reasons that still block the merge, in the order the gate recorded them. */
 export function blockingReasons(reasons: readonly string[]): string[] {
   return reasons.filter((r) => !PERSON_MERGES_REASONS.includes(r));
+}
+
+// ---- D#694 B6-3: "Queued to merge", derived (never stored) ----------------------------------------------------------------------------------------------
+
+/** The label and subtitle every reader shows for an item waiting in GitHub's merge queue. Fixed text; a test pins both. */
+export const QUEUED_TO_MERGE_LABEL = 'Queued to merge';
+export const QUEUED_TO_MERGE_SUBTITLE = "Waiting for GitHub's merge queue to build and merge it";
+
+/** GitHub's own success reasons for a dequeue (the entry left because it merged): they end nothing and never count as a removal. */
+const SUCCESS_CODES_SQL = `ARRAY[${DEQUEUE_SUCCESS_CODES.map((c) => `'${c}'`).join(', ')}]::text[]`;
+
+/**
+ * SQL for one item's queue state, judged by the newest `merge_enqueued` fact of ITS pull request (`pr`: a SQL expression for the number; left out, the pull request of the
+ * item's newest merge-gate answer, so a body-linked pull request's facts never speak for the item). The enqueue stands until a later fact of the same pull request ends it:
+ * `merged_via_queue`, a removal of the same head that is not GitHub's success reason, or a push of another head. The scalar answers the enqueued head, or NULL when the item
+ * is not queued. `account` and `item` are SQL expressions for the account id and the work item id (a column or a `$n`).
+ */
+export function queuedHeadSql(account: string, item: string, pr?: string): string {
+  const itemPr = pr ?? `(SELECT g.pr_number FROM work_item_driver_events g WHERE g.account_id = ${account} AND g.work_item_id = ${item} AND g.kind = 'merge_gate' AND g.pr_number IS NOT NULL ORDER BY g.seq DESC LIMIT 1)`;
+  return `(SELECT l.head_sha FROM (SELECT q.seq, q.head_sha, q.pr_number FROM work_item_driver_events q
+             WHERE q.account_id = ${account} AND q.work_item_id = ${item} AND q.kind = 'merge_enqueued' AND q.pr_number = ${itemPr}
+             ORDER BY q.seq DESC LIMIT 1) l
+           WHERE NOT EXISTS (SELECT 1 FROM work_item_driver_events f
+                              WHERE f.account_id = ${account} AND f.work_item_id = ${item} AND f.seq > l.seq AND f.pr_number = l.pr_number
+                                AND (f.kind = 'merged_via_queue'
+                                     OR (f.kind = 'merge_dequeued' AND f.head_sha = l.head_sha AND NOT (COALESCE(f.code, '') = ANY(${SUCCESS_CODES_SQL})))
+                                     OR (f.kind = 'pr_head_pushed' AND f.head_sha IS DISTINCT FROM l.head_sha))))`;
+}
+
+/** SQL boolean: the item is waiting in GitHub's merge queue (see `queuedHeadSql`). */
+export const isQueuedSql = (account: string, item: string, pr?: string): string => `(${queuedHeadSql(account, item, pr)} IS NOT NULL)`;
+
+/** Whether one removal fact is one the product retries after: GitHub's own (not a person's), and the first for its head. */
+export function removalRetryAllowed(removals: ReadonlyArray<{ reasons: readonly string[] }>): boolean {
+  const last = removals[removals.length - 1];
+  return removals.length === 1 && last !== undefined && !last.reasons.includes('actor_user');
+}
+
+/**
+ * The item's queued-to-merge state for a reader: the enqueued head and pull request number, or null when it is not queued. The label never shows without both
+ * (a fact with no number or head reads as not queued), so no screen can say "Queued to merge" about nothing.
+ */
+export async function readQueuedToMerge(client: Pick<PoolClient, 'query'>, accountId: string, workItemId: string, prNumber?: number): Promise<{ headSha: string; prNumber: number } | null> {
+  const { rows } = await client.query<{ head_sha: string | null; pr_number: number | null }>(
+    `SELECT l.head_sha, l.pr_number FROM (SELECT head_sha, pr_number FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'merge_enqueued' ${prNumber === undefined ? '' : 'AND pr_number = $3'} ORDER BY seq DESC LIMIT 1) l
+      WHERE ${queuedHeadSql('$1', '$2', prNumber === undefined ? undefined : '$3')} IS NOT NULL`,
+    prNumber === undefined ? [accountId, workItemId] : [accountId, workItemId, prNumber],
+  );
+  const r = rows[0];
+  return r && r.head_sha !== null && r.pr_number !== null ? { headSha: r.head_sha, prNumber: r.pr_number } : null;
 }

@@ -569,7 +569,9 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
         if (queue !== null && !isObj(queue)) return { mode: "unknown", source: "graphql_shape" };
         const rules = await listRules(await repoPath(pr), baseRef);
         const ruleQueue = rules.some((r) => r.type === "merge_queue" && !(typeof r.enforcement === "string" && r.enforcement !== "active"));
-        const value: MergeQueueMode = queue !== null && ruleQueue ? { mode: "queue", source: "graphql_and_rules" } : queue === null && !ruleQueue ? { mode: "direct", source: "graphql_and_rules" } : { mode: "unknown", source: "graphql_rules_disagree" };
+        const built = rules.find((r) => r.type === "merge_queue" && !(typeof r.enforcement === "string" && r.enforcement !== "active"))?.parameters;
+        const maxEntries = isObj(built) && Number.isInteger(built.max_entries_to_build) && (built.max_entries_to_build as number) >= 1 && (built.max_entries_to_build as number) <= 100 ? (built.max_entries_to_build as number) : undefined;
+        const value: MergeQueueMode = queue !== null && ruleQueue ? { mode: "queue", source: "graphql_and_rules", ...(maxEntries !== undefined ? { maxEntries } : {}) } : queue === null && !ruleQueue ? { mode: "direct", source: "graphql_and_rules" } : { mode: "unknown", source: "graphql_rules_disagree" };
         if (value.mode !== "unknown") {
           if (queueModeCache.size >= MERGE_QUEUE_MODE_CACHE_MAX) queueModeCache.delete(queueModeCache.keys().next().value as string);
           queueModeCache.set(key, { at: now, value });
@@ -578,6 +580,20 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
       } catch {
         // fx-swallow-ok: a failed read (the hosted client's refusal included) is `unknown`, which stops the gate; it is never read as `direct`, and nothing is cached
         return { mode: "unknown", source: "read_failed" };
+      }
+    },
+
+    /**
+     * D#694 B6-3: the base branch's merge mode and, in a queue, the batch size the rule builds at once (`max_entries_to_build`), for the product queue's in-flight bound.
+     * One read of the pull request for its base branch, then the cached mode answer. A batch size that cannot be read is 1; a failed read is `unknown` with 1.
+     */
+    async getMergeQueueInfo(pr): Promise<{ mode: MergeQueueMode["mode"]; maxEntries: number }> {
+      try {
+        const m = await this.getMergeQueueMode!(pr, (await readPr(pr)).baseRef);
+        return { mode: m.mode, maxEntries: m.mode === "queue" ? (m.maxEntries ?? 1) : 1 };
+      } catch {
+        // fx-swallow-ok: an unreadable answer is `unknown` with a bound of 1, which stops nothing from merging by hand and lets no second entry into the queue
+        return { mode: "unknown", maxEntries: 1 };
       }
     },
 

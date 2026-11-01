@@ -162,6 +162,7 @@ const RESULT_WORDS = {
   waiting: "the build is waiting for a build slot",
   merged: "Merge gate: merged",
   ready_human_merges: "Merge gate: not merged, a person merges",
+  merge_enqueued: "Merge gate: queued in GitHub's merge queue",
   merge_delegated: "Merging on your runner",
   pr_not_open: "Merge gate: the pull request is not open",
   head_moved: "Merge gate: the pull request changed after review",
@@ -533,9 +534,26 @@ export function mergeBlockSentence(data) {
   return blockingSentence(blocking.includes("public_pr_not_open") ? "public_pr_not_open" : blocking[0]);
 }
 
+/** D#694 B6-3: the label and subtitle of an item waiting in GitHub's merge queue (a core test pins both to packages/core/src/work-items/mergeReadiness.ts). */
+export const QUEUED_TO_MERGE_LABEL = "Queued to merge";
+export const QUEUED_TO_MERGE_SUBTITLE = "Waiting for GitHub's merge queue to build and merge it";
+
+/** Whether the newest gate answer among the steps put the pull request in GitHub's merge queue. A later "a person decides" answer replaces it. Never true without a pull request link. */
+export function queuedToMerge(data) {
+  const steps = data && Array.isArray(data.steps) ? data.steps : [];
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const r = isObj(steps[i]) ? steps[i].result : null;
+    if (r === "merge_enqueued") return pullUrl(data) !== null;
+    if (r === "ready_human_merges" || r === "merged" || r === "merge_delegated") return false;
+  }
+  return false;
+}
+
 /** The "Ready to merge" banner, only at review_passed, with the repo's real auto-merge setting. When something still blocks the merge it says what, in fixed words, and offers no link. */
 export function readyBanner(data) {
   if (!data || data.stage !== "review_passed") return null;
+  // D#694 B6-3: waiting in GitHub's merge queue is not "ready for you to merge": nothing is left for a person to press.
+  if (queuedToMerge(data)) return { blocked: false, queued: true, title: QUEUED_TO_MERGE_LABEL, detail: QUEUED_TO_MERGE_SUBTITLE, autoMerge: false, autoMergeText: "", url: pullUrl(data) };
   const blocked = mergeBlockSentence(data);
   if (blocked !== null) return { blocked: true, title: "Not ready to merge yet", detail: blocked + ".", autoMerge: false, autoMergeText: "", url: null };
   return {
@@ -691,6 +709,15 @@ export function createInsightPanel(deps) {
 
   function banner(b) {
     if (b.blocked) return h("div", { class: "pl-ins-ready", "data-testid": "pl-ready-blocked", role: "status" }, h("strong", null, b.title + ". "), b.detail);
+    if (b.queued) {
+      return h(
+        "div",
+        { class: "pl-ins-ready", "data-testid": "pl-queued", role: "status" },
+        h("strong", null, b.title + ". "),
+        b.detail + ". ",
+        b.url ? h("a", { href: b.url, target: "_blank", rel: "noopener noreferrer", "data-testid": "pl-queued-link" }, "Open the pull request on GitHub") : null
+      );
+    }
     return h(
       "div",
       { class: "pl-ins-ready", "data-testid": "pl-ready", role: "status" },
