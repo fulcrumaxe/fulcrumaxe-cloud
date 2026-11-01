@@ -198,7 +198,60 @@ export interface DefaultBranchReaderPort {
   getDefaultBranchTip(pr: PullRequestRef): Promise<{ branch: string; sha: string }>;
 }
 
-export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateGitHubPort & CommitReaderPort & DefaultBranchReaderPort {
+/**
+ * D#519 MQ4-a: one commit of a pull request as the commits list reports it. Logins only; a commit whose author or committer resolves to no GitHub
+ * account carries null. `truncated` is set when the list is at GitHub's cap of 250 commits (the real list may be longer): it is never complete then.
+ */
+export interface PullCommit {
+  sha: string;
+  authorLogin: string | null;
+  committerLogin: string | null;
+}
+export interface PullCommitList {
+  commits: readonly PullCommit[];
+  truncated: boolean;
+}
+/** The commits GitHub lists for one pull request, at most. */
+export const PULL_COMMITS_CAP = 250;
+
+/** D#519 MQ4-a: a comparison of two explicit commits. `files` follows `compareToBase`: null when not asked for or cut at the cap (`filesTruncated`). */
+export interface CommitComparison {
+  status: CompareStatus;
+  aheadBy: number;
+  behindBy: number;
+  mergeBaseSha: string;
+  files: readonly string[] | null;
+  filesTruncated: boolean;
+}
+
+/** D#519 MQ4-a: the two reads a conflict decision needs, hosted repositories only (both refuse on a `runner_local` repository's allowlist). */
+export interface ConflictReaderPort {
+  listPullCommits(pr: PullRequestRef): Promise<PullCommitList>;
+  compareCommits(pr: PullRequestRef, base: string, head: string, opts?: { files?: boolean }): Promise<CommitComparison>;
+}
+
+/** The paths of a compare's `files` (a rename lists both names), or null when the list is at GitHub's cap and so may be cut short. */
+function compareFileList(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) bad("compare.files");
+  const files: string[] = [];
+  const seen = new Set<string>();
+  for (const f of raw) {
+    if (!isObj(f) || typeof f.filename !== "string") bad("compare.files.filename");
+    if (f.previous_filename !== undefined && typeof f.previous_filename !== "string") bad("compare.files.previous_filename");
+    if (seen.has(f.filename)) throw new Error("GitHub compare: file repeated");
+    seen.add(f.filename);
+    files.push(f.filename);
+    // A renamed file touched both paths.
+    if (typeof f.previous_filename === "string" && !seen.has(f.previous_filename)) {
+      seen.add(f.previous_filename);
+      files.push(f.previous_filename);
+    }
+  }
+  // At the cap the list may be cut short and is NOT a complete set: it is withheld so it cannot be mistaken for one.
+  return raw.length >= COMPARE_FILES_CAP ? null : files;
+}
+
+export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateGitHubPort & CommitReaderPort & DefaultBranchReaderPort & ConflictReaderPort {
   async function repoPath(pr: PullRequestRef): Promise<string> {
     if (!Number.isSafeInteger(pr.prNumber) || pr.prNumber <= 0) throw new Error("invalid PR number");
     const { owner, name } = await deps.resolveRepo(pr.repoId);
@@ -820,24 +873,51 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
       if (!Number.isSafeInteger(body.behind_by) || (body.behind_by as number) < 0) bad("compare.behind_by");
       const counts = { status: body.status as CompareStatus, aheadBy: body.ahead_by as number, behindBy: body.behind_by as number };
       if (!wantFiles) return { ...counts, files: null, filesTruncated: false };
-      if (!Array.isArray(body.files)) bad("compare.files");
-      const files: string[] = [];
-      const seen = new Set<string>();
-      for (const f of body.files) {
-        if (!isObj(f) || typeof f.filename !== "string") bad("compare.files.filename");
-        if (f.previous_filename !== undefined && typeof f.previous_filename !== "string") bad("compare.files.previous_filename");
-        if (seen.has(f.filename)) throw new Error("GitHub compare: file repeated");
-        seen.add(f.filename);
-        files.push(f.filename);
-        // A renamed file touched both paths.
-        if (typeof f.previous_filename === "string" && !seen.has(f.previous_filename)) {
-          seen.add(f.previous_filename);
-          files.push(f.previous_filename);
-        }
-      }
-      // At the cap the list may be cut short and is NOT a complete set: it is withheld (files: null) so it cannot be mistaken for one.
-      if (body.files.length >= COMPARE_FILES_CAP) return { ...counts, files: null, filesTruncated: true };
+      const files = compareFileList(body.files);
+      if (files === null) return { ...counts, files: null, filesTruncated: true };
       return { ...counts, files, filesTruncated: false };
+    },
+
+    async listPullCommits(pr): Promise<PullCommitList> {
+      if (deps.local) throw new Error(`GitHub pull commits: ${LOCAL_REFUSED}`);
+      const path = `${await repoPath(pr)}/pulls/${pr.prNumber}/commits`;
+      const commits: PullCommit[] = [];
+      const seen = new Set<string>();
+      // The list is a bare array (no total_count), paged; a short page is the last. GitHub stops at PULL_COMMITS_CAP commits.
+      for (let page = 1; page <= Math.ceil(PULL_COMMITS_CAP / PER_PAGE) + 1; page++) {
+        const res = await get(path, { per_page: PER_PAGE, page });
+        if (res.status !== 200 || !Array.isArray(res.body)) throw new Error(`GitHub pull commits: unexpected status ${res.status}`);
+        for (const c of res.body as unknown[]) {
+          if (!isObj(c) || typeof c.sha !== "string" || !SHA_PATTERN.test(c.sha)) bad("commits.sha");
+          if (c.author !== null && !isObj(c.author)) bad("commits.author");
+          if (c.committer !== null && !isObj(c.committer)) bad("commits.committer");
+          if (seen.has(c.sha)) throw new Error("GitHub pull commits: commit repeated across pages");
+          seen.add(c.sha);
+          commits.push({
+            sha: c.sha,
+            authorLogin: c.author !== null && typeof c.author.login === "string" ? c.author.login : null,
+            committerLogin: c.committer !== null && typeof c.committer.login === "string" ? c.committer.login : null,
+          });
+        }
+        if (res.body.length < PER_PAGE) break;
+      }
+      return { commits, truncated: commits.length >= PULL_COMMITS_CAP };
+    },
+
+    async compareCommits(pr, base, head, opts): Promise<CommitComparison> {
+      if (deps.local) throw new Error(`GitHub compare commits: ${LOCAL_REFUSED}`);
+      if (!SHA_PATTERN.test(base) || !SHA_PATTERN.test(head)) throw new Error("compareCommits: malformed SHA");
+      const wantFiles = opts?.files === true;
+      const body = await okBody(await get(`${await repoPath(pr)}/compare/${base}...${head}`, wantFiles ? {} : { per_page: 1 }), "compare commits");
+      if (typeof body.status !== "string" || !COMPARE_STATUSES.has(body.status)) bad("compare.status");
+      if (!Number.isSafeInteger(body.ahead_by) || (body.ahead_by as number) < 0) bad("compare.ahead_by");
+      if (!Number.isSafeInteger(body.behind_by) || (body.behind_by as number) < 0) bad("compare.behind_by");
+      const mergeBase = dig(body, ["merge_base_commit", "sha"]);
+      if (typeof mergeBase !== "string" || !SHA_PATTERN.test(mergeBase)) bad("compare.merge_base_commit.sha");
+      const head3 = { status: body.status as CompareStatus, aheadBy: body.ahead_by as number, behindBy: body.behind_by as number, mergeBaseSha: mergeBase };
+      if (!wantFiles) return { ...head3, files: null, filesTruncated: false };
+      const files = compareFileList(body.files);
+      return { ...head3, files, filesTruncated: files === null };
     },
 
     async requiresUpToDateBranch(pr): Promise<boolean> {
