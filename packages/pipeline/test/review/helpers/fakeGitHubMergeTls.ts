@@ -35,6 +35,9 @@ import { ghError, type GhReply, type GhRequest } from "../../../../github/test/h
  *    answers the merge base (`mergeBaseSha`) with `ahead_by` (`aheadFromReviewed`; `aheadFromBase` when the first sha is the merge base), so
  *    a criss-cross history is modelled by making those two differ. `compare` also answers for a commit on the default branch
  *    (`baseShas`: `identical` at the tip, `behind` below it) and for a registered commit that is not on it (`ahead`).
+ *  - D#519 MQ4-a: `GET /pulls/{n}/commits` is a BARE ARRAY (no `total_count`), paged by `per_page` (100 at most) and `page`, and GitHub lists at most 250 commits
+ *    however many the pull request has (`pullCommits`); each item carries `sha`, `author` and `committer` (an account object or null). `GET /compare/{sha}...{sha}`
+ *    answers a pair registered in `compares` with its own `status`, counts, `merge_base_commit` and files (capped at 300, on one response); an unregistered pair keeps the merge-base answer above.
  *  - `GET /commits/{sha}/check-runs` and `/status`: one passing check run named by `checkNames` on every commit (or the runs of `checkRuns`,
  *    with GitHub's null `conclusion` until completed) and an empty combined status (or `statuses`), each cut at `per_page` with `total_count`, so a gate over the real port reaches its merge call.
  *  - `GET /branches/{b}/protection/required_status_checks`: 200 with `strict` when set, 404 "Branch not protected" / "Required status
@@ -97,6 +100,10 @@ export interface MergeWorld {
   aheadFromReviewed: number;
   aheadFromBase: number;
   mainFiles: Array<{ filename: string; previous_filename?: string }>;
+  /** D#519 MQ4-a: the commits `GET /pulls/{n}/commits` lists, oldest first. `rawAuthor`, when present, replaces the `author` member as sent (a malformed shape). */
+  pullCommits: Array<{ sha: string; authorLogin: string | null; committerLogin: string | null; rawAuthor?: unknown }>;
+  /** D#519 MQ4-a: comparisons of two explicit commits, keyed `base...head`. */
+  compares: Record<string, { status: "ahead" | "behind" | "diverged" | "identical"; aheadBy: number; behindBy: number; mergeBaseSha: string; files: Array<{ filename: string; previous_filename?: string }> }>;
   state: "open" | "closed";
   merged: boolean;
   draft: boolean;
@@ -175,6 +182,8 @@ export function freshMergeWorld(over: Partial<MergeWorld> = {}): MergeWorld {
     aheadFromReviewed: 1,
     aheadFromBase: 1,
     mainFiles: [{ filename: "docs/main-only.md" }],
+    pullCommits: [],
+    compares: {},
     state: "open",
     merged: false,
     draft: false,
@@ -316,6 +325,12 @@ export function mergeRoute(w: MergeWorld): (req: GhRequest) => GhReply | Promise
       // Two commits (the merge-base read of the tree check): the merge base, with `ahead_by` of the head side over it.
       if (/^[0-9a-f]{40}$/.test(left)) {
         if (!/^[0-9a-f]{40}$/.test(cmp[2]!)) return err(404, "Not Found");
+        const pair = w.compares[`${left}...${cmp[2]}`];
+        if (pair) {
+          // The files come on this one response, capped at 300 for the whole comparison.
+          const files = pair.files.slice(0, 300).map((f) => ({ sha: "c".repeat(40), status: f.previous_filename ? "renamed" : "modified", ...f }));
+          return json(200, { status: pair.status, ahead_by: pair.aheadBy, behind_by: pair.behindBy, total_commits: pair.aheadBy, merge_base_commit: { sha: pair.mergeBaseSha }, files });
+        }
         const ahead = left === w.mergeBaseSha ? w.aheadFromBase : w.aheadFromReviewed;
         return json(200, { status: "ahead", ahead_by: ahead, behind_by: 0, total_commits: ahead, merge_base_commit: { sha: w.mergeBaseSha }, files: [] });
       }
@@ -330,6 +345,17 @@ export function mergeRoute(w: MergeWorld): (req: GhRequest) => GhReply | Promise
       // per_page/page page the COMMITS; files come on one response, capped at 300 for the whole comparison.
       const page = w.files.slice(0, 300);
       return json(200, { status: compareStatus(w), ahead_by: w.aheadBy, behind_by: w.behindBy, total_commits: w.aheadBy, files: page.map((f) => ({ sha: "c".repeat(40), status: f.previous_filename ? "renamed" : "modified", ...f })) });
+    }
+
+    if (req.method === "GET" && req.path === `${base}/pulls/${w.prNumber}/commits`) {
+      // A bare array, cut at GitHub's 250 however long the pull request's history is, then paged.
+      const listed = w.pullCommits.slice(0, 250).map((c) => ({
+        sha: c.sha,
+        author: "rawAuthor" in c ? c.rawAuthor : c.authorLogin === null ? null : { login: c.authorLogin, id: 4242, type: "User" },
+        committer: c.committerLogin === null ? null : { login: c.committerLogin, id: 19864447, type: "User" },
+        commit: { message: "a commit" },
+      }));
+      return json(200, paged(listed, query));
     }
 
     const commit = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/commits/([0-9a-f]{40})$`).exec(req.path);

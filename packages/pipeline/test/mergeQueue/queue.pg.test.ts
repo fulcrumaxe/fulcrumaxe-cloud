@@ -742,7 +742,7 @@ describe("D#519 MQ2 merge queue core [pg]", () => {
     it("refuses a state move off the table and a slot that does not match its state", async () => {
       const w = await world();
       const a = await enqueue(w, 1, 0);
-      await expect(tenant(w.accountId, (c) => c.query(`UPDATE merge_queue_entries SET state = 'awaiting_work', work_kind = 'conflict' WHERE id = $1`, [a.id]))).rejects.toMatchObject({ code: "23514" });
+      await expect(tenant(w.accountId, (c) => c.query(`UPDATE merge_queue_entries SET state = 'awaiting_work', work_kind = 'delta_review' WHERE id = $1`, [a.id]))).rejects.toMatchObject({ code: "23514" });
       await expect(tenant(w.accountId, (c) => c.query(`UPDATE merge_queue_entries SET slot_holder = 'x' WHERE id = $1`, [a.id]))).rejects.toMatchObject({ code: "23514" });
       await expect(tenant(w.accountId, (c) => c.query(`UPDATE merge_queue_entries SET state = 'in_flight' WHERE id = $1`, [a.id]))).rejects.toMatchObject({ code: "23514" });
       await expect(tenant(w.accountId, (c) => c.query(`UPDATE merge_queue_entries SET state = 'stopped' WHERE id = $1`, [a.id]))).rejects.toMatchObject({ code: "23514" });

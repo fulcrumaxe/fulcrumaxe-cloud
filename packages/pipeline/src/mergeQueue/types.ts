@@ -93,3 +93,27 @@ export class MergeQueueError extends Error {
     this.name = "MergeQueueError";
   }
 }
+
+/** D#519 MQ4-a: one merge-conflict fix round (`merge_conflict_rounds`, migration 0948). Append-only; `runId`, `toSha`, `outcome` and `endedAt` are each set once. */
+export interface ConflictRound {
+  id: string;
+  accountId: string;
+  repoId: string;
+  workItemId: string;
+  /** Null for a round with no queue entry (the direct path). */
+  entryId: string | null;
+  round: number;
+  /** The head before the round. */
+  fromSha: string;
+  /** The default-branch tip the round was asked to merge, and the branch's name. */
+  baseSha: string;
+  baseRef: string;
+  conflictFiles: readonly string[];
+  runId: string | null;
+  /** The head the round pushed; null until it is recorded (a round that pushed nothing never has one). */
+  toSha: string | null;
+  /** A fixed code (`^[a-z][a-z0-9_]{0,63}$`). */
+  outcome: string | null;
+  createdAt: Date;
+  endedAt: Date | null;
+}

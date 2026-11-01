@@ -3,7 +3,7 @@ import { listHeadRemovals } from "@fx/core/src/work-items/driverEvents.js";
 import { isQueuedSql, removalRetryAllowed, removedByPerson } from "@fx/core/src/work-items/mergeReadiness.js";
 import { MAX_CONFLICT_ROUNDS, MERGE_QUEUE_LEASE_SECONDS } from "./policy.js";
 import { eligibilityContext, pickNext } from "./eligibility.js";
-import { MergeQueueError, type EntryKind, type MergeQueueEntry, type MergedBy, type PrFacts, type QueueState, type WorkKind } from "./types.js";
+import { MergeQueueError, type ConflictRound, type EntryKind, type MergeQueueEntry, type MergedBy, type PrFacts, type QueueState, type WorkKind } from "./types.js";
 
 /**
  * D#519 MQ2: the merge queue's persistence (migration 0824). Every function takes a `PoolClient` that is already inside a tenant
@@ -874,4 +874,129 @@ export async function endWritebackEntry(
       RETURNING ${COLUMNS}`,
     [input.accountId, input.planWritebackId, input.how],
   );
+}
+
+// ---- conflict rounds (D#519 MQ4-a, migration 0948) ---------------------------------------------------------------------------------
+
+interface RoundRow {
+  id: string;
+  account_id: string;
+  repo_id: string;
+  work_item_id: string;
+  entry_id: string | null;
+  round: number;
+  from_sha: string;
+  base_sha: string;
+  base_ref: string;
+  conflict_files: string[];
+  run_id: string | null;
+  to_sha: string | null;
+  outcome: string | null;
+  created_at: Date;
+  ended_at: Date | null;
+}
+
+const ROUND_COLUMNS = `id, account_id, repo_id, work_item_id, entry_id, round, from_sha, base_sha, base_ref, conflict_files, run_id, to_sha, outcome, created_at, ended_at`;
+
+const toRound = (r: RoundRow): ConflictRound => ({
+  id: r.id,
+  accountId: r.account_id,
+  repoId: r.repo_id,
+  workItemId: r.work_item_id,
+  entryId: r.entry_id,
+  round: r.round,
+  fromSha: r.from_sha,
+  baseSha: r.base_sha,
+  baseRef: r.base_ref,
+  conflictFiles: r.conflict_files,
+  runId: r.run_id,
+  toSha: r.to_sha,
+  outcome: r.outcome,
+  createdAt: r.created_at,
+  endedAt: r.ended_at,
+});
+
+async function oneRound(client: Queryable, sql: string, params: unknown[]): Promise<ConflictRound | null> {
+  const { rows } = await client.query<RoundRow>(sql, params);
+  return rows[0] ? toRound(rows[0]) : null;
+}
+
+export type StartConflictWorkResult =
+  | { ok: true; entry: MergeQueueEntry; round: ConflictRound }
+  /** The named holder no longer holds the slot, or the entry is not `queued` (or `in_flight`). Nothing was changed. */
+  | { ok: false; reason: "not_startable" }
+  /** The entry has used MAX_CONFLICT_ROUNDS. Nothing was changed: no round row, and the entry is as it was. */
+  | { ok: false; reason: "rounds_exhausted" }
+  | { ok: false; reason: "not_a_work_item_entry" };
+
+/**
+ * A conflict round starts: a `queued` entry (it holds no slot), or the `in_flight` one `holder` holds, becomes `awaiting_work` with kind `conflict`, its
+ * round counter steps, and the round's row is written, all by ONE statement, so no reader sees one without the others and a holder's slot is free in the
+ * same transaction that records the round. A third round is refused here as well as by the caller. `fromSha` is the entry's head as stored. A path that
+ * fails the database's path rule raises its `check_violation`; nothing is written then either.
+ */
+export async function startConflictWork(
+  client: Queryable,
+  input: { accountId: string; entryId: string; holder?: string; baseSha: string; baseRef: string; conflictFiles: readonly string[] },
+): Promise<StartConflictWorkResult> {
+  assertSha(input.baseSha);
+  const { rows } = await client.query<Row & { round_id: string }>(
+    `WITH e AS (
+       UPDATE merge_queue_entries
+          SET state = 'awaiting_work', phase = NULL, slot_holder = NULL, lease_until = NULL, slot_taken_at = NULL,
+              work_kind = 'conflict', work_run_id = NULL, conflict_rounds = conflict_rounds + 1
+        WHERE account_id = $1 AND id = $2 AND entry_kind = 'work_item' AND conflict_rounds < $3
+          AND (state = 'queued' OR (state = 'in_flight' AND slot_holder = $4::text))
+        RETURNING ${COLUMNS}
+     ), r AS (
+       INSERT INTO merge_conflict_rounds (account_id, repo_id, work_item_id, entry_id, round, from_sha, base_sha, base_ref, conflict_files)
+       SELECT e.account_id, e.repo_id, e.work_item_id, e.id, e.conflict_rounds, e.head_sha, $5, $6, $7::text[] FROM e
+       RETURNING id
+     )
+     SELECT e.*, r.id AS round_id FROM e, r`,
+    [input.accountId, input.entryId, MAX_CONFLICT_ROUNDS, input.holder ?? null, input.baseSha, input.baseRef, [...input.conflictFiles]],
+  );
+  if (rows[0]) {
+    const round = await oneRound(client, `SELECT ${ROUND_COLUMNS} FROM merge_conflict_rounds WHERE account_id = $1 AND id = $2`, [input.accountId, rows[0].round_id]);
+    if (!round) throw new MergeQueueError("bad_input");
+    return { ok: true, entry: toEntry(rows[0]), round };
+  }
+  const current = await getEntry(client, input.accountId, input.entryId);
+  if (current && current.entryKind === "plan_writeback") return { ok: false, reason: "not_a_work_item_entry" };
+  const startable = current !== null && (current.state === "queued" || (current.state === "in_flight" && current.slotHolder === (input.holder ?? null)));
+  return { ok: false, reason: startable && current.conflictRounds >= MAX_CONFLICT_ROUNDS ? "rounds_exhausted" : "not_startable" };
+}
+
+/** The round's agent run, set once. Null when the round is unknown or already has one. */
+export async function recordRoundRun(client: Queryable, input: { accountId: string; roundId: string; runId: string }): Promise<ConflictRound | null> {
+  return oneRound(client, `UPDATE merge_conflict_rounds SET run_id = $3 WHERE account_id = $1 AND id = $2 AND run_id IS NULL RETURNING ${ROUND_COLUMNS}`, [input.accountId, input.roundId, input.runId]);
+}
+
+/** The head the round pushed, set once. Null when the round is unknown or already has one. */
+export async function recordRoundHead(client: Queryable, input: { accountId: string; roundId: string; toSha: string }): Promise<ConflictRound | null> {
+  assertSha(input.toSha);
+  return oneRound(client, `UPDATE merge_conflict_rounds SET to_sha = $3 WHERE account_id = $1 AND id = $2 AND to_sha IS NULL RETURNING ${ROUND_COLUMNS}`, [input.accountId, input.roundId, input.toSha]);
+}
+
+/** The round's outcome (a fixed code) and its end time, set once. Null when the round is unknown or already ended. */
+export async function endRound(client: Queryable, input: { accountId: string; roundId: string; outcome: string }): Promise<ConflictRound | null> {
+  assertCode(input.outcome);
+  return oneRound(client, `UPDATE merge_conflict_rounds SET outcome = $3, ended_at = now() WHERE account_id = $1 AND id = $2 AND outcome IS NULL RETURNING ${ROUND_COLUMNS}`, [input.accountId, input.roundId, input.outcome]);
+}
+
+/** The resolved round's work is now its delta review: `awaiting_work`/`conflict` becomes `awaiting_work`/`delta_review`. Null when the entry is not in that state. */
+export async function switchToDeltaReview(client: Queryable, input: { accountId: string; entryId: string }): Promise<MergeQueueEntry | null> {
+  return one(
+    client,
+    `UPDATE merge_queue_entries SET work_kind = 'delta_review', work_run_id = NULL
+      WHERE account_id = $1 AND id = $2 AND state = 'awaiting_work' AND work_kind = 'conflict'
+      RETURNING ${COLUMNS}`,
+    [input.accountId, input.entryId],
+  );
+}
+
+/** A work item's rounds, oldest first. */
+export async function listConflictRounds(client: Queryable, accountId: string, workItemId: string): Promise<ConflictRound[]> {
+  const { rows } = await client.query<RoundRow>(`SELECT ${ROUND_COLUMNS} FROM merge_conflict_rounds WHERE account_id = $1 AND work_item_id = $2 ORDER BY round`, [accountId, workItemId]);
+  return rows.map(toRound);
 }
