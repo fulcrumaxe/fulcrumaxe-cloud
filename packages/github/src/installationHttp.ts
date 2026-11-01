@@ -1,7 +1,7 @@
 import type { AppCredentialsSource } from "./appCredentials.js";
 import { ADD_DISCUSSION_COMMENT_DOCUMENT, type RetractionSurface } from "./retraction.js";
 import { GH_OWNER_LOGIN_RE, GH_REPO_NAME_RE } from "./eventMapper.js";
-import { getInstallationToken, RECEIPT_BLOCK_PERMISSIONS, RETRACTION_PERMISSIONS, REVERT_PR_PERMISSIONS, type AccessTokenRequester, type InstallationTokenCache } from "./installationToken.js";
+import { getInstallationToken, PLANE_PARITY_PERMISSIONS, RECEIPT_BLOCK_PERMISSIONS, RETRACTION_PERMISSIONS, REVERT_PR_PERMISSIONS, type AccessTokenRequester, type InstallationTokenCache } from "./installationToken.js";
 import { REVERT_PR_DOCUMENT, revertPrVariables } from "./revertPr.js";
 import { pinnedMergeGateBody, pinnedMergeQueueReadBody } from "./mergeGateGraphql.js";
 
@@ -58,7 +58,7 @@ import { pinnedMergeGateBody, pinnedMergeQueueReadBody } from "./mergeGateGraphq
  *     GitHub's own `message` cut short. It never hears a token, a header or a request body.
  */
 
-export type InstallationHttpKind = "read" | "merge_gate" | "runner_pr" | "repo_map" | "branch_delete" | "branch_sync" | "receipt_block" | "retraction" | "revert_pr";
+export type InstallationHttpKind = "read" | "merge_gate" | "runner_pr" | "repo_map" | "branch_delete" | "branch_sync" | "receipt_block" | "retraction" | "revert_pr" | "plane_parity";
 
 export interface InstallationHttpRequest {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -133,7 +133,7 @@ const validRetractionSurface = (s: RetractionSurface): boolean =>
 const MESSAGE_RE = /[^\x20-\x7e]/g;
 
 /** Kinds whose log line never carries GitHub's own `message` (method, masked path and status only). Per kind, so each new write kind opts in. Shared by `revert_pr` and `retraction`. */
-const QUIET_ERROR_KINDS: ReadonlySet<InstallationHttpKind> = new Set<InstallationHttpKind>(["revert_pr", "retraction"]);
+const QUIET_ERROR_KINDS: ReadonlySet<InstallationHttpKind> = new Set<InstallationHttpKind>(["revert_pr", "retraction", "plane_parity"]);
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
@@ -161,6 +161,33 @@ function repoMapAllowed(method: string, path: string, prefix: string): boolean {
   if (path === prefix.slice(0, -1)) return true;
   const rest = path.startsWith(prefix) ? path.slice(prefix.length) : "";
   return /^git\/(trees|blobs)\/[0-9a-f]{40}$/.test(rest) || /^git\/ref\/heads\/[A-Za-z0-9._/-]{1,200}$/.test(rest);
+}
+
+/**
+ * The only calls a `plane_parity` client may make (GET only; the token holds `contents: read`, so this exact list is the security boundary):
+ * the repository (no trailing slash), the ref `heads/main` and no other, one recursive tree by 40-hex id, and a commit list from a 40-hex id: the public side
+ * `per_page` 1 to 30, the private side `per_page=100` with `page` 1 or 2. Commit lists, refs and trees carry ids, parents and paths, never a diff. There is
+ * deliberately no `compare` (its answer holds every changed file's `patch`, so it would reach file content), no `contents`, blob, archive or raw path, no other
+ * query key, and no write. The generic `..` refusal applies to every path of this kind.
+ */
+const HEX40 = "[0-9a-f]{40}";
+const PARITY_TREE_RE = new RegExp(`^git/trees/${HEX40}$`);
+const PARITY_SHA_RE = new RegExp(`^${HEX40}$`);
+function planeParityAllowed(method: string, path: string, query: Readonly<Record<string, string>> | undefined, prefix: string): boolean {
+  if (method !== "GET") return false;
+  // The repository path has no trailing slash; everything below it must name something.
+  const rest = path === prefix.slice(0, -1) ? "" : path.startsWith(prefix) && path.length > prefix.length ? path.slice(prefix.length) : null;
+  if (rest === null) return false;
+  const keys = query === undefined ? [] : Object.keys(query).sort();
+  const val = (k: string): string => query![k]!;
+  if (rest === "" || rest === "git/ref/heads/main") return keys.length === 0;
+  if (PARITY_TREE_RE.test(rest)) return keys.join() === "recursive" && val("recursive") === "1";
+  if (rest === "commits") {
+    if (!(keys.includes("sha") && PARITY_SHA_RE.test(val("sha")))) return false;
+    if (keys.join() === "per_page,sha") return /^[0-9]{1,2}$/.test(val("per_page")) && Number(val("per_page")) >= 1 && Number(val("per_page")) <= 30;
+    return keys.join() === "page,per_page,sha" && val("per_page") === "100" && (val("page") === "1" || val("page") === "2");
+  }
+  return false;
 }
 
 export function createInstallationHttp(deps: InstallationHttpDeps): (kind: InstallationHttpKind, target: InstallationHttpTarget) => Promise<InstallationHttp> {
@@ -197,6 +224,8 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
       cache: deps.cache,
       ...(kind === "branch_delete" || kind === "branch_sync" || kind === "retraction" ? { revoke: revokeInstallationToken } : {}),
       // D#7 DP7-2w: the `revert_pr` purpose, its fixed permission set and its revoke (these override the generic choices above).
+      // D#598 P1d-2: the `plane_parity` purpose and its fixed read set, revoked on close.
+      ...(kind === "plane_parity" ? { purpose: "plane_parity" as const, role: "plane_parity", scope: { repositories: [target.name] as [string], permissions: PLANE_PARITY_PERMISSIONS }, revoke: revokeInstallationToken } : {}),
       ...(kind === "revert_pr" ? { purpose: "revert_pr" as const, role: "revert_pr", scope: { repositories: [target.name] as [string], permissions: REVERT_PR_PERMISSIONS }, revoke: revokeInstallationToken } : {}),
     });
     const prefix = `/repos/${target.owner}/${target.name}/`;
@@ -209,7 +238,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
 
     return {
       async close() {
-        if (kind === "branch_delete" || kind === "branch_sync" || kind === "retraction" || kind === "revert_pr") await revokeInstallationToken(token);
+        if (kind === "branch_delete" || kind === "branch_sync" || kind === "retraction" || kind === "revert_pr" || kind === "plane_parity") await revokeInstallationToken(token);
       },
       async request(raw) {
         // Snapshot every field of the request exactly once; from here on only the snapshot is used (checks, URL, body, log), so a caller's accessor
@@ -227,7 +256,10 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
           // fx-swallow-ok: a body that cannot be serialized is refused before anything is sent
           throw new InstallationHttpError("path_refused");
         }
-        const req = { method: method as typeof raw.method, path, query: rawQuery === undefined || rawQuery === null ? undefined : { ...(rawQuery as Record<string, string | number>) }, body: snapBody };
+        // Query values become strings here, once: a value whose `toString` changes between calls cannot pass a check as one thing and be sent as another.
+        const queryText: Record<string, string> | undefined =
+          rawQuery === undefined || rawQuery === null ? undefined : Object.fromEntries(Object.entries(rawQuery as Record<string, unknown>).map(([k, v]) => [k, String(v)]));
+        const req = { method: method as typeof raw.method, path, query: queryText, body: snapBody };
         const graphql = (kind === "runner_pr" || kind === "retraction" || target.allowGraphql === true) && req.method === "POST" && req.path === GRAPHQL_PATH;
         // `revert_pr` may name `/graphql` too, but only the one exact mutation checked below.
         // D#694 B5a: the hosted `merge_gate` client may send `POST /graphql` only for one of six pinned documents (mergeGateGraphql.ts); never a blanket flag.
@@ -236,6 +268,8 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
         const pinnedGate = pinnedBody !== undefined;
         const allowed = graphql || pinnedGate || (kind === "revert_pr" && req.method === "POST" && req.path === GRAPHQL_PATH) || (req.method === "GET" && req.path === repoRoot) || (req.path.startsWith(prefix) && PATH_RE.test(req.path));
         if (!allowed || req.path.includes("..")) throw new InstallationHttpError("path_refused");
+        // `plane_parity` holds contents:read, so it gets its own EXACT list (no compare, no contents, no other ref).
+        if (kind === "plane_parity" && !planeParityAllowed(req.method, req.path, req.query, prefix)) throw new InstallationHttpError("path_refused");
         // `runner_pr` holds contents:read, so it gets its own EXACT list rather than the prefix rule above (CWE-284): a caller that
         // names this kind must not be able to read file contents, patches or commits. Everything else is refused here, PUT included.
         if (kind === "runner_pr" && !(graphql || runnerPrAllowed(req.method, req.path, prefix))) throw new InstallationHttpError("path_refused");
@@ -315,7 +349,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
             headers: {
               accept: "application/vnd.github+json",
               authorization: `Bearer ${token}`,
-              ...(kind === "branch_delete" || kind === "receipt_block" || kind === "retraction" || kind === "revert_pr" ? { "user-agent": "fulcrumaxe-cloud" } : {}),
+              ...(kind === "branch_delete" || kind === "receipt_block" || kind === "retraction" || kind === "revert_pr" || kind === "plane_parity" ? { "user-agent": "fulcrumaxe-cloud" } : {}),
               "x-github-api-version": "2022-11-28",
               ...(sendBody !== undefined ? { "content-type": "application/json" } : {}),
             },

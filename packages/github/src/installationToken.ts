@@ -224,7 +224,7 @@ export class InstallationTokenCache {
  * permission set no other purpose may ask for (see MERGE_GATE_PERMISSIONS). It exists so the check-run, status and
  * branch-protection reads, and the commit-status write, are NOT in the allowlist of every other purpose.
  */
-export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push", "plane_merge", "plane_publish_read", "branch_delete", "branch_sync", "pairing_read", "receipt_block", "retraction", "revert_pr"] as const;
+export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push", "plane_merge", "plane_publish_read", "branch_delete", "branch_sync", "pairing_read", "receipt_block", "retraction", "revert_pr", "plane_parity"] as const;
 export type MintPurpose = (typeof MINT_PURPOSES)[number];
 
 /**
@@ -322,6 +322,12 @@ export function assertReceiptBlockToken(minted: Pick<MintedAccessToken, "permiss
  * run's fetch of the item branch. Never a write, and never the issue, pull request or Discussion reads a `plan_read` token carries.
  */
 export const PLANE_PUBLISH_READ_PERMISSIONS: Readonly<Record<string, "read">> = Object.freeze({ metadata: "read", contents: "read" });
+
+/**
+ * D#598 P1d-2: the only permissions a `plane_parity` token asks for: `metadata: read` and `contents: read` of ONE repository (either side of a pairing), for
+ * the parity reads. Because `contents: read` could reach files, the HTTP kind holds an exact path list (installationHttp.ts). Fresh for every client, revoked on close.
+ */
+export const PLANE_PARITY_PERMISSIONS: Readonly<Record<string, "read">> = Object.freeze({ metadata: "read", contents: "read" });
 
 /**
  * D#598 PAIR-PICKER-API: the only permission a `pairing_read` token asks for: `metadata: read` of ONE repository, to read its public facts (visibility,
@@ -592,6 +598,13 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     allowed = Object.keys(PLANE_PUBLISH_READ_PERMISSIONS);
     appKind = params.appKind;
     namespace = "plane_publish_read:";
+  } else if (params.purpose === "plane_parity" && (params.appKind === "team" || params.appKind === "team_readonly")) {
+    // D#598 P1d-2: one repository, contents read. Minted fresh for each parity client and never cached.
+    if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
+    scope = { repositories: params.scope.repositories, permissions: PLANE_PARITY_PERMISSIONS };
+    allowed = Object.keys(PLANE_PARITY_PERMISSIONS);
+    appKind = params.appKind;
+    namespace = "plane_parity:";
   } else if (params.purpose === "plan_read" && (params.appKind === "team_readonly" || params.appKind === "team")) {
     // D#483 S3: a one-repository, fixed, read-only set. An installation-wide token has no business here.
     if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
@@ -613,7 +626,7 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     throw new InstallationTokenError("permission_not_allowed");
   }
 
-  const neverCached = params.purpose === "plane_push" || params.purpose === "plane_merge" || params.purpose === "plane_publish_read" || params.purpose === "branch_delete" || params.purpose === "branch_sync" || params.purpose === "pairing_read" || params.purpose === "retraction" || params.purpose === "revert_pr";
+  const neverCached = params.purpose === "plane_push" || params.purpose === "plane_merge" || params.purpose === "plane_publish_read" || params.purpose === "branch_delete" || params.purpose === "branch_sync" || params.purpose === "pairing_read" || params.purpose === "retraction" || params.purpose === "revert_pr" || params.purpose === "plane_parity";
   if (params.fresh === true && !neverCached) throw new InstallationTokenError("purpose_not_allowed");
   // D#598 C4: a plane_push token is never cached on any path, so it is fresh whatever the caller passes. Nothing is read from or written to the cache for it.
   // The same holds for a plane_publish_read token, which is minted and revoked for one proxied request.
@@ -659,6 +672,15 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     }
   }
   if (params.purpose === "plane_publish_read") assertPlanePublishReadToken(minted, (scope as MergeGateScope).repositories[0]);
+  if (params.purpose === "plane_parity") {
+    try {
+      // The same shape as the publish read: exactly metadata and contents at read, and the one repository.
+      assertPlanePublishReadToken(minted, (scope as MergeGateScope).repositories[0]);
+    } catch (error) {
+      await params.revoke?.(minted.token).catch(() => undefined);
+      throw error;
+    }
+  }
   if (params.purpose === "pairing_read") {
     try {
       assertPairingReadToken(minted, (scope as MergeGateScope).repositories[0]);
