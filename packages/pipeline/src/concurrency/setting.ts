@@ -142,3 +142,33 @@ export async function changeConcurrency(pool: Pool, change: ConcurrencyChange): 
     await pause(Math.min(25 * (attempt + 1), 500) + Math.floor(Math.random() * 25));
   }
 }
+
+/** Shown where a member has no name on record. Never an email, an id or the word null. */
+const UNNAMED_MEMBER = "A team member";
+/** How many past changes the history read lists (newest first). The table keeps all of them. */
+export const CONCURRENCY_HISTORY_LIMIT = 20;
+
+export interface ConcurrencyChangeRow {
+  version: number;
+  /** What the number was before this change (the starting value for the first one). */
+  from: number;
+  to: number;
+  changed_by_name: string;
+  changed_at: string;
+  /** The cost preview the person accepted (what was shown), as stored with the version. */
+  preview: Record<string, unknown>;
+}
+
+/** D#483 S5-h: the last changes to one scope's number, newest first. Read only; row security limits it to the session's account. */
+export async function listConcurrencyHistory(client: PoolClient, accountId: string, repoId: string | null): Promise<ConcurrencyChangeRow[]> {
+  const start = repoId === null ? START_BUILDS_PER_ACCOUNT : START_BUILDS_PER_REPO;
+  const { rows } = await client.query<{ version: number; max_builds: number; prev: number | null; created_at: Date; who: string; preview: Record<string, unknown> }>(
+    `SELECT s.version, s.max_builds, s.prev, s.created_at, s.preview,
+            COALESCE((SELECT COALESCE(NULLIF(u.name, ''), NULLIF(u.github_login, '')) FROM users u WHERE u.id = s.changed_by), '${UNNAMED_MEMBER}') AS who
+       FROM (SELECT version, max_builds, changed_by, created_at, preview, LAG(max_builds) OVER (ORDER BY version) AS prev
+               FROM build_concurrency_settings WHERE account_id = $1 AND repo_id IS NOT DISTINCT FROM $2::uuid) s
+      ORDER BY s.version DESC LIMIT $3`,
+    [accountId, repoId, CONCURRENCY_HISTORY_LIMIT],
+  );
+  return rows.map((r) => ({ version: Number(r.version), from: r.prev === null ? start : Number(r.prev), to: Number(r.max_builds), changed_by_name: r.who, changed_at: r.created_at.toISOString(), preview: r.preview }));
+}

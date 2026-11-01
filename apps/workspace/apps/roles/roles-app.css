@@ -129,3 +129,11 @@
 .au-preset:focus-visible, .au-preview h4:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
 .au-body[aria-busy="true"] { opacity: 0.85; }
 @media (pointer: coarse) { .au-preset { min-height: 44px; } }
+.au-limits[hidden] { display: none; }
+.au-limits .au-row > .au-preview, .au-limits .au-row > .au-list { flex-basis: 100%; min-width: 0; margin: 0; }
+.au-limits .au-value, .au-limits .au-muted, .au-limits .au-error { overflow-wrap: anywhere; min-width: 0; }
+.au-limits .rl-input { max-width: 100%; box-sizing: border-box; min-height: 32px; }
+.au-limits :is(button, input, select):focus-visible, .au-limits h4:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+.au-limits input[type="checkbox"] { width: 20px; height: 20px; }
+.au-limits .au-field:has(> input[type="checkbox"]) { flex-direction: row; align-items: center; gap: 6px; }
+@media (pointer: coarse) { .au-limits :is(button, input:not([type="checkbox"]), select) { min-height: 44px; } }

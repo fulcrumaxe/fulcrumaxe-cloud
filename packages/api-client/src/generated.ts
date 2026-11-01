@@ -2494,6 +2494,23 @@ export interface Operations {
       changed: boolean;
     };
   };
+  getAccountBuildConcurrencyHistory: {
+    path: undefined;
+    query: undefined;
+    body: undefined;
+    response: {
+      changes: Array<{
+        version: number;
+        from: number;
+        to: number;
+        changed_by_name: string;
+        changed_at: string;
+        preview: {
+          [key: string]: unknown;
+        };
+      }>;
+    };
+  };
   previewAccountBuildConcurrency: {
     path: undefined;
     query: undefined;
@@ -2552,6 +2569,25 @@ export interface Operations {
       applied_limit: number;
       clamp_reason: ("one_build_per_repo_until_d598") | (null);
       changed: boolean;
+    };
+  };
+  getRepoBuildConcurrencyHistory: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      changes: Array<{
+        version: number;
+        from: number;
+        to: number;
+        changed_by_name: string;
+        changed_at: string;
+        preview: {
+          [key: string]: unknown;
+        };
+      }>;
     };
   };
   previewRepoBuildConcurrency: {
@@ -5449,6 +5485,17 @@ export const operations = {
     queryParams: [],
     hasBody: true,
   },
+  getAccountBuildConcurrencyHistory: {
+    method: "GET",
+    path: "/api/v1/account/build-concurrency/history",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: false,
+  },
   previewAccountBuildConcurrency: {
     method: "POST",
     path: "/api/v1/account/build-concurrency/preview",
@@ -5481,6 +5528,17 @@ export const operations = {
     pathParams: ["id"],
     queryParams: [],
     hasBody: true,
+  },
+  getRepoBuildConcurrencyHistory: {
+    method: "GET",
+    path: "/api/v1/repos/{id}/build-concurrency/history",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
   },
   previewRepoBuildConcurrency: {
     method: "POST",
