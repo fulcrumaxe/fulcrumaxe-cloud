@@ -62,7 +62,7 @@ describe("runner done [pg]", () => {
     const id = await insertRunner(admin, A.accountId, A.userId, key ? { jwk: key.jwk, jkt: key.jkt, credentialMode: "api_key" } : { credentialMode: "api_key" });
     await admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[], allowed_roles = '{}' WHERE id = $1", [id, [A.repoId]]);
     // D#483 S4-b2c: as its hello would say, so every eligible role (the capability-gated claim verifier included) can be claimed here.
-    await admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, '{proposal_verifier}')", [id, A.accountId]);
+    await admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, '{proposal_verifier,discovery_analyst}')", [id, A.accountId]);
     return id;
   }
 

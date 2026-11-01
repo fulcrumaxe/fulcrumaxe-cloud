@@ -342,7 +342,7 @@ describe("runner claim, heartbeat and events [pg]", () => {
         const fresh = await newRunner({ roles: [] });
         expect((await admin.query("SELECT allowed_roles FROM runners WHERE id = $1", [fresh])).rows[0].allowed_roles).toEqual([]);
         // D#483 S4-b2c: the claim verifier also needs the capability on the runner's latest hello (its own tests are below).
-        await capable(fresh, ["proposal_verifier"]);
+        await capable(fresh, ["proposal_verifier", "discovery_analyst"]);
         for (const role of RUNNER_ELIGIBLE_ROLES) {
           const id = await pending({ role });
           const result = await claim(fresh);
@@ -368,6 +368,27 @@ describe("runner claim, heartbeat and events [pg]", () => {
         await admin.query("UPDATE agent_runs SET status = 'succeeded' WHERE id = $1", [id]);
         const next = await pending({ role: "proposal-verifier", mode: "runner_verified" });
         expect((await claim(updated)).kind).toBe("idle");
+        expect((await row(next)).status).toBe("pending");
+      });
+
+      // D#483 S4-f4 (C25-f4-3, claim step): the discovery analyst is gated by its own capability, not by the verifier's.
+      it("the discovery analyst is offered only to a runner whose latest hello advertised discovery_analyst, and the verifier's capability does not stand in for it", async () => {
+        await admin.query("UPDATE repos SET execution_mode = 'runner_verified' WHERE id = $1", [A.repoId]);
+        const id = await pending({ role: "discovery-analyst", mode: "runner_verified" });
+        const verifierOnly = await newRunner({ roles: [] });
+        await capable(verifierOnly, ["proposal_verifier"]);
+        const none = await newRunner({ roles: [] });
+        expect((await claim(none)).kind).toBe("idle");
+        expect((await claim(verifierOnly)).kind).toBe("idle");
+        expect((await row(id)).status).toBe("pending");
+        const analyst = await newRunner({ roles: [] });
+        await capable(analyst, ["discovery_analyst"]);
+        expect(await claim(analyst)).toMatchObject({ kind: "claimed", runId: id });
+        // The capability withdrawn on a later hello: the next analyst run is not offered to it.
+        await capable(analyst, []);
+        await admin.query("UPDATE agent_runs SET status = 'succeeded' WHERE id = $1", [id]);
+        const next = await pending({ role: "discovery-analyst", mode: "runner_verified" });
+        expect((await claim(analyst)).kind).toBe("idle");
         expect((await row(next)).status).toBe("pending");
       });
 

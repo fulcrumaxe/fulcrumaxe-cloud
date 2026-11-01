@@ -16,7 +16,7 @@ import {
   ITEM_PR_BRANCH,
   REVIEW_JOB_ROLES,
   jobCarriesPinnedCommit,
-  PROPOSAL_VERIFIER_ROLE,
+  CONFINED_READ_ROLES,
   RUNNER_ELIGIBLE_ROLES,
   SESSION_ID_PATTERN,
   JobSchema,
@@ -424,8 +424,8 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
       // D#483 S4-b2c: the claim verifier runs no command, so its job carries neither (it holds no Bash, and nothing runs after it).
       let sandboxAllowances: Job["sandbox_allowances"];
       let check: Job["check"];
-      // verifier-only: the verifier is the one confined role a runner job can be for today; the analyst joins in S4-f4 (S4-f1, R-C25-4).
-      if (context.sandboxAllowances && role !== PROPOSAL_VERIFIER_ROLE) {
+      // D#483 S4-f4: nor does the discovery analyst (a confined read-only role).
+      if (context.sandboxAllowances && !CONFINED_READ_ROLES.has(role)) {
         const set = parseAllowanceSet(context.sandboxAllowances);
         if (!set.ok) throw new JobIssueError("sandbox_allowances_invalid");
         if (set.set.entries.length > 0) sandboxAllowances = { entries: set.set.entries, command_timeout_s: set.set.command_timeout_s as number };

@@ -13,6 +13,15 @@
 /** The role the platform runs to check a proposal's claims. Not in the role manifest. */
 export const PROPOSAL_VERIFIER_ROLE = "proposal-verifier";
 
+/** D#483 S4-f1/S4-f4: the role the platform runs to propose changes from a repository's docs and code. Not in the role manifest. Confined exactly as the verifier is. */
+export const DISCOVERY_ANALYST_ROLE = "discovery-analyst";
+
+/**
+ * D#483 S4-f4 (R-C25-4): the platform roles that are a CONFINED READ-ONLY run (Read under the checkout, Glob and Grep, behind the one read guard). The cloud's
+ * sandbox and a local runner both test membership here, never a comparison with one role's name.
+ */
+export const CONFINED_READ_ROLES: ReadonlySet<string> = new Set([PROPOSAL_VERIFIER_ROLE, DISCOVERY_ANALYST_ROLE]);
+
 /**
  * The verifier's tools as a runner holds them, and as the cloud signs them for a runner job (`role_tools_sha256`): the bare names. The local
  * runner confines each to its own checkout itself (a `Read` rule under the workspace), so the list carries no path.

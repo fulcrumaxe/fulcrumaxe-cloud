@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { PROPOSAL_VERIFIER_RUNNER_TOOLS, VERIFIER_READ_GUARD_SCRIPT } from "@fulcrumaxe/runner-protocol";
+import { CONFINED_READ_ROLES, PROPOSAL_VERIFIER_RUNNER_TOOLS, VERIFIER_READ_GUARD_SCRIPT } from "@fulcrumaxe/runner-protocol";
 import { roleToolsDigest as cloudDigest } from "@fx/runner";
 import { describe, expect, it } from "vitest";
 import { MIN_CLAUDE_VERSION, compareVersions } from "../src/engines/claude/pin.js";
@@ -15,7 +15,6 @@ import { protectedPaths } from "../src/sandbox/sandboxSettings.js";
 import { RUNNER_BUILD_CAPABILITIES } from "../src/version.js";
 import { KEYRING, NOW, jobFor, signRaw } from "./helpers/signedJob.js";
 
-const ROLE = "proposal-verifier";
 const SANDBOX = { enabled: true, filesystem: { denyRead: ["~"] } };
 const PROTECTED = protectedPaths({ home: "/home/jane", stateDir: "/home/jane/.fx-runner", binaryDir: "/home/jane/.local/bin" });
 const SHA = "c".repeat(40);
@@ -23,8 +22,9 @@ const SHA = "c".repeat(40);
 type Hook = { matcher: string; hooks: Array<{ type: string; command: string; timeout: number }> };
 type Settings = { disableAllHooks: boolean; hooks?: { PreToolUse?: Hook[] } & Record<string, unknown>; permissions: { allow: string[]; deny: string[]; defaultMode: string; blockReadsOutsideWorkingDirectories: boolean } };
 
-/** D#483 S4-b2c: the claim verifier on a local runner. */
-describe("the claim verifier's tools on a runner", () => {
+/** D#483 S4-b2c / S4-f4 (C25-f4-4): the confined read-only roles on a local runner. The verifier's tests, run for each role. */
+for (const ROLE of ["proposal-verifier", "discovery-analyst"] as const) {
+describe(`the ${ROLE} tools on a runner`, () => {
   it("are Read, Glob and Grep only, and hash to the digest the cloud signs for a verifier job", () => {
     expect([...roleToolsFor(ROLE)]).toEqual(["Read", "Glob", "Grep"]);
     expect(roleToolsFor(ROLE)).toEqual(PROPOSAL_VERIFIER_RUNNER_TOOLS);
@@ -40,11 +40,11 @@ describe("the claim verifier's tools on a runner", () => {
   });
 
   it("this build advertises the capability on hello", () => {
-    expect(RUNNER_BUILD_CAPABILITIES).toContain("proposal_verifier");
+    expect(RUNNER_BUILD_CAPABILITIES).toContain(ROLE === "proposal-verifier" ? "proposal_verifier" : "discovery_analyst");
   });
 });
 
-describe("the claim verifier's settings file", () => {
+describe(`the ${ROLE} settings file`, () => {
   const WS = "/home/jane/.local/state/fx-runner/workspaces/run-1";
 
   it("has exactly one hook, the shared read guard on Read, Glob and Grep, given this checkout", () => {
@@ -71,8 +71,8 @@ describe("the claim verifier's settings file", () => {
     expect(JSON.stringify(permissions.allow)).not.toMatch(/Bash|Edit|Write|WebFetch|mcp__/);
   });
 
-  it("every other role still runs with all hooks off (the verifier is the only exception)", () => {
-    for (const role of Object.keys(ROLE_TOOLS).filter((r) => r !== ROLE)) {
+  it("every other role still runs with all hooks off (the confined read-only roles are the only exception)", () => {
+    for (const role of Object.keys(ROLE_TOOLS).filter((r) => !CONFINED_READ_ROLES.has(r))) {
       const file = settingsFor(role, SANDBOX, WS, PROTECTED) as Settings;
       expect(file.disableAllHooks, role).toBe(true);
       expect(file, role).not.toHaveProperty("hooks");
@@ -96,7 +96,7 @@ describe("the claim verifier's settings file", () => {
   });
 });
 
-describe("the read guard, run the way the CLI runs a command hook (sh -c <command>)", () => {
+describe(`the read guard for ${ROLE}, run the way the CLI runs a command hook (sh -c <command>)`, () => {
   const root = realpathSync(mkdtempSync(path.join(tmpdir(), "s4b2c2_guard-")));
   const ws = path.join(root, "checkout");
   mkdirSync(path.join(ws, "src"), { recursive: true });
@@ -128,7 +128,7 @@ describe("the read guard, run the way the CLI runs a command hook (sh -c <comman
   });
 });
 
-describe("a verifier job names its pinned commit", () => {
+describe(`a ${ROLE} job names its pinned commit`, () => {
   const check = (signed: unknown) => verifyJob(signed, KEYRING, NOW);
   const base = { role: ROLE, task: jobFor().task, role_tools_sha256: roleToolsDigest(ROLE) } as const;
 
@@ -142,3 +142,4 @@ describe("a verifier job names its pinned commit", () => {
     expect(check(signed).ok).toBe(false);
   });
 });
+}

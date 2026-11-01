@@ -202,6 +202,9 @@ describe('discovery_analyses, analysis_refs, proposal_title_norm and the due lis
       expect(Object.keys((await mine())[0]!)).toEqual(['account_id', 'analysis_id']);
       await startAnalysis(appPool, B.accountId, q.id);
       expect(await mine()).toHaveLength(1);
+      // 0953 (D#483 S4-f4): a Cloud-verified repository is listed too; a Local-only one is not.
+      await admin.query(`UPDATE repos SET execution_mode = 'runner_verified' WHERE id = $1`, [B.repoId]);
+      expect(await mine()).toHaveLength(1);
       await admin.query(`UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1`, [B.repoId]);
       expect(await mine()).toHaveLength(0);
       await admin.query(`UPDATE repos SET execution_mode = 'sandbox', installation_id = NULL WHERE id = $1`, [B.repoId]);

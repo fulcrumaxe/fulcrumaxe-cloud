@@ -1,4 +1,4 @@
-import { PROPOSAL_VERIFIER_ROLE, PROPOSAL_VERIFIER_RUNNER_TOOLS, RUNNER_ELIGIBLE_ROLES, canonicalJson, sha256Text } from "@fulcrumaxe/runner-protocol";
+import { DISCOVERY_ANALYST_ROLE, PROPOSAL_VERIFIER_ROLE, PROPOSAL_VERIFIER_RUNNER_TOOLS, RUNNER_ELIGIBLE_ROLES, canonicalJson, sha256Text } from "@fulcrumaxe/runner-protocol";
 
 /**
  * The tools each runner-eligible role may use on a customer's machine.
@@ -39,6 +39,7 @@ const ENTRY_FOR_ROLE: Readonly<Record<(typeof RUNNER_ELIGIBLE_ROLES)[number], re
   "acceptance-tester": REVIEWER,
   debater: REVIEWER,
   [PROPOSAL_VERIFIER_ROLE]: PROPOSAL_VERIFIER_RUNNER_TOOLS,
+  [DISCOVERY_ANALYST_ROLE]: PROPOSAL_VERIFIER_RUNNER_TOOLS,
 };
 
 /** The role table. Its keys are exactly the runner-eligible roles; each entry is frozen. */

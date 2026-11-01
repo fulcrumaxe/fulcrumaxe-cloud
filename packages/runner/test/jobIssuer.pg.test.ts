@@ -987,8 +987,8 @@ describe("JobIssuer [pg]", () => {
   });
 
   // D#483 S4-b2c: the claim verifier as a light runner job (cloud-verified repositories only).
-  describe("a claim verifier job", () => {
-    const VERIFIER = "proposal-verifier";
+  // D#483 S4-f4 (C25-f4-1, C25-f4-4, C25-f4-5): the discovery analyst is the same confined job, so the verifier's tests run for it too.
+  for (const VERIFIER of ["proposal-verifier", "discovery-analyst"]) describe(`a ${VERIFIER} job`, () => {
     /** A verifier run as the sweep starts it: no work item, the pinned commit on the row and in the prompt, in a cloud-verified repository. */
     async function verifierRun(w: Awaited<ReturnType<typeof world>>, over: { headSha?: string | null; prompt?: string } = {}): Promise<ExecutionRun> {
       await db.admin.query("UPDATE repos SET execution_mode = 'runner_verified' WHERE id = $1", [w.repoId]);

@@ -11,7 +11,7 @@ import { reportError } from "@fx/telemetry";
  * `discovery_sweep_list_due` (0952) names the connected product repositories with no sweep run yet for the current period of their frequency (UTC day, or ISO
  * week; cut in SQL, so no time zone is involved). For each, under its tenant:
  *  1. A `discovery_runs` row (trigger `sweep`, the period as reference) is queued; its UNIQUE key is the once-per-period rule. The drain (S4-c2) runs it and records why it skipped.
- *  2. If the repository may be analysed now (connected, account active, discovery on, sandbox, analysis configured) and its default branch head differs from the newest
+ *  2. If the repository may be analysed now (connected, account active, discovery on, sandbox or Cloud-verified, analysis configured) and its default branch head differs from the newest
  *     analysis row's (none counts as changed), that head's analysis is queued for the analysis pass (S4-f3). An unchanged head queues nothing. A new repository's first
  *     analysis starts here, at its first sweep, never at install (A-S4-1).
  * Spend is the analysis pass's shared `perRepoDailyUsd` counter. Nothing here creates a work item, an action request or a start, or imports the stage driver (R-597-1).
@@ -41,7 +41,7 @@ export interface DiscoveryScheduleCounts {
   analyses: number;
   /** Head already analysed or queued. */
   unchanged: number;
-  /** May not be analysed now (not connected, not paying, discovery off, not a sandbox repository, analysis off). */
+  /** May not be analysed now (not connected, not paying, discovery off, Local-only, analysis off). */
   not_analysed: number;
   errors: number;
   /** A full page was listed or the budget ran out: more may be waiting. */
@@ -73,7 +73,7 @@ export function createDiscoverySchedule(deps: DiscoveryScheduleDeps): () => Prom
            FROM repos r JOIN accounts a ON a.id = r.account_id WHERE r.account_id = $1 AND r.id = $2`, [accountId, repoId]);
       return rows[0];
     });
-    if (!analyse || !row || row.installation_id === null || row.account_status !== "active" || row.frequency === "off" || row.execution_mode !== "sandbox" || !row.gh_owner || !row.gh_name) {
+    if (!analyse || !row || row.installation_id === null || row.account_status !== "active" || row.frequency === "off" || (row.execution_mode !== "sandbox" && row.execution_mode !== "runner_verified") || !row.gh_owner || !row.gh_name) {
       counts.not_analysed += 1;
       return;
     }

@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { CONFINED_READ_ROLES, DISCOVERY_ANALYST_ROLE, PLATFORM_ROLES, PROPOSAL_VERIFIER_ROLE, VERIFIER_DENY, VERIFIER_READ_GUARD, agentSettingsFor, runnerToolsForRole, toolsForRole } from "../src/agentConfig.js";
+import { roleToolsDigest } from "../src/targets/jobIssuer.js";
 
 /**
  * D#483 S4-f1 (R-C25-4, S4f-5 first half): the discovery analyst is a confined read-only platform role, built on the verifier's confinement.
@@ -36,9 +37,10 @@ describe("S4f-5: the analyst's tools are exactly the confined Read, Glob and Gre
     for (const role of ["executor", "code-reviewer", "researcher", "", "__proto__", "Discovery-Analyst"]) expect(CONFINED_READ_ROLES.has(role), role).toBe(false);
   });
 
-  it("the runner job's tool list stays the verifier's alone: the analyst has no runner half until S4-f4", () => {
+  it("C25-f4-4: the runner job's tool list is the bare confined three for both roles (the signed role_tools_sha256 covers this list)", () => {
     expect([...runnerToolsForRole(PROPOSAL_VERIFIER_ROLE)]).toEqual(["Read", "Glob", "Grep"]);
-    expect(runnerToolsForRole(DISCOVERY_ANALYST_ROLE)).toBe(toolsForRole(DISCOVERY_ANALYST_ROLE));
+    expect(runnerToolsForRole(DISCOVERY_ANALYST_ROLE)).toBe(runnerToolsForRole(PROPOSAL_VERIFIER_ROLE));
+    expect(roleToolsDigest(DISCOVERY_ANALYST_ROLE)).toBe(roleToolsDigest(PROPOSAL_VERIFIER_ROLE));
   });
 });
 
