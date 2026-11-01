@@ -8,7 +8,7 @@ import type { PullRequestRef } from "../build/types.js";
 import { guardMain, type MainGuardGitHubPort } from "./mainGuard.js";
 import { MERGE_QUEUE_CI_WAIT_MINUTES } from "./policy.js";
 import { runRefreshStep, refreshTip, type RefreshGitHubPort, type StartDeltaReview } from "./refresh.js";
-import { adoptParkedSlot, listHeadRefreshes, markMerged, PARKED_PHASE, readQueue, reclaimExpiredLeases, releaseToQueue, renewSlot, returnToReview, stopEntry, takeSlot } from "./store.js";
+import { adoptParkedSlot, HOST_QUEUE_PHASE, listHeadRefreshes, markMerged, PARKED_PHASE, readQueue, reclaimExpiredLeases, releaseToQueue, renewSlot, returnToReview, stopEntry, takeSlot } from "./store.js";
 import type { MergeQueueEntry, PrFacts } from "./types.js";
 
 /**
@@ -39,8 +39,10 @@ export type QueueGateResult =
   | { outcome: "head_moved" }
   | { outcome: "ready_human_merges"; reasons: readonly string[] };
 
-/** D#694 B5: the phase of an entry whose pull request waits in the host's merge queue, and how long its slot is held (the store's longest lease). */
-export const HOST_QUEUE_PHASE = "host_queue";
+/**
+ * D#694 B5: how long a slot is held for an entry whose pull request waits in the host's merge queue (the store's longest lease). B6-2: this is only the bound for
+ * a lost delivery. The webhook ends the hold itself (`settlePullRequest` for a merge or a close, `settleHostDequeue` for a removal), so the usual wait is the queue's.
+ */
 export const HOST_QUEUE_LEASE_SECONDS = 3600;
 
 export type TickGitHubPort = RefreshGitHubPort & MainGuardGitHubPort;

@@ -11,7 +11,8 @@ import {
 import { classifyAuthor } from '@fx/trust';
 import { recordStage } from '@fx/core/src/work-items/recordStage.js';
 import { cleanWorkItemTitle } from '@fx/core/src/work-items/title.js';
-import { recordDriverEvent } from '@fx/core/src/work-items/driverEvents.js';
+import { dequeueReasonCode, recordDriverEvent } from '@fx/core/src/work-items/driverEvents.js';
+import { reportError } from '@fx/telemetry';
 import { IllegalStageTransitionError } from '@fx/core/src/work-items/stages.js';
 import { withTenant } from '@fx/db/src/withTenant.js';
 import { queueDiscoveries, type QueuedDiscovery } from '@fx/db/src/discoveryRuns.js';
@@ -151,6 +152,27 @@ export interface TransitionPrEvent {
   headRef?: string | null;
   /** True only when the pull request's base branch is the repository's default branch, both as the delivery states them. A planned PR child's number is bound only from such a pull request. */
   baseIsDefault?: boolean;
+  /** D#694 B6-2: the pull request's head commit as the delivery states it. A merge compares it with the head the gate sent to the host's merge queue. */
+  headSha?: string;
+}
+
+/**
+ * D#694 B6-2: `pull_request.enqueued` / `.dequeued`, the host's merge queue taking a pull request in or out. Recorded as a fact of the linked work item (`merge_enqueued`,
+ * `merge_dequeued`) and guarded exactly as `transition_pr` is. `reason` is the host's dequeue reason as a plain code (never text), null for `enqueued`; `actor` is `user` when a
+ * person removed it and `app` for anything else.
+ */
+export interface RecordQueueEvent {
+  kind: 'record_queue_event';
+  action: 'enqueued' | 'dequeued';
+  prNumber: number;
+  headSha: string;
+  reason: string | null;
+  actor: 'user' | 'app';
+  linkedIssueNumber: number | null;
+  trust: AuthorTrust;
+  isFork: boolean;
+  headRef?: string | null;
+  baseIsDefault?: boolean;
 }
 
 /**
@@ -226,6 +248,7 @@ export type MappedEvent =
   | IssueProposalChangeEvent
   | TransitionPrEvent
   | RecordPrPushEvent
+  | RecordQueueEvent
   | RouteMcpConfigEvent
   | WriteRepoNamesEvent
   | InstallationReposEvent
@@ -273,6 +296,9 @@ export interface GithubPullRequestPayload {
     head: { repo: { id: number } | null; sha?: string; ref?: string };
     base: { repo: { id: number }; ref?: string };
   };
+  /** D#694 B6-2: `dequeued` carries the host's reason (read as a plain code only); `sender.type` tells a person from an app. */
+  reason?: unknown;
+  sender?: { type?: unknown } | null;
   /** GitHub sends the repository on every delivery; only its default branch is read, to decide whether a pull request targets it. */
   repository?: { default_branch?: string };
 }
@@ -437,7 +463,8 @@ export function mapEvent(
       if (p.action === 'closed') {
         const closedAt = p.pull_request.merged_at ?? p.pull_request.created_at;
         const toStage = p.pull_request.merged ? 'merged' : 'closed_unmerged';
-        return { kind: 'transition_pr', toStage, at: new Date(closedAt), prNumber, linkedIssueNumber, trust, isFork, headRef, baseIsDefault };
+        const mergedHead = p.pull_request.head.sha;
+        return { kind: 'transition_pr', toStage, at: new Date(closedAt), prNumber, linkedIssueNumber, trust, isFork, headRef, baseIsDefault, ...(typeof mergedHead === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(mergedHead) ? { headSha: mergedHead } : {}) };
       }
       if (p.action === 'synchronize') {
         const headSha = p.pull_request.head.sha;
@@ -446,7 +473,14 @@ export function mapEvent(
         }
         return { kind: 'record_pr_push', prNumber, headSha, linkedIssueNumber, trust, isFork, headRef, baseIsDefault };
       }
-      return { kind: 'ignored', reason: `pull_request.${p.action}: not opened/closed/synchronize, no stage change` };
+      if (p.action === 'enqueued' || p.action === 'dequeued') {
+        const queuedHead = p.pull_request.head.sha;
+        if (typeof queuedHead !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(queuedHead)) {
+          return { kind: 'ignored', reason: `pull_request.${p.action}: no head commit id` };
+        }
+        return { kind: 'record_queue_event', action: p.action, prNumber, headSha: queuedHead, reason: p.action === 'dequeued' ? dequeueReasonCode(p.reason) : null, actor: p.sender?.type === 'User' ? 'user' : 'app', linkedIssueNumber, trust, isFork, headRef, baseIsDefault };
+      }
+      return { kind: 'ignored', reason: `pull_request.${p.action}: not opened/closed/synchronize/enqueued/dequeued, no stage change` };
     }
 
     case 'pull_request_review': {
@@ -579,6 +613,7 @@ export type ApplyResult =
   | { applied: 'proposal_rate_limited' }
   | { applied: 'proposal_changed'; count: number }
   | { applied: 'pr_push_recorded'; workItemId: string; recorded: boolean }
+  | { applied: 'queue_event_recorded'; workItemId: string; recorded: boolean }
   | { applied: 'mcp_config_routed' }
   | { applied: 'repo_names_written'; count: number }
   | { applied: 'repos_detached'; count: number; installationId: string; syncRequested: boolean }
@@ -588,6 +623,44 @@ const PR_URL_BASE = 'https://github.com';
 /** D#31 resolved disagreement 8's own pattern: a repo.full_name that
  * fails this is omitted from any emitted event payload. */
 const REPO_FULL_NAME_RE = /^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/;
+
+/** D#694 B6-2: the newest `merge_enqueued` fact of an item: the head the gate (or a person) sent to the host's queue, and the entry GitHub named for it (null when it named none). */
+async function latestEnqueue(client: PoolClient, accountId: string, workItemId: string): Promise<{ headSha: string | null; queueEntryId: string | null } | null> {
+  const { rows } = await client.query<{ head_sha: string | null; queue_entry_id: string | null }>(
+    `SELECT head_sha, queue_entry_id FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'merge_enqueued' ORDER BY seq DESC LIMIT 1`,
+    [accountId, workItemId],
+  );
+  return rows[0] ? { headSha: rows[0].head_sha, queueEntryId: rows[0].queue_entry_id } : null;
+}
+
+/**
+ * D#694 B6-2: a merge of an item that has a `merge_enqueued` fact is the host's queue (or its auto-merge) merging it: `merged_via_queue` is recorded once per pull request and head. The
+ * head GitHub merged must be the head the gate sent; a difference (or a merge whose head the delivery does not state) is recorded as `escalated` (`merged_head_differs`) and raised to
+ * the error reporter, and never undone, because GitHub has merged. A merge with no `merge_enqueued` fact (a person, the direct path) records nothing here.
+ */
+async function recordQueueMerge(client: PoolClient, accountId: string, workItemId: string, mapped: TransitionPrEvent): Promise<void> {
+  const sent = await latestEnqueue(client, accountId, workItemId);
+  if (sent === null || sent.headSha === null) return;
+  const merged = mapped.headSha ?? null;
+  await recordDriverEvent(client, accountId, {
+    workItemId,
+    kind: 'merged_via_queue',
+    dedupeKey: `mergedq:${mapped.prNumber}:${merged ?? sent.headSha}`,
+    headSha: merged ?? sent.headSha,
+    prNumber: mapped.prNumber,
+    ...(sent.queueEntryId !== null ? { queueEntryId: sent.queueEntryId } : {}),
+  });
+  if (merged === sent.headSha) return;
+  const { recorded } = await recordDriverEvent(client, accountId, {
+    workItemId,
+    kind: 'escalated',
+    dedupeKey: `merged_head_differs:${mapped.prNumber}:${merged ?? 'unstated'}`,
+    code: 'merged_head_differs',
+    ...(merged !== null ? { headSha: merged } : {}),
+    prNumber: mapped.prNumber,
+  });
+  if (recorded) reportError(new Error('merged head differs from the head the merge gate sent to the merge queue'), { stage: 'github.merged_head_differs' });
+}
 
 /** Looks up the work_items row that carries a GitHub number in a repo --
  * the linkage a pull_request event transitions. Never creates a row: an
@@ -871,10 +944,14 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
           return { applied: 'transitioned', workItemId, recorded: false };
         }
         if (err instanceof IllegalStageTransitionError && (mapped.toStage === 'merged' || mapped.toStage === 'closed_unmerged') && err.from === mapped.toStage) {
+          // The item may already be merged by a read that beat this delivery: the queue's merge is still recorded (one row, keyed on the pull request and head).
+          if (mapped.toStage === 'merged') await recordQueueMerge(client, ctx.accountId, workItemId, mapped);
           return { applied: 'transitioned', workItemId, recorded: false };
         }
         throw err;
       }
+
+      if (mapped.toStage === 'merged') await recordQueueMerge(client, ctx.accountId, workItemId, mapped);
 
       // C7: only on a genuine (non-duplicate) pr_opened transition, the
       // SAME client recordStage was given, and only ids/enums (D#31
@@ -907,6 +984,34 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
       // to a head seen before (A, B, A) is a new push and restarts the quiet period.
       const { recorded } = await recordDriverEvent(client, ctx.accountId, { workItemId, kind: 'pr_head_pushed', dedupeKey: `push:${ctx.deliveryId}`, code: 'synchronize', headSha: mapped.headSha, prNumber: mapped.prNumber });
       return { applied: 'pr_push_recorded', workItemId, recorded };
+    }
+
+    case 'record_queue_event': {
+      if (mapped.isFork && mapped.trust !== 'trusted') {
+        return { applied: 'skipped', reason: 'pull_request: fork or untrusted head repo, no queue fact recorded' };
+      }
+      const workItemId =
+        (await findChildPullRequestItem(client, ctx.accountId, ctx.repoId, ctx.repo.fullName, mapped.prNumber, mapped.headRef ?? null, { isFork: mapped.isFork, trusted: mapped.trust === 'trusted', baseIsDefault: mapped.baseIsDefault === true })) ??
+        (await findPullRequestItem(client, ctx.accountId, ctx.repoId, mapped.prNumber, mapped.linkedIssueNumber, { repoFullName: ctx.repo.fullName, headRef: mapped.headRef ?? null }));
+      if (!workItemId) return { applied: 'skipped', reason: unlinkedReason(mapped.linkedIssueNumber) };
+      if (mapped.action === 'enqueued') {
+        // The gate's own row for this head has the same key, so whichever arrives first is the one row (a manual enqueue has no gate row).
+        const { recorded } = await recordDriverEvent(client, ctx.accountId, { workItemId, kind: 'merge_enqueued', dedupeKey: `enqueued:${mapped.headSha}`, code: 'queue', headSha: mapped.headSha, prNumber: mapped.prNumber });
+        return { applied: 'queue_event_recorded', workItemId, recorded };
+      }
+      // One row per delivery: a second removal of the same head is a second row (the retry rule counts them), a redelivery is not.
+      const entry = await latestEnqueue(client, ctx.accountId, workItemId);
+      const { recorded } = await recordDriverEvent(client, ctx.accountId, {
+        workItemId,
+        kind: 'merge_dequeued',
+        dedupeKey: `dequeued:${ctx.deliveryId}`,
+        code: mapped.reason ?? 'unspecified',
+        reasons: [`actor_${mapped.actor}`],
+        headSha: mapped.headSha,
+        prNumber: mapped.prNumber,
+        ...(entry !== null && entry.headSha === mapped.headSha && entry.queueEntryId !== null ? { queueEntryId: entry.queueEntryId } : {}),
+      });
+      return { applied: 'queue_event_recorded', workItemId, recorded };
     }
 
     case 'route_mcp_config': {

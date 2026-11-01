@@ -47,8 +47,10 @@ import type { PoolClient } from 'pg';
  *                         usage_not_recorded; run_id: the run. Written by the sweep alone, never by the driver.
  *   merge_enqueued        D#694 B5: the merge gate put the pull request into GitHub's merge queue (code: queue | auto_merge, how it was accepted). head_sha, pr_number and the queue
  *                         entry id GitHub answered with (queue_entry_id; none for auto_merge). Ids only.
- *   merge_dequeued        D#694: GitHub took the queue entry out without merging it. What GitHub said and when: ids only; queue_entry_id names the entry.
- *   merged_via_queue      D#694: the merge queue merged the pull request. Ids only; queue_entry_id names the entry.
+ *   merge_dequeued        D#694: GitHub took the queue entry out without merging it (pull_request.dequeued; B6-2). code: the host's reason as a plain code (`dequeueReasonCode`, `unspecified` when it gave none);
+ *                         reasons: `actor_user` | `actor_app`; head_sha, pr_number; queue_entry_id when the head is the one the gate enqueued. One row per delivery, so the rows for a head count its removals.
+ *   merged_via_queue      D#694: the merge queue merged the pull request (B6-2: written by the pull_request.closed delivery of an item that has a merge_enqueued fact; one row per pull request and head).
+ *                         head_sha: the head GitHub merged. If it differs from the enqueued head an `escalated` fact (code: merged_head_differs) is written beside it. queue_entry_id names the entry.
  */
 export const DRIVER_EVENT_KINDS = [
   'build_refused',
@@ -81,6 +83,20 @@ export const DRIVER_EVENT_KINDS = [
 export const QUEUE_EVENT_KINDS: readonly DriverEventKind[] = ['merge_enqueued', 'merge_dequeued', 'merged_via_queue'];
 const QUEUE_ENTRY_RE = /^[A-Za-z0-9_=-]{1,100}$/;
 export type DriverEventKind = (typeof DRIVER_EVENT_KINDS)[number];
+
+/** D#694 B6-2: the stored code of a pull request's `dequeued` reason when GitHub gave none. */
+export const DEQUEUE_UNSPECIFIED = 'unspecified';
+/** D#694 B6-2: dequeue reasons that are the queue's success (GitHub dequeues an entry it merged): they end nothing and stop nothing. */
+export const DEQUEUE_SUCCESS_CODES: readonly string[] = ['merge', 'already_merged'];
+/**
+ * D#694 B6-2: GitHub's `dequeued` reason as a plain code. Only the first 200 characters are read, control characters and anything outside [a-z0-9_] become `_`,
+ * and a reason that leaves nothing is `unspecified`. The text is never parsed for a decision beyond comparing this code with the success codes above.
+ */
+export function dequeueReasonCode(reason: unknown): string {
+  if (typeof reason !== 'string') return DEQUEUE_UNSPECIFIED;
+  const plain = reason.slice(0, 200).toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
+  return plain === '' ? DEQUEUE_UNSPECIFIED : toCode(plain);
+}
 
 /** D#483 S5-k1b: the starts that can wait on a limit (migration 0845's check lists the same seven; a test holds the two equal). */
 export const WAITING_STAGES = ['build', 'classify', 'spec', 'respec', 'review', 'fix_round', 'panel'] as const;

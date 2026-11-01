@@ -24,6 +24,11 @@ const COLUMNS = `id, account_id, repo_id, entry_kind, work_item_id, plan_writeba
 const CLEAR_SLOT_AND_WORK = `phase = NULL, slot_holder = NULL, lease_until = NULL, slot_taken_at = NULL, work_kind = NULL, work_run_id = NULL`;
 
 const CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
+
+/** D#694 B5/B6-2: the phase of an entry whose pull request waits in the host's merge queue. No tick adopts it; only an event (or the lease running out) ends it. */
+export const HOST_QUEUE_PHASE = "host_queue";
+/** The fixed stop code of an entry the host's queue removed without merging it. */
+export const HOST_DEQUEUED_REASON = "removed_from_merge_queue";
 const SHA_RE = /^([0-9a-f]{40}|[0-9a-f]{64})$/;
 
 interface Row {
@@ -505,7 +510,8 @@ export async function settlePullRequest(
   if (input.merged) {
     return one(
       client,
-      `UPDATE merge_queue_entries SET state = 'merged', merged_by = 'person', reason = NULL, ${CLEAR_SLOT_AND_WORK}
+      // An entry waiting in the host's queue was put there by the gate, so the queue's merge is the gate's; any other merge is a person's.
+      `UPDATE merge_queue_entries SET state = 'merged', merged_by = CASE WHEN state = 'in_flight' AND phase = '${HOST_QUEUE_PHASE}' THEN 'gate' ELSE 'person' END, reason = NULL, ${CLEAR_SLOT_AND_WORK}
         WHERE account_id = $1 AND repo_id = $2 AND pr_number = $3 AND state IN ('in_review', 'queued', 'in_flight', 'awaiting_work', 'stopped')
         RETURNING ${COLUMNS}`,
       [input.accountId, input.repoId, input.prNumber],
@@ -517,6 +523,25 @@ export async function settlePullRequest(
       WHERE account_id = $1 AND repo_id = $2 AND pr_number = $3 AND state IN ('in_review', 'queued', 'in_flight', 'awaiting_work', 'stopped')
       RETURNING ${COLUMNS}`,
     [input.accountId, input.repoId, input.prNumber],
+  );
+}
+
+/**
+ * D#694 B6-2: the host's queue removed a pull request without merging it. Settles the entry that is waiting in the host's queue (`in_flight`, phase `host_queue`) for
+ * exactly the head that was last enqueued for its item: the slot is released and the entry stops with a fixed code, for a person (or B6-3's single retry) to take up. An
+ * event for any other head (one the item has moved on from), for an entry that is not waiting there, or for a final entry changes nothing, so a late or replayed delivery
+ * never undoes a merge or a close. Answers the entry it stopped, or null.
+ */
+export async function settleHostDequeue(client: Queryable, input: { accountId: string; repoId: string; prNumber: number; headSha: string }): Promise<MergeQueueEntry | null> {
+  assertSha(input.headSha);
+  return one(
+    client,
+    `UPDATE merge_queue_entries e SET state = 'stopped', reason = '${HOST_DEQUEUED_REASON}', ${CLEAR_SLOT_AND_WORK}
+      WHERE e.account_id = $1 AND e.repo_id = $2 AND e.pr_number = $3 AND e.state = 'in_flight' AND e.phase = '${HOST_QUEUE_PHASE}'
+        AND e.work_item_id IS NOT NULL
+        AND $4 = (SELECT v.head_sha FROM work_item_driver_events v WHERE v.account_id = e.account_id AND v.work_item_id = e.work_item_id AND v.kind = 'merge_enqueued' ORDER BY v.seq DESC LIMIT 1)
+      RETURNING ${COLUMNS}`,
+    [input.accountId, input.repoId, input.prNumber, input.headSha],
   );
 }
 
