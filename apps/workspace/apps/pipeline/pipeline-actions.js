@@ -1492,6 +1492,8 @@ approveSay("There is no model key for this work yet. Add one in the model settin
 approveSay("There is no model budget set for this work yet. Set one in the model settings, then try again.", "model_budget_unset");
 approveSay("A spending limit stopped this. Nothing was started.", "refused_spend", "spend_refused", "model_budget_exceeded", "per_spawn_cap_exceeded", "limit_exceeded", "quota_exceeded", "work_item_cap_exceeded", "compute_cap_exceeded");
 approveSay("This can't be done from here any more. The item has moved on, or it isn't the kind of item this applies to. Open the card again to see where it is.", "action_not_available");
+// D#694 B6-5: Remove from queue on a pull request that is not in the merge queue.
+approveSay("That pull request is not in the merge queue. Nothing was changed.", "not_in_queue");
 approveSay("The Spec changed since this page loaded. Open the card again to see the current one.", "spec_changed");
 approveSay("Only an owner or an admin can start this.", "insufficient_role", "principal_not_authorised");
 approveSay("Sign in again to do this.", "session_required");
@@ -1711,10 +1713,10 @@ export function approveView(item, approver, liveRun = false, waiting = null) {
 // for a few moments so a refusal that costs nothing reaches the sentence. An open pull request has no Close: the server says
 // so (`close_on_github`), and the card tells the person to close the pull request on GitHub.
 
-export const OPERATOR_LABELS = { request_changes: "Request changes", build_again: "Build again", respec: "Re-spec", back_to_discussion: "Back to discussion", treat_as_feature: "Treat as a feature", close: "Close", reopen: "Reopen", retry_push: "Try the push again", open_pr: "Open the pull request again" };
+export const OPERATOR_LABELS = { request_changes: "Request changes", build_again: "Build again", respec: "Re-spec", back_to_discussion: "Back to discussion", treat_as_feature: "Treat as a feature", close: "Close", reopen: "Reopen", retry_push: "Try the push again", open_pr: "Open the pull request again", remove_from_queue: "Remove from queue", queue_again: "Queue again" };
 /** The order buttons are drawn in. An action the server lists that is not here is not drawn. */
-export const OPERATOR_ORDER = ["request_changes", "build_again", "respec", "back_to_discussion", "treat_as_feature", "close", "reopen", "retry_push", "open_pr"];
-const OPERATOR_TESTIDS = { request_changes: "pl-op-changes", build_again: "pl-op-build", respec: "pl-op-respec", back_to_discussion: "pl-op-back", treat_as_feature: "pl-op-feature", close: "pl-op-close", reopen: "pl-op-reopen", retry_push: "pl-op-retry-push", open_pr: "pl-op-open-pr" };
+export const OPERATOR_ORDER = ["request_changes", "build_again", "respec", "back_to_discussion", "treat_as_feature", "close", "reopen", "retry_push", "open_pr", "remove_from_queue", "queue_again"];
+const OPERATOR_TESTIDS = { request_changes: "pl-op-changes", build_again: "pl-op-build", respec: "pl-op-respec", back_to_discussion: "pl-op-back", treat_as_feature: "pl-op-feature", close: "pl-op-close", reopen: "pl-op-reopen", retry_push: "pl-op-retry-push", open_pr: "pl-op-open-pr", remove_from_queue: "pl-op-queue-remove", queue_again: "pl-op-queue-again" };
 
 const itemPath = (id) => "/api/v1/work-items/" + encodeURIComponent(id);
 export const OPERATOR_PATHS = {
@@ -1727,6 +1729,8 @@ export const OPERATOR_PATHS = {
   reopen: (id) => itemPath(id) + "/reopen",
   retry_push: (id) => itemPath(id) + "/retry-push",
   open_pr: (id) => itemPath(id) + "/open-pr",
+  remove_from_queue: (id) => itemPath(id) + "/remove-from-queue",
+  queue_again: (id) => itemPath(id) + "/queue-again",
 };
 
 /** Under the buttons, before the click: what each one does. */
@@ -1740,6 +1744,8 @@ export const OPERATOR_NOTES = {
   reopen: "Reopen puts a closed work item back in Triaged, where it can be approved again.",
   retry_push: "Try the push again sends the change to the public repository once more. It is tried at most three times in all.",
   open_pr: "Open the pull request again opens the pull request for the branch that was already pushed. Nothing is pushed again.",
+  remove_from_queue: "Remove from queue takes the pull request out of the merge queue. Nothing queues it again by itself; Queue again does.",
+  queue_again: "Queue again checks the pull request's current commit as a first attempt would, and queues it only if everything is clear.",
 };
 export const CLOSE_ON_GITHUB_NOTE = "To close this, close its pull request on GitHub. The card then moves to Closed without a merge.";
 
@@ -1754,14 +1760,17 @@ export const OPERATOR_STARTED = {
   reopen: "Reopened. The card is back in Triaged.",
   retry_push: "Started. The push is being tried again, and the Public change line shows how it ended. This can take a minute.",
   open_pr: "The pull request is open. The Public change line has its link.",
+  remove_from_queue: "Removed. The card shows who removed it once GitHub reports the removal.",
+  queue_again: "Started. The merge check is running again, and the card shows whether the pull request was queued.",
 };
 /** Open the pull request again answers with its outcome at once; a refusal leaves the pushed branch as it was. */
 export const OPEN_PR_REFUSED = "The pull request could not be opened. The pushed branch is unchanged; the Public change line says what is known. You can try again.";
 
+export const REMOVE_DIALOG = { title: "Remove from the merge queue?", lines: ["The pull request leaves GitHub's merge queue and is not queued again by itself. Queue again puts it back."], confirm: "Yes, remove it", dismiss: "Keep it queued" };
 export const CLOSE_DIALOG = { title: "Close this work item?", lines: ["The card moves to Closed and no agent will work on it any more."], confirm: "Yes, close it", dismiss: "Keep it open" };
 export const REOPEN_DIALOG = { title: "Reopen this work item?", lines: ["The card moves back to Triaged. Nothing starts until someone approves it."], confirm: "Yes, reopen it", dismiss: "Keep it closed" };
 /** The actions that ask first, in the app's own dialog, and answer at once (no agent is involved). */
-const CONFIRMED = { close: CLOSE_DIALOG, reopen: REOPEN_DIALOG };
+const CONFIRMED = { close: CLOSE_DIALOG, reopen: REOPEN_DIALOG, remove_from_queue: REMOVE_DIALOG };
 /** Request changes asks for a note first, in the same dialog with a note box; the stage driver then runs, so it is followed like the other run actions. */
 export const NOTE_MAX = 2000;
 export const CHANGES_DIALOG = {

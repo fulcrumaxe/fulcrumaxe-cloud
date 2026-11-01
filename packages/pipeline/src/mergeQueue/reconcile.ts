@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
-import { DEQUEUE_SUCCESS_CODES, enqueueDedupeKey, listHeadRemovals, recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
+import { ACTOR_YOU, removeIntentRecent } from "@fx/core/src/work-items/queueIntent.js";
+import { DEQUEUE_SUCCESS_CODES, enqueueDedupeKey, listHeadRemovals, personRequeueCycle, queueEscalationKey, recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, StageInputError } from "@fx/core/src/work-items/stages.js";
 import { reportError } from "@fx/telemetry";
@@ -149,11 +150,11 @@ async function settle(client: PoolClient, a: { accountId: string; repoId: string
   if (reading?.state === "closed") return (await settlePullRequest(client, { accountId, repoId, prNumber: row.prNumber, merged: false })) ? "settled" : "none";
   // An auto-merge enqueue has no queue entry until its checks pass, so "no entry" is not a removal for it (unless a removal fact says so); the no-answer limit covers it.
   if (reading && reading.entry === null && (row.enqueueCode !== "auto_merge" || row.removedAt !== null)) {
-    // Gone from the host's queue, unmerged. GitHub's own removal unless a removal fact already says otherwise: the first is retried once (the take enqueues it again).
+    // Gone from the host's queue, unmerged. GitHub's own removal unless a Remove press of this head was recorded within minutes (then it is "you", and no retry follows) or a removal fact already says otherwise: the first is retried once (the take enqueues it again).
     let changed = false;
     if (row.removedAt === null) {
       const key = `dequeued:reconciled:${row.enqueueSeq}`;
-      changed = (await recordDriverEvent(client, accountId, { ...base, kind: "merge_dequeued", dedupeKey: key, code: NOT_IN_QUEUE_CODE, reasons: ["actor_app"], headSha: row.headSha, ...(row.queueEntryId !== null ? { queueEntryId: row.queueEntryId } : {}) })).recorded;
+      changed = (await recordDriverEvent(client, accountId, { ...base, kind: "merge_dequeued", dedupeKey: key, code: NOT_IN_QUEUE_CODE, reasons: [(await removeIntentRecent(client, accountId, row.workItemId, row.prNumber, row.headSha)) ? ACTOR_YOU : "actor_app"], headSha: row.headSha, ...(row.queueEntryId !== null ? { queueEntryId: row.queueEntryId } : {}) })).recorded;
     }
     const s = await settleHostDequeue(client, { accountId, repoId, prNumber: row.prNumber, headSha: row.headSha });
     if (s.outcome === "exhausted") await handToPerson(client, accountId, row.workItemId, row.headSha);
@@ -161,7 +162,7 @@ async function settle(client: PoolClient, a: { accountId: string; repoId: string
   }
   if (reading?.entry && row.removedAt !== null) {
     // Queued again by hand (the delivery was lost): the fact the webhook would have written, keyed like the gate's own enqueue of this head after its removals.
-    const removals = (await listHeadRemovals(client, accountId, row.workItemId, reading.headSha, row.prNumber)).length;
+    const removals = (await listHeadRemovals(client, accountId, row.workItemId, reading.headSha, row.prNumber, { all: true })).length;
     const { recorded } = await recordDriverEvent(client, accountId, { ...base, kind: "merge_enqueued", dedupeKey: enqueueDedupeKey(reading.headSha, removals), code: "queue", headSha: reading.headSha, queueEntryId: reading.entry.id });
     return recorded ? "settled" : "none";
   }
@@ -169,9 +170,11 @@ async function settle(client: PoolClient, a: { accountId: string; repoId: string
   if (row.removedAt === null && now.getTime() - row.enqueuedAt.getTime() >= MERGE_QUEUE_RECONCILE_NO_ANSWER_HOURS * 3_600_000) {
     const stopped = await stopEntry(client, { accountId, entryId: row.entryId, reason: NO_ANSWER_REASON });
     if (stopped === null) return "none";
-    await recordDriverEvent(client, accountId, { ...base, kind: "escalated", dedupeKey: `queue_no_answer:${row.headSha}`, code: NO_ANSWER_REASON, headSha: row.headSha });
+    // One row per cycle: after a person's Queue again, the host's next silence is a new escalation, not the first one found again.
+    const cycle = await personRequeueCycle(client, accountId, row.workItemId, row.headSha);
+    await recordDriverEvent(client, accountId, { ...base, kind: "escalated", dedupeKey: queueEscalationKey("queue_no_answer", row.headSha, cycle), code: NO_ANSWER_REASON, headSha: row.headSha });
     try {
-      await recordStage(client, { workItemId: row.workItemId, toStage: "needs_human", at: new Date(), source: "control_plane", sourceRef: `${NO_ANSWER_REASON}:${row.headSha}` });
+      await recordStage(client, { workItemId: row.workItemId, toStage: "needs_human", at: new Date(), source: "control_plane", sourceRef: `${NO_ANSWER_REASON}:${row.headSha}${cycle === 0 ? "" : `:c${cycle}`}` });
     } catch (err) {
       // fx-swallow-ok: the stop and the fact stand; an item that cannot legally move (already merged or closed) keeps its stage
       if (!(err instanceof IllegalStageTransitionError || err instanceof StageInputError)) throw err;

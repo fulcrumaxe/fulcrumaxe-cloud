@@ -214,8 +214,46 @@ describe('retry_push and open_pr (D#598 P1f-6b)', () => {
   });
 
   it('they come last in the list, after the stuck-item actions', () => {
-    expect(OPERATOR_ACTIONS.slice(-2)).toEqual(['retry_push', 'open_pr']);
+    expect(OPERATOR_ACTIONS.slice(-4, -2)).toEqual(['retry_push', 'open_pr']);
     expect(operatorActionsFor(push())).toEqual(['build_again', 'back_to_discussion', 'close', 'retry_push']);
+  });
+});
+
+describe('Remove from queue and Queue again (D#694 B6-5)', () => {
+  const q = (merge_queue: OperatorFacts['merge_queue'], over: Partial<OperatorFacts> = {}) => at({ stage: 'review_passed', merge_queue, ...over });
+
+  it('Remove from queue is offered only while the item waits in the queue, Queue again only after the queue took it out; never both, never neither unless there is nothing to do', () => {
+    expect(operatorActionsFor(q('queued'))).toContain('remove_from_queue');
+    expect(operatorActionsFor(q('queued'))).not.toContain('queue_again');
+    expect(operatorActionsFor(q('removed'))).toContain('queue_again');
+    expect(operatorActionsFor(q('removed'))).not.toContain('remove_from_queue');
+    for (const none of [null, undefined, 'not_in_queue'] as const) {
+      expect(operatorActionsFor(q(none)), String(none)).not.toContain('remove_from_queue');
+      expect(operatorActionsFor(q(none)), String(none)).not.toContain('queue_again');
+    }
+  });
+
+  it('Queue again is also offered when the host stayed silent (no_answer), and at Needs a person only when the queue put it there', () => {
+    expect(operatorActionsFor(q('no_answer'))).toContain('queue_again');
+    expect(operatorActionsFor(q('no_answer'))).not.toContain('remove_from_queue');
+    const held = (merge_queue: OperatorFacts['merge_queue'], queue_hold?: boolean) => q(merge_queue, { stage: 'needs_human', queue_hold });
+    expect(operatorVerdict('queue_again', held('no_answer', true))).toEqual({ ok: true });
+    expect(operatorVerdict('queue_again', held('removed', true))).toEqual({ ok: true });
+    expect(operatorVerdict('queue_again', held('removed', false))).toMatchObject({ ok: false });
+    expect(operatorVerdict('queue_again', held('removed', undefined))).toMatchObject({ ok: false });
+    expect(operatorVerdict('queue_again', held('queued', true))).toMatchObject({ ok: false });
+  });
+
+  it('neither is offered at another stage, to a member, for an external item, or while an agent runs; Queue again also needs the repository and the issue (it asks the driver)', () => {
+    for (const stage of ['pr_opened', 'changes_requested', 'needs_human', 'merged', 'closed']) {
+      expect(operatorVerdict('remove_from_queue', q('queued', { stage })), stage).toMatchObject({ ok: false });
+      expect(operatorVerdict('queue_again', q('removed', { stage })), stage).toMatchObject({ ok: false });
+    }
+    expect(operatorVerdict('remove_from_queue', q('queued', { role: 'member' }))).toMatchObject({ ok: false, reason: 'role' });
+    expect(operatorVerdict('queue_again', q('removed', { provenance: 'external' }))).toMatchObject({ ok: false, reason: 'external' });
+    expect(operatorVerdict('remove_from_queue', q('queued', { live_run: true }))).toMatchObject({ ok: false, reason: 'live' });
+    expect(operatorVerdict('queue_again', q('removed', { repo_id: null }))).toMatchObject({ ok: false, reason: 'no_repo' });
+    expect(operatorVerdict('queue_again', q('removed', { gh_number: null }))).toMatchObject({ ok: false, reason: 'no_issue' });
   });
 });
 

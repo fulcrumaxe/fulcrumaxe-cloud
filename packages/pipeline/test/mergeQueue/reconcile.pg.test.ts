@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { PoolClient } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { enqueueDedupeKey, recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
-import { isQueuedSql } from "@fx/core/src/work-items/mergeReadiness.js";
+import { NO_ANSWER_CODE, isQueuedSql } from "@fx/core/src/work-items/mergeReadiness.js";
+import { PERSON_REQUEUE_REASON } from "@fx/core/src/work-items/queueIntent.js";
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "../../../github/src/mergeGateGraphql.js";
 import { createGitHubMergeGatePort, type GitHubHttp } from "../../src/build/githubMergePort.js";
 import { HOST_DEQUEUED_REASON, HOST_RETRY_USED_REASON, NO_ANSWER_REASON, readHostQueued, reconcileHostQueued, releaseToQueue, takeSlot } from "../../src/mergeQueue/index.js";
@@ -20,6 +21,10 @@ let repos: QueueRepo[] = [];
 afterEach(async () => {
   await Promise.all(repos.map((r) => r.close()));
   repos = [];
+});
+
+it("the card's no_answer code is the one the reconcile writes", () => {
+  expect(NO_ANSWER_CODE).toBe(NO_ANSWER_REASON);
 });
 
 describe("reconcile of entries waiting in the host's queue [pg]", () => {
@@ -123,6 +128,26 @@ describe("reconcile of entries waiting in the host's queue [pg]", () => {
     expect(await facts(it, "merge_dequeued")).toEqual(["not_in_queue_reconciled", "not_in_queue_reconciled"]);
   });
 
+  it("B6-5: a lost removal that follows a Remove press of that head within ten minutes is recorded as the person's own (actor_you) and gets no retry; an older press is GitHub's, and is retried", async () => {
+    const r = await setup([7, 8]);
+    const pressed = r.items.get(7)!;
+    const old = r.items.get(8)!;
+    const audit = (it: QueueItem, minutesAgo: number) =>
+      db.admin.query(`INSERT INTO audit_log (account_id, actor, action, payload, created_at) VALUES ($1, 'tester', 'work_item.sent_back', $2::jsonb, now() - make_interval(mins => $3))`, [
+        r.accountId,
+        JSON.stringify({ action: "queue_remove", work_item_id: it.workItemId, pr_number: it.pr, head_sha: it.head }),
+        minutesAgo,
+      ]);
+    await audit(pressed, 2);
+    await audit(old, 11);
+    await run(r, world(r, { 7: {}, 8: {} }));
+    const reasons = async (it: QueueItem) => (await db.admin.query<{ reasons: string[] }>(`SELECT reasons FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'merge_dequeued'`, [it.workItemId])).rows.map((x) => x.reasons[0]);
+    expect(await reasons(pressed)).toEqual(["actor_you"]);
+    expect(await r.entry(7)).toMatchObject({ state: "stopped", reason: HOST_DEQUEUED_REASON });
+    expect(await reasons(old)).toEqual(["actor_app"]);
+    expect(await r.entry(8)).toMatchObject({ state: "queued", reason: null });
+  });
+
   it("a person's removal that the webhook recorded but never settled holds: the entry stops with no retry", async () => {
     const r = await setup([7]);
     const it = r.items.get(7)!;
@@ -169,6 +194,28 @@ describe("reconcile of entries waiting in the host's queue [pg]", () => {
     }
     expect(await r.entry(9)).toMatchObject({ state: "queued" });
     expect(await stage(c9!)).toBe("review_passed");
+    expect(await run(r, w, { now: at(60) })).toMatchObject({ escalated: 0 });
+  });
+
+  it("B6-5: after a person's Queue again of the same head, the host's next six-hour silence is its own escalation (the next cycle), once", async () => {
+    const r = await setup([7], 120);
+    const it = r.items.get(7)!;
+    await age(it, 300);
+    const w = world(r, { 7: { entry: true } });
+    expect(await run(r, w, { now: at(15) })).toMatchObject({ escalated: 1 });
+    // Queue again: the gate's enqueue of the same head answers the person, and the entry waits in the host's queue again.
+    await tenant(r, (c) => recordDriverEvent(c, r.accountId, { workItemId: it.workItemId, kind: "merge_enqueued", dedupeKey: `${enqueueDedupeKey(it.head, 0)}:again`, code: "queue", reasons: [PERSON_REQUEUE_REASON], headSha: it.head, prNumber: it.pr }));
+    await db.admin.query(`ALTER TABLE merge_queue_entries DISABLE TRIGGER USER`);
+    try {
+      await db.admin.query(`UPDATE merge_queue_entries SET state = 'queued', reason = NULL WHERE id = $1`, [it.entryId]);
+    } finally {
+      await db.admin.query(`ALTER TABLE merge_queue_entries ENABLE TRIGGER USER`);
+    }
+    await age(it, 400);
+    await ageEntry(it, 400);
+    expect(await run(r, w, { now: at(30) })).toMatchObject({ escalated: 1 });
+    const keys = (await db.admin.query<{ dedupe_key: string }>(`SELECT dedupe_key FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'escalated' ORDER BY seq`, [it.workItemId])).rows.map((e) => e.dedupe_key);
+    expect(keys).toEqual([`queue_no_answer:${it.head}`, `queue_no_answer:${it.head}:c1`]);
     expect(await run(r, w, { now: at(60) })).toMatchObject({ escalated: 0 });
   });
 
@@ -268,5 +315,14 @@ describe("reconcile of entries waiting in the host's queue [pg]", () => {
     const out = await reconcileHostQueued({ github: w.github, inTenant }, { accountId: r.accountId, repoId: r.repoId, maxReads: 20 });
     expect(out.reads).toBe(2);
     expect(w.reads()).toBe(1);
+  });
+  it("SR: an auto-merge enqueue with a recorded removal is still settled from the facts (a person's removal stops it)", async () => {
+    const r = await setup([7]);
+    const it = r.items.get(7)!;
+    await db.admin.query(`UPDATE work_item_driver_events SET code = 'auto_merge' WHERE work_item_id = $1 AND kind = 'merge_enqueued'`, [it.workItemId]);
+    await fact(r, it, "merge_dequeued", "dequeued:d1", { actor: "user" });
+    await age(it, 30);
+    await run(r, world(r, { 7: {} }));
+    expect(await r.entry(7)).toMatchObject({ state: "stopped", reason: HOST_DEQUEUED_REASON });
   });
 });

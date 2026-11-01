@@ -15,7 +15,19 @@ export const NO_VERDICT_ESCALATION_CODE = 'reviewer_no_verdict';
  */
 export const UNVERIFIABLE_ESCALATION_CODE = 'reviewer_unverifiable';
 
+/**
+ * D#694 B6-5: escalations the merge queue made (a used-up retry, or the host's silence for the bound). The pull request is open and nothing is wrong with the build, so
+ * Approve / Queue again re-enters the review (the reviewers' rows of the head are found by their keys; the gate then runs again), exactly as for a reviewer with no verdict.
+ */
+export const QUEUE_ESCALATION_CODES: readonly string[] = ['merge_queue_retry_used', 'merge_queue_no_answer'];
+
 export async function readReviewHold(client: Pick<PoolClient, 'query'>, workItemId: string): Promise<boolean> {
+  const code = await readEscalationCode(client, workItemId);
+  return code === NO_VERDICT_ESCALATION_CODE || (code !== null && QUEUE_ESCALATION_CODES.includes(code));
+}
+
+/** The newest escalation's code since the item last reached Needs a person, or null. */
+export async function readEscalationCode(client: Pick<PoolClient, 'query'>, workItemId: string): Promise<string | null> {
   const { rows } = await client.query<{ code: string | null }>(
     `SELECT e.code FROM work_item_driver_events e
       WHERE e.work_item_id = $1::uuid AND e.kind = 'escalated'
@@ -23,5 +35,5 @@ export async function readReviewHold(client: Pick<PoolClient, 'query'>, workItem
       ORDER BY e.seq DESC LIMIT 1`,
     [workItemId],
   );
-  return rows[0]?.code === NO_VERDICT_ESCALATION_CODE;
+  return rows[0]?.code ?? null;
 }

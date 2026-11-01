@@ -640,12 +640,22 @@ test.describe("D#483 live parity: the notice, Check the build, the board's polli
 
   test("D#694 B6-3: a review-passed item the merge gate put in GitHub's merge queue says Queued to merge, not Ready to merge", async ({ page }) => {
     const step = (result: string) => ({ kind: "continue_work_item", state: "done", code: null, result, reasons: [], at: "2026-10-27T10:00:00.000Z", finished_at: "2026-10-27T10:00:03.000Z" });
-    await setup(page, { status: 200, json: { ...REVIEW_PASSED, steps: [step("ready_human_merges"), step("merge_enqueued")] } }, "review_passed");
+    const steps = [step("ready_human_merges"), step("merge_enqueued")];
+    const queued = { state: "queued", at: "2026-10-27T10:00:03.000Z" };
+    const { mock } = await setup(page, { status: 200, json: { ...REVIEW_PASSED, steps, merge_queue: queued } }, "review_passed");
     await openDetail(page);
     await expect(tid(page, "pl-queued")).toHaveText(/^Queued to merge\. Waiting for GitHub's merge queue to build and merge it\. /);
     await expect(tid(page, "pl-queued-link")).toHaveAttribute("href", "https://github.com/acme/docs/pull/57");
+    await expect(tid(page, "pl-queue-line")).toContainText("In GitHub's merge queue since ");
     await expect(tid(page, "pl-ready")).toHaveCount(0);
     await expect(page.locator("body")).not.toContainText("Ready to merge");
+    // D#694 B6-5: the queue takes it out. The steps are exactly as they were (a removal writes none), and the banner is gone on the next read.
+    mock.activity = { status: 200, json: { ...REVIEW_PASSED, steps, merge_queue: { state: "removed", removed_by: "you", at: "2026-10-27T10:05:00.000Z" } } };
+    await page.clock.runFor(10_000);
+    await expect(tid(page, "pl-queued")).toHaveCount(0);
+    await expect(page.locator("body")).not.toContainText("Queued to merge");
+    await expect(tid(page, "pl-queue-line")).toContainText("Removed from the merge queue by you");
+    await expect(page.locator("body")).not.toContainText(/undefined|null/);
   });
 
   test("a review-passed item whose public change was refused says what blocks the merge, not that it is ready, and offers no link", async ({ page }) => {

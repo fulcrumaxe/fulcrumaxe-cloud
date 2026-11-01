@@ -94,6 +94,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "not_applicable",
   "not_approvable",
   "action_not_available",
+  // D#694 B6-5: Remove from queue on a pull request that is not in the merge queue.
+  "not_in_queue",
   "not_cancellable",
   "not_supported",
   "not_found",

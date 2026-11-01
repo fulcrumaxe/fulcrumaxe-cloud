@@ -509,6 +509,13 @@ export interface Operations {
         head_sha: string | null;
         actions: Array<"retry_push" | "open_pr" | "build_again">;
       }) | (null);
+      merge_queue?: {
+        state: "queued" | "removed" | "not_in_queue" | "no_answer";
+        position?: number;
+        removed_by?: "you" | "person" | "github";
+        reason?: string;
+        at: string;
+      };
       setup_pause?: ({
         state: "open" | "withdrawn";
         sentence: string | null;
@@ -539,7 +546,7 @@ export interface Operations {
         rejected: string;
       }>;
       receipts_total?: number;
-      actions: Array<"request_changes" | "build_again" | "respec" | "back_to_discussion" | "treat_as_feature" | "close" | "reopen" | "retry_push" | "open_pr">;
+      actions: Array<"request_changes" | "build_again" | "respec" | "back_to_discussion" | "treat_as_feature" | "close" | "reopen" | "retry_push" | "open_pr" | "remove_from_queue" | "queue_again">;
       close_on_github: boolean;
       request_changes_blocked: ("live" | "rounds") | (null);
       change_requests: Array<{
@@ -642,6 +649,28 @@ export interface Operations {
       result: "opened" | "refused";
       code: string | null;
       pr_number: (number) | (null);
+    };
+  };
+  removeFromQueueWorkItem: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      work_item_id: string;
+      result: "removed";
+    };
+  };
+  queueAgainWorkItem: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      action_id: string;
+      state: "accepted" | "claimed" | "done" | "refused" | "failed";
     };
   };
   getRunInsight: {
@@ -4525,6 +4554,28 @@ export const operations = {
   openPrWorkItem: {
     method: "POST",
     path: "/api/v1/work-items/{id}/open-pr",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  removeFromQueueWorkItem: {
+    method: "POST",
+    path: "/api/v1/work-items/{id}/remove-from-queue",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  queueAgainWorkItem: {
+    method: "POST",
+    path: "/api/v1/work-items/{id}/queue-again",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,

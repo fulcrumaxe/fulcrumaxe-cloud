@@ -1,5 +1,6 @@
 import type { PoolClient } from 'pg';
-import { DEQUEUE_SUCCESS_CODES } from './driverEvents.js';
+import { DEQUEUE_SUCCESS_CODES, DEQUEUE_UNSPECIFIED } from './driverEvents.js';
+import { ACTOR_YOU } from './queueIntent.js';
 
 /**
  * Which merge-gate reasons leave an item "ready to merge", that is, only a person's press on Merge is missing. The gate files every stop where a person decides
@@ -70,8 +71,11 @@ export const isQueuedSql = (account: string, item: string, pr?: string): string 
 /** Whether one removal fact is one the product retries after: GitHub's own (not a person's), and the first for its head. */
 export function removalRetryAllowed(removals: ReadonlyArray<{ reasons: readonly string[] }>): boolean {
   const last = removals[removals.length - 1];
-  return removals.length === 1 && last !== undefined && !last.reasons.includes('actor_user');
+  return removals.length === 1 && last !== undefined && !removedByPerson(last.reasons);
 }
+
+/** D#694 B6-5: a removal a person made (on GitHub: `actor_user`; with the Remove button: `actor_you`). Neither is ever retried by the product. */
+export const removedByPerson = (reasons: readonly string[]): boolean => reasons.includes('actor_user') || reasons.includes(ACTOR_YOU);
 
 /**
  * The item's queued-to-merge state for a reader: the enqueued head and pull request number, or null when it is not queued. The label never shows without both
@@ -85,4 +89,52 @@ export async function readQueuedToMerge(client: Pick<PoolClient, 'query'>, accou
   );
   const r = rows[0];
   return r && r.head_sha !== null && r.pr_number !== null ? { headSha: r.head_sha, prNumber: r.pr_number } : null;
+}
+
+// ---- D#694 B6-5: the item's merge-queue state, derived (never stored) -----------------------------------------------------------------------------------
+
+/** The `escalated` code B6-4's reconcile writes when the host stayed silent for the bound (pipeline's NO_ANSWER_REASON; a test holds the two equal). */
+export const NO_ANSWER_CODE = 'merge_queue_no_answer';
+
+export interface MergeQueueState {
+  /** `queued`: waiting in the host's queue. `removed`: the queue took it out unmerged. `not_in_queue`: it was enqueued, then the head moved on (a new commit, waiting for review). `no_answer`: the host said nothing for the bound (B6-4 stopped it) and no removal is on record. */
+  state: 'queued' | 'removed' | 'not_in_queue' | 'no_answer';
+  position?: number;
+  removed_by?: 'you' | 'person' | 'github';
+  /** The host's removal reason as a plain code (never text), only when the host removed it and gave one. */
+  reason?: string;
+  /** When the enqueue (queued) or the removal or push (the others) was recorded. */
+  at: string;
+}
+
+/**
+ * The state the Pipeline board, the merge-ready list, Inbox and the stalled list agree on, from the item's own pull request's facts only: the newest enqueue, and the first fact after it that
+ * ends it. Null when the item was never enqueued (or the queue merged it): there is nothing to say. `position` is left out: the enqueue fact does not keep it.
+ */
+export async function readMergeQueueState(client: Pick<PoolClient, 'query'>, accountId: string, workItemId: string): Promise<MergeQueueState | null> {
+  const { rows } = await client.query<{ seq: string; head_sha: string | null; pr_number: number | null; created_at: Date }>(
+    `SELECT q.seq, q.head_sha, q.pr_number, q.created_at FROM work_item_driver_events q
+      WHERE q.account_id = $1 AND q.work_item_id = $2 AND q.kind = 'merge_enqueued'
+        AND q.pr_number = (SELECT g.pr_number FROM work_item_driver_events g WHERE g.account_id = $1 AND g.work_item_id = $2 AND g.kind = 'merge_gate' AND g.pr_number IS NOT NULL ORDER BY g.seq DESC LIMIT 1)
+      ORDER BY q.seq DESC LIMIT 1`,
+    [accountId, workItemId],
+  );
+  const enq = rows[0];
+  if (!enq || enq.head_sha === null || enq.pr_number === null) return null;
+  const after = await client.query<{ kind: string; code: string | null; reasons: string[]; head_sha: string | null; created_at: Date }>(
+    `SELECT kind, code, reasons, head_sha, created_at FROM work_item_driver_events
+      WHERE account_id = $1 AND work_item_id = $2 AND seq > $3 AND pr_number = $4 AND kind IN ('merged_via_queue', 'merge_dequeued', 'pr_head_pushed', 'escalated') ORDER BY seq`,
+    [accountId, workItemId, enq.seq, enq.pr_number],
+  );
+  for (const f of after.rows) {
+    if (f.kind === 'merged_via_queue') return null;
+    if (f.kind === 'merge_dequeued' && f.head_sha === enq.head_sha && !DEQUEUE_SUCCESS_CODES.includes(f.code ?? '')) {
+      const removed_by = f.reasons.includes(ACTOR_YOU) ? 'you' : f.reasons.includes('actor_user') ? 'person' : 'github';
+      const reason = removed_by === 'github' && f.code !== null && f.code !== DEQUEUE_UNSPECIFIED ? { reason: f.code } : {};
+      return { state: 'removed', removed_by, ...reason, at: f.created_at.toISOString() };
+    }
+    if (f.kind === 'escalated' && f.code === NO_ANSWER_CODE && f.head_sha === enq.head_sha) return { state: 'no_answer', at: f.created_at.toISOString() };
+    if (f.kind === 'pr_head_pushed' && f.head_sha !== enq.head_sha) return { state: 'not_in_queue', at: f.created_at.toISOString() };
+  }
+  return { state: 'queued', at: enq.created_at.toISOString() };
 }

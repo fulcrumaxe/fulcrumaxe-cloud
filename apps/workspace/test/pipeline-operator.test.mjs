@@ -76,7 +76,7 @@ describe("one rule source: the app draws what the server lists, in a fixed order
   });
 
   it("the labels are exactly the words the owner approved", () => {
-    expect(OPERATOR_LABELS).toEqual({ request_changes: "Request changes", build_again: "Build again", respec: "Re-spec", back_to_discussion: "Back to discussion", treat_as_feature: "Treat as a feature", close: "Close", reopen: "Reopen", retry_push: "Try the push again", open_pr: "Open the pull request again" });
+    expect(OPERATOR_LABELS).toEqual({ request_changes: "Request changes", build_again: "Build again", respec: "Re-spec", back_to_discussion: "Back to discussion", treat_as_feature: "Treat as a feature", close: "Close", reopen: "Reopen", retry_push: "Try the push again", open_pr: "Open the pull request again", remove_from_queue: "Remove from queue", queue_again: "Queue again" });
   });
 
   it("Re-spec (D#6 R4d-5b): drawn only when the server lists it, labelled exactly Re-spec, after Build again, on its own route", () => {
@@ -112,6 +112,47 @@ describe("one rule source: the app draws what the server lists, in a fixed order
     expect(OPERATOR_PATHS.treat_as_feature(ID)).toBe("/api/v1/work-items/" + ID + "/treat-as-feature");
     expect(OPERATOR_PATHS.close(ID)).toBe("/api/v1/work-items/" + ID + "/close");
     expect(OPERATOR_PATHS.close("a/b?c")).toBe("/api/v1/work-items/a%2Fb%3Fc/close");
+  });
+});
+
+describe("D#694 B6-5: Remove from queue and Queue again", () => {
+  it("their routes, drawn only when the server lists them, after the other actions", () => {
+    expect(OPERATOR_PATHS.remove_from_queue(ID)).toBe("/api/v1/work-items/" + ID + "/remove-from-queue");
+    expect(OPERATOR_PATHS.queue_again(ID)).toBe("/api/v1/work-items/" + ID + "/queue-again");
+    expect(operatorActions({ actions: ["queue_again", "close", "remove_from_queue"] })).toEqual(["close", "remove_from_queue", "queue_again"]);
+    expect(operatorActions({ stage: "review_passed", merge_queue: { state: "queued" } })).toEqual([]);
+  });
+
+  it("Remove from queue asks first in the app's own dialog, then sends one POST with no body and answers at once (no run is followed)", async () => {
+    const call = fakeCall();
+    const { op, done } = make(call);
+    op.press(ITEM, "remove_from_queue");
+    expect(op.state).toMatchObject({ phase: "idle", action: "remove_from_queue", confirm: true });
+    expect(posts(call)).toEqual([]);
+    await op.confirmClose(ITEM);
+    expect(posts(call)).toEqual([["POST", "/api/v1/work-items/" + ID + "/remove-from-queue", undefined]]);
+    expect(gets(call)).toEqual([]);
+    expect(op.state).toMatchObject({ phase: "started", action: "remove_from_queue", text: OPERATOR_STARTED.remove_from_queue, confirm: false });
+    expect(done).toEqual([[ID, "remove_from_queue"]]);
+  });
+
+  it("Remove from queue on a pull request that is not in the queue says so in the app's words, and the dialog stays for another try", async () => {
+    const call = fakeCall(fail(409, "not_in_queue"));
+    const { op } = make(call);
+    op.press(ITEM, "remove_from_queue");
+    await op.confirmClose(ITEM);
+    expect(op.state).toMatchObject({ phase: "error", text: "That pull request is not in the merge queue. Nothing was changed." });
+    expect(approveSentenceFor("not_in_queue")).toBe("That pull request is not in the merge queue. Nothing was changed.");
+  });
+
+  it("Queue again sends at once (no dialog), one POST with no body, and the accepted run is followed", async () => {
+    const call = fakeCall();
+    const { op, done } = make(call);
+    await op.press(ITEM, "queue_again");
+    expect(posts(call)).toEqual([["POST", "/api/v1/work-items/" + ID + "/queue-again", undefined]]);
+    expect(gets(call).map((g) => g[1])).toEqual(["/api/v1/run-actions/a1"]);
+    expect(op.state).toMatchObject({ phase: "started", action: "queue_again", text: OPERATOR_STARTED.queue_again, confirm: false });
+    expect(done).toEqual([[ID, "queue_again"]]);
   });
 });
 

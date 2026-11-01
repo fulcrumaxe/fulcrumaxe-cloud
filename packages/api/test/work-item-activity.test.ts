@@ -137,6 +137,69 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
     expect(body).toMatchObject({ stage: 'triaged', halted: false, repo: null, pr_number: null, auto_merge: false, comments: [], spec: null, runs: [], steps: [], runs_truncated: false, comments_truncated: false, notice: null });
   });
 
+  // D#694 B6-5: the merge-queue state is derived from the item's own facts on each read; a removal writes no step, so it is the only thing that can end "Queued to merge" on the board.
+  it('merge_queue: queued, then removed by you / a person / GitHub (with and without a reason), then queued again; a push of another head says not_in_queue; absent when never queued or merged by the queue', async () => {
+    const { accountId, userId } = await seedAccountWithMember(admin, { role: 'owner' });
+    const A = 'a'.repeat(40);
+    const B = 'b'.repeat(40);
+    const ev = (itemId: string, kind: string, key: string, over: { code?: string; reasons?: string[]; head?: string; pr?: number } = {}) =>
+      admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key, code, reasons, head_sha, pr_number) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [accountId, itemId, kind, key, over.code ?? null, over.reasons ?? [], over.head ?? A, over.pr ?? 57]);
+    const queueOf = async (itemId: string) => ((await (await get(itemId, { accountId, userId })).json()) as Activity & { merge_queue?: Record<string, unknown> }).merge_queue;
+    const actionsOf = async (id: string) => ((await (await get(id, { accountId, userId })).json()) as Activity & { actions: string[] }).actions.filter((a) => a.endsWith('queue') || a === 'queue_again');
+    const { itemId } = await seedItem(accountId, { stage: 'review_passed' });
+    expect(await queueOf(itemId)).toBeUndefined();
+    expect(await actionsOf(itemId)).toEqual([]);
+    await ev(itemId, 'merge_gate', 'g');
+    expect(await queueOf(itemId)).toBeUndefined();
+    await ev(itemId, 'merge_enqueued', 'e1', { code: 'queue' });
+    expect(await queueOf(itemId)).toMatchObject({ state: 'queued' });
+    expect(await actionsOf(itemId)).toEqual(['remove_from_queue']);
+    // A removal ends it; who is read from the fact's reasons, and the reason only for GitHub's own removal that gave one.
+    await ev(itemId, 'merge_dequeued', 'd1', { code: 'ci_failure', reasons: ['actor_app'] });
+    expect(await queueOf(itemId)).toMatchObject({ state: 'removed', removed_by: 'github', reason: 'ci_failure' });
+    expect(await actionsOf(itemId)).toEqual(['queue_again']);
+    // The queue's success reason is not a removal; another head's removal is not this head's.
+    await ev(itemId, 'merge_dequeued', 'd2', { code: 'merge', reasons: ['actor_app'] });
+    await ev(itemId, 'merge_dequeued', 'd3', { code: 'ci_failure', reasons: ['actor_app'], head: B });
+    expect(await queueOf(itemId)).toMatchObject({ state: 'removed', removed_by: 'github' });
+    // Queued again (a newer enqueue), then removed by you, a person, and by GitHub with no reason.
+    await ev(itemId, 'merge_enqueued', 'e2', { code: 'queue' });
+    expect(await queueOf(itemId)).toMatchObject({ state: 'queued' });
+    await ev(itemId, 'merge_dequeued', 'd4', { code: 'manual', reasons: ['actor_you'] });
+    expect(await queueOf(itemId)).toEqual({ state: 'removed', removed_by: 'you', at: expect.any(String) });
+    await ev(itemId, 'merge_enqueued', 'e3', { code: 'queue' });
+    await ev(itemId, 'merge_dequeued', 'd5', { code: 'manual', reasons: ['actor_user'] });
+    expect(await queueOf(itemId)).toMatchObject({ state: 'removed', removed_by: 'person' });
+    await ev(itemId, 'merge_enqueued', 'e4', { code: 'queue' });
+    await ev(itemId, 'merge_dequeued', 'd6', { code: 'unspecified', reasons: ['actor_app'] });
+    expect(await queueOf(itemId)).toEqual({ state: 'removed', removed_by: 'github', at: expect.any(String) });
+    // The head moved on while it was queued.
+    await ev(itemId, 'merge_enqueued', 'e5', { code: 'queue' });
+    await ev(itemId, 'pr_head_pushed', 'p1', { head: B });
+    expect(await queueOf(itemId)).toMatchObject({ state: 'not_in_queue' });
+    // The queue merged it: nothing to say.
+    const merged = (await seedItem(accountId, { stage: 'review_passed' })).itemId;
+    await ev(merged, 'merge_gate', 'g');
+    await ev(merged, 'merge_enqueued', 'e1', { code: 'queue' });
+    await ev(merged, 'merged_via_queue', 'm1');
+    expect(await queueOf(merged)).toBeUndefined();
+    // The host stayed silent for the bound (B6-4 stopped it and handed it to a person): no_answer, and Queue again is offered at Needs a person. A removal fact comes first when there is one.
+    const silent = (await seedItem(accountId, { stage: 'needs_human' })).itemId;
+    await ev(silent, 'merge_gate', 'g');
+    await ev(silent, 'merge_enqueued', 'e1', { code: 'queue' });
+    await ev(silent, 'escalated', 'n1', { code: 'merge_queue_no_answer' });
+    expect(await queueOf(silent)).toEqual({ state: 'no_answer', at: expect.any(String) });
+    expect(await actionsOf(silent)).toEqual(['queue_again']);
+    const other = (await seedItem(accountId, { stage: 'needs_human' })).itemId;
+    await ev(other, 'merge_gate', 'g');
+    await ev(other, 'merge_enqueued', 'e1', { code: 'queue' });
+    await ev(other, 'escalated', 'n1', { code: 'merge_queue_no_answer', head: B });
+    expect(await queueOf(other)).toMatchObject({ state: 'queued' });
+    expect(await actionsOf(other)).toEqual([]);
+    // The schema accepts every shape above.
+    expect(activityResponseSchema.parse((await (await get(itemId, { accountId, userId })).json()) as Activity)).toBeTruthy();
+  });
+
   // D#6 R-CHK-3d: a runner run that ended on its check reads "could not run safely" in the work item's activity when the runner recorded a reason, and "failed" when it did not.
   it('a runner run that ended on its check: the recorded reason decides the end line, as on the run view', async () => {
     const { accountId, userId } = await seedAccountWithMember(admin);

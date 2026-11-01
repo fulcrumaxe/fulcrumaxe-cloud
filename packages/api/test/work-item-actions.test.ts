@@ -10,8 +10,13 @@ import { hashToken } from '../src/tokens/resolve.js';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
 import { runActionDeps } from '../src/routes/run-actions.js';
+import { readReviewHold } from '@fx/core/src/work-items/reviewHold.js';
+import { queueActionDeps } from '../src/routes/work-item-actions.js';
 import { maxFixRounds } from '@fx/spend';
-import { seedAccountWithMember } from './helpers/seed.js';
+import { seedAccountWithMember, seedUser } from './helpers/seed.js';
+import { withTenant } from '@fx/db/src/withTenant.js';
+import { removeIntentRecent } from '@fx/core/src/work-items/queueIntent.js';
+import { mergeQueue } from '@fx/pipeline';
 
 interface Identity {
   accountId: string;
@@ -801,6 +806,188 @@ describe('work item actions: back to discussion, treat as a feature, close', () 
       const { item } = await seed(other.accountId, { stage: 'review_passed' });
       expect((await post(p, path(item), note('x'))).status).toBe(404);
       expect(await notesOf(item)).toEqual([]);
+    });
+  });
+
+  describe('Remove from queue and Queue again (D#694 B6-5)', () => {
+    const HEAD = 'a'.repeat(40);
+    const PR = 41;
+    const removePath = (id: string) => `/work-items/${id}/remove-from-queue`;
+    const againPath = (id: string) => `/work-items/${id}/queue-again`;
+    const calls: Array<{ prNumber: number; audited: number }> = [];
+    let dequeueAnswer: 'dequeued' | 'not_queued' | 'throws' = 'dequeued';
+    beforeEach(() => {
+      calls.length = 0;
+      dequeueAnswer = 'dequeued';
+      queueActionDeps.dequeue = async ({ accountId, prNumber }) => {
+        calls.push({ prNumber, audited: await queueAudits(accountId) });
+        if (dequeueAnswer === 'throws') throw new Error('github down');
+        return dequeueAnswer;
+      };
+    });
+    afterEach(() => {
+      queueActionDeps.dequeue = null;
+    });
+
+    const queueAudits = (a: string) => count(`SELECT count(*) AS n FROM audit_log WHERE account_id = $1 AND action = 'work_item.sent_back' AND payload->>'action' IN ('queue_remove', 'queue_again')`, a);
+    /** A review-passed item whose newest gate answer and newest enqueue name pull request 41, then (optionally) a removal of that head by `removedBy`. */
+    async function queuedItem(accountId: string, removedBy?: 'actor_app' | 'actor_user' | 'actor_you') {
+      const { item } = await seed(accountId, { stage: 'review_passed' });
+      const ev = (kind: string, key: string, reasons: string[] = []) =>
+        admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key, code, reasons, head_sha, pr_number) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [accountId, item, kind, key, kind === 'merge_dequeued' ? 'ci_failure' : 'queue', reasons, HEAD, PR]);
+      await ev('merge_gate', 'g');
+      await ev('merge_enqueued', 'e');
+      if (removedBy) await ev('merge_dequeued', 'd', [removedBy]);
+      return item;
+    }
+    const noRequests = async (a: string) => {
+      expect(await requests(a)).toBe(0);
+      expect(signal.sent).toEqual([]);
+    };
+
+    it('an owner removes a queued pull request: the audit row (item, pull request, head, who) is committed BEFORE the host is asked, and nothing else is written', async () => {
+      const p = await person('owner');
+      const item = await queuedItem(p.accountId);
+      const res = await post(p, removePath(item));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ work_item_id: item, result: 'removed' });
+      expect(calls).toEqual([{ prNumber: PR, audited: 1 }]);
+      const a = await one<{ actor: string; payload: Record<string, unknown> }>(`SELECT actor, payload FROM audit_log WHERE account_id = $1 AND payload->>'action' = 'queue_remove'`, [p.accountId]);
+      expect(a!.actor).toBe(p.userId);
+      expect(a!.payload).toMatchObject({ work_item_id: item, pr_number: PR, head_sha: HEAD });
+      expect(await stageOf(item)).toBe('review_passed');
+      expect(await transitions(p.accountId)).toBe(0);
+      await noRequests(p.accountId);
+    });
+
+    it.each([
+      ['never queued', undefined],
+      ['already removed by GitHub', 'actor_app'],
+      ['already removed by you', 'actor_you'],
+    ] as const)('an item that is not waiting in the queue (%s) is 409 not_in_queue: nothing is written and the host is not asked', async (_name, removedBy) => {
+      const p = await person('owner');
+      const item = removedBy === undefined ? (await seed(p.accountId, { stage: 'review_passed' })).item : await queuedItem(p.accountId, removedBy);
+      const res = await post(p, removePath(item));
+      expect(res.status).toBe(409);
+      expect(await code(res)).toBe('not_in_queue');
+      expect(calls).toEqual([]);
+      expect(await queueAudits(p.accountId)).toBe(0);
+    });
+
+    it('the host saying it is not queued is 409 not_in_queue too; the host failing is 503 and the item stays queued (the intent row stands, the window is ten minutes)', async () => {
+      const p = await person('owner');
+      const item = await queuedItem(p.accountId);
+      dequeueAnswer = 'not_queued';
+      expect(await code(await post(p, removePath(item)))).toBe('not_in_queue');
+      // The press removed nothing, and says so on record: a no-op row for the same item, pull request and head, naming the press it answers.
+      const pressed = await one<{ id: string }>(`SELECT id FROM audit_log WHERE account_id = $1 AND payload->>'action' = 'queue_remove'`, [p.accountId]);
+      expect(await one(`SELECT payload FROM audit_log WHERE account_id = $1 AND payload->>'action' = 'queue_remove_noop'`, [p.accountId])).toMatchObject({ payload: { work_item_id: item, pr_number: PR, head_sha: HEAD, answers: pressed!.id } });
+      dequeueAnswer = 'throws';
+      const res = await post(p, removePath(item));
+      expect(res.status).toBe(503);
+      expect(await code(res)).toBe('run_actions_unavailable');
+      expect(await stageOf(item)).toBe('review_passed');
+    });
+
+    it('a double press: A\'s Remove dequeues it, B\'s a moment later is told not queued; the removal that follows is still yours, and no automatic retry follows', async () => {
+      const a = await person('owner');
+      const b = { accountId: a.accountId, userId: randomUUID() };
+      await seedUser(admin, b.userId);
+      await admin.query(`INSERT INTO account_members (account_id, user_id, role) VALUES ($1, $2, 'admin')`, [b.accountId, b.userId]);
+      const item = await queuedItem(a.accountId);
+      expect((await post(a, removePath(item))).status).toBe(200);
+      // GitHub has not delivered A's removal yet, so the item still reads as queued and B's press goes through to the host, which says it is not queued.
+      dequeueAnswer = 'not_queued';
+      expect(await code(await post(b, removePath(item)))).toBe('not_in_queue');
+      const rows = (await admin.query<{ id: string; actor: string; payload: { action: string; answers?: string } }>(`SELECT id, actor, payload FROM audit_log WHERE account_id = $1 AND payload->>'action' IN ('queue_remove', 'queue_remove_noop') ORDER BY created_at, id`, [a.accountId])).rows;
+      expect(rows.map((r) => [r.actor, r.payload.action])).toEqual([[a.userId, 'queue_remove'], [b.userId, 'queue_remove'], [b.userId, 'queue_remove_noop']]);
+      expect(rows[2]!.payload.answers).toBe(rows[1]!.id);
+      // What the webhook and the reconcile ask when GitHub's removal of A's press arrives: it is yours.
+      const byYou = await withTenant(appUserPool, a.accountId, (c) => removeIntentRecent(c, a.accountId, item, PR, HEAD));
+      expect(byYou).toBe(true);
+      await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key, code, reasons, head_sha, pr_number) VALUES ($1, $2, 'merge_dequeued', 'dq', 'manual', $3, $4, $5)`, [a.accountId, item, [byYou ? 'actor_you' : 'actor_app'], HEAD, PR]);
+      // A person's removal is never retried: the queue stops the entry and waits for Queue again.
+      expect(await withTenant(appUserPool, a.accountId, (c) => mergeQueue.removalVerdict(c, { accountId: a.accountId, workItemId: item, prNumber: PR }))).toEqual({ verdict: 'removed', headSha: HEAD });
+    });
+
+    it('a member, a token, an unregistered host call and another account\'s item are refused before anything is written', async () => {
+      const m = await person('member');
+      const memberItem = await queuedItem(m.accountId);
+      expect(await code(await post(m, removePath(memberItem)))).toBe('insufficient_role');
+      const o = await person('owner');
+      const item = await queuedItem(o.accountId);
+      expect((await post(await tokenFor(o, ['read', 'runs:cancel']), removePath(item))).status).toBe(403);
+      expect((await post(o, removePath(randomUUID()))).status).toBe(404);
+      expect((await post(o, removePath(memberItem))).status).toBe(404);
+      queueActionDeps.dequeue = null;
+      expect((await post(o, removePath(item))).status).toBe(503);
+      expect(await queueAudits(o.accountId)).toBe(0);
+      expect(await queueAudits(m.accountId)).toBe(0);
+    });
+
+    it('a live run is 409 already_running and nothing is written', async () => {
+      const p = await person('owner');
+      const item = await queuedItem(p.accountId);
+      await seedRun(p.accountId, item, 'running');
+      expect(await code(await post(p, removePath(item)))).toBe('already_running');
+      expect(await queueAudits(p.accountId)).toBe(0);
+    });
+
+    it.each(['actor_app', 'actor_user', 'actor_you'] as const)('Queue again after a removal (%s): 202, the audit row, the stopped queue entry goes back to review, and the item\'s normal advance is asked for; the host is never called', async (by) => {
+      const p = await person('owner');
+      const item = await queuedItem(p.accountId, by);
+      const repo = (await one<{ repo_id: string }>('SELECT repo_id FROM work_items WHERE id = $1', [item]))!.repo_id;
+      await admin.query(`INSERT INTO merge_queue_entries (account_id, repo_id, work_item_id, pr_number, head_sha, approved_at, state, reason) VALUES ($1, $2, $3, $4, $5, now(), 'stopped', 'removed_from_merge_queue')`, [p.accountId, repo, item, PR, HEAD]);
+      const res = await post(p, againPath(item));
+      expect(res.status).toBe(202);
+      expect(await one('SELECT 1 AS x FROM run_action_requests WHERE account_id = $1 AND kind = $2', [p.accountId, 'advance_work_item'])).toBeDefined();
+      expect(signal.sent).toHaveLength(1);
+      expect(await one<{ payload: Record<string, unknown> }>(`SELECT payload FROM audit_log WHERE account_id = $1 AND payload->>'action' = 'queue_again'`, [p.accountId])).toMatchObject({ payload: { work_item_id: item, pr_number: PR, head_sha: HEAD } });
+      expect(await one<{ state: string; reason: string | null }>('SELECT state, reason FROM merge_queue_entries WHERE work_item_id = $1', [item])).toEqual({ state: 'in_review', reason: null });
+      expect(calls).toEqual([]);
+    });
+
+    it.each([
+      ['a used-up retry', 'merge_queue_retry_used', 'actor_app'],
+      ['the host\'s silence', 'merge_queue_no_answer', null],
+    ] as const)('Queue again from Needs a person after %s: the audit row is written and the item\'s normal advance (which re-enters the review there) is asked for', async (_n, escalation, removedBy) => {
+      const p = await person('owner');
+      const item = await queuedItem(p.accountId, removedBy ?? undefined);
+      await admin.query(`UPDATE work_items SET stage = 'needs_human' WHERE id = $1`, [item]);
+      await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key, code, head_sha, pr_number) VALUES ($1, $2, 'escalated', 'esc', $3, $4, $5)`, [p.accountId, item, escalation, HEAD, PR]);
+      expect((await post(p, againPath(item))).status).toBe(202);
+      // No stage is written: the item stays at Needs a person, and the advance re-enters the review there (a hold the queue's escalations are part of).
+      expect(await stageOf(item)).toBe('needs_human');
+      expect(await transitions(p.accountId)).toBe(0);
+      // The driver reads the same escalation as a review hold, so the advance re-enters the review (not a rebuild).
+      expect(await readReviewHold(admin, item)).toBe(true);
+      expect(signal.sent).toHaveLength(1);
+    });
+
+    it('Queue again from Needs a person for any other reason is 409 and writes nothing', async () => {
+      const p = await person('owner');
+      const item = await queuedItem(p.accountId, 'actor_app');
+      await admin.query(`UPDATE work_items SET stage = 'needs_human' WHERE id = $1`, [item]);
+      await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key, code) VALUES ($1, $2, 'escalated', 'esc', 'max_fix_rounds')`, [p.accountId, item]);
+      expect(await code(await post(p, againPath(item)))).toBe('action_not_available');
+      expect(await readReviewHold(admin, item)).toBe(false);
+      expect(await stageOf(item)).toBe('needs_human');
+      expect(await queueAudits(p.accountId)).toBe(0);
+    });
+
+    it('Queue again on an item that is still queued, or never was, is 409 action_not_available; a member is refused; nothing is written', async () => {
+      const p = await person('owner');
+      const queued = await queuedItem(p.accountId);
+      const never = (await seed(p.accountId, { stage: 'review_passed' })).item;
+      for (const item of [queued, never]) {
+        const res = await post(p, againPath(item));
+        expect(res.status).toBe(409);
+        expect(await code(res)).toBe('action_not_available');
+      }
+      const m = await person('member');
+      expect(await code(await post(m, againPath(await queuedItem(m.accountId, 'actor_app'))))).toBe('insufficient_role');
+      expect(await queueAudits(p.accountId)).toBe(0);
+      await noRequests(p.accountId);
     });
   });
 });

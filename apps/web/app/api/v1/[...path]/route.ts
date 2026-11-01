@@ -4,7 +4,7 @@ import { appUserPool, platformOpsPool } from "@fx/api/src/sse/pools.js";
 import { runActionDeps } from "@fx/api/src/routes/run-actions.js";
 import { onboardingDeps } from "@fx/api/src/routes/onboarding.js";
 import { memoryEditDeps } from "@fx/api/src/routes/memory.js";
-import { publicChangeDeps } from "@fx/api/src/routes/work-item-actions.js";
+import { publicChangeDeps, queueActionDeps } from "@fx/api/src/routes/work-item-actions.js";
 import { setupRequestDeps } from "@fx/api/src/routes/setupRequests.js";
 import { repoPairingDeps } from "@fx/api/src/routes/repoPairing.js";
 import { decisionAskDeps } from "@fx/api/src/routes/decisionAsks.js";
@@ -20,6 +20,7 @@ import { operatorMode } from "@fx/worker";
 import { httpRunActionSignalFromEnv } from "@fx/api/src/runActions/httpSignal.js";
 import { getWorker, previewEnabled, workerConfigured } from "../../../../lib/worker";
 import { createStartRetryPush, openPublicPullRequestViaWorker } from "../../../../lib/retryPush";
+import { dequeueQueuedItem } from "../../../../lib/mergeQueue";
 import { getAuthorCheck } from "../../../../lib/github/authorCheck";
 import { getPairingInspector } from "../../../../lib/github/pairingInspector";
 
@@ -55,6 +56,8 @@ runActionDeps.getAuthorCheck = getAuthorCheck;
 // D#598 P1f-6b: Try the push again starts a durable job; Open the pull request again is one call to the worker. Both answer 503 until a worker can be built.
 publicChangeDeps.startRetryPush = (args) => (workerConfigured() ? createStartRetryPush()(args) : Promise.reject(new Error("worker not configured")));
 publicChangeDeps.openPublicPullRequest = openPublicPullRequestViaWorker;
+// D#694 B6-5: Remove from queue asks the host to take the pull request out, with the repository's merge-gate token.
+queueActionDeps.dequeue = (args) => dequeueQueuedItem(appUserPool(), args);
 // D#598 PAIR-PICKER-API: the pairing routes ask GitHub (public, default branch, App installed) through this reader.
 repoPairingDeps.getInspector = () => getPairingInspector();
 // D#598 P8b-2: Mark done runs the request's own check at once, against the same credential source the once-a-minute sweep uses.
