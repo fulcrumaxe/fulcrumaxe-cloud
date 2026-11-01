@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { clearMergeQueueModeCache, createGitHubMergeGatePort, MERGE_QUEUE_MODE_CACHE_MAX, MERGE_QUEUE_MODE_TTL_MS, type GitHubHttp, type GitHubHttpRequest } from "../../src/build/githubMergePort.js";
 import {
+  DEQUEUE_PULL_REQUEST_DOCUMENT,
   ENABLE_AUTO_MERGE_DOCUMENT,
   ENQUEUE_PULL_REQUEST_DOCUMENT,
+  MERGE_QUEUE_ENTRY_DOCUMENT,
   MERGE_QUEUE_READ_DOCUMENT,
   pinnedMergeGateBody,
 } from "../../../github/src/mergeGateGraphql.js";
@@ -15,7 +17,7 @@ import {
 const HEAD = "a".repeat(40);
 const NEW = "c".repeat(40);
 const PR = { repoId: "repo-1", prNumber: 7 };
-const DOCS = { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT };
+const DOCS = { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT };
 
 interface Fake {
   /** `Repository.mergeQueue` answer for the read document. */
@@ -28,6 +30,11 @@ interface Fake {
   /** Answers per mutation document: a GraphQL `errors` list or data. */
   enqueue: { errors?: unknown[]; data?: unknown };
   autoMerge: { errors?: unknown[]; data?: unknown };
+  /** B6-1: the dequeue mutation's answer, and the entry read's `pullRequest` answer. */
+  dequeue: { errors?: unknown[]; data?: unknown };
+  pullRequest: unknown;
+  /** The direct merge call's answer. */
+  mergeAnswer: { status: number; body: unknown };
   owner: string;
   name: string;
   requests: GitHubHttpRequest[];
@@ -44,6 +51,9 @@ const fresh = (): Fake => ({
   nodeId: "PR_kwDOabc123",
   enqueue: { data: { enqueuePullRequest: { mergeQueueEntry: { id: "MQE_kwDOentry1", position: 3 } } } },
   autoMerge: { data: { enablePullRequestAutoMerge: { pullRequest: { id: "PR_kwDOabc123" } } } },
+  dequeue: { data: { dequeuePullRequest: { mergeQueueEntry: { id: "MQE_kwDOentry1" } } } },
+  pullRequest: { state: "OPEN", merged: false, headRefOid: HEAD, mergeQueueEntry: { id: "MQE_kwDOentry1", state: "AWAITING_CHECKS", position: 2 } },
+  mergeAnswer: { status: 200, body: { merged: true, sha: "f".repeat(40) } },
   owner: "acme",
   name: "widgets",
   requests: [],
@@ -63,9 +73,12 @@ function httpFor(f: Fake): GitHubHttp {
         if (f.graphqlErrors !== undefined) return { status: 200, body: { errors: f.graphqlErrors } };
         if (query === DOCS.read) return { status: 200, body: { data: { repository: { mergeQueue: f.queue } } } };
         if (query === DOCS.enqueue) return { status: 200, body: f.enqueue };
+        if (query === DOCS.dequeue) return { status: 200, body: f.dequeue };
+        if (query === DOCS.entry) return { status: 200, body: { data: { repository: { pullRequest: f.pullRequest } } } };
         return { status: 200, body: f.autoMerge };
       }
       f.reached.push(req);
+      if (req.method === "PUT" && /\/pulls\/7\/merge$/.test(req.path)) return f.mergeAnswer;
       if (req.method === "GET" && /\/pulls\/7$/.test(req.path)) {
         return { status: 200, body: { node_id: f.nodeId, state: "open", merged: false, draft: false, mergeable: true, mergeable_state: "clean", head: { sha: HEAD }, base: { ref: "main", repo: { default_branch: "main" } } } };
       }
@@ -294,5 +307,193 @@ describe("enqueuePullRequest", () => {
     const f = fresh();
     await expect(portFor(f, { queueDocuments: { ...DOCS, enqueue: `${DOCS.enqueue}\n` } }).enqueuePullRequest!(PR, { expectedHeadOid: HEAD })).rejects.toThrow("path_refused");
     expect(f.reached.some((r) => r.path === "/graphql")).toBe(false);
+  });
+});
+
+describe("dequeuePullRequest (B6-1)", () => {
+  it("sends the pinned mutation with the pull request's node id and returns the entry the host removed", async () => {
+    const f = fresh();
+    expect(await portFor(f).dequeuePullRequest!(PR)).toEqual({ dequeued: true, entryId: "MQE_kwDOentry1" });
+    expect(f.reached.filter((r) => r.path === "/graphql").map((r) => r.body)).toEqual([{ query: DEQUEUE_PULL_REQUEST_DOCUMENT, variables: { pullRequestId: "PR_kwDOabc123" } }]);
+  });
+
+  it("a pull request that is not in the queue is not_queued, whether the host says so in words or answers a null entry", async () => {
+    const words = fresh();
+    words.dequeue = { errors: [{ type: "UNPROCESSABLE", message: "Pull request is not in the merge queue" }] };
+    expect(await portFor(words).dequeuePullRequest!(PR)).toEqual({ dequeued: false, reason: "not_queued" });
+    const empty = fresh();
+    empty.dequeue = { data: { dequeuePullRequest: { mergeQueueEntry: null } } };
+    expect(await portFor(empty).dequeuePullRequest!(PR)).toEqual({ dequeued: false, reason: "not_queued" });
+  });
+
+  it("a permission refusal is unavailable, and nothing else is tried (no auto-merge fallback)", async () => {
+    const f = fresh();
+    f.dequeue = { errors: [{ type: "FORBIDDEN", message: "Resource not accessible by integration" }] };
+    expect(await portFor(f).dequeuePullRequest!(PR)).toEqual({ dequeued: false, reason: "unavailable" });
+    expect(f.reached.filter((r) => r.path === "/graphql")).toHaveLength(1);
+  });
+
+  it.each([
+    ["any other GraphQL error", (f: Fake) => void (f.dequeue = { errors: [{ type: "UNPROCESSABLE", message: "Something else broke" }] }), "GraphQL error"],
+    ["a mix of not-in-queue and another error", (f: Fake) => void (f.dequeue = { errors: [{ message: "not in the merge queue" }, { message: "boom" }] }), "GraphQL error"],
+    ["an HTTP 500", (f: Fake) => void (f.graphqlStatus = 500), "unexpected status 500"],
+    ["an entry without a usable id", (f: Fake) => void (f.dequeue = { data: { dequeuePullRequest: { mergeQueueEntry: { id: "has space" } } } }), "malformed"],
+    ["a pull request without a usable node id", (f: Fake) => void (f.nodeId = "has space"), "malformed"],
+  ])("%s throws, never an answer", async (_n, breakIt, message) => {
+    const f = fresh();
+    breakIt(f);
+    await expect(portFor(f).dequeuePullRequest!(PR)).rejects.toThrow(message);
+  });
+
+  it("the hosted client's refusal of the document is a throw and nothing reaches the host; no documents or a runner_local port throw before any call", async () => {
+    const f = fresh();
+    await expect(portFor(f, { queueDocuments: { ...DOCS, dequeue: `${DOCS.dequeue} ` } }).dequeuePullRequest!(PR)).rejects.toThrow("path_refused");
+    expect(f.reached.some((r) => r.path === "/graphql")).toBe(false);
+    await expect(portFor(f, { queueDocuments: undefined }).dequeuePullRequest!(PR)).rejects.toThrow("no queue documents");
+    const local = createGitHubMergeGatePort({ http: httpFor(f), resolveRepo: async () => ({ owner: "acme", name: "widgets" }), markReadyForHumanMerge: async () => undefined, queueDocuments: DOCS, local: { http: { ...httpFor(f), graphql: async () => ({ status: 200, body: {} }) }, recordedBranch: async () => "b" } });
+    await expect(local.dequeuePullRequest!(PR)).rejects.toThrow("allowlist");
+    expect(f.reached.filter((r) => r.path === "/graphql")).toEqual([]);
+  });
+});
+
+describe("getQueueEntry (B6-1)", () => {
+  it("reads the pull request by number inside the repository and maps the entry's state and position", async () => {
+    const f = fresh();
+    expect(await portFor(f).getQueueEntry!(PR)).toEqual({ state: "open", merged: false, headSha: HEAD, entry: { id: "MQE_kwDOentry1", state: "awaiting_checks", position: 2 } });
+    expect(f.reached.filter((r) => r.path === "/graphql").map((r) => r.body)).toEqual([{ query: MERGE_QUEUE_ENTRY_DOCUMENT, variables: { owner: "acme", name: "widgets", number: 7 } }]);
+  });
+
+  it.each(["AWAITING_CHECKS", "LOCKED", "MERGEABLE", "QUEUED", "UNMERGEABLE"])("the entry state %s is read as its lower-case name", async (state) => {
+    const f = fresh();
+    f.pullRequest = { state: "OPEN", merged: false, headRefOid: HEAD, mergeQueueEntry: { id: "MQE_kwDOentry1", state, position: null } };
+    expect((await portFor(f).getQueueEntry!(PR)).entry).toEqual({ id: "MQE_kwDOentry1", state: state.toLowerCase(), position: null });
+  });
+
+  it("not queued is a null entry on an open pull request; merged and closed are both closed, told apart by the flag", async () => {
+    const f = fresh();
+    f.pullRequest = { state: "OPEN", merged: false, headRefOid: NEW, mergeQueueEntry: null };
+    expect(await portFor(f).getQueueEntry!(PR)).toEqual({ state: "open", merged: false, headSha: NEW, entry: null });
+    f.pullRequest = { state: "MERGED", merged: true, headRefOid: NEW, mergeQueueEntry: null };
+    expect(await portFor(f).getQueueEntry!(PR)).toEqual({ state: "closed", merged: true, headSha: NEW, entry: null });
+    f.pullRequest = { state: "CLOSED", merged: false, headRefOid: NEW, mergeQueueEntry: null };
+    expect(await portFor(f).getQueueEntry!(PR)).toEqual({ state: "closed", merged: false, headSha: NEW, entry: null });
+  });
+
+  it.each([
+    ["no pull request", null],
+    ["a state the host does not define", { state: "DRAFT", merged: false, headRefOid: HEAD, mergeQueueEntry: null }],
+    ["merged not a boolean", { state: "OPEN", merged: "no", headRefOid: HEAD, mergeQueueEntry: null }],
+    ["a malformed head", { state: "OPEN", merged: false, headRefOid: "main", mergeQueueEntry: null }],
+    ["an entry state the host does not define", { state: "OPEN", merged: false, headRefOid: HEAD, mergeQueueEntry: { id: "MQE_x", state: "PAUSED", position: 1 } }],
+    ["an entry without a usable id", { state: "OPEN", merged: false, headRefOid: HEAD, mergeQueueEntry: { id: "has space", state: "QUEUED", position: 1 } }],
+    ["a fractional position", { state: "OPEN", merged: false, headRefOid: HEAD, mergeQueueEntry: { id: "MQE_x", state: "QUEUED", position: 1.5 } }],
+  ])("a malformed answer (%s) throws, never a reading", async (_n, pullRequest) => {
+    const f = fresh();
+    f.pullRequest = pullRequest;
+    await expect(portFor(f).getQueueEntry!(PR)).rejects.toThrow("malformed");
+  });
+
+  it("GraphQL errors and an HTTP 500 throw", async () => {
+    const e = fresh();
+    e.graphqlErrors = [{ message: "boom" }];
+    await expect(portFor(e).getQueueEntry!(PR)).rejects.toThrow("GraphQL error");
+    const g = fresh();
+    g.graphqlStatus = 500;
+    await expect(portFor(g).getQueueEntry!(PR)).rejects.toThrow("unexpected status 500");
+  });
+
+  it("a refused document, a bad PR number, no documents and a runner_local port throw before any answer", async () => {
+    const f = fresh();
+    await expect(portFor(f, { queueDocuments: { ...DOCS, entry: `${DOCS.entry}\n` } }).getQueueEntry!(PR)).rejects.toThrow("path_refused");
+    await expect(portFor(f).getQueueEntry!({ repoId: "repo-1", prNumber: 0 })).rejects.toThrow("invalid PR number");
+    await expect(portFor(f, { queueDocuments: undefined }).getQueueEntry!(PR)).rejects.toThrow("no queue documents");
+    expect(f.reached).toEqual([]);
+    const local = createGitHubMergeGatePort({ http: httpFor(f), resolveRepo: async () => ({ owner: "acme", name: "widgets" }), markReadyForHumanMerge: async () => undefined, queueDocuments: DOCS, local: { http: { ...httpFor(f), graphql: async () => ({ status: 200, body: {} }) }, recordedBranch: async () => "b" } });
+    await expect(local.getQueueEntry!(PR)).rejects.toThrow("allowlist");
+    expect(f.reached).toEqual([]);
+  });
+});
+
+describe("a direct-merge refusal that names the queue evicts the stale direct answer (B6-DIRECT-CACHE-EVICT)", () => {
+  const warm = async (f: Fake) => {
+    f.queue = null;
+    f.rules = [];
+    const port = portFor(f);
+    expect(await port.getMergeQueueMode!(PR, "main")).toMatchObject({ mode: "direct" });
+    expect(await port.getMergeQueueMode!(PR, "release")).toMatchObject({ mode: "direct" });
+    // Served from the cache: nothing new reaches the host.
+    const before = reads(f);
+    await port.getMergeQueueMode!(PR, "main");
+    expect(reads(f)).toBe(before);
+    return port;
+  };
+  const queueRefusal = { status: 405, body: { message: "Repository rule violations found\n\nChanges must be made through the merge queue.\n" } };
+
+  it("the next mode read asks the host again (every base branch of the repository), and now sees the queue", async () => {
+    const f = fresh();
+    const port = await warm(f);
+    f.queue = { id: "MQ_kwDOqueue" };
+    f.rules = [{ type: "merge_queue", enforcement: "active" }];
+    f.mergeAnswer = queueRefusal;
+    expect(await port.mergePullRequest(PR, { sha: HEAD })).toEqual({ merged: false, httpStatus: 405 });
+    expect(await port.getMergeQueueMode!(PR, "main")).toMatchObject({ mode: "queue" });
+    expect(await port.getMergeQueueMode!(PR, "release")).toMatchObject({ mode: "queue" });
+  });
+
+  it("another repository's cached answer is untouched", async () => {
+    const widgets = fresh();
+    const gadgets = fresh();
+    gadgets.owner = "acme";
+    gadgets.name = "gadgets";
+    gadgets.queue = null;
+    gadgets.rules = [];
+    widgets.queue = null;
+    widgets.rules = [];
+    const byRepo = new Map([
+      ["repo-1", { owner: "acme", name: "widgets", fake: widgets }],
+      ["repo-2", { owner: "acme", name: "gadgets", fake: gadgets }],
+    ]);
+    const http: GitHubHttp = {
+      request: async (req) => {
+        const vars = (req.body as { variables?: { name?: string } } | undefined)?.variables;
+        const name = vars?.name ?? /^\/repos\/[^/]+\/([^/]+)\//.exec(req.path)?.[1];
+        return httpFor([...byRepo.values()].find((r) => r.name === name)!.fake).request(req);
+      },
+    };
+    const port = createGitHubMergeGatePort({ http, resolveRepo: async (id) => byRepo.get(id)!, markReadyForHumanMerge: async () => undefined, queueDocuments: DOCS });
+    await port.getMergeQueueMode!(PR, "main");
+    await port.getMergeQueueMode!({ repoId: "repo-2", prNumber: 7 }, "main");
+    widgets.mergeAnswer = queueRefusal;
+    await port.mergePullRequest(PR, { sha: HEAD });
+    const before = reads(gadgets);
+    await port.getMergeQueueMode!({ repoId: "repo-2", prNumber: 7 }, "main");
+    expect(reads(gadgets)).toBe(before);
+    const beforeW = reads(widgets);
+    await port.getMergeQueueMode!(PR, "main");
+    expect(reads(widgets)).toBeGreaterThan(beforeW);
+  });
+
+  it.each([
+    ["a stale sha (409)", { status: 409, body: { message: "Head branch was modified. Review and try the merge again." } }],
+    ["a failing required check (405 without the queue)", { status: 405, body: { message: 'Required status check "ci" is expected.' } }],
+    ["a body without a message", { status: 405, body: {} }],
+    ["a server error", { status: 500, body: { message: "Server Error" } }],
+  ])("%s keeps the cached answer", async (_n, answer) => {
+    const f = fresh();
+    const port = await warm(f);
+    f.mergeAnswer = answer;
+    expect((await port.mergePullRequest(PR, { sha: HEAD })).merged).toBe(false);
+    const before = reads(f);
+    expect(await port.getMergeQueueMode!(PR, "main")).toMatchObject({ mode: "direct" });
+    expect(reads(f)).toBe(before);
+  });
+
+  it("a merge that succeeds keeps the cache", async () => {
+    const f = fresh();
+    const port = await warm(f);
+    expect(await port.mergePullRequest(PR, { sha: HEAD })).toEqual({ merged: true });
+    const before = reads(f);
+    await port.getMergeQueueMode!(PR, "main");
+    expect(reads(f)).toBe(before);
   });
 });

@@ -2,7 +2,7 @@ import type { AdvanceReviewDeps } from "@fx/worker";
 import { markRunnerWork } from "@fx/core/src/pendingWork.js";
 import { settleAuthorizedOrder } from "@fx/runner-cloud";
 import { createCiGate, readPublicPullRequest, createPgLocalReviewOptIn, debaterEnabledFor, loadReviewContext, recordMergeOnlyRecheck, recordRound, resumeAgentRun, runMergeGateForItem, type GatheredVerdict, type GitHubHttp, type VerdictRole } from "@fx/pipeline";
-import { ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "@fx/github";
+import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "@fx/github";
 import { openInstallationHttp } from "./github/installationHttp";
 import { openForRepo } from "./github/localOnlyHttp";
 import { createAppRunPullRequestPort } from "./github/runnerPullRequest";
@@ -88,8 +88,8 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
           {
             pool,
             http,
-            // D#694 B5: the three documents the hosted merge client pins (@fx/github); the pipeline package does not depend on it.
-            queueDocuments: { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT },
+            // D#694 B5 and B6-1: the five documents the hosted merge client pins (@fx/github); the pipeline package does not depend on it.
+            queueDocuments: { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT },
             localReviewOptIn: createPgLocalReviewOptIn(pool),
             publicPlane: { open: openPublicHttp, read: readPublicPullRequest(pool) },
             mergeDelegate: async ({ accountId, workItemId, sha, reviewedHead }) => {
