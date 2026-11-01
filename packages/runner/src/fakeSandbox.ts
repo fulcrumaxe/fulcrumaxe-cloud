@@ -3,6 +3,8 @@ import type { AgentRuntime, NormalizedEvent, Role } from "./types.js";
 import { OPERATOR_OAUTH_ENV_NAME, buildSandboxEnv } from "./sandboxEnv.js";
 import { PLANE_PUBLISH_ROLE } from "./sandboxNaming.js";
 import { toolsForRole } from "./agentConfig.js";
+// A cycle with vercelSandboxPort.ts (it imports assertSandboxEnvMatchesRole from here); the class is only used when a scripted create fails, never at load.
+import { SandboxPortError } from "./vercelSandboxPort.js";
 import { RUN_COMMAND_MAX_OUTPUT_CHARS, assertNoAgentInPublishSandbox, assertRunCommandOptions, assertWriteFiles, vcpusForCreate } from "./runCommand.js";
 import {
   LISTABLE_PREFIXES,
@@ -137,6 +139,13 @@ export interface FakeSandboxController {
   setListPageSize(size: number): void;
   /** After this call, `listSandboxes` throws a provider error with this status (429, 500, ...). */
   failList(status: number): void;
+  /**
+   * D#483 S5-k3b: the next `times` calls of `createSandbox` (default 1; `Infinity` until healed) throw `SandboxPortError("createSandbox", status[, code])`, as the real port does
+   * for a refused create. A code that is not a short fixed identifier is dropped by the error, as in the real port. A failed call creates no sandbox.
+   */
+  failCreate(status: number, code?: string, times?: number): void;
+  /** Undoes `failCreate`. */
+  healCreate(): void;
   /** What `sandboxExists` does for this sandbox: answers `false` (a 404), or "unknown" (it THROWS, as a port that could not answer would). Unscripted: it exists. */
   scriptExists(sandboxName: string, answer: false | "unknown"): void;
   /** What `runCommand` does on this sandbox. Unscripted: exit 0 with no output. */
@@ -167,6 +176,7 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
   const snapshots = new Set<string>();
   let listPageSize = 100;
   let listFailStatus: number | undefined;
+  let createFail: { status: number; code: string | undefined; left: number } | undefined;
   let clockMs = 1_700_000_000_000;
   const existence = new Map<string, false | "unknown">();
   const commands: RecordedCommand[] = [];
@@ -225,6 +235,10 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
   const port: SandboxPort = {
     async createSandbox(opts: CreateSandboxOptions): Promise<SandboxHandle> {
       vcpusForCreate(opts);
+      if (createFail !== undefined && createFail.left > 0) {
+        createFail.left -= 1;
+        throw new SandboxPortError("createSandbox", createFail.status, createFail.code);
+      }
       // A live sandbox of this name makes a second create fail, as the provider does for a name that is not persistent. For a publish sandbox only.
       if (opts.sandboxName.startsWith("pp-") && provider.has(opts.sandboxName)) throw Object.assign(new Error("fakeSandbox: the sandbox name is taken"), { status: 400, json: { error: { code: "bad_request" } } });
       created.push(opts);
@@ -404,6 +418,12 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
     },
     failList(status) {
       listFailStatus = status;
+    },
+    failCreate(status, code, times = 1) {
+      createFail = { status, code, left: times };
+    },
+    healCreate() {
+      createFail = undefined;
     },
     scriptExists(sandboxName, answer) {
       existence.set(sandboxName, answer);

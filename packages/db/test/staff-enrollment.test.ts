@@ -235,13 +235,14 @@ describe('staff enrollment functions (OPS-C2)', () => {
     }
   });
 
-  it('ops_console can execute exactly the seven allowed SECURITY DEFINER functions in public, and no other', async () => {
+  it('ops_console can execute exactly the eight allowed SECURITY DEFINER functions in public, and no other', async () => {
     const { rows } = await admin.query<{ sig: string }>(`
       SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS sig
         FROM pg_proc p
        WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND has_function_privilege('ops_console', p.oid, 'EXECUTE')
        ORDER BY 1`);
     expect(rows.map((r) => r.sig)).toEqual([
+      'capacity_settings_write(p_key text, p_value integer)',
       'ops_auth_rate_take(p_key_hash text, p_bucket text, p_max integer, p_window interval, p_record boolean)',
       'ops_challenge_consume(p_hash text, p_expires_at timestamp with time zone)',
       'ops_current_staff()',
