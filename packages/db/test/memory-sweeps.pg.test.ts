@@ -37,12 +37,39 @@ describe('memory sweeps (D#601 MEM-4b1)', () => {
   const audit = async (id: string) => (await admin.query(`SELECT actor, action, payload FROM audit_log WHERE payload->>'entry_id' = $1 ORDER BY created_at, id`, [id])).rows;
   const sweep = async (fn: string, limit = 1000) => (await opsPool.query<{ n: number }>(`SELECT ${fn}($1::int) AS n`, [limit])).rows[0]!.n;
   const sweepAll = async () => ({ expired: await sweep('memory_sweep_expire'), retired: await sweep('memory_sweep_retire'), purged: await sweep('memory_sweep_purge') });
-  /** Moves an entry's clock back: `days` ago for each named column (fractions allowed). */
+  /**
+   * Moves an entry's clock back: `days` ago for each named column (fractions allowed). A day here is a calendar day in the database
+   * session's zone, the unit the definers count in (`interval '30 days'`), so an entry "30 days old" sits exactly on their boundary
+   * whatever zone the database runs in and even when a daylight-saving change falls inside the 30 days (that span is 719 or 721 hours).
+   */
   const age = (id: string, cols: Record<string, number>) =>
     admin.query(
-      `UPDATE memory_entries SET ${Object.keys(cols).map((c, i) => `${c} = now() - make_interval(secs => $${i + 2}::float8)`).join(', ')} WHERE id = $1`,
-      [id, ...Object.values(cols).map((d) => d * DAY)],
+      `UPDATE memory_entries SET ${Object.keys(cols).map((c, i) => `${c} = now() - $${i + 2}::float8 * interval '1 day'`).join(', ')} WHERE id = $1`,
+      [id, ...Object.values(cols)],
     );
+  /** A POSIX zone that put its clocks back `daysAgo` days ago (summer time until then, standard time since), so any window reaching past that day holds a repeated hour. */
+  const zoneWithClocksBack = (daysAgo: number): string => {
+    const rule = (d: Date) => `M${d.getUTCMonth() + 1}.${Math.floor((d.getUTCDate() - 1) / 7) + 1}.${d.getUTCDay()}/2`;
+    const ended = new Date(Date.now() - daysAgo * DAY * 1000);
+    const starts = new Date(Date.now() + 170 * DAY * 1000);
+    return `FXS0FXD-1,${rule(starts)},${rule(ended)}`;
+  };
+  /** Runs `fn` in a transaction whose session zone is `zone`; the zone is local to the transaction, so nothing leaks into the pool. */
+  const inZone = async <T>(zone: string, pool: Pool, fn: (c: PoolClient) => Promise<T>): Promise<T> => {
+    const c = await pool.connect();
+    try {
+      await c.query('BEGIN');
+      await c.query(`SELECT set_config('TimeZone', $1, true)`, [zone]);
+      const out = await fn(c);
+      await c.query('COMMIT');
+      return out;
+    } catch (e) {
+      await c.query('ROLLBACK').catch(() => undefined);
+      throw e;
+    } finally {
+      c.release();
+    }
+  };
 
   beforeAll(async () => {
     adminPool = createPool(process.env.DATABASE_URL!);
@@ -112,6 +139,32 @@ describe('memory sweeps (D#601 MEM-4b1)', () => {
       await expect(del(id, true)).rejects.toMatchObject({ message: /invalid_transition/ });
       expect(await sweep('memory_sweep_purge')).toBe(1);
       expect(await row(id)).toBeUndefined();
+    });
+    it('the boundary is a calendar 30 days when the clocks went back inside those 30 days (a 721 hour span)', async () => {
+      const zone = zoneWithClocksBack(10);
+      const probe = await inZone(zone, adminPool, async (c) => (await c.query(`SELECT now() - interval '30 days' = now() - interval '721 hours' AS ok`)).rows[0].ok);
+      expect(probe).toBe(true); // the zone really repeats an hour inside the window
+      const at30 = await write();
+      const at720h = await write();
+      await del(at30);
+      await del(at720h);
+      await inZone(zone, adminPool, async (c) => {
+        await c.query(`UPDATE memory_entries SET deleted_at = now() - 30 * interval '1 day' WHERE id = $1`, [at30]);
+        await c.query(`UPDATE memory_entries SET deleted_at = now() - interval '720 hours' WHERE id = $1`, [at720h]);
+      });
+      // Exactly 30 calendar days old: a restore is refused. 720 hours old is still inside them: it can be restored (before the purge, which would take it).
+      await withTenant(appPool, a.accountId, aAdmin, async (c) => {
+        await c.query(`SELECT set_config('TimeZone', $1, true)`, [zone]);
+        await expect(c.query(`SELECT memory_delete($1::uuid, true)`, [at30])).rejects.toMatchObject({ message: /invalid_transition/ });
+      });
+      await withTenant(appPool, a.accountId, aAdmin, async (c) => {
+        await c.query(`SELECT set_config('TimeZone', $1, true)`, [zone]);
+        expect((await c.query(`SELECT memory_delete($1::uuid, true) AS r`, [at720h])).rows[0].r).toBe('restored');
+      });
+      const purged = await inZone(zone, opsPool, async (c) => (await c.query<{ n: number }>(`SELECT memory_sweep_purge(1000) AS n`)).rows[0]!.n);
+      expect(purged).toBe(1);
+      expect(await row(at30)).toBeUndefined();
+      expect((await row(at720h)).status).toBe('approved');
     });
     it('purging a deleted head keeps the versions it replaced as history and takes its open records with it', async () => {
       const v1 = await propose();

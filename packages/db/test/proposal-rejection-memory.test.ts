@@ -144,8 +144,10 @@ describe('rejection memory (0844)', () => {
       await expect(reject(a, p, null, 'sometime')).rejects.toMatchObject({ code: PG_ERROR.INVALID_PARAMETER_VALUE });
       await expect(reject(a, p, 'x'.repeat(501), 'never')).rejects.toMatchObject({ code: PG_ERROR.INVALID_PARAMETER_VALUE });
       expect(await row(p)).toMatchObject({ state: 'new', reject_kind: null, resurface_after: null });
-      // The edge: exactly 365 days (a moment under) is allowed.
-      await reject(a, p, null, 'not_now', new Date(Date.now() + 365 * day - 60_000));
+      // The edge: exactly 365 days (a moment under) is allowed. The database counts calendar days, which are 24 hours long only when no
+      // daylight-saving change falls in the year, so the edge is asked of the database's own clock.
+      const edge = (await admin.query<{ t: Date }>(`SELECT now() + interval '365 days' - interval '1 minute' AS t`)).rows[0]!.t;
+      await reject(a, p, null, 'not_now', edge);
       expect((await row(p)).reject_kind).toBe('not_now');
     });
 
