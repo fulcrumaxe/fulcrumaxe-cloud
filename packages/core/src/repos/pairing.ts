@@ -6,6 +6,7 @@ import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { assertRepoIdShape } from './read.js';
 import { redactEventText } from '../events/redact.js';
+import { syncDerivedSetupRequest } from '../setup-requests/store.js';
 import { checkPrFooter } from '@fulcrumaxe/runner-protocol/planePushText';
 import { uncoveredRuleFiles } from '@fulcrumaxe/runner-protocol/repoPairing';
 
@@ -218,6 +219,9 @@ export async function clearRepoPairing(ctx: RepoPairingCtx, repoId: string): Pro
     await ownFullName(client, repoId);
     const { rows } = await client.query<PairingRow>(`DELETE FROM repo_pairing WHERE repo_id = $1 RETURNING ${PAIRING_COLUMNS}`, [repoId]);
     if (rows.length === 0) return false;
+    // D#598 P1d-3: nothing is paired any more, so an open parity request no longer holds. It closes as `condition_cleared` (a system close, not a
+    // withdrawal) in this transaction; the due row went with the pairing (cascade).
+    await syncDerivedSetupRequest(client, { repoId, kind: 'parity_drift', current: null });
     await audit(client, 'repo_pairing.cleared', { repo_id: repoId, before: auditShape(toPairing(rows[0])) });
     return true;
   });

@@ -3143,7 +3143,7 @@ check_stage_resume_lister_role_shape() {
   fi
 }
 
-# D#598 P8b (0874): the one SECURITY DEFINER function owned by setup_request_lister, the cross-tenant list of setup requests due for their
+# D#598 P8b (0874): the two SECURITY DEFINER functions owned by setup_request_lister (0874, 0951), the cross-tenant lists of setup requests and plane parity checks due for their
 # automatic check (0874). Prints its oid when it is exactly 'setup_request_list_due(integer,integer)' (matched by regprocedure), pinned to
 # search_path=pg_catalog, public, pg_temp, with an ACL that holds agent_run_writer and nobody else but the owner (no PUBLIC, no platform_ops,
 # no app_user), with no grant option; SHAPE_FAIL:<count> when any function the role owns is not; nothing when it owns none.
@@ -3151,7 +3151,7 @@ check_setup_request_lister_exception_shape() {
   local dbname="$1" row rc=0 oids bad
   row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
     SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
-      SELECT p.oid, (p.oid = 'public.setup_request_list_due(integer,integer)'::regprocedure
+      SELECT p.oid, (p.oid IN ('public.setup_request_list_due(integer,integer)'::regprocedure, 'public.plane_parity_list_due(integer)'::regprocedure)
         AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable)
         AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0) = ARRAY['agent_run_writer']
@@ -3170,11 +3170,11 @@ check_setup_request_lister_exception_shape() {
 }
 
 # D#598 P8b (0874): role shape of setup_request_lister. A no-op when the role does not exist. Every problem is named: NOLOGIN and unprivileged,
-# no member but the migration role and no live membership for it, a member of no role, privileges exactly the 14 granted by 0874 (column
+# no member but the migration role and no live membership for it, a member of no role, privileges exactly the 18 granted by 0874 and 0951 (column
 # SELECT on setup_requests, accounts and account_members, USAGE on public; nothing table-wide), owning exactly its one function and nothing else.
 check_setup_request_lister_role_shape() {
   local dbname="$1" out rc=0 problems
-  local expected="'column setup_requests.id SELECT','column setup_requests.account_id SELECT','column setup_requests.kind SELECT','column setup_requests.state SELECT','column setup_requests.check_kind SELECT','column setup_requests.check_ran_at SELECT','column setup_requests.created_at SELECT','column setup_requests.created_by SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT','schema public USAGE'"
+  local expected="'column setup_requests.id SELECT','column setup_requests.account_id SELECT','column setup_requests.kind SELECT','column setup_requests.state SELECT','column setup_requests.check_kind SELECT','column setup_requests.check_ran_at SELECT','column setup_requests.created_at SELECT','column setup_requests.created_by SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT','column account_members.created_at SELECT','column plane_parity_checks.repo_id SELECT','column plane_parity_checks.account_id SELECT','column plane_parity_checks.due_at SELECT','schema public USAGE'"
   out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
     WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'setup_request_lister'),
     held AS (
@@ -3189,11 +3189,11 @@ check_setup_request_lister_role_shape() {
       CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
                 OR pg_has_role('fx_migrator', 'setup_request_lister', 'USAGE') THEN 'fx_migrator holds a live membership' END,
       CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
-      CASE WHEN (SELECT count(*) FROM held) <> 14 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 14 granted by 0874' END,
-      CASE WHEN (SELECT count(*) FROM mine) <> 1
-              OR EXISTS (SELECT 1 FROM mine WHERE oid <> 'public.setup_request_list_due(integer,integer)'::regprocedure::oid)
+      CASE WHEN (SELECT count(*) FROM held) <> 18 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 18 granted by 0874 and 0951' END,
+      CASE WHEN (SELECT count(*) FROM mine) <> 2
+              OR EXISTS (SELECT 1 FROM mine WHERE oid NOT IN ('public.setup_request_list_due(integer,integer)'::regprocedure::oid, 'public.plane_parity_list_due(integer)'::regprocedure::oid))
               OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
-              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its one function and nothing else' END,
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its two functions and nothing else' END,
       CASE WHEN has_schema_privilege('setup_request_lister', 'public', 'CREATE') THEN 'still has CREATE on public' END)
     FROM r;" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then

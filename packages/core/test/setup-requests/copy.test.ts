@@ -9,9 +9,11 @@ import {
   checkIntervalFor,
   checkReasonSentence,
   isCheckReasonCode,
+  parityReason,
   repausedSentence,
   statusSentence,
 } from '../../src/setup-requests/copy.js';
+import { isValidReason } from '../../src/setup-requests/kinds.js';
 import { SETUP_REQUEST_DUE_AFTER_SECONDS } from '@fx/db/src/setupRequestLister.js';
 
 /** D#598 P8b: the approved customer copy (C8 section 1, C9 ruling 1) as the strings the API will expose. */
@@ -113,5 +115,39 @@ describe('setup request copy (P8b)', () => {
       expect(checkIntervalFor({ state: 'open', checkKind: null }, { checksAvailable: true })).toBeNull();
       expect(checkIntervalFor({ state: 'done', checkKind: 'env_var_present' }, { checksAvailable: true })).toBeNull();
     });
+  });
+});
+
+describe('parityReason (D#598 P1d-3)', () => {
+  const f = { privateRepo: 'me/priv', publicRepo: 'me/pub', sha7: 'abcdef0123' };
+  it('fills N1 and N2 from structured fields only, with a 7-character commit prefix', () => {
+    const r = parityReason('drift', { ...f, paths: ['a.ts', 'b.ts'], pathCount: 2 });
+    expect(r).toBe('Private main of me/priv differs from public main of me/pub outside the overlay paths, compared at public commit abcdef0. 2 paths differ: a.ts, b.ts. Port the change to a public pull request, or undo it on private main.');
+    expect(parityReason('no_shared_history', { ...f, paths: ['a.ts'], pathCount: 1 })).toContain('contains none of the last 30 commits on public main of me/pub, so it was compared with public commit abcdef0. 1 paths differ: a.ts.');
+  });
+  it('keeps to 1,000 characters, cuts each path to 120, lists the first that fit and then says how many more', () => {
+    const paths = Array.from({ length: 200 }, (_, i) => `dir/${String(i).padStart(3, '0')}/${'x'.repeat(150)}`);
+    const r = parityReason('drift', { ...f, paths, pathCount: 200 });
+    expect(r.length).toBeLessThanOrEqual(1000);
+    expect(r).toMatch(/200 paths differ: dir\/000\/x+…, dir\/001\//);
+    expect(r).toMatch(/, and \d+ more\. Port the change/);
+    const shown = (r.match(/dir\/\d{3}\//g) ?? []).length;
+    expect(r).toContain(`and ${200 - shown} more.`);
+    expect(r).not.toContain('x'.repeat(121));
+  });
+  it('replaces a control character in a path, so the reason stays valid whatever file name the public repo holds', () => {
+    const r = parityReason('drift', { ...f, paths: ['bad\u0007name.ts', 'tab\there\nnl.ts', 'del\u007F.ts'], pathCount: 3 });
+    expect(r).toContain('3 paths differ: bad\uFFFDname.ts, tab\uFFFDhere\uFFFDnl.ts, del\uFFFD.ts.');
+    expect(isValidReason(r)).toBe(true);
+  });
+  it('words the other results with their approved sentences and never leaves a placeholder or a null', () => {
+    for (const result of ['too_large', 'invalid_overlay', 'unsupported_branch'] as const) {
+      const r = parityReason(result, { ...f, limitRepo: 'me/pub' });
+      expect(r, result).not.toMatch(/[{}]|null|undefined/);
+      expect(r, result).toContain('me/priv and me/pub');
+    }
+    expect(parityReason('unsupported_branch', f)).toBe("me/pub uses a default branch other than main, so parity between me/priv and me/pub isn't being checked.");
+    expect(parityReason('unsupported_branch', { ...f, limitRepo: 'me/priv' })).toBe("me/priv uses a default branch other than main, so parity between me/priv and me/pub isn't being checked.");
+    expect(parityReason('too_large', { ...f, limitRepo: 'me/priv' })).toMatch(/^We can't check me\/priv: GitHub won't list all of its files in one answer\./);
   });
 });

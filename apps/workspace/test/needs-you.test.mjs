@@ -965,3 +965,15 @@ describe("WS-F1d: every state", () => {
     expect(shown.join("|")).not.toMatch(/null|undefined|NaN|Invalid Date/);
   });
 });
+
+describe("a derived parity request (D#598 P1d-3)", () => {
+  it("shows its title and its reason as plain text, with no null or undefined, and in the list beside the others", async () => {
+    const reason = "Private main of me/priv differs from public main of me/pub outside the overlay paths, compared at public commit abcdef0. 2 paths differ: a.ts, b.ts. Port the change to a public pull request, or undo it on private main.";
+    const parity = req({ id: "99999999-9999-4999-8999-999999999999", kind: "parity_drift", origin: "derived", title: "Parity check needs attention: me/pub", target: "me/pub", reason, env_name: null, work_item_id: null, created_by: null, check: null, check_interval_seconds: null, status_sentence: null, provider_url: null });
+    const { list } = await loaded({ [GET]: listOf([parity]) });
+    expect(list.state.rows).toHaveLength(1);
+    const row = list.state.rows[0];
+    expect(row).toMatchObject({ title: "Parity check needs attention: me/pub", reason, state: "open", hasCheck: false });
+    expect([row.title, row.reason, row.sentence ?? ""].join("|")).not.toMatch(/null|undefined|NaN/);
+  });
+});

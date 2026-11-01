@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { InstallationTokenCache, type AccessTokenRequester } from "../src/installationToken.js";
-import { createInstallationHttp, InstallationHttpError } from "../src/installationHttp.js";
+import { createInstallationHttp, InstallationHttpError, planeParityAllowed } from "../src/installationHttp.js";
 import { ghError, type GhReply, type GhRequest } from "./helpers/strictGithub.js";
 import { httpsRoundTrip, startStrictGithubServer, type LocalTlsServer } from "./helpers/localTlsServer.js";
 
@@ -186,5 +186,35 @@ describe("plane_parity installation HTTP kind", () => {
     const t = await setup();
     await expect(t.open("plane_parity", { ...TARGET, prNumber: 3 })).rejects.toThrow("invalid_coordinates");
     await expect(t.open("plane_parity", { ...TARGET, branch: "fx/issue-1" })).rejects.toThrow("invalid_coordinates");
+  });
+});
+
+/**
+ * The exact list on its own, with no client, token or network in front of it (the #635 review asked for this layer): every compare form is refused
+ * here, so the client's other checks (the generic dot-dot refusal, the path charset) cannot be what keeps a compare out.
+ */
+describe("planeParityAllowed (the exact list, alone)", () => {
+  const P = "/repos/acme/widgets/";
+  const ok = (path: string, query?: Record<string, string>) => planeParityAllowed("GET", path, query, P);
+  it("refuses compare in every form, and any write", () => {
+    for (const rest of [`compare/${A}...${B}`, `compare/${A}..${B}`, `compare/main...${B}`, `compare/${A}`, "compare", "compare/"]) {
+      expect(ok(P + rest), rest).toBe(false);
+      expect(ok(P + rest, { per_page: "1" }), rest).toBe(false);
+    }
+    expect(planeParityAllowed("POST", P + "commits", { sha: A, per_page: "30" }, P)).toBe(false);
+  });
+  it("allows exactly the five reads", () => {
+    expect(ok("/repos/acme/widgets")).toBe(true);
+    expect(ok(P + "git/ref/heads/main")).toBe(true);
+    expect(ok(P + "git/ref/heads/dev")).toBe(false);
+    expect(ok(P + `git/trees/${A}`, { recursive: "1" })).toBe(true);
+    expect(ok(P + `git/trees/${A}`)).toBe(false);
+    expect(ok(P + "commits", { sha: A, per_page: "30" })).toBe(true);
+    expect(ok(P + "commits", { sha: A, per_page: "31" })).toBe(false);
+    expect(ok(P + "commits", { sha: A, per_page: "100", page: "2" })).toBe(true);
+    expect(ok(P + "commits", { sha: A, per_page: "100", page: "3" })).toBe(false);
+    expect(ok(P + "commits", { sha: "main", per_page: "30" })).toBe(false);
+    expect(ok(P + "contents/README.md")).toBe(false);
+    expect(ok(P + `git/blobs/${A}`)).toBe(false);
   });
 });
