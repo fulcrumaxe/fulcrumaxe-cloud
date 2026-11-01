@@ -6,7 +6,7 @@
 import {
   ClaimMessage, ClaimRateLimitedReply, HelloMessage, HelloReply, ClaimReply, WAKE_CAPABILITY, type WakeGrant, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
   GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply,
-  PLANE_MERGE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
+  MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
   PLANE_PUSH_PAIRING_PATH, PLANE_PUSH_REPORT_PATH, PLANE_PUSH_TOKEN_PATH, PlanePushPairingMessage, PlanePushPairingReply, PlanePushReportMessage, PlanePushReportReply, PlanePushTokenMessage, PlanePushTokenReply, type ClaimCapacity, type ContextLedgerWire, type DoneCheck, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
 } from "@fulcrumaxe/runner-protocol";
 import { errorCodeOf, signedGet, signedPost, type CloudReply } from "../cloud.js";
@@ -92,7 +92,7 @@ export interface DoneInput {
 
 export interface RunnerClient {
   /** D#605 FL-2: says what this build and machine are. Best effort: the caller keeps going on any answer, and a cloud that predates `facts` answers 400. */
-  hello(message: HelloMessage): Promise<{ kind: "ok"; wake?: WakeGrant } | CallError>;
+  hello(message: HelloMessage): Promise<{ kind: "ok"; wake?: WakeGrant; /** Capabilities an older cloud refused and the hello went again without; absent when none was dropped. */ dropped?: string[] } | CallError>;
   /** D#6 RUNNER-WAKE: the no-database wake check, with the token of the grant held. Never a claim: it hands out nothing. */
   wake(token: string): Promise<WakeResult>;
   /**
@@ -150,7 +150,8 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       // capability is dropped alone first, and `wake_v1` goes too only if the hello is still refused.
       const refused = (r: CloudReply | undefined): boolean => r?.status === 400 && errorCodeOf(r.body) === "invalid_message";
       let dropped: string[] = [];
-      for (const drop of [PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY]) {
+      // `memory_limit_v1` (D#6 CARD-OOM-CAUSE-WORDS) is the newest, so it goes first: a cloud that knows the others keeps them, and the caller reads the `dropped` list to know not to send the field.
+      for (const drop of [MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY]) {
         if (!refused(reply) || !(parsed.capabilities ?? []).includes(drop)) continue;
         dropped = [...dropped, drop];
         reply = await send(HELLO_PATH, { ...parsed, capabilities: (parsed.capabilities ?? []).filter((c) => !dropped.includes(c)) });
@@ -158,7 +159,8 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       if (reply?.status !== 200) return fail(reply);
       // The hello is best effort: a 200 whose body is not a protocol reply still counts, it just brings no grant.
       const body = HelloReply.safeParse(reply.body);
-      return body.success && body.data.wake !== undefined ? { kind: "ok", wake: body.data.wake } : { kind: "ok" };
+      const left = dropped.length === 0 ? {} : { dropped };
+      return body.success && body.data.wake !== undefined ? { kind: "ok", wake: body.data.wake, ...left } : { kind: "ok", ...left };
     },
 
     async wake(token) {

@@ -4,7 +4,8 @@
  */
 import { RUNNER_SETUP_DETAILS } from "@fulcrumaxe/runner-protocol";
 import { describe, expect, it } from "vitest";
-import { endOfFailure } from "../../src/daemon/runEnded.js";
+import { LocalOnlyEvent } from "@fulcrumaxe/runner-protocol";
+import { endOfFailure, runEndedEvent } from "../../src/daemon/runEnded.js";
 import { srcFiles } from "../helpers/srcFiles.js";
 
 /** Every closed code a source text throws or hands to the git runner as the code for a failure: `new GitPathError("x")` and `git.run("x", ...)`. */
@@ -60,5 +61,23 @@ describe("C2: a new git-path code without a detail fails here", () => {
   it("the scan finds the codes this path really uses (it is not scanning nothing)", () => {
     const found = new Set(srcFiles().flatMap(([, text]) => codesIn(text)));
     for (const code of ["push_ref_refused", "push_failed", "head_not_from_base", "sandbox_stub_committed", "workspace_git_refused", "mirror_failed", "workspace_failed", "review_sha_not_in_mirror"]) expect(found.has(code), code).toBe(true);
+  });
+});
+
+describe("D#6 CARD-OOM-CAUSE-WORDS: the memory cap on a resource_limit end", () => {
+  const GIB = 1024 ** 3;
+  const at = new Date("2026-10-31T12:00:00.000Z");
+  it("rides on resource_limit only, and becomes memory_limit_bytes on the wire event", () => {
+    expect(endOfFailure("resource_limit", undefined, 6 * GIB)).toEqual({ reason: "resource_limit", memoryLimitBytes: 6 * GIB });
+    expect(endOfFailure("agent_error", undefined, 6 * GIB)).toEqual({ reason: "agent_failed" });
+    expect(endOfFailure("push_too_large", 7, 6 * GIB)).toEqual({ reason: "runner_setup", detail: "push_too_large", sizeMb: 7 });
+    expect(runEndedEvent(3, at, { reason: "resource_limit", memoryLimitBytes: 6 * GIB })).toMatchObject({ type: "run_ended", reason: "resource_limit", memory_limit_bytes: 6 * GIB });
+    expect(runEndedEvent(3, at, { reason: "resource_limit" })).not.toHaveProperty("memory_limit_bytes");
+  });
+
+  it("an event the protocol would refuse is a bug here, not a send", () => {
+    expect(() => runEndedEvent(3, at, { reason: "resource_limit", memoryLimitBytes: 0 })).toThrow();
+    expect(() => runEndedEvent(3, at, { reason: "agent_failed", memoryLimitBytes: 6 * GIB })).toThrow();
+    expect(LocalOnlyEvent.safeParse(runEndedEvent(3, at, { reason: "resource_limit", memoryLimitBytes: 2 ** 40 })).success).toBe(true);
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { HANDED_OFF_FALLBACK_LINE, HANDED_OFF_LINES } from "@fulcrumaxe/runner-protocol";
+import { COPY, HANDED_OFF_FALLBACK_LINE, HANDED_OFF_LINES } from "@fulcrumaxe/runner-protocol";
 import { runEndedSentence, withRunnerWords } from "../src/routes/runnerLineWords.js";
 
 /** D#599 HO-2b (R-599-HO1): a handed-off run's line is the protocol's, by detail, and an event with no detail has one too. */
@@ -42,5 +42,19 @@ describe("run_ended check_failed in the run view", () => {
   it("replaces the plain line of the event in withRunnerWords, and never reads \"The run ended\"", () => {
     const [line] = withRunnerWords([{ at: "2026-10-22T00:00:00.000Z", text: "The run ended", ended }], { argv: ["make", "check"] });
     expect(line!.text).toBe("The approved check (make check) failed, so this run ended without a pull request.");
+  });
+});
+
+/** D#6 CARD-OOM-CAUSE-WORDS: a memory-limit end names the cap when the runner sent a valid one, else keeps the plain sentence. */
+describe("run_ended resource_limit in the run view", () => {
+  const GIB = 1024 ** 3;
+  const why = (memory_limit_bytes?: number | null) => ({ reason: "resource_limit", detail: null, size_mb: null, ...(memory_limit_bytes === undefined ? {} : { memory_limit_bytes }) });
+  it("names the cap in GB, and falls back to the plain sentence for a missing or invalid one", () => {
+    expect(runEndedSentence(why(6 * GIB))).toContain("This job hit its 6 GB memory limit on your runner");
+    for (const bad of [undefined, null, 0, -1, 2 ** 41]) expect(runEndedSentence(why(bad)), String(bad)).toBe(COPY.resourceLimit);
+  });
+  it("is the run view line too", () => {
+    const [line] = withRunnerWords([{ at: "2026-10-31T00:00:00.000Z", text: "The run ended (resource limit)", ended: why(2 * GIB) }]);
+    expect(line!.text).toContain("its 2 GB memory limit");
   });
 });

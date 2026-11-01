@@ -572,6 +572,47 @@ describe("what the cloud is told when a run does not finish (D#6 R4a-2, C24 sect
       });
     }
 
+    // D#6 CARD-OOM-CAUSE-WORDS: the scope's own cap goes on the resource_limit end, and only to a cloud whose hello kept memory_limit_v1.
+    describe("the memory cap on resource_limit", () => {
+      const GIB = 1024 ** 3;
+      // One rig (one ledger lock) per test.
+      const sentBy = async (handler: Partial<JobHandlerDeps>, code = "resource_limit") => {
+        const rig = makeRig({ handler: { ...failWith(code), ...handler } });
+        const claimed = await rig.claim();
+        await rig.handle(claimed);
+        return cloud.runs.get(claimed.runId)?.endedBy;
+      };
+
+      it("is sent as memory_limit_bytes, the figure the limits recorded for this run", async () => {
+        const asked: string[] = [];
+        const ended = await sentBy({ sendMemoryLimit: () => true, memoryLimitBytes: (runId) => (asked.push(runId), 6 * GIB) });
+        expect(ended).toMatchObject({ type: "run_ended", reason: "resource_limit", memory_limit_bytes: 6 * GIB });
+        expect(asked).toHaveLength(1);
+      });
+
+      it("is not sent when the hello dropped the capability (an older cloud's strict parse would refuse the key)", async () => {
+        const ended = await sentBy({ sendMemoryLimit: () => false, memoryLimitBytes: () => 6 * GIB });
+        expect(ended).toMatchObject({ type: "run_ended", reason: "resource_limit" });
+        expect(ended).not.toHaveProperty("memory_limit_bytes");
+      });
+
+      it("is not sent when nothing says the cloud may take it", async () => {
+        const ended = await sentBy({ memoryLimitBytes: () => 6 * GIB });
+        expect(ended).toMatchObject({ type: "run_ended", reason: "resource_limit" });
+        expect(ended).not.toHaveProperty("memory_limit_bytes");
+      });
+
+      it("is not sent when the limits have no figure", async () => {
+        expect(await sentBy({ sendMemoryLimit: () => true, memoryLimitBytes: () => undefined })).not.toHaveProperty("memory_limit_bytes");
+      });
+
+      it("is not sent on any other end", async () => {
+        const other = await sentBy({ sendMemoryLimit: () => true, memoryLimitBytes: () => 6 * GIB }, "agent_error");
+        expect(other).toMatchObject({ reason: "agent_failed" });
+        expect(other).not.toHaveProperty("memory_limit_bytes");
+      });
+    });
+
     it("a credential mismatch sends no run_ended", async () => {
       const rig = makeRig({ handler: failWith("credential_mismatch") });
       const claimed = await rig.claim();

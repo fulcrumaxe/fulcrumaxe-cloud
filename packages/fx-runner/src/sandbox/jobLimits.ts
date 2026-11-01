@@ -63,8 +63,13 @@ export interface JobLimits {
    * The cgroup disappears with the job, so the last figure read is kept and returned after that. Never blocks: early calls start finding the cgroup.
    */
   peak?(runId: string): number | undefined;
-  /** Forgets the job's peak record. */
+  /** Forgets the job's peak record and its cap. */
   release?(runId: string): void;
+  /**
+   * D#6 CARD-OOM-CAUSE-WORDS: the memory cap (bytes) this job's scope was started with, kept when `wrap` ran (the budget can change between jobs, so it is the figure the scope used, not today's setting).
+   * Read once after `exceeded` answered true, then forgotten. Undefined for a job with no scope.
+   */
+  memoryCap?(runId: string): number | undefined;
 }
 
 export interface ScopeTools {
@@ -152,6 +157,7 @@ const SETTLE_MS = 100;
 export function createScopeLimits(config: ScopeLimitsConfig): JobLimits {
   const units = new Map<string, string>();
   const peaks = new Map<string, PeakRecord>();
+  const caps = new Map<string, number>();
   const cgroupRoot = config.cgroupRoot ?? DEFAULT_CGROUP_ROOT;
   const sleep = config.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   let counter = 0;
@@ -165,6 +171,7 @@ export function createScopeLimits(config: ScopeLimitsConfig): JobLimits {
       const budget = config.budgets()[jobClassOfRole(job.role)];
       const unit = `fxr-${job.runId}-${tag}${++counter}`;
       units.set(job.runId, unit);
+      caps.set(job.runId, budget.memoryBytes);
       peaks.set(job.runId, { unit, resolving: false });
       return {
         command: config.tools.systemdRun,
@@ -207,6 +214,12 @@ export function createScopeLimits(config: ScopeLimitsConfig): JobLimits {
     },
     release(runId) {
       peaks.delete(runId);
+      caps.delete(runId);
+    },
+    memoryCap(runId) {
+      const cap = caps.get(runId);
+      caps.delete(runId);
+      return cap;
     },
     async exceeded(runId) {
       const unit = units.get(runId);
@@ -224,6 +237,8 @@ export function createScopeLimits(config: ScopeLimitsConfig): JobLimits {
       }
       // A scope that failed stays loaded until it is reset; clear it whatever the reason, so nothing is left behind.
       if (result !== "" && result !== "success") await config.capture(config.tools.systemctl, ["--user", "reset-failed", scope], busEnv, 5_000).catch(() => undefined);
+      // The cap stays only for a run the kernel killed: `memoryCap` (or `release`) takes it. Any other end drops it here.
+      if (result !== "oom-kill") caps.delete(runId);
       return result === "oom-kill";
     },
   };

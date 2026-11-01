@@ -120,6 +120,12 @@ export interface JobHandlerDeps {
   spillRoot?: string;
   /** Replaceable so a test can count the calls. */
   runJobFn?: typeof runJob;
+  /**
+   * D#6 CARD-OOM-CAUSE-WORDS: the memory cap, in bytes, the job's scope actually ran under (the limits record it when they start the scope); read once, for a run that ended `resource_limit`.
+   * Absent where no limits are enforced. `sendMemoryLimit` says whether the cloud kept `memory_limit_v1` on the hello: false or absent means the field is never sent.
+   */
+  memoryLimitBytes?: (runId: string) => number | undefined;
+  sendMemoryLimit?: () => boolean;
   heartbeatMs?: number;
   flushMs?: number;
   /** The lease's short flush while an activity or stage event waits (default 2 s). */
@@ -646,7 +652,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
         if (stopped !== undefined) return stoppedBy(stopped);
         if (isGitStop(result.reason)) return { status: "stopped", reason: "lease_lost" };
         // A credential mismatch ends the run on its own event; the engine has queued it, so nothing more is sent for it.
-        const end = lease.saw("credential_mismatch") ? null : endOfFailure(result.reason);
+        const end = lease.saw("credential_mismatch") ? null : endOfFailure(result.reason, undefined, result.reason === "resource_limit" && deps.sendMemoryLimit?.() === true ? deps.memoryLimitBytes?.(claimed.runId) : undefined);
         if (end !== null) await reportEnd(lease, end);
         return { status: "failed", reason: result.reason };
       }

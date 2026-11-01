@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { COPY } from "../src/copy.js";
+import { COPY, memoryLimitText, resourceLimitText } from "../src/copy.js";
 
 /**
  * The words the product shows. Each string is asserted here by its exact text, so editing one is a deliberate change to
@@ -72,6 +72,7 @@ describe("the runner copy (D#6 R2b)", () => {
       sandboxUnavailable: "Sandbox not working on this machine ({reason}). Run `fx-runner doctor` there to see the fix.",
       agentFailed: "The agent stopped without finishing. Retry, or open the run for details.",
       resourceLimit: "This job hit its memory limit on your runner, so the agent was stopped before it finished. Retry, or give jobs more memory on that machine (`fx-runner config set budget.light.memory` or `budget.heavy.memory`).",
+      resourceLimitNamed: "This job hit its {limit} memory limit on your runner, so the agent was stopped before it finished. Retry, or give jobs more memory on that machine (`fx-runner config set budget.light.memory` or `budget.heavy.memory`).",
       runnerSetupFailed: "Your runner could not start the agent ({detail}). Check the runner's setup, then retry.",
       pushRejected: "Your runner could not push to the pull request's branch, because the branch changed while the agent was working. Retry to run on the new head.",
       pushTooLarge:
@@ -121,6 +122,33 @@ describe("the runner copy (D#6 R2b)", () => {
       expect(text.length, key).toBeGreaterThan(0);
       for (const match of text.matchAll(/\{([a-z]+)\}/g)) placeholders.add(match[1]!);
     }
-    expect([...placeholders].sort()).toEqual(["detail", "item", "machine", "n", "person", "reason", "repo", "run", "size", "status", "time"]);
+    expect([...placeholders].sort()).toEqual(["detail", "item", "limit", "machine", "n", "person", "reason", "repo", "run", "size", "status", "time"]);
+  });
+});
+
+describe("the memory-limit sentence names the cap (D#6 CARD-OOM-CAUSE-WORDS)", () => {
+  const GIB = 1024 ** 3;
+  it("renders the cap in the units the runner's settings use, with a fixed format", () => {
+    expect(memoryLimitText(6 * GIB)).toBe("6 GB");
+    expect(memoryLimitText(2 * GIB)).toBe("2 GB");
+    expect(memoryLimitText(1.5 * GIB)).toBe("1.5 GB");
+    expect(memoryLimitText(GIB)).toBe("1 GB");
+    expect(memoryLimitText(1024 ** 4)).toBe("1024 GB");
+    expect(memoryLimitText(512 * 1024 ** 2)).toBe("512 MB");
+    expect(memoryLimitText(GIB - 1)).toBe("1024 MB");
+    expect(memoryLimitText(1)).toBe("1 MB");
+  });
+
+  it("says nothing for a value that is not a positive whole number within the bound", () => {
+    for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 40 + 1, 2 ** 53, "6442450944", null, undefined, {}]) expect(memoryLimitText(bad), String(bad)).toBeNull();
+    expect(memoryLimitText(2 ** 40)).toBe("1024 GB");
+  });
+
+  it("is the pinned sentence with the cap, and today's sentence when the cap is missing or invalid", () => {
+    expect(resourceLimitText(6 * GIB)).toBe(
+      "This job hit its 6 GB memory limit on your runner, so the agent was stopped before it finished. Retry, or give jobs more memory on that machine (`fx-runner config set budget.light.memory` or `budget.heavy.memory`).",
+    );
+    for (const missing of [undefined, null, 0, -5, 3.2, "6", 2 ** 41]) expect(resourceLimitText(missing), String(missing)).toBe(COPY.resourceLimit);
+    expect(resourceLimitText()).toBe(COPY.resourceLimit);
   });
 });

@@ -1033,6 +1033,46 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       expect(await noticeNow()).toEqual({ kind: 'needs_human', reason: sentence });
     });
 
+    // D#6 CARD-OOM-CAUSE-WORDS: a build the runner ended at its memory limit says so on the card, and names the cap when the runner sent a valid one.
+    describe('an executor run the runner ended at its memory limit', () => {
+      const GIB = 1024 ** 3;
+      async function cardFor(extra: Record<string, unknown>, summary: string | null = null, reason = 'resource_limit') {
+        const { accountId, userId } = await seedAccountWithMember(admin, { role: 'owner' });
+        const { itemId } = await seedItem(accountId, { stage: 'needs_human' });
+        const runId = randomUUID();
+        await admin.query(
+          `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, execution_mode, status, envelope, created_at, ended_at)
+           VALUES ($1, $2, $3, 'executor', 'runner', 'runner_local', 'failed', $4::jsonb, now(), now())`,
+          [runId, accountId, itemId, JSON.stringify(summary === null ? {} : { summary })],
+        );
+        await seedEvent(accountId, runId, 1, 'runner.event', { type: 'run_ended', reason, ...extra });
+        const body = (await (await get(itemId, { accountId, userId })).json()) as Activity;
+        expect(activityResponseSchema.parse(body)).toEqual(body);
+        return body;
+      }
+
+      it('names the cap in GB on the card and on the run line, pinned verbatim', async () => {
+        const sentence = 'This job hit its 6 GB memory limit on your runner, so the agent was stopped before it finished. Retry, or give jobs more memory on that machine (`fx-runner config set budget.light.memory` or `budget.heavy.memory`).';
+        const body = await cardFor({ memory_limit_bytes: 6 * GIB });
+        expect(body.notice).toEqual({ kind: 'needs_human', reason: sentence });
+        expect(body.runs[0]!.lines.map((l) => l.text)).toContain(sentence);
+        expect(JSON.stringify(body)).not.toContain('memory_limit_bytes');
+      });
+
+      it('keeps the plain memory sentence when the cap is missing (an older runner) or invalid, never the generic "failed without a pull request"', async () => {
+        for (const extra of [{}, { memory_limit_bytes: 0 }, { memory_limit_bytes: -5 }, { memory_limit_bytes: 1.5 }, { memory_limit_bytes: '6 GB' }, { memory_limit_bytes: 2 ** 41 }, { memory_limit_bytes: 10 ** 15 }]) {
+          const body = await cardFor(extra);
+          expect(body.notice, JSON.stringify(extra)).toEqual({ kind: 'needs_human', reason: COPY.resourceLimit });
+        }
+      });
+
+      it('outranks a model summary, and is not used for any other end', async () => {
+        expect((await cardFor({ memory_limit_bytes: 2 * GIB }, 'I got most of it done.')).notice?.reason).toContain('its 2 GB memory limit');
+        expect((await cardFor({ memory_limit_bytes: 2 * GIB }, null, 'agent_failed')).notice).toEqual({ kind: 'needs_human', reason: 'The executor run failed without a pull request.' });
+        expect((await cardFor({}, 'I got most of it done.', 'agent_failed')).notice?.reason).toBe('I got most of it done.');
+      });
+    });
+
     it('FIXROUND-BASE-SYNC: a review fix round that found the branch in conflict with its base leaves the item at Needs a person with the escalation and its sentence', async () => {
       const { accountId, userId } = await seedAccountWithMember(admin, { role: 'owner' });
       const { itemId } = await seedItem(accountId, { stage: 'needs_human' });

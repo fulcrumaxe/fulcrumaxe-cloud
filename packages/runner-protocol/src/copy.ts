@@ -1,3 +1,5 @@
+import { MEMORY_LIMIT_BYTES } from "./messages.js";
+
 /**
  * The exact words the product shows about the local runner. One place, so the dashboard never retypes them and a test can
  * pin each string. Placeholders in braces (`{repo}`, `{time}`, ...) are filled from server data by the caller.
@@ -85,6 +87,8 @@ export const COPY = {
   agentFailed: "The agent stopped without finishing. Retry, or open the run for details.",
   /** D#6 RUNNER-AGENT-NO-FULLCHECK: a run whose agent the job's memory limit ended (run_ended `resource_limit`, failure reason `resource_limit`). */
   resourceLimit: "This job hit its memory limit on your runner, so the agent was stopped before it finished. Retry, or give jobs more memory on that machine (`fx-runner config set budget.light.memory` or `budget.heavy.memory`).",
+  /** D#6 CARD-OOM-CAUSE-WORDS: the same sentence with the cap the job ran under; `{limit}` is `memoryLimitText` of the runner's `memory_limit_bytes`. Used only for a valid value, else `resourceLimit`. */
+  resourceLimitNamed: "This job hit its {limit} memory limit on your runner, so the agent was stopped before it finished. Retry, or give jobs more memory on that machine (`fx-runner config set budget.light.memory` or `budget.heavy.memory`).",
   runnerSetupFailed: "Your runner could not start the agent ({detail}). Check the runner's setup, then retry.",
   /** D#6 R4a-3b (C25 section 1.4): shown when a fix round's push was rejected. */
   pushRejected: "Your runner could not push to the pull request's branch, because the branch changed while the agent was working. Retry to run on the new head.",
@@ -167,6 +171,25 @@ export const JOB_REFUSED_LINES = { review_sha_missing: REVIEW_REFUSED_LINE, revi
 export function jobRefusedText(detail: string): string {
   const own = (JOB_REFUSED_LINES as Readonly<Record<string, string>>)[detail];
   return own !== undefined ? own : `Your runner refused this job (${detail}).`;
+}
+
+const MEMORY_MB = 1_048_576;
+const MEMORY_GB = 1_073_741_824;
+
+/**
+ * A memory cap in the units the runner's settings use (`budget.*.memory` is in GB of 2^30 bytes). From one GB up it is whole GB, or one decimal when it is not a whole number ("6 GB",
+ * "1.5 GB"); below that it is whole MB, at least 1 ("512 MB"). Null for anything that is not a positive safe integer within `MEMORY_LIMIT_BYTES`, so a bad value never reaches a sentence.
+ */
+export function memoryLimitText(bytes: unknown): string | null {
+  if (typeof bytes !== "number" || !Number.isSafeInteger(bytes) || bytes < MEMORY_LIMIT_BYTES.min || bytes > MEMORY_LIMIT_BYTES.max) return null;
+  if (bytes < MEMORY_GB) return `${Math.max(1, Math.round(bytes / MEMORY_MB))} MB`;
+  return `${Math.round((bytes / MEMORY_GB) * 10) / 10} GB`;
+}
+
+/** What the dashboard shows for a `run_ended` `resource_limit` event: the sentence naming the cap when the runner sent a valid one, else the plain sentence an older runner's run gets. */
+export function resourceLimitText(memoryLimitBytes?: unknown): string {
+  const limit = memoryLimitText(memoryLimitBytes);
+  return limit === null ? COPY.resourceLimit : COPY.resourceLimitNamed.replace("{limit}", limit);
 }
 
 /**
