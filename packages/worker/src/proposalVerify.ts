@@ -110,6 +110,7 @@ interface ProposalRow {
   provenance: string;
   gh_number: number | null;
   discussion_number: number | null;
+  analysis_refs: string[] | null;
   verification: string;
   verify_attempts: number;
   gh_owner: string | null;
@@ -139,7 +140,7 @@ const requestHash = (p: ProposalRow): string =>
 
 async function readProposal(client: PoolClient, accountId: string, proposalId: string): Promise<ProposalRow | undefined> {
   const { rows } = await client.query<ProposalRow>(
-    `SELECT p.id, p.repo_id, p.title, p.summary, p.provenance, p.gh_number, p.discussion_number, p.verification, p.verify_attempts, r.gh_owner, r.gh_name
+    `SELECT p.id, p.repo_id, p.title, p.summary, p.provenance, p.gh_number, p.discussion_number, p.analysis_refs, p.verification, p.verify_attempts, r.gh_owner, r.gh_name
        FROM proposals p JOIN repos r ON r.account_id = p.account_id AND r.id = p.repo_id
       WHERE p.account_id = $1 AND p.id = $2 AND p.state = 'new' AND p.owner_process = 'product'`,
     [accountId, proposalId],

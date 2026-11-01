@@ -65,9 +65,13 @@ function prList(v: unknown, where: string): number[] {
   return [...new Set(v as number[])];
 }
 
+/** C0 controls other than tab, newline and carriage return, and DEL: a NUL fails a jsonb parameter, BEL and ESC would be stored as typed. */
+// eslint-disable-next-line no-control-regex
+const C0_CONTROLS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
+
 /** A one-line, control-token-free, length-bounded form of untrusted text. */
 export function cleanText(text: string, max: number): string {
-  return stripControlTokens(text.slice(0, max * 4)).replace(/\s+/g, " ").trim().slice(0, max);
+  return stripControlTokens(text.replace(C0_CONTROLS, "").slice(0, max * 4)).replace(/\s+/g, " ").trim().slice(0, max);
 }
 
 /** The first sentence of a milestone's definition, cut to 80 characters. */

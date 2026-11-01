@@ -864,13 +864,15 @@ export function validProposal(p) {
     ["new", "approved", "rejected", "withdrawn"].includes(p.state) && Array.isArray(p.sources);
 }
 
-/** "Issue #12", "Discussion #483", "Task D#2 · H14a", "Preview", in that order, for the sources a proposal has. */
+/** "Issue #12", "Discussion #483", "Task D#2 · H14a", "Preview", "Docs", "Code", in that order, for the sources a proposal has. */
 export function badgesFor(p) {
   const out = [];
   if (isNum(p.gh_number) && p.sources.includes("github_issue")) out.push("Issue #" + p.gh_number);
   if (isNum(p.discussion_number)) out.push("Discussion #" + p.discussion_number);
   if (str(p.task_key)) out.push("Task " + p.task_key.replace(":", " · "));
   if (p.sources.includes("preview")) out.push("Preview");
+  if (p.sources.includes("docs")) out.push("Docs");
+  if (p.sources.includes("code")) out.push("Code");
   return out;
 }
 

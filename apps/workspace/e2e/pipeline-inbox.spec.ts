@@ -115,15 +115,19 @@ test.describe("D#483 S3-L2b: Inbox rows and filters", () => {
       proposal(5, { state: "rejected", decided_at: "2026-10-16T06:06:00.000Z", reject_note: "Not now", title: "Rejected one" }),
       proposal(6, { state: "withdrawn", title: "Closed one" }),
       proposal(7, { owner_process: "internal_loop", title: "Loop one" }),
+      proposal(8, { sources: ["github_issue", "docs"], title: "Merged with docs" }),
+      proposal(9, { sources: ["docs", "code"], gh_number: null, dedupe_key: "src:0123456789abcdef", title: "From the repository" }),
     ];
     const { errors } = await start(page, m);
-    await expect(rows(page)).toHaveCount(3);
+    await expect(rows(page)).toHaveCount(5);
     const first = rows(page).filter({ hasText: "Issue number 1" });
     await expect(first.locator('[data-testid="pl-inbox-badges"]')).toHaveText("Issue #1 · Preview");
     await expect(first.locator('[data-testid="pl-inbox-details"]')).toHaveText("bug · Estimate $1.50 · M1: First steps");
     await expect(rows(page).filter({ hasText: "A planned task" }).locator('[data-testid="pl-inbox-badges"]')).toHaveText("Task D#2 · H14a");
     await expect(rows(page).filter({ hasText: "A planned task" }).locator('[data-testid="pl-inbox-details"]')).toHaveCount(0);
     await expect(rows(page).filter({ hasText: "A Discussion" }).locator('[data-testid="pl-inbox-badges"]')).toHaveText("Discussion #483");
+    await expect(rows(page).filter({ hasText: "Merged with docs" }).locator('[data-testid="pl-inbox-badges"]')).toHaveText("Issue #8 · Docs");
+    await expect(rows(page).filter({ hasText: "From the repository" }).locator('[data-testid="pl-inbox-badges"]')).toHaveText("Docs · Code");
     expect(m.requests).toContain(`GET /api/v1/proposals?repo_id=${REPO}&state=new&owner=product&section=new`);
     await axeClean(page);
 
