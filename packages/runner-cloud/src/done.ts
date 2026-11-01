@@ -1,4 +1,4 @@
-import { DONE_RETRY_AFTER_SECONDS, DoneMessage, DoneReply, DoneRetryReply, SignedJobSchema, type DoneCheck, type Job } from "@fulcrumaxe/runner-protocol";
+import { CHECK_FAILED_FILES_DROPPED, DONE_RETRY_AFTER_SECONDS, DoneMessage, DoneReply, DoneRetryReply, SignedJobSchema, type DoneCheck, type Job } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RUNNER_RUN_BRANCH, isRunnerMode } from "@fx/runner";
 import { RUNNER_PUSHING_ROLES } from "@fx/gh-policy";
@@ -193,6 +193,8 @@ async function decide(deps: RunnerCloudDeps, i: { accountId: string; runId: stri
     if (reported === undefined) return failed("internal_error");
     // What is stored is the normalised result; a field outside the contract fails the check whatever the exit status said (it is never a pass).
     const norm = normaliseCheck(reported);
+    // D#6 CHECK-FAILFILES-TO-CLOUD: a malformed list of failing test files is dropped here and the check goes on without it; the fixed code is the only trace.
+    if (norm.failedFilesDropped) (deps.log ?? ((line) => console.warn(line)))(JSON.stringify({ event: CHECK_FAILED_FILES_DROPPED, run_id: i.runId }));
     if (norm.outOfContract !== null || !checkPassed(norm.check)) {
       // The runner pushed the work to the run branch before reporting; recording it (with no pull request) is what lets the fix round continue from its tip.
       const branch = branchOf(ctx.job, i);

@@ -39,6 +39,8 @@ interface Case {
   check?: typeof CHECK;
   row?: Row;
   noDevShell?: boolean;
+  /** D#6 CHECK-FAILFILES-TO-CLOUD: the payload of the `run.check_ended` event the done route wrote (the failing test files, as stored). */
+  ended_payload?: Record<string, unknown>;
   /** The runner's run_ended check_failed event (no detail), whose line the route words with the check's command. */
   ended?: boolean;
   /** The only runner covering the repo speaks this protocol: below the check's minimum, the run waits (pending). */
@@ -59,6 +61,7 @@ const CASES: Case[] = [
   { name: 'check-unsafe-pin-failed', status: 'failed', check: CHECK, ended: true, row: { exit_code: null, duration_ms: 12, timed_out: false, skipped_tests: null, summary: 'the check was not run: these files could not be pinned (a link or a non-file on the path): scripts/check.sh', reason: 'pin_failed' } },
   { name: 'check-unsafe-protected-changed', status: 'failed', check: CHECK, ended: true, row: { exit_code: 0, duration_ms: 31_000, timed_out: false, skipped_tests: null, summary: 'the check changed paths it may not (put back where possible): pnpm-lock.yaml', reason: 'protected_changed' } },
   { name: 'check-runner-too-old', status: 'pending', check: CHECK, oldRunner: true },
+  { name: 'check-failed-files', status: 'failed', check: CHECK, ended: true, ended_payload: { exit_code: 1, timed_out: false, duration_ms: 61_000, failed_files: ['apps/ops/test/scan.test.ts', 'packages/db/test/a.pg.test.ts'], failed_files_more: 3 }, row: { exit_code: 1, duration_ms: 61_000, timed_out: false, skipped_tests: null, summary: 'failed test files (5): apps/ops/test/scan.test.ts, packages/db/test/a.pg.test.ts (and 3 more)\nFAIL x' } },
 ];
 
 /** D#6 R-CHK-3b against real Postgres: the check on the run detail, read through the real route for every state the screen draws, pinned as fixtures. */
@@ -109,6 +112,9 @@ describe('the run check through getRunInsight (D#6 R-CHK-3b)', { timeout: 120_00
     }
     if (c.noDevShell) {
       await admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload, created_at) VALUES ($1, $2, 1, 'runner.event', $3::jsonb, $4)`, [me.accountId, runId, JSON.stringify({ type: 'run_ended', reason: 'check_failed', detail: 'check_no_dev_shell' }), at(2)]);
+    }
+    if (c.ended_payload) {
+      await admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload, created_at) VALUES ($1, $2, 2, 'run.check_ended', $3::jsonb, $4)`, [me.accountId, runId, JSON.stringify(c.ended_payload), at(59)]);
     }
     if (c.row) {
       await admin.query(`INSERT INTO run_checks (account_id, run_id, exit_code, duration_ms, timed_out, skipped_tests, summary, reason) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [me.accountId, runId, c.row.exit_code, c.row.duration_ms, c.row.timed_out, c.row.skipped_tests, c.row.summary, c.row.reason ?? null]);
@@ -167,6 +173,20 @@ describe('the run check through getRunInsight (D#6 R-CHK-3b)', { timeout: 120_00
     expect(check('check-failed')!.argv[4]).toBe('a  b');
     // The too-old runner is told by the wait, which the screen reads next to the check.
     expect((bodies.get('check-runner-too-old')!.wait as { reason: string }).reason).toBe('runner_too_old_for_check');
+  });
+
+  it('D#6 CHECK-FAILFILES-TO-CLOUD: the card gets the names and the count of the rest; a stored list that fails the strict reader is not shown, and the result still is', async () => {
+    const files = (name: string) => (bodies.get(name)!.check as { result: Row & { failed_files?: string[]; failed_files_more?: number } }).result;
+    expect(files('check-failed-files')).toMatchObject({ failed_files: ['apps/ops/test/scan.test.ts', 'packages/db/test/a.pg.test.ts'], failed_files_more: 3 });
+    expect('failed_files' in files('check-failed')).toBe(false);
+    const base = { name: 'x', status: 'failed', check: CHECK, row: { exit_code: 1, duration_ms: 1, timed_out: false, skipped_tests: null, summary: 'FAIL' } } as Case;
+    let n = 100;
+    for (const bad of [['/abs/x.test.ts'], ['../x.test.ts'], ['a/../b.ts'], [7], 'a.test.ts', Array.from({ length: 21 }, (_, i) => `t/${String(i)}.test.ts`), ['a.test.ts', 'a.test.ts'], ['x'.repeat(201)]]) {
+      const runId = await seed({ ...base, ended_payload: { failed_files: bad } }, (n += 1));
+      const result = ((await insight(runId)).check as { result: Record<string, unknown> }).result;
+      expect(result, JSON.stringify(bad).slice(0, 30)).toMatchObject({ exit_code: 1 });
+      expect('failed_files' in result, JSON.stringify(bad).slice(0, 30)).toBe(false);
+    }
   });
 
   it("a sandbox run and another account's read see no check", async () => {

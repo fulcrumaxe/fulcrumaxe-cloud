@@ -35,6 +35,7 @@ const WANT: Record<string, { state: string; label: string; text: RegExp; output:
   "check-unsafe-pin-failed": { state: "unsafe", label: "Could not run safely", text: /could not be pinned to the default branch's copy/, output: true },
   "check-unsafe-protected-changed": { state: "unsafe", label: "Could not run safely", text: /The check changed files it may not change/, output: true },
   "check-unsafe-sandbox-refused": { state: "unsafe", label: "Could not run safely", text: /would not run the check with the same limits the agent had/, output: true },
+  "check-failed-files": { state: "failed", label: "Failed", text: /Exit status 1 · Took 1m 01s/, output: true },
   "check-runner-too-old": { state: "runner_too_old", label: "Runner too old", text: /Update your runner to run this repository's check\./, output: false },
 };
 
@@ -106,6 +107,12 @@ test.describe("D#6 R-CHK-3b: the Check block, every state (contract fixtures)", 
       // the first line "check files changed by this branch: …" is set apart, and only when it is there
       if (name === "check-passed") await expect(tid(page, "runs-check-changed")).toHaveText("check files changed by this branch: scripts/check.sh");
       else await expect(tid(page, "runs-check-changed")).toHaveCount(0);
+      // D#6 CHECK-FAILFILES-TO-CLOUD: the failing test files as a short list with the count of the rest, only when the runner named them
+      if (name === "check-failed-files") {
+        await expect(tid(page, "runs-check-failed")).toContainText("Failing test files:");
+        await expect(tid(page, "runs-check-failed-file")).toHaveText(["apps/ops/test/scan.test.ts", "packages/db/test/a.pg.test.ts"]);
+        await expect(tid(page, "runs-check-failed-more")).toHaveText("+3 more");
+      } else await expect(tid(page, "runs-check-failed")).toHaveCount(0);
       // no hole on the screen
       expect(await block.innerText()).not.toMatch(/(^|[^A-Za-z])(null|undefined|NaN)([^A-Za-z]|$)/);
       expect(await axeSeriousOrCritical(page)).toEqual([]);

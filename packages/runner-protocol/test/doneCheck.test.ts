@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CHECK_JOB_MIN_PROTOCOL, CHECK_NOT_RUN_REASONS, CURRENT_PROTOCOL_VERSION, DETAILS_OF_RUN_ENDED, DoneCheck, LocalOnlyEvent, RUNNER_MESSAGES, checkNotRunReason } from "../src/messages.js";
+import { CHECK_FAILED_FILES_MIN_PROTOCOL, readCheckFailedFiles, CHECK_JOB_MIN_PROTOCOL, CHECK_NOT_RUN_REASONS, CURRENT_PROTOCOL_VERSION, DETAILS_OF_RUN_ENDED, DoneCheck, LocalOnlyEvent, RUNNER_MESSAGES, checkNotRunReason } from "../src/messages.js";
 import { CHECK_NOT_RUN_LINES, checkFailedText, checkNotRunText } from "../src/copy.js";
 
 const RUN = "33333333-3333-4333-8333-333333333333";
@@ -94,5 +94,31 @@ describe("D#6 R-CHK-3d: the optional reason", () => {
     expect(checkFailedText("check_no_dev_shell", false, "pnpm run check")).toContain("needs the repository's dev shell");
     expect(checkFailedText(null, false)).toBe("The approved check failed, so this run ended without a pull request.");
     expect(checkFailedText(null, false, "")).toBe("The approved check failed, so this run ended without a pull request.");
+  });
+});
+
+describe("D#6 CHECK-FAILFILES-TO-CLOUD: the failing test files on done", () => {
+  it("declares protocol 13 as the first version that sends them, and an older runner's body without them is as before", () => {
+    expect(CHECK_FAILED_FILES_MIN_PROTOCOL).toBe(13);
+    expect(CURRENT_PROTOCOL_VERSION).toBe(CHECK_FAILED_FILES_MIN_PROTOCOL);
+    expect(done({ check: CHECK }).success).toBe(true);
+    expect(readCheckFailedFiles(undefined, undefined)).toEqual({ ok: true, value: null });
+  });
+
+  it("the done schema lets any shape through, so a malformed list is the cloud's to drop and never a 400 for the whole body", () => {
+    expect(done({ check: { ...CHECK, exit_code: 1, failed_files: "not a list", failed_files_more: -4 } }).success).toBe(true);
+  });
+
+  it("keeps a plain list with a count of the rest, and refuses every malformed one as a whole", () => {
+    expect(readCheckFailedFiles(["apps/ops/test/a.test.ts", "b.spec.mjs"], 7)).toEqual({ ok: true, value: { files: ["apps/ops/test/a.test.ts", "b.spec.mjs"], more: 7 } });
+    expect(readCheckFailedFiles(["a.test.ts"], undefined)).toEqual({ ok: true, value: { files: ["a.test.ts"], more: 0 } });
+    expect(readCheckFailedFiles([], undefined)).toEqual({ ok: true, value: null });
+    const twenty = Array.from({ length: 20 }, (_, i) => `t/${String(i)}.test.ts`);
+    expect(readCheckFailedFiles(twenty, 0).ok).toBe(true);
+    expect(readCheckFailedFiles([`${"x".repeat(200)}`], 0).ok).toBe(true);
+    const bad: unknown[] = [[...twenty, "t/21.test.ts"], "a.test.ts", {}, null, ["/abs/a.test.ts"], ["../a.test.ts"], ["a/../b.test.ts"], ["a//b.test.ts"], ["./a.test.ts"], ["a\\b.test.ts"], ["a b.test.ts"], ["a.test.ts", "a.test.ts"], [1], ["x".repeat(201)], [""]];
+    for (const list of bad) expect(readCheckFailedFiles(list, 0).ok, JSON.stringify(list)?.slice(0, 40)).toBe(false);
+    for (const more of [-1, 1.5, "3", null, 1_000_001, Number.NaN]) expect(readCheckFailedFiles(["a.test.ts"], more).ok, String(more)).toBe(false);
+    expect(readCheckFailedFiles([], 3).ok).toBe(false);
   });
 });

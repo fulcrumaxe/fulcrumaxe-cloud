@@ -655,6 +655,13 @@ const SPACE = "␣"; // the open-box mark the Repos app shows in place of each s
 /** One argument as the person must see it: quoted, each space marked, so a leading, trailing or doubled space cannot pass for tidy. */
 export const showArg = (a) => '"' + String(a).replace(/ /g, SPACE) + '"';
 export const CHECK_CHANGED = "check files changed by this branch: ";
+// D#6 CHECK-FAILFILES-TO-CLOUD: the failing test files the runner named, as the cloud validated them (plain repo-relative paths, at most 20, plus a count of the rest). Fixed words around the names.
+export const CHECK_FAILED_FILES_LABEL = "Failing test files";
+export const CHECK_FAILED_FILES_MORE = (n) => "+" + n + " more";
+function failedFilesView(r) {
+  if (!r || !Array.isArray(r.failed_files) || r.failed_files.length === 0 || !r.failed_files.every((f) => typeof f === "string")) return null;
+  return { files: r.failed_files.slice(0, 20), more: Number.isInteger(r.failed_files_more) && r.failed_files_more > 0 ? r.failed_files_more : 0 };
+}
 // D#6 R-CHK-3d: a check the runner could not run safely carries a closed reason code (the runner protocol's CHECK_NOT_RUN_REASONS); each code has one plain sentence here, kept equal to
 // the protocol's CHECK_NOT_RUN_LINES by test. A code this page does not know reads as `other`; the code itself is never drawn.
 export const CHECK_REASON_COPY = {
@@ -718,7 +725,7 @@ export function checkView(insight) {
   const first = nl === -1 ? summary : summary.slice(0, nl);
   const changed = first.startsWith(CHECK_CHANGED) ? first : null;
   const tail = changed ? (nl === -1 ? "" : summary.slice(nl + 1)) : summary;
-  return { state, label, copy: text, argv: c ? c.argv.filter((a) => typeof a === "string") : [], facts, changed, tail };
+  return { state, label, copy: text, argv: c ? c.argv.filter((a) => typeof a === "string") : [], facts, changed, tail, failed: state === "failed" ? failedFilesView(r) : null };
 }
 
 const CHECK_TONE = { passed: "ok", failed: "bad", timed_out: "bad", unsafe: "bad", no_dev_shell: "bad", runner_too_old: "warn" };
@@ -731,6 +738,7 @@ function checkSection(insight) {
     h("p", { class: "runs-verdict", "data-testid": "runs-check-state", "data-state": v.state }, h("span", { class: "runs-vchip runs-vchip-" + (CHECK_TONE[v.state] || "plain") }, v.label), " ", v.copy),
     v.argv.length ? h("ol", { class: "runs-check-argv", "aria-label": "Approved command, one argument per line", "data-testid": "runs-check-argv" }, v.argv.map((a) => h("li", null, h("code", { "data-testid": "runs-check-arg" }, showArg(a))))) : null,
     v.facts.length ? h("p", { class: "runs-muted", "data-testid": "runs-check-facts" }, v.facts.join(" · ")) : null,
+    v.failed ? h("div", { class: "runs-check-failed", "data-testid": "runs-check-failed" }, h("p", { class: "runs-muted" }, CHECK_FAILED_FILES_LABEL + ":"), h("ul", { class: "runs-facts-list" }, v.failed.files.map((f) => h("li", null, h("code", { "data-testid": "runs-check-failed-file" }, f))), v.failed.more ? h("li", { "data-testid": "runs-check-failed-more" }, CHECK_FAILED_FILES_MORE(v.failed.more)) : null)) : null,
     v.changed ? h("p", { class: "runs-check-changed", role: "note", "data-testid": "runs-check-changed" }, v.changed) : null,
     v.tail.trim() !== "" ? h("pre", { class: "runs-check-out", tabindex: "0", role: "region", "aria-label": "Check output, last lines", "data-testid": "runs-check-output" }, v.tail) : null
   );

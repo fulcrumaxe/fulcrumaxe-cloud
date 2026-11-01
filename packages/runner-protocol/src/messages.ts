@@ -229,9 +229,9 @@ export type LocalOnlyEvent = z.infer<typeof LocalOnlyEvent>;
  * The protocol version both sides speak: the cloud's current version, and the one a runner sends on `hello`. One constant, so a bump cannot move only one.
  * Version 2 is the first whose runner acts on the heartbeat's `handoff` (the checkpoint turn). Version 3 is the first whose runner accepts a cross-side
  * `continues` (a null session id, the item's pull request branch and `pr_number`; `CONTINUES_CROSS_SIDE_MIN_PROTOCOL`). Version 4 is the first whose runner accepts a job's
- * `memory` object (`MEMORY_JOB_MIN_PROTOCOL`). Version 5 is the first whose runner applies a job's `excludes` (`EXCLUDES_JOB_MIN_PROTOCOL`). Version 6 is the first whose runner writes a job's `spill` files (`SPILL_JOB_MIN_PROTOCOL`). Version 7 is the first whose runner reads a job's `context_window` (`CONTEXT_WINDOW_JOB_MIN_PROTOCOL`). Version 8 is the first whose runner runs a job's approved `check` and reports it on `done` (`CHECK_JOB_MIN_PROTOCOL`). Version 9 is the first whose runner reads a job's `pins` from its checkout (`PINS_JOB_MIN_PROTOCOL`). Version 10 is the first whose runner reads a continuation's `base_sha`, the diff base of the public publish (`BASE_SHA_JOB_MIN_PROTOCOL`). Version 11 is the first whose runner accepts a `base_sha` on a run-branch continuation too (`BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL`). Version 12 is the first whose runner accepts a planned PR child's branch, `fx/<parent#>-<key>`, as the item pull request branch of a continuation (`CHILD_BRANCH_JOB_MIN_PROTOCOL`). A bump never cuts an older runner off, see below.
+ * `memory` object (`MEMORY_JOB_MIN_PROTOCOL`). Version 5 is the first whose runner applies a job's `excludes` (`EXCLUDES_JOB_MIN_PROTOCOL`). Version 6 is the first whose runner writes a job's `spill` files (`SPILL_JOB_MIN_PROTOCOL`). Version 7 is the first whose runner reads a job's `context_window` (`CONTEXT_WINDOW_JOB_MIN_PROTOCOL`). Version 8 is the first whose runner runs a job's approved `check` and reports it on `done` (`CHECK_JOB_MIN_PROTOCOL`). Version 9 is the first whose runner reads a job's `pins` from its checkout (`PINS_JOB_MIN_PROTOCOL`). Version 10 is the first whose runner reads a continuation's `base_sha`, the diff base of the public publish (`BASE_SHA_JOB_MIN_PROTOCOL`). Version 11 is the first whose runner accepts a `base_sha` on a run-branch continuation too (`BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL`). Version 12 is the first whose runner accepts a planned PR child's branch, `fx/<parent#>-<key>`, as the item pull request branch of a continuation (`CHILD_BRANCH_JOB_MIN_PROTOCOL`). Version 13 is the first whose runner names the failing test files on `done`'s `check` (`CHECK_FAILED_FILES_MIN_PROTOCOL`). A bump never cuts an older runner off, see below.
  */
-export const CURRENT_PROTOCOL_VERSION = 12;
+export const CURRENT_PROTOCOL_VERSION = 13;
 /**
  * The oldest version `hello` still accepts. It is fixed and moves only on purpose: a bump of the current version gates a capability for the runners
  * that declare it and never refuses the ones that do not (D#599 R-599-HO1, owner question R-599-PL2b-1). A runner below it gets 426.
@@ -301,6 +301,12 @@ export const BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL = 11;
  * as above (`agent_runs.min_protocol_version`). Such a job waits for an updated runner, and the run page says so (the wait line for a runner update).
  */
 export const CHILD_BRANCH_JOB_MIN_PROTOCOL = 12;
+/**
+ * D#6 CHECK-FAILFILES-TO-CLOUD: the first version whose runner sends `check.failed_files` on `done`. This is a runner-to-cloud field, so no job is gated on it and no runner is cut off: a version 8 to 12
+ * runner omits it and the cloud then records and shows none. The bump protects the other direction: a runner that sends the field declares 13, and a cloud that predates it answers `hello` 426
+ * (its strict `done` schema would have refused the key), so the cloud deploys first.
+ */
+export const CHECK_FAILED_FILES_MIN_PROTOCOL = 13;
 
 /** The largest value of a Postgres `integer` column. `runners.protocol_version` is one, so the schema refuses anything above it (D#6 R2b). */
 export const INT4_MAX = 2_147_483_647;
@@ -592,6 +598,35 @@ export const CHECK_NOT_RUN_REASONS = ["sandbox_unavailable", "sandbox_refused", 
 export type CheckNotRunReason = (typeof CHECK_NOT_RUN_REASONS)[number];
 /** The closed code for a word off the wire or out of a row: a known code as it is, anything else `other`. */
 export const checkNotRunReason = (word: unknown): CheckNotRunReason => (typeof word === "string" && (CHECK_NOT_RUN_REASONS as readonly string[]).includes(word) ? (word as CheckNotRunReason) : "other");
+/**
+ * D#6 CHECK-FAILFILES-TO-CLOUD: the names of the test files a failed check reported, so the card and the fix round can name them. Names only, never output or file contents. At most 20 names
+ * (the card shows a short list; the runner counts the rest in `failed_files_more`), each at most 200 characters. Each is a plain repo-relative path: no leading slash, no `.`, `..` or
+ * empty segment, no backslash or space, and no repeats.
+ */
+export const CHECK_FAILED_FILES_MAX = 20;
+export const CHECK_FAILED_FILE_CHARS = 200;
+export const CHECK_FAILED_FILES_MORE_MAX = 1_000_000;
+const FAILED_FILE_NAME = /^[A-Za-z0-9_@+][A-Za-z0-9_./@+-]*$/;
+/** The fixed log code written when a list is dropped. */
+export const CHECK_FAILED_FILES_DROPPED = "check_failed_files_dropped";
+export interface CheckFailedFiles {
+  files: string[];
+  more: number;
+}
+/** The list as the cloud keeps it. `value` is null when none was sent (or an empty one); `ok: false` is a malformed list, which the caller drops while the rest of the check stands. */
+export function readCheckFailedFiles(files: unknown, more: unknown): { ok: true; value: CheckFailedFiles | null } | { ok: false } {
+  if (files === undefined && more === undefined) return { ok: true, value: null };
+  if (!Array.isArray(files) || files.length > CHECK_FAILED_FILES_MAX) return { ok: false };
+  const moreCount = more === undefined ? 0 : more;
+  if (typeof moreCount !== "number" || !Number.isSafeInteger(moreCount) || moreCount < 0 || moreCount > CHECK_FAILED_FILES_MORE_MAX) return { ok: false };
+  const seen = new Set<string>();
+  for (const name of files as unknown[]) {
+    if (typeof name !== "string" || name.length > CHECK_FAILED_FILE_CHARS || !FAILED_FILE_NAME.test(name) || name.split("/").some((part) => part === "" || part === "." || part === "..") || seen.has(name)) return { ok: false };
+    seen.add(name);
+  }
+  if (files.length === 0) return moreCount === 0 ? { ok: true, value: null } : { ok: false };
+  return { ok: true, value: { files: files as string[], more: moreCount } };
+}
 export const DoneCheck = z
   .object({
     exit_code: safeInt.min(-CHECK_EXIT_CODE_MAX).max(CHECK_EXIT_CODE_MAX).nullable(),
@@ -601,6 +636,9 @@ export const DoneCheck = z
     // No NUL: the cloud's text column refuses it and the finish would abort.
     summary: z.string().max(CHECK_SUMMARY_MAX_BYTES).refine((text) => !text.includes("\u0000"), { message: "the summary holds no NUL" }),
     reason: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/).optional(),
+    // Read with `readCheckFailedFiles` by the cloud, not refused here: a malformed list is dropped and must not turn the whole `done` into a 400.
+    failed_files: z.unknown().optional(),
+    failed_files_more: z.unknown().optional(),
   })
   .strict()
   // A check stopped at its cap did not exit.

@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { CHECK_CHANGED, CHECK_COPY, CHECK_REASON_COPY, checkView, readInsight, showArg } from "../apps/runs/runs-detail.js";
+import { CHECK_CHANGED, CHECK_COPY, CHECK_FAILED_FILES_LABEL, CHECK_FAILED_FILES_MORE, CHECK_REASON_COPY, checkView, readInsight, showArg } from "../apps/runs/runs-detail.js";
 import { CHECK_NOT_RUN_LINES } from "../../../packages/runner-protocol/src/copy.ts";
 import { CHECK_NOT_RUN_REASONS } from "../../../packages/runner-protocol/src/messages.ts";
 
@@ -15,6 +15,20 @@ const fx = (name) => readInsight(JSON.parse(readFileSync(join(PACKAGES, "api", "
 const view = (name) => checkView(fx(name));
 
 describe("the Check block, one state each", () => {
+  it("failing test files: the names the runner sent as a short list with a count of the rest, in fixed words; none for a pass, an odd list, or a run that sent none (D#6 CHECK-FAILFILES-TO-CLOUD)", () => {
+    const v = view("failed-files");
+    expect(v.state).toBe("failed");
+    expect(v.failed).toEqual({ files: ["apps/ops/test/scan.test.ts", "packages/db/test/a.pg.test.ts"], more: 3 });
+    expect(CHECK_FAILED_FILES_LABEL).toBe("Failing test files");
+    expect(CHECK_FAILED_FILES_MORE(3)).toBe("+3 more");
+    expect(view("failed").failed).toBeNull();
+    const body = fx("failed-files");
+    const withFiles = (failed_files, state = {}) => checkView({ ...body, check: { ...body.check, result: { ...body.check.result, ...state, failed_files } } }).failed;
+    expect(withFiles([1, 2])).toBeNull();
+    expect(withFiles([])).toBeNull();
+    expect(withFiles(["a.test.ts"], { exit_code: 0 })).toBeNull();
+  });
+
   it("not set: a runner run whose job carried no check says so", () => {
     expect(view("not-set")).toMatchObject({ state: "not_set", label: "Not set", copy: CHECK_COPY.not_set[1], argv: [], facts: [] });
   });
