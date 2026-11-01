@@ -127,6 +127,14 @@ export const planDataSchema = z
       })
       .strict()
       .optional(),
+    /**
+     * D#483 S5-k3b: how many sandboxes our hosted sandbox plan lets run at once (the provider's concurrent-sandbox limit). Optional so data that predates it
+     * loads; the reader throws when it is missing, there is no number in code to fall back to. `provisional` and `source` say where the figure came from.
+     */
+    capacity: z
+      .object({ hostedSandboxConcurrency: z.number().int().positive(), provisional: z.boolean(), source: z.string().min(1) })
+      .strict()
+      .optional(),
   })
   .strict();
 

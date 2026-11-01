@@ -177,14 +177,27 @@ export class SandboxNameConflictError extends Error {
   }
 }
 
-/** Any other SDK failure. Carries the operation and status only. */
+/** The provider's error codes are short fixed identifiers; anything else is not kept (it could carry text). */
+const PROVIDER_CODE_RE = /^[a-z0-9_.-]{1,64}$/i;
+
+/** The code when it is a short fixed identifier, else null. */
+export function providerCodeOf(raw: unknown): string | null {
+  return typeof raw === "string" && PROVIDER_CODE_RE.test(raw) ? raw : null;
+}
+
+/** Any other SDK failure. Carries the operation, the status and, when the provider named one, its short error code (never its message). */
 export class SandboxPortError extends Error {
+  /** The provider's own error code, only when it matches the fixed-identifier pattern; otherwise undefined. */
+  public readonly code?: string;
   constructor(
     public readonly operation: string,
     public readonly status?: number,
+    code?: string | null,
   ) {
     super(`vercel sandbox ${operation} failed${status === undefined ? "" : ` (status ${status})`}`);
     this.name = "SandboxPortError";
+    const ok = providerCodeOf(code);
+    if (ok !== null) this.code = ok;
   }
 }
 
@@ -1461,10 +1474,9 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
           return reusePersistent(opts, params, creds);
         }
         // The provider's own error code (a short fixed identifier, never its message) says why the create was refused.
-        const raw = (err as { json?: { error?: { code?: unknown } } } | null)?.json?.error?.code;
-        const code = typeof raw === "string" && /^[a-z0-9_.-]{1,64}$/i.test(raw) ? raw : null;
+        const code = providerCodeOf((err as { json?: { error?: { code?: unknown } } } | null)?.json?.error?.code);
         console.warn(JSON.stringify({ event: "sandbox.create_failed", status: statusOf(err) ?? null, code, persistent: opts.retention.persistent }));
-        throw new SandboxPortError("createSandbox", statusOf(err));
+        throw new SandboxPortError("createSandbox", statusOf(err), code);
       }
       appliedPolicy.set(created.name, policyDigest(createPolicy));
       return handleOfCreated(opts, created);

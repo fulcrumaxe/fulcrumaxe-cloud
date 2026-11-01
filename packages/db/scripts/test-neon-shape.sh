@@ -3972,14 +3972,14 @@ check_work_item_correction_table_shape() {
 }
 
 # D#68 OPS-C1 (0801) and OPS-C2 (0802): the eight SECURITY DEFINER functions owned by ops_owner (ops_current_staff, audit_write_staff, ops_login_credential,
-# ops_login_bump_sign_count, ops_enroll_lookup, ops_enroll_complete, ops_challenge_consume, ops_auth_rate_take). Prints their oids, comma separated, when every SECURITY DEFINER function the role owns is exactly one of those eight
+# ops_login_bump_sign_count, ops_enroll_lookup, ops_enroll_complete, ops_challenge_consume, ops_auth_rate_take, and from 0941 capacity_settings_write). Prints their oids, comma separated, when every SECURITY DEFINER function the role owns is exactly one of those nine
 # signatures (matched by regprocedure), pinned to search_path=pg_catalog, public, pg_temp, with an ACL that holds ops_console and nobody else but the
 # owner (no PUBLIC, no app_user, no platform_ops), with no grant option; SHAPE_FAIL:<count> when any is not; nothing when it owns none.
 check_ops_owner_exception_shape() {
   local dbname="$1" row rc=0 oids bad
   row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
     SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
-      SELECT p.oid, (p.oid = ANY(ARRAY['public.ops_current_staff()'::regprocedure, 'public.audit_write_staff(uuid,uuid,text,jsonb)'::regprocedure, 'public.ops_login_credential(bytea)'::regprocedure, 'public.ops_login_bump_sign_count(bytea,bigint)'::regprocedure, 'public.ops_enroll_lookup(text)'::regprocedure, 'public.ops_enroll_complete(text,bytea,bytea,bigint)'::regprocedure, 'public.ops_challenge_consume(text,timestamptz)'::regprocedure, 'public.ops_auth_rate_take(text,text,integer,interval,boolean)'::regprocedure]::oid[])
+      SELECT p.oid, (p.oid = ANY(ARRAY['public.ops_current_staff()'::regprocedure, 'public.audit_write_staff(uuid,uuid,text,jsonb)'::regprocedure, 'public.ops_login_credential(bytea)'::regprocedure, 'public.ops_login_bump_sign_count(bytea,bigint)'::regprocedure, 'public.ops_enroll_lookup(text)'::regprocedure, 'public.ops_enroll_complete(text,bytea,bytea,bigint)'::regprocedure, 'public.ops_challenge_consume(text,timestamptz)'::regprocedure, 'public.ops_auth_rate_take(text,text,integer,interval,boolean)'::regprocedure, 'public.capacity_settings_write(text,integer)'::regprocedure]::oid[])
         AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable)
         AND coalesce((SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0), '{}') <@ ARRAY['ops_console']
@@ -3992,7 +3992,7 @@ check_ops_owner_exception_shape() {
   fi
   IFS='|' read -r oids bad <<<"$row"
   if [ "$bad" != "0" ]; then
-    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by ops_owner fail the exception shape (not one of its eight exact signatures, a loose search_path, EXECUTE for anyone but ops_console and the owner (none at all for audit_write_staff), or a grant option)"
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by ops_owner fail the exception shape (not one of its nine exact signatures, a loose search_path, EXECUTE for anyone but ops_console and the owner (none at all for audit_write_staff), or a grant option)"
     return 0
   fi
   echo "$oids"
@@ -4053,7 +4053,7 @@ check_memory_exception_shape() {
   fi
   IFS='|' read -r oids bad <<<"$row"
   if [ "$bad" != "0" ]; then
-    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by memory_definer fail the exception shape (not one of its eight exact signatures, a loose search_path, EXECUTE for anyone but app_user and the owner, or a grant option)"
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by memory_definer fail the exception shape (not one of its nine exact signatures, a loose search_path, EXECUTE for anyone but app_user and the owner, or a grant option)"
     return 0
   fi
   echo "$oids"

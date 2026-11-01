@@ -110,3 +110,24 @@ export function discoverySettings(): DiscoverySettings {
     throw error;
   }
 }
+
+/**
+ * D#483 S5-k3b: the hosted sandbox slot total (`capacity.hostedSandboxConcurrency`). THROWS `PlanDataMissingError` when plan data is unavailable or carries
+ * no such figure: nothing falls back to a number in code, and a start that cannot read the total must not guess one.
+ */
+export function hostedSandboxSlotTotal(): number {
+  const c = loadPlanData().capacity;
+  if (c === undefined) throw new PlanDataMissingError(`${PLAN_DATA_ENV} has no capacity.hostedSandboxConcurrency`);
+  return c.hostedSandboxConcurrency;
+}
+
+/** For health checks: names what is missing, never throws on bad data, never returns a value. */
+export function hostedSandboxCapacityStatus(): 'ok' | 'hosted_sandbox_capacity_unconfigured' {
+  try {
+    hostedSandboxSlotTotal();
+    return 'ok';
+  } catch (error) {
+    if (error instanceof PlanDataMissingError) return 'hosted_sandbox_capacity_unconfigured';
+    throw error;
+  }
+}
