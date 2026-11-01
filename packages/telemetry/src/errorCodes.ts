@@ -188,6 +188,18 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "invariant_usage_not_recorded",
   // Runner prompt variant (D#6 R4d-1): a run was started for a repository whose execution mode changed since the prompt was built.
   "execution_mode_changed",
+  // Decision-step refusals (D#7 DP8-f2): the codes a refused or failed resume leaves on the item, each with a fixed card sentence.
+  "work_item_not_resumable",
+  "prompt_not_retained",
+  "principal_not_authorised",
+  "fix_round_context_missing",
+  "spec_unavailable",
+  "resume_pause_expired",
+  "resume_failed",
+  "start_refused",
+  "child_orphaned",
+  "parent_closed",
+  "key_not_in_approved_spec",
   // Per-item placement (D#599 PL-2): a run was refused before its row was written (the target's precheck, or the repo's stored cloud-verified consent being stale).
   "run_precheck_refused",
   "verified_consent_stale",
