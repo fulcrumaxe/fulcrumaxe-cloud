@@ -1,10 +1,10 @@
 import { waitUntil } from "@vercel/functions";
 import { createVercelKeepAlive, createWorker, productionVercelCredentials, type CreateWorkerOptions, type RunnerClaimFacade, type RunnerDoneFacade, type RunnerGitTicketFacade, type RunnerPlanePushFacade, type RunnerLeaseFacade, type RunnerLeaseSweeper, type RunHandoffs, type InvariantSweeper, type RunnerNoticeSweeper, type RunnerQueueSweeper, type PlanePublish, type Worker, type AdvanceFacade } from "@fx/worker";
 import type { SandboxReapWorker } from "@fx/reconcile";
-import { buildPreviewPrompt, buildVerifierPrompt, recordFromOutput, markBuildNeedsHuman, readBuildWaitReason, publishLightSpec, publishAmendment, publishRespec, runPanelForItem, runSpecForItem, triageIssueItem, type RunActionsWorker } from "@fx/pipeline";
+import { buildPreviewPrompt, parsePreviewResult, buildVerifierPrompt, recordFromOutput, markBuildNeedsHuman, readBuildWaitReason, publishLightSpec, publishAmendment, publishRespec, runPanelForItem, runSpecForItem, triageIssueItem, type RunActionsWorker } from "@fx/pipeline";
 import { autoStartOptions } from "./autoStartPrice";
 import { getAuthorCheck } from "./github/authorCheck";
-import { openVerifyReader } from "./github/planSource";
+import { openDiscoverySource, openVerifyReader } from "./github/planSource";
 import { createAppRepoVisibility } from "./github/repoVisibility";
 import { createBuildWithRepoMap } from "./github/repoMap";
 import { createPrStateReader } from "./github/prState";
@@ -73,8 +73,8 @@ export type ReversalWorker = Pick<Worker, "requestReversal" | "confirmReversal" 
 /** What the branch cleanup cron asks of the worker (D#598 P1f-5d): one pass of the cleanup sweep, and (D#598) one pass of the stale pull-request sweep. */
 export type BranchCleanupWorker = Pick<Worker, "sweepBranchCleanups" | "sweepPrSlotHolders">;
 
-/** What the claim verifier cron asks of the worker (D#483 S4-b2b): one pass of the verifier sweep, then (S5-b1a-2) one pass of the auto-start gate. */
-export type ProposalVerifySweepWorker = Pick<Worker, "sweepProposalVerification" | "sweepAutoStart">;
+/** What the claim verifier cron asks of the worker (D#483 S4-b2b): one pass of the discovery drain (S4-c2), one pass of the verifier sweep, then (S5-b1a-2) one pass of the auto-start gate. */
+export type ProposalVerifySweepWorker = Pick<Worker, "sweepDiscoveryQueue" | "sweepProposalVerification" | "sweepAutoStart">;
 
 /** What the web app asks of the worker: the pipeline's run-action port, the compute-settle tick, the runner lease-fail method (D#6 R2a), the runner queue tick (R2b) and the sandbox reaper's two methods (SANDBOX-REAPER-1b; the reconcile cron calls them). */
 export type AppWorker = RunActionsWorker & ComputeSettleSweepWorker & AdvanceWorker & DecisionWorker & ReviewWorker & LightPublishWorker & RespecPublishWorker & RunnerLeaseFacade & RunnerClaimFacade & RunnerDoneFacade & RunnerGitTicketFacade & RunnerPlanePushFacade & RunnerSweepWorker & HandoffSweepWorker & Pick<RunHandoffs, "completeHandoffOnDone"> & InvariantSweepWorker & StageResumeSweepWorker & SetupRequestCheckWorker & BranchCleanupWorker & ProposalVerifySweepWorker & DecisionAskAnswerWorker & SubItemApprovalWorker & ReversalWorker & Pick<PlanePublish, "retryPublish" | "openPublicPullRequest"> & SandboxReapWorker & Pick<AdvanceFacade, "advanceCancelStepRuns" | "advanceStartGate" | "advanceFixGate" | "advanceContinue" | "capacityClaimPass"> & Pick<Worker, "reconcilePrHolder" | "planeMerge" | "withRunnerPool" | "wakeMergeGate">;
@@ -84,7 +84,7 @@ export type WorkerOptionsProvider = () => CreateWorkerOptions | null;
 const productionProvider: WorkerOptionsProvider = () => {
   const env = process.env;
   if (!env.VERCEL_TEAM_ID?.trim() || !env.VERCEL_PROJECT_ID?.trim()) return null;
-  return { vercel: productionVercelCredentials(env), ports: { hooks: createHooksPort(), authorCheck: getAuthorCheck, follow: createFollow(), repoVisibility: createAppRepoVisibility(), continuationBase: createAppContinuationBase(), branchSync: createAppBranchSync(), continuationBinding: createAppContinuationBinding(), planePublish: createPlanePublishPorts(env) }, previewPrompt: buildPreviewPrompt, verify: { prompt: buildVerifierPrompt, record: recordFromOutput, github: openVerifyReader }, autoStart: autoStartOptions, receiptBlock: { connect: openReceiptBlockHttp }, reversal: createReversalGitOpeners(), advance: { startAdvance: createStartAdvance(), capacity: createCapacity, triage: triageIssueItem, panel: runPanelForItem, spec: runSpecForItem, build: createBuildWithRepoMap(), buildFailed: markBuildNeedsHuman, buildWaitReason: readBuildWaitReason, prState: createPrStateReader(), review: createReviewDeps(), lightSpec: publishLightSpec, respec: publishRespec, amendSpec: publishAmendment }, targetOverrides: { keepAlive: createVercelKeepAlive(waitUntil) } };
+  return { vercel: productionVercelCredentials(env), ports: { hooks: createHooksPort(), authorCheck: getAuthorCheck, follow: createFollow(), repoVisibility: createAppRepoVisibility(), continuationBase: createAppContinuationBase(), branchSync: createAppBranchSync(), continuationBinding: createAppContinuationBinding(), planePublish: createPlanePublishPorts(env) }, previewPrompt: buildPreviewPrompt, verify: { prompt: buildVerifierPrompt, record: recordFromOutput, github: openVerifyReader }, discovery: { openSource: openDiscoverySource, previewResult: parsePreviewResult }, autoStart: autoStartOptions, receiptBlock: { connect: openReceiptBlockHttp }, reversal: createReversalGitOpeners(), advance: { startAdvance: createStartAdvance(), capacity: createCapacity, triage: triageIssueItem, panel: runPanelForItem, spec: runSpecForItem, build: createBuildWithRepoMap(), buildFailed: markBuildNeedsHuman, buildWaitReason: readBuildWaitReason, prState: createPrStateReader(), review: createReviewDeps(), lightSpec: publishLightSpec, respec: publishRespec, amendSpec: publishAmendment }, targetOverrides: { keepAlive: createVercelKeepAlive(waitUntil) } };
 };
 
 let provider: WorkerOptionsProvider = productionProvider;

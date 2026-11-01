@@ -21,10 +21,13 @@ const planReadDeps = (): PlanReadDeps => ({
   requester: buildAccessTokenRequester({ resolveUpstream: (host, lookupFn) => resolveChecked(host, lookupFn), forwardPinned: nodeHttpsPinnedRequester }),
 });
 
-export const openPlanSource: NonNullable<PlanImportDeps["openSource"]> = (target) => {
+/** The full read-only source: the plan import narrows it to `PlanSource`, and the discovery drain (D#483 S4-c2) also reads `recentOpen`. */
+export function openDiscoverySource(target: { repoId: string; owner: string; name: string }): PlanSourceShape {
   factory ??= createPlanSourceFactory(planReadDeps());
   return factory(target);
-};
+}
+
+export const openPlanSource: NonNullable<PlanImportDeps["openSource"]> = (target) => openDiscoverySource(target);
 
 /**
  * D#483 S4-b2b: the claim verifier's GitHub reader, on the same read-only client as the plan import: the default branch's head (the sha a

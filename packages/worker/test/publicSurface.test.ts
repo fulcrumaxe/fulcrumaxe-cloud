@@ -135,6 +135,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "sweepAutoStart",
       "sweepBranchCleanups",
       "sweepComputeSettle",
+      "sweepDiscoveryQueue",
       "sweepInvariants",
       "sweepParkedStages",
       "sweepPrSlotHolders",
@@ -152,6 +153,8 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
     expect(worker.previewReady()).toBe(false);
     // With no verifier pieces given, the verifier sweep starts nothing and says so (D#483 S4-b2b).
     expect(await worker.sweepProposalVerification()).toMatchObject({ idle: "not_configured", listed: 0, started: 0 });
+    // With no discovery pieces given, the discovery drain runs nothing and says so (D#483 S4-c2).
+    expect(await worker.sweepDiscoveryQueue()).toMatchObject({ idle: "not_configured", accounts: 0 });
     const everything = reachable(worker);
     expect(everything).not.toContain(poolA);
     expect(everything).not.toContain(poolB);

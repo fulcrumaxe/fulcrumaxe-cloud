@@ -51,6 +51,8 @@ export interface DiscoveryRunDeps {
   openSource(target: { repoId: string; owner: string; name: string }): DiscoverySource;
   /** The classified issues of the repo's finished preview, if it has one. Read inside a tenant session by the caller's wiring. */
   previewHints?(repoId: string): Promise<PreviewHint[]>;
+  /** Asked before each queued run of `runQueuedDiscoveries`; true leaves the rest of the account's runs queued for the next pass. */
+  stop?(): boolean;
 }
 
 export type DiscoverySkipReason = 'repo_not_connected' | 'repo_name_unknown' | 'free_preview' | 'account_not_active' | 'discovery_off';
@@ -189,7 +191,10 @@ export async function runQueuedDiscoveries(deps: DiscoveryRunDeps): Promise<Disc
     return rows.map((r) => r.id);
   });
   const out: DiscoveryOutcome[] = [];
-  for (const id of ids) out.push(await runDiscovery(deps, id));
+  for (const id of ids) {
+    if (deps.stop?.()) break;
+    out.push(await runDiscovery(deps, id));
+  }
   await withdrawDisconnectedProposals(deps.pool, deps.accountId);
   return out;
 }

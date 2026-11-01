@@ -79,6 +79,11 @@ function requireEnv(name: string): string {
   return value;
 }
 
+/** D#483 S4-c2: a delivery that queued discoveries wakes the proposal-verify tick, which drains them (the same tick the verifier runs in). */
+export async function markDiscoveryDrainPending(): Promise<void> {
+  await markWorkPending("proposal-verify-sweep");
+}
+
 export function defaultGithubWebhookDeps(): GithubWebhookHandlerDeps {
   if (!cachedAppUserPool) {
     cachedAppUserPool = createPool(requireEnv("DATABASE_URL_APP_USER"));
@@ -115,6 +120,7 @@ export function defaultGithubWebhookDeps(): GithubWebhookHandlerDeps {
       const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
       if (failed) throw failed.reason;
     },
+    onDiscoveryQueued: markDiscoveryDrainPending,
     allowlist: intakeAllowlist() ?? undefined,
     issueAuthorPermission,
     repoHasEngineLoop,

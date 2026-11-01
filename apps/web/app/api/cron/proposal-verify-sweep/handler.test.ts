@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { markWorkPending, setPendingHooks } from "@fx/core/src/pendingWork";
-import type { AutoStartCounts, ProposalVerifyCounts } from "@fx/worker";
+import type { AutoStartCounts, DiscoveryDrainCounts, ProposalVerifyCounts } from "@fx/worker";
 import { makeRegion, storeOf, type FakeRegion } from "../../../../test/support/runtimeCacheFake";
 import { PROPOSAL_VERIFY_PASS_MS, proposalVerifySweepHandler, type ProposalVerifySweepHandlerDeps } from "./handler";
 
@@ -12,16 +12,18 @@ import { PROPOSAL_VERIFY_PASS_MS, proposalVerifySweepHandler, type ProposalVerif
 const SECRET = "test-cron-secret";
 const NONE: ProposalVerifyCounts = { listed: 0, started: 0, waiting: 0, recorded: 0, daily_limit: 0, daily_cap: 0, skipped: 0, failed: 0 };
 const AUTO_NONE: AutoStartCounts = { listed: 0, started: 0, asked: 0, held_by_rule: 0, no_room: 0, not_ready: 0, replayed: 0, failed: 0 };
+const DRAIN_NONE: DiscoveryDrainCounts = { accounts: 0, succeeded: 0, skipped: 0, failed: 0, errors: 0, more: false };
 const KEY = "pending:proposal-verify-sweep";
 const clock = { value: Date.parse("2026-10-22T12:00:00Z") };
 let region: FakeRegion;
 
-function setup(sweep: () => Promise<ProposalVerifyCounts> = async () => NONE, over: Partial<ProposalVerifySweepHandlerDeps> = {}, auto: () => Promise<AutoStartCounts> = async () => AUTO_NONE) {
+function setup(sweep: () => Promise<ProposalVerifyCounts> = async () => NONE, over: Partial<ProposalVerifySweepHandlerDeps> = {}, auto: () => Promise<AutoStartCounts> = async () => AUTO_NONE, drain: () => Promise<DiscoveryDrainCounts> = async () => DRAIN_NONE) {
+  const sweepDiscoveryQueue = vi.fn(drain);
   const sweepProposalVerification = vi.fn(sweep);
   const sweepAutoStart = vi.fn(auto);
-  const getWorker = vi.fn(async (): Promise<{ sweepProposalVerification: typeof sweepProposalVerification; sweepAutoStart: typeof sweepAutoStart } | null> => ({ sweepProposalVerification, sweepAutoStart }));
+  const getWorker = vi.fn(async (): Promise<{ sweepDiscoveryQueue: typeof sweepDiscoveryQueue; sweepProposalVerification: typeof sweepProposalVerification; sweepAutoStart: typeof sweepAutoStart } | null> => ({ sweepDiscoveryQueue, sweepProposalVerification, sweepAutoStart }));
   const log = vi.fn();
-  return { sweepProposalVerification, sweepAutoStart, getWorker, log, deps: { cronSecret: SECRET, getWorker, log, now: () => clock.value, ...over } satisfies ProposalVerifySweepHandlerDeps };
+  return { sweepDiscoveryQueue, sweepProposalVerification, sweepAutoStart, getWorker, log, deps: { cronSecret: SECRET, getWorker, log, now: () => clock.value, ...over } satisfies ProposalVerifySweepHandlerDeps };
 }
 const req = (authorization: string | null, method = "GET") =>
   new NextRequest("https://example.test/api/cron/proposal-verify-sweep", { method, headers: authorization === null ? {} : { authorization } });
@@ -66,7 +68,7 @@ describe("GET /api/cron/proposal-verify-sweep", () => {
     const s = setup(async () => ({ ...NONE, listed: 3, started: 2, daily_limit: 1 }));
     const res = await proposalVerifySweepHandler(req(`Bearer ${SECRET}`), s.deps);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ configured: true, ...NONE, listed: 3, started: 2, daily_limit: 1, auto_start: AUTO_NONE });
+    expect(await res.json()).toEqual({ configured: true, ...NONE, listed: 3, started: 2, daily_limit: 1, discovery: DRAIN_NONE, auto_start: AUTO_NONE });
     expect(s.sweepProposalVerification).toHaveBeenCalledTimes(1);
     expect(marker()).toBe(clock.value + PROPOSAL_VERIFY_PASS_MS);
   });
@@ -130,5 +132,30 @@ describe("GET /api/cron/proposal-verify-sweep", () => {
     const res = await proposalVerifySweepHandler(req(`Bearer ${SECRET}`), s.deps);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ configured: false });
+  });
+
+  // D#483 S4-c2: the discovery drain is the tick's first pass.
+  it("drains the discovery queue before the verifier pass, reports its counts, and keeps the next pass coming when its time budget left accounts", async () => {
+    await markWorkPending("proposal-verify-sweep", { since: clock.value });
+    const order: string[] = [];
+    const s = setup(
+      async () => (order.push("verify"), NONE),
+      {},
+      async () => AUTO_NONE,
+      async () => (order.push("drain"), { ...DRAIN_NONE, accounts: 3, succeeded: 3, more: true }),
+    );
+    const body = await (await proposalVerifySweepHandler(req(`Bearer ${SECRET}`), s.deps)).json();
+    expect(order).toEqual(["drain", "verify"]);
+    expect(body).toMatchObject({ configured: true, discovery: { accounts: 3, succeeded: 3, more: true } });
+    expect(marker()).toBe(clock.value + PROPOSAL_VERIFY_PASS_MS);
+  });
+
+  it("a fault in the drain is logged by name only, never hides the verifier's counts, and starts no extra pass", async () => {
+    await markWorkPending("proposal-verify-sweep", { since: clock.value });
+    const s = setup(async () => ({ ...NONE, listed: 2, started: 2 }), {}, async () => AUTO_NONE, async () => Promise.reject(new TypeError("postgres://u:secret@host/db")));
+    const body = await (await proposalVerifySweepHandler(req(`Bearer ${SECRET}`), s.deps)).json();
+    expect(body).toMatchObject({ configured: true, listed: 2, started: 2, discovery: null });
+    expect(s.log).toHaveBeenCalledWith("proposal verify sweep: discovery drain failed (TypeError)");
+    expect(JSON.stringify(s.log.mock.calls)).not.toContain("secret");
   });
 });

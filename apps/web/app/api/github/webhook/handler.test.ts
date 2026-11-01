@@ -392,3 +392,22 @@ describe("the intake allowlist source (D#31 AUTHOR-CHECK-WIRE)", () => {
     }
   });
 });
+
+// D#483 S4-c2: the discoveries a delivery queued are drained by the proposal-verify tick, which the delivery wakes through its pending-work marker.
+describe("the webhook's discovery hook", () => {
+  it("is wired in the production deps, and marks the proposal-verify tick pending when called", async () => {
+    vi.stubEnv("DATABASE_URL_APP_USER", "postgres://u:p@127.0.0.1:1/none");
+    vi.stubEnv("DATABASE_URL_PLATFORM_OPS", "postgres://u:p@127.0.0.1:1/none");
+    const written = new Map<string, number>();
+    setPendingHooks({ store: { get: async (k) => written.get(k) ?? null, set: async (k, v) => void written.set(k, v), delete: async (k) => void written.delete(k) } });
+    try {
+      const hook = defaultGithubWebhookDeps().onDiscoveryQueued;
+      expect(hook).toBeTypeOf("function");
+      await hook!("00000000-0000-4000-8000-000000000001", []);
+      expect(written.has("pending:proposal-verify-sweep")).toBe(true);
+    } finally {
+      setPendingHooks(null);
+      vi.unstubAllEnvs();
+    }
+  });
+});
