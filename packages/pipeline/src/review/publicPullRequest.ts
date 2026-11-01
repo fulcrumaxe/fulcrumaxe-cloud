@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import type { PlanePushState } from "@fx/core/src/repos/planePushRecord.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 
 /** A paired item's public pull request: where it lives and what the platform stamped for it. */
@@ -10,6 +11,8 @@ export interface PublicPullRequest {
   branch: string;
   /** The public branch head the platform last pushed, or null when none is stamped. */
   stampedHead: string | null;
+  /** The push record's state: `updating` and `waiting_person_pushed` mean a republish is in flight, so the stamp may be about to change. */
+  pushState: PlanePushState;
   /** The private head that public head was built from (null for a row written before it was recorded). */
   sourceHead: string | null;
   /** The pairing's overlay list: the paths kept out of the public repository. */
@@ -37,8 +40,8 @@ export type PublicPullRequestLookup = (accountId: string, workItemId: string) =>
  */
 export const readPublicPullRequest: (pool: Pool) => PublicPullRequestLookup = (pool) => async (accountId, workItemId) => {
   const found = await withTenant(pool, accountId, async (client) => {
-    const { rows } = await client.query<{ code_repo: string; branch: string; pr_number: number | null; head_sha: string | null; source_head: string | null; overlay_globs: string[]; managed: boolean }>(
-      `SELECT p.code_repo, p.branch, p.pr_number, p.head_sha,
+    const { rows } = await client.query<{ code_repo: string; branch: string; pr_number: number | null; head_sha: string | null; state: PlanePushState; source_head: string | null; overlay_globs: string[]; managed: boolean }>(
+      `SELECT p.code_repo, p.branch, p.pr_number, p.head_sha, p.state,
               -- A sandbox-built stamp carries the private head the platform read when it published. A runner-built stamp carries none (nothing a runner reports is
               -- stored as one); its source head is the branch head the CLOUD read from GitHub when the run that pushed it finished (the \`done\` event), found
               -- through the newest finished runner attempt whose outcome moved the stamp.
@@ -78,5 +81,5 @@ export const readPublicPullRequest: (pool: Pool) => PublicPullRequestLookup = (p
   if (row === null || row.pr_number === null) return { paired: true, pr: null };
   const [owner, name, extra] = row.code_repo.split("/");
   if (!owner || !name || extra !== undefined) return { paired: true, pr: null };
-  return { paired: true, pr: { owner, name, number: row.pr_number, branch: row.branch, stampedHead: row.head_sha, sourceHead: row.source_head, overlayGlobs: row.overlay_globs, managedByPerson: row.managed } };
+  return { paired: true, pr: { owner, name, number: row.pr_number, branch: row.branch, stampedHead: row.head_sha, pushState: row.state, sourceHead: row.source_head, overlayGlobs: row.overlay_globs, managedByPerson: row.managed } };
 };
