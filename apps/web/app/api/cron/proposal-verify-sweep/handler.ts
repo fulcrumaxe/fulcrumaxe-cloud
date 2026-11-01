@@ -38,6 +38,11 @@ export async function proposalVerifySweepHandler(req: NextRequest, deps: Proposa
         deps.log("proposal verify sweep: worker not configured");
         return { result: { configured: false }, workFound: false, nextDueAt: null };
       }
+      // D#483 S5-g2: the daily sweep only queues (a discovery run per repository and period, an analysis when the head changed); the passes below take what it queued. A fault in it hides nothing.
+      const schedule = await worker.sweepDiscoverySchedule().catch((err: unknown) => {
+        deps.log(`proposal verify sweep: discovery schedule failed (${err instanceof Error ? err.name : "error"})`);
+        return null;
+      });
       // D#483 S4-c2: the install and payment discovery queue drains first, so what it imports is listed by the check pass on the next tick. A fault in it
       // never hides the verifier's counts.
       const discovery = await worker.sweepDiscoveryQueue().catch((err: unknown) => {
@@ -59,10 +64,10 @@ export async function proposalVerifySweepHandler(req: NextRequest, deps: Proposa
       // wait for its renewal instead of polling: the gate cannot start them before then, and the backstop still looks now and then.
       // D#483 S5-b2c-1: the child pass counts the same way (a child it launched, or could not gate, keeps the next pass coming).
       const moreToGate = autoStart !== null && (autoStart.started > 0 || autoStart.failed > 0 || (autoStart.children?.started ?? 0) > 0 || (autoStart.children?.failed ?? 0) > 0);
-      const workFound = counts.listed > 0 || moreToGate || discovery?.more === true || (analysis?.listed ?? 0) > 0;
+      const workFound = counts.listed > 0 || moreToGate || discovery?.more === true || schedule?.more === true || (analysis?.listed ?? 0) > 0;
       const renewsAt = autoStart?.renews_at !== undefined ? Date.parse(autoStart.renews_at) : Number.NaN;
       const nextDueAt = workFound ? now() + PROPOSAL_VERIFY_PASS_MS : Number.isFinite(renewsAt) ? renewsAt : null;
-      return { result: { configured: true, ...counts, discovery, analysis, auto_start: autoStart }, workFound, nextDueAt };
+      return { result: { configured: true, ...counts, schedule, discovery, analysis, auto_start: autoStart }, workFound, nextDueAt };
     },
     deps.log,
     now,

@@ -136,6 +136,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "sweepBranchCleanups",
       "sweepComputeSettle",
       "sweepDiscoveryQueue",
+      "sweepDiscoverySchedule",
       "sweepDocsCodeAnalysis",
       "sweepInvariants",
       "sweepParkedStages",
@@ -156,6 +157,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
     expect(await worker.sweepProposalVerification()).toMatchObject({ idle: "not_configured", listed: 0, started: 0 });
     // With no discovery pieces given, the discovery drain runs nothing and says so (D#483 S4-c2).
     expect(await worker.sweepDiscoveryQueue()).toMatchObject({ idle: "not_configured", accounts: 0 });
+    expect(await worker.sweepDiscoverySchedule()).toMatchObject({ idle: "not_configured", listed: 0, queued: 0 });
     // D#483 S4-f3: with no analysis pieces given, the analysis pass starts nothing and says so.
     expect(await worker.sweepDocsCodeAnalysis()).toMatchObject({ idle: "not_configured", listed: 0, started: 0 });
     const everything = reachable(worker);
