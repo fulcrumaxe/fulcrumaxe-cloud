@@ -347,6 +347,47 @@ describe("a paired item: the wait reads the public pull request's CI", () => {
     expect((await record(mine.w, PASS_BOTH, mine.gate)).decision).toBe("all_passed");
   });
 
+  // The push state and the stamp are read from our own row. A pending answer reads the live head only: no checks and no status call (C22-6).
+  const readsChecks = (reqs: { path: string }[]) => reqs.filter((r) => /check-runs|\/status|\/statuses/.test(r.path));
+
+  it("C22-1, C22-6: a null stamp is a wait (wrong_head), nothing recorded, and no checks are read", async () => {
+    const t = await pairedWorld({ stamp: null, state: "updated" });
+    expect(await record(t.w, PASS_BOTH, t.gate)).toMatchObject({ decision: "ci_pending", recorded: [], ciReasons: ["wrong_head"] });
+    await expectNothingRecorded(t.w);
+    expect(readsChecks(t.pub.requests)).toEqual([]);
+    expect(t.pub.requests.length).toBeGreaterThan(0);
+  });
+
+  it.each(["updating", "waiting_person_pushed"])("C22-2, C22-6: state %s with the stamp equal to the live head is a wait, nothing recorded, no checks read", async (state) => {
+    const t = await pairedWorld({ state });
+    expect(await record(t.w, PASS_BOTH, t.gate)).toMatchObject({ decision: "ci_pending", recorded: [], ciReasons: ["wrong_head"] });
+    await expectNothingRecorded(t.w);
+    expect(readsChecks(t.pub.requests)).toEqual([]);
+  });
+
+  it.each(["updated", "pr_opened"])("C22-3: state %s, stamp equal to the live head, green CI: the verdicts are recorded", async (state) => {
+    const t = await pairedWorld({ state });
+    expect((await record(t.w, PASS_BOTH, t.gate)).decision).toBe("all_passed");
+  });
+
+  it("C22-4: a person's takeover with a null stamp and state updating reads the live head's CI as before", async () => {
+    const t = await pairedWorld({ stamp: null, state: "updating", managed: true });
+    expect((await record(t.w, PASS_BOTH, t.gate)).decision).toBe("all_passed");
+  });
+
+  it("C22-5, C22-6: a paired runner_local item waits the same way on a null stamp and on an update in flight, without a checks read", async () => {
+    for (const opts of [{ stamp: null, state: "updated" }, { state: "updating" }, { state: "waiting_person_pushed" }] as const) {
+      const t = await pairedWorld({ local: true, ...opts });
+      expect(await record(t.w, PASS_BOTH, t.gate)).toMatchObject({ decision: "ci_pending", recorded: [], ciReasons: ["wrong_head"] });
+      await expectNothingRecorded(t.w);
+      expect(t.pubLocal!.calls.map((c) => c.label)).not.toContain("A9 CommitChecks");
+      expect(t.pubLocal!.denied).toEqual([]);
+      expect(t.pubLocal!.refused).toEqual([]);
+    }
+    const ok = await pairedWorld({ local: true, state: "updated" });
+    expect((await record(ok.w, PASS_BOTH, ok.gate)).decision).toBe("all_passed");
+  });
+
   it("the public pull request is not open yet: the private copy is read, as before", async () => {
     const t = await pairedWorld({ prNumber: null });
     expect((await record(t.w, PASS_BOTH, t.gate)).decision).toBe("ci_pending");

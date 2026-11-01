@@ -86,7 +86,7 @@ export interface CiGate {
  * public one was green. When `openPublicHttp` is given and the item has a public pull request (found by the injected `publicPullRequest` lookup), the wait reads THAT
  * pull request's live head and checks instead. The reviewed private head is not compared with it: the two are different commits by construction.
  * What stands in for that comparison is the platform's stamp: a public head that is not the one the platform pushed (a push or a fix-round
- * republish not recorded yet, or a branch changed by someone else) is `wrong_head`, a wait. A `runner_local` repo does the same through the local-only fence: the code repository's
+ * republish not recorded yet, or a branch changed by someone else) is `wrong_head`, a wait; so is a missing stamp, or a push record still `updating` / `waiting_person_pushed`, answered before any checks are read. A `runner_local` repo does the same through the local-only fence: the code repository's
  * pull request is listed by the branch our own push record names, and its checks come from the fixed CommitChecks document. Single-plane items, and paired items whose public pull request is
  * not open yet, are read exactly as before. A failed read throws and nothing is recorded, as for the private read.
  */
@@ -113,8 +113,10 @@ export function createCiGate(deps: {
         const ref = { repoId: ctx.repoId, prNumber: publicPr.number };
         const live = (await port.getPullRequest(ref)).headSha;
         if (!SHA_PATTERN.test(live)) throw new Error("ci wait: malformed public head sha");
+        // No stamp, or a republish in flight (the stamp may still equal the live head): wait before any checks read.
+        if (!publicPr.managedByPerson && (publicPr.stampedHead === null || publicPr.pushState === "updating" || publicPr.pushState === "waiting_person_pushed")) return { state: "pending", reasons: ["wrong_head"] };
         const reading = readCiWait(await port.getCiSnapshot(ref, live), live);
-        if (reading.state === "settled" && !publicPr.managedByPerson && publicPr.stampedHead !== null && publicPr.stampedHead !== live) return { state: "pending", reasons: ["wrong_head"] };
+        if (reading.state === "settled" && !publicPr.managedByPerson && publicPr.stampedHead !== live) return { state: "pending", reasons: ["wrong_head"] };
         return reading;
       }
       const http = await deps.openHttp({ repoId: ctx.repoId, owner: ctx.owner, name: ctx.name, executionMode: ctx.executionMode });
