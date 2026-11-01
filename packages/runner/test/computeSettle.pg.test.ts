@@ -310,11 +310,13 @@ describe("D#2 COMPUTE-SETTLE CS-2a: the settle core [pg]", () => {
     const target = new SandboxTarget(createSandboxTargetHarness(db.runWriterPool).deps);
     const attempt = async (trigger: "foreground" | "background", at: Date) => {
       const id = randomUUID();
-      await db.admin.query(`INSERT INTO agent_runs (id, account_id, role, runtime, status, sandbox_requested_at) VALUES ($1, $2, 'code-reviewer', 'production', 'running', now())`, [id, accountId]);
+      await db.admin.query(`INSERT INTO agent_runs (id, account_id, role, runtime, status, sandbox_requested_at) VALUES ($1, $2, 'code-reviewer', 'production', 'running', $3)`, [id, accountId, at]);
       const verdict = await reserve(db.runWriterPool, { accountId, runId: id, plan: "starter", trigger, estimateComputeUsd: 1, now: at });
       if (verdict.decision === "admit") {
         const run = buildExecutionRun(id, { accountId, role: "code-reviewer", product: "team", roleCard: "", prompt: "", model: "haiku-4.5", capUsd: 5, spend: { plan: "starter", trigger } } as StartAgentRunInput);
         await target.settleRunCompute(run, { deadlinePassed: false, measured: [egress(0.5)] });
+        // The ledger stamps created_at from the database clock, which is the real date. Month-to-date is counted from the injected `at`, so pin the row to `at` too or the test depends on which month the suite runs in.
+        await db.admin.query(`UPDATE ledger SET created_at = $2 WHERE run_id = $1`, [id, at]);
       }
       return verdict;
     };
