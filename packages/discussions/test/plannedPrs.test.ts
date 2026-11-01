@@ -58,6 +58,13 @@ describe("parsePlannedPrs", () => {
     for (const v of bad) expect(parsePlannedPrs(v), JSON.stringify(v)).toEqual({ kind: "invalid" });
   });
 
+  it("a depends_on naming anything but a key of the same table refuses the whole table, so a cross-Discussion dependency never reaches a launch (P3d)", () => {
+    for (const dep of ["D#12", "12", "other-spec-item", "https://example.test/x", "b "]) {
+      expect(parsePlannedPrs([row("a", "A", [dep]), row("b")]), dep).toEqual({ kind: "invalid" });
+    }
+    expect(parsePlannedPrs([row("a", "A", ["b"]), row("b")]).kind).toBe("ok");
+  });
+
   it("an inherited or accessor property is not read", () => {
     const inherited = Object.create({ key: "a", title: "A" });
     expect(parsePlannedPrs([inherited, row("b")])).toEqual({ kind: "invalid" });

@@ -61,3 +61,14 @@ describe('the child launch sentences', () => {
     expect(() => childGateOutcomeOfError(e('55000', 'something_else'))).toThrow('something_else');
   });
 });
+
+describe('the two waiting sentences of a stacked planned PR (P3d)', () => {
+  it('say what the child waits for, from the one table, with the titles cleaned', () => {
+    expect(childLaunchSentence('waiting_for_pull_request', { siblingTitle: 'The API' })).toBe('Waiting for The API to open its pull request.');
+    expect(childLaunchSentence('waiting_for_merge_then_build', { siblingTitle: 'The API', otherTitle: 'The screen' })).toBe('Waiting for The API to merge before it can build on The screen.');
+  });
+  it('print the fallback, never null, undefined or an object, when a title is missing', () => {
+    const s = childLaunchSentence('waiting_for_merge_then_build', { siblingTitle: null, otherTitle: { toString: () => 'x' } });
+    expect(s).toBe('Waiting for another planned PR to merge before it can build on another planned PR.');
+  });
+});
