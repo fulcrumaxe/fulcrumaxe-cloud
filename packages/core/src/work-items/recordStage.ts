@@ -137,6 +137,14 @@ export async function recordStage(
     workItemId,
   ]);
 
+  // D#483 S5-k3b (C20, C23): closing an item is the one thing that ENDS its waiting capacity-queue entry (cancelled by a person), in the same transaction as the
+  // move, so the places behind it move up on the next read. This covers every writer of `closed`: the /close route (operatorMoves), a withdrawn proposal and any
+  // other recordStage caller. `client` is a tenant client (the lock above already needs the tenant's row), and the definer reads the account from the session.
+  // An item that ends in another way (merged, closed_unmerged, retire_superseded_work_item) is not cancelled here: its entry is skipped by the claim instead.
+  if (toStage === 'closed') {
+    await client.query('SELECT capacity_end_cancelled($1)', [workItemId]);
+  }
+
   // D#483 P3: every recorded move tells the live channel, in the same transaction as the move, so a board open in a
   // browser applies it without a reload. Ids and stage words only (resolved disagreement 8). The board never trusts the
   // stages in it: it reads the item again. The event is for the stream; it is not a webhook event type.

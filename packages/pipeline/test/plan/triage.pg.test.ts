@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PoolClient } from "pg";
 import { pgHarness } from "../helpers/pgHarness.js";
 import { seedAccount } from "../build/helpers/seed.js";
+import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { triageIntake, TRIAGE_TARGET_STAGE, type TriageDeps } from "../../src/plan/triage.js";
 import type { TriageClassifier } from "../../src/plan/classifier.js";
@@ -328,15 +329,13 @@ describe("an existing rooted discussion", () => {
     const first = await triageIntake(deps(accountId, fixture("feature")), { mode: "existing", workItemId, title: "t", body: "b" });
     expect(first).toMatchObject({ status: "triaged", stage: "discussing" });
     // A human closes it and reopens it: discussing -> closed -> triaged.
-    await h.admin.query("BEGIN");
-    try {
-      await recordStage(h.admin, { workItemId, toStage: "closed", at: new Date(), source: "control_plane", sourceRef: "human:close" });
-      await recordStage(h.admin, { workItemId, toStage: "triaged", at: new Date(), source: "control_plane", sourceRef: "human:reopen" });
-      await h.admin.query("COMMIT");
-    } catch (e) {
-      await h.admin.query("ROLLBACK");
-      throw e;
-    }
+    // D#483 S5-k3b: it also waits in the capacity queue; the close (a tenant session, as every real close is) ends that entry.
+    await h.admin.query(`INSERT INTO capacity_queue (account_id, repo_id, work_item_id, run_kind, class) SELECT account_id, COALESCE(repo_id, gen_random_uuid()), id, 'build', 'hosted_sandbox' FROM work_items WHERE id = $1`, [workItemId]);
+    await withTenant(h.runWriterPool, accountId, async (c) => {
+      await recordStage(c, { workItemId, toStage: "closed", at: new Date(), source: "control_plane", sourceRef: "human:close" });
+      await recordStage(c, { workItemId, toStage: "triaged", at: new Date(), source: "control_plane", sourceRef: "human:reopen" });
+    });
+    expect((await h.admin.query(`SELECT ended_reason FROM capacity_queue WHERE work_item_id = $1`, [workItemId])).rows).toEqual([{ ended_reason: "cancelled_by_person" }]);
     const before = (await h.admin.query(`SELECT stage FROM work_items WHERE id = $1`, [workItemId])).rows[0].stage;
     expect(before).toBe("triaged");
 
