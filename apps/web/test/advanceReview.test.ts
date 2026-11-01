@@ -20,7 +20,7 @@ vi.mock("@fx/pipeline", async (original) => ({
   readItemRecordedPullRequest: mocks.readItemRecordedPullRequest,
 }));
 
-import { ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "@fx/github";
+import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "@fx/github";
 import { createReviewDeps } from "../lib/advanceReview";
 import { reviewLoadBody } from "../lib/advanceReviewSteps";
 
@@ -63,15 +63,17 @@ describe("the review stage's merge gate (D#6 R2b)", () => {
     expect(statements.slice(0, statements.indexOf(read!)).some((s) => s.params?.includes(ACCOUNT))).toBe(true);
   });
 
-  it("D#694 B5: the gate is handed the three pinned merge-queue documents, exactly the constants @fx/github exports (this injection is the only thing that turns the queue on)", async () => {
+  it("D#694 B5 and B6-1: the gate is handed the five pinned merge-queue documents, exactly the constants @fx/github exports (this injection is the only thing that turns the queue on)", async () => {
     const { pool } = fakePool(true);
     await createReviewDeps(async () => ({}) as never).mergeGate(pool, { accountId: ACCOUNT, workItemId: ITEM, prNumber: 7 });
-    const gateDeps = mocks.runMergeGateForItem.mock.calls[0]![0] as { queueDocuments?: { read: string; enqueue: string; autoMerge: string } };
-    expect(gateDeps.queueDocuments).toEqual({ read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT });
+    const gateDeps = mocks.runMergeGateForItem.mock.calls[0]![0] as { queueDocuments?: { read: string; enqueue: string; autoMerge: string; dequeue: string; entry: string } };
+    expect(gateDeps.queueDocuments).toEqual({ read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT });
     // Not empty strings or look-alikes: each is a real document.
     expect(gateDeps.queueDocuments!.read).toContain("mergeQueue");
     expect(gateDeps.queueDocuments!.enqueue).toContain("enqueuePullRequest");
     expect(gateDeps.queueDocuments!.autoMerge).toContain("enablePullRequestAutoMerge");
+    expect(gateDeps.queueDocuments!.dequeue).toContain("dequeuePullRequest");
+    expect(gateDeps.queueDocuments!.entry).toContain("mergeQueueEntry");
   });
 
   it("D#6 R3c: a runner_local repo's gate gets a client opened with GraphQL allowed and fenced; a sandbox repo's gets the plain one", async () => {

@@ -1,4 +1,4 @@
-import { pinnedMergeGateBody } from "../../../../github/src/mergeGateGraphql.js";
+import { DEQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, pinnedMergeGateBody } from "../../../../github/src/mergeGateGraphql.js";
 import type { GitHubHttp, GitHubHttpRequest, GitHubHttpResponse } from "../../../src/build/githubMergePort.js";
 
 /**
@@ -96,7 +96,17 @@ export interface FakeRepoState {
    * recorded). `enqueue`/`autoMerge` choose the mutation's answer: `ok`, `forbidden` ("Resource not accessible by integration") or, for `enqueue`, `head_moved`
    * ("Head branch was modified"; GitHub checks `expectedHeadOid` against the real head either way). Every mutation that reached GitHub is in `mutations`.
    */
-  mergeQueue?: { exists: boolean; enqueue?: "ok" | "forbidden" | "head_moved"; autoMerge?: "ok" | "forbidden"; mutations: Array<{ kind: "enqueue" | "auto_merge"; variables: Record<string, unknown> }>; readFails?: boolean };
+  mergeQueue?: {
+    exists: boolean;
+    enqueue?: "ok" | "forbidden" | "head_moved";
+    autoMerge?: "ok" | "forbidden";
+    /** B6-1: `dequeuePullRequest` answers `ok` (the entry it removed), `forbidden`, or `not_queued` (GitHub's refusal for a pull request with no entry). */
+    dequeue?: "ok" | "forbidden" | "not_queued";
+    /** B6-1: the pull request's queue entry as the entry read reports it (default: none). A successful dequeue clears it. */
+    entry?: { id: string; state: string; position: number | null } | null;
+    mutations: Array<{ kind: "enqueue" | "auto_merge" | "dequeue"; variables: Record<string, unknown> }>;
+    readFails?: boolean;
+  };
   /** The repository's GitHub id as `GET /repos/{owner}/{repo}` reports it (default: `defaultGhId(owner, name)`, different for every repository). */
   ghId?: number;
 }
@@ -185,7 +195,22 @@ export function fakeGitHubRest(s: FakeRepoState): GitHubHttp {
         if (q.readFails) return json(502, { message: "Bad Gateway" });
         const query = accepted["query"] as string;
         const variables = accepted["variables"] as Record<string, unknown>;
-        if (query.startsWith("query")) return json(200, { data: { repository: { mergeQueue: q.exists ? { id: "MQ_kwDOfake" } : null } } });
+        if (query === MERGE_QUEUE_READ_DOCUMENT) return json(200, { data: { repository: { mergeQueue: q.exists ? { id: "MQ_kwDOfake" } : null } } });
+        if (query === MERGE_QUEUE_ENTRY_DOCUMENT) {
+          // GitHub reads the pull request by number inside the repository; the state is the GraphQL enum (OPEN, CLOSED, MERGED).
+          if (variables["number"] !== s.prNumber) return json(200, { data: { repository: { pullRequest: null } } });
+          const state = s.merged ? "MERGED" : s.state === "open" ? "OPEN" : "CLOSED";
+          return json(200, { data: { repository: { pullRequest: { state, merged: s.merged, headRefOid: s.headSha, mergeQueueEntry: q.entry ?? null } } } });
+        }
+        if (query === DEQUEUE_PULL_REQUEST_DOCUMENT) {
+          q.mutations.push({ kind: "dequeue", variables });
+          const mode = q.dequeue ?? "ok";
+          if (mode === "forbidden") return json(200, { data: null, errors: [{ type: "FORBIDDEN", message: "Resource not accessible by integration" }] });
+          if (mode === "not_queued" || q.entry == null) return json(200, { data: null, errors: [{ type: "UNPROCESSABLE", message: "Pull request is not in the merge queue" }] });
+          const removed = q.entry;
+          q.entry = null;
+          return json(200, { data: { dequeuePullRequest: { mergeQueueEntry: { id: removed.id } } } });
+        }
         const auto = query.includes("enablePullRequestAutoMerge");
         q.mutations.push({ kind: auto ? "auto_merge" : "enqueue", variables });
         const mode = auto ? (q.autoMerge ?? "ok") : (q.enqueue ?? "ok");

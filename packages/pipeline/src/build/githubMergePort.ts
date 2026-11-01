@@ -3,7 +3,10 @@ import {
   type CheckRunState,
   type CiSnapshot,
   type CommitStatusState,
+  type DequeueOutcome,
   type EnqueueOutcome,
+  type QueueEntryReading,
+  type QueueEntryState,
   type MergeBlockReason,
   type MergeQueueMode,
   type MergeCallOutcome,
@@ -65,7 +68,7 @@ export interface LocalGitHubHttp extends GitHubHttp {
 export const isLocalGitHubHttp = (http: GitHubHttp): http is LocalGitHubHttp => typeof (http as Partial<LocalGitHubHttp>).graphql === "function";
 
 /**
- * D#694 B5: the three GraphQL documents the hosted `merge_gate` client lets through (`@fx/github`'s mergeGateGraphql.ts, pinned there byte for byte).
+ * D#694 B5 and B6-1: the five GraphQL documents the hosted `merge_gate` client lets through (`@fx/github`'s mergeGateGraphql.ts, pinned there byte for byte).
  * The composition root hands them in, because this package does not depend on @fx/github; the port never writes a document of its own, so a document the
  * client has not pinned cannot be sent from here.
  */
@@ -73,6 +76,10 @@ export interface MergeQueueDocuments {
   read: string;
   enqueue: string;
   autoMerge: string;
+  /** B6-1: `dequeuePullRequest`. */
+  dequeue: string;
+  /** B6-1: the pull request and its queue entry, by number. */
+  entry: string;
 }
 
 export interface GitHubMergePortDeps {
@@ -118,6 +125,7 @@ const queueModeCache = new Map<string, { at: number; value: MergeQueueMode }>();
 export function clearMergeQueueModeCache(): void {
   queueModeCache.clear();
 }
+const QUEUE_ENTRY_STATES: ReadonlySet<string> = new Set(["AWAITING_CHECKS", "LOCKED", "MERGEABLE", "QUEUED", "UNMERGEABLE"]);
 const NODE_ID = /^[A-Za-z0-9_=-]{1,100}$/;
 const LOCAL_REFUSED = "not available on a runner_local repository's allowlist";
 
@@ -502,6 +510,13 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
     return `${owner.toLowerCase()}/${name.toLowerCase()}#${baseRef}`;
   };
 
+  /** Drops every cached queue answer of the repository (all its base branches): a refusal that names the queue means the `direct` answer is stale. */
+  async function evictRepo(pr: PullRequestRef): Promise<void> {
+    const { owner, name } = await deps.resolveRepo(pr.repoId);
+    const prefix = `${owner.toLowerCase()}/${name.toLowerCase()}#`;
+    for (const key of [...queueModeCache.keys()]) if (key.startsWith(prefix)) queueModeCache.delete(key);
+  }
+
   async function graphql(document: string, variables: Record<string, unknown>): Promise<Json> {
     const res = await deps.http.request({ method: "POST", path: "/graphql", body: { query: document, variables } });
     if (res.status !== 200 || !isObj(res.body)) throw new Error(`GitHub graphql: unexpected status ${res.status}`);
@@ -604,6 +619,53 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
       throw new Error("GitHub auto-merge: GraphQL error");
     },
 
+    async dequeuePullRequest(pr): Promise<DequeueOutcome> {
+      if (deps.local) throw new Error(`GitHub dequeue: ${LOCAL_REFUSED}`);
+      const docs = deps.queueDocuments;
+      if (docs === undefined) throw new Error("GitHub dequeue: no queue documents");
+      const out = await graphql(docs.dequeue, { pullRequestId: await pullRequestNodeId(pr) });
+      const kind = classifyGraphqlErrors(out);
+      if (kind === "permission") return { dequeued: false, reason: "unavailable" };
+      if (kind === "other") {
+        // GitHub names the case in words only; the message tells "not in the queue" apart from a real failure, nothing else is read from it.
+        const notQueued = Array.isArray(out.errors) && out.errors.length > 0 && out.errors.every((e) => isObj(e) && typeof e.message === "string" && /not (currently )?(in|part of) the merge queue|not queued/i.test(e.message));
+        if (notQueued) return { dequeued: false, reason: "not_queued" };
+        throw new Error("GitHub dequeue: GraphQL error");
+      }
+      if (kind === "head_moved") throw new Error("GitHub dequeue: GraphQL error");
+      const entry = dig(out, ["data", "dequeuePullRequest", "mergeQueueEntry"]);
+      // A success that names no entry removed nothing.
+      if (entry === null) return { dequeued: false, reason: "not_queued" };
+      if (!isObj(entry) || typeof entry.id !== "string" || !NODE_ID.test(entry.id)) bad("mergeQueueEntry.id");
+      return { dequeued: true, entryId: entry.id };
+    },
+
+    async getQueueEntry(pr): Promise<QueueEntryReading> {
+      if (deps.local) throw new Error(`GitHub queue entry: ${LOCAL_REFUSED}`);
+      const docs = deps.queueDocuments;
+      if (docs === undefined) throw new Error("GitHub queue entry: no queue documents");
+      await repoPath(pr);
+      const { owner, name } = await deps.resolveRepo(pr.repoId);
+      const body = await graphql(docs.entry, { owner, name, number: pr.prNumber });
+      if (body.errors !== undefined) throw new Error("GitHub queue entry: GraphQL error");
+      const found = dig(body, ["data", "repository", "pullRequest"]);
+      if (!isObj(found)) bad("pullRequest");
+      const state = typeof found.state === "string" ? found.state.toLowerCase() : "";
+      if (state !== "open" && state !== "closed" && state !== "merged") bad("pullRequest.state");
+      if (typeof found.merged !== "boolean") bad("pullRequest.merged");
+      if (typeof found.headRefOid !== "string" || !SHA_PATTERN.test(found.headRefOid)) bad("pullRequest.headRefOid");
+      const queued = found.mergeQueueEntry;
+      let entry: QueueEntryReading["entry"] = null;
+      if (queued !== null && queued !== undefined) {
+        if (!isObj(queued) || typeof queued.id !== "string" || !NODE_ID.test(queued.id)) bad("mergeQueueEntry.id");
+        if (typeof queued.state !== "string" || !QUEUE_ENTRY_STATES.has(queued.state)) bad("mergeQueueEntry.state");
+        if (queued.position !== undefined && queued.position !== null && !Number.isSafeInteger(queued.position)) bad("mergeQueueEntry.position");
+        entry = { id: queued.id as string, state: queued.state.toLowerCase() as QueueEntryState, position: typeof queued.position === "number" ? queued.position : null };
+      }
+      // GitHub's GraphQL state is OPEN, CLOSED or MERGED; a merged one is closed with the flag set.
+      return { state: state === "open" ? "open" : "closed", merged: found.merged, headSha: found.headRefOid, entry };
+    },
+
     async getDefaultBranchTip(pr) {
       if (deps.local) throw new Error(`GitHub default branch tip: ${LOCAL_REFUSED}`);
       const repo = await repoPath(pr);
@@ -663,6 +725,9 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
       });
       // Merged only on GitHub's explicit 200 + `merged: true`.
       if (res.status === 200 && isObj(res.body) && res.body.merged === true) return { merged: true };
+      // A refusal that names the queue means the base branch is behind one now, so a cached `direct` answer is stale: drop the repository's cached answers.
+      // The message only tells this refusal from the others; no decision reads anything else from it.
+      if (isObj(res.body) && typeof res.body.message === "string" && /merge queue/i.test(res.body.message)) await evictRepo(pr);
       return { merged: false, httpStatus: res.status };
     },
 
