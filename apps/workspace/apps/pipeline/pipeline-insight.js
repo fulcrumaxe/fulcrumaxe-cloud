@@ -320,6 +320,12 @@ export const RESUME_REFUSED_SENTENCES = Object.freeze({
   execution_mode_changed: "Your answer was saved, but this repository now builds in a different place, so it didn't continue. Use Build again to start it there.",
   resume_pause_expired: "Your answer came after this item's 14-day pause ended, so it didn't continue. Use Build again to start a new run.",
   resume_failed: "Your answer was saved, but the work couldn't continue just now. Use Build again to try again.",
+  // D#7 C31 (DP8-f3): the last five codes a resumed start records.
+  start_refused: "Your answer was saved, but the work couldn't be started again from where it stopped, so it didn't continue. Use Build again to start a new run.",
+  child_orphaned: "Your answer was saved, but the item this planned PR belonged to was deleted, so it didn't continue.",
+  parent_closed: "Your answer was saved, but the item this planned PR belongs to is closed, so it didn't continue. Reopen that item to go on.",
+  respec_needs_approval: "Your answer was saved, but the Spec changed and needs approval again, so it didn't continue. Approve the Spec, then use Build again.",
+  key_not_in_approved_spec: "Your answer was saved, but this planned PR is no longer in the approved Spec, so it didn't continue.",
 });
 export const RESUME_REFUSED_GENERIC = "This step was refused. Open the item to see what happened.";
 export const RESUME_REFUSED_START_LEAD = "Your answer was saved, but it didn't continue: ";
