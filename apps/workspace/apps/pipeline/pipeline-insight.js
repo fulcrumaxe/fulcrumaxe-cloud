@@ -12,7 +12,7 @@
 // share one file because the Pipeline app has a per-app boot-file ceiling (build/budget.mjs).
 import { clockText, h, timeNode } from "../_lib/dom.js";
 import { api, createRetryGate, isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
-import { APPROVE_SENTENCES, sayLive, stageWords } from "./pipeline-actions.js";
+import { APPROVE_SENTENCES, refusalSentence, sayLive, stageWords } from "./pipeline-actions.js";
 
 
 /** Agent roles by the phase they belong to. A role not listed is labelled "Run". */
@@ -412,28 +412,117 @@ export function startDecisionLine(data) {
  * type are told apart by their times. No code, id or database value is added to what the server sent.
  */
 export const RECEIPTS_HEADING = "Decisions recorded for this item";
+const plain = (v) => (typeof v === "string" && v.trim() !== "" && v.trim() !== "(not shown)" ? v.trim() : "");
+function receiptLine(r) {
+  const label = plain(r.label) || "A decision";
+  const by = r.by === "policy" ? "your setting" : r.by === "person" ? "a person" : "";
+  const when = typeof r.at === "string" ? formatWhen(r.at) : "";
+  const chosen = plain(r.chosen);
+  const rejected = plain(r.rejected);
+  return (
+    label + "." +
+    (chosen ? " Chosen: " + chosen + "." : "") +
+    (rejected ? " Not chosen: " + rejected + "." : "") +
+    (by ? " Decided by " + by + (when ? ", " + when : "") + "." : when ? " " + when + "." : "")
+  );
+}
 export function receiptsSection(data) {
   const list = data && data.receipts;
   if (!Array.isArray(list)) return null;
   const items = [];
   for (const r of list) {
     if (!isObj(r)) continue;
-    const plain = (v) => (typeof v === "string" && v.trim() !== "" && v.trim() !== "(not shown)" ? v.trim() : "");
-    const label = plain(r.label) || "A decision";
-    const by = r.by === "policy" ? "your setting" : r.by === "person" ? "a person" : "";
-    const when = typeof r.at === "string" ? formatWhen(r.at) : "";
-    const chosen = plain(r.chosen);
-    const rejected = plain(r.rejected);
-    const text =
-      label + "." +
-      (chosen ? " Chosen: " + chosen + "." : "") +
-      (rejected ? " Not chosen: " + rejected + "." : "") +
-      (by ? " Decided by " + by + (when ? ", " + when : "") + "." : when ? " " + when + "." : "");
+    const text = receiptLine(r);
     items.push({ text, class: r.class === 3 ? 3 : r.class === 2 ? 2 : 0 });
   }
   if (items.length === 0) return null;
   const total = Number.isInteger(data.receipts_total) ? data.receipts_total : 0;
   return { heading: RECEIPTS_HEADING, items, more: total > items.length ? "Showing the newest " + items.length + " of " + total + "." : null };
+}
+
+/**
+ * D#7 DP7-2f: the Reverse control. `GET /work-items/{id}/receipts` (any member) says per receipt what it costs to reverse and where a reversal stands; every
+ * line below is the server's own fixed sentence (`deadline_text`, `price_text`, the reversal's `text`) or one of the words here. A reversal is never undone:
+ * "Reversed" has no control. A failed reversal is shown with its reason and has no control (a retry is a later row). A receipt that reverses another names it
+ * (the server says `removed item` when the original is gone). Nothing blank, `null` or a code reaches the screen.
+ */
+export const REVERSE_WORDS = {
+  control: "Reverse",
+  confirm: "Confirm reversal",
+  confirmEstimate: "Confirm the estimate",
+  cancel: "Cancel",
+  reversed: "Reversed.",
+  failed: "Reversal failed.",
+  refusedGeneric: "This decision cannot be reversed.",
+  openGeneric: "This decision can be reversed.",
+  askAgain: "To change course, ask for the work again.",
+  stateUnknown: "A reversal is on record for this decision.",
+  reversalOf: "Reverses",
+  removed: "removed item",
+  spent: "Nothing is spent until you confirm.",
+  needsYouPointer: "A question is waiting for you in Needs you.",
+};
+const REVERSAL_STATES = new Set(["pending", "awaiting_confirm", "running", "done", "failed"]);
+export const RX_REFUSALS = {
+  forbidden: "Only an owner or an admin can reverse a decision.",
+  insufficient_role: "Only an owner or an admin can reverse a decision.",
+  not_reversible: "This decision cannot be reversed. To change course, ask for the work again.",
+  reversal_unavailable: "Reversals are not available right now, so nothing was changed. Try again later.",
+  estimate_changed: "The estimate changed while you were deciding, so nothing was spent. The new figure is shown; check it and confirm again.",
+  not_found: "This decision isn't there any more, so nothing was changed. The list has been refreshed.",
+};
+export const rxRefusal = (e) => (e && typeof e.code === "string" && has(RX_REFUSALS, e.code) ? RX_REFUSALS[e.code] : refusalSentence(e));
+export const rxMoney = (usd) => (Number.isFinite(usd) ? "$" + usd.toFixed(2) : "");
+export const confirmPrompt = (usd) => "A fresh build would use about " + rxMoney(usd) + " of your model spend. " + REVERSE_WORDS.spent;
+
+export function reversalRows(data) {
+  const list = data && data.receipts;
+  if (!Array.isArray(list)) return null;
+  const items = [];
+  for (const r of list) {
+    if (!isObj(r)) continue;
+    const it = { id: plain(r.id), text: receiptLine(r), class: r.class === 3 ? 3 : r.class === 2 ? 2 : 0, struck: false, state: "none", hint: "", action: null, targetId: "", figure: null };
+    const rv = isObj(r.reversal) ? r.reversal : null;
+    const rvText = rv ? plain(rv.text) : "";
+    if (typeof r.reverses_receipt_id === "string" && r.reverses_receipt_id !== "") {
+      it.state = "reversal";
+      it.hint = REVERSE_WORDS.reversalOf + " " + (plain(r.reverses_text) || REVERSE_WORDS.removed) + ".";
+    } else if (rv) {
+      const st = REVERSAL_STATES.has(rv.state) ? rv.state : "unknown";
+      it.state = st;
+      if (st === "done") {
+        it.struck = true;
+        it.hint = REVERSE_WORDS.reversed + (rvText ? " " + rvText : "");
+      } else if (st === "failed") it.hint = REVERSE_WORDS.failed + (rvText ? " " + rvText : "");
+      else it.hint = rvText || REVERSE_WORDS.stateUnknown;
+      if (st === "awaiting_confirm" && Number.isFinite(rv.estimate_usd) && plain(rv.id)) {
+        it.action = "confirm";
+        it.targetId = plain(rv.id);
+        it.figure = rv.estimate_usd;
+        it.hint = confirmPrompt(rv.estimate_usd);
+      }
+    } else if (r.can_reverse === true) {
+      it.state = "open";
+      it.action = "reverse";
+      const free = r.price_kind === "free_until";
+      it.hint = (free ? plain(r.deadline_text) : plain(r.price_text)) || plain(r.price_text) || plain(r.deadline_text) || REVERSE_WORDS.openGeneric;
+      if (r.price_kind === "estimate" && Number.isFinite(r.price_usd)) it.figure = r.price_usd;
+    } else {
+      it.state = "refused";
+      it.hint = (plain(r.price_text) || REVERSE_WORDS.refusedGeneric) + " " + REVERSE_WORDS.askAgain;
+    }
+    items.push(it);
+  }
+  if (items.length === 0) return null;
+  const total = Number.isInteger(data.total) ? data.total : 0;
+  return { heading: RECEIPTS_HEADING, items, more: total > items.length ? "Showing the newest " + items.length + " of " + total + "." : null };
+}
+
+/** The sentence after a reverse or confirm call answered: the route's own fixed words, or ours if they are missing. */
+export function outcomeNote(o) {
+  const msg = isObj(o) ? plain(o.message) : "";
+  const needsAsk = isObj(o) && o.status === "needs_ask";
+  return { text: msg || (needsAsk ? REVERSE_WORDS.needsYouPointer : "Reversal recorded."), needsYou: needsAsk };
 }
 
 /**
@@ -652,6 +741,11 @@ export function createInsightPanel(deps) {
   let timer = null;
   let ac = null;
   let signature = "";
+  let rx = null; // the receipts read (D#7 DP7-2f); null when the item has none or the read failed
+  const confirming = new Map(); // receipt id -> the figure the person is being asked to confirm
+  const notes = new Map(); // receipt id -> { text, needsYou } after a reverse or confirm answered
+  const fresh = new Map(); // receipt id -> the live estimate a 409 estimate_changed named; shown and sent in place of an older figure
+  const busy = new Set();
   let skeleton = null; // { body, live, rest } of the full section; null whenever a loading or error sentence replaced it
   /** Sections the person opened (true) or closed (false); a section not in here follows its default. */
   const toggled = new Map();
@@ -686,6 +780,65 @@ export function createInsightPanel(deps) {
       h("p", { role: "status", "data-testid": "pl-public-change-sentence" }, c.sentence),
       h("p", { class: "pl-muted", "data-testid": "pl-public-change-where" }, c.repo, c.branch ? " · " + c.branch : "", c.prText ? " · " + c.prText : ""),
       c.prUrl ? h("a", { href: c.prUrl, target: "_blank", rel: "noopener noreferrer", "data-testid": "pl-public-change-link" }, "Open the public pull request on GitHub") : null
+    );
+  }
+
+  async function reverseCall(it, figure) {
+    if (busy.has(it.id)) return;
+    busy.add(it.id);
+    notes.delete(it.id);
+    confirming.delete(it.id);
+    render();
+    const body = figure === null ? {} : { confirmEstimateUsd: figure };
+    const path = it.action === "confirm" ? "/api/v1/reversals/" + encodeURIComponent(it.targetId) + "/confirm" : "/api/v1/receipts/" + encodeURIComponent(it.id) + "/reverse";
+    try {
+      notes.set(it.id, outcomeNote(await deps.call("POST", path, body)));
+      fresh.delete(it.id);
+    } catch (e) {
+      if (e && e.status === 409 && Number.isFinite(e.currentEstimateUsd)) fresh.set(it.id, e.currentEstimateUsd);
+      notes.set(it.id, { text: rxRefusal(e), needsYou: false });
+    }
+    busy.delete(it.id);
+    render();
+    load();
+  }
+
+  function receiptRow(row) {
+    // The figure is the server's current one: a 409's live estimate wins over an older stored figure, never the reverse.
+    const live = fresh.get(row.id);
+    const i = live !== undefined && row.action ? { ...row, figure: Math.max(row.figure === null ? 0 : row.figure, live), hint: row.action === "confirm" ? confirmPrompt(Math.max(row.figure, live)) : row.hint } : row;
+    const note = notes.get(i.id);
+    const isBusy = busy.has(i.id);
+    const act = (testid, label, fn) => h("button", { type: "button", class: "pl-act", "data-testid": testid, "data-rx": i.id + ":" + testid, "aria-disabled": isBusy ? "true" : null, onClick: () => (busy.has(i.id) ? undefined : fn()) }, label);
+    const needsYou = typeof window !== "undefined" && window.FULCWM && window.FULCApps && window.FULCApps.get(NEEDS_YOU_APP);
+    const asking = confirming.has(i.id);
+    let control = null;
+    if (asking) {
+      control = h(
+        "span",
+        { class: "pl-rx-confirm", role: "group", "aria-label": "Confirm this reversal" },
+        h("span", { "data-testid": "pl-reverse-estimate" }, confirmPrompt(confirming.get(i.id))),
+        act("pl-reverse-confirm", REVERSE_WORDS.confirm, () => reverseCall(i, confirming.get(i.id))),
+        act("pl-reverse-cancel", REVERSE_WORDS.cancel, () => {
+          confirming.delete(i.id);
+          render();
+        })
+      );
+    } else if (i.action === "reverse") {
+      control = act("pl-reverse", REVERSE_WORDS.control, () => {
+        if (i.figure === null) return reverseCall(i, null);
+        confirming.set(i.id, i.figure);
+        render();
+      });
+    } else if (i.action === "confirm") control = act("pl-reverse-confirm-pending", REVERSE_WORDS.confirmEstimate, () => reverseCall(i, i.figure));
+    return h(
+      "li",
+      { "data-testid": "pl-receipt", "data-class": String(i.class), "data-reversal": i.state },
+      i.struck ? h("s", { "data-testid": "pl-receipt-struck" }, i.text) : i.text,
+      i.hint && !asking ? h("span", { class: "pl-muted", "data-testid": "pl-receipt-hint" }, " " + i.hint) : null,
+      control ? [" ", control] : null,
+      note ? h("span", { role: "status", "data-testid": "pl-reverse-note" }, " " + note.text + " ") : null,
+      note && note.needsYou && needsYou ? h("button", { type: "button", class: "pl-act", "data-testid": NEEDS_YOU_TESTID, onClick: () => window.FULCWM.open(NEEDS_YOU_APP) }, NEEDS_YOU_LABEL) : null
     );
   }
 
@@ -776,7 +929,13 @@ export function createInsightPanel(deps) {
     const focusDetails = active && typeof el.contains === "function" && el.contains(active) && typeof active.closest === "function" ? active.closest("details[data-key]") : null;
     const focusKey = focusDetails ? focusDetails.getAttribute("data-key") : null;
     const focusNeedsYou = !!active && typeof el.contains === "function" && el.contains(active) && typeof active.getAttribute === "function" && active.getAttribute("data-testid") === NEEDS_YOU_TESTID;
+    const focusRx = active && typeof el.contains === "function" && el.contains(active) && typeof active.getAttribute === "function" ? active.getAttribute("data-rx") : null;
     draw();
+    if (focusRx) {
+      const all = [...el.querySelectorAll("[data-rx]")];
+      const target = all.find((n) => n.getAttribute("data-rx") === focusRx) || all.find((n) => n.getAttribute("data-rx").split(":")[0] === focusRx.split(":")[0]);
+      if (target) target.focus({ preventScroll: true });
+    }
     if (focusNeedsYou) {
       const again = [...el.querySelectorAll("[data-testid]")].find((n) => n.getAttribute("data-testid") === NEEDS_YOU_TESTID);
       if (again) again.focus({ preventScroll: true });
@@ -801,6 +960,7 @@ export function createInsightPanel(deps) {
       return;
     }
     const m = buildInsight(state.data);
+    const rxRows = m.receipts && rx ? reversalRows(rx) : null;
     // The flags live in one polite live region that is created once and kept across redraws, so a flag that arrives
     // on a refresh is announced; only its text is rewritten. The rest of the section is rebuilt as before.
     if (!skeleton) {
@@ -831,8 +991,8 @@ export function createInsightPanel(deps) {
       m.receipts
         ? [
             h("h3", { class: "pl-detail-sub", "data-testid": "pl-receipts-heading" }, m.receipts.heading),
-            h("ul", { class: "pl-ins-feed", "data-testid": "pl-receipts" }, m.receipts.items.map((i) => h("li", { "data-testid": "pl-receipt", "data-class": String(i.class) }, i.text))),
-            m.receipts.more ? h("p", { class: "pl-muted", "data-testid": "pl-receipts-more" }, m.receipts.more) : [],
+            h("ul", { class: "pl-ins-feed", "data-testid": "pl-receipts" }, rxRows ? rxRows.items.map(receiptRow) : m.receipts.items.map((i) => h("li", { "data-testid": "pl-receipt", "data-class": String(i.class) }, i.text))),
+            (rxRows || m.receipts).more ? h("p", { class: "pl-muted", "data-testid": "pl-receipts-more" }, (rxRows || m.receipts).more) : [],
           ]
         : [],
       m.steps.length
@@ -873,8 +1033,19 @@ export function createInsightPanel(deps) {
       const data = await deps.call("GET", "/api/v1/work-items/" + encodeURIComponent(id) + "/activity", undefined, mine.signal);
       if (mine.signal.aborted || itemId !== id) return;
       if (!data || typeof data !== "object" || !Array.isArray(data.runs) || !Array.isArray(data.comments)) throw new Error("shape");
+      // The item's receipts, read again for what a reversal needs (price, deadline, state): the activity answer lacks them. A failed read leaves the plain list.
+      rx = null;
+      if (Array.isArray(data.receipts) && data.receipts.length > 0) {
+        try {
+          const r = await deps.call("GET", "/api/v1/work-items/" + encodeURIComponent(id) + "/receipts", undefined, mine.signal);
+          if (mine.signal.aborted || itemId !== id) return;
+          if (r && typeof r === "object" && Array.isArray(r.receipts)) rx = r;
+        } catch {
+          if (mine.signal.aborted || itemId !== id) return;
+        }
+      }
       // An unchanged answer is not redrawn, so an open section keeps its scroll position and any text selection.
-      const sig = JSON.stringify(data);
+      const sig = JSON.stringify([data, rx]);
       const changed = sig !== signature || state.status !== "ready" || state.stale;
       signature = sig;
       state = { status: "ready", data, stale: false };
@@ -895,6 +1066,10 @@ export function createInsightPanel(deps) {
       this.stop();
       itemId = id;
       toggled.clear();
+      rx = null;
+      confirming.clear();
+      notes.clear();
+      busy.clear();
       signature = "";
       state = { status: "loading", data: null, stale: false };
       render();
