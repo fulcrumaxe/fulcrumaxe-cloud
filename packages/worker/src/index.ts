@@ -13,6 +13,7 @@ export type { RunnerLeaseSweeper, RunnerLeaseSweepResult } from "./runnerLeaseSw
 export type { RunHandoffs, RunHandoffSweepResult, CompleteRunHandoffInput, CompleteRunHandoffResult, DoneHandoffResult } from "./runHandoffs.js";
 export type { RunnerQueueSweeper, RunnerQueueSweepResult } from "./runnerQueueSweep.js";
 export type { ProposalVerifyCounts, VerifyRepoReader, VerifyRecord } from "./proposalVerify.js";
+export type { DocsCodeAnalysisCounts } from "./docsCodeAnalysis.js";
 export type { AutoStartCounts } from "./autoStartSweep.js";
 export type { DiscoveryDrainCounts } from "./discoveryDrain.js";
 export type { RunnerNoticeSweeper, RunnerNoticeResult } from "./runnerNotices.js";

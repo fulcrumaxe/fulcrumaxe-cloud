@@ -41,7 +41,7 @@ export async function queueAnalysis(pool: Pool, accountId: string, repoId: strin
 export async function startAnalysis(pool: Pool, accountId: string, id: string, runId: string | null = null): Promise<boolean> {
   return withTenant(pool, accountId, async (client) => {
     const res = await client.query(
-      `UPDATE discovery_analyses SET state = 'running', started_at = now(), run_id = $3, attempts = attempts + 1 WHERE id = $1 AND account_id = $2 AND state = 'queued'`,
+      `UPDATE discovery_analyses SET state = 'running', started_at = now(), run_id = $3, attempts = attempts + 1, skip_reason = NULL WHERE id = $1 AND account_id = $2 AND state = 'queued'`,
       [id, accountId, runId],
     );
     return res.rowCount === 1;
@@ -57,6 +57,31 @@ export async function endAnalysis(pool: Pool, accountId: string, id: string, sta
         WHERE id = $1 AND account_id = $2 AND state IN ('queued', 'running')`,
       [id, accountId, state, code, counts === null ? null : JSON.stringify(counts)],
     );
+    return res.rowCount === 1;
+  });
+}
+
+/**
+ * D#483 S4-f3: moves a waiting (queued or running) analysis in place, which its guard allows: `attempts` counts one more attempt (a run started
+ * for it, or a seat that refused it), `runId` names the new run (null when none started), and `hold` is the reason it is being held, or null for none.
+ * The state does not change. Answers false when the row is not waiting.
+ */
+export async function noteAnalysisAttempt(pool: Pool, accountId: string, id: string, runId: string | null, hold: string | null): Promise<boolean> {
+  if (hold !== null && !CODE_RE.test(hold)) throw new Error('analysis: the code is a closed lowercase word');
+  return withTenant(pool, accountId, async (client) => {
+    const res = await client.query(
+      `UPDATE discovery_analyses SET attempts = attempts + 1, run_id = $3, skip_reason = $4 WHERE id = $1 AND account_id = $2 AND state IN ('queued', 'running')`,
+      [id, accountId, runId, hold],
+    );
+    return res.rowCount === 1;
+  });
+}
+
+/** Sets (or clears, with null) the reason a waiting analysis is being held (`daily_cap`). Answers false when the row is not waiting. */
+export async function holdAnalysis(pool: Pool, accountId: string, id: string, hold: string | null): Promise<boolean> {
+  if (hold !== null && !CODE_RE.test(hold)) throw new Error('analysis: the code is a closed lowercase word');
+  return withTenant(pool, accountId, async (client) => {
+    const res = await client.query(`UPDATE discovery_analyses SET skip_reason = $3 WHERE id = $1 AND account_id = $2 AND state IN ('queued', 'running')`, [id, accountId, hold]);
     return res.rowCount === 1;
   });
 }

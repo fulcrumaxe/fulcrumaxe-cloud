@@ -52,10 +52,25 @@ const textHash8 = (p: VerifyKeyInput): string =>
 export const proposalVerifyKey = (p: VerifyKeyInput): string => `${PROPOSAL_VERIFY_KEY_PREFIX}${p.id}:${textHash8(p)}:${p.verify_attempts}`;
 
 /** Verifier runs keyed for one repository's proposals and started this UTC day. `$1` account, `$2` repo, `$3` the key prefix pattern. */
-const runsToday = (externalOnly: boolean): string => `SELECT k.run_id FROM agent_run_idempotency_keys k
+const verifierRunsToday = (externalOnly: boolean): string => `SELECT k.run_id FROM agent_run_idempotency_keys k
        JOIN proposals p ON p.account_id = k.account_id AND p.id::text = split_part(k.idempotency_key, ':', 2)
       WHERE k.account_id = $1 AND k.idempotency_key LIKE $3 AND k.created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
         AND p.repo_id = $2${externalOnly ? " AND p.provenance = 'external'" : ''}`;
+
+/** D#483 S4-f3: the docs-and-code analyst's run key, `docs-code-analysis:<analysis_id>:<attempt>`. The analysis id stays the second `:` field. */
+export const ANALYSIS_KEY_PREFIX = 'docs-code-analysis:';
+export const analysisRunKey = (analysisId: string, attempt: number): string => `${ANALYSIS_KEY_PREFIX}${analysisId}:${attempt}`;
+
+/**
+ * Every run that spends against the repository's day: its verifier runs and (S4-f3) its analyst runs, started this UTC day. One counter, so the
+ * two roles share `perRepoDailyUsd`. The analysis prefix is a literal, so no caller can leave it out.
+ */
+const runsToday = (): string => `${verifierRunsToday(false)}
+      UNION ALL
+     SELECT k.run_id FROM agent_run_idempotency_keys k
+       JOIN discovery_analyses d ON d.account_id = k.account_id AND d.id::text = split_part(k.idempotency_key, ':', 2)
+      WHERE k.account_id = $1 AND k.idempotency_key LIKE '${ANALYSIS_KEY_PREFIX}%' AND k.created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+        AND d.repo_id = $2`;
 
 /**
  * External proposals of one repository whose verifier run was started this UTC day. It counts run STARTS: every attempt's key is a row,
@@ -63,7 +78,7 @@ const runsToday = (externalOnly: boolean): string => `SELECT k.run_id FROM agent
  */
 export async function externalVerifiesToday(client: Query, accountId: string, repoId: string): Promise<number> {
   const { rows } = await client.query<{ n: number }>(
-    `SELECT count(*)::int AS n FROM (${runsToday(true)}) x`,
+    `SELECT count(*)::int AS n FROM (${verifierRunsToday(true)}) x`,
     [accountId, repoId, `${PROPOSAL_VERIFY_KEY_PREFIX}%`],
   );
   return rows[0]?.n ?? 0;
@@ -130,13 +145,13 @@ export async function verifyWait(
 }
 
 /**
- * True when starting one more verifier run that reserves `nextUsd` would take the repository past `capUsd` today: the ledger rows (model
- * and compute) of the repository's verifier runs started this UTC day, plus their open reservations, plus `nextUsd`. Settled reservations
+ * True when starting one more run (verifier or, S4-f3, analyst) that reserves `nextUsd` would take the repository past `capUsd` today: the ledger rows (model
+ * and compute) of the repository's verifier and analyst runs started this UTC day, plus their open reservations, plus `nextUsd`. Settled reservations
  * are not counted (their spend is in the ledger), so nothing is counted twice. Compared in `numeric`, never in binary fractions.
  */
 export async function overRepoDailyUsd(client: Query, accountId: string, repoId: string, nextUsd: number, capUsd: number): Promise<boolean> {
   const { rows } = await client.query<{ over: boolean }>(
-    `WITH runs AS (${runsToday(false)})
+    `WITH runs AS (${runsToday()})
      SELECT (COALESCE((SELECT sum(l.usd) FROM ledger l WHERE l.account_id = $1 AND l.run_id IN (SELECT run_id FROM runs)), 0)
            + COALESCE((SELECT sum(s.usd_reserved) FROM spend_reservations s WHERE s.account_id = $1 AND s.state = 'open' AND s.run_id IN (SELECT run_id FROM runs)), 0)
            + $4::numeric) > $5::numeric AS over`,

@@ -117,13 +117,15 @@ export const planDataSchema = z
      * D#483 S4-b: the discovery and verification limits. Optional, and a missing block means discovery and verification are OFF for every
      * repo (fail closed, reported as `discovery_unconfigured`); no figure has a default. `perRepoDailyUsd` caps one repo's discovery and
      * verifier spend per day, `verifyPerProposalUsd` is the most one verification may reserve, and `externalVerifiesPerRepoPerDay` is how
-     * many proposals from outside authors one repo may have checked in a day (0 checks none).
+     * many proposals from outside authors one repo may have checked in a day (0 checks none). D#483 S4-f3: `analysisPerRunUsd` (optional) is the most one
+     * docs-and-code analysis run may reserve; without it analysis is OFF (`analysis_unconfigured`) and verification is unaffected.
      */
     discovery: z
       .object({
         perRepoDailyUsd: z.number().finite().positive(),
         verifyPerProposalUsd: z.number().finite().positive(),
         externalVerifiesPerRepoPerDay: count,
+        analysisPerRunUsd: z.number().finite().positive().optional(),
       })
       .strict()
       .optional(),
