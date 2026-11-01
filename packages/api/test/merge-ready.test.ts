@@ -105,6 +105,20 @@ describe('D#598 P8c-2b: merge-ready list', () => {
     expect(Number.isNaN(Date.parse(row.since))).toBe(false);
   });
 
+  it('D#694 B6-3: an item waiting in the merge queue of GitHub is not "ready for you to merge", even with an older ready answer; it is listed again after a removal', async () => {
+    const f = await fixture();
+    const id = await item(f.refs, 'Queued by hand');
+    await gate(f.refs, id, { pr: 9 });
+    const fact = (kind: string, code: string | null, dedupe: string) =>
+      admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, pr_number, head_sha, dedupe_key) VALUES ($1, $2, $3, $4, 9, $5, $6)`, [f.refs.accountId, id, kind, code, 'a'.repeat(40), dedupe]);
+    await fact('merge_enqueued', 'queue', 'enq');
+    expect((await read(f.member)).items).toEqual([]);
+    await fact('merge_dequeued', 'merge', 'deq-success');
+    expect((await read(f.member)).items).toEqual([]);
+    await fact('merge_dequeued', 'manual', 'deq');
+    expect((await read(f.member)).items.map((i) => i.work_item_id)).toEqual([id]);
+  });
+
   it('still lists an item whose repository is not on record, with a null link and every other field present', async () => {
     const f = await fixture(null);
     const id = await item(f.refs, 'No repository yet');

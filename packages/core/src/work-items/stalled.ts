@@ -2,7 +2,7 @@ import type { Pool } from 'pg';
 import { assertActiveMembership } from '../tenancy/scopedAccess.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { advanceActionFor } from './advance.js';
-import { blockingReasons } from './mergeReadiness.js';
+import { blockingReasons, isQueuedSql } from './mergeReadiness.js';
 import { readReviewHold } from './reviewHold.js';
 import { cleanWorkItemTitle } from './title.js';
 
@@ -62,6 +62,7 @@ const STOP_WORDS: Readonly<Record<string, string>> = Object.freeze({
   review_quiet_period_unsettled: 'The review was still waiting for the pull request to stop changing when the pipeline gave up waiting.',
   reviewer_not_started: "A reviewer couldn't start, so the review stopped before it could finish.",
   merge_gate: 'The merge check stopped before it could decide.',
+  merge_queue_retry_used: "GitHub's merge queue removed this pull request again after the one automatic retry, so the pipeline stopped for a person.",
   review_key_missing: 'The review needs a model key and there is none, so it did not start.',
   build_no_pull_request: 'The build finished without opening a pull request.',
   build_wait_timeout: 'The build ran out of time and was stopped.',
@@ -78,6 +79,9 @@ const STOP_WORDS: Readonly<Record<string, string>> = Object.freeze({
   parent_splits: 'This Spec is split into several pull requests, so this item is not built itself. Each planned pull request is built as its own item once the Spec is approved.',
 });
 
+/** D#694 B6-3: fixed words for a pull request GitHub's merge queue took out and nothing has put back. No text from GitHub is in it. */
+export const DEQUEUED_SENTENCE = "GitHub's merge queue removed this pull request and it has not been put back in the queue.";
+
 const humanise = (code: string): string => code.replace(/_/g, ' ');
 
 export interface StallFacts {
@@ -91,6 +95,8 @@ export interface StallFacts {
   /** The newest sign of life: a driver fact, a run, or the item itself. */
   lastActivity: Date;
   now: Date;
+  /** D#694 B6-3: the item is waiting in GitHub's merge queue (derived, mergeReadiness.ts). Absent reads as false. */
+  queued?: boolean;
 }
 
 export interface Stall {
@@ -130,6 +136,12 @@ export function classifyStall(f: StallFacts): Stall | null {
   if (last !== null && REFUSAL_KINDS.includes(last.kind)) {
     const base = last.kind === 'build_refused' ? "The build couldn't start" : last.kind === 'fix_round_failed' ? 'The fix round ended without finishing' : last.kind === 'resume_refused' ? "The work couldn't be resumed" : "The fix round couldn't start";
     return { code: 'refused', why: sentenceFor(last.code, base), since: last.at };
+  }
+  // D#694 B6-3: waiting in GitHub's merge queue is active work, however many other facts were written after the enqueue (B6-4 bounds how long).
+  if (f.queued === true) return null;
+  // A removal nothing has answered: a person's is a stop at once; GitHub's own is the pipeline's turn to queue it again (one automatic retry), so it is given the stale-wait time first.
+  if (last !== null && last.kind === 'merge_dequeued' && (last.reasons.includes('actor_user') || f.now.getTime() - last.at.getTime() > STALE_WAIT_MS)) {
+    return { code: 'dequeued', why: DEQUEUED_SENTENCE, since: last.at };
   }
   if (last !== null && last.kind === 'merge_gate' && last.code === 'ready_human_merges') {
     const transient = blockingReasons(last.reasons);
@@ -189,6 +201,7 @@ interface Row {
   last_reasons: string[] | null;
   last_at: Date | null;
   last_activity: Date;
+  queued: boolean;
 }
 
 /** The label for the card's top button at this stage, asked of the stage driver's own table; null when it does not advance here. */
@@ -214,6 +227,7 @@ export async function listStalledItems(ctx: StalledCtx, opts: { limit: number; n
               EXISTS (SELECT 1 FROM run_action_requests q WHERE q.target_id = w.id AND q.state IN ('accepted', 'claimed')) AS pending_request,
               EXISTS (SELECT 1 FROM decision_asks a WHERE a.work_item_id = w.id AND a.state IN ('open', 'overdue')) AS waiting_ask,
               e.kind AS last_kind, e.code AS last_code, e.reasons AS last_reasons, e.created_at AS last_at,
+              ${isQueuedSql('w.account_id', 'w.id')} AS queued,
               GREATEST(w.updated_at, e.created_at, (SELECT max(r.updated_at) FROM agent_runs r WHERE r.work_item_id = w.id)) AS last_activity
          FROM work_items w
          LEFT JOIN discussions d ON d.id = w.discussion_id
@@ -238,6 +252,7 @@ export async function listStalledItems(ctx: StalledCtx, opts: { limit: number; n
       last: r.last_kind === null || r.last_at === null ? null : { kind: r.last_kind, code: r.last_code, reasons: r.last_reasons ?? [], at: r.last_at },
       lastActivity: r.last_activity,
       now,
+      queued: r.queued,
     });
     if (stall === null) continue;
     found.push({

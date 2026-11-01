@@ -1,4 +1,6 @@
 import type { PoolClient } from "pg";
+import { listHeadRemovals } from "@fx/core/src/work-items/driverEvents.js";
+import { isQueuedSql, removalRetryAllowed } from "@fx/core/src/work-items/mergeReadiness.js";
 import { MAX_CONFLICT_ROUNDS, MERGE_QUEUE_LEASE_SECONDS } from "./policy.js";
 import { eligibilityContext, pickNext } from "./eligibility.js";
 import { MergeQueueError, type EntryKind, type MergeQueueEntry, type MergedBy, type PrFacts, type QueueState, type WorkKind } from "./types.js";
@@ -25,10 +27,10 @@ const CLEAR_SLOT_AND_WORK = `phase = NULL, slot_holder = NULL, lease_until = NUL
 
 const CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
 
-/** D#694 B5/B6-2: the phase of an entry whose pull request waits in the host's merge queue. No tick adopts it; only an event (or the lease running out) ends it. */
-export const HOST_QUEUE_PHASE = "host_queue";
-/** The fixed stop code of an entry the host's queue removed without merging it. */
+/** The fixed stop code of an entry a person took out of the host's queue (no automatic retry follows a person's removal). */
 export const HOST_DEQUEUED_REASON = "removed_from_merge_queue";
+/** The fixed stop code of an entry the host's queue took out a second time for the same head: the one automatic retry is used up. */
+export const HOST_RETRY_USED_REASON = "merge_queue_retry_used";
 const SHA_RE = /^([0-9a-f]{40}|[0-9a-f]{64})$/;
 
 interface Row {
@@ -510,9 +512,12 @@ export async function settlePullRequest(
   if (input.merged) {
     return one(
       client,
-      // An entry waiting in the host's queue was put there by the gate, so the queue's merge is the gate's; any other merge is a person's.
-      `UPDATE merge_queue_entries SET state = 'merged', merged_by = CASE WHEN state = 'in_flight' AND phase = '${HOST_QUEUE_PHASE}' THEN 'gate' ELSE 'person' END, reason = NULL, ${CLEAR_SLOT_AND_WORK}
-        WHERE account_id = $1 AND repo_id = $2 AND pr_number = $3 AND state IN ('in_review', 'queued', 'in_flight', 'awaiting_work', 'stopped')
+      // A pull request the host's queue merged (the webhook has written `merged_via_queue` before it settles the entry, or the item still reads as queued) was put there by the gate, so the queue's merge is the gate's; any other merge is a person's.
+      `UPDATE merge_queue_entries e SET state = 'merged', reason = NULL, ${CLEAR_SLOT_AND_WORK},
+              merged_by = CASE WHEN e.work_item_id IS NOT NULL AND (${isQueuedSql("e.account_id", "e.work_item_id", "e.pr_number")}
+                                 OR EXISTS (SELECT 1 FROM work_item_driver_events n WHERE n.account_id = e.account_id AND n.work_item_id = e.work_item_id AND n.kind = 'merged_via_queue' AND n.pr_number = e.pr_number))
+                               THEN 'gate' ELSE 'person' END
+        WHERE e.account_id = $1 AND e.repo_id = $2 AND e.pr_number = $3 AND e.state IN ('in_review', 'queued', 'in_flight', 'awaiting_work', 'stopped')
         RETURNING ${COLUMNS}`,
       [input.accountId, input.repoId, input.prNumber],
     );
@@ -527,22 +532,102 @@ export async function settlePullRequest(
 }
 
 /**
- * D#694 B6-2: the host's queue removed a pull request without merging it. Settles the entry that is waiting in the host's queue (`in_flight`, phase `host_queue`) for
- * exactly the head that was last enqueued for its item: the slot is released and the entry stops with a fixed code, for a person (or B6-3's single retry) to take up. An
- * event for any other head (one the item has moved on from), for an entry that is not waiting there, or for a final entry changes nothing, so a late or replayed delivery
- * never undoes a merge or a close. Answers the entry it stopped, or null.
+ * D#694 B6-3: the entries of a repo whose pull request is waiting in the host's merge queue, in queue order. Derived from the item's driver facts (mergeReadiness.ts
+ * `isQueuedSql`), never stored: the entry stays `queued`, holds no slot (the unique in-flight index allows one, and the host's queue takes several), and the tick counts
+ * these against the rule's `max_entries_to_build` and leaves them out of every take.
  */
-export async function settleHostDequeue(client: Queryable, input: { accountId: string; repoId: string; prNumber: number; headSha: string }): Promise<MergeQueueEntry | null> {
-  assertSha(input.headSha);
-  return one(
-    client,
-    `UPDATE merge_queue_entries e SET state = 'stopped', reason = '${HOST_DEQUEUED_REASON}', ${CLEAR_SLOT_AND_WORK}
-      WHERE e.account_id = $1 AND e.repo_id = $2 AND e.pr_number = $3 AND e.state = 'in_flight' AND e.phase = '${HOST_QUEUE_PHASE}'
-        AND e.work_item_id IS NOT NULL
-        AND $4 = (SELECT v.head_sha FROM work_item_driver_events v WHERE v.account_id = e.account_id AND v.work_item_id = e.work_item_id AND v.kind = 'merge_enqueued' ORDER BY v.seq DESC LIMIT 1)
-      RETURNING ${COLUMNS}`,
-    [input.accountId, input.repoId, input.prNumber, input.headSha],
+export async function readHostQueued(client: Queryable, accountId: string, repoId: string): Promise<Array<{ entryId: string; prNumber: number }>> {
+  const { rows } = await client.query<{ id: string; pr_number: number }>(
+    `SELECT e.id, e.pr_number FROM merge_queue_entries e
+      WHERE e.account_id = $1 AND e.repo_id = $2 AND e.state = 'queued' AND e.entry_kind = 'work_item' AND e.work_item_id IS NOT NULL AND ${isQueuedSql("e.account_id", "e.work_item_id", "e.pr_number")}
+      ORDER BY e.approved_at, e.pr_number`,
+    [accountId, repoId],
   );
+  return rows.map((r) => ({ entryId: r.id, prNumber: r.pr_number }));
+}
+
+/** The entries of a repo whose item is halted: the take leaves them out, so nothing is enqueued, retried or merged for an item a person stopped. */
+export async function readHaltedEntries(client: Queryable, accountId: string, repoId: string): Promise<ReadonlySet<string>> {
+  const { rows } = await client.query<{ id: string }>(
+    `SELECT e.id FROM merge_queue_entries e JOIN work_items w ON w.account_id = e.account_id AND w.id = e.work_item_id
+      WHERE e.account_id = $1 AND e.repo_id = $2 AND e.state = 'queued' AND w.halted_at IS NOT NULL`,
+    [accountId, repoId],
+  );
+  return new Set(rows.map((r) => r.id));
+}
+
+export type HostRemovalVerdict =
+  /** No removal of the head last enqueued for this pull request. */
+  | { verdict: "none" }
+  /** The first removal by GitHub: queue it again once. */
+  | { verdict: "retry"; headSha: string }
+  /** A person took it out: no automatic action follows. */
+  | { verdict: "removed"; headSha: string }
+  /** The second removal of the same head: the one automatic retry is used up. */
+  | { verdict: "exhausted"; headSha: string };
+
+/**
+ * D#694 B6-3: what the facts say about the head last enqueued for the entry's own pull request, decided from the driver facts alone (never from a counter and never
+ * from whether the webhook's settle ran). Removals of any other pull request of the item, or of another head, are not counted.
+ */
+export async function removalVerdict(client: Queryable, entry: Pick<MergeQueueEntry, "accountId" | "workItemId" | "prNumber">): Promise<HostRemovalVerdict> {
+  if (entry.workItemId === null) return { verdict: "none" };
+  const { rows } = await client.query<{ head_sha: string | null }>(
+    `SELECT head_sha FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'merge_enqueued' AND pr_number = $3 ORDER BY seq DESC LIMIT 1`,
+    [entry.accountId, entry.workItemId, entry.prNumber],
+  );
+  const headSha = rows[0]?.head_sha ?? null;
+  if (headSha === null) return { verdict: "none" };
+  const removals = await listHeadRemovals(client, entry.accountId, entry.workItemId, headSha, entry.prNumber);
+  if (removals.length === 0) return { verdict: "none" };
+  if (removalRetryAllowed(removals)) return { verdict: "retry", headSha };
+  return { verdict: removals[removals.length - 1]!.reasons.includes("actor_user") ? "removed" : "exhausted", headSha };
+}
+
+const removalStopReason = (v: "removed" | "exhausted"): string => (v === "removed" ? HOST_DEQUEUED_REASON : HOST_RETRY_USED_REASON);
+
+export type HostDequeueSettled =
+  /** The first removal by GitHub of a head: the entry stays queued, no longer reads as waiting there, and the next take runs the gate on the same head again. */
+  | { outcome: "retry"; entry: MergeQueueEntry }
+  /** A person took it out: the entry stops (reason `removed_from_merge_queue`) and waits for a person to queue it again. */
+  | { outcome: "removed"; entry: MergeQueueEntry }
+  /** The second removal of the same head: the one automatic retry is used. The entry stops (reason `merge_queue_retry_used`); the caller hands the item to a person. */
+  | { outcome: "exhausted"; entry: MergeQueueEntry }
+  | { outcome: "ignored" };
+
+/**
+ * D#694 B6-3 (replacing B6-2's stop): the host's queue removed a pull request without merging it. The webhook's fast path for `removalVerdict`; the tick decides the same
+ * from the same facts when it takes the entry, so a settle that never ran changes nothing. Applies to the `queued` entry of this repository and pull request whose last
+ * enqueued head is the one removed; a head the item has moved on from, an entry that is not waiting there, a final entry and a replay change nothing. Scoped to `repo_id`.
+ */
+export async function settleHostDequeue(client: Queryable, input: { accountId: string; repoId: string; prNumber: number; headSha: string }): Promise<HostDequeueSettled> {
+  assertSha(input.headSha);
+  const entry = await one(
+    client,
+    `SELECT ${COLUMNS} FROM merge_queue_entries e WHERE e.account_id = $1 AND e.repo_id = $2 AND e.pr_number = $3 AND e.state = 'queued' AND e.work_item_id IS NOT NULL`,
+    [input.accountId, input.repoId, input.prNumber],
+  );
+  if (!entry) return { outcome: "ignored" };
+  const v = await removalVerdict(client, entry);
+  if (v.verdict === "none" || v.headSha !== input.headSha) return { outcome: "ignored" };
+  if (v.verdict === "retry") return { outcome: "retry", entry };
+  const stopped = await one(
+    client,
+    `UPDATE merge_queue_entries SET state = 'stopped', reason = $3, ${CLEAR_SLOT_AND_WORK} WHERE account_id = $1 AND id = $2 AND state = 'queued' RETURNING ${COLUMNS}`,
+    [input.accountId, entry.id, removalStopReason(v.verdict)],
+  );
+  return stopped ? { outcome: v.verdict, entry: stopped } : { outcome: "ignored" };
+}
+
+/**
+ * D#694 B6-3: the take-time guard. For the entry that now holds the slot, `removalVerdict`; a person's removal or a used-up retry of the head the entry is about to be
+ * gated on stops it (releasing the slot) instead of enqueueing it again. Answers the stopped entry and the verdict, or null to go on.
+ */
+export async function stopOnRemovals(client: Queryable, input: { entry: MergeQueueEntry; holder: string }): Promise<{ verdict: "removed" | "exhausted"; entry: MergeQueueEntry; headSha: string } | null> {
+  const v = await removalVerdict(client, input.entry);
+  if ((v.verdict !== "removed" && v.verdict !== "exhausted") || v.headSha !== input.entry.headSha) return null;
+  const stopped = await stopEntry(client, { accountId: input.entry.accountId, entryId: input.entry.id, reason: removalStopReason(v.verdict), holder: input.holder });
+  return stopped ? { verdict: v.verdict, entry: stopped, headSha: v.headSha } : null;
 }
 
 /** The item was cancelled: its entry ends, its slot (if any) is released. The caller cancels any running fix round through the runner's own cancel. */

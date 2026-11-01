@@ -57,6 +57,8 @@ export interface RefreshStepDeps<G> {
    */
   startDeltaReview: StartDeltaReview;
   sleep(ms: number): Promise<void>;
+  /** D#694 B6-3: the base branch is behind GitHub's merge queue, which builds its own group tip: the branch is never compared or updated here. */
+  skipBehindRefresh?: boolean;
   pollIntervalMs?: number;
   pollLimit?: number;
 }
@@ -178,6 +180,8 @@ export async function runRefreshStep<G>(deps: RefreshStepDeps<G>, input: Refresh
     return afterHeadChange(deps, input, tip, now.headSha, "recovered");
   }
 
+  // D#694 B6-3: in the host's merge queue GitHub builds its own group tip, so the branch is never updated here.
+  if (deps.skipBehindRefresh) return { outcome: "not_behind", headSha: tip, gate: await deps.gate({ headSha: tip }) };
   const cmp = await deps.github.compareToBase(pr, tip);
   if (cmp.behindBy === 0) return { outcome: "not_behind", headSha: tip, gate: await deps.gate({ headSha: tip }) };
 

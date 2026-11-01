@@ -638,6 +638,16 @@ test.describe("D#483 live parity: the notice, Check the build, the board's polli
     await expect(link).toHaveAttribute("href", `https://github.com/acme/docs/pulls?q=is%3Apr+head%3Afx%2Fissue-${REVIEW_PASSED.issue_number}`);
   });
 
+  test("D#694 B6-3: a review-passed item the merge gate put in GitHub's merge queue says Queued to merge, not Ready to merge", async ({ page }) => {
+    const step = (result: string) => ({ kind: "continue_work_item", state: "done", code: null, result, reasons: [], at: "2026-10-27T10:00:00.000Z", finished_at: "2026-10-27T10:00:03.000Z" });
+    await setup(page, { status: 200, json: { ...REVIEW_PASSED, steps: [step("ready_human_merges"), step("merge_enqueued")] } }, "review_passed");
+    await openDetail(page);
+    await expect(tid(page, "pl-queued")).toHaveText(/^Queued to merge\. Waiting for GitHub's merge queue to build and merge it\. /);
+    await expect(tid(page, "pl-queued-link")).toHaveAttribute("href", "https://github.com/acme/docs/pull/57");
+    await expect(tid(page, "pl-ready")).toHaveCount(0);
+    await expect(page.locator("body")).not.toContainText("Ready to merge");
+  });
+
   test("a review-passed item whose public change was refused says what blocks the merge, not that it is ready, and offers no link", async ({ page }) => {
     const refused = { state: "refused", code: "scan_refused", sentence: "Refused: the scan found something that must not be public", repo: "acme/docs-public", branch: "fx/issue-42", pr_number: null, pr_url: null, head_sha: null, actions: [] };
     const gate = { kind: "continue_work_item", state: "done", code: null, result: "ready_human_merges", reasons: ["pr_draft", "ci_not_green", "auto_merge_not_allowed", "public_pr_not_open"], at: "2026-10-27T10:00:00.000Z", finished_at: "2026-10-27T10:00:03.000Z" };

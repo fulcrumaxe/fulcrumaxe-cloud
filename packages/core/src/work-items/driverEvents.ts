@@ -98,6 +98,26 @@ export function dequeueReasonCode(reason: unknown): string {
   return plain === '' ? DEQUEUE_UNSPECIFIED : toCode(plain);
 }
 
+/**
+ * D#694 B6-3: the removals of one head of one pull request, oldest first, as `reasons` (`actor_user` | `actor_app`). GitHub's success reasons are left out, so the count of these is the count of
+ * times the queue took the head out WITHOUT merging it: the number the one-automatic-retry rule is derived from (never a stored counter).
+ */
+export async function listHeadRemovals(client: Pick<PoolClient, 'query'>, accountId: string, workItemId: string, headSha: string, prNumber: number): Promise<Array<{ reasons: string[] }>> {
+  const { rows } = await client.query<{ reasons: string[] }>(
+    `SELECT reasons FROM work_item_driver_events
+      WHERE account_id = $1 AND work_item_id = $2 AND kind = 'merge_dequeued' AND head_sha = $3 AND pr_number = $5 AND NOT (COALESCE(code, '') = ANY($4::text[])) ORDER BY seq`,
+    [accountId, workItemId, headSha, [...DEQUEUE_SUCCESS_CODES], prNumber],
+  );
+  return rows;
+}
+
+/**
+ * D#694 B6-3: the dedupe key of an enqueue fact. The first enqueue of a head is `enqueued:<head>`; one made after `removals` removals of that head is a new fact
+ * (`enqueued:<head>:r<n>`), or the retry would find the first fact and write nothing, and the item would never read as queued again. Only the merge gate writes the later ones: the webhook's `enqueued`
+ * keeps the first key, so a replayed old delivery after a removal cannot write a fresh enqueue fact and make a removed head read as queued again.
+ */
+export const enqueueDedupeKey = (headSha: string, removals: number): string => (removals === 0 ? `enqueued:${headSha}` : `enqueued:${headSha}:r${removals}`);
+
 /** D#483 S5-k1b: the starts that can wait on a limit (migration 0845's check lists the same seven; a test holds the two equal). */
 export const WAITING_STAGES = ['build', 'classify', 'spec', 'respec', 'review', 'fix_round', 'panel'] as const;
 export type WaitingStage = (typeof WAITING_STAGES)[number];

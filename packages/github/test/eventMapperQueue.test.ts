@@ -18,10 +18,13 @@ describe('mapEvent: pull_request.enqueued and .dequeued', () => {
     expect(map(queued('enqueued'))).toMatchObject({ kind: 'record_queue_event', action: 'enqueued', prNumber: 42, headSha: HEAD, reason: null, linkedIssueNumber: 70 });
   });
 
-  it('dequeued carries the host reason as a plain code and the actor kind from the sender type', () => {
-    expect(map(queued('dequeued', { reason: 'MERGE_CONFLICT', sender: { type: 'User' } }))).toMatchObject({ kind: 'record_queue_event', action: 'dequeued', reason: 'merge_conflict', actor: 'user' });
+  it('D#694 B6-3: dequeued carries the host reason as a plain code; the reason decides who removed it (MANUAL is a person), the sender type only when there is no reason', () => {
+    expect(map(queued('dequeued', { reason: 'MERGE_CONFLICT', sender: { type: 'User' } }))).toMatchObject({ kind: 'record_queue_event', action: 'dequeued', reason: 'merge_conflict', actor: 'app' });
     expect(map(queued('dequeued', { reason: 'CI_TIMEOUT', sender: { type: 'Bot' } }))).toMatchObject({ reason: 'ci_timeout', actor: 'app' });
-    expect(map(queued('dequeued', { reason: 'MANUAL' }))).toMatchObject({ actor: 'app' });
+    expect(map(queued('dequeued', { reason: 'MANUAL' }))).toMatchObject({ actor: 'user' });
+    expect(map(queued('dequeued', { reason: 'MANUAL', sender: { type: 'Bot' } }))).toMatchObject({ actor: 'user' });
+    expect(map(queued('dequeued', { sender: { type: 'User' } }))).toMatchObject({ reason: 'unspecified', actor: 'user' });
+    expect(map(queued('dequeued', { sender: { type: 'Bot' } }))).toMatchObject({ actor: 'app' });
   });
 
   it.each([

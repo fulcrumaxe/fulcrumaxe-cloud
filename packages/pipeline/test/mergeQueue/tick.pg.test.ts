@@ -444,32 +444,4 @@ describe("D#519 MQ3-b CI classification (no database)", () => {
   });
 });
 
-describe("D#694 B5: a pull request the gate put in the host's merge queue is a settled wait [pg]", () => {
-  const db = pgHarness();
-  it("the tick that got merge_enqueued holds the entry; later ticks ask the gate zero times, enqueue nothing and merge nothing; the entry stays waiting", async () => {
-    const r = await startQueueRepo(db, {});
-    repos.push(r);
-    await r.addItem(7);
-    let gateCalls = 0;
-    const gate = async () => {
-      gateCalls++;
-      return { outcome: "merge_enqueued" as const };
-    };
-    const first = await runQueueTick(r.deps({ gate }), r);
-    expect(first.steps).toEqual([{ step: "parked", entryId: (await r.entry(7)).id, why: "host_queued" }]);
-    expect(gateCalls).toBe(1);
-    const held = await r.entry(7);
-    expect(held.state).toBe("in_flight");
-    expect(held.phase).toBe("host_queue");
-    for (let i = 0; i < 3; i++) {
-      const again = await runQueueTick(r.deps({ gate }), r);
-      expect(again.steps.map((s) => s.step)).toEqual(["idle"]);
-    }
-    expect(gateCalls).toBe(1);
-    expect(r.mergeCalls()).toEqual([]);
-    expect((await r.entry(7)).state).toBe("in_flight");
-    expect((await r.entry(7)).phase).toBe("host_queue");
-  });
-});
-
 export type { MergeQueueEntry };

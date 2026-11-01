@@ -204,7 +204,12 @@ export type UpdateBranchOutcome = { outcome: "accepted" } | { outcome: "conflict
  * D#694 B5: what the base branch does with a merge. `queue`: GitHub's merge queue is on (the GraphQL read and the branch rules agree). `direct`: both say there is none.
  * `unknown`: the read failed or the two disagree; the gate never enqueues and never merges then. `source` is a closed code for the log, never GitHub's text.
  */
-export type MergeQueueMode = { mode: "queue" | "direct" | "unknown"; source: string };
+export type MergeQueueMode = {
+  mode: "queue" | "direct" | "unknown";
+  source: string;
+  /** D#694 B6-3: `queue` only: the active rule's `max_entries_to_build`, when it is a whole number from 1 to 100. Absent when the rule does not state one. */
+  maxEntries?: number;
+};
 
 /**
  * D#694 B5: what the enqueue call answered. `via: "queue"` carries the entry GitHub made; `via: "auto_merge"` is the fallback taken only when the queue call itself was
@@ -258,6 +263,8 @@ export interface MergeGateGitHubPort {
    * (a test double, a fence that offers none) is `direct`, which is today's behaviour. A throw is read as `unknown`.
    */
   getMergeQueueMode?(pr: PullRequestRef, baseRef: string): Promise<MergeQueueMode>;
+  /** D#694 B6-3: the merge mode of the pull request's base branch and the batch size of its queue (1 when unreadable), for the product queue's in-flight bound. */
+  getMergeQueueInfo?(pr: PullRequestRef): Promise<{ mode: MergeQueueMode["mode"]; maxEntries: number }>;
   /** D#694 B5: puts the pull request in the merge queue, bound to `expectedHeadOid` (GitHub refuses if the head is any other commit). Only called when the mode is `queue`. */
   enqueuePullRequest?(pr: PullRequestRef, args: { expectedHeadOid: string }): Promise<EnqueueOutcome>;
   /** D#694 B6-1 (inert): takes the pull request out of the merge queue. Not called by the gate. */

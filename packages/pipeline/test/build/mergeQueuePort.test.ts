@@ -497,3 +497,62 @@ describe("a direct-merge refusal that names the queue evicts the stale direct an
     expect(reads(f)).toBe(before);
   });
 });
+
+describe("D#694 B6-3: getMergeQueueInfo (the product queue's bound)", () => {
+  const rule = (parameters?: unknown) => [{ type: "merge_queue", enforcement: "active", ...(parameters === undefined ? {} : { parameters }) }];
+  const info = (f: Fake, over?: Parameters<typeof portFor>[1]) => portFor(f, over).getMergeQueueInfo!(PR);
+
+  it("the batch size is the active rule's max_entries_to_build", async () => {
+    const f = fresh();
+    f.rules = rule({ max_entries_to_build: 3 });
+    expect(await info(f)).toEqual({ mode: "queue", maxEntries: 3 });
+  });
+
+  it.each([
+    ["missing", rule({})],
+    ["no parameters", rule()],
+    ["not an integer", rule({ max_entries_to_build: 2.5 })],
+    ["a string", rule({ max_entries_to_build: "3" })],
+    ["zero", rule({ max_entries_to_build: 0 })],
+    ["above GitHub's limit", rule({ max_entries_to_build: 101 })],
+  ])("a batch size that is %s is 1", async (_n, rules) => {
+    const f = fresh();
+    f.rules = rules;
+    expect(await info(f)).toEqual({ mode: "queue", maxEntries: 1 });
+  });
+
+  it("the rule that counts is an active one", async () => {
+    const f = fresh();
+    f.rules = [{ type: "merge_queue", enforcement: "evaluate", parameters: { max_entries_to_build: 9 } }, ...rule({ max_entries_to_build: 4 })];
+    expect(await info(f)).toEqual({ mode: "queue", maxEntries: 4 });
+  });
+
+  it("a branch with no queue is direct with a bound of 1; a failed read is unknown with a bound of 1, never direct", async () => {
+    const off = fresh();
+    off.queue = null;
+    off.rules = [];
+    expect(await info(off)).toEqual({ mode: "direct", maxEntries: 1 });
+    clearMergeQueueModeCache();
+    const bad = fresh();
+    bad.graphqlStatus = 500;
+    expect(await info(bad)).toEqual({ mode: "unknown", maxEntries: 1 });
+  });
+
+  it("without the pinned documents the port is direct whatever the rule says (the default the wiring test guards against)", async () => {
+    const f = fresh();
+    f.rules = rule({ max_entries_to_build: 3 });
+    expect(await info(f, { queueDocuments: undefined })).toEqual({ mode: "direct", maxEntries: 1 });
+  });
+
+  it("one read of the pull request per call, and the queue answer is cached", async () => {
+    const f = fresh();
+    f.rules = rule({ max_entries_to_build: 2 });
+    const port = portFor(f);
+    await port.getMergeQueueInfo!(PR);
+    const pulls = () => f.reached.filter((r) => /\/pulls\/7$/.test(r.path)).length;
+    const gql = () => f.reached.filter((r) => r.path === "/graphql").length;
+    expect([pulls(), gql()]).toEqual([1, 1]);
+    await port.getMergeQueueInfo!(PR);
+    expect([pulls(), gql()]).toEqual([2, 1]);
+  });
+});

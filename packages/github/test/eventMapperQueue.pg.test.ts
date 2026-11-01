@@ -70,7 +70,7 @@ describe('merge-queue deliveries [pg]', () => {
     const it1 = await item();
     const dq = payload('dequeued', it1.gh, { reason: 'MERGE_CONFLICT', sender: { type: 'User' } });
     for (let i = 0; i < 3; i++) await apply(dq, 'delivery-one');
-    expect(await events(it1.workItemId, 'merge_dequeued')).toMatchObject([{ code: 'merge_conflict', reasons: ['actor_user'], head_sha: GATED, pr_number: 800 + it1.gh, queue_entry_id: 'MQE_kwDOentry' }]);
+    expect(await events(it1.workItemId, 'merge_dequeued')).toMatchObject([{ code: 'merge_conflict', reasons: ['actor_app'], head_sha: GATED, pr_number: 800 + it1.gh, queue_entry_id: 'MQE_kwDOentry' }]);
     await apply(dq, 'delivery-two');
     expect(await events(it1.workItemId, 'merge_dequeued')).toHaveLength(2);
   });
