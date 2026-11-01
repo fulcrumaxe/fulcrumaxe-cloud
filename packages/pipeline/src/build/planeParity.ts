@@ -10,10 +10,10 @@ import type { GitHubHttp } from "./githubMergePort.js";
  * lists, and never the compare endpoint, whose answer carries diffs), and `S` is the first window commit whose id is in it. With none there is no sync point. Drift is P against S, lag is S before U with no difference, parity is S equal to U. With no
  * sync point P is compared with U (`no_shared_history` when they differ). The overlay (`compileOverlay`, the push's matcher) is dropped from BOTH sides.
  *
- * Bounds: 10 calls, 10 s each, 25 s in all. A recursive tree that is not plainly untruncated is `too_large`; any other failure to know is `unavailable`.
+ * Bounds: 10 calls, 10 s each, 25 s in all. A recursive tree that is not plainly untruncated is `too_large`; a default branch other than `main` is `unsupported_branch` (a lasting condition, raised like `too_large`); any other failure to know is `unavailable`.
  * No file content is reachable through the client or read here, and nothing is logged: a result holds paths only in `paths`, never a login, a message of GitHub's or a token.
  */
-export type PlaneParityResult = "in_parity" | "lag" | "drift" | "no_shared_history" | "too_large" | "invalid_overlay" | "unavailable";
+export type PlaneParityResult = "in_parity" | "lag" | "drift" | "no_shared_history" | "too_large" | "invalid_overlay" | "unsupported_branch" | "unavailable";
 
 export interface PlaneParityRepo {
   owner: string;
@@ -40,6 +40,8 @@ export interface PlaneParityOutcome {
   pathCount: number;
   /** Public paths the overlay matches. Counted, never named. */
   overlayOnPublicCount: number;
+  /** For `too_large` and `unsupported_branch`: which repository it is about. */
+  limitSide: "private" | "public" | null;
 }
 
 export const MAX_PARITY_CALLS = 10;
@@ -57,7 +59,10 @@ const isObj = (v: unknown): v is Json => v !== null && typeof v === "object" && 
 
 /** Thrown inside the check to end it with a result; never escapes. */
 class Stop extends Error {
-  constructor(readonly result: "too_large" | "unavailable") {
+  constructor(
+    readonly result: "too_large" | "unavailable" | "unsupported_branch",
+    readonly side: "private" | "public" | null = null,
+  ) {
     super(result);
   }
 }
@@ -67,7 +72,7 @@ export async function computePlaneParity(input: PlaneParityInput): Promise<Plane
   const deadline = input.deadline ?? now() + PARITY_DEADLINE_MS;
   const maxCalls = input.limits?.maxCalls ?? MAX_PARITY_CALLS;
   const callTimeoutMs = input.limits?.callTimeoutMs ?? PARITY_CALL_TIMEOUT_MS;
-  const out: PlaneParityOutcome = { result: "unavailable", privateSha: null, publicSha: null, syncSha: null, paths: [], pathCount: 0, overlayOnPublicCount: 0 };
+  const out: PlaneParityOutcome = { result: "unavailable", privateSha: null, publicSha: null, syncSha: null, paths: [], pathCount: 0, overlayOnPublicCount: 0, limitSide: null };
   const overlay = compileOverlay(input.pairing.overlayGlobs);
   if ("error" in overlay) return { ...out, result: "invalid_overlay" };
 
@@ -90,18 +95,20 @@ export async function computePlaneParity(input: PlaneParityInput): Promise<Plane
       if (timer !== undefined) clearTimeout(timer);
     }
   };
-  const tipOf = async (http: GitHubHttp, repo: PlaneParityRepo): Promise<string> => {
+  const tipOf = async (http: GitHubHttp, repo: PlaneParityRepo, side: "private" | "public"): Promise<string> => {
     const r = await get(http, repo, "");
-    if (r.status !== 200 || !isObj(r.body) || r.body.default_branch !== BRANCH) throw new Stop("unavailable");
+    if (r.status !== 200 || !isObj(r.body) || typeof r.body.default_branch !== "string") throw new Stop("unavailable");
+    // A lasting condition, not an outage: the check only knows `main` (the client's list allows no other ref), so a person is told.
+    if (r.body.default_branch !== BRANCH) throw new Stop("unsupported_branch", side);
     const ref = await get(http, repo, `/git/ref/heads/${BRANCH}`);
     const sha = ref.status === 200 && isObj(ref.body) && isObj(ref.body.object) ? ref.body.object.sha : undefined;
     if (typeof sha !== "string" || !SHA40.test(sha)) throw new Stop("unavailable");
     return sha;
   };
-  const readTree = async (http: GitHubHttp, repo: PlaneParityRepo, sha: string): Promise<Map<string, TreeEntry>> => {
+  const readTree = async (http: GitHubHttp, repo: PlaneParityRepo, sha: string, side: "private" | "public"): Promise<Map<string, TreeEntry>> => {
     const r = await get(http, repo, `/git/trees/${sha}`, { recursive: "1" });
     if (r.status !== 200 || !isObj(r.body) || !Array.isArray(r.body.tree)) throw new Stop("unavailable");
-    if (r.body.truncated !== false) throw new Stop("too_large");
+    if (r.body.truncated !== false) throw new Stop("too_large", side);
     const tree = treeFromEntries(r.body.tree);
     if (tree === null) throw new Stop("unavailable");
     return tree;
@@ -125,8 +132,8 @@ export async function computePlaneParity(input: PlaneParityInput): Promise<Plane
   try {
     const pubRepo = input.pairing.publicRepo;
     const privRepo = input.pairing.privateRepo;
-    const u = await tipOf(input.publicHttp, pubRepo);
-    const p = await tipOf(input.privateHttp, privRepo);
+    const u = await tipOf(input.publicHttp, pubRepo, "public");
+    const p = await tipOf(input.privateHttp, privRepo, "private");
     out.publicSha = u;
     out.privateSha = p;
 
@@ -144,10 +151,10 @@ export async function computePlaneParity(input: PlaneParityInput): Promise<Plane
     const sync = window.find((c) => history.has(c.sha))?.sha ?? null;
     out.syncSha = sync;
 
-    const privTree = await readTree(input.privateHttp, privRepo, p);
+    const privTree = await readTree(input.privateHttp, privRepo, p, "private");
     const baseSha = sync ?? u;
-    const baseTree = await readTree(input.publicHttp, pubRepo, baseSha);
-    const tipTree = baseSha === u ? baseTree : await readTree(input.publicHttp, pubRepo, u);
+    const baseTree = await readTree(input.publicHttp, pubRepo, baseSha, "public");
+    const tipTree = baseSha === u ? baseTree : await readTree(input.publicHttp, pubRepo, u, "public");
     for (const path of tipTree.keys()) if (overlay.match(path)) out.overlayOnPublicCount++;
 
     const differing = diffTreeEntries(baseTree, privTree, (path) => !overlay.match(path)).paths.slice().sort();
@@ -159,6 +166,6 @@ export async function computePlaneParity(input: PlaneParityInput): Promise<Plane
     return out;
   } catch (err) {
     // fx-swallow-ok: a Stop is a result; anything unexpected is "could not know", and its text can carry a path, so it is not kept
-    return { ...out, result: err instanceof Stop ? err.result : "unavailable", paths: [], pathCount: 0 };
+    return { ...out, result: err instanceof Stop ? err.result : "unavailable", paths: [], pathCount: 0, limitSide: err instanceof Stop ? err.side : null };
   }
 }

@@ -1,10 +1,11 @@
 import type { NextRequest, NextResponse } from "next/server";
 import { productionVercelEnvSource } from "../../../../lib/setupRequestEnvSource";
 import { getWorker } from "../../../../lib/worker";
+import { computeParityForJob } from "../../../../lib/planeParityCompute";
 import { setupRequestCheckHandler } from "./handler";
 
 /** A pass starts checks for 40 seconds at most (checkSweep.ts), well under the minute until the cron fires again. */
-export const maxDuration = 60;
+export const maxDuration = 60; // handler.ts TICK_BUDGET_MS: the parity pass starts no check that cannot finish inside it
 
 /**
  * Not under /api/v1 -- see handler.ts's header for the auth model. The provider source is lib/setupRequestEnvSource.ts: the account's own sealed Vercel token (D#598 P8d-2); an account without a
@@ -16,6 +17,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     cronSecret: process.env.CRON_SECRET ?? "",
     getWorker,
     envSource: productionVercelEnvSource,
+    planeParity: computeParityForJob,
     log: (line) => console.log(line),
   });
 }

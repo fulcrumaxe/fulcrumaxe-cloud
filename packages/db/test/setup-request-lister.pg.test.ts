@@ -12,7 +12,8 @@ const FN = 'setup_request_list_due(integer,integer)';
 const EXPECTED_PRIVILEGES = [
   ...['id', 'account_id', 'kind', 'state', 'check_kind', 'check_ran_at', 'created_at', 'created_by'].map((c) => `column setup_requests.${c} SELECT`),
   ...['id', 'deleted_at'].map((c) => `column accounts.${c} SELECT`),
-  ...['account_id', 'user_id', 'role'].map((c) => `column account_members.${c} SELECT`),
+  ...['account_id', 'user_id', 'role', 'created_at'].map((c) => `column account_members.${c} SELECT`),
+  ...['repo_id', 'account_id', 'due_at'].map((c) => `column plane_parity_checks.${c} SELECT`),
   'schema public USAGE',
 ].sort();
 
@@ -41,13 +42,13 @@ describe(`migration 0874: ${ROLE} and setup_request_list_due [pg]`, () => {
   });
 
   describe('the role', () => {
-    it('is NOLOGIN and unprivileged, has no member and is a member of nothing, and owns exactly the one lister', async () => {
+    it('is NOLOGIN and unprivileged, has no member and is a member of nothing, and owns exactly its two listers (0874, 0951)', async () => {
       const { rows } = await admin.query(`SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls FROM pg_roles WHERE rolname = $1`, [ROLE]);
       expect(rows[0]).toEqual({ rolcanlogin: false, rolsuper: false, rolcreatedb: false, rolcreaterole: false, rolreplication: false, rolbypassrls: false });
       expect((await admin.query(`SELECT 1 FROM pg_auth_members WHERE roleid = $1::regrole`, [ROLE])).rowCount, 'members').toBe(0);
       expect((await admin.query(`SELECT 1 FROM pg_auth_members WHERE member = $1::regrole`, [ROLE])).rowCount, 'member of').toBe(0);
       const owned = await admin.query<{ sig: string }>(`SELECT p.oid::regprocedure::text AS sig FROM pg_proc p WHERE p.proowner = $1::regrole`, [ROLE]);
-      expect(owned.rows.map((r) => r.sig)).toEqual([FN]);
+      expect(owned.rows.map((r) => r.sig).sort()).toEqual(['plane_parity_list_due(integer)', FN]);
       const objects = await admin.query(`SELECT 1 FROM pg_class WHERE relowner = $1::regrole UNION ALL SELECT 1 FROM pg_namespace WHERE nspowner = $1::regrole`, [ROLE]);
       expect(objects.rowCount, 'other objects').toBe(0);
       expect((await admin.query(`SELECT has_schema_privilege($1, 'public', 'CREATE') AS ok`, [ROLE])).rows[0].ok).toBe(false);
@@ -65,12 +66,12 @@ describe(`migration 0874: ${ROLE} and setup_request_list_due [pg]`, () => {
       expect(rows.map((r) => r.x).sort()).toEqual(EXPECTED_PRIVILEGES);
     });
 
-    it('has one row policy on each of account_members, accounts and setup_requests, each for this role alone', async () => {
+    it('has one row policy on each of account_members, accounts, plane_parity_checks and setup_requests, each for this role alone', async () => {
       const { rows } = await admin.query<{ tablename: string; cmd: string; roles: string[] }>(
         `SELECT tablename, cmd, roles::text[] AS roles FROM pg_policies WHERE schemaname = 'public' AND $1 = ANY(roles) ORDER BY tablename, cmd`,
         [ROLE],
       );
-      expect(rows.map((r) => `${r.tablename} ${r.cmd}`)).toEqual(['account_members SELECT', 'accounts SELECT', 'setup_requests SELECT']);
+      expect(rows.map((r) => `${r.tablename} ${r.cmd}`)).toEqual(['account_members SELECT', 'accounts SELECT', 'plane_parity_checks SELECT', 'setup_requests SELECT']);
       for (const r of rows) expect(r.roles).toEqual([ROLE]);
     });
   });

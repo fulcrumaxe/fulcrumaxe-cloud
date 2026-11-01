@@ -60,5 +60,6 @@ describe('D#598 P8a: setup request vocabulary', () => {
     expect(setupRequestTitle('app_not_installed', 'acme/web', null)).toBe('App not installed on acme/web');
     expect(setupRequestTitle('branch_pushed_by_person', 'fx/x', null)).toBe('Someone pushed to fx/x');
     expect(setupRequestTitle('overlay_path_missing', 'plan.json', null)).toBe('Add plan.json to the overlay paths');
+    expect(setupRequestTitle('parity_drift', 'me/pub', null)).toBe('Parity check needs attention: me/pub');
   });
 });

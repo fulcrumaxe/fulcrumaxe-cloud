@@ -173,7 +173,7 @@ function repoMapAllowed(method: string, path: string, prefix: string): boolean {
 const HEX40 = "[0-9a-f]{40}";
 const PARITY_TREE_RE = new RegExp(`^git/trees/${HEX40}$`);
 const PARITY_SHA_RE = new RegExp(`^${HEX40}$`);
-function planeParityAllowed(method: string, path: string, query: Readonly<Record<string, string>> | undefined, prefix: string): boolean {
+export function planeParityAllowed(method: string, path: string, query: Readonly<Record<string, string>> | undefined, prefix: string): boolean {
   if (method !== "GET") return false;
   // The repository path has no trailing slash; everything below it must name something.
   const rest = path === prefix.slice(0, -1) ? "" : path.startsWith(prefix) && path.length > prefix.length ? path.slice(prefix.length) : null;

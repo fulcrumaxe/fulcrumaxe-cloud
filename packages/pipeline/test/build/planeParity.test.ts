@@ -173,7 +173,9 @@ describe("computePlaneParity", () => {
       const w = chainWorld(5, BASE, { fail: (k, side) => (k === "commits" && side === "priv" ? { status: 200, body } : undefined) });
       expect((await makeFake(w).run()).result, JSON.stringify(body)).toBe("unavailable");
     }
-    expect((await makeFake(chainWorld(3, BASE, { defaultBranch: "master" })).run()).result).toBe("unavailable");
+    // A default branch that is not `main` is a lasting condition, not an outage: its own result, naming the side (public here).
+    const odd = await makeFake(chainWorld(3, BASE, { defaultBranch: "master" })).run();
+    expect([odd.result, odd.limitSide, odd.privateSha, odd.paths]).toEqual(["unsupported_branch", "public", null, []]);
     expect((await makeFake(chainWorld(3, BASE)).run({ deadline: Date.now() - 1 })).result).toBe("unavailable");
   });
 

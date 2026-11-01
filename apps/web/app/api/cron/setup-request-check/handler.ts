@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runGatedTick } from "@fx/core/src/pendingWork";
 import type { VercelEnvSource } from "@fx/core/src/setup-requests/checks";
+import type { ParityCompute } from "@fx/core/src/repos/planeParityChecks.js";
 import type { SetupRequestCheckWorker } from "../../../../lib/worker";
 import { cronAuthorized } from "../../../../lib/cronAuth";
 
@@ -16,12 +17,17 @@ import { cronAuthorized } from "../../../../lib/cronAuth";
  * tenant (packages/core/src/setup-requests/checkSweep.ts). The reply carries counts only.
  */
 
+/** The route's `maxDuration` in milliseconds (route.ts): the whole tick, the setup-request sweep and the parity pass together, has to be over by then. */
+export const TICK_BUDGET_MS = 60_000;
+
 export interface SetupRequestCheckHandlerDeps {
   cronSecret: string;
   /** Called only after the request is authenticated and the tick has decided to connect. Null while not configured. */
   getWorker(): Promise<SetupRequestCheckWorker | null>;
   /** Where a provider's variable names come from. Production binds the account's own sealed Vercel token (D#598 P8d-2); an account with none is unavailable. */
   envSource: VercelEnvSource;
+  /** D#598 P1d-3: the plane parity check, run in the same sweep for the pairings whose time has come. Absent, no parity check runs. */
+  planeParity?: ParityCompute;
   log(line: string): void;
   now?(): number;
 }
@@ -30,6 +36,7 @@ export async function setupRequestCheckHandler(req: NextRequest, deps: SetupRequ
   if (!cronAuthorized("/api/cron/setup-request-check", req.headers.get("authorization"), deps.cronSecret)) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
+  const deadlineAt = (deps.now ?? Date.now)() + TICK_BUDGET_MS;
   const ran = await runGatedTick(
     "setup-request-check",
     async () => {
@@ -38,7 +45,7 @@ export async function setupRequestCheckHandler(req: NextRequest, deps: SetupRequ
         deps.log("setup request check: worker not configured");
         return { result: { configured: false }, workFound: false, nextDueAt: null };
       }
-      const { nextDueAt, ...counts } = await worker.sweepSetupRequestChecks({ envSource: deps.envSource });
+      const { nextDueAt, ...counts } = await worker.sweepSetupRequestChecks({ envSource: deps.envSource, ...(deps.planeParity ? { planeParity: deps.planeParity, deadlineAt } : {}) });
       return { result: { configured: true, ...counts }, workFound: counts.listed > 0, nextDueAt };
     },
     deps.log,

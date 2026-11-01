@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { markWorkPending, setPendingHooks } from "@fx/core/src/pendingWork";
 import { sweepSetupRequestChecks } from "@fx/core/src/setup-requests/checkSweep";
+import { sweepPlaneParity } from "@fx/core/src/repos/planeParityChecks";
 import type { VercelEnvSource } from "@fx/core/src/setup-requests/checks";
 import { productionVercelEnvSource } from "../../../../lib/setupRequestEnvSource";
 import { makeRegion, storeOf, type FakeRegion } from "../../../../test/support/runtimeCacheFake";
@@ -169,5 +170,43 @@ describe("GET /api/cron/setup-request-check", () => {
     const res = await setupRequestCheckHandler(req(`Bearer ${SECRET}`), s.deps);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ configured: false });
+  });
+});
+
+describe("GET /api/cron/setup-request-check: the plane parity check (D#598 P1d-3)", () => {
+  it("passes the parity check to the worker only when one is bound; with none, the worker input names no planeParity", async () => {
+    await markWorkPending("setup-request-check", { since: clock.value - 120_000 });
+    const seen: Array<Record<string, unknown>> = [];
+    const worker = { sweepSetupRequestChecks: vi.fn(async (input: Record<string, unknown>) => (seen.push(input), { listed: 0, passed: 0, notYet: 0, skipped: 0, failed: 0, nextDueAt: null })) };
+    const base = { cronSecret: SECRET, getWorker: async () => worker, envSource: productionVercelEnvSource, log: () => undefined, now: () => clock.value };
+    await setupRequestCheckHandler(req(`Bearer ${SECRET}`), base as never);
+    const compute = vi.fn();
+    await markWorkPending("setup-request-check", { since: clock.value - 120_000 });
+    await setupRequestCheckHandler(req(`Bearer ${SECRET}`), { ...base, planeParity: compute } as never);
+    expect(seen.map((i) => "planeParity" in i)).toEqual([false, true]);
+    expect(seen[1]!.planeParity).toBe(compute);
+    // One deadline for the whole tick, counted from when the request arrived (the route's 60 s), handed to the worker for the parity pass.
+    expect(seen[1]!.deadlineAt).toBe(clock.value + 60_000);
+    expect("deadlineAt" in seen[0]!).toBe(false);
+  });
+
+  it("with a marker and nothing due, the parity list is one more statement on the same pool, no check runs and no outbound call is made; the marker then clears", async () => {
+    await markWorkPending("setup-request-check", { since: clock.value - 120_000 });
+    const s = setup();
+    const compute = vi.fn();
+    const worker = {
+      sweepSetupRequestChecks: async (input: { envSource: VercelEnvSource }) => {
+        const counts = await sweepSetupRequestChecks({ pool: s.pool, envSource: input.envSource, now: () => clock.value, log: () => undefined });
+        const parity = await sweepPlaneParity({ pool: s.pool, compute, now: () => clock.value, log: () => undefined });
+        return { ...counts, listed: counts.listed + parity.listed, parity };
+      },
+    };
+    s.getWorker.mockResolvedValueOnce(worker as never);
+    const res = await setupRequestCheckHandler(req(`Bearer ${SECRET}`), { ...s.deps, planeParity: compute });
+    expect(await res.json()).toMatchObject({ configured: true, listed: 0, parity: { listed: 0, checked: 0 } });
+    expect(s.statements.map((q) => /setup_request_list_due|plane_parity_list_due/.exec(q)?.[0])).toEqual(["setup_request_list_due", "plane_parity_list_due"]);
+    expect(compute).not.toHaveBeenCalled();
+    expect(outboundCalls).toBe(0);
+    expect(marker()).toBeNull();
   });
 });

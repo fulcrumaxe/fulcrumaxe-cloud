@@ -513,7 +513,7 @@ describe('D#598 P8a: setup requests', () => {
       // The API lists it with its fixed title, and a person can withdraw it.
       const list = (await (await call(f.member, 'GET', '/setup-requests')).json()) as { requests: Dto[] };
       expect(list.requests).toHaveLength(1);
-      expect(list.requests[0]).toMatchObject({ title: 'Public and private code differ: d.ts', origin: 'derived', created_by: null });
+      expect(list.requests[0]).toMatchObject({ title: 'Parity check needs attention: d.ts', origin: 'derived', created_by: null });
       expect((await call(f.admin, 'POST', `/setup-requests/${again!.id}/withdraw`)).status).toBe(200);
     });
   });

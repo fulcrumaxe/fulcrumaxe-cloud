@@ -99,6 +99,6 @@ export function setupRequestTitle(kind: SetupRequestKind, target: string, envNam
     case 'env_var':
       return `Add the environment variable ${envName ?? target} to ${target}`;
     case 'parity_drift':
-      return `Public and private code differ: ${target}`;
+      return `Parity check needs attention: ${target}`;
   }
 }

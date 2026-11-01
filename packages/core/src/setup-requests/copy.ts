@@ -35,7 +35,7 @@ export const COPY_REASON: Readonly<Record<CheckReasonCode, string>> = {
 };
 
 function fill(template: string, values: Readonly<Record<string, string>>): string {
-  return template.replace(/\{([a-z]+)\}/g, (whole, key: string) => values[key] ?? whole);
+  return template.replace(/\{([a-z0-9]+)\}/g, (whole, key: string) => values[key] ?? whole);
 }
 
 const secondsText = (n: number): string => `${n} ${n === 1 ? 'second' : 'seconds'}`;
@@ -108,4 +108,60 @@ export function statusSentence(request: StatusSentenceInput, opts: StatusSentenc
 /** The interval the API states for a request: the constant while it waits on an automatic check that can run, else null. */
 export function checkIntervalFor(request: Pick<StatusSentenceInput, 'state' | 'checkKind'>, opts: { checksAvailable: boolean }): number | null {
   return request.state === 'open' && request.checkKind !== null && opts.checksAvailable ? CHECK_INTERVAL_SECONDS : null;
+}
+
+/**
+ * D#598 P1d-3: the parity request. The target is the public repo's full name; the reason is one of these, filled only from structured fields (full names,
+ * a 7-character commit prefix, a count and the sorted paths). A reason is at most 1,000 characters: it lists the first paths that fit, each cut to 120
+ * characters, then "and {k} more". It holds paths and never file content.
+ */
+export const COPY_PARITY_DRIFT =
+  'Private main of {private} differs from public main of {public} outside the overlay paths, compared at public commit {sha7}. {n} paths differ: {paths}. Port the change to a public pull request, or undo it on private main.';
+export const COPY_PARITY_NO_SHARED_HISTORY =
+  'Private main of {private} contains none of the last 30 commits on public main of {public}, so it was compared with public commit {sha7}. {n} paths differ: {paths}. Bring private main up to date with public main.';
+export const COPY_PARITY_TOO_LARGE = "We can't check {repo}: GitHub won't list all of its files in one answer. Parity between {private} and {public} isn't being checked.";
+export const COPY_PARITY_INVALID_OVERLAY = "The overlay paths of the pairing between {private} and {public} can't be read, so parity isn't being checked. Fix the overlay paths in the pairing settings.";
+/** A paired repo whose default branch is not `main`: parity is only checked on main, so the sentence names the repo that has the other branch (the side the check reported) and says why. Filled from full names, as text. */
+export const COPY_PARITY_UNSUPPORTED_BRANCH = "{repo} uses a default branch other than main, so parity between {private} and {public} isn't being checked.";
+
+const PARITY_REASON_MAX = 1000;
+const PARITY_PATH_MAX = 120;
+const PARITY_PATH_CONTROL_RE = /[\u0000-\u001F\u007F]/g;
+
+export interface ParityReasonInput {
+  privateRepo: string;
+  publicRepo: string;
+  /** The repo the result is about: the one GitHub would not list in full (`too_large`), or the one whose default branch is not `main` (`unsupported_branch`). Default: the public repo. */
+  limitRepo?: string;
+  sha7?: string;
+  paths?: readonly string[];
+  pathCount?: number;
+}
+
+/** The sentence for a drift-like result, or null for a result that raises nothing. `paths` must already be sorted. */
+export function parityReason(result: 'drift' | 'no_shared_history' | 'too_large' | 'invalid_overlay' | 'unsupported_branch', f: ParityReasonInput): string {
+  const base = { private: f.privateRepo, public: f.publicRepo, repo: f.limitRepo ?? f.publicRepo };
+  if (result === 'too_large') return fill(COPY_PARITY_TOO_LARGE, base);
+  if (result === 'invalid_overlay') return fill(COPY_PARITY_INVALID_OVERLAY, base);
+  if (result === 'unsupported_branch') return fill(COPY_PARITY_UNSUPPORTED_BRANCH, base);
+  const template = result === 'drift' ? COPY_PARITY_DRIFT : COPY_PARITY_NO_SHARED_HISTORY;
+  const total = f.pathCount ?? f.paths?.length ?? 0;
+  const values = { ...base, sha7: (f.sha7 ?? '').slice(0, 7), n: String(total) };
+  const room = PARITY_REASON_MAX - fill(template, { ...values, paths: '' }).length;
+  // A path is a file name from the public repo and can hold any character; a control character would make the whole reason invalid (and the result unwritable), so it is replaced first.
+  const cut = (f.paths ?? []).map((raw) => {
+    const p = raw.replace(PARITY_PATH_CONTROL_RE, '\uFFFD');
+    return p.length > PARITY_PATH_MAX ? `${p.slice(0, PARITY_PATH_MAX - 1)}…` : p;
+  });
+  let list = '';
+  let shown = 0;
+  for (const p of cut) {
+    const more = total - shown - 1;
+    const next = `${list}${shown === 0 ? '' : ', '}${p}`;
+    if ((more > 0 ? `${next}, and ${more} more` : next).length > room) break;
+    list = next;
+    shown++;
+  }
+  const rest = total - shown;
+  return fill(template, { ...values, paths: shown === 0 ? `${rest} in all` : rest > 0 ? `${list}, and ${rest} more` : list });
 }
