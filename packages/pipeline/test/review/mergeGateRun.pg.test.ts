@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { listDriverEvents } from "@fx/core/src/work-items/driverEvents.js";
+import { ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "../../../github/src/mergeGateGraphql.js";
+import { clearMergeQueueModeCache } from "../../src/build/githubMergePort.js";
 import { runMergeGateForItem } from "../../src/review/mergeGateRun.js";
 import { loadReviewContext, loadSpecText } from "../../src/review/context.js";
 import { REVIEW_STATUS_CONTEXT } from "../../src/review/githubReads.js";
@@ -456,5 +458,114 @@ describe("D#598 P3b: a stacked child's pull request is never merged by the gate 
     await parentWithPull(w, 40);
     expect(await gate(w)).toMatchObject({ outcome: "merged", reasons: [] });
     expect(w.gh.merges).toEqual([{ sha: HEAD, method: "squash" }]);
+  });
+});
+
+describe("D#694 B5: a base branch behind GitHub's merge queue", () => {
+  const queueDocuments = { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT };
+  const queued = (w: World) => runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(w.gh), queueDocuments }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+  const withQueue = (q: Partial<NonNullable<FakeRepoState["mergeQueue"]>> = {}, rules: FakeRepoState["rulesetRules"] = [{ type: "merge_queue", enforcement: "active" }]): Partial<FakeRepoState> => ({
+    mergeQueue: { exists: true, mutations: [], ...q },
+    rulesetRules: rules,
+  });
+  beforeEach(() => clearMergeQueueModeCache());
+
+  it("queue on: the pull request is enqueued bound to the gated head, no direct merge is made, and the driver event carries the entry id (merged_by_gate is not written)", async () => {
+    const w = await world({ repo: withQueue() });
+    await passBoth(w);
+    const out = await queued(w);
+    expect(out).toMatchObject({ outcome: "merge_enqueued", headSha: HEAD, reasons: [], status: "posted" });
+    expect(w.gh.mergeQueue!.mutations).toEqual([{ kind: "enqueue", variables: { pullRequestId: "PR_kwDOfake41", expectedHeadOid: HEAD } }]);
+    expect(w.gh.merges).toEqual([]);
+    const ev = await events(w);
+    expect(ev.map((e) => e.kind)).toEqual(["review_status", "merge_gate", "merge_enqueued"]);
+    expect(ev[1]).toMatchObject({ code: "merge_enqueued", reasons: [] });
+    const { rows } = await h.admin.query<{ code: string; head_sha: string; pr_number: number; queue_entry_id: string }>(
+      "SELECT code, head_sha, pr_number, queue_entry_id FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'merge_enqueued'",
+      [w.workItemId],
+    );
+    expect(rows).toEqual([{ code: "queue", head_sha: HEAD, pr_number: 41, queue_entry_id: "MQE_kwDOfake1" }]);
+  });
+
+  it("a replayed gate on the same head writes the enqueue fact once", async () => {
+    const w = await world({ repo: withQueue() });
+    await passBoth(w);
+    await queued(w);
+    await queued(w);
+    expect((await events(w)).filter((e) => e.kind === "merge_enqueued")).toHaveLength(1);
+  });
+
+  it("queue off: today's direct merge, merged_by_gate, no queue mutation", async () => {
+    const w = await world({ repo: withQueue({ exists: false }, []) });
+    await passBoth(w);
+    expect(await queued(w)).toMatchObject({ outcome: "merged" });
+    expect(w.gh.mergeQueue!.mutations).toEqual([]);
+    expect(w.gh.merges).toEqual([{ sha: HEAD, method: "squash" }]);
+    expect((await events(w)).map((e) => e.kind)).toEqual(["review_status", "merge_gate", "merged_by_gate"]);
+  });
+
+  it.each([
+    ["the two reads disagree", withQueue({ exists: true }, [])],
+    ["the queue read fails", withQueue({ readFails: true })],
+  ])("%s: fail closed with merge_queue_unreadable, nothing enqueued or merged, and no enqueue fact", async (_n, repo) => {
+    const w = await world({ repo });
+    await passBoth(w);
+    expect(await queued(w)).toMatchObject({ outcome: "ready_human_merges", reasons: ["merge_queue_unreadable"] });
+    expect(w.gh.merges).toEqual([]);
+    expect(w.gh.mergeQueue!.mutations).toEqual([]);
+    expect((await events(w)).map((e) => e.kind)).toEqual(["review_status", "merge_gate"]);
+  });
+
+  it("the app may not use the queue: auto-merge is switched on instead and reported identically, with no entry id", async () => {
+    const w = await world({ repo: withQueue({ enqueue: "forbidden" }) });
+    await passBoth(w);
+    expect(await queued(w)).toMatchObject({ outcome: "merge_enqueued" });
+    expect(w.gh.mergeQueue!.mutations.map((m) => m.kind)).toEqual(["enqueue", "auto_merge"]);
+    expect(w.gh.mergeQueue!.mutations[1]!.variables).toEqual({ pullRequestId: "PR_kwDOfake41", expectedHeadOid: HEAD, mergeMethod: "SQUASH" });
+    const { rows } = await h.admin.query("SELECT code, queue_entry_id FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'merge_enqueued'", [w.workItemId]);
+    expect(rows).toEqual([{ code: "auto_merge", queue_entry_id: null }]);
+  });
+
+  it("neither is allowed: merge_queue_unavailable, a person decides", async () => {
+    const w = await world({ repo: withQueue({ enqueue: "forbidden", autoMerge: "forbidden" }) });
+    await passBoth(w);
+    expect(await queued(w)).toMatchObject({ outcome: "ready_human_merges", reasons: ["merge_queue_unavailable"] });
+    expect(w.gh.merges).toEqual([]);
+  });
+
+  it("head moved between the reads and the enqueue: GitHub refuses the stale expectedHeadOid, the gate reports head_moved, nothing is enqueued", async () => {
+    const w = await world({ repo: withQueue() });
+    await passBoth(w);
+    // A push lands after the gate's reads: the enqueue reaches GitHub after the head changed.
+    const http = fakeGitHubRest(w.gh);
+    let moved = false;
+    const racing = {
+      request: async (req: Parameters<typeof http.request>[0]) => {
+        if (!moved && req.method === "POST" && req.path === "/graphql" && (req.body as { query: string }).query.startsWith("mutation")) {
+          moved = true;
+          w.gh.headSha = OTHER;
+          w.gh.checks[OTHER] = [];
+        }
+        return http.request(req);
+      },
+    };
+    const out = await runMergeGateForItem({ pool: h.runWriterPool, http: racing, queueDocuments }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+    expect(out).toMatchObject({ outcome: "head_moved", headSha: HEAD });
+    expect(w.gh.merges).toEqual([]);
+    expect((await events(w)).some((e) => e.kind === "merge_enqueued")).toBe(false);
+  });
+
+  it("a stop that still holds comes first: no queue read at all", async () => {
+    const w = await world({ repo: withQueue() });
+    await run(w, "code-reviewer", "needs-fix");
+    expect(await queued(w)).toMatchObject({ outcome: "ready_human_merges" });
+    expect(w.gh.requests.some((r) => r.path === "/graphql")).toBe(false);
+  });
+
+  it("without the documents handed in the port has no queue: today's behaviour (direct merge)", async () => {
+    const w = await world({ repo: withQueue() });
+    await passBoth(w);
+    expect(await gate(w)).toMatchObject({ outcome: "merged" });
+    expect(w.gh.mergeQueue!.mutations).toEqual([]);
   });
 });

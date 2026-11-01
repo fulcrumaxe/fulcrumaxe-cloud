@@ -5,7 +5,7 @@ import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js"
 import { humanMergeOnly } from "@fx/db/src/humanMergeOnly.js";
 import { autoMergeAllowed } from "@fx/trust";
 import { readRecordedRunnerPullRequest } from "@fx/runner";
-import { createGitHubMergeGatePort, isLocalGitHubHttp, type GitHubHttp, type LocalGitHubHttp } from "../build/githubMergePort.js";
+import { createGitHubMergeGatePort, isLocalGitHubHttp, type GitHubHttp, type LocalGitHubHttp, type MergeQueueDocuments } from "../build/githubMergePort.js";
 import { carriedRunsHead, gateReviewerReasons, loadRunsOnSha, runMergeGate, RUNNER_ADMIN_OK_SQL, SHA_PATTERN, type MergeBlockReason, type ReviewMode } from "../build/mergeGate.js";
 import { listChangedFiles, listChangedFilesLocal, postReviewStatus, type ListFilesResult } from "./githubReads.js";
 import type { ChangedFile } from "./securityTrigger.js";
@@ -73,9 +73,10 @@ export interface MergeGateRunInput {
 
 export type StatusOutcome = "posted" | "skipped" | "failed";
 
-export type MergeGateRunResult =
-  | { outcome: "refused"; reason: string }
-  | { outcome: "merged" | "merge_delegated" | "ready_human_merges" | "pr_not_open" | "head_moved"; headSha: string; reasons: MergeBlockReason[]; status: StatusOutcome };
+type MergeGateRunOutcome = "merged" | "merge_delegated" | "merge_enqueued" | "ready_human_merges" | "pr_not_open" | "head_moved";
+export type MergeGateRunResult = { outcome: "refused"; reason: string } | { outcome: MergeGateRunOutcome; headSha: string; reasons: MergeBlockReason[]; status: StatusOutcome };
+/** The go phase's answer: a `runner_local` repository is never put in GitHub's merge queue (D#694 B5 is the hosted path only), so `merge_enqueued` cannot come back. */
+export type MergeGateGoResult = { outcome: "refused"; reason: string } | { outcome: Exclude<MergeGateRunOutcome, "merge_enqueued">; headSha: string; reasons: MergeBlockReason[]; status: StatusOutcome };
 
 /**
  * Two planes, `runner_local`: what the customer's runner attests about the CONTENT of the two commits (fixed shas; the runner has the git objects, the cloud
@@ -127,13 +128,14 @@ export async function reviewerFlaggedSecurity(pool: Pool, accountId: string, wor
  * `runner_local` repo it is built on the local-only client and the run's recorded branch (D#6 R3c), and a transport that is not the local-only
  * one is refused before a call. The merge gate and the CI wait (ciWait.ts) both use it, so they read the same way.
  */
-export function createReviewGitHubPort(deps: { pool: Pool; http: GitHubHttp }, ctx: ReviewContext, ids: MergeGateRunInput & { recordedBranch?: string }) {
+export function createReviewGitHubPort(deps: { pool: Pool; http: GitHubHttp; queueDocuments?: MergeQueueDocuments }, ctx: ReviewContext, ids: MergeGateRunInput & { recordedBranch?: string }) {
   const { pool, http } = deps;
   const { accountId, workItemId, prNumber } = ids;
   const localHttp = ctx.executionMode === "runner_local" ? http : null;
   if (localHttp !== null && !isLocalGitHubHttp(localHttp)) throw new Error("merge gate: a runner_local repo needs the local-only GitHub client");
   return createGitHubMergeGatePort({
     http,
+    ...(deps.queueDocuments !== undefined ? { queueDocuments: deps.queueDocuments } : {}),
     ...(localHttp !== null && isLocalGitHubHttp(localHttp)
       ? {
           local: {
@@ -179,7 +181,11 @@ export interface PublicPlanePort {
   read: PublicPullRequestLookup;
 }
 
-export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; localReviewOptIn?: LocalReviewOptInPort; publicPlane?: PublicPlanePort; mergeDelegate?: MergeDelegate }, input: MergeGateRunInput): Promise<MergeGateRunResult> {
+export type MergeGateRunDeps = { pool: Pool; http: GitHubHttp; localReviewOptIn?: LocalReviewOptInPort; publicPlane?: PublicPlanePort; mergeDelegate?: MergeDelegate; queueDocuments?: MergeQueueDocuments };
+
+export function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGateRunInput & { goPhase: { attestation: GoAttestation } }): Promise<MergeGateGoResult>;
+export function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGateRunInput): Promise<MergeGateRunResult>;
+export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGateRunInput): Promise<MergeGateRunResult> {
   const { pool, http } = deps;
   const { accountId, workItemId, prNumber } = input;
   const loaded = await loadReviewContext(pool, accountId, workItemId);
@@ -197,7 +203,7 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
   // D#6 R3c: a runner_local repo's whole review and merge path goes through the local-only client. Anything else refuses before a call.
   const runnerLocal = ctx.executionMode === "runner_local";
   const localHttp = runnerLocal ? http : null;
-  const port = createReviewGitHubPort({ pool, http }, ctx, { accountId, workItemId, prNumber });
+  const port = createReviewGitHubPort({ pool, http, ...(deps.queueDocuments !== undefined ? { queueDocuments: deps.queueDocuments } : {}) }, ctx, { accountId, workItemId, prNumber });
 
   // 1. The head the reviewers judged (the item's own pull request), and, for a paired item, the public pull request that merges.
   const head = await port.getPullRequest(pr);
@@ -226,7 +232,7 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
   if (publicPr !== null && deps.publicPlane !== undefined) {
     mergeHttp = await deps.publicPlane.open({ repoId: ctx.repoId, owner: publicPr.owner, name: publicPr.name, executionMode: ctx.executionMode });
     mergeTarget = { owner: publicPr.owner, name: publicPr.name, prNumber: publicPr.number };
-    mergePort = createReviewGitHubPort({ pool, http: mergeHttp }, { ...ctx, owner: publicPr.owner, name: publicPr.name }, { accountId, workItemId, prNumber: publicPr.number, recordedBranch: publicPr.branch });
+    mergePort = createReviewGitHubPort({ pool, http: mergeHttp, ...(deps.queueDocuments !== undefined ? { queueDocuments: deps.queueDocuments } : {}) }, { ...ctx, owner: publicPr.owner, name: publicPr.name }, { accountId, workItemId, prNumber: publicPr.number, recordedBranch: publicPr.branch });
     // The operator's lock names a repository by its GitHub id: either half of the pairing listed means a person merges.
     if (!humanLocked) humanLocked = humanMergeOnly(await readRepoGhId(mergeHttp, publicPr.owner, publicPr.name));
     // Defence in depth for `runner_local`: the cloud never calls merge on this pull request, whatever client it was given. The gate's merge call site is the
@@ -371,6 +377,18 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
     });
     if (out.outcome === "merged") {
       await recordDriverEvent(client, accountId, { workItemId, kind: "merged_by_gate", dedupeKey: `merged:${out.headSha}`, headSha: headForRow, prNumber });
+    }
+    // D#694 B5: a pull request put in GitHub's queue is a one-time stamp of what was sent. `merged_by_gate` stays for the direct path only; the merge itself is the webhook's to record.
+    if (out.outcome === "merge_enqueued") {
+      await recordDriverEvent(client, accountId, {
+        workItemId,
+        kind: "merge_enqueued",
+        dedupeKey: `enqueued:${out.headSha}`,
+        code: out.via,
+        headSha: headForRow,
+        prNumber,
+        ...(out.entryId !== null ? { queueEntryId: out.entryId } : {}),
+      });
     }
   });
   return { outcome: out.outcome, headSha: outHead, reasons, status };

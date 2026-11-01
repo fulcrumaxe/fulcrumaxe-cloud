@@ -797,7 +797,8 @@ describe("H14b merge gate: table [pg]", () => {
     };
   }
 
-  it.each(CASES.map((c) => [c.name, c] as const))("%s", async (_name, c) => {
+  // D#694 B5: the whole table runs twice, once against a port with no merge queue and once against a port that says `direct`: the same answers, and no queue call.
+  it.each(CASES.flatMap((c) => [[c.name, c, false] as const, [`${c.name} [queue mode direct]`, c, true] as const]))("%s", async (_name, c, withDirectQueue) => {
     const world = await seedWorld(c.provenance ?? "internal");
     for (const run of c.runs) await insertRun(world, run);
 
@@ -811,9 +812,12 @@ describe("H14b merge gate: table [pg]", () => {
       comments: [],
       ...c.prState,
     };
-    const github = new FakeGitHub({ pr, ...ciFor(c.ci ?? "green") });
+    const github = new FakeGitHub({ pr, ...ciFor(c.ci ?? "green"), ...(withDirectQueue ? { queueMode: "direct" as const } : {}) });
     const requested: string[] = [];
     const result = await runMergeGate(makeDeps(github, c.guard, requested), inputFor(world, c));
+    expect(github.enqueueCalls).toEqual([]);
+    // The queue is asked only at the merge call site, once every other condition is met.
+    expect(github.queueModeCalls).toEqual(withDirectQueue && c.expect === "merge" ? [pr.baseRef ?? "main"] : []);
 
     if (c.expect === "not_open") {
       expect(result).toEqual({ outcome: "pr_not_open", headSha: HEAD });
@@ -844,6 +848,115 @@ describe("H14b merge gate: table [pg]", () => {
     printed.push(
       `${c.expect === "merge" ? "MERGE" : "HUMAN"} calls=${github.mergeCalls.length} labels=[${pr.labels.join(",")}] reasons=[${(github.humanMarks[0]?.reasons ?? []).join(",")}]  ${c.name}`,
     );
+  });
+
+  describe("D#694 B5: a base branch behind GitHub's merge queue", () => {
+    const openPr = (): FakePullRequest => ({ headSha: HEAD, state: "open", merged: false, draft: false, body: "", labels: [], comments: [] });
+    async function ready(over: ConstructorParameters<typeof FakeGitHub>[0] extends infer O ? Partial<O> : never = {}) {
+      const world = await seedWorld("internal");
+      for (const run of standard()) await insertRun(world, run);
+      const github = new FakeGitHub({ pr: openPr(), ciBySha: { [HEAD]: greenCi(HEAD) }, ...over });
+      return { world, github };
+    }
+
+    it("queue on: the pull request is enqueued bound to the gated head, and nothing is merged directly (the fake would have let the app bypass the queue)", async () => {
+      const { world, github } = await ready({ queueMode: "queue" });
+      const result = await runMergeGate(makeDeps(github, undefined, []), inputFor(world, {}));
+      expect(result).toEqual({ outcome: "merge_enqueued", headSha: HEAD, entryId: "MQE_kwDOtest1", position: 1, via: "queue" });
+      expect(github.enqueueCalls).toEqual([{ expectedHeadOid: HEAD }]);
+      expect(github.queueModeCalls).toEqual(["main"]);
+      expect(github.mergeCalls).toEqual([]);
+      expect(github.humanMarks).toEqual([]);
+    });
+
+    it("queue on but a stop still holds: the queue is not even asked, and nothing is enqueued", async () => {
+      const { world, github } = await ready({ queueMode: "queue", ciBySha: { [HEAD]: snap(HEAD, [], []) } });
+      const result = await runMergeGate(makeDeps(github, undefined, []), inputFor(world, {}));
+      expect(result.outcome).toBe("ready_human_merges");
+      expect(github.queueModeCalls).toEqual([]);
+      expect(github.enqueueCalls).toEqual([]);
+      expect(github.mergeCalls).toEqual([]);
+    });
+
+    it("the caller's own stop (mergeUnavailableReason) comes before the queue", async () => {
+      const { world, github } = await ready({ queueMode: "queue" });
+      const result = await runMergeGate(makeDeps(github, undefined, []), { ...inputFor(world, {}), mergeUnavailableReason: "runner_merge_unavailable" });
+      expect(result).toMatchObject({ outcome: "ready_human_merges", reasons: ["runner_merge_unavailable"] });
+      expect(github.queueModeCalls).toEqual([]);
+    });
+
+    it.each(["unknown", "throw"] as const)("queue state unreadable (%s): fail closed with merge_queue_unreadable, nothing enqueued or merged, and a retry reads again", async (mode) => {
+      const { world, github } = await ready({ queueMode: mode });
+      const result = await runMergeGate(makeDeps(github, undefined, []), inputFor(world, {}));
+      expect(result).toEqual({ outcome: "ready_human_merges", headSha: HEAD, reasons: ["merge_queue_unreadable"] });
+      expect(github.humanMarks).toEqual([{ headSha: HEAD, reasons: ["merge_queue_unreadable"] }]);
+      expect(github.enqueueCalls).toEqual([]);
+      expect(github.mergeCalls).toEqual([]);
+      await runMergeGate(makeDeps(github, undefined, []), inputFor(world, {}));
+      expect(github.queueModeCalls).toEqual(["main", "main"]);
+    });
+
+    it("a malformed answer (neither queue nor direct) is unknown, never direct", async () => {
+      const { world, github } = await ready({ queueMode: "queue" });
+      github.getMergeQueueMode = async () => ({ mode: "maybe" as "queue", source: "fake" });
+      const result = await runMergeGate(makeDeps(github, undefined, []), inputFor(world, {}));
+      expect(result).toMatchObject({ outcome: "ready_human_merges", reasons: ["merge_queue_unreadable"] });
+      expect(github.mergeCalls).toEqual([]);
+    });
+
+    it("the app may not enqueue (and may not use auto-merge): merge_queue_unavailable, a person decides, no direct merge", async () => {
+      const { world, github } = await ready({ queueMode: "queue", enqueue: { enqueued: false, reason: "unavailable" } });
+      const result = await runMergeGate(makeDeps(github, undefined, []), inputFor(world, {}));
+      expect(result).toEqual({ outcome: "ready_human_merges", headSha: HEAD, reasons: ["merge_queue_unavailable"] });
+      expect(github.mergeCalls).toEqual([]);
+    });
+
+    it("a port that reports a queue but cannot enqueue is merge_queue_unavailable", async () => {
+      const { world, github } = await ready({ queueMode: "queue" });
+      delete github.enqueuePullRequest;
+      const result = await runMergeGate(makeDeps(github, undefined, []), inputFor(world, {}));
+      expect(result).toMatchObject({ outcome: "ready_human_merges", reasons: ["merge_queue_unavailable"] });
+    });
+
+    it("the auto-merge fallback is reported as merge_enqueued with no entry", async () => {
+      const { world, github } = await ready({ queueMode: "queue", enqueue: { enqueued: true, via: "auto_merge", entryId: null, position: null } });
+      const result = await runMergeGate(makeDeps(github, undefined, []), inputFor(world, {}));
+      expect(result).toEqual({ outcome: "merge_enqueued", headSha: HEAD, entryId: null, position: null, via: "auto_merge" });
+    });
+
+    it("head moved (GitHub refused the stale expectedHeadOid and a re-read shows a new head): head_moved, reviews are requested on the new head", async () => {
+      const requested: string[] = [];
+      const { world, github } = await ready({
+        queueMode: "queue",
+        enqueue: (fake) => {
+          fake.pr.headSha = NEW;
+          return { enqueued: false, reason: "head_moved" };
+        },
+      });
+      const result = await runMergeGate(makeDeps(github, undefined, requested), inputFor(world, {}));
+      expect(result).toEqual({ outcome: "head_moved", staleHeadSha: HEAD, newHeadSha: NEW });
+      expect(requested).toEqual([NEW]);
+      expect(github.mergeCalls).toEqual([]);
+      expect(github.humanMarks).toEqual([]);
+    });
+
+    it("head_moved with a head that did not move on a re-read is not explained: a person decides (merge_call_refused)", async () => {
+      const { world, github } = await ready({ queueMode: "queue", enqueue: { enqueued: false, reason: "head_moved" } });
+      const result = await runMergeGate(makeDeps(github, undefined, []), inputFor(world, {}));
+      expect(result).toMatchObject({ outcome: "ready_human_merges", reasons: ["merge_call_refused"] });
+    });
+
+    it("an enqueue that throws propagates (the workflow step retries); nothing is merged or marked", async () => {
+      const { world, github } = await ready({
+        queueMode: "queue",
+        enqueue: () => {
+          throw new Error("GitHub enqueue: GraphQL error");
+        },
+      });
+      await expect(runMergeGate(makeDeps(github, undefined, []), inputFor(world, {}))).rejects.toThrow("GraphQL error");
+      expect(github.mergeCalls).toEqual([]);
+      expect(github.humanMarks).toEqual([]);
+    });
   });
 
   describe("head moves between the checks and the merge call", () => {
