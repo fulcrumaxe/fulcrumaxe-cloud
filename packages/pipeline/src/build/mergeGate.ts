@@ -241,6 +241,17 @@ export interface QueueEntryReading {
   entry: { id: string; state: QueueEntryState; position: number | null } | null;
 }
 
+/**
+ * D#694 B6-6: the newest "removed from the merge queue" event of a pull request, as GitHub answered. `actorType` is the actor's GraphQL type (`User`, `Bot`), `reason` GitHub's code,
+ * and `beforeCommitOid` the head that was queued. Any of the three may be null (GitHub did not say).
+ */
+export interface QueueRemovalReading {
+  createdAt: string;
+  reason: string | null;
+  actorType: string | null;
+  beforeCommitOid: string | null;
+}
+
 export interface MergeGateGitHubPort {
   getPullRequest(pr: PullRequestRef): Promise<PullRequestState>;
   /** D#519 MQ1: the pull request's mergeability, with `mergeable: null` already polled (see `PullRequestMergeability`). With `gatedHeadSha`, polling stops as soon as the head differs from it (a moved head needs no mergeability). */
@@ -271,6 +282,8 @@ export interface MergeGateGitHubPort {
   dequeuePullRequest?(pr: PullRequestRef): Promise<DequeueOutcome>;
   /** D#694 B6-1 (inert): the pull request and its queue entry now. Not called by the gate. */
   getQueueEntry?(pr: PullRequestRef): Promise<QueueEntryReading>;
+  /** D#694 B6-6: the pull request's newest removal event from the merge queue, or null when it has none. Read by the reconcile only. */
+  getLastQueueRemoval?(pr: PullRequestRef): Promise<QueueRemovalReading | null>;
 }
 
 export interface MergeGateDeps {

@@ -1,4 +1,4 @@
-import { DEQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, pinnedMergeGateBody } from "../../../../github/src/mergeGateGraphql.js";
+import { DEQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, MERGE_QUEUE_REMOVAL_DOCUMENT, pinnedMergeGateBody } from "../../../../github/src/mergeGateGraphql.js";
 import type { GitHubHttp, GitHubHttpRequest, GitHubHttpResponse } from "../../../src/build/githubMergePort.js";
 
 /**
@@ -106,6 +106,9 @@ export interface FakeRepoState {
     entry?: { id: string; state: string; position: number | null } | null;
     mutations: Array<{ kind: "enqueue" | "auto_merge" | "dequeue"; variables: Record<string, unknown> }>;
     readFails?: boolean;
+    /** B6-6: the newest REMOVED_FROM_MERGE_QUEUE_EVENT as GitHub's timeline answers (default: none). `removalFails` answers the removal read with a 502. */
+    removal?: { createdAt: string; reason: string | null; actor: { __typename: string } | null; beforeCommit: { oid: string } | null };
+    removalFails?: boolean;
   };
   /** The repository's GitHub id as `GET /repos/{owner}/{repo}` reports it (default: `defaultGhId(owner, name)`, different for every repository). */
   ghId?: number;
@@ -192,7 +195,7 @@ export function fakeGitHubRest(s: FakeRepoState): GitHubHttp {
         const q = s.mergeQueue;
         const accepted = pinnedMergeGateBody(req.body, { owner: s.owner, name: s.name });
         if (accepted === undefined) throw new Error("path_refused");
-        if (q.readFails) return json(502, { message: "Bad Gateway" });
+        if (q.readFails || (q.removalFails && accepted["query"] === MERGE_QUEUE_REMOVAL_DOCUMENT)) return json(502, { message: "Bad Gateway" });
         const query = accepted["query"] as string;
         const variables = accepted["variables"] as Record<string, unknown>;
         if (query === MERGE_QUEUE_READ_DOCUMENT) return json(200, { data: { repository: { mergeQueue: q.exists ? { id: "MQ_kwDOfake" } : null } } });
@@ -201,6 +204,11 @@ export function fakeGitHubRest(s: FakeRepoState): GitHubHttp {
           if (variables["number"] !== s.prNumber) return json(200, { data: { repository: { pullRequest: null } } });
           const state = s.merged ? "MERGED" : s.state === "open" ? "OPEN" : "CLOSED";
           return json(200, { data: { repository: { pullRequest: { state, merged: s.merged, headRefOid: s.headSha, mergeQueueEntry: q.entry ?? null } } } });
+        }
+        if (query === MERGE_QUEUE_REMOVAL_DOCUMENT) {
+          // `timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT])`: at most the newest one.
+          if (variables["number"] !== s.prNumber) return json(200, { data: { repository: { pullRequest: null } } });
+          return json(200, { data: { repository: { pullRequest: { timelineItems: { nodes: q.removal ? [q.removal] : [] } } } } });
         }
         if (query === DEQUEUE_PULL_REQUEST_DOCUMENT) {
           q.mutations.push({ kind: "dequeue", variables });

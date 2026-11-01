@@ -1,5 +1,5 @@
 import type { PoolClient } from 'pg';
-import { PERSON_REQUEUE_REASON, QUEUE_AGAIN_ACTION, queueAuditAtSql } from './queueIntent.js';
+import { ACTOR_YOU, PERSON_REQUEUE_REASON, QUEUE_AGAIN_ACTION, queueAuditAtSql } from './queueIntent.js';
 
 /**
  * D#483 P3: the stage driver's recorded decisions (work_item_driver_events, migration 0709), as facts a read route can
@@ -97,6 +97,21 @@ export function dequeueReasonCode(reason: unknown): string {
   if (typeof reason !== 'string') return DEQUEUE_UNSPECIFIED;
   const plain = reason.slice(0, 200).toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
   return plain === '' ? DEQUEUE_UNSPECIFIED : toCode(plain);
+}
+
+/**
+ * D#694 B6-3 and B6-6: who removed a pull request from the merge queue, the one rule the webhook (`queueActor`) and the reconcile (`removalActor`) both use. The host's own
+ * reason is the primary signal: `manual` is a person. Only when the host gave no reason does the sender's type decide (a `User`). Any other reason is the queue's own doing,
+ * whoever the sender is.
+ */
+export function queueRemovalActor(reasonCode: string | null, senderType: unknown): 'user' | 'app' {
+  if (reasonCode === 'manual') return 'user';
+  return (reasonCode === null || reasonCode === DEQUEUE_UNSPECIFIED) && senderType === 'User' ? 'user' : 'app';
+}
+
+/** The reason a removal fact carries: a recent Remove press of the head is "you"; otherwise the removal's actor. The webhook and the reconcile both write it this way. */
+export function removalFactReason(byYou: boolean, actor: 'user' | 'app'): string {
+  return byYou ? ACTOR_YOU : `actor_${actor}`;
 }
 
 /**

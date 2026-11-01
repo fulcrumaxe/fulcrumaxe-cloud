@@ -230,7 +230,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
         const req = { method: method as typeof raw.method, path, query: rawQuery === undefined || rawQuery === null ? undefined : { ...(rawQuery as Record<string, string | number>) }, body: snapBody };
         const graphql = (kind === "runner_pr" || kind === "retraction" || target.allowGraphql === true) && req.method === "POST" && req.path === GRAPHQL_PATH;
         // `revert_pr` may name `/graphql` too, but only the one exact mutation checked below.
-        // D#694 B5a: the hosted `merge_gate` client may send `POST /graphql` only for one of five pinned documents (mergeGateGraphql.ts); never a blanket flag.
+        // D#694 B5a: the hosted `merge_gate` client may send `POST /graphql` only for one of six pinned documents (mergeGateGraphql.ts); never a blanket flag.
         const pinnedBody = kind === "merge_gate" && req.method === "POST" && req.path === GRAPHQL_PATH && req.query === undefined ? pinnedMergeGateBody(req.body, { owner: target.owner, name: target.name }) : undefined;
         const pinnedGate = pinnedBody !== undefined;
         const allowed = graphql || pinnedGate || (kind === "revert_pr" && req.method === "POST" && req.path === GRAPHQL_PATH) || (req.method === "GET" && req.path === repoRoot) || (req.path.startsWith(prefix) && PATH_RE.test(req.path));
