@@ -36,8 +36,14 @@ async function account(items = 1): Promise<Acct> {
   }
   return { accountId, repoId: refs.repoId, items: ids };
 }
-const enqueue = (a: Acct, item: string, refusal?: { status: number; code?: string }) =>
-  enqueueForCapacity(h.runWriterPool, a.accountId, { repoId: a.repoId, workItemId: item, runKind: "build", refusal });
+/** Since 0943 an entry counts only while its item is asking: the item's latest waiting fact says waiting_for_capacity and is fresh. */
+async function asks(a: Acct, item: string, code = "waiting_for_capacity"): Promise<void> {
+  await h.admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, stage, dedupe_key) VALUES ($1, $2, 'stage_waiting', $3, 'build', $4)`, [a.accountId, item, code, randomUUID()]);
+}
+const enqueue = async (a: Acct, item: string, refusal?: { status: number; code?: string }) => {
+  await asks(a, item);
+  return enqueueForCapacity(h.runWriterPool, a.accountId, { repoId: a.repoId, workItemId: item, runKind: "build", refusal });
+};
 const rows = async (where = "true") => (await h.admin.query(`SELECT * FROM capacity_queue WHERE ${where} ORDER BY enqueued_at, id`)).rows;
 /** A slot total that leaves exactly `room` free right now (other suites' live runs are counted, not assumed away). */
 async function totalWithRoom(room: number): Promise<() => number> {
@@ -95,6 +101,7 @@ describe("migration 0941: the queue never drops work [pg]", () => {
   it("S5k3b-3: with every slot full for three days the entry is still waiting, untouched, and nothing is claimed", async () => {
     const a = await account();
     // enqueued three days ago (an insert may set the clock; no update may move enqueued_at)
+    await asks(a, a.items[0]!);
     await h.admin.query(`INSERT INTO capacity_queue (account_id, repo_id, work_item_id, run_kind, class, enqueued_at, created_at) VALUES ($1, $2, $3, 'build', 'hosted_sandbox', now() - interval '3 days', now() - interval '3 days')`, [a.accountId, a.repoId, a.items[0]]);
     const full = await totalWithRoom(0);
     for (let i = 0; i < 3; i++) expect((await claimWithinHeadroom(h.runWriterPool, full)).claimed).toHaveLength(0);
@@ -319,7 +326,7 @@ describe("migration 0941: grants and CHECKs [pg]", () => {
     expect(await refused(h.admin.query(`UPDATE capacity_queue SET work_item_id = gen_random_uuid()`))).toMatch(/never change/);
   });
 
-  it("who may execute what: the three driver functions and the state read go to agent_run_writer, the cancel to app_user, nothing to PUBLIC", async () => {
+  it("who may execute what: the driver functions, the state read and the re-queue go to agent_run_writer, the cancel and the place read to app_user, the asking rule to nobody, nothing to PUBLIC", async () => {
     const { rows } = await h.admin.query(
       `SELECT p.proname, array_agg(DISTINCT pg_get_userbyid(a.grantee) ORDER BY pg_get_userbyid(a.grantee)) FILTER (WHERE a.grantee <> p.proowner) AS grantees, pg_get_userbyid(p.proowner) AS owner
          FROM pg_proc p, aclexplode(p.proacl) a WHERE p.pronamespace = 'public'::regnamespace AND p.proname LIKE 'capacity\\_%' AND p.proname NOT LIKE '%guard' GROUP BY p.proname, p.proowner ORDER BY 1`,
@@ -328,8 +335,11 @@ describe("migration 0941: grants and CHECKs [pg]", () => {
       { proname: "capacity_claim_next", grantees: "{agent_run_writer}", owner: "capacity_queue_definer" },
       { proname: "capacity_end_cancelled", grantees: "{app_user}", owner: "capacity_queue_definer" },
       { proname: "capacity_enqueue", grantees: "{agent_run_writer}", owner: "capacity_queue_definer" },
+      { proname: "capacity_entry_asking", grantees: null, owner: "capacity_queue_definer" },
       { proname: "capacity_mark_started", grantees: "{agent_run_writer}", owner: "capacity_queue_definer" },
+      { proname: "capacity_queue_place", grantees: "{app_user}", owner: "capacity_queue_definer" },
       { proname: "capacity_queue_state", grantees: "{agent_run_writer}", owner: "capacity_queue_definer" },
+      { proname: "capacity_requeue_refused", grantees: "{agent_run_writer}", owner: "capacity_queue_definer" },
       { proname: "capacity_settings_write", grantees: "{ops_console}", owner: OWNER_ROLE },
     ]);
   });

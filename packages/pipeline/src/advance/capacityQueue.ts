@@ -137,3 +137,13 @@ export async function markStarted(pool: Pool, entry: Pick<ClaimedEntry, "id" | "
   const { rows } = await pool.query<{ ok: boolean }>(`SELECT capacity_mark_started($1, $2, $3) AS ok`, [entry.id, entry.attempt, runId]);
   return rows[0]!.ok;
 }
+
+/**
+ * D#483 S5-k3b-2a: a claimed start the provider refused with 429 goes back. The same entry keeps its id and `enqueued_at` and starts its next attempt, with the
+ * refusal recorded (C23). True when it went back; false when the run is not the entry's own, is not `cancelled`, or the item already holds another open entry
+ * (nothing changes then). Runs on the run-writer login, like the claim.
+ */
+export async function requeueRefused(pool: Pool, entryId: string, runId: string, refusal: { status: number; code?: string | null }): Promise<boolean> {
+  const { rows } = await pool.query<{ ok: boolean }>(`SELECT capacity_requeue_refused($1, $2, $3, $4) AS ok`, [entryId, runId, refusal.status, refusal.code ?? null]);
+  return rows[0]!.ok;
+}
