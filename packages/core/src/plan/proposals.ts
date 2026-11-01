@@ -309,7 +309,9 @@ export async function getProposal(ctx: ProposalCtx, id: string, settings: () => 
       console.warn(JSON.stringify({ event: 'proposal.verify_wait_degraded', code: 'discovery_settings_failed' }));
       current = { on: false, code: 'discovery_unconfigured' };
     }
-    const wait = await verifyWait(c, ctx.principal.accountId, row, current);
+    // The analyst's refs are part of the verifier's run key; the row shape (and the API) does not carry them.
+    const refs = await c.query<{ analysis_refs: string[] | null }>('SELECT analysis_refs FROM proposals WHERE id = $1::uuid', [id]);
+    const wait = await verifyWait(c, ctx.principal.accountId, { ...row, analysis_refs: refs.rows[0]?.analysis_refs ?? null }, current);
     const claims = await c.query(
       `SELECT id, text, verdict, refute_code, checked_sha, checked_at FROM proposal_claims WHERE proposal_id = $1::uuid
        ORDER BY ${CLAIM_ORDER}, text COLLATE "C", id`,

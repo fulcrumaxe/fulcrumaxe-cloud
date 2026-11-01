@@ -89,6 +89,20 @@ describe("rows", () => {
     expect(badgesFor({ ...base, sources: ["plan_task", "preview"], gh_number: null, task_key: "D#2:H14a" })).toEqual(["Task D#2 · H14a", "Preview"]);
     expect(badgesFor({ ...base, sources: [], gh_number: null })).toEqual([]);
   });
+  it("badgesFor draws Docs and Code after Preview, and no badge shows null, undefined or an empty word for any mix of sources (C25-f2-8)", () => {
+    expect(badgesFor({ ...base, sources: ["github_issue", "docs"] })).toEqual(["Issue #12", "Docs"]);
+    expect(badgesFor({ ...base, sources: ["code", "preview", "docs"], gh_number: null })).toEqual(["Preview", "Docs", "Code"]);
+    const all = ["github_issue", "github_discussion", "plan_task", "preview", "docs", "code", "interview"];
+    for (let mask = 0; mask < 1 << all.length; mask++) {
+      const sources = all.filter((_, i) => mask & (1 << i));
+      for (const extra of [{}, { gh_number: null, discussion_number: null, task_key: null }, { discussion_number: 4, task_key: "D#2:H14a" }]) {
+        for (const badge of badgesFor({ ...base, sources, ...extra })) {
+          expect(badge.trim()).not.toBe("");
+          expect(badge).not.toMatch(BAD);
+        }
+      }
+    }
+  });
   it("detailsFor lists only what is present, the estimate in dollars and the milestone by title", () => {
     expect(detailsFor(base)).toEqual([]);
     expect(detailsFor({ ...base, category_hint: "bug", estimate_usd: 1.5, milestone_title: "M1: Start", milestone_key: "M1" })).toEqual(["bug", "Estimate $1.50", "M1: Start"]);

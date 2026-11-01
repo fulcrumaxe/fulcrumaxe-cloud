@@ -85,7 +85,7 @@ describe('verify_wait on the proposal detail route (D#483 S4b-12)', () => {
   }
   /** What a sweep start leaves: a verifier run and its key for the proposal's current attempt. */
   async function started(who: Identity, id: string): Promise<string> {
-    const p = (await admin.query('SELECT id, title, summary, gh_number, discussion_number, verify_attempts FROM proposals WHERE id = $1', [id])).rows[0];
+    const p = (await admin.query('SELECT id, title, summary, gh_number, discussion_number, verify_attempts, analysis_refs FROM proposals WHERE id = $1', [id])).rows[0];
     const runId = randomUUID();
     await admin.query(`INSERT INTO agent_runs (id, account_id, role, runtime, status) VALUES ($1, $2, 'proposal-verifier', 'local', 'running')`, [runId, who.accountId]);
     await admin.query('INSERT INTO agent_run_idempotency_keys (account_id, idempotency_key, run_id, request_hash) VALUES ($1, $2, $3, $4)', [who.accountId, proposalVerifyKey(p), runId, 'c'.repeat(64)]);

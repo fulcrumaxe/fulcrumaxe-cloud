@@ -30,12 +30,16 @@ export interface VerifyKeyInput {
   gh_number: number | null;
   discussion_number: number | null;
   verify_attempts: number;
+  /** D#483 S4-f2: the analyst's `path:start-end` refs. Null for every row made before them, whose key must not change; required so a caller cannot forget it. */
+  analysis_refs: readonly string[] | null;
 }
 type Query = Pick<PoolClient, 'query'>;
 
-/** The proposal's source refs as the verifier is given them (`#<n>`). */
-export const verifySourceRefs = (p: Pick<VerifyKeyInput, 'gh_number' | 'discussion_number'>): string[] =>
-  [p.gh_number, p.discussion_number].filter((n): n is number => n !== null).map((n) => `#${n}`);
+/** The proposal's source refs as the verifier is given them: `#<n>`, then the analyst's refs (none for a row that has none, so its key is unchanged). */
+export const verifySourceRefs = (p: Pick<VerifyKeyInput, 'gh_number' | 'discussion_number' | 'analysis_refs'>): string[] => [
+  ...[p.gh_number, p.discussion_number].filter((n): n is number => n !== null).map((n) => `#${n}`),
+  ...(p.analysis_refs ?? []),
+];
 
 /** The first 8 hex of a hash of the proposal text a run is asked about (title, summary, source refs). */
 const textHash8 = (p: VerifyKeyInput): string =>
