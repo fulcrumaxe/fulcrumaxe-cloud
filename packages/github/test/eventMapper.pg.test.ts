@@ -76,7 +76,7 @@ describe('applyMappedEvent (D#2 H13a, C18 + C7 + C25)', () => {
       return { ...real, pull_request: { ...real.pull_request, body } };
     };
     const pushes = async (workItemId: string) =>
-      (await admin.query(`SELECT head_sha, pr_number, code, created_at FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'pr_head_pushed'`, [refs.accountId, workItemId])).rows;
+      (await admin.query(`SELECT head_sha, pr_number, code, created_at FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'pr_head_pushed' ORDER BY seq`, [refs.accountId, workItemId])).rows;
 
     it('writes one fact per head commit, stamped by the database clock; a redelivery writes nothing and moves no time', async () => {
       const workItemId = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 139, stage: 'pr_opened' });
@@ -105,6 +105,25 @@ describe('applyMappedEvent (D#2 H13a, C18 + C7 + C25)', () => {
       await apply(at(B));
       expect(await apply(at(A))).toMatchObject({ applied: 'pr_push_recorded', recorded: true });
       expect((await pushes(workItemId)).map((r) => r.head_sha)).toEqual([A, B, A]);
+    });
+
+    it('the push list reads in arrival order even when the rows are not stored in it (the order is seq, not the heap)', async () => {
+      const workItemId = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 1393, stage: 'pr_opened' });
+      const base = synchronize('Closes #1393');
+      const at = (sha: string) => mapEvent('pull_request', { ...base, pull_request: { ...base.pull_request, head: { ...base.pull_request.head, sha } } }, { allowlist: [] });
+      const A = 'a'.repeat(40);
+      const B = 'b'.repeat(40);
+      await apply(at(A));
+      await apply(at(B));
+      // Which index (or none) serves an unordered read is the planner's choice, and a table scan returns rows in storage order. Rewriting the first row stores it
+      // after the second; scanning the table then reads [B, A] although A arrived first.
+      await admin.query(`UPDATE work_item_driver_events SET reasons = reasons WHERE account_id = $1 AND work_item_id = $2 AND head_sha = $3`, [refs.accountId, workItemId, A]);
+      await admin.query('SET enable_indexscan = off; SET enable_bitmapscan = off');
+      try {
+        expect((await pushes(workItemId)).map((r) => r.head_sha)).toEqual([A, B]);
+      } finally {
+        await admin.query('RESET enable_indexscan; RESET enable_bitmapscan');
+      }
     });
 
     it('a fork from an untrusted author, a pull request naming no issue, and one naming an issue with no work item record nothing', async () => {
