@@ -462,7 +462,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       : async (): Promise<DiscoveryScheduleCounts> => emptyScheduleCounts("not_configured");
     const docsCodeAnalysis =
       previewStarter && options.verify && options.analysis
-        ? createDocsCodeAnalysisSweep({ pool: pools.runnerPool, resolveSeat: resolveRunSeat, starter: previewStarter, github: options.verify.github, settings: analysisSettings, prompt: options.analysis.prompt, parse: options.analysis.parse })
+        ? createDocsCodeAnalysisSweep({ pool: pools.runnerPool, resolveSeat: resolveRunSeat, starter: previewStarter, ...(advanceStarter ? { runnerStarter: advanceStarter } : {}), visibility: repoVisibility, github: options.verify.github, settings: analysisSettings, prompt: options.analysis.prompt, parse: options.analysis.parse })
         : async (): Promise<DocsCodeAnalysisCounts> => ({ idle: "not_configured", listed: 0, started: 0, waiting: 0, recorded: 0, daily_cap: 0, skipped: 0, failed: 0 });
     const autoStart = options.autoStart
       ? createAutoStartSweep({ receiptPool: pools.receiptPool, firstRunUsd: options.autoStart.firstRunUsd, ...(options.autoStart.child ? { child: options.autoStart.child } : {}) }).sweepAutoStart

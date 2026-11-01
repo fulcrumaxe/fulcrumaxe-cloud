@@ -54,8 +54,10 @@ describe("C44-5: plain Bash in the role tables", () => {
 
   it("every other role keeps its look-only prefix list and gets no plain Bash", () => {
     // D#483 S4-b2c: the claim verifier is narrower still (Read, Glob and Grep, no Bash of any kind); proposalVerifierRunner.test.ts pins it.
+    // S4-f4: so is the discovery analyst (the same three, the same confinement).
     expect(roleToolsFor("proposal-verifier")).toEqual(["Read", "Glob", "Grep"]);
-    const others = RUNNER_ELIGIBLE_ROLES.filter((role) => !(PLAIN_BASH_ROLES as readonly string[]).includes(role) && role !== "proposal-verifier");
+    expect(roleToolsFor("discovery-analyst")).toEqual(["Read", "Glob", "Grep"]);
+    const others = RUNNER_ELIGIBLE_ROLES.filter((role) => !(PLAIN_BASH_ROLES as readonly string[]).includes(role) && role !== "proposal-verifier" && role !== "discovery-analyst");
     expect(others.length).toBeGreaterThan(0);
     for (const role of others) {
       const tools = roleToolsFor(role);

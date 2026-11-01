@@ -8,7 +8,8 @@ import { ENGINE_LOOP_MARKER } from "@fx/core/src/plan/executeImport.js";
 import { decideOwnerProcess } from "@fx/core/src/plan/ownerProcess.js";
 import type { AnalysisSettings } from "@fx/plan-data";
 import { reportError } from "@fx/telemetry";
-import { DISCOVERY_ANALYST_ROLE, VERIFIER_WORKDIR, readExecutionMode, type StartAgentRunInput } from "@fx/runner";
+import { RUNNER_CAPABILITY_FOR_ROLE } from "@fulcrumaxe/runner-protocol";
+import { DISCOVERY_ANALYST_ROLE, VERIFIER_WORKDIR, readExecutionMode, type RepoVisibility, type RepoVisibilityPort, type StartAgentRunInput } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 import type { VerifyRepoReader } from "./proposalVerify.js";
@@ -29,7 +30,14 @@ import type { VerifyRepoReader } from "./proposalVerify.js";
  *     - No run to answer: the repository is looked at; the default branch's head is read and must still be the row's (`head_moved`); the shared
  *       daily rule holds it (`daily_cap`, still queued, nothing reserved); the seat is resolved (purpose "analyse": `analysisPerRunUsd` is the
  *       run's cap and its reservation; a refusal uses an attempt) and the run starts on the pinned commit, read-only.
- *  3. Only `sandbox` repositories run here: the lister leaves the others out and `readExecutionMode` is the second lock.
+ *  3. Where the run goes is the repository's effective mode, read when the run is started (D#483 S4-f4, as `proposalVerify.ts` does):
+ *     - `sandbox`: our sandbox, through the sandbox-only starter.
+ *     - `runner_verified` (Cloud-verified): a light read-only job on the person's runner, through the starter that leaves a queued runner run pending. The
+ *       repository must read as private from GitHub now; anything else (public, unknown, a failed read) starts nothing and uses no attempt. With no
+ *       runner of the account that listed `discovery_analyst` and may take this repository, nothing is started either: the analysis is held `queued`
+ *       (`no_capable_runner`, no run, no attempt), so it waits for a runner instead of a pending job expiring into `failed`. The job carries the pinned
+ *       commit, and its result is merged exactly as a sandbox run's.
+ *     - `runner_local` (Local-only), or anything else: nothing (S4-f5). The lister leaves them out; `readExecutionMode` is the second lock.
  * Analysis is off without `analysisPerRunUsd` (`analysis_unconfigured`); the verifier pass does not read that figure.
  */
 
@@ -51,6 +59,10 @@ export interface DocsCodeAnalysisDeps {
   resolveSeat: (request: SeatRequest) => Promise<SeatResult>;
   /** The production run starter, idempotent on the key; sandbox-only (`queued: "refuse"`). */
   starter: RunStarter;
+  /** S4-f4: the starter for a `runner_verified` repository's run (`queued: "accept"`). Absent: such an analysis starts nothing. */
+  runnerStarter?: RunStarter;
+  /** S4-f4: the repository visibility port (GitHub metadata). Absent, or anything but `private`: a runner run is not started. */
+  visibility?: RepoVisibilityPort;
   github: (target: { repoId: string; owner: string; name: string }) => VerifyRepoReader;
   /** plan-data's `analysisSettings`. */
   settings: () => AnalysisSettings;
@@ -135,6 +147,26 @@ export function createDocsCodeAnalysisSweep(deps: DocsCodeAnalysisDeps): () => P
   const now = deps.now ?? Date.now;
   const readHead = (r: AnalysisRow): VerifyRepoReader => deps.github({ repoId: r.repo_id, owner: r.gh_owner ?? "", name: r.gh_name ?? "" });
 
+  /** S4-f4: the starter and mode a new run of this repository uses, or null when none may start (see the header). */
+  async function placementFor(accountId: string, repoId: string): Promise<{ mode: "sandbox" | "runner_verified"; starter: RunStarter } | null> {
+    const mode = await readExecutionMode(deps.pool, accountId, repoId);
+    if (mode === "sandbox") return { mode, starter: deps.starter };
+    if (mode !== "runner_verified" || deps.runnerStarter === undefined || deps.visibility === undefined) return null;
+    const seen: RepoVisibility = await deps.visibility.visibility({ accountId, repoId }).catch((): RepoVisibility => "unknown");
+    return seen === "private" ? { mode, starter: deps.runnerStarter } : null;
+  }
+
+  /** S4-f4: a runner of the account, not revoked, whose latest hello listed the role's capability and whose scope covers the repository and the role. */
+  const hasCapableRunner = (accountId: string, repoId: string): Promise<boolean> =>
+    withTenant(deps.pool, accountId, async (client) =>
+      (await client.query(
+        `SELECT 1 FROM runners r JOIN runner_capabilities c ON c.runner_id = r.id AND c.account_id = r.account_id
+          WHERE r.account_id = $1 AND r.revoked_at IS NULL AND $2::text = ANY(c.capabilities) AND $3::uuid = ANY(r.allowed_repo_ids)
+            AND (cardinality(r.allowed_roles) = 0 OR $4::text = ANY(r.allowed_roles)) LIMIT 1`,
+        [accountId, RUNNER_CAPABILITY_FOR_ROLE[DISCOVERY_ANALYST_ROLE], repoId, DISCOVERY_ANALYST_ROLE],
+      )).rowCount === 1,
+    );
+
   /** An ended run is answered: merge its candidates, or count the failed attempt. */
   async function settle(settings: Extract<AnalysisSettings, { on: true }>, accountId: string, r: AnalysisRow, run: RunRow): Promise<Outcome> {
     if (!ENDED.has(run.status)) return "waiting";
@@ -185,8 +217,9 @@ export function createDocsCodeAnalysisSweep(deps: DocsCodeAnalysisDeps): () => P
       await endAnalysis(deps.pool, accountId, r.id, "skipped", skip);
       return "skipped";
     }
-    // Only our sandbox runs here. The lister already leaves the others out; this is the second lock, and such an analysis stays queued.
-    if ((await readExecutionMode(deps.pool, accountId, r.repo_id)) !== "sandbox") return "skipped";
+    // The lister already leaves Local-only repositories out; this is the second lock, and such an analysis stays queued.
+    const placement = await placementFor(accountId, r.repo_id);
+    if (placement === null) return "skipped";
     const repo = { repoId: r.repo_id, owner: r.gh_owner!, name: r.gh_name! };
     const attempt = r.attempts + 1;
     const key = keyOf(r, attempt);
@@ -194,6 +227,10 @@ export function createDocsCodeAnalysisSweep(deps: DocsCodeAnalysisDeps): () => P
     const made = await withTenant(deps.pool, accountId, (client) => readRun(client, accountId, key));
     let runId = made?.id;
     if (runId === undefined) {
+      if (placement.mode === "runner_verified" && !(await hasCapableRunner(accountId, r.repo_id))) {
+        await holdAnalysis(deps.pool, accountId, r.id, "no_capable_runner");
+        return "waiting";
+      }
       let sha: string;
       try {
         sha = await deps.github(repo).headSha();
@@ -226,7 +263,8 @@ export function createDocsCodeAnalysisSweep(deps: DocsCodeAnalysisDeps): () => P
         repoId: r.repo_id,
         role: DISCOVERY_ANALYST_ROLE,
         product: "team",
-        expectedExecutionMode: "sandbox",
+        // The mode read above: a repository that moved since starts nothing (`ExecutionModeChangedError`), and the run is tried again next pass.
+        expectedExecutionMode: placement.mode,
         prompt: deps.prompt({ owner: repo.owner, name: repo.name, sha, existing }),
         workdir: VERIFIER_WORKDIR,
         // The pinned commit, not the default branch: the agent reads exactly the tree the row names, or the launch fails.
@@ -235,7 +273,7 @@ export function createDocsCodeAnalysisSweep(deps: DocsCodeAnalysisDeps): () => P
         idempotency: { key, requestHash: requestHash(r, attempt) },
       };
       try {
-        runId = (await deps.starter.start(input)).runId;
+        runId = (await placement.starter.start(input)).runId;
       } catch (err) {
         // A launch that failed (the commit could not be fetched, say) has still made its run row, which has ended: that attempt is used and answered below.
         const failed = await withTenant(deps.pool, accountId, (client) => readRun(client, accountId, key));

@@ -5,6 +5,7 @@ import {
   JobSchema,
   LIGHT_JOB_ROLES,
   PINNED_COMMIT_JOB_ROLES,
+  DISCOVERY_ANALYST_ROLE,
   PROPOSAL_VERIFIER_ROLE,
   PROPOSAL_VERIFIER_RUNNER_TOOLS,
   REVIEW_JOB_ROLES,
@@ -35,7 +36,9 @@ describe("the claim verifier role on the wire", () => {
   it("is not a review role (no merge gate, no review prompt, no sandbox route) but its job carries the pinned commit", () => {
     expect(isReviewJobRole(PROPOSAL_VERIFIER_ROLE)).toBe(false);
     expect((REVIEW_JOB_ROLES as readonly string[]).includes(PROPOSAL_VERIFIER_ROLE)).toBe(false);
-    expect([...PINNED_COMMIT_JOB_ROLES]).toEqual([...REVIEW_JOB_ROLES, PROPOSAL_VERIFIER_ROLE]);
+    expect([...PINNED_COMMIT_JOB_ROLES]).toEqual([...REVIEW_JOB_ROLES, PROPOSAL_VERIFIER_ROLE, DISCOVERY_ANALYST_ROLE]);
+    expect(jobCarriesPinnedCommit(DISCOVERY_ANALYST_ROLE)).toBe(true);
+    expect(isReviewJobRole(DISCOVERY_ANALYST_ROLE)).toBe(false);
     expect(jobCarriesPinnedCommit(PROPOSAL_VERIFIER_ROLE)).toBe(true);
     for (const role of ["executor", "docs-writer", "project-manager", "", "constructor"]) expect(jobCarriesPinnedCommit(role), role).toBe(false);
   });
@@ -49,8 +52,14 @@ describe("the claim verifier role on the wire", () => {
 
   it("is gated by the proposal_verifier capability, and no other role is", () => {
     // D#6 RUNNER-WAKE R3a: wake_v1 is a capability too, but it gates no role (below).
-    expect([...RUNNER_CAPABILITIES]).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1"]);
-    expect(RUNNER_CAPABILITY_FOR_ROLE).toEqual({ [PROPOSAL_VERIFIER_ROLE]: "proposal_verifier" });
+    expect([...RUNNER_CAPABILITIES]).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst"]);
+    expect(RUNNER_CAPABILITY_FOR_ROLE).toEqual({ [PROPOSAL_VERIFIER_ROLE]: "proposal_verifier", [DISCOVERY_ANALYST_ROLE]: "discovery_analyst" });
+    expect(LIGHT_JOB_ROLES).toContain(DISCOVERY_ANALYST_ROLE);
+    expect(JobSchema.safeParse(sampleJob({ role: DISCOVERY_ANALYST_ROLE, review: { head_sha: SHA } })).success).toBe(true);
+    // The analyst's job carries a pinned commit, and the schema refuses a malformed one. A job with no `review` at all parses here (the field is optional
+    // for every role); that absence is refused by the runner's verifyJob as review_sha_missing (fx-runner proposalVerifierRunner.test.ts, run for both roles).
+    expect(jobCarriesPinnedCommit(DISCOVERY_ANALYST_ROLE)).toBe(true);
+    for (const bad of ["", "abc", "A".repeat(40), "a".repeat(41)]) expect(JobSchema.safeParse(sampleJob({ role: DISCOVERY_ANALYST_ROLE, review: { head_sha: bad } })).success, bad).toBe(false);
   });
 
   it("the runner tool list is the bare Read, Glob and Grep: no Bash, no LS, no edit, no network", () => {
@@ -66,6 +75,7 @@ describe("hello capabilities", () => {
     expect(HelloMessage.safeParse(hello).success).toBe(true);
     expect(parse([])).toBe(true);
     expect(parse(["proposal_verifier"])).toBe(true);
+    expect(parse(["discovery_analyst"])).toBe(true);
   });
 
   it("refuse an unknown code, a repeat, a non-list and anything that is not a string", () => {

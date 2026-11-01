@@ -106,7 +106,18 @@ describe("the daily re-discovery sweep [pg]", { timeout: 60_000 }, () => {
     expect(await analyses(unconfigured.repoId)).toEqual([]);
   });
 
-  it("S5g-2: a runner-mode repository still gets its sweep run queued and no analysis (only a sandbox repository is analysed)", async () => {
+  it("S4-f4: a Cloud-verified repository is analysed like a sandbox one (a run queued and an analysis for the head); a Local-only one is not (not_analysed)", async () => {
+    const verified = await fixture();
+    await admin.query("UPDATE repos SET execution_mode = 'runner_verified' WHERE id = $1", [verified.repoId]);
+    expect(await sweep()).toMatchObject({ listed: 1, queued: 1, analyses: 1, not_analysed: 0, errors: 0 });
+    expect(await analyses(verified.repoId)).toEqual([SHA_A]);
+    const local = await fixture();
+    await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [local.repoId]);
+    expect(await sweep()).toMatchObject({ listed: 1, queued: 1, analyses: 0, not_analysed: 1, errors: 0 });
+    expect(await analyses(local.repoId)).toEqual([]);
+  });
+
+  it("S5g-2: a Local-only repository still gets its sweep run queued and no analysis (a sandbox or Cloud-verified repository is analysed)", async () => {
     const runner = await fixture();
     await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [runner.repoId]);
     expect(await sweep()).toMatchObject({ listed: 1, queued: 1, analyses: 0, not_analysed: 1, errors: 0 });

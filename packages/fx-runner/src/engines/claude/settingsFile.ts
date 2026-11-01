@@ -1,6 +1,6 @@
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { PROPOSAL_VERIFIER_ROLE, excludeDenyRules, verifierReadGuardHook } from "@fulcrumaxe/runner-protocol";
+import { CONFINED_READ_ROLES, excludeDenyRules, verifierReadGuardHook } from "@fulcrumaxe/runner-protocol";
 import { roleToolsFor } from "../../job/roleTools.js";
 import type { ProtectedPaths } from "../../sandbox/sandboxSettings.js";
 import { anchored, checkCommandDenyRules, confineFileTools, denyRules, readRulesFor, workspaceProtectedEditRules } from "./filePermissions.js";
@@ -14,7 +14,7 @@ import { EngineRefusal } from "./refusal.js";
  * workspace and the sandbox block, so a fresh run and a resume get the same file.
  */
 export function settingsFor(role: string, sandbox: Record<string, unknown>, workspace: string, protectedList: ProtectedPaths, excludes: readonly string[] = [], spillDir?: string, checkArgv?: readonly string[]): Record<string, unknown> {
-  if (role === PROPOSAL_VERIFIER_ROLE) return verifierSettings(sandbox, workspace, protectedList, excludes);
+  if (CONFINED_READ_ROLES.has(role)) return verifierSettings(role, sandbox, workspace, protectedList, excludes);
   return {
     disableAllHooks: true,
     // D#600 CX-4b: the run's spill directory is read-only to the file tools: a `Read` rule for it, and no `Edit` rule (the bare file tools of the role are confined to the workspace).
@@ -28,7 +28,7 @@ export function settingsFor(role: string, sandbox: Record<string, unknown>, work
 const VERIFIER_CHECKOUT_DENY = [".git", ".git/**", "**/.git", "**/.git/**", ".env*", "**/.env*"] as const;
 
 /**
- * D#483 S4-b2c: the claim verifier's settings. Its prompt holds an outsider's text and its claims are stored and shown, so whatever it can read
+ * D#483 S4-b2c: the claim verifier's settings (S4-f4: and the discovery analyst's, the same confinement). Its prompt holds an outsider's text and its claims are stored and shown, so whatever it can read
  * it can leak. Read, Glob and Grep only (the role entry), confined to the checkout three ways, as in the cloud's sandbox:
  *  - the allow rules name the checkout only, and reads outside the working directory are refused;
  *  - deny rules (which win over any allow) cover the checkout's `.git` and `.env*` files, plus the runner's protected paths;
@@ -37,7 +37,7 @@ const VERIFIER_CHECKOUT_DENY = [".git", ".git/**", "**/.git", "**/.git/**", ".en
  *    and `--setting-sources ""` keeps the person's own hooks out. The hook runs outside the shell sandbox, so it is a fixed script of shell
  *    built-ins with the checkout as its one argument. A checkout the command cannot carry unquoted refuses the start.
  */
-function verifierSettings(sandbox: Record<string, unknown>, workspace: string, protectedList: ProtectedPaths, excludes: readonly string[]): Record<string, unknown> {
+function verifierSettings(role: string, sandbox: Record<string, unknown>, workspace: string, protectedList: ProtectedPaths, excludes: readonly string[]): Record<string, unknown> {
   let guard: ReturnType<typeof verifierReadGuardHook>;
   try {
     guard = verifierReadGuardHook(workspace);
@@ -51,7 +51,7 @@ function verifierSettings(sandbox: Record<string, unknown>, workspace: string, p
     hooks: { PreToolUse: [guard] },
     permissions: {
       defaultMode: "dontAsk",
-      allow: confineFileTools(roleToolsFor(PROPOSAL_VERIFIER_ROLE), workspace),
+      allow: confineFileTools(roleToolsFor(role), workspace),
       deny: [...VERIFIER_CHECKOUT_DENY.map((p) => `Read(${root}/${p})`), ...denyRules(protectedList), ...excludeRules(excludes)],
       blockReadsOutsideWorkingDirectories: true,
     },
@@ -95,7 +95,7 @@ export function writeJobFiles(jobDir: string, workspace: string, role: string, s
   if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))) throw new EngineRefusal("bad_start_options", "job directory is inside the workspace");
   // The read guard compares the agent's absolute paths with the checkout it is given, so the checkout must be its own real path (a link on the way
   // to it would make the guard refuse every absolute path, or compare against a name that is not the tree).
-  if (role === PROPOSAL_VERIFIER_ROLE && realpathOrNull(workspace) !== path.resolve(workspace)) throw new EngineRefusal("bad_start_options", "the checkout is not its own real path");
+  if (CONFINED_READ_ROLES.has(role) && realpathOrNull(workspace) !== path.resolve(workspace)) throw new EngineRefusal("bad_start_options", "the checkout is not its own real path");
   mkdirSync(jobDir, { recursive: true, mode: 0o700 });
   const settingsPath = path.join(jobDir, "settings.json");
   const mcpPath = path.join(jobDir, "mcp.json");

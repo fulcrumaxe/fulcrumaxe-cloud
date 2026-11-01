@@ -121,6 +121,21 @@ describe('migration 0893: runner_capabilities and runner_capabilities_record [pg
     await record(['proposal_verifier']);
   });
 
+  // D#483 S4-f4 (0953): discovery_analyst is the sixth closed code, through the definer and under the CHECK alike.
+  it('0953: stores discovery_analyst, alone or with the others, and still refuses a repeat or a near miss', async () => {
+    await record(['discovery_analyst']);
+    expect(await stored()).toEqual(['discovery_analyst']);
+    await record(['proposal_verifier', 'wake_v1', 'plane_merge_v1', 'memory_limit_v1', 'plane_merge_queue_v1', 'discovery_analyst']);
+    expect(await stored()).toEqual(['proposal_verifier', 'wake_v1', 'plane_merge_v1', 'memory_limit_v1', 'plane_merge_queue_v1', 'discovery_analyst']);
+    for (const bad of [['discovery_analyst', 'discovery_analyst'], ['discovery_analyst_v2'], ['Discovery_analyst'], ['discovery_analyst', 'shell']]) {
+      await expect(record(bad), JSON.stringify(bad)).rejects.toMatchObject({ code: '22023' });
+    }
+    const other = await insertRunner(admin, a.accountId, a.userId);
+    await admin.query(`INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, '{discovery_analyst,wake_v1}')`, [other, a.accountId]);
+    await expect(admin.query(`UPDATE runner_capabilities SET capabilities = '{discovery_analyst,discovery_analyst_v2}' WHERE runner_id = $1`, [other])).rejects.toMatchObject({ code: '23514' });
+    await record(['proposal_verifier']);
+  });
+
   it('names the runner from the session only: none, a malformed one, an unknown one, a revoked one or another account’s is refused (42501)', async () => {
     const before = await stored();
     for (const runnerId of [null, 'not-a-uuid', randomUUID()]) await expect(record(['proposal_verifier'], { runnerId }), String(runnerId)).rejects.toMatchObject({ code: '42501' });

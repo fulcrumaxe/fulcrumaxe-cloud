@@ -17,7 +17,7 @@ import { CONTEXT_SPILL_CODES, CONTEXT_SPILL_MAX_TOTAL_BYTES } from "./contextSpi
 import { MAX_EXCLUDE_RULES, isRuleablePath } from "./excludeRules.js";
 import { MAX_JOB_PINS, isPinPath } from "./pinRules.js";
 import { CheckSchema, JobAllowancesSchema } from "./sandboxAllowances.js";
-import { PROPOSAL_VERIFIER_ROLE } from "./verifierGuard.js";
+import { DISCOVERY_ANALYST_ROLE, PROPOSAL_VERIFIER_ROLE } from "./verifierGuard.js";
 
 /** Largest `spec.text`, in characters. It matches the cap on a request body. */
 export const MAX_SPEC_TEXT_CHARS = 256 * 1024;
@@ -38,11 +38,13 @@ export const MAX_JOB_MEMORY_BYTES = 8192;
  * D#483 S4-b2c: and the claim verifier (`PROPOSAL_VERIFIER_ROLE`), a light read-only job. Adding it here is backwards compatible: a runner
  * built before it refuses such a job at parse (this list is the job's closed `role` enum), and the cloud offers it only to a runner whose
  * hello advertised `proposal_verifier` (`RUNNER_CAPABILITY_FOR_ROLE`), so the protocol version does not move.
+ * D#483 S4-f4: and the discovery analyst (`DISCOVERY_ANALYST_ROLE`), the same kind of job, gated by `discovery_analyst`.
  */
 export const RUNNER_ELIGIBLE_ROLES = [
   "executor", "project-manager", "technical-architect", "product-owner", "cost-analyst",
   "performance-expert", "security-expert", "docs-writer", "accessibility-reviewer",
   "code-reviewer", "security-reviewer", "acceptance-tester", "debater", PROPOSAL_VERIFIER_ROLE,
+  DISCOVERY_ANALYST_ROLE,
 ] as const;
 export const RunnerRole = z.enum(RUNNER_ELIGIBLE_ROLES);
 
@@ -57,11 +59,11 @@ export const isReviewJobRole = (role: string): role is ReviewJobRole => (REVIEW_
 
 /**
  * D#483 S4-b2c: the roles whose job carries `review: { head_sha }`: the four reviewers, and the claim verifier, whose `head_sha` is the pinned
- * commit its cites are re-read at. The verifier is not a review role (it gates no merge, gets no review prompt text and no sandbox route): it
+ * commit its cites are re-read at; the discovery analyst's is the commit it reads. The verifier is not a review role (it gates no merge, gets no review prompt text and no sandbox route): it
  * only shares the field, so the runner checks out exactly that commit, detached. A job of these roles without the field, or of any other role
  * with it, is refused on both sides.
  */
-export const PINNED_COMMIT_JOB_ROLES: readonly string[] = Object.freeze([...REVIEW_JOB_ROLES, PROPOSAL_VERIFIER_ROLE]);
+export const PINNED_COMMIT_JOB_ROLES: readonly string[] = Object.freeze([...REVIEW_JOB_ROLES, PROPOSAL_VERIFIER_ROLE, DISCOVERY_ANALYST_ROLE]);
 export const jobCarriesPinnedCommit = (role: string): boolean => PINNED_COMMIT_JOB_ROLES.includes(role);
 
 /**
@@ -69,7 +71,7 @@ export const jobCarriesPinnedCommit = (role: string): boolean => PINNED_COMMIT_J
  * role out for a runner that did not advertise the capability on its latest hello. A role not named here needs none.
  * D#6 RUNNER-WAKE R3a: `wake_v1` gates no role. It tells the cloud the runner can read a `wake` grant on its hello and claim replies (wake.ts).
  */
-export const RUNNER_CAPABILITIES = ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1"] as const;
+export const RUNNER_CAPABILITIES = ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst"] as const;
 /** D#6 PUBLIC-MERGE PR2a: `plane_merge_v1` gates no role either. A runner that lists it can claim and execute a merge order (messages.ts, plane-merge-*). */
 export const PLANE_MERGE_CAPABILITY = "plane_merge_v1" as const;
 /**
@@ -82,8 +84,10 @@ export const MEMORY_LIMIT_CAPABILITY = "memory_limit_v1" as const;
  * `merge_mode` on the go reply only to such a runner. For a queue repository and a runner without it the cloud answers no go (`runner_update_required`) and issues no credential.
  */
 export const PLANE_MERGE_QUEUE_CAPABILITY = "plane_merge_queue_v1" as const;
+/** D#483 S4-f4: `discovery_analyst` gates the discovery analyst's job (`RUNNER_CAPABILITY_FOR_ROLE`). */
+export const DISCOVERY_ANALYST_CAPABILITY = "discovery_analyst" as const;
 export type RunnerCapability = (typeof RUNNER_CAPABILITIES)[number];
-export const RUNNER_CAPABILITY_FOR_ROLE: Readonly<Partial<Record<(typeof RUNNER_ELIGIBLE_ROLES)[number], RunnerCapability>>> = Object.freeze({ [PROPOSAL_VERIFIER_ROLE]: "proposal_verifier" });
+export const RUNNER_CAPABILITY_FOR_ROLE: Readonly<Partial<Record<(typeof RUNNER_ELIGIBLE_ROLES)[number], RunnerCapability>>> = Object.freeze({ [PROPOSAL_VERIFIER_ROLE]: "proposal_verifier", [DISCOVERY_ANALYST_ROLE]: "discovery_analyst" });
 
 /**
  * D#6 C43-2a: the slot class of a job. The class comes from the job's signed role, so no new signed field exists. The runner and
@@ -108,6 +112,7 @@ export const JOB_CLASS_BY_ROLE: Readonly<Record<(typeof RUNNER_ELIGIBLE_ROLES)[n
   "security-reviewer": "light",
   debater: "light",
   [PROPOSAL_VERIFIER_ROLE]: "light",
+  [DISCOVERY_ANALYST_ROLE]: "light",
 };
 /** The runner-eligible roles of the light class; any other role (an unknown one included) is heavy, so the cloud's SQL can say `role = ANY(...)` for light and `NOT` for heavy. */
 export const LIGHT_JOB_ROLES: readonly string[] = RUNNER_ELIGIBLE_ROLES.filter((role) => JOB_CLASS_BY_ROLE[role] === "light");

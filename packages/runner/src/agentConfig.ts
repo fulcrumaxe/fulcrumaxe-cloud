@@ -18,7 +18,7 @@
  * nor use a tool its role was not given. The boundary that matters is still the sandbox VM, the egress firewall and the
  * gh-proxy's push and PR rules; these lists are least privilege on top of them, not a replacement.
  */
-import { CONTEXT_WARNING_CODE, CONTEXT_WARNING_TEXT, CONTEXT_WARN_PCT, PROPOSAL_VERIFIER_ROLE, PROPOSAL_VERIFIER_RUNNER_TOOLS, excludeDenyRules, verifierReadGuardHook } from "@fulcrumaxe/runner-protocol";
+import { CONFINED_READ_ROLES, CONTEXT_WARNING_CODE, CONTEXT_WARNING_TEXT, CONTEXT_WARN_PCT, DISCOVERY_ANALYST_ROLE, PROPOSAL_VERIFIER_ROLE, PROPOSAL_VERIFIER_RUNNER_TOOLS, excludeDenyRules, verifierReadGuardHook } from "@fulcrumaxe/runner-protocol";
 // D#600 CX-5c: the exclude helpers live in the protocol package, so the local runner writes the very same rules. Re-exported here under the names this package always had.
 export { EXCLUDE_PROMPT_LINE, MAX_EXCLUDE_RULES, disabledToolsFor, escapeRulePath, excludeDenyRules } from "@fulcrumaxe/runner-protocol";
 
@@ -94,7 +94,7 @@ const TOOLS_BY_ROLE: Readonly<Record<string, readonly string[]>> = Object.freeze
 });
 
 /** D#483 S4-f1: the role the platform runs to propose changes from a repository's docs and code. Not in the role manifest. Hosted half only; the runner half is S4-f4. */
-export const DISCOVERY_ANALYST_ROLE = "discovery-analyst";
+export { DISCOVERY_ANALYST_ROLE };
 
 /**
  * D#483 S4-f1 (R-C25-4): the platform roles that are a CONFINED READ-ONLY run: Read under the checkout, Glob and Grep, behind the one read guard.
@@ -102,7 +102,7 @@ export const DISCOVERY_ANALYST_ROLE = "discovery-analyst";
  * with `PROPOSAL_VERIFIER_ROLE` alone is for something only the verifier does (it cites lines and is the one role a runner job can be for today)
  * and says why in a comment (confinedRoles.test.ts holds the line).
  */
-export const CONFINED_READ_ROLES: ReadonlySet<string> = new Set([PROPOSAL_VERIFIER_ROLE, DISCOVERY_ANALYST_ROLE]);
+export { CONFINED_READ_ROLES };
 
 /**
  * The roles the platform itself runs that are not in the role manifest, each with its own settings below (today only the
@@ -138,8 +138,7 @@ export function toolsForRole(role: string): readonly string[] {
  * the runner confines to its own checkout. Fails closed like `toolsForRole`.
  */
 export function runnerToolsForRole(role: string): readonly string[] {
-  // verifier-only: the one confined role a runner job can be for today; the analyst's runner half is S4-f4.
-  return role === PROPOSAL_VERIFIER_ROLE ? PROPOSAL_VERIFIER_RUNNER_TOOLS : toolsForRole(role);
+  return CONFINED_READ_ROLES.has(role) ? PROPOSAL_VERIFIER_RUNNER_TOOLS : toolsForRole(role);
 }
 
 /**

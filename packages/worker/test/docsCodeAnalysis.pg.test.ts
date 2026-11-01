@@ -365,12 +365,14 @@ describe("the docs-and-code analysis pass [pg]", { timeout: 120_000 }, () => {
     }
   });
 
-  it("C25-f3-8: a runner_verified and a runner_local repository's analyses stay queued with no run, by the lister and by the pass's own second check", async () => {
+  it("C25-f3-8 (S4-f4 widened the lister): a runner_local repository's analysis stays queued with no run, by the lister and by the pass's own second check; a runner_verified one is listed, and this pass (no runner starter wired) starts nothing for it", async () => {
     for (const mode of ["runner_verified", "runner_local"]) {
       const { a, repoId } = await target();
       const id = await queued(a, repoId);
       await admin.query("UPDATE repos SET execution_mode = $2 WHERE id = $1", [repoId, mode]);
-      expect((await writerPool.query("SELECT analysis_id FROM discovery_analysis_list_due(200)")).rows.map((r) => r.analysis_id), mode).not.toContain(id);
+      const listed = (await writerPool.query("SELECT analysis_id FROM discovery_analysis_list_due(200)")).rows.map((r) => r.analysis_id);
+      if (mode === "runner_verified") expect(listed, mode).toContain(id);
+      else expect(listed, mode).not.toContain(id);
       forced = [{ account_id: a.accountId, analysis_id: id }];
       await sweep();
       expect(await runsOf(id), mode).toEqual([]);
