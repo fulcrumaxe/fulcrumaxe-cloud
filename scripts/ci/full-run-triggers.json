@@ -71,6 +71,7 @@
     {"from":"packages/pipeline","to":"packages/github","kind":"test","reason":"relative import in packages/pipeline/test/plan/scope.test.ts"},
     {"from":"packages/pipeline","to":"packages/worker","kind":"test","reason":"relative import in packages/pipeline/test/helpers/runActionsWorld.ts"},
     {"from":"packages/runner","to":"packages/github","kind":"test","reason":"relative import in packages/runner/test/helpers/policyFirewall.ts"},
+    {"from":"packages/runner-cloud","to":"packages/github","kind":"test","reason":"relative import in packages/runner-cloud/test/localOnlyGithub.test.ts"},
     {"from":"packages/telemetry","to":"packages/api","kind":"test","reason":"relative import in packages/telemetry/test/errorCodes.test.ts"},
     {"from":"packages/core","to":"packages/spend","kind":"test","reason":"relative import in packages/core/test/run-limits.test.ts"},
     {"from":"packages/spend","to":"packages/billing","kind":"test","reason":"relative import in packages/spend/test/unavailable.test.ts"},

@@ -46,7 +46,8 @@ describe("fenceInstallationHttp", () => {
         { method: "GET" as const, path: `/repos/acme/widgets/git/blobs/${SHA}` },
         { method: "GET" as const, path: `/repos/acme/widgets/commits/${SHA}/check-runs` },
         { method: "GET" as const, path: `/repos/acme/widgets/commits/${SHA}/status` },
-        { method: "GET" as const, path: "/repos/acme/widgets/rules/branches/main" },
+        // D#694 B7-0 (A11) allows the branch rules read for the paired code repository; the rulesets list stays refused.
+        { method: "GET" as const, path: "/repos/acme/widgets/rulesets" },
         { method: "GET" as const, path: "/repos/acme/widgets/branches/main/protection/required_status_checks" },
         { method: "PUT" as const, path: "/repos/acme/widgets/pulls/41/merge", body: { sha: SHA, merge_method: "merge" } },
         { method: "POST" as const, path: `/repos/acme/widgets/statuses/${SHA}`, body: { state: "success", context: "ci/other", description: "d" } },

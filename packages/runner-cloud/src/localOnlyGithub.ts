@@ -31,6 +31,12 @@
  *   A9   the fixed GraphQL document `CommitChecks`, keyed by pull request number and reading its last commit (check-run name, status, conclusion and app id; status-context name and state)
  *   A10  PUT  /repos/{owner}/{repo}/pulls/{n}/merge, body exactly { sha, merge_method: "squash" }
  *
+ * D#694 B7-0 (C9) adds three reads of a paired item's queue facts, each as narrow as the call itself, and no write:
+ *   A11  GET  /repos/{owner}/{repo}/rules/branches/{branch} (one path segment, no continuation fold; only the paging keys `per_page` and `page`)
+ *   A12  the fixed GraphQL document `MergeQueueRead` (`mergeQueue { id }`), variables exactly owner, name, branch
+ *   A13  the fixed GraphQL document `MergeQueueEntry` (the pull request's state, head oid and queue entry), variables exactly owner, name, integer number
+ * The enqueue, dequeue and auto-merge documents stay refused: the cloud never writes the merge or the queue for a paired item.
+ *
  * Calls not listed are refused until a numbered correction adds them with their own negative tests. Reading CI state uses only a
  * fixed GraphQL document that selects state and conclusion, never a check run's output text, summary or annotations.
  */
@@ -131,7 +137,17 @@ export const GITHUB_GRAPHQL_DOCUMENTS = Object.freeze({
   }
 }`,
 });
-export type GithubGraphqlOperation = keyof typeof GITHUB_GRAPHQL_DOCUMENTS;
+/**
+ * D#694 B7-0 (A12, A13): the two queue-read documents. Byte for byte the hosted client's `MERGE_QUEUE_READ_DOCUMENT` and `MERGE_QUEUE_ENTRY_DOCUMENT`
+ * (a test holds them equal; this package does not depend on `@fulcrumaxe/github`). They select ids, states, a position, a head oid and the merged flag.
+ */
+export const MERGE_QUEUE_READ_DOCUMENTS = Object.freeze({
+  MergeQueueRead: "query($owner: String!, $name: String!, $branch: String!) { repository(owner: $owner, name: $name) { mergeQueue(branch: $branch) { id } } }",
+  MergeQueueEntry:
+    "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { state merged headRefOid mergeQueueEntry { id state position } } } }",
+});
+const ALL_DOCUMENTS: Readonly<Record<string, string>> = Object.freeze({ ...GITHUB_GRAPHQL_DOCUMENTS, ...MERGE_QUEUE_READ_DOCUMENTS });
+export type GithubGraphqlOperation = keyof typeof GITHUB_GRAPHQL_DOCUMENTS | keyof typeof MERGE_QUEUE_READ_DOCUMENTS;
 
 /** One allowed call. `paths` are templates; `query` lists the only query keys; `body` says in words what the body must be. */
 export interface LocalOnlyAllowlistEntry {
@@ -154,6 +170,9 @@ export const LOCAL_ONLY_ALLOWLIST: readonly LocalOnlyAllowlistEntry[] = Object.f
     { id: "A7", method: "POST", paths: ["/repos/{owner}/{repo}/statuses/{sha}"], query: [], body: '{ state, context: "fulcrumaxe/review", description }' },
     { id: "A8", method: "GET", paths: ["/repos/{owner}/{repo}/branches/{branch}/protection"], query: [], body: "none" },
     { id: "A10", method: "PUT", paths: ["/repos/{owner}/{repo}/pulls/{n}/merge"], query: [], body: '{ sha, merge_method: "squash" }' },
+    { id: "A11", method: "GET", paths: ["/repos/{owner}/{repo}/rules/branches/{branch}"], query: ["per_page", "page"], body: "none" },
+    { id: "A12", method: "POST", paths: ["/graphql"], query: [], body: "{ query: MergeQueueRead, variables: exactly owner, name, branch }" },
+    { id: "A13", method: "POST", paths: ["/graphql"], query: [], body: "{ query: MergeQueueEntry, variables: exactly owner, name, number }" },
   ].map((entry) => Object.freeze(entry) as LocalOnlyAllowlistEntry),
 );
 
@@ -242,7 +261,7 @@ const ownerOrName = (value: unknown): boolean => typeof value === "string" && OW
 const positiveInt = (value: unknown): boolean => typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
 
 /** The variables each fixed document takes. */
-const VARIABLES: Readonly<Record<GithubGraphqlOperation, (v: Record<string, unknown>) => boolean>> = {
+const VARIABLES: Readonly<Record<keyof typeof GITHUB_GRAPHQL_DOCUMENTS, (v: Record<string, unknown>) => boolean>> = {
   RunBranchState: (v) => hasExactKeys(v, ["owner", "name", "head", "base"]) && ownerOrName(v.owner) && ownerOrName(v.name) && str(v.head, REF_NAME) && str(v.base, REF_NAME),
   PullRequestFiles: (v) =>
     hasExactKeys(v, ["owner", "name", "number"], ["cursor"]) && ownerOrName(v.owner) && ownerOrName(v.name) && positiveInt(v.number) && (v.cursor === undefined || v.cursor === null || str(v.cursor, CURSOR)),
@@ -250,15 +269,27 @@ const VARIABLES: Readonly<Record<GithubGraphqlOperation, (v: Record<string, unkn
   CommitChecks: (v) =>
     hasExactKeys(v, ["owner", "name", "number"], ["cursor"]) && ownerOrName(v.owner) && ownerOrName(v.name) && positiveInt(v.number) && (v.cursor === undefined || v.cursor === null || str(v.cursor, CURSOR)),
 };
+const QUEUE_VARIABLES: Readonly<Record<keyof typeof MERGE_QUEUE_READ_DOCUMENTS, (v: Record<string, unknown>) => boolean>> = {
+  MergeQueueRead: (v) => hasExactKeys(v, ["owner", "name", "branch"]) && ownerOrName(v.owner) && ownerOrName(v.name) && str(v.branch, REF_NAME),
+  MergeQueueEntry: (v) => hasExactKeys(v, ["owner", "name", "number"]) && ownerOrName(v.owner) && ownerOrName(v.name) && positiveInt(v.number),
+};
+
+/** A body for the entry whose document is `documents[name]`: exactly { query, variables }, the query that document byte for byte. */
+function documentBodyFits(body: unknown, documents: Readonly<Record<string, string>>, checks: Readonly<Record<string, (v: Record<string, unknown>) => boolean>>, only?: string): boolean {
+  if (!isPlainObject(body) || !hasExactKeys(body, ["query", "variables"])) return false;
+  const op = Object.keys(checks).find((name) => documents[name] === body.query);
+  return op !== undefined && (only === undefined || op === only) && isPlainObject(body.variables) && checks[op]!(body.variables);
+}
 
 /** Whether the body has the shape the entry names. */
 function bodyFits(entry: LocalOnlyAllowlistEntry, body: unknown): boolean {
   switch (entry.id) {
-    case "A1": {
-      if (!isPlainObject(body) || !hasExactKeys(body, ["query", "variables"])) return false;
-      const op = (Object.keys(GITHUB_GRAPHQL_DOCUMENTS) as GithubGraphqlOperation[]).find((name) => GITHUB_GRAPHQL_DOCUMENTS[name] === body.query);
-      return op !== undefined && isPlainObject(body.variables) && VARIABLES[op](body.variables);
-    }
+    case "A1":
+      return documentBodyFits(body, GITHUB_GRAPHQL_DOCUMENTS, VARIABLES);
+    case "A12":
+      return documentBodyFits(body, MERGE_QUEUE_READ_DOCUMENTS, QUEUE_VARIABLES, "MergeQueueRead");
+    case "A13":
+      return documentBodyFits(body, MERGE_QUEUE_READ_DOCUMENTS, QUEUE_VARIABLES, "MergeQueueEntry");
     case "A4":
       return (
         isPlainObject(body) &&
@@ -298,6 +329,7 @@ const QUERY_VALUES: Readonly<Record<string, (value: string) => boolean>> = {
   base: (v) => REF_NAME.test(v) && !v.includes(".."),
   state: (v) => v === "open" || v === "closed" || v === "all",
   per_page: (v) => /^\d{1,3}$/.test(v) && Number(v) >= 1 && Number(v) <= 100,
+  page: (v) => /^\d{1,3}$/.test(v) && Number(v) >= 1 && Number(v) <= 100,
 };
 
 /** The rule a call breaks, or null when it is on the allowlist. `not_allowlisted` for anything the list does not hold; `accept` for a media type other than JSON. */
@@ -305,7 +337,7 @@ export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | 
   if (typeof req.method !== "string" || typeof req.path !== "string") return NOT_ALLOWLISTED;
   const where = canonical(foldContinuationBranchPath(req.path));
   if (where === null) return NOT_ALLOWLISTED;
-  const entry = LOCAL_ONLY_ALLOWLIST.find((e) => !exclude.includes(e.id) && e.method === req.method && e.paths.some((template) => templateMatches(template, where.segments)));
+  const entry = LOCAL_ONLY_ALLOWLIST.find((e) => !exclude.includes(e.id) && e.method === req.method && e.paths.some((template) => templateMatches(template, where.segments)) && bodyFits(e, req.body));
   if (!entry) return NOT_ALLOWLISTED;
 
   const given = Object.entries(req.query ?? {});
@@ -320,7 +352,6 @@ export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | 
     }
   }
 
-  if (!bodyFits(entry, req.body)) return NOT_ALLOWLISTED;
   for (const [name, value] of Object.entries(req.headers ?? {})) {
     if (name.toLowerCase() === "accept" && !ACCEPT.test(value)) return ACCEPT_RULE;
   }
@@ -353,8 +384,8 @@ export function localOnlyGithub(inner: GithubClient, options: { exclude?: readon
   return {
     request: send,
     graphql(op, variables) {
-      if (typeof op !== "string" || !Object.hasOwn(GITHUB_GRAPHQL_DOCUMENTS, op)) return Promise.reject(new LocalOnlyGithubError(NOT_ALLOWLISTED));
-      return send({ method: "POST", path: "/graphql", body: { query: GITHUB_GRAPHQL_DOCUMENTS[op], variables } });
+      if (typeof op !== "string" || !Object.hasOwn(ALL_DOCUMENTS, op)) return Promise.reject(new LocalOnlyGithubError(NOT_ALLOWLISTED));
+      return send({ method: "POST", path: "/graphql", body: { query: ALL_DOCUMENTS[op], variables } });
     },
   };
 }

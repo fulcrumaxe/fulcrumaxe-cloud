@@ -6,8 +6,10 @@ import {
   localOnlyGithub,
   localOnlyViolation,
   type GithubClient,
+  MERGE_QUEUE_READ_DOCUMENTS,
   type GithubRequest,
 } from "../src/localOnlyGithub.js";
+import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "../../github/src/mergeGateGraphql.js";
 
 const R = "/repos/acme/app";
 const NOT = "not_allowlisted";
@@ -35,6 +37,8 @@ const SHA = "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567";
 const status = { state: "success", context: "fulcrumaxe/review", description: "Local review: every required reviewer passed on this commit, on your machine" };
 const merge = { sha: SHA, merge_method: "squash" };
 const checks = { owner: "acme", name: "app", number: 12 };
+const queueRead = { owner: "acme", name: "app", branch: "main" };
+const queueEntry = { owner: "acme", name: "app", number: 12 };
 
 /** The calls the run path makes: each is one entry of the allowlist. */
 const ALLOWED: Array<[string, GithubRequest]> = [
@@ -59,6 +63,10 @@ const ALLOWED: Array<[string, GithubRequest]> = [
   ["A7 a pending review status", { method: "POST", path: `${R}/statuses/${SHA}`, body: { ...status, state: "pending" } }],
   ["A8 branch protection", { method: "GET", path: `${R}/branches/main/protection` }],
   ["A10 the squash merge", { method: "PUT", path: `${R}/pulls/12/merge`, body: merge }],
+  ["A11 the branch rules", { method: "GET", path: `${R}/rules/branches/main` }],
+  ["A11 the branch rules, paged", { method: "GET", path: `${R}/rules/branches/main`, query: { per_page: 100, page: 2 } }],
+  ["A12 MergeQueueRead", graphql(MERGE_QUEUE_READ_DOCUMENT, queueRead)],
+  ["A13 MergeQueueEntry", graphql(MERGE_QUEUE_ENTRY_DOCUMENT, queueEntry)],
   ["a JSON Accept", { method: "GET", path: R, headers: { accept: "application/vnd.github+json" } }],
   ["a v3 JSON Accept", { method: "GET", path: R, headers: { Accept: "application/vnd.github.v3+json" } }],
   ["a trailing slash and doubled slashes read as the same path", { method: "GET", path: "//repos//acme/app/" }],
@@ -66,7 +74,7 @@ const ALLOWED: Array<[string, GithubRequest]> = [
 ];
 
 describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 section 6)", () => {
-  it("holds exactly the entries of the Spec's table, A1 to A8 and A10 (A9 is a fixed document of A1), and nothing else", () => {
+  it("holds exactly the entries of the Spec's table, A1 to A8 and A10 to A13 (A9 is a fixed document of A1), and nothing else", () => {
     expect(LOCAL_ONLY_ALLOWLIST).toEqual([
       { id: "A1", method: "POST", paths: ["/graphql"], query: [], body: "{ query: one of the three fixed documents, variables: that document's schema }" },
       { id: "A2", method: "GET", paths: ["/repos/{owner}/{repo}", "/repositories/{id}"], query: [], body: "none" },
@@ -77,6 +85,9 @@ describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 sect
       { id: "A7", method: "POST", paths: ["/repos/{owner}/{repo}/statuses/{sha}"], query: [], body: '{ state, context: "fulcrumaxe/review", description }' },
       { id: "A8", method: "GET", paths: ["/repos/{owner}/{repo}/branches/{branch}/protection"], query: [], body: "none" },
       { id: "A10", method: "PUT", paths: ["/repos/{owner}/{repo}/pulls/{n}/merge"], query: [], body: '{ sha, merge_method: "squash" }' },
+      { id: "A11", method: "GET", paths: ["/repos/{owner}/{repo}/rules/branches/{branch}"], query: ["per_page", "page"], body: "none" },
+      { id: "A12", method: "POST", paths: ["/graphql"], query: [], body: "{ query: MergeQueueRead, variables: exactly owner, name, branch }" },
+      { id: "A13", method: "POST", paths: ["/graphql"], query: [], body: "{ query: MergeQueueEntry, variables: exactly owner, name, number }" },
     ]);
     expect(Object.isFrozen(LOCAL_ONLY_ALLOWLIST)).toBe(true);
   });
@@ -398,7 +409,6 @@ describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 sect
         { method: "PUT", path: `${R}/branches/main/protection`, body: {} },
         { method: "POST", path: `${R}/branches/main/protection`, body: {} },
         { method: "DELETE", path: `${R}/branches/main/protection` },
-        { method: "GET", path: `${R}/rules/branches/main` },
         { method: "GET", path: `${R}/rulesets` },
       ];
       for (const req of cases) expect((await attempt(req)).result, `${req.method} ${req.path}`).toBe(NOT);
@@ -498,6 +508,77 @@ describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 sect
 
     it("a call that is not allowed is refused as not allowed, whatever its Accept", async () => {
       expect((await attempt({ method: "GET", path: `${R}/pulls/12`, headers: { accept: "application/vnd.github+json" } })).result).toBe(NOT);
+    });
+  });
+
+  describe("A11 to A13 (D#694 B7-0, C9): three reads, as narrow as the calls", () => {
+    it("the fence's documents are the hosted client's constants, byte for byte", () => {
+      expect(MERGE_QUEUE_READ_DOCUMENTS.MergeQueueRead).toBe(MERGE_QUEUE_READ_DOCUMENT);
+      expect(MERGE_QUEUE_READ_DOCUMENTS.MergeQueueEntry).toBe(MERGE_QUEUE_ENTRY_DOCUMENT);
+      expect(Object.keys(MERGE_QUEUE_READ_DOCUMENTS)).toEqual(["MergeQueueRead", "MergeQueueEntry"]);
+      expect(Object.isFrozen(MERGE_QUEUE_READ_DOCUMENTS)).toBe(true);
+    });
+
+    it("A11 takes one branch segment and the paging keys only, no body, and GET only", async () => {
+      const rules = `${R}/rules/branches/main`;
+      const cases: GithubRequest[] = [
+        { method: "GET", path: `${R}/rules/branches/release/1` },
+        { method: "GET", path: `${R}/rules/branches/release%2F1` },
+        { method: "GET", path: `${R}/rules/branches/release%252F1` },
+        { method: "GET", path: `${R}/rules/branches/%2e%2e` },
+        { method: "GET", path: `${rules}/extra` },
+        { method: "GET", path: `${R}/rules/branches` },
+        { method: "GET", path: rules, query: { x: "1" } },
+        { method: "GET", path: `${rules}?ref=main` },
+        { method: "GET", path: rules, query: { page: 0 } },
+        { method: "GET", path: rules, query: { per_page: 101 } },
+        { method: "GET", path: `${rules}?page=abc` },
+        { method: "GET", path: rules, body: {} },
+        ...["POST", "PUT", "PATCH", "DELETE"].map((method) => ({ method, path: rules, body: {} })),
+      ];
+      for (const req of cases) expect((await attempt(req)).result, `${req.method} ${req.path}`).toBe(NOT);
+      expect((await attempt({ method: "GET", path: rules, headers: { accept: "application/vnd.github.diff" } })).result).toBe("accept");
+    });
+
+    it("A12 and A13 refuse extra or mistyped variables, a swapped variable shape and an altered document", async () => {
+      const cases: GithubRequest[] = [
+        graphql(MERGE_QUEUE_READ_DOCUMENT, { ...queueRead, extra: 1 }),
+        graphql(MERGE_QUEUE_READ_DOCUMENT, { owner: "acme", name: "app" }),
+        graphql(MERGE_QUEUE_READ_DOCUMENT, { ...queueRead, branch: 5 }),
+        graphql(MERGE_QUEUE_READ_DOCUMENT, { ...queueRead, owner: ".." }),
+        graphql(MERGE_QUEUE_READ_DOCUMENT, queueEntry),
+        graphql(MERGE_QUEUE_ENTRY_DOCUMENT, { ...queueEntry, extra: 1 }),
+        graphql(MERGE_QUEUE_ENTRY_DOCUMENT, { ...queueEntry, number: "12" }),
+        graphql(MERGE_QUEUE_ENTRY_DOCUMENT, { ...queueEntry, number: 1.5 }),
+        graphql(MERGE_QUEUE_ENTRY_DOCUMENT, { ...queueEntry, number: 0 }),
+        graphql(MERGE_QUEUE_ENTRY_DOCUMENT, queueRead),
+        graphql(MERGE_QUEUE_READ_DOCUMENT + " ", queueRead),
+        { method: "POST", path: "/graphql", body: { query: MERGE_QUEUE_READ_DOCUMENT, variables: queueRead, operationName: "x" } },
+      ];
+      for (const req of cases) expect((await attempt(req)).result, JSON.stringify(req.body)).toBe(NOT);
+    });
+
+    it("the enqueue, dequeue and auto-merge documents stay refused, and so does any other operation name", async () => {
+      const vars = { pullRequestId: "PR_kwDOAbCd123", expectedHeadOid: SHA, mergeMethod: "SQUASH" };
+      for (const query of [ENQUEUE_PULL_REQUEST_DOCUMENT, DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT]) expect((await attempt(graphql(query, vars))).result).toBe(NOT);
+      const { client, seen } = recorder();
+      const gh = localOnlyGithub(client);
+      await expect(gh.graphql("EnqueuePullRequest" as never, vars)).rejects.toMatchObject({ rule: NOT });
+      await expect(gh.graphql("MergeQueueRead", { ...queueRead, extra: 1 })).rejects.toMatchObject({ rule: NOT });
+      await gh.graphql("MergeQueueEntry", queueEntry);
+      expect(seen.map((r) => (r.body as { query: string }).query)).toEqual([MERGE_QUEUE_ENTRY_DOCUMENT]);
+    });
+
+    it("the exclude list can drop one of them: a client without A12 cannot read the queue but still reads the entry", async () => {
+      const { client } = recorder();
+      await expect(localOnlyGithub(client, { exclude: ["A12"] }).request(graphql(MERGE_QUEUE_READ_DOCUMENT, queueRead))).rejects.toMatchObject({ rule: NOT });
+      await expect(localOnlyGithub(client, { exclude: ["A12"] }).request(graphql(MERGE_QUEUE_ENTRY_DOCUMENT, queueEntry))).resolves.toBeDefined();
+    });
+
+    it("the queue-read documents select no patch, diff, text, blob, contents or body either", () => {
+      for (const [op, document] of Object.entries(MERGE_QUEUE_READ_DOCUMENTS)) {
+        for (const word of ["patch", "diff", "text", "blob", "contents", "body", "object", "tree", "readme", "message"]) expect(document.toLowerCase(), `${op} selects ${word}`).not.toMatch(new RegExp(`\\b${word}\\b`));
+      }
     });
   });
 
