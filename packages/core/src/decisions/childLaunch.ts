@@ -7,6 +7,7 @@ import { DIAL_VERSION_CATALOGUE_DEFAULT, writeSubItemPolicyReceipt } from '@fx/d
 import { sanitize } from '@fx/trust';
 import { resolveSubItemLaunch } from '../autonomy/resolveSubItemLaunch.js';
 import { cleanWorkItemTitle } from '../work-items/title.js';
+import { readStackParent, setStackParent } from '../work-items/stackParent.js';
 import { FIX_ASK_HOLD, FIX_ASK_START, presetOf } from './fixRoundGate.js';
 
 /**
@@ -59,15 +60,24 @@ export const DIAL_LAUNCH_CHILD_ERROR_CODES = [
 const NOT_YET = "Planned PRs can't start yet.";
 
 /**
+ * D#598 P3d: the two other ways a planned PR waits on a sibling (both are the code `waiting_on_planned_pr`). A dependency that has no pull request yet is waited for until
+ * it opens one (the child then builds on it); two or more open dependencies are waited for until one is left. `waiting_on_planned_pr` keeps its own sentence for a
+ * dependency that cannot be built on (its pull request is halted, in a person's hands, or cannot be linked): that one waits for the merge.
+ */
+export type WaitingSentence = 'waiting_for_pull_request' | 'waiting_for_merge_then_build';
+
+/**
  * The one map from a reason to its sentence. `<sibling title>` and `<parent title>` stand for the CLEANED title of that item (`childLaunchSentence` fills them);
  * no sentence prints an id, a stored title as it was typed, or a database message.
  */
-export const CHILD_LAUNCH_SENTENCES: Readonly<Record<ChildLaunchCode | (typeof DIAL_LAUNCH_CHILD_ERROR_CODES)[number], string>> = Object.freeze({
+export const CHILD_LAUNCH_SENTENCES: Readonly<Record<ChildLaunchCode | (typeof DIAL_LAUNCH_CHILD_ERROR_CODES)[number] | WaitingSentence, string>> = Object.freeze({
   child_orphaned: 'The item this planned PR belonged to was deleted.',
   parent_closed: 'The item this planned PR belongs to is closed.',
   respec_needs_approval: 'The Spec changed. It needs approval again before more planned PRs start.',
   key_not_in_approved_spec: 'This planned PR is no longer in the approved Spec.',
   waiting_on_planned_pr: 'Waits for <sibling title> to merge.',
+  waiting_for_pull_request: 'Waiting for <sibling title> to open its pull request.',
+  waiting_for_merge_then_build: 'Waiting for <sibling title> to merge before it can build on <other title>.',
   external_needs_approval: 'This planned PR came from outside your team, so a person has to approve it before it starts.',
   parent_no_envelope: 'This planned PR has no spending limit to draw on. Set one on <parent title>.',
   parent_envelope_reached: "This item's spending limit is used up. Nothing more starts until you raise the limit or stop the item.",
@@ -88,10 +98,11 @@ const FALLBACK_TITLE = 'another planned PR';
 const FALLBACK_PARENT = 'the item it belongs to';
 
 /** The sentence for a code, with the titles cleaned by `cleanWorkItemTitle` (an untrusted title never reaches the screen as it was stored). */
-export function childLaunchSentence(code: keyof typeof CHILD_LAUNCH_SENTENCES, titles: { siblingTitle?: unknown; parentTitle?: unknown } = {}): string {
+export function childLaunchSentence(code: keyof typeof CHILD_LAUNCH_SENTENCES, titles: { siblingTitle?: unknown; otherTitle?: unknown; parentTitle?: unknown } = {}): string {
   const sibling = cleanWorkItemTitle(titles.siblingTitle) ?? FALLBACK_TITLE;
+  const other = cleanWorkItemTitle(titles.otherTitle) ?? FALLBACK_TITLE;
   const parent = cleanWorkItemTitle(titles.parentTitle) ?? FALLBACK_PARENT;
-  return CHILD_LAUNCH_SENTENCES[code].replace('<sibling title>', () => sibling).replace('<parent title>', () => parent);
+  return CHILD_LAUNCH_SENTENCES[code].replace('<sibling title>', () => sibling).replace('<other title>', () => other).replace('<parent title>', () => parent);
 }
 
 const isChildCode = (c: string): c is ChildLaunchCode => (CHILD_LAUNCH_CODES as readonly string[]).includes(c);
@@ -147,16 +158,52 @@ const OFFERS: Readonly<Partial<Record<ChildLaunchCode, 'close' | 'parent'>>> = {
   child_orphaned: 'close', parent_closed: 'close', key_not_in_approved_spec: 'close', child_closed: 'close', respec_needs_approval: 'parent',
 };
 
-async function titlesFor(client: PoolClient, accountId: string, child: ChildRow): Promise<{ siblingTitle: string | null; parentTitle: string | null }> {
+/** Stages in which a dependency has not opened a pull request yet (the others have one, or are over). */
+const BEFORE_PULL_REQUEST: ReadonlySet<string> = new Set(['triaged', 'discussing', 'spec_ready', 'in_progress']);
+
+interface WaitingTitles { siblingTitle: string | null; otherTitle: string | null; parentTitle: string | null; sentence: 'waiting_on_planned_pr' | WaitingSentence }
+
+/** The titles a sentence names, and which waiting sentence applies (derived from the siblings as they are now; nothing is stored). */
+async function titlesFor(client: PoolClient, accountId: string, child: ChildRow): Promise<WaitingTitles> {
   const waiting = await client.query<{ w: string[] }>('SELECT planned_pr_child_waiting_on($1::uuid) AS w', [child.id]);
-  const dep = waiting.rows[0]?.w?.[0];
-  const sibling = dep && child.parent_id
-    ? (await client.query<{ title: string | null }>('SELECT title FROM work_items WHERE account_id = $1::uuid AND parent_id = $2::uuid AND planned_pr_key = $3::text', [accountId, child.parent_id, dep])).rows[0]?.title ?? null
-    : null;
+  const deps = waiting.rows[0]?.w ?? [];
+  const sibs = child.parent_id && deps.length > 0
+    ? (await client.query<{ planned_pr_key: string; title: string | null; stage: string }>(
+        'SELECT planned_pr_key, title, stage FROM work_items WHERE account_id = $1::uuid AND parent_id = $2::uuid AND planned_pr_key = ANY($3::text[])', [accountId, child.parent_id, deps])).rows
+    : [];
+  const byKey = new Map(sibs.map((r) => [r.planned_pr_key, r]));
+  const first = deps[0] === undefined ? undefined : byKey.get(deps[0]);
+  const second = deps[1] === undefined ? undefined : byKey.get(deps[1]);
   const parent = child.parent_id
     ? (await client.query<{ title: string | null }>('SELECT title FROM work_items WHERE account_id = $1::uuid AND id = $2::uuid', [accountId, child.parent_id])).rows[0]?.title ?? null
     : null;
-  return { siblingTitle: sibling, parentTitle: parent };
+  const sentence = deps.length >= 2 ? 'waiting_for_merge_then_build' : first !== undefined && BEFORE_PULL_REQUEST.has(first.stage) ? 'waiting_for_pull_request' : 'waiting_on_planned_pr';
+  return { siblingTitle: first?.title ?? null, otherTitle: second?.title ?? null, parentTitle: parent, sentence };
+}
+
+/** The sentence key for a code: the waiting code has three sentences, every other code has one. */
+const sentenceKeyOf = (code: ChildLaunchCode, titles: WaitingTitles): keyof typeof CHILD_LAUNCH_SENTENCES => (code === 'waiting_on_planned_pr' ? titles.sentence : code);
+
+/**
+ * D#598 P3d: the launch paths that skip the sibling hold (the dial, a parent's approval) read it earlier, when the one open dependency could still be built on. That can stop being
+ * true before the link is written (the sibling is halted, goes to a person, or closes). So after the link: a child that is linked is fine; one with no link and a dependency
+ * still open is refused with the waiting code, and the caller's transaction (receipt included) rolls back. A person's own early start never calls this.
+ */
+async function linkOrRefuse(client: PoolClient, childId: string): Promise<void> {
+  if ((await linkStackParentAtLaunch(client, childId)) !== null || (await readStackParent(client, childId)) !== null) return;
+  const open = (await client.query<{ d: string[] }>('SELECT planned_pr_child_open_deps($1::uuid) AS d', [childId])).rows[0]?.d ?? [];
+  if (open.length > 0) throw new ChildLaunchRefusal('waiting_on_planned_pr');
+}
+
+/**
+ * D#598 P3d: at a launch, build on the one open dependency that has an open pull request (the database says which: `planned_pr_child_stack_target`). Nothing is set for a
+ * child with no open dependency, one that waits, or one that already has a link of its own. `setStackParent` is the one write path and refuses a cycle or another repo.
+ */
+export async function linkStackParentAtLaunch(client: PoolClient, childId: string): Promise<string | null> {
+  const target = (await client.query<{ t: string | null }>('SELECT planned_pr_child_stack_target($1::uuid) AS t', [childId])).rows[0]?.t ?? null;
+  if (target === null || (await readStackParent(client, childId)) !== null) return null;
+  await setStackParent(client, { workItemId: childId, stackParentId: target });
+  return target;
 }
 
 /**
@@ -183,10 +230,10 @@ export async function readChildLaunch(client: PoolClient, input: { accountId: st
   const titles = await titlesFor(client, accountId, child);
   let warning: ChildLaunchState['warning'] = null;
   if (person && code === null && (await blockerOf(client, childId, false, true)) === 'waiting_on_planned_pr') {
-    warning = { code: 'waiting_on_planned_pr', sentence: childLaunchSentence('waiting_on_planned_pr', titles) };
+    warning = { code: 'waiting_on_planned_pr', sentence: childLaunchSentence(titles.sentence, titles) };
   }
   if (code === null || !isChildCode(code)) return { ...none, warning };
-  return { code, sentence: childLaunchSentence(code, titles), offers: OFFERS[code] ?? null, warning, started: false };
+  return { code, sentence: childLaunchSentence(sentenceKeyOf(code, titles), titles), offers: OFFERS[code] ?? null, warning, started: false };
 }
 
 // ---- a person's launch ------------------------------------------------------------------------------------------------------------------------
@@ -233,9 +280,11 @@ export async function prepareChildLaunch(client: PoolClient, input: { accountId:
  * the driver reads that as a person's click). The key counts the child's earlier requests, so a launch after a cancelled run is a new request and a replay of the
  * same click (the child is then started, so `prepareChildLaunch` answered `launch: false`) files nothing.
  */
-export async function fileChildLaunch(client: PoolClient, input: { accountId: string; childId: string }): Promise<string> {
+export async function fileChildLaunch(client: PoolClient, input: { accountId: string; childId: string; /** A launch that must not start a child before its dependencies merge (a parent's approval). */ holdSiblings?: boolean }): Promise<string> {
   const { accountId, childId } = input;
   await client.query('SELECT work_item_set_child_envelope($1::uuid)', [childId]);
+  if (input.holdSiblings === true) await linkOrRefuse(client, childId);
+  else await linkStackParentAtLaunch(client, childId);
   const n = Number((await client.query<{ n: string }>(
     `SELECT count(*)::text AS n FROM run_action_requests WHERE account_id = $1::uuid AND kind = 'advance_work_item' AND target_id = $2::uuid`, [accountId, childId])).rows[0]!.n);
   const req = await client.query<{ action_id: string }>('SELECT action_id FROM run_action_request($1, $2, $3, $4)',
@@ -262,6 +311,7 @@ const DEFINER_REPLAY: ReadonlySet<string> = new Set(['work_started', 'receipt_no
 /** Maps what `dial_launch_child` raised to an outcome, or rethrows what is not one of its fixed refusals. */
 export function childGateOutcomeOfError(err: unknown): ChildGateResult {
   const e = err as { code?: string; message?: string } | null;
+  if (err instanceof ChildLaunchRefusal) return { outcome: 'held_by_rule', code: err.code };
   if (e?.code === '23505') return { outcome: 'replayed' };
   if (e?.code === '42501') return { outcome: 'not_ready' };
   if (e?.code === '55000' && typeof e.message === 'string') {
@@ -335,6 +385,7 @@ export async function gateChildLaunch(client: PoolClient, input: { accountId: st
     chosen: decision.outcome === 'announce' ? 'announce' : 'launch', dialVersion: dial?.version ?? DIAL_VERSION_CATALOGUE_DEFAULT,
   });
   if (receipt.replayed) return { outcome: 'replayed' };
+  await linkOrRefuse(client, childId);
   const launched = (await client.query<{ replayed: boolean }>('SELECT replayed FROM dial_launch_child($1::uuid, $2::uuid)', [childId, receipt.id])).rows[0]!;
   return { outcome: launched.replayed ? 'replayed' : 'started' };
 }

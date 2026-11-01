@@ -26,12 +26,14 @@ export type SubItemApprovalErrorCode =
   | 'session_required' | 'forbidden' | 'not_found' | 'invalid_key'
   | 'parent_not_approved' | 'respec_needs_approval' | 'no_spec' | 'no_anchor_run' | 'wrong_round'
   // A planned PR key (D#483 S5-b2c-1): why the child does not start. `child_build_unsupported` is the pairing guard: nothing starts until the build can build a child.
-  | 'child_build_unsupported' | 'child_orphaned' | 'parent_closed' | 'key_not_in_approved_spec' | 'parent_no_envelope' | 'parent_envelope_reached' | 'child_closed';
+  | 'child_build_unsupported' | 'child_orphaned' | 'parent_closed' | 'key_not_in_approved_spec' | 'parent_no_envelope' | 'parent_envelope_reached' | 'child_closed'
+  // D#598 P3d: only a parent's approval can meet this one (the sibling it was to build on changed before the link was written); the child stays where it is.
+  | 'waiting_on_planned_pr';
 
 const STATUS: Record<SubItemApprovalErrorCode, 403 | 404 | 409 | 422> = {
   session_required: 403, forbidden: 403, not_found: 404, invalid_key: 422,
   parent_not_approved: 409, respec_needs_approval: 409, no_spec: 409, no_anchor_run: 409, wrong_round: 409,
-  child_build_unsupported: 409, child_orphaned: 409, parent_closed: 409, key_not_in_approved_spec: 409, parent_no_envelope: 409, parent_envelope_reached: 409, child_closed: 409,
+  child_build_unsupported: 409, child_orphaned: 409, parent_closed: 409, key_not_in_approved_spec: 409, parent_no_envelope: 409, parent_envelope_reached: 409, child_closed: 409, waiting_on_planned_pr: 409,
 };
 
 /** `status` is the HTTP status a route answers with. Branch on `code`, never on the message. */
@@ -199,7 +201,12 @@ export async function approveSubItemIn(client: PoolClient, who: { accountId: str
   // A planned PR: the child draws on its parent's envelope and starts, filed in the person's own name (a person's click, never the dial's).
   let childLaunchedId: string | null = null;
   if (childId !== null && childPlan?.launch === true) {
-    advanceActionId = await fileChildLaunch(client, { accountId, childId });
+    try {
+      advanceActionId = await fileChildLaunch(client, { accountId, childId, holdSiblings: input.viaParentApproval === true });
+    } catch (err) {
+      if (err instanceof ChildLaunchRefusal) throw new SubItemApprovalError(err.code as ChildLaunchCode & SubItemApprovalErrorCode);
+      throw err;
+    }
     childLaunchedId = childId;
   }
   return { receiptId: receipt.id, replayed: receipt.replayed, specVersionId: spec.id, withdrawnAsks: withdrawn, advanceActionId, childLaunchedId };

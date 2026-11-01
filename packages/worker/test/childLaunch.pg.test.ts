@@ -322,13 +322,13 @@ describe("the planned PR child launch gate [pg]", { timeout: 90_000 }, () => {
     it("holds the dependent child while its sibling is open, launches it once the sibling's PR merged; a person may start it earlier and the card warns", async () => {
       const f = await fixture({ dial: "act" });
       expect(await sweep.gateChild(f.t.accountId, f.kids.ui)).toEqual({ outcome: "held_by_rule", code: "waiting_on_planned_pr" });
-      expect(await card(f, "ui")).toMatchObject({ code: "waiting_on_planned_pr", sentence: "Waits for The API to merge." });
+      expect(await card(f, "ui")).toMatchObject({ code: "waiting_on_planned_pr", sentence: "Waiting for The API to open its pull request." });
       expect(await written(f.t)).toEqual(NOTHING);
       await admin.query(`UPDATE work_items SET stage = 'merged' WHERE id = $1`, [f.kids.api]);
       expect(await sweep.gateChild(f.t.accountId, f.kids.ui)).toEqual({ outcome: "started" });
 
       const g = await fixture({ dial: "ask" });
-      expect((await card(g, "ui", true)).warning).toMatchObject({ code: "waiting_on_planned_pr", sentence: "Waits for The API to merge." });
+      expect((await card(g, "ui", true)).warning).toMatchObject({ code: "waiting_on_planned_pr", sentence: "Waiting for The API to open its pull request." });
       expect(await approve(g, "ui")).toMatchObject({ childLaunchedId: g.kids.ui });
       expect(await requestsOf(g, "ui")).toHaveLength(1);
     });

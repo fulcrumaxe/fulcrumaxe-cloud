@@ -126,7 +126,10 @@ describe("the queue merge records the work item merged [pg]", { timeout: 90_000 
     const started: AdvanceStartArgs[] = [];
     await sweeper(started).sweepParkedStages([entry]);
     expect(mine(started, f.t.accountId)).toEqual([]);
+    // The api child's pull request is open, which would let the sibling build on it (D#598 P3d): the hold is shown with the child halted (not stackable), and the halt is cleared before the tick.
+    await admin.query("UPDATE work_items SET halted_at = now(), halt_action_id = $2, halt_epoch = halt_epoch + 1 WHERE id = $1", [api, randomUUID()]);
     expect(await sweep.gateChild(f.t.accountId, f.kids.ui!)).toEqual({ outcome: "held_by_rule", code: "waiting_on_planned_pr" });
+    await admin.query("UPDATE work_items SET halted_at = NULL, halt_action_id = NULL WHERE id = $1", [api]);
     markers.clear();
 
     const out = await runQueueTick(queue.deps(), queue);
@@ -162,6 +165,12 @@ describe("the queue merge records the work item merged [pg]", { timeout: 90_000 
     expect(markers.size).toBe(0);
     await sweeper(started).sweepParkedStages([entry]);
     expect(mine(started, f.t.accountId)).toHaveLength(1);
+  });
+
+  it("while the api child's pull request is open and not halted, the dependent sibling starts at once and is stacked on it (D#598 P3d)", async () => {
+    const { f, api } = await world();
+    expect(await sweep.gateChild(f.t.accountId, f.kids.ui!)).toEqual({ outcome: "started" });
+    expect((await admin.query("SELECT stack_parent_id FROM work_items WHERE id = $1", [f.kids.ui])).rows[0].stack_parent_id).toBe(api);
   });
 
   it("a clock ahead of the database (recordStage refuses the time) never rolls back the entry's merge; the item stays for the webhook and the sweep", async () => {
