@@ -19,9 +19,9 @@ const ACTIVITY = fx("getWorkItemActivity", "200-receipts.json");
 const ITEM = LIST.data[0].id as string;
 const WIN = `#windows-container .fulc-window[data-app-id="pipeline"]`;
 const tid = (page: Page, id: string) => page.locator(`${WIN} [data-testid="${id}"]`);
-const [FREE, PRICED, STUCK, FAILED, WAITING] = ["01", "02", "03", "04", "05"].map((n) => `6b1f6c1e-3f5a-4e0e-9a55-0a7b1c2d3e${n}`);
+const [FREE, PRICED, STUCK, FAILED, WAITING, RETRY] = ["01", "02", "03", "04", "05", "06"].map((n) => `6b1f6c1e-3f5a-4e0e-9a55-0a7b1c2d3e${n}`);
 
-type Reversal = { id: string; state: string; kind: string; reason_code: string | null; estimate_usd: number | null; pr_number: number | null; text: string };
+type Reversal = { id: string; state: string; kind: string; reason_code: string | null; estimate_usd: number | null; pr_number: number | null; can_retry?: boolean; text: string };
 interface Rx { id: string; label: string; price_kind: string; price_usd: number | null; price_text: string; deadline_text: string; can_reverse: boolean; reversal: Reversal | null }
 interface Mock {
   receipts: Rx[];
@@ -44,7 +44,11 @@ const seed = (): Rx[] => [
   }),
   row(FAILED, "A decision whose revert failed", {
     can_reverse: false,
-    reversal: { id: "c-failed", state: "failed", kind: "revert_pr", reason_code: "revert_refused", estimate_usd: null, pr_number: null, text: "GitHub could not open a revert for this pull request, most likely because later changes conflict with it." },
+    reversal: { id: "c-failed", state: "failed", kind: "revert_pr", reason_code: "tooling_error", can_retry: false, estimate_usd: null, pr_number: null, text: "GitHub could not open a revert for this pull request, most likely because later changes conflict with it." },
+  }),
+  row(RETRY, "A decision whose revert could not start", {
+    can_reverse: false,
+    reversal: { id: "c-retry", state: "failed", kind: "revert_pr", reason_code: "no_installation", can_retry: true, estimate_usd: null, pr_number: null, text: "The GitHub App is no longer installed on this repository, so nothing was changed. Install it again, then try again." },
   }),
 ];
 
@@ -73,6 +77,14 @@ async function mockApi(page: Page): Promise<Mock> {
       if (mock.override) return send(route, 200, mock.override);
       const rec = (id: string) => mock.receipts.find((r) => r.id === id);
       const outcome = (status: string, message: string, id: string) => ({ status, reversal_id: "c-new", receipt_id: id, kind: "rerun", reason_code: null, estimate_usd: null, ask_id: null, message });
+      const rt = p.match(/\/reversals\/([^/]+)\/retry$/);
+      if (rt) {
+        const r = mock.receipts.find((x) => x.reversal?.id === rt[1]);
+        if (!r || !r.reversal) return send(route, 404, { error: { code: "not_found", message: "x", request_id: "r" } });
+        if (!r.reversal.can_retry) return send(route, 409, { error: { code: "not_retryable", message: "server words that must never be shown", request_id: "r" } });
+        r.reversal = { ...r.reversal, state: "pending", reason_code: null, can_retry: false, text: "Waiting to start." };
+        return send(route, 200, outcome("started", "Trying again. It will start shortly.", r.id));
+      }
       const cf = p.match(/\/reversals\/([^/]+)\/confirm$/);
       if (cf) {
         const r = mock.receipts.find((x) => x.reversal?.id === cf[1]);
@@ -206,6 +218,74 @@ test.describe("D#7 DP7-2f: the Reverse control (mocked API)", () => {
     await expect(failed).toContainText("Reversal failed. GitHub could not open a revert for this pull request");
     await expect(failed.getByRole("button")).toHaveCount(0);
     await expect(tid(page, "pl-receipts")).not.toContainText(/null|undefined|revert_refused|[0-9a-f]{8}-[0-9a-f]{4}/);
+    expect(errors).toEqual([]);
+  });
+
+  test("a failed reversal the server allows to retry shows Try again; one click retries the same reversal, and after a reload it reads Waiting to start with no button", async ({ page }) => {
+    const { mock, errors } = await setup(page);
+    const failed = line(page, "A decision whose revert could not start");
+    await expect(failed).toContainText("Reversal failed. The GitHub App is no longer installed on this repository");
+    await failed.getByTestId("pl-reverse-retry").click();
+    await expect(failed.getByTestId("pl-reverse-note")).toContainText("Trying again. It will start shortly.");
+    expect(mock.posts).toEqual([{ path: "/api/v1/reversals/c-retry/retry", body: {} }]);
+    const count = mock.receipts.length;
+    await reload(page);
+    const again = line(page, "A decision whose revert could not start");
+    await expect(again).toContainText("Waiting to start.");
+    await expect(again.getByRole("button")).toHaveCount(0);
+    await expect(tid(page, "pl-receipt")).toHaveCount(count);
+    await expect(tid(page, "pl-receipts")).not.toContainText(/null|undefined|no_installation|[0-9a-f]{8}-[0-9a-f]{4}/);
+    expect(errors).toEqual([]);
+  });
+
+  test("a failed reversal the worker will retry by itself shows no Try again; a member's press gets the owner-or-admin sentence and nothing changes; a stale press says to refresh", async ({ page }) => {
+    const { mock, errors } = await setup(page);
+    await expect(line(page, "A decision whose revert failed").getByRole("button")).toHaveCount(0);
+    const failed = line(page, "A decision whose revert could not start");
+    mock.fail = { status: 403, code: "forbidden" };
+    await failed.getByTestId("pl-reverse-retry").click();
+    await expect(failed.getByTestId("pl-reverse-note")).toHaveText("Only an owner or an admin can retry a reversal.");
+    await expect(failed.getByTestId("pl-reverse-retry")).toBeVisible();
+    mock.fail = { status: 409, code: "not_retryable" };
+    await failed.getByTestId("pl-reverse-retry").click();
+    await expect(failed.getByTestId("pl-reverse-note")).toContainText("can't be tried again from here");
+    await expect(tid(page, "pl-receipts")).not.toContainText("server words");
+    expect(mock.receipts.find((r) => r.id === RETRY)?.reversal?.state).toBe("failed");
+    expect(errors).toEqual([]);
+  });
+
+  test("Try again at 375px: nothing scrolls sideways, and it is reached by keyboard with a visible focus ring and pressed with Enter", async ({ page }) => {
+    const { mock, errors } = await setup(page);
+    await page.setViewportSize({ width: 375, height: 800 });
+    const fit = await tid(page, "pl-detail").evaluate((el) => {
+      const box = el as HTMLElement;
+      const right = box.getBoundingClientRect().right;
+      const wide = [...box.querySelectorAll("*")].filter((n) => n.getBoundingClientRect().width > 0 && n.getBoundingClientRect().right > right + 1).map((n) => n.tagName);
+      return { scrollW: box.scrollWidth, clientW: box.clientWidth, doc: document.documentElement.scrollWidth - document.documentElement.clientWidth, wide };
+    });
+    expect(fit.scrollW).toBeLessThanOrEqual(fit.clientW);
+    expect(fit.doc).toBeLessThanOrEqual(0);
+    expect(fit.wide).toEqual([]);
+    await tid(page, "pl-receipts-heading").evaluate((el) => {
+      el.setAttribute("tabindex", "-1");
+      (el as HTMLElement).focus();
+    });
+    let reached = false;
+    for (let i = 0; i < 16 && !reached; i++) {
+      await page.keyboard.press("Tab");
+      reached = await page.evaluate((id) => document.activeElement?.getAttribute("data-rx") === id + ":pl-reverse-retry", RETRY);
+    }
+    expect(reached).toBe(true);
+    const ring = await page.evaluate(() => {
+      const cs = getComputedStyle(document.activeElement as Element);
+      return { width: parseFloat(cs.outlineWidth), style: cs.outlineStyle, matches: (document.activeElement as Element).matches(":focus-visible") };
+    });
+    expect(ring.matches).toBe(true);
+    expect(ring.style).not.toBe("none");
+    expect(ring.width).toBeGreaterThanOrEqual(2);
+    await page.keyboard.press("Enter");
+    await expect.poll(() => mock.posts.length).toBe(1);
+    expect(mock.posts[0].path).toBe("/api/v1/reversals/c-retry/retry");
     expect(errors).toEqual([]);
   });
 

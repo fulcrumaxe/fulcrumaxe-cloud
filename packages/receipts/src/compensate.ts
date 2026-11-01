@@ -33,6 +33,9 @@ export const COMPENSATE_REASONS = [
   "revert_refused",
   "rerun_refused",
   "tooling_error",
+  // Migration 0936: the two the worker step ends a row with when GitHub or our own row is gone (reversalCompensate.ts).
+  "no_installation",
+  "repo_gone",
 ] as const;
 export type CompensateReason = (typeof COMPENSATE_REASONS)[number];
 
@@ -155,6 +158,8 @@ export const COMPENSATION_COPY = {
     revert_refused: "GitHub could not open a revert for this pull request, most likely because later changes conflict with it.",
     rerun_refused: "The fresh build could not be started: an owner or admin can start it once nothing else is running.",
     tooling_error: "We could not finish this step. It can be tried again.",
+    no_installation: "The GitHub App is no longer installed on this repository, so nothing was changed. Install it again, then try again.",
+    repo_gone: "This repository can no longer be reached, so nothing was changed. Once it is connected again, try again.",
   } satisfies Record<CompensateReason, string>,
 } as const;
 

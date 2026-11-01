@@ -74,7 +74,7 @@ subItemApprovalDeps.getApprover = async () => {
 // D#7 DP7-2e: reversing a decision and confirming its estimate write receipts and compensation rows on the worker (the receipt login); null (a 503) until a worker can be built.
 receiptReversalDeps.getService = async () => {
   const worker = await getWorker();
-  return worker === null ? null : { request: (input) => worker.requestReversal(input), confirm: (input) => worker.confirmReversal(input) };
+  return worker === null ? null : { request: (input) => worker.requestReversal(input), confirm: (input) => worker.confirmReversal(input), retry: (input) => worker.retryReversal(input) };
 };
 vercelConnectionDeps.getNames = () => productionVercelNames;
 // D#601 MEM-4a2b: an edited memory is scanned against this process's live installation tokens, the same source the worker's intake uses.

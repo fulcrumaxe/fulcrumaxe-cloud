@@ -7,7 +7,7 @@ import { writeReceipt } from '@fx/db/src/receiptWriter.js';
 import { listDueCompensations } from '@fx/db/src/reversalCompensation.js';
 import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
 import { withTenant } from '@fx/core/src/tenancy/withTenant.js';
-import { confirmReversal, requestReversal } from '@fx/core/src/decisions/index.js';
+import { confirmReversal, requestReversal, retryReversal } from '@fx/core/src/decisions/index.js';
 import { insertApiToken } from '@fx/core/src/tokens/service.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
 import { createReversalPlanner } from '@fx/receipts';
@@ -31,7 +31,7 @@ interface ErrorBody { error: { code: string; message: string }; data?: { current
 interface ReceiptDto {
   id: string; label: string; name: string; at: string; by: string; reverses_receipt_id: string | null; reverses_text: string; free_until: string | null; deadline_text: string;
   price_kind: string; price_usd: number | null; price_text: string; can_reverse: boolean;
-  reversal: { id: string; state: string; kind: string; reason_code: string | null; estimate_usd: number | null; text: string } | null;
+  reversal: { id: string; state: string; kind: string; reason_code: string | null; estimate_usd: number | null; pr_number: number | null; can_retry: boolean; text: string } | null;
 }
 
 describe('D#7 DP7-2e: receipts and reversals', () => {
@@ -59,6 +59,7 @@ describe('D#7 DP7-2e: receipts and reversals', () => {
     const service: ReversalService = {
       request: async (i) => (calls.push('request'), requestReversal(ctx, i.principal, { receiptId: i.receiptId, ...(i.confirmEstimateUsd === undefined ? {} : { confirmEstimateUsd: i.confirmEstimateUsd }) })),
       confirm: async (i) => (calls.push('confirm'), confirmReversal(ctx, i.principal, { reversalId: i.reversalId, confirmEstimateUsd: i.confirmEstimateUsd })),
+      retry: async (i) => (calls.push('retry'), retryReversal(ctx, i.principal, { reversalId: i.reversalId })),
     };
     receiptReversalDeps.getService = async () => service;
   });
@@ -74,8 +75,8 @@ describe('D#7 DP7-2e: receipts and reversals', () => {
     await Promise.all([adminPool.end(), platformOpsPool.end(), appUserPool.end(), receiptPool.end()]);
   });
 
-  async function call(identity: Identity, method: string, urlPath: string, body?: unknown, bearer?: string): Promise<Response> {
-    const headers = new Headers();
+  async function call(identity: Identity, method: string, urlPath: string, body?: unknown, bearer?: string, extra: Record<string, string> = {}): Promise<Response> {
+    const headers = new Headers(extra);
     if (bearer) headers.set('authorization', `Bearer ${bearer}`);
     else headers.set('cookie', `${SESSION_COOKIE_NAME}=${await signSession(identity)}`);
     if (body !== undefined) headers.set('content-type', 'application/json');
@@ -366,6 +367,136 @@ describe('D#7 DP7-2e: receipts and reversals', () => {
       expect(body.receipts.find((r) => r.id === dto.receipt_id)!.reverses_text).toBe('removed item');
       expect((await list(f.member, 'nope')).status).toBe(404);
       expect((await list(f.member, randomUUID())).status).toBe(404);
+    });
+  });
+
+  describe('DP7-2g: retry a failed compensation, and the derived revert state', () => {
+    const retry = (who: Identity, id: string, bearer?: string, extra?: Record<string, string>) => call(who, 'POST', `/reversals/${id}/retry`, undefined, bearer, extra);
+    const auditRows = async (accountId: string) => (await admin.query(`SELECT actor, payload FROM audit_log WHERE account_id = $1 AND action = 'reversal.retried'`, [accountId])).rows;
+    /** A merged item reversed by the admin: one revert row, then forced to the given state by the admin login. */
+    async function revertRow(f: Fx, to: { state: string; reason?: string | null; attempts?: number; pr?: number | null }): Promise<{ itemId: string; id: string; receiptId: string }> {
+      const w = await item(f, 'merged');
+      const dto = (await (await reverse(f.admin, await receipt(f, w))).json()) as Dto;
+      await admin.query('UPDATE reversal_compensations SET state = $2, reason_code = $3, attempts = $4, pr_number = $5 WHERE id = $1', [dto.reversal_id, to.state, to.reason ?? null, to.attempts ?? 1, to.pr ?? null]);
+      return { itemId: w.itemId, id: dto.reversal_id!, receiptId: dto.receipt_id };
+    }
+
+    it('refuses without a session, as a key, as a plain member and as a stranger; another account answers 404; the service is not called for the first four', async () => {
+      const f = await fixture();
+      const other = await fixture();
+      const r = await revertRow(f, { state: 'failed', reason: 'repo_gone' });
+      const anon = await anonymous('POST', `/reversals/${r.id}/retry`);
+      expect([anon.status, (await errOf(anon)).error.code]).toEqual([401, 'unauthenticated']);
+      const key = await retry(f.admin, r.id, await readToken(f.admin, 'work_items:write'));
+      expect([key.status, (await errOf(key)).error.code]).toEqual([403, 'session_required']);
+      expect((await retry(f.member, r.id)).status).toBe(403);
+      expect((await retry({ accountId: f.refs.accountId, userId: randomUUID() }, r.id)).status).toBe(401);
+      calls = calls.filter((c) => c !== 'request');
+      expect(calls).toEqual([]);
+      for (const id of [r.id, randomUUID(), 'not-a-uuid']) expect((await retry(other.admin, id)).status, id).toBe(404);
+      expect((await rowFor(r.itemId))[0]).toMatchObject({ state: 'failed', reason_code: 'repo_gone', attempts: 1 });
+      expect(await auditRows(f.refs.accountId)).toEqual([]);
+    });
+
+    it('with no worker the retry is 503 reversal_unavailable', async () => {
+      const f = await fixture();
+      const keep = receiptReversalDeps.getService;
+      receiptReversalDeps.getService = async () => null;
+      try {
+        const res = await retry(f.admin, randomUUID());
+        expect([res.status, (await errOf(res)).error.code]).toEqual([503, 'reversal_unavailable']);
+      } finally {
+        receiptReversalDeps.getService = keep;
+      }
+    });
+
+    it('moves a failed revert back to pending on the same row with no new reversal; a second press and a replayed key answer the same and add no second audit row', async () => {
+      const f = await fixture();
+      const r = await revertRow(f, { state: 'failed', reason: 'no_installation', attempts: 1 });
+      const receiptsBefore = await reversalReceipts(r.itemId);
+      const res = await retry(f.admin, r.id, undefined, { 'idempotency-key': 'retry-key-1' });
+      expect(res.status).toBe(200);
+      expect((await res.json()) as Dto).toMatchObject({ status: 'started', reversal_id: r.id, receipt_id: r.receiptId, kind: 'revert_pr' });
+      const rows = await rowFor(r.itemId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ id: r.id, state: 'pending', reason_code: null, attempts: 0, reversal_receipt_id: r.receiptId });
+      expect(await reversalReceipts(r.itemId)).toEqual(receiptsBefore);
+      expect(await listDueCompensations(receiptPool, 100)).toContain(r.id);
+      expect(await auditRows(f.refs.accountId)).toHaveLength(1);
+      const replay = await retry(f.admin, r.id, undefined, { 'idempotency-key': 'retry-key-1' });
+      expect(replay.status).toBe(200);
+      // A press with no key while the tick owns the row is not an error.
+      const again = await retry(f.admin, r.id);
+      expect([again.status, ((await again.json()) as Dto).status]).toEqual([200, 'started']);
+      await admin.query("UPDATE reversal_compensations SET state = 'running' WHERE id = $1", [r.id]);
+      expect([(await retry(f.admin, r.id)).status, (await rowFor(r.itemId))[0].state]).toEqual([200, 'running']);
+      expect(await auditRows(f.refs.accountId)).toHaveLength(1);
+    });
+
+    it('answers 409 not_retryable, changing nothing, for a done row, one awaiting confirmation, a failed row the tick will retry, and a refusal', async () => {
+      const f = await fixture();
+      const priced = await item(f);
+      await spend(f, priced, 2);
+      const waiting = (await (await reverse(f.admin, await receipt(f, priced))).json()) as Dto;
+      const refusedItem = await item(f);
+      const type = CATALOGUE.find((e) => e.class === 'human_over_the_loop' && e.reversal.availability === 'not_reversible')!.id;
+      const refused = (await (await reverse(f.admin, await receipt(f, refusedItem, { type }))).json()) as Dto;
+      const done = await revertRow(f, { state: 'done', pr: 9 });
+      const tick = await revertRow(f, { state: 'failed', reason: 'tooling_error', attempts: 2 });
+      for (const [id, itemId] of [[waiting.reversal_id!, priced.itemId], [refused.reversal_id!, refusedItem.itemId], [done.id, done.itemId], [tick.id, tick.itemId]] as const) {
+        const before = await rowFor(itemId);
+        const res = await retry(f.admin, id);
+        expect([res.status, (await errOf(res)).error.code], id).toEqual([409, 'not_retryable']);
+        expect(await rowFor(itemId)).toEqual(before);
+      }
+      expect(await auditRows(f.refs.accountId)).toEqual([]);
+    });
+
+    it('a tooling error at the attempt cap is retryable by a person', async () => {
+      const f = await fixture();
+      const r = await revertRow(f, { state: 'failed', reason: 'tooling_error', attempts: 3 });
+      expect((await retry(f.admin, r.id)).status).toBe(200);
+      expect((await rowFor(r.itemId))[0]).toMatchObject({ state: 'pending', attempts: 0 });
+    });
+
+    it('the list says which rows a person may retry: only a failed re-run or revert the tick will not take', async () => {
+      const f = await fixture();
+      const failedRetryable = await revertRow(f, { state: 'failed', reason: 'repo_gone' });
+      const atCap = await revertRow(f, { state: 'failed', reason: 'tooling_error', attempts: 3 });
+      const failedTick = await revertRow(f, { state: 'failed', reason: 'tooling_error', attempts: 1 });
+      const pending = await revertRow(f, { state: 'pending' });
+      const done = await revertRow(f, { state: 'done', pr: 11 });
+      const rerun = await revertRow(f, { state: 'failed', reason: 'no_installation' });
+      await admin.query("UPDATE reversal_compensations SET kind = 'rerun' WHERE id = $1", [rerun.id]);
+      const priced = await item(f);
+      await spend(f, priced, 2);
+      const waiting = (await (await reverse(f.admin, await receipt(f, priced))).json()) as Dto;
+      const type = CATALOGUE.find((e) => e.class === 'human_over_the_loop' && e.reversal.availability === 'not_reversible')!.id;
+      const refusedItem = await item(f);
+      const refused = (await (await reverse(f.admin, await receipt(f, refusedItem, { type }))).json()) as Dto;
+      const expected: Array<[string, string, boolean]> = [
+        [failedRetryable.itemId, failedRetryable.id, true], [atCap.itemId, atCap.id, true], [rerun.itemId, rerun.id, true],
+        [failedTick.itemId, failedTick.id, false], [pending.itemId, pending.id, false], [done.itemId, done.id, false],
+        [priced.itemId, waiting.reversal_id!, false], [refusedItem.itemId, refused.reversal_id!, false],
+      ];
+      for (const [itemId, id, can] of expected) {
+        const body = (await (await list(f.member, itemId)).json()) as { receipts: ReceiptDto[] };
+        expect(body.receipts.find((r) => r.reversal?.id === id)!.reversal!.can_retry, id).toBe(can);
+      }
+    });
+
+    it('every reversal state and reason reads as a sentence, never empty, null or undefined', async () => {
+      const f = await fixture();
+      const reasons = ['not_reversible', 'retraction_unavailable', 'rerun_would_overwrite_branch', 'no_person_actor', 'head_moved', 'person_managed', 'state_changed', 'revert_refused', 'rerun_refused', 'tooling_error', 'no_installation', 'repo_gone'];
+      const states: Array<[string, string | null]> = [['pending', null], ['running', null], ['awaiting_confirm', null], ['done', null], ...reasons.map((x): [string, string] => ['failed', x])];
+      for (const [state, reason] of states) {
+        const r = await revertRow(f, { state, reason });
+        const body = (await (await list(f.member, r.itemId)).json()) as { receipts: ReceiptDto[] };
+        const text = body.receipts.find((x) => x.reversal?.id === r.id)!.reversal!.text;
+        expect(typeof text, `${state} ${reason}`).toBe('string');
+        expect(text.trim().length, `${state} ${reason}`).toBeGreaterThan(10);
+        expect(text, `${state} ${reason}`).not.toMatch(/null|undefined|\[object/);
+      }
     });
   });
 });

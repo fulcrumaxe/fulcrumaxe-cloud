@@ -67,7 +67,7 @@ export type DecisionAskAnswerWorker = Pick<Worker, "answerDecisionAsk">;
 export type SubItemApprovalWorker = Pick<Worker, "approveSubItem">;
 
 /** What the reverse and confirm routes ask of the worker (D#7 DP7-2e): both write on the worker's receipt pool, which is never handed out. */
-export type ReversalWorker = Pick<Worker, "requestReversal" | "confirmReversal">;
+export type ReversalWorker = Pick<Worker, "requestReversal" | "confirmReversal" | "retryReversal">;
 
 /** What the branch cleanup cron asks of the worker (D#598 P1f-5d): one pass of the cleanup sweep, and (D#598) one pass of the stale pull-request sweep. */
 export type BranchCleanupWorker = Pick<Worker, "sweepBranchCleanups" | "sweepPrSlotHolders">;

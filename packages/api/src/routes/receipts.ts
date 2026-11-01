@@ -11,6 +11,8 @@ import { UUID_RE, idParamsSchema, notFound } from "./run-actions.js";
 export interface ReversalService {
   request(input: { principal: ReversalPrincipal; receiptId: string; confirmEstimateUsd?: number }): Promise<ReversalOutcome>;
   confirm(input: { principal: ReversalPrincipal; reversalId: string; confirmEstimateUsd: number }): Promise<ReversalOutcome>;
+  /** D#7 DP7-2g: retry a failed compensation on its own row. */
+  retry(input: { principal: ReversalPrincipal; reversalId: string }): Promise<ReversalOutcome>;
 }
 /** The seam apps/web's catch-all installs, like `decisionAskDeps`. Until a worker can be built the two writes are a 503. */
 export const receiptReversalDeps: { getService: () => Promise<ReversalService | null> } = { getService: async () => null };
@@ -25,6 +27,7 @@ export const receiptReversalDeps: { getService: () => Promise<ReversalService | 
  *    until the person confirms, here through `confirmEstimateUsd` or on the confirm route. A figure below the live estimate is 409 `estimate_changed`
  *    with the new figure. The third reversal on an item raises the question instead (`needs_ask`).
  *  - `POST /reversals/{id}/confirm` confirms a priced reversal.
+ *  - `POST /reversals/{id}/retry` (DP7-2g) puts a failed compensation back to waiting, on the same row. No new reversal, so the count does not move.
  *
  * Undo: a reversal is a receipt and is never edited or undone; the person asks for the work again. Cancelling a priced reversal is simply not confirming it.
  */
@@ -40,6 +43,8 @@ const reversalSchema = z.object({
   reason_code: z.string().nullable(),
   estimate_usd: z.number().nullable(),
   pr_number: z.number().nullable(),
+  /** True when a person may press Try again: a failed re-run or revert the worker will not retry by itself. */
+  can_retry: z.boolean(),
   /** Fixed words for the state; never GitHub text. */
   text: z.string(),
 });
@@ -118,19 +123,22 @@ const toDto = (o: ReversalOutcome) => ({
   status: o.status, reversal_id: o.reversalId, receipt_id: o.receiptId, kind: o.kind, reason_code: o.reasonCode, estimate_usd: o.estimateUsd, ask_id: o.askId, message: outcomeMessage(o),
 });
 
+const RETRY_FORBIDDEN = "only an owner or admin can retry a reversal";
+const RETRY_MESSAGES: Record<string, string> = { not_retryable: "this reversal cannot be retried", not_found: "not found", session_required: "this route accepts a session principal only" };
 const MESSAGES: Record<string, string> = {
   session_required: "this route accepts a session principal only",
   forbidden: "only an owner or admin can reverse a decision",
   not_found: "not found",
   not_reversible: "this receipt cannot be reversed",
 };
-function mapError(error: unknown): unknown {
+function mapError(error: unknown, messages: Record<string, string> = MESSAGES): unknown {
   if (!(error instanceof ReversalRequestError)) return error;
+  if (messages === RETRY_MESSAGES && error.code === "forbidden") return new ApiError(error.status, error.code, RETRY_FORBIDDEN);
   if (error.code === "estimate_changed") {
     const now = error.estimateUsd ?? 0;
     return new ApiError(409, "estimate_changed", `the estimate is now ${money(now)}; confirm again to go ahead`, undefined, { current_estimate_usd: now });
   }
-  return new ApiError(error.status, error.code, MESSAGES[error.code] ?? "this reversal cannot be made");
+  return new ApiError(error.status, error.code, messages[error.code] ?? "this reversal cannot be made");
 }
 async function service(): Promise<ReversalService> {
   const svc = await receiptReversalDeps.getService();
@@ -152,7 +160,16 @@ interface ExtraRow {
   comp_reason: string | null;
   comp_estimate: string | null;
   comp_pr: number | null;
+  comp_attempts: number | null;
 }
+
+/** A failed re-run or revert the worker's own tick will not take (it takes `tooling_error` below the cap of three attempts): the person's to retry. Mirrors migration 0945. */
+const TICK_ATTEMPT_CAP = 3;
+export function isRetryable(r: { kind: string; state: string; reason: string | null; attempts: number }): boolean {
+  return (r.kind === "rerun" || r.kind === "revert_pr") && r.state === "failed" && !(r.reason === "tooling_error" && r.attempts < TICK_ATTEMPT_CAP);
+}
+
+const retryOutcome = (o: ReversalOutcome) => ({ ...toDto(o), message: "Trying again. It will start shortly." });
 
 export const receiptRoutes: RouteEntry[] = [
   {
@@ -180,7 +197,7 @@ export const receiptRoutes: RouteEntry[] = [
         if (list === null) return { receipts: [], total: 0 };
         const extra = new Map((await client.query<ExtraRow>(
           `SELECT o.id, o.decision_type, o.created_at, o.reversal_free_until, o.reverses_receipt_id, orig.decision_type AS orig_type, orig.created_at AS orig_at,
-                  c.id AS comp_id, c.kind AS comp_kind, c.state AS comp_state, c.reason_code AS comp_reason, c.estimate_usd AS comp_estimate, c.pr_number AS comp_pr
+                  c.id AS comp_id, c.kind AS comp_kind, c.state AS comp_state, c.reason_code AS comp_reason, c.estimate_usd AS comp_estimate, c.pr_number AS comp_pr, c.attempts AS comp_attempts
              FROM decision_receipts o
              LEFT JOIN decision_receipts orig ON orig.id = o.reverses_receipt_id
              LEFT JOIN decision_receipts rr ON rr.reverses_receipt_id = o.id
@@ -199,6 +216,7 @@ export const receiptRoutes: RouteEntry[] = [
             const origLabel = x?.reverses_receipt_id == null ? null : (labels.get(x.reverses_receipt_id) ?? null);
             const reversal = x?.comp_id == null || x.comp_state == null || x.comp_kind == null ? null : {
               id: x.comp_id, state: x.comp_state, kind: x.comp_kind, reason_code: x.comp_reason, estimate_usd: x.comp_estimate === null ? null : Number(x.comp_estimate), pr_number: x.comp_pr,
+              can_retry: isRetryable({ kind: x.comp_kind, state: x.comp_state, reason: x.comp_reason, attempts: x.comp_attempts ?? 0 }),
               text: x.comp_state === "done" || x.comp_state === "failed" ? compensationSentence({ kind: x.comp_kind as never, state: x.comp_state, reasonCode: x.comp_reason as never }) : REVERSAL_TEXT[x.comp_state],
             };
             return {
@@ -284,6 +302,36 @@ export const receiptRoutes: RouteEntry[] = [
         return toDto(await svc.confirm({ principal: { accountId, userId, ...(tokenId ? { tokenId } : {}) }, reversalId: input.params.id!, confirmEstimateUsd: body.confirmEstimateUsd }));
       } catch (error) {
         throw mapError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/v1/reversals/{id}/retry",
+    operationId: "retryReversal",
+    summary: "Try a failed reversal again, on the same row",
+    description:
+      "Session only, owner or admin; a token is 403 `session_required`. No body. Puts a failed re-run or revert, one the worker will not retry by itself (any reason but a temporary tooling error, or one at its attempt cap), " +
+      "back to waiting: the same reversal, not a new one, so the reversal count does not move. The answer is `started`. Pressing it again while the reversal waits or runs answers the same and changes nothing. " +
+      "404 for an unknown reversal or one of another account; 409 `not_retryable` for a reversal that is not failed, is waiting for a confirmation, is done, or cannot be retried (a refusal); 503 `reversal_unavailable` while no worker is available. " +
+      "Every retry that happens is audited.",
+    principals: ["session"],
+    minRole: "admin",
+    idempotency: "optional",
+    rateClass: "write",
+    paramsSchema: idParamsSchema,
+    responseSchema: outcomeSchema,
+    extraResponses: {
+      "403": "Error `session_required` or `forbidden` (owner or admin only).",
+      "409": "Error `not_retryable`: this reversal is not one a person can retry.",
+    },
+    async handler(ctx, input) {
+      const svc = await service();
+      try {
+        const { accountId, userId, tokenId } = ctx.principal;
+        return retryOutcome(await svc.retry({ principal: { accountId, userId, ...(tokenId ? { tokenId } : {}) }, reversalId: input.params.id! }));
+      } catch (error) {
+        throw mapError(error, RETRY_MESSAGES);
       }
     },
   },

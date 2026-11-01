@@ -11,6 +11,8 @@ import type { PullsHttp } from "@fx/receipts";
 import { ghError } from "../../github/test/helpers/strictGithub.js";
 import { startRevertFake, type RevertFake } from "../../github/test/helpers/revertGithubFake.js";
 import { startPullsFake, type PullsFake } from "../../receipts/test/helpers/pullsGithubFake.js";
+import { retryReversal } from "@fx/core/src/decisions/reversalRequest.js";
+import { createReversalPlanner } from "@fx/receipts";
 import { runAskWindowTick } from "../src/askWindowTick.js";
 import { reconcileHolder } from "../src/prSlotReconcile.js";
 import { runReversalCompensations, type ReversalCompensateDeps, type ReversalGitOpeners } from "../src/reversalCompensate.js";
@@ -238,6 +240,60 @@ describe("reversal compensation worker step [pg]", { timeout: 120_000 }, () => {
     expect(pf.requests.length).toBe(before);
     expect((await admin.query("SELECT count(*)::int AS n FROM reversal_compensations c JOIN decision_receipts r ON r.id = c.reversal_receipt_id WHERE c.id = $1", [i.compensationId])).rows[0].n).toBe(1);
     expect(await stageOf(i)).toBe("pr_opened");
+  });
+
+  describe("DP7-2g: a person's retry reuses the failed row and the next tick carries it out", () => {
+    const retry = (i: Item) => retryReversal({ pool: receiptPool, planner: createReversalPlanner(receiptPool) }, { accountId: i.accountId, userId: i.userId }, { reversalId: i.compensationId });
+
+    it("the App uninstalled: failed no_installation, not taken by the tick, reconnect, retry, then done: one row, one reversal receipt", async () => {
+      const i = await seed({ stage: "merged" });
+      const off = await github(i, { installed: false });
+      expect(await runReversalCompensations(deps(off.git))).toEqual({ done: 0, failed: 1 });
+      expect(await rowOf(i)).toMatchObject({ state: "failed", reason_code: "no_installation", attempts: 1 });
+      // Reconnected, but nothing happens by itself: the tick does not list this row.
+      const on = await github(i);
+      expect(await runReversalCompensations(deps(on.git))).toEqual({ done: 0, failed: 0 });
+      expect(on.rf.mutations).toHaveLength(0);
+      expect(await retry(i)).toMatchObject({ status: "started", reversalId: i.compensationId });
+      expect(await rowOf(i)).toMatchObject({ state: "pending", reason_code: null, attempts: 0 });
+      expect(await runReversalCompensations(deps(on.git))).toEqual({ done: 1, failed: 0 });
+      const done = await rowOf(i);
+      expect(done).toMatchObject({ state: "done", reason_code: null, attempts: 1 });
+      expect(done.pr_number).toBeGreaterThanOrEqual(900);
+      expect(on.rf.mutations).toHaveLength(1);
+      expect((await admin.query("SELECT count(*)::int AS n FROM reversal_compensations WHERE account_id = $1", [i.accountId])).rows[0].n).toBe(1);
+      expect((await admin.query("SELECT count(*)::int AS n FROM decision_receipts WHERE account_id = $1 AND reverses_receipt_id IS NOT NULL", [i.accountId])).rows[0].n).toBe(1);
+    });
+
+    it("the repository gone: failed repo_gone, the repository connected again, retry fails again with its new reason, a second retry succeeds, all on one row id", async () => {
+      const i = await seed({ stage: "merged", repo: false });
+      const g = await github(i);
+      expect(await runReversalCompensations(deps(g.git))).toEqual({ done: 0, failed: 1 });
+      expect(await rowOf(i)).toMatchObject({ state: "failed", reason_code: "repo_gone" });
+      expect(await retry(i)).toMatchObject({ status: "started" });
+      // Still gone: the same failure comes back, and the person may press again.
+      expect(await runReversalCompensations(deps(g.git))).toEqual({ done: 0, failed: 1 });
+      expect(await rowOf(i)).toMatchObject({ state: "failed", reason_code: "repo_gone", attempts: 1 });
+      await admin.query("UPDATE repos SET gh_name = $2 WHERE id = $1", [i.repoId, i.name]);
+      expect(await retry(i)).toMatchObject({ status: "started" });
+      expect(await runReversalCompensations(deps(g.git))).toEqual({ done: 1, failed: 0 });
+      expect(await rowOf(i)).toMatchObject({ state: "done", reason_code: null });
+      expect(g.rf.mutations).toHaveLength(1);
+      expect((await admin.query("SELECT count(*)::int AS n FROM reversal_compensations WHERE account_id = $1", [i.accountId])).rows[0].n).toBe(1);
+    });
+
+    it("a failed re-run is retried the same way: the original is closed once and Build again is filed in the person's name", async () => {
+      const i = await seed({ mode: "runner_local" });
+      const off = await github(i, { installed: false });
+      expect(await runReversalCompensations(deps(off.git))).toEqual({ done: 0, failed: 1 });
+      expect(await advances(i)).toHaveLength(0);
+      const on = await github(i);
+      await retry(i);
+      expect(await runReversalCompensations(deps(on.git))).toEqual({ done: 1, failed: 0 });
+      expect(await rowOf(i)).toMatchObject({ state: "done" });
+      expect(on.pf.requests.filter((r) => r.method === "PATCH")).toHaveLength(1);
+      expect(await advances(i)).toHaveLength(1);
+    });
   });
 
   it("criterion 4: two workers ticking at once perform one compensation", async () => {

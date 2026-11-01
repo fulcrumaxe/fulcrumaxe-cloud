@@ -1915,6 +1915,7 @@ export interface Operations {
           reason_code: string | null;
           estimate_usd: number | null;
           pr_number: number | null;
+          can_retry: boolean;
           text: string;
         }) | (null);
       }>;
@@ -1948,6 +1949,23 @@ export interface Operations {
     body: {
       confirmEstimateUsd: number;
     };
+    response: {
+      status: "done" | "started" | "awaiting_confirm" | "refused" | "failed" | "needs_ask";
+      reversal_id: string | null;
+      receipt_id: string;
+      kind: string | null;
+      reason_code: string | null;
+      estimate_usd: number | null;
+      ask_id: string | null;
+      message: string;
+    };
+  };
+  retryReversal: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
     response: {
       status: "done" | "started" | "awaiting_confirm" | "refused" | "failed" | "needs_ask";
       reversal_id: string | null;
@@ -5126,6 +5144,17 @@ export const operations = {
     pathParams: ["id"],
     queryParams: [],
     hasBody: true,
+  },
+  retryReversal: {
+    method: "POST",
+    path: "/api/v1/reversals/{id}/retry",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
   },
   listMergeReady: {
     method: "GET",
