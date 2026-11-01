@@ -655,6 +655,11 @@ test.describe("D#483 live parity: the notice, Check the build, the board's polli
     await expect(tid(page, "pl-queued")).toHaveCount(0);
     await expect(page.locator("body")).not.toContainText("Queued to merge");
     await expect(tid(page, "pl-queue-line")).toContainText("Removed from the merge queue by you");
+    await expect(tid(page, "pl-queue-hint")).toHaveCount(0);
+    // D#694 B7-2: a removal by GitHub for a timeout adds the merge_group hint under the line.
+    mock.activity = { status: 200, json: { ...REVIEW_PASSED, steps, merge_queue: { state: "removed", removed_by: "github", reason: "timeout", at: "2026-10-27T10:10:00.000Z" } } };
+    await page.clock.runFor(10_000);
+    await expect(tid(page, "pl-queue-hint")).toHaveText("If this repeats, check that your CI runs on `merge_group`.");
     await expect(page.locator("body")).not.toContainText(/undefined|null/);
   });
 

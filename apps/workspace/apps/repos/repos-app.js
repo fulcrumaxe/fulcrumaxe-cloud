@@ -11,7 +11,7 @@ import { api, ApiFailure, createRetryGate, isRateLimited, retryWords, waitSecond
 import { on, onRefresh } from "../../core/cloud-live.js";
 import { autoMergeDisabled, lockNote } from "./repos-lock.js";
 import { createAllowancePanel } from "./repos-allowances.js";
-import { createAutoMergeControl, createDialControl, createModeControl, createRunnersSection } from "./repos-runners.js";
+import { createAutoMergeControl, createDialControl, createModeControl, createRunnersSection, queueView } from "./repos-runners.js";
 
 const REPOS_URL = "/api/v1/repos";
 const allowancesUrl = (id) => "/api/runners/repos/" + encodeURIComponent(id) + "/sandbox-allowances";
@@ -66,7 +66,7 @@ function githubUrl(raw) {
 
 const pickSettings = (s) =>
   s && typeof s.auto_merge === "boolean" && typeof s.block_external_auto_merge === "boolean"
-    ? { auto_merge: s.auto_merge, block_external_auto_merge: s.block_external_auto_merge, human_merge_only: s.human_merge_only === true }
+    ? { auto_merge: s.auto_merge, block_external_auto_merge: s.block_external_auto_merge, human_merge_only: s.human_merge_only === true, merge_queue: s.merge_queue }
     : null;
 const isRepo = (r) => r && typeof r.id === "string" && typeof r.product === "string";
 const cancelled = (e) => e && e.name === "AbortError";
@@ -81,7 +81,7 @@ function mountRepos(host, installNote) {
     repos: [], loading: true, loadFailed: false, isAdmin: false,
     openId: null, settings: null, settingsState: "idle", // idle | loading | ok | error
     saving: false, saveError: "", pendingOff: false, ack: false, ackError: false,
-    installBusy: false, note: installNote || "",
+    installBusy: false, note: installNote || "", queueHelp: false,
   };
   let destroyed = false, listGen = 0, settingsGen = 0;
   // D#6 R7d: the sandbox allowance panel for the open repo. Its own state survives the detail pane being rebuilt.
@@ -216,6 +216,8 @@ function mountRepos(host, installNote) {
     detailEl.replaceChildren(
       title,
       ...(lockNote(st.settings) ? [line(lockNote(st.settings), "repos-human-merge-only", "repos-muted")] : []),
+      // dom-insert-ok: queueView built this with h(); the text is fixed sentences, drawn as text nodes
+      queueView(st.settings, { open: st.queueHelp, onToggle: () => { st.queueHelp = !st.queueHelp; renderDetail(); focusTestId("repos-queue-about"); }, onRetry: () => loadSettings(st.openId, true) }),
       toggle("Auto-merge", "Merge a pull request automatically once it passes review.", st.settings.auto_merge, "repos-auto-merge", (on) => patch({ auto_merge: on }),
         autoMergeDisabled(st.settings, { isAdmin: st.isAdmin, saving: st.saving })),
       toggle("Block auto-merge for outside contributors", "Pull requests from people outside your account are never merged automatically.",

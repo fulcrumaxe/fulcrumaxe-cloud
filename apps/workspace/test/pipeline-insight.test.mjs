@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  FLAG_WORDS, limitResetTail, RECEIPTS_HEADING, receiptsSection, formatWhen, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, SPEC_REFUSED_SENTENCES, SPEC_REFUSED_GENERIC, SUPERSEDED_SENTENCE, SUPERSEDED_LINK_LABEL, phaseOf, pullUrl, queueLine, queuedToMerge, QUEUE_SENTENCES, zoneTime, readyBanner, mergeBlockSentence, blockingSentence, BLOCKING_SENTENCES, PUBLIC_REFUSED_SENTENCE, REVIEW_BLOCK_SENTENCE, UNKNOWN_BLOCK_SENTENCE, reasonWord, roleWord, runView, statusWord, stepView, usdText,
+  FLAG_WORDS, limitResetTail, RECEIPTS_HEADING, receiptsSection, formatWhen, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, SPEC_REFUSED_SENTENCES, SPEC_REFUSED_GENERIC, SUPERSEDED_SENTENCE, SUPERSEDED_LINK_LABEL, phaseOf, pullUrl, queueLine, queuedToMerge, QUEUE_SENTENCES, QUEUE_TIMEOUT_HINT, zoneTime, readyBanner, mergeBlockSentence, blockingSentence, BLOCKING_SENTENCES, PUBLIC_REFUSED_SENTENCE, REVIEW_BLOCK_SENTENCE, UNKNOWN_BLOCK_SENTENCE, reasonWord, roleWord, runView, statusWord, stepView, usdText,
 } from "../apps/pipeline/pipeline-insight.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
@@ -1214,6 +1214,35 @@ describe("D#694 B6-5: the merge-queue line and the banner read the derived merge
     }
     expect(queueLine(queued({ state: "queued" }), "UTC").text).toMatch(/since Oct 31/);
     expect(queueLine({ ...REVIEW_PASSED, merge_queue: { state: "queued" } }).text).toBe("In GitHub's merge queue since a moment ago.");
+  });
+
+  it("D#694 B7-2: the merge_group hint shows only for a removal by the host whose reason code holds timeout or timed_out", async () => {
+    expect(QUEUE_TIMEOUT_HINT).toBe("If this repeats, check that your CI runs on `merge_group`.");
+    for (const reason of ["timeout", "queue_entry_timeout", "timed_out", "checks_timed_out"]) {
+      expect(queueLine(queued({ state: "removed", removed_by: "github", reason }), "UTC").hint, reason).toBe(QUEUE_TIMEOUT_HINT);
+    }
+    for (const q of [{ removed_by: "github", reason: "merge_conflict" }, { removed_by: "github" }, { removed_by: "github", reason: "not_in_queue_reconciled" }, { removed_by: "you", reason: "timeout" }, { removed_by: "person", reason: "timed_out" }]) {
+      expect(queueLine(queued({ state: "removed", ...q }), "UTC").hint, JSON.stringify(q)).toBeUndefined();
+    }
+    // Drawn as a second line of the card, as a text node, and absent for the other removals.
+    vi.useFakeTimers();
+    vi.stubGlobal("Node", FakeNode);
+    vi.stubGlobal("document", { hidden: false, activeElement: null, createElement: (t) => new FakeEl(t), createTextNode: (text) => ({ text }) });
+    try {
+      const show = async (q) => {
+        const panel = createInsightPanel({ call: vi.fn(async () => structuredClone(queued(q))), setInterval: () => 1, clearInterval: () => {} });
+        panel.start("item-1");
+        await flush();
+        return panel;
+      };
+      const timedOut = await show({ state: "removed", removed_by: "github", reason: "timeout" });
+      expect(byId(timedOut.el, "pl-queue-hint").map((e) => e.textContent)).toEqual([QUEUE_TIMEOUT_HINT]);
+      expect(byId(timedOut.el, "pl-queue-line")[0].textContent).toContain("GitHub removed it from the merge queue");
+      expect(byId((await show({ state: "removed", removed_by: "you", reason: "timeout" })).el, "pl-queue-hint")).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
   });
 
   it("nothing to say: no merge_queue, an unknown state, and a state the table does not know all draw no line", () => {

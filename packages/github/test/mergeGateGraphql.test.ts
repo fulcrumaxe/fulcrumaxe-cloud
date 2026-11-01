@@ -179,10 +179,12 @@ describe("merge_gate POST /graphql allowance", () => {
     ["//graphql", { path: "//graphql" }],
     ["/GRAPHQL", { path: "/GRAPHQL" }],
   ];
-  it.each(refusals)("refuses %s and nothing reaches the server", async (_n, over) => {
+  // D#694 B7-2: the `read` client repeats the whole table; where a row names no body of its own, the default is the document that client may send.
+  const kindRefusals = (["merge_gate", "read"] as const).flatMap((kind) => refusals.map(([n, over]) => [`${kind} client: ${n}`, kind, kind === "read" ? read : enqueue, over] as const));
+  it.each(kindRefusals)("refuses %s and nothing reaches the server", async (_n, kind, defaultBody, over) => {
     const { open, calls } = await setup();
-    const http = await open("merge_gate", TARGET);
-    const req = { method: "POST" as const, path: "/graphql", body: enqueue, ...over } as Parameters<typeof http.request>[0];
+    const http = await open(kind, TARGET);
+    const req = { method: "POST" as const, path: "/graphql", body: defaultBody, ...over } as Parameters<typeof http.request>[0];
     await expect(http.request(req)).rejects.toBeInstanceOf(InstallationHttpError);
     expect(calls).toEqual([]);
   });
@@ -220,7 +222,8 @@ describe("merge_gate POST /graphql allowance", () => {
     for (const [kind, extra] of kinds) {
       const { open, calls } = await setup();
       const http = await open(kind, { ...TARGET, ...extra } as never);
-      for (const body of [read, enqueue, auto, dequeue, entry, removal]) {
+      // D#694 B7-2: the one exception is the `read` kind's own queue read (its allowance is tested below).
+      for (const body of [read, enqueue, auto, dequeue, entry, removal].filter((b) => !(kind === "read" && b === read))) {
         await expect(http.request({ method: "POST", path: "/graphql", body }), kind).rejects.toBeInstanceOf(InstallationHttpError);
       }
       expect(calls, kind).toEqual([]);
@@ -296,5 +299,46 @@ describe("merge_gate POST /graphql allowance", () => {
     for (const after of [1, 2, 3, 4]) await http.request(accessor({ method: "POST", path: "/graphql" }, "body", enqueue, direct, after) as never).catch(() => undefined);
     expect(calls.length).toBeGreaterThan(0);
     for (const c of calls) expect(JSON.parse(c.body)).toEqual(enqueue);
+  });
+});
+
+describe("D#694 B7-2: read kind POST /graphql allowance (the queue read alone)", () => {
+  it("sends the pinned queue read through unchanged, with the read token's own scope", async () => {
+    const { open, calls } = await setup();
+    const http = await open("read", TARGET);
+    expect((await http.request({ method: "POST", path: "/graphql", body: read })).status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.body)).toEqual(read);
+  });
+
+  const readRefusals: Array<[string, unknown]> = [
+    ["enqueuePullRequest", enqueue],
+    ["enablePullRequestAutoMerge", auto],
+    ["dequeuePullRequest", dequeue],
+    ["the entry read", entry],
+    ["the removal event read", removal],
+    ["any other query", { query: "{ viewer { login } }", variables: {} }],
+    ["a query with a trailing space", { ...read, query: read.query + " " }],
+    ["a query with a leading space", { ...read, query: " " + read.query }],
+    ["variables naming another owner", withVars(read, { owner: "other" })],
+    ["variables naming another repository", withVars(read, { name: "gadgets" })],
+    ["an extra variable", withVars(read, { extra: "x" })],
+    ["a body over 4 KiB", withVars(read, { pad: "p".repeat(MERGE_GATE_GRAPHQL_MAX_BYTES) })],
+    ["a batched array body", [read, read]],
+  ];
+  it.each(readRefusals)("refuses %s and nothing reaches the server", async (_n, body) => {
+    const { open, calls } = await setup();
+    const http = await open("read", TARGET);
+    await expect(http.request({ method: "POST", path: "/graphql", body })).rejects.toBeInstanceOf(InstallationHttpError);
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses the read document on a path other than /graphql, with a query string, and by GET", async () => {
+    const { open, calls } = await setup();
+    const http = await open("read", TARGET);
+    for (const req of [{ method: "POST", path: "/graphql/", body: read }, { method: "POST", path: "/graphql", query: { x: "1" }, body: read }, { method: "GET", path: "/graphql", body: read }, { method: "PATCH", path: "/graphql", body: read }]) {
+      await expect(http.request(req as never)).rejects.toBeInstanceOf(InstallationHttpError);
+    }
+    expect(calls).toEqual([]);
   });
 });

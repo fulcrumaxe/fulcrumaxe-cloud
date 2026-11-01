@@ -3,7 +3,7 @@ import { ADD_DISCUSSION_COMMENT_DOCUMENT, type RetractionSurface } from "./retra
 import { GH_OWNER_LOGIN_RE, GH_REPO_NAME_RE } from "./eventMapper.js";
 import { getInstallationToken, RECEIPT_BLOCK_PERMISSIONS, RETRACTION_PERMISSIONS, REVERT_PR_PERMISSIONS, type AccessTokenRequester, type InstallationTokenCache } from "./installationToken.js";
 import { REVERT_PR_DOCUMENT, revertPrVariables } from "./revertPr.js";
-import { pinnedMergeGateBody } from "./mergeGateGraphql.js";
+import { pinnedMergeGateBody, pinnedMergeQueueReadBody } from "./mergeGateGraphql.js";
 
 /**
  * D#483 P3: an HTTP client for ONE repository's GitHub API, authenticated as the write App's installation, for the stage
@@ -231,7 +231,8 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
         const graphql = (kind === "runner_pr" || kind === "retraction" || target.allowGraphql === true) && req.method === "POST" && req.path === GRAPHQL_PATH;
         // `revert_pr` may name `/graphql` too, but only the one exact mutation checked below.
         // D#694 B5a: the hosted `merge_gate` client may send `POST /graphql` only for one of six pinned documents (mergeGateGraphql.ts); never a blanket flag.
-        const pinnedBody = kind === "merge_gate" && req.method === "POST" && req.path === GRAPHQL_PATH && req.query === undefined ? pinnedMergeGateBody(req.body, { owner: target.owner, name: target.name }) : undefined;
+        // D#694 B7-2: the hosted `read` client may send the one queue read (MERGE_QUEUE_READ_DOCUMENT) and no other document, with the same checks.
+        const pinnedBody = (kind === "merge_gate" || kind === "read") && req.method === "POST" && req.path === GRAPHQL_PATH && req.query === undefined ? (kind === "merge_gate" ? pinnedMergeGateBody : pinnedMergeQueueReadBody)(req.body, { owner: target.owner, name: target.name }) : undefined;
         const pinnedGate = pinnedBody !== undefined;
         const allowed = graphql || pinnedGate || (kind === "revert_pr" && req.method === "POST" && req.path === GRAPHQL_PATH) || (req.method === "GET" && req.path === repoRoot) || (req.path.startsWith(prefix) && PATH_RE.test(req.path));
         if (!allowed || req.path.includes("..")) throw new InstallationHttpError("path_refused");
@@ -298,7 +299,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
           if (mutate && revertSent) throw new InstallationHttpError("path_refused");
           if (mutate) revertSent = true;
         }
-        if (kind === "read" && req.method !== "GET" && !graphql) throw new InstallationHttpError("method_refused");
+        if (kind === "read" && req.method !== "GET" && !graphql && !pinnedGate) throw new InstallationHttpError("method_refused");
         // PATCH is for `runner_pr` alone (closing a pull request); the other kinds never needed it and never get it.
         if (req.method === "PATCH" && kind !== "runner_pr" && kind !== "receipt_block" && kind !== "retraction") throw new InstallationHttpError("method_refused");
         // DELETE is for `branch_delete` alone, and only on its pinned ref (checked above).

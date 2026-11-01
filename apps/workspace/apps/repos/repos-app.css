@@ -103,3 +103,12 @@
 .repos-check-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 6px 0; }
 .repos-check [data-testid="repos-check-problem"]:empty { display: none; }
 .repos-check input:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+
+/* D#694 B7-2: the merge queue line and its help. */
+.repos-queue { margin: 0 0 10px; }
+.repos-queue-line { margin: 0; }
+.repos-link { padding: 0; background: none; border: 0; color: var(--accent, #1aff80); font: inherit; text-decoration: underline; cursor: pointer; }
+.repos-link:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+.repos-queue-help { margin-top: 6px; padding: 6px 10px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.repos-queue-heading { margin: 8px 0 2px; font-size: 0.85rem; }
+.repos-queue-help p { margin: 0; }

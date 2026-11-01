@@ -1,4 +1,5 @@
 {
   "auto_merge": false,
-  "block_external_auto_merge": true
+  "block_external_auto_merge": true,
+  "merge_queue": { "state": "off" }
 }
