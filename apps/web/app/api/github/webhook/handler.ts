@@ -22,6 +22,7 @@ import { issueAuthorPermission } from "../../../../lib/github/issueAuthorPermiss
 import { repoHasEngineLoop } from "../../../../lib/github/repoHasEngineLoop";
 import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
 import { markWorkPending } from "@fx/core/src/pendingWork";
+import { markDiscoveryDrainPending } from "../../../../lib/discoveryWake";
 
 /**
  * D#2 H13a: GitHub App webhook intake. Every piece of actual logic --
@@ -79,10 +80,7 @@ function requireEnv(name: string): string {
   return value;
 }
 
-/** D#483 S4-c2: a delivery that queued discoveries wakes the proposal-verify tick, which drains them (the same tick the verifier runs in). */
-export async function markDiscoveryDrainPending(): Promise<void> {
-  await markWorkPending("proposal-verify-sweep");
-}
+export { markDiscoveryDrainPending };
 
 export function defaultGithubWebhookDeps(): GithubWebhookHandlerDeps {
   if (!cachedAppUserPool) {

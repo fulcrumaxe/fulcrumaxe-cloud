@@ -89,6 +89,15 @@ describe("GET /api/github/install/{kind}/callback", () => {
     );
   });
 
+  it("the discovery wake hook is forwarded to the recorder, so a run the callback queues wakes the drain", async () => {
+    const { d, complete } = deps("ok");
+    const onDiscoveryQueued = vi.fn(async () => undefined);
+    await call("team", q(state()), {}, { ...d, onDiscoveryQueued });
+    expect(complete).toHaveBeenCalledTimes(1);
+    const recorderDeps = (complete.mock.calls[0] as unknown as [{ onDiscoveryQueued?: unknown }])[0];
+    expect(recorderDeps.onDiscoveryQueued).toBe(onDiscoveryQueued);
+  });
+
   it("no session: failed, nothing recorded", async () => {
     const { d, complete } = deps();
     const res = await call("team", q(state()), { session: false }, d);
