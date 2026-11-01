@@ -725,7 +725,9 @@ describe("the view", () => {
 
     it("shows hostile text as text only", async () => {
       const hostile = "<img src=x onerror=alert(1)>";
-      const { panel } = make({ ...OK, receipts: [one({ label: hostile })] });
+      // The receipts read is a second request (D#7 DP7-2f); its failure leaves this plain list.
+      const activity = { ...OK, receipts: [one({ label: hostile })] };
+      const { panel } = make((url) => (url.endsWith("/receipts") ? new Error("down") : activity));
       panel.start("item-rc-xss");
       await flush();
       expect(byId(panel.el, "pl-receipt").map((e) => e.textContent)).toEqual([hostile + ". Chosen: start. Not chosen: hold. Decided by your setting, " + formatWhen("2026-10-20T09:30:00.000Z") + "."]);

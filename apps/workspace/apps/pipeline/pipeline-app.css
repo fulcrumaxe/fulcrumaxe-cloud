@@ -236,3 +236,5 @@
   .pl-tabs { padding-left: 6px; padding-right: 6px; }
   .pl-inbox, .pl-plan { padding-left: 8px; padding-right: 8px; }
 }
+.pl-rx-confirm { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; max-width: 100%; }
+[data-testid="pl-receipt"] { overflow-wrap: anywhere; }

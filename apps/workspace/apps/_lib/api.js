@@ -147,6 +147,8 @@ export async function api(method, path, body, signal, opts) {
       // A runner route names its closed refusal beside the error (a short code and an entry index); never free text.
       if (data && typeof data.reason === "string" && /^[a-z_]{1,48}$/.test(data.reason)) failure.reason = data.reason;
       if (data && Number.isInteger(data.index) && data.index >= 0) failure.index = data.index;
+      // A 409 estimate_changed names the live figure beside the error (data.current_estimate_usd): a number, never text.
+      if (data && data.data && Number.isFinite(data.data.current_estimate_usd) && data.data.current_estimate_usd >= 0) failure.currentEstimateUsd = data.data.current_estimate_usd;
       throw failure;
     }
   } catch (e) {
