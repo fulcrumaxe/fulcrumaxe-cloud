@@ -1167,6 +1167,22 @@ describe("H14b merge gate: table [pg]", () => {
       expect(asked).toBe(0);
     });
   });
+
+  describe("D#598 P1d-1: the gate's author port fails closed", () => {
+    it.each([
+      ["absent", undefined, "pr_author_unverified"],
+      ["throwing", async () => { throw new Error("boom"); }, "pr_author_unverified"],
+      ["answering something else", async () => "yes" as never, "pr_author_unverified"],
+      ["untrusted", async () => "untrusted" as const, "pr_author_untrusted"],
+    ])("a public repository's pull request with a port %s never merges (%s)", async (_name, port, reason) => {
+      const world = await seedWorld("internal");
+      for (const run of standard()) await insertRun(world, run);
+      const github = new FakeGitHub({ pr: { headSha: HEAD, state: "open", merged: false, draft: false, repoPublic: true, authorLogin: "x", body: "", labels: [], comments: [] }, ciBySha: { [HEAD]: greenCi(HEAD) } });
+      const deps: MergeGateDeps = { ...makeDeps(github, undefined, []), ...(port === undefined ? {} : { pullRequestAuthorTrust: port }) };
+      expect(await runMergeGate(deps, inputFor(world, {}))).toMatchObject({ outcome: "ready_human_merges", reasons: [reason] });
+      expect(github.mergeCalls).toEqual([]);
+    });
+  });
 });
 
 describe("H14b merge gate: pure pieces", () => {

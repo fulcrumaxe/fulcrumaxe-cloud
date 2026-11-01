@@ -7,6 +7,7 @@ import { humanMergeOnly } from "@fx/db/src/humanMergeOnly.js";
 import { autoMergeAllowed } from "@fx/trust";
 import { readRecordedRunnerPullRequest } from "@fx/runner";
 import { createGitHubMergeGatePort, isLocalGitHubHttp, type GitHubHttp, type LocalGitHubHttp, type MergeQueueDocuments } from "../build/githubMergePort.js";
+import { createPullRequestAuthorTrust } from "../build/authorTrust.js";
 import { carriedRunsHead, gateReviewerReasons, loadRunsOnSha, runMergeGate, RUNNER_ADMIN_OK_SQL, SHA_PATTERN, type MergeBlockReason, type ReviewMode } from "../build/mergeGate.js";
 import { listChangedFiles, listChangedFilesLocal, postReviewStatus, type ListFilesResult } from "./githubReads.js";
 import type { ChangedFile } from "./securityTrigger.js";
@@ -187,7 +188,16 @@ export interface PublicPlanePort {
   read: PublicPullRequestLookup;
 }
 
-export type MergeGateRunDeps = { pool: Pool; http: GitHubHttp; localReviewOptIn?: LocalReviewOptInPort; publicPlane?: PublicPlanePort; mergeDelegate?: MergeDelegate; queueDocuments?: MergeQueueDocuments };
+/**
+ * D#598 P1d-1: the inputs of the author rule that only the web app knows: the platform's own App bot logins and the intake allowlist. Absent, nobody is trusted by
+ * either (an author is then trusted only on an `admin` or `maintain` permission read), so leaving it out only narrows who merges.
+ */
+export interface AuthorTrustInputs {
+  botLogins(): Promise<readonly string[]>;
+  allowlist(): readonly string[] | null;
+}
+
+export type MergeGateRunDeps = { pool: Pool; http: GitHubHttp; localReviewOptIn?: LocalReviewOptInPort; publicPlane?: PublicPlanePort; mergeDelegate?: MergeDelegate; queueDocuments?: MergeQueueDocuments; authorTrust?: AuthorTrustInputs };
 
 export function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGateRunInput & { goPhase: { attestation: GoAttestation } }): Promise<MergeGateGoResult>;
 export function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGateRunInput): Promise<MergeGateRunResult>;
@@ -353,6 +363,15 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
       requestReviews: async () => undefined,
       // D#598 P3b: the parent's pull request number, for the sentence on a stacked stop. Our rows only; no GitHub call.
       stackParentPullNumber: async () => (await withTenant(pool, accountId, (client) => readStackParentPull(client, workItemId)))?.prNumber ?? null,
+      // D#598 P1d-1: the author of the pull request that merges (the public one for a paired item), read on the client that reads it. A fenced `runner_local` client is never asked.
+      pullRequestAuthorTrust: createPullRequestAuthorTrust({
+        http: mergeHttp,
+        owner: mergeTarget.owner,
+        name: mergeTarget.name,
+        fenced: runnerLocal,
+        botLogins: deps.authorTrust?.botLogins ?? (async () => []),
+        allowlist: deps.authorTrust?.allowlist ?? (() => null),
+      }),
     },
     // D#6 M1G-a: read from the environment now, on this request. A malformed setting locks every repo; an unknown repo id
     // counts as locked while any id is listed.
@@ -363,6 +382,8 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
       // The go phase binds to the head the runner attested (the order's); the order phase to the head just read.
       ...(publicPr !== null ? { reviewedHeadSha: headSha, expectedHeadSha: go?.attestation.publicHead ?? mergeHead } : input.expectedHeadSha !== undefined ? { expectedHeadSha: input.expectedHeadSha } : {}),
       extraBlockReasons,
+      // D#598 P1d-1: a paired item's public pull request has its author checked whatever its repository reports about itself.
+      ...(publicPr !== null ? { pairedPublic: true } : {}),
       ...(input.expectedSignals !== undefined ? { expectedSignals: input.expectedSignals } : {}),
       // A paired runner_local item is merged by its runner or a person, never by the cloud (the runner side is not built yet: a person).
       ...(paired && runnerLocal && deps.mergeDelegate === undefined ? { mergeUnavailableReason: "runner_merge_unavailable" as const } : {}),

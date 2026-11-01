@@ -180,6 +180,9 @@ const REASON_WORDS = {
   human_merge_only: "the operator set this repository so that a person merges",
   local_reviews_passed_advisory: "Reviews passed on your machine. A person merges this pull request.",
   merge_call_refused: "GitHub refused the merge",
+  // D#598 P1d-1: the author of the pull request that would merge. A person reviews and merges an outside author's pull request on GitHub.
+  pr_author_untrusted: "This pull request was opened by someone who isn't an admin or maintainer of the repository, or the platform's app. The platform won't merge it. A person can review it and merge it on GitHub.",
+  pr_author_unverified: "We couldn't check who opened this pull request, so the platform didn't merge it. It checks again on the next try.",
   // Two planes: a paired repository merges its public pull request, so these two say why a person does.
   public_pr_not_open: "The public pull request is not open (not opened yet, closed or merged).",
   // Two planes, a runner_local repository: the merge goes through the customer's own runner, and these say why a person merges instead.
@@ -598,6 +601,8 @@ export const BLOCKING_SENTENCES = {
   public_head_not_reviewed: "The public pull request doesn't hold exactly what was reviewed",
   stacked_on_open_pr: "It builds on a pull request that hasn't merged yet",
   merge_call_refused: "GitHub refused the merge",
+  pr_author_untrusted: "Opened by someone outside the repository's admins and maintainers",
+  pr_author_unverified: "Couldn't check who opened the pull request",
   merge_conflict: "The pull request has a merge conflict",
   branch_behind: "The branch is behind its base branch",
   branch_protection_refused: "Branch protection refused the merge",

@@ -4,6 +4,7 @@ import { enqueueDedupeKey, listHeadRemovals, recordDriverEvent } from "@fx/core/
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "@fx/github";
 import { createPgLocalReviewOptIn, createReviewGitHubPort, loadReviewContext, readItemRecordedPullRequest, readPublicPullRequest, runMergeGateForItem, type GitHubHttp, type MergeBlockReason } from "@fx/pipeline";
 import type { PlaneMergeGoResult, PlaneMergeOrderFacts, PublicPullFacts, PublicQueueFacts } from "@fx/runner-cloud";
+import { mergeGateAuthorTrust } from "./github/authorTrust";
 import { openInstallationHttp } from "./github/installationHttp";
 import { openForRepo } from "./github/localOnlyHttp";
 import { createPrStateReader } from "./github/prState";
@@ -74,6 +75,7 @@ export function createPlaneMergeOps(deps: PlaneMergeOpsDeps) {
         http,
         queueDocuments: QUEUE_DOCUMENTS,
         localReviewOptIn: createPgLocalReviewOptIn(pool),
+        authorTrust: mergeGateAuthorTrust,
         publicPlane: { open: openPublicHttp, read: readPublicPullRequest(pool) },
         mergeDelegate: async (_args, { mergeMode: read }) => {
           // D#694 B7-1: the gate read the CODE repository's mode (not the private repo's). A queue repository's order goes only to a runner that can enqueue, and no credential is minted otherwise.

@@ -126,7 +126,8 @@ export class FakeGitHub implements MergeGateGitHubPort {
 
   async getPullRequest(_pr: PullRequestRef): Promise<PullRequestState> {
     // A copy carrying the hostile fields: the gate must not read them.
-    return { ...this.pr, baseRef: this.pr.baseRef ?? "main", defaultBranch: this.pr.defaultBranch ?? "main", labels: [...this.pr.labels], comments: [...this.pr.comments] } as PullRequestState;
+    // D#598 P1d-1: a fixture that says nothing about its repository is a private one, whose author the gate does not check.
+    return { ...this.pr, baseRef: this.pr.baseRef ?? "main", defaultBranch: this.pr.defaultBranch ?? "main", repoPublic: this.pr.repoPublic ?? false, authorLogin: this.pr.authorLogin ?? "author", labels: [...this.pr.labels], comments: [...this.pr.comments] } as PullRequestState;
   }
 
   async getCiSnapshot(_pr: PullRequestRef, headSha: string): Promise<CiSnapshot> {

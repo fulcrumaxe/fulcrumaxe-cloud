@@ -10,6 +10,10 @@ import { seedAccount, seedRepo } from "../build/helpers/seed.js";
 import { pgHarness } from "../helpers/pgHarness.js";
 import { FAKE_MERGE_BASE, fakeGitHubRest, freshRepo, type FakeRepoState } from "./helpers/fakeGitHubRest.js";
 
+/** D#598 P1d-1: the platform's own App bot opened the public pull request (the normal case), so the author rule trusts it without a permission read. */
+const BOT_LOGIN = "fulcrumaxe-app[bot]";
+const BOT_TRUST = { botLogins: async () => [BOT_LOGIN], allowlist: () => null };
+
 /**
  * Two planes [pg]: the merge gate of a paired item merges the PUBLIC pull request (the private run branch's copy is reviewed, never merged).
  * Both repositories are fakes that answer like GitHub (helpers/fakeGitHubRest.ts) over real Postgres (work item, reviewer runs, pairing, the
@@ -56,7 +60,7 @@ async function world(o: Opts = {}) {
   }
   const pubHead = o.pubHead ?? PUB_HEAD;
   const priv = freshRepo({ headSha: HEAD, checks: { [HEAD]: [] }, files: [file("src/ui/button.tsx")] });
-  const pub = freshRepo({ owner: "acme", name: "widgets-public", prNumber: PUB_PR, headSha: pubHead, checks: o.pubChecks ?? { [pubHead]: green }, files: [file("src/ui/button.tsx")] });
+  const pub = freshRepo({ owner: "acme", name: "widgets-public", prNumber: PUB_PR, isPublic: true, authorLogin: BOT_LOGIN, headSha: pubHead, checks: o.pubChecks ?? { [pubHead]: green }, files: [file("src/ui/button.tsx")] });
   if (o.paired !== false) {
     await h.admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, 'acme/widgets-public', ARRAY['.autonomous-team/**'])", [repoId, accountId]);
     const stamp = o.stamp === undefined ? PUB_HEAD : o.stamp;
@@ -89,6 +93,7 @@ const gate = (w: World) =>
   runMergeGateForItem(
     {
       pool: h.runWriterPool,
+      authorTrust: BOT_TRUST,
       http: fakeGitHubRest(w.priv),
       publicPlane: {
         open: async (c) => {
@@ -198,6 +203,7 @@ describe("a paired item: the gate merges the public pull request", () => {
     const out = await runMergeGateForItem(
       {
         pool: h.runWriterPool,
+        authorTrust: BOT_TRUST,
         http: fakeGitHubRest(w.priv),
         publicPlane: {
           open: async () => ({ request: async (req) => { if (req.method === "GET" && req.path === `/repos/acme/widgets-public/pulls/${PUB_PR}` && ++reads === 2) w.pub.headSha = OTHER; return real.request(req); } }),
@@ -219,6 +225,7 @@ describe("a paired item: the gate merges the public pull request", () => {
     const out = await runMergeGateForItem(
       {
         pool: h.runWriterPool,
+        authorTrust: BOT_TRUST,
         http: fakeGitHubRest(w.priv),
         publicPlane: {
           open: async () => ({ request: async (req) => { if (req.method === "GET" && req.path === `/repos/acme/widgets-public/pulls/${PUB_PR}` && ++reads === 3) w.pub.headSha = OTHER; return real.request(req); } }),
@@ -518,6 +525,7 @@ describe("a single-plane item is unchanged", () => {
     const out = await runMergeGateForItem(
       {
         pool: h.runWriterPool,
+        authorTrust: BOT_TRUST,
         http: fakeGitHubRest(w.priv),
         publicPlane: {
           open: async () => {

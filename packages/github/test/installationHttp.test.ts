@@ -92,6 +92,19 @@ describe("createInstallationHttp", () => {
     expect(JSON.parse(t.calls[0]!.body!)).toEqual({ state: "success", context: "fulcrumaxe/review" });
   });
 
+  it("D#598 P1d-1: merge_gate reads one collaborator's permission (GET only, nothing sent in a body), through the strict fetch, and the login stays out of the log line", async () => {
+    const t = setup((u, init) => (init?.method === "GET" && u.pathname === "/repos/acme/widgets/collaborators/Carol-d/permission" ? json(200, { permission: "write", role_name: "maintain" }) : undefined));
+    const http = await t.open("merge_gate", TARGET);
+    expect(await http.request({ method: "GET", path: "/repos/acme/widgets/collaborators/Carol-d/permission" })).toEqual({ status: 200, body: { permission: "write", role_name: "maintain" } });
+    expect(t.log[0]).toMatchObject({ path: "/repos/:o/:r/collaborators/:login/permission", status: 200 });
+    expect(JSON.stringify(t.log)).not.toContain("Carol");
+    // A login in another repository's path, or a climbing one, is refused before any request.
+    for (const path of ["/repos/evil/widgets/collaborators/Carol-d/permission", "/repos/acme/widgets/collaborators/../../other/permission"]) {
+      await expect(http.request({ method: "GET", path }), path).rejects.toThrow("path_refused");
+    }
+    expect(t.calls).toHaveLength(1);
+  });
+
   it.each([
     ["another repository", "/repos/acme/other/pulls/3"],
     ["another owner", "/repos/evil/widgets/pulls/3"],
