@@ -39,6 +39,8 @@ interface Script {
   /** The reviewer runs the worker says already started for the head and round. */
   known?: Array<{ role: string; runId: string }>;
   rounds?: Array<{ decision: string; round?: number; nextRound?: number | null }>;
+  /** The build step's answer (default: started). */
+  build?: () => { status: string; reason?: string; runId?: string; branch?: string };
   /** The head after the fix run. */
   fixPushes?: string;
   /** The item the workflow loads first (Spec ready: the build comes first, then the review on the pull request it opened). */
@@ -58,7 +60,7 @@ function setup(script: Script = {}) {
   const worker = {
     // The first read is the workflow's load; later ones are the stage looks after the executor run ended (the pull request is open by then).
     advanceLoadItem: vi.fn(async () => (++loads === 1 ? (script.item ?? AT_PR) : AT_PR)),
-    advanceBuild: vi.fn(async (..._args: unknown[]) => ({ status: "started", runId: "run-b", branch: "fx/issue-7" })),
+    advanceBuild: vi.fn(async (..._args: unknown[]) => script.build?.() ?? { status: "started", runId: "run-b", branch: "fx/issue-7" }),
     advanceLoadReview: vi.fn(async () => ({ ok: true as const, ctx: { workItemId: ITEM, stage: "pr_opened", repoId: REPO, owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", tier: "feature", specVersion: 3, debaterEnabled: false, executionMode: "sandbox", recordedPr: null } })),
     advanceLoadSpecText: vi.fn(async (_who: unknown, v: number) => (v === 3 ? { version: 3, body: "SPEC BODY" } : null)),
     advanceReviewRuns: vi.fn(async (_who: unknown, _req: { headSha: string; rereview: number }) => script.known ?? []),
@@ -284,5 +286,45 @@ describe("the fix round's start", () => {
     const t = setup({ ...fixRound });
     await workItemAdvanceWorkflow(ARGS);
     expect(t.fixes[0]).not.toHaveProperty("spendAttempt");
+  });
+});
+
+describe("C23-3: a start answering waiting_for_capacity waits by the minute, keeps its attempt and ends <stage>_paused:waiting_for_capacity", () => {
+  const CAP = "waiting_for_capacity";
+  const CAP_ASKS = 241;
+
+  it("reviewers: every one asked 241 times at its bare key, a fresh fact on the head each ask, nothing recorded", async () => {
+    const t = setup({ denyStart: () => CAP });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "paused", detail: `review_paused:${CAP}` });
+    for (const role of ["code-reviewer", "acceptance-tester"]) expect(stepsOf(t, role)).toEqual(Array.from({ length: CAP_ASKS }, () => `review:${H1}:${role}`));
+    expect(world.sleeps).toBe(240);
+    expect(facts(t, "review")).toHaveLength(CAP_ASKS);
+    expect(facts(t, "review").every((e) => e.code === CAP && e.attempt === 0 && e.headSha === H1)).toBe(true);
+    expect(new Set(facts(t, "review").map((e) => e.dedupeKey)).size).toBe(CAP_ASKS);
+    expect(t.worker.advanceRecordRound).not.toHaveBeenCalled();
+    expect(events()).not.toContain("advance.failed");
+    expect(recorded(t).map((e) => e.kind).filter((k) => k !== "stage_waiting")).toEqual([]);
+  });
+
+  it("the fix round: 241 asks with no attempt number, a fresh fact each, no refusal fact", async () => {
+    const t = setup({ rounds: [{ decision: "fix", round: 0, nextRound: 1 }, { decision: "all_passed", round: 1 }], fixPushes: H2, denyFix: () => CAP });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "paused", detail: `fix_round_paused:${CAP}` });
+    expect(t.fixes).toHaveLength(CAP_ASKS);
+    expect(t.fixes.every((f) => f.spendAttempt === undefined)).toBe(true);
+    expect(world.sleeps).toBe(240);
+    expect(facts(t, "fix_round")).toHaveLength(CAP_ASKS);
+    expect(new Set(facts(t, "fix_round").map((e) => e.dedupeKey)).size).toBe(CAP_ASKS);
+    expect(recorded(t).map((e) => e.kind)).not.toContain("stopped");
+    expect(events()).not.toContain("advance.failed");
+  });
+
+  it("the build: asked again every minute at the same attempt, ends build_paused:waiting_for_capacity, no failure and no build_refused", async () => {
+    const t = setup({ item: { ...AT_PR, stage: "spec_ready" }, build: () => ({ status: "refused", reason: CAP }) });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "paused", detail: `build_paused:${CAP}` });
+    expect(t.worker.advanceBuild).toHaveBeenCalledTimes(CAP_ASKS);
+    expect(new Set(t.worker.advanceBuild.mock.calls.map((c) => c[6]))).toEqual(new Set([undefined]));
+    expect(world.sleeps).toBe(240);
+    expect(events()).toContain("advance.paused");
+    expect(events()).not.toContain("advance.failed");
   });
 });

@@ -186,6 +186,11 @@ export interface AdvanceStepResult {
 export const SPEND_DENIAL_REASONS: readonly string[] = Object.freeze(["model_budget_exceeded", "compute_cap_exceeded", "work_item_cap_exceeded", "per_spawn_cap_exceeded", "envelope_exceeded", "model_credits_exhausted"]);
 /** D#483 S5-k1: the refusals that mean "a spending limit denied the run, ask again" (RESERVATION_DENIAL_PAUSES values; a test holds the lists equal). */
 export const RESERVATION_PAUSE_REASONS: readonly string[] = Object.freeze(["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate", "envelope_reached", "model_credits_exhausted"]);
+/**
+ * D#483 S5-k3b-2b: the refusal that means "the provider has no room, ask again" (packages/pipeline reservationPauses.ts CAPACITY_WAIT_REASONS; a test holds the lists equal).
+ * Beside the spend pauses and not inside them: it is no limit, so nothing spend-only reads it.
+ */
+export const CAPACITY_WAIT_REASONS: readonly string[] = Object.freeze(["waiting_for_capacity"]);
 
 /** Who the steps run for: the workflow's own arguments. */
 export interface AdvanceStepWho {
@@ -1389,7 +1394,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (!/^[a-z0-9:_.-]{1,100}$/i.test(head) || !/^:r[12]:[a-z][a-z-]{0,40}$/.test(tail)) return [];
     const esc = (t: string): string => t.replace(/[\\%_]/g, (c) => `\\${c}`);
     const prefix = `advance:${who.workItemId}:${head}`;
-    const exact = new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?::s(\\d{1,6}))?${tail}(?::p\\d{1,2})?$`);
+    const exact = new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?::s(\\d{1,6}))?${tail}(?::p\\d{1,6})?$`);
     return withTenant(runnerPool, who.accountId, async (client) => {
       const r = await client.query<{ idempotency_key: string; status: string }>(
         `SELECT k.idempotency_key, a.status FROM agent_run_idempotency_keys k JOIN agent_runs a ON a.account_id = k.account_id AND a.id = k.run_id
@@ -1476,12 +1481,12 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     // A start that met a reaper claim is not a refusal of the build: the workflow waits and starts again, so no fact is recorded.
     // D#483 S5-c1: nor is a start that found no build slot: the item waits (the workflow asks again) and the wait is derived from the counts when read.
     // D#483 S5-k1: nor is a start a spending limit denied: the same fact names the pause, and the pause is derived from the latest one when read.
-    if (out.status === "refused" && out.reason !== undefined && out.reason !== null && (BUILD_SLOT_WAIT_REASONS.includes(out.reason) || RESERVATION_PAUSE_REASONS.includes(out.reason))) {
+    if (out.status === "refused" && out.reason !== undefined && out.reason !== null && (BUILD_SLOT_WAIT_REASONS.includes(out.reason) || RESERVATION_PAUSE_REASONS.includes(out.reason) || CAPACITY_WAIT_REASONS.includes(out.reason))) {
       // Each ask of a wait leaves one fact (deduped per minute): the slot module counts an item as waiting only while its latest one is fresh.
       // D#483 S5-k1b: it is the generalised `stage_waiting` fact (stage `build`); the readers take the latest of it and the older `build_waiting`, and nothing writes the older kind now.
       await writeEvent(who, { kind: "stage_waiting", stage: "build", attempt: spendAttempt ?? 0, dedupeKey: `wait:${approvalId}:${Math.floor(Date.now() / 60_000)}`, code: out.reason });
       // A limit pause may outlast the workflow that is asking (it parks after four hours): tell the sweep there is work to look at.
-      if (RESERVATION_PAUSE_REASONS.includes(out.reason)) void markWorkPending("stage-resume-sweep", { since: Date.now() + STAGE_RESUME_FIRST_LOOK_MS });
+      if (RESERVATION_PAUSE_REASONS.includes(out.reason) || CAPACITY_WAIT_REASONS.includes(out.reason)) void markWorkPending("stage-resume-sweep", { since: Date.now() + STAGE_RESUME_FIRST_LOOK_MS });
     } else if (out.status === "refused" && out.reason !== "start_sandbox_reaping") {
       await writeEvent(who, { kind: "build_refused", dedupeKey: `build:${approvalId}`, code: /^[a-z][a-z0-9_]{0,63}$/.test(out.reason ?? "") ? out.reason : "refused" });
     }
@@ -1670,7 +1675,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const attemptKey = `${req.headSha}:${req.actionId}${req.retry ? `:r${req.retry}` : ""}${req.spendAttempt ? `:s${req.spendAttempt}` : ""}`;
     const refuse = async (reason: string): Promise<AdvanceRunStart> => {
       // A spending-limit denial is a pause, not a refusal: the driver leaves its waiting fact and asks again, and the sweep resumes it. No refusal fact is written.
-      if (SPEND_DENIALS.includes(reason)) return { ok: false, reason };
+      // D#483 S5-k3b-2b: nor is a wait for capacity.
+      if (SPEND_DENIALS.includes(reason) || CAPACITY_WAIT_REASONS.includes(reason)) return { ok: false, reason };
       await writeEvent(who, { kind: "fix_round_refused", dedupeKey: `fix:${attemptKey}`, code: /^[a-z][a-z0-9_]{0,63}$/.test(reason) ? reason : "refused", headSha: req.headSha, round: req.round });
       return { ok: false, reason };
     };
@@ -2135,7 +2141,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const out = await writeEvent(who, event);
     // D#483 S5-k1c: a start before the build that a limit denied leaves its waiting fact through here. Like the build's, a limit pause may outlast the workflow
     // that is asking (it parks after four hours), so the sweep is told there is work to look at.
-    if (out.recorded && event.kind === "stage_waiting" && event.code != null && RESERVATION_PAUSE_REASONS.includes(event.code)) void markWorkPending("stage-resume-sweep", { since: Date.now() + STAGE_RESUME_FIRST_LOOK_MS });
+    if (out.recorded && event.kind === "stage_waiting" && event.code != null && (RESERVATION_PAUSE_REASONS.includes(event.code) || CAPACITY_WAIT_REASONS.includes(event.code))) void markWorkPending("stage-resume-sweep", { since: Date.now() + STAGE_RESUME_FIRST_LOOK_MS });
     // A review parked for the runner's daily limit: its workflow has already ended, so the sweep looks at the next pass, not in four hours.
     else if (out.recorded && event.kind === "stage_waiting" && event.stage === "review" && event.code === "runner_daily_limit") void markWorkPending("stage-resume-sweep", { since: Date.now() + STAGE_RESUME_PASS_SECONDS * 1000 });
     return out;
@@ -2159,7 +2165,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       return r.rows;
     });
     // What follows the head is `<role>[:rr<n>][:s<n>][:p<n>][:n<pin>]` (the role, the re-review round, the attempt, a placement generation, a note pin).
-    const tail = /^([a-z][a-z-]*)(?::rr(\d{1,3}))?(?::s(\d{1,6}))?(?::p\d{1,2})?(?::n[0-9a-f]{16})?$/;
+    const tail = /^([a-z][a-z-]*)(?::rr(\d{1,3}))?(?::s(\d{1,6}))?(?::p\d{1,6})?(?::n[0-9a-f]{16})?$/;
     const newest = new Map<string, string>();
     const highest = new Map<string, number>();
     const ends = new Map<string, number>();

@@ -5,7 +5,7 @@ import { PanelSeatAbortedError, PanelSeatFailedError } from "../plan/sandboxPane
 import type { WaitClock } from "../plan/waitBudget.js";
 import { MAX_CONTINUATIONS_PER_WORK_ITEM } from "@fx/core/src/run-limits/limits.js";
 import type { AdvanceRunPorts } from "./runPorts.js";
-import { pauseForDenial } from "./reservationPauses.js";
+import { startWaitFor } from "./reservationPauses.js";
 import { SpecWriterPausedError } from "./stageStarts.js";
 import { nextSeatStep } from "./panelStarts.js";
 
@@ -147,7 +147,7 @@ export function createFollowedRunner(ports: AdvanceRunPorts, options: FollowedRu
     const started = await ports.startRun({ step, role, prompt, clone: true });
     if (!started.ok) {
       // D#483 S5-k1c: the Spec PM's start denied by a spending limit is a named pause, not a failed run. (A panel seat's denial is its own typed answer: see `runPanelSeat`.)
-      const pause = spendPauses ? pauseForDenial(started.reason) : null;
+      const pause = spendPauses ? startWaitFor(started.reason) : null;
       if (pause !== null) throw new SpecWriterPausedError(pause);
       throw new PanelSeatFailedError(`refused:${started.reason}`);
     }
@@ -164,7 +164,7 @@ export function createFollowedRunner(ports: AdvanceRunPorts, options: FollowedRu
     const { step } = await nextSeatStep(ports, request.idempotencyKey, request.round, request.role);
     const started = await ports.startRun({ step, role: request.role, prompt: request.prompt, clone: true });
     if (!started.ok) {
-      const pause = pauseForDenial(started.reason);
+      const pause = startWaitFor(started.reason);
       if (pause !== null) return { denied: true, pause };
       throw new PanelSeatFailedError(`refused:${started.reason}`);
     }

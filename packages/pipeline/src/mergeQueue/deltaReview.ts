@@ -43,7 +43,7 @@ export interface DeltaReviewPorts {
 }
 
 type NotStarted = Extract<Awaited<ReturnType<StartDeltaReview>>, { started: false }>["reason"];
-const KNOWN: readonly NotStarted[] = ["spec_changed", "invalid_input", "worker_unavailable", "head_changed"];
+const KNOWN: readonly NotStarted[] = ["spec_changed", "invalid_input", "worker_unavailable", "head_changed", "waiting_for_capacity"];
 export const fixedReason = (reason: string): NotStarted => ((KNOWN as readonly string[]).includes(reason) ? (reason as NotStarted) : "invalid_input");
 
 /** The merge commit as GitHub has it now: the PR's head, with exactly the row's two parents, and its own file list. */

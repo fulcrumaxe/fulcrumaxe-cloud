@@ -7,7 +7,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { isResumeContext, type ResumeContext } from "@fx/roles/next-role-request";
 import { readExecutionMode, sideOfMode } from "@fx/runner";
 import { sanitize } from "@fx/trust";
-import { RESERVATION_PAUSE_REASONS, SPEND_DENIAL_REASONS, type AdvanceFixRequest, type AdvanceRunRequest, type AdvanceRunStart, type AdvanceStartArgs, type AdvanceStepWho } from "./advance.js";
+import { CAPACITY_WAIT_REASONS, RESERVATION_PAUSE_REASONS, SPEND_DENIAL_REASONS, type AdvanceFixRequest, type AdvanceRunRequest, type AdvanceRunStart, type AdvanceStartArgs, type AdvanceStepWho } from "./advance.js";
 import { decisionStartFor } from "./decisionStart.js";
 import { RunActionInputError, type PerformResult } from "./runActions.js";
 
@@ -65,7 +65,7 @@ export const RESUMABLE_STAGES: readonly string[] = ["in_progress", "changes_requ
  * The start reasons that wait on a person or on another run: the spending pauses and the admit denials they come from (the one list advance.ts keeps, so a new
  * pause is never missed here), and a run of the item that is still live. The start answers with the DENIAL (`model_budget_exceeded`), the build's web step turns it into the pause.
  */
-const PAUSED_REASONS: ReadonlySet<string> = new Set([...RESERVATION_PAUSE_REASONS, ...SPEND_DENIAL_REASONS, "already_running"]);
+const PAUSED_REASONS: ReadonlySet<string> = new Set([...RESERVATION_PAUSE_REASONS, ...CAPACITY_WAIT_REASONS, ...SPEND_DENIAL_REASONS, "already_running"]);
 /** The start reasons that clear by themselves in a minute or so: a reaper claim on the sandbox, no run starter yet. */
 const DEFERRED_REASONS: ReadonlySet<string> = new Set(["start_sandbox_reaping", "sandbox_reaping", "starter_unavailable"]);
 const HALT_REASONS: readonly string[] = ["item_halted", "halted_since_approval"];

@@ -58,6 +58,14 @@ describe("advance: the panel step's ports [pg]", { timeout: 60_000 }, () => {
   }
 
   describe("startedAttempts", () => {
+    it("a placement generation past 99 reads through (`:s3:r1:security-expert:p100` is attempt 3)", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a);
+      await run(a, w, `advance:${w}:panel:${DISC}:s3:r1:security-expert:p100`, "security-expert", "succeeded");
+      const ports = await portsOf(a, w, async () => ({ ok: false, reason: "no_model" }));
+      expect(await ports.startedAttempts(`panel:${DISC}`, ":r1:security-expert")).toEqual([{ attempt: 3, status: "succeeded" }]);
+    });
+
     it("reads the runs one seat's asks started, by their real keys: the bare key, each :s<n>, a placement restart, oldest first; and no one else's", async () => {
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a);

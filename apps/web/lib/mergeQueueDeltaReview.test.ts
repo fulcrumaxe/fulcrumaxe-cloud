@@ -88,6 +88,10 @@ describe("startRole: the metered start and its refusals", () => {
     h.start = { runId: null, reason };
     expect(await start()).toEqual({ ok: false, reason: "refused_spend" });
   });
+  it("C23: a wait for capacity is NOT refused_spend (that stops the queue entry): it keeps its own code", async () => {
+    h.start = { runId: null, reason: "waiting_for_capacity" };
+    expect(await start()).toEqual({ ok: false, reason: "waiting_for_capacity" });
+  });
   it("a refusal that is not spend keeps its own code, and a missing one is invalid_input", async () => {
     h.start = { runId: null, reason: "spec_changed" };
     expect(await start()).toEqual({ ok: false, reason: "spec_changed" });

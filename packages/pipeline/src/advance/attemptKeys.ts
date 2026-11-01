@@ -11,7 +11,7 @@
 const NOTE_PIN = /:n[0-9a-f]{16}$/;
 const ATTEMPT = /:s(\d{1,6})$/;
 /** The generation suffix the worker adds when a run is started again on the other side (`:p1`, `:p2`; advance.ts PLACEMENT_RESTARTS_MAX), after the attempt and before a note pin. */
-const PLACEMENT = /:p\d{1,2}$/;
+const PLACEMENT = /:p\d{1,6}$/;
 
 /** The key without what the worker adds after the attempt: a note pin, then a placement generation. */
 const withoutTail = (key: string): string => key.replace(NOTE_PIN, "").replace(PLACEMENT, "");

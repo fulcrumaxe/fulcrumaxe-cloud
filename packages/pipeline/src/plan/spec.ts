@@ -15,7 +15,7 @@ import { ACCEPTANCE_FILES_RULES, agentOutputBlock, READ_ONLY_CHECKOUT_LINE } fro
 import { WaitBudget, type WaitClock } from "./waitBudget.js";
 import { DEFAULT_PANEL_TIMEOUT_MS, PanelYieldError, readPanelGeneration, runPanel, type MissingReason, type PanelDeps, type PanelRefusal, type PanelSeatResult } from "./panel.js";
 import { SpecWriterPausedError } from "../advance/stageStarts.js";
-import type { ReservationPause } from "../advance/reservationPauses.js";
+import type { StartWait } from "../advance/reservationPauses.js";
 
 /**
  * D#2 H15c: the Spec, the stage marker and the trigger into H14.
@@ -106,7 +106,7 @@ export interface SpecStepDeps extends PanelDeps {
 }
 
 /** `ReservationPause` (D#483 S5-k1c): the Spec writer's start was denied by a spending limit; the item waits and the start is asked again, so it is no failure. */
-export type SpecRefusal = PanelRefusal | "invalid_spec_output" | "invalid_file_scope" | "invalid_planned_prs" | "planned_prs_too_large" | "pm_timed_out" | "pm_failed" | "item_halted" | ReservationPause;
+export type SpecRefusal = PanelRefusal | "invalid_spec_output" | "invalid_file_scope" | "invalid_planned_prs" | "planned_prs_too_large" | "pm_timed_out" | "pm_failed" | "item_halted" | StartWait;
 
 export type SpecStepOutcome =
   | { status: "refused"; reason: SpecRefusal }

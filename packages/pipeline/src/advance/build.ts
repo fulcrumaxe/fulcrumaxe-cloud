@@ -16,7 +16,7 @@ import { readItemRules } from "@fx/core/src/context/contextRules.js";
 import { decideStackStart, type StackBasePort, type StackParentFacts, type StackStartRefusal } from "./stackBase.js";
 import { agentOutputBlock } from "../plan/envelope.js";
 import { takeBuildSlot } from "./buildSlots.js";
-import { pauseForDenial } from "./reservationPauses.js";
+import { startWaitFor } from "./reservationPauses.js";
 import { attemptKey } from "./attemptKeys.js";
 import { clampAssemblyMs } from "./assemblyClock.js";
 import { assemblePrompt, decisionsBlock, renderMemorySlot, MEMORY_MARKER_ROOM, type DecisionLine, type PinnedItem, type AssembledPrompt, type AssembleOptions, type MemoryPort, type NoteItem, type RenderedMemory } from "../prompt/assemblePrompt.js";
@@ -560,7 +560,7 @@ export async function startBuildForItem(
         const started = await ports.startRun({ step, role: "executor", prompt, ...(newRunId ? { runId: newRunId, buildBranch: branch, fixedBranch } : {}), ...(offer ? { decisionSnapshot: offer.snapshot } : {}), contextSections: sections, contextAssembly, ...(spill ? { contextSpill: spill } : {}), ...(memoryAside ? { jobMemory: memoryAside } : {}), memoryTokens: memoryTokensOf(memory?.stable, memory?.item), clone: true, pr: number, exclusive: true, ...(planeBase ? { headSha: planeBase.sha } : {}), expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
         // A halt refuses the start itself (the database, not the stage): say so plainly so the workflow ends instead of retrying.
         // D#483 S5-k1: a spend denial is a named pause, not a failure: the item stays where it is and the workflow asks again.
-        const pause = started.ok ? null : pauseForDenial(started.reason);
+        const pause = started.ok ? null : startWaitFor(started.reason);
         if (!started.ok && pause !== null) return { status: "refused", reason: pause };
         if (!started.ok) return { status: "refused", reason: started.reason === "item_halted" || started.reason === "halted_since_approval" ? started.reason : `start_${started.reason}` };
         startedRunId = started.runId;

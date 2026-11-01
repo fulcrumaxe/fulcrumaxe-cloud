@@ -266,7 +266,67 @@ describe("the wiring the workflow bundle cannot import", () => {
     expect(src).toContain("const BUILD_SPEND_POLL_MS = 300_000;");
     expect(src).toContain("const BUILD_SPEND_WAIT_MS = 4 * 3_600_000;");
     const helper = src.slice(src.indexOf("async function askUntilAllowed"), src.indexOf("async function pausedEnd"));
-    expect(helper).toContain("BUILD_SPEND_POLL_MS");
-    expect(helper).toContain("BUILD_SPEND_WAIT_MS");
+    // The helper waits through the two-clock helpers, which hold the constants (the spend clock is the build's; the capacity clock is its own).
+    expect(helper).toContain("sleepOn(clocks, pause)");
+    expect(helper).toContain("outOfTime(clocks, pause)");
+    expect(src.slice(src.indexOf("const outOfTime"), src.indexOf("const waitTail"))).toContain("BUILD_SPEND_WAIT_MS");
+    expect(src.slice(src.indexOf("async function sleepOn"), src.indexOf("/**", src.indexOf("async function sleepOn")))).toContain("BUILD_SPEND_POLL_MS");
+  });
+});
+
+describe("C23-3: a start answering waiting_for_capacity is a wait at every early site: a minute poll, the same attempt, a fresh fact each ask, and the end is <stage>_paused:waiting_for_capacity", () => {
+  const CAP = "waiting_for_capacity";
+  const CAP_ASKS = 241; // the first ask, then one every minute for four hours
+  const same = (base: string) => Array.from({ length: CAP_ASKS }, () => base);
+  const check = (w: W) => {
+    expect(clock.sleeps).toBe(240);
+    expect(factsOf(w)).toHaveLength(CAP_ASKS);
+    expect(factsOf(w).every((e) => e.code === CAP && e.attempt === 0)).toBe(true);
+    expect(new Set(factsOf(w).map((e) => e.dedupeKey)).size).toBe(CAP_ASKS);
+    expect(events()).toContain("advance.paused");
+    expect(events()).not.toContain("advance.failed");
+    expect(recorded(w).map((e) => e.kind).filter((k) => k !== "stage_waiting")).toEqual([]);
+  };
+
+  it("classify", async () => {
+    const w = build({ start: { ok: false, reason: CAP } });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "paused", detail: `classify_paused:${CAP}` });
+    expect(stepsOf(w)).toEqual(same(`classify:${A}`));
+    expect(factsOf(w)[0]).toMatchObject({ stage: "classify" });
+    check(w);
+  });
+
+  it("the short Spec", async () => {
+    const w = build({ start: { ok: false, reason: CAP }, item: lightItem });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "paused", detail: `spec_paused:${CAP}` });
+    expect(stepsOf(w)).toEqual(same(`light-spec:${A}`));
+    expect(factsOf(w)[0]).toMatchObject({ stage: "spec" });
+    check(w);
+  });
+
+  it("the Spec PM", async () => {
+    const w = build({ item: specItem, spec: { status: "refused", reason: CAP } });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "paused", detail: `spec_paused:${CAP}` });
+    expect(w.advanceSpec).toHaveBeenCalledTimes(CAP_ASKS);
+    expect(new Set(specAttempts(w))).toEqual(new Set([undefined]));
+    check(w);
+  });
+
+  it("the re-spec", async () => {
+    const w = build({ start: { ok: false, reason: CAP } });
+    expect(await workItemAdvanceWorkflow({ ...ARGS, respec: true, specVersion: 4 })).toEqual({ status: "paused", detail: `respec_paused:${CAP}` });
+    expect(stepsOf(w)).toEqual(same(`respec:${A}`));
+    expect(factsOf(w)[0]).toMatchObject({ stage: "respec" });
+    check(w);
+  });
+
+  it("C23-4: three hours of capacity answers, then a spend pause: the spend wait still gets its full four hours (neither clock moves on the other's polls)", async () => {
+    const w = build();
+    let call = 0;
+    w.advanceStartRun.mockImplementation(async () => ({ ok: false as const, reason: ++call <= 180 ? CAP : "model_budget_exceeded" }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "paused", detail: `classify_paused:${PAUSE}` });
+    expect(clock.sleeps).toBe(180 + 48);
+    expect(stepsOf(w)).toEqual([...Array.from({ length: 181 }, () => `classify:${A}`), ...Array.from({ length: 48 }, (_, n) => `classify:${A}:s${n + 1}`)]);
+    expect(factsOf(w).filter((e) => e.code === PAUSE)).toHaveLength(49);
   });
 });

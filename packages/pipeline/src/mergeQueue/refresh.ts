@@ -41,7 +41,7 @@ export type StartDeltaReview = (
  * files (C4 2.4), so no review is needed and the entry goes straight back to `queued`. Anything else (`head_changed`, `spec_changed`,
  * `invalid_input`, `worker_unavailable`): the entry returns to review, at its original place, and nothing was started.
  */
-) => Promise<{ started: true; runId: string | null } | { started: false; reason: "refused_spend" | "main_side_only" | "head_changed" | "spec_changed" | "invalid_input" | "worker_unavailable" }>;
+) => Promise<{ started: true; runId: string | null } | { started: false; reason: "refused_spend" | "waiting_for_capacity" | "main_side_only" | "head_changed" | "spec_changed" | "invalid_input" | "worker_unavailable" }>;
 
 export interface RefreshStepDeps<G> {
   github: RefreshGitHubPort;

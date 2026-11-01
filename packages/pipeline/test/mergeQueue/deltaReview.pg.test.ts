@@ -220,6 +220,13 @@ describe("D#519 MQ3-b-2a delta-review port [pg]", () => {
       expect((await db.admin.query(`SELECT status FROM agent_runs WHERE account_id = $1`, [s.accountId])).rows).toEqual([{ status: "cancelled" }]);
     });
 
+    it("C23: a wait for capacity is not spend: nothing started, nothing spent, the entry is NOT stopped and goes back to review to be asked again", async () => {
+      const s = await setup({}, { refuseRole: "code-reviewer", refuseWith: "waiting_for_capacity" });
+      expect(await s.run()).toMatchObject({ outcome: "delta_not_started", reason: "waiting_for_capacity" });
+      expect(await entryRow(s.entry.id)).toMatchObject({ state: "in_review", slot_holder: null, approved_at: T0 });
+      expect(await count(s.accountId, "agent_runs")).toBe(0);
+    });
+
     it("a refusal that is not spend (spec changed) returns the entry to review: no stop, no retry loop", async () => {
       const s = await setup({}, { refuseRole: "code-reviewer", refuseWith: "spec_changed" });
       expect(await s.run()).toMatchObject({ outcome: "delta_not_started", reason: "spec_changed" });

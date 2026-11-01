@@ -370,7 +370,7 @@ describe("resume_decision: resume from the answer [pg]", { timeout: 120_000 }, (
       expect(await refusalFact(w.itemId)).toEqual([]);
     });
 
-    it.each(["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate", "envelope_reached", "model_credits_exhausted", "model_budget_exceeded", "compute_cap_exceeded", "work_item_cap_exceeded", "per_spawn_cap_exceeded", "envelope_exceeded", "already_running"])(
+    it.each(["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate", "envelope_reached", "model_credits_exhausted", "model_budget_exceeded", "compute_cap_exceeded", "work_item_cap_exceeded", "per_spawn_cap_exceeded", "envelope_exceeded", "already_running", "waiting_for_capacity"])(
       "%s is a pause or a wait on another run, not a refusal: nothing is started and the request waits for the limit",
       async (reason) => {
         const w = await park();

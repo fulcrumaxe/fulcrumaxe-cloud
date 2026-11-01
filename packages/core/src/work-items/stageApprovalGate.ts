@@ -8,6 +8,9 @@ import { readReviewHold } from './reviewHold.js';
  */
 
 /** Run statuses a run cannot leave (the worker's STAGE_RESUME_TERMINAL_STATUSES re-exports this one). */
+/** The failure reason a run is cancelled with when the provider had no room (D#483 S5-k3b-2: set by the start path in S5-k3b-2c). */
+export const CAPACITY_ENDED_REASON = 'provider_capacity';
+
 export const STAGE_TERMINAL_STATUSES: readonly string[] = Object.freeze(['succeeded', 'failed', 'timed_out', 'killed_spend', 'refused_spend', 'cancelled']);
 const SESSION_RE = /^session:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 /** What a stage that has no `progressKinds` of its own treats as "it ended in a refusal that is not a limit". */
@@ -129,14 +132,18 @@ export async function stageApprovalGate<H extends { sha: string }>(
     if ('skip' in h) return h;
     onHead = h.head;
   }
-  const keys = await client.query<{ idempotency_key: string; status: string | null }>(
-    `SELECT k.idempotency_key, r.status FROM agent_run_idempotency_keys k LEFT JOIN agent_runs r ON r.account_id = k.account_id AND r.id = k.run_id
+  // D#483 S5-k3b-2b: an attempt the platform ended because our servers were full (`cancelled` with `provider_capacity`) did not really run the stage either.
+  const keys = await client.query<{ idempotency_key: string; status: string | null; capacity_ended: boolean }>(
+    `SELECT k.idempotency_key, r.status,
+            (r.status = 'cancelled' AND EXISTS (SELECT 1 FROM run_events e WHERE e.account_id = r.account_id AND e.run_id = r.id AND e.kind = 'run.status_changed'
+                                                  AND e.payload->>'to' = 'cancelled' AND e.payload->>'failureReason' = $3)) AS capacity_ended
+       FROM agent_run_idempotency_keys k LEFT JOIN agent_runs r ON r.account_id = k.account_id AND r.id = k.run_id
       WHERE k.account_id = $1 AND k.idempotency_key LIKE ANY($2::text[])`,
-    [accountId, entry.runKeyLikes(workItemId, approval.id, onHead?.sha ?? null)],
+    [accountId, entry.runKeyLikes(workItemId, approval.id, onHead?.sha ?? null), CAPACITY_ENDED_REASON],
   );
   // A run of this stage that really started (it did not end `refused_spend`) means the stage was allowed once: what came of it is the workflow's own outcome.
   // (A review starts several reviewers; a started one beside a denied one is the normal partial start, and the restart finds it by its key.)
-  if (entry.startedRunsOk !== true && keys.rows.some((r) => r.status !== 'refused_spend')) return { skip: 'stage_already_ran' };
+  if (entry.startedRunsOk !== true && keys.rows.some((r) => r.status !== 'refused_spend' && !r.capacity_ended)) return { skip: 'stage_already_ran' };
   return { approval: { id: approval.id, userId: who[1]! }, haltEpoch: item.halt_epoch, specVersion: item.version === null ? null : Number(item.version), keys: keys.rows.map((r) => r.idempotency_key), head: onHead };
 }
 

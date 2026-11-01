@@ -1,4 +1,4 @@
-import { RESERVATION_PAUSE_REASONS, RUNNER_DAILY_LIMIT_PAUSE, pauseForDenial, type ReservationPause, type ReviewLimitWait } from "./reservationPauses.js";
+import { CAPACITY_WAIT, RESERVATION_PAUSE_REASONS, RUNNER_DAILY_LIMIT_PAUSE, pauseForDenial, type ReservationPause, type ReviewLimitWait, type StartWait } from "./reservationPauses.js";
 import { attemptOfKey } from "./attemptKeys.js";
 import { WAITING_STAGES, WAITING_STAGE_POSITIONS, type WaitingStage } from "./waitingStages.js";
 import { stageKeyLikes } from "./stageStarts.js";
@@ -23,7 +23,7 @@ export interface ParkedStageEntry {
   /** Besides `itemStages`, the stages at which a planned PR child parks (the slot wake lists them; the core gate reads the same field). */
   childItemStages?: readonly string[];
   /** The pauses that park here: a fact with any other code is a different wait (a build slot) and is not resumed by this sweep. */
-  pauses: readonly (ReservationPause | ReviewLimitWait)[];
+  pauses: readonly (StartWait | ReviewLimitWait)[];
   /** The role whose seat (and so whose limits and estimate) the restarted start will meet: the headroom check asks for exactly that reservation. */
   role: string;
   /**
@@ -100,12 +100,15 @@ export const PANEL_WHOLE_CODE = "panel_whole";
 /** The facts that, after the panel's latest waiting fact, mean the panel is not the sweep's to resume: the panel is whole again (or the driver stopped, or the build refused). */
 export const PANEL_PROGRESS_KINDS: readonly string[] = Object.freeze(["build_refused", "stopped"]);
 
+/** D#483 S5-k3b-2b: every parked stage lists the capacity wait beside the spend pauses, so `work_item_list_parked_stage` finds an item that ended `<stage>_paused:waiting_for_capacity`. */
+const SPEND_AND_CAPACITY_PAUSES: readonly StartWait[] = Object.freeze([...RESERVATION_PAUSE_REASONS, CAPACITY_WAIT]);
+
 export const PARKED_STAGE_REGISTRY: Readonly<Partial<Record<WaitingStage, ParkedStageEntry>>> = Object.freeze({
   // The gate part (stages, approval, Spec, run keys) is @fx/core's BUILD_STAGE_GATE: the build card's "starts by itself" sentence reads the same one.
   build: {
     stage: "build",
     ...BUILD_STAGE_GATE,
-    pauses: RESERVATION_PAUSE_REASONS,
+    pauses: SPEND_AND_CAPACITY_PAUSES,
     role: "executor",
     respec: false,
     nextAttempt: nextAfterHighest,
@@ -115,7 +118,7 @@ export const PARKED_STAGE_REGISTRY: Readonly<Partial<Record<WaitingStage, Parked
   classify: {
     stage: "classify",
     itemStages: WAITING_STAGE_POSITIONS.classify,
-    pauses: RESERVATION_PAUSE_REASONS,
+    pauses: SPEND_AND_CAPACITY_PAUSES,
     role: PM_ROLE,
     approval: { kind: "advance_work_item", from: "self" },
     needsSpec: false,
@@ -128,7 +131,7 @@ export const PARKED_STAGE_REGISTRY: Readonly<Partial<Record<WaitingStage, Parked
   spec: {
     stage: "spec",
     itemStages: WAITING_STAGE_POSITIONS.spec,
-    pauses: RESERVATION_PAUSE_REASONS,
+    pauses: SPEND_AND_CAPACITY_PAUSES,
     role: PM_ROLE,
     approval: { kind: "advance_work_item", from: "origin" },
     needsSpec: false,
@@ -140,7 +143,7 @@ export const PARKED_STAGE_REGISTRY: Readonly<Partial<Record<WaitingStage, Parked
   respec: {
     stage: "respec",
     itemStages: WAITING_STAGE_POSITIONS.respec,
-    pauses: RESERVATION_PAUSE_REASONS,
+    pauses: SPEND_AND_CAPACITY_PAUSES,
     role: PM_ROLE,
     approval: { kind: "respec_work_item", from: "self" },
     needsSpec: true,
@@ -155,7 +158,7 @@ export const PARKED_STAGE_REGISTRY: Readonly<Partial<Record<WaitingStage, Parked
     stage: "review",
     itemStages: WAITING_STAGE_POSITIONS.review,
     // Besides the spend pauses, a reviewer the runner refused for its daily limit parks here; the sweep resumes that one by the clock (stageResume.ts), not by headroom.
-    pauses: [...RESERVATION_PAUSE_REASONS, RUNNER_DAILY_LIMIT_PAUSE],
+    pauses: [...SPEND_AND_CAPACITY_PAUSES, RUNNER_DAILY_LIMIT_PAUSE],
     role: "code-reviewer",
     approval: { kind: "advance_work_item", from: "self" },
     needsSpec: true,
@@ -170,7 +173,7 @@ export const PARKED_STAGE_REGISTRY: Readonly<Partial<Record<WaitingStage, Parked
   fix_round: {
     stage: "fix_round",
     itemStages: WAITING_STAGE_POSITIONS.fix_round,
-    pauses: RESERVATION_PAUSE_REASONS,
+    pauses: SPEND_AND_CAPACITY_PAUSES,
     role: "executor",
     approval: { kind: "advance_work_item", from: "self" },
     needsSpec: true,
@@ -188,7 +191,7 @@ export const PARKED_STAGE_REGISTRY: Readonly<Partial<Record<WaitingStage, Parked
   panel: {
     stage: "panel",
     itemStages: WAITING_STAGE_POSITIONS.panel,
-    pauses: RESERVATION_PAUSE_REASONS,
+    pauses: SPEND_AND_CAPACITY_PAUSES,
     role: "technical-architect",
     approval: { kind: "advance_work_item", from: "origin" },
     needsSpec: false,

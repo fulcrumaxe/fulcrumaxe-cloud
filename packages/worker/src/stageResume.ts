@@ -107,6 +107,8 @@ export const STAGE_RESUME_ORPHAN_AFTER_SECONDS = 600;
  * test holds them equal). It is resumed by the clock: once a UTC midnight has passed since the wait the workflow itself recorded. The spend headroom is not read for it.
  */
 export const RUNNER_DAILY_LIMIT_WAIT = "runner_daily_limit";
+/** D#483 S5-k3b-2b: the parked capacity wait (packages/pipeline reservationPauses.ts CAPACITY_WAIT; a test holds the two equal). */
+export const CAPACITY_WAIT = "waiting_for_capacity";
 const LIST_LIMIT = 200;
 /** Run statuses a run cannot leave (advance.ts ADVANCE_TERMINAL_STATUSES repeats the list and a test holds the two equal). */
 export const STAGE_RESUME_TERMINAL_STATUSES: readonly string[] = STAGE_TERMINAL_STATUSES;
@@ -194,6 +196,8 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
       counts.refreshed += 1;
       return false;
     }
+    // D#483 S5-k3b-2b: a parked capacity wait is restarted at once. The restarted workflow's first ask runs the spend check, then the queue: the sweep reads no headroom for it.
+    if (c.pause === CAPACITY_WAIT) return true;
     const seat = await deps.resolveRunSeat({ accountId: c.account_id, role: entry.role, workItemId: c.work_item_id });
     if (!seat.ok) {
       counts.skipped += 1;

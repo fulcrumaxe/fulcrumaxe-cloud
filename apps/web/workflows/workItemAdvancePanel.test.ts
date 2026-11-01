@@ -183,3 +183,18 @@ describe("S5k1e: a panel that had waited on a limit and is whole again leaves a 
     expect(whole(w)).toEqual([]);
   });
 });
+
+describe("C23-3: a panel round answering waiting_for_capacity waits by the minute on its own clock and ends panel_paused:waiting_for_capacity", () => {
+  it("241 asks, the same attempt, a fresh fact each, no failure and no Spec", async () => {
+    const w = build(() => ({ status: "refused", reason: "waiting_for_capacity" }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "paused", detail: "panel_paused:waiting_for_capacity" });
+    expect(w.advancePanel).toHaveBeenCalledTimes(241);
+    expect(clock.sleeps).toBe(240);
+    expect(factsOf(w)).toHaveLength(241);
+    expect(factsOf(w).every((e) => e.stage === "panel" && e.code === "waiting_for_capacity" && e.attempt === 0)).toBe(true);
+    expect(new Set(factsOf(w).map((e) => e.dedupeKey)).size).toBe(241);
+    expect(w.advanceSpec).not.toHaveBeenCalled();
+    expect(events()).not.toContain("advance.failed");
+    expect(recorded(w).map((e) => e.kind)).not.toContain("stopped");
+  });
+});

@@ -81,7 +81,7 @@ export function deltaReviewPorts(deps: DeltaReviewBinding): mergeQueue.DeltaComp
       if (!("who" in l)) return { ok: false, reason: l.reason };
       const started = await startReviewerBody(deps.worker, l.who, l.ctx, { number: l.pr.number, headSha: delta.mergeCommitSha, baseRef: l.pr.baseRef, branch: l.pr.branch }, role, [], 0, attempt, delta);
       if (started.runId !== null) return { ok: true, runId: started.runId };
-      // A spending limit (named pause) or an envelope denial is a refused spend; every other refusal keeps its own code.
+      // A spending limit (named pause) or an envelope denial is a refused spend; a wait for capacity is its own answer (not started, nothing spent, the entry is not stopped and is asked again on the next pass); every other refusal keeps its own code.
       return { ok: false, reason: isReservationPause(started.reason) || started.reason === "refused_spend" ? "refused_spend" : (started.reason ?? "invalid_input") };
     },
     async cancelRun(entry, runId) {
