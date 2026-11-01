@@ -13,7 +13,7 @@ import { withTenant } from './withTenant.js';
  * Queuing writes only the queue. Whether a run is allowed to read anything (free preview, repo disconnected, discovery switched off)
  * is decided when the run starts, from the current rows, and recorded as the run's skip reason.
  */
-export const DISCOVERY_TRIGGERS = ['installation_created', 'repos_added', 'activation'] as const;
+export const DISCOVERY_TRIGGERS = ['installation_created', 'repos_added', 'activation', 'sweep'] as const;
 export type DiscoveryTrigger = (typeof DISCOVERY_TRIGGERS)[number];
 
 export interface QueuedDiscovery {
@@ -32,7 +32,7 @@ export type DiscoveryScope =
  * `ref` is the installation ref, delivery id or subscription id; it is printable ASCII and at most 200 characters or this throws before any write.
  */
 export async function queueDiscoveries(pool: Pool, accountId: string, scope: DiscoveryScope, trigger: DiscoveryTrigger, ref: string): Promise<QueuedDiscovery[]> {
-  if (!DISCOVERY_TRIGGERS.includes(trigger)) throw new Error('discovery: unknown trigger');
+  if (trigger === 'sweep' || !DISCOVERY_TRIGGERS.includes(trigger)) throw new Error('discovery: unknown trigger');
   if (!REF_RE.test(ref)) throw new Error('discovery: invalid trigger reference');
   return withTenant(pool, accountId, async (client) => {
     const ids = scope.kind === 'installation' ? (scope.ghRepoIds ?? null) : null;
@@ -49,5 +49,18 @@ export async function queueDiscoveries(pool: Pool, accountId: string, scope: Dis
       [accountId, scope.kind === 'installation' ? scope.installationId : null, trigger, ref, ids === null ? null : [...ids]],
     );
     return rows.map((r) => ({ id: r.id, repoId: r.repo_id }));
+  });
+}
+
+/** D#483 S5-g2: queues the sweep's discovery of one repository for one period (`ref` is the UTC day or ISO week the list names). Answers the new row's id, or null when that period was already queued. */
+export async function queueSweepDiscovery(pool: Pool, accountId: string, repoId: string, ref: string): Promise<string | null> {
+  if (!REF_RE.test(ref)) throw new Error('discovery: invalid trigger reference');
+  return withTenant(pool, accountId, async (client) => {
+    const { rows } = await client.query<{ id: string }>(
+      `INSERT INTO discovery_runs (account_id, repo_id, trigger, trigger_ref) VALUES ($1, $2, 'sweep', $3)
+       ON CONFLICT (repo_id, trigger, trigger_ref) DO NOTHING RETURNING id`,
+      [accountId, repoId, ref],
+    );
+    return rows[0]?.id ?? null;
   });
 }

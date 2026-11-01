@@ -16,6 +16,7 @@ export type { ProposalVerifyCounts, VerifyRepoReader, VerifyRecord } from "./pro
 export type { DocsCodeAnalysisCounts } from "./docsCodeAnalysis.js";
 export type { AutoStartCounts } from "./autoStartSweep.js";
 export type { DiscoveryDrainCounts } from "./discoveryDrain.js";
+export type { DiscoveryScheduleCounts } from "./discoverySchedule.js";
 export type { RunnerNoticeSweeper, RunnerNoticeResult } from "./runnerNotices.js";
 export type { InvariantSweeper, InvariantSweepResult } from "./invariantSweep.js";
 export { RunActionInputError, RunActionUnavailableError, RunActionForbiddenError, RunActionRefusedError } from "./runActions.js";
