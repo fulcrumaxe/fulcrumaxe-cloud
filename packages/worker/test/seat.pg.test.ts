@@ -83,6 +83,40 @@ describe("seat resolver [pg]", () => {
     () => admin,
   );
 
+  it("C25-f1-3: an analyse seat takes the verifier's model and limits, the analyst's platform card and the given cap; it writes no run, reservation, work item or proposal", async () => {
+    const { loadPlatformCard } = await import("@fx/roles/cards");
+    const a = await team();
+    const before = async () => ({
+      ...(await counts(a)),
+      workItems: Number((await admin.query("SELECT count(*) FROM work_items WHERE account_id = $1", [a.accountId])).rows[0].count),
+      proposals: Number((await admin.query("SELECT count(*) FROM proposals WHERE account_id = $1", [a.accountId])).rows[0].count),
+    });
+    const start = await before();
+    const analyse = await okSeat({ accountId: a.accountId, role: "discovery-analyst", repoId: a.repoId, purpose: "analyse", capUsd: 1 });
+    const verify = await okSeat({ accountId: a.accountId, role: "proposal-verifier", repoId: a.repoId, purpose: "verify", capUsd: 0.25 });
+    expect(analyse.roleCard).toBe(loadPlatformCard("discovery-analyst"));
+    expect(analyse.roleCard).not.toBe(verify.roleCard);
+    expect(analyse.capUsd).toBe(1);
+    expect(analyse.spend.perSpawnCapUsd).toBe(1);
+    expect(analyse.spend.estimateModelUsd).toBe(1);
+    expect(analyse.model).toBe(verify.model);
+    expect(analyse.limits).toEqual(verify.limits);
+    expect(analyse.maxExtensions).toBe(0);
+    expect(analyse.timeoutMs).toBe(verify.timeoutMs);
+    expect(await before()).toEqual(start);
+    // Each purpose takes only its own role, and an unknown role is still refused (no fallback card).
+    await refusedWith(a, { accountId: a.accountId, role: "proposal-verifier", repoId: a.repoId, purpose: "analyse", capUsd: 1 }, "unknown_role");
+    await refusedWith(a, { accountId: a.accountId, role: "discovery-analyst", repoId: a.repoId, purpose: "verify", capUsd: 1 }, "unknown_role");
+    await refusedWith(a, { accountId: a.accountId, role: "no-such-role", repoId: a.repoId, purpose: "analyse", capUsd: 1 }, "unknown_role");
+    await refusedWith(a, { accountId: a.accountId, role: "discovery-analyst", repoId: a.repoId, purpose: "analyse", capUsd: 0 }, "model_budget_unset");
+    // The analyst reads through either team App and through nothing else.
+    await setKind(a, "team_readonly");
+    expect((await okSeat({ accountId: a.accountId, role: "discovery-analyst", repoId: a.repoId, purpose: "analyse", capUsd: 1 })).repoId).toBe(a.repoId);
+    await setKind(a, "sitekit");
+    await refusedWith(a, { accountId: a.accountId, role: "discovery-analyst", repoId: a.repoId, purpose: "analyse", capUsd: 1 }, "no_installation");
+    expect(await before()).toEqual(start);
+  });
+
   it("D#6 R4d-1: the executor's card follows the mode its prompt was built for (the repository's own when none is named); no other role's card changes", async () => {
     const { loadProductCard } = await import("@fx/roles/cards");
     const a = await team();

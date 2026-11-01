@@ -67,6 +67,8 @@ export const ROLE_PERMISSIONS: Readonly<
   "tui-tester": { metadata: "read", contents: "read" },
   // D#483 S4-b2a: the platform's claim verifier. It only clones the repository to read it; nothing in its token can write.
   "proposal-verifier": { metadata: "read", contents: "read" },
+  // D#483 S4-f1: the platform's discovery analyst. It reads a repository's docs and code and only proposes; nothing in its token can write.
+  "discovery-analyst": { metadata: "read", contents: "read" },
 });
 
 /**

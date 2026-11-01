@@ -182,6 +182,7 @@ export class RunnerTarget implements ExecutionTarget {
     if (this.mode === "runner_verified" && VERIFIED_SANDBOX_REVIEW_ROLES.has(run.role)) return "verified_review_not_wired";
     // D#483 S4-b2c: the claim verifier is a runner job for a cloud-verified repo only. Its result is re-read by our cloud from the repository, which a
     // Local-only repo's promise rules out, so a `runner_local` verifier run is refused before anything is counted or written.
+    // verifier-only: the verifier is the one confined role a runner job can be for today; the analyst joins in S4-f4 (S4-f1, R-C25-4).
     if (this.mode === "runner_local" && run.role === PROPOSAL_VERIFIER_ROLE) return "role_not_runner_eligible";
     return null;
   }

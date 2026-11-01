@@ -65,7 +65,7 @@ function cleanClaimText(s: string): string {
     .join("");
 }
 
-function parseCite(raw: unknown): Cite | null {
+export function parseCite(raw: unknown): Cite | null {
   if (!isObject(raw) || hasOtherKeys(raw, ["path", "start_line", "end_line"])) return null;
   const path = ownData(raw, "path");
   const start = ownData(raw, "start_line");
