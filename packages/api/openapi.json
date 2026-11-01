@@ -16519,6 +16519,9 @@
                                       "null"
                                     ]
                                   },
+                                  "can_retry": {
+                                    "type": "boolean"
+                                  },
                                   "text": {
                                     "type": "string"
                                   }
@@ -16530,6 +16533,7 @@
                                   "reason_code",
                                   "estimate_usd",
                                   "pr_number",
+                                  "can_retry",
                                   "text"
                                 ],
                                 "additionalProperties": false
@@ -16970,6 +16974,181 @@
           },
           "409": {
             "description": "Error `estimate_changed`: the live estimate is now above the figure confirmed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/reversals/{id}/retry": {
+      "post": {
+        "operationId": "retryReversal",
+        "summary": "Try a failed reversal again, on the same row",
+        "description": "Session only, owner or admin; a token is 403 `session_required`. No body. Puts a failed re-run or revert, one the worker will not retry by itself (any reason but a temporary tooling error, or one at its attempt cap), back to waiting: the same reversal, not a new one, so the reversal count does not move. The answer is `started`. Pressing it again while the reversal waits or runs answers the same and changes nothing. 404 for an unknown reversal or one of another account; 409 `not_retryable` for a reversal that is not failed, is waiting for a confirmation, is done, or cannot be retried (a refusal); 503 `reversal_unavailable` while no worker is available. Every retry that happens is audited.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "x-fx-idempotency": "optional",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Try a failed reversal again, on the same row",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "done",
+                        "started",
+                        "awaiting_confirm",
+                        "refused",
+                        "failed",
+                        "needs_ask"
+                      ]
+                    },
+                    "reversal_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "receipt_id": {
+                      "type": "string"
+                    },
+                    "kind": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "reason_code": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "estimate_usd": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "ask_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "reversal_id",
+                    "receipt_id",
+                    "kind",
+                    "reason_code",
+                    "estimate_usd",
+                    "ask_id",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error `session_required` or `forbidden` (owner or admin only).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `not_retryable`: this reversal is not one a person can retry.",
             "content": {
               "application/json": {
                 "schema": {

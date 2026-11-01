@@ -126,6 +126,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "requestReversal",
       "resolveRunSeat",
       "retryPublish",
+      "retryReversal",
       "sandboxInventory",
       "settlePairedBuild",
       "settleRunAction",

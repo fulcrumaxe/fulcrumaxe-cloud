@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from 'pg';
 import { ReceiptWriteError } from '@fx/db/src/receiptWriter.js';
 import {
-  confirmCompensation, insertCompensation,
+  confirmCompensation, insertCompensation, retryCompensation,
   type CompensationKind, type CompensationReason, type CompensationState,
 } from '@fx/db/src/reversalCompensation.js';
 import { withTenant } from '../tenancy/withTenant.js';
@@ -75,7 +75,7 @@ export async function fileAllowedReversal(
 
 // ---- The person's entry (D#7 DP7-2e): the reverse and confirm routes' service. Runs on the RECEIPT pool, under the session's tenant. ----
 
-export type ReversalRequestErrorCode = 'session_required' | 'forbidden' | 'not_found' | 'not_reversible' | 'estimate_changed';
+export type ReversalRequestErrorCode = 'session_required' | 'forbidden' | 'not_found' | 'not_reversible' | 'estimate_changed' | 'not_retryable';
 /** `status` is the HTTP status a route answers with. `estimateUsd` is the live figure on `estimate_changed`. Branch on `code`, never on the message. */
 export class ReversalRequestError extends Error {
   constructor(readonly status: 403 | 404 | 409 | 422, readonly code: ReversalRequestErrorCode, readonly estimateUsd?: number) {
@@ -199,5 +199,24 @@ export async function confirmReversal(ctx: ReversalRequestCtx, principal: Revers
   return withTenant(ctx.pool, accountId, userId, async (client) => {
     await confirmCompensation(client, found.id, live ?? input.confirmEstimateUsd);
     return outcomeOf((await client.query<CompensationRow>(ROW_SQL, [found.id])).rows[0]!);
+  });
+}
+
+/**
+ * D#7 DP7-2g: a person's retry of a failed compensation, on the SAME row (migration 0945). Owner or admin, a session only. The database moves a failed re-run
+ * or revert row the worker's own tick will not take back to `pending` (reason cleared, attempts reset, the audit row written in the same transaction) and writes
+ * no receipt, so the reversal count does not move. A row the tick already owns (`pending`, `running`) answers as it stands, which is what a second press gets.
+ * Any other row (`awaiting_confirm`, `done`, a failed row the tick will retry by itself, or the kinds `refused` and `unavailable`) is 409 `not_retryable` and nothing changes.
+ */
+export async function retryReversal(ctx: ReversalRequestCtx, principal: ReversalPrincipal, input: { reversalId: string }): Promise<ReversalOutcome> {
+  if (principal.tokenId !== undefined) throw new ReversalRequestError(403, 'session_required');
+  const { accountId, userId } = principal;
+  return withTenant(ctx.pool, accountId, userId, async (client) => {
+    await requireAdmin(client, principal);
+    if (!UUID_RE.test(input.reversalId)) throw new ReversalRequestError(404, 'not_found');
+    const out = await retryCompensation(client, input.reversalId);
+    if (!out.found) throw new ReversalRequestError(404, 'not_found');
+    if (!out.moved && out.state !== 'pending' && out.state !== 'running') throw new ReversalRequestError(409, 'not_retryable');
+    return outcomeOf((await client.query<CompensationRow>(ROW_SQL, [input.reversalId])).rows[0]!);
   });
 }

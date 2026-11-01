@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../apps/_lib/api.js";
-import { createInsightPanel, REVERSE_WORDS, RX_REFUSALS, confirmPrompt, outcomeNote, reversalRows, rxRefusal } from "../apps/pipeline/pipeline-insight.js";
+import { createInsightPanel, REVERSE_WORDS, RX_REFUSALS, RX_RETRY_REFUSALS, confirmPrompt, outcomeNote, reversalRows, rxRefusal, rxRetryRefusal } from "../apps/pipeline/pipeline-insight.js";
 
 const base = { id: "r1", label: "Starting a small piece of work", class: 2, at: "2026-10-20T09:30:00.000Z", by: "person", chosen: "start", rejected: "hold", reverses_receipt_id: null, reverses_text: "", free_until: null, deadline_text: "No free window.", price_kind: "not_yet_priced", price_usd: null, price_text: "No price yet.", can_reverse: true, reversal: null };
 const rev = (state, over) => ({ id: "c1", state, kind: "rerun", reason_code: null, estimate_usd: null, pr_number: null, text: "Waiting to start.", ...over });
@@ -26,6 +26,10 @@ const ROWS = {
   reversalOfRemoved: { ...base, id: "r3", can_reverse: false, price_kind: "unavailable", reverses_receipt_id: "r9", reverses_text: "removed item" },
   // Hostile or incomplete records the build must still draw in words.
   blankEverything: { id: "r4", label: "", at: "not a time", by: "robot", chosen: " ", rejected: "(not shown)", can_reverse: true, price_kind: "free_until", deadline_text: "", price_text: "", reversal: null },
+  failedRetry: { ...base, can_reverse: false, reversal: rev("failed", { kind: "revert_pr", reason_code: "no_installation", can_retry: true, text: "The GitHub App is no longer installed on this repository, so nothing was changed. Install it again, then try again." }) },
+  failedTick: { ...base, can_reverse: false, reversal: rev("failed", { reason_code: "tooling_error", can_retry: false, text: "We could not finish this step. It can be tried again." }) },
+  failedRetryNoId: { ...base, can_reverse: false, reversal: { state: "failed", can_retry: true, text: "x is gone." } },
+  doneCanRetry: { ...base, can_reverse: false, reversal: rev("done", { can_retry: true, text: "We opened a revert for you to review. Nothing changes until you merge it." }) },
   unknownState: { ...base, can_reverse: false, reversal: { id: "c9", state: "exploded", text: "" } },
   failedNoText: { ...base, can_reverse: false, reversal: { id: "c9", state: "failed", text: null } },
   refusedNoText: { ...base, can_reverse: false, price_kind: "unavailable", price_text: "" },
@@ -38,8 +42,30 @@ describe("D#7 DP7-2f: the Reverse control model", () => {
     const actions = Object.fromEntries(Object.keys(ROWS).map((k) => [k, rowFor(k).action]));
     expect(actions).toEqual({
       free: "reverse", priced: "reverse", unpriced: "reverse", refused: null, pending: null, awaiting: "confirm", running: null, done: null, failed: null,
-      reversal: null, reversalOfRemoved: null, blankEverything: "reverse", unknownState: null, failedNoText: null, refusedNoText: null, reversalNoText: null,
+      reversal: null, reversalOfRemoved: null, blankEverything: "reverse", failedRetry: "retry", failedTick: null, failedRetryNoId: null, doneCanRetry: null, unknownState: null, failedNoText: null, refusedNoText: null, reversalNoText: null,
     });
+  });
+
+  it("Try again is offered only on a failed reversal the server marks can_retry and names, and it targets that same reversal", () => {
+    const r = rowFor("failedRetry");
+    expect([r.action, r.targetId, r.state]).toEqual(["retry", "c1", "failed"]);
+    expect(r.hint).toBe("Reversal failed. The GitHub App is no longer installed on this repository, so nothing was changed. Install it again, then try again.");
+    expect(REVERSE_WORDS.retry).toBe("Try again");
+    // The tick's own retry, a missing id, a done row and a refusal never get one, whatever else they say.
+    for (const k of ["failedTick", "failedRetryNoId", "doneCanRetry", "refused", "pending", "running", "awaiting"]) expect(rowFor(k).action === "retry", k).toBe(false);
+    expect(rowFor("failedTick").hint).toContain("It can be tried again.");
+  });
+
+  it("a member's Try again is answered with the owner-or-admin sentence, a stale one with a refresh sentence, the rest as for Reverse", () => {
+    for (const code of ["forbidden", "insufficient_role"]) expect(rxRetryRefusal({ code })).toBe("Only an owner or an admin can retry a reversal.");
+    expect(rxRetryRefusal({ code: "not_retryable", message: "server words" })).toBe(RX_RETRY_REFUSALS.not_retryable);
+    for (const code of ["reversal_unavailable", "not_found"]) expect(rxRetryRefusal({ code })).toBe(RX_REFUSALS[code]);
+    for (const e of [{ code: "offline" }, { code: "weird", message: "server words" }, null, undefined, "x"]) {
+      const text = rxRetryRefusal(e);
+      expect(text.trim()).not.toBe("");
+      expect(text).not.toMatch(/null|undefined|weird|server words/);
+    }
+    for (const w of Object.values(RX_RETRY_REFUSALS)) expect(w).not.toMatch(/null|undefined|_/);
   });
 
   it("a free receipt shows its deadline, a priced one its estimate and asks to confirm it, a refusal gives the reason and what to do instead", () => {
@@ -60,7 +86,7 @@ describe("D#7 DP7-2f: the Reverse control model", () => {
     expect(rowFor("done").hint).toBe("Reversed. We opened a revert for you to review. Nothing changes until you merge it.");
     expect(rowFor("failed").struck).toBe(false);
     expect(rowFor("failed").hint).toMatch(/^Reversal failed\. GitHub could not open a revert/);
-    expect(rowFor("failed").action).toBeNull();
+    expect(rowFor("failed").action).toBeNull(); // no can_retry from the server, so no control
     expect(rowFor("reversal").hint).toBe("Reverses Starting a small piece of work, 2026-10-20 09:30:00 UTC.");
     expect(rowFor("reversalOfRemoved").hint).toBe("Reverses removed item.");
     expect(rowFor("reversalNoText").hint).toBe("Reverses removed item.");
@@ -81,7 +107,7 @@ describe("D#7 DP7-2f: the Reverse control model", () => {
       expect(w.trim()).not.toBe("");
       expect(w).not.toMatch(/null|undefined/);
     }
-    expect(all.more).toBe("Showing the newest 16 of 40.");
+    expect(all.more).toBe("Showing the newest 20 of 40.");
   });
 
   it("answers each refusal with a fixed sentence, an owner-or-admin one for a member", () => {
@@ -201,6 +227,59 @@ describe("D#7 DP7-2f: the confirm handlers send the figure the person was shown"
     expect(byId(panel.el, "pl-reverse-estimate")[0].textContent).toContain("$2.75");
     await press(panel, "pl-reverse-confirm");
     expect(posts[1]).toEqual({ path: "/api/v1/receipts/r1/reverse", body: { confirmEstimateUsd: 2.75 } });
+  });
+});
+
+describe("D#7 DP7-2g: Try again posts to the same reversal's retry route", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal("Node", FakeNode);
+    vi.stubGlobal("document", { hidden: false, activeElement: null, createElement: (t) => new FakeEl(t), createTextNode: (text) => ({ text }) });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+  function make(receipt, answers) {
+    const posts = [];
+    const call = vi.fn(async (method, url, body) => {
+      if (method === "POST") {
+        posts.push({ path: url, body });
+        const a = answers.shift();
+        if (a instanceof Error) throw a;
+        return a;
+      }
+      return structuredClone(url.endsWith("/receipts") ? { total: 1, receipts: [receipt] } : ACTIVITY);
+    });
+    return { panel: createInsightPanel({ call, setInterval: () => 1, clearInterval: () => {} }), posts };
+  }
+  const press = async (panel, id) => {
+    byId(panel.el, id)[0].on.click();
+    await flush();
+  };
+  const note = (panel) => byId(panel.el, "pl-reverse-note")[0].textContent;
+
+  it("one press is one POST with no body and no confirmation step; the answer's own sentence is shown", async () => {
+    const { panel, posts } = make(ROWS.failedRetry, [{ status: "started", message: "Trying again. It will start shortly." }]);
+    panel.start("item-1");
+    await flush();
+    expect(byId(panel.el, "pl-reverse")).toHaveLength(0);
+    await press(panel, "pl-reverse-retry");
+    expect(posts).toEqual([{ path: "/api/v1/reversals/c1/retry", body: undefined }]);
+    expect(note(panel)).toContain("Trying again. It will start shortly.");
+  });
+
+  it("a member's 403 shows the fixed sentence and a stale row's 409 the refresh sentence, never the server's words", async () => {
+    const forbidden = Object.assign(new Error("server words"), { status: 403, code: "forbidden" });
+    const stale = Object.assign(new Error("server words"), { status: 409, code: "not_retryable" });
+    const { panel } = make(ROWS.failedRetry, [forbidden, stale]);
+    panel.start("item-1");
+    await flush();
+    await press(panel, "pl-reverse-retry");
+    expect(note(panel)).toContain("Only an owner or an admin can retry a reversal.");
+    await press(panel, "pl-reverse-retry");
+    expect(note(panel)).toContain(RX_RETRY_REFUSALS.not_retryable);
+    expect(note(panel)).not.toContain("server words");
   });
 });
 

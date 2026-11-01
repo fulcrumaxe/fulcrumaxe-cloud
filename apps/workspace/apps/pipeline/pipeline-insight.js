@@ -450,13 +450,15 @@ export function receiptsSection(data) {
 /**
  * D#7 DP7-2f: the Reverse control. `GET /work-items/{id}/receipts` (any member) says per receipt what it costs to reverse and where a reversal stands; every
  * line below is the server's own fixed sentence (`deadline_text`, `price_text`, the reversal's `text`) or one of the words here. A reversal is never undone:
- * "Reversed" has no control. A failed reversal is shown with its reason and has no control (a retry is a later row). A receipt that reverses another names it
+ * "Reversed" has no control. A failed reversal is shown with its reason; it has a "Try again" control only where the server says `can_retry` (a failed re-run
+ * or revert the worker will not retry by itself), and that retry reuses the same reversal (D#7 DP7-2g). A receipt that reverses another names it
  * (the server says `removed item` when the original is gone). Nothing blank, `null` or a code reaches the screen.
  */
 export const REVERSE_WORDS = {
   control: "Reverse",
   confirm: "Confirm reversal",
   confirmEstimate: "Confirm the estimate",
+  retry: "Try again",
   cancel: "Cancel",
   reversed: "Reversed.",
   failed: "Reversal failed.",
@@ -478,6 +480,13 @@ export const RX_REFUSALS = {
   estimate_changed: "The estimate changed while you were deciding, so nothing was spent. The new figure is shown; check it and confirm again.",
   not_found: "This decision isn't there any more, so nothing was changed. The list has been refreshed.",
 };
+/** What a failed Try again says. A member sees the owner-or-admin sentence; anything not named here falls back to the shared sentences. */
+export const RX_RETRY_REFUSALS = {
+  forbidden: "Only an owner or an admin can retry a reversal.",
+  insufficient_role: "Only an owner or an admin can retry a reversal.",
+  not_retryable: "This reversal can't be tried again from here. The list has been refreshed.",
+};
+export const rxRetryRefusal = (e) => (e && typeof e.code === "string" && Object.hasOwn(RX_RETRY_REFUSALS, e.code) ? RX_RETRY_REFUSALS[e.code] : rxRefusal(e));
 export const rxRefusal = (e) => (e && typeof e.code === "string" && has(RX_REFUSALS, e.code) ? RX_REFUSALS[e.code] : refusalSentence(e));
 export const rxMoney = (usd) => (Number.isFinite(usd) ? "$" + usd.toFixed(2) : "");
 export const confirmPrompt = (usd) => "A fresh build would use about " + rxMoney(usd) + " of your model spend. " + REVERSE_WORDS.spent;
@@ -500,7 +509,13 @@ export function reversalRows(data) {
       if (st === "done") {
         it.struck = true;
         it.hint = REVERSE_WORDS.reversed + (rvText ? " " + rvText : "");
-      } else if (st === "failed") it.hint = REVERSE_WORDS.failed + (rvText ? " " + rvText : "");
+      } else if (st === "failed") {
+        it.hint = REVERSE_WORDS.failed + (rvText ? " " + rvText : "");
+        if (rv.can_retry === true && plain(rv.id)) {
+          it.action = "retry";
+          it.targetId = plain(rv.id);
+        }
+      }
       else it.hint = rvText || REVERSE_WORDS.stateUnknown;
       if (st === "awaiting_confirm" && Number.isFinite(rv.estimate_usd) && plain(rv.id)) {
         it.action = "confirm";
@@ -813,14 +828,15 @@ export function createInsightPanel(deps) {
     notes.delete(it.id);
     confirming.delete(it.id);
     render();
-    const body = figure === null ? {} : { confirmEstimateUsd: figure };
-    const path = it.action === "confirm" ? "/api/v1/reversals/" + encodeURIComponent(it.targetId) + "/confirm" : "/api/v1/receipts/" + encodeURIComponent(it.id) + "/reverse";
+    const retrying = it.action === "retry";
+    const body = retrying ? undefined : figure === null ? {} : { confirmEstimateUsd: figure };
+    const path = retrying ? "/api/v1/reversals/" + encodeURIComponent(it.targetId) + "/retry" : it.action === "confirm" ? "/api/v1/reversals/" + encodeURIComponent(it.targetId) + "/confirm" : "/api/v1/receipts/" + encodeURIComponent(it.id) + "/reverse";
     try {
       notes.set(it.id, outcomeNote(await deps.call("POST", path, body)));
       fresh.delete(it.id);
     } catch (e) {
       if (e && e.status === 409 && Number.isFinite(e.currentEstimateUsd)) fresh.set(it.id, e.currentEstimateUsd);
-      notes.set(it.id, { text: rxRefusal(e), needsYou: false });
+      notes.set(it.id, { text: retrying ? rxRetryRefusal(e) : rxRefusal(e), needsYou: false });
     }
     busy.delete(it.id);
     render();
@@ -855,6 +871,7 @@ export function createInsightPanel(deps) {
         render();
       });
     } else if (i.action === "confirm") control = act("pl-reverse-confirm-pending", REVERSE_WORDS.confirmEstimate, () => reverseCall(i, i.figure));
+    else if (i.action === "retry") control = act("pl-reverse-retry", REVERSE_WORDS.retry, () => reverseCall(i, null));
     return h(
       "li",
       { "data-testid": "pl-receipt", "data-class": String(i.class), "data-reversal": i.state },

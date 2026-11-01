@@ -86,6 +86,28 @@ export async function confirmCompensation(client: Pick<PoolClient, 'query'>, id:
   return rows[0]?.ok === true;
 }
 
+export interface RetryCompensationResult {
+  /** False when no row of this id stands in the caller's account. */
+  found: boolean;
+  /** True only when this call moved a failed row back to `pending`. */
+  moved: boolean;
+  /** The row's state after the call; null when it was not found. */
+  state: CompensationState | null;
+  kind: CompensationKind | null;
+}
+
+/**
+ * A person's retry (migration 0945): a `failed` re-run or revert row that the worker's own tick will not take (any reason but `tooling_error`, or
+ * `tooling_error` at the cap) goes back to `pending` with a cleared reason and no attempts, on the SAME row, and the audit row is written in the same
+ * transaction. Any other row is left untouched and reported as it stands. Owner or admin only (the database re-checks). `client` is a `withTenant` client.
+ */
+export async function retryCompensation(client: Pick<PoolClient, 'query'>, id: string): Promise<RetryCompensationResult> {
+  const { rows } = await client.query<{ o_found: boolean; o_moved: boolean; o_state: CompensationState | null; o_kind: CompensationKind | null }>(
+    'SELECT o_found, o_moved, o_state, o_kind FROM reversal_compensation_retry($1::uuid)', [id]);
+  const r = rows[0]!;
+  return { found: r.o_found, moved: r.o_moved, state: r.o_state, kind: r.o_kind };
+}
+
 /** Record the end of a claimed row. True only for a row that was `running`; false on a repeat. */
 export async function finishCompensation(
   client: Pick<PoolClient, 'query'>,
