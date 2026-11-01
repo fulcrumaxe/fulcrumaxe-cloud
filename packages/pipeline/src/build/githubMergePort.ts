@@ -111,6 +111,11 @@ export interface GitHubMergePortDeps {
    * `http` is a client that enforces the allowlist; the port also simply makes no other call.
    */
   local?: { http: LocalGitHubHttp; recordedBranch(pr: PullRequestRef): Promise<string> };
+  /**
+   * D#694 B7-1 (C9): set with `local` for a paired item's code repository. Its queue mode and its pull request's queue entry are then read through the fence's
+   * queue reads (A11 to A13) instead of the `runner_local` short-circuit. The enqueue, dequeue and auto-merge calls stay refused whatever this says.
+   */
+  pairedQueueReads?: boolean;
 }
 
 /** D#519 policy constants: how many reads (the first included) a `null` `mergeable` gets, and the wait between them. */
@@ -553,7 +558,7 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
 
     async getMergeQueueMode(pr, baseRef): Promise<MergeQueueMode> {
       // A runner_local repo is unchanged by this feature: its merge belongs to the runner (the gate stops before any merge call there).
-      if (deps.local) return { mode: "direct", source: "runner_local" };
+      if (deps.local && !deps.pairedQueueReads) return { mode: "direct", source: "runner_local" };
       const docs = deps.queueDocuments;
       if (docs === undefined) return { mode: "direct", source: "queue_not_configured" };
       try {
@@ -660,7 +665,7 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
     },
 
     async getQueueEntry(pr): Promise<QueueEntryReading> {
-      if (deps.local) throw new Error(`GitHub queue entry: ${LOCAL_REFUSED}`);
+      if (deps.local && !deps.pairedQueueReads) throw new Error(`GitHub queue entry: ${LOCAL_REFUSED}`);
       const docs = deps.queueDocuments;
       if (docs === undefined) throw new Error("GitHub queue entry: no queue documents");
       await repoPath(pr);

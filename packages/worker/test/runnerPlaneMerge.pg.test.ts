@@ -465,6 +465,20 @@ describe("plane merge order store [pg]", () => {
         expect((await row(o.id)).state).toBe(to);
       }
     });
+    // D#694 B7-1 (0947): `enqueued` is the cloud's to write, from its own read of GitHub, and only from authorized.
+    it("lets the cloud, and only the cloud, end an authorized order as enqueued; nothing else reaches it", async () => {
+      await placed(A, await item(A));
+      const o = await claimed();
+      const run = { by: "runner" as const, runnerId: runner, leaseGeneration: o.leaseGeneration };
+      expect(await store.finish({ accountId: A.accountId, orderId: o.id, to: "enqueued", code: "enqueued", actor: { by: "cloud" } })).toEqual({ kind: "not_allowed", from: "claimed" });
+      await store.authorize(lease(o));
+      expect(await store.finish({ accountId: A.accountId, orderId: o.id, to: "enqueued", code: "enqueued", actor: run })).toEqual({ kind: "not_allowed", from: "authorized" });
+      expect((await store.finish({ accountId: A.accountId, orderId: o.id, to: "enqueued", code: "enqueued", actor: { by: "cloud" } })).kind).toBe("finished");
+      expect(await row(o.id)).toMatchObject({ state: "enqueued", outcome_code: "enqueued", write_token_issued_at: expect.any(Date) });
+      // Final, and the item is free for a fresh order (B6-3's single automatic retry places one).
+      expect(await store.finish({ accountId: A.accountId, orderId: o.id, to: "failed", code: "x_code", actor: { by: "cloud" } })).toEqual({ kind: "not_allowed", from: "enqueued" });
+      expect((await store.placeOrder({ accountId: A.accountId, workItemId: o.workItemId, expectedPublicHead: HEAD, reviewedHead: REVIEWED })).kind).toBe("placed");
+    });
     it("does not let a runner merge a claimed order (no go yet), end a pending one, or expire any", async () => {
       await placed(A, await item(A));
       const o = await claimed();
@@ -598,6 +612,17 @@ describe("plane merge order store [pg]", () => {
       expect(await ask(await mkRunner(A, { scope: [] }))).toBe(false);
       await claimed();
       expect(await ask()).toBe(false);
+    });
+
+    it("runnerHasCapability reads the recorded set now: true only while the latest hello listed the capability, for this runner and account alone", async () => {
+      const has = (id: string = runner, account: string = A.accountId) => store.runnerHasCapability({ accountId: account, runnerId: id, capability: "plane_merge_queue_v1" });
+      expect(await has()).toBe(false);
+      await admin.query("UPDATE runner_capabilities SET capabilities = ARRAY['plane_merge_v1', 'plane_merge_queue_v1'] WHERE runner_id = $1", [runner]);
+      expect(await has()).toBe(true);
+      expect(await has(runner, B.accountId)).toBe(false);
+      expect(await has(await mkRunner(A, { caps: null }))).toBe(false);
+      await admin.query("UPDATE runner_capabilities SET capabilities = ARRAY['plane_merge_v1'] WHERE runner_id = $1", [runner]);
+      expect(await has()).toBe(false);
     });
 
     it("runnerTrusted re-reads the runner now: revoked, a registrant who lost the admin role, pause, drain, scope and capability each turn it off", async () => {

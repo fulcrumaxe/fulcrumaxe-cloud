@@ -484,7 +484,7 @@ export const PLANE_MERGE_REPORT_PATH = "/api/runner/plane-merge-report";
 /** The paths of a verify: at most this many; a longer change set is sent cut short with `incomplete` true. */
 export const MAX_PLANE_MERGE_PATHS = 3000;
 /** Why the runner stopped before it called merge, a closed set. */
-export const PLANE_MERGE_ABORT_CODES = ["head_moved", "base_retargeted", "pr_not_open", "pr_draft", "read_failed", "internal"] as const;
+export const PLANE_MERGE_ABORT_CODES = ["head_moved", "base_retargeted", "pr_not_open", "pr_draft", "read_failed", "internal", "queue_unreadable", "queue_mode_mismatch"] as const;
 export const PlaneMergeAbortCode = z.enum(PLANE_MERGE_ABORT_CODES);
 export type PlaneMergeAbortCode = z.infer<typeof PlaneMergeAbortCode>;
 
@@ -518,7 +518,7 @@ export const PlaneMergeReportMessage = z
   .object({
     order_id: uuid,
     lease_generation: z.number().int().safe().min(1),
-    result: z.enum(["merged", "refused", "aborted"]),
+    result: z.enum(["merged", "enqueued", "refused", "aborted"]),
     http_status: z.number().int().min(100).max(599).optional(),
     abort_code: PlaneMergeAbortCode.optional(),
     token_revoked: z.boolean(),

@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   FLAG_WORDS, limitResetTail, RECEIPTS_HEADING, receiptsSection, formatWhen, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, SPEC_REFUSED_SENTENCES, SPEC_REFUSED_GENERIC, SUPERSEDED_SENTENCE, SUPERSEDED_LINK_LABEL, phaseOf, pullUrl, queueLine, queuedToMerge, QUEUE_SENTENCES, QUEUE_TIMEOUT_HINT, zoneTime, readyBanner, mergeBlockSentence, blockingSentence, BLOCKING_SENTENCES, PUBLIC_REFUSED_SENTENCE, REVIEW_BLOCK_SENTENCE, UNKNOWN_BLOCK_SENTENCE, reasonWord, roleWord, runView, statusWord, stepView, usdText,
 } from "../apps/pipeline/pipeline-insight.js";
+import { PERSON_MERGES_REASONS } from "../apps/pipeline/pipeline-insight.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
 const fx = (name) => JSON.parse(readFileSync(join(PACKAGES, "api", "fixtures", "v1", "getWorkItemActivity", name), "utf8"));
@@ -144,6 +145,14 @@ describe("recorded pipeline steps", () => {
     it("the two-plane stops have sentences, never raw codes", () => {
       expect(reasonWord("public_pr_not_open")).toMatch(/public pull request is not open/);
       expect(reasonWord("runner_merge_unavailable")).toMatch(/A person merges the public pull request/);
+    });
+
+    // D#694 B7-1: a queue repository and an older runner. The same copy on the reason line and on the blocking line, and the stop is not a "a person presses merge" one.
+    it("a runner too old for the repository's merge queue: the card says to update it", () => {
+      const copy = "Update the runner on your machine so it can use this repository's merge queue.";
+      expect(reasonWord("runner_update_required")).toBe(copy);
+      expect(blockingSentence("runner_update_required")).toBe(copy);
+      expect(PERSON_MERGES_REASONS).not.toContain("runner_update_required");
     });
 
     it("the runner-merge stops have sentences, never raw codes", () => {

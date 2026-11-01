@@ -13,7 +13,9 @@
  *                 A path that is not valid UTF-8 cannot be told apart from GitHub's reading of it, so it makes the whole check "could not know", never a mismatch.
  *   3. verify     `plane-merge-verify`: the cloud runs the whole gate again. On go it hands over the ONE write credential and the sha the merge must name.
  *   4. merge      the pull request is read again with the write credential (head, base, open, not draft); then `PUT .../merge { sha, squash }`. GitHub itself
- *                 refuses when the head is not `sha`. The write credential is revoked in a `finally`.
+ *                 refuses when the head is not `sha`. The write credential is revoked in a `finally`. D#694 B7-1: the code repository's merge mode is read here too,
+ *                 and must be the one the cloud sent; a repository behind GitHub's merge queue is ENQUEUED (held to `sha`), never merged directly, and nothing is
+ *                 merged or enqueued when the mode is unreadable or differs. There is no auto-merge fallback.
  *   5. report     `plane-merge-report`, a hint: the cloud reads GitHub through its own client before it records anything.
  *
  * Every failure path ends in a closed code and revokes both credentials. A credential lives in a local variable of one call and nowhere else: it is never
@@ -133,6 +135,8 @@ export type PlaneMergeOutcome =
   /** No order was waiting (or the claim failed): nothing was done. */
   | "none"
   | "merged"
+  /** D#694 B7-1: the pull request was put in GitHub's merge queue; the merge itself is GitHub's, recorded by the cloud from its own events. */
+  | "enqueued"
   /** GitHub refused the merge call, or the cloud's gate said no go; the order is over. */
   | "refused"
   | "blocked"
@@ -273,7 +277,7 @@ export function createPlaneMergeHandler(deps: PlaneMergeDeps): () => Promise<Pla
   }
 
   /** The write credential's one use: read the pull request again, then the one merge call. Returns what to report; never throws. */
-  async function merge(order: PlaneMergeOrder, go: { token: string; expiresAt: string; sha: string }): Promise<MergeReport> {
+  async function merge(order: PlaneMergeOrder, go: { token: string; expiresAt: string; sha: string; mergeMode?: "queue" | "direct" }): Promise<MergeReport> {
     const aborted = (abort_code: PlaneMergeAbortCode): MergeReport => ({ result: "aborted", abort_code });
     if (go.sha !== order.expected_public_head || Date.parse(go.expiresAt) - now().getTime() < MIN_TOKEN_LIFE_MS) return aborted("internal");
     let pull: Awaited<ReturnType<PlanePushGithub["getPull"]>>;
@@ -289,6 +293,20 @@ export function createPlaneMergeHandler(deps: PlaneMergeDeps): () => Promise<Pla
     if (pull.headRef !== order.public_branch || pull.headRepo.toLowerCase() !== pull.baseRepo.toLowerCase() || pull.baseRepo.toLowerCase() !== order.code_repo.toLowerCase()) return aborted("internal");
     // The base is the repository's own default branch (its setting, not the pull request's say-so), and the one the content check compared against.
     if (pull.baseRef !== pull.defaultBranch || pull.defaultBranch !== PUBLIC_BASE_BRANCH) return aborted("base_retargeted");
+    // The cloud read the mode of the code repository; this machine reads it again with the write credential, and the two must agree. A cloud from before the queue sends none: `direct`.
+    const mode = await deps.github.getMergeQueueMode({ codeRepo: order.code_repo, branch: pull.defaultBranch, token: go.token });
+    if (mode === "unknown") return aborted("queue_unreadable");
+    if (mode !== (go.mergeMode ?? "direct")) return aborted("queue_mode_mismatch");
+    if (mode === "queue") {
+      if (pull.nodeId === "") return aborted("internal");
+      try {
+        const queued = await deps.github.enqueuePull({ codeRepo: order.code_repo, pullRequestId: pull.nodeId, expectedHeadOid: go.sha, token: go.token });
+        return queued.outcome === "enqueued" ? { result: "enqueued" } : queued.outcome === "head_moved" ? aborted("head_moved") : { result: "refused", http_status: queued.status };
+      } catch {
+        // fx-swallow-ok: no usable answer to the enqueue: it may or may not have happened, and the cloud reads GitHub itself before it records anything
+        return aborted("internal");
+      }
+    }
     try {
       const done = await deps.github.mergePull({ codeRepo: order.code_repo, number: order.pr_number, sha: go.sha, token: go.token });
       return { result: done.merged ? "merged" : "refused", http_status: done.status };
@@ -361,7 +379,7 @@ export function createPlaneMergeHandler(deps: PlaneMergeDeps): () => Promise<Pla
     // 5: the report, a hint.
     const told = await report(order, outcome, revoked);
     if (told === "fenced") return say("stopped");
-    if (outcome.result === "merged") return say("merged");
+    if (outcome.result === "merged" || outcome.result === "enqueued") return say(outcome.result);
     return say(outcome.result === "refused" ? "refused" : "aborted");
   };
 }

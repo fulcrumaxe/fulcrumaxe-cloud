@@ -55,6 +55,11 @@ describe("plane-merge-verify", () => {
   it("sends the strict message and maps go, no go and head moved", async () => {
     const go = clientAnswering(200, { go: true, token: TOKEN, expires_at: "2026-10-25T12:00:00.000Z", sha: HEAD });
     expect(await go.client.planeMergeVerify(verifyMessage)).toEqual({ kind: "go", token: TOKEN, expiresAt: "2026-10-25T12:00:00.000Z", sha: HEAD });
+    // D#694 B7-1: the merge mode the cloud sent rides along; none sent is none carried.
+    for (const mode of ["queue", "direct"] as const) {
+      expect(await clientAnswering(200, { go: true, token: TOKEN, expires_at: "2026-10-25T12:00:00.000Z", sha: HEAD, merge_mode: mode }).client.planeMergeVerify(verifyMessage)).toEqual({ kind: "go", token: TOKEN, expiresAt: "2026-10-25T12:00:00.000Z", sha: HEAD, mergeMode: mode });
+    }
+    expect(await clientAnswering(200, { go: true, token: TOKEN, expires_at: "2026-10-25T12:00:00.000Z", sha: HEAD, merge_mode: "auto_merge" }).client.planeMergeVerify(verifyMessage)).toMatchObject({ kind: "error", code: "invalid_reply" });
     expect(go.seen[0]!.url).toBe(`https://cloud.example.test${PLANE_MERGE_VERIFY_PATH}`);
     expect(PlaneMergeVerifyMessage.parse(JSON.parse(go.seen[0]!.body))).toEqual(verifyMessage);
     expect(await clientAnswering(200, { go: false, reasons: ["public_head_not_reviewed"] }).client.planeMergeVerify(verifyMessage)).toEqual({ kind: "no_go", reasons: ["public_head_not_reviewed"] });

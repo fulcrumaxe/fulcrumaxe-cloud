@@ -8,7 +8,7 @@ import { insertRunner } from './helpers/runnerFixtures.js';
 import { PG_ERROR } from './helpers/pgErrors.js';
 
 /**
- * Migration 0910 (D#6 PUBLIC-MERGE PR2a): plane_merge_orders on a real Postgres with the whole chain applied. Covers the shapes, the one open order per
+ * Migrations 0910 and 0947 (D#6 PUBLIC-MERGE PR2a; D#694 B7-1 adds the terminal state `enqueued`): plane_merge_orders on a real Postgres with the whole chain applied. Covers the shapes, the one open order per
  * item, every move of the state table (allowed and refused) and that a finished order is final, the once-only write credential, tenant isolation under the
  * app role, and the catalog facts (forced RLS, no DELETE, the guard function's pinned path and closed grants).
  */
@@ -60,10 +60,10 @@ describe('plane_merge_orders (migration 0910)', () => {
     else if (state === 'authorized') {
       await upd(a, id, claim);
       await upd(a, id, authorize);
-    } else if (state === 'merged') {
+    } else if (state === 'merged' || state === 'enqueued') {
       await upd(a, id, claim);
       await upd(a, id, authorize);
-      await upd(a, id, done('merged'));
+      await upd(a, id, done(state));
     } else if (['blocked', 'head_moved', 'failed'].includes(state)) {
       await upd(a, id, claim);
       await upd(a, id, done(state));
@@ -161,13 +161,31 @@ describe('plane_merge_orders (migration 0910)', () => {
     await expect(insertOrder(a, item)).rejects.toMatchObject({ code: PG_ERROR.UNIQUE_VIOLATION });
   });
 
+  // D#694 B7-1 (0947): `enqueued` is reached from `authorized` only (the table of moves below covers every other pair), needs the write credential's issue time, and
+  // leaves the item free for a fresh order (the one-open index covers pending, claimed and authorized only).
+  it('0947: an enqueued order carries its write credential time, is final, and a new order can be placed for the item afterwards', async () => {
+    const { id, item } = await orderIn('enqueued');
+    const row = (await admin.query(`SELECT state, outcome_code, finished_at, write_token_issued_at FROM plane_merge_orders WHERE id = $1`, [id])).rows[0];
+    expect(row).toMatchObject({ state: 'enqueued', outcome_code: 'x_code' });
+    expect(row.finished_at).not.toBeNull();
+    expect(row.write_token_issued_at).not.toBeNull();
+    const defs = (await admin.query(`SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid = 'plane_merge_orders'::regclass`)).rows as Array<{ conname: string; def: string }>;
+    const enqueuedShape = defs.find((d) => d.conname === 'plane_merge_orders_enqueued_shape')?.def ?? '';
+    expect(enqueuedShape).toContain('write_token_issued_at IS NOT NULL');
+    expect(defs.find((d) => d.conname === 'plane_merge_orders_finished_shape')?.def).toContain("'enqueued'");
+    const fresh = await insertOrder(a, item);
+    expect(fresh.rows[0]!.state).toBe('pending');
+    // 0912 is untouched: an order is still only ever inserted pending.
+    await expect(upd(a, fresh.rows[0]!.id, `state = 'enqueued', outcome_code = 'x_code', finished_at = now(), write_token_issued_at = now()`)).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });
+  });
+
   describe('the table of moves', () => {
     const OPEN = ['pending', 'claimed', 'authorized'];
-    const TERMINAL = ['merged', 'blocked', 'head_moved', 'superseded', 'failed', 'expired'];
+    const TERMINAL = ['merged', 'enqueued', 'blocked', 'head_moved', 'superseded', 'failed', 'expired'];
     const ALLOWED: Record<string, string[]> = {
       pending: ['claimed', 'blocked', 'superseded', 'expired'],
       claimed: ['pending', 'authorized', 'blocked', 'head_moved', 'superseded', 'failed', 'expired'],
-      authorized: ['merged', 'head_moved', 'superseded', 'failed', 'expired'],
+      authorized: ['merged', 'enqueued', 'head_moved', 'superseded', 'failed', 'expired'],
     };
     /** The columns each target state needs to satisfy the shape checks, so a refusal can only come from the move table. */
     const target = (from: string, to: string): string => {
@@ -175,7 +193,7 @@ describe('plane_merge_orders (migration 0910)', () => {
       if (to === 'pending') return `state = 'pending', runner_id = NULL, lease_expires_at = NULL`;
       if (to === 'claimed') return `state = 'claimed', runner_id = '${runnerA}', lease_generation = 1, attempts = 1, lease_expires_at = now() + interval '10 minutes'`;
       if (to === 'authorized') return `state = 'authorized', write_token_issued_at = now()`;
-      if (to === 'merged') return `state = 'merged', ${fin}${from === 'authorized' ? '' : ', write_token_issued_at = now()'}`;
+      if (to === 'merged' || to === 'enqueued') return `state = '${to}', ${fin}${from === 'authorized' ? '' : ', write_token_issued_at = now()'}`;
       return `state = '${to}', ${fin}`;
     };
 

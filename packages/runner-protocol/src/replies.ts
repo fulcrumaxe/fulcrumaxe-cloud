@@ -257,7 +257,8 @@ export type PlaneMergeClaimReply = z.infer<typeof PlaneMergeClaimReply>;
  * issued twice) and the sha the merge must name, or no go with closed reason codes, or no go because a head moved (the workflow re-reviews).
  */
 export const PlaneMergeVerifyReply = z.union([
-  MergeCredential.extend({ go: z.literal(true), sha: gitSha }).strict(),
+  // D#694 B7-1: `merge_mode` (the code repository's queue mode as the cloud read it) goes only to a runner that listed `plane_merge_queue_v1`; absent reads as `direct` (a cloud from before it).
+  MergeCredential.extend({ go: z.literal(true), sha: gitSha, merge_mode: z.enum(["queue", "direct"]).optional() }).strict(),
   z.object({ go: z.literal(false), reasons: z.array(mergeReason).min(1).max(40) }).strict(),
   z.object({ go: z.literal(false), head_moved: z.literal(true) }).strict(),
 ]);

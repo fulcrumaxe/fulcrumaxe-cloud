@@ -10,6 +10,10 @@
  *   getPull          `GET /repos/<o>/<n>/pulls/<number>`: the head, base, state and draft flag the merge decision is re-read from.
  *   mergePull        `PUT /repos/<o>/<n>/pulls/<number>/merge` with `{ sha, merge_method: "squash" }`: GitHub itself refuses (409) when the head is not `sha`.
  *
+ * D#694 B7-1 adds the two calls of a merge order whose code repository merges through GitHub's merge queue, with the same write token:
+ *   getMergeQueueMode  the `mergeQueue(branch)` GraphQL read and `GET /repos/<o>/<n>/rules/branches/<branch>` (all pages); `queue` or `direct` only when the two agree, else `unknown`.
+ *   enqueuePull        the `enqueuePullRequest` mutation, held to the head by `expectedHeadOid`. There is no auto-merge fallback.
+ *
  * The token is minted on the cloud side and travels here in the token reply; it is used as a bearer for these calls and, through the transport, as
  * the push header, and for nothing else. Every path is built here from a validated owner, name and branch. Redirects are an error, every call has a
  * timeout, and no error carries a token, a header, a request body or GitHub's text: a failure carries a closed `code` from the route's refusal list.
@@ -17,6 +21,8 @@
  * The host is `https://api.github.com`. An origin can be given for a test server only, and only as `http://` on loopback (the same allowance the
  * push transport makes).
  */
+
+import { ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "@fulcrumaxe/runner-protocol/planePush";
 
 export type GithubFailure = "public_unavailable" | "pr_failed";
 
@@ -33,7 +39,18 @@ export interface PlanePushGithubDeps {
   /** Default `https://api.github.com`. Anything else is for a test: https, or http on loopback, with no credentials, path or query. */
   apiOrigin?: string;
   timeoutMs?: number;
+  /** The clock of the queue-mode cache (a test moves it). */
+  now?: () => number;
 }
+
+/** How long a queue-mode answer is kept: five minutes, per code repository and branch. Only a `queue` or `direct` answer is kept. */
+const QUEUE_MODE_TTL_MS = 5 * 60_000;
+const RULES_PER_PAGE = 100;
+const RULES_MAX_PAGES = 10;
+/** GitHub's wording for an enqueue held to a head that moved; the only text read from an answer, and only to tell this refusal from any other. */
+const HEAD_MOVED_MESSAGE = /head (branch|commit|sha|oid|ref)\b.*(modified|differ|changed|match|moved)|expected.*head|head.*expected/i;
+export type QueueMode = "queue" | "direct" | "unknown";
+export type EnqueueResult = { outcome: "enqueued" } | { outcome: "head_moved" } | { outcome: "refused"; status: number };
 
 const CALL_TIMEOUT_MS = 15_000;
 const MAX_REPLY_BYTES = 256 * 1024;
@@ -87,6 +104,8 @@ export interface PullState {
   baseRef: string;
   baseRepo: string;
   defaultBranch: string;
+  /** The pull request's GraphQL node id (what the enqueue mutation names); empty when the answer carried none. */
+  nodeId: string;
 }
 
 export interface PlanePushGithub {
@@ -96,6 +115,10 @@ export interface PlanePushGithub {
   branchHead(input: { codeRepo: string; branch: string; token: string }): Promise<string | null>;
   /** The pull request as GitHub has it now; throws `public_unavailable` on anything but a 200 with the expected shape. */
   getPull(input: { codeRepo: string; number: number; token: string }): Promise<PullState>;
+  /** The code repository's merge mode on `branch`, from the queue read and the branch rules, which must agree. Never throws: anything unreadable is `unknown`. */
+  getMergeQueueMode(input: { codeRepo: string; branch: string; token: string }): Promise<QueueMode>;
+  /** Puts the pull request in the merge queue, held to `expectedHeadOid`. A permission refusal is `refused` (403); throws `public_unavailable` when no usable answer arrived. */
+  enqueuePull(input: { codeRepo: string; pullRequestId: string; expectedHeadOid: string; token: string }): Promise<EnqueueResult>;
   /** One squash merge naming the head it expects. Never throws for a refusal: GitHub's status comes back; throws `public_unavailable` only when no answer arrived. */
   mergePull(input: { codeRepo: string; number: number; sha: string; token: string }): Promise<{ status: number; merged: boolean }>;
   /** True on GitHub's 204 and on a 401 (already gone). Anything else, or no answer, is false: the token then lapses at its own expiry. Never throws. */
@@ -106,6 +129,8 @@ export function createPlanePushGithub(deps: PlanePushGithubDeps = {}): PlanePush
   const fetchFn = deps.fetchFn ?? fetch;
   const origin = checkOrigin(deps.apiOrigin ?? "https://api.github.com");
   const timeoutMs = deps.timeoutMs ?? CALL_TIMEOUT_MS;
+  const now = deps.now ?? Date.now;
+  const modes = new Map<string, { at: number; mode: QueueMode }>();
 
   async function call(method: "GET" | "POST" | "PUT" | "DELETE", path: string, token: string, body?: unknown): Promise<{ status: number; body: unknown }> {
     let res: Response;
@@ -187,7 +212,59 @@ export function createPlanePushGithub(deps: PlanePushGithubDeps = {}): PlanePush
       ) {
         throw new PlanePushGithubError("public_unavailable");
       }
-      return { number: root.number, state: root.state, merged: root.merged, draft: root.draft, headSha: head.sha, headRef: head.ref, headRepo: headRepo.full_name, baseRef: base.ref, baseRepo: baseRepo.full_name, defaultBranch: baseRepo.default_branch };
+      return { number: root.number, state: root.state, merged: root.merged, draft: root.draft, headSha: head.sha, headRef: head.ref, headRepo: headRepo.full_name, baseRef: base.ref, baseRepo: baseRepo.full_name, defaultBranch: baseRepo.default_branch, nodeId: typeof root.node_id === "string" && /^[A-Za-z0-9_=-]{1,100}$/.test(root.node_id) ? root.node_id : "" };
+    },
+
+    async getMergeQueueMode({ codeRepo, branch, token }) {
+      try {
+        const { owner, name } = split(codeRepo);
+        if (!BRANCH.test(branch) || branch.includes("..")) return "unknown";
+        const key = `${codeRepo.toLowerCase()}#${branch}`;
+        const hit = modes.get(key);
+        if (hit !== undefined && now() - hit.at >= 0 && now() - hit.at < QUEUE_MODE_TTL_MS) return hit.mode;
+        modes.delete(key);
+        const read = await call("POST", "/graphql", token, { query: MERGE_QUEUE_READ_DOCUMENT, variables: { owner, name, branch } });
+        const root = read.body as { errors?: unknown; data?: { repository?: { mergeQueue?: unknown } } } | null;
+        const repository = root?.data?.repository;
+        if (read.status !== 200 || root?.errors !== undefined || repository === null || typeof repository !== "object" || !("mergeQueue" in repository)) return "unknown";
+        const queue = repository.mergeQueue;
+        if (queue !== null && (typeof queue !== "object" || Array.isArray(queue))) return "unknown";
+        let ruleQueue = false;
+        for (let page = 1; page <= RULES_MAX_PAGES; page++) {
+          const res = await call("GET", `/repos/${owner}/${name}/rules/branches/${encodeURIComponent(branch)}?per_page=${RULES_PER_PAGE}&page=${page}`, token);
+          if (res.status !== 200 || !Array.isArray(res.body)) return "unknown";
+          for (const rule of res.body) {
+            if (rule === null || typeof rule !== "object" || Array.isArray(rule)) return "unknown";
+            const r = rule as { type?: unknown; enforcement?: unknown };
+            if (r.type === "merge_queue" && !(typeof r.enforcement === "string" && r.enforcement !== "active")) ruleQueue = true;
+          }
+          if (res.body.length < RULES_PER_PAGE) break;
+          if (page === RULES_MAX_PAGES) return "unknown";
+        }
+        const mode: QueueMode = queue !== null && ruleQueue ? "queue" : queue === null && !ruleQueue ? "direct" : "unknown";
+        if (mode !== "unknown") modes.set(key, { at: now(), mode });
+        return mode;
+      } catch {
+        // fx-swallow-ok: a read that could not be made is `unknown`, which stops the order; it is never read as `direct`
+        return "unknown";
+      }
+    },
+
+    async enqueuePull({ codeRepo, pullRequestId, expectedHeadOid, token }) {
+      split(codeRepo);
+      if (!/^[A-Za-z0-9_=-]{1,100}$/.test(pullRequestId) || !/^[0-9a-f]{40}$/.test(expectedHeadOid)) throw new PlanePushGithubError("public_unavailable");
+      const res = await call("POST", "/graphql", token, { query: ENQUEUE_PULL_REQUEST_DOCUMENT, variables: { pullRequestId, expectedHeadOid } });
+      if (res.status === 403) return { outcome: "refused", status: 403 };
+      const root = res.body as { errors?: unknown; data?: { enqueuePullRequest?: { mergeQueueEntry?: { id?: unknown } | null } | null } } | null;
+      if (res.status === 200 && root !== null && typeof root === "object" && root.errors === undefined) {
+        const id = root.data?.enqueuePullRequest?.mergeQueueEntry?.id;
+        if (typeof id === "string" && id !== "") return { outcome: "enqueued" };
+      }
+      const errors = res.status === 200 && Array.isArray(root?.errors) ? (root.errors as unknown[]) : [];
+      const field = (e: unknown, key: string): string => (e !== null && typeof e === "object" && typeof (e as Record<string, unknown>)[key] === "string" ? ((e as Record<string, string>)[key] as string) : "");
+      if (errors.some((e) => field(e, "type") === "FORBIDDEN" || /resource not accessible by integration/i.test(field(e, "message")))) return { outcome: "refused", status: 403 };
+      if (errors.some((e) => HEAD_MOVED_MESSAGE.test(field(e, "message")))) return { outcome: "head_moved" };
+      throw new PlanePushGithubError("public_unavailable");
     },
 
     async mergePull({ codeRepo, number, sha, token }) {

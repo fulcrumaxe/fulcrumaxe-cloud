@@ -1423,13 +1423,15 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
     it("an order a person's branch takeover or the runner ended is reported with its fixed code: merged, head_moved (also superseded), blocked, failed", async () => {
       const cases: Array<[string, string, string, string]> = [
         ["merged", "merged", "merged", "merged"],
+        // D#694 B7-1: an order the runner put in GitHub's merge queue (the cloud saw the entry) is its own state, not a failure and not a merge.
+        ["enqueued", "enqueued", "enqueued", "enqueued"],
         ["head_moved", "head_moved", "public_head_moved", "head_moved"],
         ["superseded", "superseded", "superseded_by_new_order", "head_moved"],
         ["blocked", "blocked", "ci_not_green", "blocked"],
         ["failed", "failed", "runner_merge_failed", "failed"],
       ];
       for (const [to, , code, state] of cases) {
-        const w = await ordered({ authorize: to === "merged" || to === "head_moved" || to === "failed", claim: to === "blocked" });
+        const w = await ordered({ authorize: to === "merged" || to === "enqueued" || to === "head_moved" || to === "failed", claim: to === "blocked" });
         await w.store.finish({ accountId: w.a.accountId, orderId: w.order.id, to: to as never, code, actor: { by: "cloud" } });
         expect(await build({}, review()).module.advanceMergeOrder(who(w.a, w.w)), to).toEqual(state === "blocked" ? { state, code, gateRecorded: false } : { state, code });
       }

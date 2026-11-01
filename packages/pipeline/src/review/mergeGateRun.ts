@@ -97,7 +97,11 @@ export interface GoAttestation {
  * merge order; the GO phase authorizes the single write credential. Either answers `delegated: true`, or `delegated: false` with the reason a person sees.
  * Nothing here merges, and the gate never learns what the credential is.
  */
-export type MergeDelegate = (args: { accountId: string; workItemId: string; sha: string; reviewedHead: string }) => Promise<{ delegated: true } | { delegated: false; reason: MergeBlockReason }>;
+export type MergeDelegate = (
+  args: { accountId: string; workItemId: string; sha: string; reviewedHead: string },
+  /** D#694 B7-1: the code repository's merge mode as the gate read it through the fence; the runner is told it and re-reads it. */
+  context: { mergeMode: "queue" | "direct" },
+) => Promise<{ delegated: true } | { delegated: false; reason: MergeBlockReason }>;
 
 /** The pull request the item's runner run recorded with its `done` (its number and run branch), or null: the item's OWN pull request, which the reviewers judged. */
 export async function readItemRecordedPullRequest(pool: Pool, accountId: string, workItemId: string): Promise<{ number: number; branch: string } | null> {
@@ -129,7 +133,7 @@ export async function reviewerFlaggedSecurity(pool: Pool, accountId: string, wor
  * `runner_local` repo it is built on the local-only client and the run's recorded branch (D#6 R3c), and a transport that is not the local-only
  * one is refused before a call. The merge gate and the CI wait (ciWait.ts) both use it, so they read the same way.
  */
-export function createReviewGitHubPort(deps: { pool: Pool; http: GitHubHttp; queueDocuments?: MergeQueueDocuments }, ctx: ReviewContext, ids: MergeGateRunInput & { recordedBranch?: string }) {
+export function createReviewGitHubPort(deps: { pool: Pool; http: GitHubHttp; queueDocuments?: MergeQueueDocuments; pairedQueueReads?: boolean }, ctx: ReviewContext, ids: MergeGateRunInput & { recordedBranch?: string }) {
   const { pool, http } = deps;
   const { accountId, workItemId, prNumber } = ids;
   const localHttp = ctx.executionMode === "runner_local" ? http : null;
@@ -137,6 +141,7 @@ export function createReviewGitHubPort(deps: { pool: Pool; http: GitHubHttp; que
   return createGitHubMergeGatePort({
     http,
     ...(deps.queueDocuments !== undefined ? { queueDocuments: deps.queueDocuments } : {}),
+    ...(deps.pairedQueueReads === true ? { pairedQueueReads: true } : {}),
     ...(localHttp !== null && isLocalGitHubHttp(localHttp)
       ? {
           local: {
@@ -233,18 +238,27 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
   if (publicPr !== null && deps.publicPlane !== undefined) {
     mergeHttp = await deps.publicPlane.open({ repoId: ctx.repoId, owner: publicPr.owner, name: publicPr.name, executionMode: ctx.executionMode });
     mergeTarget = { owner: publicPr.owner, name: publicPr.name, prNumber: publicPr.number };
-    mergePort = createReviewGitHubPort({ pool, http: mergeHttp, ...(deps.queueDocuments !== undefined ? { queueDocuments: deps.queueDocuments } : {}) }, { ...ctx, owner: publicPr.owner, name: publicPr.name }, { accountId, workItemId, prNumber: publicPr.number, recordedBranch: publicPr.branch });
+    mergePort = createReviewGitHubPort({ pool, http: mergeHttp, pairedQueueReads: true, ...(deps.queueDocuments !== undefined ? { queueDocuments: deps.queueDocuments } : {}) }, { ...ctx, owner: publicPr.owner, name: publicPr.name }, { accountId, workItemId, prNumber: publicPr.number, recordedBranch: publicPr.branch });
     // The operator's lock names a repository by its GitHub id: either half of the pairing listed means a person merges.
     if (!humanLocked) humanLocked = humanMergeOnly(await readRepoGhId(mergeHttp, publicPr.owner, publicPr.name));
     // Defence in depth for `runner_local`: the cloud never calls merge on this pull request, whatever client it was given. The gate's merge call site is the
     // delegate (an order, or the single write credential) when one is wired, and a refusal to merge otherwise.
     if (runnerLocal) {
       const delegate = deps.mergeDelegate;
+      const read = mergePort;
+      // D#694 B7-1 (C9): the code repository's mode is read through the fence's queue reads. `unknown` stops the gate (`merge_queue_unreadable`); `queue` and `direct` alike go
+      // to the delegate, which carries the mode to the runner: the cloud never merges or enqueues here, and the enqueue document is not on the fence.
       mergePort = {
         ...mergePort,
+        getMergeQueueMode: async (ref, baseRef) => {
+          const m = await read.getMergeQueueMode!(ref, baseRef);
+          return m.mode === "unknown" ? m : { mode: "direct", source: "paired_runner" };
+        },
         mergePullRequest: async (_ref, { sha }) => {
           if (delegate === undefined) throw new Error("merge gate: the cloud does not merge a runner_local repository's pull request");
-          const out = await delegate({ accountId, workItemId, sha, reviewedHead: headSha });
+          const mode = (await read.getMergeQueueMode!(mergeRef, mergeBaseRef)).mode;
+          if (mode === "unknown") return { merged: false, delegated: false, reason: "merge_queue_unreadable" };
+          const out = await delegate({ accountId, workItemId, sha, reviewedHead: headSha }, { mergeMode: mode });
           return out.delegated ? { merged: false, delegated: true } : { merged: false, delegated: false, reason: out.reason };
         },
       };

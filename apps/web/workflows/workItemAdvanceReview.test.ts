@@ -1765,6 +1765,16 @@ describe("a merge handed to the customer's runner (merge_delegated): the workflo
     expect(logs.find((l) => l.event === "advance.merge_order")).toMatchObject({ state: "merged" });
   });
 
+  // D#694 B7-1: the runner put the pull request in GitHub's merge queue and the cloud saw the entry. The merge is recorded from GitHub's own events (B6), so the wait ends
+  // without a stop and without a merged result.
+  it("an order the runner enqueued ends the wait as waiting (merge_enqueued): no stop for a person, no merged result", async () => {
+    const t = setup(fresh({ gates: [delegated], orders: [open, { state: "enqueued", code: "enqueued" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "waiting", detail: "merge_enqueued" });
+    expect(t.worker.advanceMergeOrder).toHaveBeenCalledTimes(2);
+    expect(t.worker.advanceRecordEvent).not.toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "merge_gate", code: "ready_human_merges" }));
+    expect(logs.find((l) => l.event === "advance.merge_order")).toMatchObject({ state: "enqueued" });
+  });
+
   it("the merge-only re-check path waits the same way", async () => {
     const t = setup(fresh({ mergeOnly: [{ decision: "all_passed" }], gates: [delegated], orders: [open, { state: "merged", code: "merged" }] }));
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged" });

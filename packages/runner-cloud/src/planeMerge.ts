@@ -1,6 +1,7 @@
 import {
   CLAIM_IDLE_RETRY_AFTER_SECONDS,
   PLANE_MERGE_CLAIM_PATH,
+  PLANE_MERGE_QUEUE_CAPABILITY,
   PLANE_MERGE_REPORT_PATH,
   PLANE_MERGE_VERIFY_PATH,
   PlaneMergeClaimMessage,
@@ -158,11 +159,14 @@ export async function planeMergeVerifyRun(deps: RunnerCloudDeps, req: RunnerHttp
     return { delegated: true };
   };
 
+  // D#694 B7-1: a queue repository's order goes only to a runner that can enqueue; the merge mode is sent only to such a runner (an older one's strict reply refuses the key).
+  const queueCapable = await asRunner(() => merge.store.runnerHasCapability({ accountId: runner.accountId, runnerId: runner.runnerId, capability: PLANE_MERGE_QUEUE_CAPABILITY }));
   let result: Awaited<ReturnType<PlaneMergePort["goPhase"]>>;
   try {
     result = await merge.goPhase({
       accountId: runner.accountId,
       order,
+      queueCapable,
       attestation: { reviewedHead: message.reviewed_head, publicHead: message.public_head, same: message.same, incomplete: message.incomplete, paths: message.paths },
       delegate,
     });
@@ -187,7 +191,7 @@ export async function planeMergeVerifyRun(deps: RunnerCloudDeps, req: RunnerHttp
         throw new RunnerHttpError(500, "internal", "internal error");
       }
       try {
-        return { status: 200, body: PlaneMergeVerifyReply.parse({ go: true, token: credential.token, expires_at: credential.expiresAt.toISOString(), sha: order.expectedPublicHead }), headers: NO_STORE };
+        return { status: 200, body: PlaneMergeVerifyReply.parse({ go: true, token: credential.token, expires_at: credential.expiresAt.toISOString(), sha: order.expectedPublicHead, ...(queueCapable ? { merge_mode: result.mergeMode } : {}) }), headers: NO_STORE };
       } catch (error) {
         await hosted.revokeToken(credential.token);
         await settleFailed("runner_merge_failed");
@@ -216,8 +220,8 @@ export async function planeMergeVerifyRun(deps: RunnerCloudDeps, req: RunnerHttp
 }
 
 /** What a runner (or the clock) says happened to an authorized order. Only ever a hint. */
-export type SettleHint = { result: "merged" | "refused" | "aborted"; abortCode?: string } | null;
-export type SettleOutcome = { state: "merged" | "head_moved" | "failed"; code: string; recorded: boolean } | { state: "unchanged" };
+export type SettleHint = { result: "merged" | "enqueued" | "refused" | "aborted"; abortCode?: string } | null;
+export type SettleOutcome = { state: "merged" | "enqueued" | "head_moved" | "failed"; code: string; recorded: boolean } | { state: "unchanged" };
 
 /**
  * Ends an AUTHORIZED order from what GitHub says through the cloud's own fenced client, never from a report: merged only when `merged_at` is set AND the head
@@ -226,8 +230,10 @@ export type SettleOutcome = { state: "merged" | "head_moved" | "failed"; code: s
  * reconcile of an order whose lease ran out without a report.
  */
 export async function settleAuthorizedOrder(port: PlaneMergePort, accountId: string, order: PlaneMergeOrderFacts, hint: SettleHint): Promise<SettleOutcome> {
-  const pull = await port.readPublicPull({ accountId, order });
-  const end = async (to: "merged" | "head_moved" | "failed", code: string): Promise<SettleOutcome> => {
+  // D#694 B7-1: an `enqueued` report is checked against the pull request AND its queue entry; any other hint against the pull request alone.
+  const queue = hint?.result === "enqueued" ? await port.readPublicQueue({ accountId, order }) : null;
+  const pull = queue ?? (await port.readPublicPull({ accountId, order }));
+  const end = async (to: "merged" | "enqueued" | "head_moved" | "failed", code: string): Promise<SettleOutcome> => {
     const done = await port.store.finish({ accountId, orderId: order.id, to, code, actor: { by: "cloud" } });
     if (done.kind !== "finished") return { state: "unchanged" };
     let recorded = false;
@@ -240,12 +246,22 @@ export async function settleAuthorizedOrder(port: PlaneMergePort, accountId: str
         reportError(error, { stage: "runner.plane_merge_record", route: PLANE_MERGE_REPORT_PATH });
       }
     }
+    if (to === "enqueued" && queue?.entryId != null) {
+      // The queue entry stands whatever happens next; the fact is best effort, and the webhook's delivery of the same entry dedupes onto it.
+      try {
+        await port.recordEnqueued({ accountId, order, entryId: queue.entryId });
+        recorded = true;
+      } catch (error) {
+        reportError(error, { stage: "runner.plane_merge_record_enqueued", route: PLANE_MERGE_REPORT_PATH });
+      }
+    }
     return { state: to, code, recorded };
   };
   if (pull.merged) return pull.headSha === order.expectedPublicHead ? end("merged", "merged") : end("failed", "runner_report_mismatch");
   if (!pull.open) return end("failed", "public_pr_not_open");
   if (pull.headSha !== order.expectedPublicHead) return end("head_moved", "public_head_moved");
-  // Open, the expected head, not merged.
+  // Open, the expected head, not merged. An enqueue stands only when GitHub shows the entry; the merge itself is the webhook's to record.
+  if (queue !== null) return queue.entryId === null ? end("failed", "runner_report_mismatch") : end("enqueued", "enqueued");
   if (hint?.result === "merged") return end("failed", "runner_report_mismatch");
   if (hint?.result === "refused") return end("failed", "merge_call_refused");
   if (hint?.result === "aborted") return end("failed", hint.abortCode === "base_retargeted" ? "stacked_on_open_pr" : hint.abortCode === "pr_draft" ? "pr_draft" : "runner_merge_failed");

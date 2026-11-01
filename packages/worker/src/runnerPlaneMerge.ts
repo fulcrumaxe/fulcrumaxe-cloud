@@ -21,7 +21,7 @@ import { requireUuid } from "./runActions.js";
  * `finish`. The pool is any login with the app role's grants on the tables read here.
  */
 
-export const PLANE_MERGE_STATES = ["pending", "claimed", "authorized", "merged", "blocked", "head_moved", "superseded", "failed", "expired"] as const;
+export const PLANE_MERGE_STATES = ["pending", "claimed", "authorized", "merged", "enqueued", "blocked", "head_moved", "superseded", "failed", "expired"] as const;
 export type PlaneMergeState = (typeof PLANE_MERGE_STATES)[number];
 export const PLANE_MERGE_OPEN_STATES: readonly PlaneMergeState[] = ["pending", "claimed", "authorized"];
 const isOpen = (s: PlaneMergeState): boolean => PLANE_MERGE_OPEN_STATES.includes(s);
@@ -113,7 +113,8 @@ export type FinishResult = { kind: "finished"; order: PlaneMergeOrder } | { kind
 const ENDS: Record<"pending" | "claimed" | "authorized", { cloud: readonly PlaneMergeState[]; runner: readonly PlaneMergeState[] }> = {
   pending: { cloud: ["blocked", "superseded", "expired"], runner: [] },
   claimed: { cloud: ["blocked", "head_moved", "superseded", "failed", "expired"], runner: ["blocked", "head_moved", "superseded", "failed"] },
-  authorized: { cloud: ["merged", "head_moved", "superseded", "failed", "expired"], runner: ["merged", "head_moved", "failed"] },
+  // D#694 B7-1: `enqueued` is ended by the cloud alone, from its own read of GitHub (the runner's report is only a hint).
+  authorized: { cloud: ["merged", "enqueued", "head_moved", "superseded", "failed", "expired"], runner: ["merged", "head_moved", "failed"] },
 };
 
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
@@ -205,6 +206,8 @@ export interface RunnerPlaneMergeStore {
   hasClaimable(input: { accountId: string; runnerId: string }): Promise<boolean>;
   /** True while the runner is still one that may act on an order of this repository: not revoked, registered by a still-current owner or admin, in scope, not paused or draining, listing the capability. */
   runnerTrusted(input: { accountId: string; runnerId: string; repoId: string }): Promise<boolean>;
+  /** True when the runner's latest hello listed the capability (D#694 B7-1). Reads only. */
+  runnerHasCapability(input: { accountId: string; runnerId: string; capability: string }): Promise<boolean>;
   /** One order of the account by id, whatever its state; null when none. Reads only (a late report for an order that is already over looks it up). */
   getById(input: { accountId: string; orderId: string }): Promise<PlaneMergeOrder | null>;
   /** The newest order of an item, whatever its state; null when none. */
@@ -464,6 +467,15 @@ export function createRunnerPlaneMergeStore(pool: Pool, deps: RunnerPlaneMergeDe
             LIMIT 1`,
           [input.accountId, input.runnerId, input.repoId, PLANE_MERGE_CAPABILITY],
         );
+        return rows.length > 0;
+      });
+    },
+
+    runnerHasCapability: async (input) => {
+      requireUuid(input.accountId);
+      requireUuid(input.runnerId);
+      return withTenant(pool, input.accountId, async (client) => {
+        const { rows } = await client.query<{ one: number }>("SELECT 1 AS one FROM runner_capabilities WHERE account_id = $1 AND runner_id = $2 AND $3::text = ANY(capabilities)", [input.accountId, input.runnerId, input.capability]);
         return rows.length > 0;
       });
     },
