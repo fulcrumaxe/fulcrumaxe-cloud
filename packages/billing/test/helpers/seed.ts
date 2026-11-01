@@ -27,7 +27,15 @@ export interface SeedAccountOptions {
   stripeSyncedAt?: Date | null;
 }
 
-const GRACE_PERIOD_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * The grace the database counts is a calendar `interval '7 days'` in its session time zone, which is an hour longer or shorter than
+ * 168 hours across a daylight-saving change. So the expired stamp is taken from the database's own clock and calendar, never from
+ * `Date.now()` minus a fixed number of milliseconds.
+ */
+async function graceExpiredStamp(admin: PoolClient): Promise<Date> {
+  const { rows } = await admin.query<{ t: Date }>(`SELECT now() - interval '7 days' - interval '1 second' AS t`);
+  return rows[0]!.t;
+}
 
 export async function seedAccount(
   admin: PoolClient,
@@ -39,7 +47,7 @@ export async function seedAccount(
     opts.stripeCustomerId !== undefined ? opts.stripeCustomerId : status === 'unsubscribed' ? null : `cus_test_${accountId}`;
   const now = Date.now();
   const pastDueSince =
-    status === 'past_due' ? new Date(now) : status === 'cancelled' ? new Date(now - GRACE_PERIOD_MS - 1000) : null;
+    status === 'past_due' ? new Date(now) : status === 'cancelled' ? await graceExpiredStamp(admin) : null;
   const ownerPausedAt = status === 'paused' ? new Date(now) : null;
   const keyBrokenAt = status === 'model_key_broken' ? new Date(now) : null;
 
