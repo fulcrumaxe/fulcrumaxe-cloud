@@ -35,6 +35,7 @@ import type { ContinuationSite } from "./continuation.js";
 import { readVerifiedReviewGate, type VerifiedReviewGate } from "./verifiedReviewGate.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 import { startCheckFixRound } from "./checkFix.js";
+import { CAPACITY_WAIT, CapacityWaitingError, REPO_GONE_REFUSALS, createCapacityGate, type CapacityPort } from "./capacityGate.js";
 import { BASE_SYNCED_PROMPT_LINE, BASE_SYNCED_STAGE, FIX_BASE_EVENT, checkFixBeforeStart, hasPublicCopy, recordBaseSyncUnavailable, republishGate, syncRunBranch } from "./fixRoundBase.js";
 import { BRANCH_MOVED_STAGE, checkPrivateHead, checkPublicBranch, type FixRoundHeadPorts } from "./fixRoundHeads.js";
 import { RunActionInputError, type PerformResult } from "./runActions.js";
@@ -84,6 +85,8 @@ export const FOLLOW_UP_CHAIN_MAX_RUNS = 16;
 const FOLLOW_UP_REASONS: ReadonlySet<string> = new Set(["runner_lost", "usage_limit"]);
 /** D#599 PL-2: the reason PL-1's item-scoped cancel gives a pending run it moves to `cancelled`. */
 const PLACEMENT_CHANGED = "placement_changed";
+/** D#483 S5-k3b-2c: the reason an attempt gets when the provider had no room for it (the run ends `cancelled`). The step starts again under the next generation key, and these generations are never counted. */
+const PROVIDER_CAPACITY = "provider_capacity";
 /** D#599 PL-2: how many times one step restarts on the other side after its run was cancelled for a placement change. The key of restart n is `<step key>:p<n>`. */
 export const PLACEMENT_RESTARTS_MAX = 3;
 /**
@@ -260,6 +263,11 @@ export interface AdvanceModuleDeps {
   prState?: PrStateOpen | null;
   /** D#483 S5-d: raises the `spend_past_envelope` ask (receipt login) when a start is denied by the item's spend envelope. Absent, the denial still pauses the item and no ask is raised. */
   raiseEnvelopeAsk?: RaiseEnvelopeAsk | null;
+  /**
+   * D#483 S5-k3b-2c, injected from apps/web (this package cannot import @fx/pipeline): the capacity queue behind the gate every sandbox start meets (capacityGate.ts).
+   * Absent, starts behave exactly as they always did and nothing is queued.
+   */
+  capacity?: (CapacityPort & { claimPass(): Promise<number> }) | null;
   /** D#7 DP4b-2: reads a succeeded executor run's decision fields (receipts, asks, refusals) on the receipt login. Absent, `advanceDecision` answers `none`. */
   decisionIntake?: DecisionIntake | null;
   /** D#7 start gate (b): the stage driver's call into `decideStart` on the receipt login. Absent, `advanceStartGate` lets the advance go on (nothing is recorded). */
@@ -718,6 +726,11 @@ export interface AdvanceFacade {
    */
   advanceStartFix(who: AdvanceStepWho, req: AdvanceFixRequest): Promise<AdvanceRunStart>;
   /**
+   * D#483 S5-k3b-2c: one claim pass over the capacity queue, in fair order, at most as many entries as there is room for. The slot-release trigger (a sandbox run reached a terminal
+   * status) and the 15-minute reconcile call it. It starts nothing: a claimed item's own next ask consumes the claim. Returns how many entries it claimed (0 with no port).
+   */
+  capacityClaimPass(): Promise<number>;
+  /**
    * D#6 R-CHK-3 (C47): the fix round that follows a build run whose approved check failed (`failed check_failed`, no pull request). Resumes that run's session on its recorded run branch.
    * Refuses `check_rounds_used` once the plan's `maxFixRounds()` rounds have been spent in this run's `parent_run_id` chain (a count per chain, not per item: a later "Build again" starts a new chain; the driver then ends the item in Needs human), `already_running`, `not_check_failed`.
    * A replay returns the run it started.
@@ -1060,7 +1073,23 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     });
   }
 
-  async function advanceStartRun(req: AdvanceRunRequest): Promise<AdvanceRunStart> {
+  // D#483 S5-k3b-2c: the capacity gate (capacityGate.ts) wraps the run starter and the fix-round resume, so every start site meets it. With no port both are what they were.
+  const capacityGate = deps.capacity ? createCapacityGate(runnerPool, deps.capacity) : null;
+  const starter: RunStarter | null | undefined = deps.starter && capacityGate ? { start: (input) => capacityGate.run(input, (i) => deps.starter!.start(i)) } : deps.starter;
+  const gatedResume = <R>(resume: (pool: Pool, registry: ExecutionTargetRegistry, input: StartAgentRunInput) => Promise<R>) =>
+    capacityGate ? (pool: Pool, registry: ExecutionTargetRegistry, input: StartAgentRunInput): Promise<R> => capacityGate.run(input, (i) => resume(pool, registry, i)) : resume;
+
+  /** A start refused only because the repository or its installation is no longer connected keeps waiting when the item holds a place in line (it starts when the repository is connected again). */
+  async function keepsPlace(accountId: string, workItemId: string, out: AdvanceRunStart): Promise<AdvanceRunStart> {
+    if (out.ok || !deps.capacity || !REPO_GONE_REFUSALS.includes(out.reason)) return out;
+    return (await deps.capacity.holds(accountId, workItemId).catch(() => false)) ? { ok: false, reason: CAPACITY_WAIT } : out;
+  }
+  const advanceStartRun = async (req: AdvanceRunRequest): Promise<AdvanceRunStart> => keepsPlace(req.accountId, req.workItemId, await startRun(req));
+  const advanceStartFix = async (who: AdvanceStepWho, req: AdvanceFixRequest): Promise<AdvanceRunStart> => keepsPlace(who.accountId, who.workItemId, await startFix(who, req));
+  const advanceStartCheckFix = async (who: AdvanceStepWho, failedRunId: string): Promise<AdvanceRunStart> => keepsPlace(who.accountId, who.workItemId, await startCheckFix(who, failedRunId));
+  const capacityClaimPass = async (): Promise<number> => (deps.capacity ? deps.capacity.claimPass() : 0);
+
+  async function startRun(req: AdvanceRunRequest): Promise<AdvanceRunStart> {
     if (!UUID_RE.test(req.accountId) || !UUID_RE.test(req.workItemId) || !/^[a-z0-9:_.-]{1,128}$/i.test(req.step)) return { ok: false, reason: "invalid_input" };
     if (!deps.starter) return { ok: false, reason: "starter_unavailable" };
     if (req.pr !== undefined && !(Number.isSafeInteger(req.pr) && req.pr > 0)) return { ok: false, reason: "invalid_input" };
@@ -1081,7 +1110,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const found = await withTenant(runnerPool, req.accountId, async (client) => {
       // D#599 PL-2 (AC4): a step whose run was cancelled `placement_changed` starts again on the new side, once, under the next key (`:p1`, `:p2`...). The key
       // is chosen from the rows alone, so a replay of the step finds the restart's key and returns that run: it starts nothing more.
-      for (let generation = 0; generation <= PLACEMENT_RESTARTS_MAX; generation++) {
+      // D#483 S5-k3b-2c: an attempt the provider had no room for (`cancelled` / `provider_capacity`) is passed the same way, and those generations are not counted against the limit.
+      for (let generation = 0, placements = 0; ; generation++) {
         key = generation === 0 ? baseKey : `${baseKey}:p${generation}`;
         const held = await client.query<{ status: string; reason: string | null }>(
           `SELECT a.status, (SELECT e.payload->>'failureReason' FROM run_events e WHERE e.account_id = a.account_id AND e.run_id = a.id AND e.kind = 'run.status_changed' AND e.payload->>'to' = 'cancelled' ORDER BY e.seq DESC LIMIT 1) AS reason
@@ -1090,7 +1120,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           [req.accountId, key],
         );
         const run = held.rows[0];
-        if (!run || run.status !== "cancelled" || run.reason !== PLACEMENT_CHANGED) break;
+        if (!run || run.status !== "cancelled") break;
+        if (run.reason === PROVIDER_CAPACITY) continue;
+        if (run.reason !== PLACEMENT_CHANGED || ++placements > PLACEMENT_RESTARTS_MAX) break;
       }
       const r = await client.query<{ repo_id: string | null; gh_owner: string | null; gh_name: string | null; halted: boolean; halt_epoch: number }>(
         "SELECT w.repo_id, w.halted_at IS NOT NULL AS halted, w.halt_epoch, r.gh_owner, r.gh_name FROM work_items w LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id WHERE w.id = $1 AND w.account_id = $2",
@@ -1158,8 +1190,10 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     };
     let started: Awaited<ReturnType<RunStarter["start"]>>;
     try {
-      started = await deps.starter.start(input);
+      started = await starter!.start(input);
     } catch (err) {
+      // D#483 S5-k3b-2c: our servers are full (the gate queued the item, or the provider answered 429): the item waits, nothing failed.
+      if (err instanceof CapacityWaitingError) return { ok: false, reason: CAPACITY_WAIT };
       // The database allows one live executor per pull request (the unique index). Two approvals racing to build, or a
       // build racing a fix round, lose here: the loser is told, and nothing is left behind. This is the lock.
       if (err instanceof DuplicateExecutorRunError) return { ok: false, reason: "already_running" };
@@ -1307,7 +1341,12 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return {
       startRun: (req) => advanceStartRun({ ...req, accountId: who.accountId, workItemId: who.workItemId, haltEpoch: who.haltEpoch }),
       decisionOffer: () => decisionOfferFor(who),
-      findStep: (stepPrefix) => findStepRun(who, stepPrefix),
+      // D#483 S5-k3b-2c: a step whose attempt the provider had no room for (`cancelled` / `provider_capacity`) has no run to replay: the next ask starts it again under the next generation key, and
+      // the build must not read that cancelled run as "the earlier run was cancelled" (`prior_run_cancelled`).
+      findStep: async (stepPrefix) => {
+        const found = await findStepRun(who, stepPrefix);
+        return found !== null && (await endedCancelReason(who.accountId, found.runId)) === PROVIDER_CAPACITY ? null : found;
+      },
       startedAttempts: (head, tail) => startedSeatAttempts(who, head, tail),
       headroom: (roles) => checkRoundHeadroom(runnerPool, deps.resolveRunSeat, who, roles),
       outcome: (runId) => advanceRunOutcome(who.accountId, runId),
@@ -1373,15 +1412,18 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return withTenant(runnerPool, who.accountId, (client) => recordDriverEvent(client, who.accountId, full));
   }
 
-  /** D#599 PL-2: whether a run ended `cancelled` with the reason PL-1's item-scoped cancel gives (`placement_changed`). */
-  async function endedForPlacement(accountId: string, runId: string): Promise<boolean> {
+  /**
+   * D#599 PL-2: the reason a run ended `cancelled` when it is one the platform ended and the step starts again after: `placement_changed` (PL-1's item-scoped cancel) or, D#483
+   * S5-k3b-2c, `provider_capacity` (the provider had no room). Null for any other end.
+   */
+  async function endedCancelReason(accountId: string, runId: string): Promise<typeof PLACEMENT_CHANGED | typeof PROVIDER_CAPACITY | null> {
     return withTenant(runnerPool, accountId, async (client) => {
-      const r = await client.query(
-        `SELECT 1 FROM agent_runs a JOIN run_events e ON e.account_id = a.account_id AND e.run_id = a.id AND e.kind = 'run.status_changed' AND e.payload->>'to' = 'cancelled'
-          WHERE a.account_id = $1 AND a.id = $2 AND a.status = 'cancelled' AND e.payload->>'failureReason' = $3 LIMIT 1`,
-        [accountId, runId, PLACEMENT_CHANGED],
+      const r = await client.query<{ reason: string }>(
+        `SELECT e.payload->>'failureReason' AS reason FROM agent_runs a JOIN run_events e ON e.account_id = a.account_id AND e.run_id = a.id AND e.kind = 'run.status_changed' AND e.payload->>'to' = 'cancelled'
+          WHERE a.account_id = $1 AND a.id = $2 AND a.status = 'cancelled' AND e.payload->>'failureReason' = ANY($3::text[]) LIMIT 1`,
+        [accountId, runId, [PLACEMENT_CHANGED, PROVIDER_CAPACITY]],
       );
-      return r.rowCount === 1;
+      return r.rowCount === 1 ? (r.rows[0]!.reason as typeof PLACEMENT_CHANGED | typeof PROVIDER_CAPACITY) : null;
     });
   }
 
@@ -1620,14 +1662,14 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     });
   }
 
-  async function advanceStartCheckFix(who: AdvanceStepWho, failedRunId: string): Promise<AdvanceRunStart> {
+  async function startCheckFix(who: AdvanceStepWho, failedRunId: string): Promise<AdvanceRunStart> {
     const review = deps.review;
     if (!review || !deps.registry) return { ok: false, reason: "resume_unavailable" };
     const bad = await guardStep(who);
     if (bad) return { ok: false, reason: bad.reason ?? "refused" };
     // FIXROUND-REFRESH-HEAD: a check fix round opens no pull request of its own, but on a paired item that already pushed it is held to the public branch too.
     const beforeStart = checkFixBeforeStart(runnerPool, deps.fixHeads, who);
-    const out = await startCheckFixRound({ pool: runnerPool, registry: deps.registry, resume: review.resume, resolveRunSeat: deps.resolveRunSeat, starter: deps.starter, beforeStart, baseSync: () => beforeStart.state }, who, failedRunId);
+    const out = await startCheckFixRound({ pool: runnerPool, registry: deps.registry, resume: gatedResume(review.resume), resolveRunSeat: deps.resolveRunSeat, ...(starter ? { starter } : {}), beforeStart, baseSync: () => beforeStart.state }, who, failedRunId);
     // FIXROUND-BASE-SYNC: the run a sync led to says so (a replay finds its run and merged nothing, so it adds no second line).
     if (out.ok && beforeStart.state.synced) await recordRunStage(runnerPool, { accountId: who.accountId, runId: out.runId, stage: BASE_SYNCED_STAGE });
     console.info(JSON.stringify({ event: "advance.check_fix", work_item_id: who.workItemId, failed_run_id: failedRunId, started: out.ok, reason: out.ok ? null : out.reason }));
@@ -1645,7 +1687,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return out;
   }
 
-  async function advanceStartFix(who: AdvanceStepWho, req: AdvanceFixRequest): Promise<AdvanceRunStart> {
+  async function startFix(who: AdvanceStepWho, req: AdvanceFixRequest): Promise<AdvanceRunStart> {
     const review = deps.review;
     if (!review || !deps.registry) return { ok: false, reason: "resume_unavailable" };
     const sane =
@@ -1685,9 +1727,11 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     // accepted run notes the run was started with, so the replay finds its run through the prefix (the notes accepted since would give another pin).
     // D#599 PL-2 (AC4): a fix run cancelled `placement_changed` is restarted once on the new side under the next generation (`fix:<attempt>:p1`...).
     let keyBase = `fix:${attemptKey}`;
-    for (let generation = 1; generation <= PLACEMENT_RESTARTS_MAX; generation++) {
+    // D#483 S5-k3b-2c: a round whose attempt the provider had no room for (`cancelled` / `provider_capacity`) restarts the same way, and those generations are not counted against the limit.
+    for (let generation = 1, placements = 0; ; generation++) {
       const ended = await findStepRun(who, keyBase);
-      if (!ended || !(await endedForPlacement(who.accountId, ended.runId))) break;
+      const why = ended ? await endedCancelReason(who.accountId, ended.runId) : null;
+      if (why === null || (why === PLACEMENT_CHANGED && ++placements > PLACEMENT_RESTARTS_MAX)) break;
       keyBase = `fix:${attemptKey}:p${generation}`;
     }
     const claimed = () => findStepRun(who, keyBase);
@@ -1892,7 +1936,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
             };
           }
         }
-        const fresh = await deps.starter.start({
+        const fresh = await starter!.start({
           ...seat.seat,
           accountId: who.accountId,
           repoId: state.repoId,
@@ -1925,7 +1969,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         out = await acceptQueuedRunnerRun(
           runnerPool,
           who.accountId,
-          await review.resume(runnerPool, deps.registry, {
+          await gatedResume(review.resume)(runnerPool, deps.registry, {
             ...seat.seat,
             accountId: who.accountId,
             repoId: state.repoId,
@@ -1948,6 +1992,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         );
       }
     } catch (err) {
+      // D#483 S5-k3b-2c: our servers are full: the round waits (no refusal fact), and asks again.
+      if (err instanceof CapacityWaitingError) return refuse(CAPACITY_WAIT);
       // fx-swallow-ok: the error's NAME is logged below and the refusal is recorded as a fact; its message can carry text from the sandbox or the platform
       const e = err as { name?: string };
       console.warn(JSON.stringify({ event: "advance.resume_failed", work_item_id: who.workItemId, name: typeof e?.name === "string" ? e.name.slice(0, 60) : null }));
@@ -2273,6 +2319,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     advanceRecordRound,
     advanceRecordMergeOnly,
     advanceStartFix,
+    capacityClaimPass,
     advanceStartCheckFix,
     advanceContinue,
     advanceReviewRuns,

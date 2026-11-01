@@ -5,9 +5,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { COMPUTE_NOTICE_SENTENCES, foregroundBudgetUsd, getUsage, reserve, type ReserveParams } from "@fx/spend";
+import { seedAccount as seedFullAccount } from "@fx/db/test/helpers/seed.js";
 import { pgHarness } from "./helpers/pgHarness.js";
 import { seedAccount } from "./build/helpers/seed.js";
 import { startBuildForItem } from "../src/advance/buildTesting.js";
+import { createCapacityPort } from "../src/advance/capacityPort.js";
+import { readStartWaitNotice } from "../src/advance/capacityWait.js";
 import { RESERVATION_PAUSE_SENTENCES, readReservationPause } from "../src/advance/reservationPauses.js";
 import type { AdvanceRunPorts, AdvanceRunRequest } from "../src/advance/runPorts.js";
 
@@ -130,7 +133,7 @@ describe("S5k3-2: the notice is information, it never acts", () => {
  * S5k3-5 / S5k3b-8 belong to the capacity queue (S5-k3b). Until it is on main there is no queue to fill, so the fixtures ship switched off.
  * The S5-k3b executor sets this to true, and writes the full-slots half where it says so; a switched-on file with that half unwritten fails.
  */
-const CAPACITY_QUEUE_ON = false;
+const CAPACITY_QUEUE_ON = true;
 
 describe.skipIf(!CAPACITY_QUEUE_ON)("S5k3-5: our capacity and the customer's allowance are two states (turns on with S5-k3b)", () => {
   it("allowance used and slots free: the item shows compute_cap_reached and has no queue entry", async () => {
@@ -145,9 +148,32 @@ describe.skipIf(!CAPACITY_QUEUE_ON)("S5k3-5: our capacity and the customer's all
   });
 
   it("allowance remaining and every slot full: the item shows waiting_for_capacity and never compute_cap_reached", async () => {
-    // S5-k3b: fill every hosted sandbox slot, start the item, and assert the item reads `waiting_for_capacity` (and that
-    // readReservationPause is null). Left unwritten on purpose: the slot counter and the queue helper do not exist yet.
-    throw new Error("S5-k3b must write the full-slots fixture before switching this file on");
+    // The full seed: a connected repository (an installation), so the entry is not skipped as "no longer connected".
+    const accountId = randomUUID();
+    const refs = await seedFullAccount(h.admin, accountId);
+    const m = { accountId };
+    const w = refs.workItemId;
+    const { rows } = await h.admin.query("SELECT o_slots_in_use AS n FROM capacity_queue_state('hosted_sandbox')");
+    const full = Number(rows[0].n);
+    const port = createCapacityPort({ pool: h.runWriterPool, slotTotal: () => full });
+    const repoId = refs.repoId;
+    expect(await port.admit({ accountId: m.accountId, repoId, workItemId: w, runKind: "executor" })).toEqual({ kind: "wait" });
+    await h.admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, stage, code, dedupe_key) VALUES ($1, $2, 'stage_waiting', 'build', 'waiting_for_capacity', $3)`, [m.accountId, w, randomUUID()]);
+    expect(await readReservationPause(h.runWriterPool, m.accountId, w)).toBeNull();
+    const notice = await readStartWaitNotice(h.pureAppUserPool, m.accountId, w);
+    expect(notice).toMatchObject({ kind: "capacity", wait: { place: 1 } });
+    expect(JSON.stringify(notice)).not.toContain("compute_cap_reached");
+  });
+
+  it("both at once: the customer's own limit wins (checked first), so the item shows compute_cap_reached and holds no place in line", async () => {
+    const m = await account();
+    const w = await item(m.accountId);
+    await spendShare(m.accountId, 1);
+    const out = await startBuildForItem(h.runWriterPool, m.accountId, w, randomUUID(), new SpendPorts(m.accountId, w));
+    expect(out).toEqual({ status: "refused", reason: "compute_cap_reached" });
+    await h.admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'build_waiting', 'compute_cap_reached', $3)`, [m.accountId, w, randomUUID()]);
+    expect(await readStartWaitNotice(h.pureAppUserPool, m.accountId, w)).toEqual({ kind: "limit", pause: "compute_cap_reached" });
+    expect((await h.admin.query("SELECT 1 FROM capacity_queue WHERE work_item_id = $1", [w])).rowCount).toBe(0);
   });
 });
 

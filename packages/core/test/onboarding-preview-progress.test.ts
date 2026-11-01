@@ -188,6 +188,8 @@ describe('deriveProgress', () => {
     expect(statuses(failed)).toContain('plan:failed write:pending');
     expect(deriveProgress(facts({ ...ended, runStatus: 'timed_out' }))).toMatchObject({ outcome: 'failed', reason: 'timed_out' });
     expect(deriveProgress(facts({ ...ended, runStatus: 'cancelled' })).outcome).toBe('cancelled');
+    // D#483 S5-k3b-2c: a preview the provider had no room for ended cancelled by the platform; it is not shown as the person's cancel.
+    expect(deriveProgress(facts({ ...ended, runStatus: 'cancelled', failureReason: 'provider_capacity' }))).toMatchObject({ outcome: 'failed', reason: 'provider_capacity' });
     for (const failureReason of ['runner_lost', 'sandbox_error', 'sandbox_stopped']) {
       expect(deriveProgress(facts({ ...ended, runStatus: 'failed', failureReason })).outcome).toBe('sandbox_stopped');
     }

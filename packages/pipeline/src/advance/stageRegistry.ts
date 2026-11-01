@@ -205,9 +205,32 @@ export const PARKED_STAGE_REGISTRY: Readonly<Partial<Record<WaitingStage, Parked
   },
 });
 
+/**
+ * D#483 S5-k3b-2c (C24 item 2): the check-fix round's capacity park. A build whose approved check failed has no pull request and sits at `in_progress`, which no entry above covers, so
+ * the sweep would never restart a check-fix round that ended `fix_round_paused:waiting_for_capacity`. This entry is scoped to that park reason only: its pause list is the capacity wait,
+ * so an item at `in_progress` for any other reason (a build running, a spend pause, a runner wait) is untouched. The restart is the item's own approved workflow again, which at
+ * `in_progress` with a failed check run goes straight to the check fix loop (`workItemAdvance.ts`, `check_build` with `checkFailedRunId`); the build run that failed its check is expected
+ * (`startedRunsOk`). It shares the `fix_round` stage name with the review fix round's entry (the waiting fact names the stage), so it is listed beside the registry, not in it.
+ */
+export const CHECK_FIX_PARK: ParkedStageEntry = Object.freeze({
+  stage: "fix_round",
+  itemStages: Object.freeze(["in_progress"]) as readonly string[],
+  pauses: Object.freeze([CAPACITY_WAIT]) as readonly StartWait[],
+  role: "executor",
+  approval: BUILD_STAGE_GATE.approval,
+  needsSpec: true,
+  respec: false,
+  startedRunsOk: true,
+  runKeyLikes: BUILD_STAGE_GATE.runKeyLikes,
+  nextAttempt: () => 0,
+  pauseForDenial,
+});
+
 /** The stages that wait on a limit but are not parked yet: they keep today's refusal after the wait. Every stage is registered now, so the list is empty (a test holds it so). */
 export const UNREGISTERED_STAGES: readonly WaitingStage[] = Object.freeze([] as WaitingStage[]);
 
-/** The registered stages, in the order of the closed list. */
-export const registeredStages = (registry: Readonly<Partial<Record<WaitingStage, ParkedStageEntry>>> = PARKED_STAGE_REGISTRY): ParkedStageEntry[] =>
-  WAITING_STAGES.flatMap((s) => (registry[s] ? [registry[s] as ParkedStageEntry] : []));
+/** The registered stages, in the order of the closed list, then the check-fix round's capacity park (C24). */
+export const registeredStages = (registry: Readonly<Partial<Record<WaitingStage, ParkedStageEntry>>> = PARKED_STAGE_REGISTRY): ParkedStageEntry[] => [
+  ...WAITING_STAGES.flatMap((s) => (registry[s] ? [registry[s] as ParkedStageEntry] : [])),
+  ...(registry === PARKED_STAGE_REGISTRY ? [CHECK_FIX_PARK] : []),
+];

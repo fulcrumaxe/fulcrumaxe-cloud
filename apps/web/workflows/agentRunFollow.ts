@@ -45,6 +45,17 @@ export async function followTimeoutStep(accountId: string, runId: string): Promi
   return followTimeoutBody(accountId, runId);
 }
 
+/**
+ * D#483 S5-k3b-2c: the slot-release trigger. The run this workflow followed has ended, so a hosted sandbox slot is free: one claim pass over the capacity queue. It starts nothing (a
+ * claimed item's own next ask consumes the claim) and never fails the workflow; the 60-second asks and the 15-minute reconcile are the backstops. The worker-side seam: this follower is
+ * the one place that sees every followed sandbox run reach its end, and the port is the worker's (`capacityClaimPass`).
+ */
+export async function capacityReleaseStep(): Promise<void> {
+  "use step";
+  const worker = await getWorker();
+  await worker?.capacityClaimPass().catch((err: unknown) => console.warn(JSON.stringify({ event: "capacity.claim_pass_failed", name: err instanceof Error ? err.name.slice(0, 60) : null })));
+}
+
 /** One structured line for the smoke to read in the runtime logs: a fixed event code, the two ids and a status. */
 export async function followLogStep(event: "run.follower_finalized" | "run.follower_timed_out", accountId: string, runId: string, status: string): Promise<void> {
   "use step";
@@ -75,9 +86,11 @@ export async function agentRunFollowWorkflow(args: FollowArgs): Promise<FollowOu
 
   if (seen.done) {
     await followLogStep("run.follower_finalized", accountId, runId, seen.status);
+    await capacityReleaseStep();
     return { runId, status: seen.status, timedOut: false };
   }
   const ended = await followTimeoutStep(accountId, runId);
   await followLogStep("run.follower_timed_out", accountId, runId, ended.status);
+  await capacityReleaseStep();
   return { runId, status: ended.status, timedOut: true };
 }

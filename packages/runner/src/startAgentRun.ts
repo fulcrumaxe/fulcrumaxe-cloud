@@ -22,6 +22,7 @@ import {
 } from "./executionTarget.js";
 import { defaultResolvePayer, type RunFunding } from "./funding.js";
 import { insertAgentRun, writeRunStatus, type InsertAgentRunParams } from "./runStatusWriter.js";
+import { providerCapacityOf } from "./providerCapacity.js";
 import type { RunStatus } from "./statusTransitions.js";
 import type { Product, Role } from "./types.js";
 import type { ContextSection, ContextSpill, JobMemory } from "@fulcrumaxe/runner-protocol";
@@ -362,6 +363,13 @@ async function dispatchOrCleanup(
     if (err instanceof DispatchAbortedError) {
       await target.cancel(run).catch(() => {});
       throw err;
+    }
+    // D#483 S5-k3b-2c: the provider had no room. The attempt ends `cancelled` / `provider_capacity` (an attempt the platform ended, like `placement_changed`), not failed;
+    // the caller puts the item back in the capacity queue. The cancel releases the reservation as it does for any other failure.
+    if (providerCapacityOf(err) !== null) {
+      await writeRunStatus(pool, { accountId, runId, from: "pending", to: "cancelled", failureReason: "provider_capacity" }).catch(() => {});
+      await target.cancel(run).catch(() => {});
+      throw new DispatchFailedError(runId, err, "provider_capacity");
     }
     // An agent that never started has its own fixed reason; everything else stays an internal error.
     const failureReason = err instanceof AgentStartError ? err.failureReason : "internal_error";

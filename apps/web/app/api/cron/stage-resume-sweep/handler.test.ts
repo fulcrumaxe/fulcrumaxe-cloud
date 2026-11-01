@@ -57,7 +57,7 @@ describe("GET /api/cron/stage-resume-sweep", () => {
     const res = await stageResumeSweepHandler(req(`Bearer ${SECRET}`), s.deps);
     expect(await res.json()).toMatchObject({ configured: true, listed: 2, refreshed: 2 });
     const passed = s.sweepParkedStages.mock.calls[0]![0] as Array<{ stage: string }>;
-    expect(passed.map((e) => e.stage)).toEqual(["build", "classify", "spec", "respec", "review", "fix_round", "panel"]);
+    expect(passed.map((e) => e.stage)).toEqual(["build", "classify", "spec", "respec", "review", "fix_round", "panel", "fix_round"]);
     expect(passed.map((e) => e.stage)).toEqual(registeredStages().map((e) => e.stage));
     expect(marker()).toBe(next);
   });

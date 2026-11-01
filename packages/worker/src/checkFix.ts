@@ -12,6 +12,7 @@ import { BASE_SYNCED_PROMPT_LINE, FIX_BASE_EVENT, hasPublicCopy } from "./fixRou
 import { PRIVATE_PR_MARKER } from "./planePublish.js";
 import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
 import type { RunStarter } from "./preview.js";
+import { CAPACITY_WAIT, CapacityWaitingError } from "./capacityGate.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 
 /**
@@ -217,6 +218,8 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
     );
     return { ok: true, runId: out.id };
   } catch (err) {
+    // D#483 S5-k3b-2c: our servers are full: the round waits and asks again. It never fails for capacity.
+    if (err instanceof CapacityWaitingError) return { ok: false, reason: CAPACITY_WAIT };
     if (err instanceof IdempotencyKeyTakenError) {
       const won = await withTenant(deps.pool, who.accountId, (c) => c.query<{ run_id: string }>("SELECT run_id FROM agent_run_idempotency_keys WHERE account_id = $1 AND idempotency_key = $2", [who.accountId, key]));
       if (won.rows[0]) return { ok: true, runId: won.rows[0].run_id };

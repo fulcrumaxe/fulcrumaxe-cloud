@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { SandboxPortError } from "@fx/runner";
+import { providerCapacityOf } from "@fx/runner";
 
 /**
  * D#483 S5-k3b-1: the capacity queue's helper. Our own capacity never refuses, stops or fails a customer's work: when every hosted sandbox slot is in use, or the
@@ -59,16 +59,13 @@ export async function readCapacityState(pool: Pool, slotTotal: () => number): Pr
   return { total, slotsInUse, waiting: Number(rows[0]!.o_waiting), headroom: Math.max(0, total - slotsInUse) };
 }
 
-/** The idempotency key of one start attempt of one entry. A re-queue keeps the entry and bumps the attempt; a replay of the same attempt is the same start. */
-export const capacityStartKey = (entryId: string, attempt: number): string => `capacity:${entryId}:${attempt}`;
-
 /**
  * Capacity-full, for a create that failed: the provider's 429 (any code, or none). Any other status keeps today's failure path and is never queued (C21).
  * The status and code (if any) are recorded on the entry.
  */
 export function classifyCreateFailure(err: unknown): { kind: "capacity_full"; status: 429; code: string | null } | { kind: "other" } {
-  if (err instanceof SandboxPortError && err.operation === "createSandbox" && err.status === 429) return { kind: "capacity_full", status: 429, code: err.code ?? null };
-  return { kind: "other" };
+  const full = providerCapacityOf(err);
+  return full === null ? { kind: "other" } : { kind: "capacity_full", status: 429, code: full.code ?? null };
 }
 
 /** One alert at the crossing, not one per entry: the entry that makes the queue longer than the setting. It never refuses or drops an entry. */
@@ -91,7 +88,7 @@ export interface QueueEntry {
 }
 
 /** Queues the item on its own tenant (a second call is no new place; a claimed entry that comes back keeps its place and starts its next attempt). */
-export async function enqueueForCapacity(pool: Pool, accountId: string, input: EnqueueInput): Promise<{ entry: QueueEntry; depth: number; alert: boolean }> {
+export async function enqueueForCapacity(pool: Pool, accountId: string, input: EnqueueInput): Promise<{ entry: QueueEntry; depth: number; alertDepth: number; alert: boolean }> {
   const entry = await withTenant(pool, accountId, async (c) => {
     const { rows } = await c.query<{ o_id: string; o_attempt: number; o_enqueued_at: Date; o_created: boolean }>(
       `SELECT o_id, o_attempt, o_enqueued_at, o_created FROM capacity_enqueue($1, $2, $3, $4, $5, $6)`,
@@ -102,7 +99,7 @@ export async function enqueueForCapacity(pool: Pool, accountId: string, input: E
   });
   const [{ rows }, settings] = await Promise.all([pool.query<{ o_waiting: number }>(`SELECT o_waiting FROM capacity_queue_state($1)`, [CAPACITY_CLASS]), readCapacitySettings(pool)]);
   const depth = Number(rows[0]!.o_waiting);
-  return { entry, depth, alert: crossesAlertDepth(entry.created, depth, settings.alertDepth) };
+  return { entry, depth, alertDepth: settings.alertDepth, alert: crossesAlertDepth(entry.created, depth, settings.alertDepth) };
 }
 
 export interface ClaimedEntry {
@@ -112,8 +109,6 @@ export interface ClaimedEntry {
   workItemId: string;
   runKind: string;
   attempt: number;
-  /** The key the claim-time start uses. */
-  startKey: string;
 }
 
 /** Claims entries in fair order, at most as many as there is headroom for (and `limit`), each under a lease of the stored length. */
@@ -127,7 +122,7 @@ export async function claimWithinHeadroom(pool: Pool, slotTotal: () => number, o
     );
     const r = rows[0];
     if (!r) break;
-    claimed.push({ id: r.o_id, accountId: r.o_account_id, repoId: r.o_repo_id, workItemId: r.o_work_item_id, runKind: r.o_run_kind, attempt: r.o_attempt, startKey: capacityStartKey(r.o_id, r.o_attempt) });
+    claimed.push({ id: r.o_id, accountId: r.o_account_id, repoId: r.o_repo_id, workItemId: r.o_work_item_id, runKind: r.o_run_kind, attempt: r.o_attempt});
   }
   return { claimed, state };
 }

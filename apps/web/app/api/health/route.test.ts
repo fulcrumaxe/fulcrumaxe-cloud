@@ -93,14 +93,14 @@ describe("GET /api/health", () => {
     try {
       const env: Env = { ...completeEnv("staging"), CRON_SECRET: OPERATOR_SECRET };
       resetPlanDataCache();
-      expect((await call(env, bearer(OPERATOR_SECRET))).body).toMatchObject({ ok: true, unconfigured: ["vercel_env_source_unconfigured", "branch_cleanup_signer_unconfigured"] });
+      expect((await call(env, bearer(OPERATOR_SECRET))).body).toMatchObject({ ok: true, unconfigured: ["hosted_sandbox_capacity_unconfigured", "vercel_env_source_unconfigured", "branch_cleanup_signer_unconfigured"] });
       const data = JSON.parse(process.env.FX_PLAN_DATA!);
       delete data.envelope;
       process.env.FX_PLAN_DATA = JSON.stringify(data);
       resetPlanDataCache();
       const operator = await call(env, bearer(OPERATOR_SECRET));
       expect(operator.status).toBe(200);
-      expect(operator.body).toMatchObject({ ok: true, unconfigured: ["envelope_margin_unconfigured", "vercel_env_source_unconfigured", "branch_cleanup_signer_unconfigured"] });
+      expect(operator.body).toMatchObject({ ok: true, unconfigured: ["envelope_margin_unconfigured", "hosted_sandbox_capacity_unconfigured", "vercel_env_source_unconfigured", "branch_cleanup_signer_unconfigured"] });
       const anonymous = await call(env);
       expect(anonymous.status).toBe(200);
       expect(JSON.stringify(anonymous.body)).not.toContain("envelope_margin");
@@ -109,6 +109,23 @@ describe("GET /api/health", () => {
       if (saved !== undefined) process.env.FX_PLAN_DATA = saved;
       resetPlanDataCache();
     }
+  });
+
+  it("D#483 S5-k3b-2c (C23-8): the operator is told, by a fixed code, when plan data carries no hosted sandbox slot total; with the figure the code is gone; anonymous callers never see it", async () => {
+    const saved = process.env.FX_PLAN_DATA;
+    try {
+      const env: Env = { ...completeEnv("staging"), CRON_SECRET: OPERATOR_SECRET };
+      resetPlanDataCache();
+      expect((await call(env, bearer(OPERATOR_SECRET))).body).toMatchObject({ unconfigured: expect.arrayContaining(["hosted_sandbox_capacity_unconfigured"]) });
+      // A test figure only; the real one is set by hand in the environment's plan data.
+      process.env.FX_PLAN_DATA = JSON.stringify({ ...JSON.parse(process.env.FX_PLAN_DATA!), capacity: { hostedSandboxConcurrency: 7, provisional: true, source: "test" } });
+      resetPlanDataCache();
+      expect((await call(env, bearer(OPERATOR_SECRET))).body).not.toMatchObject({ unconfigured: expect.arrayContaining(["hosted_sandbox_capacity_unconfigured"]) });
+    } finally {
+      if (saved !== undefined) process.env.FX_PLAN_DATA = saved;
+      resetPlanDataCache();
+    }
+    expect(JSON.stringify((await call({ ...completeEnv("staging"), CRON_SECRET: OPERATOR_SECRET })).body)).not.toContain("hosted_sandbox");
   });
 
   it("gives the operator the missing and invalid names, by name and fixed reason", async () => {

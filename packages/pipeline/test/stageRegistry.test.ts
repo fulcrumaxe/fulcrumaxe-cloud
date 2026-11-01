@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { WAITING_STAGES as CORE_WAITING_STAGES } from "@fx/core/src/work-items/driverEvents.js";
-import { PANEL_PROGRESS_KINDS, PANEL_WHOLE_CODE, PARKED_STAGE_REGISTRY, UNREGISTERED_STAGES, registeredStages } from "../src/advance/stageRegistry.js";
+import { PANEL_PROGRESS_KINDS, PANEL_WHOLE_CODE, CHECK_FIX_PARK, PARKED_STAGE_REGISTRY, UNREGISTERED_STAGES, registeredStages } from "../src/advance/stageRegistry.js";
 import { WAITING_STAGES, WAITING_STAGE_POSITIONS, isWaitingStage, stageOfFact } from "../src/advance/waitingStages.js";
 import { CAPACITY_WAIT, RESERVATION_PAUSE_REASONS } from "../src/advance/reservationPauses.js";
 import { attemptOfKey } from "../src/advance/attemptKeys.js";
@@ -24,7 +24,7 @@ describe("the parked-stage registry", () => {
   });
 
   it("S5k1c-8 and S5k1d-8 held, and S5k1e-7: the panel was the last row to leave the allowlist, so it is empty and every stage has an entry", () => {
-    expect(registeredStages().map((e) => e.stage)).toEqual(["build", "classify", "spec", "respec", "review", "fix_round", "panel"]);
+    expect(registeredStages().map((e) => e.stage)).toEqual(["build", "classify", "spec", "respec", "review", "fix_round", "panel", "fix_round"]);
     expect([...UNREGISTERED_STAGES]).toEqual([]);
     expect(UNREGISTERED_STAGES).toHaveLength(0);
     for (const stage of WAITING_STAGES) expect(PARKED_STAGE_REGISTRY[stage], stage).toBeDefined();
@@ -37,7 +37,7 @@ describe("the parked-stage registry", () => {
   });
 
   it("an entry is keyed by its own stage and parks only for a spend pause at stage positions the table lists", () => {
-    for (const e of registeredStages()) {
+    for (const e of registeredStages().filter((x) => x !== CHECK_FIX_PARK)) {
       expect(PARKED_STAGE_REGISTRY[e.stage]).toBe(e);
       expect(e.pauses.length).toBeGreaterThan(0);
       // The one wait that is not a spend pause: a review parked for the runner's daily limit (resumed by the clock, and only at the review stage).
@@ -100,6 +100,17 @@ describe("the waiting stages", () => {
     }
     expect(stageOfFact(null)).toBe("build");
     expect(stageOfFact("nonsense")).toBeNull();
+  });
+});
+
+describe("D#483 C24 item 2: the check-fix round's capacity park", () => {
+  it("is scoped to the capacity wait at in_progress only, never to in_progress as a whole, and no spend pause or build-slot reason parks there", () => {
+    expect(CHECK_FIX_PARK.stage).toBe("fix_round");
+    expect([...CHECK_FIX_PARK.itemStages]).toEqual(["in_progress"]);
+    expect([...CHECK_FIX_PARK.pauses]).toEqual([CAPACITY_WAIT]);
+    expect(registeredStages()).toContain(CHECK_FIX_PARK);
+    // A registry handed in by a caller does not gain it (it is the real registry's, not a stage of the table).
+    expect(registeredStages({})).toEqual([]);
   });
 });
 

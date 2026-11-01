@@ -90,6 +90,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "approveSubItem",
       "beginRunnerDone",
       "cancelRun",
+      "capacityClaimPass",
       "claimRunAction",
       "claimRunnerRun",
       "close",

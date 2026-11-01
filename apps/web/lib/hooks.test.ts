@@ -51,6 +51,7 @@ vi.mock("./worker", () => ({ getWorker: vi.fn(async () => null) }));
 
 import { agentRunFollowWorkflow } from "../workflows/agentRunFollow";
 import { createFollow, createHooksPort } from "./hooks";
+import { getWorker } from "./worker";
 
 const ACCOUNT = "11111111-1111-4111-8111-111111111111";
 const RUN = "22222222-2222-4222-8222-222222222222";
@@ -78,6 +79,21 @@ describe("the follower workflow body", () => {
     expect(out).toEqual({ runId: RUN, status: "succeeded", timedOut: false });
     expect(world.order).toEqual(["createHook", "status"]); // no sleep: it never waited for the hook or the watchdog
     expect(logged.some((l) => l.includes("run.follower_finalized"))).toBe(true);
+  });
+
+  it("D#483 S5-k3b-2c: when the followed run has ended (finished, or timed out) the follower runs one capacity claim pass; a failing pass never fails the workflow", async () => {
+    const pass = vi.fn(async () => 1);
+    vi.mocked(getWorker).mockResolvedValue({ capacityClaimPass: pass } as never);
+    try {
+      world.statuses.push({ status: "succeeded", done: true });
+      await agentRunFollowWorkflow(ARGS);
+      expect(pass).toHaveBeenCalledTimes(1);
+      vi.mocked(getWorker).mockResolvedValue({ capacityClaimPass: async () => Promise.reject(new Error("db")) } as never);
+      world.statuses.push({ status: "failed", done: true });
+      expect(await agentRunFollowWorkflow(ARGS)).toMatchObject({ status: "failed" });
+    } finally {
+      vi.mocked(getWorker).mockResolvedValue(null);
+    }
   });
 
   it("a hook for this run wakes it; the status row decides, and the follower finalizes once", async () => {
