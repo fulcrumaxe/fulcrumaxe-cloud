@@ -6,6 +6,7 @@ import type { AdvanceReviewDeps, RunnerPlaneMergeStore } from "@fx/worker";
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, MERGE_QUEUE_REMOVAL_DOCUMENT, type GithubWebhookPayload, type GithubWebhookEventName } from "@fx/github";
 import { createReviewDeps } from "./advanceReview";
 import { bindCompleteDeltaReview, bindStartDeltaReview } from "./mergeQueueDeltaReview";
+import { bindOnConflict } from "./mergeQueueConflict";
 import { getWorker } from "./worker";
 import { openInstallationHttp, readRepoAppLogin } from "./github/installationHttp";
 import { openForRepo } from "./github/localOnlyHttp";
@@ -36,6 +37,8 @@ export interface MergeQueueTickerDeps {
   appLogin?: (repoId: string) => Promise<string>;
   /** MQ3-a's delta-review start. Absent: the real one, bound to the reviewer start (mergeQueueDeltaReview.ts). */
   startDeltaReview?: mergeQueue.StartDeltaReview;
+  /** MQ4-b: the conflict decision and round start. Absent: the real one (mergeQueueConflict.ts). */
+  onConflict?: mergeQueue.QueueTickDeps["onConflict"];
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -106,6 +109,7 @@ export async function tickMergeQueueRepo(deps: MergeQueueTickerDeps, target: { a
       // D#694 B6-3: the rule's batch size bounds how many entries wait in the host's queue, and a queue branch is never updated by the product.
       queueInfo: (pr) => github.getMergeQueueInfo!(pr),
       startDeltaReview: deps.startDeltaReview ?? bindStartDeltaReview({ pool, worker: await getWorker(), open, github }),
+      onConflict: deps.onConflict ?? bindOnConflict({ pool, worker: await getWorker(), open, github }),
       sleep: deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
     },
     target,

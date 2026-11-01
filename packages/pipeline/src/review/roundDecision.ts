@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { recordDriverEvent, toCode } from "@fx/core/src/work-items/driverEvents.js";
+import { recordDriverEvent, reviewFixRoundsSql, toCode } from "@fx/core/src/work-items/driverEvents.js";
 import { UNVERIFIABLE_ESCALATION_CODE } from "@fx/core/src/work-items/reviewHold.js";
 import { checkFixRound, maxFixRounds } from "@fx/spend";
 import type { ExecutionTargetRegistry } from "@fx/runner";
@@ -64,7 +64,7 @@ export interface RoundResult {
 /** Fix rounds started so far for one item (the driver events). */
 export async function fixRoundsStarted(pool: Pool, accountId: string, workItemId: string): Promise<number> {
   return withTenant(pool, accountId, async (client) => {
-    const { rows } = await client.query<{ n: string }>("SELECT count(*)::text AS n FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'fix_round_started'", [accountId, workItemId]);
+    const { rows } = await client.query<{ n: string }>(`SELECT count(*)::text AS n FROM work_item_driver_events e WHERE e.account_id = $1 AND e.work_item_id = $2 AND ${reviewFixRoundsSql("e")}`, [accountId, workItemId]);
     return Number(rows[0]?.n ?? "0");
   });
 }

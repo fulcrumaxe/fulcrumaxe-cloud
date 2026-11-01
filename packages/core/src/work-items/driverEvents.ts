@@ -80,6 +80,16 @@ export const DRIVER_EVENT_KINDS = [
   'merged_via_queue',
 ] as const;
 
+/**
+ * D#519 MQ4-b (C7): the `fix_round_started` events that count against the review side's fix-round limit. A merge-conflict round writes the same event kind, with a
+ * `fix:<head>:<action>:c<round>` key; it is bounded by the queue entry's own conflict-round limit and must not use up a review fix round. The events carry no round
+ * kind of their own, so the `:c<round>` suffix of the key (right after the action id, which is a UUID) is what tells them apart. `alias` is the table alias in the query.
+ */
+export function reviewFixRoundsSql(alias: string): string {
+  if (!/^[a-z][a-z0-9_]{0,15}$/.test(alias)) throw new Error('reviewFixRoundsSql: bad alias');
+  return `${alias}.kind = 'fix_round_started' AND ${alias}.dedupe_key !~ '^fix:[0-9a-f]{40,64}:[0-9a-f-]{36}:c[0-9]+(:|$)'`;
+}
+
 /** D#694 B5 (migration 0938): the kinds that may carry a queue entry id. */
 export const QUEUE_EVENT_KINDS: readonly DriverEventKind[] = ['merge_enqueued', 'merge_dequeued', 'merged_via_queue'];
 const QUEUE_ENTRY_RE = /^[A-Za-z0-9_=-]{1,100}$/;

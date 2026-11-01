@@ -937,8 +937,9 @@ export type StartConflictWorkResult =
  */
 export async function startConflictWork(
   client: Queryable,
-  input: { accountId: string; entryId: string; holder?: string; baseSha: string; baseRef: string; conflictFiles: readonly string[] },
+  input: { accountId: string; entryId: string; holder?: string; fromSha: string; baseSha: string; baseRef: string; conflictFiles: readonly string[] },
 ): Promise<StartConflictWorkResult> {
+  assertSha(input.fromSha);
   assertSha(input.baseSha);
   const { rows } = await client.query<Row & { round_id: string }>(
     `WITH e AS (
@@ -950,11 +951,11 @@ export async function startConflictWork(
         RETURNING ${COLUMNS}
      ), r AS (
        INSERT INTO merge_conflict_rounds (account_id, repo_id, work_item_id, entry_id, round, from_sha, base_sha, base_ref, conflict_files)
-       SELECT e.account_id, e.repo_id, e.work_item_id, e.id, e.conflict_rounds, e.head_sha, $5, $6, $7::text[] FROM e
+       SELECT e.account_id, e.repo_id, e.work_item_id, e.id, e.conflict_rounds, $5, $6, $7, $8::text[] FROM e
        RETURNING id
      )
      SELECT e.*, r.id AS round_id FROM e, r`,
-    [input.accountId, input.entryId, MAX_CONFLICT_ROUNDS, input.holder ?? null, input.baseSha, input.baseRef, [...input.conflictFiles]],
+    [input.accountId, input.entryId, MAX_CONFLICT_ROUNDS, input.holder ?? null, input.fromSha, input.baseSha, input.baseRef, [...input.conflictFiles]],
   );
   if (rows[0]) {
     const round = await oneRound(client, `SELECT ${ROUND_COLUMNS} FROM merge_conflict_rounds WHERE account_id = $1 AND id = $2`, [input.accountId, rows[0].round_id]);

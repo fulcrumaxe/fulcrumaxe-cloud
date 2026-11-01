@@ -4,6 +4,7 @@ import { effectiveModeSql } from "@fx/runner";
 import type { WorkItemTier } from "../build/types.js";
 import { tierOfKind } from "./reviewPlan.js";
 import { resolveBuildIdentity, type BuildIdentityRefusal } from "@fx/core/src/work-items/buildIdentity.js";
+import { reviewFixRoundsSql } from "@fx/core/src/work-items/driverEvents.js";
 
 /**
  * D#483 P3: what the review stage reads about a work item before it starts anything, in one tenant-scoped read. Facts
@@ -71,7 +72,7 @@ export async function loadReviewContext(pool: Pool, accountId: string, workItemI
     const { rows } = await client.query<Row>(
       `SELECT w.stage, w.provenance, w.repo_id, r.gh_repo_id, ${effectiveModeSql("w", "r")} AS execution_mode, r.gh_owner, r.gh_name,
               CASE WHEN w.planned_pr_key IS NULL THEN d.kind ELSE w.kind END AS kind, s.version, w.planned_pr_key,
-              (SELECT count(*)::text FROM work_item_driver_events e WHERE e.account_id = w.account_id AND e.work_item_id = w.id AND e.kind = 'fix_round_started') AS fix_rounds,
+              (SELECT count(*)::text FROM work_item_driver_events e WHERE e.account_id = w.account_id AND e.work_item_id = w.id AND ${reviewFixRoundsSql("e")}) AS fix_rounds,
               (SELECT rs.mode FROM role_settings rs WHERE rs.account_id = w.account_id AND rs.repo_id = w.repo_id AND rs.role = 'debater') AS debater_mode,
               r.settings->'autoMerge' AS auto_merge, r.settings->'blockExternalAutoMerge' AS block_external,
               EXISTS (SELECT 1 FROM work_item_transitions t
