@@ -7,6 +7,7 @@ import { sandboxRunBranch } from "@fx/core/src/work-items/buildIdentity.js";
 import { SANDBOX_RERUN_BRANCH_SCHEME } from "@fx/pipeline";
 import { startBuildForItem } from "@fx/pipeline/testing/build";
 import { createPool } from "@fx/db/src/pool.js";
+import { plannedFixture } from "@fx/db/test/helpers/plannedChildren.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { nonChildUuid } from "@fx/db/test/helpers/branchIds.js";
 import { createAdvanceModule } from "../src/advance.js";
@@ -23,14 +24,16 @@ describe("sandbox rerun branch [pg]", { timeout: 120_000 }, () => {
   let adminPool: Pool;
   let admin: PoolClient;
   let writerPool: Pool;
+  let appPool: Pool;
   beforeAll(async () => {
     adminPool = createPool(process.env.WORKER_DATABASE_URL!);
     admin = await adminPool.connect();
     writerPool = createPool(process.env.WORKER_DATABASE_URL_RUN_WRITER!);
+    appPool = createPool(process.env.WORKER_DATABASE_URL_APP_USER!);
   });
   afterAll(async () => {
     admin.release();
-    for (const p of [adminPool, writerPool]) await p.end();
+    for (const p of [adminPool, writerPool, appPool]) await p.end();
   });
 
   const SEAT: SeatResult = {
@@ -164,6 +167,25 @@ describe("sandbox rerun branch [pg]", { timeout: 120_000 }, () => {
     expect(b.out.branch).toBe(`fx/${b.out.runId}-g1`);
   });
 
+  it("a planned PR child's first sandbox build records its fixed fx/<parent#>-<key> branch through the real start, and only that name", async () => {
+    const f = await plannedFixture(admin, appPool, { dial: "act" });
+    const n = nextNumber++;
+    await admin.query("UPDATE work_items SET gh_number = $2 WHERE id = $1", [f.parent, n]);
+    await admin.query("UPDATE repos SET gh_owner = 'acme', gh_name = 'widgets', execution_mode = 'sandbox' WHERE id = $1", [f.t.repoId]);
+    const child = f.kids.api!;
+    await admin.query("UPDATE work_items SET envelope_id = $2 WHERE id = $1", [child, f.envelope]);
+    const m = module();
+    const who = { accountId: f.t.accountId, userId: f.t.userId, workItemId: child, haltEpoch: 0 };
+    const out = (await m.module.advanceBuild(who, randomUUID())) as { status: string; runId: string; branch: string };
+    expect(out).toMatchObject({ status: "started" });
+    expect(out.branch).toBe(`fx/${n}-api`);
+    expect(await recordsOf(out.runId)).toEqual([`fx/${n}-api`]);
+    // The name is the caller's exact fixed name, not a shape: any other child-shaped name is refused.
+    await expect(recordBuildBranch(admin, f.t.accountId, out.runId, `fx/${n}-docs`)).rejects.toThrow(/not a build branch/);
+    await expect(recordBuildBranch(admin, f.t.accountId, out.runId, `fx/${n}-docs`, `fx/${n}-api`)).rejects.toThrow(/not a build branch/);
+    await expect(recordBuildBranch(admin, f.t.accountId, out.runId, "main", "main")).rejects.toThrow(/not a build branch/);
+  });
+
   it("criterion 3: the record is written once; a second write adds no row, and a branch that is not the run's own or the item's fixed name is refused", async () => {
     const t = await setup();
     const m = module();
@@ -174,6 +196,9 @@ describe("sandbox rerun branch [pg]", { timeout: 120_000 }, () => {
     expect(await recordsOf(out.runId)).toEqual(before);
     await expect(recordBuildBranch(admin, t.a.accountId, out.runId, `fx/${nonChildUuid()}-g1`)).rejects.toThrow(/not a build branch/);
     await expect(recordBuildBranch(admin, t.a.accountId, out.runId, "main")).rejects.toThrow(/not a build branch/);
+    // Another run's branch whose id starts with eight digits has the shape of a child branch (`fx/<digits>-<slug>`); a random id hit that about one time in forty, so it is pinned here, not left to chance.
+    await expect(recordBuildBranch(admin, t.a.accountId, out.runId, "fx/12345678-1234-1234-1234-123456789012-g1")).rejects.toThrow(/not a build branch/);
+    expect(await recordsOf(out.runId)).toEqual(before);
   });
 
   /**

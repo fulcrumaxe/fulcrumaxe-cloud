@@ -20,6 +20,8 @@ export interface AdvanceRunRequest {
   runId?: string;
   /** SANDBOX-RERUN-BRANCH-a: the branch a sandbox build pushes, recorded once as the run's `build.branch` event in its create transaction. */
   buildBranch?: string;
+  /** The item's fixed branch name (`fx/issue-<n>`, or a planned PR child's `fx/<parent#>-<key>`): the one name, besides the run's own, that `buildBranch` may be. */
+  fixedBranch?: string;
   /** Executor runs only: names the sandbox. The pull request does not exist yet, so this is the issue's number. */
   pr?: number;
   /** Start only if no OTHER run of the item is live (this step's own keyed run is always returned). Refused as `already_running`. */
