@@ -94,7 +94,8 @@ export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts:
         title: "A pull request title, never read",
         body: "A pull request body, never read",
         head: { sha: s.headSha, ref: branch, repo: { full_name: full } },
-        base: { ref: s.baseRef, repo: { full_name: full, default_branch: s.defaultBranch ?? "main" } },
+        base: { ref: s.baseRef, repo: { full_name: full, default_branch: s.defaultBranch ?? "main", private: s.isPublic !== true } },
+        user: s.authorLogin === null ? null : { login: s.authorLogin ?? "fixture-author" },
       },
     ]);
   }

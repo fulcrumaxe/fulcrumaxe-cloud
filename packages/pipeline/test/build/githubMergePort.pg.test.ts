@@ -45,7 +45,7 @@ function fakeGitHub(over: Partial<FakeState> = {}): { http: GitHubHttp; state: F
       state.requests.push(req);
       const path = req.path;
       if (req.method === "GET" && /\/pulls\/7$/.test(path)) {
-        return { status: 200, body: { state: "open", merged: false, draft: false, mergeable: true, mergeable_state: "clean", head: { sha: state.headSha }, base: { ref: state.baseRef ?? "release/main", repo: state.defaultBranch === null ? {} : { default_branch: state.defaultBranch ?? "release/main" } } } };
+        return { status: 200, body: { state: "open", merged: false, draft: false, mergeable: true, mergeable_state: "clean", head: { sha: state.headSha }, base: { ref: state.baseRef ?? "release/main", repo: state.defaultBranch === null ? {} : { default_branch: state.defaultBranch ?? "release/main", private: true } }, user: { login: "author" } } };
       }
       if (req.method === "GET" && path.endsWith("/check-runs")) {
         const list = state.checks.map((c, i) => ({ head_sha: HEAD, id: i + 1, app: { id: 1 }, ...c }));

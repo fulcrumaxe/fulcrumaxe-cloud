@@ -89,7 +89,14 @@ export interface PullRequestState {
    * only when they are equal; a port that cannot read either throws (it is never "the default"). */
   baseRef: string;
   defaultBranch: string;
+  /** D#598 P1d-1: the `user.login` of the pull request's author as GitHub reports it (null when missing or blank), and whether the repository it is in is
+   * public (`base.repo.private === false`; null when GitHub did not say). A port that reports neither is read as an unknown author in a public repository. */
+  authorLogin?: string | null;
+  repoPublic?: boolean | null;
 }
+
+/** D#598 P1d-1: who opened the pull request that merges, as the gate's author port answers. Only `trusted` lets a merge go on. */
+export type PullRequestAuthorTrust = "trusted" | "untrusted" | "unverified";
 
 export interface CheckRunState {
   name: string;
@@ -301,6 +308,11 @@ export interface MergeGateDeps {
   /** D#598 P3b: the number of the open pull request this one builds on (the stack parent's), for the sentence a person reads. Absent or
    * null: not known; the stop still holds. A throw is read as not known: it can only change the wording, never the stop. */
   stackParentPullNumber?(input: { accountId: string; workItemId: string }): Promise<number | null>;
+  /**
+   * D#598 P1d-1: decides whether the author of the pull request that merges is one the platform merges for. The gate asks it for a paired item's public pull request
+   * and for any pull request GitHub reports in a public repository. Absent, or a throw, or any answer but the three words: `unverified` (nothing merges).
+   */
+  pullRequestAuthorTrust?(pr: PullRequestRef, author: { login: string | null; repoPublic: boolean | null }): Promise<PullRequestAuthorTrust>;
 }
 
 export interface MergeGateInput {
@@ -343,6 +355,8 @@ export interface MergeGateInput {
    * today's rule. A condition that already blocks is reported as it is; this reason appears only on a pull request that would otherwise have merged.
    */
   mergeUnavailableReason?: MergeBlockReason;
+  /** D#598 P1d-1: the pull request is the public one of a pairing. Its author is always checked, whatever the repository reports about itself. */
+  pairedPublic?: boolean;
 }
 
 export type ReviewMode = "cloud" | "runner_local_off" | "runner_local_on";
@@ -378,6 +392,10 @@ export type MergeBlockReason =
   | "local_reviews_passed_advisory"
   | "auto_merge_not_allowed"
   | "human_merge_only"
+  /** D#598 P1d-1: the pull request was opened by someone who is not an admin or maintainer of its repository, the platform's app or on the allowlist. Nothing in the product merges it. */
+  | "pr_author_untrusted"
+  /** D#598 P1d-1: who opened the pull request could not be checked now (a failed or refused read); nothing merged, and the next run asks again. */
+  | "pr_author_unverified"
   /** Two planes: the public pull request's head is not the one the platform last pushed (a push not recorded yet, or a branch changed by someone else). */
   | "public_head_unrecorded"
   /** Two planes: a person took the public branch over, so what it holds was not reviewed here; the merge is theirs. */
@@ -806,6 +824,8 @@ export async function runMergeGate(deps: MergeGateDeps, input: MergeGateInput): 
     reasons.push("head_sha_malformed");
     return markHuman(deps, input.pr, headSha, reasons);
   }
+  // D#598 P1d-1 (R-P1d-1): the one place every merge mechanism passes. A reason here is a stop before the merge, queue, auto-merge and delegate call sites below.
+  if (input.pairedPublic === true || pr.repoPublic !== false) reasons.push(...(await authorReasons(deps, input.pr, pr)));
   const roles = gatedRoles(input);
   const evidenceHead = input.reviewedHeadSha ?? headSha;
   const rows = await loadEffectiveRunsOnSha(deps.pool, input.accountId, input.workItemId, evidenceHead);
@@ -868,6 +888,18 @@ export async function runMergeGate(deps: MergeGateDeps, input: MergeGateInput): 
   // A 409 with an unmoved head, or any refusal on a head other than the one gated, is not explained by what was read.
   if (status === 409 || after.headSha !== headSha) return markHuman(deps, input.pr, headSha, ["merge_call_refused"]);
   return markHuman(deps, input.pr, headSha, [await classifyRefusal(deps.github, input.pr, headSha, after)]);
+}
+
+/** D#598 P1d-1: the stop for the author of the pull request that merges. No port, a throw or an unknown answer is `unverified`, never trusted. */
+async function authorReasons(deps: MergeGateDeps, ref: PullRequestRef, pr: PullRequestState): Promise<MergeBlockReason[]> {
+  const login = typeof pr.authorLogin === "string" && pr.authorLogin.trim() !== "" ? pr.authorLogin : null;
+  let answer: unknown = "unverified";
+  try {
+    if (deps.pullRequestAuthorTrust !== undefined) answer = await deps.pullRequestAuthorTrust(ref, { login, repoPublic: typeof pr.repoPublic === "boolean" ? pr.repoPublic : null });
+  } catch {
+    // fx-swallow-ok: an author that cannot be checked is a stop (pr_author_unverified); nothing merges and the next run asks again
+  }
+  return answer === "trusted" ? [] : answer === "untrusted" ? ["pr_author_untrusted"] : ["pr_author_unverified"];
 }
 
 /** D#694 B5: the port's answer, or `direct` when it has no queue; anything but a well-formed answer (or a throw) is `unknown`, never `direct`. */

@@ -21,6 +21,10 @@ import { pgHarness } from "../helpers/pgHarness.js";
 import { QUEUE_DOCS, fakeGitHubLocal, type QueueState } from "./helpers/fakeGitHubLocal.js";
 import { fakeGitHubRest, freshRepo, type FakeRepoState } from "./helpers/fakeGitHubRest.js";
 
+/** D#598 P1d-1: the platform's own App bot opened the public pull request (the normal case), so the author rule trusts it without a permission read. */
+const BOT_LOGIN = "fulcrumaxe-app[bot]";
+const BOT_TRUST = { botLogins: async () => [BOT_LOGIN], allowlist: () => null };
+
 /**
  * Two planes, `runner_local` [pg]: the merge gate of a paired item whose repository runs on the customer's machine judges the PUBLIC pull request (its
  * draft state, CI, protection, stamps, locks), never the private draft copy, and the cloud never merges it.
@@ -113,7 +117,7 @@ async function world(o: Opts = {}) {
   }
   const pubBranch = o.pairing === false ? "fx/none" : String((await h.admin.query("SELECT branch FROM plane_pushes WHERE work_item_id = $1", [workItemId])).rows[0].branch);
   const pubHead = o.pub?.headSha ?? PUB_HEAD;
-  const pub = freshRepo({ owner: "acme", name: "widgets-public", prNumber: PUB_PR, headSha: pubHead, checks: { [pubHead]: [green] }, protectedWithoutChecks: true, runBranch: pubBranch, files: [(local ? file : patched)("src/ui/button.tsx")], ghId: 8123456, ...o.pub });
+  const pub = freshRepo({ owner: "acme", name: "widgets-public", prNumber: PUB_PR, isPublic: true, authorLogin: BOT_LOGIN, headSha: pubHead, checks: { [pubHead]: [green] }, protectedWithoutChecks: true, runBranch: pubBranch, files: [(local ? file : patched)("src/ui/button.tsx")], ghId: 8123456, ...o.pub });
   return { accountId, workItemId, repoId, ghRepoId, priv, pub, pubBranch, local, privLocal: fakeGitHubLocal(priv), pubLocal: fakeGitHubLocal(pub, { exclude: ["A10"], ...(o.queue ? { queue: o.queue } : {}) }) };
 }
 type World = Awaited<ReturnType<typeof world>>;
@@ -124,6 +128,7 @@ const gate = (w: World, o: { optIn?: LocalReviewOptInPort; pubHttp?: GitHubHttp;
   runMergeGateForItem(
     {
       pool: h.runWriterPool,
+      authorTrust: BOT_TRUST,
       http: o.privHttp ?? (w.local ? w.privLocal.http : fakeGitHubRest(w.priv)),
       localReviewOptIn: o.optIn ?? on,
       publicPlane: {
@@ -429,6 +434,7 @@ describe("a paired item whose public pull request is not open: public_pr_not_ope
     const out = await runMergeGateForItem(
       {
         pool: h.runWriterPool,
+        authorTrust: BOT_TRUST,
         http: w.privLocal.http,
         localReviewOptIn: on,
         publicPlane: {
@@ -581,6 +587,7 @@ function delegating(w: World, o: { go?: Partial<GoAttestation>; optIn?: LocalRev
     runMergeGateForItem(
       {
         pool: h.runWriterPool,
+        authorTrust: BOT_TRUST,
         http: w.privLocal.http,
         localReviewOptIn: o.optIn ?? on,
         publicPlane: { open: async () => o.pubHttp ?? w.pubLocal.http, read: readPublicPullRequest(h.runWriterPool) },
@@ -793,13 +800,13 @@ describe("the go phase: the whole gate again from fresh reads, with the runner's
     const sandbox = await world({ executionMode: "sandbox" });
     const calls: DelegateCall[] = [];
     const out = await runMergeGateForItem(
-      { pool: h.runWriterPool, http: fakeGitHubRest(sandbox.priv), localReviewOptIn: on, publicPlane: { open: async () => fakeGitHubRest(sandbox.pub), read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async (a) => (calls.push(a), { delegated: true }) },
+      { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: fakeGitHubRest(sandbox.priv), localReviewOptIn: on, publicPlane: { open: async () => fakeGitHubRest(sandbox.pub), read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async (a) => (calls.push(a), { delegated: true }) },
       { accountId: sandbox.accountId, workItemId: sandbox.workItemId, prNumber: sandbox.priv.prNumber, goPhase: { attestation: attest() } },
     );
     expect(out).toEqual({ outcome: "refused", reason: "go_not_applicable" });
     const local = await world();
     const noDelegate = await runMergeGateForItem(
-      { pool: h.runWriterPool, http: local.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => local.pubLocal.http, read: readPublicPullRequest(h.runWriterPool) } },
+      { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: local.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => local.pubLocal.http, read: readPublicPullRequest(h.runWriterPool) } },
       { accountId: local.accountId, workItemId: local.workItemId, prNumber: local.priv.prNumber, goPhase: { attestation: attest() } },
     );
     expect(noDelegate).toEqual({ outcome: "refused", reason: "go_not_applicable" });
@@ -869,5 +876,59 @@ describe("a paired item and the merge queue: the mode is read on the public repo
     expect(queueReads(w.pubLocal)).toEqual(["A13"]);
     const plain = createReviewGitHubPort({ pool: h.runWriterPool, http: w.pubLocal.http, queueDocuments: QUEUE_DOCUMENTS }, { owner: "acme", name: "widgets-public", executionMode: "runner_local" } as never, { accountId: w.accountId, workItemId: w.workItemId, prNumber: PUB_PR, recordedBranch: w.pubBranch });
     await expect(plain.getQueueEntry!({ repoId: w.repoId, prNumber: PUB_PR })).rejects.toThrow(/allowlist/);
+  });
+});
+
+describe("D#598 P1d-1: a paired item's public pull request is refused when an outsider opened it", () => {
+  const asked = (w: World) => [...w.privLocal.calls, ...w.pubLocal.calls].filter((c) => c.path.includes("/collaborators/"));
+
+  it("runner_local, order phase and go phase: a non-bot author is pr_author_unverified with ZERO permission reads, the delegate is never called and no write credential is issued", async () => {
+    for (const go of [undefined, {}]) {
+      const w = await world({ pub: { authorLogin: "outsider" } });
+      const { run, calls } = delegating(w, go === undefined ? {} : { go });
+      expect(await run()).toMatchObject({ outcome: "ready_human_merges", reasons: ["pr_author_unverified"] });
+      expect(calls).toEqual([]);
+      expect(asked(w)).toEqual([]);
+      expect([...w.pubLocal.denied, ...w.pubLocal.refused, ...w.privLocal.denied, ...w.privLocal.refused]).toEqual([]);
+      expectNoMergeAnywhere(w);
+    }
+  });
+
+  it("runner_local: the platform's bot in another letter case is delegated; the delegate is called once", async () => {
+    const w = await world({ pub: { authorLogin: "FulcrumAXE-App[BOT]" } });
+    const { run, calls } = delegating(w);
+    expect(await run()).toMatchObject({ outcome: "merge_delegated" });
+    expect(calls).toHaveLength(1);
+    expect(asked(w)).toEqual([]);
+  });
+
+  it("hosted pair: an outsider's public pull request is refused on the direct path, after one permission read of the CODE repository only", async () => {
+    const w = await world({ executionMode: "sandbox", pub: { authorLogin: "outsider", collaborators: { outsider: "write" } } });
+    expect(await gate(w)).toMatchObject({ outcome: "ready_human_merges", reasons: ["pr_author_untrusted"] });
+    expect(w.pub.permissionReads).toEqual(["outsider"]);
+    expect(w.priv.permissionReads ?? []).toEqual([]);
+    expect(w.pub.merges).toEqual([]);
+    expect(w.priv.merges).toEqual([]);
+  });
+
+  it("hosted pair: the public pull request's author is checked even when its repository reports itself private", async () => {
+    const w = await world({ executionMode: "sandbox", pub: { authorLogin: "outsider", isPublic: false } });
+    expect(await gate(w)).toMatchObject({ outcome: "ready_human_merges", reasons: ["pr_author_untrusted"] });
+    expect(w.pub.merges).toEqual([]);
+  });
+
+  it("hosted pair, queue path: an outsider is refused with no enqueue and no auto-merge; an admin author of the same pull request is enqueued", async () => {
+    const queued = { mergeQueue: { exists: true, mutations: [] }, rulesetRules: [{ type: "merge_queue", enforcement: "active" }] };
+    const run = (w: World) =>
+      runMergeGateForItem(
+        { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: fakeGitHubRest(w.priv), queueDocuments: QUEUE_DOCUMENTS, publicPlane: { open: async () => fakeGitHubRest(w.pub), read: readPublicPullRequest(h.runWriterPool) } },
+        { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber },
+      );
+    const out = await world({ executionMode: "sandbox", pub: { authorLogin: "outsider", collaborators: { outsider: "triage" }, ...queued } });
+    expect(await run(out)).toMatchObject({ outcome: "ready_human_merges", reasons: ["pr_author_untrusted"] });
+    expect(out.pub.mergeQueue!.mutations).toEqual([]);
+    const admin = await world({ executionMode: "sandbox", pub: { authorLogin: "carol", collaborators: { carol: "admin" }, ...queued } });
+    expect(await run(admin)).toMatchObject({ outcome: "merge_enqueued" });
+    expect(admin.pub.mergeQueue!.mutations).toHaveLength(1);
   });
 });

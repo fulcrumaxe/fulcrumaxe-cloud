@@ -110,6 +110,16 @@ export interface FakeRepoState {
     removal?: { createdAt: string; reason: string | null; actor: { __typename: string } | null; beforeCommit: { oid: string } | null };
     removalFails?: boolean;
   };
+  /**
+   * D#598 P1d-1: the pull request's author (`user.login`; GitHub's own shape is `{ login }`) and whether the repository is public (`base.repo.private` is the opposite).
+   * Unset: a private repository and an author the gate does not look at. `collaborators` answers `GET .../collaborators/{login}/permission` with GitHub's body
+   * (`permission` is the legacy word that folds maintain into write and triage into read; `role_name` is exact); a login it does not list is a 404. Logins are compared
+   * case-insensitively, as GitHub does. `permissionFails` answers every such read with that status. Every login asked about is in `permissionReads`.
+   */
+  isPublic?: boolean;
+  authorLogin?: string | null;
+  collaborators?: Record<string, string>;
+  permissionReads?: string[];
   /** The repository's GitHub id as `GET /repos/{owner}/{repo}` reports it (default: `defaultGhId(owner, name)`, different for every repository). */
   ghId?: number;
 }
@@ -166,7 +176,16 @@ export function fakeGitHubRest(s: FakeRepoState): GitHubHttp {
       s.requests.push(req);
       const path = req.path;
       if (req.method === "GET" && path === `${base}/pulls/${s.prNumber}`) {
-        return json(200, { node_id: `PR_kwDOfake${s.prNumber}`, number: s.prNumber, state: s.state, merged: s.merged, draft: s.draft, mergeable: s.mergeable === undefined ? true : s.mergeable, mergeable_state: s.mergeableState ?? "clean", head: { sha: s.headSha, ref: `fx/issue-7`, repo: { full_name: `${s.owner}/${s.name}` } }, base: { ref: s.baseRef, repo: { full_name: `${s.owner}/${s.name}`, default_branch: s.defaultBranch ?? "main" } } });
+        return json(200, { node_id: `PR_kwDOfake${s.prNumber}`, number: s.prNumber, state: s.state, merged: s.merged, draft: s.draft, mergeable: s.mergeable === undefined ? true : s.mergeable, mergeable_state: s.mergeableState ?? "clean", head: { sha: s.headSha, ref: `fx/issue-7`, repo: { full_name: `${s.owner}/${s.name}` } }, base: { ref: s.baseRef, repo: { full_name: `${s.owner}/${s.name}`, default_branch: s.defaultBranch ?? "main", private: s.isPublic !== true } }, user: s.authorLogin === null ? null : { login: s.authorLogin ?? "fixture-author" } });
+      }
+      const perm = new RegExp(`^${base}/collaborators/([^/]+)/permission$`).exec(path);
+      if (req.method === "GET" && perm) {
+        const login = decodeURIComponent(perm[1]!);
+        (s.permissionReads ??= []).push(login);
+        const role = Object.entries(s.collaborators ?? {}).find(([k]) => k.toLowerCase() === login.toLowerCase())?.[1];
+        if (role === undefined) return NOT_FOUND;
+        const legacy = role === "maintain" ? "write" : role === "triage" ? "read" : role;
+        return json(200, { permission: legacy, role_name: role, user: { login } });
       }
       if (req.method === "GET" && path === `${base}/pulls/${s.prNumber}/files`) {
         if (s.filesFail) return json(s.filesFail, { message: "Server Error" });
@@ -250,7 +269,7 @@ export function fakeGitHubRest(s: FakeRepoState): GitHubHttp {
         s.state = "closed";
         return json(200, { merged: true, sha: "f".repeat(40) });
       }
-      if (req.method === "GET" && path === base) return json(200, { id: s.ghId ?? defaultGhId(s.owner, s.name), full_name: `${s.owner}/${s.name}`, default_branch: s.defaultBranch ?? "main", private: false });
+      if (req.method === "GET" && path === base) return json(200, { id: s.ghId ?? defaultGhId(s.owner, s.name), full_name: `${s.owner}/${s.name}`, default_branch: s.defaultBranch ?? "main", private: s.isPublic === undefined ? false : !s.isPublic });
       const commit = /^\/repos\/[^/]+\/[^/]+\/commits\/([0-9a-f]{40})$/.exec(path);
       if (req.method === "GET" && commit) return json(200, { sha: commit[1], parents: (s.commitParents?.[commit[1]!] ?? [FAKE_MERGE_BASE]).map((sha) => ({ sha })) });
       const compare = /^\/repos\/[^/]+\/[^/]+\/compare\/(.+)\.\.\.([0-9a-f]{40})$/.exec(path);

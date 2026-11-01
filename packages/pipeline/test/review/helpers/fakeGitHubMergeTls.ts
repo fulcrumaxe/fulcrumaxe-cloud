@@ -77,6 +77,9 @@ export interface MergeWorld {
   baseRef: string;
   /** The repository default branch GitHub reports on the PR (`base.repo.default_branch`); "main" when a fixture says nothing. */
   defaultBranch?: string;
+  /** D#598 P1d-1: the pull request's author (`user.login`) and whether the repository is public (`base.repo.private` is the opposite). Unset: a private repository. */
+  prAuthorLogin?: string | null;
+  isPublic?: boolean;
   headSha: string;
   /** The commit update-branch produces (the head after the refresh). */
   refreshedHeadSha: string;
@@ -277,7 +280,8 @@ export function mergeRoute(w: MergeWorld): (req: GhRequest) => GhReply | Promise
         mergeable,
         mergeable_state: state,
         head: { sha: w.headSha, ref: "fx/item-7", repo: { full_name: `${w.owner}/${w.name}` } },
-        base: { ref: w.baseRef, repo: { full_name: `${w.owner}/${w.name}`, default_branch: w.defaultBranch ?? "main" } },
+        base: { ref: w.baseRef, repo: { full_name: `${w.owner}/${w.name}`, default_branch: w.defaultBranch ?? "main", private: w.isPublic !== true } },
+        user: w.prAuthorLogin === null ? null : { login: w.prAuthorLogin ?? "fixture-author" },
       });
     }
 

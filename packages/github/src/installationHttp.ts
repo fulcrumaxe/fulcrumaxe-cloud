@@ -371,7 +371,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
         }
         const message = !QUIET_ERROR_KINDS.has(kind) && res.status >= 400 && body !== null && typeof body === "object" && "message" in body && typeof (body as { message: unknown }).message === "string" ? (body as { message: string }).message.replace(MESSAGE_RE, "").slice(0, 120) : null;
         if (kind === "revert_pr" && req.method === "GET" && res.status === 200 && isRecord(body) && typeof body["node_id"] === "string" && /^[A-Za-z0-9_=-]{4,100}$/.test(body["node_id"])) revertNodeId = body["node_id"];
-        deps.log?.({ method: req.method, path: req.path.replace(/^\/repos\/[^/]+\/[^/]+/, "/repos/:o/:r"), status: res.status, message });
+        deps.log?.({ method: req.method, path: req.path.replace(/^\/repos\/[^/]+\/[^/]+/, "/repos/:o/:r").replace(/\/collaborators\/[^/]+\/permission$/, "/collaborators/:login/permission"), status: res.status, message });
         return { status: res.status, body };
       },
     };

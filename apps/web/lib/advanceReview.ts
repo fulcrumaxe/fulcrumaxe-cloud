@@ -3,6 +3,7 @@ import { markRunnerWork } from "@fx/core/src/pendingWork.js";
 import { settleAuthorizedOrder } from "@fx/runner-cloud";
 import { createCiGate, readPublicPullRequest, createPgLocalReviewOptIn, debaterEnabledFor, loadReviewContext, recordMergeOnlyRecheck, recordRound, resumeAgentRun, runMergeGateForItem, type GatheredVerdict, type GitHubHttp, type VerdictRole } from "@fx/pipeline";
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "@fx/github";
+import { mergeGateAuthorTrust } from "./github/authorTrust";
 import { openInstallationHttp } from "./github/installationHttp";
 import { openForRepo } from "./github/localOnlyHttp";
 import { createAppRunPullRequestPort } from "./github/runnerPullRequest";
@@ -91,6 +92,8 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
             // D#694 B5 and B6-1: the five documents the hosted merge client pins (@fx/github); the pipeline package does not depend on it.
             queueDocuments: { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT },
             localReviewOptIn: createPgLocalReviewOptIn(pool),
+            // D#598 P1d-1: who the platform merges for (its own App bots, the intake allowlist); the merge queue's tick reaches the gate through here.
+            authorTrust: mergeGateAuthorTrust,
             publicPlane: { open: openPublicHttp, read: readPublicPullRequest(pool) },
             mergeDelegate: async ({ accountId, workItemId, sha, reviewedHead }) => {
               // No store means no order can be placed: a human merge with the PR1 reason, never a merge.

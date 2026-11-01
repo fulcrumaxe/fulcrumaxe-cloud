@@ -1262,3 +1262,27 @@ describe("D#694 B6-5: the merge-queue line and the banner read the derived merge
     expect(Object.values(QUEUE_SENTENCES).every((v) => typeof v === "string" && v.length > 10 && !/undefined|null|\$\{/.test(v))).toBe(true);
   });
 });
+
+// D#598 P1d-1: both author stops have approved copy in both maps, rendered as plain text, and neither is a "person presses merge" stop.
+describe("D#598 P1d-1: the author stops", () => {
+  const COPY = {
+    pr_author_untrusted: [
+      "This pull request was opened by someone who isn't an admin or maintainer of the repository, or the platform's app. The platform won't merge it. A person can review it and merge it on GitHub.",
+      "Opened by someone outside the repository's admins and maintainers",
+    ],
+    pr_author_unverified: ["We couldn't check who opened this pull request, so the platform didn't merge it. It checks again on the next try.", "Couldn't check who opened the pull request"],
+  };
+
+  for (const [code, [long, short]] of Object.entries(COPY)) {
+    it(`${code}: the long sentence on the step row, the short line on the card, no null or undefined anywhere`, () => {
+      expect(reasonWord(code)).toBe(long);
+      expect(blockingSentence(code)).toBe(short);
+      const row = stepView({ at: "2026-11-01T12:00:00Z", kind: "merge_gate", state: "done", result: "ready_human_merges", reasons: [code] });
+      expect(row.reasons).toEqual([long]);
+      expect(mergeBlockSentence({ steps: [{ result: "ready_human_merges", reasons: [code] }] })).toBe(short);
+      for (const text of [long, short, row.text, ...row.reasons]) expect(text).not.toMatch(/null|undefined|_/);
+      expect(PERSON_MERGES_REASONS).not.toContain(code);
+    });
+  }
+
+});

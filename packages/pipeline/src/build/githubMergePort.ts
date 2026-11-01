@@ -344,6 +344,9 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
         draft: body.draft !== false,
         baseRef: base.ref,
         defaultBranch: base.repo.default_branch,
+        // D#598 P1d-1: the author and whether the repository is public, on the same read. A missing or blank login is null; `private` is a boolean on GitHub's side.
+        authorLogin: isObj(body.user) && typeof body.user.login === "string" && body.user.login.trim() !== "" ? body.user.login : null,
+        repoPublic: typeof base.repo.private === "boolean" ? !base.repo.private : null,
       },
       baseRef: base.ref,
     };
