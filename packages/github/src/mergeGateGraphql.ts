@@ -1,12 +1,12 @@
 import { GH_OWNER_LOGIN_RE } from "./eventMapper.js";
 
 /**
- * D#694 B5a and B6-1: the five GraphQL documents the hosted `merge_gate` client may send, and the shape check for each one's variables.
+ * D#694 B5a, B6-1 and B6-6: the six GraphQL documents the hosted `merge_gate` client may send, and the shape check for each one's variables.
  *
  * Threat model: a compromised or buggy caller of the hosted merge client tries to send an arbitrary GraphQL document with the
  * installation's write token. So the client (installationHttp.ts) lets `POST /graphql` through only when the `query` is `===` one of
  * these literal strings (no trimming, no parsing) and the variables pass that document's check below, with no extra keys.
- * Changing a document is a visible edit: the snapshot test pins all five.
+ * Changing a document is a visible edit: the snapshot test pins all six.
  */
 export const MERGE_QUEUE_READ_DOCUMENT = "query($owner: String!, $name: String!, $branch: String!) { repository(owner: $owner, name: $name) { mergeQueue(branch: $branch) { id } } }";
 export const ENQUEUE_PULL_REQUEST_DOCUMENT =
@@ -18,6 +18,13 @@ export const DEQUEUE_PULL_REQUEST_DOCUMENT = "mutation($pullRequestId: ID!) { de
 /** D#694 B6-1: one pull request's state and its queue entry (null when it is not queued), read by number inside the pinned repository. */
 export const MERGE_QUEUE_ENTRY_DOCUMENT =
   "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { state merged headRefOid mergeQueueEntry { id state position } } } }";
+
+/**
+ * D#694 B6-6: the newest removal of one pull request from the merge queue, read by number inside the pinned repository. `reason` is GitHub's own code, `actor.__typename` says whether a
+ * person (`User`) or an app (`Bot`) did it, and `beforeCommit.oid` is the head that was queued.
+ */
+export const MERGE_QUEUE_REMOVAL_DOCUMENT =
+  "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) { nodes { ... on RemovedFromMergeQueueEvent { createdAt reason actor { __typename } beforeCommit { oid } } } } } } }";
 
 /** The largest request body the allowance accepts, measured on the JSON the client would send. */
 export const MERGE_GATE_GRAPHQL_MAX_BYTES = 4096;
@@ -40,6 +47,7 @@ const CHECKS: ReadonlyMap<string, (v: Record<string, unknown>) => boolean> = new
   [ENQUEUE_PULL_REQUEST_DOCUMENT, (v) => keysAre(v, "expectedHeadOid,pullRequestId") && str(v["pullRequestId"], NODE_ID_RE) && str(v["expectedHeadOid"], OID_RE)],
   [DEQUEUE_PULL_REQUEST_DOCUMENT, (v) => keysAre(v, "pullRequestId") && str(v["pullRequestId"], NODE_ID_RE)],
   [MERGE_QUEUE_ENTRY_DOCUMENT, (v) => keysAre(v, "name,number,owner") && str(v["owner"], GH_OWNER_LOGIN_RE) && str(v["name"], NAME_RE) && typeof v["number"] === "number" && Number.isSafeInteger(v["number"]) && v["number"] >= 1],
+  [MERGE_QUEUE_REMOVAL_DOCUMENT, (v) => keysAre(v, "name,number,owner") && str(v["owner"], GH_OWNER_LOGIN_RE) && str(v["name"], NAME_RE) && typeof v["number"] === "number" && Number.isSafeInteger(v["number"]) && v["number"] >= 1],
   [ENABLE_AUTO_MERGE_DOCUMENT, (v) => keysAre(v, "expectedHeadOid,mergeMethod,pullRequestId") && str(v["pullRequestId"], NODE_ID_RE) && str(v["expectedHeadOid"], OID_RE) && v["mergeMethod"] === "SQUASH"],
 ]);
 
@@ -64,6 +72,6 @@ export function pinnedMergeGateBody(body: unknown, repo: { owner: string; name: 
   if (typeof query !== "string" || !isRecord(variables)) return undefined;
   const check = CHECKS.get(query);
   // The queue reads name the repository: it must be the one this client is pinned to.
-  if ((query === MERGE_QUEUE_READ_DOCUMENT || query === MERGE_QUEUE_ENTRY_DOCUMENT) && (variables["owner"] !== repo.owner || variables["name"] !== repo.name)) return undefined;
+  if ((query === MERGE_QUEUE_READ_DOCUMENT || query === MERGE_QUEUE_ENTRY_DOCUMENT || query === MERGE_QUEUE_REMOVAL_DOCUMENT) && (variables["owner"] !== repo.owner || variables["name"] !== repo.name)) return undefined;
   return check !== undefined && check(variables) ? copy : undefined;
 }

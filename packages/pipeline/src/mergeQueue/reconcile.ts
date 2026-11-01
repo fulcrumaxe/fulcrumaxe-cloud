@@ -1,10 +1,10 @@
 import type { PoolClient } from "pg";
-import { ACTOR_YOU, removeIntentRecent } from "@fx/core/src/work-items/queueIntent.js";
-import { DEQUEUE_SUCCESS_CODES, enqueueDedupeKey, listHeadRemovals, personRequeueCycle, queueEscalationKey, recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
+import { removeIntentRecent } from "@fx/core/src/work-items/queueIntent.js";
+import { DEQUEUE_SUCCESS_CODES, dequeueReasonCode, enqueueDedupeKey, listHeadRemovals, personRequeueCycle, queueEscalationKey, queueRemovalActor, recordDriverEvent, removalFactReason } from "@fx/core/src/work-items/driverEvents.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, StageInputError } from "@fx/core/src/work-items/stages.js";
 import { reportError } from "@fx/telemetry";
-import type { QueueEntryReading } from "../build/mergeGate.js";
+import type { QueueEntryReading, QueueRemovalReading } from "../build/mergeGate.js";
 import type { PullRequestRef } from "../build/types.js";
 import { handToPerson } from "./events.js";
 import { MERGE_QUEUE_RECONCILE_AFTER_MINUTES, MERGE_QUEUE_RECONCILE_NO_ANSWER_HOURS, MERGE_QUEUE_RECONCILE_READ_INTERVAL_MINUTES } from "./policy.js";
@@ -19,7 +19,7 @@ import { recordQueueMerge } from "./tick.js";
  *
  *  - merged: the queue's merge, recorded and settled the way the webhook does (`merged_via_queue`, the entry, then the item);
  *  - closed without merging: the entry is closed;
- *  - no longer in the queue: a `merge_dequeued` fact (code `not_in_queue_reconciled`, GitHub's own, so the first is retried once), then `settleHostDequeue`, the webhook's path
+ *  - no longer in the queue: a `merge_dequeued` fact (code `not_in_queue_reconciled`; the actor is read once from GitHub's removal event, see `removalActor`), then `settleHostDequeue`, the webhook's path
  *    over `removalVerdict`. The take-time `stopOnRemovals` decides from the same facts, so a person's removal and a used-up retry hold here too;
  *  - in the queue again after a recorded removal (queued by hand, the delivery lost): the `merge_enqueued` fact is recorded, so it reads as queued and is not enqueued twice;
  *  - still in the queue: left alone, until NO_ANSWER hours have passed since the enqueue: then the entry stops and the item goes to `needs_human`.
@@ -28,9 +28,20 @@ import { recordQueueMerge } from "./tick.js";
 export const NO_ANSWER_REASON = "merge_queue_no_answer";
 export const NOT_IN_QUEUE_CODE = "not_in_queue_reconciled";
 
+/**
+ * D#694 B6-6: who took the head out of the queue, from GitHub's removal event, by the webhook's own rule (`queueRemovalActor`: `manual` is a person; with no reason the sender's type decides;
+ * any other reason is the queue's). It fails toward a person (no automatic retry, never toward a merge): no event, a read that failed (`undefined`), an event for another head
+ * than the queued one, or an actor that is neither a `User` nor a `Bot` all read as `user`. Who "you" are is not decided here; the removal is matched with the audit row at read time (B6-5).
+ */
+export function removalActor(removal: QueueRemovalReading | null | undefined, queuedHead: string): "user" | "app" {
+  if (!removal || removal.beforeCommitOid !== queuedHead) return "user";
+  if (removal.actorType !== "User" && removal.actorType !== "Bot") return "user";
+  return queueRemovalActor(dequeueReasonCode(removal.reason), removal.actorType);
+}
+
 export interface ReconcileDeps {
   /** Opens the repository's GitHub client, only when there is something to read; null when the cloud does not read this repository. */
-  github(): Promise<{ getQueueEntry(pr: PullRequestRef): Promise<QueueEntryReading> } | null>;
+  github(): Promise<{ getQueueEntry(pr: PullRequestRef): Promise<QueueEntryReading>; getLastQueueRemoval?(pr: PullRequestRef): Promise<QueueRemovalReading | null> } | null>;
   inTenant<T>(accountId: string, fn: (client: PoolClient) => Promise<T>): Promise<T>;
   now?(): Date;
 }
@@ -121,8 +132,21 @@ export async function reconcileHostQueued(deps: ReconcileDeps, input: { accountI
         reportError(err, { stage: "merge_queue.reconcile_read" });
       }
     }
+    // The removal event is read only for a pull request that is open and not queued and whose removal this sweep is about to record (one extra read, not counted in `reads`). A
+    // failed read leaves `removal` undefined, which `removalActor` reads as a person.
+    let removal: QueueRemovalReading | null | undefined;
+    let pressed = false;
+    if (reading && !reading.merged && reading.state === "open" && reading.entry === null && row.removedAt === null && row.enqueueCode !== "auto_merge") {
+      try {
+        // A recent Remove press of this head is "you" and needs no answer from GitHub: the read is skipped.
+        pressed = await deps.inTenant(accountId, (c) => removeIntentRecent(c, accountId, row.workItemId, row.prNumber, row.headSha));
+        if (!pressed && github?.getLastQueueRemoval) removal = await github.getLastQueueRemoval({ repoId, prNumber: row.prNumber });
+      } catch (err) {
+        reportError(err, { stage: "merge_queue.reconcile_removal_read" });
+      }
+    }
     try {
-      const done = await deps.inTenant(accountId, (c) => settle(c, { accountId, repoId, row, reading, now }));
+      const done = await deps.inTenant(accountId, (c) => settle(c, { accountId, repoId, row, reading, removal, pressed, now }));
       if (done === "settled") out.settled += 1;
       if (done === "escalated") out.escalated += 1;
     } catch (err) {
@@ -132,8 +156,8 @@ export async function reconcileHostQueued(deps: ReconcileDeps, input: { accountI
   return out;
 }
 
-async function settle(client: PoolClient, a: { accountId: string; repoId: string; row: Candidate; reading: QueueEntryReading | null; now: Date }): Promise<"settled" | "escalated" | "none"> {
-  const { accountId, repoId, row, reading, now } = a;
+async function settle(client: PoolClient, a: { accountId: string; repoId: string; row: Candidate; reading: QueueEntryReading | null; removal?: QueueRemovalReading | null; pressed?: boolean; now: Date }): Promise<"settled" | "escalated" | "none"> {
+  const { accountId, repoId, row, reading, removal, pressed = false, now } = a;
   const base = { workItemId: row.workItemId, prNumber: row.prNumber };
   if (reading?.merged) {
     // The queue's merge, as the webhook records it: one row per pull request and head, the entry settled as the gate's, then the item.
@@ -150,11 +174,11 @@ async function settle(client: PoolClient, a: { accountId: string; repoId: string
   if (reading?.state === "closed") return (await settlePullRequest(client, { accountId, repoId, prNumber: row.prNumber, merged: false })) ? "settled" : "none";
   // An auto-merge enqueue has no queue entry until its checks pass, so "no entry" is not a removal for it (unless a removal fact says so); the no-answer limit covers it.
   if (reading && reading.entry === null && (row.enqueueCode !== "auto_merge" || row.removedAt !== null)) {
-    // Gone from the host's queue, unmerged. GitHub's own removal unless a Remove press of this head was recorded within minutes (then it is "you", and no retry follows) or a removal fact already says otherwise: the first is retried once (the take enqueues it again).
+    // Gone from the host's queue, unmerged. A Remove press of this head within minutes makes it "you" (no retry follows); otherwise GitHub's removal event decides (`removalActor`), failing toward a person. An `app` removal is retried once (the take enqueues it again). Recorded unless a removal fact already says otherwise.
     let changed = false;
     if (row.removedAt === null) {
       const key = `dequeued:reconciled:${row.enqueueSeq}`;
-      changed = (await recordDriverEvent(client, accountId, { ...base, kind: "merge_dequeued", dedupeKey: key, code: NOT_IN_QUEUE_CODE, reasons: [(await removeIntentRecent(client, accountId, row.workItemId, row.prNumber, row.headSha)) ? ACTOR_YOU : "actor_app"], headSha: row.headSha, ...(row.queueEntryId !== null ? { queueEntryId: row.queueEntryId } : {}) })).recorded;
+      changed = (await recordDriverEvent(client, accountId, { ...base, kind: "merge_dequeued", dedupeKey: key, code: NOT_IN_QUEUE_CODE, reasons: [removalFactReason(pressed, removalActor(removal, row.headSha))], headSha: row.headSha, ...(row.queueEntryId !== null ? { queueEntryId: row.queueEntryId } : {}) })).recorded;
     }
     const s = await settleHostDequeue(client, { accountId, repoId, prNumber: row.prNumber, headSha: row.headSha });
     if (s.outcome === "exhausted") await handToPerson(client, accountId, row.workItemId, row.headSha);

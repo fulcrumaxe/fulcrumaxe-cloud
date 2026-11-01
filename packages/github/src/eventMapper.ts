@@ -11,8 +11,8 @@ import {
 import { classifyAuthor } from '@fx/trust';
 import { recordStage } from '@fx/core/src/work-items/recordStage.js';
 import { cleanWorkItemTitle } from '@fx/core/src/work-items/title.js';
-import { DEQUEUE_SUCCESS_CODES, dequeueReasonCode, recordDriverEvent } from '@fx/core/src/work-items/driverEvents.js';
-import { ACTOR_YOU, removeIntentRecent } from '@fx/core/src/work-items/queueIntent.js';
+import { DEQUEUE_SUCCESS_CODES, dequeueReasonCode, queueRemovalActor, recordDriverEvent, removalFactReason } from '@fx/core/src/work-items/driverEvents.js';
+import { removeIntentRecent } from '@fx/core/src/work-items/queueIntent.js';
 import { reportError } from '@fx/telemetry';
 import { IllegalStageTransitionError } from '@fx/core/src/work-items/stages.js';
 import { withTenant } from '@fx/db/src/withTenant.js';
@@ -163,8 +163,7 @@ export interface TransitionPrEvent {
  * when this was written, so `manual` is the one value relied on; the product's own removal, B6-5, will be told apart by the intent it records itself.)
  */
 export function queueActor(reasonCode: string | null, senderType: unknown): 'user' | 'app' {
-  if (reasonCode === 'manual') return 'user';
-  return (reasonCode === null || reasonCode === 'unspecified') && senderType === 'User' ? 'user' : 'app';
+  return queueRemovalActor(reasonCode, senderType);
 }
 
 /**
@@ -1019,7 +1018,7 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
         kind: 'merge_dequeued',
         dedupeKey: `dequeued:${ctx.deliveryId}`,
         code: mapped.reason ?? 'unspecified',
-        reasons: [byYou ? ACTOR_YOU : `actor_${mapped.actor}`],
+        reasons: [removalFactReason(byYou, mapped.actor)],
         headSha: mapped.headSha,
         prNumber: mapped.prNumber,
         ...(entry !== null && entry.headSha === mapped.headSha && entry.queueEntryId !== null ? { queueEntryId: entry.queueEntryId } : {}),

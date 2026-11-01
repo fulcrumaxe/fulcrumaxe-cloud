@@ -6,6 +6,7 @@ import {
   ENQUEUE_PULL_REQUEST_DOCUMENT,
   MERGE_QUEUE_ENTRY_DOCUMENT,
   MERGE_QUEUE_READ_DOCUMENT,
+  MERGE_QUEUE_REMOVAL_DOCUMENT,
   pinnedMergeGateBody,
 } from "../../../github/src/mergeGateGraphql.js";
 
@@ -17,7 +18,7 @@ import {
 const HEAD = "a".repeat(40);
 const NEW = "c".repeat(40);
 const PR = { repoId: "repo-1", prNumber: 7 };
-const DOCS = { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT };
+const DOCS = { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT, removal: MERGE_QUEUE_REMOVAL_DOCUMENT };
 
 interface Fake {
   /** `Repository.mergeQueue` answer for the read document. */
@@ -33,6 +34,8 @@ interface Fake {
   /** B6-1: the dequeue mutation's answer, and the entry read's `pullRequest` answer. */
   dequeue: { errors?: unknown[]; data?: unknown };
   pullRequest: unknown;
+  /** B6-6: the removal read's `pullRequest` answer. */
+  removalPr: unknown;
   /** The direct merge call's answer. */
   mergeAnswer: { status: number; body: unknown };
   owner: string;
@@ -53,6 +56,7 @@ const fresh = (): Fake => ({
   autoMerge: { data: { enablePullRequestAutoMerge: { pullRequest: { id: "PR_kwDOabc123" } } } },
   dequeue: { data: { dequeuePullRequest: { mergeQueueEntry: { id: "MQE_kwDOentry1" } } } },
   pullRequest: { state: "OPEN", merged: false, headRefOid: HEAD, mergeQueueEntry: { id: "MQE_kwDOentry1", state: "AWAITING_CHECKS", position: 2 } },
+  removalPr: { timelineItems: { nodes: [] } },
   mergeAnswer: { status: 200, body: { merged: true, sha: "f".repeat(40) } },
   owner: "acme",
   name: "widgets",
@@ -75,6 +79,7 @@ function httpFor(f: Fake): GitHubHttp {
         if (query === DOCS.enqueue) return { status: 200, body: f.enqueue };
         if (query === DOCS.dequeue) return { status: 200, body: f.dequeue };
         if (query === DOCS.entry) return { status: 200, body: { data: { repository: { pullRequest: f.pullRequest } } } };
+        if (query === DOCS.removal) return { status: 200, body: { data: { repository: { pullRequest: f.removalPr } } } };
         return { status: 200, body: f.autoMerge };
       }
       f.reached.push(req);
@@ -554,5 +559,52 @@ describe("D#694 B6-3: getMergeQueueInfo (the product queue's bound)", () => {
     expect([pulls(), gql()]).toEqual([1, 1]);
     await port.getMergeQueueInfo!(PR);
     expect([pulls(), gql()]).toEqual([2, 1]);
+  });
+});
+
+describe("getLastQueueRemoval (B6-6)", () => {
+  const node = { createdAt: "2026-11-01T10:00:00Z", reason: "MANUAL", actor: { __typename: "User" }, beforeCommit: { oid: HEAD } };
+  const withNodes = (nodes: unknown) => ({ timelineItems: { nodes } });
+
+  it("reads the newest removal by number inside the repository with the pinned document and maps its facts", async () => {
+    const f = fresh();
+    f.removalPr = withNodes([node]);
+    expect(await portFor(f).getLastQueueRemoval!(PR)).toEqual({ createdAt: node.createdAt, reason: "MANUAL", actorType: "User", beforeCommitOid: HEAD });
+    expect(f.reached.filter((r) => r.path === "/graphql").map((r) => r.body)).toEqual([{ query: MERGE_QUEUE_REMOVAL_DOCUMENT, variables: { owner: "acme", name: "widgets", number: 7 } }]);
+  });
+
+  it("no event is null; a null reason, actor or commit is kept as null, never invented", async () => {
+    const f = fresh();
+    expect(await portFor(f).getLastQueueRemoval!(PR)).toBeNull();
+    f.removalPr = withNodes([{ createdAt: node.createdAt, reason: null, actor: null, beforeCommit: null }]);
+    expect(await portFor(f).getLastQueueRemoval!(PR)).toEqual({ createdAt: node.createdAt, reason: null, actorType: null, beforeCommitOid: null });
+  });
+
+  it.each([
+    ["no pull request", null],
+    ["nodes not a list", { timelineItems: { nodes: {} } }],
+    ["a node without createdAt", withNodes([{ ...node, createdAt: 5 }])],
+    ["a reason that is not text", withNodes([{ ...node, reason: 5 }])],
+    ["an actor without a type", withNodes([{ ...node, actor: {} }])],
+    ["a commit id that is not a sha", withNodes([{ ...node, beforeCommit: { oid: "main" } }])],
+  ])("a malformed answer (%s) throws, never a reading", async (_n, removalPr) => {
+    const f = fresh();
+    f.removalPr = removalPr;
+    await expect(portFor(f).getLastQueueRemoval!(PR)).rejects.toThrow("malformed");
+  });
+
+  it("GraphQL errors and an HTTP 500 throw; no removal document, a changed document and a runner_local port refuse", async () => {
+    const e = fresh();
+    e.graphqlErrors = [{ message: "boom" }];
+    await expect(portFor(e).getLastQueueRemoval!(PR)).rejects.toThrow("GraphQL error");
+    const g = fresh();
+    g.graphqlStatus = 500;
+    await expect(portFor(g).getLastQueueRemoval!(PR)).rejects.toThrow("unexpected status 500");
+    await expect(portFor(fresh(), { queueDocuments: { ...DOCS, removal: undefined as unknown as string } }).getLastQueueRemoval!(PR)).rejects.toThrow("no removal document");
+    const changed = fresh();
+    await expect(portFor(changed, { queueDocuments: { ...DOCS, removal: `${DOCS.removal} ` } }).getLastQueueRemoval!(PR)).rejects.toThrow("path_refused");
+    expect(changed.reached).toEqual([]);
+    const local = createGitHubMergeGatePort({ http: httpFor(fresh()), resolveRepo: async () => ({ owner: "acme", name: "widgets" }), markReadyForHumanMerge: async () => undefined, queueDocuments: DOCS, local: { http: { ...httpFor(fresh()), graphql: async () => ({ status: 200, body: {} }) }, recordedBranch: async () => "b" } });
+    await expect(local.getLastQueueRemoval!(PR)).rejects.toThrow("allowlist");
   });
 });

@@ -3,7 +3,7 @@ import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { createGitHubMergeGatePort, mergeQueue, type GitHubHttp } from "@fx/pipeline";
 import type { AdvanceReviewDeps, RunnerPlaneMergeStore } from "@fx/worker";
-import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, type GithubWebhookPayload, type GithubWebhookEventName } from "@fx/github";
+import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, MERGE_QUEUE_REMOVAL_DOCUMENT, type GithubWebhookPayload, type GithubWebhookEventName } from "@fx/github";
 import { createReviewDeps } from "./advanceReview";
 import { bindCompleteDeltaReview, bindStartDeltaReview } from "./mergeQueueDeltaReview";
 import { getWorker } from "./worker";
@@ -54,7 +54,7 @@ export async function openQueueGitHub(pool: Pool, open: typeof openInstallationH
     markReadyForHumanMerge: async () => undefined,
     mergeMethod: "squash",
     // D#694 B6-3: without the pinned documents the port answers `direct` before any read, so the tick would update queue-mode branches and never see the rule's batch size.
-    queueDocuments: { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT },
+    queueDocuments: { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT, removal: MERGE_QUEUE_REMOVAL_DOCUMENT },
   });
 }
 
@@ -141,7 +141,7 @@ export function sweepMergeQueue(deps: MergeQueueTickerDeps): Promise<mergeQueue.
         {
           github: async () => {
             const github = await openQueueGitHub(deps.pool, deps.open ?? openInstallationHttp, target);
-            return github ? { getQueueEntry: (pr) => github.getQueueEntry!(pr) } : null;
+            return github ? { getQueueEntry: (pr) => github.getQueueEntry!(pr), getLastQueueRemoval: (pr) => github.getLastQueueRemoval!(pr) } : null;
           },
           inTenant: (accountId, fn) => withTenant(deps.pool, accountId, fn),
         },

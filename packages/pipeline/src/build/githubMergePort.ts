@@ -7,6 +7,7 @@ import {
   type EnqueueOutcome,
   type QueueEntryReading,
   type QueueEntryState,
+  type QueueRemovalReading,
   type MergeBlockReason,
   type MergeQueueMode,
   type MergeCallOutcome,
@@ -68,7 +69,7 @@ export interface LocalGitHubHttp extends GitHubHttp {
 export const isLocalGitHubHttp = (http: GitHubHttp): http is LocalGitHubHttp => typeof (http as Partial<LocalGitHubHttp>).graphql === "function";
 
 /**
- * D#694 B5 and B6-1: the five GraphQL documents the hosted `merge_gate` client lets through (`@fx/github`'s mergeGateGraphql.ts, pinned there byte for byte).
+ * D#694 B5, B6-1 and B6-6: the six GraphQL documents the hosted `merge_gate` client lets through (`@fx/github`'s mergeGateGraphql.ts, pinned there byte for byte).
  * The composition root hands them in, because this package does not depend on @fx/github; the port never writes a document of its own, so a document the
  * client has not pinned cannot be sent from here.
  */
@@ -80,6 +81,8 @@ export interface MergeQueueDocuments {
   dequeue: string;
   /** B6-1: the pull request and its queue entry, by number. */
   entry: string;
+  /** B6-6: the pull request's newest removal event from the queue. Absent, the port has no removal read. */
+  removal?: string;
 }
 
 export interface GitHubMergePortDeps {
@@ -680,6 +683,31 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
       }
       // GitHub's GraphQL state is OPEN, CLOSED or MERGED; a merged one is closed with the flag set.
       return { state: state === "open" ? "open" : "closed", merged: found.merged, headSha: found.headRefOid, entry };
+    },
+
+    async getLastQueueRemoval(pr): Promise<QueueRemovalReading | null> {
+      if (deps.local) throw new Error(`GitHub queue removal: ${LOCAL_REFUSED}`);
+      const document = deps.queueDocuments?.removal;
+      if (document === undefined) throw new Error("GitHub queue removal: no removal document");
+      await repoPath(pr);
+      const { owner, name } = await deps.resolveRepo(pr.repoId);
+      const body = await graphql(document, { owner, name, number: pr.prNumber });
+      if (body.errors !== undefined) throw new Error("GitHub queue removal: GraphQL error");
+      const nodes = dig(body, ["data", "repository", "pullRequest", "timelineItems", "nodes"]);
+      if (!Array.isArray(nodes)) bad("timelineItems.nodes");
+      const node: unknown = (nodes as unknown[])[(nodes as unknown[]).length - 1];
+      if (node === undefined) return null;
+      if (!isObj(node) || typeof node.createdAt !== "string") bad("removal.createdAt");
+      const { reason, actor, beforeCommit } = node as Json;
+      if (reason !== null && reason !== undefined && typeof reason !== "string") bad("removal.reason");
+      if (actor !== null && actor !== undefined && (!isObj(actor) || typeof actor.__typename !== "string")) bad("removal.actor");
+      if (beforeCommit !== null && beforeCommit !== undefined && (!isObj(beforeCommit) || typeof beforeCommit.oid !== "string" || !SHA_PATTERN.test(beforeCommit.oid))) bad("removal.beforeCommit");
+      return {
+        createdAt: (node as Json).createdAt as string,
+        reason: typeof reason === "string" ? reason : null,
+        actorType: isObj(actor) ? (actor.__typename as string) : null,
+        beforeCommitOid: isObj(beforeCommit) ? (beforeCommit.oid as string) : null,
+      };
     },
 
     async getDefaultBranchTip(pr) {

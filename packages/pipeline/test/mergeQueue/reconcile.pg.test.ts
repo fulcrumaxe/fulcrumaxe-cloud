@@ -2,10 +2,10 @@ import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import type { PoolClient } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { enqueueDedupeKey, recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
-import { NO_ANSWER_CODE, isQueuedSql } from "@fx/core/src/work-items/mergeReadiness.js";
+import { enqueueDedupeKey, listHeadRemovals, recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
+import { NO_ANSWER_CODE, isQueuedSql, removalRetryAllowed } from "@fx/core/src/work-items/mergeReadiness.js";
 import { PERSON_REQUEUE_REASON } from "@fx/core/src/work-items/queueIntent.js";
-import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "../../../github/src/mergeGateGraphql.js";
+import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, MERGE_QUEUE_REMOVAL_DOCUMENT } from "../../../github/src/mergeGateGraphql.js";
 import { createGitHubMergeGatePort, type GitHubHttp } from "../../src/build/githubMergePort.js";
 import { HOST_DEQUEUED_REASON, HOST_RETRY_USED_REASON, NO_ANSWER_REASON, readHostQueued, reconcileHostQueued, releaseToQueue, takeSlot } from "../../src/mergeQueue/index.js";
 import { fakeGitHubRest, freshRepo, type FakeRepoState } from "../review/helpers/fakeGitHubRest.js";
@@ -31,21 +31,23 @@ describe("reconcile of entries waiting in the host's queue [pg]", () => {
   const db = pgHarness();
   const tenant = <T>(r: QueueRepo, fn: (c: PoolClient) => Promise<T>) => withTenant(db.pureAppUserPool, r.accountId, fn);
   const at = (minutes: number) => () => new Date(Date.now() + minutes * 60_000);
-  const DOCS = { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT };
+  const DOCS = { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT, removal: MERGE_QUEUE_REMOVAL_DOCUMENT };
 
   /** GitHub: one strict fake per pull request behind the real port; `reads` counts the entry reads. */
-  const world = (r: QueueRepo, github: Record<number, Partial<FakeRepoState> & { entry?: boolean; readFails?: boolean }>) => {
+  /** GitHub's removal event for `head`: who did it and why. */
+  const removedBy = (head: string, actor: string | null, reason: string | null = "DEQUEUED", oid: string | null = head) => ({ createdAt: "2026-11-01T10:00:00Z", reason, actor: actor === null ? null : { __typename: actor }, beforeCommit: oid === null ? null : { oid } });
+  const world = (r: QueueRepo, github: Record<number, Partial<FakeRepoState> & { entry?: boolean; readFails?: boolean; removal?: NonNullable<FakeRepoState["mergeQueue"]>["removal"]; removalFails?: boolean }>) => {
     const states = new Map<number, FakeRepoState>();
     for (const [n, o] of Object.entries(github)) {
       const it = r.items.get(Number(n))!;
-      const { entry, readFails, ...rest } = o;
-      states.set(it.pr, freshRepo({ prNumber: it.pr, headSha: it.head, mergeQueue: { exists: true, mutations: [], ...(entry ? { entry: { id: "MQE_kwDOentry1", state: "QUEUED", position: 1 } } : {}), ...(readFails ? { readFails } : {}) }, ...rest }));
+      const { entry, readFails, removal, removalFails, ...rest } = o;
+      states.set(it.pr, freshRepo({ prNumber: it.pr, headSha: it.head, mergeQueue: { exists: true, mutations: [], ...(entry ? { entry: { id: "MQE_kwDOentry1", state: "QUEUED", position: 1 } } : {}), ...(readFails ? { readFails } : {}), ...(removal ? { removal } : {}), ...(removalFails ? { removalFails } : {}) }, ...rest }));
     }
     let reads = 0;
     const http: GitHubHttp = { request: (req) => (reads++, fakeGitHubRest(states.get(((req.body as { variables?: { number?: number } }).variables ?? {}).number!)!).request(req)) };
     const port = createGitHubMergeGatePort({ http, resolveRepo: async () => ({ owner: "acme", name: "widgets" }), markReadyForHumanMerge: async () => undefined, queueDocuments: DOCS });
     let opened = 0;
-    return { reads: () => reads, opened: () => opened, github: async () => (opened++, { getQueueEntry: (pr: Parameters<NonNullable<typeof port.getQueueEntry>>[0]) => port.getQueueEntry!(pr) }) };
+    return { reads: () => reads, opened: () => opened, github: async () => (opened++, { getQueueEntry: (pr: Parameters<NonNullable<typeof port.getQueueEntry>>[0]) => port.getQueueEntry!(pr), getLastQueueRemoval: (pr: Parameters<NonNullable<typeof port.getQueueEntry>>[0]) => port.getLastQueueRemoval!(pr) }) };
   };
   const run = (r: QueueRepo, w: ReturnType<typeof world>, o: { now?: () => Date; maxReads?: number } = {}) =>
     reconcileHostQueued({ github: w.github, inTenant: (id, fn) => withTenant(db.pureAppUserPool, id, fn), ...(o.now ? { now: o.now } : {}) }, { accountId: r.accountId, repoId: r.repoId, maxReads: o.maxReads ?? 20 });
@@ -110,7 +112,7 @@ describe("reconcile of entries waiting in the host's queue [pg]", () => {
   it("a lost removal counts as a dequeue: the first is retried once (the entry stays queued and is eligible again), the second hands the item to a person", async () => {
     const r = await setup([7]);
     const it = r.items.get(7)!;
-    const w = world(r, { 7: {} });
+    const w = world(r, { 7: { removal: removedBy(it.head, "Bot") } });
     expect(await run(r, w)).toEqual({ reads: 1, settled: 1, escalated: 0 });
     expect(await facts(it, "merge_dequeued")).toEqual(["not_in_queue_reconciled"]);
     expect(await r.entry(7)).toMatchObject({ state: "queued", reason: null });
@@ -140,12 +142,69 @@ describe("reconcile of entries waiting in the host's queue [pg]", () => {
       ]);
     await audit(pressed, 2);
     await audit(old, 11);
-    await run(r, world(r, { 7: {}, 8: {} }));
+    const w = world(r, { 7: {}, 8: { removal: removedBy(old.head, "Bot") } });
+    await run(r, w);
+    // The pressed head's removal is "you" without asking GitHub who did it: two entry reads and one removal read (for the older press).
+    expect(w.reads()).toBe(3);
     const reasons = async (it: QueueItem) => (await db.admin.query<{ reasons: string[] }>(`SELECT reasons FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'merge_dequeued'`, [it.workItemId])).rows.map((x) => x.reasons[0]);
     expect(await reasons(pressed)).toEqual(["actor_you"]);
     expect(await r.entry(7)).toMatchObject({ state: "stopped", reason: HOST_DEQUEUED_REASON });
     expect(await reasons(old)).toEqual(["actor_app"]);
     expect(await r.entry(8)).toMatchObject({ state: "queued", reason: null });
+  });
+
+  /** The reconcile's `merge_dequeued` rows for the head: their reasons, and whether the retry rule would allow another enqueue. */
+  const recorded = async (r: QueueRepo, it: QueueItem) => {
+    const removals = await tenant(r, (c) => listHeadRemovals(c, r.accountId, it.workItemId, it.head, it.pr));
+    return { reasons: removals.map((x) => x.reasons), retry: removalRetryAllowed(removals) };
+  };
+
+  it("the removal's actor is read once from GitHub: a Bot removal is the queue's own and is retried once; a person's (a User with no reason, or reason MANUAL even from a Bot) is not retried and stops the entry", async () => {
+    for (const [removal, reasons, retry] of [
+      [(h: string) => removedBy(h, "Bot"), ["actor_app"], true],
+      [(h: string) => removedBy(h, "User", null), ["actor_user"], false],
+      [(h: string) => removedBy(h, "Bot", "MANUAL"), ["actor_user"], false],
+    ] as const) {
+      const r = await setup([7]);
+      const it = r.items.get(7)!;
+      const w = world(r, { 7: { removal: removal(it.head) } });
+      expect(await run(r, w)).toEqual({ reads: 1, settled: 1, escalated: 0 });
+      // The entry read and the removal read are the only calls, and the second runs once.
+      expect(w.reads()).toBe(2);
+      expect(await recorded(r, it)).toEqual({ reasons: [reasons], retry });
+      expect(await r.entry(7)).toMatchObject(retry ? { state: "queued", reason: null } : { state: "stopped", reason: HOST_DEQUEUED_REASON });
+    }
+  });
+
+  it("fails toward a person: a failed read, no event, an event for another head, or an actor GitHub did not name each record the removal as a person's, with no retry", async () => {
+    const cases: Array<[string, (h: string) => Record<string, unknown>]> = [
+      ["the read fails (HTTP 502)", () => ({ removal: removedBy("x".repeat(40), "Bot"), removalFails: true })],
+      ["there is no removal event", () => ({})],
+      ["the event is for another head", () => ({ removal: removedBy("x".repeat(40), "Bot") })],
+      ["the event names no commit", (h) => ({ removal: removedBy(h, "Bot", "DEQUEUED", null) })],
+      ["the event has no actor", (h) => ({ removal: removedBy(h, null) })],
+    ];
+    for (const [name, over] of cases) {
+      const r = await setup([7]);
+      const it = r.items.get(7)!;
+      await run(r, world(r, { 7: over(it.head) }));
+      expect(await recorded(r, it), name).toEqual({ reasons: [["actor_user"]], retry: false });
+      expect(await r.entry(7), name).toMatchObject({ state: "stopped", reason: HOST_DEQUEUED_REASON });
+    }
+  });
+
+  it("the removal is read only for a pull request that is open and not queued: not for a merge, a close, a pull request still queued, an auto-merge enqueue without an entry, or a removal already on record", async () => {
+    const a = await setup([7, 8, 9]);
+    const w = world(a, { 7: { state: "closed", merged: true }, 8: { state: "closed" }, 9: { entry: true } });
+    await run(a, w);
+    expect(w.reads()).toBe(3);
+    const b = await setup([7]);
+    const hold = b.items.get(7)!;
+    await fact(b, hold, "merge_dequeued", "dequeued:d1", { actor: "user" });
+    await age(hold, 30);
+    const wb = world(b, { 7: {} });
+    await run(b, wb);
+    expect(wb.reads()).toBe(1);
   });
 
   it("a person's removal that the webhook recorded but never settled holds: the entry stops with no retry", async () => {
@@ -280,6 +339,7 @@ describe("reconcile of entries waiting in the host's queue [pg]", () => {
     await db.admin.query(`UPDATE work_item_driver_events SET code = 'auto_merge' WHERE work_item_id = $1 AND kind = 'merge_enqueued'`, [it.workItemId]);
     const w = world(r, { 7: {} });
     expect(await run(r, w)).toEqual({ reads: 1, settled: 0, escalated: 0 });
+    expect(w.reads()).toBe(1); // no removal read: an auto-merge enqueue with no entry is not a removal
     expect(await facts(it, "merge_dequeued")).toEqual([]);
     expect(await r.entry(7)).toMatchObject({ state: "queued" });
     expect(await queued(r, it)).toBe(true);

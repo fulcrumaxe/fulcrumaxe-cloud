@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { InstallationTokenCache, type AccessTokenRequester } from "../src/installationToken.js";
 import { createInstallationHttp, InstallationHttpError, type InstallationHttpKind } from "../src/installationHttp.js";
-import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_GATE_GRAPHQL_MAX_BYTES, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, pinnedMergeGateBody } from "../src/mergeGateGraphql.js";
+import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_GATE_GRAPHQL_MAX_BYTES, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, MERGE_QUEUE_REMOVAL_DOCUMENT, pinnedMergeGateBody } from "../src/mergeGateGraphql.js";
 
 /** D#694 B5a: the pinned-document GraphQL allowance, through the real client and a local HTTP server (the call log is the server's own). */
 const TARGET = { repoId: "11111111-1111-4111-8111-111111111111", owner: "acme", name: "widgets" };
@@ -51,6 +51,7 @@ const enqueue: Doc = { query: ENQUEUE_PULL_REQUEST_DOCUMENT, variables: { pullRe
 const auto: Doc = { query: ENABLE_AUTO_MERGE_DOCUMENT, variables: { pullRequestId: "PR_kwDOAAAAAc4AAAAH", expectedHeadOid: OID, mergeMethod: "SQUASH" } };
 const dequeue: Doc = { query: DEQUEUE_PULL_REQUEST_DOCUMENT, variables: { pullRequestId: "PR_kwDOAAAAAc4AAAAH" } };
 const entry: Doc = { query: MERGE_QUEUE_ENTRY_DOCUMENT, variables: { owner: "acme", name: "widgets", number: 7 } };
+const removal: Doc = { query: MERGE_QUEUE_REMOVAL_DOCUMENT, variables: { owner: "acme", name: "widgets", number: 7 } };
 const withVars = (d: Doc, over: Record<string, unknown>): Doc => ({ query: d.query, variables: { ...d.variables, ...over } });
 const without = (d: Doc, key: string): Doc => {
   const variables = { ...d.variables };
@@ -58,15 +59,16 @@ const without = (d: Doc, key: string): Doc => {
   return { query: d.query, variables };
 };
 
-describe("the five pinned documents (snapshot: changing one is a reviewed edit)", () => {
+describe("the six pinned documents (snapshot: changing one is a reviewed edit)", () => {
   it("are exactly these strings", () => {
-    expect([MERGE_QUEUE_READ_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, DEQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT]).toMatchInlineSnapshot(`
+    expect([MERGE_QUEUE_READ_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, DEQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_REMOVAL_DOCUMENT]).toMatchInlineSnapshot(`
       [
         "query($owner: String!, $name: String!, $branch: String!) { repository(owner: $owner, name: $name) { mergeQueue(branch: $branch) { id } } }",
         "mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!) { enqueuePullRequest(input: { pullRequestId: $pullRequestId, expectedHeadOid: $expectedHeadOid }) { mergeQueueEntry { id position } } }",
         "mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!, $mergeMethod: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId, expectedHeadOid: $expectedHeadOid, mergeMethod: $mergeMethod }) { pullRequest { id } } }",
         "mutation($pullRequestId: ID!) { dequeuePullRequest(input: { id: $pullRequestId }) { mergeQueueEntry { id } } }",
         "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { state merged headRefOid mergeQueueEntry { id state position } } } }",
+        "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) { nodes { ... on RemovedFromMergeQueueEvent { createdAt reason actor { __typename } beforeCommit { oid } } } } } } }",
       ]
     `);
   });
@@ -87,7 +89,7 @@ describe("the size cap", () => {
 });
 
 describe("merge_gate POST /graphql allowance", () => {
-  it.each([["mergeQueue read", read], ["enqueuePullRequest", enqueue], ["enablePullRequestAutoMerge", auto], ["dequeuePullRequest", dequeue], ["mergeQueueEntry read", entry]])("lets %s through to the server unchanged", async (_n, body) => {
+  it.each([["mergeQueue read", read], ["enqueuePullRequest", enqueue], ["enablePullRequestAutoMerge", auto], ["dequeuePullRequest", dequeue], ["mergeQueueEntry read", entry], ["removal event read", removal]])("lets %s through to the server unchanged", async (_n, body) => {
     const { open, calls } = await setup();
     const http = await open("merge_gate", TARGET);
     const res = await http.request({ method: "POST", path: "/graphql", body });
@@ -157,6 +159,17 @@ describe("merge_gate POST /graphql allowance", () => {
     ["an entry read with a fractional number", { body: withVars(entry, { number: 1.5 }) }],
     ["an entry read with a number past the safe integers", { body: withVars(entry, { number: 2 ** 53 }) }],
     ["an entry read with a leading space", { body: { ...entry, query: " " + entry.query } }],
+    ["an unknown variable (removal)", { body: withVars(removal, { extra: "x" }) }],
+    ["a removal read without a number", { body: without(removal, "number") }],
+    ["a removal read for another owner", { body: withVars(removal, { owner: "other" }) }],
+    ["a removal read for another repository", { body: withVars(removal, { name: "gadgets" }) }],
+    ["a removal read with the number as a string", { body: withVars(removal, { number: "7" }) }],
+    ["a removal read with a number past the safe integers", { body: withVars(removal, { number: 2 ** 53 }) }],
+    ["a removal read with a trailing space", { body: { ...removal, query: removal.query + " " } }],
+    ["a removal read with its last character removed", { body: { ...removal, query: removal.query.slice(0, -1) } }],
+    ["a removal read with `last: 1` changed to `last: 2`", { body: { ...removal, query: removal.query.replace("last: 1", "last: 2") } }],
+    ["a removal read with the event type swapped", { body: { ...removal, query: removal.query.replace("REMOVED_FROM_MERGE_QUEUE_EVENT", "ADDED_TO_MERGE_QUEUE_EVENT") } }],
+    ["a body over 4 KiB (removal)", { body: withVars(removal, { pad: "p".repeat(MERGE_GATE_GRAPHQL_MAX_BYTES) }) }],
     ["a body over 4 KiB", { body: withVars(read, { pad: "p".repeat(MERGE_GATE_GRAPHQL_MAX_BYTES) }) }],
     ["GET /graphql", { method: "GET", body: undefined }],
     ["GET /graphql with the body", { method: "GET" }],
@@ -207,7 +220,7 @@ describe("merge_gate POST /graphql allowance", () => {
     for (const [kind, extra] of kinds) {
       const { open, calls } = await setup();
       const http = await open(kind, { ...TARGET, ...extra } as never);
-      for (const body of [read, enqueue, auto, dequeue, entry]) {
+      for (const body of [read, enqueue, auto, dequeue, entry, removal]) {
         await expect(http.request({ method: "POST", path: "/graphql", body }), kind).rejects.toBeInstanceOf(InstallationHttpError);
       }
       expect(calls, kind).toEqual([]);
