@@ -1,0 +1,35 @@
+{
+  "changes": [
+    {
+      "version": 2,
+      "from": 2,
+      "to": 10,
+      "changed_by_name": "Ada Admin",
+      "changed_at": "2026-10-30T14:05:00.000Z",
+      "preview": {
+        "kind": "raise",
+        "from": 2,
+        "to": 10,
+        "basis": "history",
+        "clear_minutes_old": 120,
+        "clear_minutes_new": 60,
+        "extra_per_hour_cents": 150,
+        "extra_per_day_cents": 3600,
+        "queue_total_cents": 9000,
+        "unpriced_items": 1
+      }
+    },
+    {
+      "version": 1,
+      "from": 4,
+      "to": 2,
+      "changed_by_name": "A team member",
+      "changed_at": "2026-10-28T09:30:00.000Z",
+      "preview": {
+        "kind": "lower",
+        "from": 4,
+        "to": 2
+      }
+    }
+  ]
+}

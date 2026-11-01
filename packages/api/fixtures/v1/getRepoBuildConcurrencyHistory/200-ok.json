@@ -1,0 +1,20 @@
+{
+  "changes": [
+    {
+      "version": 1,
+      "from": 2,
+      "to": 4,
+      "changed_by_name": "Ada Admin",
+      "changed_at": "2026-10-30T14:10:00.000Z",
+      "preview": {
+        "kind": "raise",
+        "from": 2,
+        "to": 4,
+        "basis": "none",
+        "clear_minutes_old": 30,
+        "clear_minutes_new": 30,
+        "unpriced_items": 0
+      }
+    }
+  ]
+}

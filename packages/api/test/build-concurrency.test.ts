@@ -277,7 +277,57 @@ describe('D#483 S5-c2: build concurrency routes', () => {
     expect((await admin.query(`SELECT 1 FROM account_runner_concurrency WHERE account_id = $1`, [f.owner.accountId])).rowCount).toBe(0);
   });
 
-  it('S5c2-4: the registry lists all six routes with their principals, and OpenAPI documents the preview shape and the 409s', () => {
+  it('S5h history: the account list is newest first with old and new values and the actor by name; a member and a token read it', async () => {
+    const f = await fixture();
+    await admin.query(`UPDATE users SET name = 'Ada Admin' WHERE id = $1`, [f.adminUser.userId]);
+    await admin.query(`UPDATE users SET name = '', github_login = 'ownerlogin' WHERE id = $1`, [f.owner.userId]);
+    expect(await (await call(f.member, 'GET', '/account/build-concurrency/history')).json()).toEqual({ changes: [] });
+    await call(f.owner, 'PUT', '/account/build-concurrency', { max_builds: 1 });
+    const shown = (await (await call(f.adminUser, 'POST', '/account/build-concurrency/preview', { max_builds: 6 })).json()) as Preview;
+    await call(f.adminUser, 'PUT', '/account/build-concurrency', { max_builds: 6, accept: true, preview_hash: shown.preview_hash });
+    const token = await tokenFor(f.owner);
+    for (const res of [await call(f.member, 'GET', '/account/build-concurrency/history'), await call(f.owner, 'GET', '/account/build-concurrency/history', undefined, token)]) {
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { changes: { version: number; from: number; to: number; changed_by_name: string; changed_at: string; preview: Record<string, unknown> }[] };
+      expect(body.changes.map((c) => [c.version, c.from, c.to, c.changed_by_name])).toEqual([
+        [2, 1, 6, 'Ada Admin'],
+        [1, 4, 1, 'ownerlogin'],
+      ]);
+      expect(new Date(body.changes[0]!.changed_at).getTime()).toBeGreaterThan(Date.now() - 60_000);
+      // the stored preview is what was shown at accept time: the raise keeps its figures, the lowering its short record
+      expect(body.changes[0]!.preview).toMatchObject({ kind: 'raise', from: 1, to: 6, preview_hash: shown.preview_hash, basis: expect.any(String) });
+      expect(body.changes[1]!.preview).toEqual({ kind: 'lower', from: 4, to: 1 });
+      expect(JSON.stringify(body)).not.toContain(f.owner.userId);
+      expect(JSON.stringify(body)).not.toMatch(/@/); // no email anywhere in the response (the seeded users have one each)
+    }
+  });
+
+  it('S5h history: a member with no name on record reads "A team member", never an id or an email; the list stops at 20', async () => {
+    const f = await fixture();
+    for (let i = 0; i < 22; i++) {
+      await admin.query(`INSERT INTO build_concurrency_settings (account_id, repo_id, max_builds, version, changed_by) VALUES ($1, NULL, $2, $3, $4)`, [f.owner.accountId, i + 1, i + 1, f.owner.userId]);
+    }
+    const body = (await (await call(f.member, 'GET', '/account/build-concurrency/history')).json()) as { changes: { version: number; from: number; to: number; changed_by_name: string }[] };
+    expect(body.changes).toHaveLength(20);
+    expect(body.changes[0]).toMatchObject({ version: 22, from: 21, to: 22, changed_by_name: 'A team member' });
+    expect(body.changes[19]!.version).toBe(3);
+  });
+
+  it('S5h history: the repo twin lists only that repo, starts from 2, and another account sees nothing of either scope', async () => {
+    const f = await fixture();
+    const other = await fixture();
+    const repo = f.repos[0]!;
+    await call(f.owner, 'PUT', `/repos/${repo}/build-concurrency`, { max_builds: 1 });
+    await call(f.owner, 'PUT', '/account/build-concurrency', { max_builds: 2 });
+    const mine = (await (await call(f.member, 'GET', `/repos/${repo}/build-concurrency/history`)).json()) as { changes: { from: number; to: number }[] };
+    expect(mine.changes.map((c) => [c.from, c.to])).toEqual([[2, 1]]);
+    expect((await (await call(f.member, 'GET', `/repos/${f.repos[1]}/build-concurrency/history`)).json())).toEqual({ changes: [] });
+    // the other account: its own account history is empty, and this account's repo is a 404, so no row of ours leaks
+    expect(await (await call(other.member, 'GET', '/account/build-concurrency/history')).json()).toEqual({ changes: [] });
+    for (const id of [repo, 'not-a-uuid']) expect((await call(other.member, 'GET', `/repos/${id}/build-concurrency/history`)).status, id).toBe(404);
+  });
+
+  it('S5c2-4: the registry lists all eight routes with their principals, and OpenAPI documents the preview shape and the 409s', () => {
     const ours = ROUTES.filter((r) => r.path.includes('build-concurrency')).map((r) => `${r.method} ${r.path} ${(r.principals ?? ['session']).join('+')} ${r.minRole}`);
     expect(ours.sort()).toEqual(
       [
@@ -287,6 +337,8 @@ describe('D#483 S5-c2: build concurrency routes', () => {
         'GET /api/v1/repos/{id}/build-concurrency session+token member',
         'POST /api/v1/repos/{id}/build-concurrency/preview session admin',
         'PUT /api/v1/repos/{id}/build-concurrency session admin',
+        'GET /api/v1/account/build-concurrency/history session+token member',
+        'GET /api/v1/repos/{id}/build-concurrency/history session+token member',
       ].sort(),
     );
     const doc = JSON.parse(readFileSync(path.join(__dirname, '..', 'openapi.json'), 'utf8')) as {

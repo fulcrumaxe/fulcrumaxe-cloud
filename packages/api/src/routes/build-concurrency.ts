@@ -7,6 +7,7 @@ import {
   SettingChangedError,
   changeConcurrency,
   computeConcurrencyPreview,
+  listConcurrencyHistory,
   readAccountConcurrency,
   readRepoConcurrency,
   type ConcurrencyPreview,
@@ -23,7 +24,7 @@ import type { RouteEntry } from "../registry.js";
 /**
  * D#483 S5-c2: the person's own build-concurrency number, for the account and for one repository, with the cost shown before a raise.
  *
- * Six routes under `/api/v1/account/build-concurrency` and `/api/v1/repos/{id}/build-concurrency` (a read, a `/preview`, a write each).
+ * Eight routes under `/api/v1/account/build-concurrency` and `/api/v1/repos/{id}/build-concurrency` (a read, a `history` read, a `/preview`, a write each).
  * The account's separate runner-job ceiling (`account/runner-concurrency`, D#605) is a different setting and is not touched here.
  *
  * Who: a read is any member (session or a read token). The preview and the write are an owner or admin on a session; a token gets
@@ -77,6 +78,20 @@ export const concurrencyPreviewSchema = z.object({
 });
 
 const accountValueSchema = z.object({ value: z.number().int(), start_value: z.number().int(), history_count: z.number().int() });
+const historySchema = z.object({
+  changes: z.array(
+    z.object({
+      version: z.number().int(),
+      from: z.number().int(),
+      to: z.number().int(),
+      /** The person's display name; never an id or an email. */
+      changed_by_name: z.string(),
+      changed_at: z.string(),
+      /** The cost preview the person accepted when they raised the number: the figures that were shown. A lowering stores only its kind and values. */
+      preview: z.record(z.string(), z.unknown()),
+    }),
+  ),
+});
 const accountChangeSchema = accountValueSchema.extend({ changed: z.boolean() });
 const repoValueSchema = z.object({
   value: z.number().int(),
@@ -137,6 +152,25 @@ export const buildConcurrencyRoutes: RouteEntry[] = [
       return withTenant(ctx.pool, accountId, userId, async (client) => {
         await assertActiveMembership(client, accountId, userId);
         return readAccountConcurrency(client, accountId);
+      });
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/v1/account/build-concurrency/history",
+    operationId: "getAccountBuildConcurrencyHistory",
+    summary: "The last 20 changes to the account's build limit: old value, new value, who and when",
+    principals: ["session", "token"],
+    minRole: "member",
+    scope: "read",
+    idempotency: "never",
+    rateClass: "read",
+    responseSchema: historySchema,
+    async handler(ctx) {
+      const { accountId, userId } = ctx.principal;
+      return withTenant(ctx.pool, accountId, userId, async (client) => {
+        await assertActiveMembership(client, accountId, userId);
+        return { changes: await listConcurrencyHistory(client, accountId, null) };
       });
     },
   },
@@ -202,6 +236,28 @@ export const buildConcurrencyRoutes: RouteEntry[] = [
       return withTenant(ctx.pool, accountId, userId, async (client) => {
         await assertRepoExists(client, repoId);
         return readRepoConcurrency(client, accountId, repoId);
+      });
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/v1/repos/{id}/build-concurrency/history",
+    operationId: "getRepoBuildConcurrencyHistory",
+    summary: "The last 20 changes to one repo's build limit: old value, new value, who and when",
+    principals: ["session", "token"],
+    minRole: "member",
+    scope: "read",
+    idempotency: "never",
+    rateClass: "read",
+    paramsSchema: idParamsSchema,
+    responseSchema: historySchema,
+    async handler(ctx, input) {
+      const repoId = input.params.id!;
+      assertRepoIdShape(repoId);
+      const { accountId, userId } = ctx.principal;
+      return withTenant(ctx.pool, accountId, userId, async (client) => {
+        await assertRepoExists(client, repoId);
+        return { changes: await listConcurrencyHistory(client, accountId, repoId) };
       });
     },
   },

@@ -456,7 +456,10 @@ test.describe("D#7 DP10b: Roles, Autonomy", () => {
     const src = readFileSync(join(SCRIPT_DIR, "..", "apps", "roles", "roles-autonomy.js"), "utf8");
     expect(src).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
     expect(src).not.toMatch(/\bfetch\(/);
-    expect(src).not.toMatch(/"(PUT|PATCH|DELETE)"/);
+    expect(src).not.toMatch(/"(PATCH|DELETE)"/);
+    // The only PUTs are the S5-h section's (builds at once, auto-start limit, margin, discovery); the dial and answer stores are POST only.
+    expect([...src.matchAll(/api\("PUT", (repoPath\(repoId, "[a-z/-]+"\)|[^,]+)/g)].map((m) => m[1]).sort()).toEqual(['ACCOUNT + "autostart-envelope"', 'ACCOUNT + "envelope-margin"', "base", 'repoPath(repoId, "discovery")']);
+    expect(src.match(/"PUT"/g)).toHaveLength(4); // no indirect method: the literal appears exactly where the four calls are
     expect(src).not.toMatch(/FULC\.(state|config|window|backend|events)/);
     const paths = [...new Set([...src.matchAll(/api\("(GET|POST)", repoPath\(repoId, "([a-z/-]+)"\)/g)].map((m) => `${m[1]} ${m[2]}`))].sort();
     expect(paths).toEqual(
