@@ -27,7 +27,7 @@ import { bindClaim, type CompleteInstallDeps } from "./installCallback.js";
  * sender completes through the same `bindClaim` as the callback. A failure
  * there is swallowed: the user's next callback binds directly. Nothing logs.
  */
-export type InstallerRecordDeps = Pick<CompleteInstallDeps, "platformOpsPool" | "appCredentials" | "fetchImpl" | "recheck" | "syncRepos" | "warn"> & {
+export type InstallerRecordDeps = Pick<CompleteInstallDeps, "platformOpsPool" | "appCredentials" | "fetchImpl" | "recheck" | "syncRepos" | "warn" | "onDiscoveryQueued"> & {
   /** The tenant pool the detach runs through (repos is writable only by app_user), as the repo sync uses it. */
   appUserPool: Pool;
 };

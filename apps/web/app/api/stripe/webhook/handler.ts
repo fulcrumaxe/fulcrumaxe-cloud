@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 import { NextRequest, NextResponse } from "next/server";
 import { createPool } from "@fx/db/src/pool";
-import { queueDiscoveries } from "@fx/db/src/discoveryRuns";
+import { queueActivationDiscovery } from "../../../../lib/discoveryWake";
 import {
   defaultStripeClient,
   handleStripeWebhookRequest,
@@ -63,7 +63,7 @@ export function defaultStripeWebhookDeps(): StripeWebhookDeps {
       ? {
           onSubscriptionActivated: async ({ accountId, subscriptionId }: { accountId: string; subscriptionId: string }) => {
             cachedAppUserPool ??= createPool(requireEnv("DATABASE_URL_APP_USER"));
-            await queueDiscoveries(cachedAppUserPool, accountId, { kind: "account" }, "activation", subscriptionId);
+            await queueActivationDiscovery(cachedAppUserPool, accountId, subscriptionId);
           },
         }
       : {}),

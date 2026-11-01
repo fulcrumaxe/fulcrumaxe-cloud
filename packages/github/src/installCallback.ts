@@ -5,6 +5,7 @@ import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
 import type { AppCredentialsSource, AppKind } from "./appCredentials.js";
 import { verifyUserInstallation } from "./userInstallations.js";
 import { syncClaimedInstallation, type SyncRepos } from "./syncInstallationRepos.js";
+import type { QueuedDiscovery } from "@fx/db/src/discoveryRuns.js";
 import { queueInstallDiscovery } from "./installDiscovery.js";
 import { recheckInstallationActive, type InstallationRecheck } from "./installationRecheck.js";
 
@@ -42,6 +43,8 @@ export interface CompleteInstallDeps {
   syncRepos?: SyncRepos;
   /** D#483 S4-c: the tenant pool the discovery is queued through after the repo sync; absent, nothing is queued here (the delivery still does). */
   appUserPool?: Pool;
+  /** D#483 S4-c2: called with the runs this install actually queued (never an empty list), so the drain tick is woken. */
+  onDiscoveryQueued?: (accountId: string, runs: readonly QueuedDiscovery[]) => Promise<unknown>;
   warn?: (message: string) => void;
 }
 

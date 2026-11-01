@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isStagingPaused, runGatedTick } from "@fx/core/src/pendingWork";
 import { createPool } from "@fx/db/src/pool";
-import { queueDiscoveries } from "@fx/db/src/discoveryRuns";
+import { queueActivationDiscovery } from "../../../../lib/discoveryWake";
 import { createErrorReporter, reportError } from "@fx/telemetry";
 import { opsAlertSinkFromEnv } from "../../../../lib/opsAlertSink";
 import { githubInstallationsJobFromEnv } from "../../../../lib/github/installationReconcile";
@@ -158,7 +158,7 @@ export function stripeSubscriptionsJobFromEnv(pool: TickDeps["pool"], report: Re
       if (paying && process.env.DATABASE_URL_APP_USER) {
         try {
           cachedAppUserPool ??= createPool(requireEnv("DATABASE_URL_APP_USER"));
-          await queueDiscoveries(cachedAppUserPool, paying.accountId, { kind: "account" }, "activation", paying.subscriptionId);
+          await queueActivationDiscovery(cachedAppUserPool, paying.accountId, paying.subscriptionId);
         } catch (err) {
           reportError(err, { stage: "reconcile.stripe_subscriptions.discovery", route: RECONCILE_ROUTE });
         }

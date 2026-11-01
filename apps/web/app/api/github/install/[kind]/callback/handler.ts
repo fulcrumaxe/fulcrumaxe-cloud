@@ -16,6 +16,7 @@ import {
   type SyncRepos,
 } from "@fx/github";
 import { appUserPool } from "@fx/api/src/sse/pools.js";
+import { wakeDiscoveryDrain } from "../../../../../../lib/discoveryWake";
 import { buildSyncRepos } from "../../../../../../lib/github/repoSync";
 import { applyRefreshedSessionCookie, resolveActiveSession } from "../../../../../../lib/shell/session-guard";
 
@@ -32,6 +33,8 @@ export interface InstallCallbackDeps {
   syncRepos?: SyncRepos;
   /** D#483 S4-c: queues the install discovery after the repo sync. */
   appUserPool?: Pool;
+  /** D#483 S4-c2: wakes the drain tick when this install queued a run. */
+  onDiscoveryQueued?: CompleteInstallDeps["onDiscoveryQueued"];
   complete?: (deps: CompleteInstallDeps, input: CompleteInstallInput) => Promise<InstallOutcome>;
   /** Counts this visit against the account's GitHub-return budget and throws RateLimitedError when over it. The default is wired to Postgres. */
   limitSession?: (subject: SessionSubject) => Promise<void>;
@@ -53,7 +56,7 @@ export function defaultInstallCallbackDeps(): InstallCallbackDeps {
     appCredentials,
     env: process.env,
     limitSession: (subject) => pgSessionLimiter(appUserPool(), SESSION_LIMITS.githubReturn)(subject),
-    ...(cachedAppUserPool ? { appUserPool: cachedAppUserPool, syncRepos: buildSyncRepos({ platformOpsPool: cachedPool, appUserPool: cachedAppUserPool, appCredentials }) } : {}),
+    ...(cachedAppUserPool ? { appUserPool: cachedAppUserPool, onDiscoveryQueued: (_accountId, runs) => wakeDiscoveryDrain(runs), syncRepos: buildSyncRepos({ platformOpsPool: cachedPool, appUserPool: cachedAppUserPool, appCredentials }) } : {}),
   };
 }
 
@@ -101,7 +104,7 @@ export async function installCallbackHandler(
   let outcome: InstallOutcome;
   try {
     outcome = await complete(
-      { platformOpsPool: d.platformOpsPool, appCredentials: d.appCredentials, env: d.env, fetchImpl: d.fetchImpl, syncRepos: d.syncRepos, appUserPool: d.appUserPool },
+      { platformOpsPool: d.platformOpsPool, appCredentials: d.appCredentials, env: d.env, fetchImpl: d.fetchImpl, syncRepos: d.syncRepos, appUserPool: d.appUserPool, onDiscoveryQueued: d.onDiscoveryQueued },
       {
         kind: appKind,
         accountId: session.accountId,

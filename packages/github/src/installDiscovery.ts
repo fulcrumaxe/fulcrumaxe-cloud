@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import { withPlatformOps } from "@fx/core/src/tenancy/withPlatformOps.js";
-import { queueDiscoveries } from "@fx/db/src/discoveryRuns.js";
+import { queueDiscoveries, type QueuedDiscovery } from "@fx/db/src/discoveryRuns.js";
 
 /**
  * D#483 S4-c: the one reference both install paths queue `installation_created` under. The delivery can arrive before the callback
@@ -17,7 +17,7 @@ export function installationDiscoveryRef(ghInstallationId: number): string {
  * Never throws and never changes the install outcome: a failure logs one fixed line, and the delivery path or the next trigger retries.
  */
 export async function queueInstallDiscovery(
-  deps: { platformOpsPool: Pool; appUserPool?: Pool; warn?: (message: string) => void },
+  deps: { platformOpsPool: Pool; appUserPool?: Pool; onDiscoveryQueued?: (accountId: string, runs: readonly QueuedDiscovery[]) => Promise<unknown>; warn?: (message: string) => void },
   kind: string,
   accountId: string,
   ghInstallationId: number,
@@ -29,7 +29,8 @@ export async function queueInstallDiscovery(
       return r.rows[0]?.id ?? null;
     });
     if (!id) return;
-    await queueDiscoveries(deps.appUserPool, accountId, { kind: "installation", installationId: id }, "installation_created", installationDiscoveryRef(ghInstallationId));
+    const runs = await queueDiscoveries(deps.appUserPool, accountId, { kind: "installation", installationId: id }, "installation_created", installationDiscoveryRef(ghInstallationId));
+    if (runs.length > 0 && deps.onDiscoveryQueued) await deps.onDiscoveryQueued(accountId, runs);
   } catch {
     // fx-swallow-ok: the claim already committed; a fixed line is logged (no id, no name) and the delivery path or a later trigger discovers
     (deps.warn ?? console.warn)("github install: queuing discovery failed");
