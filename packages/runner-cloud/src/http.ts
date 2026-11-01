@@ -208,14 +208,21 @@ export interface PlaneMergeStorePort {
   getById(input: { accountId: string; orderId: string }): Promise<PlaneMergeOrderFacts | null>;
   /** The runner's trust, read now (not revoked, registered by a current owner or admin, in scope of the repository, not paused or draining, listing the capability). */
   runnerTrusted(input: { accountId: string; runnerId: string; repoId: string }): Promise<boolean>;
+  /** D#694 B7-1: whether the runner's latest hello listed the capability (the recorded set, read now). */
+  runnerHasCapability(input: { accountId: string; runnerId: string; capability: string }): Promise<boolean>;
 }
 /** What the go phase concluded, from the whole gate run again on fresh reads. */
-export type PlaneMergeGoResult = { kind: "go" } | { kind: "blocked"; reasons: string[] } | { kind: "head_moved" } | { kind: "pr_not_open" } | { kind: "refused"; reason: string };
+/** `go` carries the code repository's merge mode as the cloud read it (D#694 B7-1); the verify reply sends it only to a runner that listed `plane_merge_queue_v1`. */
+export type PlaneMergeGoResult = { kind: "go"; mergeMode: "queue" | "direct" } | { kind: "blocked"; reasons: string[] } | { kind: "head_moved" } | { kind: "pr_not_open" } | { kind: "refused"; reason: string };
 /** The cloud's own read of the public pull request through its fenced client (paths and states only). */
 export interface PublicPullFacts {
   open: boolean;
   merged: boolean;
   headSha: string;
+}
+/** D#694 B7-1: the public pull request and its merge-queue entry (null when it is not queued), read through the fenced client. */
+export interface PublicQueueFacts extends PublicPullFacts {
+  entryId: string | null;
 }
 /**
  * D#6 PUBLIC-MERGE PR2b: everything the three merge-order routes need beyond the signature check, supplied by apps/web (the gate, the fenced GitHub client and the
@@ -228,10 +235,16 @@ export interface PlaneMergePort {
     accountId: string;
     order: PlaneMergeOrderFacts;
     attestation: { reviewedHead: string; publicHead: string; same: boolean; incomplete: boolean; paths: readonly string[] };
+    /** The runner listed `plane_merge_queue_v1`: only such a runner is given a queue repository's order (D#694 B7-1). */
+    queueCapable: boolean;
     delegate: () => Promise<{ delegated: true } | { delegated: false; reason: string }>;
   }): Promise<PlaneMergeGoResult>;
   /** The public pull request, read through the fenced client. Throws when GitHub cannot be asked. */
   readPublicPull(input: { accountId: string; order: PlaneMergeOrderFacts }): Promise<PublicPullFacts>;
+  /** The public pull request with its queue entry, for a runner's `enqueued` report. Throws when GitHub cannot be asked. */
+  readPublicQueue(input: { accountId: string; order: PlaneMergeOrderFacts }): Promise<PublicQueueFacts>;
+  /** A verified enqueue: the item's `merge_enqueued` fact, with the public pull request's number, head and entry id (the same row the webhook writes). */
+  recordEnqueued(input: { accountId: string; order: PlaneMergeOrderFacts; entryId: string }): Promise<void>;
   /** A verified merge: recorded as the gate's merge, the item's pull-request state reconciled, and the private copy closed (best effort). */
   recordMerged(input: { accountId: string; order: PlaneMergeOrderFacts }): Promise<{ privateCopy: "closed" | "left" | "failed" }>;
 }

@@ -16,6 +16,7 @@ vi.mock("@fx/pipeline", async (original) => ({
   createReviewGitHubPort: mocks.createReviewGitHubPort,
 }));
 
+import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "@fx/github";
 import { createPlaneMergeOps } from "../lib/planeMerge";
 
 /**
@@ -66,8 +67,8 @@ beforeEach(() => {
 describe("goPhase", () => {
   it("runs the whole gate with the attestation, the item's own pull request and the code repository's merge-less client; a go is the delegate having been called", async () => {
     const t = ops();
-    mocks.runMergeGateForItem.mockImplementation(async (deps: { mergeDelegate: () => Promise<unknown>; publicPlane: { open: (c: unknown) => Promise<{ request(r: unknown): Promise<unknown> }> } }) => {
-      expect(await deps.mergeDelegate()).toEqual({ delegated: true });
+    mocks.runMergeGateForItem.mockImplementation(async (deps: { mergeDelegate: (a: object, c: { mergeMode: "queue" | "direct" }) => Promise<unknown>; publicPlane: { open: (c: unknown) => Promise<{ request(r: unknown): Promise<unknown> }> } }) => {
+      expect(await deps.mergeDelegate({}, { mergeMode: "direct" })).toEqual({ delegated: true });
       // The public client is the fenced one without the merge call: a merge PUT is refused before any request.
       const pub = await deps.publicPlane.open({ repoId: REPO, owner: "acme", name: "widgets-public", executionMode: "runner_local" });
       await expect(pub.request({ method: "PUT", path: "/repos/acme/widgets-public/pulls/12/merge", body: { sha: PUB, merge_method: "squash" } })).rejects.toThrow(/local-only github: refused/);
@@ -75,7 +76,7 @@ describe("goPhase", () => {
       return { outcome: "merge_delegated", headSha: PUB, reasons: [], status: "skipped" };
     });
     const delegate = vi.fn(async () => ({ delegated: true as const }));
-    expect(await t.o.goPhase({ accountId: ACCOUNT, order, attestation, delegate })).toEqual({ kind: "go" });
+    expect(await t.o.goPhase({ accountId: ACCOUNT, order, attestation, delegate })).toEqual({ kind: "go", mergeMode: "direct" });
     expect(delegate).toHaveBeenCalledTimes(1);
     const [, input] = mocks.runMergeGateForItem.mock.calls[0]!;
     expect(input).toEqual({ accountId: ACCOUNT, workItemId: ITEM, prNumber: 7, goPhase: { attestation } });
@@ -83,8 +84,8 @@ describe("goPhase", () => {
 
   it("a delegate that refuses becomes the gate's reason, and the gate's stops come back as they are", async () => {
     const t = ops();
-    mocks.runMergeGateForItem.mockImplementation(async (deps: { mergeDelegate: () => Promise<unknown> }) => {
-      const r = await deps.mergeDelegate();
+    mocks.runMergeGateForItem.mockImplementation(async (deps: { mergeDelegate: (a: object, c: { mergeMode: "queue" | "direct" }) => Promise<unknown> }) => {
+      const r = await deps.mergeDelegate({}, { mergeMode: "direct" });
       return { outcome: "ready_human_merges", headSha: PUB, reasons: [(r as { reason: string }).reason], status: "skipped" };
     });
     expect(await t.o.goPhase({ accountId: ACCOUNT, order, attestation, delegate: async () => ({ delegated: false, reason: "runner_merge_failed" }) })).toEqual({ kind: "blocked", reasons: ["runner_merge_failed"] });
@@ -116,6 +117,69 @@ describe("goPhase", () => {
     mocks.readItemRecordedPullRequest.mockResolvedValue(null);
     expect(await t.o.goPhase({ accountId: ACCOUNT, order, attestation, delegate: async () => ({ delegated: true }) })).toEqual({ kind: "refused", reason: "no_pull_request" });
     expect(mocks.runMergeGateForItem).not.toHaveBeenCalled();
+  });
+});
+
+// D#694 B7-1: the gate reads the CODE repository's mode and hands the delegate what it read; the go carries it, and a queue repository's order goes only to a runner that can enqueue.
+describe("goPhase and the merge queue", () => {
+  const gateAnswers = (mode: "queue" | "direct") =>
+    mocks.runMergeGateForItem.mockImplementation(async (deps: { mergeDelegate: (a: object, c: { mergeMode: "queue" | "direct" }) => Promise<{ delegated: boolean; reason?: string }> }) => {
+      const r = await deps.mergeDelegate({}, { mergeMode: mode });
+      return r.delegated ? { outcome: "merge_delegated", headSha: PUB, reasons: [], status: "skipped" } : { outcome: "ready_human_merges", headSha: PUB, reasons: [r.reason], status: "skipped" };
+    });
+
+  it("a queue repository and a runner that can enqueue: the delegate runs and the go says queue; a direct one says direct", async () => {
+    const t = ops();
+    for (const mode of ["queue", "direct"] as const) {
+      gateAnswers(mode);
+      const delegate = vi.fn(async () => ({ delegated: true as const }));
+      expect(await t.o.goPhase({ accountId: ACCOUNT, order, attestation, queueCapable: true, delegate })).toEqual({ kind: "go", mergeMode: mode });
+      expect(delegate).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("a queue repository and a runner that cannot: the delegate (the write credential's mint) is NOT called and the stop is runner_update_required; a direct repository does not need the capability", async () => {
+    const t = ops();
+    gateAnswers("queue");
+    const delegate = vi.fn(async () => ({ delegated: true as const }));
+    for (const queueCapable of [false, undefined]) {
+      expect(await t.o.goPhase({ accountId: ACCOUNT, order, attestation, ...(queueCapable === undefined ? {} : { queueCapable }), delegate })).toEqual({ kind: "blocked", reasons: ["runner_update_required"] });
+    }
+    expect(delegate).not.toHaveBeenCalled();
+    gateAnswers("direct");
+    expect(await t.o.goPhase({ accountId: ACCOUNT, order, attestation, queueCapable: false, delegate })).toEqual({ kind: "go", mergeMode: "direct" });
+  });
+
+  it("the gate is given the queue documents, byte for byte the pinned ones, and the cloud's go never carries the enqueue", async () => {
+    const t = ops();
+    await t.o.goPhase({ accountId: ACCOUNT, order, attestation, delegate: async () => ({ delegated: true }) });
+    const [deps] = mocks.runMergeGateForItem.mock.calls[0]!;
+    expect(deps.queueDocuments).toEqual({ read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT });
+  });
+});
+
+describe("readPublicQueue and recordEnqueued", () => {
+  it("reads the pull request and its queue entry through the code repository's client with the paired queue reads on; an entry gives its id, none gives null", async () => {
+    const t = ops();
+    const getQueueEntry = vi.fn(async () => ({ state: "open", merged: false, headSha: PUB, entry: { id: "MQE_kwDOAAAAAQ", state: "queued", position: 1 } }));
+    mocks.createReviewGitHubPort.mockReturnValue({ getQueueEntry });
+    expect(await t.o.readPublicQueue({ accountId: ACCOUNT, order })).toEqual({ open: true, merged: false, headSha: PUB, entryId: "MQE_kwDOAAAAAQ" });
+    expect(t.open).toHaveBeenCalledWith("merge_gate", { repoId: REPO, owner: "acme", name: "widgets-public", allowGraphql: true });
+    const [deps, portCtx] = mocks.createReviewGitHubPort.mock.calls[0]!;
+    expect(deps).toMatchObject({ pairedQueueReads: true, queueDocuments: { read: MERGE_QUEUE_READ_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT } });
+    expect(portCtx).toMatchObject({ owner: "acme", name: "widgets-public" });
+    expect(getQueueEntry).toHaveBeenCalledWith({ repoId: REPO, prNumber: 12 });
+    getQueueEntry.mockResolvedValue({ state: "closed", merged: true, headSha: PUB, entry: null } as never);
+    expect(await t.o.readPublicQueue({ accountId: ACCOUNT, order })).toEqual({ open: false, merged: true, headSha: PUB, entryId: null });
+  });
+
+  it("records merge_enqueued with the PUBLIC number and head, the entry id and the key the webhook writes for the same entry; it records no merge", async () => {
+    const t = ops();
+    await t.o.recordEnqueued({ accountId: ACCOUNT, order, entryId: "MQE_kwDOAAAAAQ" });
+    const event = t.f.statements.find((s) => /INSERT INTO work_item_driver_events/.test(s.sql));
+    expect(event?.params).toEqual([ACCOUNT, ITEM, "merge_enqueued", "queue", [], PUB, 12, null, null, `enqueued:${PUB}`, null, null, "MQE_kwDOAAAAAQ"]);
+    expect(t.f.statements.some((s) => s.params?.includes("merged_by_gate"))).toBe(false);
+    expect(t.reconcile).not.toHaveBeenCalled();
   });
 });
 

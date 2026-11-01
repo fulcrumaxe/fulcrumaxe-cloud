@@ -13,7 +13,7 @@ import {
 } from "../src/messages.js";
 import { ClaimIdleReply, PlaneMergeClaimReply, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyReply, RUNNER_REPLIES } from "../src/replies.js";
 import { HelloMessage } from "../src/messages.js";
-import { PLANE_MERGE_CAPABILITY, RUNNER_CAPABILITIES } from "../src/job.js";
+import { PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, RUNNER_CAPABILITIES } from "../src/job.js";
 import { fieldPaths, g1Violations, nonStrictObjects } from "./helpers/schemaWalk.js";
 
 const ORDER = "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e";
@@ -46,6 +46,17 @@ describe("the plane_merge_v1 capability", () => {
     expect(HelloMessage.safeParse({ ...hello, capabilities: ["wake_v1", "plane_merge_v1"] }).success).toBe(true);
     expect(HelloMessage.safeParse({ ...hello, capabilities: ["plane_merge_v1", "plane_merge_v1"] }).success).toBe(false);
     expect(HelloMessage.safeParse({ ...hello, capabilities: ["plane_merge_v2"] }).success).toBe(false);
+  });
+});
+
+describe("the plane_merge_queue_v1 capability (D#694 B7-1)", () => {
+  it("is a hello capability, once, and gates no role", () => {
+    expect(PLANE_MERGE_QUEUE_CAPABILITY).toBe("plane_merge_queue_v1");
+    expect(RUNNER_CAPABILITIES).toContain(PLANE_MERGE_QUEUE_CAPABILITY);
+    const hello = { protocol_version: 1, binary_version: "0.1.0", model_auth_present: true, isolation: "container" };
+    expect(HelloMessage.safeParse({ ...hello, capabilities: ["plane_merge_v1", "plane_merge_queue_v1"] }).success).toBe(true);
+    expect(HelloMessage.safeParse({ ...hello, capabilities: ["plane_merge_queue_v1", "plane_merge_queue_v1"] }).success).toBe(false);
+    expect(HelloMessage.safeParse({ ...hello, capabilities: ["plane_merge_queue_v2"] }).success).toBe(false);
   });
 });
 
@@ -89,6 +100,10 @@ describe("the three requests", () => {
     refuse({ abort_code: "head_moved" }, "code without abort");
     refuse({ result: "aborted", abort_code: "because" }, "free-text code");
     refuse({ result: "done" }, "unknown result");
+    // D#694 B7-1: an enqueue is its own result, never a merge, and carries no abort code; the two queue aborts are closed codes.
+    expect(PlaneMergeReportMessage.safeParse(report({ result: "enqueued" })).success).toBe(true);
+    expect(PLANE_MERGE_ABORT_CODES).toEqual(expect.arrayContaining(["queue_unreadable", "queue_mode_mismatch"]));
+    refuse({ result: "enqueued", abort_code: "internal" }, "enqueued with an abort code");
     refuse({ http_status: 99 }, "status");
     refuse({ http_status: 600 }, "status");
     refuse({ sha: A }, "a sha");
@@ -142,6 +157,18 @@ describe("the replies", () => {
     for (const bad of [{ go: true, token: CRED, expires_at: exp }, { go: true, sha: B }, { go: false }, { go: false, reasons: [] }, { go: false, reasons: ["Not Snake"] }, { go: false, head_moved: false }, { go: true, reasons: ["x"], token: CRED, expires_at: exp, sha: B }, { go: false, reasons: ["a"], token: CRED }]) {
       expect(PlaneMergeVerifyReply.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
     }
+  });
+  // D#694 B7-1: `merge_mode` rides on the go reply only; absent reads as direct (a cloud from before the queue). The cloud sends it only to a runner that listed the capability, because
+  // a runner built before it parses the reply strictly: the frozen copy below is that runner's go reply.
+  it("a go reply may carry merge_mode (queue or direct, nothing else), and a runner from before it refuses a reply that does", () => {
+    const exp = "2026-10-25T12:00:00.000Z";
+    const go = { go: true, token: CRED, expires_at: exp, sha: B };
+    for (const mode of ["queue", "direct"]) expect(PlaneMergeVerifyReply.safeParse({ ...go, merge_mode: mode }).success, mode).toBe(true);
+    for (const mode of ["auto_merge", "", null, 1]) expect(PlaneMergeVerifyReply.safeParse({ ...go, merge_mode: mode }).success, String(mode)).toBe(false);
+    expect(PlaneMergeVerifyReply.safeParse({ go: false, reasons: ["runner_update_required"], merge_mode: "queue" }).success).toBe(false);
+    const oldGo = z.object({ go: z.literal(true), token: z.string().min(20).max(512).regex(/^[A-Za-z0-9_.-]+$/), expires_at: z.string(), sha: z.string() }).strict();
+    expect(oldGo.safeParse(go).success).toBe(true);
+    expect(oldGo.safeParse({ ...go, merge_mode: "direct" }).success).toBe(false);
   });
   it("the report reply and the retry reply are tiny and strict", () => {
     expect(PlaneMergeReportReply.safeParse({ recorded: true }).success).toBe(true);

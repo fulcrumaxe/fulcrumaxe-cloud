@@ -1707,6 +1707,11 @@ async function waitForMergeOrder(args: AdvanceStartArgs, pr: { number: number; h
       await advanceLogStep("advance.merge_order", { work_item_id: workItemId, pr: pr.number, state: "merged", code: order.code ?? "" });
       return { next: "end", result: { status: "merged" } };
     }
+    // D#694 B7-1: the runner put the pull request in GitHub's merge queue and the cloud saw the entry. The merge is recorded from GitHub's own events, so this wait ends.
+    if (order.state === "enqueued") {
+      await advanceLogStep("advance.merge_order", { work_item_id: workItemId, pr: pr.number, state: "enqueued", code: order.code ?? "" });
+      return { next: "end", result: { status: "waiting", detail: "merge_enqueued" } };
+    }
     if (order.state === "head_moved") {
       await advanceLogStep("advance.merge_order", { work_item_id: workItemId, pr: pr.number, state: "head_moved", code: order.code ?? "" });
       return { next: "continue" };

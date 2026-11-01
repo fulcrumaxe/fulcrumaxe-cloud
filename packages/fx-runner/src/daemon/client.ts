@@ -6,7 +6,7 @@
 import {
   ClaimMessage, ClaimRateLimitedReply, HelloMessage, HelloReply, ClaimReply, WAKE_CAPABILITY, type WakeGrant, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
   GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply,
-  MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
+  MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
   PLANE_PUSH_PAIRING_PATH, PLANE_PUSH_REPORT_PATH, PLANE_PUSH_TOKEN_PATH, PlanePushPairingMessage, PlanePushPairingReply, PlanePushReportMessage, PlanePushReportReply, PlanePushTokenMessage, PlanePushTokenReply, type ClaimCapacity, type ContextLedgerWire, type DoneCheck, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
 } from "@fulcrumaxe/runner-protocol";
 import { errorCodeOf, signedGet, signedPost, type CloudReply } from "../cloud.js";
@@ -68,7 +68,7 @@ export type PlanePushReportResult = { kind: "recorded" } | { kind: "not_paired" 
 export type PlaneMergeOrder = Extract<PlaneMergeClaimReply, { order_id: string }>;
 export type PlaneMergeClaimResult = { kind: "order"; order: PlaneMergeOrder } | { kind: "none"; retryAfter: number } | { kind: "fenced" } | CallError;
 export type PlaneMergeVerifyResult =
-  | { kind: "go"; token: string; expiresAt: string; sha: string }
+  | { kind: "go"; token: string; expiresAt: string; sha: string; mergeMode?: "queue" | "direct" }
   | { kind: "no_go"; reasons: string[] }
   | { kind: "head_moved" }
   /** 409: the order is not this runner's any more (fenced, mismatch, or a credential already issued). Nothing more may be done with it. */
@@ -150,8 +150,8 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       // capability is dropped alone first, and `wake_v1` goes too only if the hello is still refused.
       const refused = (r: CloudReply | undefined): boolean => r?.status === 400 && errorCodeOf(r.body) === "invalid_message";
       let dropped: string[] = [];
-      // `memory_limit_v1` (D#6 CARD-OOM-CAUSE-WORDS) is the newest, so it goes first: a cloud that knows the others keeps them, and the caller reads the `dropped` list to know not to send the field.
-      for (const drop of [MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY]) {
+      // `plane_merge_queue_v1` (D#694 B7-1) is the newest, so it goes first, then `memory_limit_v1` (D#6 CARD-OOM-CAUSE-WORDS): a cloud that knows the others keeps them, and the caller reads the `dropped` list to know not to send the field.
+      for (const drop of [PLANE_MERGE_QUEUE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY]) {
         if (!refused(reply) || !(parsed.capabilities ?? []).includes(drop)) continue;
         dropped = [...dropped, drop];
         reply = await send(HELLO_PATH, { ...parsed, capabilities: (parsed.capabilities ?? []).filter((c) => !dropped.includes(c)) });
@@ -289,7 +289,7 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
         const body = PlaneMergeVerifyReply.safeParse(reply.body);
         if (!body.success) return fail(reply, "invalid_reply");
         const d = body.data;
-        if (d.go) return { kind: "go", token: d.token, expiresAt: d.expires_at, sha: d.sha };
+        if (d.go) return { kind: "go", token: d.token, expiresAt: d.expires_at, sha: d.sha, ...(d.merge_mode === undefined ? {} : { mergeMode: d.merge_mode }) };
         return "head_moved" in d ? { kind: "head_moved" } : { kind: "no_go", reasons: d.reasons };
       }
       if (reply?.status === 409) {

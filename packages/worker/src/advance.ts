@@ -383,7 +383,7 @@ export interface AdvanceRoundResult {
  * again. `blocked`/`failed`/`expired`: a person merges, and `code` is the fixed reason. `none`: the item has no order. `refused`: the step may not run.
  */
 export interface AdvanceMergeOrderResult {
-  state: "open" | "merged" | "head_moved" | "blocked" | "failed" | "none" | "refused";
+  state: "open" | "merged" | "enqueued" | "head_moved" | "blocked" | "failed" | "none" | "refused";
   code: string | null;
   /**
    * Only for `blocked`: whether the merge gate itself recorded this stop as a `ready_human_merges` fact since the order was placed (a go-phase block carries the
@@ -2118,6 +2118,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         return { state: "open", code: null };
       case "merged":
         return { state: "merged", code: order.outcomeCode };
+      // D#694 B7-1: the runner put the pull request in GitHub's queue and the cloud saw the entry; the merge is recorded by B6's webhook path, not by this wait.
+      case "enqueued":
+        return { state: "enqueued", code: order.outcomeCode };
       case "head_moved":
       case "superseded":
         return { state: "head_moved", code: order.outcomeCode };

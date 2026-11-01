@@ -59,7 +59,8 @@ describe("boundary: what the source may import, and every workspace import is de
   // The one protocol subpath src may import besides the root (D#598 P1f-3): the public-push route and its scanner, which run the version-control tool for the
   // run-end hook. Only this exact subpath; the root never exports them (runner-protocol's root-closure test), and the files below are the only importers.
   const PLANE_PUSH_SUBPATH = "@fulcrumaxe/runner-protocol/planePush";
-  const PLANE_PUSH_IMPORTERS = ["src/commands/run.ts", "src/daemon/planeMerge.ts", "src/daemon/planePush.ts"];
+  // D#694 B7-1: planePushGithub.ts imports the two queue documents it sends (runner-protocol keeps the strings; a test in @fx/github holds them equal to the pinned originals).
+  const PLANE_PUSH_IMPORTERS = ["src/commands/run.ts", "src/daemon/planeMerge.ts", "src/daemon/planePush.ts", "src/daemon/planePushGithub.ts"];
 
   it("src imports only itself, node built-ins, the protocol package and the TUF client", () => {
     const violations: string[] = [];
@@ -73,7 +74,7 @@ describe("boundary: what the source may import, and every workspace import is de
     expect(violations).toEqual([]);
   });
 
-  it("the planePush subpath is imported only by the run-end hook, the merge-order handler and the command that wires them, and no other protocol subpath is allowed", () => {
+  it("the planePush subpath is imported only by the run-end hook, the merge-order handler, its GitHub calls and the command that wires them, and no other protocol subpath is allowed", () => {
     const importers = new Set<string>();
     for (const file of sourceFiles) {
       for (const match of readFileSync(file, "utf8").matchAll(specifier)) {

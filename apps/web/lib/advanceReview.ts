@@ -71,7 +71,7 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
     // read through the fenced client: the runner may have merged before it stopped.
     async reconcileMergeOrder(pool, store, order, extras) {
       const ops = createPlaneMergeOps({ open, withPool: (fn) => fn(pool), reconcile: extras.reconcile, closePrivate: (repo, number) => (privateCloser ??= createAppRunPullRequestPort()).close({ repo, number }) });
-      await settleAuthorizedOrder({ store, goPhase: ops.goPhase, readPublicPull: ops.readPublicPull, recordMerged: ops.recordMerged }, order.accountId, order, null);
+      await settleAuthorizedOrder({ store, goPhase: ops.goPhase, readPublicPull: ops.readPublicPull, readPublicQueue: ops.readPublicQueue, recordEnqueued: ops.recordEnqueued, recordMerged: ops.recordMerged }, order.accountId, order, null);
     },
     async mergeGate(pool, input, extras) {
       const loaded = await loadReviewContext(pool, input.accountId, input.workItemId);

@@ -27,6 +27,7 @@ import {
   type PlaneMergePort,
   type PlanePushHostedPort,
   type PublicPullFacts,
+  type PublicQueueFacts,
   type RunnerCloudDeps,
   type RunnerHttpRequest,
 } from "@fx/runner-cloud";
@@ -68,9 +69,12 @@ describe("plane-merge routes [pg]", () => {
   let revokeOk = true;
   let mintError: unknown = null;
   const goCalls: Array<Parameters<PlaneMergePort["goPhase"]>[0]> = [];
-  let gate: { next: PlaneMergeGoResult; before?: () => Promise<void>; throwBefore?: unknown; throwAfterDelegate?: unknown } = { next: { kind: "go" } };
+  let gate: { next: PlaneMergeGoResult; before?: () => Promise<void>; throwBefore?: unknown; throwAfterDelegate?: unknown } = { next: { kind: "go", mergeMode: "direct" } };
   let pull: PublicPullFacts | Error = { open: true, merged: false, headSha: HEAD };
   const recorded: string[] = [];
+  // D#694 B7-1: the public pull request with its queue entry, and the enqueues the cloud recorded (order id, entry id).
+  let queue: PublicQueueFacts | Error = { open: true, merged: false, headSha: HEAD, entryId: "MQE_kwDOAAAAAQ" };
+  const recordedEnqueued: Array<[string, string]> = [];
   let recordResult: "closed" | "left" | "failed" = "closed";
   let recordError: unknown = null;
 
@@ -100,10 +104,20 @@ describe("plane-merge routes [pg]", () => {
       await gate.before?.();
       if (gate.throwBefore) throw gate.throwBefore;
       if (gate.next.kind !== "go") return gate.next;
+      // As the real go phase: a queue repository's order is delegated only for a runner that can enqueue, and then no credential is minted.
+      if (gate.next.mergeMode === "queue" && input.queueCapable !== true) return { kind: "blocked", reasons: ["runner_update_required"] };
       const d = await input.delegate();
       if (!d.delegated) return { kind: "blocked", reasons: [d.reason] };
       if (gate.throwAfterDelegate) throw gate.throwAfterDelegate;
-      return { kind: "go" };
+      return { kind: "go", mergeMode: gate.next.mergeMode };
+    },
+    readPublicQueue: async () => {
+      if (queue instanceof Error) throw queue;
+      return queue;
+    },
+    recordEnqueued: async ({ order, entryId }) => {
+      if (recordError) throw recordError;
+      recordedEnqueued.push([order.id, entryId]);
     },
     readPublicPull: async () => {
       if (pull instanceof Error) throw pull;
@@ -141,8 +155,10 @@ describe("plane-merge routes [pg]", () => {
     revokeOk = true;
     mintError = null;
     goCalls.length = 0;
-    gate = { next: { kind: "go" } };
+    gate = { next: { kind: "go", mergeMode: "direct" } };
     pull = { open: true, merged: false, headSha: HEAD };
+    queue = { open: true, merged: false, headSha: HEAD, entryId: "MQE_kwDOAAAAAQ" };
+    recordedEnqueued.length = 0;
     recorded.length = 0;
     recordResult = "closed";
     recordError = null;
@@ -353,6 +369,46 @@ describe("plane-merge routes [pg]", () => {
       expect(reply.order_id).toBe(order.id);
     });
 
+    // D#694 B7-1 (C8 item 1): the merge mode goes only to a runner that listed plane_merge_queue_v1; a queue repository's order never reaches an older one.
+    describe("the merge mode and the queue capability", () => {
+      const capable = async () => mkRunner(A, key, { caps: ["plane_merge_v1", "plane_merge_queue_v1"] });
+      const verifyOf = async () => {
+        const { reply } = await claimed();
+        return { reply: reply as Claimed, res: await verifyIt(attestation(reply as Claimed)) };
+      };
+
+      it("a capable runner gets merge_mode on the go (queue or direct), and the gate is told the runner can enqueue", async () => {
+        for (const mode of ["queue", "direct"] as const) {
+          await admin.query("DELETE FROM runners WHERE account_id = $1", [A.accountId]);
+          mints.length = 0;
+          goCalls.length = 0;
+          await capable();
+          gate = { next: { kind: "go", mergeMode: mode } };
+          const { res } = await verifyOf();
+          expect(res.status).toBe(200);
+          expect(PlaneMergeVerifyReply.parse(res.body)).toMatchObject({ go: true, sha: HEAD, merge_mode: mode });
+          expect(goCalls[0]!.queueCapable).toBe(true);
+        }
+      });
+
+      it("a runner without it gets the go with no merge_mode key for a direct repository, and the gate is told it cannot enqueue", async () => {
+        const { res } = await verifyOf();
+        expect(res.status).toBe(200);
+        expect(res.body).not.toHaveProperty("merge_mode");
+        expect(PlaneMergeVerifyReply.parse(res.body)).toMatchObject({ go: true });
+        expect(goCalls[0]!.queueCapable).toBe(false);
+      });
+
+      it("a queue repository and a runner without it: no go, runner_update_required, NO write credential is minted and the order ends blocked without one", async () => {
+        gate = { next: { kind: "go", mergeMode: "queue" } };
+        const { reply, res } = await verifyOf();
+        expect(res.status).toBe(200);
+        expect(PlaneMergeVerifyReply.parse(res.body)).toEqual({ go: false, reasons: ["runner_update_required"] });
+        expect(mints.map((m) => m.kind)).toEqual(["read"]);
+        expect(await row(reply.order_id)).toMatchObject({ state: "blocked", outcome_code: "runner_update_required", write_token_issued_at: null });
+      });
+    });
+
     it("a second verify for the same order is 409 already_issued: the gate is not run again and nothing more is minted", async () => {
       const { reply } = await authorized();
       const again = await verifyIt(attestation(reply));
@@ -495,7 +551,7 @@ describe("plane-merge routes [pg]", () => {
 
     it("a gate that fails after the credential was minted revokes it and ends the order failed", async () => {
       const { order, reply } = await claimed();
-      gate = { next: { kind: "go" }, throwAfterDelegate: new Error("recording failed") };
+      gate = { next: { kind: "go", mergeMode: "direct" }, throwAfterDelegate: new Error("recording failed") };
       const res = await verifyIt(attestation(reply as Claimed));
       expect(res.status).toBe(503);
       const write = mints.find((m) => m.kind === "write")!;
@@ -506,12 +562,12 @@ describe("plane-merge routes [pg]", () => {
 
     it("a gate that cannot read GitHub is 503 public_unavailable: nothing is decided, the lease stands, and the runner may ask again", async () => {
       const { order, reply } = await claimed();
-      gate = { next: { kind: "go" }, throwBefore: new Error("GitHub down") };
+      gate = { next: { kind: "go", mergeMode: "direct" }, throwBefore: new Error("GitHub down") };
       const down = await verifyIt(attestation(reply as Claimed));
       expect(down.status).toBe(503);
       expect(down.body).toMatchObject({ error: { code: "public_unavailable" } });
       expect((await row(order.id)).state).toBe("claimed");
-      gate = { next: { kind: "go" } };
+      gate = { next: { kind: "go", mergeMode: "direct" } };
       expect((await verifyIt(attestation(reply as Claimed))).status).toBe(200);
     });
 
@@ -569,6 +625,77 @@ describe("plane-merge routes [pg]", () => {
         await reportIt(reportBody(reply, over));
         expect(await row(order.id), code).toMatchObject({ state: "failed", outcome_code: code });
       }
+    });
+
+    // D#694 B7-1: an `enqueued` report is a hint. The order ends enqueued only when the cloud's own read shows the pull request open at the order's head WITH a queue entry.
+    describe("an enqueued report", () => {
+      it("GitHub shows the entry at the expected head: the order ends enqueued (never merged), the fact is recorded once with the entry id, and nothing is recorded as merged", async () => {
+        const { order, reply } = await authorized();
+        const res = await reportIt(reportBody(reply, { result: "enqueued" }));
+        expect(PlaneMergeReportReply.parse(res.body)).toEqual({ recorded: true });
+        expect(await row(order.id)).toMatchObject({ state: "enqueued", outcome_code: "enqueued", write_token_issued_at: expect.any(Date) });
+        expect(recordedEnqueued).toEqual([[order.id, "MQE_kwDOAAAAAQ"]]);
+        expect(recorded).toEqual([]);
+      });
+
+      it("the pull request is open and not queued: failed runner_report_mismatch, nothing recorded", async () => {
+        const { order, reply } = await authorized();
+        queue = { open: true, merged: false, headSha: HEAD, entryId: null };
+        expect((await reportIt(reportBody(reply, { result: "enqueued" }))).status).toBe(200);
+        expect(await row(order.id)).toMatchObject({ state: "failed", outcome_code: "runner_report_mismatch" });
+        expect(recordedEnqueued).toEqual([]);
+        expect(recorded).toEqual([]);
+      });
+
+      it("GitHub already shows it merged at the expected head: the merged path runs; merged at another head is a mismatch", async () => {
+        const first = await authorized();
+        queue = { open: false, merged: true, headSha: HEAD, entryId: null };
+        await reportIt(reportBody(first.reply, { result: "enqueued" }));
+        expect(await row(first.order.id)).toMatchObject({ state: "merged", outcome_code: "merged" });
+        expect(recorded).toEqual([first.order.id]);
+        expect(recordedEnqueued).toEqual([]);
+        const second = await authorized();
+        queue = { open: false, merged: true, headSha: "e".repeat(40), entryId: null };
+        await reportIt(reportBody(second.reply, { result: "enqueued" }));
+        expect(await row(second.order.id)).toMatchObject({ state: "failed", outcome_code: "runner_report_mismatch" });
+      });
+
+      it("a head that moved is head_moved; a closed pull request is public_pr_not_open", async () => {
+        const moved = await authorized();
+        queue = { open: true, merged: false, headSha: "e".repeat(40), entryId: "MQE_kwDOAAAAAQ" };
+        await reportIt(reportBody(moved.reply, { result: "enqueued" }));
+        expect(await row(moved.order.id)).toMatchObject({ state: "head_moved", outcome_code: "public_head_moved" });
+        const closed = await authorized();
+        queue = { open: false, merged: false, headSha: HEAD, entryId: null };
+        await reportIt(reportBody(closed.reply, { result: "enqueued" }));
+        expect(await row(closed.order.id)).toMatchObject({ state: "failed", outcome_code: "public_pr_not_open" });
+        expect(recordedEnqueued).toEqual([]);
+      });
+
+      it("GitHub cannot be asked: 503 with retry_after, nothing recorded, the order still authorized; the same report later succeeds", async () => {
+        const { order, reply } = await authorized();
+        queue = new Error("GitHub down");
+        const down = await reportIt(reportBody(reply, { result: "enqueued" }));
+        expect(down.status).toBe(503);
+        expect(PlaneMergeRetryReply.parse(down.body)).toMatchObject({ retry_after: expect.any(Number) });
+        expect((await row(order.id)).state).toBe("authorized");
+        expect(recordedEnqueued).toEqual([]);
+        queue = { open: true, merged: false, headSha: HEAD, entryId: "MQE_kwDOAAAAAQ" };
+        expect((await reportIt(reportBody(reply, { result: "enqueued" }))).status).toBe(200);
+        expect((await row(order.id)).state).toBe("enqueued");
+      });
+
+      it("a recording that throws leaves the order enqueued (the webhook writes the same fact); an order with no go cannot be enqueued (409 not_authorized)", async () => {
+        const { order, reply } = await authorized();
+        recordError = new Error("db down");
+        expect((await reportIt(reportBody(reply, { result: "enqueued" }))).status).toBe(200);
+        expect((await row(order.id)).state).toBe("enqueued");
+        recordError = null;
+        const { reply: waiting } = await claimed();
+        const refused = await reportIt(reportBody(waiting as Claimed, { result: "enqueued" }));
+        expect(refused.status).toBe(409);
+        expect(refused.body).toMatchObject({ error: { code: "not_authorized" } });
+      });
     });
 
     it("GitHub cannot be asked: 503 with retry_after, NOTHING recorded, the order still authorized; the same report later succeeds", async () => {

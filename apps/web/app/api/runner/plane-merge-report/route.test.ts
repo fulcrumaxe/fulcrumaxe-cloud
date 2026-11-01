@@ -53,8 +53,8 @@ describe("POST /api/runner/plane-merge-report", () => {
 
   it("the runner deps hand the merge-order store, gate and GitHub access to the route", () => {
     const deps = runnerDeps();
-    for (const method of ["claimNext", "grantReadToken", "fence", "authorize", "finish", "getById", "runnerTrusted"] as const) expect(typeof deps.planeMerge!.store[method]).toBe("function");
-    for (const method of ["goPhase", "readPublicPull", "recordMerged"] as const) expect(typeof deps.planeMerge![method]).toBe("function");
+    for (const method of ["claimNext", "grantReadToken", "fence", "authorize", "finish", "getById", "runnerTrusted", "runnerHasCapability"] as const) expect(typeof deps.planeMerge!.store[method]).toBe("function");
+    for (const method of ["goPhase", "readPublicPull", "readPublicQueue", "recordEnqueued", "recordMerged"] as const) expect(typeof deps.planeMerge![method]).toBe("function");
     expect(typeof deps.planePush!.mintMergeToken).toBe("function");
     expect(typeof deps.planePush!.revokeToken).toBe("function");
   });

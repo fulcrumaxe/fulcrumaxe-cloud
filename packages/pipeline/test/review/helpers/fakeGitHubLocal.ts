@@ -35,6 +35,18 @@ const STATES = ["error", "failure", "pending", "success"];
 const MERGE_METHODS = ["merge", "squash", "rebase"];
 const FILES_PAGE = 100;
 const DOCS = GITHUB_GRAPHQL_DOCUMENTS as Record<string, string>;
+/** D#694 B7-0 (A11 to A13): the two queue-read documents, written out here so a wrong fence cannot hide behind a lenient fake. */
+export const QUEUE_DOCS: Record<string, string> = {
+  MergeQueueRead: "query($owner: String!, $name: String!, $branch: String!) { repository(owner: $owner, name: $name) { mergeQueue(branch: $branch) { id } } }",
+  MergeQueueEntry: "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { state merged headRefOid mergeQueueEntry { id state position } } } }",
+};
+/** How the code repository merges, for the queue reads: the queue read and the branch rules are separate facts; `fail` makes both answer 500. */
+export interface QueueState {
+  graphql: boolean;
+  rules: boolean;
+  fail?: boolean;
+  entry?: { id: string; state: string; position: number } | null;
+}
 
 export interface LocalFake {
   /** The client the code under test gets: the real wrapper around the strict inner client. */
@@ -49,7 +61,7 @@ export interface LocalFake {
   answers: unknown[];
 }
 
-export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts: { exclude?: readonly string[] } = {}): LocalFake {
+export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts: { exclude?: readonly string[]; queue?: QueueState } = {}): LocalFake {
   const base = `/repos/${s.owner}/${s.name}`;
   const branch = s.runBranch ?? "fx/run-g1";
   const calls: LocalFake["calls"] = [];
@@ -123,9 +135,23 @@ export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts:
   function graphql(body: unknown): { label: string; op: string; reply: () => GithubResponse } {
     const b = body as { query?: unknown; variables?: Record<string, unknown> };
     if (typeof body !== "object" || body === null || Object.keys(b).sort().join(",") !== "query,variables") deny("graphql body keys");
+    const queueOp = Object.keys(QUEUE_DOCS).find((k) => QUEUE_DOCS[k] === b.query);
+    const v = b.variables ?? {};
+    if (queueOp !== undefined) {
+      const q = opts.queue ?? { graphql: false, rules: false };
+      return {
+        label: queueOp === "MergeQueueRead" ? "A12" : "A13",
+        op: queueOp,
+        reply: () => {
+          if (q.fail) return json(502, { message: "Bad Gateway" });
+          if (queueOp === "MergeQueueRead") return json(200, { data: { repository: { mergeQueue: q.graphql ? { id: "MQ_kwDOAAAAAQ" } : null } } });
+          const closed = s.state === "closed" || s.merged;
+          return json(200, { data: { repository: { pullRequest: { state: s.merged ? "MERGED" : closed ? "CLOSED" : "OPEN", merged: s.merged, headRefOid: s.headSha, mergeQueueEntry: q.entry ?? null } } } });
+        },
+      };
+    }
     const op = Object.keys(DOCS).find((k) => DOCS[k] === b.query);
     if (op === undefined) return deny("graphql query text is not one of the fixed documents");
-    const v = b.variables ?? {};
     if (op === "PullRequestFiles") {
       return {
         label: "A1 PullRequestFiles",
@@ -180,6 +206,12 @@ export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts:
         if (Object.keys(query).length > 0 || req.body !== undefined) deny("A2 query or body");
         label = "A2";
         reply = () => json(200, { id: s.ghId ?? defaultGhId(s.owner, s.name), full_name: full, default_branch: s.defaultBranch ?? "main", private: false });
+      } else if (method === "GET" && path === `${base}/rules/branches/${s.baseRef}`) {
+        // A11: the branch's rules, paged. Only the paging keys, no body.
+        for (const k of Object.keys(query)) if (!["per_page", "page"].includes(k)) deny(`A11 query key ${k}`);
+        if (req.body !== undefined) deny("A11 body");
+        label = "A11";
+        reply = () => (opts.queue?.fail ? json(500, { message: "Server Error" }) : json(200, opts.queue?.rules ? [{ type: "merge_queue", parameters: { max_entries_to_build: 5 } }] : [{ type: "pull_request", parameters: {} }]));
       } else if (method === "GET" && path === `${base}/pulls`) {
         if (req.body !== undefined) deny("body on GET");
         label = "A3";

@@ -2,6 +2,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { ENQUEUE_PULL_REQUEST_DOCUMENT as RUNNER_ENQUEUE_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT as RUNNER_QUEUE_READ_DOCUMENT } from "@fulcrumaxe/runner-protocol/planePush";
 import { InstallationTokenCache, type AccessTokenRequester } from "../src/installationToken.js";
 import { createInstallationHttp, InstallationHttpError, type InstallationHttpKind } from "../src/installationHttp.js";
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_GATE_GRAPHQL_MAX_BYTES, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, MERGE_QUEUE_REMOVAL_DOCUMENT, pinnedMergeGateBody } from "../src/mergeGateGraphql.js";
@@ -71,6 +72,14 @@ describe("the six pinned documents (snapshot: changing one is a reviewed edit)",
         "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) { nodes { ... on RemovedFromMergeQueueEvent { createdAt reason actor { __typename } beforeCommit { oid } } } } } } }",
       ]
     `);
+  });
+});
+
+// D#694 B7-1: the local runner depends on runner-protocol alone, so it carries its own copies of the two documents it sends; they are these strings, byte for byte.
+describe("the runner's copies of the queue documents", () => {
+  it("are byte-equal to the pinned originals", () => {
+    expect(RUNNER_QUEUE_READ_DOCUMENT).toBe(MERGE_QUEUE_READ_DOCUMENT);
+    expect(RUNNER_ENQUEUE_DOCUMENT).toBe(ENQUEUE_PULL_REQUEST_DOCUMENT);
   });
 });
 

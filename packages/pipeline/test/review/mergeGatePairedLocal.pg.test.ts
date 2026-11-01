@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Records what the security trigger is asked, so a test can see WHICH paths reached it (the gate itself only answers with reasons).
 const triggerCalls = vi.hoisted(() => [] as Array<{ files: Array<{ path: string }>; truncated?: boolean }>);
@@ -10,15 +10,15 @@ vi.mock("../../src/review/securityTrigger.js", async (original) => {
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { listDriverEvents } from "@fx/core/src/work-items/driverEvents.js";
 import { LocalOnlyGithubError } from "@fx/runner-cloud";
-import type { GitHubHttp, LocalGitHubHttp } from "../../src/build/githubMergePort.js";
+import { clearMergeQueueModeCache, type GitHubHttp, type LocalGitHubHttp } from "../../src/build/githubMergePort.js";
 import { LOCAL_REVIEW_DESCRIPTION, REVIEW_STATUS_CONTEXT } from "../../src/review/githubReads.js";
-import { runMergeGateForItem, type GoAttestation, type LocalReviewOptInPort, type MergeDelegate } from "../../src/review/mergeGateRun.js";
+import { createReviewGitHubPort, runMergeGateForItem, type GoAttestation, type LocalReviewOptInPort, type MergeDelegate } from "../../src/review/mergeGateRun.js";
 import { securityTriggers } from "../../src/review/securityTrigger.js";
 import { readPublicPullRequest } from "../../src/review/publicPullRequest.js";
 import { discussingItem } from "../plan/helpers/panelFixtures.js";
 import { seedAccount, seedRepo } from "../build/helpers/seed.js";
 import { pgHarness } from "../helpers/pgHarness.js";
-import { fakeGitHubLocal } from "./helpers/fakeGitHubLocal.js";
+import { QUEUE_DOCS, fakeGitHubLocal, type QueueState } from "./helpers/fakeGitHubLocal.js";
 import { fakeGitHubRest, freshRepo, type FakeRepoState } from "./helpers/fakeGitHubRest.js";
 
 /**
@@ -62,6 +62,8 @@ interface Opts {
   executionMode?: string;
   pub?: Partial<FakeRepoState>;
   priv?: Partial<FakeRepoState>;
+  /** D#694 B7-1: how the code repository merges, as the queue reads see it. */
+  queue?: QueueState;
 }
 
 async function world(o: Opts = {}) {
@@ -112,7 +114,7 @@ async function world(o: Opts = {}) {
   const pubBranch = o.pairing === false ? "fx/none" : String((await h.admin.query("SELECT branch FROM plane_pushes WHERE work_item_id = $1", [workItemId])).rows[0].branch);
   const pubHead = o.pub?.headSha ?? PUB_HEAD;
   const pub = freshRepo({ owner: "acme", name: "widgets-public", prNumber: PUB_PR, headSha: pubHead, checks: { [pubHead]: [green] }, protectedWithoutChecks: true, runBranch: pubBranch, files: [(local ? file : patched)("src/ui/button.tsx")], ghId: 8123456, ...o.pub });
-  return { accountId, workItemId, repoId, ghRepoId, priv, pub, pubBranch, local, privLocal: fakeGitHubLocal(priv), pubLocal: fakeGitHubLocal(pub, { exclude: ["A10"] }) };
+  return { accountId, workItemId, repoId, ghRepoId, priv, pub, pubBranch, local, privLocal: fakeGitHubLocal(priv), pubLocal: fakeGitHubLocal(pub, { exclude: ["A10"], ...(o.queue ? { queue: o.queue } : {}) }) };
 }
 type World = Awaited<ReturnType<typeof world>>;
 
@@ -561,10 +563,19 @@ describe("failure paths: a read that fails is a throw (the step's retry), never 
 
 const attest = (o: Partial<GoAttestation> = {}): GoAttestation => ({ reviewedHead: HEAD, publicHead: PUB_HEAD, same: true, incomplete: false, paths: ["src/ui/button.tsx"], ...o });
 type DelegateCall = Parameters<MergeDelegate>[0];
+/** The documents the port is given (the hosted client's pinned strings in production). The read ones are the fence's; the writes are only strings the fence must refuse. */
+const QUEUE_DOCUMENTS = {
+  read: QUEUE_DOCS.MergeQueueRead!,
+  entry: QUEUE_DOCS.MergeQueueEntry!,
+  enqueue: "mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!) { enqueuePullRequest(input: { pullRequestId: $pullRequestId, expectedHeadOid: $expectedHeadOid }) { mergeQueueEntry { id position } } }",
+  autoMerge: "mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!, $mergeMethod: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId, expectedHeadOid: $expectedHeadOid, mergeMethod: $mergeMethod }) { pullRequest { id } } }",
+  dequeue: "mutation($pullRequestId: ID!) { dequeuePullRequest(input: { id: $pullRequestId }) { mergeQueueEntry { id } } }",
+};
 
 /** The gate with the merge handed to a delegate (the order phase), or with the runner's attestation as well (the go phase). The delegate records its calls. */
-function delegating(w: World, o: { go?: Partial<GoAttestation>; optIn?: LocalReviewOptInPort; pubHttp?: GitHubHttp; delegate?: MergeDelegate } = {}) {
+function delegating(w: World, o: { go?: Partial<GoAttestation>; optIn?: LocalReviewOptInPort; pubHttp?: GitHubHttp; delegate?: MergeDelegate; queueDocuments?: boolean } = {}) {
   const calls: DelegateCall[] = [];
+  const contexts: Array<Parameters<MergeDelegate>[1]> = [];
   const delegate: MergeDelegate = o.delegate ?? (async () => ({ delegated: true }));
   const run = () =>
     runMergeGateForItem(
@@ -573,11 +584,12 @@ function delegating(w: World, o: { go?: Partial<GoAttestation>; optIn?: LocalRev
         http: w.privLocal.http,
         localReviewOptIn: o.optIn ?? on,
         publicPlane: { open: async () => o.pubHttp ?? w.pubLocal.http, read: readPublicPullRequest(h.runWriterPool) },
-        mergeDelegate: async (a) => (calls.push(a), delegate(a)),
+        mergeDelegate: async (a, c) => (calls.push(a), contexts.push(c), delegate(a, c)),
+        ...(o.queueDocuments ? { queueDocuments: QUEUE_DOCUMENTS } : {}),
       },
       { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber, ...(o.go !== undefined ? { goPhase: { attestation: attest(o.go) } } : {}) },
     );
-  return { run, calls };
+  return { run, calls, contexts };
 }
 const filesReads = (w: World) => [...w.privLocal.calls, ...w.pubLocal.calls].filter((c) => c.label === "A1 PullRequestFiles").length;
 
@@ -792,5 +804,70 @@ describe("the go phase: the whole gate again from fresh reads, with the runner's
     );
     expect(noDelegate).toEqual({ outcome: "refused", reason: "go_not_applicable" });
     expect(calls).toEqual([]);
+  });
+});
+
+// ---- D#694 B7-1 (C9): a paired item's queue mode is the CODE repository's, read through the fence's queue reads ----
+
+describe("a paired item and the merge queue: the mode is read on the public repository, and the cloud never enqueues", () => {
+  // The mode answer is kept five minutes per repository and branch, in the process: every case here reads afresh.
+  beforeEach(() => clearMergeQueueModeCache());
+  const queueReads = (f: { calls: Array<{ label: string }> }) => f.calls.filter((c) => ["A11", "A12", "A13"].includes(c.label)).map((c) => c.label);
+
+  it("survey item 1: the gate's queue read is made against the PUBLIC pull request, none against the private repository (the old short-circuit would have answered direct without a call)", async () => {
+    const w = await world({ queue: { graphql: true, rules: true } });
+    const { run, calls, contexts } = delegating(w, { queueDocuments: true });
+    expect(await run()).toMatchObject({ outcome: "merge_delegated", headSha: PUB_HEAD });
+    expect(queueReads(w.pubLocal)).toEqual(expect.arrayContaining(["A11", "A12"]));
+    expect(queueReads(w.privLocal)).toEqual([]);
+    expect(calls).toHaveLength(1);
+    // The delegate is told what was read; the cloud merged and enqueued nothing, and the fence refused nothing (the port never sent a write).
+    expect(contexts).toEqual([{ mergeMode: "queue" }]);
+    expectNoMergeAnywhere(w);
+    expect(w.pubLocal.refused).toEqual([]);
+    expect(w.pubLocal.denied).toEqual([]);
+  });
+
+  it("a direct repository: the delegate is told direct; a queue read that fails is merge_queue_unreadable and the delegate is not called", async () => {
+    const direct = await world({ queue: { graphql: false, rules: false } });
+    const a = delegating(direct, { queueDocuments: true });
+    expect(await a.run()).toMatchObject({ outcome: "merge_delegated" });
+    expect(a.contexts).toEqual([{ mergeMode: "direct" }]);
+    for (const queue of [{ graphql: true, rules: false }, { graphql: false, rules: true }, { graphql: true, rules: true, fail: true }]) {
+      clearMergeQueueModeCache();
+      const w = await world({ queue });
+      const b = delegating(w, { queueDocuments: true });
+      const out = await b.run();
+      expect(reasons(out), JSON.stringify(queue)).toEqual(["merge_queue_unreadable"]);
+      expect(b.calls).toEqual([]);
+      expectNoMergeAnywhere(w);
+    }
+  });
+
+  it("the fence keeps refusing the writes for the code repository: enqueue, dequeue and auto-merge documents are not on the allowlist, whatever the port was given", async () => {
+    const w = await world({ queue: { graphql: true, rules: true } });
+    for (const document of [QUEUE_DOCUMENTS.enqueue, QUEUE_DOCUMENTS.dequeue, QUEUE_DOCUMENTS.autoMerge]) {
+      await expect(w.pubLocal.http.request({ method: "POST", path: "/graphql", body: { query: document, variables: { pullRequestId: "PR_kwDOAAAAAQ", expectedHeadOid: PUB_HEAD, mergeMethod: "SQUASH" } } })).rejects.toBeInstanceOf(LocalOnlyGithubError);
+    }
+    expect(w.pubLocal.calls.filter((c) => c.method === "POST")).toEqual([]);
+    expectNoMergeAnywhere(w);
+  });
+
+  it("a repository that is not paired keeps the old rule: no queue read at all, whatever documents the gate is given, and its own A10 merge", async () => {
+    const w = await world({ pairing: false, queue: { graphql: true, rules: true } });
+    w.priv.draft = false;
+    const { run, calls } = delegating(w, { queueDocuments: true });
+    expect(await run()).toMatchObject({ outcome: "merged", headSha: HEAD });
+    expect(calls).toEqual([]);
+    expect([...queueReads(w.privLocal), ...queueReads(w.pubLocal)]).toEqual([]);
+  });
+
+  it("the entry read (A13) works through the fence for the public pull request, and the port reads it only for a paired item", async () => {
+    const w = await world({ queue: { graphql: true, rules: true, entry: { id: "MQE_kwDOAAAAAQ", state: "QUEUED", position: 1 } } });
+    const port = createReviewGitHubPort({ pool: h.runWriterPool, http: w.pubLocal.http, queueDocuments: QUEUE_DOCUMENTS, pairedQueueReads: true }, { owner: "acme", name: "widgets-public", executionMode: "runner_local" } as never, { accountId: w.accountId, workItemId: w.workItemId, prNumber: PUB_PR, recordedBranch: w.pubBranch });
+    expect(await port.getQueueEntry!({ repoId: w.repoId, prNumber: PUB_PR })).toEqual({ state: "open", merged: false, headSha: PUB_HEAD, entry: { id: "MQE_kwDOAAAAAQ", state: "queued", position: 1 } });
+    expect(queueReads(w.pubLocal)).toEqual(["A13"]);
+    const plain = createReviewGitHubPort({ pool: h.runWriterPool, http: w.pubLocal.http, queueDocuments: QUEUE_DOCUMENTS }, { owner: "acme", name: "widgets-public", executionMode: "runner_local" } as never, { accountId: w.accountId, workItemId: w.workItemId, prNumber: PUB_PR, recordedBranch: w.pubBranch });
+    await expect(plain.getQueueEntry!({ repoId: w.repoId, prNumber: PUB_PR })).rejects.toThrow(/allowlist/);
   });
 });

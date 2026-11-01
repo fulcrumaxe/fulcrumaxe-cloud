@@ -185,7 +185,9 @@ const REASON_WORDS = {
   // Two planes, a runner_local repository: the merge goes through the customer's own runner, and these say why a person merges instead.
   runner_merge_timeout: "Your runner did not finish the merge in time (60 minutes). A person merges the public pull request.",
   runner_merge_failed: "Your runner could not finish the merge. A person merges the public pull request.",
-  runner_report_mismatch: "Your runner reported a merge that GitHub does not show. A person looks at the public pull request.",
+  runner_report_mismatch: "Your runner reported a merge or a queue entry that GitHub does not show. A person looks at the public pull request.",
+  // D#694 B7-1: the repository merges through GitHub's merge queue and the runner on your machine is too old to use it. Nothing was issued.
+  runner_update_required: "Update the runner on your machine so it can use this repository's merge queue.",
   public_branch_person_managed: "A person took over the public branch, so the merge is theirs. A person merges the public pull request.",
   public_head_unrecorded: "The public pull request's head is not the one the platform pushed. A person looks at it before it merges.",
   public_head_not_reviewed: "The public pull request does not hold exactly what was reviewed. A person looks at it before it merges.",
@@ -606,6 +608,8 @@ export const BLOCKING_SENTENCES = {
   pairing_changed: "The public repository's pairing changed",
   no_pull_request: "There is no pull request on record to merge",
   go_not_applicable: "The merge could not go through your runner",
+  // D#694 B7-1: the repository merges through GitHub's merge queue and the runner on this machine is too old to use it. Nothing was issued.
+  runner_update_required: "Update the runner on your machine so it can use this repository's merge queue.",
 };
 export const REVIEW_BLOCK_SENTENCE = "A required review hasn't passed on the latest commit";
 export const UNKNOWN_BLOCK_SENTENCE = "Something still blocks the merge";

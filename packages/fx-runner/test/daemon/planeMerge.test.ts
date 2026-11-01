@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeVerifyMessage } from "@fulcrumaxe/runner-protocol";
-import { createPublicHeadsReader, diffTreeEntries, sameChangeKeys, treeFromEntries } from "@fulcrumaxe/runner-protocol/planePush";
+import { ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, createPublicHeadsReader, diffTreeEntries, sameChangeKeys, treeFromEntries } from "@fulcrumaxe/runner-protocol/planePush";
 import type { PlaneMergeClaimResult, PlaneMergeOrder, PlaneMergeReportResult, PlaneMergeVerifyResult } from "../../src/daemon/client.js";
 import { checkContent, createPlaneMergeHandler, readTree, type PlaneMergeOutcome } from "../../src/daemon/planeMerge.js";
 import { createPlanePushGithub } from "../../src/daemon/planePushGithub.js";
@@ -133,12 +133,23 @@ interface PullFake {
   baseRepo: string;
   reportedNumber: number | undefined;
 }
+/** D#694 B7-1: how the code repository merges. The two reads (the GraphQL `mergeQueue` and the branch rules) are separate facts, so a test can make them disagree or fail. */
+interface QueueFake {
+  graphql: boolean;
+  rules: boolean;
+  readFails: boolean;
+  /** What the enqueue mutation answers: the entry, a stale-head error, a permission error (GraphQL or HTTP 403), or something else. */
+  enqueue: "ok" | "head_moved" | "forbidden" | "forbidden_http" | "other";
+  /** The queue entry the enqueue created. */
+  queued: boolean;
+}
 interface FakeGithub {
   origin: string;
   seen: Array<{ method: string; path: string; authorization: string | undefined; body: unknown }>;
   /** The tokens that are live now; a revoked one answers 401. */
   live: Set<string>;
   pull: PullFake;
+  queue: QueueFake;
   /** Runs after a GET of the pull request was answered (a test moves the head here, between the runner's read and its merge call). */
   afterGet: (() => void) | undefined;
   /** Makes the next merge call fail with this status once (e.g. 500). */
@@ -154,6 +165,7 @@ async function startGithub(head: string): Promise<FakeGithub> {
     seen: [],
     live: new Set([READ]),
     pull: { number: PR_NUMBER, state: "open", merged: false, draft: false, mergeable: true, headSha: head, headRef: BRANCH, baseRef: "main", defaultBranch: "main", headRepo: "acme/widgets", baseRepo: "acme/widgets", reportedNumber: undefined },
+    queue: { graphql: false, rules: false, readFails: false, enqueue: "ok", queued: false },
     afterGet: undefined,
     failMerge: undefined,
     failGet: undefined,
@@ -180,6 +192,7 @@ async function startGithub(head: string): Promise<FakeGithub> {
         if (state.failGet !== undefined) return json(state.failGet, { message: "boom" });
         json(200, {
           number: pr.reportedNumber ?? pr.number,
+          node_id: "PR_kwDOAAAAAQ",
           state: pr.state,
           merged: pr.merged,
           draft: pr.draft,
@@ -188,6 +201,29 @@ async function startGithub(head: string): Promise<FakeGithub> {
         });
         state.afterGet?.();
         return;
+      }
+      // The two queue reads and the enqueue (D#694 B7-1), in GitHub's wire shapes: a rule list with a `merge_queue` rule, `mergeQueue` null or an object, and an enqueue that
+      // refuses a wrong `expectedHeadOid` and creates no entry then.
+      if (req.method === "GET" && p === "/repos/acme/widgets/rules/branches/main") {
+        if (state.queue.readFails) return json(500, { message: "boom" });
+        return json(200, [{ type: "pull_request", parameters: {}, ruleset_source_type: "Repository", ruleset_source: "acme/widgets", ruleset_id: 1 }, ...(state.queue.rules ? [{ type: "merge_queue", parameters: { max_entries_to_build: 5 }, ruleset_source_type: "Repository", ruleset_source: "acme/widgets", ruleset_id: 1 }] : [])]);
+      }
+      if (req.method === "POST" && p === "/graphql") {
+        const q = body as { query?: unknown; variables?: Record<string, unknown> } | undefined;
+        if (q?.query === MERGE_QUEUE_READ_DOCUMENT) {
+          if (state.queue.readFails) return json(502, { message: "bad gateway" });
+          return json(200, { data: { repository: { mergeQueue: state.queue.graphql ? { id: "MQ_kwDOAAAAAQ" } : null } } });
+        }
+        if (q?.query === ENQUEUE_PULL_REQUEST_DOCUMENT) {
+          if (!writers.has(bearer)) return json(403, { message: "Resource not accessible by integration" });
+          if (state.queue.enqueue === "forbidden_http") return json(403, { message: "Resource not accessible by integration" });
+          if (state.queue.enqueue === "forbidden") return json(200, { data: { enqueuePullRequest: null }, errors: [{ type: "FORBIDDEN", message: "Resource not accessible by integration" }] });
+          if (state.queue.enqueue === "other") return json(200, { data: null, errors: [{ type: "UNPROCESSABLE", message: "Pull request is not mergeable" }] });
+          if (state.queue.enqueue === "head_moved" || q.variables?.expectedHeadOid !== pr.headSha) return json(200, { data: { enqueuePullRequest: null }, errors: [{ type: "UNPROCESSABLE", message: "Head branch was modified. Review and try the merge again." }] });
+          state.queue.queued = true;
+          return json(200, { data: { enqueuePullRequest: { mergeQueueEntry: { id: "MQE_kwDOAAAAAQ", position: 1 } } } });
+        }
+        return json(200, { errors: [{ message: "unknown document" }] });
       }
       if (req.method === "PUT" && p === `/repos/acme/widgets/pulls/${pr.number}/merge`) {
         if (!writers.has(bearer)) return json(403, { message: "Resource not accessible by integration" });
@@ -216,6 +252,7 @@ async function startGithub(head: string): Promise<FakeGithub> {
   return state;
 }
 const mergeCalls = (g: FakeGithub) => g.seen.filter((s) => s.method === "PUT");
+const enqueueCalls = (g: FakeGithub) => g.seen.filter((s) => s.method === "POST" && s.path === "/graphql" && (s.body as { query?: unknown } | undefined)?.query === ENQUEUE_PULL_REQUEST_DOCUMENT);
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 // The cloud's three order routes, at the protocol level, holding the schemas strictly.
@@ -242,6 +279,8 @@ interface CloudScript {
   verify?: (m: PlaneMergeVerifyMessage, call: number) => PlaneMergeVerifyResult;
   report?: (m: PlaneMergeReportMessage, call: number) => PlaneMergeReportResult;
   claim?: PlaneMergeClaimResult;
+  /** The merge mode the cloud sends on its go (D#694 B7-1); absent sends none, as a cloud from before the queue. */
+  mode?: "queue" | "direct";
 }
 function fakeCloud(order: PlaneMergeOrder, script: CloudScript = {}) {
   const log: string[] = [];
@@ -250,7 +289,7 @@ function fakeCloud(order: PlaneMergeOrder, script: CloudScript = {}) {
   let authorized = false;
   let verifyCalls = 0;
   let reportCalls = 0;
-  const goWith = (token = WRITE): PlaneMergeVerifyResult => ({ kind: "go", token, expiresAt: new Date(Date.now() + 3_000_000).toISOString(), sha: order.expected_public_head });
+  const goWith = (token = WRITE, mergeMode?: "queue" | "direct"): PlaneMergeVerifyResult => ({ kind: "go", token, expiresAt: new Date(Date.now() + 3_000_000).toISOString(), sha: order.expected_public_head, ...(mergeMode === undefined ? {} : { mergeMode }) });
   const client = {
     async planeMergeClaim(): Promise<PlaneMergeClaimResult> {
       log.push("claim");
@@ -266,7 +305,7 @@ function fakeCloud(order: PlaneMergeOrder, script: CloudScript = {}) {
         return { kind: "fenced", code: "order_mismatch" };
       }
       if (authorized) return { kind: "fenced", code: "already_issued" };
-      const answer = script.verify ? script.verify(parsed, verifyCalls) : parsed.same && !parsed.incomplete ? goWith() : { kind: "no_go" as const, reasons: ["public_head_not_reviewed"] };
+      const answer = script.verify ? script.verify(parsed, verifyCalls) : parsed.same && !parsed.incomplete ? goWith(WRITE, script.mode) : { kind: "no_go" as const, reasons: ["public_head_not_reviewed"] };
       if (answer.kind === "go") {
         authorized = true;
         // The cloud mints the write credential at this moment: it is live on GitHub from here until the runner revokes it.
@@ -648,6 +687,147 @@ describe("after the go: the pull request is read again, and the merge call is th
     expect(gh.seen.filter((s) => s.method === "GET")).toHaveLength(0);
     expect(mergeCalls(gh)).toHaveLength(0);
     bothRevoked();
+  }, T);
+});
+
+// D#694 B7-1: a code repository behind GitHub's merge queue. The runner re-reads the mode with the write credential and must agree with the cloud; it enqueues, never merges.
+describe("a repository that merges through GitHub's merge queue", () => {
+  const queueSetup = async (opts: { cloud?: "queue" | "direct"; queue?: Partial<QueueFake> } = {}): Promise<Harness> => {
+    const head = publicPr(CHANGE);
+    const reviewed = privateRun(CHANGE);
+    gh = await startGithub(head);
+    Object.assign(gh.queue, { graphql: true, rules: true }, opts.queue);
+    return harness(orderFor(head, reviewed), { mode: opts.cloud ?? "queue" });
+  };
+  const noWriteBeyondEnqueue = (): void => {
+    expect(mergeCalls(gh!)).toHaveLength(0);
+    // No auto-merge fallback: the only mutation ever sent is the enqueue.
+    expect(gh!.seen.filter((s) => JSON.stringify(s.body ?? "").includes("enablePullRequestAutoMerge"))).toHaveLength(0);
+  };
+
+  it("cloud queue and runner queue: the pull request is enqueued, held to the order's sha, and reported as enqueued", async () => {
+    const h = await queueSetup();
+    expect(await h.run()).toBe("enqueued");
+    expect(h.lines).toContain("fx-runner: public merge: enqueued");
+    expect(h.cloud.log).toEqual(["claim", "verify", "report:enqueued"]);
+    expect(h.cloud.reports[0]).toMatchObject({ result: "enqueued", token_revoked: true });
+    expect(h.cloud.reports[0]).not.toHaveProperty("abort_code");
+    expect(enqueueCalls(gh!)).toHaveLength(1);
+    expect(enqueueCalls(gh!)[0]).toMatchObject({ authorization: `Bearer ${WRITE}`, body: { variables: { pullRequestId: "PR_kwDOAAAAAQ", expectedHeadOid: gh!.pull.headSha } } });
+    expect(gh!.queue.queued).toBe(true);
+    expect(gh!.pull.merged).toBe(false);
+    noWriteBeyondEnqueue();
+    bothRevoked();
+  }, T);
+
+  it("cloud direct and runner direct: the merge call is made exactly as before", async () => {
+    const h = await queueSetup({ cloud: "direct", queue: { graphql: false, rules: false } });
+    expect(await h.run()).toBe("merged");
+    expect(mergeCalls(gh!)).toHaveLength(1);
+    expect(enqueueCalls(gh!)).toHaveLength(0);
+    bothRevoked();
+  }, T);
+
+  it.each([
+    ["the queue read says a queue and the rules say none", { rules: false }],
+    ["the rules say a queue and the queue read says none", { graphql: false }],
+    ["the reads fail", { readFails: true }],
+  ] as const)("runner unknown (%s): queue_unreadable, nothing is merged or enqueued", async (_n, queue) => {
+    const h = await queueSetup({ queue });
+    expect(await h.run()).toBe("aborted");
+    expect(h.cloud.reports[0]).toMatchObject({ result: "aborted", abort_code: "queue_unreadable", token_revoked: true });
+    expect(enqueueCalls(gh!)).toHaveLength(0);
+    noWriteBeyondEnqueue();
+    bothRevoked();
+  }, T);
+
+  it.each([
+    ["the cloud said queue and the runner reads direct", "queue", { graphql: false, rules: false }],
+    ["the cloud said direct and the runner reads queue", "direct", {}],
+  ] as const)("%s: queue_mode_mismatch, nothing is merged or enqueued", async (_n, cloud, queue) => {
+    const h = await queueSetup({ cloud, queue });
+    expect(await h.run()).toBe("aborted");
+    expect(h.cloud.reports[0]).toMatchObject({ result: "aborted", abort_code: "queue_mode_mismatch", token_revoked: true });
+    expect(enqueueCalls(gh!)).toHaveLength(0);
+    noWriteBeyondEnqueue();
+    bothRevoked();
+  }, T);
+
+  it("an old cloud (the go reply has no merge_mode) facing a queue repository: the runner's own read says queue, so it aborts queue_mode_mismatch and makes no merge call", async () => {
+    const head = publicPr(CHANGE);
+    const reviewed = privateRun(CHANGE);
+    gh = await startGithub(head);
+    Object.assign(gh.queue, { graphql: true, rules: true });
+    const h = harness(orderFor(head, reviewed));
+    expect(await h.run()).toBe("aborted");
+    expect(h.cloud.reports[0]).toMatchObject({ result: "aborted", abort_code: "queue_mode_mismatch" });
+    noWriteBeyondEnqueue();
+    expect(enqueueCalls(gh)).toHaveLength(0);
+    bothRevoked();
+  }, T);
+
+  it("a head that moved is a stale-head error: head_moved; a permission refusal is refused with 403 (GraphQL error or HTTP 403) and is not retried as auto-merge; anything else is internal", async () => {
+    const moved = await queueSetup({ queue: { enqueue: "head_moved" } });
+    expect(await moved.run()).toBe("aborted");
+    expect(moved.cloud.reports[0]).toMatchObject({ result: "aborted", abort_code: "head_moved" });
+    expect(gh!.queue.queued).toBe(false);
+    noWriteBeyondEnqueue();
+    bothRevoked();
+    await gh!.close();
+    for (const enqueue of ["forbidden", "forbidden_http"] as const) {
+      const denied = await queueSetup({ queue: { enqueue } });
+      expect(await denied.run()).toBe("refused");
+      expect(denied.cloud.reports[0]).toMatchObject({ result: "refused", http_status: 403, token_revoked: true });
+      expect(enqueueCalls(gh!)).toHaveLength(1);
+      noWriteBeyondEnqueue();
+      bothRevoked();
+      await gh!.close();
+    }
+    const other = await queueSetup({ queue: { enqueue: "other" } });
+    expect(await other.run()).toBe("aborted");
+    expect(other.cloud.reports[0]).toMatchObject({ result: "aborted", abort_code: "internal" });
+    bothRevoked();
+  }, T);
+
+  it("the write credential appears in no output line, no report and no error, whichever way the order ends", async () => {
+    const cases: Array<[string, { cloud?: "queue" | "direct"; queue?: Partial<QueueFake> }]> = [
+      ["enqueued", {}],
+      ["mismatch", { cloud: "direct" }],
+      ["unreadable", { queue: { readFails: true } }],
+      ["refused", { queue: { enqueue: "forbidden" } }],
+      ["internal", { queue: { enqueue: "other" } }],
+    ];
+    for (const [, opts] of cases) {
+      const h = await queueSetup(opts);
+      const outcome = await h.run();
+      const seenByCloud = JSON.stringify({ lines: h.lines, reports: h.cloud.reports, verifies: h.cloud.verifies, log: h.cloud.log, outcome });
+      for (const secret of [WRITE, READ]) expect(seenByCloud).not.toContain(secret);
+      expect(gh!.live.has(WRITE)).toBe(false);
+      await gh!.close();
+    }
+  }, T);
+
+  it("the mode answer is kept five minutes and only a queue or direct answer is kept; a read that fails is read again", async () => {
+    gh = await startGithub(SHA_A);
+    let clock = 1_000;
+    const github = createPlanePushGithub({ apiOrigin: gh.origin, now: () => clock });
+    gh.live.add(WRITE);
+    const mode = (): Promise<string> => github.getMergeQueueMode({ codeRepo: "acme/widgets", branch: "main", token: WRITE });
+    const reads = (): number => gh!.seen.filter((s) => s.method === "POST" && s.path === "/graphql").length;
+    expect(await mode()).toBe("direct");
+    expect(await mode()).toBe("direct");
+    expect(reads()).toBe(1);
+    Object.assign(gh.queue, { graphql: true, rules: true });
+    clock += 5 * 60_000 - 1;
+    expect(await mode()).toBe("direct");
+    clock += 1;
+    expect(await mode()).toBe("queue");
+    expect(reads()).toBe(2);
+    gh.queue.readFails = true;
+    clock += 5 * 60_000;
+    expect(await mode()).toBe("unknown");
+    expect(await mode()).toBe("unknown");
+    expect(reads()).toBe(4);
   }, T);
 });
 

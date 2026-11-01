@@ -390,6 +390,8 @@ export type MergeBlockReason =
   | "runner_merge_unavailable"
   /** Two planes, `runner_local`: the runner did not finish a merge order in time (60 minutes); a person merges. */
   | "runner_merge_timeout"
+  /** D#694 B7-1: the code repository merges through GitHub's queue and the runner on the customer's machine does not know it yet; nothing was issued, the runner needs updating. */
+  | "runner_update_required"
   /** Two planes, `runner_local`: the runner's merge order failed (its attempts ran out, or the credential could not be issued); a person merges. */
   | "runner_merge_failed"
   /** Two planes, `runner_local`: the runner said it merged and GitHub does not say so (or names another head); nothing is recorded as merged and a person looks. */
