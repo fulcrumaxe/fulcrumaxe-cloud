@@ -10831,11 +10831,29 @@
                     "human_merge_only": {
                       "type": "boolean",
                       "const": true
+                    },
+                    "merge_queue": {
+                      "type": "object",
+                      "properties": {
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "on",
+                            "off",
+                            "unreadable"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "state"
+                      ],
+                      "additionalProperties": false
                     }
                   },
                   "required": [
                     "auto_merge",
-                    "block_external_auto_merge"
+                    "block_external_auto_merge",
+                    "merge_queue"
                   ],
                   "additionalProperties": false
                 }
@@ -10972,11 +10990,29 @@
                     "human_merge_only": {
                       "type": "boolean",
                       "const": true
+                    },
+                    "merge_queue": {
+                      "type": "object",
+                      "properties": {
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "on",
+                            "off",
+                            "unreadable"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "state"
+                      ],
+                      "additionalProperties": false
                     }
                   },
                   "required": [
                     "auto_merge",
-                    "block_external_auto_merge"
+                    "block_external_auto_merge",
+                    "merge_queue"
                   ],
                   "additionalProperties": false
                 }

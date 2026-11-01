@@ -190,9 +190,9 @@ describe('D#31 API-8a: repos, settings and roles', () => {
   it('criterion 2: settings default to the fail-closed values, and read back what was stored', async () => {
     const owner = await seedAccountWithMember(admin, { role: 'owner' });
     const { repoId } = await seedRepo(owner.accountId, 'team');
-    expect(await (await call(owner, 'GET', `/repos/${repoId}/settings`)).json()).toEqual({ auto_merge: false, block_external_auto_merge: true });
+    expect(await (await call(owner, 'GET', `/repos/${repoId}/settings`)).json()).toEqual({ auto_merge: false, block_external_auto_merge: true, merge_queue: { state: 'unreadable' } });
     await admin.query(`UPDATE repos SET settings = '{"autoMerge": true}' WHERE id = $1`, [repoId]);
-    expect(await (await call(owner, 'GET', `/repos/${repoId}/settings`)).json()).toEqual({ auto_merge: true, block_external_auto_merge: true });
+    expect(await (await call(owner, 'GET', `/repos/${repoId}/settings`)).json()).toEqual({ auto_merge: true, block_external_auto_merge: true, merge_queue: { state: 'unreadable' } });
   });
 
   it('criterion 3: roles returns all 26 with mode, allowed_modes, the stored model or null, and the spend line', async () => {
@@ -244,14 +244,14 @@ describe('D#31 API-8a: repos, settings and roles', () => {
 
     const ok = await call(owner, 'PATCH', url, { block_external_auto_merge: false, acknowledge_external_risk: true });
     expect(ok.status).toBe(200);
-    expect(await ok.json()).toEqual({ auto_merge: false, block_external_auto_merge: false });
+    expect(await ok.json()).toEqual({ auto_merge: false, block_external_auto_merge: false, merge_queue: { state: 'unreadable' } });
     expect(await auditCount(owner.accountId, 'role_settings.guard_changed')).toBe(1);
-    expect(await (await call(owner, 'GET', url)).json()).toEqual({ auto_merge: false, block_external_auto_merge: false });
+    expect(await (await call(owner, 'GET', url)).json()).toEqual({ auto_merge: false, block_external_auto_merge: false, merge_queue: { state: 'unreadable' } });
 
     // Turning the guard back on needs no acknowledgement.
     const on = await call(owner, 'PATCH', url, { block_external_auto_merge: true });
     expect(on.status).toBe(200);
-    expect(await on.json()).toEqual({ auto_merge: false, block_external_auto_merge: true });
+    expect(await on.json()).toEqual({ auto_merge: false, block_external_auto_merge: true, merge_queue: { state: 'unreadable' } });
     expect(await auditCount(owner.accountId, 'role_settings.guard_changed')).toBe(2);
   });
 

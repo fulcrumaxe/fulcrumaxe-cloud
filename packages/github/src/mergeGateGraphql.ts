@@ -75,3 +75,9 @@ export function pinnedMergeGateBody(body: unknown, repo: { owner: string; name: 
   if ((query === MERGE_QUEUE_READ_DOCUMENT || query === MERGE_QUEUE_ENTRY_DOCUMENT || query === MERGE_QUEUE_REMOVAL_DOCUMENT) && (variables["owner"] !== repo.owner || variables["name"] !== repo.name)) return undefined;
   return check !== undefined && check(variables) ? copy : undefined;
 }
+
+/** D#694 B7-2: what the hosted `read` client may send over `POST /graphql`: the queue read alone, pinned to the client's repository. Returns the checked copy, or undefined to refuse. */
+export function pinnedMergeQueueReadBody(body: unknown, repo: { owner: string; name: string }): Record<string, unknown> | undefined {
+  const pinned = pinnedMergeGateBody(body, repo);
+  return pinned !== undefined && pinned["query"] === MERGE_QUEUE_READ_DOCUMENT ? pinned : undefined;
+}

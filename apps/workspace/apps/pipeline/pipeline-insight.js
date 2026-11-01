@@ -674,6 +674,8 @@ export const QUEUE_SENTENCES = Object.freeze({
   no_answer: "GitHub hasn't said where this pull request is in the merge queue for 6 hours, so a person needs to look at it.",
 });
 const RECONCILED_CODE = "not_in_queue_reconciled";
+/** D#694 B7-2: shown under a removal by the host whose reason code is a timeout (queue entries that never got checks). Display only. */
+export const QUEUE_TIMEOUT_HINT = "If this repeats, check that your CI runs on `merge_group`.";
 
 /** A server instant in the VIEWER's zone (`timeZone` undefined: the browser's own; a test passes one); "" for a missing or malformed instant. */
 export function zoneTime(iso, timeZone) {
@@ -695,7 +697,7 @@ export function queueLine(data, timeZone) {
   if (q.removed_by === "you") return { kind: "removed_you", text: QUEUE_SENTENCES.removed_you + at + "." };
   if (q.removed_by === "person") return { kind: "removed_person", text: QUEUE_SENTENCES.removed_person + at + "." };
   if (reason === RECONCILED_CODE) return { kind: "reconciled", text: QUEUE_SENTENCES.reconciled + at + "." };
-  return { kind: "removed_by_host", text: QUEUE_SENTENCES.removed_by_host + at + (reason === "" ? "" : ": " + reason.replace(/_/g, " ")) + "." };
+  return { kind: "removed_by_host", text: QUEUE_SENTENCES.removed_by_host + at + (reason === "" ? "" : ": " + reason.replace(/_/g, " ")) + ".", ...(/timeout|timed_out/.test(reason) ? { hint: QUEUE_TIMEOUT_HINT } : {}) };
 }
 
 /** The "Ready to merge" banner, only at review_passed, with the repo's real auto-merge setting. When something still blocks the merge it says what, in fixed words, and offers no link. */
@@ -1071,6 +1073,7 @@ export function createInsightPanel(deps) {
       m.childLaunch && m.childLaunch.warning !== "" ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-child-launch-warning" }, m.childLaunch.warning) : [],
       m.banner ? banner(m.banner) : [],
       m.queueLine ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-queue-line", "data-kind": m.queueLine.kind }, m.queueLine.text) : [],
+      m.queueLine && m.queueLine.hint ? h("p", { class: "pl-ins-notice", "data-testid": "pl-queue-hint" }, m.queueLine.hint) : [],
       h("p", { "data-testid": "pl-running" }, m.runningText),
       m.waitingText ? h("p", { role: "status", "data-testid": "pl-waiting-runner" }, m.waitingText) : [],
       h("p", { class: "pl-muted", "data-testid": "pl-totals" }, m.totalsText),

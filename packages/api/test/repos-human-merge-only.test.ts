@@ -62,7 +62,7 @@ describe('D#6 M1G-a: human merge only on the repo settings', () => {
     process.env[ENV] = `7,${ghRepoId}`;
     const url = `/repos/${repoId}/settings`;
 
-    expect(await (await call(owner, 'GET', url)).json()).toEqual({ auto_merge: false, block_external_auto_merge: true, human_merge_only: true });
+    expect(await (await call(owner, 'GET', url)).json()).toEqual({ auto_merge: false, block_external_auto_merge: true, human_merge_only: true, merge_queue: { state: 'unreadable' } });
     const before = await settingsOf(repoId);
     const refused = await call(owner, 'PATCH', url, { auto_merge: true });
     expect(refused.status).toBe(409);
@@ -83,7 +83,7 @@ describe('D#6 M1G-a: human merge only on the repo settings', () => {
     expect(await (await call(owner, 'GET', url)).json()).toMatchObject({ auto_merge: true, human_merge_only: true });
     const off = await call(owner, 'PATCH', url, { auto_merge: false });
     expect(off.status).toBe(200);
-    expect(await off.json()).toEqual({ auto_merge: false, block_external_auto_merge: true, human_merge_only: true });
+    expect(await off.json()).toEqual({ auto_merge: false, block_external_auto_merge: true, human_merge_only: true, merge_queue: { state: 'unreadable' } });
     expect(await audits(owner.accountId)).toBe(1);
   });
 
@@ -92,12 +92,12 @@ describe('D#6 M1G-a: human merge only on the repo settings', () => {
     const { repoId, ghRepoId } = await seedRepo(owner.accountId);
     process.env[ENV] = String(ghRepoId + 1);
     const url = `/repos/${repoId}/settings`;
-    expect(await (await call(owner, 'GET', url)).json()).toEqual({ auto_merge: false, block_external_auto_merge: true });
+    expect(await (await call(owner, 'GET', url)).json()).toEqual({ auto_merge: false, block_external_auto_merge: true, merge_queue: { state: 'unreadable' } });
     const on = await call(owner, 'PATCH', url, { auto_merge: true });
     expect(on.status).toBe(200);
-    expect(await on.json()).toEqual({ auto_merge: true, block_external_auto_merge: true });
+    expect(await on.json()).toEqual({ auto_merge: true, block_external_auto_merge: true, merge_queue: { state: 'unreadable' } });
     delete process.env[ENV];
-    expect(await (await call(owner, 'GET', url)).json()).toEqual({ auto_merge: true, block_external_auto_merge: true });
+    expect(await (await call(owner, 'GET', url)).json()).toEqual({ auto_merge: true, block_external_auto_merge: true, merge_queue: { state: 'unreadable' } });
   });
 
   it('a malformed value locks every repo (fail closed), listed or not', async () => {

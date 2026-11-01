@@ -113,6 +113,27 @@ test.describe("D#37 WS-F3: Repos app (mocked API)", () => {
     expect(appErrors).toEqual([]); // includes any CSP or Trusted Types violation
   });
 
+  test("D#694 B7-2: the merge queue line is never blank, Try again re-reads the settings, and the help opens and closes", async ({ page }) => {
+    const { mock, appErrors } = await setup(page);
+    // The first read says the queue state is unreadable (the real "could not be read" state); the retry says on.
+    (mock.settings as Record<string, unknown>).merge_queue = { state: "unreadable" };
+    await openRepos(page);
+    await tid(page, "repos-open").first().click();
+    await expect(tid(page, "repos-queue-line")).toContainText("Merge queue: could not be read");
+    (mock.settings as Record<string, unknown>).merge_queue = { state: "on" };
+    await tid(page, "repos-queue-retry").click();
+    await expect(tid(page, "repos-queue-line")).toContainText("Merge queue: on (GitHub merges for you once it is queued)");
+    await expect(tid(page, "repos-queue-retry")).toHaveCount(0);
+    expect(settingsGets(mock)).toHaveLength(2);
+    await expect(tid(page, "repos-queue-help")).toHaveCount(0);
+    await tid(page, "repos-queue-about").click();
+    await expect(tid(page, "repos-queue-help")).toContainText("There is nothing to turn on.");
+    await tid(page, "repos-queue-about").click();
+    await expect(tid(page, "repos-queue-help")).toHaveCount(0);
+    await expect(page.locator(APP)).not.toContainText(/undefined|null/);
+    expect(appErrors).toEqual([]);
+  });
+
   test("a member sees the settings disabled with the explanation, and no request can change them", async ({ page }) => {
     const { mock, appErrors } = await setup(page, { admin: false });
     await openRepos(page);

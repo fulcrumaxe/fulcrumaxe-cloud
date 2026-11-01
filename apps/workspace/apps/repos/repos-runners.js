@@ -686,3 +686,45 @@ export function createAutoMergeControl({ call = api, signal, repoId, doc = docum
   paint();
   return { el, load: () => ctl.load(false), reload: () => ctl.load(true) };
 }
+
+// ── D#694 B7-2: the merge queue line and its help block for the open repo (kept in this file: a new file would pass the boot budget) ──
+// The state is derived by the server on each read (never stored): on, off or unreadable; anything else, or a missing field, reads as "could not be read", never as off.
+// Every sentence is fixed text drawn as a text node. The help is collapsed until the line's "About the merge queue" link opens it.
+export const QUEUE_LINE = Object.freeze({
+  on: "Merge queue: on (GitHub merges for you once it is queued)",
+  off: "Merge queue: off",
+  unreadable: "Merge queue: could not be read",
+});
+export const QUEUE_ABOUT = "About the merge queue";
+export const QUEUE_RETRY = "Try again";
+
+/** Each block of the help: a heading and short plain sentences. */
+export const QUEUE_HELP = Object.freeze([
+  { heading: "What the product does", text: "The product queues the pull request instead of merging it, whenever the repository has a merge queue. There is nothing to turn on." },
+  { heading: "Your CI must run on merge_group", text: "The repository's CI workflows must run on `merge_group`, or queue entries never get checks. GitHub then removes the entry when its timeout passes, and the item shows \"GitHub removed it from the merge queue\"." },
+  { heading: "Permissions", text: "The product needs no extra GitHub App permission." },
+  { heading: "Human merge only", text: "\"Human merge only\" still wins: nothing is queued while it is on." },
+  { heading: "Taking a pull request out", text: "Use \"Remove from queue\" on the item." },
+  { heading: "In GitHub's merge queue", text: "On an item, \"In GitHub's merge queue\" means GitHub holds the pull request in its queue and merges it once its checks pass." },
+  { heading: "How fresh this line is", text: "This line is read from GitHub at most once every 5 minutes. \"Try again\" within that time shows the same answer." },
+]);
+
+/** The settings' merge queue state: on or off only when the server said exactly that. */
+export const queueState = (settings) => {
+  const s = settings && typeof settings.merge_queue === "object" && settings.merge_queue !== null ? settings.merge_queue.state : undefined;
+  return s === "on" || s === "off" ? s : "unreadable";
+};
+
+/** The line, its links and (when `open`) the help block. `onToggle` flips the help; `onRetry` re-reads the settings. */
+export function queueView(settings, { open, onToggle, onRetry }) {
+  const state = queueState(settings);
+  const link = (label, testid, onClick, extra) => h("button", { type: "button", class: "repos-link", "data-testid": testid, onClick, ...extra }, label);
+  return h("div", { class: "repos-queue", "data-testid": "repos-queue" },
+    h("p", { class: "repos-queue-line", "data-testid": "repos-queue-line", "data-state": state }, QUEUE_LINE[state],
+      state === "unreadable" ? [" ", link(QUEUE_RETRY, "repos-queue-retry", onRetry)] : [],
+      " ", link(QUEUE_ABOUT, "repos-queue-about", onToggle, { "aria-expanded": open ? "true" : "false", ...(open ? { "aria-controls": "repos-queue-help" } : {}) })),
+    open
+      ? h("div", { id: "repos-queue-help", class: "repos-queue-help repos-muted", "data-testid": "repos-queue-help" },
+          QUEUE_HELP.map((b) => h("section", null, h("h4", { class: "repos-queue-heading" }, b.heading), h("p", null, b.text))))
+      : []);
+}

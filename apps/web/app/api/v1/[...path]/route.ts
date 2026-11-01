@@ -7,6 +7,8 @@ import { memoryEditDeps } from "@fx/api/src/routes/memory.js";
 import { publicChangeDeps, queueActionDeps } from "@fx/api/src/routes/work-item-actions.js";
 import { setupRequestDeps } from "@fx/api/src/routes/setupRequests.js";
 import { repoPairingDeps } from "@fx/api/src/routes/repoPairing.js";
+import { mergeQueueModeDeps } from "@fx/api/src/routes/mergeQueueMode.js";
+import { createMergeQueueModeReader } from "../../../../lib/mergeQueueMode";
 import { decisionAskDeps } from "@fx/api/src/routes/decisionAsks.js";
 import { subItemApprovalDeps } from "@fx/api/src/routes/subItemApprovals.js";
 import { receiptReversalDeps } from "@fx/api/src/routes/receipts.js";
@@ -61,6 +63,9 @@ publicChangeDeps.openPublicPullRequest = openPublicPullRequestViaWorker;
 queueActionDeps.dequeue = (args) => dequeueQueuedItem(appUserPool(), args);
 // D#598 PAIR-PICKER-API: the pairing routes ask GitHub (public, default branch, App installed) through this reader.
 repoPairingDeps.getInspector = () => getPairingInspector();
+// D#694 B7-2: the Repos screen's merge queue line, read through the hosted `read` client (one reader per process, so its five-minute cache is shared).
+let mergeQueueReader: ReturnType<typeof createMergeQueueModeReader> | undefined;
+mergeQueueModeDeps.getReader = () => (mergeQueueReader ??= createMergeQueueModeReader(appUserPool()));
 // D#598 P8b-2: Mark done runs the request's own check at once, against the same credential source the once-a-minute sweep uses.
 setupRequestDeps.getEnvSource = () => productionVercelEnvSource;
 // D#598 P8d-2: connecting or replacing a Vercel token is checked with Vercel through the same net-guarded, address-pinned fetch.
