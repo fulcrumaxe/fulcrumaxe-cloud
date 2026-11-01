@@ -5,15 +5,15 @@ import { EXECUTOR_TOOLS, OTHER_ROLE_TOOLS, PLATFORM_ROLES, REVIEWER_TOOLS, TOOL_
 /**
  * D#483 P3: the runner's per-role tool lists against the role manifest. The runner has no fallback list: a role it does
  * not name gets no tools and its run is refused (`unknown_role`), so every manifest role must be named there, and the
- * runner names no role the manifest lacks other than its named platform roles (`PLATFORM_ROLES`, today only the claim
- * verifier), which the manifest must not also hold.
+ * runner names no role the manifest lacks other than its named platform roles (`PLATFORM_ROLES`, today the claim verifier
+ * and the discovery analyst), which the manifest must not also hold.
  */
 describe("agent tool lists follow the role manifest", () => {
   const EDITS = ["Edit", "MultiEdit", "Write", "NotebookEdit"];
 
   it("the runner's tool table names exactly the manifest's roles plus the named platform roles", () => {
     const manifest = ROLE_MANIFEST.map((r) => r.name);
-    expect([...PLATFORM_ROLES]).toEqual(["proposal-verifier"]);
+    expect([...PLATFORM_ROLES]).toEqual(["proposal-verifier", "discovery-analyst"]);
     for (const role of PLATFORM_ROLES) expect(manifest, role).not.toContain(role);
     expect([...TOOL_LISTED_ROLES].sort()).toEqual([...manifest, ...PLATFORM_ROLES].sort());
   });

@@ -93,11 +93,22 @@ const TOOLS_BY_ROLE: Readonly<Record<string, readonly string[]>> = Object.freeze
   "quality-sweep": OTHER_ROLE_TOOLS,
 });
 
+/** D#483 S4-f1: the role the platform runs to propose changes from a repository's docs and code. Not in the role manifest. Hosted half only; the runner half is S4-f4. */
+export const DISCOVERY_ANALYST_ROLE = "discovery-analyst";
+
+/**
+ * D#483 S4-f1 (R-C25-4): the platform roles that are a CONFINED READ-ONLY run: Read under the checkout, Glob and Grep, behind the one read guard.
+ * Every test that means "a confined read-only platform role" is a test of membership here, never a comparison with one role's name. A comparison
+ * with `PROPOSAL_VERIFIER_ROLE` alone is for something only the verifier does (it cites lines and is the one role a runner job can be for today)
+ * and says why in a comment (confinedRoles.test.ts holds the line).
+ */
+export const CONFINED_READ_ROLES: ReadonlySet<string> = new Set([PROPOSAL_VERIFIER_ROLE, DISCOVERY_ANALYST_ROLE]);
+
 /**
  * The roles the platform itself runs that are not in the role manifest, each with its own settings below (today only the
- * claim verifier, `PROPOSAL_VERIFIER_ROLE`). Named here so the manifest parity check can allow exactly these and nothing else.
+ * claim verifier, `PROPOSAL_VERIFIER_ROLE`, and the discovery analyst, `DISCOVERY_ANALYST_ROLE`). Named here so the manifest parity check can allow exactly these and nothing else.
  */
-export const PLATFORM_ROLES: readonly string[] = Object.freeze(["proposal-verifier"]);
+export const PLATFORM_ROLES: readonly string[] = Object.freeze([PROPOSAL_VERIFIER_ROLE, DISCOVERY_ANALYST_ROLE]);
 
 /** The roles that have a tool list: the table's, in table order, then the platform roles. Every other name is refused by `toolsForRole`. */
 export const TOOL_LISTED_ROLES: readonly string[] = Object.freeze([...Object.keys(TOOLS_BY_ROLE), ...PLATFORM_ROLES]);
@@ -116,7 +127,7 @@ export class UnknownRoleError extends Error {
  * list. Own-property lookup only, so names like `constructor` and `__proto__` are unknown too.
  */
 export function toolsForRole(role: string): readonly string[] {
-  if (role === PROPOSAL_VERIFIER_ROLE) return VERIFIER_ALLOW;
+  if (CONFINED_READ_ROLES.has(role)) return VERIFIER_ALLOW;
   if (typeof role !== "string" || !Object.hasOwn(TOOLS_BY_ROLE, role)) throw new UnknownRoleError(role);
   return TOOLS_BY_ROLE[role]!;
 }
@@ -127,6 +138,7 @@ export function toolsForRole(role: string): readonly string[] {
  * the runner confines to its own checkout. Fails closed like `toolsForRole`.
  */
 export function runnerToolsForRole(role: string): readonly string[] {
+  // verifier-only: the one confined role a runner job can be for today; the analyst's runner half is S4-f4.
   return role === PROPOSAL_VERIFIER_ROLE ? PROPOSAL_VERIFIER_RUNNER_TOOLS : toolsForRole(role);
 }
 
@@ -168,7 +180,7 @@ export const VERIFIER_READ_GUARD = verifierReadGuardHook(VERIFIER_WORKDIR);
  * are written before a fresh run and before a resumed one, so a resume has exactly the permissions of a start.
  */
 export function agentSettingsFor(role: string, excludes: readonly string[] = []): Record<string, unknown> {
-  if (role === PROPOSAL_VERIFIER_ROLE) {
+  if (CONFINED_READ_ROLES.has(role)) {
     return {
       ...FX_AGENT_SETTINGS,
       hooks: { ...FX_AGENT_SETTINGS.hooks, PreToolUse: [VERIFIER_READ_GUARD] },

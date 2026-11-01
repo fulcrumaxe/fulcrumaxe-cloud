@@ -7,7 +7,7 @@ import { getRoleEntry } from "@fx/roles";
 import { loadPlatformCard, loadProductCard, type CardRuntime } from "@fx/roles/cards";
 import { PREVIEW_COMPUTE_CAP_USD, PREVIEW_MAX_RUN_MS, PREVIEW_MODEL_CAP_USD } from "./preview.js";
 import type { RetrySeatSource } from "./retry.js";
-import { effectiveModeSql, runsInOurSandbox, RUN_TIME_CEILING_MS, SANDBOX_MAX_TIMEOUT_MS, boundedLimit, runnerLimitsFrom, sandboxComputeUsdFor, sandboxTimeFor, type Product, type RunLimitsInput, type StartAgentRunInput } from "@fx/runner";
+import { DISCOVERY_ANALYST_ROLE, PROPOSAL_VERIFIER_ROLE, effectiveModeSql, runsInOurSandbox, RUN_TIME_CEILING_MS, SANDBOX_MAX_TIMEOUT_MS, boundedLimit, runnerLimitsFrom, sandboxComputeUsdFor, sandboxTimeFor, type Product, type RunLimitsInput, type StartAgentRunInput } from "@fx/runner";
 import { isClaudeModelId, type PlanId } from "@fx/spend";
 import { estimateRunModelUsd } from "@fx/core/src/role-settings/runPrice.js";
 
@@ -34,7 +34,12 @@ export type SeatRequest =
    * D#483 S4-b2a: the claim verifier (`role` is its run role, proposal-verifier). It borrows VERIFY_LIMITS_ROLE's limits and model, as a
    * preview borrows the project manager's, and runs on its own platform card; `capUsd` is the per-proposal figure, its cap and its reservation.
    */
-  | { accountId: string; role: string; repoId: string; purpose: "verify"; capUsd: number };
+  | { accountId: string; role: string; repoId: string; purpose: "verify"; capUsd: number }
+  /**
+   * D#483 S4-f1: the discovery analyst (`role` is discovery-analyst). The same shape as a verify seat: VERIFY_LIMITS_ROLE's limits and model,
+   * its own platform card, and `capUsd` (the analysis figure) as its cap and its reservation. Read-only on either team App.
+   */
+  | { accountId: string; role: string; repoId: string; purpose: "analyse"; capUsd: number };
 
 /** The manifest role a verifier run takes its limits and model from (TL ruling 1, 10-22). Customer role settings are unchanged. */
 export const VERIFY_LIMITS_ROLE = "project-manager";
@@ -110,7 +115,9 @@ export function createSeatResolver(deps: SeatDeps): (request: SeatRequest) => Pr
     const { accountId } = request;
     const repoScoped = "purpose" in request;
     const preview = repoScoped && request.purpose === "preview";
-    const verify = repoScoped && request.purpose === "verify";
+    // A verify seat and an analyse seat are one shape: a confined read-only platform run on a borrowed role. Each is bound to its own role name.
+    const verify = repoScoped && (request.purpose === "verify" || request.purpose === "analyse");
+    if (verify && request.role !== (request.purpose === "verify" ? PROPOSAL_VERIFIER_ROLE : DISCOVERY_ANALYST_ROLE)) return refuse("unknown_role");
     // A verifier run is billed, limited and routed as the role it borrows; only its card and its run row are its own.
     const role = verify ? VERIFY_LIMITS_ROLE : request.role;
     const entry = getRoleEntry(role);
