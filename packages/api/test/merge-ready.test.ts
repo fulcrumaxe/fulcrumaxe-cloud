@@ -119,6 +119,14 @@ describe('D#598 P8c-2b: merge-ready list', () => {
     expect((await read(f.member)).items.map((i) => i.work_item_id)).toEqual([id]);
   });
 
+  it('D#694 B6-4: a body-linked other pull request that was enqueued does not make the item queued: it stays listed for its own pull request', async () => {
+    const f = await fixture();
+    const id = await item(f.refs, 'Linked to someone else');
+    await gate(f.refs, id, { pr: 9 });
+    await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, pr_number, head_sha, dedupe_key) VALUES ($1, $2, 'merge_enqueued', 'queue', 99, $3, 'enq-foreign')`, [f.refs.accountId, id, 'b'.repeat(40)]);
+    expect((await read(f.member)).items.map((i) => i.work_item_id)).toEqual([id]);
+  });
+
   it('still lists an item whose repository is not on record, with a null link and every other field present', async () => {
     const f = await fixture(null);
     const id = await item(f.refs, 'No repository yet');

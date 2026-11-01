@@ -4,7 +4,7 @@ import type { MergeGateGitHubPort } from "../build/mergeGate.js";
 import type { PullRequestRef } from "../build/types.js";
 import { decideCarryForward } from "./carryForward.js";
 import { MAX_REFRESHES } from "./policy.js";
-import { attachWorkRun, finishWork, listHeadRefreshes, markRefreshRequested, readRefreshRequested, recordHeadRefresh, releaseForWork, renewSlot, returnToReview, stopEntry, type HeadRefreshRow } from "./store.js";
+import { attachWorkRun, finishWork, listHeadRefreshes, markRefreshRequested, readRefreshRequested, recordHeadRefresh, refreshTip, releaseForWork, renewSlot, returnToReview, stopEntry } from "./store.js";
 import type { MergeQueueEntry } from "./types.js";
 
 /**
@@ -145,17 +145,7 @@ export async function verifyRefresh(
   return { ok: true, baseSha: second, commit };
 }
 
-/** The head the entry has reached through verified refreshes: from the reviewed head, follow `from -> to` rows. */
-export function refreshTip(reviewedHead: string, refreshes: readonly HeadRefreshRow[]): string {
-  let cur = reviewedHead;
-  const seen = new Set([cur]);
-  for (;;) {
-    const next = refreshes.find((r) => r.fromSha === cur);
-    if (!next || seen.has(next.toSha)) return cur;
-    seen.add(next.toSha);
-    cur = next.toSha;
-  }
-}
+export { refreshTip };
 
 export async function runRefreshStep<G>(deps: RefreshStepDeps<G>, input: RefreshStepInput): Promise<RefreshOutcome<G>> {
   const { accountId, holder, pr } = input;

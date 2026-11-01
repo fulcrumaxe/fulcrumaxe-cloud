@@ -120,6 +120,18 @@ export function sweepMergeQueue(deps: MergeQueueTickerDeps): Promise<mergeQueue.
   return mergeQueue.sweepMergeQueue({
     listTargets: (now, limit) => mergeQueue.listMergeQueueSweepTargets(deps.pool, now, limit),
     inTenant: (accountId, fn) => withTenant(deps.pool, accountId, fn),
+    // D#694 B6-4: the backstop for a lost merge or removal delivery; the client opens only when an entry is due for a read.
+    reconcile: (target, maxReads) =>
+      mergeQueue.reconcileHostQueued(
+        {
+          github: async () => {
+            const github = await openQueueGitHub(deps.pool, deps.open ?? openInstallationHttp, target);
+            return github ? { getQueueEntry: (pr) => github.getQueueEntry!(pr) } : null;
+          },
+          inTenant: (accountId, fn) => withTenant(deps.pool, accountId, fn),
+        },
+        { ...target, maxReads },
+      ),
     tick: async (target) => {
       await completeWaitingDeltaReviews(deps, target);
       await tickMergeQueueRepo(deps, target);

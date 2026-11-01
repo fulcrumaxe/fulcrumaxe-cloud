@@ -258,7 +258,7 @@ async function queueInfoOf(deps: QueueTickDeps, pr: PullRequestRef): Promise<{ m
 }
 
 /** Moves the entry's item to `merged`. GitHub has already merged, so the entry's merged state never rolls back: an item that cannot legally move there (already merged, closed, not at a pull-request stage) or an `at` ahead of the database clock is refused by recordStage before it writes anything, and is left to the webhook and the slot sweep. */
-async function recordQueueMerge(client: PoolClient, workItemId: string, entryId: string, at: Date): Promise<void> {
+export async function recordQueueMerge(client: PoolClient, workItemId: string, entryId: string, at: Date): Promise<void> {
   try {
     await recordStage(client, { workItemId, toStage: "merged", at, source: "webhook", sourceRef: `merge_queue:${entryId}` });
   } catch (err) {

@@ -4,7 +4,7 @@ import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { enqueueDedupeKey, recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
 import { isQueuedSql, readQueuedToMerge } from "@fx/core/src/work-items/mergeReadiness.js";
 import type { PoolClient } from "pg";
-import { applyQueueEvent, HOST_DEQUEUED_REASON, HOST_RETRY_USED_REASON, readHostQueued, settleHostDequeue, takeSlot } from "../../src/mergeQueue/index.js";
+import { applyQueueEvent, HOST_DEQUEUED_REASON, HOST_RETRY_USED_REASON, readHostQueued, settleHostDequeue, stopOnRemovals, takeSlot } from "../../src/mergeQueue/index.js";
 import { seedRepo } from "../build/helpers/seed.js";
 import { pgHarness } from "../helpers/pgHarness.js";
 import { shaOf, startQueueRepo, type QueueItem, type QueueRepo } from "./helpers/queueRepo.js";
@@ -196,5 +196,21 @@ describe("host-queue settle and the one automatic retry [pg]", () => {
     await enqueued(r, 7);
     for (const payload of [{ action: "dequeued", pull_request: { number: 0, head: { sha: shaOf(7, "head") } } }, { action: "dequeued", pull_request: { number: 7, head: { sha: "main" } } }, { action: "dequeued", pull_request: { number: 7 } }, { action: "dequeued" }, null]) await apply(r, payload);
     expect(await r.entry(7)).toMatchObject({ state: "queued" });
+  });
+
+  it("D#694 B6-4: with carried-forward refreshes the enqueued head is the refresh tip: the settle is lost, and the take still stops the entry after the second removal", async () => {
+    const r = await setup([7]);
+    const it = r.items.get(7)!;
+    await db.admin.query(`UPDATE work_items SET stage = 'review_passed' WHERE id = $1`, [it.workItemId]);
+    await db.admin.query(`INSERT INTO head_refreshes (account_id, repo_id, work_item_id, entry_id, from_sha, to_sha, base_sha) VALUES ($1, $2, $3, $4, $5, $6, $7)`, [r.accountId, r.repoId, it.workItemId, it.entryId, it.head, it.fresh, shaOf(7, "tip")]);
+    await fact(r, it, "merge_enqueued", it.fresh, { key: enqueueDedupeKey(it.fresh, 0) });
+    await fact(r, it, "merge_dequeued", it.fresh);
+    await fact(r, it, "merge_enqueued", it.fresh, { key: enqueueDedupeKey(it.fresh, 1) });
+    await fact(r, it, "merge_dequeued", it.fresh); // no webhook settle ran for either
+    const taken = await tenant(r, (c) => takeSlot(c, { accountId: r.accountId, repoId: r.repoId, holder: "t", facts: new Map([[it.entryId, { open: true, draft: false }]]) }));
+    expect(taken.taken?.headSha).toBe(it.head);
+    const stopped = await tenant(r, (c) => stopOnRemovals(c, { entry: taken.taken!, holder: "t" }));
+    expect(stopped).toMatchObject({ verdict: "exhausted", headSha: it.fresh });
+    expect(await r.entry(7)).toMatchObject({ state: "stopped", reason: HOST_RETRY_USED_REASON });
   });
 });

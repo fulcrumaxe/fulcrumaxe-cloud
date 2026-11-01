@@ -38,3 +38,13 @@ export const WRITEBACK_YIELD_MINUTES = 120;
  * `in_review` with the fixed event code `delta_review_timeout`: a review that never ends must not hold an approved entry out of the queue forever.
  */
 export const MERGE_QUEUE_DELTA_REVIEW_MAX_MINUTES = 120;
+
+/**
+ * D#694 B6-4: the reconcile behind a lost merge-queue webhook. An entry waiting in the host's queue is read from GitHub only once it has waited this long (a webhook is
+ * normally minutes), then at most once per read interval per entry; one sweep makes at most the per-sweep number of reads across all repositories. Past the no-answer
+ * limit with the pull request still in the host's queue (or unreadable) the item goes to a person.
+ */
+export const MERGE_QUEUE_RECONCILE_AFTER_MINUTES = 20;
+export const MERGE_QUEUE_RECONCILE_READ_INTERVAL_MINUTES = 10;
+export const MERGE_QUEUE_RECONCILE_NO_ANSWER_HOURS = 6;
+export const MERGE_QUEUE_RECONCILE_READS_PER_SWEEP = 20;
