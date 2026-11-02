@@ -5,7 +5,7 @@ import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { FILE_LIST_NOTICE_COPY_KEY, REVIEW_STOP_COPY_KEY, getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
 import { PUBLIC_CHANGE_STATES } from "@fx/core/src/repos/publicChangeCopy.js";
 import { OPERATOR_ACTIONS } from "@fx/core/src/work-items/operatorActions.js";
-import { STACKED_WAIT_STATES, readConflictState, readMergeQueueState, readStackedWait } from "@fx/core/src/work-items/mergeReadiness.js";
+import { STACKED_WAIT_STATES, readConflictState, readMergeQueueState, readQueueWait, readStackedWait } from "@fx/core/src/work-items/mergeReadiness.js";
 import { statusSentence } from "@fx/core/src/setup-requests/copy.js";
 import { readChildLaunch } from "@fx/core/src/decisions/childLaunch.js";
 import { RUNNER_DAILY_LIMIT_SENTENCE, mergeQueue } from "@fx/pipeline";
@@ -88,6 +88,10 @@ export const activityResponseSchema = z.object({
   conflict_round: z.object({ running: z.literal(true), attempt: z.number().int(), of: z.number().int(), base_ref: z.string().nullable() }).optional(),
   // D#519 MQ4-d: present only for an item whose queue entry stopped at a merge conflict. `kind`: `attempts_spent` (fix rounds were tried), `foreign_commits` (the conflict files hold commits the platform did not write), `direct` (no fix round ran). `files` is at most 100 repository paths; `base_ref` is null when it was not recorded.
   conflict_stop: z.object({ kind: z.enum(["attempts_spent", "foreign_commits", "direct"]), attempts: z.number().int(), files: z.array(z.string()), base_ref: z.string().nullable() }).optional(),
+  // D#519 MQ5-c1: present only for an item whose own queue entry waits (`ahead`: entries in front of it in this repository's queue) or stopped with a code whose sentence names a branch, a resource, a key or a parent pull request. Derived on this read; every field is optional and absent when unknown.
+  queue_wait: z
+    .object({ ahead: z.number().int().min(0).optional(), branch: z.string().nullable().optional(), resource: z.string().nullable().optional(), key: z.string().nullable().optional(), main_key: z.string().nullable().optional(), parent_pr: z.number().int().min(1).nullable().optional() })
+    .optional(),
   // D#598 P3c: a queued stacked child's place, derived on this read from its queue entry and its parent's. `parent_pr` is the number the entry records (null when unknown). Absent for every other item.
   stacked_wait: z.object({ state: z.enum(STACKED_WAIT_STATES), parent_pr: z.number().int().nullable() }).optional(),
   // D#598 P8c-3: present only while a setup request holds the item. `sentence` is the request's status sentence (null when it has none: a withdrawn request, or one that closed meanwhile; the card then shows its own pause line).
@@ -196,7 +200,8 @@ export const workItemActivityRoutes: RouteEntry[] = [
       const queueState = queued ? await withTenant(ctx.pool, accountId, userId, tokenId, (client) => readMergeQueueState(client, accountId, input.params.id!)) : null;
       const stackedWait = queued ? await withTenant(ctx.pool, accountId, userId, tokenId, (client) => readStackedWait(client, accountId, input.params.id!)) : null;
       const conflict = queued ? await withTenant(ctx.pool, accountId, userId, tokenId, (client) => readConflictState(client, accountId, input.params.id!, mergeQueue.MAX_CONFLICT_ROUNDS)) : null;
-      const activity = { ...rest, ...childLaunch, ...(queueState === null ? {} : { merge_queue: queueState }), ...(stackedWait === null ? {} : { stacked_wait: stackedWait }), ...(conflict ?? {}), runs, ...(publicChange === null ? {} : { public_change: publicChange }), ...(startDecision === null ? {} : { start_decision: startDecision }), ...(receipts === null ? {} : { receipts: receipts.receipts, ...(receipts.total > receipts.receipts.length ? { receipts_total: receipts.total } : {}) }), ...(recheck === null ? {} : { review_recheck: { kind: recheck.kind, sentence: COPY.reviewMergeOnlyRecheck } }), ...setupPause };
+      const queueWait = queued ? await withTenant(ctx.pool, accountId, userId, tokenId, (client) => readQueueWait(client, accountId, input.params.id!, mergeQueue.countAhead)) : null;
+      const activity = { ...rest, ...childLaunch, ...(queueWait === null ? {} : { queue_wait: queueWait }), ...(queueState === null ? {} : { merge_queue: queueState }), ...(stackedWait === null ? {} : { stacked_wait: stackedWait }), ...(conflict ?? {}), runs, ...(publicChange === null ? {} : { public_change: publicChange }), ...(startDecision === null ? {} : { start_decision: startDecision }), ...(receipts === null ? {} : { receipts: receipts.receipts, ...(receipts.total > receipts.receipts.length ? { receipts_total: receipts.total } : {}) }), ...(recheck === null ? {} : { review_recheck: { kind: recheck.kind, sentence: COPY.reviewMergeOnlyRecheck } }), ...setupPause };
       // The Re-spec notices carry the KEY of their sentence out of @fx/core; the words are written once, in the runner protocol's copy.
       const n = activity.notice;
       // A build the runner ended at its memory limit: the same sentence the run's own line has, naming the cap when the runner sent one. The raw end never leaves.

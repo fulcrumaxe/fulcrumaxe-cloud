@@ -4066,6 +4066,53 @@
                       ],
                       "additionalProperties": false
                     },
+                    "queue_wait": {
+                      "type": "object",
+                      "properties": {
+                        "ahead": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "branch": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "resource": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "key": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "main_key": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "parent_pr": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "additionalProperties": false
+                    },
                     "stacked_wait": {
                       "type": "object",
                       "properties": {

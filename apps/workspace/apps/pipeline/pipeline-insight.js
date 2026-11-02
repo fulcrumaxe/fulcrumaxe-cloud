@@ -215,7 +215,8 @@ const ROLE_CODES = { code_reviewer: "code review", security_reviewer: "security 
 const plainCode = (code) => String(code).replace(/_/g, " ");
 
 /** A fixed gate reason code in words. Codes this file does not know are shown with underscores as spaces. */
-export function reasonWord(code) {
+export function reasonWord(code, queueWait) {
+  if (Object.hasOwn(FIELD_SENTENCES, code)) return blockingSentence(code, queueWait);
   if (REASON_WORDS[code]) return REASON_WORDS[code];
   const m = /^(missing_run|run_not_succeeded|run_not_production|verdict_not_pass)_(.+)$/.exec(String(code));
   if (m && ROLE_CODES[m[2]]) {
@@ -624,8 +625,34 @@ export const REVIEW_BLOCK_SENTENCE = "A required review hasn't passed on the lat
 export const UNKNOWN_BLOCK_SENTENCE = "Something still blocks the merge";
 export const PUBLIC_REFUSED_SENTENCE = "The public change was refused, so there is no pull request to merge";
 
-/** The one sentence for a blocking reason code. */
-export function blockingSentence(code) {
+/** D#519 MQ5-c1: a value drawn into a field-filled sentence must have the shape of a branch name, a resource name or a key. Anything else counts as missing. */
+const FILL_NAME = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/;
+const fillName = (v) => (typeof v === "string" && FILL_NAME.test(v) && v !== "null" && v !== "undefined" ? v : null);
+const fillCount = (v, min) => (Number.isInteger(v) && v >= min ? v : null);
+
+/**
+ * D#519 MQ5-c1: the section 5 sentences that name a value. Each takes the item's `queue_wait` and answers the filled sentence, or null when a field it needs is missing,
+ * blank or of the wrong shape, and the caller then shows the code's fixed sentence from BLOCKING_SENTENCES. Values are only ever joined into a string, which is drawn as a text node.
+ * `history_rewritten` names nothing, so its sentence is always the same.
+ */
+export const FIELD_SENTENCES = Object.freeze({
+  merge_queue_waiting: (q) => (fillCount(q.ahead, 1) === null ? null : `Waiting to merge: ${q.ahead} ahead of it in this repo's queue.`),
+  branch_behind: (q) => (fillName(q.branch) === null ? null : `This pull request kept falling behind ${q.branch}. Update it or merge it by hand.`),
+  branch_protection_refused: (q) => (fillName(q.branch) === null ? null : `${q.branch}'s protection rules refused the merge. Check the rules in GitHub or merge it by hand.`),
+  ordered_resource_out_of_order: (q) => (["resource", "key", "main_key", "branch"].some((k) => fillName(q[k]) === null) ? null : orderedResourceSentence({ resource: q.resource, key: q.key, mainKey: q.main_key, branch: q.branch })),
+  merge_dependency_closed: (q) => (fillCount(q.parent_pr, 1) === null ? null : `The pull request this one builds on (#${q.parent_pr}) was closed without merging.`),
+  history_rewritten: () => "This branch's history was rewritten, so its reviews no longer apply.",
+});
+
+/** The banner's detail: the sentence with its closing stop. The section 5 sentences already end in one; the older fixed ones are pinned to get one added. */
+const bannerDetail = (sentence) => (Object.values(BLOCKING_SENTENCES).includes(sentence) || !sentence.endsWith(".") ? sentence + "." : sentence);
+
+/** The one sentence for a blocking reason code. `queueWait` is the activity response's `queue_wait`; it fills the section 5 sentences, and without it (or with a bad field) the code's fixed sentence is shown. */
+export function blockingSentence(code, queueWait) {
+  if (Object.hasOwn(FIELD_SENTENCES, code)) {
+    const filled = FIELD_SENTENCES[code](isObj(queueWait) ? queueWait : {});
+    if (filled !== null) return filled;
+  }
   if (Object.hasOwn(BLOCKING_SENTENCES, code)) return BLOCKING_SENTENCES[code];
   if (/^stacked_on_pr_/.test(String(code))) return BLOCKING_SENTENCES.stacked_on_open_pr;
   if (/^(missing_run|run_not_succeeded|run_not_production|runner_not_trusted|verdict_not_pass)_/.test(String(code))) return REVIEW_BLOCK_SENTENCE;
@@ -668,7 +695,7 @@ export function mergeBlockSentence(data) {
   if (reasons === null) return null;
   const blocking = reasons.filter((r) => !PERSON_MERGES_REASONS.includes(r));
   if (blocking.length === 0) return null;
-  return blockingSentence(blocking.includes("public_pr_not_open") ? "public_pr_not_open" : blocking[0]);
+  return blockingSentence(blocking.includes("public_pr_not_open") ? "public_pr_not_open" : blocking[0], data.queue_wait);
 }
 
 /** D#694 B6-3: the label and subtitle of an item waiting in GitHub's merge queue (a core test pins both to packages/core/src/work-items/mergeReadiness.ts). */
@@ -781,7 +808,7 @@ export function readyBanner(data) {
   // D#694 B6-3: waiting in GitHub's merge queue is not "ready for you to merge": nothing is left for a person to press.
   if (queuedToMerge(data)) return { blocked: false, queued: true, title: QUEUED_TO_MERGE_LABEL, detail: QUEUED_TO_MERGE_SUBTITLE, autoMerge: false, autoMergeText: "", url: pullUrl(data) };
   const blocked = mergeBlockSentence(data);
-  if (blocked !== null) return { blocked: true, title: "Not ready to merge yet", detail: blocked + ".", autoMerge: false, autoMergeText: "", url: null };
+  if (blocked !== null) return { blocked: true, title: "Not ready to merge yet", detail: bannerDetail(blocked), autoMerge: false, autoMergeText: "", url: null };
   return {
     blocked: false,
     title: "Ready to merge",
