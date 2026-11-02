@@ -7,6 +7,7 @@ import { FOLLOW_UP_CHILD_START_SUPPORTED } from "@fx/pipeline";
 import { createAutoStartSweep } from "../src/autoStartSweep.js";
 import { createAdvanceModule, type AdvanceTriageInput } from "../src/advance.js";
 import { createRunActionFacade } from "../src/runActions.js";
+import { plannedFixture, type PlannedFixture } from "@fx/db/test/helpers/plannedChildren.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 
 /**
@@ -90,8 +91,8 @@ describe("follow-up children: the producer and the advance fact [pg]", { timeout
     expect(await sweepWith(true).makeFollowUpChild(a.accountId, note.followUp)).toBe("not_ready");
   });
 
-  it("C28-2a-5: with the flag false or absent the producer lists nothing and creates nothing, and the shipped constant is false", async () => {
-    expect(FOLLOW_UP_CHILD_START_SUPPORTED).toBe(false);
+  it("C28-2a-5: with the flag false or absent the producer lists nothing and creates nothing (the shipped constant is true since the launch, D#483 S5-b2d-2b)", async () => {
+    expect(FOLLOW_UP_CHILD_START_SUPPORTED).toBe(true);
     const a = await seedAccount(admin, randomUUID());
     const p = await setup(a);
     for (const flag of [false, undefined]) {
@@ -123,16 +124,82 @@ describe("follow-up children: the producer and the advance fact [pg]", { timeout
     expect(await mod.advanceTriage(a.accountId, input)).toEqual({ status: "refused", reason: "item_changed" });
     expect(triaged).toEqual([]);
     expect((await mod.advanceLoadItem(a.accountId, child))?.followUp).toBe(true);
+    // The follow-up's own text is read through the row that names THIS child; a row that names none gives no text (never another item's).
+    expect((await mod.advanceLoadItem(a.accountId, child))?.followUpText).toEqual({ title: "Add a retry", why: "why" });
+    await admin.query("UPDATE work_item_follow_ups SET child_id = NULL WHERE id = $1", [p.followUp]);
+    expect((await mod.advanceLoadItem(a.accountId, child))?.followUpText).toBeUndefined();
+    await admin.query("UPDATE work_item_follow_ups SET child_id = $2 WHERE id = $1", [p.followUp, child]);
     const row = await withTenant(appPool, a.accountId, a.userId, undefined, async (c) => (await c.query("SELECT * FROM run_action_request('advance_work_item', $1, $3, $2)", [child, "h".repeat(64), null])).rows[0]);
     expect(await createRunActionFacade(writerPool, {} as never).claimRunAction(row.action_id, 600)).not.toBeNull();
-    // The identity now resolves for a follow-up child (its root's number), so the table's follow-up rule answers, and nothing starts (C29-0-5).
-    expect(await mod.performAdvanceWorkItem(row.action_id)).toEqual({ result: "refused", errorCode: "not_advanceable" });
+    // The identity resolves for a follow-up child (its root's number) and the stage table answers `light_spec` for it (D#483 S5-b2d-2b): the perform gets past the table to the
+    // first seat check, which this fake refuses with its own code. Nothing starts, and triage is not reached.
+    expect(await mod.performAdvanceWorkItem(row.action_id)).not.toEqual({ result: "refused", errorCode: "not_advanceable" });
     expect(started).toEqual([]);
+    expect(triaged).toEqual([]);
     // The control: the same shape without the follow-up link reaches triage.
     const plain = randomUUID();
     const plainNumber = number + 1;
     await admin.query("INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number) VALUES ($1, $2, $3, 'issue', 'internal', 'triaged', $4)", [plain, a.accountId, a.repoId, plainNumber]);
     expect(await mod.advanceTriage(a.accountId, { ...input, workItemId: plain, number: plainNumber })).toMatchObject({ status: "triaged" });
     expect(triaged).toHaveLength(1);
+  });
+
+  describe("D#483 S5-b2d-2b: the launch pass", () => {
+    const room = { buildSupported: true, room: async () => ({ fits: true, remainingUsd: 100, priceUsd: 1 }) };
+    const launchSweep = (supported: boolean) => createAutoStartSweep({ receiptPool, firstRunUsd: async () => 1, child: room, followUp: { childStartSupported: supported }, warn: () => {} });
+    /** A parent approved the way the product does it (definers), with a follow-up recorded on it; the sweep itself makes the child. */
+    async function approved(dial: "ask" | "act" | "announce" | null): Promise<{ f: PlannedFixture; followUp: string }> {
+      const f = await plannedFixture(admin, appPool, { table: [], dial });
+      const followUp = (await admin.query<{ id: string }>(
+        `INSERT INTO work_item_follow_ups (account_id, work_item_id, source_role, title, why, title_key, disposition) VALUES ($1, $2, 'code-reviewer', 'Add a retry', 'why', $3, 'child') RETURNING id`,
+        [f.t.accountId, f.parent, randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, "")])).rows[0]!.id;
+      return { f, followUp };
+    }
+    const childOf = async (parent: string) => (await admin.query<{ id: string }>("SELECT id FROM work_items WHERE parent_id = $1 AND follow_up_id IS NOT NULL", [parent])).rows[0]?.id;
+    const dialRequests = async (child: string) => (await admin.query<{ idempotency_key: string }>("SELECT idempotency_key FROM run_action_requests WHERE target_id = $1", [child])).rows.map((r) => r.idempotency_key);
+
+    it("C28-2b-1: under Balanced the same pass that makes the child launches it through the dial (one dial: request, one receipt on the parent); a second pass adds nothing", async () => {
+      const { f } = await approved("announce");
+      const first = await launchSweep(true).sweepAutoStart();
+      expect(first.follow_up_launches?.started).toBeGreaterThanOrEqual(1);
+      const child = (await childOf(f.parent))!;
+      const keys = await dialRequests(child);
+      expect(keys).toHaveLength(1);
+      expect(keys[0]).toMatch(/^dial:/);
+      await launchSweep(true).sweepAutoStart();
+      expect(await dialRequests(child)).toEqual(keys);
+      expect((await admin.query("SELECT 1 FROM decision_receipts WHERE work_item_id = $1 AND decision_type = 'launch_sub_item'", [f.parent])).rowCount).toBe(1);
+    });
+
+    it("C28-2b-1 / C28-2b-4: under Cautious it asks, once per parent and follow-up, and files nothing", async () => {
+      const { f } = await approved("ask");
+      await launchSweep(true).sweepAutoStart();
+      await launchSweep(true).sweepAutoStart();
+      const child = (await childOf(f.parent))!;
+      expect(await dialRequests(child)).toEqual([]);
+      expect((await admin.query("SELECT 1 FROM decision_asks WHERE work_item_id = $1 AND decision_type = 'launch_sub_item'", [f.parent])).rowCount).toBe(1);
+    });
+
+    it("after a short Spec that failed the dial does not launch the child again (no paid retry loop); it waits for a person's Approve", async () => {
+      const { f } = await approved("act");
+      await launchSweep(true).sweepAutoStart();
+      const child = (await childOf(f.parent))!;
+      expect(await dialRequests(child)).toHaveLength(1);
+      await admin.query("UPDATE run_action_requests SET state = 'done', finished_at = now() WHERE target_id = $1", [child]);
+      await admin.query("INSERT INTO agent_runs (account_id, work_item_id, role, runtime, status) VALUES ($1, $2, 'project-manager', 'local', 'failed')", [f.t.accountId, child]);
+      const again = await launchSweep(true).sweepAutoStart();
+      expect(await dialRequests(child)).toHaveLength(1);
+      expect(again.follow_up_launches?.started ?? 0).toBe(0);
+    });
+
+    it("with the flag false the launch pass does not run", async () => {
+      const { f } = await approved("act");
+      await admin.query("SELECT 1");
+      const made = await launchSweep(true).makeFollowUpChild(f.t.accountId, (await admin.query<{ id: string }>("SELECT id FROM work_item_follow_ups WHERE work_item_id = $1", [f.parent])).rows[0]!.id);
+      expect(made).toBe("made");
+      const counts = await launchSweep(false).sweepAutoStart();
+      expect(counts.follow_up_launches).toBeUndefined();
+      expect(await dialRequests((await childOf(f.parent))!)).toEqual([]);
+    });
   });
 });

@@ -141,12 +141,12 @@ describe('a follow-up child\'s identity and Spec [pg]', { timeout: 60_000 }, () 
   });
 
   describe('C29-0-4: the key space', () => {
-    it('findPlannedChild never answers a follow-up child, and a person\'s Approve with its key is refused before any child is read', async () => {
+    it('findPlannedChild never answers a follow-up child, and a fu- key that names none is refused before any receipt (the follow-up launch is in followUpLaunch.pg.test.ts)', async () => {
       const f = await fu();
       await withTenant(appPool, f.t.accountId, (c) => findPlannedChild(c, f.t.accountId, f.parent, f.key).then((id) => expect(id).toBeNull()));
       const ctx = { pool: receiptPool, principal: { accountId: f.t.accountId, userId: owner } };
-      await expect(approveSubItem(ctx, { workItemId: f.parent, key: f.key })).rejects.toMatchObject({ code: 'invalid_key' });
-      await expect(approveSubItem(ctx, { workItemId: f.parent, key: f.key })).rejects.toBeInstanceOf(SubItemApprovalError);
+      await expect(approveSubItem(ctx, { workItemId: f.parent, key: 'fu-000000000000' })).rejects.toMatchObject({ code: 'invalid_key' });
+      await expect(approveSubItem(ctx, { workItemId: f.parent, key: 'fu-000000000000' })).rejects.toBeInstanceOf(SubItemApprovalError);
     });
   });
 

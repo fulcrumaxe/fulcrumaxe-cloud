@@ -6,6 +6,7 @@ import { getCurrentDialSetting } from '@fx/db/src/decisions.js';
 import { DIAL_VERSION_CATALOGUE_DEFAULT, writeSubItemPolicyReceipt } from '@fx/db/src/receiptWriter.js';
 import { sanitize } from '@fx/trust';
 import { resolveSubItemLaunch } from '../autonomy/resolveSubItemLaunch.js';
+import type { StartCategory } from '../autonomy/resolveStart.js';
 import { cleanWorkItemTitle } from '../work-items/title.js';
 import { readStackParent, setStackParent } from '../work-items/stackParent.js';
 import { FIX_ASK_HOLD, FIX_ASK_START, presetOf } from './fixRoundGate.js';
@@ -31,6 +32,7 @@ export const CHILD_LAUNCH_CODES = [
   'key_not_in_approved_spec',
   'waiting_on_planned_pr',
   'external_needs_approval',
+  'needs_person_approval',
   'parent_no_envelope',
   'parent_envelope_reached',
   'child_build_unsupported',
@@ -48,6 +50,7 @@ export const DIAL_LAUNCH_CHILD_ERROR_CODES = [
   'respec_needs_approval',
   'key_not_in_approved_spec',
   'external_needs_approval',
+  'needs_person_approval',
   'parent_no_envelope',
   'work_started',
   'child_closed',
@@ -79,6 +82,7 @@ export const CHILD_LAUNCH_SENTENCES: Readonly<Record<ChildLaunchCode | (typeof D
   waiting_for_pull_request: 'Waiting for <sibling title> to open its pull request.',
   waiting_for_merge_then_build: 'Waiting for <sibling title> to merge before it can build on <other title>.',
   external_needs_approval: 'This planned PR came from outside your team, so a person has to approve it before it starts.',
+  needs_person_approval: 'A person made this follow-up an item, so a person has to start it.',
   parent_no_envelope: 'This planned PR has no spending limit to draw on. Set one on <parent title>.',
   parent_envelope_reached: "This item's spending limit is used up. Nothing more starts until you raise the limit or stop the item.",
   child_build_unsupported: NOT_YET,
@@ -115,20 +119,32 @@ export interface ChildLaunchDeps {
   room(client: PoolClient, input: { accountId: string; repoId: string; envelopeId: string; childId: string }): Promise<{ fits: boolean; remainingUsd: number; priceUsd: number }>;
 }
 
-interface ChildRow { id: string; parent_id: string | null; repo_id: string | null; planned_pr_key: string; planned_pr_spec_version_id: string | null; title: string | null }
+interface ChildRow { id: string; parent_id: string | null; repo_id: string | null; planned_pr_key: string; planned_pr_spec_version_id: string | null; title: string | null; kind: string | null }
 
 const lockChild = (client: PoolClient, accountId: string, childId: string): Promise<unknown> =>
   client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`child_launch:${accountId}:${childId}`]);
 
-async function blockerOf(client: PoolClient, childId: string, skipWaiting: boolean, skipExternal: boolean): Promise<string | null> {
-  const { rows } = await client.query<{ b: string | null }>('SELECT planned_pr_child_blocker($1::uuid, $2::boolean, $3::boolean) AS b', [childId, skipWaiting, skipExternal]);
+/** `followUp`: the follow-up launch rule (migration 0965, no sibling wait) instead of the planned PR rule (0920). The two never answer for the other's child. */
+async function blockerOf(client: PoolClient, childId: string, skipWaiting: boolean, skipExternal: boolean, followUp = false): Promise<string | null> {
+  const { rows } = followUp
+    ? await client.query<{ b: string | null }>('SELECT follow_up_child_blocker($1::uuid, $2::boolean) AS b', [childId, skipExternal])
+    : await client.query<{ b: string | null }>('SELECT planned_pr_child_blocker($1::uuid, $2::boolean, $3::boolean) AS b', [childId, skipWaiting, skipExternal]);
   return rows[0]?.b ?? null;
 }
 
-async function readChild(client: PoolClient, accountId: string, childId: string): Promise<ChildRow | null> {
+/** A planned PR child, or with `followUp` a follow-up child (D#483 S5-b2d-2b): the two are told apart by `follow_up_id`, and a read for one never finds the other. */
+async function readChild(client: PoolClient, accountId: string, childId: string, followUp = false): Promise<ChildRow | null> {
   const { rows } = await client.query<ChildRow>(
-    `SELECT id, parent_id, repo_id, planned_pr_key, planned_pr_spec_version_id, title FROM work_items WHERE id = $1::uuid AND account_id = $2::uuid AND planned_pr_key IS NOT NULL AND follow_up_id IS NULL`, [childId, accountId]);
+    `SELECT id, parent_id, repo_id, planned_pr_key, planned_pr_spec_version_id, title, kind FROM work_items
+      WHERE id = $1::uuid AND account_id = $2::uuid AND planned_pr_key IS NOT NULL AND (follow_up_id IS NOT NULL) = $3::boolean`, [childId, accountId, followUp]);
   return rows[0] ?? null;
+}
+
+/** The follow-up child of `parentId` with this key (`fu-<hex>`), or null. */
+export async function findFollowUpChild(client: PoolClient, accountId: string, parentId: string, key: string): Promise<string | null> {
+  const { rows } = await client.query<{ id: string }>(
+    `SELECT id FROM work_items WHERE account_id = $1::uuid AND parent_id = $2::uuid AND planned_pr_key = $3::text AND follow_up_id IS NOT NULL`, [accountId, parentId, key]);
+  return rows[0]?.id ?? null;
 }
 
 /** The planned PR child of `parentId` with this key, or null (a key that names no child is a sub-item key of some other kind). */
@@ -256,13 +272,14 @@ export interface PreparedChildLaunch {
  * hold (6) do not stop a person. Throws `ChildLaunchRefusal` (the whole approval then rolls back, so a refusal leaves nothing). Takes the child's lock, then the
  * envelope's (the same order as the dial, so two launches cannot deadlock).
  */
-export async function prepareChildLaunch(client: PoolClient, input: { accountId: string; childId: string; deps: ChildLaunchDeps | undefined }): Promise<PreparedChildLaunch> {
+export async function prepareChildLaunch(client: PoolClient, input: { accountId: string; childId: string; deps: ChildLaunchDeps | undefined; followUp?: boolean }): Promise<PreparedChildLaunch> {
   const { accountId, childId, deps } = input;
+  const followUp = input.followUp === true;
   if (deps === undefined || deps.buildSupported !== true) throw new ChildLaunchRefusal('child_build_unsupported');
   await lockChild(client, accountId, childId);
-  const child = await readChild(client, accountId, childId);
+  const child = await readChild(client, accountId, childId, followUp);
   if (child === null) throw new ChildLaunchRefusal('child_orphaned');
-  const code = await blockerOf(client, childId, true, true);
+  const code = await blockerOf(client, childId, true, true, followUp);
   if (code === 'work_started') return { childId, launch: false };
   if (code !== null) {
     if (!isChildCode(code)) throw new ChildLaunchRefusal('child_orphaned');
@@ -280,7 +297,7 @@ export async function prepareChildLaunch(client: PoolClient, input: { accountId:
  * the driver reads that as a person's click). The key counts the child's earlier requests, so a launch after a cancelled run is a new request and a replay of the
  * same click (the child is then started, so `prepareChildLaunch` answered `launch: false`) files nothing.
  */
-export async function fileChildLaunch(client: PoolClient, input: { accountId: string; childId: string; /** A launch that must not start a child before its dependencies merge (a parent's approval). */ holdSiblings?: boolean }): Promise<string> {
+export async function fileChildLaunch(client: PoolClient, input: { accountId: string; childId: string; /** A launch that must not start a child before its dependencies merge (a parent's approval). */ holdSiblings?: boolean; /** The client's Idempotency-Key (a follow-up child's Approve), in place of the per-child counter. */ idempotencyKey?: string }): Promise<string> {
   const { accountId, childId } = input;
   await client.query('SELECT work_item_set_child_envelope($1::uuid)', [childId]);
   if (input.holdSiblings === true) await linkOrRefuse(client, childId);
@@ -288,7 +305,7 @@ export async function fileChildLaunch(client: PoolClient, input: { accountId: st
   const n = Number((await client.query<{ n: string }>(
     `SELECT count(*)::text AS n FROM run_action_requests WHERE account_id = $1::uuid AND kind = 'advance_work_item' AND target_id = $2::uuid`, [accountId, childId])).rows[0]!.n);
   const req = await client.query<{ action_id: string }>('SELECT action_id FROM run_action_request($1, $2, $3, $4)',
-    ['advance_work_item', childId, `child:${childId}:${n + 1}`, createHash('sha256').update(`advance_work_item:${childId}`).digest('hex')]);
+    ['advance_work_item', childId, input.idempotencyKey ?? `child:${childId}:${n + 1}`, createHash('sha256').update(`advance_work_item:${childId}`).digest('hex')]);
   return req.rows[0]!.action_id;
 }
 
@@ -305,7 +322,7 @@ export const CHILD_ASK_START_LABEL = 'Start it';
 export const CHILD_ASK_HOLD_LABEL = 'Hold it for now';
 
 /** The definer refusals that mean "this one, not now" (the transaction rolled back, nothing is left behind). */
-const DEFINER_HELD: ReadonlySet<string> = new Set(['child_orphaned', 'parent_closed', 'respec_needs_approval', 'key_not_in_approved_spec', 'external_needs_approval', 'parent_no_envelope', 'child_closed']);
+const DEFINER_HELD: ReadonlySet<string> = new Set(['child_orphaned', 'parent_closed', 'respec_needs_approval', 'key_not_in_approved_spec', 'external_needs_approval', 'needs_person_approval', 'parent_no_envelope', 'child_closed']);
 const DEFINER_REPLAY: ReadonlySet<string> = new Set(['work_started', 'receipt_not_in_transaction']);
 
 /** Maps what `dial_launch_child` raised to an outcome, or rethrows what is not one of its fixed refusals. */
@@ -327,23 +344,24 @@ export function childGateOutcomeOfError(err: unknown): ChildGateResult {
  * `dial_launch_child` both refuse one). Anything this does not recognise ends in `not_ready` or an ask, never a start. A refusal at the database rolls the whole
  * transaction back (the caller maps it with `childGateOutcomeOfError`), so a half launch cannot exist.
  */
-export async function gateChildLaunch(client: PoolClient, input: { accountId: string; childId: string; deps: ChildLaunchDeps | undefined }): Promise<ChildGateResult> {
+export async function gateChildLaunch(client: PoolClient, input: { accountId: string; childId: string; deps: ChildLaunchDeps | undefined; /** The follow-up launch (D#483 S5-b2d-2b): its own rule and definer, the parent's approved version in place of a pinned one. */ followUp?: boolean }): Promise<ChildGateResult> {
   const { accountId, childId, deps } = input;
+  const followUp = input.followUp === true;
   await lockChild(client, accountId, childId);
-  const child = await readChild(client, accountId, childId);
+  const child = await readChild(client, accountId, childId, followUp);
   if (child === null) return { outcome: 'not_ready' };
-  const blocker = await blockerOf(client, childId, false, false);
+  const blocker = await blockerOf(client, childId, false, false, followUp);
   if (blocker === 'work_started') return { outcome: 'replayed' };
   if (blocker !== null) return isChildCode(blocker) ? { outcome: 'held_by_rule', code: blocker } : { outcome: 'not_ready' };
   // The reasons are derived above; nothing below this line writes until the build supports a child.
   if (deps === undefined || deps.buildSupported !== true) return { outcome: 'not_ready' };
-  if (child.parent_id === null || child.repo_id === null || child.planned_pr_spec_version_id === null) return { outcome: 'not_ready' };
+  if (child.parent_id === null || child.repo_id === null || (!followUp && child.planned_pr_spec_version_id === null)) return { outcome: 'not_ready' };
 
   const parentId = child.parent_id;
   const envelopeId = await parentEnvelope(client, accountId, parentId);
   if (envelopeId === null) return { outcome: 'held_by_rule', code: 'parent_no_envelope' };
-  const facts = (await client.query<{ approval_id: string; approved_version: number; current_version: number; keys: string[]; owner_process: string | null }>(
-    `SELECT a.id AS approval_id, av.version AS approved_version, cv.version AS current_version,
+  const facts = (await client.query<{ approval_id: string; approved_id: string; approved_version: number; current_version: number; keys: string[]; owner_process: string | null }>(
+    `SELECT a.id AS approval_id, av.id AS approved_id, av.version AS approved_version, cv.version AS current_version,
             COALESCE((SELECT array_agg(e ->> 'key') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(av.frontmatter -> 'planned_prs') = 'array' THEN av.frontmatter -> 'planned_prs' ELSE '[]'::jsonb END) e), ARRAY[]::text[]) AS keys,
             (SELECT p.owner_process FROM proposals p WHERE p.account_id = $1::uuid AND p.work_item_id = $2::uuid LIMIT 1) AS owner_process
        FROM work_item_approvals a
@@ -361,38 +379,40 @@ export async function gateChildLaunch(client: PoolClient, input: { accountId: st
       ownerProcess: (facts.owner_process ?? 'product') as 'product', engineLoopRepo: false, provenance: 'internal', hasPersonApproval: true,
       approvedSpecVersion: facts.approved_version, currentSpecVersion: facts.current_version, envelopeRemainingUsd: room.remainingUsd,
     },
-    sub: { kind: 'planned_pr', key: child.planned_pr_key, category: null },
-    approvedSpecKeys: facts.keys,
+    // A follow-up child is a sub-item with no key in the approved Spec; its category is its kind (`small`, a constant of the definer that made it).
+    sub: followUp ? { kind: 'follow_up_child', key: null, category: child.kind as StartCategory | null } : { kind: 'planned_pr', key: child.planned_pr_key, category: null },
+    approvedSpecKeys: followUp ? [] : facts.keys,
     firstRunReservationUsd: room.priceUsd,
     asNewItem: { verification: 'verified', freePreview: false, hasWriteInstall: true },
   });
-  // Case (d): a key the approved version does not list is never a new item.
-  if (decision.outcome === 'new_item') return { outcome: 'held_by_rule', code: 'key_not_in_approved_spec' };
+  // Case (d): a key the approved version does not list is never a new item. A follow-up child that is not small widens scope: a person decides, nothing starts.
+  if (decision.outcome === 'new_item') return followUp ? { outcome: 'not_ready' } : { outcome: 'held_by_rule', code: 'key_not_in_approved_spec' };
   if (decision.outcome === 'wait') return { outcome: 'no_room', code: 'parent_envelope_reached' };
   if (decision.outcome === 'refused') return { outcome: 'not_ready' };
   if (decision.outcome === 'ask' && decision.reason !== 'dial') return { outcome: 'not_ready' };
 
   // The run that published the approved version anchors both the receipt and an ask: the project manager's, else any run of this parent on that version.
+  const specVersionId = followUp ? facts.approved_id : child.planned_pr_spec_version_id!;
   const anchor = (await client.query<{ id: string }>(
     `SELECT id FROM agent_runs WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND spec_version_id = $3::uuid
-      ORDER BY (role = 'project-manager') DESC, created_at DESC, id DESC LIMIT 1`, [accountId, parentId, child.planned_pr_spec_version_id])).rows[0]?.id;
+      ORDER BY (role = 'project-manager') DESC, created_at DESC, id DESC LIMIT 1`, [accountId, parentId, specVersionId])).rows[0]?.id;
   if (anchor === undefined) return { outcome: 'not_ready' };
 
-  if (decision.outcome === 'ask') return askForChild(client, { accountId, parentId, child, anchor, preset: presetOf(dial?.disposition) });
+  if (decision.outcome === 'ask') return askForChild(client, { accountId, parentId, child, anchor, preset: presetOf(dial?.disposition), noun: followUp ? 'follow-up' : 'planned PR' });
 
   const receipt = await writeSubItemPolicyReceipt(client, {
-    runId: anchor, workItemId: parentId, key: child.planned_pr_key, specVersionId: child.planned_pr_spec_version_id, approvalId: facts.approval_id,
+    runId: anchor, workItemId: parentId, key: child.planned_pr_key, specVersionId, approvalId: facts.approval_id,
     chosen: decision.outcome === 'announce' ? 'announce' : 'launch', dialVersion: dial?.version ?? DIAL_VERSION_CATALOGUE_DEFAULT,
   });
   if (receipt.replayed) return { outcome: 'replayed' };
-  await linkOrRefuse(client, childId);
-  const launched = (await client.query<{ replayed: boolean }>('SELECT replayed FROM dial_launch_child($1::uuid, $2::uuid)', [childId, receipt.id])).rows[0]!;
+  if (!followUp) await linkOrRefuse(client, childId);
+  const launched = (await client.query<{ replayed: boolean }>(`SELECT replayed FROM ${followUp ? 'dial_launch_follow_up_child' : 'dial_launch_child'}($1::uuid, $2::uuid)`, [childId, receipt.id])).rows[0]!;
   return { outcome: launched.replayed ? 'replayed' : 'started' };
 }
 
 /** One ask per (parent, key): "Start planned PR: <cleaned title>?", anchored on the run that published the approved version. A second pass finds it and raises none. */
-async function askForChild(client: PoolClient, input: { accountId: string; parentId: string; child: ChildRow; anchor: string; preset: ReturnType<typeof presetOf> }): Promise<ChildGateResult> {
-  const { accountId, parentId, child, anchor, preset } = input;
+async function askForChild(client: PoolClient, input: { accountId: string; parentId: string; child: ChildRow; anchor: string; preset: ReturnType<typeof presetOf>; noun: 'planned PR' | 'follow-up' }): Promise<ChildGateResult> {
+  const { accountId, parentId, child, anchor, preset, noun } = input;
   // One ask per (parent, key) for the version being asked about (its anchor run): a live ask is found, and so is one a person already answered (a hold stays held,
   // it is not asked again every pass). An ask on an older version's run, or one that was withdrawn, does not stop a new one.
   const open = await client.query(
@@ -402,8 +422,8 @@ async function askForChild(client: PoolClient, input: { accountId: string; paren
   if (open.rows.length > 0) return { outcome: 'asked' };
   const cls = catalogueClassOf('launch_sub_item');
   if (cls === null || cls === 'automated_with_monitoring') return { outcome: 'not_ready' };
-  const title = cleanWorkItemTitle(child.title) ?? child.planned_pr_key;
-  const rationale = sanitize(`Start planned PR: ${title}? Your setting asks before a planned PR starts. Nothing starts until you answer: start it, or hold it.`);
+  const title = (cleanWorkItemTitle(child.title) ?? child.planned_pr_key).replace(/^Follow-up: /, '');
+  const rationale = sanitize(`Start ${noun}: ${title}? Your setting asks before a ${noun} starts. Nothing starts until you answer: start it, or hold it.`);
   const askId = await raiseAskMarked(client, {
     class: cls, decisionType: 'launch_sub_item', workItemId: parentId, runId: anchor,
     // The answer path is the sub-item one (answerAsk starts on `FIX_ASK_START`), so the option ids are shared with the fix rounds; only the words differ.

@@ -36,7 +36,11 @@ import { markWorkPending } from "@fx/core/src/pendingWork.js";
  *
  * D#483 S5-b2d-2a: then a follow-up pass makes a work item of each recorded follow-up whose parent a person approved and that is not closed
  * (`follow_up_child_list_due`, then `follow_up_child_create` in the tenant's own transaction on this same login). Only while the pipeline's
- * `FOLLOW_UP_CHILD_START_SUPPORTED` (injected as `followUp.childStartSupported`) is true: otherwise it does not even list. A child it makes is not started here.
+ * `FOLLOW_UP_CHILD_START_SUPPORTED` (injected as `followUp.childStartSupported`) is true: otherwise it does not even list. A child it makes is launched by the launch pass below (D#483 S5-b2d-2b).
+ *
+ * D#483 S5-b2d-2b: then a launch pass for the follow-up children (`follow_up_child_launch_list_due`), one transaction each through the same gate as a planned PR child
+ * (`gateChildLaunch` with `followUp`): the follow-up launch rule (`follow_up_child_blocker`), the repo's `launch_sub_item` dial, the parent's envelope, then the keyed policy receipt
+ * on the PARENT and `dial_launch_follow_up_child`, or one ask. Same flag as the producer, and the same pairing guard on the build.
  *
  * Every number and state that is unknown fails closed to "no start". The proposal stays `new`, and the Inbox says why (the off sentence, or the person's own
  * Approve). Writes happen only inside the gate transaction, so a pass that stops half way leaves nothing half done.
@@ -74,6 +78,8 @@ export interface AutoStartCounts {
   children?: ChildPassCounts;
   /** D#483 S5-b2d-2a: the follow-up pass (absent while the flag is off or the time budget is used up). */
   follow_ups?: FollowUpPassCounts;
+  /** D#483 S5-b2d-2b: the launch pass for follow-up children, counted like the child pass (absent while the flag is off or the time budget is used up). */
+  follow_up_launches?: ChildPassCounts;
   /** When some proposal waits only for room: the Monday 00:00 UTC the weekly limit renews. */
   renews_at?: string;
 }
@@ -234,9 +240,9 @@ export function createAutoStartSweep(deps: AutoStartDeps) {
   }
 
   /** One planned PR child through the dial, in one transaction. Tests call it for children the lister would not name. */
-  async function gateChild(accountId: string, childId: string): Promise<{ outcome: ChildGateOutcome; code?: ChildLaunchCode }> {
+  async function gateChild(accountId: string, childId: string, followUp = false): Promise<{ outcome: ChildGateOutcome; code?: ChildLaunchCode }> {
     try {
-      return await withTenant(deps.receiptPool, accountId, (client) => gateChildLaunch(client, { accountId, childId, deps: deps.child }));
+      return await withTenant(deps.receiptPool, accountId, (client) => gateChildLaunch(client, { accountId, childId, deps: deps.child, followUp }));
     } catch (err) { // fx-swallow-ok: a definer's fixed refusal is an outcome (rolled back, nothing left); anything else is rethrown by childGateOutcomeOfError
       // The definers' fixed refusals leave nothing behind (the whole transaction rolled back); anything else is a fault and is rethrown. A refusal that means
       // "not ready" is logged as a fixed line (its SQLSTATE and the definer's fixed code, never a value), so a missing grant shows up.
@@ -246,17 +252,20 @@ export function createAutoStartSweep(deps: AutoStartDeps) {
     }
   }
 
-  async function sweepChildren(counts: AutoStartCounts, startedAt: number): Promise<void> {
+  /** The child pass; with `followUp`, the launch pass for follow-up children (its own lister, the same gate). */
+  async function sweepChildren(counts: AutoStartCounts, startedAt: number, followUp = false): Promise<void> {
+    if (followUp && deps.followUp?.childStartSupported !== true) return;
     const c: ChildPassCounts = { listed: 0, started: 0, asked: 0, held_by_rule: 0, no_room: 0, not_ready: 0, replayed: 0, failed: 0, held: {} };
-    counts.children = c;
+    counts[followUp ? "follow_up_launches" : "children"] = c;
+    const list = followUp ? "follow_up_child_launch_list_due" : "planned_pr_child_list_due";
     let after: [string | null, string | null] = [null, null];
     for (;;) {
-      const { rows } = await deps.receiptPool.query<{ account_id: string; child_id: string; created_at: Date }>("SELECT account_id, child_id, created_at FROM planned_pr_child_list_due($1::integer, $2::timestamptz, $3::uuid)", [AUTOSTART_CHILD_LIST_PAGE, ...after]);
+      const { rows } = await deps.receiptPool.query<{ account_id: string; child_id: string; created_at: Date }>(`SELECT account_id, child_id, created_at FROM ${list}($1::integer, $2::timestamptz, $3::uuid)`, [AUTOSTART_CHILD_LIST_PAGE, ...after]);
       for (const r of rows) {
         c.listed += 1;
         if (now().getTime() - startedAt > AUTOSTART_PASS_BUDGET_MS) return;
         try {
-          const res = await gateChild(r.account_id, r.child_id);
+          const res = await gateChild(r.account_id, r.child_id, followUp);
           c[res.outcome] += 1;
           if (res.code !== undefined) c.held[res.code] = (c.held[res.code] ?? 0) + 1;
         } catch (err) {
@@ -344,13 +353,14 @@ export function createAutoStartSweep(deps: AutoStartDeps) {
     }
     await sweepChildren(counts, startedAt);
     await sweepFollowUps(counts, startedAt);
+    await sweepChildren(counts, startedAt, true);
     return finish(counts);
   }
 
   function finish(counts: AutoStartCounts): AutoStartCounts {
     // A start the dial filed is an advance request row written by a definer, which sends no kick: without the marker the gated run-action cron would leave it
     // for its half-hour backstop.
-    if (counts.started > 0 || (counts.children?.started ?? 0) > 0) void markWorkPending("run-action-sweep");
+    if (counts.started > 0 || (counts.children?.started ?? 0) > 0 || (counts.follow_up_launches?.started ?? 0) > 0) void markWorkPending("run-action-sweep");
     if (counts.no_room > 0) counts.renews_at = new Date(weekStartUtc(now()).getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
     return counts;
   }

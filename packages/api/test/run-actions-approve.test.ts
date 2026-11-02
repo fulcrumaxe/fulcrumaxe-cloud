@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { setPendingHooks } from '@fx/core/src/pendingWork.js';
@@ -15,7 +15,7 @@ import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
 import { DISCUSSION_KINDS, isBuildableKind } from '@fx/discussions';
 import { ADVANCE_NON_BUILDABLE_KINDS, ADVANCEABLE_STAGES, FOLLOW_UP_NOT_STARTED } from '@fx/core/src/work-items/advance.js';
-import { TERMINAL_RUN_STATUSES, runActionDeps } from '../src/routes/run-actions.js';
+import { TERMINAL_RUN_STATUSES, approveFollowUpDeps, runActionDeps } from '../src/routes/run-actions.js';
 import { listStalledItems } from '@fx/core/src/work-items/stalled.js';
 import { seedAccountWithMember } from './helpers/seed.js';
 import { withTenant } from '@fx/core/src/tenancy/withTenant.js';
@@ -212,7 +212,9 @@ describe('D#483 P1: approve route', () => {
     await expectNothingWritten(p.accountId);
   });
 
-  it('C29-0-5: a follow-up child at triaged (no issue number of its own) is 409 not_approvable with the advance table\'s sentence, never triaged, and nothing is written', async () => {
+  it('C29-0-5: with the start unsupported (flag injected false) a follow-up child at triaged (no issue number of its own) is 409 not_approvable with the advance table\'s sentence, never triaged, and nothing is written', async () => {
+    approveFollowUpDeps.startSupported = false;
+    onTestFinished(() => void (approveFollowUpDeps.startSupported = true));
     const p = await person('owner');
     const parent = await seedIssueItem(p.accountId);
     await admin.query(`INSERT INTO work_item_approvals (account_id, work_item_id, approved_by, source) VALUES ($1, $2, $3, 'work_item_approve')`, [p.accountId, parent, p.userId]);

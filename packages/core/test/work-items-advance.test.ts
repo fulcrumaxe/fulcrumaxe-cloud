@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { WORK_ITEM_STAGES } from '../src/work-items/stages.js';
-import { ADVANCEABLE_STAGES, ADVANCE_LIGHT_KINDS, ADVANCE_NON_BUILDABLE_KINDS, ADVANCE_PANEL_KINDS, FOLLOW_UP_NOT_STARTED, advanceActionFor } from '../src/work-items/advance.js';
+import { ADVANCEABLE_STAGES, ADVANCE_LIGHT_KINDS, ADVANCE_NON_BUILDABLE_KINDS, ADVANCE_PANEL_KINDS, FOLLOW_UP_CHILD_START_SUPPORTED, FOLLOW_UP_NOT_STARTED, advanceActionFor } from '../src/work-items/advance.js';
 
 /** D#483: the one table of what the stage driver can advance, and what advancing does. */
 describe('advanceActionFor', () => {
@@ -160,12 +160,28 @@ describe('advanceActionFor for a planned PR child', () => {
 describe('advanceActionFor for a follow-up child (S5-b2d-2a)', () => {
   const base = { stage: 'triaged', discussion_id: null, kind: 'small', has_spec: false };
 
-  it('answers the fixed sentence from triaged, whatever the other facts say, and never `triage`', () => {
+  it('with the start unsupported it answers the fixed sentence from triaged, whatever the other facts say, and never `triage`', () => {
     for (const extra of [{}, { discussion_id: 'd' }, { has_spec: true }, { kind: null }, { kind: 'feature', discussion_id: 'd' }, { child: true, has_spec: true }]) {
-      const v = advanceActionFor({ ...base, ...extra, follow_up: true });
+      const v = advanceActionFor({ ...base, ...extra, follow_up: true, follow_up_start_supported: false });
       expect(v, JSON.stringify(extra)).toEqual({ ok: false, reason: 'state', message: 'follow-up items start in a later release' });
     }
     expect(FOLLOW_UP_NOT_STARTED).toBe('follow-up items start in a later release');
+  });
+
+  it('with the start supported (the constant is true) its action from triaged is `light_spec`, never `triage` and never `build`, even though it carries a key (`child`)', () => {
+    expect(FOLLOW_UP_CHILD_START_SUPPORTED).toBe(true);
+    for (const extra of [{}, { discussion_id: 'd' }, { has_spec: true }, { kind: null }, { child: true, has_spec: true }, { child: true }]) {
+      expect(advanceActionFor({ ...base, ...extra, follow_up: true }), JSON.stringify(extra)).toEqual({ ok: true, action: 'light_spec' });
+    }
+  });
+
+  it('after the short Spec it builds like a child: spec_ready, needs_human and the review stages follow the child rows', () => {
+    const c = { ...base, child: true, follow_up: true, has_spec: true };
+    for (const stage of ['spec_ready', 'needs_human']) expect(advanceActionFor({ ...c, stage }).ok, stage).toBe(true);
+    expect(advanceActionFor({ ...c, stage: 'spec_ready' })).toEqual({ ok: true, action: 'build' });
+    expect(advanceActionFor({ ...c, stage: 'needs_human' })).toEqual({ ok: true, action: 'rebuild' });
+    expect(advanceActionFor({ ...c, stage: 'pr_opened' })).toEqual({ ok: true, action: 'review' });
+    expect(advanceActionFor({ ...c, stage: 'spec_ready', has_spec: false })).toMatchObject({ ok: false });
   });
 
   it('is unchanged for an item that is not one: false and absent read as before', () => {

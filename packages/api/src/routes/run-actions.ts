@@ -8,10 +8,13 @@ import { checkRetryAuthor, hasBlockingRetryChild, requestRunAction, type AuthorC
 import type { RouteContext, RouteEntry } from "../registry.js";
 import { SESSION_LIMITS } from "../ratelimit/session.js";
 import { maxFixRounds } from "@fx/spend";
-import { advanceActionFor } from "@fx/core/src/work-items/advance.js";
+import { advanceActionFor, FOLLOW_UP_CHILD_START_SUPPORTED } from "@fx/core/src/work-items/advance.js";
+import { specOfItemSql } from "@fx/core/src/work-items/stages.js";
+import { SubItemApprovalError } from "@fx/core/src/decisions/approveSubItem.js";
 import { readReviewHold } from "@fx/core/src/work-items/reviewHold.js";
 import {
   AlreadyRunningError,
+  ApiError,
   AuthorCheckUnavailableError,
   EscalateError,
   ExternalRequiresHumanError,
@@ -214,6 +217,9 @@ async function retry(ctx: RouteContext, id: string) {
  * Accepts only an INTERNAL item with a repo and an issue behind it, at a stage the driver can advance, that has not
  * been triaged by the pipeline yet and has no run live. An external item needs a person to move it.
  */
+/** D#483 S5-b2d-2b: tests inject the follow-up flag here (the constant is true). */
+export const approveFollowUpDeps: { startSupported: boolean } = { startSupported: FOLLOW_UP_CHILD_START_SUPPORTED };
+
 async function approve(ctx: RouteContext, id: string) {
   if (!UUID_RE.test(id)) throw notFound();
   const signal = runActionDeps.getRunActionSignal();
@@ -222,10 +228,14 @@ async function approve(ctx: RouteContext, id: string) {
   const key = ctx.idempotencyKey || undefined;
   const actor = `session:${userId}`;
 
+  // D#483 S5-b2d-2b: a follow-up child's launch is its Approve at `triaged`; it is made by the approver below, after this transaction.
+  const launched: { launch: { parentId: string; key: string } | null } = { launch: null };
   await withTenant(ctx.pool, accountId, userId, tokenId, async (client) => {
-    const { rows } = await client.query<{ stage: string; provenance: string; repo_id: string | null; gh_number: string | null; discussion_id: string | null; kind: string | null; has_spec: boolean; follow_up: boolean }>(
-      `SELECT w.stage, w.provenance, w.repo_id, w.gh_number, w.discussion_id, d.kind, (w.follow_up_id IS NOT NULL) AS follow_up,
-              EXISTS (SELECT 1 FROM spec_versions s WHERE s.work_item_id = w.id AND s.erased_at IS NULL) AS has_spec
+    // The facts are the worker's (`performDriven`): a follow-up child carries its key (`child`) and its own kind and Spec, and has no discussion.
+    const { rows } = await client.query<{ stage: string; provenance: string; repo_id: string | null; gh_number: string | null; discussion_id: string | null; kind: string | null; has_spec: boolean; follow_up: boolean; child: boolean; parent_id: string | null; planned_pr_key: string | null }>(
+      `SELECT w.stage, w.provenance, w.repo_id, w.gh_number, w.discussion_id, CASE WHEN w.planned_pr_key IS NULL THEN d.kind ELSE w.kind END AS kind, (w.follow_up_id IS NOT NULL) AS follow_up,
+              (w.planned_pr_key IS NOT NULL) AS child, w.parent_id, w.planned_pr_key,
+              EXISTS (SELECT 1 FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${specOfItemSql("s", "w")}) AS has_spec
          FROM work_items w LEFT JOIN discussions d ON d.id = w.discussion_id
         WHERE w.id = $1`,
       [id],
@@ -242,10 +252,15 @@ async function approve(ctx: RouteContext, id: string) {
     if (item.repo_id === null) throw new NoRepoError();
     // A follow-up child has no number of its own (it builds on its parent's issue): the advance table answers it, with its own sentence.
     if (item.gh_number === null && !item.follow_up) throw new NotApprovableError("work item has no GitHub issue");
-    const verdict = advanceActionFor({ ...item, no_verdict_hold: item.stage === "needs_human" && (await readReviewHold(client, id)) });
+    const verdict = advanceActionFor({ ...item, follow_up_start_supported: approveFollowUpDeps.startSupported, no_verdict_hold: item.stage === "needs_human" && (await readReviewHold(client, id)) });
     if (!verdict.ok) throw new NotApprovableError(verdict.message);
     const live = await client.query<{ n: string }>("SELECT count(*) AS n FROM agent_runs WHERE work_item_id = $1 AND NOT (status = ANY($2::text[]))", [id, TERMINAL_RUN_STATUSES]);
     if (Number(live.rows[0]!.n) > 0) throw new AlreadyRunningError();
+    // A follow-up child is held to its parent's approval, not one of its own (the receipts and the launch rule read the parent's), so no approval row is written for it.
+    if (item.follow_up) {
+      if (item.stage === "triaged") launched.launch = { parentId: item.parent_id!, key: item.planned_pr_key! };
+      return;
+    }
     // D#483 S5-b2a: the person's click is a record (migration 0906). Written after every refusal above and before the request, so an item whose
     // run starts always has the row; a repeat of an unchanged approval writes nothing.
     const { rows: recorded } = await client.query<{ o_replayed: boolean }>("SELECT o_replayed FROM work_item_approval_record($1::uuid, 'work_item_approve')", [id]);
@@ -256,6 +271,24 @@ async function approve(ctx: RouteContext, id: string) {
       await attachSplitParentEnvelope(client, { accountId, workItemId: id });
     }
   });
+  const launch = launched.launch;
+  if (launch !== null) {
+    // The same approval a person's click on the sub-item makes (`approveSubItem` on the parent with the child's key): the launch checks, the receipt in the person's name, the
+    // child's envelope and its advance request. Loaded here: subItemApprovals.ts imports this file.
+    const { subItemApprovalDeps, MESSAGES } = await import("./subItemApprovals.js");
+    const approver = await subItemApprovalDeps.getApprover();
+    if (approver === null) throw new ApiError(503, "sub_item_approval_unavailable", "approvals are not available yet");
+    try {
+      const done = await approver({ principal: { accountId, userId }, workItemId: launch.parentId, key: launch.key, ...(key ? { idempotencyKey: key } : {}) });
+      if (done.advanceActionId === null) throw new AlreadyRunningError();
+      const { announceNewRunAction } = await import("@fx/core/src/runActions/index.js");
+      await announceNewRunAction({ signal }, { actionId: done.advanceActionId, accountId, kind: "advance_work_item" });
+      return { action_id: done.advanceActionId, state: "accepted" as (typeof STATES)[number] };
+    } catch (err) {
+      if (err instanceof SubItemApprovalError) throw new ApiError(err.status, err.code, MESSAGES[err.code] ?? "this approval is not available");
+      throw err;
+    }
+  }
   // D#483 S5-b2c-2: the approval may have made planned PR children (a hint: the auto-start sweep reads the rows).
   void markWorkPending("proposal-verify-sweep");
 
