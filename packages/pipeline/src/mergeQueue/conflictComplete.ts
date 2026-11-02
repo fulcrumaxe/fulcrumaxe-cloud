@@ -1,7 +1,7 @@
 import type { PoolClient } from "pg";
 import type { ConflictReaderPort, DefaultBranchReaderPort, OrderedResourceReaderPort } from "../build/githubMergePort.js";
 import type { PullRequestRef } from "../build/types.js";
-import { readPlatformCommitProof, recordStop, type EntrylessStart } from "./conflict.js";
+import { readPlatformCommitProof, recordStop, type EntrylessStart, type PlatformCommitProofReader } from "./conflict.js";
 import { readMergeCommit, readPlainDiff, startDeltaForSource, type DeltaSource } from "./deltaReview.js";
 import type { DeltaCompletionPorts } from "./deltaComplete.js";
 import { checkOrdering } from "./orderedResources.js";
@@ -41,6 +41,18 @@ export interface ConflictCompletionPorts<S extends RoundSubject = MergeQueueEntr
    * `history_rewritten`: the republish was not one commit on the public main tip read for the round. `done`: any other end (the item's own refusal record stands).
    */
   publicOutcome?(who: S, round: ConflictRound): Promise<"none" | "pending" | "done" | "branch_moved" | "history_rewritten" | "failed">;
+  /**
+   * D#519 MQ4-e2-c2 (C20): for a `runner_local` round, where the push proof comes from. Absent (every hosted and sandbox round): the one shared source, `readPlatformCommitProof`.
+   * The adapter (`createRoundGitHub`) answers it from the run's attestation, pinned by cloud-held values.
+   */
+  platformCommits?: PlatformCommitProofReader;
+  /** Set only with the `runner_local` adapter: whether its attestation is there and is for the live head. Absent: the round is read from GitHub as before. */
+  runnerFed?: RunnerFedPort;
+}
+
+export interface RunnerFedPort {
+  /** `unreadable`: no attestation, or one that is malformed or disagrees with the round row. `head_changed`: it is for another head than the live one. */
+  read(liveHead: string): Promise<"ok" | "unreadable" | "head_changed">;
 }
 
 export type ConflictCompletion =
@@ -60,7 +72,7 @@ export type ConflictCompletion =
 async function resolutionBase<S extends RoundSubject>(ports: ConflictCompletionPorts<S>, entry: S, pr: PullRequestRef, round: ConflictRound, head: string): Promise<string | null> {
   const commit = await ports.github.getCommit(pr, head);
   if (commit.parents.length !== 2 || commit.parents[0] !== round.fromSha) return null;
-  const proof = round.runId === null ? null : await readPlatformCommitProof()?.(entry, [head]);
+  const proof = round.runId === null ? null : await (ports.platformCommits ?? readPlatformCommitProof())?.(entry, [head]);
   if (!proof?.pushes.some((p) => p.runId === round.runId && p.oldSha === round.fromSha && p.newSha === head)) return null;
   const second = commit.parents[1]!;
   const tip = await ports.github.getDefaultBranchTip(pr);
@@ -93,6 +105,12 @@ async function judgeRoundHead<S extends RoundSubject>(ports: ConflictCompletionP
 
   const head = live.headSha;
   if (head === round.fromSha) return { done: ended ? { kind: "stop", reason: stopReason, outcome: "pushed_nothing" } : stillRunning() };
+  if (ports.runnerFed) {
+    // A `runner_local` round is read from its run's attestation: none yet (or none readable) waits while the run goes and stops once it ended; one for another head is a head that moved.
+    const fed = await ports.runnerFed.read(head);
+    if (fed === "unreadable") return { done: ended ? { kind: "stop", reason: stopReason, outcome: "conflict_round_unreadable" } : stillRunning() };
+    if (fed === "head_changed") return { done: { kind: "review", reason: "head_changed", toSha: head } };
+  }
   // The head moved after the round's own was recorded: someone pushed again.
   if (round.toSha !== null && round.toSha !== head) return { done: { kind: "review", reason: "head_changed", toSha: head } };
   if ((await ports.github.compareCommits(pr, round.fromSha, head)).status !== "ahead") return { done: { kind: "stop", reason: "history_rewritten", outcome: "history_rewritten" } };
@@ -129,7 +147,10 @@ export async function judgeConflictRound<S extends RoundSubject>(ports: Conflict
   // Against the new tip: a branch that conflicts again is a new conflict (bounded by the item's own count), not a delta review.
   const fresh = await ports.github.getMergeability(pr, { gatedHeadSha: head });
   if (fresh.state !== "open" || fresh.merged || fresh.headSha !== head) return { kind: "review", reason: "head_changed", toSha: head };
-  if (fresh.mergeable === null || fresh.mergeableState === "unknown") return { kind: "waiting" };
+  if (fresh.mergeable === null || fresh.mergeableState === "unknown") {
+    // Hosted: GitHub is still computing. A runner round never gets a better answer than the attested "unknown", so it waits to the round timeout and then stops unreadable.
+    return ports.runnerFed && stillRunning().kind === "stop" ? { kind: "stop", reason: "merge_conflict", outcome: "conflict_round_unreadable" } : { kind: "waiting" };
+  }
   if (fresh.mergeable === false && fresh.mergeableState === "dirty") return { kind: "again", head };
 
   const src: DeltaSource = { fromSha: round.fromSha, toSha: head, baseSha, trigger: "conflict_resolution" };
