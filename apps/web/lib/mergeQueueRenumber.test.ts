@@ -73,18 +73,17 @@ describe("MQ5-b1: the renumber round's start ports", () => {
     expect(bad.advanceStartFix).not.toHaveBeenCalled();
   });
 
-  it("the tick's binding is off by default (the constant), reads nothing, and starts nothing; injecting the constant turns it on", async () => {
+  it("the tick's binding is on (the constant since MQ5-b2); a start passed false reads nothing and starts nothing; with the proof unread the decision answers no without a GitHub read", async () => {
     const advanceStartFix = vi.fn(async () => ({ ok: true, runId: "run-9" }));
     const deps = { pool: {} as never, worker: { advanceStartFix } as never, open: (async () => ({})) as never, github: {} as never };
     const ask = { autoRenumber: true, resource: "migrations", files, highest: "0712" };
-    expect(mergeQueue.RENUMBER_START_ENABLED).toBe(false);
-    expect(await bindOnRenumber(deps)(entry, "holder", ask, SHA("a"))).toBe(false);
+    expect(mergeQueue.RENUMBER_START_ENABLED).toBe(true);
     expect(await bindOnRenumber(deps, false)(entry, "holder", ask, SHA("a"))).toBe(false);
     expect(advanceStartFix).not.toHaveBeenCalled();
-    // Enabled, the decision runs and needs the push-record proof; with none readable it answers no without a GitHub read (the stub github has no methods).
+    // Enabled (the default is the constant), the decision runs and needs the push-record proof; with none readable it answers no without a GitHub read (the stub github has no methods).
     mergeQueue.setPlatformCommitProofForTest(async () => null);
     try {
-      expect(await bindOnRenumber(deps, true)(entry, "holder", ask, SHA("a"))).toBe(false);
+      for (const enabled of [undefined, true]) expect(await bindOnRenumber(deps, enabled)(entry, "holder", ask, SHA("a"))).toBe(false);
     } finally {
       mergeQueue.setPlatformCommitProofForTest(null);
     }

@@ -147,7 +147,7 @@ export async function tickMergeQueueRepo(deps: MergeQueueTickerDeps, target: { a
  */
 export async function completeWaitingDeltaReviews(deps: MergeQueueTickerDeps, target: { accountId: string; repoId: string }): Promise<void> {
   const entries = await withTenant(deps.pool, target.accountId, (c) => mergeQueue.readQueue(c, target.accountId, target.repoId));
-  const waiting = entries.filter((e) => e.state === "awaiting_work" && (e.workKind === "delta_review" || e.workKind === "conflict"));
+  const waiting = entries.filter((e) => e.state === "awaiting_work" && (e.workKind === "delta_review" || e.workKind === "conflict" || e.workKind === "renumber"));
   if (waiting.length === 0) return;
   const open = deps.open ?? openInstallationHttp;
   const github = await openQueueGitHub(deps.pool, open, target);
@@ -156,8 +156,9 @@ export async function completeWaitingDeltaReviews(deps: MergeQueueTickerDeps, ta
   const complete = bindCompleteDeltaReview(binding);
   const completeRound = bindCompleteConflictRound(binding);
   for (const first of waiting) {
-    if (first.workKind === "conflict") await completeRound(first);
-    const entry = first.workKind === "conflict" ? await withTenant(deps.pool, target.accountId, (c) => mergeQueue.getEntry(c, target.accountId, first.id)) : first;
+    const round = first.workKind === "conflict" || first.workKind === "renumber";
+    if (round) await completeRound(first);
+    const entry = round ? await withTenant(deps.pool, target.accountId, (c) => mergeQueue.getEntry(c, target.accountId, first.id)) : first;
     if (entry?.state === "awaiting_work" && entry.workKind === "delta_review") await complete(entry);
   }
 }

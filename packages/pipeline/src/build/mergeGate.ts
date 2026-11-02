@@ -438,6 +438,8 @@ export type MergeBlockReason =
   | "conflict_round_running"
   | "branch_protection_refused"
   | "ordered_resource_out_of_order"
+  /** D#519 MQ5-b2: the renumber round changed paths outside the renamed resource files and the files that refer to them. */
+  | "renumber_out_of_scope"
   /** D#598 P5c-b: a plan write-back changes something the platform did not compute; a person looks. */
   | "writeback_content_mismatch"
   /** D#598 P5c-b: the comparison for a plan write-back could not finish; nothing merged and a person merges. */

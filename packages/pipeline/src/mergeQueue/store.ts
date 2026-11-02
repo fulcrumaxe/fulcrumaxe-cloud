@@ -1042,12 +1042,12 @@ export async function endRound(client: Queryable, input: { accountId: string; ro
   return oneRound(client, `UPDATE merge_conflict_rounds SET outcome = $3, ended_at = now() WHERE account_id = $1 AND id = $2 AND outcome IS NULL RETURNING ${ROUND_COLUMNS}`, [input.accountId, input.roundId, input.outcome]);
 }
 
-/** The resolved round's work is now its delta review: `awaiting_work`/`conflict` becomes `awaiting_work`/`delta_review`. Null when the entry is not in that state. */
+/** The resolved round's work is now its delta review: `awaiting_work`/`conflict` (or `renumber`) becomes `awaiting_work`/`delta_review`. Null when the entry is not in that state. */
 export async function switchToDeltaReview(client: Queryable, input: { accountId: string; entryId: string }): Promise<MergeQueueEntry | null> {
   return one(
     client,
     `UPDATE merge_queue_entries SET work_kind = 'delta_review', work_run_id = NULL
-      WHERE account_id = $1 AND id = $2 AND state = 'awaiting_work' AND work_kind = 'conflict'
+      WHERE account_id = $1 AND id = $2 AND state = 'awaiting_work' AND work_kind IN ('conflict', 'renumber')
       RETURNING ${COLUMNS}`,
     [input.accountId, input.entryId],
   );

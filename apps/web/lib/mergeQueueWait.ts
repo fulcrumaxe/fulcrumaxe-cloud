@@ -66,7 +66,7 @@ export async function waitBody(worker: QueueWorker | null, who: StepWho): Promis
     if (!entry) return { state: "missing" };
     // D#519 MQ4-c: a merge-conflict fix round that has ended moves on (to its delta review, back to review, or to a person); one that conflicts again may be
     // back in the queue, and the tick has work for it. The delta review it starts is then followed in the same look.
-    if (entry.state === "awaiting_work" && entry.workKind === "conflict") {
+    if (entry.state === "awaiting_work" && (entry.workKind === "conflict" || entry.workKind === "renumber")) {
       const github = await openQueueGitHub(pool, openInstallationHttp, entry);
       if (github) await bindCompleteConflictRound({ pool, worker, open: openInstallationHttp, github })(entry);
       entry = (await read()) ?? entry;

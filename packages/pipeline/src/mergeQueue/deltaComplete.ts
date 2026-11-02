@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
 import { MERGE_QUEUE_DELTA_REVIEW_MAX_MINUTES } from "./policy.js";
-import { deltaInput, fixedReason, readMergeCommit, refreshSource, startDeltaRoles, type DeltaReviewPorts, type DeltaRunRef, type DeltaSource } from "./deltaReview.js";
+import { deltaInput, fixedReason, readSourceDiff, refreshSource, startDeltaRoles, type DeltaReviewPorts, type DeltaRunRef, type DeltaSource } from "./deltaReview.js";
 import { refreshTip } from "./refresh.js";
 import { finishWork, listConflictRounds, listHeadRefreshes, returnToReview, settlePullRequest, stopEntry } from "./store.js";
 import type { MergeQueueEntry, RoundSubject } from "./types.js";
@@ -45,8 +45,9 @@ async function sourceOf(ports: DeltaCompletionPorts, entry: MergeQueueEntry): Pr
   const { accountId } = entry;
   if (entry.workItemId !== null) {
     const rounds = await ports.inTenant(accountId, (c) => listConflictRounds(c, accountId, entry.workItemId!));
-    const round = rounds.find((r) => r.entryId === entry.id && r.round === entry.conflictRounds && r.fromSha === entry.headSha && r.toSha !== null && r.outcome === "resolved");
-    if (round) return { src: { fromSha: round.fromSha, toSha: round.toSha!, baseSha: null, trigger: "conflict_resolution" }, toSha: round.toSha! };
+    // A renumber round starts from the head the refresh step ended on, which can be a refresh tip and not the entry's stored head, so only a conflict round is matched by it.
+    const round = rounds.find((r) => r.entryId === entry.id && r.round === entry.conflictRounds && (r.kind === "renumber" || r.fromSha === entry.headSha) && r.toSha !== null && r.outcome === "resolved");
+    if (round) return { src: { fromSha: round.fromSha, toSha: round.toSha!, baseSha: null, trigger: round.kind === "renumber" ? "renumber" : "conflict_resolution" }, toSha: round.toSha! };
   }
   const refreshes = await ports.inTenant(accountId, (c) => listHeadRefreshes(c, accountId, entry.id));
   const toSha = refreshTip(entry.headSha, refreshes);
@@ -86,8 +87,8 @@ export async function completeDeltaReview(ports: DeltaCompletionPorts, entry: Me
     case "waiting":
       return { outcome: "waiting" };
     case "passed":
-      // A conflict round's merge commit IS the head now (the entry's stored head is the pre-round one); a refresh's stays the reviewed head, as before.
-      await ports.inTenant(accountId, (c) => finishWork(c, { accountId, entryId: entry.id, ...(src.trigger === "conflict_resolution" ? { headSha: toSha } : {}) }));
+      // A fix round's head IS the head now (the entry's stored head is the pre-round one); a refresh's stays the reviewed head, as before.
+      await ports.inTenant(accountId, (c) => finishWork(c, { accountId, entryId: entry.id, ...(src.trigger !== "refresh_overlap" ? { headSha: toSha } : {}) }));
       return { outcome: "passed" };
     case "refused_spend":
       await ports.inTenant(accountId, (c) => stopEntry(c, { accountId, entryId: entry.id, reason: "refused_spend" }));
@@ -138,7 +139,7 @@ export async function judgeDeltaReview<S extends RoundSubject>(ports: DeltaCompl
   // The debater tries to refute a pass: it runs only after every other role has passed.
   const due = others.length > 0 ? others : plan.roles.includes("debater") && !have.has("debater") ? ["debater"] : [];
   if (due.length === 0) return { kind: "passed" };
-  const read = await readMergeCommit(ports.github, who, src);
+  const read = await readSourceDiff(ports.github, who, src);
   if (!read.ok) return { kind: "back", reason: read.reason };
   const started = await startDeltaRoles(ports, who, deltaInput(src, read.files, read.baseSha), due);
   if (started.ok) return { kind: "waiting" };

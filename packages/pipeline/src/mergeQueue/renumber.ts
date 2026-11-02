@@ -11,10 +11,11 @@ import { subjectOf, type ConflictRound, type MergeQueueEntry } from "./types.js"
  * the default branch's latest key. When a round is allowed, the entry gives up its slot and an executor run renames the files and fixes their references; when it
  * is not, the entry stops `ordered_resource_out_of_order` exactly as MQ5-a leaves it. Nothing here judges the end of a round: that is MQ5-b2.
  *
- * The start is OFF: `RENUMBER_START_ENABLED` is false until MQ5-b2 (the round-end judge, the delta review on a plain diff, and the completion dispatch) lands, so no
- * round can start that nothing can finish. A disabled start reads nothing and answers "not started".
+ * The start is ON since MQ5-b2 (the round-end judge `judgeRenumberRound`, the delta review on a plain diff, and the completion dispatch in the wait and the sweep), so every round
+ * that starts can finish. It stays refused for an item with an open public copy (the worker refuses `conflict_public_copy`: nothing maps a renumber round's republish), and a
+ * `runner_local` repository is never ticked, so its entries cannot reach it. A disabled start (tests pass `false`) reads nothing and answers "not started".
  */
-export const RENUMBER_START_ENABLED = false;
+export const RENUMBER_START_ENABLED = true;
 
 /** What the check found, as structured fields: the resource, the added files of it, the default branch's highest key, and the repository's `autoRenumber`. */
 export interface RenumberAsk {

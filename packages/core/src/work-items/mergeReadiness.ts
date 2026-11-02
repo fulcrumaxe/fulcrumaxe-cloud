@@ -169,7 +169,7 @@ export async function readConflictState(client: Pick<PoolClient, 'query'>, accou
   );
   const e = rows[0];
   if (!e) return null;
-  if (e.state === 'awaiting_work' && e.work_kind === 'conflict') {
+  if (e.state === 'awaiting_work' && (e.work_kind === 'conflict' || e.work_kind === 'renumber')) {
     const r = (await client.query<{ round: number; base_ref: string | null }>(`SELECT round, base_ref FROM merge_conflict_rounds WHERE account_id = $1 AND entry_id = $2 ORDER BY round DESC LIMIT 1`, [accountId, e.id])).rows[0];
     return r ? { conflict_round: { running: true, attempt: r.round, of, base_ref: r.base_ref } } : null;
   }
