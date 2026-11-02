@@ -218,10 +218,10 @@ describe("the docs-and-code analysis pass on a runner [pg]", { timeout: 120_000 
     expect((await pass(id)).started).toBe(1);
   });
 
-  it("C25-f4-5: a Local-only repository is not listed, and a pass handed its analysis anyway starts nothing and reads nothing of it", async () => {
+  it("C25-f4-5 (C27-f3f-2 ends it): a Local-only repository's analysis is listed, and the pass ends it skipped (repo_runs_locally), starting nothing and reading nothing of it", async () => {
     const { a, repoId, id } = await target("runner_local");
     await runnerWith(a, repoId, ["discovery_analyst"]);
-    expect((await writerPool.query("SELECT analysis_id FROM discovery_analysis_list_due(200)")).rows.map((r) => r.analysis_id)).not.toContain(id);
+    expect((await writerPool.query("SELECT analysis_id FROM discovery_analysis_list_due(200)")).rows.map((r) => r.analysis_id)).toContain(id);
     headReads.length = 0;
     only = [id];
     const forced = createDocsCodeAnalysisSweep({
@@ -236,10 +236,32 @@ describe("the docs-and-code analysis pass on a runner [pg]", { timeout: 120_000 
       parse: parseAnalystOutput,
       list: async () => [{ account_id: a.accountId, analysis_id: id }],
     });
-    await forced();
+    expect(await forced()).toMatchObject({ skipped: 1, started: 0 });
     expect(await runsOf(id)).toEqual([]);
     expect(headReads).not.toContain(repoId);
-    expect(await row(id)).toMatchObject({ state: "queued", attempts: 0 });
+    expect(await row(id)).toMatchObject({ state: "skipped", skip_reason: "repo_runs_locally", attempts: 0 });
+  });
+
+  it("C27-f3f-1 (running): a running analysis whose repository is disconnected waits while its run goes, and is settled skipped (repo_not_connected) with nothing merged once the run ends; switched to runner_local mid-run, the same with repo_runs_locally", async () => {
+    for (const [reason, change] of [
+      ["repo_not_connected", "UPDATE repos SET installation_id = NULL WHERE id = $1"],
+      ["repo_runs_locally", "UPDATE repos SET execution_mode = 'runner_local', verified_copy_sha256 = NULL WHERE id = $1"],
+    ] as const) {
+      const { a, repoId, id } = await target();
+      await runnerWith(a, repoId, ["discovery_analyst"]);
+      expect((await pass(id)).started, reason).toBe(1);
+      const [run] = await runsOf(id);
+      await admin.query(change, [repoId]);
+      // Listed by the real lister, and its run is still pending: the pass waits and writes nothing.
+      expect(await pass(id), reason).toMatchObject({ listed: 1, waiting: 1 });
+      expect(await row(id), reason).toMatchObject({ state: "running", attempts: 1, run_id: run!.id, skip_reason: null });
+      // The run ends with candidates: the pass looks again and discards them.
+      await admin.query("UPDATE agent_runs SET status = 'succeeded', envelope = $2::jsonb WHERE id = $1", [run!.id, JSON.stringify(CANDIDATES)]);
+      expect(await pass(id), reason).toMatchObject({ listed: 1, skipped: 1 });
+      expect(await row(id), reason).toMatchObject({ state: "skipped", skip_reason: reason, attempts: 1 });
+      expect(await proposalTitles(repoId), reason).toEqual([]);
+      expect(await runsOf(id), reason).toHaveLength(1);
+    }
   });
 
   it("without a runner starter or a visibility port wired, a Cloud-verified analysis starts nothing and stays queued", async () => {

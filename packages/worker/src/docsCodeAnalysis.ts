@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { endAnalysis, holdAnalysis, noteAnalysisAttempt, startAnalysis } from "@fx/db/src/discoveryAnalyses.js";
+import { endAnalysis, holdAnalysis, noteAnalysisAttempt, releaseAnalysisRun, startAnalysis } from "@fx/db/src/discoveryAnalyses.js";
 import { analysisRunKey, overRepoDailyUsd } from "@fx/core/src/plan/proposalVerifyLimits.js";
 import { mergeCandidates, type AnalysisCandidate } from "@fx/core/src/discovery/candidates.js";
 import { ENGINE_LOOP_MARKER } from "@fx/core/src/plan/executeImport.js";
@@ -20,13 +20,15 @@ import type { VerifyRepoReader } from "./proposalVerify.js";
  * and the one thing written from it is `mergeCandidates` (new `pending` inbox rows). Nothing here creates a work item, an action request or a
  * start, changes a proposal's decision, or imports the stage driver. Nothing in production queues an analysis yet (OD-C25-4); tests do.
  *
- *  1. `discovery_analysis_list_due` (0950) names the analyses waiting (sandbox repositories only; ids).
+ *  1. `discovery_analysis_list_due` (0950, 0959) names the analyses waiting (ids), including those whose repository is no longer eligible (disconnected,
+ *     Local-only, not a team repository), which the pass ends `skipped` with that reason and never starts (S4-f3-f).
  *  2. Per analysis, under its tenant, with `attempts` the attempts used so far (a run started, or a seat that refused):
- *     - The current attempt's run (`docs-code-analysis:<id>:<attempts>`) still going: wait.
+ *     - The current attempt's run (`docs-code-analysis:<id>:<attempts>`, while the row still names a run) still going: wait.
  *     - It ended: the repository is looked at again (connected, discovery on, account active; else the analysis ends `skipped` and NOTHING is
  *       merged). A run that succeeded at the row's pinned sha is parsed; a rejected envelope ends the analysis `failed` / `output_rejected` with
  *       nothing written, otherwise `mergeCandidates` writes and the analysis ends `succeeded` with its counts. A run that failed, timed out, was
- *       killed at its cap, was cancelled or was refused at admit has used its attempt: the third is the last (`run_*` code), else the next starts.
+ *       killed at its cap, was cancelled or was refused at admit has used its attempt: the third is the last (`run_*` code); otherwise the row lets go of
+ *       the run (its code kept as the hold reason) and the next attempt starts on a LATER pass, never this one, as the verifier does (S4-f3-f).
  *     - No run to answer: the repository is looked at; the default branch's head is read and must still be the row's (`head_moved`); the shared
  *       daily rule holds it (`daily_cap`, still queued, nothing reserved); the seat is resolved (purpose "analyse": `analysisPerRunUsd` is the
  *       run's cap and its reservation; a refusal uses an attempt) and the run starts on the pinned commit, read-only.
@@ -37,7 +39,8 @@ import type { VerifyRepoReader } from "./proposalVerify.js";
  *       runner of the account that listed `discovery_analyst` and may take this repository, nothing is started either: the analysis is held `queued`
  *       (`no_capable_runner`, no run, no attempt), so it waits for a runner instead of a pending job expiring into `failed`. The job carries the pinned
  *       commit, and its result is merged exactly as a sandbox run's.
- *     - `runner_local` (Local-only), or anything else: nothing (S4-f5). The lister leaves them out; `readExecutionMode` is the second lock.
+ *     - `runner_local` (Local-only): the analysis ends `skipped` / `repo_runs_locally` (S4-f3-f; the analyst on a Local-only runner is S4-f5). Anything
+ *       else: nothing; `readExecutionMode` is the second lock.
  * Analysis is off without `analysisPerRunUsd` (`analysis_unconfigured`); the verifier pass does not read that figure.
  */
 
@@ -98,6 +101,9 @@ interface AnalysisRow {
   gh_owner: string | null;
   gh_name: string | null;
   installation_id: string | null;
+  execution_mode: string;
+  product: string;
+  run_id: string | null;
   account_status: string;
   frequency: string | null;
 }
@@ -114,7 +120,7 @@ const requestHash = (r: AnalysisRow, attempt: number): string => createHash("sha
 
 async function readAnalysis(client: PoolClient, accountId: string, id: string): Promise<AnalysisRow | undefined> {
   const { rows } = await client.query<AnalysisRow>(
-    `SELECT d.id, d.repo_id, d.head_sha, d.state, d.attempts, r.gh_owner, r.gh_name, r.installation_id, a.status AS account_status,
+    `SELECT d.id, d.repo_id, d.head_sha, d.state, d.attempts, d.run_id, r.gh_owner, r.gh_name, r.installation_id, r.execution_mode, r.product, a.status AS account_status,
             (SELECT s.frequency FROM discovery_settings s WHERE s.account_id = d.account_id AND s.repo_id = d.repo_id ORDER BY s.version DESC LIMIT 1) AS frequency
        FROM discovery_analyses d JOIN repos r ON r.account_id = d.account_id AND r.id = d.repo_id JOIN accounts a ON a.id = d.account_id
       WHERE d.account_id = $1 AND d.id = $2 AND d.state IN ('queued', 'running')`,
@@ -132,9 +138,12 @@ async function readRun(client: PoolClient, accountId: string, key: string): Prom
   return rows[0];
 }
 
-/** The closed reason the repository may not be read now, or null. The same four reasons `runDiscovery` records. */
+/** The closed reason the repository may not be read now, or null: `runDiscovery`'s four reasons, and (S4-f3-f) a repository that left the analysis's scope. */
 function skipReasonOf(r: AnalysisRow): string | null {
   if (r.installation_id === null) return "repo_not_connected";
+  if (r.product !== "team") return "repo_not_team";
+  // Not `execution_mode_changed`: that code already says something else on the Pipeline card.
+  if (r.execution_mode === "runner_local") return "repo_runs_locally";
   if (r.account_status !== "active") return r.account_status === "unsubscribed" ? "free_preview" : "account_not_active";
   if (r.frequency === "off") return "discovery_off";
   if (!r.gh_owner || !r.gh_name) return "repo_name_unknown";
@@ -168,7 +177,7 @@ export function createDocsCodeAnalysisSweep(deps: DocsCodeAnalysisDeps): () => P
     );
 
   /** An ended run is answered: merge its candidates, or count the failed attempt. */
-  async function settle(settings: Extract<AnalysisSettings, { on: true }>, accountId: string, r: AnalysisRow, run: RunRow): Promise<Outcome> {
+  async function settle(accountId: string, r: AnalysisRow, run: RunRow): Promise<Outcome> {
     if (!ENDED.has(run.status)) return "waiting";
     // The repository is looked at again before anything is written: one disconnected or switched off while its run went gets nothing.
     const skip = skipReasonOf(r);
@@ -198,12 +207,11 @@ export function createDocsCodeAnalysisSweep(deps: DocsCodeAnalysisDeps): () => P
       await endAnalysis(deps.pool, accountId, r.id, "succeeded", null, { ...merged.counts, candidates: parsed.candidates.length });
       return "recorded";
     }
-    // Failed, timed out, killed at its cap, cancelled, refused at admit, or a run at another commit: the attempt is used.
-    if (r.attempts >= MAX_ANALYSIS_ATTEMPTS) {
-      await endAnalysis(deps.pool, accountId, r.id, "failed", run.status === "succeeded" ? "run_head_mismatch" : failCodeOf(run.status));
-      return "failed";
-    }
-    return begin(settings, accountId, r);
+    // Failed, timed out, killed at its cap, cancelled, refused at admit, or a run at another commit: the attempt is used. The next one starts on a later pass.
+    const code = run.status === "succeeded" ? "run_head_mismatch" : failCodeOf(run.status);
+    if (r.attempts >= MAX_ANALYSIS_ATTEMPTS) await endAnalysis(deps.pool, accountId, r.id, "failed", code);
+    else await releaseAnalysisRun(deps.pool, accountId, r.id, run.id, code);
+    return "failed";
   }
 
   /** Starts the next attempt's run (see the header). */
@@ -217,7 +225,7 @@ export function createDocsCodeAnalysisSweep(deps: DocsCodeAnalysisDeps): () => P
       await endAnalysis(deps.pool, accountId, r.id, "skipped", skip);
       return "skipped";
     }
-    // The lister already leaves Local-only repositories out; this is the second lock, and such an analysis stays queued.
+    // A Local-only repository has already ended the analysis above; this is the second lock (a mode that moved since), and such an analysis stays queued.
     const placement = await placementFor(accountId, r.repo_id);
     if (placement === null) return "skipped";
     const repo = { repoId: r.repo_id, owner: r.gh_owner!, name: r.gh_name! };
@@ -284,11 +292,11 @@ export function createDocsCodeAnalysisSweep(deps: DocsCodeAnalysisDeps): () => P
     }
     const noted = r.state === "queued" ? await startAnalysis(deps.pool, accountId, r.id, runId) : await noteAnalysisAttempt(deps.pool, accountId, r.id, runId, null);
     if (!noted) return "skipped";
-    // A run refused at admit has already ended: answer it now rather than on the next pass.
+    // A run refused at admit (or a launch that failed) has already ended: answer it now; its next attempt waits for a later pass.
     const after = await withTenant(deps.pool, accountId, (client) => readRun(client, accountId, key));
     if (after === undefined || !ENDED.has(after.status)) return "started";
     const fresh = await withTenant(deps.pool, accountId, (client) => readAnalysis(client, accountId, r.id));
-    return fresh === undefined ? "skipped" : settle(settings, accountId, fresh, after);
+    return fresh === undefined ? "skipped" : settle(accountId, fresh, after);
   }
 
   /** A seat that refused counts an attempt; the third is the last and the analysis ends with the seat's code. */
@@ -302,10 +310,10 @@ export function createDocsCodeAnalysisSweep(deps: DocsCodeAnalysisDeps): () => P
     const found = await withTenant(deps.pool, accountId, async (client) => {
       const r = await readAnalysis(client, accountId, analysisId);
       if (!r) return null;
-      return { r, run: r.attempts > 0 ? await readRun(client, accountId, keyOf(r, r.attempts)) : undefined };
+      return { r, run: r.attempts > 0 && r.run_id !== null ? await readRun(client, accountId, keyOf(r, r.attempts)) : undefined };
     });
     if (found === null) return "skipped";
-    return found.run !== undefined ? settle(settings, accountId, found.r, found.run) : begin(settings, accountId, found.r);
+    return found.run !== undefined ? settle(accountId, found.r, found.run) : begin(settings, accountId, found.r);
   }
 
   return async function sweepDocsCodeAnalysis(): Promise<DocsCodeAnalysisCounts> {

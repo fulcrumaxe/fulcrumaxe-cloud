@@ -13,7 +13,8 @@ import { buildVerifierPrompt } from "../../pipeline/src/discovery/verifierPrompt
 import { recordFromOutput } from "../../pipeline/src/discovery/verifierResult.js";
 import { createFakeModelConnectionPort } from "../../runner/test/helpers/sandboxTargetFakes.js";
 import { buildWorker, type Worker } from "../src/compositionRoot.js";
-import { createDocsCodeAnalysisSweep, MAX_ANALYSIS_ATTEMPTS, type DocsCodeAnalysisCounts } from "../src/docsCodeAnalysis.js";
+import { createDocsCodeAnalysisSweep, MAX_ANALYSIS_ATTEMPTS, type DocsCodeAnalysisCounts, type DocsCodeAnalysisDeps } from "../src/docsCodeAnalysis.js";
+import { createDiscoverySchedule } from "../src/discoverySchedule.js";
 import { createProposalVerifySweep } from "../src/proposalVerify.js";
 import { createRunStarter } from "../src/starter.js";
 import { seedPreviewTarget } from "./support/previewTarget.js";
@@ -82,6 +83,8 @@ describe("the docs-and-code analysis pass [pg]", { timeout: 120_000 }, () => {
   /** Rows handed to the pass as they are, for a repository the real lister leaves out (disconnected, or not a sandbox one). */
   let forced: Array<{ account_id: string; analysis_id: string }> | null = null;
   let sweep: () => Promise<DocsCodeAnalysisCounts>;
+  /** The production deps of `sweep`, for a test that needs its own clock or the default lister. */
+  let deps: DocsCodeAnalysisDeps;
   let verify: () => Promise<unknown>;
   let spentN = 900;
 
@@ -99,7 +102,7 @@ describe("the docs-and-code analysis pass [pg]", { timeout: 120_000 }, () => {
     });
     const starter = createRunStarter({ pool: writerPool, registry: worker.registry, follow: async () => undefined, queued: "refuse" });
     const github = () => ({ headSha: async () => head, readFile: async (path: string) => (markerPresent && path === ".autonomous-team/project.json" ? "{}" : null) });
-    sweep = createDocsCodeAnalysisSweep({
+    deps = {
       pool: writerPool,
       resolveSeat: worker.resolveRunSeat,
       starter,
@@ -108,7 +111,8 @@ describe("the docs-and-code analysis pass [pg]", { timeout: 120_000 }, () => {
       prompt: buildAnalystPrompt,
       parse: parseAnalystOutput,
       list: async () => forced ?? (await writerPool.query<{ account_id: string; analysis_id: string }>("SELECT account_id, analysis_id FROM discovery_analysis_list_due(200)")).rows.filter((r) => only === null || only.includes(r.analysis_id)),
-    });
+    };
+    sweep = createDocsCodeAnalysisSweep(deps);
     verify = createProposalVerifySweep({
       pool: writerPool,
       resolveSeat: worker.resolveRunSeat,
@@ -365,19 +369,93 @@ describe("the docs-and-code analysis pass [pg]", { timeout: 120_000 }, () => {
     }
   });
 
-  it("C25-f3-8 (S4-f4 widened the lister): a runner_local repository's analysis stays queued with no run, by the lister and by the pass's own second check; a runner_verified one is listed, and this pass (no runner starter wired) starts nothing for it", async () => {
+  it("C25-f3-8 (S4-f4 widened the lister; C27-f3f-2 ends Local-only): a runner_verified repository's analysis is listed and this pass (no runner starter wired) starts nothing for it; a runner_local one is listed and ends skipped (repo_runs_locally) with no run", async () => {
     for (const mode of ["runner_verified", "runner_local"]) {
       const { a, repoId } = await target();
       const id = await queued(a, repoId);
       await admin.query("UPDATE repos SET execution_mode = $2 WHERE id = $1", [repoId, mode]);
-      const listed = (await writerPool.query("SELECT analysis_id FROM discovery_analysis_list_due(200)")).rows.map((r) => r.analysis_id);
-      if (mode === "runner_verified") expect(listed, mode).toContain(id);
-      else expect(listed, mode).not.toContain(id);
-      forced = [{ account_id: a.accountId, analysis_id: id }];
-      await sweep();
+      expect((await writerPool.query("SELECT analysis_id FROM discovery_analysis_list_due(200)")).rows.map((r) => r.analysis_id), mode).toContain(id);
+      await pass(id);
       expect(await runsOf(id), mode).toEqual([]);
-      expect(await row(id), mode).toMatchObject({ state: "queued", attempts: 0, skip_reason: null });
+      if (mode === "runner_verified") expect(await row(id), mode).toMatchObject({ state: "queued", attempts: 0, skip_reason: null });
+      else expect(await row(id), mode).toMatchObject({ state: "skipped", attempts: 0, skip_reason: "repo_runs_locally" });
     }
+  });
+
+  it("C27-f3f-1: a queued analysis whose repository is then disconnected (or moved off team) is listed by the real lister on the next pass and ends skipped with that reason; no run is started, nothing is reserved and no head is read", async () => {
+    const cases: Array<[string, string]> = [
+      ["repo_not_connected", "UPDATE repos SET installation_id = NULL WHERE id = $1"],
+      ["repo_not_team", "UPDATE repos SET product = 'sitekit' WHERE id = $1"],
+    ];
+    for (const [reason, change] of cases) {
+      const { a, repoId } = await target();
+      const id = await queued(a, repoId);
+      const reservedBefore = await reservations(a.accountId);
+      await admin.query(change, [repoId]);
+      head = MOVED; // a head read would end it head_moved instead
+      expect(await pass(id), reason).toMatchObject({ listed: 1, skipped: 1, started: 0 });
+      expect(await row(id), reason).toMatchObject({ state: "skipped", skip_reason: reason, attempts: 0, run_id: null });
+      expect(await runsOf(id), reason).toEqual([]);
+      expect(await reservations(a.accountId), reason).toBe(reservedBefore);
+      expect(await pass(id), reason).toMatchObject({ listed: 0 });
+      head = SHA;
+    }
+  });
+
+  it("C27-f3f-2: a queued analysis on a repository switched to runner_local ends skipped (repo_runs_locally) with no run; switched back, a new head queues a fresh analysis through the sweep, and the pass starts it", async () => {
+    const { a, repoId } = await target();
+    const id = await queued(a, repoId);
+    await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [repoId]);
+    expect(await pass(id)).toMatchObject({ listed: 1, skipped: 1, started: 0 });
+    expect(await row(id)).toMatchObject({ state: "skipped", skip_reason: "repo_runs_locally", attempts: 0 });
+    expect(await runsOf(id)).toEqual([]);
+
+    await admin.query("UPDATE repos SET execution_mode = 'sandbox' WHERE id = $1", [repoId]);
+    head = MOVED;
+    // The real sweep lister, narrowed to this repository (the database is shared).
+    const schedule = createDiscoverySchedule({
+      pool: writerPool,
+      openSource: () => ({ head: async () => ({ defaultBranch: "main", sha: head }), file: async () => null, recentOpen: async () => ({ items: [] }) }),
+      settings: () => settings(),
+      list: async (after, limit) => {
+        let cur = after;
+        for (;;) {
+          const { rows } = await writerPool.query<{ account_id: string; repo_id: string; period_ref: string }>("SELECT * FROM discovery_sweep_list_due($1, $2, $3)", [limit, cur?.accountId ?? null, cur?.repoId ?? null]);
+          const own = rows.filter((r) => r.repo_id === repoId);
+          if (own.length > 0 || rows.length < limit) return own;
+          cur = { accountId: rows[rows.length - 1]!.account_id, repoId: rows[rows.length - 1]!.repo_id };
+        }
+      },
+    });
+    expect(await schedule()).toMatchObject({ analyses: 1, errors: 0 });
+    const fresh = (await admin.query<{ id: string; state: string; head_sha: string }>("SELECT id, state, head_sha FROM discovery_analyses WHERE repo_id = $1 AND id <> $2", [repoId, id])).rows;
+    expect(fresh).toEqual([{ id: expect.any(String), state: "queued", head_sha: MOVED }]);
+    expect(await row(id)).toMatchObject({ state: "skipped", skip_reason: "repo_runs_locally" });
+    expect((await pass(fresh[0]!.id)).started).toBe(1);
+    await ended(fresh[0]!.id);
+  });
+
+  it("C27-f3f-3: a launch that fails three times uses one attempt per pass on a test clock (attempts 1, then 2, then the analysis ends failed with the run's code), and the pass between attempts keeps the code as the hold reason", async () => {
+    let clock = Date.parse("2026-11-02T12:00:00Z");
+    const timed = createDocsCodeAnalysisSweep({ ...deps, now: () => clock });
+    const { a, repoId } = await target();
+    cloneExit = 128;
+    const id = await queued(a, repoId);
+    for (let n = 1; n <= MAX_ANALYSIS_ATTEMPTS; n++) {
+      only = [id];
+      const counts = await timed();
+      // The clock never moves inside a pass, so its budget is not what stopped it: the failed launch was answered and the next attempt left for a later pass.
+      expect(counts, `pass ${n}`).toMatchObject({ listed: 1, failed: 1, started: 0 });
+      const runs = await runsOf(id);
+      expect(runs.map((r) => r.idempotency_key), `pass ${n}`).toEqual(Array.from({ length: n }, (_, i) => `docs-code-analysis:${id}:${i + 1}`));
+      expect(runs.every((r) => r.status === "failed"), `pass ${n}`).toBe(true);
+      if (n < MAX_ANALYSIS_ATTEMPTS) expect(await row(id), `pass ${n}`).toMatchObject({ state: "running", attempts: n, run_id: null, skip_reason: "run_failed" });
+      clock += 15 * 60_000;
+    }
+    expect(await row(id)).toMatchObject({ state: "failed", skip_reason: "run_failed", attempts: MAX_ANALYSIS_ATTEMPTS });
+    only = [id];
+    expect(await timed()).toMatchObject({ listed: 0 });
+    expect(await runsOf(id)).toHaveLength(MAX_ANALYSIS_ATTEMPTS);
   });
 
   it("S4f-5 (second half): verifier spend and the analyst's reservation share perRepoDailyUsd; a held analysis stays queued with daily_cap and nothing reserved, and starts the next UTC day", async () => {
@@ -406,5 +484,42 @@ describe("the docs-and-code analysis pass [pg]", { timeout: 120_000 }, () => {
     const other = await target();
     expect(await overRepoDailyUsd(admin, other.a.accountId, other.repoId, 0.4, 1.8)).toBe(false);
     await ended(id);
+  });
+
+  it("C27-f3f-4: the default lister branch (no deps.list) lists exactly the due rows of two accounts, at most 5 of one account per pass, oldest first; the lister refuses a platform_ops login and a bad limit", async () => {
+    // The database is shared: every other waiting analysis is ended first, so the default branch's list is this test's alone.
+    await admin.query("UPDATE discovery_analyses SET state = 'skipped', skip_reason = 'test_cleared', finished_at = now() WHERE state IN ('queued', 'running')");
+    const rest: DocsCodeAnalysisDeps = { ...deps };
+    delete rest.list;
+    const unlisted = createDocsCodeAnalysisSweep(rest);
+    const A = await target();
+    const B = await target();
+    const shaOf = (n: number): string => n.toString(16).padStart(40, "0");
+    const aIds: string[] = [];
+    for (let n = 1; n <= 6; n++) aIds.push(await queued(A.a, A.repoId, shaOf(n)));
+    const bIds = [await queued(B.a, B.repoId, shaOf(7)), await queued(B.a, B.repoId, shaOf(8))];
+    // An ended analysis and a deleted account's analysis are not due.
+    const C = await target();
+    const gone = await queued(C.a, C.repoId, shaOf(9));
+    await admin.query("UPDATE accounts SET deleted_at = now() WHERE id = $1", [C.a.accountId]);
+    // No listed analysis matches the head, so each one the pass is handed ends head_moved and starts nothing: what ended is exactly what was listed.
+    head = MOVED;
+    expect(await unlisted()).toMatchObject({ listed: 7, skipped: 7, started: 0 });
+    const states = async (ids: string[]) => (await admin.query<{ id: string; state: string; skip_reason: string | null }>("SELECT id, state, skip_reason FROM discovery_analyses WHERE id = ANY($1::uuid[])", [ids])).rows;
+    const ended7 = await states([...aIds.slice(0, 5), ...bIds]);
+    expect(ended7).toHaveLength(7);
+    for (const r of ended7) expect(r).toMatchObject({ state: "skipped", skip_reason: "head_moved" });
+    expect(await states([aIds[5]!, gone])).toEqual(expect.arrayContaining([{ id: aIds[5], state: "queued", skip_reason: null }, { id: gone, state: "queued", skip_reason: null }]));
+    // The sixth of account A is listed on the next pass.
+    expect(await unlisted()).toMatchObject({ listed: 1, skipped: 1 });
+    await admin.query("UPDATE accounts SET deleted_at = NULL WHERE id = $1", [C.a.accountId]);
+
+    const ops = createPool(process.env.WORKER_DATABASE_URL_PLATFORM_OPS!);
+    try {
+      await expect(ops.query("SELECT * FROM discovery_analysis_list_due(5)")).rejects.toMatchObject({ code: "42501" });
+    } finally {
+      await ops.end();
+    }
+    for (const bad of ["0", "201", "NULL"]) await expect(writerPool.query(`SELECT * FROM discovery_analysis_list_due(${bad})`), bad).rejects.toMatchObject({ code: "22023" });
   });
 });
