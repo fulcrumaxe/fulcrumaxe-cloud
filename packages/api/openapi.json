@@ -3997,6 +3997,75 @@
                       ],
                       "additionalProperties": false
                     },
+                    "conflict_round": {
+                      "type": "object",
+                      "properties": {
+                        "running": {
+                          "type": "boolean",
+                          "const": true
+                        },
+                        "attempt": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "of": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "base_ref": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "running",
+                        "attempt",
+                        "of",
+                        "base_ref"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "conflict_stop": {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "attempts_spent",
+                            "foreign_commits",
+                            "direct"
+                          ]
+                        },
+                        "attempts": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "files": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "base_ref": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "attempts",
+                        "files",
+                        "base_ref"
+                      ],
+                      "additionalProperties": false
+                    },
                     "setup_pause": {
                       "anyOf": [
                         {
