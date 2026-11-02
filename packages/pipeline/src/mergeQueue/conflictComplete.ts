@@ -53,6 +53,11 @@ export interface ConflictCompletionPorts<S extends RoundSubject = MergeQueueEntr
 export interface RunnerFedPort {
   /** `unreadable`: no attestation, or one that is malformed or disagrees with the round row. `head_changed`: it is for another head than the live one. */
   read(liveHead: string): Promise<"ok" | "unreadable" | "head_changed">;
+  /**
+   * D#519 MQ4-e2-c3 (C18-3): true only when the round's run can never be claimed: every runner of the account is revoked or deleted, or none is at the protocol the job needs.
+   * An offline, busy or paused runner is not that: those wait. Absent or false: the round is waited out as before.
+   */
+  unreachable?(): Promise<boolean>;
 }
 
 export type ConflictCompletion =
@@ -102,6 +107,9 @@ async function judgeRoundHead<S extends RoundSubject>(ports: ConflictCompletionP
   const ended = round.runId === null ? true : await ports.roundRunEnded(who, round.runId);
   const stillRunning = (): RoundVerdict =>
     (ports.now?.() ?? new Date()).getTime() - round.createdAt.getTime() >= MERGE_QUEUE_CONFLICT_ROUND_MAX_MINUTES * 60_000 ? { kind: "stop", reason: stopReason, outcome: "round_timeout" } : { kind: "waiting" };
+
+  // C18-3: the one runner_local state that is not waited out, because it cannot end by itself (a finished run with no attestation is the unreadable stop below).
+  if (!ended && ports.runnerFed !== undefined && (await ports.runnerFed.unreachable?.()) === true) return { done: { kind: "stop", reason: stopReason, outcome: "conflict_round_unreadable" } };
 
   const head = live.headSha;
   if (head === round.fromSha) return { done: ended ? { kind: "stop", reason: stopReason, outcome: "pushed_nothing" } : stillRunning() };

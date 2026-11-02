@@ -3,7 +3,7 @@ import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { expectedSignalNames, loadReviewContext, mergeQueue, readPublicPullRequest } from "@fx/pipeline";
-import { bindCompleteConflictRound, bindCompleteEntryless, completeRunnerEntryless, endRoundWithoutPr, entrylessStartPorts, readEntrylessSubject, runnerStartPorts } from "./mergeQueueConflict";
+import { bindCompleteConflictRound, bindCompleteEntryless, completeRunnerEntryless, endRoundWithoutPr, endRunnerRoundIfTargetChanged, entrylessStartPorts, openRunnerRound, readEntrylessSubject, runnerStartPorts } from "./mergeQueueConflict";
 import { bindCompleteDeltaReview } from "./mergeQueueDeltaReview";
 import { openQueueGitHub } from "./mergeQueue";
 import { openInstallationHttp } from "./github/installationHttp";
@@ -107,6 +107,8 @@ export async function conflictStartBody(worker: QueueWorker | null, who: StepWho
     const subject = await readEntrylessSubject(base, who.accountId, who.workItemId);
     if (!("id" in subject)) return { state: "not_applicable" };
     const github = await openQueueGitHub(pool, openInstallationHttp, subject);
+    // A `runner_local` repository is never started from here: this decision reads the pull request's commits and compares, which the fence has no document for. Its round is started
+    // from the runner's own stored facts (`runnerConflictBody`) and followed through the adapter (`conflictWaitBody`); the hosted sandbox starter is never reached (R-519-C15-7).
     if (!github) return { state: "not_applicable" };
     const out = await mergeQueue.startEntrylessConflict(entrylessStartPorts({ ...base, github }), subject);
     return out.outcome === "stopped" ? { state: "stopped", reason: out.reason } : { state: out.outcome };
@@ -114,10 +116,12 @@ export async function conflictStartBody(worker: QueueWorker | null, who: StepWho
 }
 
 /**
- * Held off until the end of a `runner_local` round is built (MQ4-e2-c): a round started now would never end, because the completion needs the hosted client a runner_local repository
- * does not have, so the gate would stay blocked. Flip it in that row.
+ * D#519 MQ4-e2-c3: on. The end of a `runner_local` round now exists (the runner's attestation, judged by `judgeConflictRound` through the adapter, the delta review, the fresh CI read), so a
+ * platform verdict on a refused merge order starts the round on the item's own runner. It is read only by the runner conflict path: `runnerConflictBody` (the start) and the runner round's
+ * wait (the next round after a head that conflicts again). An ordinary fix round and a sandbox round never read it. Undo: set it back to false (one line); `runnerConflictBody` then
+ * stops the item as `merge_conflict` with the stored detail, as before, and nothing is deleted.
  */
-export const RUNNER_CONFLICT_START_ENABLED = false;
+export const RUNNER_CONFLICT_START_ENABLED = true;
 
 /**
  * D#519 MQ4-e2-b: the runner refused the merge call of a paired `runner_local` item's public pull request (405) and attested a conflict; the cloud kept the verdict on the order it
@@ -167,7 +171,8 @@ export async function conflictWaitBody(worker: QueueWorker | null, who: StepWho)
     if (!("id" in subject)) return { state: "none" };
     // A hosted repository's round is read from GitHub; a `runner_local` one through its adapter (the fence plus the run's attestation). Neither: nothing to follow.
     const github = await openQueueGitHub(pool, openInstallationHttp, subject);
-    const done = github ? await bindCompleteEntryless({ ...base, github })(subject) : await completeRunnerEntryless(base, subject, RUNNER_CONFLICT_START_ENABLED);
+    // The target is resolved again at the end (C18-15): a runner round whose repository left runner_local is stopped, never completed by the hosted client.
+    const done = (await endRunnerRoundIfTargetChanged(base, subject)) ?? (github ? await bindCompleteEntryless({ ...base, github })(subject) : await completeRunnerEntryless(base, subject, RUNNER_CONFLICT_START_ENABLED));
     if (!done) return { state: "none" };
     switch (done.outcome) {
       case "returned":
@@ -194,10 +199,21 @@ export async function conflictWaitBody(worker: QueueWorker | null, who: StepWho)
 export async function conflictGateBody(worker: QueueWorker | null, who: StepWho, prNumber: number): Promise<GateOut> {
   const expected = worker?.withRunnerPool
     ? await worker.withRunnerPool(async (pool): Promise<string[] | null> => {
-        const subject = await readEntrylessSubject({ pool, worker, open: openInstallationHttp }, who.accountId, who.workItemId);
-        const github = "id" in subject ? await openQueueGitHub(pool, openInstallationHttp, subject) : null;
-        if (!("id" in subject) || !github) return null;
+        const base = { pool, worker, open: openInstallationHttp };
+        const subject = await readEntrylessSubject(base, who.accountId, who.workItemId);
+        if (!("id" in subject)) return null;
+        const github = await openQueueGitHub(pool, openInstallationHttp, subject);
         const rounds = (await withTenant(pool, who.accountId, (c) => mergeQueue.listConflictRounds(c, who.accountId, who.workItemId))).filter((r) => r.entryId === null);
+        if (!github) {
+          // D#519 MQ4-e2-c3: a `runner_local` repository's checks are read through the fence (`CommitChecks`, A9), which answers for the pull request's LAST commit only. So the signals
+          // expected are the ones the judged merge commit shows now, and only while that is still the head; the first round's pre-round head can no longer be read. The gate then
+          // demands every one of them green plus the branch's required checks, and an empty list is never green (below).
+          const runner = await openRunnerRound(base, subject);
+          const judged = [...rounds].reverse().find((r) => r.toSha !== null)?.toSha;
+          if (!runner || !judged) return null;
+          const snapshot = await runner.ci({ repoId: subject.repoId, prNumber }, judged);
+          return snapshot.headSha === judged ? expectedSignalNames(snapshot) : null;
+        }
         let origin = [...rounds].reverse().find((r) => r.toSha !== null);
         // A later round starts from the earlier round's merge commit: walk back to the head the chain began at.
         for (let hops = 0; origin !== undefined && hops < rounds.length; hops += 1) {

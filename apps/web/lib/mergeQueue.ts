@@ -6,7 +6,7 @@ import type { AdvanceReviewDeps, RunnerPlaneMergeStore } from "@fx/worker";
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, MERGE_QUEUE_REMOVAL_DOCUMENT, type GithubWebhookPayload, type GithubWebhookEventName } from "@fx/github";
 import { createReviewDeps } from "./advanceReview";
 import { bindCompleteDeltaReview, bindStartDeltaReview } from "./mergeQueueDeltaReview";
-import { bindCompleteConflictRound, bindCompleteEntryless, bindOnConflict, completeRunnerEntryless, endRoundWithoutPr, readEntrylessSubject } from "./mergeQueueConflict";
+import { bindCompleteConflictRound, bindCompleteEntryless, bindOnConflict, completeRunnerEntryless, endRoundWithoutPr, endRunnerRoundIfTargetChanged, readEntrylessSubject } from "./mergeQueueConflict";
 import { RUNNER_CONFLICT_START_ENABLED } from "./mergeQueueWait";
 import { bindOnRenumber } from "./mergeQueueRenumber";
 import { getWorker } from "./worker";
@@ -176,7 +176,7 @@ export async function completeEntrylessRounds(deps: MergeQueueTickerDeps, target
   const base = { pool: deps.pool, worker: await getWorker(), open: deps.open ?? openInstallationHttp };
   for (const round of open) {
     const subject = await readEntrylessSubject(base, target.accountId, round.workItemId, true);
-    if ("id" in subject) await (github ? bindCompleteEntryless({ ...base, github })(subject) : completeRunnerEntryless(base, subject, RUNNER_CONFLICT_START_ENABLED));
+    if ("id" in subject) await ((await endRunnerRoundIfTargetChanged(base, subject)) ?? (github ? bindCompleteEntryless({ ...base, github })(subject) : completeRunnerEntryless(base, subject, RUNNER_CONFLICT_START_ENABLED)));
     else if (subject.reason === "no_open_pr") await endRoundWithoutPr(base, target.accountId, round.workItemId);
   }
 }
