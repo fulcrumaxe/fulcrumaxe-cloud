@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { createGitHubMergeGatePort, mergeQueue, type GitHubHttp } from "@fx/pipeline";
+import { createGitHubMergeGatePort, mergeQueue, mergeRecordedHead, type GitHubHttp } from "@fx/pipeline";
 import type { AdvanceReviewDeps, RunnerPlaneMergeStore } from "@fx/worker";
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, MERGE_QUEUE_REMOVAL_DOCUMENT, type GithubWebhookPayload, type GithubWebhookEventName } from "@fx/github";
 import { createReviewDeps } from "./advanceReview";
@@ -78,6 +78,22 @@ export async function dequeueQueuedItem(pool: Pool, input: { accountId: string; 
   throw new Error("dequeue: the host refused");
 }
 
+/** D#598 P5c-b: the ports a plan write-back needs, on the same installation client as the tick's other reads. The comparison's reads are GET only. */
+function bindWritebackPort(deps: { pool: Pool; open: typeof openInstallationHttp; github: ReturnType<typeof createGitHubMergeGatePort> }): mergeQueue.WritebackTickPort {
+  return {
+    merge: (pr, args) => mergeRecordedHead(deps.github, pr, args.sha),
+    open: async (target) => {
+      const repo = await withTenant(deps.pool, target.accountId, async (c) =>
+        (await c.query<{ gh_owner: string | null; gh_name: string | null; execution_mode: string }>(`SELECT gh_owner, gh_name, execution_mode FROM repos WHERE account_id = $1 AND id = $2`, [target.accountId, target.repoId])).rows[0],
+      );
+      if (!repo?.gh_owner || !repo.gh_name || repo.execution_mode === "runner_local") return null;
+      const http = (await openForRepo(deps.open, repo.execution_mode, "merge_gate", { repoId: target.repoId, owner: repo.gh_owner, name: repo.gh_name })) as GitHubHttp;
+      const { openDiscoverySource } = await import("./github/planSource");
+      return mergeQueue.openWritebackReads(http, { owner: repo.gh_owner, name: repo.gh_name }, openDiscoverySource({ repoId: target.repoId, owner: repo.gh_owner, name: repo.gh_name }));
+    },
+  };
+}
+
 export async function tickMergeQueueRepo(deps: MergeQueueTickerDeps, target: { accountId: string; repoId: string }): Promise<mergeQueue.QueueTickResult | null> {
   const { pool, orders } = deps;
   const open = deps.open ?? openInstallationHttp;
@@ -108,6 +124,7 @@ export async function tickMergeQueueRepo(deps: MergeQueueTickerDeps, target: { a
             throw new Error("merge queue: gate answered an outcome this queue does not know");
         }
       },
+      writeback: bindWritebackPort({ pool, open, github }),
       // D#694 B6-3: the rule's batch size bounds how many entries wait in the host's queue, and a queue branch is never updated by the product.
       queueInfo: (pr) => github.getMergeQueueInfo!(pr),
       startDeltaReview: deps.startDeltaReview ?? bindStartDeltaReview({ pool, worker: await getWorker(), open, github }),

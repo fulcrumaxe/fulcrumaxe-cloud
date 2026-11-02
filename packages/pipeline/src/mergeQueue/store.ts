@@ -410,6 +410,34 @@ export async function requeueOrderedStopped(client: Queryable, input: { accountI
   );
 }
 
+/** D#598 P5c-b: the codes with which a plan write-back stops for a person. */
+export const WRITEBACK_STOP_CODES = ["ready_human_merges", "writeback_content_mismatch", "writeback_check_unfinished"] as const;
+export type WritebackStopCode = (typeof WRITEBACK_STOP_CODES)[number];
+
+/**
+ * D#598 P5c-b: the repo's plan write-backs that wait for a person, one row per write-back (an entry is one per record), keyed on the record and the head the
+ * platform recorded. Derived from the entry, so a repeated tick raises nothing new and a merged or closed pull request leaves it by itself.
+ */
+export async function listWritebackNeedsYou(client: Queryable, input: { accountId: string; repoId: string }): Promise<Array<{ planWritebackId: string; prNumber: number; headSha: string; code: WritebackStopCode }>> {
+  const { rows } = await client.query<{ plan_writeback_id: string; pr_number: number; head_sha: string; reason: WritebackStopCode }>(
+    `SELECT plan_writeback_id, pr_number, head_sha, reason FROM merge_queue_entries
+      WHERE account_id = $1 AND repo_id = $2 AND entry_kind = 'plan_writeback' AND state = 'stopped' AND reason = ANY($3::text[]) ORDER BY approved_at, pr_number`,
+    [input.accountId, input.repoId, [...WRITEBACK_STOP_CODES]],
+  );
+  return rows.map((r) => ({ planWritebackId: r.plan_writeback_id, prNumber: r.pr_number, headSha: r.head_sha, code: r.reason }));
+}
+
+/** D#598 P5c-b: a write-back that stopped only because a person merges returns to the queue, at its place, once the toggle is on and no lock applies. */
+export async function requeueReadyWritebacks(client: Queryable, input: { accountId: string; repoId: string }): Promise<MergeQueueEntry[]> {
+  return many(
+    client,
+    `UPDATE merge_queue_entries SET state = 'queued', reason = NULL, ${CLEAR_SLOT_AND_WORK}
+      WHERE account_id = $1 AND repo_id = $2 AND entry_kind = 'plan_writeback' AND state = 'stopped' AND reason = 'ready_human_merges'
+      RETURNING ${COLUMNS}`,
+    [input.accountId, input.repoId],
+  );
+}
+
 /** The holder gives the slot back; the entry stays queued at its original position. Null when the caller no longer holds it. */
 export async function releaseToQueue(client: Queryable, input: { accountId: string; entryId: string; holder: string }): Promise<MergeQueueEntry | null> {
   return one(

@@ -411,6 +411,10 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "ordered_resource_out_of_order",
   "ordered_resource_unknown",
   "ordered_resource_unreadable",
+  // Plan write-back merge decision (D#598 P5c-b): the three reasons a plan update waits for a person.
+  "ready_human_merges",
+  "writeback_content_mismatch",
+  "writeback_check_unfinished",
   // Envelope edits and the weekly auto-start envelope (D#483 S5-e2): the one new code the routes throw.
   "confirmation_required",
 ];

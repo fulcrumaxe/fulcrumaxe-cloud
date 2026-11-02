@@ -10,7 +10,8 @@ import { guardMain, type MainGuardGitHubPort } from "./mainGuard.js";
 import { clearOrderedStops, orderedStep, type OrderedDeps, type OrderedOutcome } from "./orderedCheck.js";
 import { MERGE_QUEUE_CI_WAIT_MINUTES } from "./policy.js";
 import { runRefreshStep, refreshTip, type RefreshGitHubPort, type StartDeltaReview } from "./refresh.js";
-import { adoptParkedSlot, listConflictRounds, listHeadRefreshes, markMerged, PARKED_PHASE, readHaltedEntries, readHostQueued, readQueue, reclaimExpiredLeases, releaseToQueue, renewSlot, returnToReview, stopEntry, stopOnRemovals, takeSlot } from "./store.js";
+import { adoptParkedSlot, listConflictRounds, listHeadRefreshes, listWritebackNeedsYou, markMerged, PARKED_PHASE, readHaltedEntries, readHostQueued, readQueue, reclaimExpiredLeases, releaseToQueue, renewSlot, requeueReadyWritebacks, returnToReview, stopEntry, stopOnRemovals, takeSlot } from "./store.js";
+import { runWritebackGate, writebackPermission, type WritebackTickPort } from "./writeback.js";
 import { handToPerson } from "./events.js";
 import type { MergeQueueEntry, PrFacts } from "./types.js";
 
@@ -30,7 +31,8 @@ import type { MergeQueueEntry, PrFacts } from "./types.js";
  *  4. After a merge, start again from 1: main moved, so every queued entry is rechecked against the new tip before the next merge.
  *     Merges are serial, each one against a main tip the refresh step just compared.
  *
- * Write-back entries (D#598 P5b) are left alone: they never get facts here, so they are never eligible for this tick (their merge is P5c's).
+ * Write-back entries (D#598 P5c-b) are taken only when the caller binds `writeback`. Without it they never get facts here, so they are never eligible. With it they take the slot and
+ * wait for CI like a work item, are never refreshed (no update-branch, so no delta review and no agent run), and end in `runWritebackGate`'s decision instead of the work-item gate.
  */
 
 export type QueueGateResult =
@@ -57,6 +59,8 @@ export interface QueueTickDeps {
    * `maxEntries` entries of the repository in the host's queue at a time.
    */
   queueInfo?(pr: PullRequestRef): Promise<{ mode: "queue" | "direct" | "unknown"; maxEntries: number }>;
+  /** D#598 P5c-b: the ports a plan write-back needs (locks, GitHub reads for the byte comparison, the merge call). Absent: write-back entries are left alone. */
+  writeback?: WritebackTickPort;
   /** MQ3-a's port, bound by the caller to the real reviewer start. */
   startDeltaReview: StartDeltaReview;
   /**
@@ -99,6 +103,7 @@ export async function runQueueTick(deps: QueueTickDeps, input: { accountId: stri
   const out: QueueTickResult = { steps: [], conflicted: [], waiting: [] };
   // D#519 MQ5-a: an entry stopped only for ordering returns to the queue once no ordered resource applies to the repository any more.
   await clearOrderedStops({ github: deps.github, inTenant: deps.inTenant, ...(deps.now ? { now: deps.now } : {}) }, input);
+  await reopenReadyWritebacks(deps, input);
   for (let pass = 0; pass < (deps.maxPasses ?? 10); pass++) {
     const facts = await recheck(deps, input, out);
     const step = await takeAndRun(deps, input, facts);
@@ -110,6 +115,15 @@ export async function runQueueTick(deps: QueueTickDeps, input: { accountId: stri
   return out;
 }
 
+/** D#598 P5c-b: a write-back that waits only because a person merges goes back to the queue once the toggle is on and no lock applies (the undo of turning it off). */
+async function reopenReadyWritebacks(deps: QueueTickDeps, input: { accountId: string; repoId: string }): Promise<void> {
+  if (!deps.writeback) return;
+  const waiting = await deps.inTenant(input.accountId, (c) => listWritebackNeedsYou(c, input));
+  if (!waiting.some((w) => w.code === "ready_human_merges")) return;
+  const { setting, locks } = await writebackPermission(deps, input);
+  if (setting && locks.repoAutoMerge && !locks.humanMergeOnly) await deps.inTenant(input.accountId, (c) => requeueReadyWritebacks(c, input));
+}
+
 async function recheck(deps: QueueTickDeps, input: { accountId: string; repoId: string }, out: QueueTickResult): Promise<Map<string, PrFacts>> {
   const { accountId, repoId } = input;
   // A holder whose lease lapsed goes back to the queue FIRST, so it is rechecked with the rest and keeps its place ahead of later entries.
@@ -119,7 +133,7 @@ async function recheck(deps: QueueTickDeps, input: { accountId: string; repoId: 
   // A halted item (a person stopped it) is left out too: nothing is enqueued, retried or merged for it.
   const skipped = new Set((await deps.inTenant(accountId, (c) => readHostQueued(c, accountId, repoId))).map((h) => h.entryId));
   for (const id of await deps.inTenant(accountId, (c) => readHaltedEntries(c, accountId, repoId))) skipped.add(id);
-  const queued = (await deps.inTenant(accountId, (c) => readQueue(c, accountId, repoId))).filter((e) => e.state === "queued" && e.entryKind === "work_item" && !skipped.has(e.id));
+  const queued = (await deps.inTenant(accountId, (c) => readQueue(c, accountId, repoId))).filter((e) => e.state === "queued" && (e.entryKind === "work_item" || deps.writeback !== undefined) && !skipped.has(e.id));
   const facts = new Map<string, PrFacts>();
   const conflicted: MergeQueueEntry[] = [];
   // D#519 C8: the head the pull request has right now (after a refresh it is the refresh tip, not the entry's stored head), from the read made below.
@@ -142,7 +156,7 @@ async function recheck(deps: QueueTickDeps, input: { accountId: string; repoId: 
         liveHeads.set(e.id, m.headSha);
       }
       else if (isUnknown(m)) out.waiting.push(e.id);
-      else facts.set(e.id, { open: true, draft: m.mergeableState === "draft", ...(m.baseRef !== undefined && m.defaultBranch !== undefined ? { baseRef: m.baseRef, defaultBranch: m.defaultBranch } : {}) });
+      else facts.set(e.id, { open: true, draft: m.mergeableState === "draft", ...(m.baseRef !== undefined && m.defaultBranch !== undefined ? { baseRef: m.baseRef, defaultBranch: m.defaultBranch } : {}), ...(e.entryKind === "plan_writeback" ? { headSha: m.headSha } : {}) });
     }),
   );
   await Promise.all(conflicted.map((e) => handleConflict(deps, accountId, e, undefined, liveHeads.get(e.id)).then(() => void out.conflicted.push(e.id))));
@@ -208,7 +222,7 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
       gate: ({ headSha }) => orderedThenCi(deps, accountId, held, holder, pr, headSha),
       startDeltaReview: deps.startDeltaReview,
       sleep: deps.sleep,
-      ...(queueMode ? { skipBehindRefresh: true } : {}),
+      ...(queueMode || held.entryKind === "plan_writeback" ? { skipBehindRefresh: true } : {}),
       ...(deps.pollIntervalMs !== undefined ? { pollIntervalMs: deps.pollIntervalMs } : {}),
       ...(deps.pollLimit !== undefined ? { pollLimit: deps.pollLimit } : {}),
     },
@@ -384,5 +398,9 @@ async function ciThenGate(
   }
   // Mid-merge: no other tick may adopt this holder from here on.
   if (!(await deps.inTenant(accountId, (c) => renewSlot(c, { accountId, entryId: entry.id, holder, phase: "merge" })))) return { outcome: "pr_not_open" };
+  if (entry.entryKind === "plan_writeback") {
+    if (!deps.writeback || entry.planWritebackId === null) return { outcome: "ready_human_merges", reasons: ["writeback_check_unfinished"] };
+    return runWritebackGate({ inTenant: deps.inTenant, writeback: deps.writeback }, { accountId, repoId: entry.repoId, planWritebackId: entry.planWritebackId, pr, headSha });
+  }
   return deps.gate({ entry, headSha, expectedSignals: expected });
 }
