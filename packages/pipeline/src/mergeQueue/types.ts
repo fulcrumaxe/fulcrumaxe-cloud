@@ -18,6 +18,8 @@ export const FINAL_STATES: readonly QueueState[] = ["merged", "closed", "cancell
 /** Work that takes the slot away: an agent run. `renumber` and `conflict` count against MAX_CONFLICT_ROUNDS. */
 export const WORK_KINDS = ["conflict", "renumber", "delta_review"] as const;
 export type WorkKind = (typeof WORK_KINDS)[number];
+/** D#519 MQ5-b1: which fix round a `merge_conflict_rounds` row records (migration 0969). */
+export type RoundKind = "conflict" | "renumber";
 
 export type MergedBy = "gate" | "person";
 
@@ -112,6 +114,8 @@ export interface ConflictRound {
   baseSha: string;
   baseRef: string;
   conflictFiles: readonly string[];
+  /** `conflict` for every round before MQ5-b. */
+  kind: RoundKind;
   runId: string | null;
   /** The head the round pushed; null until it is recorded (a round that pushed nothing never has one). */
   toSha: string | null;

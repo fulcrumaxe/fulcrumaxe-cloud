@@ -137,27 +137,42 @@ export async function decideConflict<S extends RoundSubject>(ports: ConflictPort
   const files = [...new Set(mine.files.filter((f) => main.has(f)))].sort();
   if (files.length === 0 || files.length > CONFLICT_FILES_MAX || !files.every(isSafeRepoPath)) return no("no_conflict_files", files, tip.branch);
 
+  const authored = await provePlatformAuthored(ports, entry, pr, files);
+  if (authored !== "ok") return no(authored, files, tip.branch);
+  return { go: true, files, baseSha: tip.sha, baseRef: tip.branch };
+}
+
+/**
+ * Rule (a) of D#519 C10, shared by the conflict round and the renumber round (MQ5-b1): every commit of the pull request that touches one of `files` is proved the
+ * platform's own. Anything that cannot be read answers `unreadable` / `identity_unread`; a commit a person made answers `foreign_commits`.
+ */
+export async function provePlatformAuthored<S extends RoundSubject>(
+  ports: Pick<ConflictPorts<S>, "github" | "platformCommits">,
+  entry: S,
+  pr: PullRequestRef,
+  files: readonly string[],
+): Promise<"ok" | "unreadable" | "identity_unread" | "foreign_commits"> {
   const list = await ports.github.listPullCommits(pr);
-  if (list.truncated || list.commits.length > CONFLICT_COMMIT_READS_MAX) return no("unreadable", files, tip.branch);
+  if (list.truncated || list.commits.length > CONFLICT_COMMIT_READS_MAX) return "unreadable";
   // Every commit is read first (the walk needs every parent); then only the commits that touch a conflict file have to be proved the platform's.
   const infos: CommitInfo[] = [];
   for (const c of list.commits) {
     const info = await ports.github.getCommit(pr, c.sha);
-    if (info.files === null || info.filesTruncated) return no("unreadable", files, tip.branch);
+    if (info.files === null || info.filesTruncated) return "unreadable";
     infos.push(info);
   }
   const shas = list.commits.map((c) => c.sha);
   const proof = await ports.platformCommits(entry, shas);
-  if (proof === null) return no("identity_unread", files, tip.branch);
+  if (proof === null) return "identity_unread";
   const covered = coveredCommits(shas, new Map(infos.map((i) => [i.sha, i.parents])), proof);
-  if (covered === "unreadable") return no("unreadable", files, tip.branch);
+  if (covered === "unreadable") return "unreadable";
   const appLogin = proof.appLogin?.trim() ? proof.appLogin : null;
   const conflicting = new Set(files);
   for (const info of infos) {
     if (!info.files!.some((f) => conflicting.has(f)) || covered.has(info.sha)) continue;
-    if (appLogin === null || !platformRefreshIdentity(info, appLogin).ok) return no("foreign_commits", files, tip.branch);
+    if (appLogin === null || !platformRefreshIdentity(info, appLogin).ok) return "foreign_commits";
   }
-  return { go: true, files, baseSha: tip.sha, baseRef: tip.branch };
+  return "ok";
 }
 
 /** The tick's `onConflict`. Answers whether the conflict is being handled (a round started, or the entry waits); false stops the entry with `merge_conflict`. */

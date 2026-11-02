@@ -3,7 +3,7 @@ import { listHeadRemovals } from "@fx/core/src/work-items/driverEvents.js";
 import { isQueuedSql, removalRetryAllowed, removedByPerson } from "@fx/core/src/work-items/mergeReadiness.js";
 import { MAX_CONFLICT_ROUNDS, MERGE_QUEUE_LEASE_SECONDS } from "./policy.js";
 import { eligibilityContext, pickNext } from "./eligibility.js";
-import { MergeQueueError, type ConflictRound, type EntryKind, type MergeQueueEntry, type MergedBy, type PrFacts, type QueueState, type WorkKind } from "./types.js";
+import { MergeQueueError, type ConflictRound, type EntryKind, type MergeQueueEntry, type MergedBy, type PrFacts, type QueueState, type RoundKind, type WorkKind } from "./types.js";
 
 /**
  * D#519 MQ2: the merge queue's persistence (migration 0824). Every function takes a `PoolClient` that is already inside a tenant
@@ -914,6 +914,7 @@ interface RoundRow {
   base_sha: string;
   base_ref: string;
   conflict_files: string[];
+  kind: RoundKind;
   run_id: string | null;
   to_sha: string | null;
   outcome: string | null;
@@ -921,7 +922,7 @@ interface RoundRow {
   ended_at: Date | null;
 }
 
-const ROUND_COLUMNS = `id, account_id, repo_id, work_item_id, entry_id, round, from_sha, base_sha, base_ref, conflict_files, run_id, to_sha, outcome, created_at, ended_at`;
+const ROUND_COLUMNS = `id, account_id, repo_id, work_item_id, entry_id, round, from_sha, base_sha, base_ref, conflict_files, kind, run_id, to_sha, outcome, created_at, ended_at`;
 
 const toRound = (r: RoundRow): ConflictRound => ({
   id: r.id,
@@ -934,6 +935,7 @@ const toRound = (r: RoundRow): ConflictRound => ({
   baseSha: r.base_sha,
   baseRef: r.base_ref,
   conflictFiles: r.conflict_files,
+  kind: r.kind,
   runId: r.run_id,
   toSha: r.to_sha,
   outcome: r.outcome,
@@ -955,32 +957,34 @@ export type StartConflictWorkResult =
   | { ok: false; reason: "not_a_work_item_entry" };
 
 /**
- * A conflict round starts: a `queued` entry (it holds no slot), or the `in_flight` one `holder` holds, becomes `awaiting_work` with kind `conflict`, its
+ * A conflict round (or, with `kind: "renumber"`, an ordered-resource renumber round: the same bound, record and state move) starts: a `queued` entry (it holds no slot), or the `in_flight` one `holder` holds, becomes `awaiting_work` with kind `conflict`, its
  * round counter steps, and the round's row is written, all by ONE statement, so no reader sees one without the others and a holder's slot is free in the
  * same transaction that records the round. A third round is refused here as well as by the caller. `fromSha` is the entry's head as stored. A path that
  * fails the database's path rule raises its `check_violation`; nothing is written then either.
  */
 export async function startConflictWork(
   client: Queryable,
-  input: { accountId: string; entryId: string; holder?: string; fromSha: string; baseSha: string; baseRef: string; conflictFiles: readonly string[] },
+  input: { accountId: string; entryId: string; holder?: string; fromSha: string; baseSha: string; baseRef: string; conflictFiles: readonly string[]; kind?: RoundKind },
 ): Promise<StartConflictWorkResult> {
+  const kind = input.kind ?? "conflict";
+  if (kind !== "conflict" && kind !== "renumber") throw new MergeQueueError("bad_input");
   assertSha(input.fromSha);
   assertSha(input.baseSha);
   const { rows } = await client.query<Row & { round_id: string }>(
     `WITH e AS (
        UPDATE merge_queue_entries
           SET state = 'awaiting_work', phase = NULL, slot_holder = NULL, lease_until = NULL, slot_taken_at = NULL,
-              work_kind = 'conflict', work_run_id = NULL, conflict_rounds = conflict_rounds + 1
+              work_kind = $9::text, work_run_id = NULL, conflict_rounds = conflict_rounds + 1
         WHERE account_id = $1 AND id = $2 AND entry_kind = 'work_item' AND conflict_rounds < $3
           AND (state = 'queued' OR (state = 'in_flight' AND slot_holder = $4::text))
         RETURNING ${COLUMNS}
      ), r AS (
-       INSERT INTO merge_conflict_rounds (account_id, repo_id, work_item_id, entry_id, round, from_sha, base_sha, base_ref, conflict_files)
-       SELECT e.account_id, e.repo_id, e.work_item_id, e.id, e.conflict_rounds, $5, $6, $7, $8::text[] FROM e
+       INSERT INTO merge_conflict_rounds (account_id, repo_id, work_item_id, entry_id, round, from_sha, base_sha, base_ref, conflict_files, kind)
+       SELECT e.account_id, e.repo_id, e.work_item_id, e.id, e.conflict_rounds, $5, $6, $7, $8::text[], $9::text FROM e
        RETURNING id
      )
      SELECT e.*, r.id AS round_id FROM e, r`,
-    [input.accountId, input.entryId, MAX_CONFLICT_ROUNDS, input.holder ?? null, input.fromSha, input.baseSha, input.baseRef, [...input.conflictFiles]],
+    [input.accountId, input.entryId, MAX_CONFLICT_ROUNDS, input.holder ?? null, input.fromSha, input.baseSha, input.baseRef, [...input.conflictFiles], kind],
   );
   if (rows[0]) {
     const round = await oneRound(client, `SELECT ${ROUND_COLUMNS} FROM merge_conflict_rounds WHERE account_id = $1 AND id = $2`, [input.accountId, rows[0].round_id]);

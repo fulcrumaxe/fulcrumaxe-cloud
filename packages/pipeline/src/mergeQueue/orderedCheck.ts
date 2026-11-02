@@ -6,6 +6,7 @@ import type { PullRequestRef } from "../build/types.js";
 import { checkOrdering, detectResource, readOrderedConfig, type ResourceRule } from "./orderedResources.js";
 import { MERGE_QUEUE_CI_WAIT_MINUTES } from "./policy.js";
 import { MAIN_GUARD_PARK_LEASE_SECONDS } from "./mainGuard.js";
+import type { RenumberAsk } from "./renumber.js";
 import { PARKED_PHASE, readOrderedStops, renewSlot, requeueOrderedStopped, stopEntry } from "./store.js";
 import type { MergeQueueEntry } from "./types.js";
 
@@ -26,11 +27,13 @@ export interface OrderedDeps {
   github: Partial<OrderedResourceReaderPort>;
   inTenant<T>(accountId: string, fn: (client: PoolClient) => Promise<T>): Promise<T>;
   now?(): Date;
+  /** MQ5-b1: starts a renumber round for the failed check; true when it handled the entry (see `createOnRenumber`). Absent or false: the entry stops, as MQ5-a left it. */
+  onRenumber?(entry: MergeQueueEntry, holder: string, ask: RenumberAsk, headSha: string): Promise<boolean>;
 }
 
-export type OrderedOutcome = { outcome: "ordered_stopped" } | { outcome: "ordered_waiting" } | { outcome: "ordered_unreadable" };
+export type OrderedOutcome = { outcome: "ordered_renumbering" } | { outcome: "ordered_stopped" } | { outcome: "ordered_waiting" } | { outcome: "ordered_unreadable" };
 
-type Resolved = { state: "none" } | { state: "unknown" } | { state: "some"; resources: ResourceRule[]; branch: string; tip: readonly string[] };
+type Resolved = { state: "none" } | { state: "unknown" } | { state: "some"; resources: ResourceRule[]; branch: string; tip: readonly string[]; autoRenumber: boolean };
 
 const part = (prefix: string, v: string): string => `${prefix}_${v.toLowerCase().replace(/[^a-z0-9_]+/g, "_")}`.slice(0, 64);
 
@@ -45,7 +48,7 @@ async function resolve(deps: OrderedDeps, accountId: string, pr: PullRequestRef)
     const tree = await read.listDefaultBranchPaths(pr);
     if (!tree.ok) return { state: "unknown" };
     const resources = config.configured ? config.resources : [detectResource(tree.paths)].filter((r): r is ResourceRule => r !== null);
-    return resources.length === 0 ? { state: "none" } : { state: "some", resources, branch: tree.branch, tip: tree.paths };
+    return resources.length === 0 ? { state: "none" } : { state: "some", resources, branch: tree.branch, tip: tree.paths, autoRenumber: config.autoRenumber };
   } catch (err) {
     reportError(err, { stage: "merge_queue.ordered_resources" });
     return { state: "unknown" };
@@ -65,7 +68,7 @@ export async function orderedStep(deps: OrderedDeps, args: { accountId: string; 
   if (!deps.github.listDefaultBranchPaths || !deps.github.listPullRequestAdds) return null;
   const resolved = await resolve(deps, accountId, pr);
   if (resolved.state === "none") return null;
-  let bad: { rule: ResourceRule; key: string; highest: string } | null = null;
+  let bad: { rule: ResourceRule; key: string; highest: string; files: string[] } | null = null;
   if (resolved.state === "some") {
     try {
       const adds = await deps.github.listPullRequestAdds(pr);
@@ -73,7 +76,7 @@ export async function orderedStep(deps: OrderedDeps, args: { accountId: string; 
         for (const rule of resolved.resources) {
           const v = checkOrdering(rule, adds.paths, resolved.tip);
           if (!v.ok) {
-            bad = { rule, key: v.key, highest: v.highest };
+            bad = { rule, key: v.key, highest: v.highest, files: adds.paths.filter((p) => rule.matches(p)) };
             break;
           }
         }
@@ -86,6 +89,8 @@ export async function orderedStep(deps: OrderedDeps, args: { accountId: string; 
   const event = (c: PoolClient, code: string, reasons: string[]): Promise<unknown> =>
     entry.workItemId === null ? Promise.resolve() : recordDriverEvent(c, accountId, { workItemId: entry.workItemId, kind: code === "ordered_resource_unknown" ? "merge_gate" : "stopped", dedupeKey: `${headSha}:${code}`, code, reasons, headSha, prNumber: entry.prNumber });
   if (bad !== null && resolved.state === "some") {
+    // MQ5-b1: a round, when one is allowed and the start is on; otherwise the stop below (MQ5-a's behaviour).
+    if (deps.onRenumber && (await deps.onRenumber(entry, holder, { autoRenumber: resolved.autoRenumber, resource: bad.rule.name, files: bad.files, highest: bad.highest }, headSha))) return { outcome: "ordered_renumbering" };
     const reasons = [part("resource", bad.rule.name), part("key", bad.key), part("highest", bad.highest), part("branch", resolved.branch)];
     await deps.inTenant(accountId, async (c) => {
       await stopEntry(c, { accountId, entryId: entry.id, reason: "ordered_resource_out_of_order", holder });

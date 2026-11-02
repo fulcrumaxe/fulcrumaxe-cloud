@@ -7,7 +7,7 @@ import { classifyCi, expectedSignalNames, type CiVerdict, type MergeBlockReason,
 import type { OrderedResourceReaderPort } from "../build/githubMergePort.js";
 import type { PullRequestRef } from "../build/types.js";
 import { guardMain, type MainGuardGitHubPort } from "./mainGuard.js";
-import { clearOrderedStops, orderedStep, type OrderedOutcome } from "./orderedCheck.js";
+import { clearOrderedStops, orderedStep, type OrderedDeps, type OrderedOutcome } from "./orderedCheck.js";
 import { MERGE_QUEUE_CI_WAIT_MINUTES } from "./policy.js";
 import { runRefreshStep, refreshTip, type RefreshGitHubPort, type StartDeltaReview } from "./refresh.js";
 import { adoptParkedSlot, listConflictRounds, listHeadRefreshes, markMerged, PARKED_PHASE, readHaltedEntries, readHostQueued, readQueue, reclaimExpiredLeases, releaseToQueue, renewSlot, returnToReview, stopEntry, stopOnRemovals, takeSlot } from "./store.js";
@@ -64,6 +64,8 @@ export interface QueueTickDeps {
    * merge reports one. Answers whether a fix round was started. Absent, or `false`: the entry stops with `merge_conflict`.
    */
   onConflict?(entry: MergeQueueEntry, holder?: string, liveHeadSha?: string): Promise<boolean>;
+  /** D#519 MQ5-b1: starts a renumber round for an ordered-resource check that failed (see `OrderedDeps.onRenumber`). Absent: the entry stops. */
+  onRenumber?: OrderedDeps["onRenumber"];
   sleep(ms: number): Promise<void>;
   pollIntervalMs?: number;
   pollLimit?: number;
@@ -252,6 +254,8 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
       return { step: "parked", entryId: held.id, why: "ci_pending" };
     case "ordered_waiting":
       return { step: "parked", entryId: held.id, why: "ordered_resource_unknown" };
+    case "ordered_renumbering":
+      return release("ordered_resource_renumbering");
     case "ordered_stopped":
       return release("ordered_resource_out_of_order");
     case "ordered_unreadable":
@@ -328,7 +332,7 @@ async function afterRefusal(deps: QueueTickDeps, accountId: string, entry: Merge
 
 /** D#519 MQ5-a: the ordered-resource check on the head the refresh step ended on, then (when it passes or does not apply) CI and the gate. */
 async function orderedThenCi(deps: QueueTickDeps, accountId: string, entry: MergeQueueEntry, holder: string, pr: PullRequestRef, headSha: string): Promise<QueueGateResult | OrderedOutcome | { outcome: "parked" | "ci_red" | "ci_timeout" }> {
-  return (await orderedStep({ github: deps.github, inTenant: deps.inTenant, ...(deps.now ? { now: deps.now } : {}) }, { accountId, entry, holder, pr, headSha })) ?? ciThenGate(deps, accountId, entry, holder, pr, headSha);
+  return (await orderedStep({ github: deps.github, inTenant: deps.inTenant, ...(deps.now ? { now: deps.now } : {}), ...(deps.onRenumber ? { onRenumber: deps.onRenumber } : {}) }, { accountId, entry, holder, pr, headSha })) ?? ciThenGate(deps, accountId, entry, holder, pr, headSha);
 }
 
 /**
