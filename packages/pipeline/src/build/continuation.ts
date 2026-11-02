@@ -329,7 +329,15 @@ async function withWorkItemLock<T>(pool: Pool, accountId: string, workItemId: st
   };
   lock.on("error", onError);
   try {
-    await beginLockTransaction(lock);
+    try {
+      await beginLockTransaction(lock);
+    } catch (err) {
+      // The connection died before the lock was taken: nothing started, so this is busy (retry), never a throw
+      // out of the continue. Any other setup failure is a real error and still throws.
+      if (!broken && !isLostConnection(err)) throw err;
+      broken = true;
+      return undefined;
+    }
     const { rows } = await lock.query<{ ok: boolean }>(`SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0)) AS ok`, [`continue_work_item:${accountId}:${workItemId}`]);
     if (!rows[0]!.ok) return undefined;
     return await fn();
@@ -345,6 +353,12 @@ async function withWorkItemLock<T>(pool: Pool, accountId: string, workItemId: st
     lock.off("error", onError);
     lock.release(broken); // a broken connection is destroyed, not returned
   }
+}
+
+/** A backend that was terminated or a socket that is gone (Postgres class 57P/08, or pg's own closed-connection errors). */
+function isLostConnection(err: unknown): boolean {
+  const e = err as { code?: unknown; message?: unknown } | null;
+  return (typeof e?.code === "string" && /^(57P|08)/.test(e.code)) || /Connection terminated|not queryable|Client was closed/.test(String(e?.message ?? ""));
 }
 
 /** A positive integer, or the default: a bad value (0, negative, fractional, NaN) never sizes the pool. */
