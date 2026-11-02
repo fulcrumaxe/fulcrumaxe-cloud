@@ -21,7 +21,7 @@ import {
   kindLabel,
   verdictFor,
 } from "./pipeline-storage.js";
-import { createOperatorPanel, createRunsPanel } from "./pipeline-actions.js";
+import { createFollowUpsPanel, createOperatorPanel, createRunsPanel } from "./pipeline-actions.js";
 import { api } from "../_lib/api.js";
 import { NEEDS_YOU_APP, createInsightPanel, createPlan } from "./pipeline-insight.js";
 // One source for the count: the Needs you app's own reads and row rules (D#37 C47). Nothing of them is copied here.
@@ -50,6 +50,7 @@ function mountApp(contentEl, launchArg) {
   let history = null; // { status: "loading" | "ready" | "error", data }
   let historyAc = null;
   let runs = null; // the open detail's Runs panel (pipeline-actions.js)
+  let followUps = null; // the open detail's Follow-ups list (pipeline-actions.js)
   let activity = null; // the open item's last activity read: the action buttons are drawn from its `actions`
   // What the pipeline is doing for the open item (pipeline-insight.js). Every answer also feeds the action buttons.
   const insight = createInsightPanel({
@@ -286,6 +287,8 @@ function mountApp(contentEl, launchArg) {
       operator.el,
       // dom-insert-ok: createRunsPanel (pipeline-actions.js) always returns a panel with its el set
       ...(runs ? [runs.el] : []),
+      // dom-insert-ok: createFollowUpsPanel (pipeline-actions.js) always returns a panel with its el set
+      ...(followUps ? [followUps.el] : []),
       h("h3", { class: "pl-detail-sub" }, "History"),
       body
     );
@@ -304,6 +307,8 @@ function mountApp(contentEl, launchArg) {
     activity = null;
     syncOperator(); // no buttons from the previous card while this one's activity is being read
     if (runs) runs.destroy();
+    if (followUps) followUps.destroy();
+    followUps = createFollowUpsPanel({ itemId: item.id, onOpenItem: (id) => select(id) });
     // The board repaints on a label change; the detail (the approve button hides while a run is live) on a change of that too.
     // The action buttons come from the activity read, and the server offers them only while no run is live: when a run starts
     // or ends (a cancel, a finish), the activity is read again at once so the buttons follow without reopening the card.
@@ -359,8 +364,9 @@ function mountApp(contentEl, launchArg) {
     operator.reset();
     activity = null;
     if (runs) runs.destroy();
+    if (followUps) followUps.destroy();
     insight.stop();
-    openId = openItem = history = runs = null;
+    openId = openItem = history = runs = followUps = null;
     syncOperator();
     paintDetail();
     const el = id && columns.querySelector('[data-id="' + id + '"]');

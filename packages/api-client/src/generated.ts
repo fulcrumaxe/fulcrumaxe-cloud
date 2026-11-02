@@ -1732,14 +1732,34 @@ export interface Operations {
     body: undefined;
     response: {
       work_item_id: string;
+      can_make_item: boolean;
+      make_item_available: boolean;
       follow_ups: Array<{
+        id: string;
         title: string;
         why: string;
         disposition: "child" | "note";
         source_role: string;
         source_label: string;
         created_at: string;
+        state: "item" | "pending" | "note" | "parent_closed";
+        child_id?: string;
+        child_stage?: string;
       }>;
+    };
+  };
+  makeFollowUpItem: {
+    path: {
+      id: string;
+      follow_up_id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      work_item_id: string;
+      follow_up_id: string;
+      child_id: string;
+      created: boolean;
     };
   };
   listSetupRequests: {
@@ -5195,6 +5215,17 @@ export const operations = {
     tokenSelfOnly: false,
     idempotency: "never",
     pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  makeFollowUpItem: {
+    method: "POST",
+    path: "/api/v1/work-items/{id}/follow-ups/{follow_up_id}/make-item",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "required",
+    pathParams: ["id","follow_up_id"],
     queryParams: [],
     hasBody: false,
   },

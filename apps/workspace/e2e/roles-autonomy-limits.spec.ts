@@ -398,13 +398,13 @@ test.describe("D#483 S5-h: Autonomy, builds at once and the other limits", () =>
     expect(m.over).toBe(0);
   });
 
-  test("the view source has no sink and no direct fetch, and the section only writes through the four settings' routes", () => {
+  test("the view source has no sink and no direct fetch, and the section only writes through the five settings' routes", () => {
     const src = readFileSync(join(SCRIPT_DIR, "..", "apps", "roles", "roles-autonomy.js"), "utf8");
     expect(src).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
     expect(src).not.toMatch(/\bfetch\(/);
     expect(src).not.toMatch(/"(PATCH|DELETE)"/);
     expect(src).not.toMatch(/FULC\.(state|config|window|backend|events)/);
     const writes = [...src.matchAll(/api\("(PUT|POST)", ([^,]+),/g)].map((x) => `${x[1]} ${x[2]}`).filter((x) => !x.startsWith("POST repoPath(")).sort();
-    expect(writes).toEqual(['POST base + "/preview"', 'POST base + "/preview"', 'PUT ACCOUNT + "autostart-envelope"', 'PUT ACCOUNT + "envelope-margin"', 'PUT base', 'PUT repoPath(repoId']);
+    expect(writes).toEqual(['POST base + "/preview"', 'POST base + "/preview"', 'PUT ACCOUNT + "autostart-envelope"', 'PUT ACCOUNT + "envelope-margin"', 'PUT base', 'PUT repoPath(repoId', 'PUT repoPath(repoId']);
   });
 });

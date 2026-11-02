@@ -115,16 +115,16 @@ describe("S5h-3: no other page renders or writes these settings", () => {
     expect(calls).toEqual(["GET /api/v1/account/autostart-envelope"]);
     expect(pipeline).not.toMatch(/(?:PUT|POST)", "\/api\/v1\/account\/(?:autostart-envelope|envelope-margin|build-concurrency)/);
   });
-  // The PUT surface of the view: each route pinned in full, and the literal method exactly four times (an indirect method would hide a call).
+  // The PUT surface of the view: each route pinned in full, and the literal method exactly five times (an indirect method would hide a call).
   const putSurface = (src) => ({
     routes: [...src.matchAll(/api\("PUT", (repoPath\(repoId, "[a-z/-]+"\)|[^,]+)/g)].map((m) => m[1]).sort(),
     literals: (src.match(/"PUT"/g) || []).length,
   });
-  const EXPECTED_PUTS = ['ACCOUNT + "autostart-envelope"', 'ACCOUNT + "envelope-margin"', "base", 'repoPath(repoId, "discovery")'];
+  const EXPECTED_PUTS = ['ACCOUNT + "autostart-envelope"', 'ACCOUNT + "envelope-margin"', "base", 'repoPath(repoId, "discovery")', 'repoPath(repoId, "follow-ups/setting")'];
   const viewSource = () => readFileSync(join(ROOT, "apps", "roles", "roles-autonomy.js"), "utf8");
 
-  it("the Autonomy view PUTs only to the four settings' routes, each named in full, through the literal method", () => {
-    expect(putSurface(viewSource())).toEqual({ routes: EXPECTED_PUTS, literals: 4 });
+  it("the Autonomy view PUTs only to the five settings' routes, each named in full, through the literal method", () => {
+    expect(putSurface(viewSource())).toEqual({ routes: EXPECTED_PUTS, literals: 5 });
   });
   it("mutation: retargeting the discovery PUT to the dial route is caught", () => {
     const mutated = viewSource().replace('api("PUT", repoPath(repoId, "discovery")', 'api("PUT", repoPath(repoId, "decision-settings/dial")');

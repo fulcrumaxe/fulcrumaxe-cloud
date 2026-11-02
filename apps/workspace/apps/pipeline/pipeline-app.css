@@ -100,6 +100,9 @@
 .pl-detail-title { margin: 12px 0 2px; font-size: 1rem; overflow-wrap: anywhere; }
 .pl-detail-meta { margin: 0 0 6px; color: var(--text-muted, rgba(26, 255, 128, 0.55)); }
 .pl-detail-sub { margin: 12px 0 6px; font-size: 0.85rem; }
+.pl-fu-list { margin: 0; padding: 0; list-style: none; }
+.pl-fu-row { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; margin-bottom: 10px; overflow-wrap: anywhere; }
+.pl-error { margin: 2px 0 0; color: var(--danger, #ff6b6b); }
 .pl-history { margin: 0; padding-left: 18px; }
 .pl-history li { margin-bottom: 4px; }
 .pl-reviewer { margin-left: 8px; color: var(--accent, #1aff80); }
