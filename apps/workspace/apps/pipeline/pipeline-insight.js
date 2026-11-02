@@ -709,6 +709,38 @@ export function queueLine(data, timeZone) {
   return { kind: "removed_by_host", text: QUEUE_SENTENCES.removed_by_host + at + (reason === "" ? "" : ": " + reason.replace(/_/g, " ")) + ".", ...(/timeout|timed_out/.test(reason) ? { hint: QUEUE_TIMEOUT_HINT } : {}) };
 }
 
+/** D#519 MQ4-d: the words for a merge-conflict fix round. Fixed text; only structured fields (a branch name, repository paths, two counts) fill the braces. A run's summary never does. */
+export const CONFLICT_SENTENCES = Object.freeze({
+  running: (b, k, max) => "Resolving a conflict with " + b + ": fix attempt " + k + " of " + max + " is running.",
+  attempts_spent: (b, f, k) => "It conflicts with " + b + f + ". We tried " + (k === 1 ? "once" : k + " times") + ", so a person needs to resolve it.",
+  foreign_commits: (b, f) => "It conflicts with " + b + (f === "" ? ", and some files have commits we didn't write" : f + ", and these files have commits we didn't write") + ", so a person needs to resolve it.",
+  direct: (b) => "It conflicts with " + b + ". Automatic conflict fixes don't run for this repository yet, so a person needs to resolve it.",
+});
+export const CONFLICT_FILES_SHOWN = 10;
+export const CONFLICT_NO_BRANCH = "its target branch";
+const posInt = (n) => Number.isInteger(n) && n >= 1;
+
+/** The conflicted paths as " in a, b and 3 more" (at most 10 named), or "" when there are none to name: no empty value ever reaches the screen. */
+function conflictFilesText(files) {
+  const list = (Array.isArray(files) ? files : []).filter((f) => typeof f === "string" && f.trim() !== "");
+  if (list.length === 0) return "";
+  const named = list.slice(0, CONFLICT_FILES_SHOWN).join(", ");
+  return " in " + (list.length > CONFLICT_FILES_SHOWN ? named + " and " + (list.length - CONFLICT_FILES_SHOWN) + " more" : named);
+}
+
+/** The line for a running fix round or a stop at a merge conflict, derived by the server on this read, or null when there is nothing to say. */
+export function conflictLine(data) {
+  const round = data && isObj(data.conflict_round) ? data.conflict_round : null;
+  const stop = data && isObj(data.conflict_stop) ? data.conflict_stop : null;
+  const branch = (o) => (typeof o.base_ref === "string" && o.base_ref.trim() !== "" ? o.base_ref : CONFLICT_NO_BRANCH);
+  if (round !== null && round.running === true && posInt(round.attempt) && posInt(round.of)) return { kind: "running", text: CONFLICT_SENTENCES.running(branch(round), round.attempt, round.of) };
+  if (stop === null) return null;
+  if (stop.kind === "attempts_spent" && posInt(stop.attempts)) return { kind: "attempts_spent", text: CONFLICT_SENTENCES.attempts_spent(branch(stop), conflictFilesText(stop.files), stop.attempts) };
+  if (stop.kind === "foreign_commits") return { kind: "foreign_commits", text: CONFLICT_SENTENCES.foreign_commits(branch(stop), conflictFilesText(stop.files)) };
+  if (stop.kind === "direct") return { kind: "direct", text: CONFLICT_SENTENCES.direct(branch(stop)) };
+  return null;
+}
+
 /** The "Ready to merge" banner, only at review_passed, with the repo's real auto-merge setting. When something still blocks the merge it says what, in fixed words, and offers no link. */
 export function readyBanner(data) {
   if (!data || data.stage !== "review_passed") return null;
@@ -781,6 +813,7 @@ export function buildInsight(data, timeZone) {
     childLaunch: childLaunchLine(data),
     banner: readyBanner(data),
     queueLine: queueLine(data, timeZone),
+    conflictLine: conflictLine(data),
     runningText: running.length ? "Running now: " + running.map((r) => r.role).join(", ") : "Nothing is running right now.",
     waitingText: waiting.length ? waitingLine(waiting, waitingRaw) : null,
     totalsText: finished.length + " agent run" + (finished.length === 1 ? "" : "s") + " finished" + (finished.length ? " · $" + spent.toFixed(2) + " so far" : ""),
@@ -1083,6 +1116,7 @@ export function createInsightPanel(deps) {
       m.banner ? banner(m.banner) : [],
       m.queueLine ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-queue-line", "data-kind": m.queueLine.kind }, m.queueLine.text) : [],
       m.queueLine && m.queueLine.hint ? h("p", { class: "pl-ins-notice", "data-testid": "pl-queue-hint" }, m.queueLine.hint) : [],
+      m.conflictLine ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-conflict-line", "data-kind": m.conflictLine.kind }, m.conflictLine.text) : [],
       h("p", { "data-testid": "pl-running" }, m.runningText),
       m.waitingText ? h("p", { role: "status", "data-testid": "pl-waiting-runner" }, m.waitingText) : [],
       h("p", { class: "pl-muted", "data-testid": "pl-totals" }, m.totalsText),

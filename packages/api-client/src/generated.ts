@@ -516,6 +516,18 @@ export interface Operations {
         reason?: string;
         at: string;
       };
+      conflict_round?: {
+        running: true;
+        attempt: number;
+        of: number;
+        base_ref: string | null;
+      };
+      conflict_stop?: {
+        kind: "attempts_spent" | "foreign_commits" | "direct";
+        attempts: number;
+        files: Array<string>;
+        base_ref: string | null;
+      };
       setup_pause?: ({
         state: "open" | "withdrawn";
         sentence: string | null;

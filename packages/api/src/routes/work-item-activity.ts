@@ -5,10 +5,10 @@ import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { FILE_LIST_NOTICE_COPY_KEY, REVIEW_STOP_COPY_KEY, getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
 import { PUBLIC_CHANGE_STATES } from "@fx/core/src/repos/publicChangeCopy.js";
 import { OPERATOR_ACTIONS } from "@fx/core/src/work-items/operatorActions.js";
-import { readMergeQueueState } from "@fx/core/src/work-items/mergeReadiness.js";
+import { readConflictState, readMergeQueueState } from "@fx/core/src/work-items/mergeReadiness.js";
 import { statusSentence } from "@fx/core/src/setup-requests/copy.js";
 import { readChildLaunch } from "@fx/core/src/decisions/childLaunch.js";
-import { RUNNER_DAILY_LIMIT_SENTENCE } from "@fx/pipeline";
+import { RUNNER_DAILY_LIMIT_SENTENCE, mergeQueue } from "@fx/pipeline";
 import { setupRequestDeps } from "./setupRequests.js";
 import type { RouteEntry } from "../registry.js";
 import { runnerUsageSchema } from "./runs.js";
@@ -84,6 +84,10 @@ export const activityResponseSchema = z.object({
   merge_queue: z
     .object({ state: z.enum(["queued", "removed", "not_in_queue", "no_answer"]), position: z.number().int().optional(), removed_by: z.enum(["you", "person", "github"]).optional(), reason: z.string().optional(), at: z.string() })
     .optional(),
+  // D#519 MQ4-d: present only while a merge-conflict fix round runs for the item (derived on this read; gone on the next read after it ends). `of` is the round bound.
+  conflict_round: z.object({ running: z.literal(true), attempt: z.number().int(), of: z.number().int(), base_ref: z.string().nullable() }).optional(),
+  // D#519 MQ4-d: present only for an item whose queue entry stopped at a merge conflict. `kind`: `attempts_spent` (fix rounds were tried), `foreign_commits` (the conflict files hold commits the platform did not write), `direct` (no fix round ran). `files` is at most 100 repository paths; `base_ref` is null when it was not recorded.
+  conflict_stop: z.object({ kind: z.enum(["attempts_spent", "foreign_commits", "direct"]), attempts: z.number().int(), files: z.array(z.string()), base_ref: z.string().nullable() }).optional(),
   // D#598 P8c-3: present only while a setup request holds the item. `sentence` is the request's status sentence (null when it has none: a withdrawn request, or one that closed meanwhile; the card then shows its own pause line).
   setup_pause: z.object({ state: z.enum(["open", "withdrawn"]), sentence: z.string().nullable() }).nullable().optional(),
   // D#483 S5-b2c-2: present only for a planned PR child that has not started and has something to say: the reason it does not launch (a fixed sentence, derived on this read) and what the card offers with it, and/or the warning that it waits on a sibling (a person may still start it).
@@ -187,7 +191,8 @@ export const workItemActivityRoutes: RouteEntry[] = [
         : null;
       const childLaunch = launch === null || launch.started || (launch.code === null && launch.warning === null) ? {} : { child_launch: { code: launch.code, sentence: launch.sentence, offers: launch.offers, warning: launch.warning } };
       const queueState = ["review_passed", "pr_opened", "changes_requested", "needs_human"].includes(read.stage) ? await withTenant(ctx.pool, accountId, userId, tokenId, (client) => readMergeQueueState(client, accountId, input.params.id!)) : null;
-      const activity = { ...rest, ...childLaunch, ...(queueState === null ? {} : { merge_queue: queueState }), runs, ...(publicChange === null ? {} : { public_change: publicChange }), ...(startDecision === null ? {} : { start_decision: startDecision }), ...(receipts === null ? {} : { receipts: receipts.receipts, ...(receipts.total > receipts.receipts.length ? { receipts_total: receipts.total } : {}) }), ...(recheck === null ? {} : { review_recheck: { kind: recheck.kind, sentence: COPY.reviewMergeOnlyRecheck } }), ...setupPause };
+      const conflict = ["review_passed", "pr_opened", "changes_requested", "needs_human"].includes(read.stage) ? await withTenant(ctx.pool, accountId, userId, tokenId, (client) => readConflictState(client, accountId, input.params.id!, mergeQueue.MAX_CONFLICT_ROUNDS)) : null;
+      const activity = { ...rest, ...childLaunch, ...(queueState === null ? {} : { merge_queue: queueState }), ...(conflict ?? {}), runs, ...(publicChange === null ? {} : { public_change: publicChange }), ...(startDecision === null ? {} : { start_decision: startDecision }), ...(receipts === null ? {} : { receipts: receipts.receipts, ...(receipts.total > receipts.receipts.length ? { receipts_total: receipts.total } : {}) }), ...(recheck === null ? {} : { review_recheck: { kind: recheck.kind, sentence: COPY.reviewMergeOnlyRecheck } }), ...setupPause };
       // The Re-spec notices carry the KEY of their sentence out of @fx/core; the words are written once, in the runner protocol's copy.
       const n = activity.notice;
       // A build the runner ended at its memory limit: the same sentence the run's own line has, naming the cap when the runner sent one. The raw end never leaves.

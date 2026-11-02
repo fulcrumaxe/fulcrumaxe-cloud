@@ -138,3 +138,53 @@ export async function readMergeQueueState(client: Pick<PoolClient, 'query'>, acc
   }
   return { state: 'queued', at: enq.created_at.toISOString() };
 }
+
+// ---- D#519 MQ4-d: what the card says about a merge-conflict fix round, derived on this read (never stored) -----------------------------------------------
+
+export interface ConflictRoundView {
+  running: true;
+  attempt: number;
+  of: number;
+  base_ref: string | null;
+}
+
+export interface ConflictStopView {
+  /** `attempts_spent`: fix rounds were tried. `foreign_commits`: the conflict files hold commits the platform did not write. `direct`: no fix round ran. */
+  kind: 'attempts_spent' | 'foreign_commits' | 'direct';
+  attempts: number;
+  files: string[];
+  base_ref: string | null;
+}
+
+/**
+ * The item's one product-queue entry, read for the card. A running round is an entry in `awaiting_work`/`conflict` with a round row (`attempt` is that row's
+ * `round`); the answer is gone on the next read after the entry leaves that state. A `merge_conflict` stop is told apart from the newest `stopped` fact for the
+ * same pull request and round count: its sub-code, its attempt count and the detail row of migration 0957. Null when there is nothing to say. `of` is the
+ * bound, passed by the caller (the pipeline owns it).
+ */
+export async function readConflictState(client: Pick<PoolClient, 'query'>, accountId: string, workItemId: string, of: number): Promise<{ conflict_round: ConflictRoundView } | { conflict_stop: ConflictStopView } | null> {
+  const { rows } = await client.query<{ id: string; state: string; work_kind: string | null; reason: string | null; pr_number: number; conflict_rounds: number; updated_at: Date }>(
+    `SELECT id, state, work_kind, reason, pr_number, conflict_rounds, updated_at FROM merge_queue_entries WHERE account_id = $1 AND work_item_id = $2`,
+    [accountId, workItemId],
+  );
+  const e = rows[0];
+  if (!e) return null;
+  if (e.state === 'awaiting_work' && e.work_kind === 'conflict') {
+    const r = (await client.query<{ round: number; base_ref: string | null }>(`SELECT round, base_ref FROM merge_conflict_rounds WHERE account_id = $1 AND entry_id = $2 ORDER BY round DESC LIMIT 1`, [accountId, e.id])).rows[0];
+    return r ? { conflict_round: { running: true, attempt: r.round, of, base_ref: r.base_ref } } : null;
+  }
+  if (e.state !== 'stopped' || e.reason !== 'merge_conflict') return null;
+  const ev = (
+    await client.query<{ reasons: string[]; conflict_files: string[] | null; base_ref: string | null }>(
+      `SELECT v.reasons, d.conflict_files, d.base_ref FROM work_item_driver_events v LEFT JOIN work_item_driver_event_details d ON d.driver_event_id = v.id AND d.account_id = v.account_id
+        WHERE v.account_id = $1 AND v.work_item_id = $2 AND v.kind = 'stopped' AND v.code = 'merge_conflict' AND v.pr_number = $3 AND v.round = $4 AND v.created_at BETWEEN $5::timestamptz - interval '60 seconds' AND $5::timestamptz + interval '60 seconds'
+        ORDER BY v.seq DESC LIMIT 1`,
+      [accountId, workItemId, e.pr_number, e.conflict_rounds, e.updated_at],
+    )
+  ).rows[0];
+  const attempts = e.conflict_rounds;
+  if (ev?.reasons[0] === 'foreign_commits') return { conflict_stop: { kind: 'foreign_commits', attempts, files: ev.conflict_files ?? [], base_ref: ev.base_ref } };
+  if (attempts === 0) return { conflict_stop: { kind: 'direct', attempts, files: [], base_ref: ev?.base_ref ?? null } };
+  const last = (await client.query<{ conflict_files: string[]; base_ref: string }>(`SELECT conflict_files, base_ref FROM merge_conflict_rounds WHERE account_id = $1 AND work_item_id = $2 ORDER BY round DESC LIMIT 1`, [accountId, workItemId])).rows[0];
+  return { conflict_stop: { kind: 'attempts_spent', attempts, files: last?.conflict_files ?? [], base_ref: last?.base_ref ?? ev?.base_ref ?? null } };
+}
