@@ -33,7 +33,7 @@ import type { MergeQueueEntry } from "./types.js";
 export const MAIN_RED_SENTENCE = "The main branch is failing its checks. Merging resumes when it passes.";
 
 /** The most a lease may be (the store's bound). Longer than the CI wait's 60 minutes would not fit, so a parked wait renews to this. */
-const MAIN_GUARD_PARK_LEASE_SECONDS = 3600;
+export const MAIN_GUARD_PARK_LEASE_SECONDS = 3600;
 
 export type MainGuardCode = "main_red" | "main_ci_unknown";
 

@@ -394,6 +394,22 @@ export async function requeueCiStopped(client: Queryable, input: { accountId: st
   );
 }
 
+/** D#519 MQ5-a: the repository's entries stopped by the ordered-resource check. Read to learn whether a configuration that no longer applies leaves any. */
+export async function readOrderedStops(client: Queryable, input: { accountId: string; repoId: string }): Promise<MergeQueueEntry[]> {
+  return many(client, `SELECT ${COLUMNS} FROM merge_queue_entries WHERE account_id = $1 AND repo_id = $2 AND state = 'stopped' AND reason = 'ordered_resource_out_of_order' ORDER BY approved_at, pr_number`, [input.accountId, input.repoId]);
+}
+
+/** D#519 MQ5-a: an entry stopped only because of ordering returns to the queue, at its original position, once the check no longer applies to the repository. */
+export async function requeueOrderedStopped(client: Queryable, input: { accountId: string; repoId: string }): Promise<MergeQueueEntry[]> {
+  return many(
+    client,
+    `UPDATE merge_queue_entries SET state = 'queued', reason = NULL, ${CLEAR_SLOT_AND_WORK}
+      WHERE account_id = $1 AND repo_id = $2 AND state = 'stopped' AND reason = 'ordered_resource_out_of_order'
+      RETURNING ${COLUMNS}`,
+    [input.accountId, input.repoId],
+  );
+}
+
 /** The holder gives the slot back; the entry stays queued at its original position. Null when the caller no longer holds it. */
 export async function releaseToQueue(client: Queryable, input: { accountId: string; entryId: string; holder: string }): Promise<MergeQueueEntry | null> {
   return one(

@@ -109,6 +109,8 @@ export interface MergeWorld {
   mainFiles: Array<{ filename: string; previous_filename?: string }>;
   /** D#519 MQ4-a: the commits `GET /pulls/{n}/commits` lists, oldest first. `rawAuthor`, when present, replaces the `author` member as sent (a malformed shape). */
   pullCommits: Array<{ sha: string; authorLogin: string | null; committerLogin: string | null; rawAuthor?: unknown }>;
+  /** D#519 MQ5-a: the files `GET /pulls/{n}/files` lists. GitHub pages them by 100 at most and lists no more than 3,000 whatever the pull request holds. */
+  pullFiles: Array<{ filename: string; status: string; previous_filename?: string }>;
   /** D#519 MQ4-a: comparisons of two explicit commits, keyed `base...head`. */
   compares: Record<string, { status: "ahead" | "behind" | "diverged" | "identical"; aheadBy: number; behindBy: number; mergeBaseSha: string; files: Array<{ filename: string; previous_filename?: string }> }>;
   state: "open" | "closed";
@@ -199,6 +201,7 @@ export function freshMergeWorld(over: Partial<MergeWorld> = {}): MergeWorld {
     aheadFromBase: 1,
     mainFiles: [{ filename: "docs/main-only.md" }],
     pullCommits: [],
+    pullFiles: [],
     compares: {},
     state: "open",
     merged: false,
@@ -375,6 +378,11 @@ export function mergeRoute(w: MergeWorld): (req: GhRequest) => GhReply | Promise
       // per_page/page page the COMMITS; files come on one response, capped at 300 for the whole comparison.
       const page = w.files.slice(0, 300);
       return json(200, { status: compareStatus(w), ahead_by: w.aheadBy, behind_by: w.behindBy, total_commits: w.aheadBy, files: page.map((f) => ({ sha: "c".repeat(40), status: f.previous_filename ? "renamed" : "modified", ...f })) });
+    }
+
+    if (req.method === "GET" && req.path === `${base}/pulls/${w.prNumber}/files`) {
+      const listed = w.pullFiles.slice(0, 3000).map((f) => ({ sha: "e".repeat(40), additions: 1, deletions: 0, changes: 1, ...f }));
+      return json(200, paged(listed, query));
     }
 
     if (req.method === "GET" && req.path === `${base}/pulls/${w.prNumber}/commits`) {

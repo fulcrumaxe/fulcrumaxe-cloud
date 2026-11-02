@@ -10,6 +10,8 @@ export * from "./events.js";
 export * from "./deltaReview.js";
 export * from "./deltaComplete.js";
 export * from "./mainGuard.js";
+export * from "./orderedResources.js";
+export * from "./orderedCheck.js";
 export * from "./conflict.js";
 export * from "./conflictComplete.js";
 export * from "./reconcile.js";

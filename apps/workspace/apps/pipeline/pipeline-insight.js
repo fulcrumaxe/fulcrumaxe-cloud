@@ -629,6 +629,17 @@ export function blockingSentence(code) {
   return UNKNOWN_BLOCK_SENTENCE;
 }
 
+/**
+ * D#519 MQ5-a: the sentence for a pull request the ordered-resource check stopped, filled from the structured fields of the stop only (the resource, the key it adds,
+ * the default branch's highest key and the branch). A field that is missing or blank gives the fixed code sentence instead, never "null" or "undefined".
+ */
+export function orderedResourceSentence(fields) {
+  const f = isObj(fields) ? fields : {};
+  const named = (v) => typeof v === "string" && v.trim() !== "" && v !== "null" && v !== "undefined";
+  if (!named(f.resource) || !named(f.key) || !named(f.mainKey) || !named(f.branch)) return BLOCKING_SENTENCES.ordered_resource_out_of_order;
+  return `${f.resource} ${f.key} must come after ${f.branch}'s latest (${f.mainKey}).`;
+}
+
 /** The reasons of the newest gate answer "a person decides" among the steps, or null when no step carries one. */
 function newestGateReasons(data) {
   const steps = Array.isArray(data.steps) ? data.steps : [];

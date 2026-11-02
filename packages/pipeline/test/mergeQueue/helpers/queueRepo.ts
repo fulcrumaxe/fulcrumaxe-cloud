@@ -49,10 +49,13 @@ export interface QueueRepo {
   addItem(pr: number, opts?: { approvedAt?: Date; world?: Partial<MergeWorld>; state?: "queued"; existingWorkItemId?: string; dependsOnPrNumber?: number }): Promise<QueueItem>;
   entry(pr: number): Promise<MergeQueueEntry>;
   queue(): Promise<MergeQueueEntry[]>;
-  deps(over?: Partial<QueueTickDeps> & { autoMerge?: boolean }): QueueTickDeps;
+  /** `ordered`: the tick's port has the ordered-resource reads (D#519 MQ5-a). Off by default, so the older suites' exact call lists are unchanged. */
+  deps(over?: Partial<QueueTickDeps> & { autoMerge?: boolean; ordered?: boolean }): QueueTickDeps;
   close(): Promise<void>;
   /** The default branch moved: every other open pull request is behind it. */
   mainMoved(exceptPr: number): void;
+  /** D#519 MQ5-a: the default branch's tip as pull request `pr`'s fake serves it is now commit `tipSha`, whose tree holds exactly `paths`. */
+  setTip(pr: number, tipSha: string, paths: readonly string[]): void;
 }
 
 export async function startQueueRepo(db: { admin: PoolClient; runWriterPool: Pool; pureAppUserPool: Pool }, opts: { onDeltaReview?: StartDeltaReview; existing?: { accountId: string; repoId: string } } = {}): Promise<QueueRepo> {
@@ -115,10 +118,17 @@ export async function startQueueRepo(db: { admin: PoolClient; runWriterPool: Poo
     mainMoved(exceptPr) {
       for (const [n, it] of items) if (n !== exceptPr && !it.g.world.merged) it.g.world.behindBy += 1;
     },
+    setTip(pr, tipSha, paths) {
+      const it = items.get(pr)!;
+      it.g.world.baseTipSha = tipSha;
+      it.g.world.trees[tipSha] = Object.fromEntries(paths.map((p) => [p, `100644 blob ${"d".repeat(40)}`]));
+      for (const sha of [tipSha, reverse(tipSha)]) byUnique.set(sha, it);
+    },
     deps(over = {}) {
-      const { autoMerge = true, ...rest } = over;
+      const { autoMerge = true, ordered = false, ...rest } = over;
+      const { listPullRequestAdds: _adds, listDefaultBranchPaths: _paths, ...withoutOrdered } = port;
       return {
-        github: port,
+        github: ordered ? port : withoutOrdered,
         inTenant: tenant,
         ourLogin: BOT,
         gate: async ({ entry, headSha, expectedSignals }) => {
