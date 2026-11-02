@@ -642,3 +642,46 @@ describe("real git, through the real handler", () => {
     expect((await git(["for-each-ref", "--format=%(refname)", "refs/heads/main", "refs/heads/other"], target)).trim()).toBe("");
   }, 60_000);
 });
+
+/** D#519 MQ4-b0 (C10-7), runner path: a real git push body, a real ticket; the recorder is a spy (its database side is platformPushRecorder.pg.test.ts). */
+describe("D#519 MQ4-b0: a runner_verified push GitHub accepted is recorded by the ticket's run id", () => {
+  const withRecorder = (over: Parameters<typeof harness>[0] = {}, record: (key: unknown, body: Uint8Array) => Promise<void> = async () => undefined) => {
+    const h = harness({ upstream: () => ({ status: 200, headers: { "content-type": "application/x-git-receive-pack-result" }, bodyStream: new Response("ok").body }), ...over });
+    const spy = vi.fn(record);
+    h.deps.recordPlatformPushes = spy;
+    return { ...h, spy };
+  };
+
+  it("200: the run id signed into the ticket and the exact body, handed to defer", async () => {
+    const h = withRecorder();
+    expect((await ghProxyHandler(req({ path: RECEIVE, ticket: await ticketFor(), body: bodies.push.body }), h.deps)).status).toBe(200);
+    expect(h.spy).toHaveBeenCalledTimes(1);
+    expect(h.spy.mock.calls[0]![0]).toEqual({ runId: RUN });
+    expect(Buffer.from(h.spy.mock.calls[0]![1]).equals(Buffer.from(bodies.push.body))).toBe(true);
+    expect(h.deferred).toHaveLength(1);
+  });
+
+  it("a non-200 answer, a refused lease, or a fetch: nothing recorded", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const refused = withRecorder({ upstream: () => ({ status: 403, headers: {}, bodyStream: new Response("no").body }) });
+    expect((await ghProxyHandler(req({ path: RECEIVE, ticket: await ticketFor(), body: bodies.push.body }), refused.deps)).status).toBe(403);
+    const unleased = withRecorder({ resolution: { verdict: "expired" } });
+    expect((await ghProxyHandler(req({ path: RECEIVE, ticket: await ticketFor(), body: bodies.push.body }), unleased.deps)).status).not.toBe(200);
+    const fetch = withRecorder({ upstream: () => ({ status: 200, headers: {}, bodyStream: new Response("x").body }) });
+    expect((await ghProxyHandler(req({ path: UPLOAD, ticket: await ticketFor(), body: bodies.lsRefs }), fetch.deps)).status).toBe(200);
+    for (const h of [refused, unleased, fetch]) expect(h.spy).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
+
+  it("a record that fails still returns GitHub's answer; the log carries the error class only", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const h = withRecorder({}, async () => Promise.reject(Object.assign(new Error(`connection to ${MINTED} refused`), { name: "DatabaseError" })));
+    const res = await ghProxyHandler(req({ path: RECEIVE, ticket: await ticketFor(), body: bodies.push.body }), h.deps);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ok");
+    await Promise.all(h.deferred);
+    expect(warn.mock.calls.filter((c) => c[0] === "gh-proxy: push record failed").map((c) => c[1])).toEqual([{ error: "DatabaseError" }]);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(MINTED);
+    vi.restoreAllMocks();
+  });
+});

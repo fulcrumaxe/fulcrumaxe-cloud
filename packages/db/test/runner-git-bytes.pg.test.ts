@@ -142,7 +142,7 @@ describe(`migration 0766: ${ROLE} and runner_git_bytes_account, the enforced dai
 
   it('run_binding_resolver holds EXECUTE on exactly six functions, and the proxy login can read nothing', async () => {
     const { rows } = await admin.query<{ proname: string }>(`SELECT DISTINCT p.proname FROM pg_proc p, aclexplode(p.proacl) a WHERE a.grantee = 'run_binding_resolver'::regrole::oid AND a.privilege_type = 'EXECUTE' ORDER BY 1`);
-    expect(rows.map((x) => x.proname)).toEqual(['plane_publish_installation_owned', 'resolve_plane_publish_target', 'resolve_runner_bound_branch', 'resolve_runner_git_request', 'resolve_sandbox_run', 'runner_git_bytes_account']);
+    expect(rows.map((x) => x.proname)).toEqual(['plane_publish_installation_owned', 'record_platform_ref_push', 'resolve_plane_publish_target', 'resolve_runner_bound_branch', 'resolve_runner_git_request', 'resolve_sandbox_run', 'runner_git_bytes_account']);
     await expect(proxyPool.query(`SELECT 1 FROM runner_git_upload_pack_bytes LIMIT 1`)).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
     await expect(proxyPool.query(`INSERT INTO runner_git_upload_pack_bytes (account_id, repo_id, utc_day, bytes) VALUES ($1, $1, now(), 1)`, [randomUUID()])).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
   });

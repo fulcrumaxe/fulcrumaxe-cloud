@@ -75,12 +75,13 @@ describe("gh-proxy route.ts: DATABASE_URL_GH_PROXY fail-closed caching (fix roun
     const createRunnerBoundBranchResolver = vi.fn(() => "bound-resolver" as unknown);
     const createPublishTargetResolver = vi.fn(() => "publish-resolver" as unknown);
     const createPublishInstallationOwnership = vi.fn(() => "publish-ownership" as unknown);
+    const createPlatformPushRecorder = vi.fn(() => "push-recorder" as unknown);
     const createPool = vi.fn(() => "pool" as unknown);
     const ghProxyHandler = vi.fn(async () => new Response(null));
     const defaultGhProxyHandlerDeps = vi.fn(() => ({}) as Record<string, unknown>);
 
     vi.doMock("@fx/runner", () => ({ loadGithubForwardConfig }));
-    vi.doMock("@fx/github", () => ({ createRunResolver, createRunnerGitResolver, createRunnerCloneBudget, createRunnerBoundBranchResolver, createPublishTargetResolver, createPublishInstallationOwnership }));
+    vi.doMock("@fx/github", () => ({ createRunResolver, createRunnerGitResolver, createRunnerCloneBudget, createRunnerBoundBranchResolver, createPublishTargetResolver, createPublishInstallationOwnership, createPlatformPushRecorder }));
     vi.doMock("@fx/db/src/pool", () => ({ createPool }));
     vi.doMock("./handler", () => ({ defaultGhProxyHandlerDeps, ghProxyHandler }));
 
@@ -106,6 +107,10 @@ describe("gh-proxy route.ts: DATABASE_URL_GH_PROXY fail-closed caching (fix roun
     expect(createPublishInstallationOwnership).toHaveBeenCalledTimes(1);
     expect(createPublishInstallationOwnership).toHaveBeenCalledWith("pool");
     expect(ghProxyHandler).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ ownsPublishInstallation: "publish-ownership" }));
+    // D#519 MQ4-b0: the push recorder is built once, on the same narrow pool (EXECUTE on record_platform_ref_push), and set on the deps.
+    expect(createPlatformPushRecorder).toHaveBeenCalledTimes(1);
+    expect(createPlatformPushRecorder).toHaveBeenCalledWith("pool");
+    expect(ghProxyHandler).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ recordPlatformPushes: "push-recorder" }));
     expect(defaultGhProxyHandlerDeps).toHaveBeenCalledTimes(1);
     expect(ghProxyHandler).toHaveBeenCalledTimes(2);
   });

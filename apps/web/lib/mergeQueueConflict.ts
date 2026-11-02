@@ -1,6 +1,12 @@
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { assembleConflictPrompt, isReservationPause, mergeQueue, promptRuntimeOf, startWaitFor } from "@fx/pipeline";
 import { deltaReviewPorts, readEntryContext, readEntryWho, type DeltaReviewBinding } from "./mergeQueueDeltaReview";
+import { appUserPool } from "./github/installationReconcile";
+import { readRepoAppLogin } from "./github/installationHttp";
+
+// D#519 MQ4-b0: the ONE production binding of the platform commit proof: the push records the gh-proxy writes, read as app_user in the entry's tenant.
+// The pool is opened at the first read, not here. Removing this line turns MQ4 off (every conflict then stops `identity_unread`, with no GitHub read).
+mergeQueue.bindPlatformCommitProof(mergeQueue.createPlatformPushReader({ inTenant: (accountId, fn) => withTenant(appUserPool(), accountId, fn), appLogin: readRepoAppLogin }));
 
 /**
  * D#519 MQ4-b: binds the merge queue's `onConflict` to the real conflict round. Everything about the item (who approved it, its halt epoch, its review

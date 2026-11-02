@@ -66,6 +66,7 @@ Every `CREATE TABLE` in `packages/db/migrations/*.sql` at HEAD, one row each (49
 | `sitekit_entitlements` | `0679_sitekit_billing.sql` | tenant (`app_user` SELECT only; the Stripe webhook writes as `platform_ops`) | yes |
 | `sitekit_checkout_sessions` | `0679_sitekit_billing.sql` | tenant (insert-only; `app_user` SELECT only) | yes |
 | `work_item_transitions` | `0610_work_item_stages.sql` | tenant | yes |
+| `platform_ref_pushes` | `0956_platform_ref_pushes.sql` | tenant (`app_user` SELECT only; append-only; the only writer is the `record_platform_ref_push` definer, called by the gh-proxy login after GitHub accepts a push) | yes |
 | `work_item_supersedes` | `0851_retire_superseded_work_item.sql` | tenant (`app_user` SELECT only; the only writer is the `retire_superseded_work_item` definer) | yes |
 | `account_features` | `0611_exposure_audit.sql` | tenant | yes |
 | `platform_audit` | `0611_exposure_audit.sql` | platform-wide (`platform_ops` reads, a dedicated `exposure_writer` role writes; exempted in `platformWideTables.ts`) | no (exempted; nullable `account_id`, cross-tenant by design) |

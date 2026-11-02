@@ -43,7 +43,7 @@ vi.mock("./mergeQueue", () => ({
     },
   }),
 }));
-vi.mock("./github/installationHttp", () => ({ openInstallationHttp: async () => ({}) }));
+vi.mock("./github/installationHttp", () => ({ openInstallationHttp: async () => ({}), readRepoAppLogin: async () => "fulcrumaxe-app[bot]" }));
 
 import { mergeQueue } from "@fx/pipeline";
 import { waitBody, type QueueWorker } from "./mergeQueueWait";
@@ -61,6 +61,8 @@ afterEach(() => mergeQueue.setPlatformCommitProofForTest(null));
 
 describe("waitBody's conflicting-again path reads the shared platform commit proof", () => {
   it("unread: no round can start from the wait either; the stop is recorded and GitHub is not read", async () => {
+    // D#519 MQ4-b0: the production binding (the push-record reader) is loaded with the wiring, so "unread" is a source that answers null.
+    mergeQueue.setPlatformCommitProofForTest(async () => null);
     await waitBody(worker, WHO);
     expect(h.decided).toEqual([false]);
     expect(h.tipReads).toBe(0);

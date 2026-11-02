@@ -56,19 +56,25 @@ export type PlatformCommitProofReader = (entry: MergeQueueEntry, shas: readonly 
 
 /**
  * The ONE source of the proof. Every conflict binding (the tick's `onConflict`, the queue wait, the sweep, the round end) reads it here; none passes its own.
- * It answers unread (null) until its production binding is set in one place, and nothing here sets it. Only a test sets it, through
- * `setPlatformCommitProofForTest`, which production code must never call (a test scans for that).
+ * It answers unread (null) until `bindPlatformCommitProof` is called, and the web wiring calls it in exactly one place (a test scans for that). A test
+ * may override it through `setPlatformCommitProofForTest`, which production code must never call (a test scans for that too).
  */
 let platformCommitProofSource: PlatformCommitProofReader | null = null;
+let platformCommitProofOverride: PlatformCommitProofReader | null = null;
 
 /** The proof reader, or null while it has not been read. */
 export function readPlatformCommitProof(): PlatformCommitProofReader | null {
-  return platformCommitProofSource;
+  return platformCommitProofOverride ?? platformCommitProofSource;
 }
 
-/** TEST ONLY: overrides the source (null restores "unread"). Production code never calls this. */
-export function setPlatformCommitProofForTest(reader: PlatformCommitProofReader | null): void {
+/** The production binding (D#519 MQ4-b0: the push-record reader). Called once, by the web wiring; undo is not calling it. */
+export function bindPlatformCommitProof(reader: PlatformCommitProofReader): void {
   platformCommitProofSource = reader;
+}
+
+/** TEST ONLY: overrides the source; null drops the override (back to the production binding, or "unread" where there is none). Production code never calls this. */
+export function setPlatformCommitProofForTest(reader: PlatformCommitProofReader | null): void {
+  platformCommitProofOverride = reader;
 }
 
 const ZERO_SHA = /^0{40}$/;

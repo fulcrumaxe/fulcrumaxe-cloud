@@ -100,7 +100,7 @@ describe("resume_decision: resume from the answer [pg]", { timeout: 120_000 }, (
     askId: string;
   }
   /** An item parked on an open ask: an executor run that succeeded and asked, a retained start prompt, a stage and a halt epoch. */
-  async function park(o: { a?: SeedRefs; stage?: string; prompt?: string | null; ghNumber?: number | null; spec?: boolean; mode?: string } = {}): Promise<World> {
+  async function park(o: { a?: SeedRefs; stage?: string; prompt?: string | null; ghNumber?: number | null; spec?: boolean; mode?: string; head?: string } = {}): Promise<World> {
     const a = o.a ?? (await seedAccount(admin, randomUUID()));
     const itemId = randomUUID();
     const parkedRunId = randomUUID();
@@ -110,7 +110,7 @@ describe("resume_decision: resume from the answer [pg]", { timeout: 120_000 }, (
       specId = randomUUID();
       await admin.query("INSERT INTO spec_versions (id, account_id, work_item_id, version, body, body_sha256, created_by_kind) VALUES ($1, $2, $3, 1, $4, $5, 'system')", [specId, a.accountId, itemId, SPEC_BODY, SPEC_SHA]);
     }
-    await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, ended_at, spec_version_id, execution_mode) VALUES ($1, $2, $3, 'executor', $6, 'succeeded', now(), $4, $5)", [parkedRunId, a.accountId, itemId, specId, o.mode ?? null, o.mode === undefined ? "local" : "runner"]);
+    await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, ended_at, spec_version_id, execution_mode, head_sha) VALUES ($1, $2, $3, 'executor', $6, 'succeeded', now(), $4, $5, $7)", [parkedRunId, a.accountId, itemId, specId, o.mode ?? null, o.mode === undefined ? "local" : "runner", o.head ?? null]);
     if (o.prompt !== null) await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.input', $3::jsonb)", [a.accountId, parkedRunId, JSON.stringify({ prompt: o.prompt ?? PROMPT })]);
     const askId = await withTenant(receiptPool, a.accountId, async (c) =>
       (await c.query<{ id: string }>(
@@ -171,6 +171,21 @@ describe("resume_decision: resume from the answer [pg]", { timeout: 120_000 }, (
       expect(f.starts[0]!.prompt).toContain("cause: decision_resolved\noption: split");
       const runId = (out as unknown as { outcome: { run_id: string } }).outcome.run_id;
       expect(f.follows).toEqual([{ accountId: w.a.accountId, userId: w.a.userId, workItemId: w.itemId, actionId, haltEpoch: 0, specVersion: null, resumeRunId: runId }]);
+    });
+
+    it("D#519 MQ4-b0: a parked stacked build resumes from the parked run's start commit (its head_sha); a default-branch build passes none", async () => {
+      const stacked = await park({ head: "e".repeat(40), prompt: `${PROMPT}\n1. This work builds on a pull request that has not merged yet.` });
+      await answer(stacked, "split");
+      const f = fakes();
+      await f.facade.performResumeDecision(await claim(stacked.askId));
+      expect(f.starts).toHaveLength(1);
+      expect(f.starts[0]!.headSha).toBe("e".repeat(40));
+      const plain = await park();
+      await answer(plain, "split");
+      const g = fakes();
+      await g.facade.performResumeDecision(await claim(plain.askId));
+      expect(g.starts).toHaveLength(1);
+      expect(g.starts[0]).not.toHaveProperty("headSha");
     });
 
     it("deny resumes with decision_denied and no option", async () => {

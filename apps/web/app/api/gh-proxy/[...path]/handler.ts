@@ -21,6 +21,8 @@ import {
   verifySandboxOidcToken,
   OidcVerifyError,
   type AccessTokenRequester,
+  type PlatformPushKey,
+  type PlatformPushRecorder,
   type ProxyDecisionDeps,
   type RunnerCloneBudget,
   type RunnerGitDenyReason,
@@ -117,6 +119,8 @@ export interface GhProxyHandlerDeps extends ProxyDecisionDeps {
    * the count is not lost when the response closes and the instance is frozen. Injectable so tests need no platform. Unset: the runner path answers 503.
    */
   defer?: (work: Promise<unknown>) => void;
+  /** D#519 MQ4-b0: records a forwarded push GitHub answered 200 (migration 0956), handed to `defer`. Unset: nothing is recorded. */
+  recordPlatformPushes?: PlatformPushRecorder;
 }
 
 export interface PinnedRequestParams {
@@ -683,6 +687,8 @@ export async function ghProxyHandler(
   try {
     const forwarded = await forwardUpstream(req, deps, { path, rawBody, decision, target: path.startsWith("/repos/") ? "api" : "git" });
     if (publishRun) logPublishProxy(publishTrace, "allow", forwarded.status);
+    // A publish run's push goes to the paired public repository: not recorded here (D#519 C10, left to MQ4-e1); the database refuses that role too.
+    else recordPushes(deps, { sandboxName }, req.method, path, rawBody, forwarded.status);
     return forwarded;
   } catch (err) {
     if (publishRun) logPublishProxy(publishTrace, "forward_failed", undefined);
@@ -862,7 +868,7 @@ async function runnerGitHandler(req: NextRequest, deps: GhProxyHandlerDeps, tick
   }
 
   const repoId = claims.repo.id;
-  return forwardUpstream(req, deps, {
+  const forwarded = await forwardUpstream(req, deps, {
     path,
     rawBody,
     decision,
@@ -884,6 +890,24 @@ async function runnerGitHandler(req: NextRequest, deps: GhProxyHandlerDeps, tick
         }
       : {}),
   });
+  recordPushes(deps, { runId: claims.runId }, req.method, path, rawBody, forwarded.status);
+  return forwarded;
+}
+
+/**
+ * D#519 MQ4-b0: after GitHub answered an allowed receive-pack with 200, its ref updates are recorded through `defer`, never awaited. A record that fails
+ * is logged by error class only and changes nothing about the push or the answer the client gets; that push reads as foreign later (fail closed).
+ */
+function recordPushes(deps: GhProxyHandlerDeps, key: PlatformPushKey, method: string, path: string, rawBody: Uint8Array, status: number): void {
+  const record = deps.recordPlatformPushes;
+  if (status !== 200 || method !== "POST" || !path.endsWith("/git-receive-pack") || !record || !deps.defer) return;
+  const failed = (err: unknown) => console.warn("gh-proxy: push record failed", { error: err instanceof Error ? err.name : "unknown" });
+  try {
+    deps.defer(record(key, rawBody).catch(failed));
+  } catch (err) {
+    // fx-swallow-ok: a record must never fail the push; only the error class is logged
+    failed(err);
+  }
 }
 
 interface AllowedForward {

@@ -93,9 +93,15 @@ describe("startConflictRound", () => {
 
 describe("the platform commit proof (C10: push records or a verified app commit, never author fields)", () => {
   afterEach(() => mergeQueue.setPlatformCommitProofForTest(null));
-  it("absent: reads as unread, so no conflict round can start", async () => {
-    expect(await build().ports.platformCommits(entry, [])).toBeNull();
-    expect(await build().ports.platformCommits(entry, [SHA("c")])).toBeNull();
+  it("MQ4-b0: bound to the push-record reader at import; the empty-sha probe answers readable without opening the pool or any query", async () => {
+    // The probe would throw here if it reached the database: DATABASE_URL_APP_USER is unset in this test and withTenant is a fake that records no call.
+    const saved = process.env.DATABASE_URL_APP_USER;
+    delete process.env.DATABASE_URL_APP_USER;
+    try {
+      expect(await build().ports.platformCommits(entry, [])).toEqual({ appLogin: null, pushes: [] });
+    } finally {
+      if (saved !== undefined) process.env.DATABASE_URL_APP_USER = saved;
+    }
   });
   it("present: the one module-level source, passed the entry and shas, its answer unchanged, and read at call time by every binding", async () => {
     const early = build().ports;
@@ -105,6 +111,9 @@ describe("the platform commit proof (C10: push records or a verified app commit,
     expect(await build().ports.platformCommits(entry, [SHA("c")])).toEqual(proof);
     expect(await early.platformCommits(entry, [])).toEqual(proof);
     expect(asked).toEqual([["e1", [SHA("c")]], ["e1", []]]);
+    // Dropping the override goes back to the production binding (the push-record reader), not to "unread".
+    mergeQueue.setPlatformCommitProofForTest(null);
+    expect(await early.platformCommits(entry, [])).toEqual({ appLogin: null, pushes: [] });
   });
   it("production code never sets the source: no file outside the tests names the test-only setter", () => {
     // Every source file under apps/ (routes, workflows, libs) and packages/, tests excluded.
@@ -120,6 +129,24 @@ describe("the platform commit proof (C10: push records or a verified app commit,
     };
     roots.forEach(walk);
     expect(hits.map((p) => p.split("/").slice(-1)[0])).toEqual(["conflict.ts"]);
+  });
+  it("MQ4-b0: exactly one production call binds the proof, here, and nothing else binds it", () => {
+    const roots = [new URL("../../", import.meta.url).pathname, new URL("../../../packages/", import.meta.url).pathname];
+    const calls: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (e.name === "node_modules" || e.name === ".next" || e.name === "dist" || e.name === "test") continue;
+        const p = join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (/\.(ts|tsx)$/.test(e.name) && !/\.(test|spec)\.(ts|tsx)$/.test(e.name)) {
+          const n = [...readFileSync(p, "utf8").matchAll(/\bbindPlatformCommitProof\(/g)].length;
+          for (let i = 0; i < n; i++) calls.push(p.split("/").slice(-1)[0]!);
+        }
+      }
+    };
+    roots.forEach(walk);
+    // conflict.ts defines it (one match: the declaration); mergeQueueConflict.ts is the one call.
+    expect(calls.sort()).toEqual(["conflict.ts", "mergeQueueConflict.ts"]);
   });
 });
 
