@@ -192,7 +192,7 @@ export interface CreateWorkerOptions {
    */
   analysis?: Pick<DocsCodeAnalysisDeps, "prompt" | "parse">;
   /** D#483 S5-b1a-2: the auto-start gate's injected price of an item's first run (pipeline's `firstRunReservationUsd`). Absent, `sweepAutoStart` starts nothing and answers `idle: "not_configured"`. */
-  autoStart?: Pick<AutoStartDeps, "firstRunUsd" | "child">;
+  autoStart?: Pick<AutoStartDeps, "firstRunUsd" | "child" | "followUp">;
   /**
    * D#7 DP6a-WIRING: the client for the receipt block on an item's pull request (apps/web opens it with the `receipt_block` token purpose). Absent, no block is
    * written and nothing else changes.
@@ -467,7 +467,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
         ? createDocsCodeAnalysisSweep({ pool: pools.runnerPool, resolveSeat: resolveRunSeat, starter: previewStarter, ...(advanceStarter ? { runnerStarter: advanceStarter } : {}), visibility: repoVisibility, github: options.verify.github, settings: analysisSettings, prompt: options.analysis.prompt, parse: options.analysis.parse })
         : async (): Promise<DocsCodeAnalysisCounts> => ({ idle: "not_configured", listed: 0, started: 0, waiting: 0, recorded: 0, daily_cap: 0, skipped: 0, failed: 0 });
     const autoStart = options.autoStart
-      ? createAutoStartSweep({ receiptPool: pools.receiptPool, firstRunUsd: options.autoStart.firstRunUsd, ...(options.autoStart.child ? { child: options.autoStart.child } : {}) }).sweepAutoStart
+      ? createAutoStartSweep({ receiptPool: pools.receiptPool, firstRunUsd: options.autoStart.firstRunUsd, ...(options.autoStart.child ? { child: options.autoStart.child } : {}), ...(options.autoStart.followUp ? { followUp: options.autoStart.followUp } : {}) }).sweepAutoStart
       : async (): Promise<AutoStartCounts> => ({ idle: "not_configured", listed: 0, started: 0, asked: 0, held_by_rule: 0, no_room: 0, not_ready: 0, replayed: 0, failed: 0 });
     // D#483 S5-k1b: the parked-stage sweep restarts a stage whose workflow gave up waiting for a spending limit, once the limit allows it.
     const stageResume = createStageResume(pools.runnerPool, { resolveRunSeat, startAdvance: options.advance?.startAdvance ?? null, buildWaitReason: options.advance?.buildWaitReason ? (accountId, workItemId) => options.advance!.buildWaitReason!(pools.runnerPool, accountId, workItemId) : null });

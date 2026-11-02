@@ -584,6 +584,8 @@ export interface AdvanceItem extends AdvancePrSource {
   reviewHold?: boolean;
   /** D#483 S5-b2c-2: a planned PR child. `ghNumber`, `kind`, `hasSpec` and `specVersion` are then its parent's issue and the Spec version it names. */
   child?: true;
+  /** D#483 S5-b2d-2a: a follow-up child (`work_items.follow_up_id` is set). It is never triaged: the stage table answers a fixed sentence for it. */
+  followUp?: true;
   /** D#483 S5-b2b: set when the item is not a planned PR child and its newest Spec plans two or more pull requests: the item itself is never built, its children are. */
   splits?: true;
   /** D#483 S5-b2b: set when the item is not a planned PR child and already has planned PR children. A re-spec to a single pull request must not turn such a parent into a build: its children stay, and a person decides. */
@@ -820,9 +822,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const read = await withTenant(runnerPool, accountId, userId, async (client) => {
       const role = await client.query<{ role: string }>("SELECT role FROM account_members WHERE account_id = $1 AND user_id = $2", [accountId, userId]);
       // D#483 S5-b2c-2: a planned PR child reads its PARENT's issue number and the Spec version it names (its kind is its own, it has no discussion); `child` routes it straight to the build.
-      const item = await client.query<{ stage: string; provenance: string; repo_id: string | null; discussion_id: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; acceptance_files: unknown; child: boolean; planned_count: number | null }>(
+      const item = await client.query<{ stage: string; provenance: string; repo_id: string | null; discussion_id: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; acceptance_files: unknown; child: boolean; follow_up: boolean; planned_count: number | null }>(
         `SELECT w.stage, w.provenance, w.repo_id, w.discussion_id,
-                CASE WHEN w.planned_pr_key IS NULL THEN d.kind ELSE w.kind END AS kind, (w.planned_pr_key IS NOT NULL) AS child,
+                CASE WHEN w.planned_pr_key IS NULL THEN d.kind ELSE w.kind END AS kind, (w.planned_pr_key IS NOT NULL) AS child, (w.follow_up_id IS NOT NULL) AS follow_up,
                 EXISTS (SELECT 1 FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL}) AS has_spec,
                 (SELECT max(s.version) FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL}) AS spec_version,
                 (SELECT s.frontmatter -> 'acceptance_files' FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL} ORDER BY s.version DESC LIMIT 1) AS acceptance_files,
@@ -1032,9 +1034,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
 
   async function loadItemRow(accountId: string, workItemId: string): Promise<Omit<AdvanceItem, keyof AdvancePrSource> | null> {
     return withTenant(runnerPool, accountId, async (client) => {
-      const r = await client.query<{ child: boolean; planned_pr_key: string | null; stage: string; provenance: string; repo_id: string | null; discussion_id: string | null; gh_owner: string | null; gh_name: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; executor_run_id: string | null; planned_count: number | null; has_children: boolean; check_failed_run_id: string | null; p_id: string | null; p_title: string | null; p_summary: string | null }>(
+      const r = await client.query<{ child: boolean; follow_up: boolean; planned_pr_key: string | null; stage: string; provenance: string; repo_id: string | null; discussion_id: string | null; gh_owner: string | null; gh_name: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; executor_run_id: string | null; planned_count: number | null; has_children: boolean; check_failed_run_id: string | null; p_id: string | null; p_title: string | null; p_summary: string | null }>(
         `SELECT w.stage, w.provenance, w.repo_id, w.discussion_id, r.gh_owner, r.gh_name,
-                CASE WHEN w.planned_pr_key IS NULL THEN d.kind ELSE w.kind END AS kind, (w.planned_pr_key IS NOT NULL) AS child, w.planned_pr_key,
+                CASE WHEN w.planned_pr_key IS NULL THEN d.kind ELSE w.kind END AS kind, (w.planned_pr_key IS NOT NULL) AS child, (w.follow_up_id IS NOT NULL) AS follow_up, w.planned_pr_key,
                 (SELECT ar.id FROM agent_runs ar WHERE ar.account_id = w.account_id AND ar.work_item_id = w.id AND ar.role = 'executor' ORDER BY ar.created_at DESC, ar.id DESC LIMIT 1) AS executor_run_id,
                 (SELECT x.id FROM (SELECT a.id, a.status, a.account_id FROM agent_runs a WHERE a.account_id = w.account_id AND a.work_item_id = w.id AND a.role = 'executor' ORDER BY a.created_at DESC, a.id DESC LIMIT 1) x
                   WHERE x.status = 'failed'
@@ -1063,6 +1065,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         ? {
             reviewHold,
             ...(row.child ? { child: true } : {}),
+            ...(row.follow_up ? { followUp: true as const } : {}),
             ...(Number(row.planned_count ?? 0) >= 2 ? { splits: true as const } : {}),
             ...(row.has_children ? { hasChildren: true as const } : {}),
             ...(identity?.ok ? { branch: identity.identity.branch } : {}),
@@ -1322,7 +1325,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     // A replay of a triage that already finished is allowed (the pipeline's triage is idempotent on the source event): the
     // item then sits at `closed`, retired by that very triage. Anything else not at `triaged` is not ours to advance.
     const replay = item.stage === "closed" && (await supersededByTriage(accountId, input.workItemId));
-    const verdict = advanceActionFor({ stage: item.stage, discussion_id: item.hasDiscussion ? "d" : null, kind: item.kind, has_spec: item.hasSpec });
+    const verdict = advanceActionFor({ stage: item.stage, discussion_id: item.hasDiscussion ? "d" : null, kind: item.kind, has_spec: item.hasSpec, ...(item.followUp ? { follow_up: true } : {}) });
     if (!replay && !(verdict.ok && verdict.action === "triage")) return { status: "refused", reason: "not_advanceable" };
     const out = await deps.triage(runnerPool, accountId, input);
     console.info(JSON.stringify({ event: "advance.triaged", work_item_id: input.workItemId, status: out.status, category: out.category ?? null, stage: out.stage ?? null, reason: out.reason ?? null }));

@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import { cleanText } from "@fx/core/src/plan/roadmapFile.js";
+import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 
 /**
@@ -58,15 +59,20 @@ export function readFollowUps(status: string, envelope: unknown): FollowUp[] {
 /**
  * Records one run's follow-ups, in a transaction of its own. Never throws: a failure is one fixed log line with the run id and nothing else (no model
  * text, no error text), and the review or the build that called it carries on exactly as it would have.
+ *
+ * D#483 S5-b2d-2a: when the definer recorded at least one, the sweep that makes them into work items is marked as having work (the same tick as the
+ * auto-start pass), after the transaction committed so the sweep can see the rows. The marker is a hint that never throws or waits; a lost one is found by the tick's backstop.
  */
 export async function recordRunFollowUps(pool: Pool, accountId: string, runId: string): Promise<void> {
   try {
-    await withTenant(pool, accountId, async (client) => {
+    const recorded = await withTenant(pool, accountId, async (client) => {
       const run = (await client.query<{ status: string; envelope: unknown }>("SELECT status, envelope FROM agent_runs WHERE id = $1 AND account_id = $2", [runId, accountId])).rows[0];
       const items = run ? readFollowUps(run.status, run.envelope) : [];
-      if (items.length === 0) return;
-      await client.query("SELECT follow_ups_record($1, $2::jsonb)", [runId, JSON.stringify(items)]);
+      if (items.length === 0) return 0;
+      const answer = (await client.query<{ r: { recorded?: unknown } | null }>("SELECT follow_ups_record($1, $2::jsonb) AS r", [runId, JSON.stringify(items)])).rows[0]?.r;
+      return typeof answer?.recorded === "number" ? answer.recorded : 0;
     });
+    if (recorded > 0) void markWorkPending("proposal-verify-sweep");
   } catch {
     // fx-swallow-ok: a follow-up is never worth failing a review or a build over; the fixed line is the trace, and it carries no model or error text
     console.warn(JSON.stringify({ event: "follow_ups.record_failed", run_id: runId }));

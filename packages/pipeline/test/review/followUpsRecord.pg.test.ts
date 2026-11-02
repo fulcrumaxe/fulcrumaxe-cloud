@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExecutionTargetRegistry } from "@fx/runner";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
+import { setPendingHooks } from "@fx/core/src/pendingWork.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import type { CiGate } from "../../src/review/ciWait.js";
 import { recordRunFollowUps } from "../../src/review/followUps.js";
@@ -20,7 +21,10 @@ describe("follow-ups recorded with a review round [pg]", () => {
   const db = pgHarness();
   const HEAD = "c".repeat(40);
   const SETTLED: CiGate = { read: async () => ({ state: "settled", reasons: [] }) };
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    setPendingHooks(null);
+  });
 
   async function seed(): Promise<{ accountId: string; workItemId: string; registry: ExecutionTargetRegistry }> {
     const accountId = randomUUID();
@@ -109,5 +113,30 @@ describe("follow-ups recorded with a review round [pg]", () => {
     expect(await stageOf(workItemId)).toBe("review_passed");
     const ev = await db.admin.query("SELECT count(*)::int AS n FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'review_verdicts'", [workItemId]);
     expect(ev.rows[0].n).toBe(1);
+  });
+
+  it("C28-2a (wake): recording at least one follow-up marks the verify sweep as having work, once the rows are committed; recording none marks nothing, and a store that throws changes nothing", async () => {
+    const { accountId, workItemId } = await seed();
+    const sets: { key: string; atCommit: number }[] = [];
+    const count = async () => (await db.admin.query<{ n: number }>("SELECT count(*)::int AS n FROM work_item_follow_ups WHERE work_item_id = $1", [workItemId])).rows[0]!.n;
+    setPendingHooks({ store: { get: async () => null, delete: async () => {}, set: async (key) => void sets.push({ key, atCommit: await count() }) }, keepAlive: () => {} });
+    const none = await reviewerRun(accountId, workItemId, "code-reviewer", { verdict: "pass" });
+    await recordRunFollowUps(db.runWriterPool, accountId, none);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(sets).toEqual([]);
+    const one = await reviewerRun(accountId, workItemId, "code-reviewer", { verdict: "pass", follow_ups: [{ title: "Add a retry", why: "" }] });
+    await recordRunFollowUps(db.runWriterPool, accountId, one);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(sets.filter((x) => x.key === "pending:proposal-verify-sweep")).toEqual([{ key: "pending:proposal-verify-sweep", atCommit: 1 }]);
+    // The same follow-up again is a duplicate: recorded 0, so no second mark.
+    const dup = await reviewerRun(accountId, workItemId, "security-reviewer", { verdict: "pass", follow_ups: [{ title: " ADD a retry ", why: "" }] });
+    await recordRunFollowUps(db.runWriterPool, accountId, dup);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(sets.filter((x) => x.key === "pending:proposal-verify-sweep")).toHaveLength(1);
+    // A store that throws never reaches the caller: the row is still there.
+    setPendingHooks({ store: { get: async () => null, delete: async () => {}, set: async () => { throw new Error("store down"); } }, keepAlive: () => {}, reportError: () => {} });
+    const two = await reviewerRun(accountId, workItemId, "code-reviewer", { verdict: "pass", follow_ups: [{ title: "Log the timeout", why: "" }] });
+    await expect(recordRunFollowUps(db.runWriterPool, accountId, two)).resolves.toBeUndefined();
+    expect(await count()).toBe(2);
   });
 });

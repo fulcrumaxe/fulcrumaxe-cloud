@@ -46,7 +46,15 @@ export interface AdvanceFacts {
    * `has_spec` means the Spec version it names exists. `kind` is its own. Absent or false: every other item, as before.
    */
   child?: boolean;
+  /**
+   * D#483 S5-b2d-2a: the item is a follow-up child (`work_items.follow_up_id` is set). It has no discussion, no category from text and no Spec, so it never reaches
+   * triage: from `triaged` it answers `FOLLOW_UP_NOT_STARTED` until a later release starts it. Absent or false: every other item, as before.
+   */
+  follow_up?: boolean;
 }
+
+/** The one sentence a follow-up child answers while its start does not exist yet. */
+export const FOLLOW_UP_NOT_STARTED = 'follow-up items start in a later release';
 
 interface StageRule {
   /** What advancing does; may depend on the facts (a triaged item the pipeline already discussed is a different job from one it has not). */
@@ -80,8 +88,8 @@ const RULES: Readonly<Record<string, StageRule>> = Object.freeze({
   // Or, when it already did and the kind has no panel (small, bug, doc) and there is no Spec yet: the short Spec again. That is how
   // a request the project manager judged not feasible, or a short-Spec step that failed, is tried again after the issue was edited.
   triaged: {
-    action: (f) => (f.child === true ? 'build' : f.discussion_id !== null && isLight(f) ? 'light_spec' : 'triage'),
-    unmet: (f) => (f.child === true ? childBuildUnmet(f) : f.discussion_id === null || isLight(f) ? null : 'work item is already triaged'),
+    action: (f) => (f.child === true ? 'build' : f.follow_up === true ? 'light_spec' : f.discussion_id !== null && isLight(f) ? 'light_spec' : 'triage'),
+    unmet: (f) => (f.follow_up === true ? FOLLOW_UP_NOT_STARTED : f.child === true ? childBuildUnmet(f) : f.discussion_id === null || isLight(f) ? null : 'work item is already triaged'),
   },
   // Discussed by the pipeline but no Spec yet: a panel or a Spec step that failed (or was cut short) leaves the item
   // here, and approving it again runs the panel and the Spec once more. Only a kind with a panel qualifies. An item

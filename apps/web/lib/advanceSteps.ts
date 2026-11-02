@@ -83,7 +83,7 @@ export async function loadBody(worker: AdvanceWorker | null, reader: IssueReader
   if (item.ghNumber === null && fromProposal === null) return { ok: false, reason: (item.identityRefusal === "child_orphaned" ? "child_orphaned" : "no_issue_link") };
   // The one table (@fx/core work-items/advance.ts), the same one the route and the worker's perform ask, says whether this
   // stage and state can be advanced and by what. A later stage adds a mode here and a branch in the workflow.
-  const verdict = advanceActionFor({ stage: item.stage, discussion_id: item.hasDiscussion ? "d" : null, kind: item.kind, has_spec: item.hasSpec, no_verdict_hold: item.reviewHold === true, ...(item.child === true ? { child: true } : {}) });
+  const verdict = advanceActionFor({ stage: item.stage, discussion_id: item.hasDiscussion ? "d" : null, kind: item.kind, has_spec: item.hasSpec, no_verdict_hold: item.reviewHold === true, ...(item.child === true ? { child: true } : {}), ...(item.followUp === true ? { follow_up: true } : {}) });
   if (!verdict.ok) return { ok: false, reason: "not_advanceable" };
   if (fromProposal !== null) {
     // The proposal's own title and summary, read from the database in the item's tenant transaction: no GitHub call, no label rule. The text is third-party

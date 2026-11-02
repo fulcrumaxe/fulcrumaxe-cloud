@@ -34,6 +34,10 @@ import { markWorkPending } from "@fx/core/src/pendingWork.js";
  * ask per (parent, key). A start it files is keyed `dial:<receipt>`, so the driver reads it as the dial's (`dialFiled`) and never a person's click. Until the build
  * supports a child (`CHILD_BUILD_SUPPORTED`, injected as `child.buildSupported`) the pass derives every reason and files nothing.
  *
+ * D#483 S5-b2d-2a: then a follow-up pass makes a work item of each recorded follow-up whose parent a person approved and that is not closed
+ * (`follow_up_child_list_due`, then `follow_up_child_create` in the tenant's own transaction on this same login). Only while the pipeline's
+ * `FOLLOW_UP_CHILD_START_SUPPORTED` (injected as `followUp.childStartSupported`) is true: otherwise it does not even list. A child it makes is not started here.
+ *
  * Every number and state that is unknown fails closed to "no start". The proposal stays `new`, and the Inbox says why (the off sentence, or the person's own
  * Approve). Writes happen only inside the gate transaction, so a pass that stops half way leaves nothing half done.
  */
@@ -68,6 +72,8 @@ export interface AutoStartCounts {
   idle?: "not_configured";
   /** D#483 S5-b2c-1: the child pass (absent when the proposal pass used the whole time budget). */
   children?: ChildPassCounts;
+  /** D#483 S5-b2d-2a: the follow-up pass (absent while the flag is off or the time budget is used up). */
+  follow_ups?: FollowUpPassCounts;
   /** When some proposal waits only for room: the Monday 00:00 UTC the weekly limit renews. */
   renews_at?: string;
 }
@@ -87,6 +93,9 @@ export interface ChildPassCounts {
 }
 export const AUTOSTART_CHILD_LIST_PAGE = 50;
 
+/** D#483 S5-b2d-2a: the follow-up pass's counts. `made` is children created now; `existing` is a follow-up whose child was already there (a replay). */
+export interface FollowUpPassCounts { listed: number; made: number; existing: number; not_ready: number; failed: number }
+
 export interface AutoStartDeps {
   /** The RECEIPT login's pool: the only login that can call the list and the two dial definers. */
   receiptPool: Pool;
@@ -94,6 +103,8 @@ export interface AutoStartDeps {
   firstRunUsd(client: PoolClient, input: { accountId: string; repoId: string }): Promise<number>;
   /** D#483 S5-b2c-1: the child pass's outside pieces (pipeline's `CHILD_BUILD_SUPPORTED` and the parent envelope's room for p(executor)). Absent, the child pass files nothing (`not_ready`). */
   child?: ChildLaunchDeps;
+  /** D#483 S5-b2d-2a: pipeline's `FOLLOW_UP_CHILD_START_SUPPORTED`. False or absent: the follow-up pass lists and makes nothing. */
+  followUp?: { childStartSupported: boolean };
   now?(): Date;
   warn?(line: string): void;
 }
@@ -261,6 +272,47 @@ export function createAutoStartSweep(deps: AutoStartDeps) {
     }
   }
 
+  /** One follow-up becomes a work item, in the tenant's own transaction. A refusal of the definer ("not this one now") is an outcome; anything else is a fault. */
+  async function makeFollowUpChild(accountId: string, followUpId: string): Promise<"made" | "existing" | "not_ready"> {
+    try {
+      const res = await withTenant(deps.receiptPool, accountId, (client) => client.query<{ o_created: boolean }>("SELECT o_created FROM follow_up_child_create($1::uuid)", [followUpId]));
+      return res.rows[0]?.o_created === true ? "made" : "existing";
+    } catch (err) {
+      const e = err as { code?: string; message?: string } | null;
+      // 55000 carries the code as the message (a parent closed, or not approved, since the list was read); 42501 and P0002 are a row or a right that is gone.
+      if (e?.code === "55000" || e?.code === "42501" || e?.code === "P0002") {
+        warn(JSON.stringify({ event: "auto_start.follow_up_refused", sqlstate: e.code, reason: e.message?.slice(0, 64) ?? null }));
+        return "not_ready";
+      }
+      throw err;
+    }
+  }
+
+  async function sweepFollowUps(counts: AutoStartCounts, startedAt: number): Promise<void> {
+    if (deps.followUp?.childStartSupported !== true) return;
+    const c: FollowUpPassCounts = { listed: 0, made: 0, existing: 0, not_ready: 0, failed: 0 };
+    counts.follow_ups = c;
+    let after: [string | null, string | null] = [null, null];
+    for (;;) {
+      const { rows } = await deps.receiptPool.query<{ account_id: string; follow_up_id: string; created_at: Date }>("SELECT account_id, follow_up_id, created_at FROM follow_up_child_list_due($1::integer, $2::timestamptz, $3::uuid)", [AUTOSTART_CHILD_LIST_PAGE, ...after]);
+      for (const r of rows) {
+        c.listed += 1;
+        if (now().getTime() - startedAt > AUTOSTART_PASS_BUDGET_MS) return;
+        try {
+          c[await makeFollowUpChild(r.account_id, r.follow_up_id)] += 1;
+        } catch (err) {
+          // One follow-up that cannot be made never holds up the rest; it is listed again next pass.
+          reportError(err, { stage: "auto_start.follow_up" });
+          warn(JSON.stringify({ event: "auto_start.follow_up_failed" }));
+          c.failed += 1;
+        }
+      }
+      if (rows.length < AUTOSTART_CHILD_LIST_PAGE) return;
+      const last = rows[rows.length - 1]!;
+      after = [last.created_at.toISOString(), last.follow_up_id];
+    }
+  }
+
   async function sweepAutoStart(): Promise<AutoStartCounts> {
     const counts: AutoStartCounts = { listed: 0, started: 0, asked: 0, held_by_rule: 0, no_room: 0, not_ready: 0, replayed: 0, failed: 0 };
     const startedAt = now().getTime();
@@ -291,6 +343,7 @@ export function createAutoStartSweep(deps: AutoStartDeps) {
       after = [last.verified_at.toISOString(), last.proposal_id];
     }
     await sweepChildren(counts, startedAt);
+    await sweepFollowUps(counts, startedAt);
     return finish(counts);
   }
 
@@ -302,5 +355,5 @@ export function createAutoStartSweep(deps: AutoStartDeps) {
     return counts;
   }
 
-  return { sweepAutoStart, gateProposal, gateChild };
+  return { sweepAutoStart, gateProposal, gateChild, makeFollowUpChild };
 }
