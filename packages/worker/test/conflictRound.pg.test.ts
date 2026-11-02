@@ -199,7 +199,7 @@ describe("advance: the conflict fix-round kind [pg]", { timeout: 60_000 }, () =>
     const a = await seedAccount(admin, randomUUID());
     const t = await item(a);
     const h = harness();
-    for (const extra of [{ reviewer: "code" }, { failingRunId: randomUUID() }, { person: true }, { kind: "renumber" }]) {
+    for (const extra of [{ reviewer: "code" }, { failingRunId: randomUUID() }, { person: true }, { kind: "merge" }]) {
       expect(await h.module.advanceStartFix(who(a, t.id), conflictReq(t, extra))).toEqual({ ok: false, reason: "invalid_input" });
     }
     expect(h.resume).not.toHaveBeenCalled();
@@ -254,5 +254,45 @@ describe("advance: the conflict fix-round kind [pg]", { timeout: 60_000 }, () =>
     expect(h.resolveRunSeat).toHaveBeenCalledWith(expect.objectContaining({ role: "executor", workItemId: t.id, expectedExecutionMode: "sandbox" }));
     expect(h.inputs[0]).toMatchObject({ pr: t.n, workdir: expect.any(String), expectedExecutionMode: "sandbox" });
     expect(h.inputs[0]).not.toHaveProperty("cloneRepo");
+  });
+
+  it("MQ5-b1: a renumber round is a conflict round in every check (resumes the build's session, no base sync, stage kept) under its own attempt key", async () => {
+    const a = await seedAccount(admin, randomUUID());
+    const t = await item(a);
+    const h = harness();
+    const before = await stageMoves(t.id);
+    const out = await h.module.advanceStartFix(who(a, t.id), conflictReq(t, { kind: "renumber", prompt: "renumber the files" }));
+    expect(out.ok).toBe(true);
+    expect(h.syncBase).not.toHaveBeenCalled();
+    expect(h.inputs[0]).toMatchObject({ parentRunId: t.build, role: "executor", prompt: expect.stringContaining("renumber the files") });
+    expect(h.inputs[0]!.idempotency!.key).toMatch(new RegExp(`^advance:${t.id}:fix:${HEAD}:[0-9a-f-]{36}:n1$`));
+    expect(await stageOf(t.id)).toBe("review_passed");
+    expect(await stageMoves(t.id)).toBe(before);
+    expect((await events(t.id)).map((e) => e.kind)).toEqual(["fix_round_started"]);
+  });
+
+  it("MQ5-b1: a renumber round takes no reviewer, failing run or person, exactly as a conflict round", async () => {
+    const a = await seedAccount(admin, randomUUID());
+    const t = await item(a);
+    const h = harness();
+    for (const extra of [{ reviewer: "code" }, { failingRunId: randomUUID() }, { person: true }]) {
+      expect(await h.module.advanceStartFix(who(a, t.id), conflictReq(t, { kind: "renumber", ...extra }))).toEqual({ ok: false, reason: "invalid_input" });
+    }
+    expect(h.resume).not.toHaveBeenCalled();
+  });
+
+  it("MQ5-b1: a renumber round on an item with an open public copy is refused before anything starts", async () => {
+    const a = await seedAccount(admin, randomUUID());
+    const t = await item(a);
+    await admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, 'acme/widgets-public', $3) ON CONFLICT (repo_id) DO NOTHING", [a.repoId, a.accountId, ["private/**"]]);
+    await admin.query(
+      `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state)
+       VALUES ($1, $2, $3, 'acme/widgets-public', $4, $5, $6, 7, 'https://github.com/acme/widgets-public/pull/7', 'pr_opened')`,
+      [a.accountId, t.id, a.repoId, "f".repeat(64), "d".repeat(40), "e".repeat(40)],
+    );
+    const h = harness();
+    expect(await h.module.advanceStartFix(who(a, t.id), conflictReq(t, { kind: "renumber", baseSha: "b".repeat(40) }))).toEqual({ ok: false, reason: "conflict_public_copy" });
+    expect(h.resume).not.toHaveBeenCalled();
+    expect(h.syncBase).not.toHaveBeenCalled();
   });
 });

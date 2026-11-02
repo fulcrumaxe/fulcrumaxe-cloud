@@ -423,8 +423,10 @@ export interface AdvanceFixRequest {
    * D#519 MQ4-b (R-519-C6-1): `conflict` is a merge-conflict round on a queued entry. It takes no `failingRunId`, `person` or `reviewer`, is bounded by the entry's
    * conflict rounds (the caller's start) instead of `checkFixRound`, does NOT sync the branch with its base (the executor merges it itself), and leaves the stage where it is.
    * Absent: `review`, today's behaviour.
+   * D#519 MQ5-b1: `renumber` is the ordered-resource round on a queued entry. It is a `conflict` round in every check below (same bounds, no base sync, stage kept),
+   * with its own attempt key; the executor renames the pull request's new files, makes no merge commit, and a pull request with an open public copy is refused.
    */
-  kind?: "review" | "conflict";
+  kind?: "review" | "conflict" | "renumber";
   /** D#519 MQ4-e1-b: a `conflict` round's own base (the default-branch tip it was asked to merge). With an open public copy it is the round's signed diff base. Never set by a review round. */
   baseSha?: string;
   /** Which review the card shows as asking for changes. Absent only for a `conflict` round. */
@@ -1712,7 +1714,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
   async function startFix(who: AdvanceStepWho, req: AdvanceFixRequest): Promise<AdvanceRunStart> {
     const review = deps.review;
     if (!review || !deps.registry) return { ok: false, reason: "resume_unavailable" };
-    const conflict = req.kind === "conflict";
+    const renumber = req.kind === "renumber";
+    const conflict = req.kind === "conflict" || renumber;
     const sane =
       (req.kind === undefined || req.kind === "review" || conflict) &&
       (req.baseSha === undefined || (conflict && SHA_RE.test(req.baseSha))) &&
@@ -1739,7 +1742,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (!conflict && checkFixRound(req.round) === "escalate") return { ok: false, reason: "max_fix_rounds" };
 
     // D#483 S5-k1d: the attempt after a spending-limit denial goes last, after the re-review retry (`:r<n>`), so the two never collide.
-    const attemptKey = `${req.headSha}:${req.actionId}${conflict ? `:c${req.round}` : ""}${req.retry ? `:r${req.retry}` : ""}${req.spendAttempt ? `:s${req.spendAttempt}` : ""}`;
+    const attemptKey = `${req.headSha}:${req.actionId}${renumber ? `:n${req.round}` : conflict ? `:c${req.round}` : ""}${req.retry ? `:r${req.retry}` : ""}${req.spendAttempt ? `:s${req.spendAttempt}` : ""}`;
     const refuse = async (reason: string): Promise<AdvanceRunStart> => {
       // A spending-limit denial is a pause, not a refusal: the driver leaves its waiting fact and asks again, and the sweep resumes it. No refusal fact is written.
       // D#483 S5-k3b-2b: nor is a wait for capacity.
@@ -1854,6 +1857,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           // The base is signed only for the branch that was synced: the issuer compares it with the branch it resolves for the job.
           baseTip = sync.baseSha;
           syncedBranch = pr.branch;
+        } else if (publicCopy && renumber) {
+          // MQ5-b1: a renumber round has no republish mapping (b2 may add one); with an open public copy it is refused before anything starts.
+          return refuse("conflict_public_copy");
         } else if (publicCopy && req.baseSha !== undefined) {
           // D#519 MQ4-e1-b (R-519-C12-4): the item's open public pull request is republished when the round ends. A stacked change is refused here, with nothing merged (read only);
           // the base the round is signed with is the default-branch tip it was asked to merge, on this branch, where a review round has its sync's.

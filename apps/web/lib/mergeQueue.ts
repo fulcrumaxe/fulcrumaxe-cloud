@@ -7,6 +7,7 @@ import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL
 import { createReviewDeps } from "./advanceReview";
 import { bindCompleteDeltaReview, bindStartDeltaReview } from "./mergeQueueDeltaReview";
 import { bindCompleteConflictRound, bindCompleteEntryless, bindOnConflict, endRoundWithoutPr, readEntrylessSubject } from "./mergeQueueConflict";
+import { bindOnRenumber } from "./mergeQueueRenumber";
 import { getWorker } from "./worker";
 import { openInstallationHttp, readRepoAppLogin } from "./github/installationHttp";
 import { openForRepo } from "./github/localOnlyHttp";
@@ -39,6 +40,7 @@ export interface MergeQueueTickerDeps {
   startDeltaReview?: mergeQueue.StartDeltaReview;
   /** MQ4-b: the conflict decision and round start. Absent: the real one (mergeQueueConflict.ts). */
   onConflict?: mergeQueue.QueueTickDeps["onConflict"];
+  onRenumber?: mergeQueue.QueueTickDeps["onRenumber"];
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -110,6 +112,7 @@ export async function tickMergeQueueRepo(deps: MergeQueueTickerDeps, target: { a
       queueInfo: (pr) => github.getMergeQueueInfo!(pr),
       startDeltaReview: deps.startDeltaReview ?? bindStartDeltaReview({ pool, worker: await getWorker(), open, github }),
       onConflict: deps.onConflict ?? bindOnConflict({ pool, worker: await getWorker(), open, github }),
+      onRenumber: deps.onRenumber ?? bindOnRenumber({ pool, worker: await getWorker(), open, github }),
       sleep: deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
     },
     target,
