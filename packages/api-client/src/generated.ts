@@ -1229,7 +1229,7 @@ export interface Operations {
       block_external_auto_merge: boolean;
       human_merge_only?: true;
       merge_queue: {
-        state: "on" | "off" | "unreadable";
+        state: "on" | "off" | "runner" | "unreadable";
       };
     };
   };
@@ -1248,7 +1248,7 @@ export interface Operations {
       block_external_auto_merge: boolean;
       human_merge_only?: true;
       merge_queue: {
-        state: "on" | "off" | "unreadable";
+        state: "on" | "off" | "runner" | "unreadable";
       };
     };
   };

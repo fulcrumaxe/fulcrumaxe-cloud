@@ -688,11 +688,12 @@ export function createAutoMergeControl({ call = api, signal, repoId, doc = docum
 }
 
 // ── D#694 B7-2: the merge queue line and its help block for the open repo (kept in this file: a new file would pass the boot budget) ──
-// The state is derived by the server on each read (never stored): on, off or unreadable; anything else, or a missing field, reads as "could not be read", never as off.
+// The state is derived by the server on each read (never stored): on, off, runner (Local-only: the runner merges) or unreadable; anything else, or a missing field, reads as "could not be read", never as off.
 // Every sentence is fixed text drawn as a text node. The help is collapsed until the line's "About the merge queue" link opens it.
 export const QUEUE_LINE = Object.freeze({
   on: "Merge queue: on (GitHub merges for you once it is queued)",
   off: "Merge queue: off",
+  runner: "Merge queue: your runner handles merges for this repository.",
   unreadable: "Merge queue: could not be read",
 });
 export const QUEUE_ABOUT = "About the merge queue";
@@ -712,7 +713,7 @@ export const QUEUE_HELP = Object.freeze([
 /** The settings' merge queue state: on or off only when the server said exactly that. */
 export const queueState = (settings) => {
   const s = settings && typeof settings.merge_queue === "object" && settings.merge_queue !== null ? settings.merge_queue.state : undefined;
-  return s === "on" || s === "off" ? s : "unreadable";
+  return s === "on" || s === "off" || s === "runner" ? s : "unreadable";
 };
 
 /** The line, its links and (when `open`) the help block. `onToggle` flips the help; `onRetry` re-reads the settings. */

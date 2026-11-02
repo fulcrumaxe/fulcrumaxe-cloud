@@ -55,11 +55,11 @@ describe('D#694 B7-2: merge_queue on the repo settings', () => {
   it('is the reader\'s on or off for an installed repo, and the reader is asked with the caller\'s own account and repo', async () => {
     const { identity, repoId } = await seed(true);
     const asked: unknown[] = [];
-    for (const answer of ['on', 'off']) {
+    for (const answer of ['on', 'off', 'runner']) {
       mergeQueueModeDeps.getReader = () => reader(async () => (asked.push(answer), answer));
       expect(await state(identity, repoId)).toEqual({ state: answer });
     }
-    expect(asked).toEqual(['on', 'off']);
+    expect(asked).toEqual(['on', 'off', 'runner']);
   });
 
   it('is unreadable with no reader set, for a repo with no installation (the reader is not asked), and when the reader fails or answers something else', async () => {
