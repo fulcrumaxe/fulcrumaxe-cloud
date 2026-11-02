@@ -18,6 +18,7 @@ import { stopReply } from "./heartbeat.js";
 import { loadAcceptanceScope, pathInScope, type AcceptanceScope, type TenantQueryable } from "./acceptanceScope.js";
 import { RunPullRequestError, loadRunPullRequestText, type PullRequestRef, type PullRequestRepo, type RunPullRequestPort, type RunPullRequestText } from "./runPullRequest.js";
 import { normaliseCheck } from "./checkResult.js";
+import { checkConflictAttestation, storeConflictAttestation } from "./conflictAttest.js";
 import { verifyRunnerRequest } from "./verifyRunnerRequest.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -71,6 +72,9 @@ export async function doneRun(deps: RunnerCloudDeps, req: RunnerHttpRequest, run
   const leases = requireLeases(deps);
   const lease = { accountId: runner.accountId, runnerId: runner.runnerId, runId: message.run_id, leaseGeneration: message.lease_generation };
 
+  // D#519 MQ4-e2-c1: a conflict attestation is judged from the cloud's own rows before anything else is touched; a refusal is a 400 and writes nothing.
+  const attestation = message.conflict_attest === undefined ? undefined : { value: message.conflict_attest, ...(await asRunner(() => checkConflictAttestation(deps, { accountId: runner.accountId, runnerId: runner.runnerId, runId: message.run_id, leaseGeneration: message.lease_generation }, message.conflict_attest!))) };
+
   const begun = await asRunner(() => leases.beginRunnerDone(lease));
   if (begun.kind === "fenced") return stopReply(begun.reason);
   if (begun.kind === "replay") return doneReply(begun.verdict);
@@ -82,6 +86,9 @@ export async function doneRun(deps: RunnerCloudDeps, req: RunnerHttpRequest, run
     if (handed.kind === "retry") return retryReply();
     if (handed.kind === "completed") return doneReply({ outcome: "succeeded", failureReason: null, prNumber: null });
   }
+
+  // Stored once the lease has held (not fenced, not a replay), before the verdict, so a retried `done` finds it; the same value again is a no-op.
+  if (attestation?.store) await asRunner(() => storeConflictAttestation(deps, { accountId: runner.accountId, runId: message.run_id }, attestation.value));
 
   const decided = await decide(deps, lease, message.check);
   if (decided.kind === "retry") return retryReply();

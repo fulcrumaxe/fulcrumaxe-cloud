@@ -286,6 +286,11 @@ export interface ExecutionRun {
    */
   continuesBaseBranch?: string;
   /**
+   * D#519 MQ4-e2-c1 (C19): set only by a merge-conflict round's start, from the round row the conflict code holds when it starts the run. The runner job issuer copies it into the signed job as
+   * `conflict_round`, without reading the database. Never set by any other start, and never taken from a runner.
+   */
+  conflictRound?: { fromSha: string; baseSha: string; baseRef: string };
+  /**
    * D#599 PL-2b-2: set on a run that starts a round on a branch another side opened (not a follow-up): `RunnerTarget.dispatch` then issues a continuation
    * with no session (a foreign session is never claimed). A follow-up of a lost round sets `continuesBranch` alone and goes through `resume`.
    */

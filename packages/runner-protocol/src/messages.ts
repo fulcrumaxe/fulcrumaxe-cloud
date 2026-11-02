@@ -230,9 +230,9 @@ export type LocalOnlyEvent = z.infer<typeof LocalOnlyEvent>;
  * The protocol version both sides speak: the cloud's current version, and the one a runner sends on `hello`. One constant, so a bump cannot move only one.
  * Version 2 is the first whose runner acts on the heartbeat's `handoff` (the checkpoint turn). Version 3 is the first whose runner accepts a cross-side
  * `continues` (a null session id, the item's pull request branch and `pr_number`; `CONTINUES_CROSS_SIDE_MIN_PROTOCOL`). Version 4 is the first whose runner accepts a job's
- * `memory` object (`MEMORY_JOB_MIN_PROTOCOL`). Version 5 is the first whose runner applies a job's `excludes` (`EXCLUDES_JOB_MIN_PROTOCOL`). Version 6 is the first whose runner writes a job's `spill` files (`SPILL_JOB_MIN_PROTOCOL`). Version 7 is the first whose runner reads a job's `context_window` (`CONTEXT_WINDOW_JOB_MIN_PROTOCOL`). Version 8 is the first whose runner runs a job's approved `check` and reports it on `done` (`CHECK_JOB_MIN_PROTOCOL`). Version 9 is the first whose runner reads a job's `pins` from its checkout (`PINS_JOB_MIN_PROTOCOL`). Version 10 is the first whose runner reads a continuation's `base_sha`, the diff base of the public publish (`BASE_SHA_JOB_MIN_PROTOCOL`). Version 11 is the first whose runner accepts a `base_sha` on a run-branch continuation too (`BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL`). Version 12 is the first whose runner accepts a planned PR child's branch, `fx/<parent#>-<key>`, as the item pull request branch of a continuation (`CHILD_BRANCH_JOB_MIN_PROTOCOL`). Version 13 is the first whose runner names the failing test files on `done`'s `check` (`CHECK_FAILED_FILES_MIN_PROTOCOL`). A bump never cuts an older runner off, see below.
+ * `memory` object (`MEMORY_JOB_MIN_PROTOCOL`). Version 5 is the first whose runner applies a job's `excludes` (`EXCLUDES_JOB_MIN_PROTOCOL`). Version 6 is the first whose runner writes a job's `spill` files (`SPILL_JOB_MIN_PROTOCOL`). Version 7 is the first whose runner reads a job's `context_window` (`CONTEXT_WINDOW_JOB_MIN_PROTOCOL`). Version 8 is the first whose runner runs a job's approved `check` and reports it on `done` (`CHECK_JOB_MIN_PROTOCOL`). Version 9 is the first whose runner reads a job's `pins` from its checkout (`PINS_JOB_MIN_PROTOCOL`). Version 10 is the first whose runner reads a continuation's `base_sha`, the diff base of the public publish (`BASE_SHA_JOB_MIN_PROTOCOL`). Version 11 is the first whose runner accepts a `base_sha` on a run-branch continuation too (`BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL`). Version 12 is the first whose runner accepts a planned PR child's branch, `fx/<parent#>-<key>`, as the item pull request branch of a continuation (`CHILD_BRANCH_JOB_MIN_PROTOCOL`). Version 13 is the first whose runner names the failing test files on `done`'s `check` (`CHECK_FAILED_FILES_MIN_PROTOCOL`). Version 14 is the first whose runner accepts a job's `conflict_round` and attests the end of that round on `done` (`CONFLICT_ATTEST_JOB_MIN_PROTOCOL`). A bump never cuts an older runner off, see below.
  */
-export const CURRENT_PROTOCOL_VERSION = 13;
+export const CURRENT_PROTOCOL_VERSION = 14;
 /**
  * The oldest version `hello` still accepts. It is fixed and moves only on purpose: a bump of the current version gates a capability for the runners
  * that declare it and never refuses the ones that do not (D#599 R-599-HO1, owner question R-599-PL2b-1). A runner below it gets 426.
@@ -308,6 +308,11 @@ export const CHILD_BRANCH_JOB_MIN_PROTOCOL = 12;
  * (its strict `done` schema would have refused the key), so the cloud deploys first.
  */
 export const CHECK_FAILED_FILES_MIN_PROTOCOL = 13;
+/**
+ * D#519 MQ4-e2-c1: the first version whose runner reads a job's `conflict_round` and sends its attestation on `done`. Same claim gate as above: an older runner's strict parse would refuse the key,
+ * so a marked job waits for an updated runner. A version is never lowered; stopping the key is one line in the issuer. The cloud deploys first.
+ */
+export const CONFLICT_ATTEST_JOB_MIN_PROTOCOL = 14;
 
 /** The largest value of a Postgres `integer` column. `runners.protocol_version` is one, so the schema refuses anything above it (D#6 R2b). */
 export const INT4_MAX = 2_147_483_647;
@@ -674,6 +679,30 @@ export const DoneCheck = z
   .refine((check) => !check.timed_out || check.exit_code === null, { message: "a timed-out check has no exit code", path: ["exit_code"] });
 export type DoneCheck = z.infer<typeof DoneCheck>;
 
+/** The most paths a conflict attestation lists; more than this is `truncated`, which the cloud never reads as a pass. */
+export const MAX_CONFLICT_ATTEST_PATHS = 100;
+/**
+ * D#519 MQ4-e2-c1 (C18): what a runner says about the end of a merge-conflict round: closed facts about the result, computed in its mirror against the anchors the cloud signed in the job.
+ * Paths only (the detail-path rules), never content, a diff, a message or an author. The cloud accepts it only for a run it issued whose signed job carries `conflict_round`, whose round
+ * row it holds, and only from a runner that kept `conflict_facts_v1`; nothing here is a verdict.
+ */
+export const ConflictAttestation = z
+  .object({
+    head: gitSha,
+    // One parent (a commit that is not a merge) or two; the cloud's judge reads anything but a merge of the signed anchors as a stop.
+    parents: z.array(gitSha).min(1).max(2),
+    from_sha: gitSha,
+    base_sha: gitSha,
+    history: z.enum(["descendant", "not"]),
+    pushed_by_round: z.boolean(),
+    second_parent_on_default: z.boolean(),
+    still_conflicting: z.enum(["yes", "no", "unknown"]),
+    touched_paths: z.array(conflictPath).max(MAX_CONFLICT_ATTEST_PATHS).refine((ps) => new Set(ps).size === ps.length, "a path is named once"),
+    truncated: z.boolean(),
+  })
+  .strict();
+export type ConflictAttestation = z.infer<typeof ConflictAttestation>;
+
 /** `done` is a hint. The cloud checks GitHub itself; `agentOutput` is stored as advisory only. */
 export const DoneMessage = z
   .object({
@@ -687,6 +716,8 @@ export const DoneMessage = z
       .optional(),
     context_ledger: ContextLedgerBody.optional(),
     check: DoneCheck.optional(),
+    // D#519 MQ4-e2-c1: only from a runner at protocol 14 that kept `conflict_facts_v1`, and only at the end of a conflict round (the cloud checks both; anything else is a 400).
+    conflict_attest: ConflictAttestation.optional(),
   })
   .strict();
 

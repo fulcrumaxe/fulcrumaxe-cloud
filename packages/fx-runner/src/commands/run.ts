@@ -41,6 +41,7 @@ import { createGitPath } from "../daemon/gitPath.js";
 import { createGitPathA } from "../daemon/gitPathA.js";
 import { createSandboxedPurge } from "../daemon/resumePurgeSandbox.js";
 import { createJobHandler } from "../daemon/jobHandler.js";
+import { computeConflictAttestation } from "../daemon/conflictAttest.js";
 import { createPlaneBaseLedger, createPlanePushHook } from "../daemon/planePush.js";
 import { createPlanePushGithub } from "../daemon/planePushGithub.js";
 import { createPlaneMergeHandler } from "../daemon/planeMerge.js";
@@ -369,6 +370,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       say: (line) => ctx.out(line),
     });
     const handle = createJobHandler({
+      // D#519 MQ4-e2-c1: a conflict round's attestation; the handler is handed the function and never the log it reads.
+      conflictAttest: (input) => computeConflictAttestation({ ...input, scratchRoot: path.join(ctx.stateDir, "conflict-attest"), pushLog }),
       planePush,
       // D#6 CARD-OOM-CAUSE-WORDS: the scope's own cap goes on a `resource_limit` end, to a cloud whose hello kept `memory_limit_v1` (set below, once the hello is answered).
       ...(limits?.memoryCap === undefined ? {} : { memoryLimitBytes: (runId: string) => limits.memoryCap?.(runId), sendMemoryLimit: () => memoryLimitAccepted }),

@@ -100,7 +100,7 @@ describe("D#6 R-CHK-3d: the optional reason", () => {
 describe("D#6 CHECK-FAILFILES-TO-CLOUD: the failing test files on done", () => {
   it("declares protocol 13 as the first version that sends them, and an older runner's body without them is as before", () => {
     expect(CHECK_FAILED_FILES_MIN_PROTOCOL).toBe(13);
-    expect(CURRENT_PROTOCOL_VERSION).toBe(CHECK_FAILED_FILES_MIN_PROTOCOL);
+    expect(CURRENT_PROTOCOL_VERSION).toBeGreaterThanOrEqual(CHECK_FAILED_FILES_MIN_PROTOCOL);
     expect(done({ check: CHECK }).success).toBe(true);
     expect(readCheckFailedFiles(undefined, undefined)).toEqual({ ok: true, value: null });
   });

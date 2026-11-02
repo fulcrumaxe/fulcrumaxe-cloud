@@ -60,7 +60,7 @@ describe("boundary: what the source may import, and every workspace import is de
   // run-end hook. Only this exact subpath; the root never exports them (runner-protocol's root-closure test), and the files below are the only importers.
   const PLANE_PUSH_SUBPATH = "@fulcrumaxe/runner-protocol/planePush";
   // D#694 B7-1: planePushGithub.ts imports the two queue documents it sends (runner-protocol keeps the strings; a test in @fx/github holds them equal to the pinned originals).
-  const PLANE_PUSH_IMPORTERS = ["src/commands/run.ts", "src/daemon/conflictFacts.ts", "src/daemon/planeMerge.ts", "src/daemon/planePush.ts", "src/daemon/planePushGithub.ts"];
+  const PLANE_PUSH_IMPORTERS = ["src/commands/run.ts", "src/daemon/conflictAttest.ts", "src/daemon/conflictFacts.ts", "src/daemon/planeMerge.ts", "src/daemon/planePush.ts", "src/daemon/planePushGithub.ts"];
 
   it("src imports only itself, node built-ins, the protocol package and the TUF client", () => {
     const violations: string[] = [];
@@ -150,7 +150,7 @@ describe("G4: nothing secret in the source, the tests or the README", () => {
 describe("D#519 MQ4-RUNNER-PUSH-LOG: the push log is local-only", () => {
   // The only files that touch the log. None builds a message to the cloud from it; the cloud client, the job handler and the protocol never see it. D#519 MQ4-e2-a: the conflict facts READ it (`records()`),
   // and the merge handler hands it over; what leaves the machine is a closed verdict and paths, never a record.
-  const LOG_USERS = ["src/commands/run.ts", "src/daemon/conflictFacts.ts", "src/daemon/gitPath.ts", "src/daemon/gitPathA.ts", "src/daemon/planeMerge.ts", "src/daemon/push.ts", "src/daemon/pushLog.ts"];
+  const LOG_USERS = ["src/commands/run.ts", "src/daemon/conflictAttest.ts", "src/daemon/conflictFacts.ts", "src/daemon/gitPath.ts", "src/daemon/gitPathA.ts", "src/daemon/planeMerge.ts", "src/daemon/push.ts", "src/daemon/pushLog.ts"];
 
   it("no source file outside the wiring names the log's file or reads its entries", () => {
     const users = sourceFiles.filter((f) => /PUSH_LOG_FILE|pushLog|PushLog|push-log/.test(readFileSync(f, "utf8"))).map((f) => path.relative(PACKAGE_DIR, f).split(path.sep).join("/"));
@@ -160,6 +160,13 @@ describe("D#519 MQ4-RUNNER-PUSH-LOG: the push log is local-only", () => {
   it("the log module sends nothing: no network, no client, no cloud import", () => {
     const text = readFileSync(path.join(PACKAGE_DIR, "src", "daemon", "pushLog.ts"), "utf8");
     expect([...text.matchAll(IMPORT_SPECIFIER)].map((m) => m[1])).toEqual(["node:crypto", "node:fs", "node:path", "./ledger.js"]);
+  });
+
+  it("D#519 MQ4-e2-c1: the conflict attestation only reads the log (records()), and the job handler never sees it: it is handed a function", () => {
+    const text = readFileSync(path.join(PACKAGE_DIR, "src", "daemon", "conflictAttest.ts"), "utf8");
+    expect(text).not.toMatch(/\.append\(|\.close\(|sinkFor|PUSH_LOG_FILE/);
+    expect(text).toContain("records()");
+    expect(readFileSync(path.join(PACKAGE_DIR, "src", "daemon", "jobHandler.ts"), "utf8")).not.toMatch(/PUSH_LOG_FILE|pushLog|PushLog|push-log/);
   });
 
   it("the conflict facts only read the log: they never append, and what they return holds no record field", () => {

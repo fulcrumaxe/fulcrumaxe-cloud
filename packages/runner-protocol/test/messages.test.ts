@@ -312,7 +312,7 @@ describe("the other messages", () => {
     expect(done({ session_id: "7f0c1d2e-aaaa-bbbb-cccc-0123456789ab" })).toBe(true);
     for (const bad of ["", "a b", "s;ls", "x".repeat(129), 5, null]) expect(done({ session_id: bad }), String(bad)).toBe(false);
     // Additive: every key the message had before is still there.
-    expect(Object.keys(RUNNER_MESSAGES.done.shape).sort()).toEqual(["agentOutput", "check", "context_ledger", "lease_generation", "run_id", "session_id"]);
+    expect(Object.keys(RUNNER_MESSAGES.done.shape).sort()).toEqual(["agentOutput", "check", "conflict_attest", "context_ledger", "lease_generation", "run_id", "session_id"]);
   });
 
   it("done's advisory agentOutput is bounded", () => {

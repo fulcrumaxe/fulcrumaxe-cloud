@@ -4,7 +4,7 @@
  * list is never sent and a reply it does not describe is never believed: it is an error with a closed code.
  */
 import {
-  ClaimMessage, ClaimRateLimitedReply, HelloMessage, HelloReply, ClaimReply, WAKE_CAPABILITY, type WakeGrant, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
+  ClaimMessage, ClaimRateLimitedReply, type ConflictAttestation, HelloMessage, HelloReply, ClaimReply, WAKE_CAPABILITY, type WakeGrant, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
   GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply,
   CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
   PLANE_PUSH_PAIRING_PATH, PLANE_PUSH_REPORT_PATH, PLANE_PUSH_TOKEN_PATH, PlanePushPairingMessage, PlanePushPairingReply, PlanePushReportMessage, PlanePushReportReply, PlanePushTokenMessage, PlanePushTokenReply, type ClaimCapacity, type ContextLedgerWire, type DoneCheck, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
@@ -88,6 +88,8 @@ export interface DoneInput {
   contextLedger?: ContextLedgerWire | undefined;
   /** D#6 R-CHK-2: how the repository's approved check ended. Present only for a job that carried a check. */
   check?: DoneCheck | undefined;
+  /** D#519 MQ4-e2-c1: the end-of-round attestation of a conflict round. Present only for a job whose signed form carried `conflict_round`. */
+  conflictAttest?: ConflictAttestation | undefined;
 }
 
 export interface RunnerClient {
@@ -331,7 +333,7 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
     },
 
     async done(input) {
-      const base = { run_id: input.runId, lease_generation: input.leaseGeneration, ...(input.sessionId === undefined ? {} : { session_id: input.sessionId }), ...(input.check === undefined ? {} : { check: input.check }) };
+      const base = { run_id: input.runId, lease_generation: input.leaseGeneration, ...(input.sessionId === undefined ? {} : { session_id: input.sessionId }), ...(input.check === undefined ? {} : { check: input.check }), ...(input.conflictAttest === undefined ? {} : { conflict_attest: input.conflictAttest }) };
       // The ledger is advisory too: one the protocol refuses is left out, and so is it once an older cloud has refused the field.
       const ledger = input.contextLedger !== undefined && !cloudRefusesLedger ? { context_ledger: input.contextLedger } : {};
       const build = (extra: Record<string, unknown>) => {
