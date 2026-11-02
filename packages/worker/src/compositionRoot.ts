@@ -289,7 +289,7 @@ export interface Worker extends PlanePublish, RunActionFacade, RunnerLeaseFacade
   confirmReversal(input: { principal: ReversalPrincipal; reversalId: string; confirmEstimateUsd: number }): Promise<ReversalOutcome>;
   /** D#7 DP7-2g: a person's retry of a failed compensation, on the same row. */
   retryReversal(input: { principal: ReversalPrincipal; reversalId: string }): Promise<ReversalOutcome>;
-  approveSubItem(input: { principal: { accountId: string; userId: string; tokenId?: string }; workItemId: string; key: string; viaParentApproval?: boolean }): Promise<SubItemApprovalResult>;
+  approveSubItem(input: { principal: { accountId: string; userId: string; tokenId?: string }; workItemId: string; key: string; viaParentApproval?: boolean; idempotencyKey?: string }): Promise<SubItemApprovalResult>;
   /** D#2 SANDBOX-REAPER-1b (C82): the per-account inventory, rebuilt from the provider's list and the run rows. Plain data in and out; for the cron only. */
   sandboxInventory(input: SandboxInventoryInput): Promise<SandboxInventoryResult>;
   close(): Promise<void>;
@@ -544,7 +544,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       sweepParkedStages: stageResume.sweepParkedStages,
       wakeMergeGate: gateReask.wakeMergeGate,
       sweepSetupRequestChecks: async (input) => { const counts = await runSetupRequestCheckSweep({ pool: pools.runnerPool, envSource: input.envSource }); if (!input.planeParity) return counts; const parity = await sweepPlaneParity({ pool: pools.runnerPool, compute: input.planeParity, ...(input.deadlineAt !== undefined ? { deadlineAt: input.deadlineAt } : {}) }); return { ...counts, listed: counts.listed + parity.listed, nextDueAt: [counts.nextDueAt, parity.nextDueAt].reduce<number | null>((a, b) => (a === null ? b : b === null ? a : Math.min(a, b)), null), parity }; },
-      approveSubItem: (input) => approveSubItem({ pool: pools.receiptPool, principal: input.principal, ...(afterReceipt ? { afterReceipt } : {}), ...(options.autoStart?.child ? { child: options.autoStart.child } : {}) }, { workItemId: input.workItemId, key: input.key, ...(input.viaParentApproval === true ? { viaParentApproval: true } : {}) }),
+      approveSubItem: (input) => approveSubItem({ pool: pools.receiptPool, principal: input.principal, ...(afterReceipt ? { afterReceipt } : {}), ...(options.autoStart?.child ? { child: options.autoStart.child } : {}) }, { workItemId: input.workItemId, key: input.key, ...(input.viaParentApproval === true ? { viaParentApproval: true } : {}), ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}) }),
       requestReversal: (input) => requestReversalFor({ pool: pools.receiptPool, planner: createReversalPlanner(pools.receiptPool) }, input.principal, { receiptId: input.receiptId, ...(input.confirmEstimateUsd === undefined ? {} : { confirmEstimateUsd: input.confirmEstimateUsd }) }),
       retryReversal: (input) => retryReversalFor({ pool: pools.receiptPool, planner: createReversalPlanner(pools.receiptPool) }, input.principal, { reversalId: input.reversalId }),
       confirmReversal: (input) => confirmReversalFor({ pool: pools.receiptPool, planner: createReversalPlanner(pools.receiptPool) }, input.principal, { reversalId: input.reversalId, confirmEstimateUsd: input.confirmEstimateUsd }),

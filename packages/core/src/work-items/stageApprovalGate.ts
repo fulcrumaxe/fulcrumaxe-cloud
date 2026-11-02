@@ -59,11 +59,14 @@ export async function stageApprovalGate<H extends { sha: string }>(
   head?: () => Promise<{ skip: string } | { head: H }>,
 ): Promise<StageGateResult<H>> {
   const item = (
-    await client.query<{ stage: string; provenance: string; halted: boolean; halt_epoch: number; version: number | null; spec_at: Date | null; is_child: boolean; planned_count: number | null }>(
+    await client.query<{ stage: string; provenance: string; halted: boolean; halt_epoch: number; version: number | null; spec_at: Date | null; changed_at: Date | null; is_child: boolean; planned_count: number | null }>(
       // A planned PR child's Spec is the version its parent planned for it (the worker's SPEC_OF_ITEM_SQL); any other item's is its own.
       `SELECT w.stage, w.provenance, w.halted_at IS NOT NULL AS halted, w.halt_epoch, (w.planned_pr_key IS NOT NULL AND w.parent_id IS NOT NULL) AS is_child,
               (SELECT max(s.version) FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM}) AS version,
               (SELECT max(s.created_at) FROM spec_versions s WHERE s.account_id = w.account_id AND ${SPEC_OF_ITEM}) AS spec_at,
+              -- When the Spec last changed AFTER its first version. A follow-up child's launch is its approval, and the first version is the short Spec that launch wrote (D#483 C29-2b-2):
+              -- a later one (a re-spec) is a different Spec, as for any item. Any other item: the same time as spec_at.
+              (SELECT max(s.created_at) FROM spec_versions s WHERE s.account_id = w.account_id AND ${SPEC_OF_ITEM} AND (w.follow_up_id IS NULL OR s.version > 1)) AS changed_at,
               (SELECT CASE WHEN jsonb_typeof(s.frontmatter -> 'planned_prs') = 'array' THEN jsonb_array_length(s.frontmatter -> 'planned_prs') ELSE 0 END FROM spec_versions s
                 WHERE ${readsOwnSpecSql('w')} AND s.account_id = w.account_id AND s.work_item_id = w.id AND s.erased_at IS NULL ORDER BY s.version DESC LIMIT 1) AS planned_count
          FROM work_items w WHERE w.id = $1 AND w.account_id = $2`,
@@ -107,7 +110,7 @@ export async function stageApprovalGate<H extends { sha: string }>(
   const who = SESSION_RE.exec(approval.requested_by);
   if (!who || approval.principal_kind !== 'session') return { skip: 'no_approval' };
   // The Spec the person approved is the newest one: one written after the approval was performed is a different Spec, and the person decides about it.
-  if (entry.needsSpec && item.spec_at !== null && item.spec_at.getTime() > approval.finished_at.getTime()) return { skip: 'spec_changed' };
+  if (entry.needsSpec && item.changed_at !== null && item.changed_at.getTime() > approval.finished_at.getTime()) return { skip: 'spec_changed' };
   const member = await client.query<{ role: string }>('SELECT role FROM account_members WHERE account_id = $1 AND user_id = $2', [accountId, who[1]]);
   const role = member.rows[0]?.role;
   if (role !== 'owner' && role !== 'admin') return { skip: 'approver_gone' };

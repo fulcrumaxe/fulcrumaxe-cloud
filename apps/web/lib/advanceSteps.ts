@@ -37,7 +37,7 @@ export type LoadedAdvance =
   /** An item at `needs_human` that still has its Spec ("Build again"): a fresh build, after a look for a pull request that is still open for the issue's branch (the repository facts are for that lookup). */
   | ({ ok: true; mode: "rebuild"; number: number; specVersion: number | null; repoId: string; owner: string; name: string; reviewHold?: boolean; branch: string } & AdvancePrSource)
   /** A small, bug or doc item the pipeline triaged (no panel) that has no Spec yet: the project manager's short Spec, from the issue as it reads NOW (an edited issue is what a re-approval wants). */
-  | { ok: true; mode: "light"; category: string; title: string; body: string }
+  | { ok: true; mode: "light"; category: string; title: string; body: string; /** D#483 S5-b2d-2b: a follow-up child, started by its launch: the text is the follow-up row's, and the start ask was the launch's. */ followUp?: true }
   /** An item discussed by the pipeline that has no Spec yet (a panel or Spec step that failed): the panel and the Spec run again. */
   | { ok: true; mode: "spec" }
   /** An item at `in_progress` with no run live: its build ended and nobody recorded what came of it. Look for the pull request (found: the review; none: Needs human, against `executorRunId`). */
@@ -85,6 +85,11 @@ export async function loadBody(worker: AdvanceWorker | null, reader: IssueReader
   // stage and state can be advanced and by what. A later stage adds a mode here and a branch in the workflow.
   const verdict = advanceActionFor({ stage: item.stage, discussion_id: item.hasDiscussion ? "d" : null, kind: item.kind, has_spec: item.hasSpec, no_verdict_hold: item.reviewHold === true, ...(item.child === true ? { child: true } : {}), ...(item.followUp === true ? { follow_up: true } : {}) });
   if (!verdict.ok) return { ok: false, reason: "not_advanceable" };
+  // D#483 S5-b2d-2b: a follow-up child has no issue of its own (`ghNumber` is its root's): its short Spec is written from the follow-up it was made from, never from the root's issue.
+  if (verdict.action === "light_spec" && item.followUp === true) {
+    if (item.followUpText === undefined) return { ok: false, reason: "child_orphaned" };
+    return { ok: true, mode: "light", category: item.kind ?? "", title: item.followUpText.title, body: item.followUpText.why, followUp: true };
+  }
   if (fromProposal !== null) {
     // The proposal's own title and summary, read from the database in the item's tenant transaction: no GitHub call, no label rule. The text is third-party
     // (it can come from an outside author's issue), so it goes to every prompt through `sanitize` like an issue body does; the approval made the item

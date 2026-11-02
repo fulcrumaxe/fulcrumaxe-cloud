@@ -651,7 +651,8 @@ export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promis
   }
   // A small, bug or doc item the pipeline triaged earlier and has no Spec: the short Spec again, from the issue as it reads now.
   if (loaded.mode === "light") {
-    const gate = await startGatePhase(args, workItemId, { mode: "light", category: loaded.category, cameInAs: null });
+    // A follow-up child's launch was the start decision (the dial's receipt or a person's click), so the start gate does not ask a second time.
+    const gate = loaded.followUp === true ? null : await startGatePhase(args, workItemId, { mode: "light", category: loaded.category, cameInAs: null });
     return gate ?? lightPhase(args, workItemId, { category: loaded.category, title: loaded.title, body: loaded.body }, firstAttemptOf(args));
   }
 

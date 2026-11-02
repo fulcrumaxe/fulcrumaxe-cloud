@@ -12,6 +12,7 @@ import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
 import { activityResponseSchema, workItemActivityRoutes } from '../src/routes/work-item-activity.js';
 import { seedAccountWithMember } from './helpers/seed.js';
+import { withTenant } from '@fx/core/src/tenancy/withTenant.js';
 
 const FX_SESSION_SECRET = 's'.repeat(32);
 
@@ -499,6 +500,30 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       expect(await noticeOf(accountId, userId, itemId)).toBeNull();
       await admin.query(`UPDATE agent_runs SET status = 'succeeded' WHERE id = $1`, [live]);
       expect((await noticeOf(accountId, userId, itemId))!.kind).toBe('spec_refused');
+    });
+
+    it('a follow-up child\'s card (D#483 S5-b2d-2b): a not-feasible stop and a failed short Spec read as fixed sentences that name no issue and no GitHub; too large keeps its own; another item is unchanged', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin, { role: 'owner' });
+      const { itemId: parent } = await seedItem(accountId, { stage: 'triaged' });
+      const followUp = (await admin.query<{ id: string }>(
+        `INSERT INTO work_item_follow_ups (account_id, work_item_id, source_role, title, why, title_key, disposition) VALUES ($1, $2, 'code-reviewer', 'Add a retry', 'why', $3, 'child') RETURNING id`,
+        [accountId, parent, randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '')])).rows[0]!.id;
+      const child = await withTenant(appUserPool, accountId, userId, async (c) => (await c.query<{ o_child_id: string }>('SELECT * FROM follow_up_child_create($1)', [followUp])).rows[0]!.o_child_id);
+      // not feasible: the project manager's reason is model text and is not shown; the notice is the fixed code
+      await seedRun(accountId, child, { role: 'project-manager', status: 'succeeded', createdAt: '2026-10-03T10:00:00Z', envelope: { feasible: false, reason: 'Edit the issue on GitHub.' } });
+      expect(await noticeOf(accountId, userId, child)).toEqual({ kind: 'spec_refused', reason: 'follow_up_not_feasible' });
+      // a short Spec that did not publish (a stop by the Spec step): the retry code, whatever the refusal was
+      await admin.query(`DELETE FROM agent_runs WHERE work_item_id = $1`, [child]);
+      const stop = (code: string, key: string) =>
+        admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'stopped', $3, $4)`, [accountId, child, code, key]);
+      await stop('invalid_spec_output', 'light:f1');
+      expect(await noticeOf(accountId, userId, child)).toEqual({ kind: 'spec_refused', reason: 'follow_up_spec_failed' });
+      await stop('follow_up_too_large', 'light:f2');
+      expect(await noticeOf(accountId, userId, child)).toEqual({ kind: 'spec_refused', reason: 'follow_up_too_large' });
+      // an ordinary item at Triaged is unchanged
+      const { itemId: plain } = await seedItem(accountId, { stage: 'triaged' });
+      await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'stopped', 'invalid_spec_output', 'light:p1')`, [accountId, plain]);
+      expect(await noticeOf(accountId, userId, plain)).toEqual({ kind: 'spec_refused', reason: 'invalid_spec_output' });
     });
 
     it('spec_refused: a Spec writer run that failed with empty_agent_output or clone_failed shows that code at Triaged; another code, another role or a live run shows none', async () => {

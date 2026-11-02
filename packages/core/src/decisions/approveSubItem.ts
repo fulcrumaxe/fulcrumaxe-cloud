@@ -5,7 +5,7 @@ import { getCurrentDialSetting } from '@fx/db/src/decisions.js';
 import { DIAL_VERSION_CATALOGUE_DEFAULT, writeSubItemApprovalReceipt } from '@fx/db/src/receiptWriter.js';
 import { CHECK_KEY_RE, checkKeyOf } from './fixRoundGate.js';
 import { runAfterReceipt, type AfterReceiptHook } from './receiptHook.js';
-import { ChildLaunchRefusal, fileChildLaunch, findPlannedChild, prepareChildLaunch, type ChildLaunchCode, type ChildLaunchDeps } from './childLaunch.js';
+import { ChildLaunchRefusal, fileChildLaunch, findFollowUpChild, findPlannedChild, prepareChildLaunch, type ChildLaunchCode, type ChildLaunchDeps } from './childLaunch.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { reviewFixRoundsSql } from '../work-items/driverEvents.js';
 import { VERDICT_ROLES } from '../work-items/verdictRoles.js';
@@ -65,6 +65,8 @@ export interface SubItemApprovalInput {
    * planned PR key: the receipt then names that approval (`approval_id`), so it is told apart from a card click.
    */
   viaParentApproval?: boolean;
+  /** The client's Idempotency-Key of a follow-up child's own Approve: it becomes the key of the advance request the launch files. */
+  idempotencyKey?: string;
 }
 export interface SubItemApprovalResult {
   receiptId: string;
@@ -127,8 +129,8 @@ export async function approveSubItemIn(client: PoolClient, who: { accountId: str
       specOwnerId = identity.identity.specOwnerId; // the parent for a planned child, the follow-up child itself for a follow-up
     }
   }
-  // `fu-` is the follow-up launch's key space (D#483 S5-b2d-2b): nothing launches one yet, and it must never be read as a planned PR key.
-  if (input.key.startsWith('fu-')) throw new SubItemApprovalError('invalid_key');
+  // `fu-` is the follow-up launch's key space (D#483 S5-b2d-2b): it names a follow-up child of this item and is never read as a planned PR key.
+  const followUpKey = input.key.startsWith('fu-');
   const spec = (await client.query<{ id: string }>(
     isChildRound
       ? 'SELECT id FROM spec_versions WHERE account_id = $1::uuid AND id = $3::uuid AND work_item_id = $2::uuid AND erased_at IS NULL'
@@ -144,11 +146,13 @@ export async function approveSubItemIn(client: PoolClient, who: { accountId: str
   // later count when that round arrives.
   // A planned PR key names a child of this parent (migration 0919). Its launch is checked before anything is written: any refusal here throws, and the whole
   // approval (the receipt included) rolls back, so a refused Approve leaves nothing. Check 5 (a sibling that has not merged) is not a block for a person.
-  const childId = input.key.startsWith('fix-') || input.key.startsWith('check-') ? null : await findPlannedChild(client, accountId, input.workItemId, input.key);
+  const childId = roundKey ? null : followUpKey ? await findFollowUpChild(client, accountId, input.workItemId, input.key) : await findPlannedChild(client, accountId, input.workItemId, input.key);
+  // A `fu-` key that names no follow-up child of this item is refused: it is not a sub-item key of any other kind, so no receipt may be written for it.
+  if (followUpKey && childId === null) throw new SubItemApprovalError('invalid_key');
   let childPlan: { launch: boolean } | null = null;
   if (childId !== null) {
     try {
-      childPlan = await prepareChildLaunch(client, { accountId, childId, deps: childDeps });
+      childPlan = await prepareChildLaunch(client, { accountId, childId, deps: childDeps, followUp: followUpKey });
     } catch (err) {
       if (err instanceof ChildLaunchRefusal) throw new SubItemApprovalError(err.code as ChildLaunchCode & SubItemApprovalErrorCode);
       throw err;
@@ -210,7 +214,7 @@ export async function approveSubItemIn(client: PoolClient, who: { accountId: str
   let childLaunchedId: string | null = null;
   if (childId !== null && childPlan?.launch === true) {
     try {
-      advanceActionId = await fileChildLaunch(client, { accountId, childId, holdSiblings: input.viaParentApproval === true });
+      advanceActionId = await fileChildLaunch(client, { accountId, childId, holdSiblings: input.viaParentApproval === true, ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}) });
     } catch (err) {
       if (err instanceof ChildLaunchRefusal) throw new SubItemApprovalError(err.code as ChildLaunchCode & SubItemApprovalErrorCode);
       throw err;

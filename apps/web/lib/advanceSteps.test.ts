@@ -60,6 +60,30 @@ describe("loadBody: every refusal is data with a fixed code", () => {
   });
 });
 
+describe("loadBody: a follow-up child is loaded for its short Spec from the follow-up row (D#483 S5-b2d-2b)", () => {
+  const FOLLOW: AdvanceItem = { ...ITEM_OK, stage: "triaged", ghNumber: 41, branch: "fx/41-fu-0123456789ab", kind: "small", child: true, followUp: true, followUpText: { title: "Add a retry", why: "the sync drops writes" } };
+  const withItem = (over: Partial<AdvanceItem>) => worker({ advanceLoadItem: async (): Promise<AdvanceItem | null> => ({ ...FOLLOW, ...over }) });
+
+  it("takes the title and why from the follow-up row, reads no GitHub issue (the root's number is not its issue), and says it is a follow-up", async () => {
+    const read = vi.fn(reader(issue({ title: "ROOT ISSUE", body: "root body" })));
+    const out = await loadBody(withItem({}), read, ACCOUNT, ITEM);
+    expect(out).toEqual({ ok: true, mode: "light", category: "small", title: "Add a retry", body: "the sync drops writes", followUp: true });
+    expect(read).not.toHaveBeenCalled();
+    // it needs no reader at all
+    expect(await loadBody(withItem({}), null, ACCOUNT, ITEM)).toMatchObject({ ok: true, mode: "light", followUp: true });
+  });
+
+  it("a follow-up child whose follow-up row cannot be read is refused as orphaned, and never falls back to the root's issue", async () => {
+    const read = vi.fn(reader(issue()));
+    expect(await loadBody(withItem({ followUpText: undefined }), read, ACCOUNT, ITEM)).toEqual({ ok: false, reason: "child_orphaned" });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("past triaged it is a build like any child, not a light Spec", async () => {
+    expect(await loadBody(withItem({ stage: "spec_ready", hasSpec: true, specVersion: 1 }), null, ACCOUNT, ITEM)).toMatchObject({ ok: true, mode: "build", number: 41 });
+  });
+});
+
 describe("loadBody: a triaged small, bug or doc item without a Spec is loaded for the short Spec", () => {
   const TRIAGED_LIGHT: AdvanceItem = { ...ITEM_OK, stage: "triaged", hasDiscussion: true, kind: "bug", hasSpec: false };
   const withItem = (over: Partial<AdvanceItem>) => worker({ advanceLoadItem: async (): Promise<AdvanceItem | null> => ({ ...TRIAGED_LIGHT, ...over }) });

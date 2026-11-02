@@ -47,13 +47,22 @@ export interface AdvanceFacts {
    */
   child?: boolean;
   /**
-   * D#483 S5-b2d-2a: the item is a follow-up child (`work_items.follow_up_id` is set). It has no discussion, no category from text and no Spec, so it never reaches
-   * triage: from `triaged` it answers `FOLLOW_UP_NOT_STARTED` until a later release starts it. Absent or false: every other item, as before.
+   * D#483 S5-b2d-2a: the item is a follow-up child (`work_items.follow_up_id` is set). It has no discussion and no category from text, so it never reaches triage: from
+   * `triaged` its action is `light_spec` (its own short Spec), whatever `child` says (it carries a key too), or `FOLLOW_UP_NOT_STARTED` while its start is not supported.
+   * Absent or false: every other item, as before.
    */
   follow_up?: boolean;
+  /** Tests only: the value of `FOLLOW_UP_CHILD_START_SUPPORTED` to use instead of the constant. */
+  follow_up_start_supported?: boolean;
 }
 
-/** The one sentence a follow-up child answers while its start does not exist yet. */
+/**
+ * D#483 S5-b2d-2b: whether a follow-up child can be started (the launch exists). The producer makes children only while this is true, "Make it an item" is open only
+ * while it is true, and a follow-up child's `triaged` entry answers `FOLLOW_UP_NOT_STARTED` while it is false. It is code, not a setting. Pipeline re-exports it.
+ */
+export const FOLLOW_UP_CHILD_START_SUPPORTED = true;
+
+/** The one sentence a follow-up child answers while its start is not supported. */
 export const FOLLOW_UP_NOT_STARTED = 'follow-up items start in a later release';
 
 interface StageRule {
@@ -88,8 +97,8 @@ const RULES: Readonly<Record<string, StageRule>> = Object.freeze({
   // Or, when it already did and the kind has no panel (small, bug, doc) and there is no Spec yet: the short Spec again. That is how
   // a request the project manager judged not feasible, or a short-Spec step that failed, is tried again after the issue was edited.
   triaged: {
-    action: (f) => (f.child === true ? 'build' : f.follow_up === true ? 'light_spec' : f.discussion_id !== null && isLight(f) ? 'light_spec' : 'triage'),
-    unmet: (f) => (f.follow_up === true ? FOLLOW_UP_NOT_STARTED : f.child === true ? childBuildUnmet(f) : f.discussion_id === null || isLight(f) ? null : 'work item is already triaged'),
+    action: (f) => (f.follow_up === true ? 'light_spec' : f.child === true ? 'build' : f.discussion_id !== null && isLight(f) ? 'light_spec' : 'triage'),
+    unmet: (f) => (f.follow_up === true ? ((f.follow_up_start_supported ?? FOLLOW_UP_CHILD_START_SUPPORTED) ? null : FOLLOW_UP_NOT_STARTED) : f.child === true ? childBuildUnmet(f) : f.discussion_id === null || isLight(f) ? null : 'work item is already triaged'),
   },
   // Discussed by the pipeline but no Spec yet: a panel or a Spec step that failed (or was cut short) leaves the item
   // here, and approving it again runs the panel and the Spec once more. Only a kind with a panel qualifies. An item

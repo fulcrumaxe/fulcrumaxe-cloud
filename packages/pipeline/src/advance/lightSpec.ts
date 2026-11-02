@@ -96,6 +96,9 @@ export async function publishLightSpec(pool: Pool, accountId: string, workItemId
     // A halted item gets no Spec from the pipeline: nothing was written.
     if (err instanceof WorkItemHaltedError) return { status: "refused", reason: "item_halted" };
     const code = (err as { code?: unknown })?.code;
+    // D#483 S5-b2d-2b: the table above was read and was fine, so this refusal is the store's own: an item with a planned PR key never stores a Planned PRs table. The only keyed
+    // item that gets a short Spec is a follow-up child, so a split proposed for it stops it as too large (nothing is published, so nothing builds).
+    if (code === "invalid_planned_prs") return { status: "refused", reason: "follow_up_too_large" };
     // fx-swallow-ok: the refusal is returned as a fixed code and recorded by the caller; the error's text is not kept
     return { status: "refused", reason: typeof code === "string" && CODE.test(code) ? code : "publish_failed" };
   }

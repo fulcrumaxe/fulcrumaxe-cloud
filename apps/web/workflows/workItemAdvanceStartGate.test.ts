@@ -215,6 +215,20 @@ describe("the other entries: the short Spec, the spec step and the build", () =>
     expect(w.advanceStartRun.mock.calls.map((c) => c[0].step)).toEqual([expect.stringMatching(/^light-spec:/)]);
   });
 
+  it("D#483 S5-b2d-2b: a follow-up child's short Spec never asks the start gate (its launch was the start decision), and is written from the follow-up's own text, not the root's issue", async () => {
+    const followUpItem: AdvanceItem = { ...ITEM_OK, kind: "small", child: true, followUp: true, followUpText: { title: "Add a retry", why: "the sync drops writes" } };
+    const w = build({ item: followUpItem });
+    await workItemAdvanceWorkflow(ARGS);
+    expect(w.advanceStartGate).not.toHaveBeenCalled();
+    expect(w.advanceStartRun).toHaveBeenCalledTimes(1);
+    const req = w.advanceStartRun.mock.calls[0]![0];
+    expect(req.step).toMatch(/^light-spec:/);
+    expect(req.prompt).toContain("Add a retry");
+    expect(req.prompt).toContain("the sync drops writes");
+    // the root's issue (title "T", body "B") is never the input
+    expect(req.prompt).not.toContain("TITLE:\nT\n");
+  });
+
   it("the resumed advance after an answered small start re-enters at the short Spec and the gate finds the pair started (no second ask)", async () => {
     const w = build({ item: lightItem, gate: () => ({ proceed: true, how: "already_started" }) });
     await workItemAdvanceWorkflow(ARGS);

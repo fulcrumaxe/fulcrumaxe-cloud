@@ -584,6 +584,8 @@ export interface AdvanceItem extends AdvancePrSource {
   child?: true;
   /** D#483 S5-b2d-2a: a follow-up child (`work_items.follow_up_id` is set). It is never triaged: the stage table answers a fixed sentence for it. */
   followUp?: true;
+  /** D#483 S5-b2d-2b: a follow-up child's own title and why, read from the follow-up row it was made from (model text, untrusted: the short Spec's prompt fences it). The child has no issue of its own. */
+  followUpText?: { title: string; why: string };
   /** D#483 S5-b2b: set when the item is not a planned PR child and its newest Spec plans two or more pull requests: the item itself is never built, its children are. */
   splits?: true;
   /** D#483 S5-b2b: set when the item is not a planned PR child and already has planned PR children. A re-spec to a single pull request must not turn such a parent into a build: its children stay, and a person decides. */
@@ -1032,9 +1034,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
 
   async function loadItemRow(accountId: string, workItemId: string): Promise<Omit<AdvanceItem, keyof AdvancePrSource> | null> {
     return withTenant(runnerPool, accountId, async (client) => {
-      const r = await client.query<{ child: boolean; follow_up: boolean; planned_pr_key: string | null; stage: string; provenance: string; repo_id: string | null; discussion_id: string | null; gh_owner: string | null; gh_name: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; executor_run_id: string | null; planned_count: number | null; has_children: boolean; check_failed_run_id: string | null; p_id: string | null; p_title: string | null; p_summary: string | null }>(
+      const r = await client.query<{ child: boolean; follow_up: boolean; fu_title: string | null; fu_why: string | null; planned_pr_key: string | null; stage: string; provenance: string; repo_id: string | null; discussion_id: string | null; gh_owner: string | null; gh_name: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; executor_run_id: string | null; planned_count: number | null; has_children: boolean; check_failed_run_id: string | null; p_id: string | null; p_title: string | null; p_summary: string | null }>(
         `SELECT w.stage, w.provenance, w.repo_id, w.discussion_id, r.gh_owner, r.gh_name,
-                CASE WHEN w.planned_pr_key IS NULL THEN d.kind ELSE w.kind END AS kind, (w.planned_pr_key IS NOT NULL) AS child, (w.follow_up_id IS NOT NULL) AS follow_up, w.planned_pr_key,
+                CASE WHEN w.planned_pr_key IS NULL THEN d.kind ELSE w.kind END AS kind, (w.planned_pr_key IS NOT NULL) AS child, (w.follow_up_id IS NOT NULL) AS follow_up, fu.title AS fu_title, fu.why AS fu_why, w.planned_pr_key,
                 (SELECT ar.id FROM agent_runs ar WHERE ar.account_id = w.account_id AND ar.work_item_id = w.id AND ar.role = 'executor' ORDER BY ar.created_at DESC, ar.id DESC LIMIT 1) AS executor_run_id,
                 (SELECT x.id FROM (SELECT a.id, a.status, a.account_id FROM agent_runs a WHERE a.account_id = w.account_id AND a.work_item_id = w.id AND a.role = 'executor' ORDER BY a.created_at DESC, a.id DESC LIMIT 1) x
                   WHERE x.status = 'failed'
@@ -1051,6 +1053,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
            LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
            LEFT JOIN discussions d ON d.account_id = w.account_id AND d.id = w.discussion_id
            LEFT JOIN proposals pr ON pr.account_id = w.account_id AND pr.work_item_id = w.id AND pr.state = 'approved'
+           LEFT JOIN work_item_follow_ups fu ON fu.account_id = w.account_id AND fu.id = w.follow_up_id AND fu.child_id = w.id
           WHERE w.id = $1 AND w.account_id = $2`,
         [workItemId, accountId],
       );
@@ -1064,6 +1067,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
             reviewHold,
             ...(row.child ? { child: true } : {}),
             ...(row.follow_up ? { followUp: true as const } : {}),
+            ...(row.follow_up && row.fu_title !== null ? { followUpText: { title: row.fu_title, why: row.fu_why ?? "" } } : {}),
             ...(Number(row.planned_count ?? 0) >= 2 ? { splits: true as const } : {}),
             ...(row.has_children ? { hasChildren: true as const } : {}),
             ...(identity?.ok ? { branch: identity.identity.branch } : {}),

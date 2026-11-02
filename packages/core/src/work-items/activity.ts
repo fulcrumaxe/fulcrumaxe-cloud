@@ -180,6 +180,9 @@ export const LIGHT_SPEC_REFUSAL_CODES: readonly string[] = Object.freeze([
   'planned_prs_too_large',
   'planned_split_missing',
   'planned_split_unflagged',
+  'follow_up_too_large',
+  'follow_up_spec_failed',
+  'follow_up_not_feasible',
   'spec_too_large',
   'item_halted',
   'publish_failed',
@@ -644,8 +647,9 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       auto_merge: boolean | null;
       halted: boolean;
       repo_id: string | null;
+      follow_up: boolean;
     }>(
-      `SELECT w.stage, w.halted_at IS NOT NULL AS halted, w.repo_id, w.discussion_id, w.gh_number, r.gh_owner, r.gh_name,
+      `SELECT w.stage, w.halted_at IS NOT NULL AS halted, w.repo_id, (w.follow_up_id IS NOT NULL) AS follow_up, w.discussion_id, w.gh_number, r.gh_owner, r.gh_name,
               -- The merge gate's own rule (@fx/trust autoMergeAllowed): the JSON boolean true, and for external work also
               -- the JSON boolean false on blockExternalAutoMerge. A string "true" is not true.
               ((r.settings->'autoMerge') = 'true'::jsonb
@@ -745,7 +749,8 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
     if (supersededRoot !== null) {
       notice = { kind: 'superseded', reason: supersededRoot };
     } else if (pm) {
-      notice = { kind: 'not_feasible', reason: safeModelText(pm.reason, ACTIVITY_LIMITS.maxNoticeChars) };
+      // A follow-up child has no issue to edit, and its card shows a fixed sentence in place of the model's reason (D#483 S5-b2d-2b).
+      notice = item.follow_up ? { kind: 'spec_refused', reason: 'follow_up_not_feasible' } : { kind: 'not_feasible', reason: safeModelText(pm.reason, ACTIVITY_LIMITS.maxNoticeChars) };
     } else if (fileListNotice) {
       notice = fileListNotice;
     } else if (waitNotice) {
@@ -755,7 +760,8 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
     } else if (RESUME_REFUSAL_STAGES.includes(item.stage) && (resumeCode = await readResumeRefusal(client, workItemId)) !== null) {
       notice = { kind: 'resume_refused', reason: resumeCode };
     } else if (item.stage === 'triaged' && (refusalCode = await readSpecRefusal(client, workItemId)) !== null) {
-      notice = { kind: 'spec_refused', reason: refusalCode };
+      // A follow-up child has no issue to edit: every refusal but "too large" reads "approve again to retry" (D#483 S5-b2d-2b).
+      notice = { kind: 'spec_refused', reason: item.follow_up && refusalCode !== 'follow_up_too_large' ? 'follow_up_spec_failed' : refusalCode };
     } else if (item.stage === 'needs_human') {
       // Build again was pressed and the driver stopped before starting anything (an open pull request, or GitHub could not be asked):
       // the newest such stop since the item reached Needs a person, by a fixed code.
