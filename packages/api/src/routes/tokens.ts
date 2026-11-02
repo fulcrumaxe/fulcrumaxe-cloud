@@ -194,6 +194,7 @@ export const tokenRoutes: RouteEntry[] = [
     summary: "Revoke a single token (a token principal may only delete itself)",
     principals: ["session", "token"],
     tokenSelfOnly: true,
+    tokens: ["api", "delegation"],
     minRole: "member",
     idempotency: "never",
     rateClass: "write",

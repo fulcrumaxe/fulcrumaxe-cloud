@@ -46,6 +46,7 @@ import { proposalRoutes } from "./proposals.js";
 import { proposalEnvelopeRoutes } from "./proposal-envelopes.js";
 import { envelopeSettingRoutes } from "./envelope-settings.js";
 import { correctionRoutes } from "./corrections.js";
+import { assistantRoutes } from "./assistant.js";
 import { runHandoffRoutes } from "./run-handoff.js";
 import { memoryRoutes } from "./memory.js";
 
@@ -118,6 +119,7 @@ export const ROUTES: RouteEntry[] = [
   ...proposalEnvelopeRoutes,
   ...envelopeSettingRoutes,
   ...correctionRoutes,
+  ...assistantRoutes,
   ...runHandoffRoutes,
   ...memoryRoutes,
 ];

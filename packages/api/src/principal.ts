@@ -17,6 +17,8 @@ export interface Principal {
   /** A session's scopes are unrestricted by definition -- callers should check `role`, not `scopes`, for a session principal. Populated (as the intersection with the creator's current role) for a token principal from API-3b onward. */
   scopes: Scope[];
   tokenId?: string;
+  /** D#597 CC-4: set only on an assistant delegation token -- the one repo it is bound to and the client that asked. */
+  delegation?: { repoId: string; clientId: string };
 }
 
 /**

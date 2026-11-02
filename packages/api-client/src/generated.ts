@@ -4080,6 +4080,65 @@ export interface Operations {
       applied_at: string | null;
     };
   };
+  mintAssistantToken: {
+    path: undefined;
+    query: undefined;
+    body: {
+      repo_id: string;
+      client_id: string;
+    };
+    response: {
+      id: string;
+      token: string;
+      display_hint: string;
+      scopes: Array<"read" | "corrections:write">;
+      repo_id: string;
+      client_id: string;
+      expires_at: string;
+    };
+  };
+  startAssistantLink: {
+    path: undefined;
+    query: undefined;
+    body: {
+      client_id: string;
+    };
+    response: {
+      device_code: string;
+      user_code: string;
+      expires_at: string;
+      interval_seconds: number;
+    };
+  };
+  pollAssistantLink: {
+    path: undefined;
+    query: undefined;
+    body: {
+      device_code: string;
+    };
+    response: {
+      status: "pending" | "expired" | "approved";
+      token?: {
+        token: string;
+        scopes: Array<"read" | "corrections:write">;
+        repo_id: string;
+        client_id: string;
+        expires_at: string;
+        token_id: string;
+      };
+    };
+  };
+  approveAssistantLink: {
+    path: undefined;
+    query: undefined;
+    body: {
+      user_code: string;
+      repo_id: string;
+    };
+    response: {
+      client_id: string;
+    };
+  };
   requestRunHandoff: {
     path: {
       id: string;
@@ -6276,8 +6335,8 @@ export const operations = {
   acceptCorrection: {
     method: "POST",
     path: "/api/v1/corrections/{id}/accept",
-    tokenAccess: false,
-    scope: null,
+    tokenAccess: true,
+    scope: "corrections:write",
     tokenSelfOnly: false,
     idempotency: "optional",
     pathParams: ["id"],
@@ -6287,11 +6346,55 @@ export const operations = {
   rejectCorrection: {
     method: "POST",
     path: "/api/v1/corrections/{id}/reject",
-    tokenAccess: false,
-    scope: null,
+    tokenAccess: true,
+    scope: "corrections:write",
     tokenSelfOnly: false,
     idempotency: "optional",
     pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  mintAssistantToken: {
+    method: "POST",
+    path: "/api/v1/assistant/tokens",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
+  },
+  startAssistantLink: {
+    method: "POST",
+    path: "/api/v1/assistant/link",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
+  },
+  pollAssistantLink: {
+    method: "POST",
+    path: "/api/v1/assistant/link/poll",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
+  },
+  approveAssistantLink: {
+    method: "POST",
+    path: "/api/v1/assistant/link/approve",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
     queryParams: [],
     hasBody: true,
   },

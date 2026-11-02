@@ -4,13 +4,14 @@ import { getRun } from "@fx/core/src/runs/read.js";
 import { listRunEvents } from "@fx/core/src/events/read.js";
 import { verifySession } from "@fx/core/src/auth/session.js";
 import { getSessionEpochAndRevocation } from "@fx/core/src/auth/identity.js";
-import { NotFoundError, ForbiddenError } from "@fx/core/src/tenancy/errors.js";
+import { NotFoundError } from "@fx/core/src/tenancy/errors.js";
 import { reportError } from "@fx/telemetry";
 import { handleApiRequest, pathOf } from "../handler.js";
-import { ApiError, CrossSiteRefusedError, InsufficientScopeError, SessionRequiredError, mapError } from "../errors.js";
+import { ApiError, CrossSiteRefusedError, mapError } from "../errors.js";
 import { principalIdOf, resolvePrincipal, type Principal } from "../principal.js";
 import { enforceTokenRateLimits } from "../ratelimit/limits.js";
 import { PgRateLimitStore, type RateLimitStore } from "../ratelimit/store.js";
+import { assertRouteAccess } from "../access.js";
 import { ROLE_RANK } from "../registry.js";
 import { hashToken } from "../tokens/resolve.js";
 import { EVENT_ROUTE_ACCESS } from "../routes/events.js";
@@ -178,15 +179,7 @@ async function authenticate(req: Request, deps: StreamDeps): Promise<Principal> 
       tokenBucketKey: principalIdOf(principal),
     });
   }
-  if (!EVENT_ROUTE_ACCESS.principals.includes(principal.kind)) {
-    throw new SessionRequiredError();
-  }
-  if (principal.kind === "token" && !principal.scopes.includes(EVENT_ROUTE_ACCESS.scope)) {
-    throw new InsufficientScopeError();
-  }
-  if (ROLE_RANK[principal.role] < ROLE_RANK[EVENT_ROUTE_ACCESS.minRole]) {
-    throw new ForbiddenError(`requires role >= ${EVENT_ROUTE_ACCESS.minRole}, got ${principal.role}`);
-  }
+  assertRouteAccess(principal, EVENT_ROUTE_ACCESS);
   return principal;
 }
 

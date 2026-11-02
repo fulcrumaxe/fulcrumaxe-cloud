@@ -80,7 +80,14 @@ describe('token-inventory: generic session-only and scope enforcement over the r
   }
 
   describe('session-only entries reject an every-scope token', () => {
-    const sessionOnlyEntries = ROUTES.filter((r) => !effectivePrincipals(r).includes('token'));
+    const sessionOnlyEntries = ROUTES.filter((r) => !effectivePrincipals(r).includes('token') && !r.anonymous);
+
+    it('the anonymous set is exactly the two device-link routes', () => {
+      expect(ROUTES.filter((r) => r.anonymous).map((r) => `${r.method} ${r.path}`).sort()).toEqual([
+        'POST /api/v1/assistant/link',
+        'POST /api/v1/assistant/link/poll',
+      ]);
+    });
 
     it('the registry has at least one session-only entry (not vacuous)', () => {
       expect(sessionOnlyEntries.length).toBeGreaterThan(0);
@@ -171,7 +178,7 @@ describe('token-inventory: write scopes open only the routes that declare them',
         'postComment:discussions:write', 'editComment:discussions:write',
         'createDiscussion:discussions:write', 'patchDiscussion:discussions:write', 'reviseDiscussion:discussions:write',
         'setWorkItemPriority:work_items:write', 'rejectProposal:work_items:write', 'restoreProposal:work_items:write', 'withdrawProposalApproval:work_items:write',
-        'listCorrections:read', 'createCorrection:corrections:write',
+        'listCorrections:read', 'createCorrection:corrections:write', 'acceptCorrection:corrections:write', 'rejectCorrection:corrections:write',
       ].sort(),
     );
   });

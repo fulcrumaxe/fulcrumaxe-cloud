@@ -94,6 +94,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "invalid_return_url",
   "invalid_token",
   "invalid_window",
+  "link_already_redeemed",
+  "link_unavailable",
   "model_key_required",
   "never_imported",
   "no_billing_account",

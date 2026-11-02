@@ -22,6 +22,9 @@ interface ResolvedTokenRow {
   revoked_at: string | null;
   token_hash: string;
   creator_role: string | null;
+  delegated: boolean;
+  repo_id: string | null;
+  client_id: string | null;
 }
 
 /** The token text of an `Authorization` header: the one place the `Bearer ` prefix is stripped (the stream re-check reuses it, so it hashes exactly what the first request did). */
@@ -115,5 +118,6 @@ export async function resolveApiToken(
     role: row.creator_role as MembershipRole,
     scopes,
     tokenId: row.id,
+    ...(row.delegated && row.repo_id && row.client_id ? { delegation: { repoId: row.repo_id, clientId: row.client_id } } : {}),
   };
 }

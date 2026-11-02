@@ -388,7 +388,7 @@ describe('D#597 CC-2a: correction routes', () => {
     const t = await tokenFor(o, ['read', 'runs:cancel', 'work_items:write', 'discussions:write', 'corrections:write']);
     const writes = ROUTES.filter((r) => effectivePrincipals(r).includes('token') && r.method !== 'GET');
     expect(writes.map((r) => r.operationId)).toEqual(expect.arrayContaining(['cancelWorkItem', 'setWorkItemPriority', 'createCorrection']));
-    expect(writes.map((r) => r.operationId)).not.toContain('acceptCorrection');
+    // CC-4: accept and reject admit an assistant delegation token (and refuse every ordinary one), so they are walked here too
     await propose(o, item, 'pause', 'again');
     for (const r of writes) {
       const urlPath = r.path.replace('/api/v1', '').replace('{id}', item);

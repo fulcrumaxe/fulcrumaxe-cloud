@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from 'pg';
 import { withTenant } from '../tenancy/withTenant.js';
-import { AccountNotActiveError, ForbiddenError } from '../tenancy/errors.js';
+import { AccountNotActiveError, ForbiddenError, NotFoundError } from '../tenancy/errors.js';
 import { emitDomainEvent } from '../domain-events/emit.js';
 
 /** Local copy of packages/api/src/registry.ts's Scope (C7: every domain module keeps its own copy rather than sharing one type). */
@@ -55,11 +55,15 @@ export interface InsertApiTokenParams {
   name?: string | null;
   scopes: Scope[];
   expiresAt: Date;
+  /** D#597 CC-4: an assistant delegation token, bound to one repo of the account and to the client that asked. The database caps its life at one hour and its scopes at read + corrections:write. */
+  delegation?: { repoId: string; clientId: string };
 }
 
 export interface InsertedApiToken {
   id: string;
   createdAt: string;
+  /** What the database stored: a delegation token's is clipped to an hour from the database's own clock, whatever clock the caller read. */
+  expiresAt: string;
 }
 
 /**
@@ -136,11 +140,17 @@ export async function insertApiToken(pool: Pool, params: InsertApiTokenParams): 
     }
     assertScopesAllowedForRole(params.scopes, role);
 
-    const { rows } = await client.query<{ id: string; created_at: Date }>(
-      `INSERT INTO api_tokens (account_id, created_by, token_hash, display_hint, scopes, expires_at, name)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING id, created_at`,
-      [params.accountId, params.createdBy, params.tokenHash, params.displayHint, params.scopes, params.expiresAt, params.name ?? null],
+    if (params.delegation) {
+      // RLS answers for the repo: another account's repo id is simply not found.
+      const found = await client.query('SELECT 1 FROM repos WHERE id = $1', [params.delegation.repoId]);
+      if (found.rowCount === 0) throw new NotFoundError(`repo ${params.delegation.repoId} not found`);
+    }
+    const { rows } = await client.query<{ id: string; created_at: Date; expires_at: Date }>(
+      `INSERT INTO api_tokens (account_id, created_by, token_hash, display_hint, scopes, expires_at, name, delegated, repo_id, client_id)
+       VALUES ($1, $2, $3, $4, $5, CASE WHEN $8 THEN LEAST($6::timestamptz, now() + interval '1 hour') ELSE $6 END, $7, $8, $9, $10)
+       RETURNING id, created_at, expires_at`,
+      [params.accountId, params.createdBy, params.tokenHash, params.displayHint, params.scopes, params.expiresAt, params.name ?? null,
+        params.delegation !== undefined, params.delegation?.repoId ?? null, params.delegation?.clientId ?? null],
     );
     const row = rows[0]!;
     await client.query('SELECT audit_write_api_tokens($1, $2::jsonb)', [
@@ -149,7 +159,7 @@ export async function insertApiToken(pool: Pool, params: InsertApiTokenParams): 
     ]);
     // API-5c: a hint that the token list changed. Empty payload, and the id stays in subject_id (never on the wire), so a member's stream reveals nothing of anyone's tokens. Last statement before COMMIT (case-A guard).
     await emitDomainEvent(client, { type: 'api_token.created', accountId: params.accountId, subjectId: row.id, payload: {} });
-    return { id: row.id, createdAt: row.created_at.toISOString() };
+    return { id: row.id, createdAt: row.created_at.toISOString(), expiresAt: row.expires_at.toISOString() };
   });
 }
 
