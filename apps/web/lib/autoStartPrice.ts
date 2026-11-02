@@ -1,4 +1,4 @@
-import { CHILD_BUILD_SUPPORTED, childFirstRunUsd, firstRunReservationUsd } from "@fx/pipeline";
+import { CHILD_BUILD_SUPPORTED, FOLLOW_UP_CHILD_START_SUPPORTED, childFirstRunUsd, firstRunReservationUsd } from "@fx/pipeline";
 import { childEnvelopeRoom } from "@fx/spend";
 import type { CreateWorkerOptions } from "@fx/worker";
 
@@ -11,6 +11,8 @@ import type { CreateWorkerOptions } from "@fx/worker";
  */
 export const autoStartOptions: NonNullable<CreateWorkerOptions["autoStart"]> = {
   firstRunUsd: (client, input) => firstRunReservationUsd(client, input),
+  /** D#483 S5-b2d-2a: the follow-up child producer's flag (false until the launch exists). */
+  followUp: { childStartSupported: FOLLOW_UP_CHILD_START_SUPPORTED },
   child: {
     buildSupported: CHILD_BUILD_SUPPORTED,
     room: async (client, input) => {

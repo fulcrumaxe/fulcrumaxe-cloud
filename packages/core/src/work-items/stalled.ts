@@ -191,6 +191,7 @@ interface Row {
   stage: string;
   kind: string | null;
   discussion_id: string | null;
+  follow_up: boolean;
   has_spec: boolean;
   halted: boolean;
   live_run: boolean;
@@ -205,8 +206,8 @@ interface Row {
 }
 
 /** The label for the card's top button at this stage, asked of the stage driver's own table; null when it does not advance here. */
-export function stallActionLabel(stage: string, facts: { discussionId: string | null; kind: string | null; hasSpec: boolean; noVerdictHold: boolean }): string | null {
-  const verdict = advanceActionFor({ stage, discussion_id: facts.discussionId, kind: facts.kind, has_spec: facts.hasSpec, no_verdict_hold: facts.noVerdictHold });
+export function stallActionLabel(stage: string, facts: { discussionId: string | null; kind: string | null; hasSpec: boolean; noVerdictHold: boolean; followUp?: boolean }): string | null {
+  const verdict = advanceActionFor({ stage, discussion_id: facts.discussionId, kind: facts.kind, has_spec: facts.hasSpec, no_verdict_hold: facts.noVerdictHold, ...(facts.followUp === true ? { follow_up: true } : {}) });
   if (!verdict.ok) return null;
   if (stage === 'needs_human') return verdict.action === 'review' ? 'Continue the review' : 'Build again';
   return STALL_ACTION_LABELS[stage] ?? null;
@@ -220,7 +221,7 @@ export async function listStalledItems(ctx: StalledCtx, opts: { limit: number; n
   const rows = await withTenant(ctx.pool, accountId, userId, tokenId, async (client) => {
     await assertActiveMembership(client, accountId, userId);
     const res = await client.query<Row>(
-      `SELECT w.id, w.title, w.stage, d.kind, w.discussion_id,
+      `SELECT w.id, w.title, w.stage, d.kind, w.discussion_id, (w.follow_up_id IS NOT NULL) AS follow_up,
               EXISTS (SELECT 1 FROM spec_versions s WHERE s.work_item_id = w.id AND s.erased_at IS NULL) AS has_spec,
               w.halted_at IS NOT NULL AS halted,
               EXISTS (SELECT 1 FROM agent_runs r WHERE r.work_item_id = w.id AND r.status NOT IN ('succeeded', 'failed', 'timed_out', 'killed_spend', 'refused_spend', 'cancelled')) AS live_run,
@@ -261,7 +262,7 @@ export async function listStalledItems(ctx: StalledCtx, opts: { limit: number; n
       stage: r.stage,
       code: stall.code,
       why: stall.why,
-      actionLabel: stallActionLabel(r.stage, { discussionId: r.discussion_id, kind: r.kind, hasSpec: r.has_spec, noVerdictHold: r.hold }),
+      actionLabel: stallActionLabel(r.stage, { discussionId: r.discussion_id, kind: r.kind, hasSpec: r.has_spec, noVerdictHold: r.hold, followUp: r.follow_up }),
       since: stall.since,
     });
   }

@@ -107,7 +107,7 @@ export function operatorVerdict(action: OperatorAction, f: OperatorFacts): Opera
     if (f.gh_number === null) return no('no_issue', 'work item has no GitHub issue');
   }
   if (f.live_run) return no('live', 'agents are already working on this work item');
-  const stageFacts = { stage: f.stage, discussion_id: f.discussion_id, kind: f.kind, has_spec: f.has_spec };
+  const stageFacts = { stage: f.stage, discussion_id: f.discussion_id, kind: f.kind, has_spec: f.has_spec, ...(f.follow_up === true ? { follow_up: true } : {}) };
   switch (action) {
     case 'request_changes': {
       const prStage = CLOSE_ON_GITHUB_STAGES.includes(f.stage);
@@ -178,8 +178,8 @@ export function closeOnGithub(f: Pick<OperatorFacts, 'stage' | 'provenance' | 'r
  * second sees the first's stage. Null when the item does not exist for this account.
  */
 export async function readOperatorFacts(client: PoolClient, workItemId: string, role: string, lock = false): Promise<OperatorFacts | null> {
-  const { rows } = await client.query<{ account_id: string; stage: string; provenance: string; repo_id: string | null; gh_number: string | null; discussion_id: string | null; kind: string | null; has_spec: boolean; acceptance_files: unknown; live_run: boolean; needs_human_from: string | null; fix_rounds_started: string }>(
-    `SELECT w.account_id, w.stage, w.provenance, w.repo_id, w.gh_number, w.discussion_id, d.kind,
+  const { rows } = await client.query<{ account_id: string; stage: string; provenance: string; repo_id: string | null; gh_number: string | null; discussion_id: string | null; kind: string | null; follow_up: boolean; has_spec: boolean; acceptance_files: unknown; live_run: boolean; needs_human_from: string | null; fix_rounds_started: string }>(
+    `SELECT w.account_id, w.stage, w.provenance, w.repo_id, w.gh_number, w.discussion_id, d.kind, (w.follow_up_id IS NOT NULL) AS follow_up,
             EXISTS (SELECT 1 FROM spec_versions s WHERE s.work_item_id = w.id AND s.erased_at IS NULL) AS has_spec,
             (SELECT s.frontmatter -> 'acceptance_files' FROM spec_versions s WHERE s.work_item_id = w.id AND s.erased_at IS NULL ORDER BY s.version DESC LIMIT 1) AS acceptance_files,
             EXISTS (SELECT 1 FROM agent_runs r WHERE r.work_item_id = w.id AND r.status NOT IN ('succeeded', 'failed', 'timed_out', 'killed_spend', 'refused_spend', 'cancelled')) AS live_run,

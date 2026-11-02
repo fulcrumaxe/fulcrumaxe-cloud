@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { WORK_ITEM_STAGES } from '../src/work-items/stages.js';
-import { ADVANCEABLE_STAGES, ADVANCE_LIGHT_KINDS, ADVANCE_NON_BUILDABLE_KINDS, ADVANCE_PANEL_KINDS, advanceActionFor } from '../src/work-items/advance.js';
+import { ADVANCEABLE_STAGES, ADVANCE_LIGHT_KINDS, ADVANCE_NON_BUILDABLE_KINDS, ADVANCE_PANEL_KINDS, FOLLOW_UP_NOT_STARTED, advanceActionFor } from '../src/work-items/advance.js';
 
 /** D#483: the one table of what the stage driver can advance, and what advancing does. */
 describe('advanceActionFor', () => {
@@ -154,5 +154,27 @@ describe('advanceActionFor for a planned PR child', () => {
 
   it('an item that is not a child is unchanged: a triaged item with no discussion is still triaged by the driver', () => {
     expect(advanceActionFor({ ...CHILD, child: undefined, has_spec: false, kind: null })).toEqual({ ok: true, action: 'triage' });
+  });
+});
+
+describe('advanceActionFor for a follow-up child (S5-b2d-2a)', () => {
+  const base = { stage: 'triaged', discussion_id: null, kind: 'small', has_spec: false };
+
+  it('answers the fixed sentence from triaged, whatever the other facts say, and never `triage`', () => {
+    for (const extra of [{}, { discussion_id: 'd' }, { has_spec: true }, { kind: null }, { kind: 'feature', discussion_id: 'd' }, { child: true, has_spec: true }]) {
+      const v = advanceActionFor({ ...base, ...extra, follow_up: true });
+      expect(v, JSON.stringify(extra)).toEqual({ ok: false, reason: 'state', message: 'follow-up items start in a later release' });
+    }
+    expect(FOLLOW_UP_NOT_STARTED).toBe('follow-up items start in a later release');
+  });
+
+  it('is unchanged for an item that is not one: false and absent read as before', () => {
+    expect(advanceActionFor({ ...base })).toEqual({ ok: true, action: 'triage' });
+    expect(advanceActionFor({ ...base, follow_up: false })).toEqual({ ok: true, action: 'triage' });
+    expect(advanceActionFor({ ...base, discussion_id: 'd' })).toEqual({ ok: true, action: 'light_spec' });
+  });
+
+  it('touches no other stage', () => {
+    expect(advanceActionFor({ stage: 'spec_ready', discussion_id: 'd', kind: 'feature', has_spec: true, follow_up: true })).toEqual({ ok: true, action: 'build' });
   });
 });

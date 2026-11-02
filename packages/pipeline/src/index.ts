@@ -10,6 +10,7 @@ export * from "./advance/followedRunner.js";
 export * from "./advance/specFlow.js";
 export * from "./advance/build.js";
 export * from "./advance/childBuild.js";
+export * from "./advance/followUpChild.js";
 export * from "./advance/stackBase.js";
 export * from "./advance/buildSlots.js";
 export * from "./advance/reservationPauses.js";
