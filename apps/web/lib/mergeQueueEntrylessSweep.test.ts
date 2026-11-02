@@ -26,6 +26,7 @@ vi.mock("./mergeQueueConflict", () => ({
   bindCompleteEntryless: () => async (subject: unknown) => void h.completed.push(subject),
   readEntrylessSubject: async (...a: unknown[]) => (h.subjectCalls.push(a.slice(1)), h.subject),
   endRoundWithoutPr: async (_d: unknown, _a: string, item: string) => void h.endedWithoutPr.push(item),
+  endRunnerRoundIfTargetChanged: async () => null,
 }));
 vi.mock("./worker", () => ({ getWorker: async () => null }));
 vi.mock("./github/installationHttp", () => ({ openInstallationHttp: async () => ({}), readRepoAppLogin: async () => "bot" }));

@@ -14,6 +14,10 @@ const h = vi.hoisted(() => ({
   rounds: [] as Array<Record<string, unknown>>,
   signals: {} as Record<string, string[]>,
   gateCalls: [] as unknown[],
+  /** D#519 MQ4-e2-c3: null: the hosted client answers; otherwise the repository is runner_local and this is what its fence reads (CommitChecks, A9), or null for no adapter. */
+  runnerRepo: false as boolean,
+  runnerCi: null as null | { headSha: string; names: string[] },
+  runnerOpen: true,
   ended: [] as unknown[],
   cancelled: [] as unknown[],
 }));
@@ -26,7 +30,7 @@ vi.mock("@fx/pipeline", () => ({
   startWaitFor: () => null,
   readPublicPullRequest: () => async () => h.publicCopy,
   readItemRecordedPullRequest: async () => h.recorded,
-  expectedSignalNames: (s: string[]) => s,
+  expectedSignalNames: (s: string[] | { names: string[] }) => (Array.isArray(s) ? s : s.names),
   loadReviewContext: async () => ({ ok: true, ctx: { repoId: "repo-1" } }),
   mergeQueue: { listConflictRounds: async () => h.rounds, endRound: async (_c: unknown, input: unknown) => void h.ended.push(input), bindPlatformCommitProof: () => undefined, createPlatformPushReader: () => undefined },
 }));
@@ -38,10 +42,10 @@ vi.mock("./advanceReviewSteps", () => ({
 vi.mock("./mergeQueueDeltaReview", () => ({ readEntryContext: async () => ({}), readEntryWho: async () => ({ who: { accountId: "acct", userId: "u", workItemId: "item", haltEpoch: 0 }, actionId: "act" }), deltaReviewPorts: () => ({}) }));
 vi.mock("./github/installationReconcile", () => ({ appUserPool: () => ({}) }));
 vi.mock("./github/installationHttp", () => ({ readRepoAppLogin: async () => "bot", openInstallationHttp: async () => ({}) }));
-vi.mock("./mergeQueue", () => ({ openQueueGitHub: async () => ({ getCiSnapshot: async (_pr: unknown, sha: string) => h.signals[sha] ?? [] }) }));
+vi.mock("./mergeQueue", () => ({ openQueueGitHub: async () => (h.runnerRepo ? null : { getCiSnapshot: async (_pr: unknown, sha: string) => h.signals[sha] ?? [] }) }));
 vi.mock("@fx/core/src/pendingWork.js", () => ({ markWorkPending: async () => undefined }));
 vi.mock("@fx/core/src/work-items/stackParentPull.js", () => ({ readStackParentPull: async () => null }));
-vi.mock("./mergeQueueConflict", async (orig) => ({ ...(await orig<typeof import("./mergeQueueConflict")>()) }));
+vi.mock("./mergeQueueConflict", async (orig) => ({ ...(await orig<typeof import("./mergeQueueConflict")>()), openRunnerRound: async () => (h.runnerOpen ? { ci: async (_pr: unknown, _sha: string) => h.runnerCi } : null) }));
 
 import { endRoundWithoutPr, readEntrylessSubject } from "./mergeQueueConflict";
 import { conflictGateBody, type QueueWorker } from "./mergeQueueWait";
@@ -57,6 +61,9 @@ beforeEach(() => {
   h.recorded = { number: 7, branch: "fx/run" };
   h.rounds = [round({ round: 1 })];
   h.signals = {};
+  h.runnerRepo = false;
+  h.runnerCi = null;
+  h.runnerOpen = true;
   h.gateCalls = [];
   h.ended = [];
   h.cancelled = [];
@@ -136,6 +143,34 @@ describe("conflictGateBody: CI on a round's merge commit", () => {
     expect(await conflictGateBody(worker, WHO, 7)).toMatchObject({ outcome: "ready_human_merges", reasons: ["ci_not_green"] });
     h.rounds = [round({ round: 1 })];
     expect(await conflictGateBody(worker, WHO, 7)).toMatchObject({ reasons: ["ci_not_green"] });
+    expect(h.gateCalls).toEqual([]);
+  });
+});
+
+describe("D#519 MQ4-e2-c3 conflictGateBody on a runner_local repository: CI through the fence's CommitChecks", () => {
+  beforeEach(() => {
+    h.runnerRepo = true;
+    h.rounds = [round({ round: 1, fromSha: FROM, toSha: MID, outcome: "resolved" })];
+  });
+
+  it("C18-12: the gate is asked with the signals the judged merge commit shows (read from the fence), not through the hosted client", async () => {
+    h.runnerCi = { headSha: MID, names: ["ci/test", "fulcrumaxe/review"] };
+    await conflictGateBody(worker, WHO, 7);
+    expect(h.gateCalls).toEqual([[7, ["ci/test", "fulcrumaxe/review"]]]);
+  });
+
+  it("a snapshot of another commit (the head moved), no signal at all, no judged merge commit, or no adapter: the gate is not run and the answer is ci_not_green", async () => {
+    const answer = () => conflictGateBody(worker, WHO, 7);
+    h.runnerCi = { headSha: "9".repeat(40), names: ["ci/test"] };
+    expect(await answer()).toMatchObject({ outcome: "ready_human_merges", reasons: ["ci_not_green"] });
+    h.runnerCi = { headSha: MID, names: [] };
+    expect(await answer()).toMatchObject({ reasons: ["ci_not_green"] });
+    h.runnerCi = { headSha: MID, names: ["ci/test"] };
+    h.rounds = [round({ round: 1 })];
+    expect(await answer()).toMatchObject({ reasons: ["ci_not_green"] });
+    h.rounds = [round({ round: 1, toSha: MID, outcome: "resolved" })];
+    h.runnerOpen = false;
+    expect(await answer()).toMatchObject({ reasons: ["ci_not_green"] });
     expect(h.gateCalls).toEqual([]);
   });
 });

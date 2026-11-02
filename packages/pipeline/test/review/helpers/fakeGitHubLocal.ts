@@ -61,7 +61,7 @@ export interface LocalFake {
   answers: unknown[];
 }
 
-export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts: { exclude?: readonly string[]; queue?: QueueState } = {}): LocalFake {
+export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts: { exclude?: readonly string[]; queue?: QueueState; transport?: (inner: GithubClient) => GithubClient } = {}): LocalFake {
   const base = `/repos/${s.owner}/${s.name}`;
   const branch = s.runBranch ?? "fx/run-g1";
   const calls: LocalFake["calls"] = [];
@@ -239,7 +239,7 @@ export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }, opts:
     },
   };
 
-  const fenced = localOnlyGithub(inner, opts.exclude === undefined ? {} : { exclude: opts.exclude });
+  const fenced = localOnlyGithub(opts.transport ? opts.transport(inner) : inner, opts.exclude === undefined ? {} : { exclude: opts.exclude });
   const note = (e: unknown): never => {
     if (e instanceof LocalOnlyGithubError) refused.push(e.rule);
     throw e;

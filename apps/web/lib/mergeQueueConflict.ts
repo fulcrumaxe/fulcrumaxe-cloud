@@ -1,6 +1,6 @@
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { assembleConflictPrompt, createGitHubMergeGatePort, isLocalGitHubHttp, isReservationPause, listChangedFilesLocal, mergeQueue, promptRuntimeOf, readItemRecordedPullRequest, readPublicPullRequest, startWaitFor } from "@fx/pipeline";
-import { CONFLICT_ATTESTATION_EVENT } from "@fx/runner-cloud";
+import { assembleConflictPrompt, createGitHubMergeGatePort, type CiSnapshot, isLocalGitHubHttp, isReservationPause, listChangedFilesLocal, mergeQueue, promptRuntimeOf, readItemRecordedPullRequest, readPublicPullRequest, startWaitFor } from "@fx/pipeline";
+import { CONFLICT_ATTESTATION_EVENT, anyRunnerCanTakeConflictRound } from "@fx/runner-cloud";
 import { findPrBody, reviewLoadBody } from "./advanceReviewSteps";
 import { deltaReviewPorts, readEntryContext, readEntryWho, type DeltaReviewBinding } from "./mergeQueueDeltaReview";
 import { appUserPool } from "./github/installationReconcile";
@@ -185,6 +185,29 @@ export function bindCompleteEntryless(deps: ConflictBinding): (subject: mergeQue
   return (subject) => mergeQueue.completeEntrylessRound(ports, subject);
 }
 
+/**
+ * D#519 MQ4-e2-c3 (C18-15, R-519-C15-7): the execution target is resolved again at the END of a runner round. A round whose run is a runner run was started on the item's own runner;
+ * if the repository is no longer `runner_local` (switched to a sandbox mid-round) it is never completed as a runner round, and never handed to the hosted client: its run is cancelled,
+ * an open round ends `execution_mode_changed`, and the item stops as `merge_conflict` for a person. Null: the round is not a runner round, or the target is unchanged.
+ */
+export async function endRunnerRoundIfTargetChanged(deps: Omit<DeltaReviewBinding, "github">, subject: mergeQueue.ConflictSubject): Promise<mergeQueue.EntrylessCompletion | null> {
+  const { accountId, repoId, workItemId } = subject;
+  const seen = await withTenant(deps.pool, accountId, async (c) => {
+    const rounds = await mergeQueue.listConflictRounds(c, accountId, workItemId);
+    const round = rounds[rounds.length - 1];
+    if (!round || round.entryId !== null || round.runId === null || (round.outcome !== null && round.outcome !== "resolved")) return null;
+    const row = (await c.query<{ runtime: string; execution_mode: string }>("SELECT a.runtime, r.execution_mode FROM agent_runs a JOIN repos r ON r.account_id = a.account_id WHERE a.account_id = $1 AND a.id = $2 AND r.id = $3", [accountId, round.runId, repoId])).rows[0];
+    return row ? { round, runtime: row.runtime, mode: row.execution_mode } : null;
+  });
+  if (!seen || seen.runtime !== "runner" || seen.mode === "runner_local") return null;
+  const found = await readEntryWho(deps, { accountId, workItemId });
+  if ("who" in found) await deps.worker?.advanceCancel(found.who, seen.round.runId!);
+  const who = { ...subject, roundsUsed: seen.round.round };
+  if (seen.round.outcome === null) await withTenant(deps.pool, accountId, (c) => mergeQueue.endRound(c, { accountId, roundId: seen.round.id, outcome: "execution_mode_changed" }));
+  await mergeQueue.recordStop({ inTenant: (a, fn) => withTenant(deps.pool, a, fn) }, who, "execution_mode_changed", subject.headSha, "merge_conflict");
+  return { outcome: "stopped", reason: "merge_conflict" };
+}
+
 /** A confirmed `no_open_pr` for an item with no recorded pull request: nothing can be read or followed, so its open round ends as a closed pull request's does, with its run cancelled. */
 export async function endRoundWithoutPr(deps: Omit<DeltaReviewBinding, "github">, accountId: string, workItemId: string): Promise<boolean> {
   const rounds = await withTenant(deps.pool, accountId, (c) => mergeQueue.listConflictRounds(c, accountId, workItemId));
@@ -206,7 +229,7 @@ export async function readFirstAttestation(pool: DeltaReviewBinding["pool"], acc
  * D#519 MQ4-e2-c2: the ports for a `runner_local` item's round, replacing the null the hosted client gives such a repository. Only the fence's reads are made (the pull request list
  * A3, `RunBranchState`, `PullRequestFiles`) plus the run's stored attestation, read by the round's OWN run id. Null when the repository is not `runner_local` or nothing can be read.
  */
-export async function openRunnerRound(deps: Omit<DeltaReviewBinding, "github">, subject: mergeQueue.ConflictSubject): Promise<{ adapter: mergeQueue.RoundGitHub; fence: mergeQueue.RoundFence; round: mergeQueue.ConflictRound | undefined } | null> {
+export async function openRunnerRound(deps: Omit<DeltaReviewBinding, "github">, subject: mergeQueue.ConflictSubject): Promise<{ adapter: mergeQueue.RoundGitHub; fence: mergeQueue.RoundFence; round: mergeQueue.ConflictRound | undefined; ci(pr: { repoId: string; prNumber: number }, sha: string): Promise<CiSnapshot> } | null> {
   const { accountId, repoId } = subject;
   const repo = await withTenant(deps.pool, accountId, async (c) => (await c.query<{ gh_owner: string | null; gh_name: string | null; execution_mode: string }>("SELECT gh_owner, gh_name, execution_mode FROM repos WHERE account_id = $1 AND id = $2", [accountId, repoId])).rows[0]);
   if (!repo?.gh_owner || !repo.gh_name || repo.execution_mode !== "runner_local") return null;
@@ -236,7 +259,9 @@ export async function openRunnerRound(deps: Omit<DeltaReviewBinding, "github">, 
   const rounds = await withTenant(deps.pool, accountId, (c) => mergeQueue.listConflictRounds(c, accountId, subject.workItemId));
   const round = rounds[rounds.length - 1];
   const stored = round?.runId ? await readFirstAttestation(deps.pool, accountId, round.runId) : null;
-  return { adapter: mergeQueue.createRoundGitHub(fence, round, stored), fence, round };
+  // C18-3 (c3): the one runner state that is not waited out; read as the app login in the account's tenant, never from the message.
+  const unreachable = async () => !(await withTenant(appUserPool(), accountId, (c) => anyRunnerCanTakeConflictRound(c, accountId, repoId)));
+  return { adapter: mergeQueue.createRoundGitHub(fence, round, stored, unreachable), fence, round, ci: (pr, sha) => merge.getCiSnapshot(pr, sha) };
 }
 
 /**

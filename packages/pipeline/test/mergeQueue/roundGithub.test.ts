@@ -13,7 +13,7 @@ import {
   type RoundFence,
 } from "../../src/mergeQueue/index.js";
 import { freshRepo } from "../review/helpers/fakeGitHubRest.js";
-import { fakeGitHubLocal } from "../review/helpers/fakeGitHubLocal.js";
+import { fakeGitHubLocalTls } from "../review/helpers/fakeGitHubLocalTls.js";
 
 /**
  * D#519 MQ4-e2-c2 (C18, C19, C20): the end of a `runner_local` conflict round, judged by the SAME `judgeConflictRound` the hosted rounds use, with the adapter in place of GitHub. The
@@ -67,6 +67,8 @@ interface World {
   tip?: string;
   prFiles?: readonly string[] | null;
   ended?: boolean;
+  /** c3: whether no runner of the account could ever take the run (absent: the port is not given, as in c2). */
+  unreachable?: boolean;
   now?: Date;
 }
 function build(stored: unknown, w: World = {}) {
@@ -76,7 +78,7 @@ function build(stored: unknown, w: World = {}) {
     defaultBranchTip: async () => ({ branch: "main", sha: w.tip ?? TIP }),
     prFiles: async () => (w.prFiles === undefined ? ["src/a.ts", "src/b.ts"] : w.prFiles),
   };
-  const adapter = createRoundGitHub(fence, round, stored);
+  const adapter = createRoundGitHub(fence, round, stored, w.unreachable === undefined ? undefined : async () => w.unreachable!);
   const started: unknown[] = [];
   const ports = {
     github: adapter.github,
@@ -173,6 +175,32 @@ describe("D#519 MQ4-e2-c2 the runner-fed adapter under the shared judge", () => 
   });
 });
 
+describe("D#519 MQ4-e2-c3 (C18-3, C18-16): the 'cannot be followed' stop is only for a run nobody can ever take, or one that ended with no attestation", () => {
+  const stop = { kind: "stop", reason: "merge_conflict", outcome: "conflict_round_unreadable" };
+
+  it("no runner can take the run (every one revoked or deleted, or none at the needed protocol): the round stops at once instead of waiting out its timeout", async () => {
+    expect((await judge(null, { ended: false, unreachable: true })).v).toEqual(stop);
+    // Even with a head the run already pushed: it cannot send the attestation, so it cannot be judged.
+    expect((await judge(att(), { ended: false, unreachable: true })).v).toEqual(stop);
+  });
+
+  it("an offline, busy or paused runner is not that (the port answers false): the round waits while the run goes", async () => {
+    expect((await judge(null, { ended: false, unreachable: false })).v).toEqual({ kind: "waiting" });
+    expect((await judge(att({ still_conflicting: "unknown" }), { ended: false, unreachable: false })).v).toEqual({ kind: "waiting" });
+  });
+
+  it("a run that ended is judged by what it left, whatever the runners are now: a clean attestation passes, none stops unreadable", async () => {
+    expect((await judge(att(), { ended: true, unreachable: true })).v).toEqual({ kind: "delta_started" });
+    expect((await judge(null, { ended: true, unreachable: false })).v).toEqual(stop);
+  });
+
+  it("a hosted-shaped port set (no runnerFed) never asks: its rounds are read as before", async () => {
+    const b = build(null, { ended: false, unreachable: true });
+    const plain = { ...b.ports, runnerFed: undefined, platformCommits: undefined } as unknown as ConflictCompletionPorts<ConflictSubject>;
+    expect((await judgeConflictRound(plain, subject, round))).not.toEqual(stop);
+  });
+});
+
 describe("D#519 MQ4-e2-c2 C20: the push proof on runner_local, pinned at both ends", () => {
   const proof = async (stored: unknown, shas: readonly string[] = [HEAD]) => (await build(stored).adapter.platformCommits(subject, shas))?.pushes ?? null;
 
@@ -213,7 +241,7 @@ describe("D#519 MQ4-e2-c2 the judge's seam keeps the sandbox default", () => {
 describe("D#519 MQ4-e2-c2 the fence answers the pull request's state and head (A3), the attestation only the rest", () => {
   it("through the real local-only wrapper: head from the list read, mergeable from the attestation for that head only", async () => {
     const repo = freshRepo({ owner: "acme", name: "widgets", prNumber: 7, headSha: HEAD, runBranch: "fx/run-g1" } as never);
-    const fake = fakeGitHubLocal(repo as never);
+    const fake = await fakeGitHubLocalTls(repo as never);
     const merge = createGitHubMergeGatePort({ http: fake.http, local: { http: fake.http, recordedBranch: async () => "fx/run-g1" }, resolveRepo: async () => ({ owner: "acme", name: "widgets" }), markReadyForHumanMerge: async () => undefined });
     const fence: RoundFence = { getMergeability: (pr, o) => merge.getMergeability(pr, o), defaultBranchTip: async () => ({ branch: "main", sha: TIP }), prFiles: async () => null };
     const pr = { repoId: "repo", prNumber: 7 };
@@ -225,5 +253,9 @@ describe("D#519 MQ4-e2-c2 the fence answers the pull request's state and head (A
     expect(new Set(fake.calls.map((c) => c.label))).toEqual(new Set(["A3"]));
     expect(fake.denied).toEqual([]);
     expect(fake.refused).toEqual([]);
+    // Over real TLS with the strict rules applied to the raw request: every request carried a User-Agent and the SNI name was api.github.com.
+    expect(fake.server.seen.length).toBeGreaterThan(0);
+    expect(fake.server.seen.every((r) => r.headers["user-agent"] === "fulcrumaxe-cloud" && r.servername === "api.github.com")).toBe(true);
+    await fake.close();
   });
 });

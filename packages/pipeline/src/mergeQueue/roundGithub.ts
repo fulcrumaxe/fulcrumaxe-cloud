@@ -67,7 +67,7 @@ export interface RoundGitHub {
  * `round`: the cloud's own row (its `from_sha`, `base_sha` and run id are the signed anchors, which the `done` route already matched to the attestation). `stored`: the run's first
  * `conflict.attestation` event payload, or null when there is none.
  */
-export function createRoundGitHub(fence: RoundFence, round: ConflictRound | undefined, stored: unknown): RoundGitHub {
+export function createRoundGitHub(fence: RoundFence, round: ConflictRound | undefined, stored: unknown, unreachable?: () => Promise<boolean>): RoundGitHub {
   const a = round === undefined ? null : parseAttestation(stored);
   // The anchors in the attestation are the signed ones echoed back; a row that disagrees makes the whole attestation unreadable.
   const att = a !== null && round !== undefined && a.from_sha === round.fromSha && a.base_sha === round.baseSha ? a : null;
@@ -79,6 +79,8 @@ export function createRoundGitHub(fence: RoundFence, round: ConflictRound | unde
         if (att === null) return "unreadable";
         return att.head === liveHead ? "ok" : "head_changed";
       },
+      // C18-3 (c3): the web wiring's read of whether any runner could ever take the run; absent in a test that does not care.
+      ...(unreachable ? { unreachable } : {}),
     },
     github: {
       async getMergeability(pr, opts) {
