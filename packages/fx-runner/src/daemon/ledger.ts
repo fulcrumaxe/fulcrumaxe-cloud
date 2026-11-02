@@ -108,7 +108,7 @@ function publishLock(lock: string, pid: number): boolean {
   }
 }
 
-function takeLock(lock: string, pid: number, alive: (pid: number) => boolean, now: () => Date): void {
+export function takeLock(lock: string, pid: number, alive: (pid: number) => boolean, now: () => Date): void {
   for (let attempt = 0; attempt < 4; attempt++) {
     if (publishLock(lock, pid)) return;
     const owner = readOwner(lock);

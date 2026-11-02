@@ -65,7 +65,7 @@ describe.skipIf(!usable)("R7b: the allowances in a real bubblewrap sandbox", () 
     for (const dir of [workspace, tempDir, path.join(tempDir, "xdg-cache"), store, otherStore, scratch, readOnlyDir, path.join(root, "bin")]) mkdirSync(dir, { recursive: true });
     writeFileSync(path.join(readOnlyDir, "data.txt"), "readable-data");
     // a canary in every place the floor protects, in the other repo's store, in the state directory and in the home directory itself
-    const planted = [".ssh/id_ed25519", ".aws/credentials", ".config/gh/hosts.yml", ".claude.json", ".config/fx-runner/key", ".gnupg/secring", ".netrc", ".npmrc", ".bashrc", ".fx-runner/jobs.json", "notes.txt", ".cache/fx-runner/pnpm-store/acme__other/canary"];
+    const planted = [".ssh/id_ed25519", ".aws/credentials", ".config/gh/hosts.yml", ".claude.json", ".config/fx-runner/key", ".gnupg/secring", ".netrc", ".npmrc", ".bashrc", ".fx-runner/jobs.json", ".fx-runner/push-log/pushes.json", "notes.txt", ".cache/fx-runner/pnpm-store/acme__other/canary"];
     for (const file of planted) {
       mkdirSync(path.dirname(path.join(home, file)), { recursive: true });
       writeFileSync(path.join(home, file), CANARY);
@@ -108,7 +108,7 @@ describe.skipIf(!usable)("R7b: the allowances in a real bubblewrap sandbox", () 
   });
 
   it("canaries: with every allowance applied, no credential, shell file, state file or other repo's store can be read", () => {
-    const files = [".ssh/id_ed25519", ".aws/credentials", ".config/gh/hosts.yml", ".claude.json", ".config/fx-runner/key", ".gnupg/secring", ".netrc", ".npmrc", ".bashrc", ".fx-runner/jobs.json", "notes.txt", ".cache/fx-runner/pnpm-store/acme__other/canary"];
+    const files = [".ssh/id_ed25519", ".aws/credentials", ".config/gh/hosts.yml", ".claude.json", ".config/fx-runner/key", ".gnupg/secring", ".netrc", ".npmrc", ".bashrc", ".fx-runner/jobs.json", ".fx-runner/push-log/pushes.json", "notes.txt", ".cache/fx-runner/pnpm-store/acme__other/canary"];
     for (const file of files) {
       const out = inSandbox(`cat ${path.join(home, file)}`);
       expect(out.stdout, file).not.toContain(CANARY);
@@ -123,11 +123,13 @@ describe.skipIf(!usable)("R7b: the allowances in a real bubblewrap sandbox", () 
   it("canaries: nothing outside the allowances can be written, with the allowances applied", () => {
     // The home directory and the shared temp directories (denied for reading, D#6 RUNNER-CWD-1; `root` is under the temp directory) are a scratch tmpfs inside
     // the sandbox, so a write there succeeds and vanishes; what counts is that the host never sees it.
-    for (const target of [path.join(home, "fx-probe"), path.join(home, ".bashrc"), path.join(otherStore, "x"), path.join(root, "outside")]) inSandbox(`echo pwned > ${target}`);
+    for (const target of [path.join(home, ".fx-runner", "push-log", "forged"), path.join(home, "fx-probe"), path.join(home, ".bashrc"), path.join(otherStore, "x"), path.join(root, "outside")]) inSandbox(`echo pwned > ${target}`);
     for (const target of ["/etc/fx-probe", path.join(root, "shared-read", "x")]) {
       expect(inSandbox(`echo pwned > ${target}`).code, target).not.toBe(0);
     }
     expect(existsSync(path.join(otherStore, "x"))).toBe(false);
+    expect(existsSync(path.join(home, ".fx-runner", "push-log", "forged"))).toBe(false);
+    expect(readFileSync(path.join(home, ".fx-runner", "push-log", "pushes.json"), "utf8")).toBe(CANARY);
     expect(existsSync(path.join(home, "fx-probe"))).toBe(false);
     expect(existsSync("/etc/fx-probe")).toBe(false);
     expect(readFileSync(path.join(home, ".bashrc"), "utf8")).toBe(CANARY);
