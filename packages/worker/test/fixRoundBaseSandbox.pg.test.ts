@@ -426,16 +426,29 @@ describe("FIXROUND-BASE-SYNC-SANDBOX: the sandbox side gets the same base sync [
       expect(await fixBaseOf((out as { runId: string }).runId)).toEqual([{ base_sha: ROUND_BASE, branch: t.branch, conflict: true }]);
     });
 
-    it("a runner round on a public copy is refused conflict_public_copy (its round end is not mapped yet): no run, nothing synced, and a runner round with no public copy is unchanged", async () => {
+    it("C15-1 (runner): a runner round on a public copy starts, signed with the round's own base on the item's branch, the sync only read; a stacked change and a copy a person took over keep their answers; a runner round with no public copy is unchanged", async () => {
       const t = await item("runner");
       await publicCopy(t);
-      const syncBase = port(vi.fn());
+      const merges = vi.fn();
+      const syncBase = port(merges);
       const h = harness({ privateHead: async () => ASKED, syncBase });
-      const before = await runs(t.w);
-      expect(await h.module.advanceStartFix(who(t), conflictReq(t))).toEqual({ ok: false, reason: "conflict_public_copy" });
-      expect(h.resume).not.toHaveBeenCalled();
-      expect(syncBase).not.toHaveBeenCalled();
-      expect(await runs(t.w)).toBe(before);
+      const out = await h.module.advanceStartFix(who(t), conflictReq(t));
+      expect(out.ok).toBe(true);
+      expect(syncBase).toHaveBeenCalledWith({ repo: { id: t.a.repoId, owner: "acme", name: "widgets" }, branch: t.branch, prNumber: PR, publicCopy: true, readOnly: true });
+      expect(merges).not.toHaveBeenCalled();
+      expect(h.resumed[0]!.base).toEqual({ sha: ROUND_BASE, branch: t.branch });
+      const stacked = await item("runner");
+      await publicCopy(stacked);
+      const hs = harness({ privateHead: async () => ASKED, syncBase: port(vi.fn(), true) });
+      const before = await runs(stacked.w);
+      expect(await hs.module.advanceStartFix(who(stacked), conflictReq(stacked))).toEqual({ ok: false, reason: "republish_stacked_unsupported" });
+      expect(hs.resume).not.toHaveBeenCalled();
+      expect(await runs(stacked.w)).toBe(before);
+      const taken = await item("runner");
+      await publicCopy(taken, { managed: true });
+      const ht = harness({ privateHead: async () => ASKED, syncBase: port(vi.fn()) });
+      expect((await ht.module.advanceStartFix(who(taken), conflictReq(taken))).ok).toBe(true);
+      expect(ht.resumed[0]!.base).toBeUndefined();
       const plain = await item("runner");
       const hp = harness({ privateHead: async () => ASKED, syncBase: port(vi.fn()) });
       expect((await hp.module.advanceStartFix(who(plain), conflictReq(plain))).ok).toBe(true);

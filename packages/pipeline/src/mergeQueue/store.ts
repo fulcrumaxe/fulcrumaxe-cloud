@@ -1007,13 +1007,15 @@ export async function switchToDeltaReview(client: Queryable, input: { accountId:
 
 /**
  * D#519 MQ4-e1-b: how the republish of the public pull request ended for a round's run, from the platform's own rows: the round's run succeeded and signed a conflict base
- * (a sandbox round that republishes), and the newest fix-round attempt of a run that is its child carries the label the publish verified.
+ * (a sandbox round that republishes, or a runner round whose signed job carries a base), and the newest fix-round attempt of a run that is its child (a runner round: of the run itself) carries the label the publish verified.
  */
 export type RepublishOutcome = "none" | "pending" | "done" | "branch_moved" | "history_rewritten" | "failed";
 export async function readRepublishOutcome(client: Queryable, round: ConflictRound): Promise<RepublishOutcome> {
   if (round.runId === null) return "none";
   const { rows } = await client.query<{ signed: boolean; outcome: string | null; finished: boolean | null; refusal: string | null; managed: boolean | null; state: string | null }>(
-    `SELECT EXISTS (SELECT 1 FROM run_events e WHERE e.account_id = r.account_id AND e.run_id = r.id AND e.kind = 'plane.fix_base' AND e.payload->>'conflict' = 'true') AS signed,
+    `SELECT (EXISTS (SELECT 1 FROM run_events e WHERE e.account_id = r.account_id AND e.run_id = r.id AND e.kind = 'plane.fix_base' AND e.payload->>'conflict' = 'true')
+                    -- a runner round carries the base in its signed job; its own run holds the attempt
+                    OR (r.runtime = 'runner' AND (r.job_signed #>> '{job,continues,base_sha}') IS NOT NULL)) AS signed,
             a.outcome, (a.finished_at IS NOT NULL) AS finished,
             -- a refusal the republish recorded before (or without) an attempt row; its key ends with the executor run's id as a short word
             (SELECT d.code FROM work_item_driver_events d WHERE d.account_id = r.account_id AND d.work_item_id = r.work_item_id AND d.kind = 'escalated' AND d.code LIKE 'republish\\_%'
@@ -1021,7 +1023,7 @@ export async function readRepublishOutcome(client: Queryable, round: ConflictRou
             (pp.managed_by_person_at IS NOT NULL) AS managed, pp.state
        FROM agent_runs r
        LEFT JOIN LATERAL (SELECT x.outcome, x.finished_at FROM plane_push_attempts x JOIN agent_runs p ON p.account_id = x.account_id AND p.id = x.run_id
-                           WHERE x.account_id = r.account_id AND x.kind = 'fix_round' AND p.parent_run_id = r.id ORDER BY x.attempt_no DESC LIMIT 1) a ON true
+                           WHERE x.account_id = r.account_id AND x.kind = 'fix_round' AND (p.parent_run_id = r.id OR (r.runtime = 'runner' AND p.id = r.id)) ORDER BY x.attempt_no DESC LIMIT 1) a ON true
        LEFT JOIN LATERAL (SELECT q.managed_by_person_at, q.state FROM plane_pushes q WHERE q.account_id = r.account_id AND q.work_item_id = r.work_item_id ORDER BY q.created_at DESC, q.id LIMIT 1) pp ON true
       WHERE r.account_id = $1 AND r.id = $2 AND r.status = 'succeeded'`,
     [round.accountId, round.runId],

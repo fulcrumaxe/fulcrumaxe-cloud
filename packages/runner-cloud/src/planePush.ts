@@ -205,6 +205,9 @@ interface Decision {
   skip?: boolean;
 }
 
+/** The attempt label of a conflict round's republish that sat on the wrong parent or was rejected by the history check (the same word the sandbox publish uses). */
+const HISTORY_REWRITTEN = "history_rewritten";
+
 const NOOP: Decision = { outcome: null, terminal: false, label: "noop", skip: true };
 
 const MISMATCH: Decision = { outcome: { state: "refused", code: "report_mismatch" }, terminal: true, label: "report_mismatch" };
@@ -217,7 +220,7 @@ const bad = (): never => {
  * The report is a hint. For a phase that says something exists on GitHub, GitHub is asked (with the hosted side's own token) and the answer
  * decides; the runner's `branch` is compared with the record's and never used.
  */
-async function decide(m: PlanePushReportMessage, plane: { codeRepo: string; branch: string; pairingDigest: string; state: string }, attempt: { tokenIssued: boolean; finished: boolean; outcome: string | null } | null, port: PlanePushHostedPort, accountId: string): Promise<Decision> {
+async function decide(m: PlanePushReportMessage, plane: { codeRepo: string; branch: string; pairingDigest: string; state: string }, attempt: { tokenIssued: boolean; finished: boolean; outcome: string | null } | null, port: PlanePushHostedPort, accountId: string, conflictRound?: { tip: string | null }): Promise<Decision> {
   switch (m.phase) {
     case "building":
       // The build start already stamped `building`; a report must never move a later state back to it.
@@ -249,7 +252,13 @@ async function decide(m: PlanePushReportMessage, plane: { codeRepo: string; bran
       const input = { accountId, codeRepo: plane.codeRepo, branch: plane.branch, headSha: m.head_sha, tipSha: m.tip_sha };
       // An update is only ever of a pull request that is open (the grant gave the hook no token otherwise); the same read of GitHub as a first push decides it: head, its single parent, that parent in public main.
       if (m.phase === "updated" && plane.state !== "pr_opened") return MISMATCH;
-      if (!(await port.verifyPushed(input))) return MISMATCH;
+      // D#519 MQ4-E1-B-RUNNER-ROUND-END (C11-e1-4c): a conflict round's republish must sit on the public main tip the CLOUD recorded at the grant (or reads now), never on the one the hook names.
+      // Anything else, or a head GitHub does not confirm, is a rewritten history; the attempt keeps that label and the round's end reads it.
+      if (m.phase === "updated" && conflictRound) {
+        const rewritten: Decision = { outcome: { state: "refused", code: "push_failed" }, terminal: true, label: HISTORY_REWRITTEN };
+        if (m.tip_sha !== conflictRound.tip && m.tip_sha !== ((await port.branchHead?.({ accountId, codeRepo: plane.codeRepo, branch: "main" })) ?? null)) return rewritten;
+        if (!(await port.verifyPushed(input))) return rewritten;
+      } else if (!(await port.verifyPushed(input))) return MISMATCH;
       if (m.phase === "updated") return { outcome: { state: "updated", headSha: m.head_sha, tipSha: m.tip_sha }, terminal: true, label: "updated" };
       if (m.phase === "pushed") return { outcome: { state: "pushed", headSha: m.head_sha, tipSha: m.tip_sha }, terminal: false, label: "pushed" };
       if (m.phase === "pr_failed") return { outcome: { state: "pushed_pr_not_opened", headSha: m.head_sha, tipSha: m.tip_sha }, terminal: true, label: "pr_failed" };
@@ -274,7 +283,7 @@ export async function planePushReportRun(deps: RunnerCloudDeps, req: RunnerHttpR
 
   let decision: Decision;
   try {
-    decision = await decide(message, context.plane, context.attempt, port, runner.accountId);
+    decision = await decide(message, context.plane, context.attempt, port, runner.accountId, context.conflictRound);
   } catch (error) {
     // GitHub could not be asked: nothing is recorded, and the hook sends the report again.
     if (failureCode(error) === "not_configured") throw new RunnerHttpError(503, "not_configured", "the runner API has no GitHub App configured");

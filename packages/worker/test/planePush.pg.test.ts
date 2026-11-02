@@ -10,6 +10,7 @@ import { stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
 import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
 import { REPUBLISH_BRANCH_MOVED_SENTENCE, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
 import { planePushPairingRun, planePushReportRun, planePushTokenRun, toResponse, type PlanePushHostedPort, type RunnerCloudDeps, type RunnerLeaseOps } from "@fx/runner-cloud";
+import { mergeQueue } from "@fx/pipeline";
 import { createRunnerClaimFacade } from "../src/runnerClaims.js";
 import { createRunnerPlanePushFacade } from "../src/runnerPlanePush.js";
 import { ORIGIN, newKey, signed, type TestKey } from "../../runner-cloud/test/helpers.js";
@@ -37,7 +38,7 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
   const TOKEN = ["g", "hs", "w".repeat(36)].join("_"); // gitleaks:allow
 
   // The recording stand-in for GitHub.
-  const github = { mints: [] as string[], mintedFor: [] as string[], mintError: null as unknown, pushed: true, pr: { url: "https://github.com/acme/widgets-public/pull/9" } as { url: string } | null, asked: [] as string[] };
+  const github = { mints: [] as string[], mintedFor: [] as string[], mintError: null as unknown, pushed: true, pr: { url: "https://github.com/acme/widgets-public/pull/9" } as { url: string } | null, asked: [] as string[], mainTip: "9".repeat(40) as string | null, heads: [] as string[] };
   const port: PlanePushHostedPort = {
     mintToken: async (codeRepo, accountId) => {
       github.mints.push(codeRepo);
@@ -54,10 +55,15 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       return github.pr;
     },
     revokeToken: async () => true,
+    // The real port reads one branch of the repository in the request (its own token, revoked after).
+    branchHead: async ({ codeRepo, branch }) => {
+      github.heads.push(`${codeRepo}@${branch}`);
+      return branch === "main" ? github.mainTip : null;
+    },
   };
 
   let identity: { name: string; email: string } | null = { name: "Fulcrumaxe Bot", email: "bot@example.com" };
-  const facade = () => createRunnerPlanePushFacade(writerPool, { now: () => clock });
+  const facade = () => createRunnerPlanePushFacade(writerPool, { now: () => clock, publicHead: (i) => port.branchHead!(i) });
   const ops = (): RunnerLeaseOps => ({ ...claims, ...facade() }) as unknown as RunnerLeaseOps;
   const deps = (): RunnerCloudDeps => ({ appUserPool: appPool, origin: ORIGIN, failRunnerLeases: null, leases: ops(), planePush: port, planePushIdentity: () => identity, now: () => new Date(clock) });
   const created = () => Math.floor(clock / 1000);
@@ -88,6 +94,8 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
     github.mints.length = 0;
     github.mintedFor.length = 0;
     github.asked.length = 0;
+    github.heads.length = 0;
+    github.mainTip = "9".repeat(40);
     github.mintError = null;
     github.pushed = true;
     github.pr = { url: "https://github.com/acme/widgets-public/pull/9" };
@@ -930,6 +938,141 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       const res = await askToken(next);
       expect(res.status).toBe(409);
       expect(res.body).toMatchObject({ error: { code: "pairing_changed" } });
+    });
+  });
+
+  // D#519 MQ4-E1-B-RUNNER-ROUND-END: the end of a runner's merge-conflict round on a public copy, read from the platform's own rows.
+  describe("a conflict round's republish is judged like a sandbox round's (C15-1 to C15-6)", () => {
+    const BASE = "c".repeat(40);
+    const NEW_HEAD = "d".repeat(40);
+    const NEW_TIP = "e".repeat(40);
+    const OLD_MAIN = "8".repeat(40);
+    const MAIN = "9".repeat(40);
+    async function open(): Promise<void> {
+      await pair();
+      await stamp();
+      await admin.query("UPDATE plane_pushes SET state = 'pr_opened', head_sha = $2, tip_sha = $3, pr_number = 9, pr_url = 'https://github.com/acme/widgets-public/pull/9' WHERE work_item_id = $1", [A.workItemId, HEAD, TIP]);
+      await admin.query("UPDATE work_items SET stage = 'changes_requested' WHERE id = $1", [A.workItemId]);
+    }
+    /** A claimed continuation signed with a base; with `conflict`, the item's round row names it (the marker). */
+    async function round(conflict: boolean, base: string | null = BASE) {
+      const run = await claimedRun({ continues: base === null ? {} : { baseSha: base } });
+      if (conflict) {
+        const started = await mergeQueue.startEntrylessConflictRound(admin as never, { accountId: A.accountId, workItemId: A.workItemId, fromSha: HEAD, baseSha: BASE, baseRef: "main", conflictFiles: ["a.txt"] });
+        if (!started.ok) throw new Error("no round");
+        await mergeQueue.recordRoundRun(admin as never, { accountId: A.accountId, roundId: started.round.id, runId: run.id });
+      }
+      return run;
+    }
+    const roundTips = async (id: string) => (await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'plane.round_tip'", [id])).rows.map((r) => r.payload);
+    const readOutcome = (id: string) => mergeQueue.readRepublishOutcome(admin as never, { accountId: A.accountId, runId: id } as never);
+    const outcomeOf = async (id: string) => {
+      await admin.query("UPDATE agent_runs SET status = 'succeeded' WHERE id = $1", [id]);
+      return readOutcome(id);
+    };
+    const updated = (run: { id: string; generation: number }, tip: string) => report(run, { phase: "updated", head_sha: NEW_HEAD, tip_sha: tip });
+
+    it("C15-1: the grant of a conflict round records the public main tip it read (main of the paired repository only); a review round records none and reads nothing", async () => {
+      await open();
+      const r = await round(true);
+      expect((await askToken(r)).status).toBe(200);
+      expect(github.heads).toEqual(["acme/widgets-public@main"]);
+      expect(await roundTips(r.id)).toEqual([{ tip: MAIN }]);
+      await admin.query("UPDATE agent_runs SET status = 'cancelled' WHERE id = $1", [r.id]);
+      const review = await round(false);
+      expect((await askToken(review)).status).toBe(200);
+      expect(github.heads).toHaveLength(1);
+      expect(await roundTips(review.id)).toEqual([]);
+    });
+
+    it("C15-2: a republish on the recorded tip is accepted though main has moved since; it moves the stamp and the round reads done", async () => {
+      await open();
+      const r = await round(true);
+      await askToken(r);
+      github.mainTip = NEW_TIP;
+      expect((await updated(r, MAIN)).status).toBe(200);
+      expect(await planeRow()).toMatchObject({ head_sha: NEW_HEAD, tip_sha: MAIN });
+      expect(await outcomeOf(r.id)).toBe("done");
+    });
+
+    it("C15-2: with no tip recorded (the grant could not read one), only the main tip read at the report is accepted", async () => {
+      await open();
+      const r = await round(true);
+      github.mainTip = null;
+      await askToken(r);
+      expect(await roundTips(r.id)).toEqual([]);
+      github.mainTip = OLD_MAIN;
+      expect((await updated(r, OLD_MAIN)).status).toBe(200);
+      expect(await outcomeOf(r.id)).toBe("done");
+    });
+
+    it("C15-4/-5: a tip that is neither the recorded one nor main's now ends history_rewritten, whatever the hook says; the stamp stays and the item goes to a person", async () => {
+      await open();
+      const r = await round(true);
+      await askToken(r);
+      github.mainTip = NEW_TIP;
+      expect((await updated(r, OLD_MAIN)).status).toBe(200);
+      expect(github.asked).toEqual([]);
+      expect(await planeRow()).toMatchObject({ head_sha: HEAD, tip_sha: TIP });
+      expect((await attempts())[0]).toMatchObject({ outcome: "history_rewritten" });
+      expect(await outcomeOf(r.id)).toBe("history_rewritten");
+      expect((await admin.query("SELECT stage FROM work_items WHERE id = $1", [A.workItemId])).rows[0].stage).toBe("needs_human");
+    });
+
+    it("C15-4: a head GitHub does not confirm (two parents, or not the branch head) ends history_rewritten even on the right tip", async () => {
+      await open();
+      const r = await round(true);
+      await askToken(r);
+      github.pushed = false;
+      expect((await updated(r, MAIN)).status).toBe(200);
+      expect(github.asked).toEqual(["pushed"]);
+      expect(await planeRow()).toMatchObject({ head_sha: HEAD });
+      expect(await outcomeOf(r.id)).toBe("history_rewritten");
+    });
+
+    it("C15-6: a review round is judged as before: any tip is only checked by GitHub, no main read, no history label", async () => {
+      await open();
+      const r = await round(false);
+      await askToken(r);
+      expect((await updated(r, OLD_MAIN)).status).toBe(200);
+      expect(github.heads).toEqual([]);
+      expect(await planeRow()).toMatchObject({ head_sha: NEW_HEAD });
+      await admin.query("UPDATE agent_runs SET status = 'succeeded' WHERE id = $1", [r.id]);
+      github.pushed = false;
+      const again = await round(false);
+      await askToken(again);
+      await updated(again, OLD_MAIN);
+      expect((await attempts()).at(-1)).toMatchObject({ outcome: "report_mismatch" });
+    });
+
+    it("C15-3: the hook's lease refusal (public_branch_moved) reads branch_moved for a conflict round, with nothing moved on GitHub; a review round's attempt keeps its label", async () => {
+      await open();
+      const r = await round(true);
+      await askToken(r);
+      expect((await report(r, { phase: "refused", code: "public_branch_moved" })).status).toBe(200);
+      expect(github.asked).toEqual([]);
+      expect(await planeRow()).toMatchObject({ head_sha: HEAD, tip_sha: TIP });
+      expect(await outcomeOf(r.id)).toBe("branch_moved");
+      const review = await round(false);
+      await askToken(review);
+      await report(review, { phase: "refused", code: "public_branch_moved" });
+      expect((await attempts()).at(-1)).toMatchObject({ outcome: "public_branch_moved" });
+    });
+
+    it("any other failure reads failed, and a round the hook has not reported on reads pending", async () => {
+      await open();
+      const waiting = await round(true);
+      await askToken(waiting);
+      expect(await outcomeOf(waiting.id)).toBe("pending");
+      await admin.query("UPDATE agent_runs SET status = 'running' WHERE id = $1", [waiting.id]);
+      await report(waiting, { phase: "refused", code: "scan_refused" });
+      expect(await outcomeOf(waiting.id)).toBe("failed");
+    });
+
+    it("a runner round whose job carries no base is no republishing round: none", async () => {
+      await open();
+      const run = await round(true, null);
+      expect(await outcomeOf(run.id)).toBe("none");
     });
   });
 });

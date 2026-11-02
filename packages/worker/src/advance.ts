@@ -1854,9 +1854,6 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           // The base is signed only for the branch that was synced: the issuer compares it with the branch it resolves for the job.
           baseTip = sync.baseSha;
           syncedBranch = pr.branch;
-        } else if (publicCopy && runnerSide) {
-          // MQ4-e1-b: a runner round's republish has no round-end mapping yet (its push is made by the runner), so it is refused here and the item ends at `merge_conflict` as before.
-          return refuse("conflict_public_copy");
         } else if (publicCopy && req.baseSha !== undefined) {
           // D#519 MQ4-e1-b (R-519-C12-4): the item's open public pull request is republished when the round ends. A stacked change is refused here, with nothing merged (read only);
           // the base the round is signed with is the default-branch tip it was asked to merge, on this branch, where a review round has its sync's.
