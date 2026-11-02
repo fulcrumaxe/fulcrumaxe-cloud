@@ -119,10 +119,30 @@ export interface ConflictPorts {
 }
 
 type NoCode = "rounds_exhausted" | "no_conflict_files" | "foreign_commits" | "unreadable" | "identity_unread";
-export type ConflictDecision = { go: true; files: readonly string[]; baseSha: string; baseRef: string } | { go: false; code: NoCode; files: readonly string[] };
+export type ConflictDecision = { go: true; files: readonly string[]; baseSha: string; baseRef: string } | { go: false; code: NoCode; files: readonly string[]; baseRef?: string };
 
 const REFUSED_SPEND = "refused_spend";
 export const CAPACITY_WAIT_REASONS: readonly string[] = ["capacity_wait", "waiting_for_capacity"];
+
+/**
+ * The detail table's rules (migration 0957 and 0948), in code, so a value the table would refuse is left out and never fails the stop. The same corpus, and
+ * every BMP code point, runs through these and through the SQL functions (detailChecks.pg.test.ts). `[[:cntrl:]]` is read as C0, DEL and C1.
+ */
+const CNTRL = /[\u0000-\u001f\u007f-\u009f]/;
+// Wider than the SQL `[[:space:]]` on purpose (no-break spaces too): a ref the table would take may be dropped, one it would refuse never passes.
+const SPACE = /[\s\u0085\u180e]/;
+const wellFormed = (s: string): boolean => Buffer.from(s, "utf8").toString("utf8") === s;
+
+export function isDetailPath(p: unknown): p is string {
+  if (typeof p !== "string" || p === "" || !wellFormed(p) || Array.from(p).length > 512 || Buffer.byteLength(p) > 1024) return false;
+  if (CNTRL.test(p) || /[\u0085\u2028\u2029\\]/.test(p)) return false;
+  return !/^\//.test(p) && !/^~(\/|$)/.test(p) && !/^[A-Za-z]:\//.test(p) && !/(^|\/)(\.|\.\.)?(\/|$)/.test(p);
+}
+
+export function isDetailRef(r: unknown): r is string {
+  if (typeof r !== "string" || !wellFormed(r) || Buffer.byteLength(r) < 1 || Buffer.byteLength(r) > 255) return false;
+  return !CNTRL.test(r) && !SPACE.test(r) && !r.includes("..") && !r.startsWith("-") && !/[~^:?*[\\]/.test(r);
+}
 
 class Undo extends Error {
   constructor(readonly refusal: string) {
@@ -135,7 +155,8 @@ class Undo extends Error {
  * one (after a refresh, the refresh tip), else the stored head, so the files are computed against the commit the executor merges from.
  */
 export async function decideConflict(ports: ConflictPorts, entry: MergeQueueEntry, liveHeadSha?: string): Promise<ConflictDecision> {
-  const no = (code: NoCode, files: readonly string[] = []): ConflictDecision => ({ go: false, code, files });
+  // The default branch's name is known once its tip was read; a decision that stops before any read (identity, bound) has none, and adds no read to get one.
+  const no = (code: NoCode, files: readonly string[] = [], baseRef?: string): ConflictDecision => ({ go: false, code, files, ...(baseRef === undefined ? {} : { baseRef }) });
   if (entry.entryKind !== "work_item" || entry.workItemId === null) return no("unreadable");
   if (entry.conflictRounds >= MAX_CONFLICT_ROUNDS) return no("rounds_exhausted");
   // Asked before any GitHub read: with the proof unread (today, in production) a decision costs no call at all.
@@ -144,32 +165,32 @@ export async function decideConflict(ports: ConflictPorts, entry: MergeQueueEntr
   const headSha = liveHeadSha ?? entry.headSha;
   const tip = await ports.github.getDefaultBranchTip(pr);
   const mine = await ports.github.compareCommits(pr, tip.sha, headSha, { files: true });
-  if (mine.files === null || mine.filesTruncated) return no("unreadable");
+  if (mine.files === null || mine.filesTruncated) return no("unreadable", [], tip.branch);
   const theirs = await ports.github.compareCommits(pr, mine.mergeBaseSha, tip.sha, { files: true });
-  if (theirs.files === null || theirs.filesTruncated) return no("unreadable");
+  if (theirs.files === null || theirs.filesTruncated) return no("unreadable", [], tip.branch);
   const main = new Set(theirs.files);
   const files = [...new Set(mine.files.filter((f) => main.has(f)))].sort();
-  if (files.length === 0 || files.length > CONFLICT_FILES_MAX || !files.every(isSafeRepoPath)) return no("no_conflict_files", files);
+  if (files.length === 0 || files.length > CONFLICT_FILES_MAX || !files.every(isSafeRepoPath)) return no("no_conflict_files", files, tip.branch);
 
   const list = await ports.github.listPullCommits(pr);
-  if (list.truncated || list.commits.length > CONFLICT_COMMIT_READS_MAX) return no("unreadable", files);
+  if (list.truncated || list.commits.length > CONFLICT_COMMIT_READS_MAX) return no("unreadable", files, tip.branch);
   // Every commit is read first (the walk needs every parent); then only the commits that touch a conflict file have to be proved the platform's.
   const infos: CommitInfo[] = [];
   for (const c of list.commits) {
     const info = await ports.github.getCommit(pr, c.sha);
-    if (info.files === null || info.filesTruncated) return no("unreadable", files);
+    if (info.files === null || info.filesTruncated) return no("unreadable", files, tip.branch);
     infos.push(info);
   }
   const shas = list.commits.map((c) => c.sha);
   const proof = await ports.platformCommits(entry, shas);
-  if (proof === null) return no("identity_unread", files);
+  if (proof === null) return no("identity_unread", files, tip.branch);
   const covered = coveredCommits(shas, new Map(infos.map((i) => [i.sha, i.parents])), proof);
-  if (covered === "unreadable") return no("unreadable", files);
+  if (covered === "unreadable") return no("unreadable", files, tip.branch);
   const appLogin = proof.appLogin?.trim() ? proof.appLogin : null;
   const conflicting = new Set(files);
   for (const info of infos) {
     if (!info.files!.some((f) => conflicting.has(f)) || covered.has(info.sha)) continue;
-    if (appLogin === null || !platformRefreshIdentity(info, appLogin).ok) return no("foreign_commits", files);
+    if (appLogin === null || !platformRefreshIdentity(info, appLogin).ok) return no("foreign_commits", files, tip.branch);
   }
   return { go: true, files, baseSha: tip.sha, baseRef: tip.branch };
 }
@@ -179,7 +200,7 @@ export function createOnConflict(ports: ConflictPorts): (entry: MergeQueueEntry,
   return async (entry, holder, liveHeadSha) => {
     const decision = await decideConflict(ports, entry, liveHeadSha);
     if (!decision.go) {
-      await recordStop(ports, entry, decision.code, liveHeadSha ?? entry.headSha);
+      await recordStop(ports, entry, decision.code, liveHeadSha ?? entry.headSha, "merge_conflict", { baseRef: decision.baseRef ?? null, ...(decision.code === "foreign_commits" ? { conflictFiles: decision.files } : {}) });
       return false;
     }
     if (ports.tryMechanicalReplay && (await ports.tryMechanicalReplay(entry, decision.files))) return true;
@@ -201,7 +222,7 @@ export function createOnConflict(ports: ConflictPorts): (entry: MergeQueueEntry,
         return "started" as const;
       });
       if (started === "rounds_exhausted") {
-        await recordStop(ports, entry, "rounds_exhausted", liveHeadSha ?? entry.headSha);
+        await recordStop(ports, entry, "rounds_exhausted", liveHeadSha ?? entry.headSha, "merge_conflict", { baseRef: decision.baseRef });
         return false;
       }
       // "moved": another pass already moved the entry (a round is running, or it was stopped or merged). Its record is that pass's; this one writes nothing.
@@ -217,7 +238,7 @@ export function createOnConflict(ports: ConflictPorts): (entry: MergeQueueEntry,
         await ports.inTenant(accountId, (c) => stopEntry(c, { accountId, entryId: entry.id, reason: REFUSED_SPEND, ...(holder !== undefined ? { holder } : {}) }));
         return true;
       }
-      await recordStop(ports, entry, "round_not_started", liveHeadSha ?? entry.headSha);
+      await recordStop(ports, entry, "round_not_started", liveHeadSha ?? entry.headSha, "merge_conflict", { baseRef: decision.baseRef });
       return false;
     }
   };
@@ -227,8 +248,11 @@ export function createOnConflict(ports: ConflictPorts): (entry: MergeQueueEntry,
  * The fixed fact behind a `merge_conflict` stop: why no round ran (or how the last one ended: MQ4-c), and how many already had. Codes and counts only.
  * `eventCode` is the stop's own code (`merge_conflict` unless the end of a round stopped the entry for another fixed reason).
  */
-export async function recordStop(ports: Pick<ConflictPorts, "inTenant">, entry: MergeQueueEntry, code: string, headSha: string, eventCode = "merge_conflict"): Promise<void> {
+export async function recordStop(ports: Pick<ConflictPorts, "inTenant">, entry: MergeQueueEntry, code: string, headSha: string, eventCode = "merge_conflict", detail?: { baseRef?: string | null; conflictFiles?: readonly string[] }): Promise<void> {
   if (entry.workItemId === null) return;
+  // The table checks both and a bad value fails the write, and the event with it; each value is held to the table's rules here, and one that fails is left out.
+  const baseRef = isDetailRef(detail?.baseRef) ? detail!.baseRef! : null;
+  const conflictFiles = (detail?.conflictFiles ?? []).filter(isDetailPath).slice(0, CONFLICT_FILES_MAX);
   await ports.inTenant(entry.accountId, (c) =>
     recordDriverEvent(c, entry.accountId, {
       workItemId: entry.workItemId!,
@@ -239,6 +263,7 @@ export async function recordStop(ports: Pick<ConflictPorts, "inTenant">, entry: 
       headSha,
       prNumber: entry.prNumber,
       round: entry.conflictRounds,
+      detail: { conflictFiles, baseRef },
     }),
   );
 }

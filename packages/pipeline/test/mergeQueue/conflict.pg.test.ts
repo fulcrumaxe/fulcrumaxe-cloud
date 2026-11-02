@@ -1,7 +1,7 @@
 import type { PoolClient } from "pg";
 import { afterEach, describe, expect, it } from "vitest";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { MAX_CONFLICT_ROUNDS, createOnConflict, listConflictRounds, runQueueTick, takeSlot, type ConflictPorts, type PlatformPush, type RoundStart } from "../../src/mergeQueue/index.js";
+import { MAX_CONFLICT_ROUNDS, createOnConflict, listConflictRounds, recordStop, runQueueTick, takeSlot, type ConflictPorts, type PlatformPush, type RoundStart } from "../../src/mergeQueue/index.js";
 import type { MergeWorld } from "../review/helpers/fakeGitHubMergeTls.js";
 import { pgHarness } from "../helpers/pgHarness.js";
 import { BOT, T0, shaOf, startQueueRepo, type QueueRepo } from "./helpers/queueRepo.js";
@@ -96,6 +96,9 @@ describe("D#519 MQ4-b conflict decision and round start [pg]", () => {
     return { started, onConflict: createOnConflict(ports) };
   }
   const events = async (workItemId: string) => (await db.admin.query(`SELECT kind, code, reasons, round FROM work_item_driver_events WHERE work_item_id = $1 ORDER BY seq`, [workItemId])).rows as Array<{ kind: string; code: string; reasons: string[]; round: number }>;
+  /** The detail rows of a work item's driver events (migration 0957), exactly. */
+  const details = async (workItemId: string) =>
+    (await db.admin.query(`SELECT e.code, e.reasons, d.conflict_files, d.base_ref FROM work_item_driver_event_details d JOIN work_item_driver_events e ON e.id = d.driver_event_id WHERE e.work_item_id = $1 ORDER BY e.seq`, [workItemId])).rows;
   const roundRows = async (r: QueueRepo, workItemId: string) => tenant(r, (c) => listConflictRounds(c, r.accountId, workItemId));
 
   it("C6-b1: a conflict on files only the platform touched starts one round, with the conflict files and the default branch's tip", async () => {
@@ -154,6 +157,7 @@ describe("D#519 MQ4-b conflict decision and round start [pg]", () => {
     await runQueueTick(r.deps({ onConflict }), r);
     expect(started).toEqual([]);
     expect(await events(a.workItemId)).toEqual([{ kind: "stopped", code: "merge_conflict", reasons: ["foreign_commits"], round: 0 }]);
+    expect(await details(a.workItemId)).toEqual([{ code: "merge_conflict", reasons: ["foreign_commits"], conflict_files: ["src/a.ts"], base_ref: "main" }]);
     const { rows } = await db.admin.query(`SELECT head_sha, dedupe_key FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'stopped'`, [a.workItemId]);
     expect(rows).toEqual([{ head_sha: refreshTip, dedupe_key: `conflict:${refreshTip}:0:foreign_commits` }]);
     expect((await r.entry(7)).headSha).toBe(a.head);
@@ -168,6 +172,15 @@ describe("D#519 MQ4-b conflict decision and round start [pg]", () => {
     expect(await r.entry(7)).toMatchObject({ state: "stopped", reason: "merge_conflict" });
     expect(await roundRows(r, a.workItemId)).toEqual([]);
     expect(await events(a.workItemId)).toEqual([{ kind: "stopped", code: "merge_conflict", reasons: ["foreign_commits"], round: 0 }]);
+    expect(await details(a.workItemId)).toEqual([{ code: "merge_conflict", reasons: ["foreign_commits"], conflict_files: ["src/a.ts"], base_ref: "main" }]);
+  });
+
+  it("a stop after the default branch was read records its name and no files (only foreign_commits keeps files)", async () => {
+    const r = await start();
+    const a = await r.addItem(7, { world: conflictWorld(7, { commits: [{ author: BOT, files: ["src/a.ts"] }], mainFiles: ["src/unrelated.ts"] }) });
+    const { onConflict } = wire(r);
+    await runQueueTick(r.deps({ onConflict }), r);
+    expect(await details(a.workItemId)).toEqual([{ code: "merge_conflict", reasons: ["no_conflict_files"], conflict_files: [], base_ref: "main" }]);
   });
 
   describe("C10: the platform's own commits are proved by push records or a verified app commit, never by author fields", () => {
@@ -291,6 +304,8 @@ describe("D#519 MQ4-b conflict decision and round start [pg]", () => {
       const out = await run([{ author: BOT, files: A }], { platformCommits: async (e, shas) => (n++ === 0 ? fromLog()(e, shas) : null) });
       expect(out.started).toEqual([]);
       expect(out.events[0]).toMatchObject({ reasons: ["identity_unread"] });
+      // Stopped after the default branch was read: its name is stored for the card (no files: only foreign_commits keeps them).
+      expect(await details(out.entry.workItemId!)).toEqual([{ code: "merge_conflict", reasons: ["identity_unread"], conflict_files: [], base_ref: "main" }]);
     });
   });
 
@@ -341,6 +356,8 @@ describe("D#519 MQ4-b conflict decision and round start [pg]", () => {
     await runQueueTick(r.deps({ onConflict }), r);
     expect(started).toEqual([]);
     expect((await events(a.workItemId))[0]).toMatchObject({ reasons: ["identity_unread"] });
+    // Stopped before any GitHub read: no branch is known, and none is fetched for the card.
+    expect(await details(a.workItemId)).toEqual([]);
   });
 
   it("C6-b3: an entry with the bound's rounds used gets no further round, and the attempt count is on the fact", async () => {
@@ -387,6 +404,55 @@ describe("D#519 MQ4-b conflict decision and round start [pg]", () => {
     await runQueueTick(r.deps({ onConflict }), r);
     expect(await r.entry(7)).toMatchObject({ state: "stopped", reason: "merge_conflict", conflictRounds: 0 });
     expect(await roundRows(r, a.workItemId)).toEqual([]);
+    // The tip was read, so the branch is known and stored (round_not_started).
+    expect(await details(a.workItemId)).toEqual([{ code: "merge_conflict", reasons: ["round_not_started"], conflict_files: [], base_ref: "main" }]);
+  });
+
+  it("a round start that finds the bound used meanwhile (a race) stops as rounds_exhausted with the branch it already read", async () => {
+    const r = await start();
+    const a = await r.addItem(7, { world: conflictWorld(7, { commits: [{ author: BOT, files: ["src/a.ts"] }] }) });
+    const stale = await r.entry(7);
+    await db.admin.query(`UPDATE merge_queue_entries SET conflict_rounds = $2 WHERE id = $1`, [a.entryId, MAX_CONFLICT_ROUNDS]);
+    const { onConflict, started } = wire(r);
+    expect(await onConflict(stale)).toBe(false);
+    expect(started).toEqual([]);
+    expect(await details(a.workItemId)).toEqual([{ code: "merge_conflict", reasons: ["rounds_exhausted"], conflict_files: [], base_ref: "main" }]);
+  });
+
+  it("a foreign_commits stop whose paths the table would refuse is still recorded and the entry stops; the bad paths are left out of the detail", async () => {
+    const r = await start();
+    const bad = ["~/a.ts", "~", "C:/a.ts", "a\u2028b.ts"];
+    const files = [...bad, "src/a.ts"];
+    const a = await r.addItem(7, { world: conflictWorld(7, { commits: [{ author: BOT, files: ["src/a.ts"] }, { author: "mallory", files }], prFiles: files, mainFiles: files }) });
+    const { onConflict, started } = wire(r);
+    await runQueueTick(r.deps({ onConflict }), r);
+    expect(started).toEqual([]);
+    expect(await r.entry(7)).toMatchObject({ state: "stopped", reason: "merge_conflict" });
+    expect(await events(a.workItemId)).toEqual([{ kind: "stopped", code: "merge_conflict", reasons: ["foreign_commits"], round: 0 }]);
+    expect(await details(a.workItemId)).toEqual([{ code: "merge_conflict", reasons: ["foreign_commits"], conflict_files: ["src/a.ts"], base_ref: "main" }]);
+  });
+
+  it("a default branch the table would refuse (a C1 control character, a line separator) leaves the branch out; the stop is still recorded", async () => {
+    // The fake cannot serve such a branch name over HTTP, so the stop is recorded through recordStop with the value the decision would have passed it.
+    const r = await start();
+    const a = await r.addItem(7, { world: conflictWorld(7, { commits: [{ author: BOT, files: ["src/a.ts"] }] }) });
+    const entry = await r.entry(7);
+    const ports = { inTenant: <T,>(accountId: string, fn: (c: PoolClient) => Promise<T>) => withTenant(db.pureAppUserPool, accountId, fn) };
+    for (const [i, bad] of ["ma\u0085in", "ma\u2028in", "ma\u0080in"].entries()) {
+      await recordStop(ports, entry, `foreign_commits`, shaOf(7, "head").replace(/.$/, String(i)), "merge_conflict", { baseRef: bad, conflictFiles: ["src/a.ts"] });
+    }
+    expect((await details(a.workItemId)).map((d) => d.base_ref)).toEqual([null, null, null]);
+    expect((await details(a.workItemId)).map((d) => d.conflict_files)).toEqual([["src/a.ts"], ["src/a.ts"], ["src/a.ts"]]);
+  });
+
+  it("only foreign_commits keeps files: a stop for another reason with a non-empty file list stores none", async () => {
+    const r = await start();
+    // 101 common files is over the bound, so the decision stops with no_conflict_files while holding a non-empty list.
+    const files = Array.from({ length: 101 }, (_, i) => `src/f${String(i).padStart(3, "0")}.ts`);
+    const a = await r.addItem(7, { world: conflictWorld(7, { commits: [{ author: BOT, files }], prFiles: files, mainFiles: files }) });
+    const { onConflict } = wire(r);
+    await runQueueTick(r.deps({ onConflict }), r);
+    expect(await details(a.workItemId)).toEqual([{ code: "merge_conflict", reasons: ["no_conflict_files"], conflict_files: [], base_ref: "main" }]);
   });
 
   it("C6-b5: two queued entries conflicted after a merge both start their rounds in the same tick, and the clean one is not disturbed", async () => {
