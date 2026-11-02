@@ -1,7 +1,7 @@
 import { sleep } from "workflow";
 import type { AdvanceContinueOut, ContinuationSite, AdvanceRunStart, AdvanceStartArgs, AdvanceTriageResult, DecisionStepCode, FixGateStepInput, FixGateStepOut, StartGateStepInput, StartGateStepOut } from "@fx/worker";
 import { getWorker } from "../lib/worker";
-import { conflictGateBody, conflictStartBody, conflictWaitBody, enqueueBody, waitBody, type ConflictStartOut, type ConflictWaitOut, type QueueWaitOut } from "../lib/mergeQueueWait";
+import { conflictGateBody, conflictStartBody, conflictWaitBody, enqueueBody, runnerConflictBody, waitBody, type ConflictStartOut, type ConflictWaitOut, type QueueWaitOut } from "../lib/mergeQueueWait";
 import { getIssueReader } from "../lib/github/issueRead";
 import { openInstallationHttp } from "../lib/github/installationHttp";
 import { publishLightSpecBody, startLightSpecBody, type LightPublished } from "../lib/advanceLightSteps";
@@ -489,6 +489,12 @@ export async function advanceMergeQueueWaitStep(accountId: string, userId: strin
 export async function advanceConflictStartStep(accountId: string, userId: string, workItemId: string, haltEpoch: number): Promise<ConflictStartOut> {
   "use step";
   return conflictStartBody(await getWorker(), { accountId, userId, workItemId, haltEpoch });
+}
+
+/** D#519 MQ4-e2-b: starts the round of a `runner_local` item whose merge order the runner ended with a conflict verdict (or stops it, for a foreign one). */
+export async function advanceRunnerConflictStep(accountId: string, userId: string, workItemId: string, haltEpoch: number): Promise<ConflictStartOut> {
+  "use step";
+  return runnerConflictBody(await getWorker(), { accountId, userId, workItemId, haltEpoch });
 }
 
 /** D#519 MQ4-e1-a: the gate asked again for the merge commit a conflict round produced (it must show the CI signals the round's first pre-round head showed). */
@@ -1725,7 +1731,7 @@ async function personFixRound(args: AdvanceStartArgs, ctx: ReviewCtx): Promise<{
  * until it is over: merged (GitHub says so, read by the cloud), a head moved (review again), or a stop for a person with the order's fixed reason. An order past its
  * 60-minute deadline is expired by the step itself (`runner_merge_timeout`).
  */
-async function waitForMergeOrder(args: AdvanceStartArgs, pr: { number: number; headSha: string }): Promise<{ next: "continue" } | { next: "end"; result: Result }> {
+async function waitForMergeOrder(args: AdvanceStartArgs, pr: { number: number; headSha: string }, reentries = 0): Promise<{ next: "continue" } | { next: "end"; result: Result }> {
   const { accountId, userId, workItemId } = args;
   const stop = async (code: string, record: boolean): Promise<{ next: "end"; result: Result }> => {
     if (record) await advanceEventStep(accountId, userId, workItemId, { kind: "merge_gate", dedupeKey: `${pr.headSha}:order:${code}`, code: "ready_human_merges", reasons: [code], headSha: pr.headSha, prNumber: pr.number });
@@ -1750,6 +1756,11 @@ async function waitForMergeOrder(args: AdvanceStartArgs, pr: { number: number; h
     // The go phase already recorded the gate's own reasons for a block it found; a stop the gate never saw (a claim-time takeover or pairing change, a go phase
     // that was refused or found the pull request closed) is recorded here, so the card says why.
     if (order.state === "blocked") return stop(order.code ?? "runner_merge_failed", order.gateRecorded !== true);
+    // D#519 MQ4-e2-b: a failed order that carries the runner's conflict verdict starts the round (or the foreign stop); anything else about it is today's stop.
+    if (order.state === "failed" && (order.code === "merge_conflict_runner" || order.code === "merge_conflict_foreign")) {
+      const round = await conflictRound(args, pr, reentries, advanceRunnerConflictStep);
+      if (round !== "not_applicable") return round === null ? { next: "continue" } : { next: "end", result: round };
+    }
     if (order.state === "failed") return stop(order.code ?? "runner_merge_failed", true);
     if (order.state === "refused") {
       await stopped(args, "merge_order", order.code ?? "refused", { head: pr.headSha, pr: pr.number });
@@ -1798,7 +1809,7 @@ async function mergeAfterPass(args: AdvanceStartArgs, pr: { number: number; head
   // The head moved while the gate ran: review the new head.
   if (gate.outcome === "head_moved") return null;
   if (gate.outcome === "merge_delegated") {
-    const waited = await waitForMergeOrder(args, pr);
+    const waited = await waitForMergeOrder(args, pr, reentries);
     return waited.next === "continue" ? null : waited.result;
   }
   // D#519 MQ4-e1-a: the pull request does not merge cleanly. An item with no queue entry and no public copy gets a fix round; any other item stops as it always did.
@@ -1814,12 +1825,12 @@ async function mergeAfterPass(args: AdvanceStartArgs, pr: { number: number; head
  * D#519 MQ4-e1-a: the fix round of a pull request that conflicts, for an item with no queue entry. Starts the round, then waits on it (a durable sleep and one read per poll, as the
  * queue wait does). `not_applicable`: not this path's item, so the gate's own stop stands. Null: review the (new) head. A passed delta review of the merge commit re-enters the gate.
  */
-async function conflictRound(args: AdvanceStartArgs, pr: { number: number; headSha: string }, reentries: number): Promise<Result | null | "not_applicable"> {
+async function conflictRound(args: AdvanceStartArgs, pr: { number: number; headSha: string }, reentries: number, startStep: typeof advanceConflictStartStep = advanceConflictStartStep): Promise<Result | null | "not_applicable"> {
   const { accountId, userId, workItemId } = args;
-  let started = await advanceConflictStartStep(accountId, userId, workItemId, args.haltEpoch);
+  let started = await startStep(accountId, userId, workItemId, args.haltEpoch);
   for (let waited = 0; started.state === "waiting" && waited < MERGE_QUEUE_WAIT_MAX_MS; waited += MERGE_QUEUE_WAIT_POLL_MS) {
     await sleep(MERGE_QUEUE_WAIT_POLL_MS);
-    started = await advanceConflictStartStep(accountId, userId, workItemId, args.haltEpoch);
+    started = await startStep(accountId, userId, workItemId, args.haltEpoch);
   }
   await advanceLogStep("advance.merge_conflict", { work_item_id: workItemId, pr: pr.number, state: started.state });
   if (started.state === "not_applicable") return "not_applicable";

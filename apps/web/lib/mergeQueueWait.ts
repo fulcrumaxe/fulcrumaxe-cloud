@@ -3,7 +3,7 @@ import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { expectedSignalNames, loadReviewContext, mergeQueue, readPublicPullRequest } from "@fx/pipeline";
-import { bindCompleteConflictRound, bindCompleteEntryless, endRoundWithoutPr, entrylessStartPorts, readEntrylessSubject } from "./mergeQueueConflict";
+import { bindCompleteConflictRound, bindCompleteEntryless, endRoundWithoutPr, entrylessStartPorts, readEntrylessSubject, runnerStartPorts } from "./mergeQueueConflict";
 import { bindCompleteDeltaReview } from "./mergeQueueDeltaReview";
 import { openQueueGitHub } from "./mergeQueue";
 import { openInstallationHttp } from "./github/installationHttp";
@@ -109,6 +109,45 @@ export async function conflictStartBody(worker: QueueWorker | null, who: StepWho
     const github = await openQueueGitHub(pool, openInstallationHttp, subject);
     if (!github) return { state: "not_applicable" };
     const out = await mergeQueue.startEntrylessConflict(entrylessStartPorts({ ...base, github }), subject);
+    return out.outcome === "stopped" ? { state: "stopped", reason: out.reason } : { state: out.outcome };
+  });
+}
+
+/**
+ * Held off until the end of a `runner_local` round is built (MQ4-e2-c): a round started now would never end, because the completion needs the hosted client a runner_local repository
+ * does not have, so the gate would stay blocked. Flip it in that row.
+ */
+export const RUNNER_CONFLICT_START_ENABLED = false;
+
+/**
+ * D#519 MQ4-e2-b: the runner refused the merge call of a paired `runner_local` item's public pull request (405) and attested a conflict; the cloud kept the verdict on the order it
+ * ended. The round is decided from those stored facts alone and started on the item's own (runner) target; `conflict_foreign` is the item-22 stop. `not_applicable`: the latest
+ * order carries no verdict (an old runner, `unknown`, or any other end), or the item's private head is no longer the head the order was reviewed at: today's stop stands.
+ * The paths are the runner's true content conflicts, narrower than the hosted decision's "changed on both sides".
+ */
+export async function runnerConflictBody(worker: QueueWorker | null, who: StepWho, startEnabled: boolean = RUNNER_CONFLICT_START_ENABLED): Promise<ConflictStartOut> {
+  if (!worker?.withRunnerPool) return { state: "not_applicable" };
+  return worker.withRunnerPool(async (pool) => {
+    if ((await haltState(pool, who)).stale) return { state: "halted" };
+    const order = await withTenant(pool, who.accountId, async (c) =>
+      (
+        await c.query<{ state: string; reviewed_head: string; conflict_verdict: "conflict_platform" | "conflict_foreign" | null; conflict_base_sha: string | null; conflict_base_ref: string | null; conflict_files: string[] | null }>(
+          `SELECT state, reviewed_head, conflict_verdict, conflict_base_sha, conflict_base_ref, conflict_files FROM plane_merge_orders WHERE account_id = $1 AND work_item_id = $2 ORDER BY created_at DESC, id DESC LIMIT 1`,
+          [who.accountId, who.workItemId],
+        )
+      ).rows[0],
+    );
+    if (!order || order.state !== "failed" || order.conflict_verdict === null || order.conflict_base_sha === null || order.conflict_base_ref === null || order.conflict_files === null) return { state: "not_applicable" };
+    const base = { pool, worker, open: openInstallationHttp };
+    const subject = await readEntrylessSubject(base, who.accountId, who.workItemId);
+    // The verdict describes the private head the order was reviewed at; a head that moved since is judged afresh by the review loop.
+    if (!("id" in subject) || subject.headSha !== order.reviewed_head) return { state: "not_applicable" };
+    if (!startEnabled && order.conflict_verdict === "conflict_platform") {
+      // Held: no round starts, so the item stops as a conflict with the stored detail, for a person (the foreign stop and the stored verdict stay live).
+      await mergeQueue.recordStop(runnerStartPorts(base), subject, "round_not_started", subject.headSha, "merge_conflict", { baseRef: order.conflict_base_ref, conflictFiles: order.conflict_files });
+      return { state: "stopped", reason: "merge_conflict" };
+    }
+    const out = await mergeQueue.startEntrylessFromRunnerFacts(runnerStartPorts(base), subject, { verdict: order.conflict_verdict, baseSha: order.conflict_base_sha, baseRef: order.conflict_base_ref, files: order.conflict_files });
     return out.outcome === "stopped" ? { state: "stopped", reason: out.reason } : { state: out.outcome };
   });
 }

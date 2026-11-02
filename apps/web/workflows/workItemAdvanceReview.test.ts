@@ -20,12 +20,14 @@ vi.mock("workflow/api", () => ({ resumeHook: vi.fn(), start: vi.fn() }));
 // so every test below keeps the direct gate it always had.
 const queue = vi.hoisted(() => ({ queued: false, looks: [{ state: "waiting" }] as Array<Record<string, unknown>>, enqueues: [] as unknown[], waits: 0 }));
 // D#519 MQ4-e1-a: the two steps of a merge-conflict round for an item with no queue entry are scripted the same way (bodies: lib/mergeQueueWait.test.ts).
-const conflict = vi.hoisted(() => ({ start: [{ state: "not_applicable" }] as Array<Record<string, unknown>>, looks: [{ state: "waiting" }] as Array<Record<string, unknown>>, starts: 0, waits: 0 }));
+const conflict = vi.hoisted(() => ({ start: [{ state: "not_applicable" }] as Array<Record<string, unknown>>, looks: [{ state: "waiting" }] as Array<Record<string, unknown>>, starts: 0, waits: 0, runner: [{ state: "not_applicable" }] as Array<Record<string, unknown>>, runnerStarts: 0 }));
 vi.mock("../lib/mergeQueueWait", async (orig) => ({
   ...(await orig<typeof import("../lib/mergeQueueWait")>()),
   // The gate asked again for a round's merge commit: its CI rule (the round's first head's signals) is tested in lib/mergeQueueEntryless.test.ts; here it is the worker's gate.
   conflictGateBody: async (w: { advanceMergeGate(who: unknown, pr: number, signals?: string[]): Promise<unknown> }, who: unknown, pr: number) => w.advanceMergeGate(who, pr, ["conflict-gate-stub"]),
   conflictStartBody: async () => (conflict.starts++, conflict.start.length > 1 ? conflict.start.shift()! : conflict.start[0]!),
+  // D#519 MQ4-e2-b: the start from a runner_local order's stored verdict (body: lib/mergeQueueWait.test.ts).
+  runnerConflictBody: async () => (conflict.runnerStarts++, conflict.runner.length > 1 ? conflict.runner.shift()! : conflict.runner[0]!),
   conflictWaitBody: async () => (conflict.waits++, conflict.looks.length > 1 ? conflict.looks.shift()! : conflict.looks[0]!),
   enqueueBody: async (_w: unknown, _who: unknown, input: unknown) => (queue.enqueues.push(input), { queued: queue.queued }),
   waitBody: async () => (queue.waits++, queue.looks.length > 1 ? queue.looks.shift()! : queue.looks[0]!),
@@ -238,7 +240,7 @@ let logs: Array<Record<string, unknown>>;
 beforeEach(() => {
   world.sleeps = 0;
   Object.assign(queue, { queued: false, looks: [{ state: "waiting" }], enqueues: [], waits: 0 });
-  Object.assign(conflict, { start: [{ state: "not_applicable" }], looks: [{ state: "waiting" }], starts: 0, waits: 0 });
+  Object.assign(conflict, { start: [{ state: "not_applicable" }], looks: [{ state: "waiting" }], starts: 0, waits: 0, runner: [{ state: "not_applicable" }], runnerStarts: 0 });
   logs = [];
   vi.spyOn(console, "info").mockImplementation((line: unknown) => void logs.push(JSON.parse(String(line))));
 });
@@ -1847,6 +1849,64 @@ describe("a merge handed to the customer's runner (merge_delegated): the workflo
     const t = setup(fresh({ gates: [{ outcome: "ready_human_merges", reasons: ["ci_not_green"], status: "posted" }] }));
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "ready_human_merges", detail: "ci_not_green" });
     expect(t.worker.advanceMergeOrder).not.toHaveBeenCalled();
+  });
+});
+
+// D#519 MQ4-e2-b: the runner refused the merge call of a paired runner_local item (405) and the order ended with the runner's conflict verdict.
+describe("a runner_local order that ended with a conflict verdict", () => {
+  const delegated = { outcome: "merge_delegated", reasons: [] as string[], status: "posted" };
+
+  it("a platform verdict starts the round from the order (not the hosted decision) and the workflow follows it to its end", async () => {
+    conflict.runner = [{ state: "started" }];
+    conflict.looks = [{ state: "waiting" }, { state: "merged" }];
+    const t = setup(fresh({ gates: [delegated], orders: [{ state: "failed", code: "merge_conflict_runner" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged" });
+    expect(conflict.runnerStarts).toBe(1);
+    expect(conflict.starts).toBe(0);
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(1);
+    expect(logs.find((l) => l.event === "advance.merge_conflict")).toMatchObject({ state: "started" });
+  });
+
+  it("a capacity wait at the start is asked again after a durable sleep, through the same step", async () => {
+    conflict.runner = [{ state: "waiting" }, { state: "started" }];
+    conflict.looks = [{ state: "merged" }];
+    setup(fresh({ gates: [delegated], orders: [{ state: "failed", code: "merge_conflict_runner" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged" });
+    expect(conflict.runnerStarts).toBe(2);
+    expect(conflict.starts).toBe(0);
+    expect(world.sleeps).toBe(1);
+  });
+
+  it("a foreign verdict is Needs a person with the merge_conflict stop (the item-22 sentence is recorded by the start); no round is waited on", async () => {
+    conflict.runner = [{ state: "stopped", reason: "merge_conflict" }];
+    const t = setup(fresh({ gates: [delegated], orders: [{ state: "failed", code: "merge_conflict_foreign" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "merge_conflict" });
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "merge_conflict" }));
+    expect(conflict.waits).toBe(0);
+  });
+
+  it("a head that moved since the order (not applicable) leaves the order's own stop, recorded with its code", async () => {
+    conflict.runner = [{ state: "not_applicable" }];
+    const t = setup(fresh({ gates: [delegated], orders: [{ state: "failed", code: "merge_conflict_runner" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "ready_human_merges", detail: "merge_conflict_runner" });
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "merge_gate", reasons: ["merge_conflict_runner"] }));
+  });
+
+  it("an old runner's refused call (no verdict, code merge_call_refused) and any other failed order are today's stop: the start is never asked", async () => {
+    for (const code of ["merge_call_refused", "runner_merge_failed", "runner_report_mismatch"]) {
+      conflict.runnerStarts = 0;
+      setup(fresh({ gates: [delegated], orders: [{ state: "failed", code }] }));
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "ready_human_merges", detail: code });
+      expect(conflict.runnerStarts, code).toBe(0);
+    }
+  });
+
+  it("a round that cannot be followed ends at the same bound as the hosted round's, and the count is carried across the new order each pass asks for", async () => {
+    conflict.runner = [{ state: "running" }];
+    conflict.looks = [{ state: "none" }];
+    setup(fresh({ gates: [delegated], orders: [{ state: "failed", code: "merge_conflict_runner" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "conflict_round_unreadable" });
+    expect(conflict.waits).toBe(6);
   });
 });
 

@@ -174,6 +174,14 @@ export interface PlanePushHostedPort {
   mintMergeToken?(codeRepo: string, accountId: string, kind: "read" | "write"): Promise<{ token: string; expiresAt: Date }>;
 }
 
+/** D#519 MQ4-e2-b: the runner's verdict on a refused merge call, as the store keeps it on the order it ends (packages/worker `PlaneMergeConflict`, which this package cannot import). */
+export interface PlaneMergeConflictRecord {
+  verdict: "conflict_platform" | "conflict_foreign";
+  baseSha: string;
+  baseRef: string;
+  files: readonly string[];
+}
+
 /**
  * D#6 PUBLIC-MERGE PR2b: the part of a merge order the routes read (the shape of packages/worker `PlaneMergeOrder`, which this package cannot import).
  * Every value here is the cloud's own row; nothing a runner sent is ever copied into it.
@@ -205,7 +213,7 @@ export interface PlaneMergeStorePort {
   grantReadToken(lease: PlaneMergeLease): Promise<{ kind: "granted"; order: PlaneMergeOrderFacts } | { kind: "already_issued" } | { kind: "fenced"; reason: string }>;
   fence(lease: PlaneMergeLease): Promise<{ kind: "ok"; order: PlaneMergeOrderFacts } | { kind: "fenced"; reason: string }>;
   authorize(lease: PlaneMergeLease): Promise<{ kind: "authorized"; order: PlaneMergeOrderFacts } | { kind: "already_issued" } | { kind: "fenced"; reason: string }>;
-  finish(input: { accountId: string; orderId: string; to: string; code: string; actor: { by: "runner"; runnerId: string; leaseGeneration: number } | { by: "cloud" } }): Promise<{ kind: "finished"; order: PlaneMergeOrderFacts } | { kind: "fenced"; reason: string } | { kind: "not_allowed"; from: string } | { kind: "not_found" }>;
+  finish(input: { accountId: string; orderId: string; to: string; code: string; actor: { by: "runner"; runnerId: string; leaseGeneration: number } | { by: "cloud" }; conflict?: PlaneMergeConflictRecord }): Promise<{ kind: "finished"; order: PlaneMergeOrderFacts } | { kind: "fenced"; reason: string } | { kind: "not_allowed"; from: string } | { kind: "not_found" }>;
   /** One order by id, whatever its state (a late report for an order that is already over looks it up); null when there is none. */
   getById(input: { accountId: string; orderId: string }): Promise<PlaneMergeOrderFacts | null>;
   /** The runner's trust, read now (not revoked, registered by a current owner or admin, in scope of the repository, not paused or draining, listing the capability). */

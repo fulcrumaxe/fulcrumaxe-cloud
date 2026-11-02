@@ -341,6 +341,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "base_synced",
   "pull_request_unreadable",
   "base_unreadable",
+  "merge_conflict_foreign",
+  "merge_conflict_runner",
   "merge_refused",
   "branch_exists",
   "pr_failed",

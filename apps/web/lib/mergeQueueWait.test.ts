@@ -29,10 +29,14 @@ const h = vi.hoisted(() => ({
   entrylessDone: { outcome: "waiting" } as Record<string, unknown>,
   subjectCalls: [] as unknown[][],
   endedWithoutPr: 0,
+  /** MQ4-e2-b: the item's latest merge order row (null: none), and the facts the start was given. */
+  order: null as Record<string, unknown> | null,
+  runnerStarts: [] as unknown[][],
+  stops: [] as unknown[][],
 }));
 
 vi.mock("@fx/core/src/tenancy/withTenant.js", () => ({
-  withTenant: async (_pool: unknown, _account: string, fn: (c: unknown) => unknown) => fn({ query: async () => ({ rows: [h.halt] }) }),
+  withTenant: async (_pool: unknown, _account: string, fn: (c: unknown) => unknown) => fn({ query: async (sql: string) => ({ rows: /plane_merge_orders/.test(sql) ? (h.order ? [h.order] : []) : [h.halt] }) }),
 }));
 vi.mock("@fx/core/src/pendingWork.js", () => ({ markWorkPending: async (...a: unknown[]) => void h.pending.push(a) }));
 vi.mock("@fx/core/src/work-items/stackParentPull.js", () => ({ readStackParentPull: async () => h.stackParent }));
@@ -45,6 +49,8 @@ vi.mock("@fx/pipeline", () => ({
     getEntryByWorkItem: async () => (h.roundDone > 0 && h.afterRound ? h.afterRound : h.entry),
     cancelWorkItemEntry: async (_c: unknown, input: unknown) => void h.cancelled.push(input),
     startEntrylessConflict: async (_ports: unknown, subject: unknown) => (h.started.push(subject), h.startOut),
+    recordStop: async (...a: unknown[]) => void h.stops.push(a),
+    startEntrylessFromRunnerFacts: async (_ports: unknown, subject: unknown, facts: unknown) => (h.runnerStarts.push([subject, facts]), h.startOut),
   },
 }));
 vi.mock("./mergeQueue", () => ({ openQueueGitHub: async () => h.github }));
@@ -53,12 +59,13 @@ vi.mock("./mergeQueueConflict", () => ({
   readEntrylessSubject: async (...a: unknown[]) => (h.subjectCalls.push(a.slice(1)), h.subject),
   endRoundWithoutPr: async () => (h.endedWithoutPr++, true),
   entrylessStartPorts: () => ({}),
+  runnerStartPorts: () => ({}),
   bindCompleteEntryless: () => async () => h.entrylessDone,
 }));
 vi.mock("./mergeQueueDeltaReview", () => ({ bindCompleteDeltaReview: () => async () => (h.completed++, h.completion) }));
 vi.mock("./github/installationHttp", () => ({ openInstallationHttp: async () => ({}) }));
 
-import { conflictStartBody, conflictWaitBody, enqueueBody, waitBody, type QueueWorker } from "./mergeQueueWait";
+import { RUNNER_CONFLICT_START_ENABLED, conflictStartBody, conflictWaitBody, enqueueBody, runnerConflictBody as runnerConflictBodyWith, waitBody, type QueueWorker } from "./mergeQueueWait";
 
 const WHO = { accountId: "acct", userId: "u", workItemId: "item", haltEpoch: 0 };
 const worker = { withRunnerPool: async (fn: (pool: unknown) => unknown) => fn({}) } as unknown as QueueWorker;
@@ -86,6 +93,9 @@ beforeEach(() => {
   h.entrylessDone = { outcome: "waiting" };
   h.subjectCalls = [];
   h.endedWithoutPr = 0;
+  h.order = null;
+  h.runnerStarts = [];
+  h.stops = [];
 });
 
 describe("enqueueBody: hosted, unpaired repositories only", () => {
@@ -299,5 +309,78 @@ describe("the subject readers' seams", () => {
     h.subject = { reason: "no_open_pr" };
     expect(await conflictWaitBody(worker, WHO)).toEqual({ state: "closed" });
     expect(h.endedWithoutPr).toBe(1);
+  });
+});
+
+// D#519 MQ4-e2-b: the round of a runner_local item, from the verdict the runner's refused merge call left on the order. No hosted repository client is opened for it
+// (`openQueueGitHub` answers null for a runner_local repository, and the body never asks).
+// The start is held until the end of a runner_local round exists (MQ4-e2-c): these tests run it switched on, and the held state is tested below.
+const runnerConflictBody = (w: QueueWorker | null, who: typeof WHO) => runnerConflictBodyWith(w, who, true);
+
+describe("runnerConflictBody", () => {
+  const ORDER = { state: "failed", reviewed_head: "c".repeat(40), conflict_verdict: "conflict_platform", conflict_base_sha: "d".repeat(40), conflict_base_ref: "main", conflict_files: ["src/a.ts"] };
+  beforeEach(() => {
+    h.order = { ...ORDER };
+    h.github = null;
+  });
+
+  it("starts the round from the stored facts for the item's own subject, and reports the start's answer", async () => {
+    for (const outcome of ["started", "running", "waiting"]) {
+      h.startOut = { outcome };
+      expect(await runnerConflictBody(worker, WHO)).toEqual({ state: outcome });
+    }
+    h.startOut = { outcome: "stopped", reason: "merge_conflict" };
+    expect(await runnerConflictBody(worker, WHO)).toEqual({ state: "stopped", reason: "merge_conflict" });
+    expect(h.runnerStarts[0]).toEqual([h.subject, { verdict: "conflict_platform", baseSha: "d".repeat(40), baseRef: "main", files: ["src/a.ts"] }]);
+    // The hosted decision is never used.
+    expect(h.started).toEqual([]);
+  });
+
+  it("a foreign verdict is handed on as it is (the start makes the item-22 stop)", async () => {
+    h.order = { ...ORDER, conflict_verdict: "conflict_foreign" };
+    await runnerConflictBody(worker, WHO);
+    expect(h.runnerStarts[0]![1]).toMatchObject({ verdict: "conflict_foreign" });
+  });
+
+  it.each([
+    ["no order", () => void (h.order = null)],
+    ["an order that carries no verdict (an old runner, unknown, any other end)", () => void (h.order = { ...ORDER, conflict_verdict: null, conflict_base_sha: null, conflict_base_ref: null, conflict_files: null })],
+    ["an order that is not failed", () => void (h.order = { ...ORDER, state: "authorized" })],
+    ["a private head that moved since the order was reviewed", () => void (h.subject = { id: "item", headSha: "e".repeat(40) })],
+    ["an item that is not this path's", () => void (h.subject = { reason: "conflict_public_copy" })],
+  ])("%s: not applicable, nothing starts", async (_name, arrange) => {
+    arrange();
+    expect(await runnerConflictBody(worker, WHO)).toEqual({ state: "not_applicable" });
+    expect(await runnerConflictBody(null, WHO)).toEqual({ state: "not_applicable" });
+    expect(h.runnerStarts).toEqual([]);
+  });
+
+  it("a halted item starts nothing", async () => {
+    h.halt = { halted: true, halt_epoch: 0 };
+    expect(await runnerConflictBody(worker, WHO)).toEqual({ state: "halted" });
+    expect(h.runnerStarts).toEqual([]);
+  });
+});
+
+describe("runnerConflictBody while the start is held (RUNNER_CONFLICT_START_ENABLED)", () => {
+  const ORDER = { state: "failed", reviewed_head: "c".repeat(40), conflict_verdict: "conflict_platform", conflict_base_sha: "d".repeat(40), conflict_base_ref: "main", conflict_files: ["src/a.ts"] };
+  beforeEach(() => void (h.order = { ...ORDER }));
+
+  it("ships switched off", () => expect(RUNNER_CONFLICT_START_ENABLED).toBe(false));
+
+  it("a platform verdict starts nothing: the item stops as merge_conflict with the stored base and paths recorded", async () => {
+    expect(await runnerConflictBodyWith(worker, WHO, false)).toEqual({ state: "stopped", reason: "merge_conflict" });
+    expect(h.runnerStarts).toEqual([]);
+    expect(h.stops).toEqual([[expect.anything(), h.subject, "round_not_started", "c".repeat(40), "merge_conflict", { baseRef: "main", conflictFiles: ["src/a.ts"] }]]);
+  });
+
+  it("the default is the constant, and a foreign verdict still takes the live foreign stop", async () => {
+    expect(await runnerConflictBodyWith(worker, WHO)).toEqual({ state: "stopped", reason: "merge_conflict" });
+    expect(h.runnerStarts).toEqual([]);
+    h.order = { ...ORDER, conflict_verdict: "conflict_foreign" };
+    h.stops = [];
+    await runnerConflictBodyWith(worker, WHO, false);
+    expect(h.runnerStarts).toHaveLength(1);
+    expect(h.stops).toEqual([]);
   });
 });

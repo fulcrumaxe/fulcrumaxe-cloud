@@ -627,7 +627,7 @@ describe("plane-merge routes [pg]", () => {
       }
     });
 
-    // D#519 MQ4-e2-a, C15-16 and C15-18: the conflict verdict is checked and DROPPED. Nothing stores or acts on it yet, so an order ends exactly as it does without one.
+    // D#519 MQ4-e2-b, C15-19: the verdict is stored on the order the report ends, from the cloud's own read of GitHub, and nowhere else.
     describe("a conflict verdict on a refused 405", () => {
       const verdictOf = (over: Record<string, unknown> = {}) => ({ verdict: "conflict_platform", paths: ["src/a.ts"], base_sha: "c".repeat(40), base_ref: "main", ...over });
       const capable = async (caps: string[]) => void (await admin.query("UPDATE runner_capabilities SET capabilities = $2::text[] WHERE runner_id = $1", [runner, caps]));
@@ -635,24 +635,79 @@ describe("plane-merge routes [pg]", () => {
         const r = await row(id);
         return { state: r.state, outcome_code: r.outcome_code };
       };
-      const COLUMNS_BEFORE = async () => (await admin.query("SELECT column_name FROM information_schema.columns WHERE table_name = 'plane_merge_orders' ORDER BY 1")).rows.map((r: { column_name: string }) => r.column_name);
+      const stored = async (id: string) => (await admin.query("SELECT conflict_verdict, conflict_base_sha, conflict_base_ref, conflict_files FROM plane_merge_orders WHERE id = $1", [id])).rows[0];
 
-      it("from a runner that listed conflict_facts_v1, for an authorized order: recorded, and the order ends exactly as the same report without it (inert)", async () => {
+      it("a platform verdict ends the order failed with merge_conflict_runner and keeps the four facts; a foreign one ends merge_conflict_foreign", async () => {
         await capable(["plane_merge_v1", "conflict_facts_v1"]);
-        const columns = await COLUMNS_BEFORE();
+        const platform = await authorized();
+        const res = await reportIt(reportBody(platform.reply, { result: "refused", http_status: 405, conflict: verdictOf() }));
+        expect(PlaneMergeReportReply.parse(res.body)).toEqual({ recorded: true });
+        expect(await endState(platform.order.id)).toEqual({ state: "failed", outcome_code: "merge_conflict_runner" });
+        expect(await stored(platform.order.id)).toEqual({ conflict_verdict: "conflict_platform", conflict_base_sha: "c".repeat(40), conflict_base_ref: "main", conflict_files: ["src/a.ts"] });
+        const foreign = await authorized();
+        await reportIt(reportBody(foreign.reply, { result: "refused", http_status: 405, conflict: verdictOf({ verdict: "conflict_foreign", paths: ["src/b.ts", "src/a.ts"] }) }));
+        expect(await endState(foreign.order.id)).toEqual({ state: "failed", outcome_code: "merge_conflict_foreign" });
+        expect((await stored(foreign.order.id)).conflict_files).toEqual(["src/b.ts", "src/a.ts"]);
+      });
+
+      it("unknown, and a report with no field, end as a refused call always did and store nothing (the old-runner fallback)", async () => {
+        await capable(["plane_merge_v1", "conflict_facts_v1"]);
         const plain = await authorized();
         await reportIt(reportBody(plain.reply, { result: "refused", http_status: 405 }));
-        const withVerdict = await authorized();
-        const res = await reportIt(reportBody(withVerdict.reply, { result: "refused", http_status: 405, conflict: verdictOf() }));
-        expect(PlaneMergeReportReply.parse(res.body)).toEqual({ recorded: true });
-        expect(await endState(withVerdict.order.id)).toEqual(await endState(plain.order.id));
-        expect(await endState(withVerdict.order.id)).toEqual({ state: "failed", outcome_code: "merge_call_refused" });
-        // Nothing of the verdict is kept: the table has no column for it yet (MQ4-e2-b adds them).
-        expect(await COLUMNS_BEFORE()).toEqual(columns);
-        expect(JSON.stringify((await admin.query("SELECT * FROM plane_merge_orders WHERE id = $1", [withVerdict.order.id])).rows)).not.toContain("src/a.ts");
-        // An unknown verdict is accepted the same way.
         const unknown = await authorized();
         expect((await reportIt(reportBody(unknown.reply, { result: "refused", http_status: 405, conflict: { verdict: "unknown", paths: [] } }))).status).toBe(200);
+        for (const o of [plain.order, unknown.order]) {
+          expect(await endState(o.id)).toEqual({ state: "failed", outcome_code: "merge_call_refused" });
+          expect(await stored(o.id)).toEqual({ conflict_verdict: null, conflict_base_sha: null, conflict_base_ref: null, conflict_files: null });
+        }
+      });
+
+      it("the verdict is used only when GitHub, read by the cloud, shows the pull request open at the order's head and not merged", async () => {
+        await capable(["plane_merge_v1", "conflict_facts_v1"]);
+        const moved = await authorized();
+        pull = { open: true, merged: false, headSha: "d".repeat(40) };
+        await reportIt(reportBody(moved.reply, { result: "refused", http_status: 405, conflict: verdictOf() }));
+        expect(await endState(moved.order.id)).toEqual({ state: "head_moved", outcome_code: "public_head_moved" });
+        const closed = await authorized();
+        pull = { open: false, merged: false, headSha: HEAD };
+        await reportIt(reportBody(closed.reply, { result: "refused", http_status: 405, conflict: verdictOf() }));
+        expect(await endState(closed.order.id)).toEqual({ state: "failed", outcome_code: "public_pr_not_open" });
+        for (const o of [moved.order, closed.order]) expect((await stored(o.id)).conflict_verdict).toBeNull();
+      });
+
+      it("the table refuses a second write, a write while the order is open, and a verdict on a code that does not match", async () => {
+        await capable(["plane_merge_v1", "conflict_facts_v1"]);
+        const done = await authorized();
+        await reportIt(reportBody(done.reply, { result: "refused", http_status: 405, conflict: verdictOf() }));
+        await expect(admin.query("UPDATE plane_merge_orders SET conflict_files = ARRAY['x'] WHERE id = $1", [done.order.id])).rejects.toThrow(/finished order does not change/);
+        const open = await authorized();
+        await expect(admin.query("UPDATE plane_merge_orders SET conflict_verdict = 'conflict_platform', conflict_base_sha = $2, conflict_base_ref = 'main', conflict_files = ARRAY['x'] WHERE id = $1", [open.order.id, "c".repeat(40)])).rejects.toThrow(/written with the order's end/);
+        const end = (code: string, files: string) =>
+          admin.query(`UPDATE plane_merge_orders SET state = 'failed', outcome_code = $2, finished_at = now(), conflict_verdict = 'conflict_platform', conflict_base_sha = $3, conflict_base_ref = 'main', conflict_files = ${files} WHERE id = $1`, [open.order.id, code, "c".repeat(40)]);
+        await expect(end("merge_conflict_foreign", "ARRAY['x']")).rejects.toThrow(/plane_merge_orders_conflict_shape/);
+        await expect(end("merge_conflict_runner", "ARRAY['../x']")).rejects.toThrow(/plane_merge_orders_conflict_files_check/);
+        await expect(end("merge_conflict_runner", `(SELECT array_agg('f' || g) FROM generate_series(1, 101) g)`)).rejects.toThrow(/plane_merge_orders_conflict_files_check/);
+        await expect(end("merge_conflict_runner", "ARRAY[]::text[]")).rejects.toThrow(/plane_merge_orders_conflict_files_check/);
+        await expect(admin.query("UPDATE plane_merge_orders SET conflict_base_sha = 'nope' WHERE id = $1", [open.order.id])).rejects.toThrow();
+      });
+
+      it("the shape CHECK alone (the guard allows the move) refuses a verdict on an order that ends merged, with the verdict's own code", async () => {
+        const { order } = await authorized();
+        await expect(
+          admin.query(
+            `UPDATE plane_merge_orders SET state = 'merged', outcome_code = 'merge_conflict_runner', finished_at = now(), conflict_verdict = 'conflict_platform', conflict_base_sha = $2, conflict_base_ref = 'main', conflict_files = ARRAY['x'] WHERE id = $1`,
+            [order.id, "c".repeat(40)],
+          ),
+        ).rejects.toThrow(/plane_merge_orders_conflict_shape/);
+        expect((await row(order.id)).state).toBe("authorized");
+      });
+
+      it("the store refuses a verdict on any end but a failed order with the matching code", async () => {
+        const { order } = await authorized();
+        const input = { accountId: A.accountId, orderId: order.id, actor: { by: "cloud" } as const, conflict: { verdict: "conflict_platform" as const, baseSha: "c".repeat(40), baseRef: "main", files: ["src/a.ts"] } };
+        await expect(store.finish({ ...input, to: "merged", code: "merged" })).rejects.toThrow(/conflict verdict/);
+        await expect(store.finish({ ...input, to: "failed", code: "merge_conflict_foreign" })).rejects.toThrow(/conflict verdict/);
+        expect((await row(order.id)).state).toBe("authorized");
       });
 
       it("from a runner that did not list the capability: 400 invalid_message, the order is untouched and can still be reported", async () => {
