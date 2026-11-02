@@ -201,6 +201,48 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
     expect(activityResponseSchema.parse((await (await get(itemId, { accountId, userId })).json()) as Activity)).toBeTruthy();
   });
 
+  // D#519 MQ5-c1: `queue_wait` is derived on each read from the item's own queue entry; absent for no entry and any other state, and another account sees nothing.
+  it('queue_wait: absent without an entry, `ahead` while it waits (own account and repository only), absent again once it is in another state', async () => {
+    const mine = await seedAccountWithMember(admin, { role: 'owner' });
+    const theirs = await seedAccountWithMember(admin, { role: 'owner' });
+    const { itemId } = await seedItem(mine.accountId, { stage: 'review_passed' });
+    const waitOf = async (id: string, who: { accountId: string; userId: string }) => (await (await get(id, who)).json()) as Activity & { queue_wait?: Record<string, unknown> };
+    expect((await waitOf(itemId, mine)).queue_wait).toBeUndefined();
+    const repoId = (await admin.query<{ repo_id: string }>('SELECT repo_id FROM work_items WHERE id = $1', [itemId])).rows[0]!.repo_id;
+    const other = (await admin.query<{ id: string }>(`INSERT INTO work_items (account_id, repo_id, kind, provenance) VALUES ($1, $2, 'bug', 'internal') RETURNING id`, [mine.accountId, repoId])).rows[0]!.id;
+    const put = (id: string, pr: number, at: string, state: string) =>
+      admin.query(`INSERT INTO merge_queue_entries (account_id, repo_id, work_item_id, pr_number, head_sha, approved_at, state) VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7)`, [mine.accountId, repoId, id, pr, 'a'.repeat(40), at, state]);
+    await put(other, 3, '2026-01-01T00:00:00Z', 'queued');
+    await put(itemId, 9, '2026-01-02T00:00:00Z', 'queued');
+    expect((await waitOf(itemId, mine)).queue_wait).toEqual({ ahead: 1 });
+    expect(activityResponseSchema.parse(await (await get(itemId, mine)).json())).toBeTruthy();
+    expect((await get(itemId, theirs)).status).toBe(404);
+    await admin.query(`UPDATE merge_queue_entries SET state = 'in_review' WHERE work_item_id = $1`, [itemId]);
+    expect((await waitOf(itemId, mine)).queue_wait).toBeUndefined();
+  });
+
+  // MQ5-c1-6 through the route and the real `mergeQueue.countAhead`: two accounts, a repository of the same name each, a different number of entries ahead in each.
+  it('queue_wait: each caller\'s `ahead` counts only its own account\'s entries, and the other account\'s item answers 404', async () => {
+    const accts = [await seedAccountWithMember(admin, { role: 'owner' }), await seedAccountWithMember(admin, { role: 'owner' })];
+    const items: string[] = [];
+    for (const [i, who] of accts.entries()) {
+      const { itemId } = await seedItem(who.accountId, { stage: 'review_passed' });
+      items.push(itemId);
+      const repoId = (await admin.query<{ repo_id: string }>('SELECT repo_id FROM work_items WHERE id = $1', [itemId])).rows[0]!.repo_id;
+      // Account 0 has two entries ahead of its item, account 1 has one: a count that crossed accounts would show 3 or 2.
+      for (let n = 0; n < (i === 0 ? 2 : 1); n++) {
+        const w = (await admin.query<{ id: string }>(`INSERT INTO work_items (account_id, repo_id, kind, provenance) VALUES ($1, $2, 'bug', 'internal') RETURNING id`, [who.accountId, repoId])).rows[0]!.id;
+        await admin.query(`INSERT INTO merge_queue_entries (account_id, repo_id, work_item_id, pr_number, head_sha, approved_at, state) VALUES ($1, $2, $3, $4, $5, '2026-01-01T00:00:00Z', 'queued')`, [who.accountId, repoId, w, 100 + n, 'a'.repeat(40)]);
+      }
+      await admin.query(`INSERT INTO merge_queue_entries (account_id, repo_id, work_item_id, pr_number, head_sha, approved_at, state) VALUES ($1, $2, $3, 9, $4, '2026-01-02T00:00:00Z', 'queued')`, [who.accountId, repoId, itemId, 'a'.repeat(40)]);
+    }
+    const aheadOf = async (id: string, who: (typeof accts)[number]) => ((await (await get(id, who)).json()) as { queue_wait?: { ahead?: number } }).queue_wait?.ahead;
+    expect(await aheadOf(items[0]!, accts[0]!)).toBe(2);
+    expect(await aheadOf(items[1]!, accts[1]!)).toBe(1);
+    expect((await get(items[1]!, accts[0]!)).status).toBe(404);
+    expect((await get(items[0]!, accts[1]!)).status).toBe(404);
+  });
+
   // D#6 R-CHK-3d: a runner run that ended on its check reads "could not run safely" in the work item's activity when the runner recorded a reason, and "failed" when it did not.
   it('a runner run that ended on its check: the recorded reason decides the end line, as on the run view', async () => {
     const { accountId, userId } = await seedAccountWithMember(admin);

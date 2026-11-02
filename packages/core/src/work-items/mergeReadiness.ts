@@ -189,6 +189,80 @@ export async function readConflictState(client: Pick<PoolClient, 'query'>, accou
   return { conflict_stop: { kind: 'attempts_spent', attempts, files: last?.conflict_files ?? [], base_ref: last?.base_ref ?? ev?.base_ref ?? null } };
 }
 
+// ---- D#519 MQ5-c1: where an item stands in the product merge queue, derived on each read (never stored) -------------------------------------------------
+
+/** The stop codes whose card sentence is filled from structured fields (the queue's own `reason` on the entry). */
+export const QUEUE_WAIT_STOP_CODES = ['branch_behind', 'branch_protection_refused', 'ordered_resource_out_of_order', 'merge_dependency_closed', 'history_rewritten'] as const;
+
+export interface QueueWait {
+  ahead?: number;
+  branch?: string | null;
+  resource?: string | null;
+  key?: string | null;
+  main_key?: string | null;
+  parent_pr?: number | null;
+}
+
+const TOKEN_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const BRANCH_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/;
+
+/** The value of the first `<prefix>_<value>` code in a fact's reasons, or null when none parses by shape (a token that does not parse is left out). */
+function reasonToken(reasons: readonly string[], prefix: string): string | null {
+  for (const r of reasons) {
+    if (!r.startsWith(`${prefix}_`)) continue;
+    const v = r.slice(prefix.length + 1);
+    if (TOKEN_SHAPE.test(v)) return v;
+  }
+  return null;
+}
+
+/**
+ * The item's own queue entry for the card: `ahead` while it waits (`queued` / `awaiting_work`, counted by `countAhead` over the same account and repository), and the
+ * per-code fields once it stopped with one of the codes above, from the newest `stopped` fact of the same pull request and round within 60 seconds of the entry's last change
+ * (matched as `readConflictState` matches) and its detail row. `countAhead` is passed in because the pipeline package owns it. Null for no entry or any other state. Only counts
+ * and the item's own tokens are returned: no other item's id, title, branch or pull request number.
+ */
+export async function readQueueWait(
+  client: Pick<PoolClient, 'query'>,
+  accountId: string,
+  workItemId: string,
+  countAhead: (client: Pick<PoolClient, 'query'>, accountId: string, entryId: string) => Promise<number>,
+): Promise<QueueWait | null> {
+  const { rows } = await client.query<{ id: string; state: string; reason: string | null; pr_number: number; conflict_rounds: number; updated_at: Date; parent_pr: number | null }>(
+    `SELECT id, state, reason, pr_number, conflict_rounds, updated_at, depends_on_pr_number AS parent_pr FROM merge_queue_entries WHERE account_id = $1 AND work_item_id = $2`,
+    [accountId, workItemId],
+  );
+  const e = rows[0];
+  if (!e) return null;
+  if (e.state === 'queued' || e.state === 'awaiting_work') return { ahead: await countAhead(client, accountId, e.id) };
+  if (e.state !== 'stopped' || e.reason === null || !(QUEUE_WAIT_STOP_CODES as readonly string[]).includes(e.reason)) return null;
+  const out: QueueWait = {};
+  if (e.reason === 'merge_dependency_closed') {
+    if (e.parent_pr !== null) out.parent_pr = e.parent_pr;
+    return out;
+  }
+  const ev = (
+    await client.query<{ reasons: string[]; base_ref: string | null }>(
+      `SELECT v.reasons, d.base_ref FROM work_item_driver_events v LEFT JOIN work_item_driver_event_details d ON d.driver_event_id = v.id AND d.account_id = v.account_id
+        WHERE v.account_id = $1 AND v.work_item_id = $2 AND v.kind = 'stopped' AND v.code = $3 AND v.pr_number = $4 AND v.round = $5 AND v.created_at BETWEEN $6::timestamptz - interval '60 seconds' AND $6::timestamptz + interval '60 seconds'
+        ORDER BY v.seq DESC LIMIT 1`,
+      [accountId, workItemId, e.reason, e.pr_number, e.conflict_rounds, e.updated_at],
+    )
+  ).rows[0];
+  if (!ev) return out;
+  const branch = reasonToken(ev.reasons, 'branch') ?? (ev.base_ref !== null && BRANCH_SHAPE.test(ev.base_ref) ? ev.base_ref : null);
+  if (branch !== null) out.branch = branch;
+  if (e.reason === 'ordered_resource_out_of_order') {
+    const resource = reasonToken(ev.reasons, 'resource');
+    const key = reasonToken(ev.reasons, 'key');
+    const mainKey = reasonToken(ev.reasons, 'highest');
+    if (resource !== null) out.resource = resource;
+    if (key !== null) out.key = key;
+    if (mainKey !== null) out.main_key = mainKey;
+  }
+  return out;
+}
+
 // ---- D#598 P3c: a stacked child's place in the product merge queue, derived (never stored) ---------------------------------------------------------------
 
 export const STACKED_WAIT_STATES = ['waiting', 'moving', 'conflict', 'parent_closed', 'retarget_failed'] as const;

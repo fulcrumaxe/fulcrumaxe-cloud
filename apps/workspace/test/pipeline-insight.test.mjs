@@ -241,7 +241,6 @@ describe("the Ready to merge banner is honest about what still blocks the merge"
     ["merge_queue_waiting", "The pull request is waiting in the merge queue"],
     ["ordered_resource_out_of_order", "Another change has to merge before this one"],
     ["merge_dependency_closed", "The pull request it builds on was closed without merging"],
-    ["history_rewritten", "The branch history was rewritten after review"],
     ["pairing_changed", "The public repository's pairing changed"],
     ["no_pull_request", "There is no pull request on record to merge"],
     ["go_not_applicable", "The merge could not go through your runner"],
@@ -254,6 +253,12 @@ describe("the Ready to merge banner is honest about what still blocks the merge"
     const b = readyBanner(withGate(["auto_merge_not_allowed", code]));
     expect(b).toMatchObject({ blocked: true, title: "Not ready to merge yet", detail: sentence + ".", url: null, autoMergeText: "" });
     expect(b.detail).not.toContain(code);
+  });
+
+  it("history_rewritten (D#519 section 5) names nothing, so it is one sentence that already ends in a stop, no link to GitHub", () => {
+    const sentence = "This branch's history was rewritten, so its reviews no longer apply.";
+    expect(blockingSentence("history_rewritten")).toBe(sentence);
+    expect(readyBanner(withGate(["auto_merge_not_allowed", "history_rewritten"]))).toMatchObject({ blocked: true, title: "Not ready to merge yet", detail: sentence, url: null, autoMergeText: "" });
   });
 
   it("names the first blocking reason, leaving the person-merges ones out", () => {
@@ -1304,9 +1309,9 @@ describe("D#519 MQ4-d: the merge-conflict fix round lines", () => {
     expect(conflictLine(withConflict(SPENT)).text).toBe("It conflicts with main in src/a.ts, src/b.ts. We tried 2 times, so a person needs to resolve it.");
     expect(conflictLine(withConflict(FOREIGN)).text).toBe("It conflicts with main in src/a.ts, and these files have commits we didn't write, so a person needs to resolve it.");
     expect(conflictLine(withConflict(DIRECT)).text).toBe("It conflicts with main. Automatic conflict fixes don't run for this repository yet, so a person needs to resolve it.");
-    // history_rewritten is the body's sentence, unchanged: the existing blocking sentence.
+    // history_rewritten names nothing, so it is the section 5 sentence every time; the old sentence stays as the table's fallback.
     const rewritten = withConflict({ steps: [{ kind: "merge_gate", result: "ready_human_merges", reasons: ["history_rewritten"] }] });
-    expect(mergeBlockSentence(rewritten)).toBe("The branch history was rewritten after review");
+    expect(mergeBlockSentence(rewritten)).toBe("This branch's history was rewritten, so its reviews no longer apply.");
     expect(BLOCKING_SENTENCES.history_rewritten).toBe("The branch history was rewritten after review");
   });
 

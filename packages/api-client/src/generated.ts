@@ -528,6 +528,14 @@ export interface Operations {
         files: Array<string>;
         base_ref: string | null;
       };
+      queue_wait?: {
+        ahead?: number;
+        branch?: string | null;
+        resource?: string | null;
+        key?: string | null;
+        main_key?: string | null;
+        parent_pr?: (number) | (null);
+      };
       stacked_wait?: {
         state: "waiting" | "moving" | "conflict" | "parent_closed" | "retarget_failed";
         parent_pr: (number) | (null);
