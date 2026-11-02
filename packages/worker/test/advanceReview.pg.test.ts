@@ -1050,6 +1050,9 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const rd = review();
       expect(await build({}, rd).module.advanceMergeGate(who(a, w), 41)).toMatchObject({ outcome: "merged" });
       expect(rd.mergeGate).toHaveBeenCalledWith(writerPool, { accountId: a.accountId, workItemId: w, prNumber: 41 }, { orders: expect.objectContaining({ placeOrder: expect.any(Function) }) });
+      // The signals a conflict round's merge commit must show are forwarded to the gate; without them the input is exactly as before.
+      await build({}, rd).module.advanceMergeGate(who(a, w), 41, ["ci/test"]);
+      expect(rd.mergeGate).toHaveBeenLastCalledWith(writerPool, { accountId: a.accountId, workItemId: w, prNumber: 41, expectedSignals: ["ci/test"] }, expect.anything());
       const ext = await item(a, { provenance: "external" });
       expect(await build({}, rd).module.advanceMergeGate(who(a, ext), 41)).toEqual({ outcome: "refused", reason: "external_requires_human" });
       expect(await build({}, rd).module.advanceMergeGate(who(a, w), 0)).toEqual({ outcome: "refused", reason: "invalid_input" });

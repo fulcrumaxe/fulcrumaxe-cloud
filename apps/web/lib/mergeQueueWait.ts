@@ -2,12 +2,12 @@ import type { Pool } from "pg";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { loadReviewContext, mergeQueue, readPublicPullRequest } from "@fx/pipeline";
-import { bindCompleteConflictRound } from "./mergeQueueConflict";
+import { expectedSignalNames, loadReviewContext, mergeQueue, readPublicPullRequest } from "@fx/pipeline";
+import { bindCompleteConflictRound, bindCompleteEntryless, endRoundWithoutPr, entrylessStartPorts, readEntrylessSubject } from "./mergeQueueConflict";
 import { bindCompleteDeltaReview } from "./mergeQueueDeltaReview";
 import { openQueueGitHub } from "./mergeQueue";
 import { openInstallationHttp } from "./github/installationHttp";
-import type { ReviewWorker } from "./advanceReviewSteps";
+import { mergeGateBody, type GateOut, type ReviewWorker } from "./advanceReviewSteps";
 import type { StepWho } from "./advanceStageSteps";
 
 /**
@@ -91,4 +91,83 @@ export async function waitBody(worker: QueueWorker | null, who: StepWho): Promis
         return { state: "waiting" };
     }
   });
+}
+
+/**
+ * D#519 MQ4-e1-a: the direct gate answered `merge_conflict` for an item with no queue entry. `not_applicable`: this is not the path for the item (a public copy, no repository
+ * the cloud reads, no worker): the existing stop stands. `started`/`running`/`waiting`: a round is open or will be asked for again; `stopped`: the decision stopped it.
+ */
+export type ConflictStartOut = { state: "not_applicable" | "started" | "running" | "waiting" | "halted" } | { state: "stopped"; reason: string };
+
+export async function conflictStartBody(worker: QueueWorker | null, who: StepWho): Promise<ConflictStartOut> {
+  if (!worker?.withRunnerPool) return { state: "not_applicable" };
+  return worker.withRunnerPool(async (pool) => {
+    if ((await haltState(pool, who)).stale) return { state: "halted" };
+    const base = { pool, worker, open: openInstallationHttp };
+    const subject = await readEntrylessSubject(base, who.accountId, who.workItemId);
+    if (!("id" in subject)) return { state: "not_applicable" };
+    const github = await openQueueGitHub(pool, openInstallationHttp, subject);
+    if (!github) return { state: "not_applicable" };
+    const out = await mergeQueue.startEntrylessConflict(entrylessStartPorts({ ...base, github }), subject);
+    return out.outcome === "stopped" ? { state: "stopped", reason: out.reason } : { state: out.outcome };
+  });
+}
+
+/** One look at the item's round with no queue entry, moving it on (see `completeEntrylessRound`). `in_review`: the review loop reads the head again. `passed`: the delta review passed. */
+export type ConflictWaitOut = { state: "passed"; headSha: string } | { state: "waiting" | "in_review" | "halted" | "none" | "merged" | "closed" } | { state: "stopped"; reason: string };
+
+export async function conflictWaitBody(worker: QueueWorker | null, who: StepWho): Promise<ConflictWaitOut> {
+  if (!worker?.withRunnerPool) return { state: "none" };
+  return worker.withRunnerPool(async (pool) => {
+    if ((await haltState(pool, who)).stale) return { state: "halted" };
+    const base = { pool, worker, open: openInstallationHttp };
+    const subject = await readEntrylessSubject(base, who.accountId, who.workItemId, true);
+    // A lookup that failed is asked again on the next poll; a pull request that is confirmed gone, with nothing recorded to read, ends the round.
+    if (!("id" in subject) && subject.reason === "try_later") return { state: "waiting" };
+    if (!("id" in subject) && subject.reason === "no_open_pr") return (await endRoundWithoutPr(base, who.accountId, who.workItemId)) ? { state: "closed" } : { state: "none" };
+    if (!("id" in subject)) return { state: "none" };
+    const github = await openQueueGitHub(pool, openInstallationHttp, subject);
+    if (!github) return { state: "none" };
+    const done = await bindCompleteEntryless({ ...base, github })(subject);
+    switch (done.outcome) {
+      case "returned":
+        return { state: "in_review" };
+      case "stopped":
+        return { state: "stopped", reason: done.reason };
+      case "settled":
+        return { state: done.as };
+      case "passed":
+        return { state: "passed", headSha: subject.headSha };
+      case "not_waiting":
+        return { state: "none" };
+      default:
+        return { state: "waiting" };
+    }
+  });
+}
+
+/**
+ * D#519 MQ4-e1-a: the direct gate asked again for the merge commit a conflict round produced. Like the queue tick, it must show every CI signal the FIRST round's pre-round head
+ * showed (the platform's own review status alone is no CI), and a head with nothing to compare against never reads as green: the answer is then `ci_not_green` without the gate
+ * being run, and the workflow's bounded wait asks again.
+ */
+export async function conflictGateBody(worker: QueueWorker | null, who: StepWho, prNumber: number): Promise<GateOut> {
+  const expected = worker?.withRunnerPool
+    ? await worker.withRunnerPool(async (pool): Promise<string[] | null> => {
+        const subject = await readEntrylessSubject({ pool, worker, open: openInstallationHttp }, who.accountId, who.workItemId);
+        const github = "id" in subject ? await openQueueGitHub(pool, openInstallationHttp, subject) : null;
+        if (!("id" in subject) || !github) return null;
+        const rounds = (await withTenant(pool, who.accountId, (c) => mergeQueue.listConflictRounds(c, who.accountId, who.workItemId))).filter((r) => r.entryId === null);
+        let origin = [...rounds].reverse().find((r) => r.toSha !== null);
+        // A later round starts from the earlier round's merge commit: walk back to the head the chain began at.
+        for (let hops = 0; origin !== undefined && hops < rounds.length; hops += 1) {
+          const prev = rounds.find((r) => r.id !== origin!.id && r.toSha === origin!.fromSha);
+          if (prev === undefined) break;
+          origin = prev;
+        }
+        return origin === undefined ? null : expectedSignalNames(await github.getCiSnapshot({ repoId: subject.repoId, prNumber }, origin.fromSha));
+      })
+    : null;
+  if (expected === null || expected.length === 0) return { outcome: "ready_human_merges", reasons: ["ci_not_green"], status: null, headSha: null };
+  return mergeGateBody(worker, who, prNumber, expected);
 }

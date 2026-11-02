@@ -120,3 +120,28 @@ export interface ConflictRound {
   createdAt: Date;
   endedAt: Date | null;
 }
+
+/**
+ * D#519 MQ4-e1-a: what the conflict code reads of a work item's round, whether or not it has a queue entry. `entryId` is null for a direct-gate item (no entry); then
+ * `roundsUsed` is the number of `merge_conflict_rounds` rows the item has. `id` is a key for logs and caches only, never written: the entry's id, else the work item's.
+ */
+export interface ConflictSubject {
+  id: string;
+  accountId: string;
+  repoId: string;
+  workItemId: string;
+  prNumber: number;
+  headSha: string;
+  entryId: string | null;
+  roundsUsed: number;
+}
+
+/** What the round and delta ports accept: a queue entry as today, or a subject with none. */
+export type RoundSubject = MergeQueueEntry | ConflictSubject;
+
+/** The adapter: a work-item entry as a subject, a subject as itself, anything else (a plan write-back) null. */
+export function subjectOf(who: RoundSubject): ConflictSubject | null {
+  if (!("entryKind" in who)) return who;
+  if (who.entryKind !== "work_item" || who.workItemId === null) return null;
+  return { id: who.id, accountId: who.accountId, repoId: who.repoId, workItemId: who.workItemId, prNumber: who.prNumber, headSha: who.headSha, entryId: who.id, roundsUsed: who.conflictRounds };
+}

@@ -434,6 +434,8 @@ export type MergeBlockReason =
   | "merge_queue_unavailable"
   | "branch_behind"
   | "merge_conflict"
+  /** D#519 MQ4-e1-a: a merge-conflict fix round of the item is running (its newest round has no outcome); nothing merges under it. */
+  | "conflict_round_running"
   | "branch_protection_refused"
   | "ordered_resource_out_of_order"
   | "merge_dependency_closed"

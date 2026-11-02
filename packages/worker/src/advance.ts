@@ -773,7 +773,7 @@ export interface AdvanceFacade {
    */
   advanceDeltaRuns(who: AdvanceStepWho, req: { headSha: string }): Promise<Array<{ role: string; runId: string; attempt: number; reusable: boolean }>>;
   /** D#483 P3: the merge gate on the pull request's current head. */
-  advanceMergeGate(who: AdvanceStepWho, prNumber: number): Promise<AdvanceMergeGateResult>;
+  advanceMergeGate(who: AdvanceStepWho, prNumber: number, expectedSignals?: readonly string[]): Promise<AdvanceMergeGateResult>;
   /**
    * D#6 PUBLIC-MERGE PR2b: one look at the merge order the gate placed (`merge_delegated`): lapsed leases are returned to the queue, an authorized order the runner
    * never reported on is ended from GitHub's own answer, and an order past its 60-minute deadline is expired (`runner_merge_timeout`). One read of the order otherwise.
@@ -2123,12 +2123,12 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return { status: out.status, reason: out.status === "refused" ? code : null, version: typeof out.version === "number" ? out.version : null };
   }
 
-  async function advanceMergeGate(who: AdvanceStepWho, prNumber: number): Promise<AdvanceMergeGateResult> {
+  async function advanceMergeGate(who: AdvanceStepWho, prNumber: number, expectedSignals?: readonly string[]): Promise<AdvanceMergeGateResult> {
     if (!deps.review) return { outcome: "refused", reason: "review_unavailable" };
     if (!Number.isSafeInteger(prNumber) || prNumber <= 0) return { outcome: "refused", reason: "invalid_input" };
     const bad = await guardStep(who);
     if (bad) return { outcome: "refused", reason: bad.reason ?? "refused" };
-    const out = await deps.review.mergeGate(runnerPool, { accountId: who.accountId, workItemId: who.workItemId, prNumber }, { orders: planeMerge });
+    const out = await deps.review.mergeGate(runnerPool, { accountId: who.accountId, workItemId: who.workItemId, prNumber, ...(expectedSignals !== undefined ? { expectedSignals } : {}) }, { orders: planeMerge });
     console.info(JSON.stringify({ event: "advance.merge_gate", work_item_id: who.workItemId, pr: prNumber, outcome: out.outcome, reasons: out.reasons ?? null, status: out.status ?? null }));
     return out;
   }

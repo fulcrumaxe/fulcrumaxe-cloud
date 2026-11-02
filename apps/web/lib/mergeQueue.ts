@@ -6,7 +6,7 @@ import type { AdvanceReviewDeps, RunnerPlaneMergeStore } from "@fx/worker";
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, MERGE_QUEUE_REMOVAL_DOCUMENT, type GithubWebhookPayload, type GithubWebhookEventName } from "@fx/github";
 import { createReviewDeps } from "./advanceReview";
 import { bindCompleteDeltaReview, bindStartDeltaReview } from "./mergeQueueDeltaReview";
-import { bindCompleteConflictRound, bindOnConflict } from "./mergeQueueConflict";
+import { bindCompleteConflictRound, bindCompleteEntryless, bindOnConflict, endRoundWithoutPr, readEntrylessSubject } from "./mergeQueueConflict";
 import { getWorker } from "./worker";
 import { openInstallationHttp, readRepoAppLogin } from "./github/installationHttp";
 import { openForRepo } from "./github/localOnlyHttp";
@@ -142,6 +142,24 @@ export async function completeWaitingDeltaReviews(deps: MergeQueueTickerDeps, ta
   }
 }
 
+/**
+ * D#519 MQ4-e1-a: the sweep's backstop for a merge-conflict round with no queue entry: when the workflow that drives its wait died, this ends the round the way the wait would
+ * (its end checks, the 120-minute timeout, the delta review it starts). Idempotent with the workflow's own wait step. It reads only rounds that are still open.
+ */
+export async function completeEntrylessRounds(deps: MergeQueueTickerDeps, target: { accountId: string; repoId: string }): Promise<void> {
+  const open = await withTenant(deps.pool, target.accountId, (c) => mergeQueue.listOpenEntrylessRounds(c, target.accountId, target.repoId));
+  if (open.length === 0) return;
+  const github = await openQueueGitHub(deps.pool, deps.open ?? openInstallationHttp, target);
+  if (!github) return;
+  const base = { pool: deps.pool, worker: await getWorker(), open: deps.open ?? openInstallationHttp };
+  const complete = bindCompleteEntryless({ ...base, github });
+  for (const round of open) {
+    const subject = await readEntrylessSubject(base, target.accountId, round.workItemId, true);
+    if ("id" in subject) await complete(subject);
+    else if (subject.reason === "no_open_pr") await endRoundWithoutPr(base, target.accountId, round.workItemId);
+  }
+}
+
 export function sweepMergeQueue(deps: MergeQueueTickerDeps): Promise<mergeQueue.MergeQueueSweepResult> {
   return mergeQueue.sweepMergeQueue({
     listTargets: (now, limit) => mergeQueue.listMergeQueueSweepTargets(deps.pool, now, limit),
@@ -159,6 +177,7 @@ export function sweepMergeQueue(deps: MergeQueueTickerDeps): Promise<mergeQueue.
         { ...target, maxReads },
       ),
     tick: async (target) => {
+      await completeEntrylessRounds(deps, target);
       await completeWaitingDeltaReviews(deps, target);
       await tickMergeQueueRepo(deps, target);
     },

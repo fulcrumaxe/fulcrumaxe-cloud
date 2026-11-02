@@ -2,7 +2,7 @@ import type { PoolClient } from "pg";
 import type { DeltaReviewInput } from "../review/reviewPrompts.js";
 import { listHeadRefreshes, markDeltaSkipped, type HeadRefreshRow } from "./store.js";
 import type { RefreshGitHubPort, StartDeltaReview } from "./refresh.js";
-import type { MergeQueueEntry } from "./types.js";
+import type { MergeQueueEntry, RoundSubject } from "./types.js";
 
 /**
  * D#519 MQ3-b-2: the real `startDeltaReview` port (MQ3-a's `StartDeltaReview`). It runs inside the transaction that already released the
@@ -43,17 +43,17 @@ export interface DeltaSource {
 
 export const refreshSource = (row: HeadRefreshRow): DeltaSource => ({ fromSha: row.fromSha, toSha: row.toSha, baseSha: row.baseSha, trigger: "refresh_overlap" });
 
-export interface DeltaReviewPorts {
+export interface DeltaReviewPorts<S extends RoundSubject = MergeQueueEntry> {
   github: Pick<RefreshGitHubPort, "getMergeability" | "getCommit" | "compareToBase">;
   /** The roles the gate requires on the entry's pull request at `headSha` (`reviewPlanFor` over the PR's whole diff), or why they cannot be known. `flagged`: the delta code reviewer asked for a security review. */
-  plan(args: { entry: MergeQueueEntry; headSha: string; flagged?: boolean }): Promise<{ ok: true; roles: readonly string[] } | { ok: false; reason: string }>;
+  plan(args: { entry: S; headSha: string; flagged?: boolean }): Promise<{ ok: true; roles: readonly string[] } | { ok: false; reason: string }>;
   /** The newest delta run of each role on this merge commit. */
-  runs(entry: MergeQueueEntry, toSha: string): Promise<DeltaRunRef[]>;
+  runs(entry: S, toSha: string): Promise<DeltaRunRef[]>;
   /** Starts one delta-mode reviewer run (`startReviewerBody` with `delta`) under `attempt`. A spend refusal is `reason: "refused_spend"`. */
-  startRole(args: { entry: MergeQueueEntry; role: string; delta: DeltaReviewInput; attempt: number }): Promise<{ ok: true; runId: string } | { ok: false; reason: string }>;
-  cancelRun(entry: MergeQueueEntry, runId: string): Promise<void>;
+  startRole(args: { entry: S; role: string; delta: DeltaReviewInput; attempt: number }): Promise<{ ok: true; runId: string } | { ok: false; reason: string }>;
+  cancelRun(entry: S, runId: string): Promise<void>;
   /** A fixed-code `head_refresh` driver event on the item (`main_side_only`, `not_carried`, `delta_review_timeout`, ...). */
-  recordEvent(args: { entry: MergeQueueEntry; toSha: string; code: string }): Promise<void>;
+  recordEvent(args: { entry: S; toSha: string; code: string }): Promise<void>;
 }
 
 type NotStarted = Extract<Awaited<ReturnType<StartDeltaReview>>, { started: false }>["reason"];
@@ -63,7 +63,7 @@ export const fixedReason = (reason: string): NotStarted => ((KNOWN as readonly s
 /** The merge commit as GitHub has it now: the PR's head, with exactly the source's two parents, and its own file list. */
 export async function readMergeCommit(
   github: DeltaReviewPorts["github"],
-  entry: MergeQueueEntry,
+  entry: RoundSubject,
   src: DeltaSource,
 ): Promise<{ ok: true; files: readonly string[]; baseSha: string } | { ok: false; reason: "head_changed" | "invalid_input" }> {
   const pr = { repoId: entry.repoId, prNumber: entry.prNumber };
@@ -78,9 +78,9 @@ export async function readMergeCommit(
 export const deltaInput = (src: DeltaSource, files: readonly string[], baseSha: string): DeltaReviewInput => ({ mergeCommitSha: src.toSha, parents: [src.fromSha, baseSha], parentRoles: ["pr_side", "main_side"], changedFiles: files, trigger: src.trigger });
 
 /** Starts `roles` in order, reusing a role's run that already exists. On a refusal or a throw, cancels the runs THIS call started (never a reused one). */
-export async function startDeltaRoles(
-  ports: DeltaReviewPorts,
-  entry: MergeQueueEntry,
+export async function startDeltaRoles<S extends RoundSubject>(
+  ports: DeltaReviewPorts<S>,
+  entry: S,
   delta: DeltaReviewInput,
   roles: readonly string[],
 ): Promise<{ ok: true; runIds: string[] } | { ok: false; reason: string }> {
@@ -116,7 +116,7 @@ export async function startDeltaRoles(
  * The roles the gate requires for the merge commit, started in delta mode (code reviewer first). The refresh's start and the conflict round's end both use it.
  * A refused start is `refused_spend`; any other reason is a fixed code.
  */
-export async function startDeltaForSource(ports: DeltaReviewPorts, entry: MergeQueueEntry, src: DeltaSource, read: { files: readonly string[]; baseSha: string }): Promise<{ ok: true; runIds: string[] } | { ok: false; reason: string }> {
+export async function startDeltaForSource<S extends RoundSubject>(ports: DeltaReviewPorts<S>, entry: S, src: DeltaSource, read: { files: readonly string[]; baseSha: string }): Promise<{ ok: true; runIds: string[] } | { ok: false; reason: string }> {
   const plan = await ports.plan({ entry, headSha: src.toSha });
   if (!plan.ok) return { ok: false, reason: fixedReason(plan.reason) };
   const roles = plan.roles.filter((r) => r !== "debater");

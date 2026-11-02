@@ -1,7 +1,7 @@
 import { sleep } from "workflow";
 import type { AdvanceContinueOut, ContinuationSite, AdvanceRunStart, AdvanceStartArgs, AdvanceTriageResult, DecisionStepCode, FixGateStepInput, FixGateStepOut, StartGateStepInput, StartGateStepOut } from "@fx/worker";
 import { getWorker } from "../lib/worker";
-import { enqueueBody, waitBody, type QueueWaitOut } from "../lib/mergeQueueWait";
+import { conflictGateBody, conflictStartBody, conflictWaitBody, enqueueBody, waitBody, type ConflictStartOut, type ConflictWaitOut, type QueueWaitOut } from "../lib/mergeQueueWait";
 import { getIssueReader } from "../lib/github/issueRead";
 import { openInstallationHttp } from "../lib/github/installationHttp";
 import { publishLightSpecBody, startLightSpecBody, type LightPublished } from "../lib/advanceLightSteps";
@@ -94,6 +94,8 @@ const RUNNER_PENDING_CEILING_MS = 73 * 3_600_000;
 /** How often, and for how long, the workflow looks at its merge queue entry. After the bound the entry stays in the queue and the tick still merges it. */
 const MERGE_QUEUE_WAIT_POLL_MS = 2 * 60_000;
 const MERGE_QUEUE_WAIT_MAX_MS = 24 * 60 * 60_000;
+/** D#519 MQ4-e1-a: how often a conflict round that cannot be followed is looked for again before the item goes to a person. */
+const CONFLICT_REENTRIES_MAX = 5;
 
 /**
  * D#6 C29: the word a panel or Spec step answers with when it hands control back because its seats or the PM are queued on (or
@@ -481,6 +483,24 @@ export async function advanceMergeQueueEnqueueStep(accountId: string, userId: st
 export async function advanceMergeQueueWaitStep(accountId: string, userId: string, workItemId: string, haltEpoch: number): Promise<QueueWaitOut> {
   "use step";
   return waitBody(await getWorker(), { accountId, userId, workItemId, haltEpoch });
+}
+
+/** D#519 MQ4-e1-a: starts the merge-conflict fix round of an item with no queue entry, after the direct gate answered `merge_conflict`. */
+export async function advanceConflictStartStep(accountId: string, userId: string, workItemId: string, haltEpoch: number): Promise<ConflictStartOut> {
+  "use step";
+  return conflictStartBody(await getWorker(), { accountId, userId, workItemId, haltEpoch });
+}
+
+/** D#519 MQ4-e1-a: the gate asked again for the merge commit a conflict round produced (it must show the CI signals the round's first pre-round head showed). */
+export async function advanceConflictGateStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, prNumber: number): Promise<GateOut> {
+  "use step";
+  return conflictGateBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, prNumber);
+}
+
+/** D#519 MQ4-e1-a: one look at that round (it also moves the round's end and its delta review on). */
+export async function advanceConflictWaitStep(accountId: string, userId: string, workItemId: string, haltEpoch: number): Promise<ConflictWaitOut> {
+  "use step";
+  return conflictWaitBody(await getWorker(), { accountId, userId, workItemId, haltEpoch });
 }
 
 type Result = { status: string; detail?: string };
@@ -1745,7 +1765,7 @@ async function waitForMergeOrder(args: AdvanceStartArgs, pr: { number: number; h
  * Every required reviewer passed on `pr`'s head. A hosted, unpaired repo's item goes into its repo's merge queue and this waits on the entry (D#519
  * MQ3-b-2b); every other item calls the gate itself, as before. Null: review the (new) head. Otherwise the workflow's result.
  */
-async function mergeAfterPass(args: AdvanceStartArgs, pr: { number: number; headSha: string }): Promise<Result | null> {
+async function mergeAfterPass(args: AdvanceStartArgs, pr: { number: number; headSha: string }, afterConflict = false, reentries = 0): Promise<Result | null> {
   const { accountId, userId, workItemId } = args;
   if ((await advanceMergeQueueEnqueueStep(accountId, userId, workItemId, args.haltEpoch, { prNumber: pr.number, headSha: pr.headSha })).queued) {
     for (let waited = 0; waited < MERGE_QUEUE_WAIT_MAX_MS; waited += MERGE_QUEUE_WAIT_POLL_MS) {
@@ -1764,7 +1784,15 @@ async function mergeAfterPass(args: AdvanceStartArgs, pr: { number: number; head
     }
     return { status: "waiting", detail: "merge_queue_wait_ended" };
   }
-  const gate = await advanceMergeGateStep(accountId, userId, workItemId, args.haltEpoch, pr.number);
+  const askGate = () => (afterConflict ? advanceConflictGateStep(accountId, userId, workItemId, args.haltEpoch, pr.number) : advanceMergeGateStep(accountId, userId, workItemId, args.haltEpoch, pr.number));
+  let gate = await askGate();
+  // A head a conflict round produced has had no CI yet: wait for it (same cadence and limit as a review's), and ask the gate again when it is the only thing missing.
+  for (let waited = 0; afterConflict && gate.outcome === "ready_human_merges" && gate.reasons.length === 1 && gate.reasons[0] === "ci_not_green" && waited < CI_WAIT_MS; ) {
+    const pause = waited < CI_POLL_FAST_FOR_MS ? CI_POLL_MS : CI_POLL_SLOW_MS;
+    await sleep(pause);
+    waited += pause;
+    gate = await askGate();
+  }
   await advanceLogStep("advance.merge_gate", { work_item_id: workItemId, pr: pr.number, outcome: gate.outcome, reasons: gate.reasons.join(","), status: gate.status });
   // The head moved while the gate ran: review the new head.
   if (gate.outcome === "head_moved") return null;
@@ -1772,8 +1800,59 @@ async function mergeAfterPass(args: AdvanceStartArgs, pr: { number: number; head
     const waited = await waitForMergeOrder(args, pr);
     return waited.next === "continue" ? null : waited.result;
   }
+  // D#519 MQ4-e1-a: the pull request does not merge cleanly. An item with no queue entry and no public copy gets a fix round; any other item stops as it always did.
+  if (gate.outcome === "ready_human_merges" && gate.reasons.includes("merge_conflict")) {
+    const round = await conflictRound(args, pr, reentries);
+    if (round !== "not_applicable") return round;
+  }
   if (gate.outcome === "error" || gate.outcome === "refused") await stopped(args, "merge_gate", gate.reasons[0] ?? gate.outcome, { head: pr.headSha, pr: pr.number });
   return { status: gate.outcome, detail: gate.reasons.join(",") || undefined };
+}
+
+/**
+ * D#519 MQ4-e1-a: the fix round of a pull request that conflicts, for an item with no queue entry. Starts the round, then waits on it (a durable sleep and one read per poll, as the
+ * queue wait does). `not_applicable`: not this path's item, so the gate's own stop stands. Null: review the (new) head. A passed delta review of the merge commit re-enters the gate.
+ */
+async function conflictRound(args: AdvanceStartArgs, pr: { number: number; headSha: string }, reentries: number): Promise<Result | null | "not_applicable"> {
+  const { accountId, userId, workItemId } = args;
+  let started = await advanceConflictStartStep(accountId, userId, workItemId, args.haltEpoch);
+  for (let waited = 0; started.state === "waiting" && waited < MERGE_QUEUE_WAIT_MAX_MS; waited += MERGE_QUEUE_WAIT_POLL_MS) {
+    await sleep(MERGE_QUEUE_WAIT_POLL_MS);
+    started = await advanceConflictStartStep(accountId, userId, workItemId, args.haltEpoch);
+  }
+  await advanceLogStep("advance.merge_conflict", { work_item_id: workItemId, pr: pr.number, state: started.state });
+  if (started.state === "not_applicable") return "not_applicable";
+  if (started.state === "halted") return haltedEnd(args, "merge_conflict");
+  if (started.state === "stopped") {
+    await stopped(args, "merge_conflict", started.reason, { head: pr.headSha, pr: pr.number });
+    return { status: "needs_human", detail: started.reason };
+  }
+  if (started.state === "waiting") return { status: "waiting", detail: "conflict_round_not_started" };
+  for (let waited = 0; waited < MERGE_QUEUE_WAIT_MAX_MS; waited += MERGE_QUEUE_WAIT_POLL_MS) {
+    const look = await advanceConflictWaitStep(accountId, userId, workItemId, args.haltEpoch);
+    await advanceLogStep("advance.merge_conflict", { work_item_id: workItemId, pr: pr.number, state: `wait_${look.state}` });
+    if (look.state === "halted") return haltedEnd(args, "merge_conflict");
+    // The round ended back in review (a person pushed, or the checks of its end said so): the review loop reads the head and goes on from there.
+    if (look.state === "in_review") return null;
+    if (look.state === "passed") return mergeAfterPass(args, { number: pr.number, headSha: look.headSha }, true);
+    if (look.state === "merged" || look.state === "closed") return { status: look.state };
+    if (look.state === "stopped") {
+      await stopped(args, "merge_conflict", look.reason, { head: pr.headSha, pr: pr.number });
+      return { status: "needs_human", detail: look.reason };
+    }
+    // No open round and nothing to follow (the next round is waiting for capacity, or the item moved): the gate decides again.
+    // A bounded number of times, a poll apart; then a fixed stop for a person (the round cannot be followed).
+    if (look.state === "none") {
+      if (reentries >= CONFLICT_REENTRIES_MAX) {
+        await stopped(args, "merge_conflict", "conflict_round_unreadable", { head: pr.headSha, pr: pr.number });
+        return { status: "needs_human", detail: "conflict_round_unreadable" };
+      }
+      await sleep(MERGE_QUEUE_WAIT_POLL_MS);
+      return mergeAfterPass(args, pr, false, reentries + 1);
+    }
+    await sleep(MERGE_QUEUE_WAIT_POLL_MS);
+  }
+  return { status: "waiting", detail: "conflict_round_wait_ended" };
 }
 
 async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promise<Result> {

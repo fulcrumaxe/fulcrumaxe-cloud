@@ -22,6 +22,13 @@ const h = vi.hoisted(() => ({
   /** MQ4-c: the conflict-round completion, and what the entry reads as once it has run (null: unchanged). */
   roundDone: 0,
   afterRound: null as Record<string, unknown> | null,
+  /** MQ4-e1-a: the item's subject (or why it is not this path's), the start's answer, and the entry-less completion. */
+  subject: { id: "item", headSha: "c".repeat(40) } as Record<string, unknown>,
+  startOut: { outcome: "started" } as { outcome: string; reason?: string },
+  started: [] as unknown[],
+  entrylessDone: { outcome: "waiting" } as Record<string, unknown>,
+  subjectCalls: [] as unknown[][],
+  endedWithoutPr: 0,
 }));
 
 vi.mock("@fx/core/src/tenancy/withTenant.js", () => ({
@@ -37,14 +44,21 @@ vi.mock("@fx/pipeline", () => ({
     enqueueEntry: async (_c: unknown, input: unknown) => (h.enqueue.push(input), { entry: { id: "entry-1" }, outcome: h.enqueueOutcome }),
     getEntryByWorkItem: async () => (h.roundDone > 0 && h.afterRound ? h.afterRound : h.entry),
     cancelWorkItemEntry: async (_c: unknown, input: unknown) => void h.cancelled.push(input),
+    startEntrylessConflict: async (_ports: unknown, subject: unknown) => (h.started.push(subject), h.startOut),
   },
 }));
 vi.mock("./mergeQueue", () => ({ openQueueGitHub: async () => h.github }));
+vi.mock("./mergeQueueConflict", () => ({
+  bindCompleteConflictRound: () => async () => void h.roundDone++,
+  readEntrylessSubject: async (...a: unknown[]) => (h.subjectCalls.push(a.slice(1)), h.subject),
+  endRoundWithoutPr: async () => (h.endedWithoutPr++, true),
+  entrylessStartPorts: () => ({}),
+  bindCompleteEntryless: () => async () => h.entrylessDone,
+}));
 vi.mock("./mergeQueueDeltaReview", () => ({ bindCompleteDeltaReview: () => async () => (h.completed++, h.completion) }));
-vi.mock("./mergeQueueConflict", () => ({ bindCompleteConflictRound: () => async () => void h.roundDone++ }));
 vi.mock("./github/installationHttp", () => ({ openInstallationHttp: async () => ({}) }));
 
-import { enqueueBody, waitBody, type QueueWorker } from "./mergeQueueWait";
+import { conflictStartBody, conflictWaitBody, enqueueBody, waitBody, type QueueWorker } from "./mergeQueueWait";
 
 const WHO = { accountId: "acct", userId: "u", workItemId: "item", haltEpoch: 0 };
 const worker = { withRunnerPool: async (fn: (pool: unknown) => unknown) => fn({}) } as unknown as QueueWorker;
@@ -65,6 +79,13 @@ beforeEach(() => {
   h.completed = 0;
   h.roundDone = 0;
   h.afterRound = null;
+  h.subject = { id: "item", headSha: "c".repeat(40) };
+  h.github = {};
+  h.startOut = { outcome: "started" };
+  h.started = [];
+  h.entrylessDone = { outcome: "waiting" };
+  h.subjectCalls = [];
+  h.endedWithoutPr = 0;
 });
 
 describe("enqueueBody: hosted, unpaired repositories only", () => {
@@ -205,5 +226,78 @@ describe("waitBody: one look at the entry", () => {
     h.halt = { halted: false, halt_epoch: 5 };
     expect(await waitBody(worker, WHO)).toEqual({ state: "halted" });
     expect(h.cancelled).toEqual([]);
+  });
+});
+
+// D#519 MQ4-e1-a: a merge-conflict round for an item with no queue entry.
+describe("conflictStartBody", () => {
+  it("starts the round for the item's own subject, and reports the start's answer (started, running, waiting, or a stop with its fixed code)", async () => {
+    for (const outcome of ["started", "running", "waiting"]) {
+      h.startOut = { outcome };
+      expect(await conflictStartBody(worker, WHO)).toEqual({ state: outcome });
+    }
+    h.startOut = { outcome: "stopped", reason: "refused_spend" };
+    expect(await conflictStartBody(worker, WHO)).toEqual({ state: "stopped", reason: "refused_spend" });
+    expect(h.started).toHaveLength(4);
+    expect(h.started[0]).toBe(h.subject);
+  });
+
+  it("not this path's item (a public copy, no pull request, a repository the cloud does not read), or no worker: nothing starts", async () => {
+    h.subject = { reason: "conflict_public_copy" };
+    expect(await conflictStartBody(worker, WHO)).toEqual({ state: "not_applicable" });
+    h.subject = { id: "item", headSha: "c".repeat(40) };
+    h.github = null;
+    expect(await conflictStartBody(worker, WHO)).toEqual({ state: "not_applicable" });
+    expect(await conflictStartBody(null, WHO)).toEqual({ state: "not_applicable" });
+    expect(h.started).toEqual([]);
+  });
+
+  it("a halted item starts nothing", async () => {
+    h.halt = { halted: true, halt_epoch: 0 };
+    expect(await conflictStartBody(worker, WHO)).toEqual({ state: "halted" });
+    expect(h.started).toEqual([]);
+  });
+});
+
+describe("conflictWaitBody", () => {
+  it.each([
+    [{ outcome: "waiting" }, { state: "waiting" }],
+    [{ outcome: "delta_started" }, { state: "waiting" }],
+    [{ outcome: "new_round" }, { state: "waiting" }],
+    [{ outcome: "passed" }, { state: "passed", headSha: "c".repeat(40) }],
+    [{ outcome: "returned", reason: "not_carried" }, { state: "in_review" }],
+    [{ outcome: "stopped", reason: "history_rewritten" }, { state: "stopped", reason: "history_rewritten" }],
+    [{ outcome: "settled", as: "merged" }, { state: "merged" }],
+    [{ outcome: "settled", as: "closed" }, { state: "closed" }],
+    [{ outcome: "not_waiting" }, { state: "none" }],
+  ])("a completion of %j is reported as %j", async (done, out) => {
+    h.entrylessDone = done;
+    expect(await conflictWaitBody(worker, WHO)).toEqual(out);
+  });
+
+  it("no subject, no repository, no worker: nothing to follow; a halted item is halted", async () => {
+    h.subject = { reason: "invalid_input" };
+    expect(await conflictWaitBody(worker, WHO)).toEqual({ state: "none" });
+    expect(await conflictWaitBody(null, WHO)).toEqual({ state: "none" });
+    h.subject = { id: "item", headSha: "c".repeat(40) };
+    h.halt = { halted: true, halt_epoch: 0 };
+    expect(await conflictWaitBody(worker, WHO)).toEqual({ state: "halted" });
+  });
+});
+
+describe("the subject readers' seams", () => {
+  it("the wait follows a round that is open, so it reads the subject in the 'ended' mode (the stored-row fallback); the start never does", async () => {
+    await conflictWaitBody(worker, WHO);
+    await conflictStartBody(worker, WHO);
+    expect(h.subjectCalls).toEqual([["acct", "item", true], ["acct", "item"]]);
+  });
+
+  it("a lookup that failed is asked again next poll (waiting); a confirmed no_open_pr with nothing recorded ends the round and reports closed", async () => {
+    h.subject = { reason: "try_later" };
+    expect(await conflictWaitBody(worker, WHO)).toEqual({ state: "waiting" });
+    expect(h.endedWithoutPr).toBe(0);
+    h.subject = { reason: "no_open_pr" };
+    expect(await conflictWaitBody(worker, WHO)).toEqual({ state: "closed" });
+    expect(h.endedWithoutPr).toBe(1);
   });
 });

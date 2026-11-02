@@ -604,6 +604,7 @@ export const BLOCKING_SENTENCES = {
   pr_author_untrusted: "Opened by someone outside the repository's admins and maintainers",
   pr_author_unverified: "Couldn't check who opened the pull request",
   merge_conflict: "The pull request has a merge conflict",
+  conflict_round_running: "A merge-conflict fix round is running.",
   branch_behind: "The branch is behind its base branch",
   branch_protection_refused: "Branch protection refused the merge",
   merge_queue_waiting: "The pull request is waiting in the merge queue",
