@@ -488,8 +488,8 @@ describe('audit_write / audit_write_system: append-only, unforgeable audit_log (
       // cannot run before it, so it is held back and applied with them.
       // 0872 (D#598 P1f-5r) widens 0731's and 0760's objects, so it is held back with them.
       // 0905 (D#6) adds a probe over 0731's sandbox_reap_ex_state, so it goes with them.
-      // 0952 (D#483 S5-g2) lists repositories by their discovery_settings (0849, itself an audit_write migration), so it goes with them.
-      const BUILDS_ON_HELD_BACK = ['0760_sandbox_reaper_net.sql', '0761_sandbox_reap_lock.sql', '0872_publish_sandbox_reaper.sql', '0905_sandbox_reap_pending_probe.sql', '0952_discovery_sweep.sql'];
+      // 0952 (D#483 S5-g2) lists repositories by their discovery_settings (0849, itself an audit_write migration), so it goes with them; 0955 replaces that list.
+      const BUILDS_ON_HELD_BACK = ['0760_sandbox_reaper_net.sql', '0761_sandbox_reap_lock.sql', '0872_publish_sandbox_reaper.sql', '0905_sandbox_reap_pending_probe.sql', '0952_discovery_sweep.sql', '0955_discovery_sweep_paging.sql'];
       const AUDIT_WRITE_MIGRATIONS = allFiles.filter(
         (f) => BUILDS_ON_HELD_BACK.includes(f) || isAuditWriteMigration(readFileSync(path.join(DEFAULT_MIGRATIONS_DIR, f), 'utf8')),
       );
