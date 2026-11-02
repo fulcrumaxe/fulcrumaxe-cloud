@@ -367,6 +367,8 @@ describe("the 0943 grants [pg]", () => {
       "work_items.account_id SELECT",
       "work_items.halted_at SELECT",
       "work_items.id SELECT",
+      // D#483 S5-k3b-h (0958): capacity_enqueue checks the item is on the repository it names
+      "work_items.repo_id SELECT",
       "work_items.stage SELECT",
     ]);
     const { rows: t } = await h.admin.query(`SELECT count(*)::int AS n FROM pg_class c, aclexplode(c.relacl) a WHERE a.grantee = 'capacity_queue_definer'::regrole AND c.relname IN ('work_items', 'work_item_driver_events')`);

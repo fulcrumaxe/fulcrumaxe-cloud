@@ -52,6 +52,7 @@ say("The decision settings for this work couldn't be read right now, so the retr
 say("The original request isn't kept any more, so this run can't be repeated.", "prompt_not_retained");
 say("This account isn't set up to start a run for this work item.", "unknown_role", "no_card", "no_repo", "no_installation", "installation_not_writable", "no_model", "model_budget_unset", "limits_exceed_sandbox", "account_not_found", "seat_refused");
 say("A spending limit stopped this retry. Nothing was started.", "refused_spend", "model_budget_exceeded", "per_spawn_cap_exceeded", "limit_exceeded", "quota_exceeded", "work_item_cap_exceeded", "compute_cap_exceeded");
+say("All build slots are in use right now. Try again when one frees up.", "waiting_for_capacity");
 const GENERIC = "That didn't work. Nothing was changed.";
 export const sentenceFor = (code) => (Object.prototype.hasOwnProperty.call(SENTENCES, code) ? SENTENCES[code] : GENERIC);
 

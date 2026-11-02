@@ -21,6 +21,7 @@ import {
   type RunStatus,
   type StartAgentRunInput,
   providerCapacityOf,
+  endProviderCapacity,
 } from "@fx/runner";
 import { ResumeBackendError, ResumeSideError, lookupOwnedExecutorSession } from "./resumeOwnership.js";
 
@@ -82,7 +83,7 @@ async function resumeOrCleanup(
     }
     // D#483 S5-k3b-2c: the provider had no room; same ending as `startAgentRun`'s: cancelled before it started, and the caller puts the item back in the queue.
     if (providerCapacityOf(err) !== null) {
-      await writeRunStatus(pool, { accountId, runId, from: "pending", to: "cancelled", failureReason: "provider_capacity" }).catch(() => {});
+      await endProviderCapacity(pool, accountId, runId);
       await target.cancel(run).catch(() => {});
       throw new DispatchFailedError(runId, err, "provider_capacity");
     }

@@ -68,8 +68,12 @@ export function classifyCreateFailure(err: unknown): { kind: "capacity_full"; st
   return full === null ? { kind: "other" } : { kind: "capacity_full", status: 429, code: full.code ?? null };
 }
 
-/** One alert at the crossing, not one per entry: the entry that makes the queue longer than the setting. It never refuses or drops an entry. */
-export const crossesAlertDepth = (created: boolean, depthAfter: number, alertDepth: number): boolean => created && depthAfter === alertDepth + 1;
+/**
+ * One alert at the crossing, not one per entry: a new entry whose enqueue took the depth from at most the setting to above it. It never refuses or drops an entry.
+ * S5-k3b-h: the depth before is the read taken before the enqueue, so two enqueues landing at once (20 to 22) still cross once; without it, one entry is assumed.
+ */
+export const crossesAlertDepth = (created: boolean, depthAfter: number, alertDepth: number, depthBefore = depthAfter - 1): boolean =>
+  created && depthBefore <= alertDepth && depthAfter > alertDepth;
 
 export interface EnqueueInput {
   repoId: string;
@@ -77,6 +81,8 @@ export interface EnqueueInput {
   runKind: string;
   /** The provider answer that sent the item here, when it was one. */
   refusal?: { status: number; code?: string | null };
+  /** The waiting count read before this enqueue, when the caller already has it; otherwise it is read here first. */
+  depthBefore?: number;
 }
 
 export interface QueueEntry {
@@ -88,7 +94,8 @@ export interface QueueEntry {
 }
 
 /** Queues the item on its own tenant (a second call is no new place; a claimed entry that comes back keeps its place and starts its next attempt). */
-export async function enqueueForCapacity(pool: Pool, accountId: string, input: EnqueueInput): Promise<{ entry: QueueEntry; depth: number; alertDepth: number; alert: boolean }> {
+export async function enqueueForCapacity(pool: Pool, accountId: string, input: EnqueueInput): Promise<{ entry: QueueEntry; depth: number; depthBefore: number; alertDepth: number; alert: boolean }> {
+  const depthBefore = input.depthBefore ?? (await readCapacityState(pool, () => 0)).waiting;
   const entry = await withTenant(pool, accountId, async (c) => {
     const { rows } = await c.query<{ o_id: string; o_attempt: number; o_enqueued_at: Date; o_created: boolean }>(
       `SELECT o_id, o_attempt, o_enqueued_at, o_created FROM capacity_enqueue($1, $2, $3, $4, $5, $6)`,
@@ -99,7 +106,7 @@ export async function enqueueForCapacity(pool: Pool, accountId: string, input: E
   });
   const [{ rows }, settings] = await Promise.all([pool.query<{ o_waiting: number }>(`SELECT o_waiting FROM capacity_queue_state($1)`, [CAPACITY_CLASS]), readCapacitySettings(pool)]);
   const depth = Number(rows[0]!.o_waiting);
-  return { entry, depth, alertDepth: settings.alertDepth, alert: crossesAlertDepth(entry.created, depth, settings.alertDepth) };
+  return { entry, depth, depthBefore, alertDepth: settings.alertDepth, alert: crossesAlertDepth(entry.created, depth, settings.alertDepth, depthBefore) };
 }
 
 export interface ClaimedEntry {
@@ -111,7 +118,11 @@ export interface ClaimedEntry {
   attempt: number;
 }
 
-/** Claims entries in fair order, at most as many as there is headroom for (and `limit`), each under a lease of the stored length. */
+/**
+ * Claims entries in fair order, at most as many as there is headroom for (and `limit`), each under a lease of the stored length.
+ * The headroom is read once, before the claims, and not in the claim's own statement: two passes at once can claim one slot too many. That is by design. The
+ * over-claimed start meets the provider's 429, which ends the attempt and puts the entry back with its place (C23), so nothing is lost or started twice.
+ */
 export async function claimWithinHeadroom(pool: Pool, slotTotal: () => number, opts: { limit?: number } = {}): Promise<{ claimed: ClaimedEntry[]; state: CapacityState }> {
   const [state, settings] = [await readCapacityState(pool, slotTotal), await readCapacitySettings(pool)];
   const claimed: ClaimedEntry[] = [];

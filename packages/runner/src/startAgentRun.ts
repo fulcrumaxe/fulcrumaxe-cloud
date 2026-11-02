@@ -337,6 +337,22 @@ function raceDispatch(dispatch: Promise<DispatchResult>, queueTtlMs: number): Pr
 }
 
 /**
+ * D#483 S5-k3b-h: ends an attempt the provider refused with 429 (`pending` -> `cancelled` / `provider_capacity`), and tries the write a second time when the first
+ * throws. A run left `pending` by two failed writes is logged once, by id only (never the error's text), and the capacity gate ends it on the item's next start.
+ */
+export async function endProviderCapacity(pool: Pool, accountId: string, runId: string): Promise<void> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await writeRunStatus(pool, { accountId, runId, from: "pending", to: "cancelled", failureReason: "provider_capacity" });
+      return;
+    } catch {
+      // fx-swallow-ok: the second try, then the fixed line below; the capacity gate ends a run still left pending
+    }
+  }
+  console.warn(JSON.stringify({ event: "run.capacity_cancel_write_failed", run_id: runId }));
+}
+
+/**
  * PR #85 fix round item 3 (CWE-772): wraps `target.dispatch` so a
  * REJECTION -- e.g. a `modelConnection.get` failure AFTER `createSandbox`
  * already created a real sandbox -- can never leak that sandbox or the
@@ -367,7 +383,7 @@ async function dispatchOrCleanup(
     // D#483 S5-k3b-2c: the provider had no room. The attempt ends `cancelled` / `provider_capacity` (an attempt the platform ended, like `placement_changed`), not failed;
     // the caller puts the item back in the capacity queue. The cancel releases the reservation as it does for any other failure.
     if (providerCapacityOf(err) !== null) {
-      await writeRunStatus(pool, { accountId, runId, from: "pending", to: "cancelled", failureReason: "provider_capacity" }).catch(() => {});
+      await endProviderCapacity(pool, accountId, runId);
       await target.cancel(run).catch(() => {});
       throw new DispatchFailedError(runId, err, "provider_capacity");
     }
