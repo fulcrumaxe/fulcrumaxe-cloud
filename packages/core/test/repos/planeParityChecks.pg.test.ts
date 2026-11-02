@@ -211,6 +211,7 @@ describe('plane parity checks [pg]', () => {
       const p = await pair(A);
       await mark(A, p.pub, null);
       await makeDue(A);
+      const startedAt = Date.now();
       const counts = await sweep(async () => {
         await mark(A, p.pub, null);
         return outcome('lag');
@@ -221,7 +222,8 @@ describe('plane parity checks [pg]', () => {
       expect(Number(r.secs)).toBeGreaterThan(0);
       expect(Number(r.secs)).toBeLessThanOrEqual(60);
       expect(counts.nextDueAt).not.toBeNull();
-      expect(counts.nextDueAt! - Date.now()).toBeLessThanOrEqual(61_000);
+      // The database stamps the time; bound it against the clock read before the sweep, with 1 s of skew.
+      expect(counts.nextDueAt! - startedAt).toBeLessThanOrEqual(61_000);
     });
 
     it('a check that throws is recorded as unavailable, not lost', async () => {
@@ -382,14 +384,24 @@ describe('plane parity checks [pg]', () => {
       const p = await pair(A);
       await due(A, p);
       const nexts: number[] = [];
+      const lows: number[] = [];
       for (let i = 0; i < 3; i++) {
         await makeDue(A);
+        // The database stamps nextDueAt (microseconds, rounded to ms on the way out). Read the clock BEFORE
+        // the sweep for the upper bound so rounding cannot push it over, and AFTER for the lower bound.
+        const startedAt = Date.now();
         const counts = await sweep(returning(outcome('unavailable')));
-        nexts.push(counts.nextDueAt! - Date.now());
+        const finishedAt = Date.now();
+        nexts.push(counts.nextDueAt! - startedAt);
+        lows.push(counts.nextDueAt! - finishedAt);
       }
-      expect(nexts[0]).toBeLessThanOrEqual(300_000);
-      expect(nexts[1]).toBeLessThanOrEqual(300_000);
-      expect(nexts[2]).toBeGreaterThan(1_700_000);
+      const skew = 1_000;
+      expect(nexts[0]).toBeLessThanOrEqual(300_000 + skew);
+      expect(nexts[1]).toBeLessThanOrEqual(300_000 + skew);
+      expect(nexts[2]).toBeLessThanOrEqual(1_800_000 + skew);
+      expect(lows[0]).toBeGreaterThan(280_000);
+      expect(lows[1]).toBeGreaterThan(280_000);
+      expect(lows[2]).toBeGreaterThan(1_700_000);
     });
 
     it('a pairing whose repo has no name is dropped from the due list instead of being leased again every 5 minutes', async () => {
