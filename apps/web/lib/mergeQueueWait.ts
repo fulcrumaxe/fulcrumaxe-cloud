@@ -14,7 +14,7 @@ import type { StepWho } from "./advanceStageSteps";
  * D#519 MQ3-b-2b: the workflow's two steps against the merge queue (apps/web/workflows/workItemAdvance.ts holds the directives).
  *
  *  - `enqueueBody`: after every required reviewer passed, a HOSTED, UNPAIRED item goes into its repo's queue instead of calling the gate itself.
- *    A paired item (its merge belongs to the public plane's order), a `runner_local` one, a stacked child, a halted item, or a worker without a
+ *    A paired item (its merge belongs to the public plane's order), a `runner_local` one, a stacked child whose parent has no queue entry (D#598 P3c), a halted item, or a worker without a
  *    pool is `queued: false` and the workflow calls the direct gate exactly as before: nothing about those repos changes.
  *  - `waitBody`: one look at the entry. A delta review that is running is moved on here (`completeDeltaReview`), so the workflow's own durable wait
  *    is what drives it; the tick, started by the cron behind the `merge-queue-sweep` marker, takes the slot, refreshes, waits for CI and merges.
@@ -36,10 +36,14 @@ export async function enqueueBody(worker: QueueWorker | null, who: StepWho, inpu
     const loaded = await loadReviewContext(pool, who.accountId, who.workItemId);
     if (!loaded.ok || loaded.ctx.executionMode === "runner_local") return null;
     if ((await readPublicPullRequest(pool)(who.accountId, who.workItemId)) !== null) return null;
-    if ((await withTenant(pool, who.accountId, (c) => readStackParentPull(c, who.workItemId))) !== null) return null;
+    // D#598 P3c (C24): a stacked child is queued behind its parent only when the parent's pull request is known AND the queue has an entry for it (any state, same repo).
+    // Otherwise the direct gate stops it with `stacked_on_open_pr`, as before: an entry whose parent never gets one would wait for ever.
+    const parent = await withTenant(pool, who.accountId, (c) => readStackParentPull(c, who.workItemId));
+    const dependsOnPrNumber = parent === null ? null : parent.prNumber;
+    if (parent !== null && (dependsOnPrNumber === null || parent.parentRepoId !== loaded.ctx.repoId || !(await withTenant(pool, who.accountId, (c) => mergeQueue.hasEntryForPr(c, who.accountId, loaded.ctx.repoId, dependsOnPrNumber))))) return null;
     // `approved_at` is stamped here the first time and never again: an existing entry keeps its own.
     const entry = await withTenant(pool, who.accountId, (c) =>
-      mergeQueue.enqueueEntry(c, { accountId: who.accountId, repoId: loaded.ctx.repoId, workItemId: who.workItemId, prNumber: input.prNumber, headSha: input.headSha, approvedAt: new Date() }),
+      mergeQueue.enqueueEntry(c, { accountId: who.accountId, repoId: loaded.ctx.repoId, workItemId: who.workItemId, prNumber: input.prNumber, headSha: input.headSha, dependsOnPrNumber, approvedAt: new Date() }),
     );
     return entry.outcome === "final" ? null : entry.entry.id;
   });

@@ -3,7 +3,7 @@ import type { PoolClient } from "pg";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, StageInputError } from "@fx/core/src/work-items/stages.js";
 import { reportError } from "@fx/telemetry";
-import { classifyCi, expectedSignalNames, type CiVerdict, type MergeBlockReason, type PullRequestMergeability } from "../build/mergeGate.js";
+import { classifyCi, expectedSignalNames, type CiVerdict, type MergeBlockReason, type MergeGateGitHubPort, type PullRequestMergeability } from "../build/mergeGate.js";
 import type { PullRequestRef } from "../build/types.js";
 import { guardMain, type MainGuardGitHubPort } from "./mainGuard.js";
 import { MERGE_QUEUE_CI_WAIT_MINUTES } from "./policy.js";
@@ -40,7 +40,7 @@ export type QueueGateResult =
   | { outcome: "head_moved" }
   | { outcome: "ready_human_merges"; reasons: readonly string[] };
 
-export type TickGitHubPort = RefreshGitHubPort & MainGuardGitHubPort;
+export type TickGitHubPort = RefreshGitHubPort & MainGuardGitHubPort & Pick<MergeGateGitHubPort, "retargetPullRequest">;
 
 export interface QueueTickDeps {
   github: TickGitHubPort;
@@ -136,7 +136,7 @@ async function recheck(deps: QueueTickDeps, input: { accountId: string; repoId: 
         liveHeads.set(e.id, m.headSha);
       }
       else if (isUnknown(m)) out.waiting.push(e.id);
-      else facts.set(e.id, { open: true, draft: m.mergeableState === "draft" });
+      else facts.set(e.id, { open: true, draft: m.mergeableState === "draft", ...(m.baseRef !== undefined && m.defaultBranch !== undefined ? { baseRef: m.baseRef, defaultBranch: m.defaultBranch } : {}) });
     }),
   );
   await Promise.all(conflicted.map((e) => handleConflict(deps, accountId, e, undefined, liveHeads.get(e.id)).then(() => void out.conflicted.push(e.id))));
@@ -169,6 +169,17 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
     return st;
   });
   if (stopped) return release(stopped.verdict === "removed" ? "removed_from_merge_queue" : "merge_queue_retry_used");
+
+  // D#598 P3c: a stacked child (it is only eligible once its parent merged) is moved onto the default branch BEFORE anything compares, refreshes or judges it, because all of those read the
+  // PR's own base (the main-branch guard included: it takes the required checks of the PR's base, which for a child is the parent's branch). One call, and none when GitHub already moved it. A refused or failed call stops the entry for a person; nothing merges and nothing is counted for a retry.
+  const f = facts.get(held.id);
+  if (held.dependsOnPrNumber !== null && f?.baseRef !== undefined && f.defaultBranch !== undefined && f.baseRef !== f.defaultBranch) {
+    const moved = await deps.github.retargetPullRequest?.(pr, { base: f.defaultBranch }).then((r) => r.moved, (err) => (reportError(err, { stage: "merge_queue.retarget" }), false));
+    if (moved !== true) {
+      await deps.inTenant(accountId, (c) => stopEntry(c, { accountId, entryId: held.id, reason: "retarget_failed", holder }));
+      return release("retarget_failed");
+    }
+  }
 
   // D#519 MQ-MAIN-RED-GUARD: no refresh, CI wait or merge while the default branch's newest result is red.
   const main = await guardMain({ github: deps.github, inTenant: deps.inTenant, ...(deps.now ? { now: deps.now } : {}) }, { accountId, entry: held, holder, pr });

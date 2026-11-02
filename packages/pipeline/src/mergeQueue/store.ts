@@ -122,6 +122,11 @@ export async function getEntryByWorkItem(client: Queryable, accountId: string, w
   return one(client, `SELECT ${COLUMNS} FROM merge_queue_entries WHERE account_id = $1 AND work_item_id = $2`, [accountId, workItemId]);
 }
 
+/** D#598 P3c: whether the repo has an entry for this pull request in any state (a stacked child is enqueued only behind a parent the queue knows). */
+export async function hasEntryForPr(client: Queryable, accountId: string, repoId: string, prNumber: number): Promise<boolean> {
+  return (await client.query(`SELECT 1 FROM merge_queue_entries WHERE account_id = $1 AND repo_id = $2 AND pr_number = $3 LIMIT 1`, [accountId, repoId, prNumber])).rows.length > 0;
+}
+
 /**
  * A repo's queue in order: every entry that is not final, plus the final ones some live stacked child still names as its parent (a
  * merged parent is what makes the child eligible; a closed one is what stops it).
@@ -214,7 +219,9 @@ export async function enqueueEntry(client: Queryable, input: EnqueueInput): Prom
   if (existing.state === "merged" || existing.state === "closed" || existing.state === "cancelled") return { entry: existing, outcome: "final" };
 
   const sameHead = existing.headSha === input.headSha && existing.dependsOnPrNumber === dependsOn;
-  if (sameHead && (existing.state === "queued" || existing.state === "in_flight" || existing.state === "awaiting_work" || existing.state === "stopped")) {
+  // D#598 P3c (C25): the person's "Check the merge" (the Review-passed advance) re-files the entry for the same head after a failed base change (the cause was outside the entry), so that one stop is not "unchanged". The gate's automatic re-ask and the parked-stage sweep never reach this.
+  const keepsStop = existing.state === "stopped" && existing.reason !== "retarget_failed";
+  if (sameHead && (existing.state === "queued" || existing.state === "in_flight" || existing.state === "awaiting_work" || keepsStop)) {
     return { entry: existing, outcome: "unchanged" };
   }
 

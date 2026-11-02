@@ -42,7 +42,7 @@ import type { PullRequestRef } from "./types.js";
  */
 
 export interface GitHubHttpRequest {
-  method: "GET" | "POST" | "PUT";
+  method: "GET" | "POST" | "PUT" | "PATCH";
   path: string;
   query?: Readonly<Record<string, string | number>>;
   body?: unknown;
@@ -307,11 +307,13 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
   async function readMergeabilityOnce(pr: PullRequestRef): Promise<PullRequestMergeability> {
     const body = await readPrBody(pr);
     const { state } = parsePr(body);
-    if (deps.local) return { headSha: state.headSha, state: state.state, merged: state.merged, mergeable: null, mergeableState: "unknown" };
+    // D#598 P3c: the base and default branch come from this same read, so the queue tick needs no second one.
+    const branches = { baseRef: state.baseRef, defaultBranch: state.defaultBranch };
+    if (deps.local) return { headSha: state.headSha, state: state.state, merged: state.merged, mergeable: null, mergeableState: "unknown", ...branches };
     if (body.mergeable !== null && typeof body.mergeable !== "boolean") bad("pull.mergeable");
     if (typeof body.mergeable_state !== "string") bad("pull.mergeable_state");
     const mergeableState: MergeableState = MERGEABLE_STATES.has(body.mergeable_state) ? (body.mergeable_state as MergeableState) : "unknown";
-    return { headSha: state.headSha, state: state.state, merged: state.merged, mergeable: body.mergeable, mergeableState };
+    return { headSha: state.headSha, state: state.state, merged: state.merged, mergeable: body.mergeable, mergeableState, ...branches };
   }
 
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -838,6 +840,14 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
 
     async getMergeability(pr, opts) {
       return readMergeability(pr, opts?.gatedHeadSha);
+    },
+
+    async retargetPullRequest(pr, args) {
+      if (deps.local) throw new Error(`GitHub change base: ${LOCAL_REFUSED}`);
+      if (args.base.trim() === "") throw new Error("retargetPullRequest: no base branch");
+      // The only field sent is `base`; GitHub moves the base without touching a commit, and answers 422 for a branch that does not exist.
+      const res = await deps.http.request({ method: "PATCH", path: `${await repoPath(pr)}/pulls/${pr.prNumber}`, body: { base: args.base } });
+      return { moved: res.status === 200 && isObj(res.body) && isObj(res.body.base) && res.body.base.ref === args.base };
     },
 
     async updateBranch(pr, args): Promise<UpdateBranchOutcome> {

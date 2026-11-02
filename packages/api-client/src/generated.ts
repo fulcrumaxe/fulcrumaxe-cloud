@@ -528,6 +528,10 @@ export interface Operations {
         files: Array<string>;
         base_ref: string | null;
       };
+      stacked_wait?: {
+        state: "waiting" | "moving" | "conflict" | "parent_closed" | "retarget_failed";
+        parent_pr: (number) | (null);
+      };
       setup_pause?: ({
         state: "open" | "withdrawn";
         sentence: string | null;

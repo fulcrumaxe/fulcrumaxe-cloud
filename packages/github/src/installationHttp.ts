@@ -334,8 +334,13 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
           if (mutate) revertSent = true;
         }
         if (kind === "read" && req.method !== "GET" && !graphql && !pinnedGate) throw new InstallationHttpError("method_refused");
-        // PATCH is for `runner_pr` alone (closing a pull request); the other kinds never needed it and never get it.
-        if (req.method === "PATCH" && kind !== "runner_pr" && kind !== "receipt_block" && kind !== "retraction") throw new InstallationHttpError("method_refused");
+        // PATCH is for `runner_pr` (closing a pull request), and a few exact ones; the other kinds never needed it and never get it.
+        if (req.method === "PATCH" && kind !== "runner_pr" && kind !== "receipt_block" && kind !== "retraction" && kind !== "merge_gate") throw new InstallationHttpError("method_refused");
+        // D#598 P3c: `merge_gate` (pull_requests:write) may PATCH one thing: a pull request's base, a body of exactly `{ base }`. Any other body, a query, or any other path is refused.
+        if (kind === "merge_gate" && req.method === "PATCH") {
+          const b = req.body as Record<string, unknown> | undefined;
+          if (!(req.query === undefined && req.path.startsWith(`${prefix}pulls/`) && /^\d+$/.test(req.path.slice(prefix.length + "pulls/".length)) && isRecord(b) && Object.keys(b).join() === "base" && typeof b["base"] === "string" && b["base"] !== "")) throw new InstallationHttpError("method_refused");
+        }
         // DELETE is for `branch_delete` alone, and only on its pinned ref (checked above).
         if (req.method === "DELETE" && kind !== "branch_delete") throw new InstallationHttpError("method_refused");
         if (kind === "runner_pr" && req.method === "PUT") throw new InstallationHttpError("method_refused");

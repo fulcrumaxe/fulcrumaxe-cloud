@@ -175,7 +175,7 @@ describe("D#519 MQ1 port: mergeability", () => {
     const g = await github({ neverComputes: true });
     const { port, sleeps } = portOver(g.http, { pollLimit: MERGEABLE_POLL_LIMIT });
     const m = await port.getMergeability(PR);
-    expect(m).toEqual({ headSha: HEAD, state: "open", merged: false, mergeable: null, mergeableState: "unknown" });
+    expect(m).toEqual({ headSha: HEAD, state: "open", merged: false, mergeable: null, mergeableState: "unknown", baseRef: "main", defaultBranch: "main" });
     expect(sleeps).toHaveLength(MERGEABLE_POLL_LIMIT - 1);
   });
 
@@ -379,7 +379,7 @@ describe("D#519 MQ1 port: a runner_local repository stays inside its allowlist",
 
   it("the list read carries no mergeability, so nothing is classified from it and nothing is polled", async () => {
     const { port, requests, sleeps } = localPort();
-    expect(await port.getMergeability(PR)).toEqual({ headSha: HEAD, state: "open", merged: false, mergeable: null, mergeableState: "unknown" });
+    expect(await port.getMergeability(PR)).toEqual({ headSha: HEAD, state: "open", merged: false, mergeable: null, mergeableState: "unknown", baseRef: "main", defaultBranch: "main" });
     expect(sleeps).toEqual([]);
     expect(requests).toEqual(["GET /repos/acme/widgets/pulls"]);
   });

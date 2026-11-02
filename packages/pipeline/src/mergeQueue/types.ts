@@ -67,6 +67,9 @@ export interface PrFacts {
   headSha?: string;
   /** Set by the tick (MQ3) only after it has verified a platform `head_refresh` from the recorded sha to `headSha`. */
   refreshVerified?: boolean;
+  /** D#598 P3c: the branch the PR merges into and the repository's default, from the recheck's own read. A stacked child whose base is not the default is moved by the tick. */
+  baseRef?: string;
+  defaultBranch?: string;
 }
 
 /** Why an entry cannot take the slot right now. */

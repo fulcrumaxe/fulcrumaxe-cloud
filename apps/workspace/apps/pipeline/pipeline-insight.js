@@ -741,6 +741,25 @@ export function conflictLine(data) {
   return null;
 }
 
+/**
+ * D#598 P3c: a queued stacked child's line, from the server's derived `stacked_wait`. Fixed text; the only value filled in is the parent's number, taken from the integer field
+ * `parent_pr` and from nothing a model wrote. Without a valid number the clause reads "its parent pull request". Never prints null, undefined or NaN.
+ */
+export const STACKED_SENTENCES = Object.freeze({
+  waiting: (p) => "Waiting for " + p + " to merge.",
+  moving: (p) => cap(p) + " merged. This pull request now goes to the main branch.",
+  conflict: (p) => "Conflict after " + p + " merged: a fix round is running.",
+  parent_closed: (p) => cap(p) + " was closed without merging, so this pull request can't merge as it is. A person needs to decide.",
+  retarget_failed: () => "We couldn't move this pull request onto the main branch, so a person needs to do it.",
+});
+const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+export function stackedLine(data) {
+  const w = data && isObj(data.stacked_wait) ? data.stacked_wait : null;
+  if (w === null || !Object.prototype.hasOwnProperty.call(STACKED_SENTENCES, w.state)) return null;
+  const parent = Number.isInteger(w.parent_pr) && w.parent_pr >= 1 ? "#" + w.parent_pr : "its parent pull request";
+  return { kind: w.state, text: STACKED_SENTENCES[w.state](parent) };
+}
+
 /** The "Ready to merge" banner, only at review_passed, with the repo's real auto-merge setting. When something still blocks the merge it says what, in fixed words, and offers no link. */
 export function readyBanner(data) {
   if (!data || data.stage !== "review_passed") return null;
@@ -813,7 +832,9 @@ export function buildInsight(data, timeZone) {
     childLaunch: childLaunchLine(data),
     banner: readyBanner(data),
     queueLine: queueLine(data, timeZone),
-    conflictLine: conflictLine(data),
+    // C25: a stacked child in a conflict round gets its own line ("Conflict after #n merged"); the general running line is not drawn beside it.
+    conflictLine: stackedLine(data)?.kind === "conflict" && conflictLine(data)?.kind === "running" ? null : conflictLine(data),
+    stackedLine: stackedLine(data),
     runningText: running.length ? "Running now: " + running.map((r) => r.role).join(", ") : "Nothing is running right now.",
     waitingText: waiting.length ? waitingLine(waiting, waitingRaw) : null,
     totalsText: finished.length + " agent run" + (finished.length === 1 ? "" : "s") + " finished" + (finished.length ? " · $" + spent.toFixed(2) + " so far" : ""),
@@ -1117,6 +1138,7 @@ export function createInsightPanel(deps) {
       m.queueLine ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-queue-line", "data-kind": m.queueLine.kind }, m.queueLine.text) : [],
       m.queueLine && m.queueLine.hint ? h("p", { class: "pl-ins-notice", "data-testid": "pl-queue-hint" }, m.queueLine.hint) : [],
       m.conflictLine ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-conflict-line", "data-kind": m.conflictLine.kind }, m.conflictLine.text) : [],
+      m.stackedLine ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-stacked-line", "data-kind": m.stackedLine.kind }, m.stackedLine.text) : [],
       h("p", { "data-testid": "pl-running" }, m.runningText),
       m.waitingText ? h("p", { role: "status", "data-testid": "pl-waiting-runner" }, m.waitingText) : [],
       h("p", { class: "pl-muted", "data-testid": "pl-totals" }, m.totalsText),

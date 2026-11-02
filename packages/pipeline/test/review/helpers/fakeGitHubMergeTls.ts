@@ -22,6 +22,10 @@ import { ghError, type GhReply, type GhRequest } from "../../../../github/test/h
  *    `refreshAfterReads` later reads of the pull request); **422** both for an `expected_head_sha` that is not the head and for a merge
  *    conflict (told apart only by re-reading the pull request), and for a branch with no new base commits; 403 when
  *    `updateForbidden`. A body that is not a JSON object, or an `expected_head_sha` that is not a 40-hex string, is 422 as well.
+ *  - D#598 P3c `PATCH /pulls/{n}` (change the base): needs a bearer credential (401 "Requires authentication" without one) and a token that holds
+ *    pull_requests:write (403 "Resource not accessible by integration" when `patchForbidden`); a body that is not an object with a non-empty string `base` is 422; a base that is
+ *    not an existing branch of the repository (the default branch, the PR's current base, or one listed in `branches`) is 422 "Validation Failed". On 200 the pull request's base
+ *    is the new branch and its head is untouched. `patchAnswer` forces any other status.
  *  - `GET /compare/{base}...{head}`: `status` (`ahead` / `behind` / `diverged` / `identical`), `ahead_by`, `behind_by` and `files`,
  *    with `files` on one response only, capped at 300 (`per_page`/`page` page the commits); the head must be a commit that exists (404 otherwise).
  *  - `GET /commits/{sha}` (D#519 MQ3-a): a commit GitHub knows (`commits`), with `parents`, `author` (the account the commit's author resolves
@@ -140,6 +144,15 @@ export interface MergeWorld {
   mergeGauge?: { now: number; max: number };
   /** Forces the update-branch call's status. */
   updateAnswer?: number;
+  /** D#598 P3c: branches that exist besides the default branch and the PR's own base; a PATCH to any other name is 422. */
+  branches?: string[];
+  /** D#598 P3c: the token lacks pull_requests:write (403), or any other forced status for the base change. */
+  patchForbidden?: boolean;
+  patchAnswer?: number;
+  /** D#598 P3c: every base the PR was moved to, in order. */
+  baseChanges: string[];
+  /** D#598 P3c: runs after a successful base change (GitHub recomputes mergeability against the new base). */
+  onPatch?: (w: MergeWorld) => void;
   /** Classic protection exists but requires no status checks: GitHub answers 404 "Required status checks not enabled". */
   classicNotEnabled?: boolean;
   /** Both protection reads answer 500 once a merge request has been seen (the read that refines a refusal fails). */
@@ -204,6 +217,7 @@ export function freshMergeWorld(over: Partial<MergeWorld> = {}): MergeWorld {
     calls: [],
     merges: [],
     updates: [],
+    baseChanges: [],
     ...over,
   };
 }
@@ -283,6 +297,18 @@ export function mergeRoute(w: MergeWorld): (req: GhRequest) => GhReply | Promise
         base: { ref: w.baseRef, repo: { full_name: `${w.owner}/${w.name}`, default_branch: w.defaultBranch ?? "main", private: w.isPublic !== true } },
         user: w.prAuthorLogin === null ? null : { login: w.prAuthorLogin ?? "fixture-author" },
       });
+    }
+
+    if (req.method === "PATCH" && req.path === `${base}/pulls/${w.prNumber}`) {
+      if (!/^(bearer|token) \S+$/i.test(req.headers["authorization"] ?? "")) return err(401, "Requires authentication");
+      if (w.patchForbidden) return err(403, "Resource not accessible by integration");
+      if (w.patchAnswer !== undefined) return err(w.patchAnswer, "Server Error");
+      const next = body !== null && typeof body === "object" && !Array.isArray(body) ? (body as { base?: unknown }).base : undefined;
+      if (typeof next !== "string" || next === "" || ![w.defaultBranch ?? "main", w.baseRef, ...(w.branches ?? [])].includes(next)) return err(422, "Validation Failed");
+      w.baseRef = next;
+      w.baseChanges.push(next);
+      w.onPatch?.(w);
+      return json(200, { number: w.prNumber, state: w.state, base: { ref: w.baseRef, repo: { full_name: `${w.owner}/${w.name}`, default_branch: w.defaultBranch ?? "main" } } });
     }
 
     if (req.method === "PUT" && req.path === `${base}/pulls/${w.prNumber}/merge`) {

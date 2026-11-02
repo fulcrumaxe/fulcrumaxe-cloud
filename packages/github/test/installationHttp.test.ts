@@ -145,6 +145,33 @@ describe("createInstallationHttp", () => {
     await expect(setup(() => undefined).open("read", { ...TARGET, owner: "-bad" })).rejects.toThrow("invalid_coordinates");
   });
 
+  it("D#598 P3c: the merge_gate client may PATCH a pull request's base and nothing else over PATCH (its token holds pull_requests:write)", async () => {
+    const t = setup((u) => json(200, { ok: u.pathname }));
+    const http = await t.open("merge_gate", TARGET);
+    expect(t.minted[0]).toMatchObject({ permissions: expect.objectContaining({ pull_requests: "write" }) });
+    expect((await http.request({ method: "PATCH", path: "/repos/acme/widgets/pulls/3", body: { base: "main" } })).status).toBe(200);
+    expect(t.calls).toHaveLength(1);
+    for (const [name, req] of [
+      ["a title", { path: "/repos/acme/widgets/pulls/3", body: { title: "x" } }],
+      ["a state (closing it)", { path: "/repos/acme/widgets/pulls/3", body: { state: "closed" } }],
+      ["a base with another key beside it", { path: "/repos/acme/widgets/pulls/3", body: { base: "main", state: "closed" } }],
+      ["a base that is not text", { path: "/repos/acme/widgets/pulls/3", body: { base: 7 } }],
+      ["an empty base", { path: "/repos/acme/widgets/pulls/3", body: { base: "" } }],
+      ["no body", { path: "/repos/acme/widgets/pulls/3" }],
+      ["a query", { path: "/repos/acme/widgets/pulls/3", query: { x: "1" }, body: { base: "main" } }],
+      ["an issue", { path: "/repos/acme/widgets/issues/3", body: { base: "main" } }],
+      ["the pulls list", { path: "/repos/acme/widgets/pulls", body: { base: "main" } }],
+      ["a sub-resource", { path: "/repos/acme/widgets/pulls/3/merge", body: { base: "main" } }],
+      ["a non-numeric pull request", { path: "/repos/acme/widgets/pulls/x", body: { base: "main" } }],
+    ] as const) {
+      await expect(http.request({ method: "PATCH", ...req }), name).rejects.toThrow(/method_refused|path_refused/);
+    }
+    expect(t.calls).toHaveLength(1);
+    // The other kinds still never PATCH a base.
+    const read = await t.open("read", TARGET);
+    await expect(read.request({ method: "PATCH", path: "/repos/acme/widgets/pulls/3", body: { base: "main" } })).rejects.toThrow("method_refused");
+  });
+
   describe("runner_pr (D#6 R2b-3e)", () => {
     it("mints a one-repository token that can read refs and write pull requests, sends JSON Accept, and reaches /graphql and PATCH", async () => {
       const seen: Array<{ url: string; method: string; accept: string | null; type: string | null }> = [];
