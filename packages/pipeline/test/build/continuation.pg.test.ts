@@ -2,7 +2,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Pool, type PoolClient } from "pg";
+import { Client, Pool, type PoolClient } from "pg";
 import { describe, expect, it } from "vitest";
 import { startAgentRun, writeRunStatus, type StartAgentRunInput } from "@fx/runner";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
@@ -621,12 +621,14 @@ describe("H14c-5d-1 continuation [pg]", () => {
         const f = await seed();
         await ended(f);
         let open!: () => void;
+        let reached = false; // only kill once the work is under way: a kill before that is the setup window, tested below
         const gate = new Promise<void>((r) => { open = r; });
-        const held = { sandbox: { ...f.fake.target, admit: async (...a: Parameters<typeof f.fake.target.admit>) => { await gate; return f.fake.target.admit(...a); } } };
+        const held = { sandbox: { ...f.fake.target, admit: async (...a: Parameters<typeof f.fake.target.admit>) => { reached = true; await gate; return f.fake.target.admit(...a); } } };
         const pending = continueWorkItem({ pool: db.runWriterPool, registry: held }, { accountId: f.accountId, workItemId: f.workItemId, requestId: "die-1", resumeInput: f.input });
         let killed = 0;
         for (let i = 0; i < 100 && killed === 0; i++) {
           await new Promise((r) => setTimeout(r, 30));
+          if (!reached) continue;
           killed = (await db.admin.query(`SELECT count(*)::int AS n FROM (SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'fx-continue-lock' AND state = 'idle in transaction') t`)).rows[0].n;
         }
         expect(killed).toBeGreaterThan(0);
@@ -643,6 +645,36 @@ describe("H14c-5d-1 continuation [pg]", () => {
         expect(uncaught).toEqual([]);
       } finally {
         process.off("uncaughtException", spy);
+        await setContinueLockPoolMax(4);
+      }
+    }, 30_000);
+
+    it("a lock connection killed between BEGIN and SET LOCAL is busy, not a throw or an unhandled rejection, and the next continue works", async () => {
+      await setContinueLockPoolMax(3);
+      const unhandled: unknown[] = [];
+      const spy = (e: unknown) => unhandled.push(e);
+      process.on("unhandledRejection", spy);
+      const orig = Client.prototype.query as (...x: unknown[]) => unknown;
+      let killed = 0;
+      (Client.prototype as { query: unknown }).query = function (this: Client & { processID?: number }, ...a: unknown[]) {
+        if (killed === 0 && typeof a[0] === "string" && a[0].startsWith("SET LOCAL lock_timeout")) {
+          killed++;
+          return db.admin.query("SELECT pg_terminate_backend($1)", [this.processID]).then(() => orig.apply(this, a));
+        }
+        return orig.apply(this, a);
+      };
+      try {
+        const f = await seed();
+        await ended(f);
+        const pending = manual(f, "die-setup");
+        await new Promise((r) => setTimeout(r, 200)); // an unhandled rejection would surface here, before anyone awaits
+        expect(await pending).toEqual({ outcome: "busy" });
+        expect(killed).toBe(1);
+        expect(unhandled).toEqual([]);
+        expect((await manual(f, "die-setup-2")).outcome).toBe("continued");
+      } finally {
+        (Client.prototype as { query: unknown }).query = orig;
+        process.off("unhandledRejection", spy);
         await setContinueLockPoolMax(4);
       }
     }, 30_000);
