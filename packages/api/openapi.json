@@ -10841,6 +10841,7 @@
                             "on",
                             "off",
                             "runner",
+                            "not_installed",
                             "unreadable"
                           ]
                         }
@@ -11001,6 +11002,7 @@
                             "on",
                             "off",
                             "runner",
+                            "not_installed",
                             "unreadable"
                           ]
                         }

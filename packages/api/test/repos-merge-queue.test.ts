@@ -8,8 +8,8 @@ import { mergeQueueModeDeps, type MergeQueueModeReader } from '../src/routes/mer
 import { seedAccountWithMember } from './helpers/seed.js';
 
 /**
- * D#694 B7-2: the repo settings read carries `merge_queue.state`, derived on each read and never stored. It is `unreadable` (never `off`) when no
- * reader is set, the repo has no installation, or the reader fails or answers something else. Through the real `handleApiRequest` against real Postgres.
+ * D#694 B7-2: the repo settings read carries `merge_queue.state`, derived on each read and never stored. It is `not_installed` for a repo with no installation (the reader is not asked) and `unreadable` (never `off`) when no
+ * reader is set, or the reader fails or answers something else. Through the real `handleApiRequest` against real Postgres.
  */
 describe('D#694 B7-2: merge_queue on the repo settings', () => {
   let adminPool: Pool;
@@ -62,14 +62,27 @@ describe('D#694 B7-2: merge_queue on the repo settings', () => {
     expect(asked).toEqual(['on', 'off', 'runner']);
   });
 
-  it('is unreadable with no reader set, for a repo with no installation (the reader is not asked), and when the reader fails or answers something else', async () => {
-    const installed = await seed(true);
-    expect(await state(installed.identity, installed.repoId)).toEqual({ state: 'unreadable' });
-    const bare = await seed(false);
+  it('is not_installed for a repo with no installation, in every execution mode, and the reader is never asked (D#694 C10-1)', async () => {
     let asked = 0;
     mergeQueueModeDeps.getReader = () => reader(async () => (asked++, 'on'));
-    expect(await state(bare.identity, bare.repoId)).toEqual({ state: 'unreadable' });
+    for (const mode of ['sandbox', 'runner_local']) {
+      const bare = await seed(false);
+      await admin.query(`UPDATE repos SET execution_mode = $2 WHERE id = $1`, [bare.repoId, mode]);
+      expect(await state(bare.identity, bare.repoId), mode).toEqual({ state: 'not_installed' });
+    }
     expect(asked).toBe(0);
+  });
+
+  it('an installed runner_local repo still answers runner, whatever the reader says (D#694 C10-2)', async () => {
+    const { identity, repoId } = await seed(true);
+    await admin.query(`UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1`, [repoId]);
+    mergeQueueModeDeps.getReader = () => reader(async () => 'runner');
+    expect(await state(identity, repoId)).toEqual({ state: 'runner' });
+  });
+
+  it('is unreadable with no reader set, and when the reader fails or answers something else', async () => {
+    const installed = await seed(true);
+    expect(await state(installed.identity, installed.repoId)).toEqual({ state: 'unreadable' });
     mergeQueueModeDeps.getReader = () => reader(async () => Promise.reject(new Error('GitHub said token ghs_secret')));
     expect(await state(installed.identity, installed.repoId)).toEqual({ state: 'unreadable' });
     for (const odd of ['maybe', '', 'ON']) {
