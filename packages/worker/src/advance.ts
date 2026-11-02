@@ -422,8 +422,14 @@ export interface AdvanceFixRequest {
    * `refused_spend` run, and a replay of the same key finds that run again, so each later ask is a new attempt: `:s<n>` after everything else in the round's key.
    */
   spendAttempt?: number;
-  /** Which review the card shows as asking for changes. */
-  reviewer: "code" | "security" | "acceptance";
+  /**
+   * D#519 MQ4-b (R-519-C6-1): `conflict` is a merge-conflict round on a queued entry. It takes no `failingRunId`, `person` or `reviewer`, is bounded by the entry's
+   * conflict rounds (the caller's start) instead of `checkFixRound`, does NOT sync the branch with its base (the executor merges it itself), and leaves the stage where it is.
+   * Absent: `review`, today's behaviour.
+   */
+  kind?: "review" | "conflict";
+  /** Which review the card shows as asking for changes. Absent only for a `conflict` round. */
+  reviewer?: "code" | "security" | "acceptance";
   /** A reviewer run whose verdict asked for the changes. Absent only for a person's round (`person`) with no reviewer finding on the head. */
   failingRunId?: string;
   /**
@@ -1690,8 +1696,10 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
   async function startFix(who: AdvanceStepWho, req: AdvanceFixRequest): Promise<AdvanceRunStart> {
     const review = deps.review;
     if (!review || !deps.registry) return { ok: false, reason: "resume_unavailable" };
+    const conflict = req.kind === "conflict";
     const sane =
-      UUID_RE.test(req.actionId) && (req.failingRunId === undefined ? req.person === true : UUID_RE.test(req.failingRunId)) &&
+      (req.kind === undefined || req.kind === "review" || conflict) &&
+      UUID_RE.test(req.actionId) && (conflict ? req.failingRunId === undefined && req.person === undefined && req.reviewer === undefined : req.failingRunId === undefined ? req.person === true : UUID_RE.test(req.failingRunId)) &&
       (req.person === undefined || req.person === true) &&
       Number.isSafeInteger(req.issue) && req.issue > 0 &&
       SHA_RE.test(req.headSha) &&
@@ -1704,17 +1712,17 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       (req.fallbackContextSpill === undefined || (req.fallbackPrompt !== undefined && isContextSpill(req.fallbackContextSpill))) &&
       (req.retry === undefined || (Number.isInteger(req.retry) && req.retry >= 1 && req.retry <= 3)) &&
       (req.spendAttempt === undefined || (Number.isSafeInteger(req.spendAttempt) && req.spendAttempt >= 0 && req.spendAttempt <= MAX_WAITING_ATTEMPT)) &&
-      (req.reviewer === "code" || req.reviewer === "security" || req.reviewer === "acceptance") &&
+      (conflict || req.reviewer === "code" || req.reviewer === "security" || req.reviewer === "acceptance") &&
       (req.expectedExecutionMode === undefined || MODE_RE.test(req.expectedExecutionMode)) &&
       (req.pr === undefined || (Number.isSafeInteger(req.pr.number) && req.pr.number >= 1 && req.pr.number <= 2_147_483_647 && (RUNNER_RUN_BRANCH.test(req.pr.branch) || ITEM_PR_BRANCH.test(req.pr.branch))));
     if (!sane) return { ok: false, reason: "invalid_input" };
     const bad = await guardStep(who);
     if (bad) return { ok: false, reason: bad.reason ?? "refused" };
     // The plan's fix-round limit, for every round (a reviewer's round is decided under it already; a person's round is held to the same number).
-    if (checkFixRound(req.round) === "escalate") return { ok: false, reason: "max_fix_rounds" };
+    if (!conflict && checkFixRound(req.round) === "escalate") return { ok: false, reason: "max_fix_rounds" };
 
     // D#483 S5-k1d: the attempt after a spending-limit denial goes last, after the re-review retry (`:r<n>`), so the two never collide.
-    const attemptKey = `${req.headSha}:${req.actionId}${req.retry ? `:r${req.retry}` : ""}${req.spendAttempt ? `:s${req.spendAttempt}` : ""}`;
+    const attemptKey = `${req.headSha}:${req.actionId}${conflict ? `:c${req.round}` : ""}${req.retry ? `:r${req.retry}` : ""}${req.spendAttempt ? `:s${req.spendAttempt}` : ""}`;
     const refuse = async (reason: string): Promise<AdvanceRunStart> => {
       // A spending-limit denial is a pause, not a refusal: the driver leaves its waiting fact and asks again, and the sweep resumes it. No refusal fact is written.
       // D#483 S5-k3b-2b: nor is a wait for capacity.
@@ -1821,12 +1829,15 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         if (!head.ok) return refuse(head.reason);
         headMoved = head.moved;
         // FIXROUND-BASE-SYNC: bring the branch up to date with its base before anything starts; a conflict goes to a person, any other failure refuses the round.
-        const sync = await syncRunBranch(runnerPool, deps.fixHeads, who, { repo: { id: repoId, owner: found.coords.gh_owner, name: found.coords.gh_name }, pr, liveHead: head.head, moveToNeedsPerson: true, attempt: attemptKey, publicCopy });
-        if (!sync.ok) return refuse(sync.reason);
-        baseSynced = sync.synced;
-        // The base is signed only for the branch that was synced: the issuer compares it with the branch it resolves for the job.
-        baseTip = sync.baseSha;
-        syncedBranch = pr.branch;
+        // A conflict round skips the sync (D#519 R-519-C6-1): the executor merges the default branch itself, and a conflict there is the very work it was asked to do.
+        if (!conflict) {
+          const sync = await syncRunBranch(runnerPool, deps.fixHeads, who, { repo: { id: repoId, owner: found.coords.gh_owner, name: found.coords.gh_name }, pr, liveHead: head.head, moveToNeedsPerson: true, attempt: attemptKey, publicCopy });
+          if (!sync.ok) return refuse(sync.reason);
+          baseSynced = sync.synced;
+          // The base is signed only for the branch that was synced: the issuer compares it with the branch it resolves for the job.
+          baseTip = sync.baseSha;
+          syncedBranch = pr.branch;
+        } else if (publicCopy) return refuse("conflict_public_copy");
       } else if (!runnerSide && !(req.pr !== undefined && (await withTenant(runnerPool, who.accountId, async (client) => (await client.query<{ execution_mode: string | null }>("SELECT execution_mode FROM agent_runs WHERE id = $1 AND account_id = $2", [parent, who.accountId])).rows[0]?.execution_mode ?? null).then((m) => sideOfMode(m) !== sideOfMode(effective))))) {
         // A sandbox round always has a pull request (the review step found it on GitHub): without one it is refused, never started on a stale base.
         // A cross-side round with a pair that is not the item's is left to the binding check below, which refuses it `pr_unbound`.
@@ -1842,10 +1853,10 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
 
     // The board says "Changes requested" the moment a fix round starts, whatever an earlier record said (a pass recorded
     // after a needs-fix used to leave the card at "ready to merge").
-    if (state.stage !== "changes_requested") {
+    if (!conflict && state.stage !== "changes_requested") {
       try {
         await withTenant(runnerPool, who.accountId, (client) =>
-          recordStage(client, { workItemId: who.workItemId, toStage: "changes_requested", reviewer: req.reviewer, at: new Date(), source: "control_plane", sourceRef: `fix-round:${req.failingRunId ?? attemptKey}` }),
+          recordStage(client, { workItemId: who.workItemId, toStage: "changes_requested", reviewer: req.reviewer!, at: new Date(), source: "control_plane", sourceRef: `fix-round:${req.failingRunId ?? attemptKey}` }),
         );
       } catch (err) {
         if (err instanceof StageHaltedError) return refuse("item_halted");

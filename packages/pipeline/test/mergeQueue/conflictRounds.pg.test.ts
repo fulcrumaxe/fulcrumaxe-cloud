@@ -49,9 +49,9 @@ describe("D#519 MQ4-a conflict rounds [pg]", () => {
     );
     return r.entry;
   }
-  const start = (w: World, e: MergeQueueEntry, over: { holder?: string; files?: string[] } = {}) =>
+  const start = (w: World, e: MergeQueueEntry, over: { holder?: string; files?: string[]; fromSha?: string } = {}) =>
     tenant(w.accountId, (c) =>
-      startConflictWork(c, { accountId: w.accountId, entryId: e.id, ...(over.holder ? { holder: over.holder } : {}), baseSha: sha("c"), baseRef: "main", conflictFiles: over.files ?? ["src/a.ts"] }),
+      startConflictWork(c, { accountId: w.accountId, entryId: e.id, ...(over.holder ? { holder: over.holder } : {}), fromSha: over.fromSha ?? e.headSha, baseSha: sha("c"), baseRef: "main", conflictFiles: over.files ?? ["src/a.ts"] }),
     );
   const row = async (id: string) => (await db.admin.query(`SELECT * FROM merge_queue_entries WHERE id = $1`, [id])).rows[0] as Record<string, unknown>;
   const rounds = async (id: string) => (await db.admin.query(`SELECT * FROM merge_conflict_rounds WHERE work_item_id = $1 ORDER BY round`, [id])).rows as Array<Record<string, unknown>>;
@@ -134,7 +134,7 @@ describe("D#519 MQ4-a conflict rounds [pg]", () => {
       try {
         await tx.query("BEGIN");
         await tx.query("SELECT set_config('app.account_id', $1, true)", [w.accountId]);
-        const r = await startConflictWork(tx, { accountId: w.accountId, entryId: a.id, holder: "h", baseSha: sha("c"), baseRef: "main", conflictFiles: ["x.ts"] });
+        const r = await startConflictWork(tx, { accountId: w.accountId, entryId: a.id, holder: "h", fromSha: a.headSha, baseSha: sha("c"), baseRef: "main", conflictFiles: ["x.ts"] });
         expect(r.ok).toBe(true);
         // Before the commit, a second connection sees neither the freed slot nor the round.
         expect(await row(a.id)).toMatchObject({ state: "in_flight", slot_holder: "h", conflict_rounds: 0 });
@@ -157,7 +157,7 @@ describe("D#519 MQ4-a conflict rounds [pg]", () => {
       try {
         await tx.query("BEGIN");
         await tx.query("SELECT set_config('app.account_id', $1, true)", [w.accountId]);
-        await startConflictWork(tx, { accountId: w.accountId, entryId: a.id, holder: "h", baseSha: sha("c"), baseRef: "main", conflictFiles: [] });
+        await startConflictWork(tx, { accountId: w.accountId, entryId: a.id, holder: "h", fromSha: a.headSha, baseSha: sha("c"), baseRef: "main", conflictFiles: [] });
         await tx.query("ROLLBACK");
       } finally {
         tx.release();

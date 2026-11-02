@@ -20,10 +20,12 @@ export interface DeltaReviewBinding {
   github: mergeQueue.DeltaReviewPorts["github"];
 }
 
-interface Loaded {
+export interface Loaded {
   who: StepWho;
   ctx: ReviewCtx;
   pr: PrFound;
+  /** The approval (`run_action_requests` id) that started the item's advance. It names a fix round's key. */
+  actionId: string;
 }
 
 export function deltaReviewPorts(deps: DeltaReviewBinding): mergeQueue.DeltaCompletionPorts {
@@ -39,27 +41,7 @@ export function deltaReviewPorts(deps: DeltaReviewBinding): mergeQueue.DeltaComp
     return out;
   }
 
-  async function read(entry: mergeQueue.MergeQueueEntry): Promise<Loaded | { reason: string }> {
-    if (!deps.worker || entry.workItemId === null) return { reason: "worker_unavailable" };
-    // The person whose approval started the item's advance, and the item's halt epoch: the same two facts the parked-stage sweep restarts a stage with.
-    const facts = await withTenant(deps.pool, entry.accountId, async (c) => ({
-      epoch: (await c.query<{ halt_epoch: number }>("SELECT halt_epoch FROM work_items WHERE id = $1 AND account_id = $2", [entry.workItemId, entry.accountId])).rows[0]?.halt_epoch,
-      user: (
-        await c.query<{ u: string }>(
-          `SELECT substring(requested_by from 9) AS u FROM run_action_requests
-            WHERE account_id = $1 AND kind = 'advance_work_item' AND target_id = $2 AND state = 'done' AND principal_kind = 'session'
-            ORDER BY finished_at DESC LIMIT 1`,
-          [entry.accountId, entry.workItemId],
-        )
-      ).rows[0]?.u,
-    }));
-    if (facts.epoch === undefined || facts.user === undefined) return { reason: "invalid_input" };
-    const who: StepWho = { accountId: entry.accountId, userId: facts.user, workItemId: entry.workItemId, haltEpoch: facts.epoch };
-    const ctx = await reviewLoadBody(deps.worker, who, null);
-    if (!ctx.ok) return { reason: ctx.reason };
-    const pr = await findPrBody(deps.open, ctx);
-    return pr.ok ? { who, ctx, pr } : { reason: "invalid_input" };
-  }
+  const read = (entry: mergeQueue.MergeQueueEntry): Promise<Loaded | { reason: string }> => readEntryContext(deps, entry);
 
   return {
     github: deps.github,
@@ -107,4 +89,27 @@ export function bindStartDeltaReview(deps: DeltaReviewBinding): mergeQueue.Start
 export function bindCompleteDeltaReview(deps: DeltaReviewBinding): (entry: mergeQueue.MergeQueueEntry) => Promise<mergeQueue.DeltaCompletion> {
   const ports = deltaReviewPorts(deps);
   return (entry) => mergeQueue.completeDeltaReview(ports, entry);
+}
+
+/** D#519 MQ4-b: shared with the conflict round: everything about the item the queue does not carry, read from the stored rows and GitHub. */
+export async function readEntryContext(deps: DeltaReviewBinding, entry: mergeQueue.MergeQueueEntry): Promise<Loaded | { reason: string }> {
+  if (!deps.worker || entry.workItemId === null) return { reason: "worker_unavailable" };
+  // The person whose approval started the item's advance, and the item's halt epoch: the same two facts the parked-stage sweep restarts a stage with.
+  const facts = await withTenant(deps.pool, entry.accountId, async (c) => ({
+    epoch: (await c.query<{ halt_epoch: number }>("SELECT halt_epoch FROM work_items WHERE id = $1 AND account_id = $2", [entry.workItemId, entry.accountId])).rows[0]?.halt_epoch,
+    user: (
+      await c.query<{ u: string; id: string }>(
+        `SELECT substring(requested_by from 9) AS u, id FROM run_action_requests
+          WHERE account_id = $1 AND kind = 'advance_work_item' AND target_id = $2 AND state = 'done' AND principal_kind = 'session'
+          ORDER BY finished_at DESC LIMIT 1`,
+        [entry.accountId, entry.workItemId],
+      )
+    ).rows[0],
+  }));
+  if (facts.epoch === undefined || facts.user === undefined) return { reason: "invalid_input" };
+  const who: StepWho = { accountId: entry.accountId, userId: facts.user.u, workItemId: entry.workItemId, haltEpoch: facts.epoch };
+  const ctx = await reviewLoadBody(deps.worker, who, null);
+  if (!ctx.ok) return { reason: ctx.reason };
+  const pr = await findPrBody(deps.open, ctx);
+  return pr.ok ? { who, ctx, pr, actionId: facts.user.id } : { reason: "invalid_input" };
 }

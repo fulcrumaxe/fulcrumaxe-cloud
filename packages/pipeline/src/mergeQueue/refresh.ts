@@ -88,8 +88,8 @@ export type RefreshOutcome<G> =
   | { outcome: "foreign_head"; headSha: string; reason: VerifyFailure }
   /** The refresh bound was spent. The entry is stopped with `branch_behind`. */
   | { outcome: "branch_behind" }
-  /** Update-branch could not merge: a real conflict. MQ4 owns what happens next; the slot is still held. */
-  | { outcome: "conflict" }
+  /** Update-branch could not merge: a real conflict. MQ4 owns what happens next; the slot is still held. `headSha` is the live head (the refresh tip) this step already read. */
+  | { outcome: "conflict"; headSha: string }
   /** GitHub has not applied the update yet (or the head moved under us). Run the step again; nothing was recorded. */
   | { outcome: "refresh_pending" }
   | { outcome: "pr_not_open" }
@@ -190,7 +190,7 @@ export async function runRefreshStep<G>(deps: RefreshStepDeps<G>, input: Refresh
   if (update.outcome === "conflict" || update.outcome === "head_moved") {
     // GitHub did not apply it: the request is withdrawn, so a later foreign push at this head cannot ride on it.
     await deps.inTenant(accountId, (c) => markRefreshRequested(c, { accountId, entryId, holder, fromSha: null }));
-    return update.outcome === "conflict" ? { outcome: "conflict" } : { outcome: "refresh_pending" };
+    return update.outcome === "conflict" ? { outcome: "conflict", headSha: tip } : { outcome: "refresh_pending" };
   }
 
   // 202: GitHub applies the merge later. Read until the head changes, renewing the lease on every wait.

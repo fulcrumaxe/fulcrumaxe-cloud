@@ -180,7 +180,7 @@ describe("D#519 MQ3-a refresh and carry-forward [pg]", () => {
 
     it("a conflict from update-branch is reported as such, with nothing recorded", async () => {
       const s = await setup({ behindBy: 2, classicStrict: true, conflict: true });
-      expect(await step(s)).toEqual({ outcome: "conflict" });
+      expect(await step(s)).toEqual({ outcome: "conflict", headSha: HEAD });
       expect(await refreshRows(s.accountId)).toEqual([]);
       expect((await entryRow(s.entry.id)).state).toBe("in_flight");
     });
@@ -335,7 +335,7 @@ describe("D#519 MQ3-a refresh and carry-forward [pg]", () => {
       expect(seenAtCall).toBe(HEAD);
 
       const c = await setup({ behindBy: 2, classicStrict: true, conflict: true });
-      expect(await step(c)).toEqual({ outcome: "conflict" });
+      expect(await step(c)).toEqual({ outcome: "conflict", headSha: HEAD });
       expect((await entryRow(c.entry.id)).refresh_requested_from).toBeNull();
     });
   });

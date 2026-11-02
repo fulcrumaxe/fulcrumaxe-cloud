@@ -17,6 +17,7 @@ import { loadPlanData } from '@fx/plan-data';
 import { mayOpenPublicPullRequest, mayRetryPublish, readRetryFacts, type RetryFacts } from '../repos/planePushRecord.js';
 import { parseAcceptanceScope } from '../specs/acceptanceScope.js';
 import { ADVANCE_PANEL_KINDS, advanceActionFor, type AdvanceFacts } from './advance.js';
+import { reviewFixRoundsSql } from './driverEvents.js';
 import { QUEUE_ESCALATION_CODES, readEscalationCode } from './reviewHold.js';
 import { readMergeQueueState, type MergeQueueState } from './mergeReadiness.js';
 import { isLegalStageTransition } from './stages.js';
@@ -183,7 +184,7 @@ export async function readOperatorFacts(client: PoolClient, workItemId: string, 
             (SELECT s.frontmatter -> 'acceptance_files' FROM spec_versions s WHERE s.work_item_id = w.id AND s.erased_at IS NULL ORDER BY s.version DESC LIMIT 1) AS acceptance_files,
             EXISTS (SELECT 1 FROM agent_runs r WHERE r.work_item_id = w.id AND r.status NOT IN ('succeeded', 'failed', 'timed_out', 'killed_spend', 'refused_spend', 'cancelled')) AS live_run,
             (SELECT t.from_stage FROM work_item_transitions t WHERE t.work_item_id = w.id AND t.to_stage = 'needs_human' ORDER BY t.at DESC, t.created_at DESC LIMIT 1) AS needs_human_from,
-            (SELECT count(*)::text FROM work_item_driver_events e WHERE e.work_item_id = w.id AND e.kind = 'fix_round_started') AS fix_rounds_started
+            (SELECT count(*)::text FROM work_item_driver_events e WHERE e.work_item_id = w.id AND ${reviewFixRoundsSql('e')}) AS fix_rounds_started
        FROM work_items w LEFT JOIN discussions d ON d.id = w.discussion_id
       WHERE w.id = $1::uuid${lock ? ' FOR UPDATE OF w' : ''}`,
     [workItemId],

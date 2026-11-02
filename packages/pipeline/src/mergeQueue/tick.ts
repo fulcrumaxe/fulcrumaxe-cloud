@@ -61,7 +61,7 @@ export interface QueueTickDeps {
    * MQ4's port: a real conflict. Called for a queued entry as soon as a recheck sees it, and for the holder when update-branch or the
    * merge reports one. Answers whether a fix round was started. Absent, or `false`: the entry stops with `merge_conflict`.
    */
-  onConflict?(entry: MergeQueueEntry): Promise<boolean>;
+  onConflict?(entry: MergeQueueEntry, holder?: string, liveHeadSha?: string): Promise<boolean>;
   sleep(ms: number): Promise<void>;
   pollIntervalMs?: number;
   pollLimit?: number;
@@ -116,6 +116,8 @@ async function recheck(deps: QueueTickDeps, input: { accountId: string; repoId: 
   const queued = (await deps.inTenant(accountId, (c) => readQueue(c, accountId, repoId))).filter((e) => e.state === "queued" && e.entryKind === "work_item" && !skipped.has(e.id));
   const facts = new Map<string, PrFacts>();
   const conflicted: MergeQueueEntry[] = [];
+  // D#519 C8: the head the pull request has right now (after a refresh it is the refresh tip, not the entry's stored head), from the read made below.
+  const liveHeads = new Map<string, string>();
   out.waiting = [];
   await Promise.all(
     queued.map(async (e) => {
@@ -129,18 +131,21 @@ async function recheck(deps: QueueTickDeps, input: { accountId: string; repoId: 
         return;
       }
       if (m.state !== "open" || m.merged) facts.set(e.id, { open: false, draft: false });
-      else if (m.mergeable === false && m.mergeableState === "dirty") conflicted.push(e);
+      else if (m.mergeable === false && m.mergeableState === "dirty") {
+        conflicted.push(e);
+        liveHeads.set(e.id, m.headSha);
+      }
       else if (isUnknown(m)) out.waiting.push(e.id);
       else facts.set(e.id, { open: true, draft: m.mergeableState === "draft" });
     }),
   );
-  await Promise.all(conflicted.map((e) => handleConflict(deps, accountId, e, undefined).then(() => void out.conflicted.push(e.id))));
+  await Promise.all(conflicted.map((e) => handleConflict(deps, accountId, e, undefined, liveHeads.get(e.id)).then(() => void out.conflicted.push(e.id))));
   return facts;
 }
 
 /** A real conflict. MQ4 (when wired) starts its fix round; otherwise the entry needs a person. Either way the slot is not held after. */
-async function handleConflict(deps: QueueTickDeps, accountId: string, entry: MergeQueueEntry, holder: string | undefined): Promise<void> {
-  if (deps.onConflict && (await deps.onConflict(entry))) return;
+async function handleConflict(deps: QueueTickDeps, accountId: string, entry: MergeQueueEntry, holder: string | undefined, liveHeadSha: string | undefined): Promise<void> {
+  if (deps.onConflict && (await deps.onConflict(entry, holder, liveHeadSha))) return;
   await deps.inTenant(accountId, (c) => stopEntry(c, { accountId, entryId: entry.id, reason: "merge_conflict", ...(holder !== undefined ? { holder } : {}) }));
 }
 
@@ -193,16 +198,20 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
     { accountId, entry: held, holder, pr },
   );
 
+  // The head the gate ran on (the pull request's live head), for a conflict the gate reports.
+  let liveHead: string | undefined;
   let gate: QueueGateResult | { outcome: "parked" | "ci_red" | "ci_timeout" };
   switch (refresh.outcome) {
     case "not_behind":
+      liveHead = refresh.headSha;
       gate = refresh.gate;
       break;
     case "refreshed":
+      liveHead = refresh.toSha;
       gate = await ciThenGate(deps, accountId, held, holder, pr, refresh.toSha);
       break;
     case "conflict":
-      await handleConflict(deps, accountId, held, holder);
+      await handleConflict(deps, accountId, held, holder, refresh.headSha);
       return release("merge_conflict");
     case "refresh_pending":
       await park(deps, accountId, held, holder);
@@ -241,7 +250,7 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
       await deps.inTenant(accountId, (c) => releaseToQueue(c, { accountId, entryId: held.id, holder }));
       return release("pr_not_open");
     case "ready_human_merges":
-      return afterRefusal(deps, accountId, held, holder, gate.reasons);
+      return afterRefusal(deps, accountId, held, holder, gate.reasons, liveHead);
     default:
       await deps.inTenant(accountId, (c) => stopEntry(c, { accountId, entryId: held.id, reason: "merge_call_refused", holder }));
       return release("merge_call_refused");
@@ -272,7 +281,7 @@ async function park(deps: QueueTickDeps, accountId: string, entry: MergeQueueEnt
 }
 
 /** The gate refused for a reason. CI regressing under it waits again; a behind or conflicting branch goes back through the refresh; the rest needs a person. */
-async function afterRefusal(deps: QueueTickDeps, accountId: string, entry: MergeQueueEntry, holder: string, reasons: readonly string[]): Promise<TickStep> {
+async function afterRefusal(deps: QueueTickDeps, accountId: string, entry: MergeQueueEntry, holder: string, reasons: readonly string[], liveHead: string | undefined): Promise<TickStep> {
   const has = (r: MergeBlockReason) => reasons.includes(r);
   if (has("ci_not_green")) {
     await park(deps, accountId, entry, holder);
@@ -288,7 +297,7 @@ async function afterRefusal(deps: QueueTickDeps, accountId: string, entry: Merge
     return { step: "released", entryId: entry.id, why: "branch_behind" };
   }
   if (has("merge_conflict")) {
-    await handleConflict(deps, accountId, entry, holder);
+    await handleConflict(deps, accountId, entry, holder, liveHead);
     return { step: "released", entryId: entry.id, why: "merge_conflict" };
   }
   const reason = stopCode(reasons[0] ?? "merge_call_refused");

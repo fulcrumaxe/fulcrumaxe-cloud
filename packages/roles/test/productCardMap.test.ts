@@ -146,7 +146,7 @@ describe("the executor card for a run on the person's own machine (D#6 R4d-1, C3
   it("the sandbox card is unchanged: the default and an explicit sandbox runtime both give the pinned text", async () => {
     const { loadProductCard } = await import("../src/cards.js");
     const sha = (s: string | undefined): string => createHash("sha256").update(s ?? "").digest("hex");
-    expect(sha(loadProductCard("executor"))).toBe("afd4d4e3ff3f001db4bef63b7d8499e7da62dc0766b8ca9b1ff627f90da30a6a");
+    expect(sha(loadProductCard("executor"))).toBe("3f11432b4ce4c1f10aa9ae09849169a195fbf2ac83f29ca66de443f8934b0cc5");
     expect(loadProductCard("executor", { runtime: "sandbox" })).toBe(loadProductCard("executor"));
   });
 

@@ -9,6 +9,7 @@ import { resolveSubItemLaunch } from '../autonomy/resolveSubItemLaunch.js';
 import { resolveBuildIdentity } from '../work-items/buildIdentity.js';
 import { VERDICT_ROLES } from '../work-items/verdictRoles.js';
 import { withTenant } from '../tenancy/withTenant.js';
+import { reviewFixRoundsSql } from '../work-items/driverEvents.js';
 
 /**
  * D#483 S5-b2a part 2 (R3 of the D#7 dial wiring): the driver's gate in front of a REVIEW fix round. Check-fix rounds are not gated yet (a follow-up row).
@@ -160,7 +161,7 @@ async function decide(client: PoolClient, accountId: string, input: FixGateInput
     key = checkKeyOf(input.checkFailedRunId);
   } else {
     const started = (await client.query<{ n: string }>(
-      `SELECT count(*)::text AS n FROM work_item_driver_events WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND kind = 'fix_round_started'`, [accountId, workItemId])).rows[0]!.n;
+      `SELECT count(*)::text AS n FROM work_item_driver_events e WHERE e.account_id = $1::uuid AND e.work_item_id = $2::uuid AND ${reviewFixRoundsSql('e')}`, [accountId, workItemId])).rows[0]!.n;
     key = `fix-${Number(started) + 1}`;
   }
 

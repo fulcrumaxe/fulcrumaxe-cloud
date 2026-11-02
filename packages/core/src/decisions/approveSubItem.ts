@@ -7,6 +7,7 @@ import { CHECK_KEY_RE, checkKeyOf } from './fixRoundGate.js';
 import { runAfterReceipt, type AfterReceiptHook } from './receiptHook.js';
 import { ChildLaunchRefusal, fileChildLaunch, findPlannedChild, prepareChildLaunch, type ChildLaunchCode, type ChildLaunchDeps } from './childLaunch.js';
 import { withTenant } from '../tenancy/withTenant.js';
+import { reviewFixRoundsSql } from '../work-items/driverEvents.js';
 import { VERDICT_ROLES } from '../work-items/verdictRoles.js';
 import { resolveBuildIdentity } from '../work-items/buildIdentity.js';
 
@@ -151,7 +152,7 @@ export async function approveSubItemIn(client: PoolClient, who: { accountId: str
     const m = FIX_KEY_RE.exec(input.key);
     if (m === null) throw new SubItemApprovalError('invalid_key');
     const started = (await client.query<{ n: string }>(
-      `SELECT count(*)::text AS n FROM work_item_driver_events WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND kind = 'fix_round_started'`, [accountId, input.workItemId])).rows[0]!.n;
+      `SELECT count(*)::text AS n FROM work_item_driver_events e WHERE e.account_id = $1::uuid AND e.work_item_id = $2::uuid AND ${reviewFixRoundsSql('e')}`, [accountId, input.workItemId])).rows[0]!.n;
     if (Number(m[1]) !== Number(started) + 1) throw new SubItemApprovalError('wrong_round');
   }
   // A check fix round is approved only for the failed run it would resume, and only while that run is still the item's newest executor run (a round started or a
