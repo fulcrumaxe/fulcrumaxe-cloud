@@ -30,7 +30,7 @@ vi.mock("./advanceReviewSteps", () => ({
   reviewerOutcomeBody: async () => ({}),
 }));
 
-import { CANCEL_NOT_CONFIRMED, conflictCompletionPorts, conflictPorts } from "./mergeQueueConflict";
+import { CANCEL_NOT_CONFIRMED, conflictCompletionPorts, conflictPorts, runnerStartPorts } from "./mergeQueueConflict";
 
 const SHA = (c: string) => c.repeat(40);
 const entry = { id: "e1", accountId: "acct", workItemId: "item", headSha: SHA("a"), prNumber: 41 } as mergeQueue.MergeQueueEntry;
@@ -88,6 +88,39 @@ describe("startConflictRound", () => {
     const { ports, advanceStartFix } = build();
     expect(await ports.startConflictRound({ entry, round: { ...round, conflictFiles: ["../escape"] } })).toEqual({ ok: false, reason: "invalid_input" });
     expect(advanceStartFix).not.toHaveBeenCalled();
+  });
+});
+
+describe("runnerStartPorts (D#519 MQ4-e2-b, C15-20): the round of a runner_local item", () => {
+  const subject = { ...entry, entryId: null, roundsUsed: 0 } as mergeQueue.ConflictSubject;
+  it("starts through the worker's conflict fix round on the item's own runner target, with a runner prompt; it holds no repository client and opens none", async () => {
+    h.ctx = { ...h.ctx, executionMode: "runner_local" };
+    const advanceStartFix = vi.fn(async () => ({ ok: true, runId: "run-9" }));
+    const open = vi.fn();
+    const ports = runnerStartPorts({ pool: {} as never, worker: { advanceStartFix } as never, open: open as never });
+    expect(Object.keys(ports).sort()).toEqual(["inTenant", "startConflictRound"]);
+    expect(await ports.startConflictRound({ entry: subject, round })).toEqual({ ok: true, runId: "run-9" });
+    const [, req] = advanceStartFix.mock.calls[0] as unknown as [unknown, Record<string, unknown>];
+    // The worker resolves the run's target from this mode: a runner_local repository's round goes to its runner, never to a hosted sandbox.
+    expect(req).toMatchObject({ kind: "conflict", expectedExecutionMode: "runner_local", round: 2, baseSha: SHA("b") });
+    expect(req["prompt"]).toContain("- src/a.ts");
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it.each(["sandbox", "runner_verified"])("an item whose effective mode is %s is refused execution_mode_changed: advanceStartFix is never called", async (mode) => {
+    h.ctx = { ...h.ctx, executionMode: mode };
+    const advanceStartFix = vi.fn(async () => ({ ok: true, runId: "run-9" }));
+    const ports = runnerStartPorts({ pool: {} as never, worker: { advanceStartFix } as never, open: (async () => ({})) as never });
+    expect(await ports.startConflictRound({ entry: subject, round })).toEqual({ ok: false, reason: "execution_mode_changed" });
+    expect(advanceStartFix).not.toHaveBeenCalled();
+  });
+
+  it("a runner that is offline or a full queue is the worker's own answer (waiting_for_capacity), passed on unchanged: no round is spent and no hosted start is made", async () => {
+    h.ctx = { ...h.ctx, executionMode: "runner_local" };
+    const advanceStartFix = vi.fn(async () => ({ ok: false, reason: "waiting_for_capacity" }));
+    const ports = runnerStartPorts({ pool: {} as never, worker: { advanceStartFix } as never, open: (async () => ({})) as never });
+    expect(await ports.startConflictRound({ entry: subject, round })).toEqual({ ok: false, reason: "waiting_for_capacity" });
+    expect(advanceStartFix).toHaveBeenCalledTimes(1);
   });
 });
 

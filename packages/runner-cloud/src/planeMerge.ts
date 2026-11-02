@@ -14,7 +14,7 @@ import {
   PlaneMergeVerifyReply,
 } from "@fulcrumaxe/runner-protocol";
 import { reportError } from "@fx/telemetry";
-import { RunnerHttpError, asRunner, parseJsonBody, parseMessage, type PlaneMergeLease, type PlaneMergeOrderFacts, type PlaneMergePort, type PlanePushHostedPort, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
+import { RunnerHttpError, asRunner, parseJsonBody, parseMessage, type PlaneMergeConflictRecord, type PlaneMergeLease, type PlaneMergeOrderFacts, type PlaneMergePort, type PlanePushHostedPort, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { verifyRunnerRequest } from "./verifyRunnerRequest.js";
 
 /**
@@ -221,7 +221,9 @@ export async function planeMergeVerifyRun(deps: RunnerCloudDeps, req: RunnerHttp
 }
 
 /** What a runner (or the clock) says happened to an authorized order. Only ever a hint. */
-export type SettleHint = { result: "merged" | "enqueued" | "refused" | "aborted"; abortCode?: string } | null;
+export type SettleHint = { result: "merged" | "enqueued" | "refused" | "aborted"; abortCode?: string; conflict?: PlaneMergeConflictRecord } | null;
+/** The order's code for each verdict the cloud stores (D#519 MQ4-e2-b); the store and the table's shape CHECK hold the same pairing. */
+const CONFLICT_CODES = { conflict_platform: "merge_conflict_runner", conflict_foreign: "merge_conflict_foreign" } as const;
 export type SettleOutcome = { state: "merged" | "enqueued" | "head_moved" | "failed"; code: string; recorded: boolean } | { state: "unchanged" };
 
 /**
@@ -234,8 +236,8 @@ export async function settleAuthorizedOrder(port: PlaneMergePort, accountId: str
   // D#694 B7-1: an `enqueued` report is checked against the pull request AND its queue entry; any other hint against the pull request alone.
   const queue = hint?.result === "enqueued" ? await port.readPublicQueue({ accountId, order }) : null;
   const pull = queue ?? (await port.readPublicPull({ accountId, order }));
-  const end = async (to: "merged" | "enqueued" | "head_moved" | "failed", code: string): Promise<SettleOutcome> => {
-    const done = await port.store.finish({ accountId, orderId: order.id, to, code, actor: { by: "cloud" } });
+  const end = async (to: "merged" | "enqueued" | "head_moved" | "failed", code: string, conflict?: PlaneMergeConflictRecord): Promise<SettleOutcome> => {
+    const done = await port.store.finish({ accountId, orderId: order.id, to, code, actor: { by: "cloud" }, ...(conflict !== undefined ? { conflict } : {}) });
     if (done.kind !== "finished") return { state: "unchanged" };
     let recorded = false;
     if (to === "merged") {
@@ -264,7 +266,8 @@ export async function settleAuthorizedOrder(port: PlaneMergePort, accountId: str
   // Open, the expected head, not merged. An enqueue stands only when GitHub shows the entry; the merge itself is the webhook's to record.
   if (queue !== null) return queue.entryId === null ? end("failed", "runner_report_mismatch") : end("enqueued", "enqueued");
   if (hint?.result === "merged") return end("failed", "runner_report_mismatch");
-  if (hint?.result === "refused") return end("failed", "merge_call_refused");
+  // The verdict is used only here: GitHub, read by the cloud, shows the pull request open at the order's head and not merged, and the runner's merge call was refused. A report with no verdict is today's stop.
+  if (hint?.result === "refused") return hint.conflict !== undefined ? end("failed", CONFLICT_CODES[hint.conflict.verdict], hint.conflict) : end("failed", "merge_call_refused");
   if (hint?.result === "aborted") return end("failed", hint.abortCode === "base_retargeted" ? "stacked_on_open_pr" : hint.abortCode === "pr_draft" ? "pr_draft" : "runner_merge_failed");
   return end("failed", "runner_merge_failed");
 }
@@ -274,12 +277,14 @@ export async function planeMergeReportRun(deps: RunnerCloudDeps, req: RunnerHttp
   const message = parseMessage(PlaneMergeReportMessage, parseJsonBody(req));
   const { merge } = requirePlaneMerge(deps);
   const lease = leaseOf(runner, message.order_id, message.lease_generation);
-  // D#519 MQ4-e2-a: the conflict verdict is accepted only from a runner whose latest hello listed `conflict_facts_v1` (the message schema already limits it to a refused 405). It is checked and DROPPED: nothing
-  // reads it until the cloud half (MQ4-e2-b) stores it, so no order, round or event differs for a report that carries one.
+  // D#519 MQ4-e2-a: the conflict verdict is accepted only from a runner whose latest hello listed `conflict_facts_v1` (the message schema already limits it to a refused 405).
   if (message.conflict !== undefined) {
     const capable = await asRunner(() => merge.store.runnerHasCapability({ accountId: runner.accountId, runnerId: runner.runnerId, capability: CONFLICT_FACTS_CAPABILITY }));
     if (!capable) throw new RunnerHttpError(400, "invalid_message", "the message does not match the protocol");
   }
+  // D#519 MQ4-e2-b: `unknown` carries nothing and is not stored (the order ends as a refused call always did); the other two are stored on the order's end, by `settleAuthorizedOrder`.
+  const storedConflict: PlaneMergeConflictRecord | undefined =
+    message.conflict !== undefined && message.conflict.verdict !== "unknown" ? { verdict: message.conflict.verdict, baseSha: message.conflict.base_sha!, baseRef: message.conflict.base_ref!, files: message.conflict.paths } : undefined;
   const fence = await asRunner(() => merge.store.fence(lease));
   if (fence.kind === "fenced") {
     // A late report for an order that is already over (expired, failed, superseded or head_moved while authorized) from the runner that held it: the runner may
@@ -317,7 +322,7 @@ export async function planeMergeReportRun(deps: RunnerCloudDeps, req: RunnerHttp
   }
 
   try {
-    await settleAuthorizedOrder(merge, runner.accountId, order, { result: message.result, ...(message.abort_code !== undefined ? { abortCode: message.abort_code } : {}) });
+    await settleAuthorizedOrder(merge, runner.accountId, order, { result: message.result, ...(message.abort_code !== undefined ? { abortCode: message.abort_code } : {}), ...(storedConflict !== undefined ? { conflict: storedConflict } : {}) });
   } catch (error) {
     if (error instanceof RunnerHttpError) throw error;
     // GitHub could not be asked: nothing is recorded, and the runner sends the report again.

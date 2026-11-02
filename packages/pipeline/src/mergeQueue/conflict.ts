@@ -232,8 +232,44 @@ export type EntrylessStart = { outcome: "started" | "running" | "waiting" } | { 
  * starts the agent run: an `Undo` refusal rolls the round back. There is no slot to give back. The round starts from the live head `subject.headSha`.
  */
 export async function startEntrylessConflict(ports: ConflictPorts<ConflictSubject>, subject: ConflictSubject): Promise<EntrylessStart> {
+  return startEntrylessFromDecision(ports, subject, await decideConflict(ports, subject));
+}
+
+/**
+ * D#519 MQ4-e2-b: what the runner attests about a `runner_local` item's refused merge call, as the merge order stored it. The paths are the runner's TRUE content conflicts
+ * (merge-tree's conflicted files), narrower than the hosted decision's "changed on both sides"; they are taken as given, held to the detail table's rules.
+ */
+export interface RunnerConflictFacts {
+  verdict: "conflict_platform" | "conflict_foreign";
+  baseSha: string;
+  baseRef: string;
+  files: readonly string[];
+}
+
+/**
+ * The decision from the runner's facts alone: pure, no read. The same bound as `decideConflict` and the same closed result. Only a platform verdict goes; a foreign one is the
+ * item-22 stop (`foreign_commits`, with the stored paths); a value outside the table's rules fails closed as `unreadable`.
+ */
+export function decideFromRunnerFacts(facts: RunnerConflictFacts, roundsUsed: number): ConflictDecision {
+  const files = [...facts.files];
+  const baseRef = isDetailRef(facts.baseRef) ? facts.baseRef : undefined;
+  if (roundsUsed >= MAX_CONFLICT_ROUNDS) return { go: false, code: "rounds_exhausted", files, ...(baseRef === undefined ? {} : { baseRef }) };
+  const shaOk = /^([0-9a-f]{40}|[0-9a-f]{64})$/.test(facts.baseSha);
+  if (baseRef === undefined || !shaOk || files.length === 0 || files.length > CONFLICT_FILES_MAX || !files.every(isDetailPath)) return { go: false, code: "unreadable", files: [] };
+  if (facts.verdict === "conflict_foreign") return { go: false, code: "foreign_commits", files, baseRef };
+  return { go: true, files, baseSha: facts.baseSha, baseRef };
+}
+
+/** What a start needs: the tenant and the round's own start. No repository read: a `runner_local` item's decision comes from the runner's facts. */
+export type RoundStartPorts = Pick<ConflictPorts<ConflictSubject>, "inTenant" | "startConflictRound">;
+
+/** The item's round from the runner's stored facts: the same start and stops as `startEntrylessConflict`, with `decideFromRunnerFacts` as the decision. */
+export async function startEntrylessFromRunnerFacts(ports: RoundStartPorts, subject: ConflictSubject, facts: RunnerConflictFacts): Promise<EntrylessStart> {
+  return startEntrylessFromDecision(ports, subject, decideFromRunnerFacts(facts, subject.roundsUsed));
+}
+
+async function startEntrylessFromDecision(ports: RoundStartPorts, subject: ConflictSubject, decision: ConflictDecision): Promise<EntrylessStart> {
   const { accountId } = subject;
-  const decision = await decideConflict(ports, subject);
   const stop = async (code: string, eventCode = "merge_conflict", detail?: { baseRef?: string | null; conflictFiles?: readonly string[] }): Promise<EntrylessStart> => {
     await recordStop(ports, subject, code, subject.headSha, eventCode, detail);
     return { outcome: "stopped", reason: eventCode };

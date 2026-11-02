@@ -22,6 +22,58 @@ export interface ConflictBinding extends DeltaReviewBinding {
 /** The fixed reason on the stop event when a round's run could not be cancelled (the event's code is the existing `merge_conflict`). */
 export const CANCEL_NOT_CONFIRMED = "run_cancel_not_confirmed";
 
+/**
+ * The round's run start: reads the item's own context and starts the `conflict` fix round on the item's own execution target (`advanceStartFix` resolves it from the
+ * repository's mode, so a `runner_local` repository's round goes to its runner and never to a hosted sandbox). It reads only stored rows and the item's pull-request lookup.
+ */
+export function conflictRoundStarter(deps: Omit<ConflictBinding, "github" | "tryMechanicalReplay">, only?: "runner_local"): (args: { entry: mergeQueue.RoundSubject; round: mergeQueue.ConflictRound }) => Promise<mergeQueue.RoundStart> {
+  return async function startConflictRound({ entry, round }) {
+    const l = await readEntryContext(deps, entry);
+    if (!("who" in l)) return { ok: false, reason: l.reason };
+    // A round decided from a runner's attested facts runs only on the runner: an item whose mode changed since the order ended is refused here, before any start.
+    if (only !== undefined && l.ctx.executionMode !== only) return { ok: false, reason: "execution_mode_changed" };
+    const runtime = promptRuntimeOf(l.ctx.executionMode);
+    let prompt;
+    try {
+      prompt = assembleConflictPrompt({
+        owner: l.ctx.owner,
+        name: l.ctx.name,
+        issue: l.ctx.issue,
+        pr: l.pr.number,
+        headSha: round.fromSha,
+        branch: l.pr.branch,
+        baseRef: round.baseRef,
+        baseSha: round.baseSha,
+        files: round.conflictFiles,
+        round: round.round,
+        of: mergeQueue.MAX_CONFLICT_ROUNDS,
+        runtime,
+      });
+    } catch {
+      // fx-swallow-ok: a value the prompt refuses is a closed refusal; the error text can name a path
+      return { ok: false, reason: "invalid_input" };
+    }
+    const started = await deps.worker!.advanceStartFix(l.who, {
+      kind: "conflict",
+      baseSha: round.baseSha,
+      issue: l.ctx.issue,
+      headSha: round.fromSha,
+      prompt: prompt.prompt,
+      contextSections: prompt.sections,
+      round: round.round,
+      actionId: l.actionId,
+      // Fixed for the runner path, so the start itself refuses (`execution_mode_changed`) if the mode changes after the check above.
+      expectedExecutionMode: only ?? l.ctx.executionMode,
+      pr: { number: l.pr.number, branch: l.pr.branch },
+    });
+    if (started.ok) return { ok: true, runId: started.runId };
+    // A spending-limit pause is a refused spend (the entry stops, nothing is retried); a wait for capacity keeps its own answer.
+    const capacity = started.reason === "waiting_for_capacity";
+    const spend = isReservationPause(started.reason) || started.reason === "refused_spend" || (!capacity && startWaitFor(started.reason) !== null);
+    return { ok: false, reason: capacity ? "waiting_for_capacity" : spend ? "refused_spend" : (started.reason ?? "invalid_input") };
+  };
+}
+
 export function conflictPorts<S extends mergeQueue.RoundSubject = mergeQueue.MergeQueueEntry>(deps: ConflictBinding): mergeQueue.ConflictPorts<S> {
   return {
     github: deps.github,
@@ -29,49 +81,13 @@ export function conflictPorts<S extends mergeQueue.RoundSubject = mergeQueue.Mer
     // D#519 C10: the one module-level source of the push-record proof: unread (no round starts) until its production binding is set.
     platformCommits: async (entry, shas) => (await mergeQueue.readPlatformCommitProof()?.(entry, shas)) ?? null,
     ...(deps.tryMechanicalReplay ? { tryMechanicalReplay: deps.tryMechanicalReplay as mergeQueue.ConflictPorts<S>["tryMechanicalReplay"] } : {}),
-    async startConflictRound({ entry, round }) {
-      const l = await readEntryContext(deps, entry);
-      if (!("who" in l)) return { ok: false, reason: l.reason };
-      const runtime = promptRuntimeOf(l.ctx.executionMode);
-      let prompt;
-      try {
-        prompt = assembleConflictPrompt({
-          owner: l.ctx.owner,
-          name: l.ctx.name,
-          issue: l.ctx.issue,
-          pr: l.pr.number,
-          headSha: round.fromSha,
-          branch: l.pr.branch,
-          baseRef: round.baseRef,
-          baseSha: round.baseSha,
-          files: round.conflictFiles,
-          round: round.round,
-          of: mergeQueue.MAX_CONFLICT_ROUNDS,
-          runtime,
-        });
-      } catch {
-        // fx-swallow-ok: a value the prompt refuses is a closed refusal; the error text can name a path
-        return { ok: false, reason: "invalid_input" };
-      }
-      const started = await deps.worker!.advanceStartFix(l.who, {
-        kind: "conflict",
-        baseSha: round.baseSha,
-        issue: l.ctx.issue,
-        headSha: round.fromSha,
-        prompt: prompt.prompt,
-        contextSections: prompt.sections,
-        round: round.round,
-        actionId: l.actionId,
-        expectedExecutionMode: l.ctx.executionMode,
-        pr: { number: l.pr.number, branch: l.pr.branch },
-      });
-      if (started.ok) return { ok: true, runId: started.runId };
-      // A spending-limit pause is a refused spend (the entry stops, nothing is retried); a wait for capacity keeps its own answer.
-      const capacity = started.reason === "waiting_for_capacity";
-      const spend = isReservationPause(started.reason) || started.reason === "refused_spend" || (!capacity && startWaitFor(started.reason) !== null);
-      return { ok: false, reason: capacity ? "waiting_for_capacity" : spend ? "refused_spend" : (started.reason ?? "invalid_input") };
-    },
+    startConflictRound: conflictRoundStarter(deps),
   };
+}
+
+/** D#519 MQ4-e2-b: the ports of a round started from the runner's facts: the tenant and the run start only. No repository read, so no GitHub client is opened. */
+export function runnerStartPorts(deps: Omit<ConflictBinding, "github" | "tryMechanicalReplay">): mergeQueue.RoundStartPorts {
+  return { inTenant: (accountId, fn) => withTenant(deps.pool, accountId, fn), startConflictRound: conflictRoundStarter(deps, "runner_local") };
 }
 
 /** The tick's `onConflict`, bound. */

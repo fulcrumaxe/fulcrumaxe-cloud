@@ -106,6 +106,14 @@ export interface FinishInput {
   to: Exclude<PlaneMergeState, "pending" | "claimed" | "authorized">;
   code: string;
   actor: FinishActor;
+  /** D#519 MQ4-e2-b: the runner's verdict on a refused merge call, written in the statement that ends the order (a failed one, with its matching code); nothing else carries it. */
+  conflict?: PlaneMergeConflict;
+}
+export interface PlaneMergeConflict {
+  verdict: "conflict_platform" | "conflict_foreign";
+  baseSha: string;
+  baseRef: string;
+  files: readonly string[];
 }
 export type FinishResult = { kind: "finished"; order: PlaneMergeOrder } | { kind: "fenced"; reason: FenceReason } | { kind: "not_allowed"; from: PlaneMergeState } | { kind: "not_found" };
 
@@ -116,6 +124,9 @@ const ENDS: Record<"pending" | "claimed" | "authorized", { cloud: readonly Plane
   // D#694 B7-1: `enqueued` is ended by the cloud alone, from its own read of GitHub (the runner's report is only a hint).
   authorized: { cloud: ["merged", "enqueued", "head_moved", "superseded", "failed", "expired"], runner: ["merged", "head_moved", "failed"] },
 };
+
+/** The order's code for each stored verdict (the table's shape CHECK holds the same pairing). */
+export const CONFLICT_ORDER_CODES = { conflict_platform: "merge_conflict_runner", conflict_foreign: "merge_conflict_foreign" } as const;
 
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
@@ -257,10 +268,11 @@ export function createRunnerPlaneMergeStore(pool: Pool, deps: RunnerPlaneMergeDe
     return { requeued: requeued.rowCount ?? 0, failed: failed.rowCount ?? 0 };
   };
 
-  const end = async (client: PoolClient, orderId: string, accountId: string, to: PlaneMergeState, code: string, at: Date): Promise<PlaneMergeOrder> => {
+  const end = async (client: PoolClient, orderId: string, accountId: string, to: PlaneMergeState, code: string, at: Date, conflict?: PlaneMergeConflict): Promise<PlaneMergeOrder> => {
     const { rows } = await client.query<Row>(
-      `UPDATE plane_merge_orders o SET state = $3, outcome_code = $4, finished_at = $5 WHERE o.account_id = $1 AND o.id = $2 RETURNING ${COLUMNS}`,
-      [accountId, orderId, to, code, at],
+      `UPDATE plane_merge_orders o SET state = $3, outcome_code = $4, finished_at = $5, conflict_verdict = $6, conflict_base_sha = $7, conflict_base_ref = $8, conflict_files = $9
+        WHERE o.account_id = $1 AND o.id = $2 RETURNING ${COLUMNS}`,
+      [accountId, orderId, to, code, at, conflict?.verdict ?? null, conflict?.baseSha ?? null, conflict?.baseRef ?? null, conflict ? [...conflict.files] : null],
     );
     return toOrder(rows[0]!);
   };
@@ -410,7 +422,8 @@ export function createRunnerPlaneMergeStore(pool: Pool, deps: RunnerPlaneMergeDe
         if (!isOpen(order.state)) return { kind: "not_allowed", from: order.state };
         const allowed = ENDS[order.state as keyof typeof ENDS][input.actor.by];
         if (!allowed.includes(input.to)) return { kind: "not_allowed", from: order.state };
-        return { kind: "finished", order: await end(client, order.id, input.accountId, input.to, input.code, at) };
+        if (input.conflict && (input.to !== "failed" || input.code !== CONFLICT_ORDER_CODES[input.conflict.verdict])) throw new Error("finish: a conflict verdict ends a failed order with its own code");
+        return { kind: "finished", order: await end(client, order.id, input.accountId, input.to, input.code, at, input.conflict) };
       });
     },
 
