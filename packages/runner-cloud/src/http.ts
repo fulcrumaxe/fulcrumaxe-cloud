@@ -161,6 +161,8 @@ export interface PlanePushHostedPort {
   mintToken(codeRepo: string, accountId: string): Promise<{ token: string; expiresAt: Date }>;
   /** True only if the branch head is `headSha`, its single parent is `tipSha`, and `tipSha` is in public main's history. */
   verifyPushed(input: { accountId: string; codeRepo: string; branch: string; headSha: string; tipSha: string }): Promise<boolean>;
+  /** A branch head on the public repository (a token minted and revoked per read), or null when the branch does not exist. Absent from an older port: a conflict round then cannot be judged and its republish is refused. */
+  branchHead?(input: { accountId: string; codeRepo: string; branch: string }): Promise<string | null>;
   /** The pull request's address if it is OPEN with head ref `branch` in `codeRepo` itself, base `main` and an address in `codeRepo`; otherwise null. */
   verifyPullRequest(input: { accountId: string; codeRepo: string; branch: string; number: number }): Promise<{ url: string } | null>;
   /** Revokes a token this side minted and could not hand out. True when it is gone (revoked, or already invalid); never throws. */
@@ -293,7 +295,7 @@ export interface RunnerLeaseOps {
     | { kind: "already_issued" }
     | { kind: "attempts_exhausted" }
     | { kind: "refused"; code: string }
-    | { kind: "granted"; attemptId: string; id: string; codeRepo: string; branch: string; itemTitle: string; prFooter: string | null; issueNumber: number | null; child: boolean; updateOf: string | null }
+    | { kind: "granted"; attemptId: string; id: string; codeRepo: string; branch: string; itemTitle: string; prFooter: string | null; issueNumber: number | null; child: boolean; updateOf: string | null; /** True when the run is a merge-conflict round of the item (its end is judged against the public main tip). */ conflictRound?: boolean }
   >;
   /** D#598 P1f-2b: the repository's live pairing, only while its digest equals the build-start stamp. Read-only; the hook calls it twice. */
   planePushPairing?(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }): Promise<
@@ -308,7 +310,7 @@ export interface RunnerLeaseOps {
   planePushReportContext?(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }): Promise<
     | { kind: "fenced"; reason: StopReason }
     | { kind: "not_paired" }
-    | { kind: "context"; plane: { id: string; codeRepo: string; branch: string; state: string; pairingDigest: string }; attempt: { id: string; tokenIssued: boolean; finished: boolean; outcome: string | null } | null }
+    | { kind: "context"; plane: { id: string; codeRepo: string; branch: string; state: string; pairingDigest: string }; attempt: { id: string; tokenIssued: boolean; finished: boolean; outcome: string | null } | null; /** Set for a conflict round: the public main tip the cloud recorded at its grant (null when none was recorded). */ conflictRound?: { tip: string | null } }
   >;
   planePushRecordReport?(input: {
     accountId: string;

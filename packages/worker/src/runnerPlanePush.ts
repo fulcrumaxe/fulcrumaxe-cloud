@@ -72,12 +72,12 @@ export type PlanePushGrantResult =
   /** The row already has the three push attempts the schema allows. */
   | { kind: "attempts_exhausted" }
   /** `itemTitle` is the work item's title as stored: untrusted text that only `buildPlanePushText` may turn into public text. */
-  | ({ kind: "granted"; attemptId: string; itemTitle: string; /** The pairing's PR footer template and the item's issue number: inputs to the text builder only. */ prFooter: string | null; issueNumber: number | null; /** True for a planned PR child: `issueNumber` is then its parent's. */ child: boolean; /** The head the platform last pushed, for a fix round that updates the open public pull request; null for a first push. */ updateOf: string | null } & PlanePushFacts);
+  | ({ kind: "granted"; attemptId: string; itemTitle: string; /** The pairing's PR footer template and the item's issue number: inputs to the text builder only. */ prFooter: string | null; issueNumber: number | null; /** True for a planned PR child: `issueNumber` is then its parent's. */ child: boolean; /** The head the platform last pushed, for a fix round that updates the open public pull request; null for a first push. */ updateOf: string | null; /** The run is the merge-conflict round of its item (its `merge_conflict_rounds` row names it). */ conflictRound: boolean } & PlanePushFacts);
 
 export type PlanePushReportContextResult =
   | { kind: "fenced"; reason: StopReason }
   | { kind: "not_paired" }
-  | { kind: "context"; plane: PlanePushFacts & { state: string; /** The digest stamped at build start; a report's echo is compared with it. */ pairingDigest: string }; attempt: { id: string; tokenIssued: boolean; finished: boolean; outcome: string | null } | null };
+  | { kind: "context"; plane: PlanePushFacts & { state: string; /** The digest stamped at build start; a report's echo is compared with it. */ pairingDigest: string }; attempt: { id: string; tokenIssued: boolean; finished: boolean; outcome: string | null } | null; /** Present for a merge-conflict round: the public main tip recorded at its grant, or null when none was. */ conflictRound?: { tip: string | null } };
 
 export interface PlanePushRecordInput extends PlanePushLeaseInput {
   /** From `planePushReportContext`; the row is re-read and compared. */
@@ -111,6 +111,8 @@ export interface RunnerPlanePushFacade {
 }
 
 export interface RunnerPlanePushDeps {
+  /** The public repository's branch head (a token minted and revoked per read). Without it a conflict round's tip is not recorded and its end is judged against the tip read at the report. */
+  publicHead?: (input: { accountId: string; codeRepo: string; branch: string }) => Promise<string | null>;
   now?: () => number;
   limits?: RunnerLimitsSource;
 }
@@ -162,6 +164,13 @@ const hasOpenPublicPr = (r: PlanePushRow): boolean => r.state === "pr_opened" &&
 /** Nothing was published yet (the row is in a state a new attempt may replace) and no person has the branch: a fix round publishes it for the first time. */
 const mayFirstPublish = (r: PlanePushRow): boolean => r.managedByPersonAt === null && RESTAMPABLE.includes(r.state);
 
+/** The run is the round of a merge conflict: a round row of its item names it. The marker is the platform's own row, never anything the run said. */
+const isConflictRound = async (client: PoolClient, accountId: string, runId: string): Promise<boolean> =>
+  (await client.query("SELECT 1 FROM merge_conflict_rounds WHERE account_id = $1 AND run_id = $2", [accountId, runId])).rows.length > 0;
+
+/** The event a conflict round's grant leaves: the public main tip the cloud read before the runner pushed (the report is compared with it, never trusted). */
+export const ROUND_TIP_EVENT = "plane.round_tip";
+
 const isPlannedChild = async (client: PoolClient, accountId: string, workItemId: string): Promise<boolean> =>
   (await client.query("SELECT 1 FROM work_items WHERE account_id = $1 AND id = $2 AND planned_pr_key IS NOT NULL", [accountId, workItemId])).rows.length > 0;
 
@@ -173,8 +182,21 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
   const limits = deps.limits ?? runnerLimits;
   const fence = async (client: PoolClient, input: PlanePushLeaseInput) => leaseVerdict(client, input, new Date(now()), 0, limits(input.accountId).maxRunWallClockMs);
 
-  return {
-    planePushGrant: (input) =>
+  /** A conflict round's grant records the public main tip it saw. A read that fails records nothing, which only makes the end stricter (the tip is then read again at the report). */
+  const recordRoundTip = async (input: PlanePushLeaseInput, codeRepo: string): Promise<void> => {
+    if (!deps.publicHead) return;
+    let tip: string | null = null;
+    try {
+      tip = await deps.publicHead({ accountId: input.accountId, codeRepo, branch: "main" });
+    } catch {
+      // fx-swallow-ok: GitHub could not be asked; no tip is recorded and the report is judged against the tip read then
+      return;
+    }
+    if (tip === null || !/^[0-9a-f]{40}$/.test(tip)) return;
+    await withTenant(runnerPool, input.accountId, (client) => insertRunEvent(client, input.accountId, input.runId, ROUND_TIP_EVENT, { tip }));
+  };
+
+  const grant = (input: PlanePushLeaseInput): Promise<PlanePushGrantResult> =>
       guarded(async () => {
         requireLease(input);
         return withTenant(runnerPool, input.accountId, async (client): Promise<PlanePushGrantResult> => {
@@ -236,9 +258,16 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           const skipped = prFooterSkipReason(prFooter, build.issueNumber, { child: build.child });
           if (skipped !== null) await insertRunEvent(client, input.accountId, input.runId, "plane.pr_footer_skipped", { reason: skipped });
           const stored = titles[0]?.title ?? "";
-          return { kind: "granted", attemptId: made[0]!.id, itemTitle: build.child ? safeChildTitle(cleanWorkItemTitle(stored)) : stored, prFooter, issueNumber: build.issueNumber, child: build.child, updateOf: update ? locked!.headSha : null, ...facts(row) };
+          return { kind: "granted", attemptId: made[0]!.id, itemTitle: build.child ? safeChildTitle(cleanWorkItemTitle(stored)) : stored, prFooter, issueNumber: build.issueNumber, child: build.child, updateOf: update ? locked!.headSha : null, conflictRound: update && (await isConflictRound(client, input.accountId, input.runId)), ...facts(row) };
         });
-      }),
+      });
+
+  return {
+    planePushGrant: async (input) => {
+      const granted = await grant(input);
+      if (granted.kind === "granted" && granted.conflictRound) await recordRoundTip(input, granted.codeRepo);
+      return granted;
+    },
 
     planePushPairing: (input) =>
       guarded(async () => {
@@ -290,7 +319,10 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
             [input.accountId, input.runId, input.leaseGeneration],
           );
           const attempt = rows[0] ? { id: rows[0].id, tokenIssued: rows[0].token_issued_at !== null, finished: rows[0].finished_at !== null, outcome: rows[0].outcome } : null;
-          return { kind: "context", plane: { ...facts(found.row), state: found.row.state, pairingDigest: found.row.pairingDigest }, attempt };
+          // A conflict round's end is judged against the tip recorded at its grant (the newest one; none when the grant could not read it).
+          const round = found.continues && (await isConflictRound(client, input.accountId, input.runId));
+          const tip = !round ? null : ((await client.query<{ tip: string | null }>("SELECT payload->>'tip' AS tip FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 ORDER BY seq DESC LIMIT 1", [input.accountId, input.runId, ROUND_TIP_EVENT])).rows[0]?.tip ?? null);
+          return { kind: "context", plane: { ...facts(found.row), state: found.row.state, pairingDigest: found.row.pairingDigest }, attempt, ...(round ? { conflictRound: { tip } } : {}) };
         });
       }),
 
