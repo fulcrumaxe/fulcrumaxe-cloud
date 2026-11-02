@@ -191,6 +191,8 @@ export interface DriverEventInput {
   attempt?: number | null;
   /** The three queue kinds only: GitHub's node id of the queue entry (migration 0938). */
   queueEntryId?: string | null;
+  /** A merge-conflict `stopped` fact only (migration 0957): the conflicted paths and the base branch. Both are checked by the table, so a bad one fails the write. */
+  detail?: { conflictFiles?: readonly string[]; baseRef?: string | null };
 }
 
 /** A code made safe for the store: lower-cased, anything outside [a-z0-9_] to `_`, leading digit prefixed. For turning a hyphenated role or verdict into a code. */
@@ -231,9 +233,13 @@ export async function recordDriverEvent(client: PoolClient, accountId: string, e
   const r = await client.query(
     `INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, reasons, head_sha, pr_number, round, run_id, dedupe_key, stage, attempt, queue_entry_id)
      VALUES ($1, $2, $3, $4, $5::text[], $6, $7, $8, $9, $10, $11, $12, $13)
-     ON CONFLICT (account_id, work_item_id, kind, dedupe_key) DO NOTHING`,
+     ON CONFLICT (account_id, work_item_id, kind, dedupe_key) DO NOTHING RETURNING id`,
     [accountId, e.workItemId, e.kind, e.code ?? null, [...(e.reasons ?? [])], e.headSha ?? null, e.prNumber ?? null, e.round ?? null, e.runId ?? null, e.dedupeKey, e.stage ?? null, e.attempt ?? null, e.queueEntryId ?? null],
   );
+  const d = e.detail;
+  if (r.rowCount === 1 && d !== undefined && ((d.conflictFiles?.length ?? 0) > 0 || (d.baseRef ?? null) !== null)) {
+    await client.query(`INSERT INTO work_item_driver_event_details (driver_event_id, account_id, conflict_files, base_ref) VALUES ($1, $2, $3::text[], $4)`, [r.rows[0].id, accountId, [...(d.conflictFiles ?? [])], d.baseRef ?? null]);
+  }
   return { recorded: r.rowCount === 1 };
 }
 
