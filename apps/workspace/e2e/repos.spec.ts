@@ -145,6 +145,17 @@ test.describe("D#37 WS-F3: Repos app (mocked API)", () => {
     expect(appErrors).toEqual([]);
   });
 
+  test("D#694: a repository with no GitHub App installation says so, with no Try again, and keeps the help link", async ({ page }) => {
+    const { mock, appErrors } = await setup(page);
+    (mock.settings as Record<string, unknown>).merge_queue = { state: "not_installed" };
+    await openRepos(page);
+    await tid(page, "repos-open").first().click();
+    await expect(tid(page, "repos-queue-line")).toContainText("Merge queue: not read, because the GitHub App is not installed on this repository.");
+    await expect(tid(page, "repos-queue-retry")).toHaveCount(0);
+    await expect(tid(page, "repos-queue-about")).toHaveCount(1);
+    expect(appErrors).toEqual([]);
+  });
+
   test("a member sees the settings disabled with the explanation, and no request can change them", async ({ page }) => {
     const { mock, appErrors } = await setup(page, { admin: false });
     await openRepos(page);
