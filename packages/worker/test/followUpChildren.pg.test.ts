@@ -106,9 +106,8 @@ describe("follow-up children: the producer and the advance fact [pg]", { timeout
     const p = await setup(a);
     await sweepWith(true).sweepAutoStart();
     const child = (await kids(p.parent))[0]!.id;
-    // Give it an issue number, as a person's route might: the stage table alone must stop it.
+    // The child carries a key of its own (0962) and so can never hold an issue number (0922's CHECK); the triage input names one anyway: the stage table alone must stop it.
     const number = 880000 + Math.floor(Math.random() * 9000);
-    await admin.query(`UPDATE work_items SET gh_number = $2 WHERE id = $1`, [child, number]);
     const triaged: AdvanceTriageInput[] = [];
     const started: unknown[] = [];
     const mod = createAdvanceModule(writerPool, {
@@ -118,12 +117,14 @@ describe("follow-up children: the producer and the advance fact [pg]", { timeout
       triage: async (_pool, _account, input) => (triaged.push(input), { status: "triaged", category: input.category, stage: "discussing" }),
     });
     const input: AdvanceTriageInput = { workItemId: child, title: "t", body: "b", category: "small", sourceEventId: "s", repoId: a.repoId, login: "o", number };
-    expect(await mod.advanceTriage(a.accountId, input)).toEqual({ status: "refused", reason: "not_advanceable" });
+    // advanceTriage with this child's input is unreachable now: its identity is the key, never an issue number, so the input's number cannot match (item_changed). The advance action is the path.
+    expect(await mod.advanceTriage(a.accountId, input)).toEqual({ status: "refused", reason: "item_changed" });
     expect(triaged).toEqual([]);
     expect((await mod.advanceLoadItem(a.accountId, child))?.followUp).toBe(true);
     const row = await withTenant(appPool, a.accountId, a.userId, undefined, async (c) => (await c.query("SELECT * FROM run_action_request('advance_work_item', $1, $3, $2)", [child, "h".repeat(64), null])).rows[0]);
     expect(await createRunActionFacade(writerPool, {} as never).claimRunAction(row.action_id, 600)).not.toBeNull();
-    expect(await mod.performAdvanceWorkItem(row.action_id)).toEqual({ result: "refused", errorCode: "not_advanceable" });
+    // With no issue number possible (see above) the build step's identity check answers first; 2b-0 puts the follow-up fact in front of it (C29-0-5).
+    expect(await mod.performAdvanceWorkItem(row.action_id)).toEqual({ result: "refused", errorCode: "no_issue_link" });
     expect(started).toEqual([]);
     // The control: the same shape without the follow-up link reaches triage.
     const plain = randomUUID();
