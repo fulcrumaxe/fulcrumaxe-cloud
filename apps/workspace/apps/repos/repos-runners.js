@@ -730,3 +730,109 @@ export function queueView(settings, { open, onToggle, onRetry }) {
           QUEUE_HELP.map((b) => h("section", null, h("h4", { class: "repos-queue-heading" }, b.heading), h("p", null, b.text))))
       : []);
 }
+
+// ── D#598 P5c-a: the switch for merging plan updates automatically, in the open repo's settings (kept in this file: a new file would pass the boot budget) ──
+// Off until an owner or admin turns it on. The answer is { auto_merge, default }; anything else reads as "isn't available", never as off. Words are this file's own
+// fixed sentences, drawn as text nodes; a refusal is chosen by status, never from the server's message. The state is announced twice: by the switch itself and by a
+// polite status line after each save.
+export const PLAN_WRITEBACK_LABEL = "Merge plan updates automatically";
+export const PLAN_WRITEBACK_SENTENCE = "Merge plan updates by itself when they match what we computed and checks pass. Off: a person merges them.";
+export const PLAN_WRITEBACK_WORDS = Object.freeze({
+  savedOn: "Saved. Plan updates are merged automatically.",
+  savedOff: "Saved. A person merges plan updates.",
+  adminOnly: "Only owners and admins can change this.",
+  saveFailed: "That change couldn't be saved. Try again.",
+});
+export const planWritebackUrl = (repoId) => "/api/v1/repos/" + encodeURIComponent(repoId) + "/plan-writeback/setting";
+
+/** The answer read, or null unless both fields are booleans. */
+export const readPlanWriteback = (b) => (b && typeof b.auto_merge === "boolean" && typeof b.default === "boolean" ? { on: b.auto_merge } : null);
+
+/** What the switch shows for a state, with no DOM. `st`: { status: loading | ready | error, on, phase: idle | saving | saved | error, error }. */
+export function planWritebackModel(st, canChange) {
+  if (st.status === "loading") return { kind: "loading", text: LOADING_TEXT };
+  if (st.status !== "ready") return { kind: "error", text: UNAVAILABLE_TEXT };
+  return {
+    kind: "ready",
+    on: st.phase === "saving" ? st.want === true : st.on === true, // while saving the switch shows what was asked for
+    busy: st.phase === "saving",
+    adminOnly: !canChange,
+    saved: st.phase === "saved" ? (st.on ? PLAN_WRITEBACK_WORDS.savedOn : PLAN_WRITEBACK_WORDS.savedOff) : "",
+    error: st.phase === "error" ? st.error : "",
+  };
+}
+
+/** One repo's switch: read it, PUT the other value with a fresh Idempotency-Key, show what the server answered. */
+export function createPlanWritebackController({ call = api, signal, repoId, onChange = () => {} } = {}) {
+  let st = { status: "loading", on: false, phase: "idle", error: "" };
+  const set = (patch) => {
+    st = { ...st, ...patch };
+    onChange();
+  };
+  async function load() {
+    try {
+      const v = readPlanWriteback(await call("GET", planWritebackUrl(repoId), undefined, signal));
+      set(v ? { status: "ready", on: v.on } : { status: "error" });
+    } catch (e) {
+      if (!cancelled(e)) set({ status: "error" });
+    }
+  }
+  async function change(on) {
+    if (st.status !== "ready" || st.phase === "saving") return;
+    set({ phase: "saving", error: "", want: on });
+    try {
+      const v = readPlanWriteback(await call("PUT", planWritebackUrl(repoId), { auto_merge: on }, signal, { idempotencyKey: crypto.randomUUID() }));
+      if (!v) return set({ phase: "error", error: PLAN_WRITEBACK_WORDS.saveFailed });
+      set({ on: v.on, phase: "saved" });
+    } catch (e) {
+      if (!cancelled(e)) set({ phase: "error", error: e && e.status === 403 ? PLAN_WRITEBACK_WORDS.adminOnly : PLAN_WRITEBACK_WORDS.saveFailed });
+    }
+  }
+  return { load, change, get state() { return st; } };
+}
+
+/**
+ * The view. `el` goes into the repo's settings; `canChange()` says whether the signed-in person is an owner or admin. Every node is built once and only its
+ * state changes, so focus stays on the switch through a save (it is never disabled while saving: `aria-disabled` and an ignored press instead) and each new
+ * status or error sentence is read out. A failed save moves focus to the error, as the auto-merge control does.
+ */
+export function createPlanWritebackControl({ call = api, signal, repoId, canChange = () => false } = {}) {
+  const ctl = createPlanWritebackController({ call, signal, repoId, onChange: () => paint() });
+  const note = h("p", { class: "repos-muted", "data-testid": "repos-plan-writeback-note" });
+  const box = h("input", {
+    type: "checkbox", role: "switch", id: "repos-plan-writeback-switch", "data-testid": "repos-plan-writeback-switch", "aria-describedby": "repos-plan-writeback-help",
+    onChange: () => {
+      const m = planWritebackModel(ctl.state, canChange());
+      if (m.kind === "ready" && !m.busy) ctl.change(box.checked);
+      else box.checked = m.on; // a press while saving changes nothing
+    },
+  });
+  const adminOnly = h("p", { class: "repos-muted", "data-testid": "repos-plan-writeback-admin-only" }, PLAN_WRITEBACK_WORDS.adminOnly);
+  const saved = h("p", { class: "repos-muted", role: "status", "data-testid": "repos-plan-writeback-saved" });
+  const failed = h("p", { class: "repos-error", role: "alert", tabindex: "-1", id: "repos-plan-writeback-error", "data-testid": "repos-plan-writeback-error" });
+  const group = h("div", { "data-testid": "repos-plan-writeback-group" },
+    h("label", { class: "repos-toggle", for: "repos-plan-writeback-switch" }, box, h("span", null, h("strong", null, PLAN_WRITEBACK_LABEL),
+      h("span", { class: "repos-muted", id: "repos-plan-writeback-help", "data-testid": "repos-plan-writeback-help" }, PLAN_WRITEBACK_SENTENCE))),
+    adminOnly, saved, failed);
+  const el = h("div", { class: "repos-toggle-group", "data-testid": "repos-plan-writeback" }, note, group);
+  let hadError = false;
+  function paint() {
+    const m = planWritebackModel(ctl.state, canChange());
+    const ready = m.kind === "ready";
+    group.hidden = !ready;
+    note.hidden = ready;
+    note.textContent = ready ? "" : m.text;
+    note.setAttribute("data-state", m.kind);
+    if (!ready) return;
+    box.checked = m.on;
+    box.disabled = m.adminOnly; // a member's switch is plainly off-limits; a save in flight only sets aria-disabled
+    box.setAttribute("aria-disabled", m.busy ? "true" : "false");
+    adminOnly.hidden = !m.adminOnly;
+    saved.textContent = m.saved;
+    failed.textContent = m.error;
+    if (m.error && !hadError) failed.focus();
+    hadError = !!m.error;
+  }
+  paint();
+  return { el, load: () => ctl.load(), repaint: paint };
+}
