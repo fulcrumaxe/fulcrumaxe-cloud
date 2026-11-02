@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  FLAG_WORDS, limitResetTail, RECEIPTS_HEADING, receiptsSection, formatWhen, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, SPEC_REFUSED_SENTENCES, SPEC_REFUSED_GENERIC, SUPERSEDED_SENTENCE, SUPERSEDED_LINK_LABEL, phaseOf, pullUrl, queueLine, queuedToMerge, QUEUE_SENTENCES, QUEUE_TIMEOUT_HINT, zoneTime, readyBanner, mergeBlockSentence, blockingSentence, BLOCKING_SENTENCES, PUBLIC_REFUSED_SENTENCE, REVIEW_BLOCK_SENTENCE, UNKNOWN_BLOCK_SENTENCE, reasonWord, roleWord, runView, statusWord, stepView, usdText,
+  FLAG_WORDS, limitResetTail, RECEIPTS_HEADING, receiptsSection, formatWhen, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, SPEC_REFUSED_SENTENCES, SPEC_REFUSED_GENERIC, SUPERSEDED_SENTENCE, SUPERSEDED_LINK_LABEL, phaseOf, pullUrl, queueLine, conflictLine, CONFLICT_SENTENCES, CONFLICT_NO_BRANCH, queuedToMerge, QUEUE_SENTENCES, QUEUE_TIMEOUT_HINT, zoneTime, readyBanner, mergeBlockSentence, blockingSentence, BLOCKING_SENTENCES, PUBLIC_REFUSED_SENTENCE, REVIEW_BLOCK_SENTENCE, UNKNOWN_BLOCK_SENTENCE, reasonWord, roleWord, runView, statusWord, stepView, usdText,
 } from "../apps/pipeline/pipeline-insight.js";
 import { PERSON_MERGES_REASONS } from "../apps/pipeline/pipeline-insight.js";
 
@@ -1285,4 +1285,133 @@ describe("D#598 P1d-1: the author stops", () => {
     });
   }
 
+});
+
+describe("D#519 MQ4-d: the merge-conflict fix round lines", () => {
+  const withConflict = (extra) => ({ ...REVIEW_PASSED, ...extra });
+  const RUNNING = { conflict_round: { running: true, attempt: 1, of: 2, base_ref: "main" } };
+  const SPENT = { conflict_stop: { kind: "attempts_spent", attempts: 2, files: ["src/a.ts", "src/b.ts"], base_ref: "main" } };
+  const FOREIGN = { conflict_stop: { kind: "foreign_commits", attempts: 0, files: ["src/a.ts"], base_ref: "main" } };
+  const DIRECT = { conflict_stop: { kind: "direct", attempts: 0, files: [], base_ref: "main" } };
+  const BAD_WORDS = /null|undefined|NaN|\[object|\{|\}|\s\s|\s\.|:\s*$/;
+
+  it("C6-d1: each of the five sentences, word for word, with the structured values", () => {
+    expect(conflictLine(withConflict(RUNNING)).text).toBe("Resolving a conflict with main: fix attempt 1 of 2 is running.");
+    expect(conflictLine(withConflict(SPENT)).text).toBe("It conflicts with main in src/a.ts, src/b.ts. We tried 2 times, so a person needs to resolve it.");
+    expect(conflictLine(withConflict(FOREIGN)).text).toBe("It conflicts with main in src/a.ts, and these files have commits we didn't write, so a person needs to resolve it.");
+    expect(conflictLine(withConflict(DIRECT)).text).toBe("It conflicts with main. Automatic conflict fixes don't run for this repository yet, so a person needs to resolve it.");
+    // history_rewritten is the body's sentence, unchanged: the existing blocking sentence.
+    const rewritten = withConflict({ steps: [{ kind: "merge_gate", result: "ready_human_merges", reasons: ["history_rewritten"] }] });
+    expect(mergeBlockSentence(rewritten)).toBe("The branch history was rewritten after review");
+    expect(BLOCKING_SENTENCES.history_rewritten).toBe("The branch history was rewritten after review");
+  });
+
+  it("a foreign_commits stop with no file list says 'some files', never an empty list", () => {
+    const foreign = (files, base_ref = "main") => conflictLine(withConflict({ conflict_stop: { kind: "foreign_commits", attempts: 0, files, base_ref } })).text;
+    expect(foreign([])).toBe("It conflicts with main, and some files have commits we didn't write, so a person needs to resolve it.");
+    expect(foreign([null, "", " "], null)).toBe("It conflicts with its target branch, and some files have commits we didn't write, so a person needs to resolve it.");
+    expect(foreign(["src/a.ts"])).toBe("It conflicts with main in src/a.ts, and these files have commits we didn't write, so a person needs to resolve it.");
+  });
+
+  it("a path or branch with a bidi override or a zero-width character is drawn as text, not as markup, and never changes the sentence's fixed words", async () => {
+    const odd = "src/‮evil​.ts";
+    const text = conflictLine(withConflict({ conflict_stop: { kind: "foreign_commits", attempts: 0, files: [odd, "<img src=x onerror=alert(1)>"], base_ref: "ma​in" } })).text;
+    expect(text).toBe("It conflicts with ma​in in " + odd + ", <img src=x onerror=alert(1)>, and these files have commits we didn't write, so a person needs to resolve it.");
+    vi.useFakeTimers();
+    vi.stubGlobal("Node", FakeNode);
+    vi.stubGlobal("document", { hidden: false, activeElement: null, createElement: (t) => new FakeEl(t), createTextNode: (text) => ({ text }) });
+    try {
+      const panel = createInsightPanel({ call: vi.fn(async () => structuredClone(withConflict({ conflict_stop: { kind: "foreign_commits", attempts: 0, files: [odd], base_ref: "main" } }))), setInterval: () => 1, clearInterval: () => {} });
+      panel.start("item-1");
+      await flush();
+      const line = byId(panel.el, "pl-conflict-line")[0];
+      expect(line.textContent).toContain(odd);
+      // Only a text node child: no element was made out of the path.
+      expect(line.kids.filter((c) => c instanceof FakeEl)).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+
+  it("the attempts sentence says 'once' for one try and 'k times' from two", () => {
+    const spent = (attempts) => conflictLine(withConflict({ conflict_stop: { kind: "attempts_spent", attempts, files: ["src/a.ts"], base_ref: "main" } })).text;
+    expect(spent(1)).toBe("It conflicts with main in src/a.ts. We tried once, so a person needs to resolve it.");
+    expect(spent(2)).toBe("It conflicts with main in src/a.ts. We tried 2 times, so a person needs to resolve it.");
+    expect(spent(3)).toContain("We tried 3 times,");
+  });
+
+  it("C6-d1: the lines are drawn on the card as plain text with a status role, one per state", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("Node", FakeNode);
+    vi.stubGlobal("document", { hidden: false, activeElement: null, createElement: (t) => new FakeEl(t), createTextNode: (text) => ({ text }) });
+    try {
+      for (const extra of [RUNNING, SPENT, FOREIGN, DIRECT]) {
+        const panel = createInsightPanel({ call: vi.fn(async () => structuredClone(withConflict(extra))), setInterval: () => 1, clearInterval: () => {} });
+        panel.start("item-1");
+        await flush();
+        const lines = byId(panel.el, "pl-conflict-line");
+        expect(lines, JSON.stringify(extra)).toHaveLength(1);
+        expect(lines[0].textContent).toBe(conflictLine(withConflict(extra)).text);
+      }
+      const none = createInsightPanel({ call: vi.fn(async () => structuredClone(REVIEW_PASSED)), setInterval: () => 1, clearInterval: () => {} });
+      none.start("item-1");
+      await flush();
+      expect(byId(none.el, "pl-conflict-line")).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+
+  it("C6-d2: an executor summary with a code-like and a file-like string never reaches the conflict line", () => {
+    const run = { id: "r1", role: "executor", status: "succeeded", summary: "Resolved MERGE_CONFLICT_CODE_9 in secret/evil.ts", lines: [], actions: [] };
+    for (const extra of [RUNNING, SPENT, FOREIGN, DIRECT]) {
+      const data = { ...REVIEW_PASSED, runs: [run], ...extra };
+      expect(conflictLine(data).text).not.toMatch(/MERGE_CONFLICT_CODE_9|secret\/evil\.ts|Resolved/);
+      expect(JSON.stringify(buildInsight(data).conflictLine)).not.toMatch(/MERGE_CONFLICT_CODE_9|secret\/evil\.ts/);
+    }
+    // Summary-shaped fields on the conflict objects themselves are not read either.
+    expect(conflictLine(withConflict({ conflict_round: { ...RUNNING.conflict_round, summary: "SUMMARY_TEXT", sentence: "SENTENCE_TEXT" } })).text).not.toMatch(/SUMMARY_TEXT|SENTENCE_TEXT/);
+  });
+
+  it("C6-d3: no null, undefined or empty value in any state, including missing branch, files and counts", () => {
+    const states = [
+      RUNNING, SPENT, FOREIGN, DIRECT,
+      { conflict_round: { running: true, attempt: 2, of: 2, base_ref: null } },
+      { conflict_stop: { kind: "attempts_spent", attempts: 1, files: [], base_ref: null } },
+      { conflict_stop: { kind: "foreign_commits", attempts: 0, files: [null, "", "  ", "ok.ts"], base_ref: "" } },
+      { conflict_stop: { kind: "foreign_commits", attempts: 0, files: [], base_ref: undefined } },
+      { conflict_stop: { kind: "direct", attempts: 0, files: null, base_ref: null } },
+    ];
+    for (const extra of states) {
+      const line = conflictLine(withConflict(extra));
+      expect(line, JSON.stringify(extra)).not.toBeNull();
+      expect(line.text.trim()).not.toBe("");
+      expect(line.text).not.toMatch(BAD_WORDS);
+    }
+    expect(conflictLine(withConflict({ conflict_round: { running: true, attempt: 2, of: 2, base_ref: null } })).text).toBe(`Resolving a conflict with ${CONFLICT_NO_BRANCH}: fix attempt 2 of 2 is running.`);
+    expect(conflictLine(withConflict({ conflict_stop: { kind: "direct", attempts: 0, files: [], base_ref: null } })).text).toBe("It conflicts with its target branch. Automatic conflict fixes don't run for this repository yet, so a person needs to resolve it.");
+    // A shape the table does not know says nothing, never a half sentence.
+    for (const bad of [{ conflict_round: { running: true, attempt: 0, of: 2 } }, { conflict_round: { running: false, attempt: 1, of: 2 } }, { conflict_stop: { kind: "attempts_spent", attempts: null } }, { conflict_stop: { kind: "sideways" } }, { conflict_stop: "x" }, {}]) {
+      expect(conflictLine(withConflict(bad)), JSON.stringify(bad)).toBeNull();
+    }
+    expect(conflictLine(null)).toBeNull();
+    expect(Object.values(CONFLICT_SENTENCES).every((f) => typeof f === "function")).toBe(true);
+  });
+
+  it("more than 10 files names ten and then 'and {k} more'; ten or fewer name them all", () => {
+    const files = (n) => Array.from({ length: n }, (_, i) => `f${i + 1}.ts`);
+    const text = (n) => conflictLine(withConflict({ conflict_stop: { kind: "foreign_commits", attempts: 0, files: files(n), base_ref: "main" } })).text;
+    expect(text(10)).toContain("in f1.ts, f2.ts, f3.ts, f4.ts, f5.ts, f6.ts, f7.ts, f8.ts, f9.ts, f10.ts,");
+    expect(text(10)).not.toContain("more");
+    expect(text(11)).toContain("in f1.ts, f2.ts, f3.ts, f4.ts, f5.ts, f6.ts, f7.ts, f8.ts, f9.ts, f10.ts and 1 more,");
+    expect(text(100)).toContain("f10.ts and 90 more,");
+    expect(text(11)).not.toContain("f11.ts");
+  });
+
+  it("C6-d4: the running sentence is derived from the response alone: the next read without conflict_round has no line", () => {
+    expect(buildInsight(withConflict(RUNNING)).conflictLine.kind).toBe("running");
+    expect(buildInsight(REVIEW_PASSED).conflictLine).toBeNull();
+  });
 });
