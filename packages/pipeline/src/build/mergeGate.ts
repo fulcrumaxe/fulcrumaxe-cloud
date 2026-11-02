@@ -181,6 +181,9 @@ export interface PullRequestMergeability {
   merged: boolean;
   mergeable: boolean | null;
   mergeableState: MergeableState;
+  /** D#598 P3c: the branch the pull request merges into and the repository's default, from the same read. Absent from a port that does not say. */
+  baseRef?: string;
+  defaultBranch?: string;
 }
 
 /** GitHub's compare `status`: the head relative to the base branch. */
@@ -263,6 +266,8 @@ export interface MergeGateGitHubPort {
   getPullRequest(pr: PullRequestRef): Promise<PullRequestState>;
   /** D#519 MQ1: the pull request's mergeability, with `mergeable: null` already polled (see `PullRequestMergeability`). With `gatedHeadSha`, polling stops as soon as the head differs from it (a moved head needs no mergeability). */
   getMergeability(pr: PullRequestRef, opts?: { gatedHeadSha?: string }): Promise<PullRequestMergeability>;
+  /** D#598 P3c: `PATCH .../pulls/{n}` with `base`: the pull request's base becomes `base` (no commit changes). `moved: false` is a refusal; a transport failure throws. Absent: the queue stops the entry. */
+  retargetPullRequest?(pr: PullRequestRef, args: { base: string }): Promise<{ moved: boolean }>;
   /** D#519 MQ1: `PUT .../update-branch` with `expected_head_sha`. Asynchronous on GitHub's side (see `UpdateBranchOutcome`). */
   updateBranch(pr: PullRequestRef, args: { expectedHeadSha: string }): Promise<UpdateBranchOutcome>;
   /** D#519 MQ1: the base branch against `headSha`. `files` asks for the changed paths too (every page). */

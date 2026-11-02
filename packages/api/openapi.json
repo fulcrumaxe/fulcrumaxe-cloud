@@ -4066,6 +4066,38 @@
                       ],
                       "additionalProperties": false
                     },
+                    "stacked_wait": {
+                      "type": "object",
+                      "properties": {
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "waiting",
+                            "moving",
+                            "conflict",
+                            "parent_closed",
+                            "retarget_failed"
+                          ]
+                        },
+                        "parent_pr": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "state",
+                        "parent_pr"
+                      ],
+                      "additionalProperties": false
+                    },
                     "setup_pause": {
                       "anyOf": [
                         {

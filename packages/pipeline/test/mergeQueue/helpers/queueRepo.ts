@@ -46,7 +46,7 @@ export interface QueueRepo {
   items: Map<number, QueueItem>;
   /** Everything the fakes saw, one list, in order. */
   mergeCalls(): number[];
-  addItem(pr: number, opts?: { approvedAt?: Date; world?: Partial<MergeWorld>; state?: "queued"; existingWorkItemId?: string }): Promise<QueueItem>;
+  addItem(pr: number, opts?: { approvedAt?: Date; world?: Partial<MergeWorld>; state?: "queued"; existingWorkItemId?: string; dependsOnPrNumber?: number }): Promise<QueueItem>;
   entry(pr: number): Promise<MergeQueueEntry>;
   queue(): Promise<MergeQueueEntry[]>;
   deps(over?: Partial<QueueTickDeps> & { autoMerge?: boolean }): QueueTickDeps;
@@ -104,7 +104,7 @@ export async function startQueueRepo(db: { admin: PoolClient; runWriterPool: Poo
         await db.admin.query(`INSERT INTO agent_runs (account_id, work_item_id, role, runtime, status, envelope, head_sha) VALUES ($1, $2, $3, 'production', 'succeeded', '{"verdict":"pass"}', $4)`, [accountId, workItemId, role, head]);
       }
       const g = await startMergeTlsGitHub({ prNumber: pr, headSha: head, refreshedHeadSha: fresh, baseTipSha: shaOf(pr, "tip"), baseShas: [shaOf(pr, "tip")], refreshAuthorLogin: BOT, ...o.world });
-      const created = await tenant(accountId, (c) => enqueueEntry(c, { accountId, repoId, workItemId, prNumber: pr, headSha: head, approvedAt: o.approvedAt ?? T0 }));
+      const created = await tenant(accountId, (c) => enqueueEntry(c, { accountId, repoId, workItemId, prNumber: pr, headSha: head, approvedAt: o.approvedAt ?? T0, ...(o.dependsOnPrNumber === undefined ? {} : { dependsOnPrNumber: o.dependsOnPrNumber }) }));
       const item: QueueItem = { pr, workItemId, entryId: created.entry.id, g, head, fresh };
       items.set(pr, item);
       for (const sha of [head, fresh, shaOf(pr, "tip"), reverse(head), reverse(fresh)]) byUnique.set(sha, item);

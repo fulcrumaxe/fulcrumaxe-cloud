@@ -5,6 +5,7 @@ import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { createGateReask, findGateReaskCandidates, reaskMergeGate, GATE_REASK_CODE } from "../src/gateReask.js";
 import type { AdvanceStartArgs } from "../src/advance.js";
+import { PARKED_STAGE_REGISTRY } from "@fx/pipeline";
 
 /**
  * The merge gate asks itself again [pg]: real rows, the real driver-event store, the real approval decision (`stageApprovalGate`) and the real candidate query. The
@@ -164,5 +165,24 @@ describe("the merge gate re-ask [pg]", { timeout: 60_000 }, () => {
     expect(await ask(started, w, a.accountId, true)).toEqual({ started: false, reason: "start_failed" });
     expect(await claims(w)).toBe(1);
     expect(await ask(started, w, a.accountId)).toEqual({ started: false, reason: "already_asked" });
+  });
+
+  it("D#598 P3c (C25): a child stopped for retarget_failed is not re-filed by the gate's automatic re-ask or listed by the parked-stage sweep: only a person's Check the merge ends that stop", async () => {
+    const { a, w } = await atGate({ paired: false, reasons: ["ci_not_green"] });
+    // What the queue left behind: the entry stopped, and the workflow's own `stopped` fact recorded after the last gate answer.
+    await admin.query(
+      `INSERT INTO merge_queue_entries (account_id, repo_id, work_item_id, pr_number, head_sha, depends_on_pr_number, approved_at, state, reason)
+       VALUES ($1, $2, $3, 674, $4, 640, now(), 'stopped', 'retarget_failed')`,
+      [a.accountId, a.repoId, w, HEAD],
+    );
+    await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, head_sha, pr_number, dedupe_key) VALUES ($1, $2, 'stopped', 'retarget_failed', $3, 674, $4)", [a.accountId, w, HEAD, `stop:${randomUUID()}`]);
+    const started: AdvanceStartArgs[] = [];
+    expect(await ask(started, w, a.accountId)).toEqual({ started: false, reason: "moved_on" });
+    expect(started).toEqual([]);
+    const review = PARKED_STAGE_REGISTRY.review!;
+    const listed = await writerPool.query<{ work_item_id: string }>("SELECT work_item_id FROM work_item_list_parked_stage($1, $2::text[], $3::text[], 0, 100)", [review.stage, [...review.itemStages], [...review.pauses]]);
+    expect(listed.rows.map((r) => r.work_item_id)).not.toContain(w);
+    const entry = (await admin.query("SELECT state, reason FROM merge_queue_entries WHERE work_item_id = $1", [w])).rows[0];
+    expect(entry).toEqual({ state: "stopped", reason: "retarget_failed" });
   });
 });

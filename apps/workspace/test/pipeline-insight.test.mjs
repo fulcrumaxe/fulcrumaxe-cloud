@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  FLAG_WORDS, limitResetTail, RECEIPTS_HEADING, receiptsSection, formatWhen, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, SPEC_REFUSED_SENTENCES, SPEC_REFUSED_GENERIC, SUPERSEDED_SENTENCE, SUPERSEDED_LINK_LABEL, phaseOf, pullUrl, queueLine, conflictLine, CONFLICT_SENTENCES, CONFLICT_NO_BRANCH, queuedToMerge, QUEUE_SENTENCES, QUEUE_TIMEOUT_HINT, zoneTime, readyBanner, mergeBlockSentence, blockingSentence, BLOCKING_SENTENCES, PUBLIC_REFUSED_SENTENCE, REVIEW_BLOCK_SENTENCE, UNKNOWN_BLOCK_SENTENCE, reasonWord, roleWord, runView, statusWord, stepView, usdText,
+  FLAG_WORDS, limitResetTail, RECEIPTS_HEADING, receiptsSection, formatWhen, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, START_DECISION_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, SPEC_REFUSED_SENTENCES, SPEC_REFUSED_GENERIC, SUPERSEDED_SENTENCE, SUPERSEDED_LINK_LABEL, phaseOf, pullUrl, queueLine, conflictLine, CONFLICT_SENTENCES, CONFLICT_NO_BRANCH, queuedToMerge, stackedLine, STACKED_SENTENCES, QUEUE_SENTENCES, QUEUE_TIMEOUT_HINT, zoneTime, readyBanner, mergeBlockSentence, blockingSentence, BLOCKING_SENTENCES, PUBLIC_REFUSED_SENTENCE, REVIEW_BLOCK_SENTENCE, UNKNOWN_BLOCK_SENTENCE, reasonWord, roleWord, runView, statusWord, stepView, usdText,
 } from "../apps/pipeline/pipeline-insight.js";
 import { PERSON_MERGES_REASONS } from "../apps/pipeline/pipeline-insight.js";
 
@@ -1413,5 +1413,80 @@ describe("D#519 MQ4-d: the merge-conflict fix round lines", () => {
   it("C6-d4: the running sentence is derived from the response alone: the next read without conflict_round has no line", () => {
     expect(buildInsight(withConflict(RUNNING)).conflictLine.kind).toBe("running");
     expect(buildInsight(REVIEW_PASSED).conflictLine).toBeNull();
+  });
+});
+
+describe("D#598 P3c: a queued stacked child's line, from the derived stacked_wait", () => {
+  const withWait = (state, parent_pr) => ({ ...REVIEW_PASSED, stacked_wait: { state, parent_pr } });
+  const EXPECTED = {
+    waiting: ["Waiting for #40 to merge.", "Waiting for its parent pull request to merge."],
+    moving: ["#40 merged. This pull request now goes to the main branch.", "Its parent pull request merged. This pull request now goes to the main branch."],
+    conflict: ["Conflict after #40 merged: a fix round is running.", "Conflict after its parent pull request merged: a fix round is running."],
+    parent_closed: ["#40 was closed without merging, so this pull request can't merge as it is. A person needs to decide.", "Its parent pull request was closed without merging, so this pull request can't merge as it is. A person needs to decide."],
+    retarget_failed: ["We couldn't move this pull request onto the main branch, so a person needs to do it.", "We couldn't move this pull request onto the main branch, so a person needs to do it."],
+  };
+
+  it.each(Object.entries(EXPECTED))("%s: the fixed sentence with the parent's number, and 'its parent pull request' when it is unknown", (state, [known, unknown]) => {
+    expect(stackedLine(withWait(state, 40))).toEqual({ kind: state, text: known });
+    expect(stackedLine(withWait(state, null))).toEqual({ kind: state, text: unknown });
+    expect(buildInsight(withWait(state, 40), "UTC").stackedLine.text).toBe(known);
+  });
+
+  it("all five states, with a known, a missing and a malformed number, never print null, undefined or NaN", () => {
+    expect(Object.keys(STACKED_SENTENCES).sort()).toEqual(Object.keys(EXPECTED).sort());
+    for (const state of Object.keys(EXPECTED)) {
+      for (const n of [40, null, undefined, "40", "not a number", NaN, 0, -3, 1.5, {}, []]) {
+        const line = stackedLine(withWait(state, n));
+        expect(line.text, `${state} ${String(n)}`).not.toMatch(/null|undefined|NaN|\[object/);
+        if (typeof n !== "number" || !Number.isInteger(n) || n < 1) expect(line.text).not.toMatch(/#/);
+      }
+    }
+  });
+
+  it("a number-like string anywhere else in the answer (an executor's summary, a run's text) never fills a brace; only parent_pr does", () => {
+    const hostile = { ...withWait("waiting", null), summary: "#999 merged", runs: [{ role: "executor", summary: "parent is #777" }], pr_number: 555 };
+    expect(stackedLine(hostile).text).toBe("Waiting for its parent pull request to merge.");
+    expect(stackedLine(withWait("waiting", "#999")).text).toBe("Waiting for its parent pull request to merge.");
+  });
+
+  it("an item with no stacked_wait, an unknown state, or no answer says nothing", () => {
+    expect(stackedLine(REVIEW_PASSED)).toBeNull();
+    expect(stackedLine(withWait("something_else", 40))).toBeNull();
+    expect(stackedLine(withWait("constructor", 40))).toBeNull();
+    expect(stackedLine(null)).toBeNull();
+    expect(buildInsight(REVIEW_PASSED, "UTC").stackedLine).toBeNull();
+  });
+
+  it("the panel draws it as a text node line of its own, only when there is one", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("Node", FakeNode);
+    vi.stubGlobal("document", { hidden: false, activeElement: null, createElement: (t) => new FakeEl(t), createTextNode: (text) => ({ text }) });
+    try {
+      const show = async (data) => {
+        const panel = createInsightPanel({ call: vi.fn(async () => structuredClone(data)), setInterval: () => 1, clearInterval: () => {} });
+        panel.start("item-1");
+        await flush();
+        return panel;
+      };
+      const line = byId((await show(withWait("moving", 40))).el, "pl-stacked-line");
+      expect(line.map((e) => e.textContent)).toEqual(["#40 merged. This pull request now goes to the main branch."]);
+      expect(byId((await show(REVIEW_PASSED)).el, "pl-stacked-line")).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("D#598 P3c (C25): one line, not two, for a stacked child in a conflict round", () => {
+  const RUNNING = { conflict_round: { running: true, attempt: 1, of: 2, base_ref: "main" } };
+  const SPENT = { conflict_stop: { kind: "attempts_spent", attempts: 2, files: ["src/a.ts"], base_ref: "main" } };
+  it("a stacked child in a round shows only 'Conflict after #n merged'; an ordinary item keeps the running line; a stop line is never hidden", () => {
+    const stacked = { ...REVIEW_PASSED, ...RUNNING, stacked_wait: { state: "conflict", parent_pr: 40 } };
+    const m = buildInsight(stacked, "UTC");
+    expect(m.stackedLine.text).toBe("Conflict after #40 merged: a fix round is running.");
+    expect(m.conflictLine).toBeNull();
+    expect(buildInsight({ ...REVIEW_PASSED, ...RUNNING }, "UTC").conflictLine.kind).toBe("running");
+    expect(buildInsight({ ...REVIEW_PASSED, ...SPENT, stacked_wait: { state: "waiting", parent_pr: 40 } }, "UTC").conflictLine.kind).toBe("attempts_spent");
   });
 });

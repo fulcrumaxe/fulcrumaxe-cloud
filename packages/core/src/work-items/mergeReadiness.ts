@@ -188,3 +188,35 @@ export async function readConflictState(client: Pick<PoolClient, 'query'>, accou
   const last = (await client.query<{ conflict_files: string[]; base_ref: string }>(`SELECT conflict_files, base_ref FROM merge_conflict_rounds WHERE account_id = $1 AND work_item_id = $2 ORDER BY round DESC LIMIT 1`, [accountId, workItemId])).rows[0];
   return { conflict_stop: { kind: 'attempts_spent', attempts, files: last?.conflict_files ?? [], base_ref: last?.base_ref ?? ev?.base_ref ?? null } };
 }
+
+// ---- D#598 P3c: a stacked child's place in the product merge queue, derived (never stored) ---------------------------------------------------------------
+
+export const STACKED_WAIT_STATES = ['waiting', 'moving', 'conflict', 'parent_closed', 'retarget_failed'] as const;
+export interface StackedWait {
+  state: (typeof STACKED_WAIT_STATES)[number];
+  /** The parent's pull request number as the child's queue entry records it (`depends_on_pr_number`); never read from text a model wrote. */
+  parent_pr: number | null;
+}
+
+/**
+ * Where a stacked child stands, from its own queue entry and its parent's entry on each read. Null when the item is not a queued stacked child, or has nothing to say (the entry
+ * merged, ended, or is not in a state this describes). `moving` covers the child from the moment its parent merged until its own merge: its base moves to the default branch first.
+ */
+export async function readStackedWait(client: Pick<PoolClient, 'query'>, accountId: string, workItemId: string): Promise<StackedWait | null> {
+  const r = await client.query<{ state: string; work_kind: string | null; reason: string | null; parent_pr: number | null; parent_state: string | null }>(
+    `SELECT c.state, c.work_kind, c.reason, c.depends_on_pr_number AS parent_pr, p.state AS parent_state
+       FROM merge_queue_entries c
+       LEFT JOIN merge_queue_entries p ON p.account_id = c.account_id AND p.repo_id = c.repo_id AND p.pr_number = c.depends_on_pr_number
+      WHERE c.account_id = $1 AND c.work_item_id = $2 AND c.depends_on_pr_number IS NOT NULL`,
+    [accountId, workItemId],
+  );
+  const e = r.rows[0];
+  if (!e) return null;
+  const at = (state: StackedWait['state']): StackedWait => ({ state, parent_pr: e.parent_pr });
+  if (e.state === 'stopped') return e.reason === 'merge_dependency_closed' ? at('parent_closed') : e.reason === 'retarget_failed' ? at('retarget_failed') : null;
+  if (e.parent_state === 'closed' || e.parent_state === 'cancelled') return e.state === 'queued' || e.state === 'awaiting_work' ? at('parent_closed') : null;
+  const merged = e.parent_state === 'merged';
+  if (e.state === 'awaiting_work' && e.work_kind === 'conflict') return merged ? at('conflict') : null;
+  if (e.state === 'queued' || e.state === 'in_flight') return merged ? at('moving') : e.state === 'queued' ? at('waiting') : null;
+  return null;
+}

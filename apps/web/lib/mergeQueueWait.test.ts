@@ -10,6 +10,7 @@ const h = vi.hoisted(() => ({
   ctx: { ok: true, ctx: { repoId: "repo-1", executionMode: "sandbox" } } as { ok: boolean; ctx?: { repoId: string; executionMode: string } },
   paired: null as unknown,
   stackParent: null as unknown,
+  parentEntry: true,
   enqueue: [] as unknown[],
   enqueueOutcome: "created" as string,
   entry: null as Record<string, unknown> | null,
@@ -32,6 +33,7 @@ vi.mock("@fx/pipeline", () => ({
   loadReviewContext: async () => h.ctx,
   readPublicPullRequest: () => async () => h.paired,
   mergeQueue: {
+    hasEntryForPr: async () => h.parentEntry,
     enqueueEntry: async (_c: unknown, input: unknown) => (h.enqueue.push(input), { entry: { id: "entry-1" }, outcome: h.enqueueOutcome }),
     getEntryByWorkItem: async () => (h.roundDone > 0 && h.afterRound ? h.afterRound : h.entry),
     cancelWorkItemEntry: async (_c: unknown, input: unknown) => void h.cancelled.push(input),
@@ -53,6 +55,7 @@ beforeEach(() => {
   h.ctx = { ok: true, ctx: { repoId: "repo-1", executionMode: "sandbox" } };
   h.paired = null;
   h.stackParent = null;
+  h.parentEntry = true;
   h.enqueue = [];
   h.enqueueOutcome = "created";
   h.entry = null;
@@ -67,14 +70,16 @@ beforeEach(() => {
 describe("enqueueBody: hosted, unpaired repositories only", () => {
   it("a hosted unpaired item is enqueued once with a fresh approved_at, and the sweep is told there is work", async () => {
     expect(await enqueueBody(worker, WHO, INPUT)).toEqual({ queued: true });
-    expect(h.enqueue).toEqual([{ accountId: "acct", repoId: "repo-1", workItemId: "item", prNumber: 41, headSha: INPUT.headSha, approvedAt: expect.any(Date) }]);
+    expect(h.enqueue).toEqual([{ accountId: "acct", repoId: "repo-1", workItemId: "item", prNumber: 41, headSha: INPUT.headSha, dependsOnPrNumber: null, approvedAt: expect.any(Date) }]);
     expect(h.pending).toEqual([["merge-queue-sweep"]]);
   });
 
   it.each([
     ["a runner_local repository", () => void (h.ctx = { ok: true, ctx: { repoId: "repo-1", executionMode: "runner_local" } })],
     ["a paired item (its public pull request merges by a placed order)", () => void (h.paired = { paired: true, pr: null })],
-    ["a stacked child (the direct gate keeps stopping it)", () => void (h.stackParent = { parentId: "p", parentRepoId: "repo-1", prNumber: 40 })],
+    ["D#598 P3c: a stacked child whose parent has no pull request number (the direct gate stops it with stacked_on_open_pr)", () => void (h.stackParent = { parentId: "p", parentRepoId: "repo-1", prNumber: null })],
+    ["D#598 P3c (C24): a stacked child whose parent has a number but no queue entry (a direct-gate merge, or merged before the child was enqueued)", () => void ((h.stackParent = { parentId: "p", parentRepoId: "repo-1", prNumber: 40 }), (h.parentEntry = false))],
+    ["D#598 P3c: a stacked child whose parent is in another repository", () => void (h.stackParent = { parentId: "p", parentRepoId: "repo-2", prNumber: 40 })],
     ["an item halted since the workflow began", () => void (h.halt = { halted: false, halt_epoch: 3 })],
     ["a cancelled item", () => void (h.halt = { halted: true, halt_epoch: 0 })],
     ["an item whose review context cannot be read", () => void (h.ctx = { ok: false })],
@@ -83,6 +88,23 @@ describe("enqueueBody: hosted, unpaired repositories only", () => {
     expect(await enqueueBody(worker, WHO, INPUT)).toEqual({ queued: false });
     expect(h.enqueue).toEqual([]);
     expect(h.pending).toEqual([]);
+  });
+
+  it("D#598 P3c (C24): a stacked child whose parent has a queue entry is enqueued with the parent's pull request number, and the sweep is told", async () => {
+    h.stackParent = { parentId: "p", parentRepoId: "repo-1", prNumber: 40 };
+    expect(await enqueueBody(worker, WHO, INPUT)).toEqual({ queued: true });
+    expect(h.enqueue).toEqual([expect.objectContaining({ prNumber: 41, dependsOnPrNumber: 40 })]);
+    expect(h.pending).toEqual([["merge-queue-sweep"]]);
+  });
+
+  it("D#598 P3c (C25): after a retarget_failed stop the wait reports it, and the person's Check the merge (this step again) files the child afresh behind the same parent", async () => {
+    h.stackParent = { parentId: "p", parentRepoId: "repo-1", prNumber: 40 };
+    h.entry = { state: "stopped", reason: "retarget_failed", workKind: null };
+    expect(await waitBody(worker, WHO)).toEqual({ state: "stopped", reason: "retarget_failed" });
+    h.enqueueOutcome = "requeued";
+    expect(await enqueueBody(worker, WHO, INPUT)).toEqual({ queued: true });
+    expect(h.enqueue).toEqual([expect.objectContaining({ workItemId: "item", prNumber: 41, headSha: INPUT.headSha, dependsOnPrNumber: 40 })]);
+    expect(h.pending).toEqual([["merge-queue-sweep"]]);
   });
 
   it("no worker, or a worker with no pool, is not queued", async () => {
