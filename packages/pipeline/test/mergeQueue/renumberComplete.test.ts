@@ -34,6 +34,18 @@ describe("roundOwnPushes (rule a at the round's end)", () => {
     expect(await roundOwnPushes(logOf(push(FROM, MID), push(MID, HEAD, "run-2")), round, HEAD)).toBe("foreign");
   });
 
+  it("a record that created the branch is no link, however the rest of the chain would run", async () => {
+    // Answers any tip with a record from FROM except the head's own, which created the branch. Read as a link, its null old tip would be followed to a tip that "chains".
+    const reads: string[] = [];
+    const pushesTo = async (sha: string) => (reads.push(sha), [push(sha === HEAD ? null : FROM, sha)]);
+    expect(await roundOwnPushes(pushesTo, round, HEAD)).toBe("foreign");
+    expect(reads).toEqual([HEAD]);
+    // The same in the middle of a chain: MID was created by a push record with no old tip.
+    reads.length = 0;
+    expect(await roundOwnPushes(async (sha) => (reads.push(sha), [push(sha === MID ? null : sha === HEAD ? MID : FROM, sha)]), round, HEAD)).toBe("foreign");
+    expect(reads).toEqual([HEAD, MID]);
+  });
+
   it("a record whose new tip is not the one asked for is no link", async () => {
     expect(await roundOwnPushes(async () => [push(FROM, MID)], round, HEAD)).toBe("foreign");
   });

@@ -5,7 +5,7 @@ import type { ConflictBinding } from "./mergeQueueConflict";
 
 /**
  * D#519 MQ5-b1: the renumber round's start ports. The same context lookup, proof and run start as the conflict round; the prompt is the renumber one and the worker
- * round is `renumber` (no base sync, no merge). The start itself stays off until MQ5-b2 (`mergeQueue.RENUMBER_START_ENABLED`).
+ * round is `renumber` (no base sync, no merge). The start is on (`mergeQueue.RENUMBER_START_ENABLED`, turned on by MQ5-b2).
  */
 export function renumberPorts(deps: ConflictBinding): mergeQueue.RenumberPorts {
   return {

@@ -1308,6 +1308,11 @@ describe("D#519 MQ4-d: the merge-conflict fix round lines", () => {
   it("C6-d1: each of the five sentences, word for word, with the structured values", () => {
     expect(conflictLine(withConflict(RUNNING)).text).toBe("Resolving a conflict with main: fix attempt 1 of 2 is running.");
     expect(conflictLine(withConflict(SPENT)).text).toBe("It conflicts with main in src/a.ts, src/b.ts. We tried 2 times, so a person needs to resolve it.");
+    // A renumber round is not a conflict fix: it has its own words, filled from the structured fields only (kind, branch, two counts).
+    const renumber = conflictLine(withConflict({ conflict_round: { ...RUNNING.conflict_round, kind: "renumber" } }));
+    expect(renumber).toEqual({ kind: "running", text: "Renumbering its new files to follow main: attempt 1 of 2 is running." });
+    expect(renumber.text).not.toMatch(/conflict/i);
+    expect(conflictLine(withConflict({ conflict_round: { ...RUNNING.conflict_round, kind: "conflict" } })).text).toBe("Resolving a conflict with main: fix attempt 1 of 2 is running.");
     expect(conflictLine(withConflict(FOREIGN)).text).toBe("It conflicts with main in src/a.ts, and these files have commits we didn't write, so a person needs to resolve it.");
     expect(conflictLine(withConflict(DIRECT)).text).toBe("It conflicts with main. Automatic conflict fixes don't run for this repository yet, so a person needs to resolve it.");
     // history_rewritten names nothing, so it is the section 5 sentence every time; the old sentence stays as the table's fallback.
