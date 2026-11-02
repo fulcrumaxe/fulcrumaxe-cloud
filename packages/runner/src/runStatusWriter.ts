@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
+import { setDeferredRoleEventWriter } from "@fx/core/src/memory/deferredRole.js";
 import { redactEventPayload } from "@fx/core/src/events/redact.js";
 // A relative import: @fx/features is not a dependency of this package and this
 // change may not touch the lockfile.
@@ -265,6 +266,9 @@ export async function recordLimitExtended(
     }),
   );
 }
+
+// D#601 MEM-9: core's deferred role pass (run by `recordStage`) writes its run events through this writer; it cannot import the runner.
+setDeferredRoleEventWriter((client, accountId, runId, kind, payload) => insertRunEvent(client, accountId, runId, kind, payload));
 
 /**
  * D#601 MEM-2: the one `memory.proposals` row a run's memory intake leaves, on the caller's client so it commits with the entries it lists.

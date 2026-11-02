@@ -1,6 +1,7 @@
 import type { PoolClient } from 'pg';
 import { emitDomainEvent } from '../domain-events/emit.js';
 import { markWorkPending } from '../pendingWork.js';
+import { ingestDeferredRoleProposals } from '../memory/deferredRole.js';
 import {
   assertLegalStageTransition,
   StageInputError,
@@ -158,6 +159,8 @@ export async function recordStage(
   // D#598 P1f-5d: an item that reaches a final stage may have branches to remove. This only wakes the cleanup cron (a hint: the stage is read again, and
   // the standard backstop looks now and then); nothing about the move is stamped.
   if (toStage === 'merged' || toStage === 'closed_unmerged' || toStage === 'closed') {
+    // D#601 MEM-9: role lessons proposed by this item's runs wait for this move; they are taken in now, in this transaction (a failure here never fails the move).
+    await ingestDeferredRoleProposals(client, workItemId);
     void markWorkPending('branch-cleanup');
     // The end-of-item sandbox reap pass (a 15-minute reconcile job) is what looks at this item's sandbox; the reconciler is otherwise on a slow cadence.
     void markWorkPending('reconcile');

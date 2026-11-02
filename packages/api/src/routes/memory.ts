@@ -149,6 +149,8 @@ const cardSchema = z.object({
   age: z.string().min(1),
   open_state: z.enum(["not_required", "opened", "unopened"]),
   scope_label: z.string().min(1),
+  evidence_repos: z.number().int().min(0),
+  needs_second_repo: z.boolean(),
 });
 export const memoryQueueResponseSchema = z.object({ cards: z.array(cardSchema), truncated: z.boolean() });
 const openResponseSchema = z.object({ opened: z.boolean() });
@@ -213,6 +215,8 @@ function mapMemoryError(err: unknown): never {
       throw new ApiError(422, "must_open_first", `${n} of these cards have not been opened yet; open each one first`, [{ path: "ids", code: "must_open_first" }]);
     }
     if (err.code === "mixed_sources") throw new ApiError(422, "mixed_sources", "a batch can only hold cards from one source", [{ path: "ids", code: "mixed_sources" }]);
+    if (err.code === "needs_second_repo") throw new ApiError(422, err.code, err.message, [{ path: "id", code: err.code }]);
+    if (err.code === "role_batch_refused") throw new ApiError(422, err.code, err.message, [{ path: "ids", code: err.code }]);
     throw new ApiError(422, err.code, "request failed validation", [{ path: "body", code: "invalid" }]);
   }
   throw err;
@@ -288,7 +292,7 @@ export const memoryRoutes: RouteEntry[] = [
     operationId: "getMemoryQueue",
     summary: "Memory proposals waiting for a decision",
     description:
-      "Session only, member. The `proposed` entries, oldest first, each card with its body, who proposed it, its evidence, and `open_state`: for an imported or runner-sourced card, whether THIS caller opened THIS version (`opened` or `unopened`); `not_required` for every other source. Reading the queue opens nothing. At most 200 cards; `truncated` says more matched.",
+      "Session only, member. The `proposed` entries, oldest first, each card with its body, who proposed it, its evidence, and `open_state`: for an imported or runner-sourced card, whether THIS caller opened THIS version (`opened` or `unopened`); `not_required` for every other source. A role lesson an agent proposed carries `evidence_repos` (distinct repositories behind its runs) and `needs_second_repo` (true below two: it cannot be approved yet). Reading the queue opens nothing. At most 200 cards; `truncated` says more matched.",
     principals: ["session"],
     minRole: "member",
     idempotency: "never",
@@ -310,6 +314,8 @@ export const memoryRoutes: RouteEntry[] = [
             age: c.age,
             open_state: c.openState,
             scope_label: c.scopeLabel,
+            evidence_repos: c.evidenceRepos,
+            needs_second_repo: c.needsSecondRepo,
           })),
           truncated: queue.truncated,
         };

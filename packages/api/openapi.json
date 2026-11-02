@@ -37310,7 +37310,7 @@
       "get": {
         "operationId": "getMemoryQueue",
         "summary": "Memory proposals waiting for a decision",
-        "description": "Session only, member. The `proposed` entries, oldest first, each card with its body, who proposed it, its evidence, and `open_state`: for an imported or runner-sourced card, whether THIS caller opened THIS version (`opened` or `unopened`); `not_required` for every other source. Reading the queue opens nothing. At most 200 cards; `truncated` says more matched.",
+        "description": "Session only, member. The `proposed` entries, oldest first, each card with its body, who proposed it, its evidence, and `open_state`: for an imported or runner-sourced card, whether THIS caller opened THIS version (`opened` or `unopened`); `not_required` for every other source. A role lesson an agent proposed carries `evidence_repos` (distinct repositories behind its runs) and `needs_second_repo` (true below two: it cannot be approved yet). Reading the queue opens nothing. At most 200 cards; `truncated` says more matched.",
         "security": [
           {
             "session": []
@@ -37515,6 +37515,14 @@
                           "scope_label": {
                             "type": "string",
                             "minLength": 1
+                          },
+                          "evidence_repos": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "needs_second_repo": {
+                            "type": "boolean"
                           }
                         },
                         "required": [
@@ -37526,7 +37534,9 @@
                           "evidence",
                           "age",
                           "open_state",
-                          "scope_label"
+                          "scope_label",
+                          "evidence_repos",
+                          "needs_second_repo"
                         ],
                         "additionalProperties": false
                       }

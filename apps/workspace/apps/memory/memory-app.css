@@ -53,6 +53,8 @@ textarea.mem-input { width: 100%; min-height: 6em; resize: vertical; }
   cursor: pointer;
 }
 .mem-btn:hover { border-color: var(--accent, #1aff80); }
+.mem-btn[aria-disabled="true"]:hover { border-color: var(--border, rgba(26, 255, 128, 0.3)); }
+.mem-need { align-self: center; }
 .mem-btn[aria-disabled="true"], .mem-btn:disabled { opacity: 0.65; cursor: default; }
 .mem-btn-quiet { border-style: dashed; }
 .mem-link { min-height: 44px; padding: 0 4px; background: none; border: 0; color: var(--accent, #1aff80); font: inherit; text-decoration: underline; cursor: pointer; }

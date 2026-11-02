@@ -4,6 +4,7 @@ import { stripControlTokens } from '@fx/trust';
 import { ForbiddenError, NotFoundError } from '../tenancy/errors.js';
 import { assertActiveMembership } from '../tenancy/scopedAccess.js';
 import { withTenant } from '../tenancy/withTenant.js';
+import { assertRoleEvidence, assertRoleMove, assertRoleRoomForStep } from './evidence.js';
 
 /**
  * D#601 MEM-1: the durable memory store. Values mirror the CHECKs of migration 0793. Every write goes through a database function that
@@ -70,7 +71,7 @@ export interface MemoryEntry {
 }
 
 /** Every code a memory call can throw. All are on the telemetry allowlist (packages/telemetry/src/errorCodes.ts); a test pins the two together. */
-export const MEMORY_ERROR_CODES = ['invalid_message', 'invalid_transition', 'secret_detected', 'memory_full', 'conflict', 'mixed_sources', 'must_open_first'] as const;
+export const MEMORY_ERROR_CODES = ['invalid_message', 'invalid_transition', 'secret_detected', 'memory_full', 'conflict', 'mixed_sources', 'must_open_first', 'needs_second_repo', 'role_batch_refused'] as const;
 export type MemoryErrorCode = (typeof MEMORY_ERROR_CODES)[number];
 
 /** Maps to 422. */
@@ -358,6 +359,8 @@ export async function decideMemory(ctx: MemoryCtx, input: { id: string; to: Memo
   assertEnum('decision', MEMORY_DECISIONS, input.to);
   assertUuid('memory entry', input.id);
   return inSession(ctx, async (client) => {
+    if (input.to === 'approved') await assertRoleEvidence(client, [input.id]);
+    await assertRoleRoomForStep(client, [input.id], input.to);
     const { rows } = await client.query<{ r: string }>('SELECT memory_decide($1::uuid, $2) AS r', [input.id, input.to]);
     return { outcome: rows[0]!.r === 'decided' ? 'decided' : 'already_decided', entry: await readEntry(client, input.id) };
   });
@@ -377,6 +380,7 @@ export async function editMemory(
   if (input.scope !== undefined) assertEnum('scope', MEMORY_SCOPES, input.scope);
   const text = await prepareMemoryTextFor(ctx, input.body, input.why);
   return inSession(ctx, async (client) => {
+    if (input.scope === 'role') await assertRoleMove(client, input.id, input.scopeRef ?? null);
     const { rows } = await client.query<{ id: string }>('SELECT memory_edit($1::uuid, $2, $3, $4, $5, $6) AS id', [
       input.id,
       text.body,

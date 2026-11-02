@@ -46,6 +46,7 @@ export const COPY = Object.freeze({
   unknownSource: "Unknown source",
   deletedEntry: "Deleted entry",
   approve: "Approve",
+  needsSecondRepo: "Needs evidence from a second repo",
   editThenApprove: "Edit then approve",
   reject: "Reject",
   openCard: "Open card",
@@ -107,7 +108,7 @@ export function checkEdit(body, why) {
 export function failureWords(e) {
   if (isRateLimited(e)) return retryWords(waitSeconds(e));
   if (!e) return COPY.failed;
-  if (e.code === "must_open_first" || e.code === "mixed_sources" || e.code === "conflict") return text(e.message, COPY.failed);
+  if (e.code === "must_open_first" || e.code === "mixed_sources" || e.code === "conflict" || e.code === "needs_second_repo" || e.code === "role_batch_refused") return text(e.message, COPY.failed);
   if (e.code === "secret_detected") return COPY.secret;
   if (e.code === "invalid_transition") return COPY.transition;
   if (e.code === "memory_full") return COPY.full;

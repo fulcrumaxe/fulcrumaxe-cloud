@@ -1,9 +1,12 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { ingestMemoryProposals, type IngestMemoryProposalsResult } from "@fx/core/src/memory/intake.js";
+import { TERMINAL_WORK_ITEM_STAGES } from "@fx/core/src/work-items/stages.js";
+import { setDeferredRoleErrorSink, setDeferredRoleLiveSecrets } from "@fx/core/src/memory/deferredRole.js";
 import { repoScopeRef, type LiveSecretsSource } from "@fx/core/src/memory/index.js";
 import type { PoolClient } from "pg";
 import { liveInstallationTokens } from "@fx/github";
+import { reportError } from "@fx/telemetry";
 import { recordMemoryProposalsEvent } from "@fx/runner";
 
 /**
@@ -34,9 +37,13 @@ interface RunFacts {
   work_item_id: string | null;
   runtime: string;
   status: string;
+  stage: string | null;
 }
 
 const defaultLiveSecrets: LiveSecretsSource = () => liveInstallationTokens();
+// MEM-9: the deferred role pass (run by `recordStage` when an item reaches a terminal stage) scans against this process's live tokens too.
+setDeferredRoleLiveSecrets(defaultLiveSecrets);
+setDeferredRoleErrorSink((err, stage) => reportError(err, { stage }));
 
 /**
  * The run's repository key, built exactly as the retriever builds it (`repoScopeRef(gh_node_id, gh_installation_id)`), or null when the run has
@@ -60,7 +67,7 @@ export async function resolveRunRepoScopeRef(client: PoolClient, accountId: stri
 export async function ingestRunMemoryProposals(input: RunMemoryIntakeInput): Promise<IngestRunResult> {
   if (input.envelope === null || input.envelope.memory_proposals === undefined) return { status: "none" };
   const facts = await withTenant(input.pool, input.accountId, async (client) => {
-    const { rows } = await client.query<RunFacts>("SELECT role, work_item_id, runtime, status FROM agent_runs WHERE id = $1 AND account_id = $2", [input.runId, input.accountId]);
+    const { rows } = await client.query<RunFacts>("SELECT ar.role, ar.work_item_id, ar.runtime, ar.status, w.stage FROM agent_runs ar LEFT JOIN work_items w ON w.account_id = ar.account_id AND w.id = ar.work_item_id WHERE ar.id = $1 AND ar.account_id = $2", [input.runId, input.accountId]);
     return rows[0] ?? null;
   });
   if (facts === null) return { status: "none" };
@@ -73,6 +80,14 @@ export async function ingestRunMemoryProposals(input: RunMemoryIntakeInput): Pro
     workItemId: facts.work_item_id,
     role: facts.role,
     source: "agent",
+    // MEM-9: agent-proposed role lessons are accepted (as pending entries only) once the run's work item is done.
+    allowRoleScope: true,
+    // Read inside the intake lock, in the intake's own transaction, so a merge landing between this call and the lock is not missed.
+    itemTerminal: async (client) => {
+      if (facts.work_item_id === null) return false;
+      const { rows } = await client.query<{ stage: string }>("SELECT stage FROM work_items WHERE id = $1 AND account_id = $2", [facts.work_item_id, input.accountId]);
+      return rows[0] !== undefined && (TERMINAL_WORK_ITEM_STAGES as readonly string[]).includes(rows[0].stage);
+    },
     envelope: input.envelope,
     liveSecrets: input.liveSecrets ?? defaultLiveSecrets,
     resolveRepoScopeRef: (client) => resolveRunRepoScopeRef(client, input.accountId, input.runId),

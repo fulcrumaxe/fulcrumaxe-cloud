@@ -389,6 +389,13 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "scope_unresolved",
   "duplicate",
   "pending_full",
+  // Agent-proposed role lessons (D#601 MEM-9): intake refusals, the approval that lacks a second repository, a batch that holds a role entry, and a failed deferred pass.
+  "role_mismatch",
+  "item_not_terminal",
+  "role_full",
+  "needs_second_repo",
+  "role_batch_refused",
+  "role_intake_failed",
   // Proposal inbox refusals (D#483 S3-L2a): thrown through a variable by ProposalRefusedApiError, so the scan cannot see them.
   "not_new",
   "not_rejected",
