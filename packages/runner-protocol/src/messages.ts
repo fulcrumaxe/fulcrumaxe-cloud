@@ -4,6 +4,7 @@
  * change may add a field but never remove or rename one.
  */
 import { z } from "zod";
+import { isDetailPath, isDetailRef } from "./detailRules.js";
 import { CONTEXT_MAX_COUNT, CONTEXT_MAX_TOOL_CALLS, CONTEXT_SECTION_CODES, CONTEXT_TOOL_ENUM, CONTEXT_TRIMMED_REASONS } from "./contextLedger.js";
 import { MAX_ENVELOPE_INPUT_BYTES } from "./envelope.js";
 import { RUNNER_CAPABILITIES, SESSION_ID_PATTERN } from "./job.js";
@@ -513,6 +514,31 @@ export const PlaneMergeVerifyMessage = z
   .refine((m) => !(m.same && m.incomplete), { message: "an incomplete check cannot be the same", path: ["same"] });
 export type PlaneMergeVerifyMessage = z.infer<typeof PlaneMergeVerifyMessage>;
 
+/** The most conflict paths a merge report carries; more than this is "unknown" (nothing is cut short and sent). */
+export const MAX_CONFLICT_FACT_PATHS = 100;
+/** D#519 MQ4-e2-a: what the runner attests about a refused merge call, a closed set. `clean` is never sent: a refusal with clean facts carries no field. */
+export const PLANE_MERGE_CONFLICT_VERDICTS = ["conflict_platform", "conflict_foreign", "unknown"] as const;
+/** The paths and the ref are held to the detail table's own rules (`detailRules.ts`, shared with the pipeline), so a value that parses here can never fail the table's CHECK. */
+const conflictPath = z.string().refine(isDetailPath, "path is not a plain relative path");
+const conflictRef = z.string().refine(isDetailRef, "ref is not a plain branch name");
+/**
+ * D#519 MQ4-e2-a: the runner's verdict on a refused merge call, computed on the PRIVATE reviewed head against the private default (the mirror's HEAD). Shas, a ref name,
+ * paths and a closed verdict: no content, diff or body. `unknown` carries nothing else; a platform or foreign verdict names the base it was computed against and at least one path.
+ */
+export const PlaneMergeConflictFacts = z
+  .object({
+    verdict: z.enum(PLANE_MERGE_CONFLICT_VERDICTS),
+    paths: z.array(conflictPath).max(MAX_CONFLICT_FACT_PATHS).refine((ps) => new Set(ps).size === ps.length, "a path is named once"),
+    base_sha: gitSha.optional(),
+    base_ref: conflictRef.optional(),
+  })
+  .strict()
+  .refine((f) => (f.verdict === "unknown" ? f.paths.length === 0 && f.base_sha === undefined && f.base_ref === undefined : f.paths.length > 0 && f.base_sha !== undefined && f.base_ref !== undefined), {
+    message: "unknown carries nothing; a conflict verdict carries its paths and its base",
+    path: ["verdict"],
+  });
+export type PlaneMergeConflictFacts = z.infer<typeof PlaneMergeConflictFacts>;
+
 /** What the runner did with the merge, as a HINT: the cloud reads GitHub itself before it records anything. */
 export const PlaneMergeReportMessage = z
   .object({
@@ -521,10 +547,13 @@ export const PlaneMergeReportMessage = z
     result: z.enum(["merged", "enqueued", "refused", "aborted"]),
     http_status: z.number().int().min(100).max(599).optional(),
     abort_code: PlaneMergeAbortCode.optional(),
+    /** D#519 MQ4-e2-a: only with a refused 405, and only from a runner that kept `conflict_facts_v1`. */
+    conflict: PlaneMergeConflictFacts.optional(),
     token_revoked: z.boolean(),
   })
   .strict()
-  .refine((m) => (m.result === "aborted") === (m.abort_code !== undefined), { message: "abort_code goes with result aborted, and only with it", path: ["abort_code"] });
+  .refine((m) => (m.result === "aborted") === (m.abort_code !== undefined), { message: "abort_code goes with result aborted, and only with it", path: ["abort_code"] })
+  .refine((m) => m.conflict === undefined || (m.result === "refused" && m.http_status === 405), { message: "conflict facts go with a refused 405 and only with it", path: ["conflict"] });
 export type PlaneMergeReportMessage = z.infer<typeof PlaneMergeReportMessage>;
 
 export const EventsMessage = z.object({ run_id: uuid, lease_generation: leaseGeneration, events: z.array(LocalOnlyEvent).min(1).max(MAX_EVENTS_PER_BATCH) }).strict();

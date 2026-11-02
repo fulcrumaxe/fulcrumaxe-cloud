@@ -74,8 +74,8 @@ export function git(repoDir: string, args: string[], input?: string | Buffer, ex
       if (code === 0 && size <= MAX_OUTPUT) resolve(Buffer.concat(out));
       else {
         const stderr = Buffer.concat(err).toString("utf8");
-        // `stderr` and `exitCode` are for a caller that classifies the failure locally; they are never sent anywhere.
-        reject(Object.assign(new Error(`git ${args[0] ?? ""} failed: ${stderr.split("\n")[0] ?? ""}`), { stderr, exitCode: code }));
+        // `stderr`, `exitCode` and `stdout` are for a caller that classifies the failure locally (`merge-tree` answers a conflict with exit 1 and its facts on stdout); they are never sent anywhere.
+        reject(Object.assign(new Error(`git ${args[0] ?? ""} failed: ${stderr.split("\n")[0] ?? ""}`), { stderr, exitCode: code, stdout: size <= MAX_OUTPUT ? Buffer.concat(out) : Buffer.alloc(0) }));
       }
     });
     child.stdin.on("error", () => undefined);

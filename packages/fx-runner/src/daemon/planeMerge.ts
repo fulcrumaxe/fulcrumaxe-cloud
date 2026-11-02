@@ -16,7 +16,8 @@
  *                 refuses when the head is not `sha`. The write credential is revoked in a `finally`. D#694 B7-1: the code repository's merge mode is read here too,
  *                 and must be the one the cloud sent; a repository behind GitHub's merge queue is ENQUEUED (held to `sha`), never merged directly, and nothing is
  *                 merged or enqueued when the mode is unreadable or differs. There is no auto-merge fallback.
- *   5. report     `plane-merge-report`, a hint: the cloud reads GitHub through its own client before it records anything.
+ *   5. report     `plane-merge-report`, a hint: the cloud reads GitHub through its own client before it records anything. D#519 MQ4-e2-a: after a merge call GitHub
+ *                 refused with 405, and only when the cloud kept `conflict_facts_v1`, the report also carries the runner's conflict verdict (conflictFacts.ts).
  *
  * Every failure path ends in a closed code and revokes both credentials. A credential lives in a local variable of one call and nowhere else: it is never
  * written to a file, a log line, an error, a report, or any process this one starts except the fetch's own environment (the same as a push).
@@ -27,6 +28,8 @@ import path from "node:path";
 import { MAX_PLANE_MERGE_PATHS, type PlaneMergeAbortCode, type PlaneMergeReportMessage, type PlaneMergeVerifyMessage } from "@fulcrumaxe/runner-protocol";
 import { PUBLIC_BASE_BRANCH, compileOverlay, diffTreeEntries, planePushGit, sameChangeKeys, treeFromLsTree, type PublicHeadsReader, type TreeEntry } from "@fulcrumaxe/runner-protocol/planePush";
 import type { PlaneMergeOrder, RunnerClient } from "./client.js";
+import { computeConflictFacts, type FactsGit } from "./conflictFacts.js";
+import type { PushLog } from "./pushLog.js";
 import type { PlanePushGithub } from "./planePushGithub.js";
 
 export interface ContentCheck {
@@ -154,6 +157,14 @@ export interface PlaneMergeDeps {
   syncMirror: (repo: { id: string; owner: string; name: string }) => Promise<{ dir: string }>;
   /** A directory in the runner's private state where the throwaway repositories are built (made 0700). */
   workRoot: string;
+  /** D#519 MQ4-e2-a: whether the cloud's hello kept `conflict_facts_v1`; read when a 405 comes back. Absent is false: nothing is computed and nothing new is sent. */
+  sendConflictFacts?: () => boolean;
+  /** The runner's push log (rule (a) of the conflict facts). Absent or closed: the verdict is "unknown". */
+  pushLog?: Pick<PushLog, "records">;
+  /** Replaceable so a test can watch the version-control calls the facts make. */
+  factsGit?: FactsGit;
+  /** How long the conflict facts may take before the answer is "unknown" (default two minutes). */
+  factsTimeoutMs?: number;
   uid?: number | undefined;
   now?: () => Date;
   /** Replaceable so a test does not wait. */
@@ -162,6 +173,8 @@ export interface PlaneMergeDeps {
   say?: (line: string) => void;
 }
 
+/** The conflict facts are a few version-control calls on the customer's own mirror; past this they are "unknown" and the report goes without them. */
+const FACTS_TIMEOUT_MS = 120_000;
 const WORK_DIR = /^m-[A-Za-z0-9]{6}$/;
 const CALL_TRIES = 3;
 const REPORT_TRIES = 5;
@@ -235,7 +248,7 @@ export function createPlaneMergeHandler(deps: PlaneMergeDeps): () => Promise<Pla
   sweepMergeWorkRoot(deps.workRoot);
 
   /** The content check for a claimed order, with the read credential revoked as soon as the fetch is over. `moved` when the branch is not at the order's head. */
-  async function inspect(order: PlaneMergeOrder): Promise<{ check: ContentCheck; moved: boolean; readRevoked: boolean }> {
+  async function inspect(order: PlaneMergeOrder): Promise<{ check: ContentCheck; moved: boolean; readRevoked: boolean; privateDir?: string }> {
     let work: string | undefined;
     let readRevoked = false;
     let tips: { head: string; defaultTip: string } | undefined;
@@ -264,11 +277,41 @@ export function createPlaneMergeHandler(deps: PlaneMergeDeps): () => Promise<Pla
         return { check: NOT_KNOWN, moved: false, readRevoked };
       }
       const check = await checkContent({ publicDir: work, publicHead: tips.head, publicDefault: tips.defaultTip, privateDir, reviewedHead: order.reviewed_head, overlayGlobs: order.overlay_globs }).catch(() => NOT_KNOWN);
-      return { check, moved: false, readRevoked };
+      return { check, moved: false, readRevoked, privateDir };
     } finally {
       if (work !== undefined && isOwnDirectory(deps.workRoot, work)) {
         try {
           rmSync(work, { recursive: true, force: true });
+        } catch {
+          // fx-swallow-ok: a leftover is only disk; the next start sweeps the work root
+        }
+      }
+    }
+  }
+
+  /** The conflict verdict for a refused 405: computed in a throwaway directory of the work root, removed whatever happens. Never throws; no private mirror is "unknown". */
+  async function conflictFor(order: PlaneMergeOrder, privateDir: string | undefined): Promise<PlaneMergeReportMessage["conflict"]> {
+    const unknown: NonNullable<PlaneMergeReportMessage["conflict"]> = { verdict: "unknown", paths: [] };
+    if (privateDir === undefined) return unknown;
+    let scratch: string | undefined;
+    try {
+      ensureRoot(deps.workRoot, deps.uid);
+      scratch = mkdtempSync(path.join(deps.workRoot, "m-"));
+      if (!isOwnDirectory(deps.workRoot, scratch)) return unknown;
+      let timer: NodeJS.Timeout | undefined;
+      const late = new Promise<"late">((resolve) => {
+        timer = setTimeout(() => resolve("late"), deps.factsTimeoutMs ?? FACTS_TIMEOUT_MS);
+      });
+      const facts = await Promise.race([computeConflictFacts({ privateDir, reviewedHead: order.reviewed_head, scratch, pushLog: deps.pushLog, ...(deps.factsGit === undefined ? {} : { git: deps.factsGit }) }), late]).finally(() => clearTimeout(timer));
+      if (facts === "late") return unknown;
+      return facts ?? undefined;
+    } catch {
+      // fx-swallow-ok: a scratch directory that cannot be made is "unknown", the closed answer
+      return unknown;
+    } finally {
+      if (scratch !== undefined && isOwnDirectory(deps.workRoot, scratch)) {
+        try {
+          rmSync(scratch, { recursive: true, force: true });
         } catch {
           // fx-swallow-ok: a leftover is only disk; the next start sweeps the work root
         }
@@ -374,6 +417,12 @@ export function createPlaneMergeHandler(deps: PlaneMergeDeps): () => Promise<Pla
       outcome = { result: "aborted", abort_code: "internal" };
     } finally {
       revoked = await deps.github.revokeToken(verdict.token);
+    }
+
+    // D#519 MQ4-e2-a: only a refused 405 asks for the facts, and only when the cloud kept the capability. A clean merge-tree sends nothing: the stop stays as it is.
+    if (outcome.result === "refused" && outcome.http_status === 405 && deps.sendConflictFacts?.() === true) {
+      const conflict = await conflictFor(order, seen.privateDir);
+      if (conflict !== undefined) outcome = { ...outcome, conflict };
     }
 
     // 5: the report, a hint.

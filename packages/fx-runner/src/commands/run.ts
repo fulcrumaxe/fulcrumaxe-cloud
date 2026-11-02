@@ -44,7 +44,7 @@ import { createJobHandler } from "../daemon/jobHandler.js";
 import { createPlaneBaseLedger, createPlanePushHook } from "../daemon/planePush.js";
 import { createPlanePushGithub } from "../daemon/planePushGithub.js";
 import { createPlaneMergeHandler } from "../daemon/planeMerge.js";
-import { MEMORY_LIMIT_CAPABILITY, type LimitedBy } from "@fulcrumaxe/runner-protocol";
+import { CONFLICT_FACTS_CAPABILITY, MEMORY_LIMIT_CAPABILITY, type LimitedBy } from "@fulcrumaxe/runner-protocol";
 import { createGitTransport, createPublicHeadsReader } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
@@ -129,6 +129,8 @@ export interface RunHooks {
   probe?: ResourceProbe;
   /** Whether per-job limits are enforced, and the limits to start jobs under (default: tried on the real machine through the engine's process start). */
   jobLimits?: { enforced: boolean; limits?: JobLimits; reason?: string };
+  /** A test seam: told, once the hello is answered, whether the conflict verdict may be sent on a merge report. */
+  onConflictFactsAccepted?: (accepted: boolean) => void;
 }
 
 /** Whether a process with this pid exists: ESRCH means gone; success and EPERM (another user's process) mean it is there. */
@@ -305,6 +307,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const usage = createUsageGate({ credentialMode: registration.credential_mode === "subscription" ? "subscription" : "api_key", now: () => clock.now().getTime() });
     const stopped = new AbortController();
     let memoryLimitAccepted = false;
+    /** D#519 MQ4-e2-a: set once the hello is answered; a merge report carries a conflict verdict only when the cloud kept `conflict_facts_v1`. */
+    let conflictFactsAccepted = false;
     const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) });
     // macOS: a resumed workspace's ignored build output is purged in a child under sandbox-exec that can write below the workspace only (D#6 RESUME-CLEAN-MAC).
     const sandboxedPurge = host.platform === "darwin" && host.selfCommand !== undefined ? createSandboxedPurge({ capture: host.engine.capture, selfCommand: host.selfCommand, stateDir, isFile: host.sandbox.isFile }) : undefined;
@@ -359,6 +363,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         return git.syncMirror(repo);
       },
       workRoot: path.join(stateDir, "plane-merge"),
+      sendConflictFacts: () => conflictFactsAccepted,
+      ...(pushLog === undefined ? {} : { pushLog }),
       uid: host.uid,
       say: (line) => ctx.out(line),
     });
@@ -455,6 +461,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       const wake = new WakeTracker(hello?.kind === "ok" ? hello.wake : undefined);
       // An answer that failed, or one that dropped the capability, leaves the field unsent: the card then keeps its plain sentence.
       memoryLimitAccepted = hello?.kind === "ok" && !(hello.dropped ?? []).includes(MEMORY_LIMIT_CAPABILITY);
+      conflictFactsAccepted = hello?.kind === "ok" && !(hello.dropped ?? []).includes(CONFLICT_FACTS_CAPABILITY);
+      hooks.onConflictFactsAccepted?.(conflictFactsAccepted);
       const end = await pollLoop({
         client,
         wake,

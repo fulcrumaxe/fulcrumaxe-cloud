@@ -1,5 +1,6 @@
 import {
   CLAIM_IDLE_RETRY_AFTER_SECONDS,
+  CONFLICT_FACTS_CAPABILITY,
   PLANE_MERGE_CLAIM_PATH,
   PLANE_MERGE_QUEUE_CAPABILITY,
   PLANE_MERGE_REPORT_PATH,
@@ -273,6 +274,12 @@ export async function planeMergeReportRun(deps: RunnerCloudDeps, req: RunnerHttp
   const message = parseMessage(PlaneMergeReportMessage, parseJsonBody(req));
   const { merge } = requirePlaneMerge(deps);
   const lease = leaseOf(runner, message.order_id, message.lease_generation);
+  // D#519 MQ4-e2-a: the conflict verdict is accepted only from a runner whose latest hello listed `conflict_facts_v1` (the message schema already limits it to a refused 405). It is checked and DROPPED: nothing
+  // reads it until the cloud half (MQ4-e2-b) stores it, so no order, round or event differs for a report that carries one.
+  if (message.conflict !== undefined) {
+    const capable = await asRunner(() => merge.store.runnerHasCapability({ accountId: runner.accountId, runnerId: runner.runnerId, capability: CONFLICT_FACTS_CAPABILITY }));
+    if (!capable) throw new RunnerHttpError(400, "invalid_message", "the message does not match the protocol");
+  }
   const fence = await asRunner(() => merge.store.fence(lease));
   if (fence.kind === "fenced") {
     // A late report for an order that is already over (expired, failed, superseded or head_moved while authorized) from the runner that held it: the runner may
@@ -300,6 +307,8 @@ export async function planeMergeReportRun(deps: RunnerCloudDeps, req: RunnerHttp
   const recorded = { status: 200, body: PlaneMergeReportReply.parse({ recorded: true }), headers: NO_STORE } as const;
 
   if (order.state === "claimed") {
+    // A verdict about a refused merge call cannot come before any merge call could be made.
+    if (message.conflict !== undefined) throw new RunnerHttpError(400, "invalid_message", "the message does not match the protocol");
     // No go was ever issued: nothing was merged, and a report that says it was cannot be true.
     if (message.result !== "aborted") throw new RunnerHttpError(409, "not_authorized", "no write credential was issued for this order");
     const moved = message.abort_code === "head_moved" || message.abort_code === "base_retargeted";

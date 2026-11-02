@@ -627,6 +627,66 @@ describe("plane-merge routes [pg]", () => {
       }
     });
 
+    // D#519 MQ4-e2-a, C15-16 and C15-18: the conflict verdict is checked and DROPPED. Nothing stores or acts on it yet, so an order ends exactly as it does without one.
+    describe("a conflict verdict on a refused 405", () => {
+      const verdictOf = (over: Record<string, unknown> = {}) => ({ verdict: "conflict_platform", paths: ["src/a.ts"], base_sha: "c".repeat(40), base_ref: "main", ...over });
+      const capable = async (caps: string[]) => void (await admin.query("UPDATE runner_capabilities SET capabilities = $2::text[] WHERE runner_id = $1", [runner, caps]));
+      const endState = async (id: string) => {
+        const r = await row(id);
+        return { state: r.state, outcome_code: r.outcome_code };
+      };
+      const COLUMNS_BEFORE = async () => (await admin.query("SELECT column_name FROM information_schema.columns WHERE table_name = 'plane_merge_orders' ORDER BY 1")).rows.map((r: { column_name: string }) => r.column_name);
+
+      it("from a runner that listed conflict_facts_v1, for an authorized order: recorded, and the order ends exactly as the same report without it (inert)", async () => {
+        await capable(["plane_merge_v1", "conflict_facts_v1"]);
+        const columns = await COLUMNS_BEFORE();
+        const plain = await authorized();
+        await reportIt(reportBody(plain.reply, { result: "refused", http_status: 405 }));
+        const withVerdict = await authorized();
+        const res = await reportIt(reportBody(withVerdict.reply, { result: "refused", http_status: 405, conflict: verdictOf() }));
+        expect(PlaneMergeReportReply.parse(res.body)).toEqual({ recorded: true });
+        expect(await endState(withVerdict.order.id)).toEqual(await endState(plain.order.id));
+        expect(await endState(withVerdict.order.id)).toEqual({ state: "failed", outcome_code: "merge_call_refused" });
+        // Nothing of the verdict is kept: the table has no column for it yet (MQ4-e2-b adds them).
+        expect(await COLUMNS_BEFORE()).toEqual(columns);
+        expect(JSON.stringify((await admin.query("SELECT * FROM plane_merge_orders WHERE id = $1", [withVerdict.order.id])).rows)).not.toContain("src/a.ts");
+        // An unknown verdict is accepted the same way.
+        const unknown = await authorized();
+        expect((await reportIt(reportBody(unknown.reply, { result: "refused", http_status: 405, conflict: { verdict: "unknown", paths: [] } }))).status).toBe(200);
+      });
+
+      it("from a runner that did not list the capability: 400 invalid_message, the order is untouched and can still be reported", async () => {
+        const { order, reply } = await authorized();
+        const res = await reportIt(reportBody(reply, { result: "refused", http_status: 405, conflict: verdictOf() }));
+        expect(res.status).toBe(400);
+        expect(res.body).toMatchObject({ error: { code: "invalid_message" } });
+        expect((await row(order.id)).state).toBe("authorized");
+        expect((await reportIt(reportBody(reply, { result: "refused", http_status: 405 }))).status).toBe(200);
+      });
+
+      it("for an order that was never authorized, or with any result or status but a refused 405: 400 invalid_message", async () => {
+        await capable(["plane_merge_v1", "conflict_facts_v1"]);
+        const { reply: waiting } = await claimed();
+        const early = await reportIt(reportBody(waiting as Claimed, { result: "refused", http_status: 405, conflict: verdictOf() }));
+        expect(early.status).toBe(400);
+        expect(early.body).toMatchObject({ error: { code: "invalid_message" } });
+        const { order, reply } = await authorized();
+        for (const over of [{ result: "merged" }, { result: "enqueued" }, { result: "refused", http_status: 409 }, { result: "aborted", abort_code: "internal" }]) {
+          const res = await reportIt(reportBody(reply, { ...over, conflict: verdictOf() }));
+          expect(res.status, JSON.stringify(over)).toBe(400);
+        }
+        expect((await row(order.id)).state).toBe("authorized");
+      });
+
+      it("a malformed verdict (an extra key, a path that is not a plain relative path) is a 400 even from a capable runner", async () => {
+        await capable(["plane_merge_v1", "conflict_facts_v1"]);
+        const { reply } = await authorized();
+        for (const bad of [{ ...verdictOf(), patch: "x" }, verdictOf({ paths: ["../x"] }), verdictOf({ verdict: "clean" })]) {
+          expect((await reportIt(reportBody(reply, { result: "refused", http_status: 405, conflict: bad }))).status).toBe(400);
+        }
+      });
+    });
+
     // D#694 B7-1: an `enqueued` report is a hint. The order ends enqueued only when the cloud's own read shows the pull request open at the order's head WITH a queue entry.
     describe("an enqueued report", () => {
       it("GitHub shows the entry at the expected head: the order ends enqueued (never merged), the fact is recorded once with the entry id, and nothing is recorded as merged", async () => {

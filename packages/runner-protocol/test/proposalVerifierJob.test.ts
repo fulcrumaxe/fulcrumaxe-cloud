@@ -52,7 +52,7 @@ describe("the claim verifier role on the wire", () => {
 
   it("is gated by the proposal_verifier capability, and no other role is", () => {
     // D#6 RUNNER-WAKE R3a: wake_v1 is a capability too, but it gates no role (below).
-    expect([...RUNNER_CAPABILITIES]).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst"]);
+    expect([...RUNNER_CAPABILITIES]).toEqual(["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1"]);
     expect(RUNNER_CAPABILITY_FOR_ROLE).toEqual({ [PROPOSAL_VERIFIER_ROLE]: "proposal_verifier", [DISCOVERY_ANALYST_ROLE]: "discovery_analyst" });
     expect(LIGHT_JOB_ROLES).toContain(DISCOVERY_ANALYST_ROLE);
     expect(JobSchema.safeParse(sampleJob({ role: DISCOVERY_ANALYST_ROLE, review: { head_sha: SHA } })).success).toBe(true);
@@ -76,6 +76,7 @@ describe("hello capabilities", () => {
     expect(parse([])).toBe(true);
     expect(parse(["proposal_verifier"])).toBe(true);
     expect(parse(["discovery_analyst"])).toBe(true);
+    expect(parse(["conflict_facts_v1"])).toBe(true);
   });
 
   it("refuse an unknown code, a repeat, a non-list and anything that is not a string", () => {

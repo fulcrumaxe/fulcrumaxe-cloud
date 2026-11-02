@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -134,6 +137,44 @@ describe('migration 0893: runner_capabilities and runner_capabilities_record [pg
     await admin.query(`INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, '{discovery_analyst,wake_v1}')`, [other, a.accountId]);
     await expect(admin.query(`UPDATE runner_capabilities SET capabilities = '{discovery_analyst,discovery_analyst_v2}' WHERE runner_id = $1`, [other])).rejects.toMatchObject({ code: '23514' });
     await record(['proposal_verifier']);
+  });
+
+  // D#519 MQ4-e2-a (0968, C15-17): conflict_facts_v1 is the seventh closed code, through the definer and under the CHECK alike, and nothing else of the function changes.
+  it('0968: stores conflict_facts_v1, alone or with the others, and still refuses a repeat or a near miss', async () => {
+    await record(['conflict_facts_v1']);
+    expect(await stored()).toEqual(['conflict_facts_v1']);
+    const all = ['proposal_verifier', 'wake_v1', 'plane_merge_v1', 'memory_limit_v1', 'plane_merge_queue_v1', 'discovery_analyst', 'conflict_facts_v1'];
+    await record(all);
+    expect(await stored()).toEqual(all);
+    for (const bad of [['conflict_facts_v1', 'conflict_facts_v1'], ['conflict_facts_v2'], ['Conflict_facts_v1'], ['conflict_facts_v1', 'shell']]) {
+      await expect(record(bad), JSON.stringify(bad)).rejects.toMatchObject({ code: '22023' });
+    }
+    const other = await insertRunner(admin, a.accountId, a.userId);
+    await admin.query(`INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, '{conflict_facts_v1,wake_v1}')`, [other, a.accountId]);
+    await expect(admin.query(`UPDATE runner_capabilities SET capabilities = '{conflict_facts_v1,conflict_facts_v2}' WHERE runner_id = $1`, [other])).rejects.toMatchObject({ code: '23514' });
+    await record(['proposal_verifier']);
+  });
+
+  it('0968 changes exactly one value of the CHECK and of the closed list: the rest of the statement is 0953 verbatim, and the function keeps its signature, owner, pinned search_path and grants', async () => {
+    const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
+    const section = (file: string, from: string, to: string): string => {
+      const text = readFileSync(path.join(dir, file), 'utf8');
+      return text.slice(text.indexOf(from), to === '' ? undefined : text.indexOf(to, text.indexOf(from)));
+    };
+    const old0953 = section('0953_discovery_analyst_runner.sql', 'ALTER TABLE runner_capabilities DROP CONSTRAINT', "DO $$\nBEGIN\n  IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) THEN\n    IF NOT EXISTS (\n      SELECT 1 FROM pg_auth_members m\n      WHERE m.roleid = 'discovery_analysis_lister'");
+    const new0968 = section('0968_runner_conflict_facts_capability.sql', 'ALTER TABLE runner_capabilities DROP CONSTRAINT', '');
+    expect(new0968.split("'conflict_facts_v1'")).toHaveLength(3);
+    expect(new0968.replaceAll(", 'conflict_facts_v1'", '').trim()).toBe(old0953.trim());
+    const { rows } = await admin.query(
+      `SELECT pg_get_function_identity_arguments(p.oid) AS args, p.prosecdef, p.proconfig, pg_get_userbyid(p.proowner) AS owner, p.proacl::text AS acl
+         FROM pg_proc p WHERE p.proname = 'runner_capabilities_record' AND p.pronamespace = 'public'::regnamespace`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ args: 'p_capabilities text[]', prosecdef: true });
+    expect(rows[0].proconfig).toEqual(['search_path=pg_catalog, public, pg_temp']);
+    // No PUBLIC grant (an empty grantee in the ACL text), and app_user may execute.
+    expect(String(rows[0].acl)).not.toMatch(/[{,]=X/);
+    expect(String(rows[0].acl)).toContain('app_user=X');
   });
 
   it('names the runner from the session only: none, a malformed one, an unknown one, a revoked one or another account’s is refused (42501)', async () => {
