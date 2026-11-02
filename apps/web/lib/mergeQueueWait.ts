@@ -3,7 +3,7 @@ import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { expectedSignalNames, loadReviewContext, mergeQueue, readPublicPullRequest } from "@fx/pipeline";
-import { bindCompleteConflictRound, bindCompleteEntryless, endRoundWithoutPr, entrylessStartPorts, readEntrylessSubject, runnerStartPorts } from "./mergeQueueConflict";
+import { bindCompleteConflictRound, bindCompleteEntryless, completeRunnerEntryless, endRoundWithoutPr, entrylessStartPorts, readEntrylessSubject, runnerStartPorts } from "./mergeQueueConflict";
 import { bindCompleteDeltaReview } from "./mergeQueueDeltaReview";
 import { openQueueGitHub } from "./mergeQueue";
 import { openInstallationHttp } from "./github/installationHttp";
@@ -165,9 +165,10 @@ export async function conflictWaitBody(worker: QueueWorker | null, who: StepWho)
     if (!("id" in subject) && subject.reason === "try_later") return { state: "waiting" };
     if (!("id" in subject) && subject.reason === "no_open_pr") return (await endRoundWithoutPr(base, who.accountId, who.workItemId)) ? { state: "closed" } : { state: "none" };
     if (!("id" in subject)) return { state: "none" };
+    // A hosted repository's round is read from GitHub; a `runner_local` one through its adapter (the fence plus the run's attestation). Neither: nothing to follow.
     const github = await openQueueGitHub(pool, openInstallationHttp, subject);
-    if (!github) return { state: "none" };
-    const done = await bindCompleteEntryless({ ...base, github })(subject);
+    const done = github ? await bindCompleteEntryless({ ...base, github })(subject) : await completeRunnerEntryless(base, subject, RUNNER_CONFLICT_START_ENABLED);
+    if (!done) return { state: "none" };
     switch (done.outcome) {
       case "returned":
         return { state: "in_review" };

@@ -1,9 +1,12 @@
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { assembleConflictPrompt, isReservationPause, mergeQueue, promptRuntimeOf, readItemRecordedPullRequest, readPublicPullRequest, startWaitFor } from "@fx/pipeline";
+import { assembleConflictPrompt, createGitHubMergeGatePort, isLocalGitHubHttp, isReservationPause, listChangedFilesLocal, mergeQueue, promptRuntimeOf, readItemRecordedPullRequest, readPublicPullRequest, startWaitFor } from "@fx/pipeline";
+import { CONFLICT_ATTESTATION_EVENT } from "@fx/runner-cloud";
 import { findPrBody, reviewLoadBody } from "./advanceReviewSteps";
 import { deltaReviewPorts, readEntryContext, readEntryWho, type DeltaReviewBinding } from "./mergeQueueDeltaReview";
 import { appUserPool } from "./github/installationReconcile";
 import { readRepoAppLogin } from "./github/installationHttp";
+import { openForRepo } from "./github/localOnlyHttp";
+import { createAppRunPullRequestPort } from "./github/runnerPullRequest";
 
 // D#519 MQ4-b0: the ONE production binding of the platform commit proof: the push records the gh-proxy writes, read as app_user in the entry's tenant.
 // The pool is opened at the first read, not here. Removing this line turns MQ4 off (every conflict then stops `identity_unread`, with no GitHub read).
@@ -191,4 +194,66 @@ export async function endRoundWithoutPr(deps: Omit<DeltaReviewBinding, "github">
   if (open.runId && found && "who" in found) await deps.worker?.advanceCancel(found.who, open.runId);
   await withTenant(deps.pool, accountId, (c) => mergeQueue.endRound(c, { accountId, roundId: open.id, outcome: "pr_closed" }));
   return true;
+}
+
+/** The run's FIRST `conflict.attestation` event (lowest seq, then id): two concurrent first `done`s can store two, and only the first is ever read. A follow-up child's run has none. */
+export async function readFirstAttestation(pool: DeltaReviewBinding["pool"], accountId: string, runId: string): Promise<unknown> {
+  const rows = await withTenant(pool, accountId, async (c) => (await c.query<{ payload: unknown }>("SELECT payload FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 ORDER BY seq ASC, id ASC LIMIT 1", [accountId, runId, CONFLICT_ATTESTATION_EVENT])).rows);
+  return rows[0]?.payload ?? null;
+}
+
+/**
+ * D#519 MQ4-e2-c2: the ports for a `runner_local` item's round, replacing the null the hosted client gives such a repository. Only the fence's reads are made (the pull request list
+ * A3, `RunBranchState`, `PullRequestFiles`) plus the run's stored attestation, read by the round's OWN run id. Null when the repository is not `runner_local` or nothing can be read.
+ */
+export async function openRunnerRound(deps: Omit<DeltaReviewBinding, "github">, subject: mergeQueue.ConflictSubject): Promise<{ adapter: mergeQueue.RoundGitHub; fence: mergeQueue.RoundFence; round: mergeQueue.ConflictRound | undefined } | null> {
+  const { accountId, repoId } = subject;
+  const repo = await withTenant(deps.pool, accountId, async (c) => (await c.query<{ gh_owner: string | null; gh_name: string | null; execution_mode: string }>("SELECT gh_owner, gh_name, execution_mode FROM repos WHERE account_id = $1 AND id = $2", [accountId, repoId])).rows[0]);
+  if (!repo?.gh_owner || !repo.gh_name || repo.execution_mode !== "runner_local") return null;
+  const owner = repo.gh_owner;
+  const name = repo.gh_name;
+  const l = await readEntryContext(deps, subject);
+  if (!("who" in l)) return null;
+  const http = await openForRepo(deps.open, "runner_local", "read", { repoId, owner, name });
+  if (!isLocalGitHubHttp(http)) return null;
+  const merge = createGitHubMergeGatePort({ http, local: { http, recordedBranch: async () => l.pr.branch }, resolveRepo: async () => ({ owner, name }), markReadyForHumanMerge: async () => undefined, mergeMethod: "squash" });
+  const runs = createAppRunPullRequestPort({ open: deps.open });
+  const prRepo = { id: repoId, owner, name };
+  const fence: mergeQueue.RoundFence = {
+    getMergeability: (pr, opts) => merge.getMergeability(pr, opts),
+    // `RunBranchState` reads a named branch's head: the default branch's own name (from the repository read) gives its tip.
+    defaultBranchTip: async () => {
+      const branch = await runs.defaultBranch(prRepo);
+      const state = await runs.branchState({ repo: prRepo, branch, base: branch });
+      if (!state.exists || state.headOid === null) throw new Error("default branch tip unreadable");
+      return { branch, sha: state.headOid };
+    },
+    prFiles: async (pr) => {
+      const found = await listChangedFilesLocal(http, { owner, name, pr: pr.prNumber });
+      return found.ok && !found.truncated ? found.files.map((f) => f.path) : null;
+    },
+  };
+  const rounds = await withTenant(deps.pool, accountId, (c) => mergeQueue.listConflictRounds(c, accountId, subject.workItemId));
+  const round = rounds[rounds.length - 1];
+  const stored = round?.runId ? await readFirstAttestation(deps.pool, accountId, round.runId) : null;
+  return { adapter: mergeQueue.createRoundGitHub(fence, round, stored), fence, round };
+}
+
+/**
+ * One look at a `runner_local` work item's round with no queue entry, through the adapter (a hosted repository's is `bindCompleteEntryless`). Null when the repository is not `runner_local`. For a runner round that conflicts again, the next round starts only when `startEnabled` (the held constant), from the default tip the fence reads now.
+ */
+export async function completeRunnerEntryless(deps: Omit<DeltaReviewBinding, "github">, subject: mergeQueue.ConflictSubject, startEnabled: boolean): Promise<mergeQueue.EntrylessCompletion | null> {
+  const runner = await openRunnerRound(deps, subject);
+  if (!runner) return null;
+  // The completion reads only the adapter's reads; the wide hosted type is for the start, which this path does not use.
+  const ports = entrylessCompletionPorts({ ...deps, github: runner.adapter.github as unknown as ConflictBinding["github"] });
+  const { round, fence } = runner;
+  const next: mergeQueue.ConflictCompletionPorts<mergeQueue.ConflictSubject>["startEntryless"] =
+    startEnabled && round !== undefined
+      ? async (s) => {
+          const tip = await fence.defaultBranchTip({ repoId: s.repoId, prNumber: s.prNumber });
+          return mergeQueue.startEntrylessFromRunnerFacts(runnerStartPorts(deps), s, { verdict: "conflict_platform", baseSha: tip.sha, baseRef: tip.branch, files: round.conflictFiles });
+        }
+      : undefined;
+  return mergeQueue.completeEntrylessRound({ ...ports, github: runner.adapter.github, platformCommits: runner.adapter.platformCommits, runnerFed: runner.adapter.runnerFed, startEntryless: next }, subject);
 }
