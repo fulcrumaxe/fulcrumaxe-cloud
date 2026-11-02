@@ -36,9 +36,11 @@ export function readGateWake(eventName: string, payload: unknown): GateWake | nu
   if (typeof full !== "string" || !FULL_NAME.test(full)) return null;
   const sha = (v: unknown): string | null => (typeof v === "string" && SHA.test(v) ? v : null);
   if (eventName === "pull_request") {
-    if (typeof p.action !== "string" || !PR_OPENED.has(p.action)) return null;
+    // D#519 MQ4-e1-b: GitHub's merge queue took the pull request out (the item's own record of the cause decides whether anything starts).
+    const dequeued = p.action === "dequeued";
+    if (typeof p.action !== "string" || (!dequeued && !PR_OPENED.has(p.action))) return null;
     const numbers = asNumbers([p.pull_request]);
-    return numbers.length === 1 ? { repoFullName: full, prNumbers: numbers, headSha: sha(p.pull_request?.head?.sha) } : null;
+    return numbers.length === 1 ? { repoFullName: full, prNumbers: numbers, headSha: sha(p.pull_request?.head?.sha), ...(dequeued ? { dequeued: true } : {}) } : null;
   }
   if (eventName === "check_run" || eventName === "check_suite") {
     const ci = eventName === "check_run" ? p.check_run : p.check_suite;

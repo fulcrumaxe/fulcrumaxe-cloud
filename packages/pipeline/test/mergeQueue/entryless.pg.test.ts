@@ -410,4 +410,78 @@ describe("D#519 MQ4-e1-a conflict round for an item with no queue entry [pg]", (
     expect(await s.complete()).toMatchObject({ outcome: "stopped" });
     expect(await listOpenEntrylessRounds(db.admin, s.accountId, s.repoId)).toEqual([]);
   });
+
+  // D#519 MQ4-e1-b: the two mappings of a paired item's public copy (the conflict path only).
+  describe("MQ4-e1-b: a paired item's public copy", () => {
+    it("C11-e1-4b (before the round): the start refused because the public branch is not where the platform left it stops foreign_commits with the files; no round, no run, no public ref written", async () => {
+      const s = await setup({ startAnswer: () => ({ ok: false, reason: "public_branch_moved" }) });
+      expect(await s.start()).toEqual({ outcome: "stopped", reason: "merge_conflict" });
+      expect(await s.rounds()).toEqual([]);
+      expect(await s.driverEvents()).toEqual([{ kind: "stopped", code: "merge_conflict", reasons: ["foreign_commits"], round: 0 }]);
+      expect(await s.details()).toEqual([{ code: "merge_conflict", reasons: ["foreign_commits"], conflict_files: ["src/a.ts"] }]);
+      expect(s.g.world.calls.filter((c) => c.method !== "GET")).toEqual([]);
+      // Any other refusal keeps the generic word.
+      const other = await setup({ startAnswer: () => ({ ok: false, reason: "republish_failed" }) });
+      expect(await other.start()).toEqual({ outcome: "stopped", reason: "merge_conflict" });
+      expect((await other.driverEvents()).map((e) => e.reasons)).toEqual([["round_not_started"]]);
+    });
+
+    it("C12-e1b-1: after GitHub's queue removed the head for a conflict, the conflicted pull request gets its round and nothing is enqueued or merged for that head", async () => {
+      const s = await setup();
+      await db.admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, reasons, head_sha, pr_number, dedupe_key) VALUES ($1, $2, 'merge_dequeued', 'merge_conflict', ARRAY['actor_app'], $3, $4, 'dequeued:one')`, [s.accountId, s.workItemId, FROM, PR]);
+      expect(await s.start()).toEqual({ outcome: "started" });
+      expect((await s.rounds())[0]).toMatchObject({ entryId: null, fromSha: FROM, outcome: null });
+      expect(s.executors).toHaveLength(1);
+      // The strict fake saw reads only: no enqueue (a GraphQL mutation), no merge, no update of the branch.
+      expect(s.g.world.calls.filter((c) => c.method !== "GET")).toEqual([]);
+      expect((await db.admin.query(`SELECT kind FROM work_item_driver_events WHERE work_item_id = $1 AND kind IN ('merge_enqueued', 'merged_by_gate')`, [s.workItemId])).rows).toEqual([]);
+    });
+
+    async function resolved(publicOutcome: NonNullable<ConflictCompletionPorts<ConflictSubject>["publicOutcome"]>) {
+      const s = await setup();
+      await s.start();
+      await s.push();
+      await s.endRun();
+      s.ports.publicOutcome = publicOutcome;
+      return s;
+    }
+
+    it("C11-e1-4b (in the publish): a lease refusal ends the round foreign_commits with the files; no delta review starts, no pass is carried, no public ref moves", async () => {
+      const s = await resolved(async () => "branch_moved");
+      expect(await s.complete()).toEqual({ outcome: "stopped", reason: "merge_conflict" });
+      expect((await s.rounds())[0]).toMatchObject({ outcome: "foreign_commits" });
+      expect(await s.details()).toEqual([{ code: "merge_conflict", reasons: ["foreign_commits"], conflict_files: ["src/a.ts"] }]);
+      expect(s.started).toEqual([]);
+      expect(await s.refreshRows()).toBe(0);
+      expect(s.g.world.calls.filter((c) => c.method !== "GET")).toEqual([]);
+    });
+
+    it("C11-e1-4c: a republish that is not one commit on the main tip ends history_rewritten; nothing is started", async () => {
+      const s = await resolved(async () => "history_rewritten");
+      expect(await s.complete()).toEqual({ outcome: "stopped", reason: "history_rewritten" });
+      expect((await s.rounds())[0]).toMatchObject({ outcome: "history_rewritten" });
+      expect((await s.driverEvents()).map((e) => [e.code, e.reasons])).toEqual([["history_rewritten", ["history_rewritten"]]]);
+      expect(s.started).toEqual([]);
+    });
+
+    it("a republish that did not update the public copy (scan refusal, unreachable repository, crashed hook, copy taken over or closed) ends the round republish_failed: the round has an outcome, no delta review starts, a replay finds nothing to do", async () => {
+      const s = await resolved(async () => "failed");
+      expect(await s.complete()).toEqual({ outcome: "stopped", reason: "merge_conflict" });
+      expect((await s.rounds())[0]).toMatchObject({ outcome: "republish_failed" });
+      expect(s.started).toEqual([]);
+      expect(await s.refreshRows()).toBe(0);
+      expect(await s.complete()).toEqual({ outcome: "not_waiting" });
+      expect(await listOpenEntrylessRounds(db.admin, s.accountId, s.repoId)).toEqual([]);
+    });
+
+    it("C11-e1-4a: a republish still going waits (the round bound applies); a finished one goes to the delta review of every gated role", async () => {
+      let state: "pending" | "done" = "pending";
+      const s = await resolved(async () => state);
+      expect(await s.complete()).toEqual({ outcome: "waiting" });
+      expect(s.started).toEqual([]);
+      state = "done";
+      expect(await s.complete()).toEqual({ outcome: "delta_started" });
+      expect(s.started.map((x) => x.role)).toEqual(["code-reviewer", "acceptance-tester"]);
+    });
+  });
 });

@@ -21,7 +21,8 @@ export type BranchSyncOutcome =
 
 export interface BranchSyncPort {
   /** `branch` must be one of the two shapes the platform pushes; the client refuses any other. */
-  sync(input: { repo: { id: string; owner: string; name: string }; branch: string; prNumber: number; publicCopy?: boolean }): Promise<BranchSyncOutcome>;
+  /** `readOnly`: stops before the merge (D#519 MQ4-e1-b: a conflict round merges the base itself); a branch that is not stacked answers `up_to_date` with the base's current tip, nothing written. */
+  sync(input: { repo: { id: string; owner: string; name: string }; branch: string; prNumber: number; publicCopy?: boolean; readOnly?: boolean }): Promise<BranchSyncOutcome>;
 }
 
 export class BranchSyncError extends Error {
@@ -41,7 +42,7 @@ const segment = (s: string): string => s.split("/").map(encodeURIComponent).join
 
 export function createBranchSyncPort(open: (kind: InstallationHttpKind, target: InstallationHttpTarget) => Promise<InstallationHttp>): BranchSyncPort {
   return {
-    async sync({ repo, branch, prNumber, publicCopy }) {
+    async sync({ repo, branch, prNumber, publicCopy, readOnly }) {
       const http = await open("branch_sync", { repoId: repo.id, owner: repo.owner, name: repo.name, branch, prNumber });
       try {
         const root = `/repos/${repo.owner}/${repo.name}`;
@@ -57,6 +58,7 @@ export function createBranchSyncPort(open: (kind: InstallationHttpKind, target: 
         const ref = await http.request({ method: "GET", path: `${root}/git/ref/heads/${segment(baseRef)}` });
         const baseSha = dig(ref.body, "object", "sha");
         if (ref.status !== 200 || typeof baseSha !== "string" || !SHA.test(baseSha)) throw new BranchSyncError("base_unreadable");
+        if (readOnly === true) return { kind: "up_to_date", baseSha, baseRef, stacked };
         const merged = await http.request({ method: "POST", path: `${root}/merges`, body: { base: branch, head: baseSha, commit_message: message(branch, baseRef) } });
         if (merged.status === 204) return { kind: "up_to_date", baseSha, baseRef, stacked };
         if (merged.status === 409) return { kind: "conflict", baseSha, baseRef, stacked };

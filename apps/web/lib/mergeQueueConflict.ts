@@ -55,6 +55,7 @@ export function conflictPorts<S extends mergeQueue.RoundSubject = mergeQueue.Mer
       }
       const started = await deps.worker!.advanceStartFix(l.who, {
         kind: "conflict",
+        baseSha: round.baseSha,
         issue: l.ctx.issue,
         headSha: round.fromSha,
         prompt: prompt.prompt,
@@ -121,6 +122,7 @@ export function entrylessCompletionPorts(deps: ConflictBinding): mergeQueue.Conf
     cancelRun: (entry, runId) => cancelRoundRun(deps, entry, runId),
     roundRunEnded: async (entry, runId) => (deps.worker ? (await deps.worker.advanceRunOutcome(entry.accountId, runId)).done : false),
     startEntryless: (subject) => mergeQueue.startEntrylessConflict(conflict, subject),
+    publicOutcome: (_subject, round) => withTenant(deps.pool, round.accountId, (c) => mergeQueue.readRepublishOutcome(c, round)),
   };
 }
 
@@ -130,7 +132,7 @@ export function entrylessStartPorts(deps: ConflictBinding): mergeQueue.ConflictP
 
 /**
  * The item's own view for a round with no queue entry, read from stored rows and the live pull request; the caller passes none of it. `reason` when it is not this path's:
- * the item has a public copy (MQ4-e1-b's), no review context, or no open pull request.
+ * the item has a public copy a person took over or that is not open, no review context, or no open pull request.
  * `ended`: the caller only follows a round that is open (the wait, the sweep). When the pull request is no longer open (a person merged or closed it) the subject is
  * built from the stored rows instead (the item's recorded pull request and the newest round's head), so the completion can read its state and end the round.
  */
@@ -139,7 +141,10 @@ export async function readEntrylessSubject(deps: Omit<DeltaReviewBinding, "githu
   if (!("who" in found)) return found;
   const ctx = await reviewLoadBody(deps.worker, found.who, null);
   if (!ctx.ok) return { reason: ctx.reason };
-  if ((await readPublicPullRequest(deps.pool)(accountId, workItemId)) !== null) return { reason: "conflict_public_copy" };
+  // A paired item is this path's only when its public pull request is open and the platform's own (MQ4-e1-b); a stacked one is refused by the round's start.
+  const paired = await readPublicPullRequest(deps.pool)(accountId, workItemId);
+  // An open round is followed to its end whatever became of the copy meanwhile (its end reads the republish): only a start refuses.
+  if (!ended && paired !== null && (paired.pr === null || paired.pr.managedByPerson || paired.pr.pushState !== "pr_opened")) return { reason: "conflict_public_copy" };
   const pr = await findPrBody(deps.open, ctx);
   // Only a confirmed `no_open_pr` falls back to stored rows; a lookup that failed (GitHub unavailable) says "try later", so a stale recorded pull request is never judged.
   if (!pr.ok && ended && pr.reason !== "no_open_pr") return { reason: "try_later" };

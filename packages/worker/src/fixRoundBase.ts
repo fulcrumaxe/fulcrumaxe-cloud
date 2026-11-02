@@ -66,7 +66,7 @@ export async function syncRunBranch(
   pool: Pool,
   ports: FixRoundHeadPorts | null | undefined,
   who: Who,
-  input: { repo: Repo; pr: { number: number; branch: string }; liveHead: string | null; moveToNeedsPerson: boolean; attempt: string; publicCopy?: boolean },
+  input: { repo: Repo; pr: { number: number; branch: string }; liveHead: string | null; moveToNeedsPerson: boolean; attempt: string; publicCopy?: boolean; readOnly?: boolean },
 ): Promise<BaseSyncResult> {
   const unavailable = async (liveHead: string | null): Promise<BaseSyncResult> => {
     await recordBaseSyncUnavailable(pool, who, input.attempt, liveHead, input.pr.number);
@@ -80,7 +80,7 @@ export async function syncRunBranch(
     // The check round has not read the branch yet; the merge's first parent is compared with this.
     live ??= privateHead ? await privateHead({ repo: input.repo, branch: input.pr.branch }) : null;
     if (live === null || !SHA.test(live)) throw new Error("no head");
-    outcome = await syncBase({ repo: input.repo, branch: input.pr.branch, prNumber: input.pr.number, ...(input.publicCopy === true ? { publicCopy: true } : {}) });
+    outcome = await syncBase({ repo: input.repo, branch: input.pr.branch, prNumber: input.pr.number, ...(input.publicCopy === true ? { publicCopy: true } : {}), ...(input.readOnly === true ? { readOnly: true } : {}) });
   } catch {
     // fx-swallow-ok: the cause can carry a repository name or a token; only the fixed code survives
     console.warn(JSON.stringify({ event: "advance.base_sync_unavailable", work_item_id: who.workItemId }));

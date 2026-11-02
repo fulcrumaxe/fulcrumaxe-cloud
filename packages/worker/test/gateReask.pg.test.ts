@@ -185,4 +185,62 @@ describe("the merge gate re-ask [pg]", { timeout: 60_000 }, () => {
     const entry = (await admin.query("SELECT state, reason FROM merge_queue_entries WHERE work_item_id = $1", [w])).rows[0];
     expect(entry).toEqual({ state: "stopped", reason: "retarget_failed" });
   });
+
+  // D#519 MQ4-e1-b (C12-e1b-1, C6-e1-3): GitHub's merge queue took a paired item's public pull request out.
+  describe("a removal from GitHub's merge queue", () => {
+    const dequeue = (a: SeedRefs, w: string, o: { code?: string; reasons?: string[] } = {}) =>
+      admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, reasons, head_sha, pr_number, dedupe_key) VALUES ($1, $2, 'merge_dequeued', $3, $4::text[], $5, 501, $6)", [a.accountId, w, o.code ?? "merge_conflict", o.reasons ?? ["actor_app"], HEAD, `dequeued:${randomUUID()}`]);
+    const askDequeued = (started: AdvanceStartArgs[], w: string, accountId: string) =>
+      reaskMergeGate(writerPool, { startAdvance: async (args) => void started.push(args), log: () => undefined }, { accountId, workItemId: w, dequeued: true });
+
+    it("the queue's own removal starts the item's workflow once, as the approver, without the gate answer being transient; nothing is enqueued or merged by the wake", async () => {
+      // The newest gate answer is the one the enqueue left: not a transient stop, so the ordinary re-ask would not start it.
+      const { a, w, approval } = await atGate({ reasons: ["human_merge_only"] });
+      await dequeue(a, w);
+      const started: AdvanceStartArgs[] = [];
+      expect((await ask(started, w, a.accountId)).started).toBe(false);
+      expect(await askDequeued(started, w, a.accountId)).toEqual({ started: true });
+      expect(started).toEqual([expect.objectContaining({ accountId: a.accountId, userId: a.userId, workItemId: w, actionId: approval })]);
+      expect(await askDequeued(started, w, a.accountId)).toEqual({ started: false, reason: "already_asked" });
+      expect(started).toHaveLength(1);
+      expect((await admin.query("SELECT kind FROM work_item_driver_events WHERE work_item_id = $1 AND kind IN ('merge_enqueued', 'merged_by_gate')", [w])).rows).toEqual([]);
+      // A second removal is a second fact and asks again, once.
+      await dequeue(a, w);
+      expect((await askDequeued(started, w, a.accountId)).started).toBe(true);
+    });
+
+    it("a person's removal, a success, a removal the item has moved on from, and a head that was queued again start nothing", async () => {
+      const person = await atGate();
+      await dequeue(person.a, person.w, { code: "manual", reasons: ["actor_user"] });
+      const merged = await atGate();
+      await dequeue(merged.a, merged.w, { code: "merge" });
+      const moved = await atGate();
+      await dequeue(moved.a, moved.w);
+      await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, head_sha, pr_number, dedupe_key) VALUES ($1, $2, 'pr_head_pushed', 'observed', $3, 674, $4)", [moved.a.accountId, moved.w, HEAD, `p:${randomUUID()}`]);
+      const requeued = await atGate();
+      await dequeue(requeued.a, requeued.w);
+      await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, head_sha, pr_number, dedupe_key) VALUES ($1, $2, 'merge_enqueued', 'queue', $3, 501, $4)", [requeued.a.accountId, requeued.w, HEAD, `e:${randomUUID()}`]);
+      const never = await atGate();
+      const started: AdvanceStartArgs[] = [];
+      expect(await askDequeued(started, person.w, person.a.accountId)).toEqual({ started: false, reason: "not_a_conflict_removal" });
+      expect(await askDequeued(started, merged.w, merged.a.accountId)).toEqual({ started: false, reason: "not_a_conflict_removal" });
+      expect(await askDequeued(started, moved.w, moved.a.accountId)).toEqual({ started: false, reason: "moved_on" });
+      expect(await askDequeued(started, requeued.w, requeued.a.accountId)).toEqual({ started: false, reason: "moved_on" });
+      expect(await askDequeued(started, never.w, never.a.accountId)).toEqual({ started: false, reason: "not_a_conflict_removal" });
+      expect(started).toEqual([]);
+    });
+
+    it("the wake reaches the item through its public pull request, and the facade passes the flag on", async () => {
+      const { a, w } = await atGate({ reasons: ["human_merge_only"] });
+      await dequeue(a, w);
+      const started: AdvanceStartArgs[] = [];
+      const facade = createGateReask(writerPool, { startAdvance: async (args) => void started.push(args), log: () => undefined });
+      expect(await facade.wakeMergeGate({ accountId: a.accountId, repoId: a.repoId, wake: { ...wake, dequeued: true } })).toBe(1);
+      expect(started.map((s) => s.workItemId)).toEqual([w]);
+      // The same delivery without the flag is the ordinary wake: the gate answer is not transient, so nothing starts.
+      const plain = await atGate({ reasons: ["human_merge_only"] });
+      await dequeue(plain.a, plain.w);
+      expect(await facade.wakeMergeGate({ accountId: plain.a.accountId, repoId: plain.a.repoId, wake })).toBe(0);
+    });
+  });
 });

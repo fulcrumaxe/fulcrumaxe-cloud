@@ -2057,6 +2057,17 @@ describe("a merge-conflict round for an item with no queue entry", () => {
     expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(1);
   });
 
+  it("C12-e1b-1: the run a removal from GitHub's merge queue wakes (the same review-stage workflow) asks the gate, sees the conflict and starts the round: no merge order, no enqueue, no second gate ask before the round ends", async () => {
+    conflict.start = [{ state: "started" }];
+    conflict.looks = [{ state: "waiting" }, { state: "merged" }];
+    const t = setup(fresh({ gates: [dirty] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged" });
+    expect(conflict.starts).toBe(1);
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(1);
+    expect(t.worker.advanceMergeOrder).not.toHaveBeenCalled();
+    expect(queue.enqueues).toHaveLength(1);
+  });
+
   it("a round starts and the workflow waits on it durably; after the passed delta review it waits for CI on the merge commit and re-enters the gate", async () => {
     conflict.start = [{ state: "started" }];
     conflict.looks = [{ state: "waiting" }, { state: "waiting" }, { state: "passed", headSha: H2 }];

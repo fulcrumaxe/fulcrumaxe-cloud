@@ -13,6 +13,10 @@ describe("readGateWake: which deliveries can clear a gate stop", () => {
       expect(readGateWake("pull_request", { action, repository, pull_request: { number: 501, head: { sha: SHA } } })).toEqual({ repoFullName: "Acme/widgets-public", prNumbers: [501], headSha: SHA });
     }
   });
+  it("C12-e1b-1: a pull request taken out of GitHub's merge queue names its number and head, marked as a removal; the reason in the payload is not read", () => {
+    expect(readGateWake("pull_request", { action: "dequeued", reason: "MERGE_CONFLICT", repository, pull_request: { number: 501, head: { sha: SHA } } })).toEqual({ repoFullName: "Acme/widgets-public", prNumbers: [501], headSha: SHA, dequeued: true });
+    expect(readGateWake("pull_request", { action: "enqueued", repository, pull_request: { number: 501 } })).toBeNull();
+  });
   it("a pull request closed, pushed to, edited or drafted wakes nothing", () => {
     for (const action of ["closed", "synchronize", "edited", "converted_to_draft", "labeled"]) expect(readGateWake("pull_request", { action, repository, pull_request: { number: 501 } })).toBeNull();
   });
