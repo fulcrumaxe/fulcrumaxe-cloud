@@ -122,7 +122,7 @@ describe("settling a paired sandbox build, and opening the public pull request a
   const pair = () =>
     admin.query(`INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, 'acme/widgets-public', ARRAY['docs/ops/']) ON CONFLICT (repo_id) DO NOTHING`, [A.repoId, A.accountId]);
   const planeRow = async () => (await admin.query("SELECT * FROM plane_pushes WHERE work_item_id = $1", [A.workItemId])).rows[0];
-  const attempts = async () => (await admin.query("SELECT * FROM plane_push_attempts WHERE account_id = $1 ORDER BY attempt_no", [A.accountId])).rows;
+  const attempts = async () => (await admin.query("SELECT * FROM plane_push_attempts WHERE account_id = $1 ORDER BY attempt_no, created_at, id", [A.accountId])).rows;
   const publishRuns = async () => (await admin.query("SELECT id, role, runtime, status, envelope, sandbox_name, parent_run_id, work_item_id, sandbox_requested_at FROM agent_runs WHERE account_id = $1 AND role = 'plane_publish'", [A.accountId])).rows;
 
   /** Puts the push record in `state` with the fields that state's shape requires (the table's checks). */

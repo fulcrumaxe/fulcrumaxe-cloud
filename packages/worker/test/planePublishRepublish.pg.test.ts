@@ -80,7 +80,7 @@ describe("a sandbox fix round updates the open public pull request [pg]", () => 
   });
 
   const planeRow = async () => (await admin.query("SELECT * FROM plane_pushes WHERE work_item_id = $1", [A.workItemId])).rows[0];
-  const attempts = async () => (await admin.query("SELECT * FROM plane_push_attempts WHERE account_id = $1 ORDER BY kind, attempt_no", [A.accountId])).rows;
+  const attempts = async () => (await admin.query("SELECT * FROM plane_push_attempts WHERE account_id = $1 ORDER BY kind, attempt_no, created_at, id", [A.accountId])).rows;
   const publishRuns = async () => (await admin.query("SELECT id, status, sandbox_name, parent_run_id FROM agent_runs WHERE account_id = $1 AND role = 'plane_publish'", [A.accountId])).rows;
   const facts = async () => (await admin.query("SELECT kind, code FROM work_item_driver_events WHERE work_item_id = $1 ORDER BY seq", [A.workItemId])).rows;
   const stageOf = async () => (await admin.query("SELECT stage FROM work_items WHERE id = $1", [A.workItemId])).rows[0].stage as string;
