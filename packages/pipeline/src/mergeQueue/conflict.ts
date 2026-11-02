@@ -5,8 +5,8 @@ import type { PullRequestRef } from "../build/types.js";
 import { isSafeRepoPath } from "../discovery/verifierOutput.js";
 import { MAX_CONFLICT_ROUNDS } from "./policy.js";
 import { platformRefreshIdentity } from "./refresh.js";
-import { recordRoundRun, releaseToQueue, startConflictWork, stopEntry } from "./store.js";
-import type { ConflictRound, MergeQueueEntry } from "./types.js";
+import { recordRoundRun, releaseToQueue, startConflictWork, startEntrylessConflictRound, stopEntry } from "./store.js";
+import { subjectOf, type ConflictRound, type ConflictSubject, type MergeQueueEntry, type RoundSubject } from "./types.js";
 
 /**
  * D#519 MQ4-b: the real `onConflict`. A queued entry (or the slot holder) whose pull request no longer merges cleanly is given a fix round, but
@@ -52,7 +52,7 @@ export interface PlatformCommitProof {
   pushes: readonly PlatformPush[];
 }
 /** The proof for an entry's commits `shas` (records whose new tip is one of them). Null while unread. An empty list asks only whether it can be read. */
-export type PlatformCommitProofReader = (entry: MergeQueueEntry, shas: readonly string[]) => Promise<PlatformCommitProof | null>;
+export type PlatformCommitProofReader = { bivariant(entry: RoundSubject, shas: readonly string[]): Promise<PlatformCommitProof | null> }["bivariant"];
 
 /**
  * The ONE source of the proof. Every conflict binding (the tick's `onConflict`, the queue wait, the sweep, the round end) reads it here; none passes its own.
@@ -110,18 +110,18 @@ export function coveredCommits(prShas: readonly string[], parents: ReadonlyMap<s
 
 export type RoundStart = { ok: true; runId: string } | { ok: false; reason: string };
 
-export interface ConflictPorts {
+export interface ConflictPorts<S extends RoundSubject = MergeQueueEntry> {
   github: CommitReaderPort & ConflictReaderPort & DefaultBranchReaderPort;
   inTenant<T>(accountId: string, fn: (client: PoolClient) => Promise<T>): Promise<T>;
   /** The proof for the entry's commits `shas` (see `PlatformCommitProofReader`). Null while unread: no round starts (the entry stops as it does today). */
-  platformCommits(entry: MergeQueueEntry, shas: readonly string[]): Promise<PlatformCommitProof | null>;
+  platformCommits(entry: S, shas: readonly string[]): Promise<PlatformCommitProof | null>;
   /** MQ8: tries a mechanical replay first. Answers whether it settled the conflict. Absent: skipped. */
-  tryMechanicalReplay?(entry: MergeQueueEntry, files: readonly string[]): Promise<boolean>;
+  tryMechanicalReplay?(entry: S, files: readonly string[]): Promise<boolean>;
   /**
    * Starts the round's agent run, inside the start transaction: a refusal leaves no round row. `capacity_wait` and `refused_spend` have their own handling;
    * any other reason stops the entry as a conflict.
    */
-  startConflictRound(args: { entry: MergeQueueEntry; round: ConflictRound }): Promise<RoundStart>;
+  startConflictRound(args: { entry: S; round: ConflictRound }): Promise<RoundStart>;
 }
 
 type NoCode = "rounds_exhausted" | "no_conflict_files" | "foreign_commits" | "unreadable" | "identity_unread";
@@ -160,15 +160,16 @@ class Undo extends Error {
  * The decision alone (no write): bound, files, authorship. A read that is cut short answers no. D#519 C8: "the PR head" is the live head when the caller read
  * one (after a refresh, the refresh tip), else the stored head, so the files are computed against the commit the executor merges from.
  */
-export async function decideConflict(ports: ConflictPorts, entry: MergeQueueEntry, liveHeadSha?: string): Promise<ConflictDecision> {
+export async function decideConflict<S extends RoundSubject>(ports: ConflictPorts<S>, entry: S, liveHeadSha?: string): Promise<ConflictDecision> {
   // The default branch's name is known once its tip was read; a decision that stops before any read (identity, bound) has none, and adds no read to get one.
   const no = (code: NoCode, files: readonly string[] = [], baseRef?: string): ConflictDecision => ({ go: false, code, files, ...(baseRef === undefined ? {} : { baseRef }) });
-  if (entry.entryKind !== "work_item" || entry.workItemId === null) return no("unreadable");
-  if (entry.conflictRounds >= MAX_CONFLICT_ROUNDS) return no("rounds_exhausted");
+  const subject = subjectOf(entry);
+  if (subject === null) return no("unreadable");
+  if (subject.roundsUsed >= MAX_CONFLICT_ROUNDS) return no("rounds_exhausted");
   // Asked before any GitHub read: with the proof unread (today, in production) a decision costs no call at all.
   if ((await ports.platformCommits(entry, [])) === null) return no("identity_unread");
-  const pr: PullRequestRef = { repoId: entry.repoId, prNumber: entry.prNumber };
-  const headSha = liveHeadSha ?? entry.headSha;
+  const pr: PullRequestRef = { repoId: subject.repoId, prNumber: subject.prNumber };
+  const headSha = liveHeadSha ?? subject.headSha;
   const tip = await ports.github.getDefaultBranchTip(pr);
   const mine = await ports.github.compareCommits(pr, tip.sha, headSha, { files: true });
   if (mine.files === null || mine.filesTruncated) return no("unreadable", [], tip.branch);
@@ -250,25 +251,61 @@ export function createOnConflict(ports: ConflictPorts): (entry: MergeQueueEntry,
   };
 }
 
+/** `running`: a round of this item is already open (or a queue entry is live): nothing was started or changed. `waiting`: no capacity yet; the caller asks again. */
+export type EntrylessStart = { outcome: "started" | "running" | "waiting" } | { outcome: "stopped"; reason: string };
+
+/**
+ * D#519 MQ4-e1-a: the same decision and bound as the queue's `onConflict`, for a work item with no queue entry. One transaction inserts the round row (entry_id NULL) and
+ * starts the agent run: an `Undo` refusal rolls the round back. There is no slot to give back. The round starts from the live head `subject.headSha`.
+ */
+export async function startEntrylessConflict(ports: ConflictPorts<ConflictSubject>, subject: ConflictSubject): Promise<EntrylessStart> {
+  const { accountId } = subject;
+  const decision = await decideConflict(ports, subject);
+  const stop = async (code: string, eventCode = "merge_conflict", detail?: { baseRef?: string | null; conflictFiles?: readonly string[] }): Promise<EntrylessStart> => {
+    await recordStop(ports, subject, code, subject.headSha, eventCode, detail);
+    return { outcome: "stopped", reason: eventCode };
+  };
+  if (!decision.go) return stop(decision.code, "merge_conflict", { baseRef: decision.baseRef ?? null, ...(decision.code === "foreign_commits" ? { conflictFiles: decision.files } : {}) });
+  try {
+    const started = await ports.inTenant(accountId, async (c) => {
+      await c.query(`SET LOCAL idle_in_transaction_session_timeout = ${START_IDLE_TIMEOUT_MS}`);
+      const s = await startEntrylessConflictRound(c, { accountId, workItemId: subject.workItemId, fromSha: subject.headSha, baseSha: decision.baseSha, baseRef: decision.baseRef, conflictFiles: decision.files });
+      if (!s.ok) return s.reason;
+      const run = await ports.startConflictRound({ entry: { ...subject, roundsUsed: s.round.round }, round: s.round });
+      if (!run.ok) throw new Undo(run.reason);
+      await recordRoundRun(c, { accountId, roundId: s.round.id, runId: run.runId });
+      return "started" as const;
+    });
+    if (started === "rounds_exhausted") return stop("rounds_exhausted", "merge_conflict", { baseRef: decision.baseRef });
+    return { outcome: started === "started" ? "started" : "running" };
+  } catch (err) {
+    if (!(err instanceof Undo)) throw err;
+    if (CAPACITY_WAIT_REASONS.includes(err.refusal)) return { outcome: "waiting" };
+    if (err.refusal === REFUSED_SPEND) return stop(REFUSED_SPEND, REFUSED_SPEND);
+    return stop("round_not_started", "merge_conflict", { baseRef: decision.baseRef });
+  }
+}
+
 /**
  * The fixed fact behind a `merge_conflict` stop: why no round ran (or how the last one ended: MQ4-c), and how many already had. Codes and counts only.
  * `eventCode` is the stop's own code (`merge_conflict` unless the end of a round stopped the entry for another fixed reason).
  */
-export async function recordStop(ports: Pick<ConflictPorts, "inTenant">, entry: MergeQueueEntry, code: string, headSha: string, eventCode = "merge_conflict", detail?: { baseRef?: string | null; conflictFiles?: readonly string[] }): Promise<void> {
-  if (entry.workItemId === null) return;
+export async function recordStop(ports: Pick<ConflictPorts, "inTenant">, who: RoundSubject, code: string, headSha: string, eventCode = "merge_conflict", detail?: { baseRef?: string | null; conflictFiles?: readonly string[] }): Promise<void> {
+  const entry = subjectOf(who);
+  if (entry === null) return;
   // The table checks both and a bad value fails the write, and the event with it; each value is held to the table's rules here, and one that fails is left out.
   const baseRef = isDetailRef(detail?.baseRef) ? detail!.baseRef! : null;
   const conflictFiles = (detail?.conflictFiles ?? []).filter(isDetailPath).slice(0, CONFLICT_FILES_MAX);
   await ports.inTenant(entry.accountId, (c) =>
     recordDriverEvent(c, entry.accountId, {
-      workItemId: entry.workItemId!,
+      workItemId: entry.workItemId,
       kind: "stopped",
-      dedupeKey: `conflict:${headSha}:${entry.conflictRounds}:${code}`,
+      dedupeKey: `conflict:${headSha}:${entry.roundsUsed}:${code}`,
       code: eventCode,
       reasons: [code],
       headSha,
       prNumber: entry.prNumber,
-      round: entry.conflictRounds,
+      round: entry.roundsUsed,
       detail: { conflictFiles, baseRef },
     }),
   );

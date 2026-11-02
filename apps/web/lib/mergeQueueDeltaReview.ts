@@ -28,11 +28,11 @@ export interface Loaded {
   actionId: string;
 }
 
-export function deltaReviewPorts(deps: DeltaReviewBinding): mergeQueue.DeltaCompletionPorts {
+export function deltaReviewPorts<S extends mergeQueue.RoundSubject = mergeQueue.MergeQueueEntry>(deps: DeltaReviewBinding): mergeQueue.DeltaCompletionPorts<S> {
   // One lookup per entry and head; the ports are built per tick or per wait step, so nothing outlives it.
   const loaded = new Map<string, Loaded | { reason: string }>();
 
-  async function load(entry: mergeQueue.MergeQueueEntry): Promise<Loaded | { reason: string }> {
+  async function load(entry: S): Promise<Loaded | { reason: string }> {
     const key = `${entry.id}:${entry.headSha}`;
     const known = loaded.get(key);
     if (known) return known;
@@ -41,7 +41,7 @@ export function deltaReviewPorts(deps: DeltaReviewBinding): mergeQueue.DeltaComp
     return out;
   }
 
-  const read = (entry: mergeQueue.MergeQueueEntry): Promise<Loaded | { reason: string }> => readEntryContext(deps, entry);
+  const read = (entry: S): Promise<Loaded | { reason: string }> => readEntryContext(deps, entry);
 
   return {
     github: deps.github,
@@ -92,7 +92,7 @@ export function bindCompleteDeltaReview(deps: DeltaReviewBinding): (entry: merge
 }
 
 /** D#519 MQ4-b: shared with the conflict round: everything about the item the queue does not carry, read from the stored rows and GitHub. */
-export async function readEntryContext(deps: DeltaReviewBinding, entry: mergeQueue.MergeQueueEntry): Promise<Loaded | { reason: string }> {
+export async function readEntryContext(deps: Omit<DeltaReviewBinding, "github">, entry: { accountId: string; workItemId: string | null }): Promise<Loaded | { reason: string }> {
   const found = await readEntryWho(deps, entry);
   if (!("who" in found)) return found;
   const { who, actionId } = found;
@@ -103,7 +103,7 @@ export async function readEntryContext(deps: DeltaReviewBinding, entry: mergeQue
 }
 
 /** D#519 MQ4-c: only who acts for the entry (no review context and no open pull request needed), so a run can be cancelled after its pull request ended. */
-export async function readEntryWho(deps: DeltaReviewBinding, entry: mergeQueue.MergeQueueEntry): Promise<{ who: StepWho; actionId: string } | { reason: string }> {
+export async function readEntryWho(deps: Omit<DeltaReviewBinding, "github">, entry: { accountId: string; workItemId: string | null }): Promise<{ who: StepWho; actionId: string } | { reason: string }> {
   if (!deps.worker || entry.workItemId === null) return { reason: "worker_unavailable" };
   // The person whose approval started the item's advance, and the item's halt epoch: the same two facts the parked-stage sweep restarts a stage with.
   const facts = await withTenant(deps.pool, entry.accountId, async (c) => ({

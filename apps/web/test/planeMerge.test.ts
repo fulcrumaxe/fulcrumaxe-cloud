@@ -34,11 +34,15 @@ const order = { id: "4d5e6f7a-8b9c-4d1e-9f2a-3b4c5d6e7f80", workItemId: ITEM, pl
 const ctx = { repoId: REPO, owner: "acme", name: "widgets", executionMode: "runner_local" };
 const attestation = { reviewedHead: SRC, publicHead: PUB, same: true, incomplete: false, paths: ["src/a.ts"] };
 
-function fakePool(branch: string | null = `fx/p-${PUSH}`) {
+/** A `merge_conflict_rounds` row of the item (D#519 MQ4-e1-a), open (no outcome) unless an outcome is given. */
+const roundRow = (outcome: string | null) => ({ id: "5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a81", account_id: ACCOUNT, repo_id: REPO, work_item_id: ITEM, entry_id: null, round: 1, from_sha: SRC, base_sha: "b".repeat(40), base_ref: "main", conflict_files: ["src/a.ts"], run_id: null, to_sha: null, outcome, created_at: new Date(), ended_at: outcome === null ? null : new Date() });
+
+function fakePool(branch: string | null = `fx/p-${PUSH}`, rounds: Array<ReturnType<typeof roundRow>> = []) {
   const statements: Array<{ sql: string; params: unknown[] | undefined }> = [];
   const client = {
     query: async (sql: string, params?: unknown[]) => {
       statements.push({ sql, params });
+      if (/FROM merge_conflict_rounds/.test(sql)) return { rows: rounds, rowCount: rounds.length };
       return { rows: /FROM plane_pushes/.test(sql) ? (branch === null ? [] : [{ branch }]) : [], rowCount: 0 };
     },
     release: () => undefined,
@@ -46,8 +50,8 @@ function fakePool(branch: string | null = `fx/p-${PUSH}`) {
   return { pool: { connect: async () => client } as never, statements };
 }
 
-function ops(over: { open?: ReturnType<typeof vi.fn>; reconcile?: ReturnType<typeof vi.fn>; closePrivate?: ReturnType<typeof vi.fn> | null } = {}) {
-  const f = fakePool();
+function ops(over: { open?: ReturnType<typeof vi.fn>; reconcile?: ReturnType<typeof vi.fn>; closePrivate?: ReturnType<typeof vi.fn> | null; rounds?: Array<ReturnType<typeof roundRow>> } = {}) {
+  const f = fakePool(undefined, over.rounds);
   const plain = { request: vi.fn(async () => ({ status: 200, body: [] })) };
   const open = over.open ?? vi.fn(async () => plain as never);
   const closePrivate = over.closePrivate === null ? undefined : (over.closePrivate ?? vi.fn(async () => undefined));
@@ -121,6 +125,27 @@ describe("goPhase", () => {
 });
 
 // D#694 B7-1: the gate reads the CODE repository's mode and hands the delegate what it read; the go carries it, and a queue repository's order goes only to a runner that can enqueue.
+describe("goPhase and a merge-conflict fix round (D#519 MQ4-e1-a)", () => {
+  it("while the item's newest round has no outcome, go answers no-go conflict_round_running: the gate is not run, no client is opened and the credential's mint is never called", async () => {
+    const t = ops({ rounds: [roundRow(null)] });
+    const delegate = vi.fn(async () => ({ delegated: true as const }));
+    expect(await t.o.goPhase({ accountId: ACCOUNT, order, attestation, delegate })).toEqual({ kind: "blocked", reasons: ["conflict_round_running"] });
+    expect(delegate).not.toHaveBeenCalled();
+    expect(mocks.runMergeGateForItem).not.toHaveBeenCalled();
+    expect(t.open).not.toHaveBeenCalled();
+  });
+
+  it("an item whose newest round has ended, or that has none, goes through the gate exactly as before", async () => {
+    for (const rounds of [[roundRow("resolved")], []]) {
+      const t = ops({ rounds });
+      const delegate = vi.fn(async () => ({ delegated: true as const }));
+      mocks.runMergeGateForItem.mockClear();
+      await t.o.goPhase({ accountId: ACCOUNT, order, attestation, delegate });
+      expect(mocks.runMergeGateForItem).toHaveBeenCalledTimes(1);
+    }
+  });
+});
+
 describe("goPhase and the merge queue", () => {
   const gateAnswers = (mode: "queue" | "direct") =>
     mocks.runMergeGateForItem.mockImplementation(async (deps: { mergeDelegate: (a: object, c: { mergeMode: "queue" | "direct" }) => Promise<{ delegated: boolean; reason?: string }> }) => {

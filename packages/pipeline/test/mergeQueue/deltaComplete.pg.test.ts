@@ -256,6 +256,7 @@ describe("D#519 MQ3-b-2b delta-review completion [pg]", () => {
       try {
         await db.admin.query("SET LOCAL session_replication_role = replica");
         await db.admin.query("DELETE FROM merge_queue_entries WHERE account_id <> $1", [s.accountId]);
+        await db.admin.query("DELETE FROM merge_conflict_rounds WHERE account_id <> $1", [s.accountId]);
         return (await db.admin.query('SELECT account_id AS "accountId", repo_id AS "repoId" FROM merge_queue_sweep_targets(now(), 200)')).rows;
       } finally {
         await db.admin.query("ROLLBACK");

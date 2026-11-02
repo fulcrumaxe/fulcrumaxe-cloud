@@ -235,6 +235,7 @@ describe("the Ready to merge banner is honest about what still blocks the merge"
     ["stacked_on_pr_40", "It builds on a pull request that hasn't merged yet"],
     ["merge_call_refused", "GitHub refused the merge"],
     ["merge_conflict", "The pull request has a merge conflict"],
+    ["conflict_round_running", "A merge-conflict fix round is running."],
     ["branch_behind", "The branch is behind its base branch"],
     ["branch_protection_refused", "Branch protection refused the merge"],
     ["merge_queue_waiting", "The pull request is waiting in the merge queue"],

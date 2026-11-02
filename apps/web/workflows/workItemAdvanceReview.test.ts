@@ -19,8 +19,14 @@ vi.mock("workflow/api", () => ({ resumeHook: vi.fn(), start: vi.fn() }));
 // D#519 MQ3-b-2b: the merge queue's two steps are scripted here (their bodies are tested in lib/mergeQueueWait.test.ts). By default nothing is queued,
 // so every test below keeps the direct gate it always had.
 const queue = vi.hoisted(() => ({ queued: false, looks: [{ state: "waiting" }] as Array<Record<string, unknown>>, enqueues: [] as unknown[], waits: 0 }));
+// D#519 MQ4-e1-a: the two steps of a merge-conflict round for an item with no queue entry are scripted the same way (bodies: lib/mergeQueueWait.test.ts).
+const conflict = vi.hoisted(() => ({ start: [{ state: "not_applicable" }] as Array<Record<string, unknown>>, looks: [{ state: "waiting" }] as Array<Record<string, unknown>>, starts: 0, waits: 0 }));
 vi.mock("../lib/mergeQueueWait", async (orig) => ({
   ...(await orig<typeof import("../lib/mergeQueueWait")>()),
+  // The gate asked again for a round's merge commit: its CI rule (the round's first head's signals) is tested in lib/mergeQueueEntryless.test.ts; here it is the worker's gate.
+  conflictGateBody: async (w: { advanceMergeGate(who: unknown, pr: number, signals?: string[]): Promise<unknown> }, who: unknown, pr: number) => w.advanceMergeGate(who, pr, ["conflict-gate-stub"]),
+  conflictStartBody: async () => (conflict.starts++, conflict.start.length > 1 ? conflict.start.shift()! : conflict.start[0]!),
+  conflictWaitBody: async () => (conflict.waits++, conflict.looks.length > 1 ? conflict.looks.shift()! : conflict.looks[0]!),
   enqueueBody: async (_w: unknown, _who: unknown, input: unknown) => (queue.enqueues.push(input), { queued: queue.queued }),
   waitBody: async () => (queue.waits++, queue.looks.length > 1 ? queue.looks.shift()! : queue.looks[0]!),
 }));
@@ -232,6 +238,7 @@ let logs: Array<Record<string, unknown>>;
 beforeEach(() => {
   world.sleeps = 0;
   Object.assign(queue, { queued: false, looks: [{ state: "waiting" }], enqueues: [], waits: 0 });
+  Object.assign(conflict, { start: [{ state: "not_applicable" }], looks: [{ state: "waiting" }], starts: 0, waits: 0 });
   logs = [];
   vi.spyOn(console, "info").mockImplementation((line: unknown) => void logs.push(JSON.parse(String(line))));
 });
@@ -2035,4 +2042,82 @@ describe("the merge queue instead of the direct gate", () => {
     expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
   });
 });
+});
+
+// D#519 MQ4-e1-a: the direct gate answers merge_conflict for an item with no queue entry.
+describe("a merge-conflict round for an item with no queue entry", () => {
+  const dirty = { outcome: "ready_human_merges", reasons: ["merge_conflict"], status: "posted" };
+  const noCi = { outcome: "ready_human_merges", reasons: ["ci_not_green"], status: "posted" };
+
+  it("not this path's item (a public copy, or nothing the cloud reads): the gate's own stop stands, as before", async () => {
+    const t = setup(fresh({ gates: [dirty] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "ready_human_merges", detail: "merge_conflict" });
+    expect(conflict.starts).toBe(1);
+    expect(conflict.waits).toBe(0);
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(1);
+  });
+
+  it("a round starts and the workflow waits on it durably; after the passed delta review it waits for CI on the merge commit and re-enters the gate", async () => {
+    conflict.start = [{ state: "started" }];
+    conflict.looks = [{ state: "waiting" }, { state: "waiting" }, { state: "passed", headSha: H2 }];
+    const t = setup(fresh({ gates: [dirty, noCi, { outcome: "merged", reasons: [], status: "posted" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged", detail: undefined });
+    expect(conflict.waits).toBe(3);
+    // Two polls between three looks, and one wait for the merge commit's CI.
+    expect(world.sleeps).toBe(3);
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(3);
+    // The first ask is the plain gate; both asks after the round go through the round's own gate step (the one that carries the CI signals).
+    expect(t.worker.advanceMergeGate.mock.calls.map((c: unknown[]) => c.length === 3)).toEqual([false, true, true]);
+    // No second round start, no enqueue after the round, no review of the merge commit by the workflow.
+    expect(conflict.starts).toBe(1);
+    expect(t.worker.advanceRecordRound).toHaveBeenCalledTimes(1);
+    expect(events()).toContain("advance.merge_conflict");
+  });
+
+  it("the round ends back in review (a person pushed, or its end checks say so): the review loop reads the head again", async () => {
+    conflict.start = [{ state: "started" }];
+    conflict.looks = [{ state: "in_review" }];
+    const t = setup(fresh({ gates: [dirty, { outcome: "merged", reasons: [], status: "posted" }] }));
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+    expect(t.worker.advanceRecordRound).toHaveBeenCalledTimes(2);
+  });
+
+  it("a stop (foreign commits, a refused spend, history rewritten) is Needs a person with the fixed code, recorded as a stop; nothing is retried", async () => {
+    conflict.start = [{ state: "stopped", reason: "refused_spend" }];
+    const t = setup(fresh({ gates: [dirty] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "refused_spend" });
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "refused_spend" }));
+    expect(conflict.starts).toBe(1);
+
+    conflict.looks = [{ state: "waiting" }, { state: "stopped", reason: "history_rewritten" }];
+    conflict.start = [{ state: "started" }];
+    setup(fresh({ gates: [dirty] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "history_rewritten" });
+  });
+
+  it("a round that cannot be followed (the look answers none) is looked for again a poll apart, a bounded number of times, then stops for a person with a fixed code", async () => {
+    conflict.start = [{ state: "running" }];
+    conflict.looks = [{ state: "none" }];
+    const t = setup(fresh({ gates: [dirty] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "conflict_round_unreadable" });
+    expect(world.sleeps).toBe(5);
+    expect(conflict.waits).toBe(6);
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "conflict_round_unreadable" }));
+  });
+
+  it("a capacity wait at the start is asked again after a durable sleep; the pull request merged by a person ends the workflow with that word", async () => {
+    conflict.start = [{ state: "waiting" }, { state: "started" }];
+    conflict.looks = [{ state: "merged" }];
+    setup(fresh({ gates: [dirty] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged" });
+    expect(conflict.starts).toBe(2);
+    expect(world.sleeps).toBe(1);
+  });
+
+  it("other gate stops are untouched: only merge_conflict starts a round", async () => {
+    conflict.start = [{ state: "started" }];
+    setup(fresh({ gates: [{ outcome: "ready_human_merges", reasons: ["branch_behind"], status: "posted" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "ready_human_merges", detail: "branch_behind" });
+    expect(conflict.starts).toBe(0);
+  });
 });

@@ -1,9 +1,9 @@
 import type { PoolClient } from "pg";
 import { MERGE_QUEUE_DELTA_REVIEW_MAX_MINUTES } from "./policy.js";
-import { deltaInput, fixedReason, readMergeCommit, refreshSource, startDeltaRoles, type DeltaReviewPorts, type DeltaSource } from "./deltaReview.js";
+import { deltaInput, fixedReason, readMergeCommit, refreshSource, startDeltaRoles, type DeltaReviewPorts, type DeltaRunRef, type DeltaSource } from "./deltaReview.js";
 import { refreshTip } from "./refresh.js";
 import { finishWork, listConflictRounds, listHeadRefreshes, returnToReview, settlePullRequest, stopEntry } from "./store.js";
-import type { MergeQueueEntry } from "./types.js";
+import type { MergeQueueEntry, RoundSubject } from "./types.js";
 
 /**
  * D#519 MQ3-b-2b: what happens when a delta review's runs end. One call looks at ONE `awaiting_work` entry whose work is a delta review and
@@ -21,10 +21,10 @@ import type { MergeQueueEntry } from "./types.js";
  *    still required by the tick that takes it.
  *  - A follow-up start refused for spend stops the entry (`refused_spend`, Needs a person); no retry loop.
  */
-export interface DeltaCompletionPorts extends DeltaReviewPorts {
+export interface DeltaCompletionPorts<S extends RoundSubject = MergeQueueEntry> extends DeltaReviewPorts<S> {
   inTenant<T>(accountId: string, fn: (client: PoolClient) => Promise<T>): Promise<T>;
   /** How one run stands: ended or not, the verdict word, and whether the code reviewer asked for a security review. A run that ended without a verdict is `noVerdict`. */
-  outcome(entry: MergeQueueEntry, runId: string): Promise<{ done: boolean; verdict: string; securityNeeded: boolean; noVerdict: boolean }>;
+  outcome(entry: S, runId: string): Promise<{ done: boolean; verdict: string; securityNeeded: boolean; noVerdict: boolean }>;
   now?(): Date;
 }
 
@@ -70,46 +70,78 @@ export async function completeDeltaReview(ports: DeltaCompletionPorts, entry: Me
   };
   if (!src) return back("invalid_input");
 
-  const now = await ports.github.getMergeability({ repoId: entry.repoId, prNumber: entry.prNumber }, { gatedHeadSha: toSha });
-  if (now.state !== "open" || now.merged) {
-    await cancelAll();
-    await ports.inTenant(accountId, (c) => settlePullRequest(c, { accountId, repoId: entry.repoId, prNumber: entry.prNumber, merged: now.merged === true }));
-    return { outcome: "settled", as: now.merged === true ? "merged" : "closed" };
+  const v = await judgeDeltaReview(ports, entry, { src, toSha, runs, startedAt: entry.updatedAt });
+  switch (v.kind) {
+    case "settled":
+      await cancelAll();
+      await ports.inTenant(accountId, (c) => settlePullRequest(c, { accountId, repoId: entry.repoId, prNumber: entry.prNumber, merged: v.merged }));
+      return { outcome: "settled", as: v.merged ? "merged" : "closed" };
+    case "back":
+      return back(v.reason);
+    case "not_carried":
+      await cancelAll();
+      await ports.recordEvent({ entry, toSha, code: "not_carried" });
+      await ports.inTenant(accountId, (c) => returnToReview(c, { accountId, entryId: entry.id }));
+      return { outcome: "not_carried" };
+    case "waiting":
+      return { outcome: "waiting" };
+    case "passed":
+      // A conflict round's merge commit IS the head now (the entry's stored head is the pre-round one); a refresh's stays the reviewed head, as before.
+      await ports.inTenant(accountId, (c) => finishWork(c, { accountId, entryId: entry.id, ...(src.trigger === "conflict_resolution" ? { headSha: toSha } : {}) }));
+      return { outcome: "passed" };
+    case "refused_spend":
+      await ports.inTenant(accountId, (c) => stopEntry(c, { accountId, entryId: entry.id, reason: "refused_spend" }));
+      return { outcome: "refused_spend" };
   }
-  if (now.headSha !== toSha) return back("head_changed");
-  if ((ports.now?.() ?? new Date()).getTime() - entry.updatedAt.getTime() >= MERGE_QUEUE_DELTA_REVIEW_MAX_MINUTES * 60_000) return back("delta_review_timeout");
-  if (runs.length === 0) return back("invalid_input");
+}
 
-  const results = await Promise.all(runs.map(async (r) => ({ ...r, ...(await ports.outcome(entry, r.runId)) })));
+/** D#519 MQ4-e1-a: what a delta review's runs say, as a verdict. Each path (a queue entry, a work item with none) maps it to its own moves. */
+export type DeltaVerdict =
+  | { kind: "settled"; merged: boolean }
+  | { kind: "back"; reason: string }
+  | { kind: "not_carried" }
+  | { kind: "waiting" }
+  | { kind: "passed" }
+  | { kind: "refused_spend" };
+
+export interface DeltaJudgement {
+  src: DeltaSource;
+  toSha: string;
+  runs: readonly DeltaRunRef[];
+  /** When the review began; the timeout runs from here. */
+  startedAt: Date;
+}
+
+/**
+ * The reads and run starts of a delta review's completion, with no write to an entry or an item. It may start the follow-up roles (the security reviewer a flag adds, the
+ * debater after the passes), which is a run start and not an entry move; everything else is the caller's.
+ */
+export async function judgeDeltaReview<S extends RoundSubject>(ports: DeltaCompletionPorts<S>, who: S, j: DeltaJudgement): Promise<DeltaVerdict> {
+  const { src, toSha, runs } = j;
+  const now = await ports.github.getMergeability({ repoId: who.repoId, prNumber: who.prNumber }, { gatedHeadSha: toSha });
+  if (now.state !== "open" || now.merged) return { kind: "settled", merged: now.merged === true };
+  if (now.headSha !== toSha) return { kind: "back", reason: "head_changed" };
+  if ((ports.now?.() ?? new Date()).getTime() - j.startedAt.getTime() >= MERGE_QUEUE_DELTA_REVIEW_MAX_MINUTES * 60_000) return { kind: "back", reason: "delta_review_timeout" };
+  if (runs.length === 0) return { kind: "back", reason: "invalid_input" };
+
+  const results = await Promise.all(runs.map(async (r) => ({ ...r, ...(await ports.outcome(who, r.runId)) })));
   const failed = results.filter((r) => r.done && (r.noVerdict || r.verdict !== "pass"));
-  if (failed.length > 0) {
-    await cancelAll();
-    await ports.recordEvent({ entry, toSha, code: "not_carried" });
-    await ports.inTenant(accountId, (c) => returnToReview(c, { accountId, entryId: entry.id }));
-    return { outcome: "not_carried" };
-  }
-  if (results.some((r) => !r.done)) return { outcome: "waiting" };
+  if (failed.length > 0) return { kind: "not_carried" };
+  if (results.some((r) => !r.done)) return { kind: "waiting" };
 
   // Everything started has passed. What does the gate still require, now that the code reviewer may have flagged security?
   const flagged = results.some((r) => r.role === "code-reviewer" && r.securityNeeded);
-  const plan = await ports.plan({ entry, headSha: toSha, flagged });
-  if (!plan.ok) return back(fixedReason(plan.reason));
+  const plan = await ports.plan({ entry: who, headSha: toSha, flagged });
+  if (!plan.ok) return { kind: "back", reason: fixedReason(plan.reason) };
   const have = new Set(runs.map((r) => r.role));
   const others = plan.roles.filter((r) => r !== "debater" && !have.has(r));
   // The debater tries to refute a pass: it runs only after every other role has passed.
   const due = others.length > 0 ? others : plan.roles.includes("debater") && !have.has("debater") ? ["debater"] : [];
-  if (due.length === 0) {
-    // A conflict round's merge commit IS the head now (the entry's stored head is the pre-round one); a refresh's stays the reviewed head, as before.
-    await ports.inTenant(accountId, (c) => finishWork(c, { accountId, entryId: entry.id, ...(src.trigger === "conflict_resolution" ? { headSha: toSha } : {}) }));
-    return { outcome: "passed" };
-  }
-  const read = await readMergeCommit(ports.github, entry, src);
-  if (!read.ok) return back(read.reason);
-  const started = await startDeltaRoles(ports, entry, deltaInput(src, read.files, read.baseSha), due);
-  if (started.ok) return { outcome: "waiting" };
-  if (started.reason === "refused_spend") {
-    await ports.inTenant(accountId, (c) => stopEntry(c, { accountId, entryId: entry.id, reason: "refused_spend" }));
-    return { outcome: "refused_spend" };
-  }
-  return back(fixedReason(started.reason));
+  if (due.length === 0) return { kind: "passed" };
+  const read = await readMergeCommit(ports.github, who, src);
+  if (!read.ok) return { kind: "back", reason: read.reason };
+  const started = await startDeltaRoles(ports, who, deltaInput(src, read.files, read.baseSha), due);
+  if (started.ok) return { kind: "waiting" };
+  if (started.reason === "refused_spend") return { kind: "refused_spend" };
+  return { kind: "back", reason: fixedReason(started.reason) };
 }

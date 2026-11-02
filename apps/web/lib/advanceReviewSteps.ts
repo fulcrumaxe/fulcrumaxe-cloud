@@ -521,9 +521,9 @@ export async function mergeOrderBody(worker: ReviewWorker | null, who: StepWho):
   return { state: out.state, code: out.code, ...(out.gateRecorded !== undefined ? { gateRecorded: out.gateRecorded } : {}) };
 }
 
-export async function mergeGateBody(worker: ReviewWorker | null, who: StepWho, prNumber: number): Promise<GateOut> {
+export async function mergeGateBody(worker: ReviewWorker | null, who: StepWho, prNumber: number, expectedSignals?: readonly string[]): Promise<GateOut> {
   if (!worker) return { outcome: "refused", reasons: ["worker_unavailable"], status: null, headSha: null };
-  const out = await worker.advanceMergeGate(who, prNumber);
+  const out = expectedSignals === undefined ? await worker.advanceMergeGate(who, prNumber) : await worker.advanceMergeGate(who, prNumber, expectedSignals);
   return { outcome: out.outcome, reasons: out.reasons ?? (out.reason ? [out.reason] : []), status: out.status ?? null, headSha: out.headSha ?? null };
 }
 

@@ -1010,3 +1010,39 @@ export async function listConflictRounds(client: Queryable, accountId: string, w
   const { rows } = await client.query<RoundRow>(`SELECT ${ROUND_COLUMNS} FROM merge_conflict_rounds WHERE account_id = $1 AND work_item_id = $2 ORDER BY round`, [accountId, workItemId]);
   return rows.map(toRound);
 }
+
+export type StartEntrylessRoundResult = { ok: true; round: ConflictRound } | { ok: false; reason: "rounds_exhausted" | "not_startable" };
+
+/**
+ * D#519 MQ4-e1-a: a conflict round for a work item with no queue entry (`entry_id` NULL), by ONE statement. The number is the item's rows + 1, so the bound is the
+ * same MAX_CONFLICT_ROUNDS and a round is counted in the statement that writes it. It writes nothing while the item's newest round has no outcome, or while the item has
+ * a live queue entry: a replayed or racing start opens no second round (the unique key on (account, work item, round) turns a lost race into no row). The repository is
+ * the item's own, read here and never passed.
+ */
+export async function startEntrylessConflictRound(
+  client: Queryable,
+  input: { accountId: string; workItemId: string; fromSha: string; baseSha: string; baseRef: string; conflictFiles: readonly string[] },
+): Promise<StartEntrylessRoundResult> {
+  assertSha(input.fromSha);
+  assertSha(input.baseSha);
+  const round = await oneRound(
+    client,
+    `INSERT INTO merge_conflict_rounds (account_id, repo_id, work_item_id, entry_id, round, from_sha, base_sha, base_ref, conflict_files)
+     SELECT w.account_id, w.repo_id, w.id, NULL, r.used + 1, $3, $4, $5, $6::text[]
+       FROM work_items w, LATERAL (SELECT count(*)::int AS used FROM merge_conflict_rounds WHERE account_id = $1 AND work_item_id = $2) r
+      WHERE w.account_id = $1 AND w.id = $2 AND w.repo_id IS NOT NULL AND r.used < $7
+        AND NOT EXISTS (SELECT 1 FROM merge_conflict_rounds WHERE account_id = $1 AND work_item_id = $2 AND outcome IS NULL)
+        AND NOT EXISTS (SELECT 1 FROM merge_queue_entries WHERE account_id = $1 AND work_item_id = $2 AND state NOT IN ('merged', 'closed', 'cancelled'))
+     ON CONFLICT (account_id, work_item_id, round) DO NOTHING
+     RETURNING ${ROUND_COLUMNS}`,
+    [input.accountId, input.workItemId, input.fromSha, input.baseSha, input.baseRef, [...input.conflictFiles], MAX_CONFLICT_ROUNDS],
+  );
+  if (round) return { ok: true, round };
+  return { ok: false, reason: (await listConflictRounds(client, input.accountId, input.workItemId)).length >= MAX_CONFLICT_ROUNDS ? "rounds_exhausted" : "not_startable" };
+}
+
+/** The repository's open rounds that have no queue entry (the sweep's backstop), oldest first. */
+export async function listOpenEntrylessRounds(client: Queryable, accountId: string, repoId: string): Promise<ConflictRound[]> {
+  const { rows } = await client.query<RoundRow>(`SELECT ${ROUND_COLUMNS} FROM merge_conflict_rounds WHERE account_id = $1 AND repo_id = $2 AND entry_id IS NULL AND outcome IS NULL ORDER BY created_at`, [accountId, repoId]);
+  return rows.map(toRound);
+}

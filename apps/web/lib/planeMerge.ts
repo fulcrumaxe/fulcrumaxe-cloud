@@ -2,7 +2,7 @@ import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { enqueueDedupeKey, listHeadRemovals, recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "@fx/github";
-import { createPgLocalReviewOptIn, createReviewGitHubPort, loadReviewContext, readItemRecordedPullRequest, readPublicPullRequest, runMergeGateForItem, type GitHubHttp, type MergeBlockReason } from "@fx/pipeline";
+import { createPgLocalReviewOptIn, createReviewGitHubPort, loadReviewContext, mergeQueue, readItemRecordedPullRequest, readPublicPullRequest, runMergeGateForItem, type GitHubHttp, type MergeBlockReason } from "@fx/pipeline";
 import type { PlaneMergeGoResult, PlaneMergeOrderFacts, PublicPullFacts, PublicQueueFacts } from "@fx/runner-cloud";
 import { mergeGateAuthorTrust } from "./github/authorTrust";
 import { openInstallationHttp } from "./github/installationHttp";
@@ -67,6 +67,9 @@ export function createPlaneMergeOps(deps: PlaneMergeOpsDeps) {
     // The item's own (private) pull request: the run's recorded one.
     const recorded = await readItemRecordedPullRequest(pool, accountId, order.workItemId);
     if (recorded === null) return { kind: "refused", reason: "no_pull_request" };
+    // D#519 MQ4-e1-a: while the item's newest merge-conflict round has no outcome the branch is being fixed. No gate run and no credential: nothing may merge under it.
+    const rounds = await withTenant(pool, accountId, (client) => mergeQueue.listConflictRounds(client, accountId, order.workItemId));
+    if (rounds.length > 0 && rounds[rounds.length - 1]!.outcome === null) return { kind: "blocked", reasons: ["conflict_round_running"] };
     const http = await openReviewHttp({ repoId: c.repoId, owner: c.owner, name: c.name, executionMode: c.executionMode });
     let mergeMode: "queue" | "direct" = "direct";
     const out = await runMergeGateForItem(
