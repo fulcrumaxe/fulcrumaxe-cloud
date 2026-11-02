@@ -134,6 +134,17 @@ test.describe("D#37 WS-F3: Repos app (mocked API)", () => {
     expect(appErrors).toEqual([]);
   });
 
+  test("D#694: a Local-only repository says its runner handles merges, with no Try again, and keeps the help link", async ({ page }) => {
+    const { mock, appErrors } = await setup(page);
+    (mock.settings as Record<string, unknown>).merge_queue = { state: "runner" };
+    await openRepos(page);
+    await tid(page, "repos-open").first().click();
+    await expect(tid(page, "repos-queue-line")).toContainText("Merge queue: your runner handles merges for this repository.");
+    await expect(tid(page, "repos-queue-retry")).toHaveCount(0);
+    await expect(tid(page, "repos-queue-about")).toHaveCount(1);
+    expect(appErrors).toEqual([]);
+  });
+
   test("a member sees the settings disabled with the explanation, and no request can change them", async ({ page }) => {
     const { mock, appErrors } = await setup(page, { admin: false });
     await openRepos(page);

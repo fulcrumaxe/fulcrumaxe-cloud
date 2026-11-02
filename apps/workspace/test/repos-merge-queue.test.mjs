@@ -27,8 +27,9 @@ describe("the merge queue line", () => {
   it.each([
     [{ merge_queue: { state: "on" } }, "on", "Merge queue: on (GitHub merges for you once it is queued)"],
     [{ merge_queue: { state: "off" } }, "off", "Merge queue: off"],
+    [{ merge_queue: { state: "runner" } }, "runner", "Merge queue: your runner handles merges for this repository."],
     [{ merge_queue: { state: "unreadable" } }, "unreadable", "Merge queue: could not be read"],
-  ])("shows exactly one of the three sentences for %j", (settings, state, sentence) => {
+  ])("shows exactly one of the four sentences for %j", (settings, state, sentence) => {
     expect(QUEUE_LINE[state]).toBe(sentence);
     const line = lineOf(view(settings));
     expect(line.getAttribute("data-state")).toBe(state);
@@ -51,7 +52,10 @@ describe("the merge queue line", () => {
     expect(retry.map((e) => e.textContent)).toEqual([QUEUE_RETRY]);
     retry[0].on.click();
     expect(onRetry).toHaveBeenCalledTimes(1);
-    for (const state of ["on", "off"]) expect(byId(view({ merge_queue: { state } }), "repos-queue-retry")).toHaveLength(0);
+    for (const state of ["on", "off", "runner"]) expect(byId(view({ merge_queue: { state } }), "repos-queue-retry")).toHaveLength(0);
+    const runner = view({ merge_queue: { state: "runner" } });
+    expect(lineOf(runner).textContent).not.toContain(QUEUE_RETRY);
+    expect(byId(runner, "repos-queue-about")).toHaveLength(1); // the help link stays
   });
 });
 

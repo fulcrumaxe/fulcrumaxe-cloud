@@ -36,7 +36,7 @@ const settingsResponseSchema = z.object({
   /** D#6 M1G-a: present (true) only when the operator locked this repository to human merges; absent otherwise. */
   human_merge_only: z.literal(true).optional(),
   /** D#694 B7-2: derived on each read (never stored); `unreadable` also covers a repo with no installation. */
-  merge_queue: z.object({ state: z.enum(["on", "off", "unreadable"]) }),
+  merge_queue: z.object({ state: z.enum(["on", "off", "runner", "unreadable"]) }),
 });
 
 /**

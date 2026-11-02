@@ -10840,6 +10840,7 @@
                           "enum": [
                             "on",
                             "off",
+                            "runner",
                             "unreadable"
                           ]
                         }
@@ -10999,6 +11000,7 @@
                           "enum": [
                             "on",
                             "off",
+                            "runner",
                             "unreadable"
                           ]
                         }

@@ -127,9 +127,13 @@ describe("D#694 B7-2: the merge queue line's reader", () => {
     expect(calls.length).toBeGreaterThan(first);
   });
 
-  it("is unreadable with no call for a runner_local repo, a repo with no owner, and a repo that is missing", async () => {
+  it("is runner, with no call, for a runner_local repo (its merge belongs to the customer's runner)", async () => {
     row = { gh_owner: "acme", gh_name: "widgets", execution_mode: "runner_local" };
-    expect(await reader().read({ accountId: ACCOUNT, repoId: "a" })).toBe("unreadable");
+    expect(await reader().read({ accountId: ACCOUNT, repoId: "a" })).toBe("runner");
+    expect(calls).toEqual([]);
+  });
+
+  it("is unreadable with no call for a repo with no owner, and a repo that is missing", async () => {
     row = { gh_owner: null, gh_name: null, execution_mode: "cloud" };
     expect(await reader().read({ accountId: ACCOUNT, repoId: "a" })).toBe("unreadable");
     row = undefined;
