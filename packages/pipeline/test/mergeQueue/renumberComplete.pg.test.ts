@@ -8,6 +8,7 @@ import {
   createOnRenumber,
   getEntry,
   listConflictRounds,
+  releaseForWork,
   runQueueTick,
   setPlatformCommitProofForTest,
   type ConflictCompletionPorts,
@@ -183,6 +184,27 @@ describe("D#519 MQ5-b2 renumber round end [pg]", () => {
     const out = await runQueueTick(tickDeps(r), r);
     expect(out.steps[0]).toMatchObject({ step: "merged", prNumber: 7 });
     expect(r.mergeCalls()).toEqual([7]);
+  });
+
+  it("MQ5-b2 follow-up: a finished renumber round is not the source of a LATER refresh's delta review", async () => {
+    const { r, a, round, s } = await running();
+    const to = push(a, round, { old: mig(710), neu: mig(713) });
+    await s.endRun(round.runId!);
+    await s.complete();
+    await s.finishReviews();
+    expect(await s.completeDelta()).toEqual({ outcome: "passed" });
+    // Later the branch is refreshed on top of the round's result, and that refresh is what is reviewed now.
+    const next = `${"e".repeat(38)}07`;
+    await db.admin.query(`INSERT INTO head_refreshes (account_id, repo_id, work_item_id, entry_id, from_sha, to_sha, base_sha, files_overlap) VALUES ($1, $2, $3, $4, $5, $6, $7, true)`, [r.accountId, r.repoId, a.workItemId, a.entryId, to, next, round.baseSha]);
+    await db.admin.query(`UPDATE merge_queue_entries SET state = 'in_flight', slot_holder = 'h', lease_until = now() + interval '5 minutes', slot_taken_at = now(), phase = 'refresh' WHERE id = $1`, [a.entryId]);
+    expect((await tenant(r.accountId, (c) => releaseForWork(c, { accountId: r.accountId, entryId: a.entryId, holder: "h", kind: "delta_review" }))).ok).toBe(true);
+    for (const role of ["code-reviewer", "acceptance-tester"]) {
+      await db.admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, head_sha, envelope) VALUES ($1, $2, $3, $4, 'production', 'succeeded', $5, $6::jsonb)`, [randomUUID(), r.accountId, a.workItemId, role, next, JSON.stringify(pass)]);
+    }
+    a.g.world.headSha = next;
+    // Matched to the old round, the source would be `to` and the moved head would read as head_changed; the refresh is the source, so the reviews at `next` count.
+    expect(await s.completeDelta()).toEqual({ outcome: "passed" });
+    expect(await r.entry(7)).toMatchObject({ state: "queued", headSha: to });
   });
 
   describe("item 28: two queued pull requests add the same next number", () => {

@@ -58,7 +58,7 @@ describe('readConflictState', () => {
   it('C6-d4: a running round is told with its round row, and the next read after the entry leaves awaiting_work says nothing', async () => {
     const id = await entry('awaiting_work', { workKind: 'conflict', rounds: 1 });
     await round(id, 1, ['src/a.ts']);
-    expect(await read()).toEqual({ conflict_round: { running: true, attempt: 1, of: OF, base_ref: 'main' } });
+    expect(await read()).toEqual({ conflict_round: { running: true, kind: 'conflict', attempt: 1, of: OF, base_ref: 'main' } });
     await admin.query(`UPDATE merge_queue_entries SET state = 'queued', work_kind = NULL, work_run_id = NULL WHERE id = $1`, [id]);
     expect(await read()).toBeNull();
   });
@@ -69,7 +69,7 @@ describe('readConflictState', () => {
       `INSERT INTO merge_conflict_rounds (account_id, repo_id, work_item_id, entry_id, round, from_sha, base_sha, base_ref, conflict_files, kind) VALUES ($1, $2, $3, $4, 1, $5, $6, 'main', ARRAY['db/0710_x.sql'], 'renumber')`,
       [refs.accountId, refs.repoId, refs.workItemId, id, head, 'b'.repeat(40)],
     );
-    expect(await read()).toEqual({ conflict_round: { running: true, attempt: 1, of: OF, base_ref: 'main' } });
+    expect(await read()).toEqual({ conflict_round: { running: true, kind: 'renumber', attempt: 1, of: OF, base_ref: 'main' } });
     await admin.query(`UPDATE merge_queue_entries SET state = 'queued', work_kind = NULL, work_run_id = NULL WHERE id = $1`, [id]);
     expect(await read()).toBeNull();
   });

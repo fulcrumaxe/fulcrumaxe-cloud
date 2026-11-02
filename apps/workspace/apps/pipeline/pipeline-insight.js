@@ -769,6 +769,7 @@ export function queueLine(data, timeZone) {
 /** D#519 MQ4-d: the words for a merge-conflict fix round. Fixed text; only structured fields (a branch name, repository paths, two counts) fill the braces. A run's summary never does. */
 export const CONFLICT_SENTENCES = Object.freeze({
   running: (b, k, max) => "Resolving a conflict with " + b + ": fix attempt " + k + " of " + max + " is running.",
+  renumbering: (b, k, max) => "Renumbering its new files to follow " + b + ": attempt " + k + " of " + max + " is running.",
   attempts_spent: (b, f, k) => "It conflicts with " + b + f + ". We tried " + (k === 1 ? "once" : k + " times") + ", so a person needs to resolve it.",
   foreign_commits: (b, f) => "It conflicts with " + b + (f === "" ? ", and some files have commits we didn't write" : f + ", and these files have commits we didn't write") + ", so a person needs to resolve it.",
   direct: (b) => "It conflicts with " + b + ". Automatic conflict fixes don't run for this repository yet, so a person needs to resolve it.",
@@ -790,7 +791,7 @@ export function conflictLine(data) {
   const round = data && isObj(data.conflict_round) ? data.conflict_round : null;
   const stop = data && isObj(data.conflict_stop) ? data.conflict_stop : null;
   const branch = (o) => (typeof o.base_ref === "string" && o.base_ref.trim() !== "" ? o.base_ref : CONFLICT_NO_BRANCH);
-  if (round !== null && round.running === true && posInt(round.attempt) && posInt(round.of)) return { kind: "running", text: CONFLICT_SENTENCES.running(branch(round), round.attempt, round.of) };
+  if (round !== null && round.running === true && posInt(round.attempt) && posInt(round.of)) return { kind: "running", text: (round.kind === "renumber" ? CONFLICT_SENTENCES.renumbering : CONFLICT_SENTENCES.running)(branch(round), round.attempt, round.of) };
   if (stop === null) return null;
   if (stop.kind === "attempts_spent" && posInt(stop.attempts)) return { kind: "attempts_spent", text: CONFLICT_SENTENCES.attempts_spent(branch(stop), conflictFilesText(stop.files), stop.attempts) };
   if (stop.kind === "foreign_commits") return { kind: "foreign_commits", text: CONFLICT_SENTENCES.foreign_commits(branch(stop), conflictFilesText(stop.files)) };

@@ -143,6 +143,8 @@ export async function readMergeQueueState(client: Pick<PoolClient, 'query'>, acc
 
 export interface ConflictRoundView {
   running: true;
+  /** `renumber` for a round that renumbers the pull request's new numbered files; `conflict` for a merge-conflict fix round. */
+  kind: 'conflict' | 'renumber';
   attempt: number;
   of: number;
   base_ref: string | null;
@@ -171,7 +173,7 @@ export async function readConflictState(client: Pick<PoolClient, 'query'>, accou
   if (!e) return null;
   if (e.state === 'awaiting_work' && (e.work_kind === 'conflict' || e.work_kind === 'renumber')) {
     const r = (await client.query<{ round: number; base_ref: string | null }>(`SELECT round, base_ref FROM merge_conflict_rounds WHERE account_id = $1 AND entry_id = $2 ORDER BY round DESC LIMIT 1`, [accountId, e.id])).rows[0];
-    return r ? { conflict_round: { running: true, attempt: r.round, of, base_ref: r.base_ref } } : null;
+    return r ? { conflict_round: { running: true, kind: e.work_kind === 'renumber' ? 'renumber' : 'conflict', attempt: r.round, of, base_ref: r.base_ref } } : null;
   }
   if (e.state !== 'stopped' || e.reason !== 'merge_conflict') return null;
   const ev = (
