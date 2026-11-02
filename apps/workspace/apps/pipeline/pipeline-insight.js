@@ -227,13 +227,13 @@ export function reasonWord(code, queueWait) {
 }
 
 /** One recorded run action as a row of text, or null when it carries nothing to say. Recorded fields only. */
-export function stepView(step) {
+export function stepView(step, queueWait) {
   if (!step || typeof step.kind !== "string") return null;
   const parts = [KIND_WORDS[step.kind] || plainCode(step.kind), STATE_WORDS[step.state] || plainCode(step.state)];
   if (step.result) parts.push(RESULT_WORDS[step.result] || plainCode(step.result));
   if (step.code) parts.push("reason: " + plainCode(step.code));
   const stacked = stackedWords(step.reasons);
-  const reasons = stacked.codes.map((c) => (c === "stacked_on_open_pr" && stacked.sentence ? stacked.sentence : reasonWord(c)));
+  const reasons = stacked.codes.map((c) => (c === "stacked_on_open_pr" && stacked.sentence ? stacked.sentence : reasonWord(c, queueWait)));
   return { at: step.at, text: parts.join(" · "), reasons };
 }
 
@@ -670,14 +670,28 @@ export function orderedResourceSentence(fields) {
   return `${f.resource} ${f.key} must come after ${f.branch}'s latest (${f.mainKey}).`;
 }
 
+/** The place of the newest gate answer "a person decides" among the steps (oldest first), or -1 when there is none. */
+function newestGateIndex(steps) {
+  for (let i = steps.length - 1; i >= 0; i--) if (isObj(steps[i]) && steps[i].result === "ready_human_merges") return i;
+  return -1;
+}
+
 /** The reasons of the newest gate answer "a person decides" among the steps, or null when no step carries one. */
 function newestGateReasons(data) {
   const steps = Array.isArray(data.steps) ? data.steps : [];
-  for (let i = steps.length - 1; i >= 0; i--) {
-    const s = steps[i];
-    if (isObj(s) && s.result === "ready_human_merges") return Array.isArray(s.reasons) ? s.reasons.filter((r) => typeof r === "string") : [];
-  }
-  return null;
+  const i = newestGateIndex(steps);
+  if (i < 0) return null;
+  return Array.isArray(steps[i].reasons) ? steps[i].reasons.filter((r) => typeof r === "string") : [];
+}
+
+/**
+ * D#519 MQ5-c2: the queue chip, from the item's `queue_wait.ahead` on each read (never stored). First in line has nobody ahead, so it reads with the code's own fixed sentence
+ * and never "0 ahead". Null when the item has no waiting entry or `ahead` is not a count.
+ */
+export function queueChip(data) {
+  const q = data && isObj(data.queue_wait) ? data.queue_wait : null;
+  if (q === null || !Number.isInteger(q.ahead) || q.ahead < 0) return null;
+  return { ahead: q.ahead, text: q.ahead === 0 ? BLOCKING_SENTENCES.merge_queue_waiting + "." : FIELD_SENTENCES.merge_queue_waiting(q) };
 }
 
 /**
@@ -874,6 +888,7 @@ export function buildInsight(data, timeZone) {
     childLaunch: childLaunchLine(data),
     banner: readyBanner(data),
     queueLine: queueLine(data, timeZone),
+    queueChip: queueChip(data),
     // C25: a stacked child in a conflict round gets its own line ("Conflict after #n merged"); the general running line is not drawn beside it.
     conflictLine: stackedLine(data)?.kind === "conflict" && conflictLine(data)?.kind === "running" ? null : conflictLine(data),
     stackedLine: stackedLine(data),
@@ -889,7 +904,14 @@ export function buildInsight(data, timeZone) {
     commentCount: Array.isArray(data.comments) ? data.comments.length : 0,
     commentsTruncated: data.comments_truncated === true,
     spec: data.spec && typeof data.spec.body === "string" ? { version: data.spec.version, body: data.spec.body } : null,
-    steps: (Array.isArray(data.steps) ? data.steps : []).map(stepView).filter(Boolean),
+    // The field-filled sentences belong to the item's newest gate answer only; an older step keeps the fixed sentence.
+    steps: (Array.isArray(data.steps) ? data.steps : [])
+      .map((st, i, all) => {
+        const newest = i === newestGateIndex(all);
+        const v = stepView(st, newest ? data.queue_wait : undefined);
+        return v && newest ? { ...v, newest } : v;
+      })
+      .filter(Boolean),
   };
 }
 
@@ -1030,8 +1052,9 @@ export function createInsightPanel(deps) {
     );
   }
 
-  function banner(b) {
-    if (b.blocked) return h("div", { class: "pl-ins-ready", "data-testid": "pl-ready-blocked", role: "status" }, h("strong", null, b.title + ". "), b.detail);
+  function banner(b, queueText) {
+    // When the queue status carries this very sentence it is the only status; the banner shows the same words without a role.
+    if (b.blocked) return h("div", { class: "pl-ins-ready", "data-testid": "pl-ready-blocked", role: queueText !== "" && b.detail === queueText ? null : "status" },h("strong", null, b.title + ". "), b.detail);
     if (b.queued) {
       return h(
         "div",
@@ -1162,12 +1185,20 @@ export function createInsightPanel(deps) {
     // on a refresh is announced; only its text is rewritten. The rest of the section is rebuilt as before.
     if (!skeleton) {
       const live = h("div", { class: "pl-ins-flags", "data-testid": "pl-flags", role: "status", "aria-live": "polite" });
+      // The queue status is the one live region for the queue-waiting sentence (the chip, banner and step row show the same words without a role). It is created once and its text is only
+      // rewritten when the sentence changes, so a count change is announced and an unrelated redraw is not.
+      const queueLive = h("p", { class: "pl-sr", role: "status", "data-testid": "pl-queue-live" });
       const rest = h("div", { class: "pl-ins-rest" });
-      const body = h("div", { class: "pl-ins-body" }, h("h3", { class: "pl-detail-sub" }, "What's happening"), live, rest);
-      skeleton = { body, live, rest };
+      const body = h("div", { class: "pl-ins-body" }, h("h3", { class: "pl-detail-sub" }, "What's happening"), live, queueLive, rest);
+      skeleton = { body, live, queueLive, queueShown: "", rest };
       el.replaceChildren(body);
     }
     skeleton.live.replaceChildren(...flagNodes(m.flags));
+    const queueText = m.queueChip ? m.queueChip.text : "";
+    if (skeleton.queueShown !== queueText) {
+      skeleton.queueShown = queueText;
+      skeleton.queueLive.replaceChildren(...(queueText === "" ? [] : [h("span", null, queueText)]));
+    }
     // h() skips null children; the native replaceChildren would print "null" for one.
     const restKids = [
       state.stale ? h("p", { class: "pl-muted", role: "status", "data-testid": "pl-live-state" }, SENTENCES.stale) : [],
@@ -1176,8 +1207,9 @@ export function createInsightPanel(deps) {
       m.startDecision ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-start-decision", "data-state": m.startDecision.state }, m.startDecision.text) : [],
       m.childLaunch && m.childLaunch.text !== "" ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-child-launch", "data-offers": m.childLaunch.offers || "" }, m.childLaunch.text) : [],
       m.childLaunch && m.childLaunch.warning !== "" ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-child-launch-warning" }, m.childLaunch.warning) : [],
-      m.banner ? banner(m.banner) : [],
+      m.banner ? banner(m.banner, queueText) : [],
       m.queueLine ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-queue-line", "data-kind": m.queueLine.kind }, m.queueLine.text) : [],
+      m.queueChip ? h("p", { class: "pl-ins-notice", "data-testid": "pl-queue-chip" }, m.queueChip.text) : [],
       m.queueLine && m.queueLine.hint ? h("p", { class: "pl-ins-notice", "data-testid": "pl-queue-hint" }, m.queueLine.hint) : [],
       m.conflictLine ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-conflict-line", "data-kind": m.conflictLine.kind }, m.conflictLine.text) : [],
       m.stackedLine ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-stacked-line", "data-kind": m.stackedLine.kind }, m.stackedLine.text) : [],
@@ -1208,7 +1240,7 @@ export function createInsightPanel(deps) {
                   { "data-testid": "pl-step" },
                   s.at ? [timeNode(s.at, true), " "] : [],
                   s.text,
-                  s.reasons.length ? h("span", { class: "pl-muted" }, " — " + s.reasons.join("; ")) : []
+                  s.reasons.length ? h("span", { class: "pl-muted" }," — " + s.reasons.join("; ")) : []
                 )
               )
             ),

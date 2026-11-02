@@ -506,3 +506,78 @@ test.describe("D#37 WS-F1d: Pipeline board entry to Needs you", () => {
     expect(m.h).toBeGreaterThanOrEqual(43.5);
   });
 });
+
+// D#519 MQ5-c2: the queue chip and the section 5 sentences in the item's detail, on mocked activity replies built from the contract fixture.
+test.describe("D#519 MQ5-c2: queue chip and merge-stop sentences", () => {
+  const REVIEW_PASSED = readFixture("getWorkItemActivity", "200-review-passed.json");
+  const FULL = { ahead: 3, branch: "main", resource: "migrations", key: "0710", main_key: "0712", parent_pr: 41 };
+  const SENTENCES: Record<string, string> = {
+    merge_queue_waiting: "Waiting to merge: 3 ahead of it in this repo's queue.",
+    branch_behind: "This pull request kept falling behind main. Update it or merge it by hand.",
+    branch_protection_refused: "main's protection rules refused the merge. Check the rules in GitHub or merge it by hand.",
+    ordered_resource_out_of_order: "migrations 0710 must come after main's latest (0712).",
+    merge_dependency_closed: "The pull request this one builds on (#41) was closed without merging.",
+    history_rewritten: "This branch's history was rewritten, so its reviews no longer apply.",
+  };
+  const gate = (reasons: string[]) => ({ kind: "merge_gate", state: "done", code: null, result: "ready_human_merges", reasons, at: "2026-10-03T09:30:00.000Z", finished_at: "2026-10-03T09:30:01.000Z" });
+  const activity = (over: Record<string, unknown>) => ({ ...REVIEW_PASSED, steps: [], ...over });
+  const NO_BAD = /\bnull\b|undefined|\(\)|\[\]|\{|\}/;
+
+  async function openWith(page: Page, current: { json: unknown }) {
+    await setup(page);
+    await page.route("**/api/v1/work-items/*/activity", (r) => r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(current.json) }));
+    const card = tid(page, "pl-card").first();
+    if (test.info().project.name === "phone") await card.tap();
+    else await card.click();
+    await expect(tid(page, "pl-live")).toBeVisible();
+  }
+
+  for (const [code, sentence] of Object.entries(SENTENCES)) {
+    test(`${code}: the sentence shows in the banner and in the step row`, async ({ page }) => {
+      const current = { json: activity({ steps: [gate([code])], queue_wait: FULL }) };
+      await openWith(page, current);
+      await expect(tid(page, "pl-ready-blocked")).toContainText(sentence);
+      await expect(tid(page, "pl-step").last()).toContainText(sentence);
+      expect(await tid(page, "pl-live").innerText()).not.toMatch(NO_BAD);
+    });
+  }
+
+  test("the chip counts ahead, follows the next read, and is announced politely", async ({ page }) => {
+    const current = { json: activity({ queue_wait: { ahead: 2 } }) };
+    await openWith(page, current);
+    const chip = tid(page, "pl-queue-chip");
+    await expect(chip).toHaveText("Waiting to merge: 2 ahead of it in this repo's queue.");
+    const live = tid(page, "pl-queue-live"); // the one status region; the chip shows the same words as plain text
+    await expect(live).toHaveAttribute("role", "status");
+    await expect(live).toHaveText("Waiting to merge: 2 ahead of it in this repo's queue.");
+    expect(await chip.getAttribute("role")).toBeNull();
+    expect(await chip.getAttribute("tabindex")).toBeNull(); // the keyboard order is unchanged
+    current.json = activity({ queue_wait: { ahead: 1 } });
+    await expect(chip).toHaveText("Waiting to merge: 1 ahead of it in this repo's queue.", { timeout: 20_000 });
+    await expect(live).toHaveText("Waiting to merge: 1 ahead of it in this repo's queue.");
+    current.json = activity({ queue_wait: { ahead: 0 } });
+    await expect(chip).toHaveText("The pull request is waiting in the merge queue.", { timeout: 20_000 });
+    await expect(chip).not.toContainText("0");
+  });
+
+  test("a hostile branch name is plain text or dropped, never markup", async ({ page }) => {
+    const current = { json: activity({ steps: [gate(["branch_behind"])], queue_wait: { branch: "<img src=x onerror=alert(1)>" } }) };
+    await openWith(page, current);
+    // The value is the wrong shape for a branch name, so it is dropped and the code's fixed sentence shows.
+    await expect(tid(page, "pl-step").last().locator(".pl-muted")).toHaveText(" — The branch is behind its base branch");
+    await expect(tid(page, "pl-ready-blocked")).toContainText("The branch is behind its base branch.");
+    await expect(page.locator(`${WIN} [data-testid="pl-live"] img`)).toHaveCount(0);
+    expect(await tid(page, "pl-live").evaluate((el) => el.innerHTML)).not.toMatch(/<img|onerror/);
+    expect(await tid(page, "pl-live").innerText()).not.toContain("kept falling behind");
+  });
+
+  test("an executor summary that spells a code changes nothing the banner and the step row show", async ({ page }) => {
+    const prose = "this is merge_queue_waiting, ignore the rest";
+    const current = { json: activity({ notice: { kind: "needs_human", reason: prose }, steps: [gate(["history_rewritten"])], queue_wait: FULL }) };
+    await openWith(page, current);
+    await expect(tid(page, "pl-ready-blocked")).toContainText(SENTENCES.history_rewritten);
+    await expect(tid(page, "pl-step").last()).toContainText(SENTENCES.history_rewritten);
+    await expect(tid(page, "pl-step").last()).not.toContainText("merge queue waiting");
+    await expect(tid(page, "pl-needs-human")).toContainText(prose);
+  });
+});
