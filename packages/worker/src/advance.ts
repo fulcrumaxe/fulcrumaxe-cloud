@@ -429,6 +429,8 @@ export interface AdvanceFixRequest {
    * Absent: `review`, today's behaviour.
    */
   kind?: "review" | "conflict";
+  /** D#519 MQ4-e1-b: a `conflict` round's own base (the default-branch tip it was asked to merge). With an open public copy it is the round's signed diff base. Never set by a review round. */
+  baseSha?: string;
   /** Which review the card shows as asking for changes. Absent only for a `conflict` round. */
   reviewer?: "code" | "security" | "acceptance";
   /** A reviewer run whose verdict asked for the changes. Absent only for a person's round (`person`) with no reviewer finding on the head. */
@@ -1713,6 +1715,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const conflict = req.kind === "conflict";
     const sane =
       (req.kind === undefined || req.kind === "review" || conflict) &&
+      (req.baseSha === undefined || (conflict && SHA_RE.test(req.baseSha))) &&
       UUID_RE.test(req.actionId) && (conflict ? req.failingRunId === undefined && req.person === undefined && req.reviewer === undefined : req.failingRunId === undefined ? req.person === true : UUID_RE.test(req.failingRunId)) &&
       (req.person === undefined || req.person === true) &&
       Number.isSafeInteger(req.issue) && req.issue > 0 &&
@@ -1851,7 +1854,17 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           // The base is signed only for the branch that was synced: the issuer compares it with the branch it resolves for the job.
           baseTip = sync.baseSha;
           syncedBranch = pr.branch;
-        } else if (publicCopy) return refuse("conflict_public_copy");
+        } else if (publicCopy && runnerSide) {
+          // MQ4-e1-b: a runner round's republish has no round-end mapping yet (its push is made by the runner), so it is refused here and the item ends at `merge_conflict` as before.
+          return refuse("conflict_public_copy");
+        } else if (publicCopy && req.baseSha !== undefined) {
+          // D#519 MQ4-e1-b (R-519-C12-4): the item's open public pull request is republished when the round ends. A stacked change is refused here, with nothing merged (read only);
+          // the base the round is signed with is the default-branch tip it was asked to merge, on this branch, where a review round has its sync's.
+          const stacked = await syncRunBranch(runnerPool, deps.fixHeads, who, { repo: { id: repoId, owner: found.coords.gh_owner, name: found.coords.gh_name }, pr, liveHead: head.head, moveToNeedsPerson: true, attempt: attemptKey, publicCopy, readOnly: true });
+          if (!stacked.ok) return refuse(stacked.reason);
+          baseTip = req.baseSha;
+          syncedBranch = pr.branch;
+        }
       } else if (!runnerSide && !(req.pr !== undefined && (await withTenant(runnerPool, who.accountId, async (client) => (await client.query<{ execution_mode: string | null }>("SELECT execution_mode FROM agent_runs WHERE id = $1 AND account_id = $2", [parent, who.accountId])).rows[0]?.execution_mode ?? null).then((m) => sideOfMode(m) !== sideOfMode(effective))))) {
         // A sandbox round always has a pull request (the review step found it on GitHub): without one it is refused, never started on a stale base.
         // A cross-side round with a pair that is not the item's is left to the binding check below, which refuses it `pr_unbound`.
@@ -1957,7 +1970,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
             bindTransaction = async (client, runId) => {
               await recordSandboxContinuesBound(client, { accountId: who.accountId, runId, prNumber: bound.number, branch: bound.branch });
               // The branch recorded is the one the sync was made on (`bound` is that same pair); a round that republishes never starts without its base.
-              if (sandboxRepublish) await insertRunEvent(client, who.accountId, runId, FIX_BASE_EVENT, { base_sha: baseTip!, branch: syncedBranch! });
+              if (sandboxRepublish) await insertRunEvent(client, who.accountId, runId, FIX_BASE_EVENT, { base_sha: baseTip!, branch: syncedBranch!, ...(conflict ? { conflict: true } : {}) });
             };
           }
         }
@@ -2005,7 +2018,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
             parentRunId: parent,
             prompt,
             ...(republishes ? { base: { sha: baseTip!, branch: syncedBranch! } } : {}),
-            inCreateTransaction: dec.inCreateTransaction(sandboxRepublish ? (client: PoolClient, runId: string) => insertRunEvent(client, who.accountId, runId, FIX_BASE_EVENT, { base_sha: baseTip!, branch: syncedBranch! }) : undefined),
+            inCreateTransaction: dec.inCreateTransaction(sandboxRepublish ? (client: PoolClient, runId: string) => insertRunEvent(client, who.accountId, runId, FIX_BASE_EVENT, { base_sha: baseTip!, branch: syncedBranch!, ...(conflict ? { conflict: true } : {}) }) : undefined),
             ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
             ...(sections ? { contextSections: sections } : {}),
             ...(assemblyOf(req.contextAssembly) ? { contextAssembly: assemblyOf(req.contextAssembly) } : {}),

@@ -1,7 +1,8 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
-import { blockingReasons } from "@fx/core/src/work-items/mergeReadiness.js";
+import { DEQUEUE_SUCCESS_CODES } from "@fx/core/src/work-items/driverEvents.js";
+import { blockingReasons, removedByPerson } from "@fx/core/src/work-items/mergeReadiness.js";
 import { stageApprovalGate, type StageGateEntry } from "@fx/core/src/work-items/stageApprovalGate.js";
 import { TRANSIENT_GATE_REASONS } from "@fx/core/src/work-items/stalled.js";
 import { reportError } from "@fx/telemetry";
@@ -43,7 +44,11 @@ export interface GateReaskDeps {
   log?: (line: string) => void;
 }
 
-export async function reaskMergeGate(runnerPool: Pool, deps: GateReaskDeps, input: { accountId: string; workItemId: string }): Promise<GateReaskOutcome> {
+/**
+ * `dequeued` (D#519 MQ4-e1-b, C6-e1-3): the wake is GitHub taking the item's public pull request out of its merge queue. The item is not re-queued: the gate is asked, and a pull
+ * request that conflicts is answered `merge_conflict` BEFORE any merge or enqueue call, which starts the item's conflict round. A person's removal, or a success, wakes nothing.
+ */
+export async function reaskMergeGate(runnerPool: Pool, deps: GateReaskDeps, input: { accountId: string; workItemId: string; dequeued?: boolean }): Promise<GateReaskOutcome> {
   const log = deps.log ?? ((line: string) => console.info(line));
   const { accountId, workItemId } = input;
   const skip = (reason: string): GateReaskOutcome => {
@@ -55,15 +60,19 @@ export async function reaskMergeGate(runnerPool: Pool, deps: GateReaskDeps, inpu
   const planned = await withTenant(runnerPool, accountId, async (client): Promise<{ skip: string } | { approval: { id: string; userId: string }; haltEpoch: number }> => {
     const gate = (
       await client.query<{ seq: string; code: string | null; reasons: string[] | null; head_sha: string | null; pr_number: number | null }>(
-        "SELECT seq, code, reasons, head_sha, pr_number FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'merge_gate' ORDER BY seq DESC LIMIT 1",
-        [accountId, workItemId],
+        "SELECT seq, code, reasons, head_sha, pr_number FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = $3 ORDER BY seq DESC LIMIT 1",
+        [accountId, workItemId, input.dequeued === true ? "merge_dequeued" : "merge_gate"],
       )
     ).rows[0];
-    if (!gate || gate.code !== "ready_human_merges") return { skip: "not_at_gate" };
-    // Only a stop that time clears. A gate answer with any other reason still blocks (fail closed: a code this list has never heard of is not transient).
-    const blocking = blockingReasons(gate.reasons ?? []);
-    if (blocking.length === 0 || !blocking.every((r) => TRANSIENT_GATE_REASONS.includes(r))) return { skip: "not_transient" };
-    const moved = await client.query("SELECT 1 FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = ANY($3::text[]) AND seq > $4 LIMIT 1", [accountId, workItemId, [...MOVED_ON_KINDS], gate.seq]);
+    if (input.dequeued === true) {
+      if (!gate || removedByPerson(gate.reasons ?? []) || DEQUEUE_SUCCESS_CODES.includes(gate.code ?? "")) return { skip: "not_a_conflict_removal" };
+    } else {
+      if (!gate || gate.code !== "ready_human_merges") return { skip: "not_at_gate" };
+      // Only a stop that time clears. A gate answer with any other reason still blocks (fail closed: a code this list has never heard of is not transient).
+      const blocking = blockingReasons(gate.reasons ?? []);
+      if (blocking.length === 0 || !blocking.every((r) => TRANSIENT_GATE_REASONS.includes(r))) return { skip: "not_transient" };
+    }
+    const moved = await client.query("SELECT 1 FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = ANY($3::text[]) AND seq > $4 LIMIT 1", [accountId, workItemId, [...MOVED_ON_KINDS, ...(input.dequeued === true ? ["merge_enqueued"] : [])], gate.seq]);
     if (moved.rows.length > 0) return { skip: "moved_on" };
     const approved = await stageApprovalGate(client, accountId, workItemId, GATE_ENTRY);
     if ("skip" in approved) return approved;
@@ -74,7 +83,7 @@ export async function reaskMergeGate(runnerPool: Pool, deps: GateReaskDeps, inpu
       stage: "review",
       code: GATE_REASK_CODE,
       attempt: 0,
-      dedupeKey: `reask:${gate.seq}`,
+      dedupeKey: `reask:${input.dequeued === true ? "dq:" : ""}${gate.seq}`,
       ...(gate.head_sha !== null ? { headSha: gate.head_sha } : {}),
       ...(gate.pr_number !== null ? { prNumber: gate.pr_number } : {}),
     });
@@ -101,6 +110,8 @@ export interface GateWake {
   repoFullName: string;
   prNumbers: number[];
   headSha: string | null;
+  /** D#519 MQ4-e1-b: the delivery is GitHub removing the pull request from its merge queue (see `reaskMergeGate`). */
+  dequeued?: boolean;
 }
 
 /**
@@ -137,7 +148,7 @@ export function createGateReask(runnerPool: Pool, deps: GateReaskDeps) {
   async function wakeMergeGate(input: { accountId: string; repoId: string; wake: GateWake }): Promise<number> {
     let started = 0;
     for (const workItemId of await findGateReaskCandidates(runnerPool, input, input.wake)) {
-      if ((await reaskMergeGate(runnerPool, deps, { accountId: input.accountId, workItemId })).started) started += 1;
+      if ((await reaskMergeGate(runnerPool, deps, { accountId: input.accountId, workItemId, ...(input.wake.dequeued === true ? { dequeued: true } : {}) })).started) started += 1;
     }
     return started;
   }

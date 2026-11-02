@@ -394,4 +394,95 @@ describe("FIXROUND-BASE-SYNC-SANDBOX: the sandbox side gets the same base sync [
       expect(await fixBaseOf(started[0]!)).toEqual([{ base_sha: BASE, branch: t.branch }]);
     });
   });
+
+  // D#519 MQ4-e1-b (R-519-C12-4): a MERGE-CONFLICT round on an item whose public pull request is open is signed with the round's OWN base (the default-branch tip it was asked to merge).
+  describe("MQ4-e1-b: a conflict round on a public copy carries the round's base", () => {
+    const ROUND_BASE = "1".repeat(40);
+    const conflictReq = (t: { n: number; branch: string }, over: Record<string, unknown> = {}) => ({
+      kind: "conflict" as const, issue: t.n, headSha: ASKED, prompt: "merge main", round: 1, actionId: randomUUID(), baseSha: ROUND_BASE,
+      ...(t.branch === `fx/issue-${t.n}` ? { pr: { number: PR, branch: t.branch } } : {}), ...over,
+    });
+    const fixBaseOf = async (runId: string) => (await admin.query<{ payload: unknown }>("SELECT payload FROM run_events WHERE run_id = $1 AND kind = $2", [runId, FIX_BASE_EVENT])).rows.map((r) => r.payload);
+    // The real port's contract (packages/github branchSync.ts): a stacked change with a public copy is answered "stacked"; `readOnly` stops before the merge; anything else would merge.
+    const port = (merges: () => void, stacked = false) => vi.fn(async (i: { publicCopy?: boolean; readOnly?: boolean }): Promise<BranchSyncOutcome> => {
+      if (i.publicCopy === true && stacked) return { kind: "stacked", baseRef: "fx/parent" };
+      if (i.readOnly === true) return { kind: "up_to_date", baseSha: BASE, baseRef: "main", stacked };
+      merges();
+      return merged();
+    });
+
+    it("C12-e1b-2 (sandbox): the run's create transaction records the round's base, marked as a conflict round's, and the sync is only read: nothing is merged", async () => {
+      const t = await item("sandbox");
+      await publicCopy(t);
+      const merges = vi.fn();
+      const syncBase = port(merges);
+      const h = harness({ privateHead: async () => ASKED, syncBase });
+      const out = await h.module.advanceStartFix(who(t), conflictReq(t));
+      expect(out.ok).toBe(true);
+      expect(syncBase).toHaveBeenCalledWith({ repo: { id: t.a.repoId, owner: "acme", name: "widgets" }, branch: t.branch, prNumber: PR, publicCopy: true, readOnly: true });
+      expect(merges).not.toHaveBeenCalled();
+      // The signed base is the round's own, not the tip the read-only call happened to see.
+      expect(h.resumed[0]!.base).toEqual({ sha: ROUND_BASE, branch: t.branch });
+      expect(await fixBaseOf((out as { runId: string }).runId)).toEqual([{ base_sha: ROUND_BASE, branch: t.branch, conflict: true }]);
+    });
+
+    it("a runner round on a public copy is refused conflict_public_copy (its round end is not mapped yet): no run, nothing synced, and a runner round with no public copy is unchanged", async () => {
+      const t = await item("runner");
+      await publicCopy(t);
+      const syncBase = port(vi.fn());
+      const h = harness({ privateHead: async () => ASKED, syncBase });
+      const before = await runs(t.w);
+      expect(await h.module.advanceStartFix(who(t), conflictReq(t))).toEqual({ ok: false, reason: "conflict_public_copy" });
+      expect(h.resume).not.toHaveBeenCalled();
+      expect(syncBase).not.toHaveBeenCalled();
+      expect(await runs(t.w)).toBe(before);
+      const plain = await item("runner");
+      const hp = harness({ privateHead: async () => ASKED, syncBase: port(vi.fn()) });
+      expect((await hp.module.advanceStartFix(who(plain), conflictReq(plain))).ok).toBe(true);
+      expect(hp.resumed[0]!.base).toBeUndefined();
+    });
+
+    it("C12-e1b-2: a stacked change still refuses republish_stacked_unsupported before anything starts; a base from a review round's request is invalid", async () => {
+      const t = await item("sandbox");
+      await publicCopy(t);
+      const merges = vi.fn();
+      const h = harness({ privateHead: async () => ASKED, syncBase: port(merges, true) });
+      const before = await runs(t.w);
+      expect(await h.module.advanceStartFix(who(t), conflictReq(t))).toEqual({ ok: false, reason: "republish_stacked_unsupported" });
+      expect(merges).not.toHaveBeenCalled();
+      expect(h.resume).not.toHaveBeenCalled();
+      expect(await runs(t.w)).toBe(before);
+      expect(await h.module.advanceStartFix(who(t), { ...fixReq(t), baseSha: ROUND_BASE } as never)).toEqual({ ok: false, reason: "invalid_input" });
+      expect(await h.module.advanceStartFix(who(t), conflictReq(t, { baseSha: "not-a-sha" }))).toEqual({ ok: false, reason: "invalid_input" });
+    });
+
+    it("C12-e1b-2: a public copy with no base in the request is refused republish_base_missing (never started on a guess); a copy a person took over republishes nothing", async () => {
+      const t = await item("sandbox");
+      await publicCopy(t);
+      const h = harness({ privateHead: async () => ASKED, syncBase: port(vi.fn()) });
+      expect(await h.module.advanceStartFix(who(t), conflictReq(t, { baseSha: undefined }))).toEqual({ ok: false, reason: "republish_base_missing" });
+      expect(h.resume).not.toHaveBeenCalled();
+      const p = await item("sandbox");
+      await publicCopy(p, { managed: true });
+      const syncBase = port(vi.fn());
+      const hp = harness({ privateHead: async () => ASKED, syncBase });
+      const out = await hp.module.advanceStartFix(who(p), conflictReq(p));
+      expect(out.ok).toBe(true);
+      expect(syncBase).not.toHaveBeenCalled();
+      expect(hp.resumed[0]!.base).toBeUndefined();
+      expect(await fixBaseOf((out as { runId: string }).runId)).toEqual([]);
+    });
+
+    it("C12-e1b-3: a public branch that is not where the platform left it refuses a conflict round and a review round alike with public_branch_moved", async () => {
+      const heads = { privateHead: async () => ASKED, syncBase: port(vi.fn()), publicHead: async () => "9".repeat(40) };
+      const t = await item("sandbox");
+      await publicCopy(t);
+      expect(await harness(heads).module.advanceStartFix(who(t), conflictReq(t))).toEqual({ ok: false, reason: "public_branch_moved" });
+      const u = await item("sandbox");
+      await publicCopy(u);
+      const review = harness(heads);
+      expect(await review.module.advanceStartFix(who(u), fixReq(u))).toEqual({ ok: false, reason: "public_branch_moved" });
+      expect((await facts(u.w)).filter((f) => f.kind === "stopped").map((f) => f.code)).toEqual(["public_branch_moved"]);
+    });
+  });
 });

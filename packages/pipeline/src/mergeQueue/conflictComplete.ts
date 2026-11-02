@@ -31,6 +31,12 @@ export interface ConflictCompletionPorts<S extends RoundSubject = MergeQueueEntr
   onConflict?(entry: MergeQueueEntry): Promise<boolean>;
   /** D#519 MQ4-e1-a: for a work item with no queue entry, the start of the next round when its head conflicts again. */
   startEntryless?(subject: ConflictSubject): Promise<EntrylessStart>;
+  /**
+   * D#519 MQ4-e1-b: how the republish of the item's public pull request ended for this round's run (the platform's own record of the attempt, never the hook's word).
+   * `none`: this round republishes nothing. `pending`: the run succeeded and the republish has not finished. `branch_moved`: the lease failed (a person's commit is on the public branch).
+   * `history_rewritten`: the republish was not one commit on the public main tip read for the round. `done`: any other end (the item's own refusal record stands).
+   */
+  publicOutcome?(who: S, round: ConflictRound): Promise<"none" | "pending" | "done" | "branch_moved" | "history_rewritten" | "failed">;
 }
 
 export type ConflictCompletion =
@@ -90,6 +96,13 @@ export async function judgeConflictRound<S extends RoundSubject>(ports: Conflict
   const baseSha = await resolutionBase(ports, who, pr, round, head);
   if (baseSha === null) return { kind: "review", reason: "not_a_resolution", toSha: head };
   if (!ended) return stillRunning();
+  // A paired item's public copy was republished by the round's end (C11-e1-4b, 4c): a person's commit there, or a history that is not one commit on the main tip, stops the round.
+  const pub = await ports.publicOutcome?.(who, round);
+  if (pub === "pending") return stillRunning();
+  if (pub === "branch_moved") return { kind: "stop", reason: "merge_conflict", outcome: "foreign_commits" };
+  // Any other end (a scan refusal, an unreachable public repository, a crashed hook, a report GitHub did not confirm, a copy no longer open): the item is already with a person, so no delta review is paid for.
+  if (pub === "failed") return { kind: "stop", reason: "merge_conflict", outcome: "republish_failed" };
+  if (pub === "history_rewritten") return { kind: "stop", reason: "history_rewritten", outcome: "history_rewritten" };
 
   // Against the new tip: a branch that conflicts again is a new conflict (bounded by the item's own count), not a delta review.
   const fresh = await ports.github.getMergeability(pr, { gatedHeadSha: head });

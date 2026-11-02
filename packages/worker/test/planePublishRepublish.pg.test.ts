@@ -1,12 +1,17 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
 import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
 import { REPUBLISH_BRANCH_MOVED_SENTENCE, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
+import { generateKeyPairSync } from "node:crypto";
+import { createPlanePushApi, createHostedPlanePush, InstallationTokenCache } from "@fx/github";
+import { httpsRoundTrip, startStrictGithubServer, type LocalTlsServer } from "../../github/test/helpers/localTlsServer.js";
+import { ghError, type GhReply } from "../../github/test/helpers/strictGithub.js";
+import { mergeQueue } from "@fx/pipeline";
 import { createFakeSandbox, type AgentRuntime, type NetworkPolicyRule, type PlanePublishLine } from "@fx/runner";
 import { phaseLine } from "../../runner/src/planePublish/protocol.js";
 import { FIX_BASE_EVENT } from "../src/fixRoundBase.js";
@@ -83,14 +88,14 @@ describe("a sandbox fix round updates the open public pull request [pg]", () => 
   const inputOf = () => JSON.parse(fake.state.writtenFiles.filter((f) => f.path.endsWith("input.json")).pop()!.content) as Record<string, unknown>;
 
   /** A sandbox fix round that finished: it carries the base the cloud brought its branch up to date with (written in its create transaction), like `advanceStartFix` does. */
-  async function fixRound(over: { base?: boolean; branch?: string } = {}): Promise<string> {
+  async function fixRound(over: { base?: boolean; branch?: string; conflict?: boolean } = {}): Promise<string> {
     const id = randomUUID();
     await admin.query(
       `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id, head_sha) VALUES ($1, $2, $3, 'executor', 'production', 'succeeded', 'sandbox', $4, $5)`,
       [id, A.accountId, A.workItemId, A.repoId, BASE],
     );
     if (over.base !== false) {
-      await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, $3, $4)", [A.accountId, id, FIX_BASE_EVENT, JSON.stringify({ base_sha: FIX_BASE, branch: over.branch ?? "fx/issue-42" })]);
+      await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, $3, $4)", [A.accountId, id, FIX_BASE_EVENT, JSON.stringify({ base_sha: FIX_BASE, branch: over.branch ?? "fx/issue-42", ...(over.conflict ? { conflict: true } : {}) })]);
     }
     return id;
   }
@@ -268,6 +273,192 @@ describe("a sandbox fix round updates the open public pull request [pg]", () => 
       await unchanged();
       expect(await facts()).toEqual([{ kind: "escalated", code: "republish_failed" }]);
       expect(await stageOf()).toBe("needs_human");
+    });
+  });
+
+  // D#519 MQ4-e1-b (C11-e1-4a to 4c): a MERGE-CONFLICT round's republish. The platform's real `verifyPushed` runs over the real API client, over Node's TLS path, against a strict GitHub that keeps a
+  // commit graph: one-parent and main-history answers come from the graph. What it cannot fake: GitHub's own merge-base arithmetic (the compare answer is derived from the graph) and rate limits.
+  describe("MQ4-e1-b: the conflict round's republish is judged against the main tip the platform read", () => {
+    const OLD_MAIN = "3".repeat(40);
+    const OTHER = "4".repeat(40);
+    let server: LocalTlsServer;
+    let graph: { parents: Map<string, string[]>; refs: Map<string, string>; mainReads: string[] };
+    let key: string;
+    beforeAll(() => {
+      key = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey as unknown as string;
+    });
+    afterEach(async () => {
+      await server?.close();
+    });
+    const json = (status: number, body: unknown): GhReply => ({ status, headers: { "content-type": "application/json; charset=utf-8" }, body: JSON.stringify(body) });
+    const ancestors = (c: string): Set<string> => {
+      const seen = new Set<string>();
+      for (const todo = [c]; todo.length > 0; ) {
+        const x = todo.pop()!;
+        if (seen.has(x)) continue;
+        seen.add(x);
+        todo.push(...(graph.parents.get(x) ?? []));
+      }
+      return seen;
+    };
+    async function github(): Promise<PlanePublishDeps["hosted"]> {
+      const root = "/repos/acme/widgets-public";
+      server = await startStrictGithubServer((req): GhReply => {
+        if (req.method === "DELETE" && req.path === "/installation/token") return { status: 204, headers: {}, body: "" };
+        if (req.path === `${root}/installation`) return json(200, { id: 42, app_slug: "fulcrumaxe" });
+        const ref = req.path.startsWith(`${root}/git/ref/heads/`) ? decodeURIComponent(req.path.slice(`${root}/git/ref/heads/`.length)) : null;
+        if (ref === "main" && graph.mainReads.length > 0) return json(200, { object: { sha: graph.mainReads.length > 1 ? graph.mainReads.shift()! : graph.mainReads[0]! } });
+        if (ref !== null) return graph.refs.has(ref) ? json(200, { object: { sha: graph.refs.get(ref) } }) : ghError(404, "Not Found");
+        const commit = /\/git\/commits\/([0-9a-f]{40})$/.exec(req.path);
+        if (commit) return graph.parents.has(commit[1]!) ? json(200, { parents: graph.parents.get(commit[1]!)!.map((sha) => ({ sha })) }) : ghError(404, "Not Found");
+        const compare = /\/compare\/main\.\.\.([0-9a-f]{40})$/.exec(req.path);
+        if (compare) {
+          const main = graph.refs.get("main")!;
+          const c = compare[1]!;
+          return json(200, { status: c === main ? "identical" : ancestors(main).has(c) ? "behind" : ancestors(c).has(main) ? "ahead" : "diverged" });
+        }
+        return ghError(404, "Not Found");
+      });
+      const s = server;
+      const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input));
+        const r = await httpsRoundTrip(
+          { host: "api.github.com", port: s.port, path: url.pathname + url.search, method: init?.method ?? "GET", headers: init?.headers as Record<string, string>, ca: s.ca, servername: "api.github.com",
+            lookup: ((_h: string, o: { all?: boolean }, cb: (...a: unknown[]) => void) => (o?.all ? cb(null, [{ address: "127.0.0.1", family: 4 }]) : cb(null, "127.0.0.1", 4))) as never },
+          init?.body as string | undefined,
+        );
+        return new Response(r.status === 204 ? null : r.body, { status: r.status, headers: r.headers });
+      }) as typeof fetch;
+      const requester = async (p: { permissions?: Record<string, string>; repositories?: string[] }) => ({ token: "ghs_planepush1", expiresAt: new Date(Date.now() + 3_600_000).toISOString(), permissions: { metadata: "read", ...p.permissions }, repositories: p.repositories ?? [] });
+      const api = createPlanePushApi({ appCredentials: () => ({ appId: "12345", privateKeyPem: key, webhookSecret: "unused" }), requester: requester as never, cache: new InstallationTokenCache(), fetchImpl });
+      const real = createHostedPlanePush(api, { ownsInstallation: async (_a, id) => id === 42 });
+      return { verifyPushed: real.verifyPushed, verifyPullRequest: real.verifyPullRequest, openPullRequest: real.openPullRequest, branchHead: real.branchHead };
+    }
+    /** The graph after the hook pushed: main is `tip`; the platform's branch holds `head`, whose parents are `parents`. */
+    async function pushed(head: string, parents: string[], mainReads: string[] = [NEW_TIP]) {
+      const branch = (await planeRow()).branch as string;
+      graph = { parents: new Map([[OLD_MAIN, []], [NEW_TIP, [OLD_MAIN]], [OTHER, [OLD_MAIN]], [head, parents]]), refs: new Map([["main", NEW_TIP], [branch, head]]), mainReads };
+    }
+    const outcome = async (run: string) => mergeQueue.readRepublishOutcome(admin as never, { accountId: A.accountId, runId: run } as never);
+    const writes = () => server.seen.filter((r) => r.method !== "GET" && r.method !== "DELETE");
+
+    it("C11-e1-4a: one commit whose single parent is the main tip, on a branch at the recorded head: the stamp moves and the round's republish reads as done", async () => {
+      await pushed(NEW_HEAD, [NEW_TIP]);
+      const run = await fixRound({ conflict: true });
+      expect((await settle(run, { hosted: await github() })).publish).toEqual({ kind: "updated", attemptNo: 1 });
+      expect(await planeRow()).toMatchObject({ head_sha: NEW_HEAD, tip_sha: NEW_TIP, source_head: PRIVATE_HEAD });
+      expect(await outcome(run)).toBe("done");
+      expect(server.seen.every((r) => r.headers["user-agent"] === "fulcrumaxe-cloud")).toBe(true);
+    });
+
+    it("C11-e1-4a: main moving after the platform's first read still passes when the head sits on the tip read at the start or the one read at the end", async () => {
+      await pushed(NEW_HEAD, [NEW_TIP], [NEW_TIP, OTHER]);
+      graph.parents.set(OTHER, [NEW_TIP]);
+      graph.refs.set("main", OTHER);
+      expect((await settle(await fixRound({ conflict: true }), { hosted: await github() })).publish).toMatchObject({ kind: "updated" });
+    });
+
+    it("C11-e1-4a: the head may also sit on the tip read at the END (main moved forward while the publish ran, after the first read)", async () => {
+      await pushed(NEW_HEAD, [NEW_TIP], [OLD_MAIN, NEW_TIP]);
+      expect((await settle(await fixRound({ conflict: true }), { hosted: await github() })).publish).toMatchObject({ kind: "updated" });
+    });
+
+    it("an unreadable START read of the main tip refuses before any sandbox starts: republish_failed, no attempt, and the round reads it as a stop", async () => {
+      await pushed(NEW_HEAD, [NEW_TIP]);
+      const run = await fixRound({ conflict: true });
+      const hosted = { ...(await github()), branchHead: async () => null };
+      expect((await settle(run, { hosted })).publish).toEqual({ kind: "refused", code: "republish_failed", attemptNo: null });
+      expect(fake.state.created).toEqual([]);
+      expect(await attempts()).toEqual([]);
+      expect(await outcome(run)).toBe("failed");
+    });
+
+    it.each([
+      ["a scan refusal", () => say({ phase: "refused", code: "scan_refused", refusals: [{ kind: "identifier_hit", place: "src/a.ts:2", rule_key: "identifier-rule#1" }] })],
+      ["a hook that crashed", () => ({ exitCode: 1, stdout: "" })],
+      ["a report GitHub does not confirm (a first-push line)", () => say({ phase: "pr_opened", head_sha: NEW_HEAD, tip_sha: NEW_TIP, pr_number: 11 })],
+    ])("%s: the round reads a stop (failed), never done, so no delta review is paid for", async (_label, hook) => {
+      await pushed(NEW_HEAD, [NEW_TIP]);
+      output = hook;
+      const run = await fixRound({ conflict: true });
+      expect((await settle(run, { hosted: await github() })).publish).toMatchObject({ kind: "refused", code: "republish_failed" });
+      expect(await outcome(run)).toBe("failed");
+    });
+
+    it("a refusal recorded with no attempt row (identity missing) reads as the same stop, not pending", async () => {
+      identityMissing = true;
+      const run = await fixRound({ conflict: true });
+      expect(await outcome(run)).toBe("pending");
+      expect((await settle(run, { hosted: await github() })).publish).toEqual({ kind: "refused", code: "republish_failed", attemptNo: null });
+      expect(await attempts()).toEqual([]);
+      expect(await outcome(run)).toBe("failed");
+    });
+
+    it("an EARLIER run's recorded refusal on the same item is not this round's: the current round still reads pending, and an old no_change does not read done", async () => {
+      identityMissing = true;
+      const older = await fixRound({ conflict: true });
+      const old = await fixRound({ conflict: true });
+      expect((await settle(old, { hosted: await github() })).publish).toMatchObject({ kind: "refused", attemptNo: null });
+      await admin.query(
+        `INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'escalated', 'republish_no_change', 'republish_no_change:' || left(encode(sha256(convert_to($3::text, 'UTF8')), 'hex'), 32))`,
+        [A.accountId, A.workItemId, older],
+      );
+      identityMissing = false;
+      const current = await fixRound({ conflict: true });
+      expect(await outcome(old)).toBe("failed");
+      expect(await outcome(older)).toBe("done");
+      expect(await outcome(current)).toBe("pending");
+    });
+
+    it("no attempt and the copy changed under the round: taken over reads branch_moved, closed or merged reads failed, and an update in flight still reads pending", async () => {
+      const run = await fixRound({ conflict: true });
+      expect(await outcome(run)).toBe("pending");
+      await admin.query("UPDATE plane_pushes SET state = 'updating' WHERE work_item_id = $1", [A.workItemId]);
+      expect(await outcome(run)).toBe("pending");
+      await admin.query("UPDATE plane_pushes SET state = 'pr_closed' WHERE work_item_id = $1", [A.workItemId]);
+      expect(await outcome(run)).toBe("failed");
+      await admin.query("UPDATE plane_pushes SET state = 'pr_opened', managed_by_person_at = now() WHERE work_item_id = $1", [A.workItemId]);
+      expect(await outcome(run)).toBe("branch_moved");
+    });
+
+    it.each([
+      ["two parents", NEW_HEAD, [NEW_TIP, OTHER]],
+      ["a parent that is in main's history but not its tip", NEW_HEAD, [OLD_MAIN]],
+      ["a parent that is not in main's history", NEW_HEAD, [OTHER]],
+    ])("C11-e1-4c: %s ends history_rewritten: no stamp moves, the item is in Needs a person, and the round reads it", async (_label, head, parents) => {
+      await pushed(head, parents);
+      output = () => say({ phase: "updated", head_sha: head, tip_sha: parents[0]! });
+      const run = await fixRound({ conflict: true });
+      expect((await settle(run, { hosted: await github() })).publish).toMatchObject({ kind: "refused", code: "republish_failed" });
+      expect(await planeRow()).toMatchObject({ head_sha: STAMP, tip_sha: TIP });
+      expect(await attempts()).toEqual([expect.objectContaining({ outcome: "history_rewritten" })]);
+      expect(await outcome(run)).toBe("history_rewritten");
+      expect(await stageOf()).toBe("needs_human");
+      expect(writes()).toEqual([]);
+    });
+
+    it("C12-e1b-3: the same older-main parent on a REVIEW round (no conflict mark) is judged as before: the hook's tip is believed, the stamp moves", async () => {
+      await pushed(NEW_HEAD, [OLD_MAIN]);
+      output = () => say({ phase: "updated", head_sha: NEW_HEAD, tip_sha: OLD_MAIN });
+      expect((await settle(await fixRound(), { hosted: await github() })).publish).toMatchObject({ kind: "updated" });
+      expect(await outcome(await fixRound())).toBe("none");
+    });
+
+    it("C11-e1-4b: the hook's lease refusal (a person's commit on the public branch) republishes nothing, moves no public ref, and the round reads it as branch_moved", async () => {
+      await pushed(OTHER, [OLD_MAIN]);
+      output = () => say({ phase: "refused", code: "public_branch_moved" });
+      const run = await fixRound({ conflict: true });
+      expect((await settle(run, { hosted: await github() })).publish).toEqual({ kind: "refused", code: "republish_branch_moved", attemptNo: 1 });
+      expect(await planeRow()).toMatchObject({ head_sha: STAMP, tip_sha: TIP });
+      expect(await outcome(run)).toBe("branch_moved");
+      expect(writes()).toEqual([]);
+      expect([...graph.refs.values()]).toEqual([NEW_TIP, OTHER]);
+    });
+
+    it("the round reads pending while the republish has not finished, and none when the run signed no conflict base", async () => {
+      const run = await fixRound({ conflict: true });
+      expect(await outcome(run)).toBe("pending");
+      expect(await outcome(await fixRound())).toBe("none");
     });
   });
 });

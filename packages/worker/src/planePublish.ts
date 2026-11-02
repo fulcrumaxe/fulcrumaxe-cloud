@@ -113,7 +113,7 @@ interface Facts {
   stamp: string | null;
   /** The work item's stage now: a pull request closed or merged on GitHub leaves the push row at `pr_opened`, and it is the item that records it. */
   itemStage: string;
-  fixBase: { sha: string; branch: string } | null;
+  fixBase: { sha: string; branch: string; conflict: boolean } | null;
   updateAttempts: number;
   pairing: { codeRepo: string; overlayGlobs: string[]; identifierRulesPath: string | null; planDataRulesPath: string | null; prFooter: string | null } | null;
 }
@@ -176,7 +176,7 @@ async function readFacts(client: PoolClient, accountId: string, which: { runId: 
   // The base the cloud wrote when it started a sandbox fix round that must update the public pull request (a malformed one reads as none: the round then publishes nothing).
   const { rows: bases } = await client.query<{ payload: { base_sha?: unknown; branch?: unknown } | null }>("SELECT payload FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 ORDER BY seq DESC LIMIT 1", [accountId, r.run_id, FIX_BASE_EVENT]);
   const b = bases[0]?.payload;
-  const fixBase = b && typeof b.base_sha === "string" && SHA.test(b.base_sha) && typeof b.branch === "string" && UPDATE_BRANCH.test(b.branch) && !b.branch.includes("..") ? { sha: b.base_sha, branch: b.branch } : null;
+  const fixBase = b && typeof b.base_sha === "string" && SHA.test(b.base_sha) && typeof b.branch === "string" && UPDATE_BRANCH.test(b.branch) && !b.branch.includes("..") ? { sha: b.base_sha, branch: b.branch, conflict: (b as { conflict?: unknown }).conflict === true } : null;
   const { rows: updates } = await client.query<{ n: number }>(
     `SELECT count(*)::int AS n FROM plane_push_attempts a JOIN agent_runs pr ON pr.account_id = a.account_id AND pr.id = a.run_id
       WHERE a.account_id = $1 AND a.plane_push_id = $2 AND a.kind = 'fix_round' AND pr.parent_run_id = $3`,
@@ -454,13 +454,16 @@ function logPublishRefused(workItemId: string, code: string, failureClass?: stri
   console.info(JSON.stringify({ event: "plane.publish_refused", work_item_id: workItemId, code, ...(cls === undefined ? {} : { class: cls }) }));
 }
 
+/** The attempt label of a conflict round's republish that sat on the wrong parent or was rejected by the history check (C11-e1-4c); the conflict round's end reads it. */
+export const HISTORY_REWRITTEN = "history_rewritten";
+
 const REFUSED = (code: string, refusals?: PlanePublishLine["refusals"]): { outcome: VerifiedOutcome; label: string } => ({ outcome: { state: "refused", code, ...(refusals ? { refusals } : {}) }, label: code });
 
 /** What an update attempt ends with: the stamp moves (`updated`), or the item goes to a person with the code the round's refusal is recorded under. */
 type UpdateEnd = { kind: "updated"; headSha: string; tipSha: string } | { kind: "refused"; code: string; label: string; failureClass?: string };
 
 /** The hook's terminal line for an UPDATE, believed only after GitHub confirms it (the same read of the branch as a first push). Anything doubtful is a failed update. */
-async function verifyUpdate(deps: PlanePublishDeps, accountId: string, facts: Facts, line: PlanePublishLine): Promise<UpdateEnd> {
+async function verifyUpdate(deps: PlanePublishDeps, accountId: string, facts: Facts, line: PlanePublishLine, roundTip: string | null = null): Promise<UpdateEnd> {
   const failed = (label: string): UpdateEnd => ({ kind: "refused", code: REPUBLISH_FAILED, label, ...(label === "private_read_failed" ? { failureClass: line.failure_class ?? "other" } : {}) });
   switch (line.phase) {
     case "no_change":
@@ -470,10 +473,14 @@ async function verifyUpdate(deps: PlanePublishDeps, accountId: string, facts: Fa
     case "updated": {
       if (line.head_sha === undefined || line.tip_sha === undefined || (line.branch !== undefined && line.branch !== facts.branch)) return failed(PUBLISH_CODES.reportMismatch);
       try {
-        // The branch is the push row's, whatever the line says.
+        // D#519 MQ4-e1-b (C11-e1-4c): a conflict round's republish must sit on the public main tip the PLATFORM read (before the sandbox ran, or now), not on the tip the hook reports;
+        // anything else, or a head `verifyPushed` rejects, is a rewritten history. A review round is judged as before.
+        const conflict = facts.fixBase?.conflict === true;
+        const tipNow = conflict ? ((await deps.hosted.branchHead?.({ accountId, codeRepo: facts.codeRepo, branch: "main" })) ?? null) : null;
+        if (conflict && line.tip_sha !== roundTip && line.tip_sha !== tipNow) return failed(HISTORY_REWRITTEN);
         return (await deps.hosted.verifyPushed({ accountId, codeRepo: facts.codeRepo, branch: facts.branch, headSha: line.head_sha, tipSha: line.tip_sha }))
           ? { kind: "updated", headSha: line.head_sha, tipSha: line.tip_sha }
-          : failed(PUBLISH_CODES.reportMismatch);
+          : failed(conflict ? HISTORY_REWRITTEN : PUBLISH_CODES.reportMismatch);
       } catch {
         // fx-swallow-ok: GitHub could not be asked; nothing is stored from the line and the item goes to a person
         return failed("public_unavailable");
@@ -515,16 +522,18 @@ async function republish(deps: PlanePublishDeps, accountId: string, facts: Facts
   let policy: NetworkPolicyRule[];
   let head: string | null;
   let defaultTip: string | null;
+  let roundTip: string | null = null;
   try {
     policy = await deps.networkPolicy();
     head = await deps.privateHead({ repo: facts.repo, branch: fixBase.branch });
     // The trusted private default tip, read by the platform as for a first push: the pairing's rules are read there, and the rule-file guard runs from merge-base(base, tip) to the head.
     defaultTip = await deps.privateDefaultHead({ repo: facts.repo });
+    if (fixBase.conflict) roundTip = (await deps.hosted.branchHead?.({ accountId, codeRepo: facts.codeRepo, branch: "main" })) ?? null;
   } catch {
     // fx-swallow-ok: the proxy host or GitHub could not be used; nothing was started, the item shows the fixed failure sentence
     return stopWith(REPUBLISH_FAILED);
   }
-  if (head === null || defaultTip === null || !/^[0-9a-f]{40}$/.test(defaultTip)) return stopWith(REPUBLISH_FAILED);
+  if (head === null || defaultTip === null || !/^[0-9a-f]{40}$/.test(defaultTip) || (fixBase.conflict && roundTip === null)) return stopWith(REPUBLISH_FAILED);
 
   const attemptId = randomUUID();
   const name = sandboxNameFor({ role: PLANE_PUBLISH_ROLE, runId: attemptId, attemptId });
@@ -596,7 +605,7 @@ async function republish(deps: PlanePublishDeps, accountId: string, facts: Facts
     } else {
       // The pairing is hook INPUT: re-read now, and trust nothing from the hook if it moved.
       const after = await withTenant(deps.pool, accountId, (c) => readFacts(c, accountId, { runId: facts.runId }));
-      end = after?.pairing && digestOf(after.pairing) === givenDigest ? await verifyUpdate(deps, accountId, facts, run.terminal) : { kind: "refused", code: REPUBLISH_FAILED, label: "pairing_changed" };
+      end = after?.pairing && digestOf(after.pairing) === givenDigest ? await verifyUpdate(deps, accountId, facts, run.terminal, roundTip) : { kind: "refused", code: REPUBLISH_FAILED, label: "pairing_changed" };
     }
   } catch {
     // fx-swallow-ok: the sandbox, the write or GitHub failed in a way the hook's output cannot explain; the item shows the fixed failure sentence

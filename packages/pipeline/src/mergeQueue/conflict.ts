@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { PUBLIC_BRANCH_MOVED } from "@fx/core/src/repos/planePushRecord.js";
 import { recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
 import type { CommitInfo, CommitReaderPort, ConflictReaderPort, DefaultBranchReaderPort } from "../build/githubMergePort.js";
 import type { PullRequestRef } from "../build/types.js";
@@ -282,6 +283,9 @@ export async function startEntrylessConflict(ports: ConflictPorts<ConflictSubjec
     if (!(err instanceof Undo)) throw err;
     if (CAPACITY_WAIT_REASONS.includes(err.refusal)) return { outcome: "waiting" };
     if (err.refusal === REFUSED_SPEND) return stop(REFUSED_SPEND, REFUSED_SPEND);
+    // MQ4-e1-b (C11-e1-4b): a public branch that is no longer where the platform left it holds a person's commit: the foreign-commits stop, with the files, in this path only
+    // (a review round keeps `public_branch_moved`). Nothing was published and no public ref moved.
+    if (err.refusal === PUBLIC_BRANCH_MOVED) return stop("foreign_commits", "merge_conflict", { baseRef: decision.baseRef, conflictFiles: decision.files });
     return stop("round_not_started", "merge_conflict", { baseRef: decision.baseRef });
   }
 }

@@ -145,6 +145,30 @@ describe("branch sync: stacked pull requests (R2-c0)", () => {
   });
 });
 
+describe("branch sync: read only (D#519 MQ4-e1-b)", () => {
+  const readOnly = (t: ReturnType<typeof setup>) => t.port.sync({ repo: REPO, branch: BRANCH, prNumber: 12, publicCopy: true, readOnly: true });
+
+  it("a change on the default branch answers with the base's tip and writes nothing: the pull request and the ref are read, POST /merges is never sent, the branch is unchanged", async () => {
+    const w = world();
+    const t = setup(w);
+    expect(await readOnly(t)).toEqual({ kind: "up_to_date", baseSha: hex("3"), baseRef: "main", stacked: false });
+    expect(t.log).toEqual([`GET /repos/acme/widgets/pulls/12`, `GET /repos/acme/widgets/git/ref/heads/main`, `DELETE /installation/token`]);
+    expect(t.bodies).toEqual([]);
+    expect(w.refs.get(BRANCH)).toBe(hex("2"));
+  });
+
+  it("a stacked change with a public copy is still refused first, and its base is not read", async () => {
+    const w = world();
+    w.parents.set(hex("4"), [hex("1")]);
+    w.refs.set("fx/parent", hex("4"));
+    w.pull.baseRef = "fx/parent";
+    const t = setup(w);
+    expect(await readOnly(t)).toEqual({ kind: "stacked", baseRef: "fx/parent" });
+    expect(t.log).toEqual([`GET /repos/acme/widgets/pulls/12`, `DELETE /installation/token`]);
+    expect(t.bodies).toEqual([]);
+  });
+});
+
 describe("branch sync: the merges call and what comes back", () => {
   it("201: main moved, no conflict: one merge commit whose parents are the branch tip and the base tip; the branch moved to it", async () => {
     const w = world();

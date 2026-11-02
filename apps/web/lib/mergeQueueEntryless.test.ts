@@ -108,10 +108,17 @@ describe("readEntrylessSubject", () => {
     expect(h.ended).toEqual([]);
   });
 
-  it("an item with a public copy is not this path's, whether or not the pull request is open", async () => {
-    h.publicCopy = { paired: true };
-    h.pr = { ok: false, reason: "no_open_pr" };
-    expect(await readEntrylessSubject(base, "acct", "item", true)).toEqual({ reason: "conflict_public_copy" });
+  it("C12-e1b-2: a paired item is this path's only when its public pull request is open and the platform's own; no public pull request, a copy a person took over, or one mid-update is refused conflict_public_copy", async () => {
+    h.pr = { ok: true, number: 7, headSha: "a".repeat(40) } as never;
+    const copy = (over: Record<string, unknown> = {}) => ({ paired: true, pr: { owner: "o", name: "n", number: 9, branch: "fx/p-1", stampedHead: "b".repeat(40), pushState: "pr_opened", sourceHead: null, overlayGlobs: [], managedByPerson: false, ...over } });
+    for (const refused of [{ paired: true, pr: null }, copy({ managedByPerson: true }), copy({ pushState: "updating" })]) {
+      h.publicCopy = refused;
+      expect(await readEntrylessSubject(base, "acct", "item")).toEqual({ reason: "conflict_public_copy" });
+      // An open round is followed to its end whatever became of the copy: the end reads the republish and stops it, so the wait and the sweep never strand it.
+      expect(await readEntrylessSubject(base, "acct", "item", true)).toMatchObject({ id: "item", entryId: null, prNumber: 7 });
+    }
+    h.publicCopy = copy();
+    expect(await readEntrylessSubject(base, "acct", "item")).toMatchObject({ id: "item", entryId: null, prNumber: 7 });
   });
 });
 

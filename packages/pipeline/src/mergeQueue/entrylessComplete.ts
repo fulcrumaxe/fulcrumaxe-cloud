@@ -47,7 +47,7 @@ export async function completeEntrylessRound(ports: ConflictCompletionPorts<Conf
       case "stop":
         await cancel();
         await finish(v.outcome);
-        await recordStop(ports, who, v.outcome, who.headSha, v.reason);
+        await recordStop(ports, who, v.outcome, who.headSha, v.reason, v.outcome === "foreign_commits" ? { baseRef: round.baseRef, conflictFiles: round.conflictFiles } : undefined);
         return { outcome: "stopped", reason: v.reason };
       case "waiting":
         return { outcome: "waiting" };

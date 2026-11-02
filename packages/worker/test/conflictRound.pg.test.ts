@@ -222,7 +222,7 @@ describe("advance: the conflict fix-round kind [pg]", { timeout: 60_000 }, () =>
     expect((await events(t.id)).map((e) => e.kind)).toEqual([]);
   });
 
-  it("a conflict round on an item with a public pull request is refused conflict_public_copy: no run, no stage move, nothing recorded", async () => {
+  it("a conflict round on an item with a public pull request but no base in the request is refused republish_base_missing: no run, nothing merged (MQ4-e1-b carries the base; see fixRoundBaseSandbox)", async () => {
     const a = await seedAccount(admin, randomUUID());
     const t = await item(a);
     // The record of what the platform pushed to the public repo for the item, with no person having taken it over.
@@ -233,12 +233,9 @@ describe("advance: the conflict fix-round kind [pg]", { timeout: 60_000 }, () =>
       [a.accountId, t.id, a.repoId, "f".repeat(64), "d".repeat(40), "e".repeat(40)],
     );
     const h = harness();
-    const before = await stageMoves(t.id);
-    expect(await h.module.advanceStartFix(who(a, t.id), conflictReq(t))).toEqual({ ok: false, reason: "conflict_public_copy" });
+    expect(await h.module.advanceStartFix(who(a, t.id), conflictReq(t))).toEqual({ ok: false, reason: "republish_base_missing" });
     expect(h.resume).not.toHaveBeenCalled();
     expect(h.syncBase).not.toHaveBeenCalled();
-    expect(await stageOf(t.id)).toBe("review_passed");
-    expect(await stageMoves(t.id)).toBe(before);
   });
 
   it("a stage that cannot take a fix round refuses the conflict round too", async () => {
