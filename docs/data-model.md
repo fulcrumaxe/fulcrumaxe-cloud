@@ -54,6 +54,7 @@ Every `CREATE TABLE` in `packages/db/migrations/*.sql` at HEAD, one row each (49
 | `context_rules` | `0871_context_rules.sql` | tenant (`app_user` SELECT only; written by `context_rule_save` and `context_rule_remove`: owner or admin for repo scope, any member for item scope) | yes |
 | `ask_routes` | `0836_ask_routes.sql` | tenant | yes |
 | `discovery_settings` | `0849_discovery_settings.sql` | tenant | yes |
+| `plan_writeback_settings` | `0967_plan_writeback_settings.sql` | tenant (append-only: `app_user` SELECT and INSERT; owner or admin to write; version trigger; no UPDATE or DELETE) | yes |
 | `setup_requests` | `0856_setup_requests.sql`, `0874_setup_request_lister.sql`, `0877_setup_request_repaused.sql` | tenant (`app_user` SELECT, INSERT and a column-limited UPDATE; owner or admin to propose or decide; no DELETE; the cross-account due list is `setup_request_list_due`, run-writer only) | yes |
 | `plane_parity_checks` | `0951_plane_parity_checks.sql` | tenant (`app_user` SELECT, INSERT and a column-limited UPDATE; no DELETE, rows go with the pairing; the cross-account due list is `plane_parity_list_due`, run-writer only) | yes |
 | `branch_cleanups` | `0886_branch_cleanup_lister.sql` | tenant (`app_user` SELECT and INSERT; no UPDATE or DELETE; the cross-account due list is `branch_cleanup_list_due`, run-writer only) | yes |

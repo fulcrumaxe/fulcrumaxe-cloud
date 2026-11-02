@@ -1762,6 +1762,30 @@ export interface Operations {
       created: boolean;
     };
   };
+  getPlanWritebackSetting: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      auto_merge: boolean;
+      default: boolean;
+    };
+  };
+  setPlanWritebackSetting: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      auto_merge: boolean;
+    };
+    response: {
+      auto_merge: boolean;
+      default: boolean;
+    };
+  };
   listSetupRequests: {
     path: undefined;
     query: {
@@ -5228,6 +5252,28 @@ export const operations = {
     pathParams: ["id","follow_up_id"],
     queryParams: [],
     hasBody: false,
+  },
+  getPlanWritebackSetting: {
+    method: "GET",
+    path: "/api/v1/repos/{id}/plan-writeback/setting",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  setPlanWritebackSetting: {
+    method: "PUT",
+    path: "/api/v1/repos/{id}/plan-writeback/setting",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "required",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
   },
   listSetupRequests: {
     method: "GET",

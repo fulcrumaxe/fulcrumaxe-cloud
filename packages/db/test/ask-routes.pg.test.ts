@@ -424,6 +424,7 @@ describe('ask_routes (0836)', () => {
       'vercel_connection.connect',
       'vercel_connection.rotate',
       'vercel_connection.remove',
+      'plan_writeback_setting.changed',
     ];
 
     it('audit_write accepts every expected action', async () => {
