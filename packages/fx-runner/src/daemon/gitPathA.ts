@@ -23,6 +23,7 @@ import { createMirrors, githubUrl, type Mirrors, type RepoRef } from "./mirror.j
 import { LISTING_CAP } from "./repoMap.js";
 import { pinWorkspaceGit } from "./hostRead.js";
 import { cleanResumedWorkspace, type SandboxedPurge } from "./resumeClean.js";
+import { pushSinkOf } from "./pushLog.js";
 import { publishBranch, pushPlan, workspaceHead, type PushLease } from "./push.js";
 import { gitProxyHashFor, gitProxyPinned, PINNED_GIT_PROXIES, type PinnedGitProxies } from "../keyring.js";
 
@@ -31,7 +32,7 @@ export const TICKET_REUSE_MS = 240_000;
 /** Linux `statfs` types of memory-backed file systems: tmpfs and ramfs. */
 export const MEMORY_FS_TYPES: ReadonlySet<number> = new Set([0x01021994, 0x858458f6]);
 
-export interface GitPathADeps extends Omit<GitDeps, "mapHttp">, Pick<GitPathDeps, "mirrorsRoot" | "stateDir" | "keepClear" | "signal" | "log"> {
+export interface GitPathADeps extends Omit<GitDeps, "mapHttp">, Pick<GitPathDeps, "mirrorsRoot" | "stateDir" | "keepClear" | "signal" | "log" | "pushLog"> {
   /** The cloud address this runner is registered with (its pinned proxy is looked up by it). */
   cloudOrigin: string;
   /** Asks the cloud for a ticket for this run: the signed client's `gitTicket`. */
@@ -178,7 +179,7 @@ export function createGitPathA(deps: GitPathADeps): GitPath {
           return { git: session.git, url: session.url };
         },
       };
-      return publishBranch(git, forObjects.dir(job.repo), "", workspace, base, lease, snapshotsRoot, { continues: job.continues, transport, ...(stopped === undefined ? {} : { stopped }) });
+      return publishBranch(git, forObjects.dir(job.repo), "", workspace, base, lease, snapshotsRoot, { continues: job.continues, transport, ...(stopped === undefined ? {} : { stopped }), ...pushSinkOf(deps.pushLog, job) });
     },
   };
 }

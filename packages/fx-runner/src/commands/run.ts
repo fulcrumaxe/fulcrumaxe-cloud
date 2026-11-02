@@ -54,7 +54,8 @@ import { createJobWatch } from "../daemon/watch.js";
 import { createEventRelay, realClock, type Clock } from "../daemon/lease.js";
 import { createAutoUpdate, type UpdateHost } from "../update/updater.js";
 import { createUpdater, type UpdateHooks } from "./update.js";
-import { createFileLedger, LedgerLockedError, type FileLedger } from "../daemon/ledger.js";
+import { createFileLedger, LedgerLockedError, type FileLedger, type LedgerOptions } from "../daemon/ledger.js";
+import { createPushLog, PUSH_LOG_FILE, type PushLog } from "../daemon/pushLog.js";
 import { cacheRootsFor, mirrorKeepClear, type RepoRef } from "../daemon/mirror.js";
 import { LaunchRefused, prepareDaemonDir } from "../launchDir.js";
 import { abortOnSignals, pollLoop, type PollEvent } from "../daemon/pollLoop.js";
@@ -131,6 +132,15 @@ export interface RunHooks {
 }
 
 /** Whether a process with this pid exists: ESRCH means gone; success and EPERM (another user's process) mean it is there. */
+/** The push log under the state directory, with one line at start when it is damaged and closed (the way back: remove the moved-aside file). */
+export function openPushLog(stateDir: string, options: LedgerOptions, out: (line: string) => void): PushLog {
+  const file = path.join(stateDir, PUSH_LOG_FILE);
+  removeStaleLedgerTemp(file, options.now?.() ?? new Date());
+  const log = createPushLog(file, options);
+  if (log.closed) out(`fx-runner: the push log is damaged and closed (see ${PUSH_LOG_FILE}.damaged-* in the state directory); it reopens empty once that file is removed`);
+  return log;
+}
+
 export function pidIsAlive(kill: RunHost["kill"], pid: number): boolean {
   try {
     kill(pid, 0);
@@ -282,10 +292,13 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
   // start on the same state directory exits above and touches nothing), and only in this state directory's own spill root, so another daemon's live runs are never reached.
   const ownSpillRoot = spillRootFor(spillRoot, stateDir);
   sweepStaleSpill(ownSpillRoot);
+  let pushLog: PushLog | undefined;
   try {
     // Closed (damaged or quarantined): nothing that is not on the ledger runs, so no claim is made. One message, one exit, no polling.
     if (ledger.closed) throw new CliError("ledger_closed: the job ledger is damaged and was moved aside (see jobs.ledger.damaged-* in the state directory), so no job can be claimed");
 
+    // The runner's push log (D#519 MQ4-RUNNER-PUSH-LOG): kept in the state directory, which no job can reach. A damaged one is closed, not fatal: pushes still run and nothing is recorded.
+    pushLog = openPushLog(stateDir, { pid: host.pid, isAlive: (pid) => pidIsAlive(host.kill, pid), now: ctx.now }, ctx.out);
     const clock = hooks.clock ?? realClock;
     const relay = createEventRelay();
     // Claim gating on the plan's usage limit (D#6 C43-6): reads every job's metadata events, so one job's limit holds back the claims of all. A runner on an API key has no plan window.
@@ -295,9 +308,9 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) });
     // macOS: a resumed workspace's ignored build output is purged in a child under sandbox-exec that can write below the workspace only (D#6 RESUME-CLEAN-MAC).
     const sandboxedPurge = host.platform === "darwin" && host.selfCommand !== undefined ? createSandboxedPurge({ capture: host.engine.capture, selfCommand: host.selfCommand, stateDir, isFile: host.sandbox.isFile }) : undefined;
-    const git = createGitPath({ platform: host.platform, ...(sandboxedPurge === undefined ? {} : { sandboxedPurge }), capture: host.engine.capture, ...(host.engine.captureLarge === undefined ? {} : { captureLarge: host.engine.captureLarge }), envOptions, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, log: (line) => ctx.out(line), ...(hooks.remoteUrl === undefined ? {} : { remoteUrl: hooks.remoteUrl }) });
+    const git = createGitPath({ platform: host.platform, pushLog, ...(sandboxedPurge === undefined ? {} : { sandboxedPurge }), capture: host.engine.capture, ...(host.engine.captureLarge === undefined ? {} : { captureLarge: host.engine.captureLarge }), envOptions, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, log: (line) => ctx.out(line), ...(hooks.remoteUrl === undefined ? {} : { remoteUrl: hooks.remoteUrl }) });
     // Path A (cloud-verified jobs) exists only where this build pins a GitHub proxy for the cloud; a verified job elsewhere ends `git_proxy_unpinned`.
-    const gitA = gitProxyHashFor(registration.cloud_origin, hooks.gitProxies) === undefined ? undefined : createGitPathA({ capture: host.engine.capture, ...(host.engine.captureLarge === undefined ? {} : { captureLarge: host.engine.captureLarge }), envOptions, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, log: (line) => ctx.out(line), cloudOrigin: registration.cloud_origin, platform: host.platform, ...(sandboxedPurge === undefined ? {} : { sandboxedPurge }), mintTicket: (runId, generation) => client.gitTicket(runId, generation), ...(hooks.gitProxies === undefined ? {} : { pinned: hooks.gitProxies }) });
+    const gitA = gitProxyHashFor(registration.cloud_origin, hooks.gitProxies) === undefined ? undefined : createGitPathA({ pushLog, capture: host.engine.capture, ...(host.engine.captureLarge === undefined ? {} : { captureLarge: host.engine.captureLarge }), envOptions, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, log: (line) => ctx.out(line), cloudOrigin: registration.cloud_origin, platform: host.platform, ...(sandboxedPurge === undefined ? {} : { sandboxedPurge }), mintTicket: (runId, generation) => client.gitTicket(runId, generation), ...(hooks.gitProxies === undefined ? {} : { pinned: hooks.gitProxies }) });
     const packageStoreRoot = path.join(path.dirname(mirrorsRoot), "pnpm-store");
     const sandbox = createHostSandbox({
       credentials,
@@ -492,6 +505,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       detach();
     }
   } finally {
+    pushLog?.close();
     ledger.close();
   }
 }

@@ -16,9 +16,10 @@ import { LISTING_CAP, readRepoMap } from "./repoMap.js";
 import { sweepSnapshots } from "./snapshot.js";
 import { pinWorkspaceGit } from "./hostRead.js";
 import { cleanResumedWorkspace, type SandboxedPurge } from "./resumeClean.js";
+import { pushSinkOf, type PushLog } from "./pushLog.js";
 import { publishBranch, PUSH_BRANCH_PREFIX, pushPlan, workspaceHead, type PushLease, type Published } from "./push.js";
 
-export type GitJob = Pick<Job, "repo" | "continues" | "branch_prefix" | "role" | "review">;
+export type GitJob = Pick<Job, "repo" | "continues" | "branch_prefix" | "role" | "review"> & { job_id?: string };
 
 /** The only roles whose commits are pushed (C25 section 3.2). Any other role's commit stays in its workspace, which is discarded. */
 export const PUSHING_ROLES: ReadonlySet<string> = new Set(["executor", "docs-writer"]);
@@ -79,6 +80,8 @@ export interface GitPathDeps extends GitDeps, Pick<MirrorDeps, "mirrorsRoot" | "
   platform: NodeJS.Platform;
   /** macOS: the purge run in a child under `sandbox-exec` (D#6 RESUME-CLEAN-MAC). */
   sandboxedPurge?: SandboxedPurge;
+  /** The runner's push log (D#519 MQ4-RUNNER-PUSH-LOG): each push this path makes is recorded in it. */
+  pushLog?: PushLog;
 }
 
 /**
@@ -186,6 +189,6 @@ export function createGitPath(deps: GitPathDeps): GitPath {
     checkBase: (job, sha) => mirrorCheckBase(git, mirrors.dir(job.repo), sha),
     nixSource: (job, sha) => mirrorNixSource(git, mirrors.dir(job.repo), sha),
     publish: async (job, lease, workspace, base, stopped) =>
-      !PUSHING_ROLES.has(job.role) ? { pushed: false } : publishBranch(git, mirrors.dir(job.repo), mirrors.url(job.repo), workspace, base, lease, snapshotsRoot, { continues: job.continues, ...(stopped === undefined ? {} : { stopped }) }),
+      !PUSHING_ROLES.has(job.role) ? { pushed: false } : publishBranch(git, mirrors.dir(job.repo), mirrors.url(job.repo), workspace, base, lease, snapshotsRoot, { continues: job.continues, ...(stopped === undefined ? {} : { stopped }), ...pushSinkOf(deps.pushLog, job) }),
   };
 }

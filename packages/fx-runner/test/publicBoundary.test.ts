@@ -146,3 +146,18 @@ describe("G4: nothing secret in the source, the tests or the README", () => {
     expect(TOKEN_SHAPE_PATTERN_SOURCES.some((source) => new RegExp(source).test(`const key = "${planted}";`))).toBe(true);
   });
 });
+
+describe("D#519 MQ4-RUNNER-PUSH-LOG: the push log is local-only", () => {
+  // The only files that touch the log. None builds a message to the cloud from it; the cloud client, the job handler and the protocol never see it.
+  const LOG_USERS = ["src/commands/run.ts", "src/daemon/gitPath.ts", "src/daemon/gitPathA.ts", "src/daemon/push.ts", "src/daemon/pushLog.ts"];
+
+  it("no source file outside the wiring names the log's file or reads its entries", () => {
+    const users = sourceFiles.filter((f) => /PUSH_LOG_FILE|pushLog|PushLog|push-log/.test(readFileSync(f, "utf8"))).map((f) => path.relative(PACKAGE_DIR, f).split(path.sep).join("/"));
+    expect(users.sort()).toEqual(LOG_USERS);
+  });
+
+  it("the log module sends nothing: no network, no client, no cloud import", () => {
+    const text = readFileSync(path.join(PACKAGE_DIR, "src", "daemon", "pushLog.ts"), "utf8");
+    expect([...text.matchAll(IMPORT_SPECIFIER)].map((m) => m[1])).toEqual(["node:crypto", "node:fs", "node:path", "./ledger.js"]);
+  });
+});

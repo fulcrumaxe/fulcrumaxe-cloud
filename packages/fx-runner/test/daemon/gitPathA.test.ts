@@ -9,6 +9,7 @@ import { GitPathError, type GitCapture } from "../../src/daemon/git.js";
 import { createGitPathA, type GitPathADeps } from "../../src/daemon/gitPathA.js";
 import type { GitJob } from "../../src/daemon/gitPath.js";
 import { createGit } from "../../src/daemon/git.js";
+import { createPushLog } from "../../src/daemon/pushLog.js";
 import { PUSH_BUDGET_BYTES, assertAllowedChunkRefspec, runPush } from "../../src/daemon/push.js";
 import { originHash, gitProxyPinned, gitProxyHashFor, PINNED_GIT_PROXIES } from "../../src/keyring.js";
 import { runCapture } from "../../src/engines/claude/capture.js";
@@ -350,6 +351,18 @@ describe("a push is cut to fit the proxy's cap, and goes whole or not at all", (
       expect(push.args[push.args.length - 1]).toMatch(new RegExp(`^[0-9a-f]{40}:refs/heads/${BRANCH}$`));
     }
     expect(commits.map((c) => pushes.findIndex((p) => p.args.at(-1)!.startsWith(c)))).toEqual([0, 1, 2]);
+  });
+
+  it("as built by createGitPathA, each chunk is recorded in the push log: three entries, in order, with the job id", async () => {
+    const log = createPushLog(path.join(root, "state", "push-log", "pushes.json"), { pid: process.pid, isAlive: () => true });
+    const { gitPath } = makePathA({ pushLog: log });
+    const job = { ...jobFor(), job_id: "11111111-2222-4333-8444-555555555555" };
+    const workspace = newWorkspace();
+    const { base } = await gitPath.prepare(job, lease, workspace);
+    const commits = [agentCommit(workspace, "a.bin", 3_000_000), agentCommit(workspace, "b.bin", 3_000_000), agentCommit(workspace, "c.bin", 3_000_000)];
+    await gitPath.publish(job, lease, workspace, base);
+    expect(log.records()!.map((r) => [r.ref, r.old_sha, r.new_sha, r.job_id, r.start])).toEqual(commits.map((sha, i) => [`refs/heads/${BRANCH}`, i === 0 ? "0".repeat(40) : commits[i - 1], sha, job.job_id, base]));
+    log.close();
   });
 
   it("commits that fit together go in one push, with the plain private-ref refspec", async () => {

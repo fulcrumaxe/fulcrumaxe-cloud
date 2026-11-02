@@ -15,6 +15,7 @@
 import path from "node:path";
 import { ITEM_PR_BRANCH } from "@fulcrumaxe/runner-protocol";
 import { assertGitVersion, GitPathError, type Git } from "./git.js";
+import type { PushSink } from "./pushLog.js";
 import { EMPTY_BLOB_IDS, isSandboxStubName, SANDBOX_STUB_PATHSPECS } from "./sandboxStubs.js";
 import { takeSnapshot } from "./snapshot.js";
 import { assertGitDirShape, assertWorkspaceGit } from "./workspaceGit.js";
@@ -194,6 +195,17 @@ export interface PublishOptions {
   continues?: PushContinues | null;
   /** True once the cloud has said stop: nothing is pushed after that (C24 section 1.3). Asked right before the push. */
   stopped?: () => boolean;
+  /** The runner's push log, bound to this job: one entry per push that succeeds (D#519 MQ4-RUNNER-PUSH-LOG). Absent: nothing is recorded. */
+  pushLog?: PushSink;
+}
+
+/** Records a push the daemon made. A log that cannot take the entry never fails a push that already landed: the commit then reads as foreign, the safe way to be wrong. */
+function recordPush(sink: PushSink | undefined, entry: { ref: string; old: string; new: string; start: string; startedAt: Date }): void {
+  try {
+    sink?.record(entry);
+  } catch {
+    // fx-swallow-ok: an unrecorded push of the daemon's own only ever reads as someone else's commit later
+  }
 }
 
 /**
@@ -201,9 +213,11 @@ export interface PublishOptions {
  * fresh ticket, and then ends `push_incomplete`; the codes in `NO_RETRY` end it at once. A lost race on a fix round's branch is `push_rejected`
  * (read from what the remote holds now), and a chunk that turns out to have landed anyway counts as pushed. Returns false when `stopped` says so.
  */
-async function pushChunks(transport: PushTransport, mirrorDir: string, ends: readonly string[], plan: PushPlan, lease: PushLease, continues: PushContinues | null, bounds: ChunkBounds, stopped: (() => boolean) | undefined): Promise<boolean> {
+async function pushChunks(transport: PushTransport, mirrorDir: string, ends: readonly string[], plan: PushPlan, lease: PushLease, continues: PushContinues | null, bounds: ChunkBounds, stopped: (() => boolean) | undefined, sink?: PushSink): Promise<boolean> {
   let expectedTip = bounds.base;
+  let first = true;
   for (const oid of ends) {
+    const startedAt = new Date();
     const refspec = ends.length === 1 ? plan.refspec : `${oid}:refs/heads/${plan.branch}`;
     for (let attempt = 0; ; attempt++) {
       if (stopped?.() === true) return false;
@@ -223,6 +237,9 @@ async function pushChunks(transport: PushTransport, mirrorDir: string, ends: rea
         if (attempt >= CHUNK_RETRIES) throw new GitPathError("push_incomplete");
       }
     }
+    // A fresh branch is created by its first chunk: the remote had no tip, so `old` is the zero id. Every later chunk follows the one before.
+    recordPush(sink, { ref: `refs/heads/${plan.branch}`, old: first && continues === null ? "0".repeat(oid.length) : expectedTip, new: oid, start: bounds.base, startedAt });
+    first = false;
     expectedTip = oid;
   }
   return true;
@@ -290,12 +307,14 @@ export async function publishBranch(git: Git, mirrorDir: string, url: string, wo
       if (transport !== undefined) {
         // Path A: sized before anything is sent, so a commit the relay would refuse stops the run with nothing pushed.
         const ends = await planChunks(git, mirrorDir, base, sha);
-        if (!(await pushChunks(transport, mirrorDir, ends, plan, lease, continues, { base, sha }, options.stopped))) return { pushed: false };
+        if (!(await pushChunks(transport, mirrorDir, ends, plan, lease, continues, { base, sha }, options.stopped, options.pushLog))) return { pushed: false };
         return { pushed: true, branch: plan.branch, sha };
       }
       if (options.stopped?.() === true) return { pushed: false };
+      const startedAt = new Date();
       try {
         await runPush(git, mirrorDir, url, plan.refspec, lease, continues);
+        recordPush(options.pushLog, { ref: `refs/heads/${plan.branch}`, old: continues === null ? "0".repeat(sha.length) : base, new: sha, start: base, startedAt });
       } catch (error) {
         if (continues === null || !(error instanceof GitPathError) || error.code !== "push_failed") throw error;
         // The branch can move between the check and the push, and the remote then refuses it as non-fast-forward. Say so from what the remote holds now; the push itself is not retried. (A branch deleted in that window is re-created by the push: the accepted gap of C25 section 1.4.)
