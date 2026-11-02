@@ -4,10 +4,10 @@ import { writebackNotice } from "../../src/build/planWriteback.js";
 
 const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
-const record = { state: "open" as const, planPath: ".autonomous-team/roadmap.json", headSha: HEAD, baseSha: BASE };
+const record = { state: "open" as const, planPath: ".autonomous-team/roadmap.json", headSha: HEAD, baseSha: BASE, prNumber: 7 };
 const open: WritebackLocks = { repoAutoMerge: true, humanMergeOnly: false };
 const read = (over: Partial<Extract<WritebackEvidence, { kind: "read" }>> = {}): WritebackEvidence => ({ kind: "read", mergeBaseSha: BASE, files: [record.planPath], expected: "{}\n", actual: "{}\n", ...over });
-const decide = (over: Partial<Parameters<typeof decideWritebackMerge>[0]> = {}) => decideWritebackMerge({ setting: true, locks: open, record, head: HEAD, evidence: read(), ...over });
+const decide = (over: Partial<Parameters<typeof decideWritebackMerge>[0]> = {}) => decideWritebackMerge({ setting: true, locks: open, record, head: HEAD, prNumber: 7, evidence: read(), ...over });
 
 describe("D#598 P5c-b decideWritebackMerge (pure)", () => {
   it("merges only on a byte-equal file at the recorded head and base, naming the recorded head", () => {
@@ -40,6 +40,16 @@ describe("D#598 P5c-b decideWritebackMerge (pure)", () => {
     expect(decide({ head: "d".repeat(40) }).decision).toBe("writeback_content_mismatch");
   });
 
+  it("a rename into the plan path is a mismatch, whatever the file list says", () => {
+    expect(decide({ evidence: read({ renamed: true }) }).decision).toBe("writeback_content_mismatch");
+  });
+
+  it("an entry whose pull request is not the record's is a stop for a person, before any read", () => {
+    expect(decide({ prNumber: 8 })).toEqual({ decision: "writeback_pr_mismatch" });
+    expect(decide({ prNumber: 8, evidence: undefined })).toEqual({ decision: "writeback_pr_mismatch" });
+    expect(decide({ record: { ...record, prNumber: null } }).decision).toBe("writeback_pr_mismatch");
+  });
+
   it("a comparison that could not finish, or a record that is not open or lacks its head or base, is 'could not finish', never a merge", () => {
     expect(decide({ evidence: { kind: "unfinished" } }).decision).toBe("writeback_check_unfinished");
     for (const r of [{ ...record, state: "changed_by_other" as const }, { ...record, headSha: null }, { ...record, baseSha: null }]) {
@@ -50,6 +60,7 @@ describe("D#598 P5c-b decideWritebackMerge (pure)", () => {
   it("the exact copy of the three sentences", () => {
     expect(writebackNotice({ kind: "ready_human_merges" })).toBe("Plan update ready. A person merges it, or turn on automatic merging for plan updates in this repo's settings.");
     expect(writebackNotice({ kind: "writeback_content_mismatch" })).toBe("This plan update changes something we did not compute. A person needs to look at it.");
+    expect(writebackNotice({ kind: "writeback_pr_mismatch" })).toBe("This plan update is recorded against a different pull request than the one in the queue. A person needs to look at it.");
     expect(writebackNotice({ kind: "writeback_check_unfinished" })).toBe("We could not check this plan update, so we did not merge it. A person merges it.");
   });
 });

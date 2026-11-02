@@ -31,8 +31,8 @@ describe("R-P1d-1: the merge gate is the only way the product merges", () => {
     expect(mentioning(/\b(?:mergePullRequest|enqueuePullRequest)\b/)).toEqual(MERGE_CALLS);
   });
 
-  it("only the gate's file (its definition) and the one write-back caller name mergeRecordedHead, which carries no checks of its own", () => {
-    expect(mentioning(/\bmergeRecordedHead\(/)).toEqual(["apps/web/lib/mergeQueue.ts", "packages/pipeline/src/build/mergeGate.ts"]);
+  it("only the gate's file (its definition) and the one write-back caller name mergeRecordedHead anywhere (call, alias, re-export or passed as a value), which carries no checks of its own", () => {
+    expect(mentioning(/\bmergeRecordedHead\b/)).toEqual(["apps/web/lib/mergeQueue.ts", "packages/pipeline/src/build/mergeGate.ts"]);
   });
 
   it("in the write-back gate the merge call sits after the merge decision and its refusal", () => {
