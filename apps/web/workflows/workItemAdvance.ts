@@ -7,7 +7,7 @@ import { openInstallationHttp } from "../lib/github/installationHttp";
 import { publishLightSpecBody, startLightSpecBody, type LightPublished } from "../lib/advanceLightSteps";
 import { publishRespecBody, startRespecBody, type RespecPublished } from "../lib/advanceRespecSteps";
 import { loadBody, runOutcomeBody, startClassifyBody, triageBody, type ClassifyOutcome, type LoadedAdvance, type TriageLoaded } from "../lib/advanceSteps";
-import { buildBody, buildFailedBody, buildOutcomeBody, cancelRunBody, cancelStepRunsBody, checkFixBody, continueBody, type CheckFixOut, decisionBody, fixGateBody, panelBody, specBody, stageBody, startGateBody, type BuildRunOutcome, type StepOutcome } from "../lib/advanceStageSteps";
+import { buildBody, buildFailedBody, buildOutcomeBody, cancelRunBody, cancelStepRunsBody, checkFixBody, continueBody, type CheckFixOut, decisionBody, fixGateBody, followUpsBody, panelBody, specBody, stageBody, startGateBody, type BuildRunOutcome, type StepOutcome } from "../lib/advanceStageSteps";
 import {
   cancelBody,
   eventBody,
@@ -274,6 +274,12 @@ export async function advanceBuildFailedStep(accountId: string, workItemId: stri
 export async function advanceDecisionStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, runId: string): Promise<DecisionStepCode> {
   "use step";
   return decisionBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, runId);
+}
+
+/** D#483 S5-b2d-1: records a succeeded executor run's follow-ups after its pull request was found. Returns nothing and never throws; a replay records nothing new. */
+export async function advanceFollowUpsStep(accountId: string, runId: string): Promise<void> {
+  "use step";
+  return followUpsBody(await getWorker().catch(() => null), accountId, runId);
 }
 
 /** Stops a live run of the item (the wait for it ran out). The existing cancel path, as the approver. Safe on a finished run. */
@@ -1066,6 +1072,8 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
     return { status: "failed", detail: "build_no_pull_request" };
   }
   await advanceLogStep("advance.built", { work_item_id: workItemId, run_id: runId, stage });
+  // D#483 S5-b2d-1: the build succeeded and its pull request is found: its follow-ups are recorded (the run whose envelope says them is the end of the chain).
+  await advanceFollowUpsStep(accountId, outcome.tailRunId);
   // The pull request is open: the reviewers are next, in this same workflow.
   // The review asks from its own first attempt: a restart attempt of the build's start is not the reviewers'.
   if (stage === "pr_opened" || stage === "changes_requested" || stage === "review_passed") {
@@ -1677,6 +1685,8 @@ async function personFixRound(args: AdvanceStartArgs, ctx: ReviewCtx): Promise<{
     await stopped(args, "review_pr", after.reason);
     return { end: { status: "no_pr", detail: after.reason } };
   }
+  // D#483 S5-b2d-1: a succeeded fix round whose pull request is found again records its follow-ups.
+  if (fixed.status === "succeeded") await advanceFollowUpsStep(accountId, fixed.tailRunId);
   if (after.headSha === pr.headSha) {
     // Nothing was pushed for the person's request: stop and say so. The reviewers do not look again at a commit the person asked to change.
     await advanceEventStep(accountId, userId, workItemId, { kind: "fix_pushed_nothing", dedupeKey: `nothing:${pr.headSha}:${actionId}:person`, code: "person_request", headSha: pr.headSha, prNumber: pr.number, runId });
@@ -1961,6 +1971,8 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       await stopped(args, "review_pr", after.reason);
       return { status: "no_pr", detail: after.reason };
     }
+    // D#483 S5-b2d-1: the same for a fix round of the review loop.
+    if (fixed.status === "succeeded") await advanceFollowUpsStep(accountId, fixed.tailRunId);
     if (after.headSha === pr.headSha) {
       // "No change needed": the fix proved the code right and pushed nothing. The reviewers that asked for the fix look once more at this same head; a second
       // "no change" on it is a disagreement the driver cannot settle, and goes to a person. The fix-round limit still bounds the whole.

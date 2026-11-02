@@ -1684,6 +1684,48 @@ export interface Operations {
       }>;
     };
   };
+  getFollowUpSetting: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      children: boolean;
+      default: boolean;
+    };
+  };
+  setFollowUpSetting: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      children: boolean;
+    };
+    response: {
+      children: boolean;
+      default: boolean;
+    };
+  };
+  listWorkItemFollowUps: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      work_item_id: string;
+      follow_ups: Array<{
+        title: string;
+        why: string;
+        disposition: "child" | "note";
+        source_role: string;
+        source_label: string;
+        created_at: string;
+      }>;
+    };
+  };
   listSetupRequests: {
     path: undefined;
     query: {
@@ -5106,6 +5148,39 @@ export const operations = {
     pathParams: ["id"],
     queryParams: [],
     hasBody: true,
+  },
+  getFollowUpSetting: {
+    method: "GET",
+    path: "/api/v1/repos/{id}/follow-ups/setting",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  setFollowUpSetting: {
+    method: "PUT",
+    path: "/api/v1/repos/{id}/follow-ups/setting",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "required",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  listWorkItemFollowUps: {
+    method: "GET",
+    path: "/api/v1/work-items/{id}/follow-ups",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
   },
   listSetupRequests: {
     method: "GET",

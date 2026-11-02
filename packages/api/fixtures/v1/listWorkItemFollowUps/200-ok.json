@@ -1,0 +1,21 @@
+{
+  "work_item_id": "3b9d6a41-7c2e-4f0a-9e51-2d8c4b7f1a06",
+  "follow_ups": [
+    {
+      "title": "Add a retry",
+      "why": "The upload fails on a flaky network and nothing tries again.",
+      "disposition": "child",
+      "source_role": "code-reviewer",
+      "source_label": "Code reviewer",
+      "created_at": "2026-11-01T10:00:00.000Z"
+    },
+    {
+      "title": "Log the timeout",
+      "why": "",
+      "disposition": "note",
+      "source_role": "executor",
+      "source_label": "Executor",
+      "created_at": "2026-11-01T11:00:00.000Z"
+    }
+  ]
+}

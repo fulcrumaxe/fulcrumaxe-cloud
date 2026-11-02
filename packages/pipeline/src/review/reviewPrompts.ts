@@ -3,6 +3,7 @@ import { assemblePrompt, type AssembledPrompt, type AssembleOptions, type NoteIt
 import { MAX_FINDINGS, MAX_FINDING_CHARS } from "./findingCaps.js";
 import { isSafeRepoPath } from "../discovery/verifierOutput.js";
 import { BOT_EMAIL, BOT_NAME, RUNNER_TESTS_LINE, type PromptRuntime } from "../advance/build.js";
+import { REVIEWER_FOLLOW_UPS_LINE } from "./followUps.js";
 
 /**
  * D#483 P3: the prompts of the review stage. Built here, in the pipeline package, from values the platform holds (the repo
@@ -201,6 +202,7 @@ export function assembleReviewPrompt(input: ReviewPromptInput): AssembledPrompt 
       output: [
         'Your verdict is exactly one of these three words, in lower case: "pass" (ready to merge), "needs-fix" (fixable problems: list each one so the executor can fix it), "fail" (wrong approach, or you cannot review it).',
         "Put every problem in `findings`, one entry each, naming the file and line. `summary` is plain text.",
+        ...(role === "debater" ? [] : [REVIEWER_FOLLOW_UPS_LINE]),
         ...(role === "acceptance-tester" ? [UNVERIFIABLE_LINE] : []),
         ...agentOutputBlock(example),
       ].join("\n"),
@@ -222,6 +224,7 @@ export function assembleReviewPrompt(input: ReviewPromptInput): AssembledPrompt 
     output: [
       'Your verdict is exactly one of these three words, in lower case: "pass" (ready to merge), "needs-fix" (fixable problems: list each one so the executor can fix it), "fail" (wrong approach, or you cannot review it).',
       "Put every problem in `findings`, one entry each, naming the file and line. `summary` is plain text.",
+      ...(role === "debater" ? [] : [REVIEWER_FOLLOW_UPS_LINE]),
       ...(role === "acceptance-tester" ? [UNVERIFIABLE_LINE] : []),
       ...agentOutputBlock(example),
     ].join("\n"),

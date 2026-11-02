@@ -87,6 +87,7 @@ function setup(o: SetupOptions = {}) {
     }),
     advanceFixGate: vi.fn(async (_who: unknown, input: { personFiled: boolean; checkFailedRunId?: string }) => (o.fixGate ? o.fixGate(input) : { proceed: true as const, how: "not_gated", announce: false })),
     advanceDecision: vi.fn(async (): Promise<DecisionStepCode> => o.decision ?? "none"),
+    advanceRecordFollowUps: vi.fn(async () => undefined),
     advanceCancel: vi.fn(async () => undefined),
     advanceRecordEvent: vi.fn(async () => ({ recorded: true })),
     advanceStartGate: vi.fn(async (..._args: unknown[]) => ({ proceed: true as const, how: "person_receipt" })),
@@ -199,6 +200,10 @@ describe("the build for an item at Spec ready", () => {
     expect(events()).toEqual(["advance.build_started", "advance.build_ended", "advance.built", "advance.stopped"]);
     expect(logs[1]).toMatchObject({ run_id: "run-b", run_status: "succeeded", has_summary: true });
     expect(logs[2]).toMatchObject({ stage: "pr_opened" });
+    // D#483 S5-b2d-1: the succeeded build's follow-ups are recorded once, after its pull request was found, and before the review starts.
+    expect(w.advanceRecordFollowUps).toHaveBeenCalledTimes(1);
+    expect(w.advanceRecordFollowUps).toHaveBeenCalledWith(ACCOUNT, "run-b");
+    expect(w.advanceRecordFollowUps.mock.invocationCallOrder[0]!).toBeLessThan(w.advanceLoadReview.mock.invocationCallOrder[0]!);
   });
 
   // D#599 PL-2 (AC4): the driver half. The worker owns the keys (its own test proves one restart and none on replay); the workflow starts the step again and follows the new run.
@@ -391,6 +396,8 @@ describe("the build for an item at Spec ready", () => {
       expect(events()).toContain("advance.check_fix_started");
       expect(logs.find((l) => l.event === "advance.check_fix_started")).toMatchObject({ work_item_id: ITEM, run_id: "run-fix-1", round: 1 });
       expect(logs.find((l) => l.event === "advance.built")).toMatchObject({ run_id: "run-fix-1" });
+      // The follow-ups are the succeeded round's, the end of the chain; the failed build said nothing that counts.
+      expect(w.advanceRecordFollowUps.mock.calls).toEqual([[ACCOUNT, "run-fix-1"]]);
     });
 
     it("a round that fails its check again is followed by another, each on the newest failed run", async () => {
@@ -410,6 +417,8 @@ describe("the build for an item at Spec ready", () => {
       expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-fix-1", "check_rounds_used");
       expect(w.advanceRecordEvent).toHaveBeenCalledWith(WHO, { kind: "stopped", dedupeKey: "build:run-fix-1", code: "build_check_rounds_used", runId: "run-fix-1" });
       expect(logs.at(-1)).toMatchObject({ event: "advance.failed", at: "check_fix", reason: "check_rounds_used", recorded: "recorded" });
+      // A build that ends with no pull request records no follow-ups.
+      expect(w.advanceRecordFollowUps).not.toHaveBeenCalled();
     });
 
     it("a fix round the worker could not start (another refusal) ends like any failed build: recorded under the run's own failure code, not as a spent limit", async () => {

@@ -22,6 +22,7 @@ SPEC (version 3):
 <<END UNTRUSTED>>
 
 Your final block must include a `summary`: a plain-text account of the session for the repository owner, no markup needed. Say what you changed and why, the files you touched, the commands you ran to test it and their result, and anything you were unsure about or left out.
+If you noticed work worth doing later that this change does not need, you may add it to an optional `follow_ups` array in your final block, at most 3 items of {"title":"<at most 120 characters>","why":"<at most 600 characters>"}; anything that blocks this change is not a follow-up, it belongs in the change itself (a reviewer would report it as a finding with "needs-fix").
 End your final message with this block, and nothing after it:
 <!-- AGENT_OUTPUT -->
 ```json

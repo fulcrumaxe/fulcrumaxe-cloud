@@ -19,6 +19,7 @@ import { decisionSettingRoutes } from "./decision-settings.js";
 import { actionRuleRoutes } from "./action-rules.js";
 import { askSettingRoutes } from "./ask-settings.js";
 import { discoveryRoutes } from "./discovery.js";
+import { followUpRoutes } from "./followUps.js";
 import { setupRequestRoutes } from "./setupRequests.js";
 import { decisionAskRoutes } from "./decisionAsks.js";
 import { subItemApprovalRoutes } from "./subItemApprovals.js";
@@ -88,6 +89,7 @@ export const ROUTES: RouteEntry[] = [
   ...decisionSettingRoutes,
   ...askSettingRoutes,
   ...discoveryRoutes,
+  ...followUpRoutes,
   ...setupRequestRoutes,
   ...decisionAskRoutes,
   ...subItemApprovalRoutes,

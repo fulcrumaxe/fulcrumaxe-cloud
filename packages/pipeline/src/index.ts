@@ -30,6 +30,7 @@ export * from "./review/securityTrigger.js";
 export * from "./review/reviewPlan.js";
 export * from "./review/reviewPrompts.js";
 export * from "./review/verdicts.js";
+export { recordRunFollowUps } from "./review/followUps.js";
 export * from "./review/githubReads.js";
 export * from "./review/context.js";
 export * from "./review/mergeGateRun.js";
