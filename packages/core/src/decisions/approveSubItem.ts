@@ -116,17 +116,24 @@ export async function approveSubItemIn(client: PoolClient, who: { accountId: str
   // refuse with their own codes, before anything is written. Every other item keeps its own newest Spec version and its own newest approval.
   const roundKey = input.key.startsWith('fix-') || input.key.startsWith('check-');
   let childSpecId: string | null = null;
+  let specOwnerId = input.workItemId;
+  let isChildRound = false;
   if (roundKey) {
     const identity = await resolveBuildIdentity(client, accountId, input.workItemId, 'start');
     if (!identity.ok && identity.isChild && identity.reason !== 'not_found' && identity.reason !== 'no_issue_link') throw new SubItemApprovalError(identity.reason);
-    if (identity.ok && identity.identity.isChild) childSpecId = identity.identity.specVersionId;
+    if (identity.ok && identity.identity.isChild) {
+      isChildRound = true;
+      childSpecId = identity.identity.specVersionId;
+      specOwnerId = identity.identity.specOwnerId; // the parent for a planned child, the follow-up child itself for a follow-up
+    }
   }
-  const isChildRound = childSpecId !== null;
+  // `fu-` is the follow-up launch's key space (D#483 S5-b2d-2b): nothing launches one yet, and it must never be read as a planned PR key.
+  if (input.key.startsWith('fu-')) throw new SubItemApprovalError('invalid_key');
   const spec = (await client.query<{ id: string }>(
     isChildRound
       ? 'SELECT id FROM spec_versions WHERE account_id = $1::uuid AND id = $3::uuid AND work_item_id = $2::uuid AND erased_at IS NULL'
       : 'SELECT id FROM spec_versions WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND erased_at IS NULL ORDER BY version DESC LIMIT 1',
-    isChildRound ? [accountId, item.parent_id, childSpecId] : [accountId, input.workItemId])).rows[0];
+    isChildRound ? [accountId, specOwnerId, childSpecId] : [accountId, input.workItemId])).rows[0];
   if (spec === undefined) throw new SubItemApprovalError('no_spec');
   const approval = (await client.query<{ id: string; spec_version_id: string | null }>(
     'SELECT id, spec_version_id FROM work_item_approvals WHERE account_id = $1::uuid AND work_item_id = $2::uuid ORDER BY created_at DESC, id DESC LIMIT 1', [accountId, isChildRound ? item.parent_id : input.workItemId])).rows[0];

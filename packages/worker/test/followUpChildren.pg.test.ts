@@ -108,6 +108,8 @@ describe("follow-up children: the producer and the advance fact [pg]", { timeout
     const child = (await kids(p.parent))[0]!.id;
     // The child carries a key of its own (0962) and so can never hold an issue number (0922's CHECK); the triage input names one anyway: the stage table alone must stop it.
     const number = 880000 + Math.floor(Math.random() * 9000);
+    // The root has its issue (the child builds on it), so the identity resolves and only the advance table's follow-up rule can stop it.
+    await admin.query("UPDATE work_items SET gh_number = $2 WHERE id = $1", [p.parent, number + 500]);
     const triaged: AdvanceTriageInput[] = [];
     const started: unknown[] = [];
     const mod = createAdvanceModule(writerPool, {
@@ -123,8 +125,8 @@ describe("follow-up children: the producer and the advance fact [pg]", { timeout
     expect((await mod.advanceLoadItem(a.accountId, child))?.followUp).toBe(true);
     const row = await withTenant(appPool, a.accountId, a.userId, undefined, async (c) => (await c.query("SELECT * FROM run_action_request('advance_work_item', $1, $3, $2)", [child, "h".repeat(64), null])).rows[0]);
     expect(await createRunActionFacade(writerPool, {} as never).claimRunAction(row.action_id, 600)).not.toBeNull();
-    // With no issue number possible (see above) the build step's identity check answers first; 2b-0 puts the follow-up fact in front of it (C29-0-5).
-    expect(await mod.performAdvanceWorkItem(row.action_id)).toEqual({ result: "refused", errorCode: "no_issue_link" });
+    // The identity now resolves for a follow-up child (its root's number), so the table's follow-up rule answers, and nothing starts (C29-0-5).
+    expect(await mod.performAdvanceWorkItem(row.action_id)).toEqual({ result: "refused", errorCode: "not_advanceable" });
     expect(started).toEqual([]);
     // The control: the same shape without the follow-up link reaches triage.
     const plain = randomUUID();

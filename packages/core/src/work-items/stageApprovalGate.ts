@@ -1,5 +1,6 @@
 import type { PoolClient } from 'pg';
 import { readReviewHold } from './reviewHold.js';
+import { readsOwnSpecSql, specOfItemSql } from './stages.js';
 
 /**
  * The one place that decides whether a parked stage may be started again with no person: the worker's sweep (packages/worker stageResume.ts `planFor`) calls it to
@@ -15,7 +16,7 @@ export const STAGE_TERMINAL_STATUSES: readonly string[] = Object.freeze(['succee
 const SESSION_RE = /^session:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 /** What a stage that has no `progressKinds` of its own treats as "it ended in a refusal that is not a limit". */
 const DEFAULT_PROGRESS_KINDS: readonly string[] = Object.freeze(['build_refused', 'stopped']);
-const SPEC_OF_ITEM = '(CASE WHEN w.planned_pr_key IS NULL THEN s.work_item_id = w.id ELSE s.id = w.planned_pr_spec_version_id AND s.work_item_id = w.parent_id END)';
+const SPEC_OF_ITEM = specOfItemSql('s', 'w');
 const likeEscape = (text: string): string => text.replace(/[\\%_]/g, (c) => `\\${c}`);
 
 /** The parts of a registry entry the decision reads. */
@@ -64,7 +65,7 @@ export async function stageApprovalGate<H extends { sha: string }>(
               (SELECT max(s.version) FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM}) AS version,
               (SELECT max(s.created_at) FROM spec_versions s WHERE s.account_id = w.account_id AND ${SPEC_OF_ITEM}) AS spec_at,
               (SELECT CASE WHEN jsonb_typeof(s.frontmatter -> 'planned_prs') = 'array' THEN jsonb_array_length(s.frontmatter -> 'planned_prs') ELSE 0 END FROM spec_versions s
-                WHERE w.planned_pr_key IS NULL AND s.account_id = w.account_id AND s.work_item_id = w.id AND s.erased_at IS NULL ORDER BY s.version DESC LIMIT 1) AS planned_count
+                WHERE ${readsOwnSpecSql('w')} AND s.account_id = w.account_id AND s.work_item_id = w.id AND s.erased_at IS NULL ORDER BY s.version DESC LIMIT 1) AS planned_count
          FROM work_items w WHERE w.id = $1 AND w.account_id = $2`,
       [workItemId, accountId],
     )

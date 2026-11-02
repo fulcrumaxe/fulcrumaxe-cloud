@@ -21,12 +21,12 @@ describe("parsePlannedPrs", () => {
   });
 
   it("PLANNED-PR-KEY-PREFIX-CHECK: a key starting with fix- or check- is refused, and so is any key outside the pattern", () => {
-    for (const key of ["fix-1", "fix-", "check-ab12", "check-"]) {
+    for (const key of ["fix-1", "fix-", "check-ab12", "check-", "fu-3f2a9c01b7de", "fu-"]) {
       expect(isPlannedPrKey(key), key).toBe(false);
       expect(parsePlannedPrs([row(key), row("ok")]), key).toEqual({ kind: "invalid" });
     }
     for (const key of ["Api", "a b", "a_b", "", "a".repeat(33), "é", "a/b"]) expect(isPlannedPrKey(key), key).toBe(false);
-    for (const key of ["a", "api", "a-b-1", "0", "a".repeat(32), "prefix-fix-1", "fixed", "checks"]) expect(isPlannedPrKey(key), key).toBe(true);
+    for (const key of ["a", "api", "a-b-1", "0", "a".repeat(32), "prefix-fix-1", "fixed", "checks", "fun", "fu1"]) expect(isPlannedPrKey(key), key).toBe(true);
     expect(isPlannedPrKey(5)).toBe(false);
   });
 

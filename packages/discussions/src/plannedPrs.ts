@@ -7,7 +7,7 @@
  */
 export const PLANNED_PR_KEY_RE = /^[a-z0-9-]{1,32}$/;
 /** `fix-<round>` and `check-<run>` are the sub-item keys the driver itself launches (a fix round, a check fix round); a planned PR may not use their names. */
-export const RESERVED_PLANNED_PR_PREFIXES = ["fix-", "check-"] as const;
+export const RESERVED_PLANNED_PR_PREFIXES = ["fix-", "check-", "fu-"] as const;
 export const MAX_PLANNED_PRS = 12;
 export const MAX_PLANNED_PR_TITLE = 120;
 /** One printable line with nothing that would break a markdown table cell. */

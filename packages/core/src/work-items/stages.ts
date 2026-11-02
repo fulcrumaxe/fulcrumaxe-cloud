@@ -46,9 +46,23 @@ export const TERMINAL_WORK_ITEM_STAGES: readonly WorkItemStage[] = Object.freeze
 /**
  * SQL for "this work item (alias `parent`) has a planned PR child that is still LIVE": a child in none of the terminal stages above. A merged, closed or closed-unmerged
  * child does not count, so a parent whose children are all done can be built again. The pipeline's build start and the worker's load both use this one text.
+ * A follow-up child (`follow_up_id` set) is later work that never blocks its parent, so it does not count.
  */
 export const hasLivePlannedChildSql = (parent: string): string =>
-  `EXISTS (SELECT 1 FROM work_items k WHERE k.account_id = ${parent}.account_id AND k.parent_id = ${parent}.id AND k.planned_pr_key IS NOT NULL AND k.stage NOT IN (${TERMINAL_WORK_ITEM_STAGES.map((s) => `'${s}'`).join(', ')}))`;
+  `EXISTS (SELECT 1 FROM work_items k WHERE k.account_id = ${parent}.account_id AND k.parent_id = ${parent}.id AND k.planned_pr_key IS NOT NULL AND k.follow_up_id IS NULL AND k.stage NOT IN (${TERMINAL_WORK_ITEM_STAGES.map((s) => `'${s}'`).join(', ')}))`;
+
+/**
+ * SQL for "this item (alias `w`) reads its OWN Spec versions": an item with no planned PR key, or a follow-up child (its key is derived from `follow_up_id`; it is never pinned to a parent version).
+ * A planned PR child whose pin was cleared stays on the pinned side and fails closed.
+ */
+export const readsOwnSpecSql = (w = 'w'): string => `(${w}.planned_pr_key IS NULL OR ${w}.follow_up_id IS NOT NULL)`;
+
+/**
+ * The ONE selector for "which spec_versions row (alias `s`) belongs to this item (alias `w`)": its own, or for a planned PR child the one version of its parent that it names
+ * (`planned_pr_spec_version_id`, never the parent's newest). Every consumer uses this text; a source scan fails on a second copy.
+ */
+export const specOfItemSql = (s = 's', w = 'w'): string =>
+  `(CASE WHEN ${readsOwnSpecSql(w)} THEN ${s}.work_item_id = ${w}.id ELSE ${s}.id = ${w}.planned_pr_spec_version_id AND ${s}.work_item_id = ${w}.parent_id END)`;
 
 /** The 3 legal values of `work_item_transitions.reviewer`. */
 export const WORK_ITEM_TRANSITION_REVIEWERS = ['code', 'security', 'acceptance'] as const;

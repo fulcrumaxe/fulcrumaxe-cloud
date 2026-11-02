@@ -206,6 +206,11 @@ async function writeSpecVersion(
       }
     }
 
+    // An item with a planned PR key (a planned child, a follow-up child) never stores (checked after an amendment has carried a table forward, so it holds for every write) a Planned PRs table, so an approval on it can never create grandchildren.
+    if (plannedPrs !== null && (await client.query("SELECT 1 FROM work_items WHERE id = $1 AND planned_pr_key IS NOT NULL", [workItemId])).rowCount === 1) {
+      throw new DiscussionsError("invalid_planned_prs", "a child item cannot split into more planned PRs");
+    }
+
     if (amend) {
       // Stamp each delivered correction `applied` IN this transaction. The definer locks the row and answers `not_accepted` for one a person rejected (or
       // that was already delivered) after the caller read it; any such id throws, and the insert below never happens, so a reject always wins.

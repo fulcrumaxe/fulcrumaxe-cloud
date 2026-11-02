@@ -127,14 +127,14 @@ async function blockerOf(client: PoolClient, childId: string, skipWaiting: boole
 
 async function readChild(client: PoolClient, accountId: string, childId: string): Promise<ChildRow | null> {
   const { rows } = await client.query<ChildRow>(
-    `SELECT id, parent_id, repo_id, planned_pr_key, planned_pr_spec_version_id, title FROM work_items WHERE id = $1::uuid AND account_id = $2::uuid AND planned_pr_key IS NOT NULL`, [childId, accountId]);
+    `SELECT id, parent_id, repo_id, planned_pr_key, planned_pr_spec_version_id, title FROM work_items WHERE id = $1::uuid AND account_id = $2::uuid AND planned_pr_key IS NOT NULL AND follow_up_id IS NULL`, [childId, accountId]);
   return rows[0] ?? null;
 }
 
 /** The planned PR child of `parentId` with this key, or null (a key that names no child is a sub-item key of some other kind). */
 export async function findPlannedChild(client: PoolClient, accountId: string, parentId: string, key: string): Promise<string | null> {
   const { rows } = await client.query<{ id: string }>(
-    `SELECT id FROM work_items WHERE account_id = $1::uuid AND parent_id = $2::uuid AND planned_pr_key = $3::text`, [accountId, parentId, key]);
+    `SELECT id FROM work_items WHERE account_id = $1::uuid AND parent_id = $2::uuid AND planned_pr_key = $3::text AND follow_up_id IS NULL`, [accountId, parentId, key]);
   return rows[0]?.id ?? null;
 }
 

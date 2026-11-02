@@ -56,6 +56,11 @@ export interface BuildIdentity {
    * consumers read their own newest version, as they always did); a child's is its pinned `planned_pr_spec_version_id` (null only for `observe`, after that version was erased).
    */
   specVersionId: string | null;
+  /**
+   * The work item whose `spec_versions` hold `specVersionId`: the parent for a planned PR child (its version is the parent's), the item itself otherwise (a top-level item, and a follow-up child,
+   * whose version is its own short Spec).
+   */
+  specOwnerId: string;
   isChild: boolean;
 }
 
@@ -96,6 +101,8 @@ export async function childBuildBlocker(client: Pick<PoolClient, "query">, accou
     key_in_table: boolean | null;
     key_in_approved: boolean | null;
     started: boolean;
+    follow_up: boolean;
+    follow_up_linked: boolean;
   }>(
     `SELECT c.parent_id, p.envelope_id AS parent_envelope, c.envelope_id AS child_envelope, p.id IS NOT NULL AS parent_found, (p.stage <> 'closed' AND p.repo_id IS NOT DISTINCT FROM c.repo_id) AS parent_open,
             ap.spec_version_id AS approved,
@@ -107,7 +114,8 @@ export async function childBuildBlocker(client: Pick<PoolClient, "query">, accou
             (SELECT bool_or((e ->> 'key') = c.planned_pr_key)
                FROM spec_versions sv, LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(sv.frontmatter -> 'planned_prs') = 'array' THEN sv.frontmatter -> 'planned_prs' ELSE '[]'::jsonb END) AS e
               WHERE sv.id = ap.spec_version_id AND sv.account_id = c.account_id AND sv.work_item_id = c.parent_id AND sv.erased_at IS NULL) AS key_in_approved,
-            (c.stage <> 'triaged' OR EXISTS (SELECT 1 FROM agent_runs r WHERE r.account_id = c.account_id AND r.work_item_id = c.id AND r.status <> 'cancelled')) AS started
+            (c.stage <> 'triaged' OR EXISTS (SELECT 1 FROM agent_runs r WHERE r.account_id = c.account_id AND r.work_item_id = c.id AND r.status <> 'cancelled')) AS started,
+            (c.follow_up_id IS NOT NULL) AS follow_up, ${followUpLinkSql("c")} AS follow_up_linked
        FROM work_items c
        LEFT JOIN work_items p ON p.account_id = c.account_id AND p.id = c.parent_id
        LEFT JOIN LATERAL (SELECT a.spec_version_id FROM work_item_approvals a WHERE a.account_id = c.account_id AND a.work_item_id = c.parent_id ORDER BY a.created_at DESC, a.id DESC LIMIT 1) ap ON true
@@ -118,7 +126,10 @@ export async function childBuildBlocker(client: Pick<PoolClient, "query">, accou
   if (!r || r.parent_id === null || !r.parent_found) return "child_orphaned";
   if (r.parent_open !== true) return "parent_closed";
   if (r.approved === null || r.approved !== r.newest) return "respec_needs_approval";
-  if (r.started) {
+  // A follow-up child is held to its own Spec, not a version of its parent's table: check 4 is "the follow-up row names this child under this parent".
+  if (r.follow_up) {
+    if (!r.follow_up_linked) return "child_orphaned";
+  } else if (r.started) {
     if (r.key_in_approved !== true) return "key_not_in_approved_spec";
   } else if (r.child_version !== r.approved || r.key_in_table !== true) {
     return "key_not_in_approved_spec";
@@ -126,6 +137,14 @@ export async function childBuildBlocker(client: Pick<PoolClient, "query">, accou
   if (options.envelope !== false && (r.parent_envelope === null || r.child_envelope !== r.parent_envelope)) return "parent_no_envelope";
   return null;
 }
+
+/**
+ * SQL for "the follow-up row names this child (alias `c`) under its parent": the row with the child's `follow_up_id` has `child_id` = the child, and was recorded on the parent itself or on one of its planned
+ * PR children (the parent is the root, C29 2.4).
+ */
+const followUpLinkSql = (c: string): string =>
+  `EXISTS (SELECT 1 FROM work_item_follow_ups f WHERE f.account_id = ${c}.account_id AND f.id = ${c}.follow_up_id AND f.child_id = ${c}.id
+      AND (f.work_item_id = ${c}.parent_id OR EXISTS (SELECT 1 FROM work_items rec WHERE rec.account_id = f.account_id AND rec.id = f.work_item_id AND rec.parent_id = ${c}.parent_id)))`;
 
 /** The build's own extra check: the parent has an envelope and the child's is that same one (else `parent_no_envelope`). Null when it holds, or when the item is not a child. */
 export async function childEnvelopeBlocker(client: Pick<PoolClient, "query">, accountId: string, childId: string): Promise<"parent_no_envelope" | null> {
@@ -146,6 +165,8 @@ interface ItemRow {
   parent_number: string | null;
   pinned: string | null;
   approved: string | null;
+  follow_up: boolean;
+  own_newest: string | null;
 }
 
 /** A recorded child branch, parsed: the parent number and the key. A leading zero or an empty key is not a branch this platform made. */
@@ -198,7 +219,8 @@ async function recordedBranch(client: Pick<PoolClient, "query">, accountId: stri
  */
 export async function resolveBuildIdentity(client: Pick<PoolClient, "query">, accountId: string, workItemId: string, purpose: BuildPurpose, out?: { fixed?: string }): Promise<BuildIdentityResult> {
   const found = await client.query<ItemRow>(
-    `SELECT w.planned_pr_key, w.gh_number::text AS gh_number, w.parent_id, p.id IS NOT NULL AS parent_found, p.gh_number::text AS parent_number, w.planned_pr_spec_version_id AS pinned,
+    `SELECT w.planned_pr_key, w.gh_number::text AS gh_number, w.parent_id, p.id IS NOT NULL AS parent_found, p.gh_number::text AS parent_number, w.planned_pr_spec_version_id AS pinned, (w.follow_up_id IS NOT NULL) AS follow_up,
+            (SELECT s.id FROM spec_versions s WHERE s.account_id = w.account_id AND s.work_item_id = w.id AND s.erased_at IS NULL ORDER BY s.version DESC LIMIT 1) AS own_newest,
             (SELECT a.spec_version_id FROM work_item_approvals a WHERE a.account_id = w.account_id AND a.work_item_id = w.id ORDER BY a.created_at DESC, a.id DESC LIMIT 1) AS approved
        FROM work_items w LEFT JOIN work_items p ON p.account_id = w.account_id AND p.id = w.parent_id AND w.planned_pr_key IS NOT NULL
       WHERE w.id = $1 AND w.account_id = $2`,
@@ -212,7 +234,7 @@ export async function resolveBuildIdentity(client: Pick<PoolClient, "query">, ac
     if (n === null) return { ok: false, reason: "no_issue_link", isChild: false };
     if (out) out.fixed = branchFor(n);
     const rec = await recordedBranch(client, accountId, workItemId, { fixed: branchFor(n), key: null });
-    return { ok: true, identity: { issueNumber: n, branch: rec?.branch ?? branchFor(n), specVersionId: row.approved, isChild: false } };
+    return { ok: true, identity: { issueNumber: n, branch: rec?.branch ?? branchFor(n), specVersionId: row.approved, specOwnerId: workItemId, isChild: false } };
   }
 
   const key = row.planned_pr_key;
@@ -221,20 +243,22 @@ export async function resolveBuildIdentity(client: Pick<PoolClient, "query">, ac
     if (blocked !== null) return { ok: false, reason: blocked as BuildIdentityRefusal, isChild: true };
     const n = positiveInt(row.parent_number);
     if (n === null) return { ok: false, reason: "no_issue_link", isChild: true };
-    if (row.pinned === null) return { ok: false, reason: "key_not_in_approved_spec", isChild: true };
+    if (row.pinned === null && !row.follow_up) return { ok: false, reason: "key_not_in_approved_spec", isChild: true };
     // A start pushes to the pull request already open: the newest run branch if a rebuild made one, else the fixed name computed from the live parent.
     if (out) out.fixed = childBranchFor(n, key);
     const rec = await recordedBranch(client, accountId, workItemId, { fixed: null, key });
-    return { ok: true, identity: { issueNumber: n, branch: rec?.runShaped ? rec.branch : childBranchFor(n, key), specVersionId: row.pinned, isChild: true } };
+    return { ok: true, identity: { issueNumber: n, branch: rec?.runShaped ? rec.branch : childBranchFor(n, key), specVersionId: row.follow_up ? row.own_newest : row.pinned, specOwnerId: row.follow_up ? workItemId : row.parent_id!, isChild: true } };
   }
 
   // observe: no launch checks. What was recorded wins; the live parent is the fallback.
+  const ownVersion = row.follow_up ? row.own_newest : row.pinned;
+  const owner = row.follow_up ? workItemId : (row.parent_id ?? workItemId);
   const recorded = await recordedBranch(client, accountId, workItemId, { fixed: null, key });
   const live = row.parent_id === null || !row.parent_found ? null : positiveInt(row.parent_number);
   const fromRecord = recorded !== null && !recorded.runShaped ? positiveInt(RECORDED_CHILD_BRANCH.exec(recorded.branch)![1]!) : null;
   if (out) out.fixed = live !== null ? childBranchFor(live, key) : recorded !== null && !recorded.runShaped ? recorded.branch : undefined;
-  if (recorded !== null && (fromRecord !== null || live !== null)) return { ok: true, identity: { issueNumber: (fromRecord ?? live)!, branch: recorded.branch, specVersionId: row.pinned, isChild: true } };
+  if (recorded !== null && (fromRecord !== null || live !== null)) return { ok: true, identity: { issueNumber: (fromRecord ?? live)!, branch: recorded.branch, specVersionId: ownVersion, specOwnerId: owner, isChild: true } };
   if (row.parent_id === null || !row.parent_found || recorded !== null) return { ok: false, reason: "child_orphaned", isChild: true };
   if (live === null) return { ok: false, reason: "no_issue_link", isChild: true };
-  return { ok: true, identity: { issueNumber: live, branch: childBranchFor(live, key), specVersionId: row.pinned, isChild: true } };
+  return { ok: true, identity: { issueNumber: live, branch: childBranchFor(live, key), specVersionId: ownVersion, specOwnerId: owner, isChild: true } };
 }
