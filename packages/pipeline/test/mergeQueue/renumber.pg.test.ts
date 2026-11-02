@@ -61,12 +61,11 @@ describe("D#519 MQ5-b1 renumber round start [pg]", () => {
   const commitReads = (r: QueueRepo) => r.calls.filter((c) => /\/pulls\/\d+\/commits/.test(c.path)).length;
   const agentRuns = async (r: QueueRepo) => Number((await db.admin.query("SELECT count(*) AS n FROM agent_runs WHERE account_id = $1", [r.accountId])).rows[0].n);
 
-  it("the constant ships off, and a disabled start reads nothing: the entry stops exactly as MQ5-a leaves it", async () => {
-    expect(RENUMBER_START_ENABLED).toBe(false);
+  it("the constant is on since MQ5-b2, and a start passed false reads nothing: the entry stops exactly as MQ5-a leaves it", async () => {
+    expect(RENUMBER_START_ENABLED).toBe(true);
     const r = await start();
     const a = await item(r, 7, mig(710), mig(711, 712));
-    // The default argument is the constant: no injection here.
-    const { onRenumber, started } = wire(r, { log: pushes(7, BOT) });
+    const { onRenumber, started } = wire(r, { enabled: false, log: pushes(7, BOT) });
     const out = await runQueueTick(deps(r, onRenumber), r);
     expect(out.steps[0]).toEqual({ step: "released", entryId: a.entryId, why: "ordered_resource_out_of_order" });
     expect(await r.entry(7)).toMatchObject({ state: "stopped", reason: "ordered_resource_out_of_order", workKind: null, conflictRounds: 0 });

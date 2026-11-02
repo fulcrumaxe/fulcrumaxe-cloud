@@ -69,6 +69,16 @@ describe("the sweep completes waiting delta reviews and conflict rounds", () => 
     expect(h.completed).toEqual(["round:b", "delta:b"]);
   });
 
+  it("MQ5-b2: a renumber round is looked at like a conflict round, and its delta review is followed in the same sweep", async () => {
+    h.queue = [
+      { id: "n", state: "awaiting_work", workKind: "renumber" },
+      { id: "q", state: "queued", workKind: null },
+    ];
+    h.afterRound = { n: { id: "n", state: "awaiting_work", workKind: "delta_review" } };
+    await completeWaitingDeltaReviews(deps, target);
+    expect(h.completed).toEqual(["round:n", "delta:n"]);
+  });
+
   it("does nothing when nothing waits", async () => {
     h.queue = [{ id: "c", state: "queued", workKind: null }];
     await completeWaitingDeltaReviews(deps, target);

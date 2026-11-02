@@ -208,6 +208,20 @@ describe("waitBody: one look at the entry", () => {
     expect(h.pending).toEqual([["merge-queue-sweep"]]);
   });
 
+  it("MQ5-b2: a renumber round is moved on by this look the same way: its delta review is followed, and an entry back in the queue wakes the sweep", async () => {
+    at("awaiting_work", { workKind: "renumber" });
+    expect(await waitBody(worker, WHO)).toEqual({ state: "waiting" });
+    expect(h.roundDone).toBe(1);
+    expect(h.completed).toBe(0);
+    h.roundDone = 0;
+    h.afterRound = { id: "entry-1", accountId: "acct", repoId: "repo-1", state: "awaiting_work", workKind: "delta_review", reason: null };
+    await waitBody(worker, WHO);
+    expect([h.roundDone, h.completed]).toEqual([1, 1]);
+    h.roundDone = 0;
+    h.afterRound = { id: "entry-1", state: "stopped", workKind: null, reason: "renumber_out_of_scope" };
+    expect(await waitBody(worker, WHO)).toEqual({ state: "stopped", reason: "renumber_out_of_scope" });
+  });
+
   it("MQ4-c: a round that ends in review, or stops, is reported as the entry's state", async () => {
     at("awaiting_work", { workKind: "conflict" });
     h.afterRound = { id: "entry-1", state: "in_review", workKind: null, reason: null };

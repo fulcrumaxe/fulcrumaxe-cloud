@@ -110,3 +110,37 @@ describe("3. validation fails closed", () => {
     }
   });
 });
+
+/** D#519 MQ5-b2 (C16-3): a renumber round's review is a plain diff `from_sha..head` with the trigger `renumber`; only the pre-round head is a parent. */
+describe("5. a renumber (plain diff) delta prompt", () => {
+  const PLAIN: DeltaReviewInput = { mergeCommitSha: MERGE, parents: [PR_SIDE], parentRoles: ["pr_side"], changedFiles: ["packages/db/migrations/0710_x.sql", "packages/db/migrations/0713_x.sql", "packages/db/src/refs.ts"], trigger: "renumber" };
+  const bad = (over: Partial<DeltaReviewInput> = {}) => () => buildReviewPrompt({ ...BASE, delta: { ...PLAIN, ...over } });
+
+  it.each(ROLES)("%s: names the head and the one diff, asks the two scope questions, and mentions no second parent", (role) => {
+    const p = buildReviewPrompt({ ...BASE, role, delta: PLAIN });
+    expect(p).toContain("(renumber)");
+    expect(p).toContain(`git diff ${PR_SIDE}..${MERGE}`);
+    expect(p).toContain("packages/db/migrations/0713_x.sql");
+    expect(p).toContain("are the changed paths only the renamed resource files and the files that refer to them, and does each reference now name the new key");
+    expect(p).toContain("FILES THE RENUMBER CHANGED");
+    expect(p).not.toMatch(/main_side|merge commit|two diffs|did the merge keep/);
+    expect(p).not.toContain("origin/main...");
+  });
+
+  it("a runner prompt makes the reviewer confirm HEAD is the head; the sandbox prompt has its own checkout step", () => {
+    expect(buildReviewPrompt({ ...BASE, delta: PLAIN, runtime: "runner" })).toContain(`Confirm \`git rev-parse HEAD\` prints ${MERGE}`);
+    expect(buildReviewPrompt({ ...BASE, delta: PLAIN })).toContain(`git fetch origin fx/issue-7 && git ch${"eckout"} ${MERGE}`);
+  });
+
+  it("the merge shapes are unchanged by it: a two-parent renumber, or a one-parent merge trigger, is refused", () => {
+    expect(bad({ parents: [PR_SIDE, MAIN_SIDE], parentRoles: ["pr_side", "main_side"] })).toThrow(ReviewPromptInputError);
+    expect(bad({ trigger: "conflict_resolution" })).toThrow(ReviewPromptInputError);
+    expect(bad({ trigger: "refresh_overlap" })).toThrow(ReviewPromptInputError);
+  });
+
+  it("a malformed sha, a parent equal to the head, or a wrong role is refused", () => {
+    expect(bad({ parents: ["xyz"] })).toThrow(ReviewPromptInputError);
+    expect(bad({ parents: [MERGE] })).toThrow(ReviewPromptInputError);
+    expect(bad({ parentRoles: ["main_side"] as never })).toThrow(ReviewPromptInputError);
+  });
+});

@@ -63,6 +63,17 @@ describe('readConflictState', () => {
     expect(await read()).toBeNull();
   });
 
+  it('MQ5-b2: a running renumber round is told like a conflict round, and the next read after it ends says nothing', async () => {
+    const id = await entry('awaiting_work', { workKind: 'renumber', rounds: 1 });
+    await admin.query(
+      `INSERT INTO merge_conflict_rounds (account_id, repo_id, work_item_id, entry_id, round, from_sha, base_sha, base_ref, conflict_files, kind) VALUES ($1, $2, $3, $4, 1, $5, $6, 'main', ARRAY['db/0710_x.sql'], 'renumber')`,
+      [refs.accountId, refs.repoId, refs.workItemId, id, head, 'b'.repeat(40)],
+    );
+    expect(await read()).toEqual({ conflict_round: { running: true, attempt: 1, of: OF, base_ref: 'main' } });
+    await admin.query(`UPDATE merge_queue_entries SET state = 'queued', work_kind = NULL, work_run_id = NULL WHERE id = $1`, [id]);
+    expect(await read()).toBeNull();
+  });
+
   it('a delta review is not a conflict round', async () => {
     await entry('awaiting_work', { workKind: 'delta_review' });
     expect(await read()).toBeNull();

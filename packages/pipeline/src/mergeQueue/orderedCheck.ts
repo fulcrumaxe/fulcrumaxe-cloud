@@ -33,12 +33,12 @@ export interface OrderedDeps {
 
 export type OrderedOutcome = { outcome: "ordered_renumbering" } | { outcome: "ordered_stopped" } | { outcome: "ordered_waiting" } | { outcome: "ordered_unreadable" };
 
-type Resolved = { state: "none" } | { state: "unknown" } | { state: "some"; resources: ResourceRule[]; branch: string; tip: readonly string[]; autoRenumber: boolean };
+export type Resolved = { state: "none" } | { state: "unknown" } | { state: "some"; resources: ResourceRule[]; branch: string; tip: readonly string[]; autoRenumber: boolean };
 
 const part = (prefix: string, v: string): string => `${prefix}_${v.toLowerCase().replace(/[^a-z0-9_]+/g, "_")}`.slice(0, 64);
 
 /** Which resources apply to the repository now, with the tip's paths. Anything unreadable is `unknown`. */
-async function resolve(deps: OrderedDeps, accountId: string, pr: PullRequestRef): Promise<Resolved> {
+export async function resolveOrdered(deps: OrderedDeps, accountId: string, pr: PullRequestRef): Promise<Resolved> {
   const read = deps.github as OrderedResourceReaderPort;
   try {
     const row = await deps.inTenant(accountId, async (c) => (await c.query<{ settings: unknown }>("SELECT settings FROM repos WHERE id = $1", [pr.repoId])).rows[0]);
@@ -60,13 +60,13 @@ export async function clearOrderedStops(deps: OrderedDeps, input: { accountId: s
   if (!deps.github.listDefaultBranchPaths) return;
   const stops = await deps.inTenant(input.accountId, (c) => readOrderedStops(c, input));
   if (stops.length === 0) return;
-  if ((await resolve(deps, input.accountId, { repoId: input.repoId, prNumber: stops[0]!.prNumber })).state === "none") await deps.inTenant(input.accountId, (c) => requeueOrderedStopped(c, input));
+  if ((await resolveOrdered(deps, input.accountId, { repoId: input.repoId, prNumber: stops[0]!.prNumber })).state === "none") await deps.inTenant(input.accountId, (c) => requeueOrderedStopped(c, input));
 }
 
 export async function orderedStep(deps: OrderedDeps, args: { accountId: string; entry: MergeQueueEntry; holder: string; pr: PullRequestRef; headSha: string }): Promise<OrderedOutcome | null> {
   const { accountId, entry, holder, pr, headSha } = args;
   if (!deps.github.listDefaultBranchPaths || !deps.github.listPullRequestAdds) return null;
-  const resolved = await resolve(deps, accountId, pr);
+  const resolved = await resolveOrdered(deps, accountId, pr);
   if (resolved.state === "none") return null;
   let bad: { rule: ResourceRule; key: string; highest: string; files: string[] } | null = null;
   if (resolved.state === "some") {

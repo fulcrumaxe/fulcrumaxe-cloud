@@ -240,6 +240,7 @@ describe("the Ready to merge banner is honest about what still blocks the merge"
     ["branch_protection_refused", "Branch protection refused the merge"],
     ["merge_queue_waiting", "The pull request is waiting in the merge queue"],
     ["ordered_resource_out_of_order", "Another change has to merge before this one"],
+    ["renumber_out_of_scope", "The automatic renumber changed more than the numbered files, so a person needs to look at it"],
     ["merge_dependency_closed", "The pull request it builds on was closed without merging"],
     ["pairing_changed", "The public repository's pairing changed"],
     ["no_pull_request", "There is no pull request on record to merge"],

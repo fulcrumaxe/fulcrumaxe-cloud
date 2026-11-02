@@ -613,6 +613,7 @@ export const BLOCKING_SENTENCES = {
   branch_protection_refused: "Branch protection refused the merge",
   merge_queue_waiting: "The pull request is waiting in the merge queue",
   ordered_resource_out_of_order: "Another change has to merge before this one",
+  renumber_out_of_scope: "The automatic renumber changed more than the numbered files, so a person needs to look at it",
   merge_dependency_closed: "The pull request it builds on was closed without merging",
   history_rewritten: "The branch history was rewritten after review",
   pairing_changed: "The public repository's pairing changed",

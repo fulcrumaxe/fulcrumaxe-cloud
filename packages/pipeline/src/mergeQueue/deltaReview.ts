@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import type { ConflictReaderPort } from "../build/githubMergePort.js";
 import type { DeltaReviewInput } from "../review/reviewPrompts.js";
 import { listHeadRefreshes, markDeltaSkipped, type HeadRefreshRow } from "./store.js";
 import type { RefreshGitHubPort, StartDeltaReview } from "./refresh.js";
@@ -44,7 +45,7 @@ export interface DeltaSource {
 export const refreshSource = (row: HeadRefreshRow): DeltaSource => ({ fromSha: row.fromSha, toSha: row.toSha, baseSha: row.baseSha, trigger: "refresh_overlap" });
 
 export interface DeltaReviewPorts<S extends RoundSubject = MergeQueueEntry> {
-  github: Pick<RefreshGitHubPort, "getMergeability" | "getCommit" | "compareToBase">;
+  github: Pick<RefreshGitHubPort, "getMergeability" | "getCommit" | "compareToBase"> & Partial<Pick<ConflictReaderPort, "compareCommits">>;
   /** The roles the gate requires on the entry's pull request at `headSha` (`reviewPlanFor` over the PR's whole diff), or why they cannot be known. `flagged`: the delta code reviewer asked for a security review. */
   plan(args: { entry: S; headSha: string; flagged?: boolean }): Promise<{ ok: true; roles: readonly string[] } | { ok: false; reason: string }>;
   /** The newest delta run of each role on this merge commit. */
@@ -75,7 +76,31 @@ export async function readMergeCommit(
   return { ok: true, files: commit.files, baseSha: commit.parents[1]! };
 }
 
-export const deltaInput = (src: DeltaSource, files: readonly string[], baseSha: string): DeltaReviewInput => ({ mergeCommitSha: src.toSha, parents: [src.fromSha, baseSha], parentRoles: ["pr_side", "main_side"], changedFiles: files, trigger: src.trigger });
+/**
+ * D#519 MQ5-b2: a renumber round's head is reviewed as a PLAIN diff `fromSha..toSha`, never as a merge commit: the head is open and is the round's, it has exactly one parent (a merge
+ * commit is the wrong shape and is refused), and the changed paths are the comparison's own list (a rename under both names). `baseSha` is `fromSha`, the diff's start.
+ */
+export async function readPlainDiff(
+  github: DeltaReviewPorts["github"],
+  entry: RoundSubject,
+  src: DeltaSource,
+): Promise<{ ok: true; files: readonly string[]; baseSha: string } | { ok: false; reason: "head_changed" | "invalid_input" | "not_a_renumber" }> {
+  const pr = { repoId: entry.repoId, prNumber: entry.prNumber };
+  const now = await github.getMergeability(pr, { gatedHeadSha: src.toSha });
+  if (now.state !== "open" || now.merged || now.headSha !== src.toSha) return { ok: false, reason: "head_changed" };
+  if ((await github.getCommit(pr, src.toSha)).parents.length !== 1) return { ok: false, reason: "not_a_renumber" };
+  const diff = await github.compareCommits?.(pr, src.fromSha, src.toSha, { files: true });
+  if (!diff || diff.status !== "ahead" || diff.files === null || diff.filesTruncated || diff.files.length === 0) return { ok: false, reason: "invalid_input" };
+  return { ok: true, files: diff.files, baseSha: src.fromSha };
+}
+
+/** The reader for a source's shape: the merge commit of a refresh or a conflict round, or the plain diff of a renumber round. */
+export const readSourceDiff = (github: DeltaReviewPorts["github"], entry: RoundSubject, src: DeltaSource) => (src.trigger === "renumber" ? readPlainDiff(github, entry, src) : readMergeCommit(github, entry, src));
+
+export const deltaInput = (src: DeltaSource, files: readonly string[], baseSha: string): DeltaReviewInput =>
+  src.trigger === "renumber"
+    ? { mergeCommitSha: src.toSha, parents: [src.fromSha], parentRoles: ["pr_side"], changedFiles: files, trigger: src.trigger }
+    : { mergeCommitSha: src.toSha, parents: [src.fromSha, baseSha], parentRoles: ["pr_side", "main_side"], changedFiles: files, trigger: src.trigger };
 
 /** Starts `roles` in order, reusing a role's run that already exists. On a refusal or a throw, cancels the runs THIS call started (never a reused one). */
 export async function startDeltaRoles<S extends RoundSubject>(

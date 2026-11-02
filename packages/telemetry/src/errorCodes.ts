@@ -411,6 +411,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "ordered_resource_out_of_order",
   "ordered_resource_unknown",
   "ordered_resource_unreadable",
+  // Merge queue renumber round (D#519 MQ5-b2): the stop when the round changed paths outside the renamed files and their references.
+  "renumber_out_of_scope",
   // Plan write-back merge decision (D#598 P5c-b): the three reasons a plan update waits for a person.
   "ready_human_merges",
   "writeback_content_mismatch",
