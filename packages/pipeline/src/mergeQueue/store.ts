@@ -639,6 +639,8 @@ export async function cancelWorkItemEntry(
 ): Promise<MergeQueueEntry | null> {
   const reason = input.reason ?? "work_item_cancelled";
   assertCode(reason);
+  // D#519 MQ4-c: a conflict round still open when its item is cancelled ends here (its run is cancelled with the item), so no round reads as running for ever.
+  await client.query(`UPDATE merge_conflict_rounds SET outcome = 'cancelled', ended_at = now() WHERE account_id = $1 AND work_item_id = $2 AND outcome IS NULL`, [input.accountId, input.workItemId]);
   return one(
     client,
     `UPDATE merge_queue_entries SET state = 'cancelled', reason = $3, ${CLEAR_SLOT_AND_WORK}

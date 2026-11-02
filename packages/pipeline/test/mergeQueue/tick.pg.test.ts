@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { createGitHubMergeGatePort } from "../../src/build/githubMergePort.js";
 import { classifyCi, expectedSignalNames, greenSignalNames, missingExpectedSignals, runMergeGate, type CiSnapshot } from "../../src/build/mergeGate.js";
-import { MERGE_QUEUE_CI_WAIT_MINUTES, finishWork, requeueCiStopped, runQueueTick, sweepMergeQueue, type MergeQueueEntry } from "../../src/mergeQueue/index.js";
+import { MERGE_QUEUE_CI_WAIT_MINUTES, endRound, finishWork, recordRoundHead, requeueCiStopped, runQueueTick, startConflictWork, sweepMergeQueue, type MergeQueueEntry } from "../../src/mergeQueue/index.js";
 import { pgHarness } from "../helpers/pgHarness.js";
 import { T0, startQueueRepo, type QueueRepo } from "./helpers/queueRepo.js";
 
@@ -291,6 +291,91 @@ describe("D#519 MQ3-b queue tick [pg]", () => {
       expect(late.steps.map((s) => s.step)).toEqual(["released", "merged", "idle"]);
       expect((await r.entry(7)).reason).toBe("ci_not_green");
       expect(r.mergeCalls()).toEqual([8]);
+    });
+  });
+
+  describe("D#519 MQ4-c: a head a conflict round produced (C6-c4, review 3 and 4)", () => {
+    const statuses = { "fulcrumaxe/review": "success" as const };
+    const M2 = "9".repeat(40);
+    const building = [{ name: "build", status: "in_progress" as const, conclusion: null }];
+
+    /** The entry as the rounds leave it: one round per `to` sha, each from the live head before it, the last one's head the entry's head, queued again. */
+    async function afterRounds(r: QueueRepo, item: { entryId: string; workItemId: string; head: string }, to: string[]) {
+      const { accountId } = r;
+      let from = item.head;
+      for (const toSha of to) {
+        await withTenant(db.pureAppUserPool, accountId, async (c) => {
+          const s = await startConflictWork(c, { accountId, entryId: item.entryId, fromSha: from, baseSha: "c".repeat(40), baseRef: "main", conflictFiles: ["src/a.ts"] });
+          if (!s.ok) throw new Error(s.reason);
+          await recordRoundHead(c, { accountId, roundId: s.round.id, toSha });
+          await endRound(c, { accountId, roundId: s.round.id, outcome: "conflicted_again" });
+          await finishWork(c, { accountId, entryId: item.entryId, headSha: toSha });
+        });
+        // The delta review passed on the round's head: its reviewer rows.
+        for (const role of ["code-reviewer", "acceptance-tester"]) {
+          await db.admin.query(`INSERT INTO agent_runs (account_id, work_item_id, role, runtime, status, envelope, head_sha) VALUES ($1, $2, $3, 'production', 'succeeded', '{"verdict":"pass"}', $4)`, [accountId, item.workItemId, role, toSha]);
+        }
+        from = toSha;
+      }
+    }
+
+    it("second round: round 1's merge commit was pushed while the PR conflicted and has no checks; the signals come from the FIRST pre-round head, so a lone review status on the final head never merges", async () => {
+      const r = await start();
+      const a = await r.addItem(7, { world: { statuses, checkRunsBySha: {} } });
+      // The reviewed head showed build and lint. The round-1 merge commit shows nothing; the final head shows only our review status.
+      a.g.world.checkRunsBySha = { [a.head]: reviewed, [a.fresh]: [], [M2]: [] };
+      a.g.world.headSha = M2;
+      await afterRounds(r, a, [a.fresh, M2]);
+      expect(await r.entry(7)).toMatchObject({ state: "queued", headSha: M2, conflictRounds: 2 });
+
+      const first = await runQueueTick(r.deps(), r);
+      expect(first.steps.map((s) => s.step)).toEqual(["parked"]);
+      expect(a.g.world.merges).toEqual([]);
+      // `build` posts, `lint` has not.
+      a.g.world.checkRunsBySha[M2] = [reviewed[0]!];
+      expect((await runQueueTick(r.deps(), r)).steps.map((s) => s.step)).toEqual(["parked"]);
+      expect(a.g.world.merges).toEqual([]);
+      a.g.world.checkRunsBySha[M2] = reviewed;
+      expect((await runQueueTick(r.deps(), r)).steps.map((s) => s.step)).toEqual(["merged", "idle"]);
+      expect(a.g.world.merges).toEqual([{ sha: M2, method: expect.anything() }]);
+    });
+
+    it("a round-produced head whose expected set is empty (nothing was green on the pre-round head) reads as pending, never green", async () => {
+      const r = await start();
+      const a = await r.addItem(7, { world: { statuses, checkRunsBySha: {} } });
+      a.g.world.checkRunsBySha = { [a.head]: [], [a.fresh]: [] };
+      a.g.world.headSha = a.fresh;
+      await afterRounds(r, a, [a.fresh]);
+      expect((await runQueueTick(r.deps(), r)).steps.map((s) => s.step)).toEqual(["parked"]);
+      expect(a.g.world.merges).toEqual([]);
+    });
+
+    it(`the CI wait of a round's head is measured from the round's ended_at, not from when the slot was first taken (${MERGE_QUEUE_CI_WAIT_MINUTES} minutes)`, async () => {
+      const r = await start();
+      const a = await r.addItem(7, { world: { statuses, checkRunsBySha: {} } });
+      a.g.world.checkRunsBySha = { [a.head]: reviewed, [a.fresh]: building };
+      a.g.world.headSha = a.fresh;
+      await afterRounds(r, a, [a.fresh]);
+      const now = new Date(Date.now() + (MERGE_QUEUE_CI_WAIT_MINUTES + 10) * MIN);
+      // ended_at is written once (a trigger), so the test backdates it as the superuser with triggers off for this one statement.
+      const endedAt = async (at: Date) => {
+        await db.admin.query("SET session_replication_role = replica");
+        try {
+          await db.admin.query(`UPDATE merge_conflict_rounds SET ended_at = $2 WHERE account_id = $1`, [r.accountId, at]);
+        } finally {
+          await db.admin.query("SET session_replication_role = DEFAULT");
+        }
+      };
+      // The slot is taken "now" (real time), 70 minutes before the clock below, but the round ended 5 minutes before it: still waiting.
+      await endedAt(new Date(now.getTime() - 5 * MIN));
+      expect((await runQueueTick(r.deps({ now: () => now }), r)).steps.map((s) => s.step)).toEqual(["parked"]);
+      expect(await r.entry(7)).toMatchObject({ state: "in_flight", phase: "parked" });
+      // The round ended an hour and a minute before the clock: released as ci_not_green.
+      await endedAt(new Date(now.getTime() - (MERGE_QUEUE_CI_WAIT_MINUTES + 1) * MIN));
+      const late = await runQueueTick(r.deps({ now: () => now }), r);
+      expect(late.steps.map((s) => s.step)[0]).toBe("released");
+      expect(await r.entry(7)).toMatchObject({ state: "stopped", reason: "ci_not_green" });
+      expect(a.g.world.merges).toEqual([]);
     });
   });
 

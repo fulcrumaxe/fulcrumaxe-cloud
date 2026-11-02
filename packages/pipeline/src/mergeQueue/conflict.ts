@@ -223,15 +223,18 @@ export function createOnConflict(ports: ConflictPorts): (entry: MergeQueueEntry,
   };
 }
 
-/** The fixed fact behind a `merge_conflict` stop: why no round ran, and how many already had. Codes and counts only. */
-async function recordStop(ports: ConflictPorts, entry: MergeQueueEntry, code: string, headSha: string): Promise<void> {
+/**
+ * The fixed fact behind a `merge_conflict` stop: why no round ran (or how the last one ended: MQ4-c), and how many already had. Codes and counts only.
+ * `eventCode` is the stop's own code (`merge_conflict` unless the end of a round stopped the entry for another fixed reason).
+ */
+export async function recordStop(ports: Pick<ConflictPorts, "inTenant">, entry: MergeQueueEntry, code: string, headSha: string, eventCode = "merge_conflict"): Promise<void> {
   if (entry.workItemId === null) return;
   await ports.inTenant(entry.accountId, (c) =>
     recordDriverEvent(c, entry.accountId, {
       workItemId: entry.workItemId!,
       kind: "stopped",
       dedupeKey: `conflict:${headSha}:${entry.conflictRounds}:${code}`,
-      code: "merge_conflict",
+      code: eventCode,
       reasons: [code],
       headSha,
       prNumber: entry.prNumber,

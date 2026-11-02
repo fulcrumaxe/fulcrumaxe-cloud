@@ -1,6 +1,6 @@
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { assembleConflictPrompt, isReservationPause, mergeQueue, promptRuntimeOf, startWaitFor } from "@fx/pipeline";
-import { readEntryContext, type DeltaReviewBinding } from "./mergeQueueDeltaReview";
+import { deltaReviewPorts, readEntryContext, readEntryWho, type DeltaReviewBinding } from "./mergeQueueDeltaReview";
 
 /**
  * D#519 MQ4-b: binds the merge queue's `onConflict` to the real conflict round. Everything about the item (who approved it, its halt epoch, its review
@@ -11,6 +11,9 @@ export interface ConflictBinding extends DeltaReviewBinding {
   github: mergeQueue.ConflictPorts["github"] & DeltaReviewBinding["github"];
   tryMechanicalReplay?: mergeQueue.ConflictPorts["tryMechanicalReplay"];
 }
+
+/** The fixed reason on the stop event when a round's run could not be cancelled (the event's code is the existing `merge_conflict`). */
+export const CANCEL_NOT_CONFIRMED = "run_cancel_not_confirmed";
 
 export function conflictPorts(deps: ConflictBinding): mergeQueue.ConflictPorts {
   return {
@@ -66,4 +69,35 @@ export function conflictPorts(deps: ConflictBinding): mergeQueue.ConflictPorts {
 /** The tick's `onConflict`, bound. */
 export function bindOnConflict(deps: ConflictBinding): NonNullable<mergeQueue.QueueTickDeps["onConflict"]> {
   return mergeQueue.createOnConflict(conflictPorts(deps));
+}
+
+/**
+ * D#519 MQ4-c: the ports for the end of a round. The delta-review ports (the same stored-fact lookups) plus: whether the round's run ended, a cancel that needs
+ * only who acts for the entry (the pull request may already be closed or merged), and the bound `onConflict` for a head that conflicts again.
+ */
+export function conflictCompletionPorts(deps: ConflictBinding): mergeQueue.ConflictCompletionPorts {
+  return {
+    ...deltaReviewPorts(deps),
+    github: deps.github,
+    async cancelRun(entry, runId) {
+      const found = await readEntryWho(deps, entry);
+      if ("who" in found && deps.worker) {
+        await deps.worker.advanceCancel(found.who, runId);
+        return;
+      }
+      // No worker, or nobody on record to act for the item: the run cannot be cancelled from here, yet the round still ends and the entry still stops or
+      // returns. Say so where the person looks (the item's driver event: an existing stop code with a fixed reason) and in the log, rather than nothing.
+      console.warn(JSON.stringify({ event: "merge_queue.conflict_run_not_cancelled", entry_id: entry.id, run_id: runId, reason: "who" in found ? "worker_unavailable" : found.reason }));
+      await mergeQueue.recordStop({ inTenant: (accountId, fn) => withTenant(deps.pool, accountId, fn) }, entry, CANCEL_NOT_CONFIRMED, entry.headSha);
+    },
+    // A worker that cannot be reached answers "not ended": the entry waits, and the round timeout still bounds it.
+    roundRunEnded: async (entry, runId) => (deps.worker ? (await deps.worker.advanceRunOutcome(entry.accountId, runId)).done : false),
+    onConflict: (entry) => bindOnConflict(deps)(entry),
+  };
+}
+
+/** One look at an entry whose conflict round is running (see `completeConflictRound`). */
+export function bindCompleteConflictRound(deps: ConflictBinding): (entry: mergeQueue.MergeQueueEntry) => Promise<mergeQueue.ConflictCompletion> {
+  const ports = conflictCompletionPorts(deps);
+  return (entry) => mergeQueue.completeConflictRound(ports, entry);
 }

@@ -10,12 +10,18 @@ import { RESERVATION_PAUSE_REASONS, mergeQueue } from "@fx/pipeline";
 const h = vi.hoisted(() => ({
   facts: { halt_epoch: 4, u: "user-1", id: "6f1d6c34-7f0d-4a53-8d4c-0a5e8a6b9c11" } as { halt_epoch?: number; u?: string; id?: string },
   ctx: { ok: true, tier: "feature", debaterEnabled: false, repoId: "r", owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", specVersion: 3, executionMode: "sandbox" } as Record<string, unknown>,
+  /** The driver events the binding wrote (the real writer is replaced by this recorder: its SQL is the core's, covered there). */
+  events: [] as Array<{ accountId: string; input: Record<string, unknown> }>,
   pr: { ok: true, number: 41, headSha: "f".repeat(40), baseRef: "main", branch: "fx/issue-7", securityCodes: [] as string[] } as Record<string, unknown>,
 }));
 
 vi.mock("@fx/core/src/tenancy/withTenant.js", () => ({
   withTenant: async (_pool: unknown, _account: string, fn: (c: unknown) => unknown) =>
     fn({ query: async (sql: string) => ({ rows: sql.includes("halt_epoch") ? [{ halt_epoch: h.facts.halt_epoch }] : h.facts.u === undefined ? [] : [{ u: h.facts.u, id: h.facts.id }] }) }),
+}));
+vi.mock("@fx/core/src/work-items/driverEvents.js", async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  recordDriverEvent: async (_c: unknown, accountId: string, input: Record<string, unknown>) => void h.events.push({ accountId, input }),
 }));
 vi.mock("./advanceReviewSteps", () => ({
   reviewLoadBody: async () => h.ctx,
@@ -24,7 +30,7 @@ vi.mock("./advanceReviewSteps", () => ({
   reviewerOutcomeBody: async () => ({}),
 }));
 
-import { conflictPorts } from "./mergeQueueConflict";
+import { CANCEL_NOT_CONFIRMED, conflictCompletionPorts, conflictPorts } from "./mergeQueueConflict";
 
 const SHA = (c: string) => c.repeat(40);
 const entry = { id: "e1", accountId: "acct", workItemId: "item", headSha: SHA("a"), prNumber: 41 } as mergeQueue.MergeQueueEntry;
@@ -37,6 +43,7 @@ function build(start: (who: unknown, req: Record<string, unknown>) => unknown = 
 }
 
 beforeEach(() => {
+  h.events = [];
   h.facts = { halt_epoch: 4, u: "user-1", id: "6f1d6c34-7f0d-4a53-8d4c-0a5e8a6b9c11" };
   h.ctx = { ok: true, tier: "feature", debaterEnabled: false, repoId: "r", owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", specVersion: 3, executionMode: "sandbox" };
   h.pr = { ok: true, number: 41, headSha: "f".repeat(40), baseRef: "main", branch: "fx/issue-7", securityCodes: [] };
@@ -113,5 +120,42 @@ describe("the platform commit proof (C10: push records or a verified app commit,
     };
     roots.forEach(walk);
     expect(hits.map((p) => p.split("/").slice(-1)[0])).toEqual(["conflict.ts"]);
+  });
+});
+
+describe("MQ4-c: the ports for the end of a round", () => {
+  const completion = (worker: Record<string, unknown> | null) => conflictCompletionPorts({ pool: {} as never, worker: worker as never, open: (async () => ({})) as never, github: {} as never });
+
+  it("the cancel needs only who acts for the entry: a pull request that is already closed (no open one found) still has its run cancelled, and nothing is recorded", async () => {
+    h.pr = { ok: false };
+    const advanceCancel = vi.fn(async () => undefined);
+    await completion({ advanceCancel }).cancelRun(entry, "run-9");
+    expect(advanceCancel).toHaveBeenCalledWith({ accountId: "acct", userId: "user-1", workItemId: "item", haltEpoch: 4 }, "run-9");
+    expect(h.events).toEqual([]);
+  });
+
+  it.each([
+    ["no approver on record", () => void (h.facts.u = undefined), { advanceCancel: vi.fn(async () => undefined) }, "invalid_input"],
+    ["no worker", () => undefined, null, "worker_unavailable"],
+  ])("review 5: %s - the run cannot be cancelled, and that is recorded for the person (an existing stop code, a fixed reason) and logged, not dropped", async (_name, arrange, worker, why) => {
+    arrange();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await completion(worker).cancelRun(entry, "run-9");
+      if (worker) expect(worker.advanceCancel).not.toHaveBeenCalled();
+      expect(h.events).toEqual([
+        { accountId: "acct", input: expect.objectContaining({ workItemId: "item", kind: "stopped", code: "merge_conflict", reasons: [CANCEL_NOT_CONFIRMED], headSha: entry.headSha, prNumber: 41 }) },
+      ]);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(String(warn.mock.calls[0]![0]))).toEqual({ event: "merge_queue.conflict_run_not_cancelled", entry_id: "e1", run_id: "run-9", reason: why });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("the round's run has ended when the worker says done; an unreachable worker reads as not ended (the round timeout still bounds the wait)", async () => {
+    expect(await completion({ advanceRunOutcome: async () => ({ done: true }) }).roundRunEnded(entry, "run-9")).toBe(true);
+    expect(await completion({ advanceRunOutcome: async () => ({ done: false }) }).roundRunEnded(entry, "run-9")).toBe(false);
+    expect(await completion(null).roundRunEnded(entry, "run-9")).toBe(false);
   });
 });

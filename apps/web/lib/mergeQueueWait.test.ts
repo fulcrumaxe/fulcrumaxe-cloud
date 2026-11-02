@@ -18,6 +18,9 @@ const h = vi.hoisted(() => ({
   completion: { outcome: "waiting" } as { outcome: string },
   completed: 0,
   github: {} as unknown,
+  /** MQ4-c: the conflict-round completion, and what the entry reads as once it has run (null: unchanged). */
+  roundDone: 0,
+  afterRound: null as Record<string, unknown> | null,
 }));
 
 vi.mock("@fx/core/src/tenancy/withTenant.js", () => ({
@@ -30,12 +33,13 @@ vi.mock("@fx/pipeline", () => ({
   readPublicPullRequest: () => async () => h.paired,
   mergeQueue: {
     enqueueEntry: async (_c: unknown, input: unknown) => (h.enqueue.push(input), { entry: { id: "entry-1" }, outcome: h.enqueueOutcome }),
-    getEntryByWorkItem: async () => h.entry,
+    getEntryByWorkItem: async () => (h.roundDone > 0 && h.afterRound ? h.afterRound : h.entry),
     cancelWorkItemEntry: async (_c: unknown, input: unknown) => void h.cancelled.push(input),
   },
 }));
 vi.mock("./mergeQueue", () => ({ openQueueGitHub: async () => h.github }));
 vi.mock("./mergeQueueDeltaReview", () => ({ bindCompleteDeltaReview: () => async () => (h.completed++, h.completion) }));
+vi.mock("./mergeQueueConflict", () => ({ bindCompleteConflictRound: () => async () => void h.roundDone++ }));
 vi.mock("./github/installationHttp", () => ({ openInstallationHttp: async () => ({}) }));
 
 import { enqueueBody, waitBody, type QueueWorker } from "./mergeQueueWait";
@@ -56,6 +60,8 @@ beforeEach(() => {
   h.pending = [];
   h.completion = { outcome: "waiting" };
   h.completed = 0;
+  h.roundDone = 0;
+  h.afterRound = null;
 });
 
 describe("enqueueBody: hosted, unpaired repositories only", () => {
@@ -126,6 +132,36 @@ describe("waitBody: one look at the entry", () => {
     h.completion = { outcome: "passed" };
     await waitBody(worker, WHO);
     expect(h.pending).toEqual([["merge-queue-sweep"]]);
+  });
+
+  it("MQ4-c: a conflict round is moved on by this look; the delta review it starts is followed in the same look; an entry back in the queue wakes the sweep", async () => {
+    at("awaiting_work", { workKind: "conflict" });
+    expect(await waitBody(worker, WHO)).toEqual({ state: "waiting" });
+    expect(h.roundDone).toBe(1);
+    expect(h.completed).toBe(0);
+    expect(h.pending).toEqual([]);
+    // The round ended and its delta review started: that review is completed in the same look.
+    h.roundDone = 0;
+    h.afterRound = { id: "entry-1", accountId: "acct", repoId: "repo-1", state: "awaiting_work", workKind: "delta_review", reason: null };
+    await waitBody(worker, WHO);
+    expect(h.roundDone).toBe(1);
+    expect(h.completed).toBe(1);
+    // A head that conflicts again may be queued again (a capacity wait): the tick has work.
+    h.roundDone = 0;
+    h.completed = 0;
+    h.afterRound = { id: "entry-1", accountId: "acct", repoId: "repo-1", state: "queued", workKind: null, reason: null };
+    await waitBody(worker, WHO);
+    expect(h.completed).toBe(0);
+    expect(h.pending).toEqual([["merge-queue-sweep"]]);
+  });
+
+  it("MQ4-c: a round that ends in review, or stops, is reported as the entry's state", async () => {
+    at("awaiting_work", { workKind: "conflict" });
+    h.afterRound = { id: "entry-1", state: "in_review", workKind: null, reason: null };
+    expect(await waitBody(worker, WHO)).toEqual({ state: "in_review" });
+    h.roundDone = 0;
+    h.afterRound = { id: "entry-1", state: "stopped", workKind: null, reason: "history_rewritten" };
+    expect(await waitBody(worker, WHO)).toEqual({ state: "stopped", reason: "history_rewritten" });
   });
 
   it("an entry that is not a delta review is not completed", async () => {
