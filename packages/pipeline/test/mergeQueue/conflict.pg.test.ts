@@ -432,6 +432,34 @@ describe("D#519 MQ4-b conflict decision and round start [pg]", () => {
     expect(await r.entry(7)).toMatchObject({ state: "awaiting_work", conflictRounds: 1 });
   });
 
+  it("D#519 MQ4-e2-c1 (C19-3): a start that fails after the round row is inserted (a dispatch that throws) leaves no round row, no run and the entry as it was", async () => {
+    const r = await start();
+    const a = await r.addItem(7, { world: conflictWorld(7, { commits: [{ author: BOT, files: ["src/a.ts"] }] }) });
+    const { onConflict, started } = wire(r, () => {
+      throw new Error("dispatch failed");
+    });
+    await expect(runQueueTick(r.deps({ onConflict }), r)).rejects.toThrow();
+    expect(started).toHaveLength(1);
+    expect(await roundRows(r, a.workItemId)).toEqual([]);
+    expect(await r.entry(7)).toMatchObject({ conflictRounds: 0, slotHolder: null });
+  });
+
+  it("D#519 MQ4-e2-c1 (C19-1): the start is handed the round's own from_sha, base_sha and base_ref, the values the job's conflict_round carries", async () => {
+    const r = await start();
+    const a = await r.addItem(7, { world: conflictWorld(7, { commits: [{ author: BOT, files: ["src/a.ts"] }] }) });
+    const seen: Array<{ fromSha: string; baseSha: string; baseRef: string }> = [];
+    const { onConflict } = wire(r, () => ({ ok: true, runId: RUN }), {
+      async startConflictRound({ round }) {
+        seen.push({ fromSha: round.fromSha, baseSha: round.baseSha, baseRef: round.baseRef });
+        return { ok: true, runId: RUN };
+      },
+    });
+    await runQueueTick(r.deps({ onConflict }), r);
+    const rows = await roundRows(r, a.workItemId);
+    expect(rows).toHaveLength(1);
+    expect(seen).toEqual([{ fromSha: rows[0]!.fromSha, baseSha: rows[0]!.baseSha, baseRef: rows[0]!.baseRef }]);
+  });
+
   it("any other refusal to start leaves no round and stops the entry as merge_conflict", async () => {
     const r = await start();
     const a = await r.addItem(7, { world: conflictWorld(7, { commits: [{ author: BOT, files: ["src/a.ts"] }] }) });

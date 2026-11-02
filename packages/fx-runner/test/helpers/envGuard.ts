@@ -73,6 +73,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/sandbox/checkHome.ts": ["fs", "path"], // D#6 chknested: makes the check's own home (a fresh mkdtemp directory with two exclusively created files) inside the job's temp directory; nothing is read
   "src/sandbox/checkSeccomp.ts": ["os"], // D#6 R-CHK-2: os.arch() picks the system call numbers of the seccomp filter the check runs under; nothing else
   "src/job/lockfileCheck.ts": ["path"], // D#6 C44-4: normalising a repo-relative link target
+  "src/daemon/conflictAttest.ts": ["fs", "path"], // D#519 MQ4-e2-c1: the same throwaway object store as the conflict facts, in a directory the caller supplies; every program runs through the shared reader
   "src/daemon/conflictFacts.ts": ["fs", "path"], // D#519 MQ4-e2-a: the throwaway object store of a conflict check gets an alternates file (mkdir, write) and its path is joined; every program runs through the shared reader
   "src/daemon/planeMerge.ts": ["fs", "path"], // D#6 PUBLIC-MERGE PR3: the merge order's throwaway repository directory under the state directory: lstat of the work root and of each work directory (a link is never followed or deleted), a 0700 create, and a sweep of leftovers; every program runs through the shared git reader
   "src/daemon/mirror.ts": ["fs", "path"], // the persistent mirrors: a 0700 directory of bare repositories, one per repo id

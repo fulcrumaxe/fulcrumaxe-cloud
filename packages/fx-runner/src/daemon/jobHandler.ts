@@ -17,7 +17,7 @@
  * checkpoint prompt (`checkpointTurn.ts`), the commit is pushed, and one `run_ended` `handed_off` (`pushed`, `push_failed` or `deadline`) goes out in place
  * of `done`. The note the agent writes stays on this machine.
  */
-import { DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, contextLedgerToWire, type ContextLedgerMeasure, type CheckNotRunReason, type ContextSection, type DoneCheck, type HANDED_OFF_DETAILS, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, contextLedgerToWire, type ContextLedgerMeasure, type CheckNotRunReason, type ConflictAttestation, type ContextSection, type DoneCheck, type HANDED_OFF_DETAILS, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { CHECKPOINT_MAX_TURN_MS, runCheckpointTurn } from "./checkpointTurn.js";
 import type { CheckpointNote } from "../job/checkpoint.js";
 import type { NixDetail, NixFromDefault, NixResult, NixShellStep, NixSkip, NixSource } from "./nixShell.js";
@@ -85,6 +85,11 @@ export interface JobHandlerDeps {
    * before `done`. Absent: no executor run enters a hook, as before. A run on a repository that is not paired is told so by the cloud and goes on unchanged.
    */
   planePush?: { baseLedger: PlaneBaseLedger; run: (input: PlanePushRunEnd) => Promise<PlanePushOutcome> };
+  /**
+   * D#519 MQ4-e2-c1: computes a conflict round's attestation from the mirror, the pushed head and the job's signed `conflict_round`. The wiring supplies it (it holds the push log, which this
+   * handler never sees). Absent: a conflict round attests nothing and the cloud reads that as missing.
+   */
+  conflictAttest?: (input: { mirrorDir: string; head: string; jobId: string; round: NonNullable<Job["conflict_round"]> }) => Promise<ConflictAttestation | undefined>;
   /** Git path A (cloud-verified, D#6 R5a-3). Absent when this build pins no GitHub relay for the cloud: a `verified` job then ends `git_proxy_unpinned`. */
   gitA?: GitPath;
   events: EventRelay;
@@ -675,13 +680,16 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       // A job with a check always has an outcome here; if the hook never recorded one, that is a failure, not a pass.
       // What the runner knows about the context it loaded, for the ledger: the repository map's size and hash, and the pinned files' sections and reasons. The same on every way a run ends.
       const ledgerSections = (): ContextSection[] => [...(repoMapHeld.map === undefined ? [] : [{ code: "map" as const, ...repoMapDigest(repoMapHeld.map.text), trimmed_bytes: 0 }]), ...(pinsHeld.read === undefined ? [] : pinLedgerSections(pinsHeld.read))];
+      // D#519 MQ4-e2-c1: only a job whose signed form carried `conflict_round` attests, and only when the round pushed a head; a job without the key sends nothing new.
+      const conflictMirror = job.conflict_round !== undefined && published.pushed ? git.mirrorDir?.(job) : undefined;
+      const conflictAttest = job.conflict_round !== undefined && published.pushed && conflictMirror !== undefined ? await deps.conflictAttest?.({ mirrorDir: conflictMirror, head: published.sha, jobId: job.job_id, round: job.conflict_round }) : undefined;
       const checked = checkHeld.outcome ?? (job.check === undefined ? undefined : closedCheck("the check was not run", "other"));
       if (checked !== undefined && !checked.passed) {
         await lease.flush();
         const stoppedAtCheck = lease.ended();
         if (stoppedAtCheck !== undefined) return stoppedBy(stoppedAtCheck);
         await reportEnd(lease, { reason: "check_failed", ...(checked.noDevShell === true ? { detail: "check_no_dev_shell" as const } : {}) });
-        const sentFailed = await sendDone(claimed, result, lease, ledgerSections(), checked.body);
+        const sentFailed = await sendDone(claimed, result, lease, ledgerSections(), checked.body, conflictAttest);
         if (sentFailed.status === "aborted") abandonSend = !(await reportShutdown(lease));
         return sentFailed;
       }
@@ -699,7 +707,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       // A stop reply (to anything sent so far, the flush included) ends the run: `done` is not sent for it.
       const stoppedAfterPush = lease.ended();
       if (stoppedAfterPush !== undefined) return stoppedBy(stoppedAfterPush);
-      const sent = await sendDone(claimed, result, lease, ledgerSections(), checked?.body);
+      const sent = await sendDone(claimed, result, lease, ledgerSections(), checked?.body, conflictAttest);
       if (sent.status === "aborted") abandonSend = !(await reportShutdown(lease));
       return sent;
     } finally {
@@ -769,12 +777,12 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     return sent;
   }
 
-  async function sendDone(claimed: Claimed, result: { sessionId?: string; agentOutput?: Record<string, unknown>; contextLedger?: ContextLedgerMeasure; workspace?: string }, lease: ReturnType<typeof startLease>, sections: readonly ContextSection[] = [], check?: DoneCheck): Promise<JobResult> {
+  async function sendDone(claimed: Claimed, result: { sessionId?: string; agentOutput?: Record<string, unknown>; contextLedger?: ContextLedgerMeasure; workspace?: string }, lease: ReturnType<typeof startLease>, sections: readonly ContextSection[] = [], check?: DoneCheck, conflictAttest?: ConflictAttestation): Promise<JobResult> {
     // Integers, enums and hashes only (C8 section 6). The one section the runner knows is the repository map it built (D#600 CX-3b): a byte count and the
     // text's sha256, never a path or any of the text. The other sections are the cloud's, which sent the prompt.
     const contextLedger = result.contextLedger === undefined ? undefined : contextLedgerToWire(result.contextLedger, sections);
     for (let attempt = 1; attempt <= attempts; attempt++) {
-      const reply = await clientOf(claimed.runId).done({ runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, sessionId: result.sessionId, agentOutput: result.agentOutput, contextLedger, check });
+      const reply = await clientOf(claimed.runId).done({ runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, sessionId: result.sessionId, agentOutput: result.agentOutput, contextLedger, check, conflictAttest });
       if (reply.kind === "done") {
         if (result.sessionId !== undefined && result.workspace !== undefined) {
           await deps.recordSession(result.sessionId, result.workspace).catch(() => undefined);

@@ -123,6 +123,8 @@ export interface StartAgentRunInput {
    * `baseSha` is the base of its `branch` and this is not used.
    */
   base?: { sha: string; branch: string };
+  /** D#519 MQ4-e2-c1 (C19): see `ExecutionRun.conflictRound`. Only a conflict round's start sets it. */
+  conflictRound?: { fromSha: string; baseSha: string; baseRef: string };
   workdir?: string;
   /** D#2 PREVIEW-RUNNER-EVENTS: see `ExecutionRun.cloneRepo` (`sha`: the proposal verifier's pinned checkout). */
   cloneRepo?: { owner: string; name: string; sha?: string };
@@ -203,6 +205,7 @@ export function buildExecutionRun(id: string, input: StartAgentRunInput): Execut
     model: input.model,
     backend: input.backend,
     ...(input.continues ? { continuesBranch: input.continues.branch, continuesFresh: true, ...(input.continues.prNumber === undefined ? {} : { continuesPrNumber: input.continues.prNumber }), ...(input.continues.baseSha === undefined ? {} : { continuesBaseSha: input.continues.baseSha, continuesBaseBranch: input.continues.branch }) } : input.base ? { continuesBaseSha: input.base.sha, continuesBaseBranch: input.base.branch } : {}),
+    ...(input.conflictRound ? { conflictRound: input.conflictRound } : {}),
     workdir: input.workdir,
     cloneRepo: input.cloneRepo,
     contextSections: input.contextSections,

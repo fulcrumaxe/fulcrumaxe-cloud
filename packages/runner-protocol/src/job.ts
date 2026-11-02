@@ -244,6 +244,14 @@ export const JobPinsSchema = z
   .strict();
 export type JobPins = z.infer<typeof JobPinsSchema>;
 
+/**
+ * D#519 MQ4-e2-c1 (C18, C19): marks a job as a merge-conflict round and carries the anchors the cloud recorded for it, so the runner's attestation is computed against values the cloud signed and
+ * not against its own record of where the round began. All three are the cloud's own (`merge_conflict_rounds`). Present only on an executor's `fix` job that continues a branch; omitted (never null)
+ * on every other job, so their canonical JSON and signature are unchanged. The cloud signs it only for a runner of `CONFLICT_ATTEST_JOB_MIN_PROTOCOL` or later.
+ */
+export const JobConflictRoundSchema = z.object({ from_sha: z.string().regex(/^[0-9a-f]{40}$/), base_sha: z.string().regex(/^[0-9a-f]{40}$/), base_ref: branchName }).strict();
+export type JobConflictRound = z.infer<typeof JobConflictRoundSchema>;
+
 export const JobSchema = z
   .object({
     schema_version: z.literal(1),
@@ -302,6 +310,8 @@ export const JobSchema = z
     // the cloud). Omitted (never null) when the model has no figure: the runner then says nothing about context. The signature covers it. The cloud signs it only for a runner of
     // `CONTEXT_WINDOW_JOB_MIN_PROTOCOL` or later: an older runner's strict parse would refuse the key.
     context_window: z.number().int().min(1).max(CONTEXT_WINDOW_MAX_TOKENS).optional(),
+    // D#519 MQ4-e2-c1: see `JobConflictRoundSchema`. Omitted (never null) on every job that is not a conflict round.
+    conflict_round: JobConflictRoundSchema.optional(),
     // A branch-name prefix such as "fx/". No URL, no "..".
     branch_prefix: z.string().regex(/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*\/$/).max(100).refine((value) => !value.includes("..")),
     model_hint: z.string().regex(/^[A-Za-z0-9._:-]{1,100}$/).nullable(),
@@ -313,7 +323,15 @@ export const JobSchema = z
 export type Job = z.infer<typeof JobSchema>;
 
 /** A job and its Ed25519 signature (base64url) over the canonical JSON of the job. */
-export const SignedJobSchema = z.object({ job: JobSchema, signature: z.string().regex(/^[A-Za-z0-9_-]{86}$/) }).strict();
+export const SignedJobSchema = z
+  .object({
+    // A conflict round is the executor's own fix round on a branch it continues: nowhere else (D#519 MQ4-e2-c1). The rule ties two fields, so it sits here and not on `JobSchema` (an object whose shape is read).
+    job: JobSchema.superRefine((job, ctx) => {
+      if (job.conflict_round !== undefined && (job.role !== "executor" || job.task.kind !== "fix" || job.continues === null)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "conflict_round is only on an executor fix job that continues a branch", path: ["conflict_round"] });
+      }
+    }),
+    signature: z.string().regex(/^[A-Za-z0-9_-]{86}$/) }).strict();
 export type SignedJob = z.infer<typeof SignedJobSchema>;
 
 /**

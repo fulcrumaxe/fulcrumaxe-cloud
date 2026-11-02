@@ -56,6 +56,8 @@ export function conflictRoundStarter(deps: Omit<ConflictBinding, "github" | "try
     const started = await deps.worker!.advanceStartFix(l.who, {
       kind: "conflict",
       baseSha: round.baseSha,
+      // D#519 MQ4-e2-c1 (C19): the round row's own anchors, carried to the runner job; the one place that sets them.
+      conflictRound: { fromSha: round.fromSha, baseSha: round.baseSha, baseRef: round.baseRef },
       issue: l.ctx.issue,
       headSha: round.fromSha,
       prompt: prompt.prompt,

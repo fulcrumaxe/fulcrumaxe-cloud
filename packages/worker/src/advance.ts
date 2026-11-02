@@ -429,6 +429,11 @@ export interface AdvanceFixRequest {
   kind?: "review" | "conflict" | "renumber";
   /** D#519 MQ4-e1-b: a `conflict` round's own base (the default-branch tip it was asked to merge). With an open public copy it is the round's signed diff base. Never set by a review round. */
   baseSha?: string;
+  /**
+   * D#519 MQ4-e2-c1 (C19): a `conflict` round's anchors as the conflict code holds them when it starts the run (the round row's `from_sha`, `base_sha` and `base_ref`). A runner job copies them into
+   * its signed `conflict_round`; nothing is read at issue time. Only a `conflict` round may carry it (any other kind is refused), and only `conflictRoundStarter` sets it.
+   */
+  conflictRound?: { fromSha: string; baseSha: string; baseRef: string };
   /** Which review the card shows as asking for changes. Absent only for a `conflict` round. */
   reviewer?: "code" | "security" | "acceptance";
   /** A reviewer run whose verdict asked for the changes. Absent only for a person's round (`person`) with no reviewer finding on the head. */
@@ -1719,6 +1724,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const sane =
       (req.kind === undefined || req.kind === "review" || conflict) &&
       (req.baseSha === undefined || (conflict && SHA_RE.test(req.baseSha))) &&
+      (req.conflictRound === undefined || (conflict && SHA_RE.test(req.conflictRound.fromSha) && SHA_RE.test(req.conflictRound.baseSha))) &&
       UUID_RE.test(req.actionId) && (conflict ? req.failingRunId === undefined && req.person === undefined && req.reviewer === undefined : req.failingRunId === undefined ? req.person === true : UUID_RE.test(req.failingRunId)) &&
       (req.person === undefined || req.person === true) &&
       Number.isSafeInteger(req.issue) && req.issue > 0 &&
@@ -1994,6 +2000,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           ...(freshSpill ? { contextSpill: freshSpill } : {}),
           ...(continues ? { continues, parentRunId: parent } : {}),
           inCreateTransaction: dec.inCreateTransaction(bindTransaction),
+          ...(conflict && req.conflictRound ? { conflictRound: req.conflictRound } : {}),
           // A fresh session: the repository is cloned into the workdir, as for a build.
           workdir: PREVIEW_WORKDIR,
           cloneRepo: { owner: coords.gh_owner, name: coords.gh_name },
@@ -2021,6 +2028,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
             parentRunId: parent,
             prompt,
             ...(republishes ? { base: { sha: baseTip!, branch: syncedBranch! } } : {}),
+            ...(conflict && req.conflictRound ? { conflictRound: req.conflictRound } : {}),
             inCreateTransaction: dec.inCreateTransaction(sandboxRepublish ? (client: PoolClient, runId: string) => insertRunEvent(client, who.accountId, runId, FIX_BASE_EVENT, { base_sha: baseTip!, branch: syncedBranch!, ...(conflict ? { conflict: true } : {}) }) : undefined),
             ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
             ...(sections ? { contextSections: sections } : {}),
