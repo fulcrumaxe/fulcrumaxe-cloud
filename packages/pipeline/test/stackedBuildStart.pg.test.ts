@@ -105,6 +105,15 @@ describe("D#598 P3b: a stacked child's executor starts from the parent's open pu
     expect(await stageOf(t.childId)).toBe("in_progress");
   });
 
+  it("D#519 MQ4-b0: the run's recorded start commit (head_sha) is the parent head it was told to build on; a default-branch start records none", async () => {
+    const t = await stackedWorld();
+    await start(t, new Github(() => openParent()));
+    expect(t.world.requests[0]!.headSha).toBe(HEAD);
+    const merged = await stackedWorld();
+    await start(merged, new Github(() => openParent({ state: "closed", merged: true })));
+    expect(merged.world.requests[0]!.headSha).toBeUndefined();
+  });
+
   it("the fetched tip differs from the pull request's head: refused with a reason, no run, the item stays at spec_ready", async () => {
     const t = await stackedWorld();
     const out = await start(t, new Github(() => openParent({ branchTipSha: MOVED })));

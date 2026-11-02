@@ -161,7 +161,7 @@ interface Facts {
   item: { stage: string; halted: boolean; halt_epoch: number; repo_id: string | null } | undefined;
   /** The request's own row: the halt epoch it recorded, and how long ago it was made (on the database's clock). */
   request: { epoch: number | null; ageSeconds: number; attempts: number } | undefined;
-  parked: { id: string; created_at: Date; execution_mode: string | null; spec_version_id: string | null; spec_version: number | null; prompt: string | null } | undefined;
+  parked: { id: string; created_at: Date; execution_mode: string | null; spec_version_id: string | null; spec_version: number | null; prompt: string | null; head_sha: string | null } | undefined;
   /** An executor run newer than the parked one that this resume did not start (a person's Approve or Build again). */
   newerExecutor: boolean;
   /** The run this resume started, if it did (a run a spending limit denied is not one: it started nothing). */
@@ -214,8 +214,8 @@ export function createResumeModule(runnerPool: Pool, deps: ResumeModuleDeps): Re
       let newerExecutor = false;
       if (ask.run_id !== null) {
         const run = (
-          await client.query<{ created_at: Date; execution_mode: string | null; spec_version_id: string | null; version: number | null }>(
-            `SELECT r.created_at, r.execution_mode, r.spec_version_id, sv.version FROM agent_runs r
+          await client.query<{ created_at: Date; execution_mode: string | null; spec_version_id: string | null; version: number | null; head_sha: string | null }>(
+            `SELECT r.created_at, r.execution_mode, r.spec_version_id, sv.version, r.head_sha FROM agent_runs r
                LEFT JOIN spec_versions sv ON sv.id = r.spec_version_id AND sv.account_id = r.account_id
               WHERE r.id = $1 AND r.account_id = $2 AND r.work_item_id = $3`,
             [ask.run_id, accountId, ask.work_item_id],
@@ -223,7 +223,7 @@ export function createResumeModule(runnerPool: Pool, deps: ResumeModuleDeps): Re
         ).rows[0];
         if (run) {
           const input = (await client.query<{ payload: { prompt?: unknown } }>("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'run.input' ORDER BY seq LIMIT 1", [ask.run_id])).rows[0];
-          parked = { id: ask.run_id, created_at: run.created_at, execution_mode: run.execution_mode, spec_version_id: run.spec_version_id, spec_version: run.version === null ? null : Number(run.version), prompt: typeof input?.payload.prompt === "string" ? input.payload.prompt : null };
+          parked = { id: ask.run_id, created_at: run.created_at, execution_mode: run.execution_mode, spec_version_id: run.spec_version_id, spec_version: run.version === null ? null : Number(run.version), prompt: typeof input?.payload.prompt === "string" ? input.payload.prompt : null, head_sha: run.head_sha };
           // A newer executor run than the ask's own (other than this resume's, whatever became of them) means a person pressed Approve or Build again.
           const newer = await client.query<{ id: string }>(
             "SELECT id FROM agent_runs WHERE account_id = $1 AND work_item_id = $2 AND role = 'executor' AND id <> $3 AND created_at > $4::timestamptz AND NOT (id = ANY($5::uuid[])) LIMIT 1",
@@ -412,6 +412,8 @@ export function createResumeModule(runnerPool: Pool, deps: ResumeModuleDeps): Re
       exclusive: true,
       haltEpoch: f.item.halt_epoch,
       parentRunId: f.parked.id,
+      // D#519 MQ4-b0: the resumed build starts from the parked run's start commit (a stacked or paired base), so its first push is bounded by it.
+      ...(f.parked.head_sha !== null && SHA_RE.test(f.parked.head_sha) ? { headSha: f.parked.head_sha } : {}),
       decisionSnapshot: dec.offer.snapshot,
       ...(f.parked.execution_mode !== null && /^[a-z][a-z_]{0,31}$/.test(f.parked.execution_mode) ? { expectedExecutionMode: f.parked.execution_mode } : {}),
       ...(f.parked.spec_version_id === null ? {} : { specVersionId: f.parked.spec_version_id }),

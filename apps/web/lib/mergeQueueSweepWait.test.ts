@@ -16,7 +16,13 @@ vi.mock("@fx/core/src/pendingWork.js", () => ({ markWorkPending: async () => und
 vi.mock("@fx/core/src/tenancy/withTenant.js", () => ({ withTenant: async (_p: unknown, _a: string, fn: (c: unknown) => unknown) => fn({ query: async () => ({ rows: [{ gh_owner: "acme", gh_name: "widgets", execution_mode: "sandbox" }] }) }) }));
 vi.mock("@fx/pipeline", () => ({
   createGitHubMergeGatePort: () => ({}),
-  mergeQueue: { readQueue: async () => h.queue, getEntry: async (_c: unknown, _a: string, id: string) => h.afterRound[id] ?? h.queue.find((e) => e.id === id), MERGE_QUEUE_LEASE_SECONDS: 30 },
+  mergeQueue: {
+    readQueue: async () => h.queue,
+    getEntry: async (_c: unknown, _a: string, id: string) => h.afterRound[id] ?? h.queue.find((e) => e.id === id),
+    MERGE_QUEUE_LEASE_SECONDS: 30,
+    bindPlatformCommitProof: () => undefined,
+    createPlatformPushReader: () => async () => null,
+  },
 }));
 vi.mock("./advanceReview", () => ({ createReviewDeps: () => ({}) }));
 vi.mock("./mergeQueueDeltaReview", () => ({

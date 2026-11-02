@@ -1,7 +1,7 @@
 import type { PoolClient } from "pg";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { MAX_CONFLICT_ROUNDS, createOnConflict, listConflictRounds, runQueueTick, takeSlot, type ConflictPorts, type PlatformPush, type RoundStart } from "../../src/mergeQueue/index.js";
+import { MAX_CONFLICT_ROUNDS, createOnConflict, createPlatformPushReader, listConflictRounds, runQueueTick, takeSlot, type ConflictPorts, type MergeQueueEntry, type PlatformPush, type RoundStart } from "../../src/mergeQueue/index.js";
 import type { MergeWorld } from "../review/helpers/fakeGitHubMergeTls.js";
 import { pgHarness } from "../helpers/pgHarness.js";
 import { BOT, T0, shaOf, startQueueRepo, type QueueRepo } from "./helpers/queueRepo.js";
@@ -66,10 +66,20 @@ function conflictWorld(pr: number, spec: Spec, defaultTipOf = pr, headSha = shaO
   };
 }
 
+/**
+ * D#519 MQ4-b0: when set, the log is written into `platform_ref_pushes` (the rows the proxy's definer writes) and the REAL reader answers, so every C10
+ * case below runs twice: once over the injected log, once over the stored records.
+ */
+let viaRecords: { insert(entry: MergeQueueEntry, log: readonly PlatformPush[]): Promise<void>; reader(appLogin: string | null): ConflictPorts["platformCommits"] } | null = null;
+
 /** The proof the record reader would give: our app's login, and the logged pushes whose new tip is one of `shas`. */
 const fromLog =
   (appLogin: string | null = BOT, log: () => readonly PlatformPush[] = () => pushLog): ConflictPorts["platformCommits"] =>
-  async (_entry, shas) => ({ appLogin, pushes: log().filter((p) => shas.includes(p.newSha)) });
+  async (entry, shas) => {
+    if (viaRecords === null) return { appLogin, pushes: log().filter((p) => shas.includes(p.newSha)) };
+    await viaRecords.insert(entry, log());
+    return viaRecords.reader(appLogin)(entry, shas);
+  };
 
 describe("D#519 MQ4-b conflict decision and round start [pg]", () => {
   const db = pgHarness();
@@ -170,7 +180,32 @@ describe("D#519 MQ4-b conflict decision and round start [pg]", () => {
     expect(await events(a.workItemId)).toEqual([{ kind: "stopped", code: "merge_conflict", reasons: ["foreign_commits"], round: 0 }]);
   });
 
-  describe("C10: the platform's own commits are proved by push records or a verified app commit, never by author fields", () => {
+  describe.each([["an injected log", false], ["the real push-record reader over platform_ref_pushes (MQ4-b0)", true]])("C10 (%s): the platform's own commits are proved by push records or a verified app commit, never by author fields", (_label, records) => {
+    beforeAll(() => {
+      if (!records) return;
+      viaRecords = {
+        async insert(entry, log) {
+          await db.admin.query(`DELETE FROM platform_ref_pushes WHERE account_id = $1 AND repo_id = $2`, [entry.accountId, entry.repoId]);
+          for (const p of log) {
+            await db.admin.query(
+              `INSERT INTO platform_ref_pushes (account_id, repo_id, run_id, runtime, ref, old_sha, new_sha, start_sha) VALUES ($1, $2, $3, 'production', 'refs/heads/fx/issue-7', $4, $5, $6)`,
+              [entry.accountId, entry.repoId, p.runId, p.oldSha, p.newSha, p.startSha],
+            );
+          }
+        },
+        reader: (appLogin) =>
+          createPlatformPushReader({
+            inTenant: (accountId, fn) => withTenant(db.pureAppUserPool, accountId, fn),
+            appLogin: async () => {
+              if (appLogin === null) throw new Error("no installation");
+              return appLogin;
+            },
+          }),
+      };
+    });
+    afterAll(() => {
+      viaRecords = null;
+    });
     const agentRuns = async (r: QueueRepo) => Number((await db.admin.query(`SELECT count(*)::int AS n FROM agent_runs WHERE account_id = $1`, [r.accountId])).rows[0].n);
     /** One conflicted PR 7 with these commits, decided by one tick. */
     const run = async (commits: Commit[], over: Partial<ConflictPorts> = {}, extra: (w: Partial<MergeWorld>) => void = () => {}) => {

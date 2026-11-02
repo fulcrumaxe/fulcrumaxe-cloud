@@ -1338,6 +1338,25 @@ describe("D#598 P1f-4b: the publish run's per-request mint, use and revoke", () 
     expect(fake.live.size).toBe(1);
   });
 
+  it("D#519 MQ4-b0: a publish push GitHub accepted writes no push record (the paired public repository is MQ4-e1's)", async () => {
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    const record = vi.fn(async () => undefined);
+    const deferred: Promise<unknown>[] = [];
+    const pkt = (line: string) => (line.length + 4).toString(16).padStart(4, "0") + line;
+    const body = pkt(`${"0".repeat(40)} ${"2".repeat(40)} refs/heads/${BRANCH}\0report-status\n`) + "0000PACK";
+    const accepted: PinnedRequester[] = [];
+    const deps = publishDeps(fake, { recordPlatformPushes: record, defer: (w) => void deferred.push(w) }, PUBLISH_RUN, (inner) => async (p) => {
+      if (!p.path.endsWith("/git-receive-pack")) return inner(p);
+      accepted.push(inner);
+      return { status: 200, headers: { "content-type": "application/x-git-receive-pack-result" }, bodyStream: new Response("0000").body };
+    });
+    const res = await call(deps, "/acme-public/widgets-pub.git/git-receive-pack", "POST", body);
+    expect(res.status).toBe(200);
+    expect(accepted).toHaveLength(1);
+    expect(record).not.toHaveBeenCalled();
+    expect(deferred).toEqual([]);
+  });
+
   it("a denied request mints nothing, answers a generic 403, and logs a fixed reason", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const deps = publishDeps(fake);
@@ -1451,5 +1470,79 @@ describe("D#598 P1f-4b: buildPinnedFetch, the publish path's own GitHub calls", 
     const res = await buildPinnedFetch({ forwardPinned, resolveUpstream: async () => ["1.2.3.4"] })("https://api.github.com/installation/token", { method: "DELETE" });
     expect(res.status).toBe(204);
     expect(await res.text()).toBe("");
+  });
+});
+
+/**
+ * D#519 MQ4-b0 (C10-7), sandbox path: the push record, through the REAL decideProxyRequest for an executor run. The recorder is a spy here (the
+ * database side is packages/github/test/platformPushRecorder.pg.test.ts); `defer` stands in for Vercel's waitUntil.
+ */
+describe("D#519 MQ4-b0: a forwarded push is recorded after GitHub answers 200", () => {
+  const RECEIVE = "/acme/widgets.git/git-receive-pack";
+  const pkt = (line: string) => (line.length + 4).toString(16).padStart(4, "0") + line;
+  const BODY = Buffer.concat([Buffer.from(pkt(`${"1".repeat(40)} ${"2".repeat(40)} refs/heads/fx/issue-7\0report-status side-band-64k\n`) + "0000"), Buffer.from("PACK\0\0\0\x02\0\0\0\0")]);
+
+  function harness(over: { status?: number; run?: typeof RESOLVED_RUN | { role: string } | null; record?: (key: unknown, body: Uint8Array) => Promise<void> } = {}) {
+    const deferred: Promise<unknown>[] = [];
+    const record = vi.fn(over.record ?? (async () => undefined));
+    const deps = fakeDeps({
+      resolveSandboxRun: vi.fn(async () => (over.run === undefined ? RESOLVED_RUN : over.run) as typeof RESOLVED_RUN | null),
+      accessTokenRequester: successfulMint(),
+      appCredentials: () => ({ appId: "7", privateKeyPem: realPrivateKeyPem, webhookSecret: "unused-in-these-tests" }),
+      forwardPinned: vi.fn(async (): Promise<PinnedResponse> => ({ status: over.status ?? 200, headers: { "content-type": "application/x-git-receive-pack-result" }, bodyStream: new Response("0000").body })),
+      defer: (w) => void deferred.push(w),
+      recordPlatformPushes: record,
+    });
+    return { deps, record, deferred };
+  }
+  const push = async (deps: GhProxyHandlerDeps, path = RECEIVE, method = "POST") =>
+    ghProxyHandler(new NextRequest(`https://example.test/api/gh-proxy${path}`, { method, headers: { host: CONFIG_HOST, "vercel-sandbox-oidc-token": await signOidc() }, ...(method === "POST" ? { body: BODY } : {}) }), deps, decideProxyRequest);
+
+  it("an allowed receive-pack answered 200: the sandbox name and the exact body go to the recorder, through defer", async () => {
+    const h = harness();
+    const res = await push(h.deps);
+    expect(res.status).toBe(200);
+    expect(h.record).toHaveBeenCalledTimes(1);
+    const [key, body] = h.record.mock.calls[0]!;
+    expect(key).toEqual({ sandboxName: "rn-8-executor-run-1" });
+    expect(Buffer.from(body).equals(BODY)).toBe(true);
+    expect(h.deferred).toHaveLength(1);
+  });
+
+  it.each([401, 403, 404, 422, 500])("GitHub answered %i: nothing recorded", async (status) => {
+    const h = harness({ status });
+    expect((await push(h.deps)).status).toBe(status);
+    expect(h.record).not.toHaveBeenCalled();
+  });
+
+  it("a denied push (no run resolves) is never forwarded or recorded", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const h = harness({ run: null });
+    expect((await push(h.deps)).status).toBe(403);
+    expect(h.record).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
+
+  it("a read (info/refs, upload-pack) answered 200 is not a push: nothing recorded", async () => {
+    const h = harness();
+    expect((await push(h.deps, "/acme/widgets.git/info/refs?service=git-receive-pack", "GET")).status).toBe(200);
+    // A POST that is a fetch, not a push.
+    expect((await push(h.deps, "/acme/widgets.git/git-upload-pack")).status).toBe(200);
+    expect(h.deps.forwardPinned).toHaveBeenCalledTimes(2);
+    expect(h.record).not.toHaveBeenCalled();
+  });
+
+  it("a record that rejects, or throws, never changes GitHub's answer to the client, and is logged by class only", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    for (const record of [async () => Promise.reject(new TypeError("secret detail ghs_x")), () => { throw new RangeError("secret detail"); }]) {
+      const h = harness({ record: record as never });
+      const res = await push(h.deps);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe("0000");
+      await Promise.all(h.deferred);
+    }
+    expect(warn.mock.calls.filter((c) => c[0] === "gh-proxy: push record failed").map((c) => c[1])).toEqual([{ error: "TypeError" }, { error: "RangeError" }]);
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/secret|ghs_/);
+    vi.restoreAllMocks();
   });
 });

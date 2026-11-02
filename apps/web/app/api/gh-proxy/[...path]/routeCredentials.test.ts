@@ -35,6 +35,7 @@ describe("gh-proxy route.ts: callers with no proxy credential are refused before
       createRunnerBoundBranchResolver: vi.fn(),
       createPublishTargetResolver: vi.fn(),
       createPublishInstallationOwnership: vi.fn(),
+      createPlatformPushRecorder: vi.fn(),
     }));
     vi.doMock("@fx/db/src/pool", () => ({ createPool }));
     vi.doMock("./handler", () => ({ defaultGhProxyHandlerDeps, ghProxyHandler }));
