@@ -4,6 +4,7 @@ import { effectiveModeSql } from "@fx/runner";
 import type { WorkItemTier } from "../build/types.js";
 import { tierOfKind } from "./reviewPlan.js";
 import { resolveBuildIdentity, type BuildIdentityRefusal } from "@fx/core/src/work-items/buildIdentity.js";
+import { specOfItemSql } from "@fx/core/src/work-items/stages.js";
 import { reviewFixRoundsSql } from "@fx/core/src/work-items/driverEvents.js";
 
 /**
@@ -85,7 +86,7 @@ export async function loadReviewContext(pool: Pool, accountId: string, workItemI
          LEFT JOIN LATERAL (
            SELECT sv.version FROM spec_versions sv
             WHERE sv.account_id = w.account_id AND sv.erased_at IS NULL
-              AND (CASE WHEN w.planned_pr_key IS NULL THEN sv.work_item_id = w.id ELSE sv.id = w.planned_pr_spec_version_id AND sv.work_item_id = w.parent_id END)
+              AND ${specOfItemSql("sv", "w")}
             ORDER BY sv.version DESC LIMIT 1
          ) s ON true
         WHERE w.id = $1 AND w.account_id = $2`,
@@ -136,7 +137,7 @@ export async function loadSpecText(pool: Pool, accountId: string, workItemId: st
     // A planned PR child reviews against the Spec version it names (a version of its parent); everything else against its own newest.
     const { rows } = await client.query<{ version: number; body: string }>(
       `SELECT sv.version, sv.body FROM work_items w JOIN spec_versions sv ON sv.account_id = w.account_id AND sv.erased_at IS NULL
-          AND (CASE WHEN w.planned_pr_key IS NULL THEN sv.work_item_id = w.id ELSE sv.id = w.planned_pr_spec_version_id AND sv.work_item_id = w.parent_id END)
+          AND ${specOfItemSql("sv", "w")}
         WHERE w.id = $2 AND w.account_id = $1 ORDER BY sv.version DESC LIMIT 1`,
       [accountId, workItemId],
     );

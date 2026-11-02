@@ -134,13 +134,13 @@ async function decide(client: PoolClient, accountId: string, input: FixGateInput
   const owner = await client.query<{ owner_process: string }>('SELECT owner_process FROM proposals WHERE account_id = $1::uuid AND work_item_id = $2::uuid LIMIT 1', [accountId, workItemId]);
   const item = { ...row, owner_process: owner.rows[0]?.owner_process ?? null };
 
-  // What the item is held to. A top-level item: its own newest Spec version and its own newest approval. A child: its pinned version (a version of its parent) and the parent's newest approval.
+  // What the item is held to. A top-level item: its own newest Spec version and its own newest approval. A planned child: its pinned version (a version of its parent); a follow-up child: its own newest. Either way the parent's newest approval.
   const pinned = child && identity.ok ? identity.identity.specVersionId : null;
   const spec = (await client.query<{ id: string; version: number }>(
     child
       ? 'SELECT id, version FROM spec_versions WHERE account_id = $1::uuid AND id = $3::uuid AND work_item_id = $2::uuid AND erased_at IS NULL'
       : 'SELECT id, version FROM spec_versions WHERE account_id = $1::uuid AND work_item_id = $2::uuid AND erased_at IS NULL ORDER BY version DESC LIMIT 1',
-    child ? [accountId, row.parent_id, pinned] : [accountId, workItemId])).rows[0];
+    child && identity.ok ? [accountId, identity.identity.specOwnerId, pinned] : [accountId, workItemId])).rows[0];
   const approval = (await client.query<{ id: string; spec_version_id: string | null; version: number | null }>(
     `SELECT a.id, a.spec_version_id, s.version FROM work_item_approvals a
        LEFT JOIN spec_versions s ON s.account_id = a.account_id AND s.id = a.spec_version_id

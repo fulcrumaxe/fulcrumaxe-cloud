@@ -5,7 +5,7 @@ import type { LiveSecretsSource } from "@fx/core/src/memory/index.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
-import { hasLivePlannedChildSql } from "@fx/core/src/work-items/stages.js";
+import { hasLivePlannedChildSql, specOfItemSql } from "@fx/core/src/work-items/stages.js";
 import { stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
 import { IllegalStageTransitionError, WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { isBuildableKind } from "@fx/discussions";
@@ -306,7 +306,7 @@ async function readFacts(pool: Pool, accountId: string, workItemId: string): Pro
          LEFT JOIN LATERAL (
            SELECT sv.id, sv.version, sv.body, sv.frontmatter -> 'acceptance_files' AS acceptance_files, sv.frontmatter -> 'planned_prs' AS planned_prs FROM spec_versions sv
             WHERE sv.account_id = w.account_id AND sv.erased_at IS NULL
-              AND (CASE WHEN w.planned_pr_key IS NULL THEN sv.work_item_id = w.id ELSE sv.id = w.planned_pr_spec_version_id AND sv.work_item_id = w.parent_id END)
+              AND ${specOfItemSql("sv", "w")}
             ORDER BY sv.version DESC LIMIT 1
          ) s ON true
         WHERE w.id = $1 AND w.account_id = $2`,

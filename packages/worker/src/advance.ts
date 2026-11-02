@@ -7,7 +7,7 @@ import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
 import { NO_VERDICT_ESCALATION_CODE, readReviewHold } from "@fx/core/src/work-items/reviewHold.js";
 import { VERDICT_ROLES } from "@fx/core/src/work-items/verdictRoles.js";
-import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError, hasLivePlannedChildSql } from "@fx/core/src/work-items/stages.js";
+import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError, hasLivePlannedChildSql, readsOwnSpecSql, specOfItemSql } from "@fx/core/src/work-items/stages.js";
 import { MAX_WAITING_ATTEMPT, assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
 import { markRunnerWork, markWorkPending } from "@fx/core/src/pendingWork.js";
 import { createRunnerPlaneMergeStore, PLANE_MERGE_OPEN_STATES, type PlaneMergeOrder, type RunnerPlaneMergeStore } from "./runnerPlaneMerge.js";
@@ -59,11 +59,7 @@ import { STAGE_RESUME_PASS_SECONDS } from "./stageResume.js";
  */
 
 
-/**
- * D#483 S5-b2c-2: the Spec versions an item is built and reviewed against (alias `s`, item `w`). Its own, except for a planned PR child, whose is the one version of its parent that
- * it names (`planned_pr_spec_version_id`). Never the parent's newest.
- */
-const SPEC_OF_ITEM_SQL = "(CASE WHEN w.planned_pr_key IS NULL THEN s.work_item_id = w.id ELSE s.id = w.planned_pr_spec_version_id AND s.work_item_id = w.parent_id END)";
+const SPEC_OF_ITEM_SQL = specOfItemSql("s", "w");
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** An execution mode word (`sandbox`, `runner_local`): lower case and underscores only. */
 const MODE_RE = /^[a-z][a-z_]{0,31}$/;
@@ -829,7 +825,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
                 (SELECT max(s.version) FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL}) AS spec_version,
                 (SELECT s.frontmatter -> 'acceptance_files' FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL} ORDER BY s.version DESC LIMIT 1) AS acceptance_files,
                 (SELECT CASE WHEN jsonb_typeof(s.frontmatter -> 'planned_prs') = 'array' THEN jsonb_array_length(s.frontmatter -> 'planned_prs') ELSE 0 END FROM spec_versions s
-                  WHERE w.planned_pr_key IS NULL AND s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL} ORDER BY s.version DESC LIMIT 1) AS planned_count
+                  WHERE ${readsOwnSpecSql("w")} AND s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL} ORDER BY s.version DESC LIMIT 1) AS planned_count
            FROM work_items w LEFT JOIN discussions d ON d.account_id = w.account_id AND d.id = w.discussion_id
           WHERE w.id = $1 AND w.account_id = $2`,
         [workItemId, accountId],
@@ -1047,7 +1043,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
                 EXISTS (SELECT 1 FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL}) AS has_spec,
                 (SELECT max(s.version) FROM spec_versions s WHERE s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL}) AS spec_version,
                 (SELECT CASE WHEN jsonb_typeof(s.frontmatter -> 'planned_prs') = 'array' THEN jsonb_array_length(s.frontmatter -> 'planned_prs') ELSE 0 END FROM spec_versions s
-                  WHERE w.planned_pr_key IS NULL AND s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL} ORDER BY s.version DESC LIMIT 1) AS planned_count,
+                  WHERE ${readsOwnSpecSql("w")} AND s.account_id = w.account_id AND s.erased_at IS NULL AND ${SPEC_OF_ITEM_SQL} ORDER BY s.version DESC LIMIT 1) AS planned_count,
                 (w.planned_pr_key IS NULL AND ${hasLivePlannedChildSql("w")}) AS has_children
            FROM work_items w
            LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id

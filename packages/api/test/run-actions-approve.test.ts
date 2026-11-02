@@ -14,10 +14,11 @@ import { hashToken } from '../src/tokens/resolve.js';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
 import { DISCUSSION_KINDS, isBuildableKind } from '@fx/discussions';
-import { ADVANCE_NON_BUILDABLE_KINDS, ADVANCEABLE_STAGES } from '@fx/core/src/work-items/advance.js';
+import { ADVANCE_NON_BUILDABLE_KINDS, ADVANCEABLE_STAGES, FOLLOW_UP_NOT_STARTED } from '@fx/core/src/work-items/advance.js';
 import { TERMINAL_RUN_STATUSES, runActionDeps } from '../src/routes/run-actions.js';
 import { listStalledItems } from '@fx/core/src/work-items/stalled.js';
 import { seedAccountWithMember } from './helpers/seed.js';
+import { withTenant } from '@fx/core/src/tenancy/withTenant.js';
 
 interface Identity {
   accountId: string;
@@ -209,6 +210,25 @@ describe('D#483 P1: approve route', () => {
     expect(res.status).toBe(409);
     expect(await code(res)).toBe('not_approvable');
     await expectNothingWritten(p.accountId);
+  });
+
+  it('C29-0-5: a follow-up child at triaged (no issue number of its own) is 409 not_approvable with the advance table\'s sentence, never triaged, and nothing is written', async () => {
+    const p = await person('owner');
+    const parent = await seedIssueItem(p.accountId);
+    await admin.query(`INSERT INTO work_item_approvals (account_id, work_item_id, approved_by, source) VALUES ($1, $2, $3, 'work_item_approve')`, [p.accountId, parent, p.userId]);
+    const followUp = (await admin.query<{ id: string }>(
+      `INSERT INTO work_item_follow_ups (account_id, work_item_id, source_role, title, why, title_key, disposition) VALUES ($1, $2, 'code-reviewer', 'Add a retry', 'why', $3, 'child') RETURNING id`,
+      [p.accountId, parent, randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '')])).rows[0]!.id;
+    const child = await withTenant(appUserPool, p.accountId, p.userId, async (c) => (await c.query<{ o_child_id: string }>('SELECT * FROM follow_up_child_create($1)', [followUp])).rows[0]!.o_child_id);
+    expect((await admin.query('SELECT gh_number, stage FROM work_items WHERE id = $1', [child])).rows[0]).toEqual({ gh_number: null, stage: 'triaged' });
+    const res = await post(p, `/work-items/${child}/approve`);
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as ErrBody;
+    expect(body.error.code).toBe('not_approvable');
+    expect(body.error.message).toContain(FOLLOW_UP_NOT_STARTED);
+    expect(await rowCount(p.accountId)).toBe(0);
+    expect(signal.sent).toEqual([]);
+    expect((await admin.query('SELECT stage FROM work_items WHERE id = $1', [child])).rows[0].stage).toBe('triaged');
   });
 
   let discussionNumber = 10;

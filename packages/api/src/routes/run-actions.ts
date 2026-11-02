@@ -223,8 +223,8 @@ async function approve(ctx: RouteContext, id: string) {
   const actor = `session:${userId}`;
 
   await withTenant(ctx.pool, accountId, userId, tokenId, async (client) => {
-    const { rows } = await client.query<{ stage: string; provenance: string; repo_id: string | null; gh_number: string | null; discussion_id: string | null; kind: string | null; has_spec: boolean }>(
-      `SELECT w.stage, w.provenance, w.repo_id, w.gh_number, w.discussion_id, d.kind,
+    const { rows } = await client.query<{ stage: string; provenance: string; repo_id: string | null; gh_number: string | null; discussion_id: string | null; kind: string | null; has_spec: boolean; follow_up: boolean }>(
+      `SELECT w.stage, w.provenance, w.repo_id, w.gh_number, w.discussion_id, d.kind, (w.follow_up_id IS NOT NULL) AS follow_up,
               EXISTS (SELECT 1 FROM spec_versions s WHERE s.work_item_id = w.id AND s.erased_at IS NULL) AS has_spec
          FROM work_items w LEFT JOIN discussions d ON d.id = w.discussion_id
         WHERE w.id = $1`,
@@ -240,7 +240,8 @@ async function approve(ctx: RouteContext, id: string) {
     // Fail closed, as the intake gate does: only the exact literal "internal" is internal.
     if (item.provenance !== "internal") throw new ExternalRequiresHumanError();
     if (item.repo_id === null) throw new NoRepoError();
-    if (item.gh_number === null) throw new NotApprovableError("work item has no GitHub issue");
+    // A follow-up child has no number of its own (it builds on its parent's issue): the advance table answers it, with its own sentence.
+    if (item.gh_number === null && !item.follow_up) throw new NotApprovableError("work item has no GitHub issue");
     const verdict = advanceActionFor({ ...item, no_verdict_hold: item.stage === "needs_human" && (await readReviewHold(client, id)) });
     if (!verdict.ok) throw new NotApprovableError(verdict.message);
     const live = await client.query<{ n: string }>("SELECT count(*) AS n FROM agent_runs WHERE work_item_id = $1 AND NOT (status = ANY($2::text[]))", [id, TERMINAL_RUN_STATUSES]);
