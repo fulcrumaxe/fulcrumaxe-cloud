@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { DispatchFailedError, providerCapacityOf, readRunSide, type StartAgentRunInput } from "@fx/runner";
+import { DispatchFailedError, providerCapacityOf, readRunSide, writeRunStatusOn, type StartAgentRunInput } from "@fx/runner";
 import { checkHeadroom } from "@fx/spend";
 
 /**
@@ -10,7 +10,8 @@ import { checkHeadroom } from "@fx/spend";
  *
  * The gate wraps the run starter and the fix-round resume, so every start site (classify, Spec, re-spec, reviewers, build, the parked-decision resume, the merge queue's delta review, fix
  * rounds and check-fix rounds) meets it without a second copy of the order. C23 item 3's order:
- *   1. a key that already holds a run is a replay and passes through untouched;
+ *   1. a key that already holds a run is a replay and passes through (S5-k3b-h: a claim the item holds is consumed with that run; a run a 429 left `pending` because
+ *      its cancel write failed is ended now, and the order runs again for a fresh attempt);
  *   2. anything but a sandbox run passes through (runner runs already wait as pending);
  *   3. rule 1 first: the read-only spend check. A deny goes to the starter as today (refused and keyed `refused_spend`) and is never queued;
  *   4. a held claim is consumed, in the run's create transaction (`capacity_mark_started`; a lost claim rolls the run back and the order runs again);
@@ -61,10 +62,26 @@ export interface CapacityPort {
 const ATTEMPTS = 3;
 
 export function createCapacityGate(pool: Pool, port: CapacityPort) {
-  /** Whether a key already holds a run (a replay). */
-  async function replays(accountId: string, key: string | undefined): Promise<boolean> {
-    if (key === undefined) return false;
-    return withTenant(pool, accountId, async (client) => (await client.query("SELECT 1 FROM agent_run_idempotency_keys WHERE account_id = $1 AND idempotency_key = $2", [accountId, key])).rowCount === 1);
+  /**
+   * The run a key already holds (a replay), or null. `stuck`: a sandbox run still `pending` whose dispatch is over without a sandbox (no session was recorded and the
+   * cleanup's stop mark is set, which no live dispatch has), whose item went back to the queue on a 429 after the run was created. Only a failed cancel write
+   * leaves that state (if the stop mark failed with them, the run is not recognised and the follower watchdog ends it). `entry`: the item's own open entry under a claim, consumed with this run.
+   */
+  async function replayed(accountId: string, workItemId: string, key: string | undefined) {
+    if (key === undefined) return null;
+    return withTenant(pool, accountId, async (client) => {
+      const { rows } = await client.query<{ id: string; stuck: boolean; entry_id: string | null; attempt: number | null }>(
+        `SELECT r.id, (r.status = 'pending' AND r.execution_mode = 'sandbox' AND cardinality(r.sandbox_session_ids) = 0 AND r.sandbox_stopped_at IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM capacity_queue q WHERE q.account_id = r.account_id AND q.work_item_id = r.work_item_id AND q.ended_at IS NULL
+                                 AND q.started_run_id IS NULL AND q.refused_status = 429 AND q.created_at >= r.created_at)) AS stuck, c.id AS entry_id, c.attempt
+           FROM agent_run_idempotency_keys k JOIN agent_runs r ON r.account_id = k.account_id AND r.id = k.run_id
+           LEFT JOIN capacity_queue c ON c.account_id = r.account_id AND c.work_item_id = $3 AND r.work_item_id = $3 AND r.status <> 'cancelled'
+                 AND c.ended_at IS NULL AND c.started_run_id IS NULL AND c.claimed_at IS NOT NULL
+          WHERE k.account_id = $1 AND k.idempotency_key = $2`,
+        [accountId, key, workItemId],
+      );
+      return rows[0] ?? null;
+    });
   }
 
   return {
@@ -73,7 +90,19 @@ export function createCapacityGate(pool: Pool, port: CapacityPort) {
       if (!input.workItemId || !input.repoId) return start(input);
       const who: CapacityAdmit = { accountId: input.accountId, repoId: input.repoId, workItemId: input.workItemId, runKind: input.role.replace(/[^a-z0-9]+/gi, "_").toLowerCase() };
       for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
-        if (await replays(input.accountId, input.idempotency?.key)) return start(input);
+        const held = await replayed(input.accountId, input.workItemId, input.idempotency?.key);
+        if (held?.stuck) {
+          // End it as the 429 meant to (compare-and-set) and free its key (the database frees only a key whose run never ran) in ONE transaction, so no asker
+          // ever reads the key held by the ended run and replays past the gate. Then the order runs again: the fresh attempt meets the gate under the same key.
+          // A second asker that loses the write runs the order again too and finds the winner's run.
+          await withTenant(pool, input.accountId, async (c) => {
+            const ended = await writeRunStatusOn(c, { accountId: input.accountId, runId: held.id, from: "pending", to: "cancelled", failureReason: "provider_capacity" });
+            if (ended.updated) await c.query("SELECT agent_run_release_idempotency_key($1, $2)", [input.accountId, input.idempotency!.key]);
+          });
+          continue;
+        }
+        if (held?.entry_id) await pool.query("SELECT capacity_mark_started($1, $2, $3)", [held.entry_id, held.attempt, held.id]);
+        if (held) return start(input);
         const side = await readRunSide(pool, input.accountId, input.repoId, input.workItemId).catch(() => null);
         if (side === null || side.mode !== "sandbox") return start(input);
         const headroom = await checkHeadroom(pool, { accountId: input.accountId, ...input.spend });

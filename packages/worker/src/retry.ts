@@ -6,6 +6,7 @@ import { IdempotencyKeyTakenError, NoSpecVersionError, WorkItemHaltedError, canc
 // A relative import: @fx/model-router is not a dependency of this package and this change may not touch the lockfile.
 import { escalate, type PreviousRun } from "../../model-router/src/escalate.js";
 import { reportError } from "@fx/telemetry";
+import { CAPACITY_WAIT, CapacityWaitingError, createCapacityGate, type CapacityPort } from "./capacityGate.js";
 import { decisionStartFor, type DecisionStart } from "./decisionStart.js";
 import { PREVIEW_SEAT_REFUSALS, type PreviewSeatConfig } from "./preview.js";
 import { RunActionInputError, RunActionRefusedError, RunActionUnavailableError, type PerformResult } from "./runActions.js";
@@ -41,6 +42,8 @@ export interface RetryModuleDeps {
   seats: RetrySeatSource | null;
   /** BuiltWorker.authorCheck: the lookup and the allowlist intake uses. Read at perform time, never cached. */
   authorCheck: AuthorCheckProvider;
+  /** D#483 S5-k3b-h: the capacity queue the advance module's gate asks (the same port). With none, a retry starts as it did before the gate. */
+  capacity?: CapacityPort | null;
 }
 
 export interface RetryFacade {
@@ -101,6 +104,9 @@ interface Found {
 /** Package-internal: `runnerPool` is the runner login's pool and is captured here, never exposed. */
 export function createRetryModule(runnerPool: Pool, registry: ExecutionTargetRegistry, deps: RetryModuleDeps): RetryFacade {
   const key = (actionId: string): string => `run-action:${actionId}`;
+  // A person's Retry meets the same capacity gate as every other start: with every hosted slot in use the item waits in the queue instead of starting.
+  const gate = deps.capacity ? createCapacityGate(runnerPool, deps.capacity) : null;
+  const begin = (input: StartAgentRunInput) => (gate ? gate.run(input, (i) => startAgentRun(runnerPool, registry, i)) : startAgentRun(runnerPool, registry, input));
 
   const startedBy = async (accountId: string, userId: string, actionId: string): Promise<{ id: string; status: string } | undefined> =>
     withTenant(runnerPool, accountId, userId, async (client) => {
@@ -234,9 +240,14 @@ export function createRetryModule(runnerPool: Pool, registry: ExecutionTargetReg
     let started;
     try {
       // A retry on a runner repo is queued for a runner and nothing waits on it here: it is accepted and its id returned.
-      started = await acceptQueuedRunnerRun(runnerPool, accountId, await startAgentRun(runnerPool, registry, input));
+      started = await acceptQueuedRunnerRun(runnerPool, accountId, await begin(input));
     } catch (err) {
       if (err instanceof RetryBlockedError) return blockedOrOwn(accountId, userId, actionId);
+      // Our servers are full: the item is queued and nothing ran. A run a 429 ended is released with its claim, so the next Retry starts clean.
+      if (err instanceof CapacityWaitingError) {
+        await cleanUp(accountId, userId, actionId, createdId).catch(() => undefined);
+        return refused(CAPACITY_WAIT);
+      }
       // The item was halted: the trigger refused the insert, so nothing exists. The person resumes with Approve or Build again.
       if (err instanceof WorkItemHaltedError) return refused("item_halted");
       // D#6 R4d-5c (C36): the run being retried has no Spec version to inherit (built before the pin). Nothing was written; the way on is Re-spec, then Build again.

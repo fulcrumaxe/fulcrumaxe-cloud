@@ -42,7 +42,7 @@ export function createCapacityPort(deps: CapacityPortDeps) {
       // Counted as the claim counts: over entries that are asking. The new entry joins once its item writes the waiting fact, so it is added here when it is not yet in the read.
       const place = await readCapacityPlace(pool, who.accountId, who.workItemId);
       const depth = place?.o_skip === "not_waiting" ? out.depth + 1 : out.depth;
-      if (crossesAlertDepth(true, depth, out.alertDepth)) await deps.alert(capacityAlertText(depth, out.alertDepth)).catch((err: unknown) => deps.onAlertError?.(err));
+      if (crossesAlertDepth(true, depth, out.alertDepth, out.depthBefore)) await deps.alert(capacityAlertText(depth, out.alertDepth)).catch((err: unknown) => deps.onAlertError?.(err));
     }
     return out;
   }
@@ -69,7 +69,7 @@ export function createCapacityPort(deps: CapacityPortDeps) {
       const state = await readCapacityState(pool, () => slots);
       if (state.headroom > 0 && state.waiting === 0) return { kind: "start" as const };
       // Case 6: queued (a second call keeps the place); one claim pass; the item's own entry, if that pass took it, is consumed now.
-      const { entry } = await enqueue({ repoId: input.repoId, workItemId: input.workItemId, runKind: input.runKind, accountId: input.accountId });
+      const { entry } = await enqueue({ repoId: input.repoId, workItemId: input.workItemId, runKind: input.runKind, accountId: input.accountId, depthBefore: state.waiting });
       if (state.headroom > 0) {
         const { claimed } = await claimWithinHeadroom(pool, () => slots, { limit: state.headroom });
         const mine = claimed.find((c) => c.id === entry.id);
