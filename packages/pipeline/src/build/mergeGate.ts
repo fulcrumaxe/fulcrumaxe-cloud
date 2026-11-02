@@ -438,6 +438,10 @@ export type MergeBlockReason =
   | "conflict_round_running"
   | "branch_protection_refused"
   | "ordered_resource_out_of_order"
+  /** D#598 P5c-b: a plan write-back changes something the platform did not compute; a person looks. */
+  | "writeback_content_mismatch"
+  /** D#598 P5c-b: the comparison for a plan write-back could not finish; nothing merged and a person merges. */
+  | "writeback_check_unfinished"
   | "merge_dependency_closed"
   | "history_rewritten";
 
@@ -786,6 +790,14 @@ export function reviewerReasons(roles: readonly GatedRole[], rows: readonly RunR
     if (!roles.includes(role)) reasons.push(...vetoReasons(role, rows, localOn));
   }
   return reasons;
+}
+
+/**
+ * D#598 P5c-b: the one merge call for the platform's own plan write-back, pinned to the recorded head. It lives here, with the gate's other merge call, so no
+ * composition root names the mutation. It carries no checks of its own: every caller must run the write-back gate first. Its caller (`runWritebackGate`) has already compared the file byte for byte and checked the switch and both locks.
+ */
+export function mergeRecordedHead(port: Pick<MergeGateGitHubPort, "mergePullRequest">, pr: PullRequestRef, sha: string): Promise<MergeCallOutcome> {
+  return port.mergePullRequest(pr, { sha });
 }
 
 /**

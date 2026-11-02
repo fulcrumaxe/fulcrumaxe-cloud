@@ -31,6 +31,22 @@ describe("R-P1d-1: the merge gate is the only way the product merges", () => {
     expect(mentioning(/\b(?:mergePullRequest|enqueuePullRequest)\b/)).toEqual(MERGE_CALLS);
   });
 
+  it("only the gate's file (its definition) and the one write-back caller name mergeRecordedHead, which carries no checks of its own", () => {
+    expect(mentioning(/\bmergeRecordedHead\(/)).toEqual(["apps/web/lib/mergeQueue.ts", "packages/pipeline/src/build/mergeGate.ts"]);
+  });
+
+  it("in the write-back gate the merge call sits after the merge decision and its refusal", () => {
+    const src = readFileSync(path.join(REPO_ROOT, "packages/pipeline/src/mergeQueue/writeback.ts"), "utf8");
+    const fn = src.slice(src.indexOf("export async function runWritebackGate("));
+    const decided = fn.indexOf("decideWritebackMerge({ ...base, evidence })");
+    const refuse = fn.indexOf('if (decided.decision !== "merge")');
+    const merge = fn.indexOf("deps.writeback.merge(");
+    expect(decided).toBeGreaterThan(0);
+    expect(refuse).toBeGreaterThan(decided);
+    expect(merge).toBeGreaterThan(refuse);
+    expect(fn.indexOf("deps.writeback.merge(", merge + 1)).toBe(-1);
+  });
+
   it("only the documents' home, the runner and four composition roots name the enqueue and auto-merge documents", () => {
     expect(mentioning(/\b(?:ENQUEUE_PULL_REQUEST_DOCUMENT|ENABLE_AUTO_MERGE_DOCUMENT)\b/)).toEqual(DOCUMENTS);
   });
