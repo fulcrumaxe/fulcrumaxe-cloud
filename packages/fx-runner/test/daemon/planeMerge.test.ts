@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -6,9 +7,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeVerifyMessage } from "@fulcrumaxe/runner-protocol";
-import { ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, createPublicHeadsReader, diffTreeEntries, sameChangeKeys, treeFromEntries } from "@fulcrumaxe/runner-protocol/planePush";
+import { ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, createPublicHeadsReader, planePushGit, diffTreeEntries, sameChangeKeys, treeFromEntries } from "@fulcrumaxe/runner-protocol/planePush";
 import type { PlaneMergeClaimResult, PlaneMergeOrder, PlaneMergeReportResult, PlaneMergeVerifyResult } from "../../src/daemon/client.js";
+import type { FactsGit } from "../../src/daemon/conflictFacts.js";
 import { checkContent, createPlaneMergeHandler, readTree, type PlaneMergeOutcome } from "../../src/daemon/planeMerge.js";
+import { createPushLog, type PushLog } from "../../src/daemon/pushLog.js";
+import { ledgerOptions } from "../helpers/ledgerOptions.js";
 import { createPlanePushGithub } from "../../src/daemon/planePushGithub.js";
 import { startGitHttpServer, type GitHttpServer } from "../helpers/gitHttpServer.js";
 
@@ -281,6 +285,8 @@ interface CloudScript {
   claim?: PlaneMergeClaimResult;
   /** The merge mode the cloud sends on its go (D#694 B7-1); absent sends none, as a cloud from before the queue. */
   mode?: "queue" | "direct";
+  /** D#519 MQ4-e2-a: whether the runner's latest hello listed `conflict_facts_v1`, as the route reads it. A `conflict` from a runner without it is a 400. */
+  conflictCapable?: boolean;
 }
 function fakeCloud(order: PlaneMergeOrder, script: CloudScript = {}) {
   const log: string[] = [];
@@ -320,6 +326,8 @@ function fakeCloud(order: PlaneMergeOrder, script: CloudScript = {}) {
       reportCalls++;
       // As the route: before a go was issued, only an abort can be true.
       if (!authorized && parsed.result !== "aborted") return { kind: "fenced", code: "not_authorized" };
+      // As the route: a conflict verdict is taken only from a runner that listed the capability, for an authorized order (the schema already ties it to a refused 405).
+      if (parsed.conflict !== undefined && (script.conflictCapable !== true || !authorized)) return { kind: "error", status: 400, code: "invalid_message" };
       return script.report ? script.report(parsed, reportCalls) : { kind: "recorded" };
     },
   };
@@ -331,7 +339,7 @@ interface Harness {
   lines: string[];
   cloud: ReturnType<typeof fakeCloud>;
 }
-function harness(order: PlaneMergeOrder, script: CloudScript = {}, over: { syncMirror?: () => Promise<{ dir: string }>; sleeps?: number[] } = {}): Harness {
+function harness(order: PlaneMergeOrder, script: CloudScript = {}, over: { syncMirror?: () => Promise<{ dir: string }>; sleeps?: number[]; facts?: { send: boolean; pushLog?: Pick<PushLog, "records">; git?: FactsGit } } = {}): Harness {
   const cloud = fakeCloud(order, script);
   const lines: string[] = [];
   const handler = createPlaneMergeHandler({
@@ -340,6 +348,7 @@ function harness(order: PlaneMergeOrder, script: CloudScript = {}, over: { syncM
     reader: createPublicHeadsReader({ origin: world.server.origin }),
     syncMirror: over.syncMirror ?? (async () => ({ dir: world.mirror })),
     workRoot: world.workRoot,
+    ...(over.facts === undefined ? {} : { sendConflictFacts: () => over.facts!.send, ...(over.facts.pushLog === undefined ? {} : { pushLog: over.facts.pushLog }), ...(over.facts.git === undefined ? {} : { factsGit: over.facts.git }) }),
     sleep: async (ms) => void over.sleeps?.push(ms),
     say: (l) => lines.push(l),
   });
@@ -860,5 +869,143 @@ describe("the heads reader refuses what it was not built for, before any network
     await expect(reader.fetchHeads(dir, "acme/widgets/extra", BRANCH)).rejects.toThrow();
     expect(world.server.seen).toEqual([]);
     expect(() => createPublicHeadsReader({ origin: "http://example.com" })).toThrow();
+  }, T);
+});
+
+// D#519 MQ4-e2-a, C15-15: the conflict facts ride the report that follows a refused 405, and nothing is computed on any other path.
+describe("the conflict verdict on the merge report", () => {
+  const EDIT = { "src/a.ts": "export const a = 2;\n" };
+  let logRoot: string;
+  let pushLog: PushLog;
+  beforeEach(() => {
+    logRoot = mkdtempSync(path.join(tmpdir(), "pm-facts-"));
+    pushLog = createPushLog(path.join(logRoot, "push-log", "pushes.json"), ledgerOptions());
+  });
+  afterEach(() => {
+    pushLog.close();
+    rmSync(logRoot, { recursive: true, force: true });
+  });
+  /** The private default moves to a conflicting edit of the same file, in the mirror. Returns the new default tip. */
+  const defaultMoves = (): string => {
+    sh(world.priv, "checkout", "-q", "main");
+    put(world.priv, { "src/a.ts": "export const a = 3;\n" });
+    const tip = commitAll(world.priv, "default moved");
+    sh(world.priv, "push", "-q", "-f", world.mirror, "HEAD:refs/heads/main");
+    return tip;
+  };
+  const spyGit = (calls: string[][]): FactsGit => async (dir, args, input, extra) => {
+    calls.push(args);
+    return planePushGit(dir, args, input, extra);
+  };
+  const conflictOrder = async (opts: { moves?: boolean; covered?: boolean } = {}) => {
+    const head = publicPr(EDIT);
+    const reviewed = privateRun(EDIT);
+    const tip = opts.moves === false ? world.base : defaultMoves();
+    gh = await startGithub(head);
+    gh.pull.mergeable = false;
+    if (opts.covered !== false) pushLog.append({ ref: "refs/heads/fx/run", old_sha: "0".repeat(40), new_sha: reviewed, started_at: new Date().toISOString(), job_id: randomUUID(), start: world.base });
+    return { order: orderFor(head, reviewed), reviewed, tip };
+  };
+  const objectFiles = (): string => execFileSync("find", [path.join(world.mirror, "objects"), "-type", "f"], { encoding: "utf8" }).split("\n").sort().join("\n");
+
+  it("a refused 405 with the capability kept: the report carries the platform verdict, and the mirror is untouched", async () => {
+    const { order, tip } = await conflictOrder();
+    const before = objectFiles();
+    const h = harness(order, { conflictCapable: true }, { facts: { send: true, pushLog } });
+    expect(await h.run()).toBe("refused");
+    expect(h.cloud.reports[0]).toMatchObject({ result: "refused", http_status: 405, conflict: { verdict: "conflict_platform", paths: ["src/a.ts"], base_sha: tip, base_ref: "main" } });
+    expect(objectFiles()).toBe(before);
+    expect(workDirsLeft()).toEqual([]);
+    bothRevoked();
+  }, T);
+
+  it("a commit the log does not hold on a conflict file: conflict_foreign", async () => {
+    const { order } = await conflictOrder({ covered: false });
+    const h = harness(order, { conflictCapable: true }, { facts: { send: true, pushLog } });
+    expect(await h.run()).toBe("refused");
+    expect(h.cloud.reports[0]!.conflict).toMatchObject({ verdict: "conflict_foreign", paths: ["src/a.ts"] });
+  }, T);
+
+  it("a private default that has not taken the conflicting change reads clean: no field, today's stop", async () => {
+    const { order } = await conflictOrder({ moves: false });
+    const h = harness(order, { conflictCapable: true }, { facts: { send: true, pushLog } });
+    expect(await h.run()).toBe("refused");
+    expect(h.cloud.reports[0]).toMatchObject({ result: "refused", http_status: 405 });
+    expect(h.cloud.reports[0]).not.toHaveProperty("conflict");
+  }, T);
+
+  it("no push log: unknown, with nothing else in the field", async () => {
+    const { order } = await conflictOrder();
+    const h = harness(order, { conflictCapable: true }, { facts: { send: true } });
+    expect(await h.run()).toBe("refused");
+    expect(h.cloud.reports[0]!.conflict).toEqual({ verdict: "unknown", paths: [] });
+  }, T);
+
+  it("facts that take too long are unknown, and the report still goes", async () => {
+    const { order } = await conflictOrder();
+    const slow: FactsGit = () => new Promise<Buffer>(() => undefined);
+    // The harness has no timeout option: build the handler with a short one.
+    const lines: string[] = [];
+    const cloud = fakeCloud(order, { conflictCapable: true });
+    const handler = createPlaneMergeHandler({ client: cloud.client, github: createPlanePushGithub({ apiOrigin: gh!.origin }), reader: createPublicHeadsReader({ origin: world.server.origin }), syncMirror: async () => ({ dir: world.mirror }), workRoot: world.workRoot, sleep: async () => undefined, say: (l) => lines.push(l), sendConflictFacts: () => true, pushLog, factsGit: slow, factsTimeoutMs: 200 });
+    expect(await handler()).toBe("refused");
+    expect(cloud.reports[0]!.conflict).toEqual({ verdict: "unknown", paths: [] });
+    expect(workDirsLeft()).toEqual([]);
+  }, T);
+
+  it("a hello that dropped conflict_facts_v1: nothing is computed and nothing new is sent", async () => {
+    const { order } = await conflictOrder();
+    const calls: string[][] = [];
+    const h = harness(order, {}, { facts: { send: false, pushLog, git: spyGit(calls) } });
+    expect(await h.run()).toBe("refused");
+    expect(h.cloud.reports[0]).not.toHaveProperty("conflict");
+    expect(calls).toEqual([]);
+    // Not wired at all (a build or a test without the option) is the same.
+    const bare = harness(order, {}, {});
+    gh!.live.add(READ);
+    expect(await bare.run()).toBe("refused");
+    expect(bare.cloud.reports[0]).not.toHaveProperty("conflict");
+  }, T);
+
+  it("the facts are computed only after a refused 405: merged, another status, aborted and enqueued compute nothing", async () => {
+    const calls: string[][] = [];
+    const facts = { send: true, pushLog, git: spyGit(calls) };
+    const head = publicPr(CHANGE);
+    const reviewed = privateRun(CHANGE);
+    gh = await startGithub(head);
+    const merged = harness(orderFor(head, reviewed), { conflictCapable: true }, { facts });
+    expect(await merged.run()).toBe("merged");
+    expect(merged.cloud.reports[0]).not.toHaveProperty("conflict");
+    await gh.close();
+
+    gh = await startGithub(head);
+    gh.failMerge = 409;
+    const other = harness(orderFor(head, reviewed), { conflictCapable: true }, { facts });
+    expect(await other.run()).toBe("refused");
+    expect(other.cloud.reports[0]).toMatchObject({ http_status: 409 });
+    expect(other.cloud.reports[0]).not.toHaveProperty("conflict");
+    await gh.close();
+
+    gh = await startGithub(head);
+    gh.pull.headSha = "b".repeat(40);
+    const aborted = harness(orderFor(head, reviewed), { conflictCapable: true }, { facts });
+    expect(await aborted.run()).toBe("aborted");
+    expect(aborted.cloud.reports[0]).not.toHaveProperty("conflict");
+    await gh.close();
+
+    gh = await startGithub(head);
+    Object.assign(gh.queue, { graphql: true, rules: true });
+    const queued = harness(orderFor(head, reviewed), { conflictCapable: true, mode: "queue" }, { facts });
+    expect(await queued.run()).toBe("enqueued");
+    expect(queued.cloud.reports[0]).not.toHaveProperty("conflict");
+    expect(calls).toEqual([]);
+  }, T);
+
+  it("the route's rule, in the fake: a verdict from a runner without the capability is refused as invalid_message", async () => {
+    const { order } = await conflictOrder();
+    const h = harness(order, { conflictCapable: false }, { facts: { send: true, pushLog } });
+    await h.run();
+    expect(h.cloud.reports.some((r) => r.conflict !== undefined)).toBe(true);
+    expect(h.cloud.log.filter((l) => l.startsWith("report"))).toHaveLength(1);
   }, T);
 });

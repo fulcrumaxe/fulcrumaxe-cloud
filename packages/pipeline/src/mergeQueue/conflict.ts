@@ -1,4 +1,6 @@
 import type { PoolClient } from "pg";
+import { isDetailPath, isDetailRef } from "@fulcrumaxe/runner-protocol";
+import { COVERED_COMMITS_MAX, coveredCommits } from "@fulcrumaxe/runner-protocol/planePush";
 import { PUBLIC_BRANCH_MOVED } from "@fx/core/src/repos/planePushRecord.js";
 import { recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
 import type { CommitInfo, CommitReaderPort, ConflictReaderPort, DefaultBranchReaderPort } from "../build/githubMergePort.js";
@@ -24,7 +26,7 @@ import { subjectOf, type ConflictRound, type ConflictSubject, type MergeQueueEnt
  */
 
 /** The commits of a pull request one decision reads. A longer pull request fails closed. */
-export const CONFLICT_COMMIT_READS_MAX = 100;
+export const CONFLICT_COMMIT_READS_MAX = COVERED_COMMITS_MAX;
 /** `merge_conflict_rounds.conflict_files` holds at most this many paths. */
 export const CONFLICT_FILES_MAX = 100;
 /**
@@ -78,36 +80,8 @@ export function setPlatformCommitProofForTest(reader: PlatformCommitProofReader 
   platformCommitProofOverride = reader;
 }
 
-const ZERO_SHA = /^0{40}$/;
-
-/**
- * Which of the pull request's commits `prShas` the push records cover, walking `parents` (from the commit reads the decision already made) and never leaving
- * the pull request's own set. `reach(x)` is `x` and its ancestors inside the set. A record covers `reach(new)` minus `reach(old)`; one that created the
- * branch covers `reach(new)` minus `reach(start)`. A record whose `new` is outside the set, or whose non-zero `old` is (history was rewritten), covers
- * nothing. More commits than one decision reads is `unreadable`.
- */
-export function coveredCommits(prShas: readonly string[], parents: ReadonlyMap<string, readonly string[]>, proof: Pick<PlatformCommitProof, "pushes">): ReadonlySet<string> | "unreadable" {
-  if (prShas.length > CONFLICT_COMMIT_READS_MAX) return "unreadable";
-  const inPr = new Set(prShas);
-  const reach = (x: string | null): Set<string> => {
-    const seen = new Set<string>();
-    const todo = x !== null && inPr.has(x) ? [x] : [];
-    for (let c = todo.pop(); c !== undefined; c = todo.pop()) {
-      if (seen.has(c)) continue;
-      seen.add(c);
-      for (const p of parents.get(c) ?? []) if (inPr.has(p)) todo.push(p);
-    }
-    return seen;
-  };
-  const covered = new Set<string>();
-  for (const p of proof.pushes) {
-    const created = p.oldSha === null || ZERO_SHA.test(p.oldSha);
-    if (!inPr.has(p.newSha) || (!created && !inPr.has(p.oldSha!))) continue;
-    const below = reach(created ? p.startSha : p.oldSha);
-    for (const c of reach(p.newSha)) if (!below.has(c)) covered.add(c);
-  }
-  return covered;
-}
+/** Moved to the runner protocol (`planePush/coveredCommits.ts`) so the local runner walks the same rule; re-exported here for the callers and tests that name it. */
+export { coveredCommits };
 
 export type RoundStart = { ok: true; runId: string } | { ok: false; reason: string };
 
@@ -131,25 +105,8 @@ export type ConflictDecision = { go: true; files: readonly string[]; baseSha: st
 const REFUSED_SPEND = "refused_spend";
 export const CAPACITY_WAIT_REASONS: readonly string[] = ["capacity_wait", "waiting_for_capacity"];
 
-/**
- * The detail table's rules (migration 0957 and 0948), in code, so a value the table would refuse is left out and never fails the stop. The same corpus, and
- * every BMP code point, runs through these and through the SQL functions (detailChecks.pg.test.ts). `[[:cntrl:]]` is read as C0, DEL and C1.
- */
-const CNTRL = /[\u0000-\u001f\u007f-\u009f]/;
-// Wider than the SQL `[[:space:]]` on purpose (no-break spaces too): a ref the table would take may be dropped, one it would refuse never passes.
-const SPACE = /[\s\u0085\u180e]/;
-const wellFormed = (s: string): boolean => Buffer.from(s, "utf8").toString("utf8") === s;
-
-export function isDetailPath(p: unknown): p is string {
-  if (typeof p !== "string" || p === "" || !wellFormed(p) || Array.from(p).length > 512 || Buffer.byteLength(p) > 1024) return false;
-  if (CNTRL.test(p) || /[\u0085\u2028\u2029\\]/.test(p)) return false;
-  return !/^\//.test(p) && !/^~(\/|$)/.test(p) && !/^[A-Za-z]:\//.test(p) && !/(^|\/)(\.|\.\.)?(\/|$)/.test(p);
-}
-
-export function isDetailRef(r: unknown): r is string {
-  if (typeof r !== "string" || !wellFormed(r) || Buffer.byteLength(r) < 1 || Buffer.byteLength(r) > 255) return false;
-  return !CNTRL.test(r) && !SPACE.test(r) && !r.includes("..") && !r.startsWith("-") && !/[~^:?*[\\]/.test(r);
-}
+// The detail table's path and ref rules live in the runner protocol (`detailRules.ts`), shared with the merge report's conflict facts; re-exported for the callers and tests that name them.
+export { isDetailPath, isDetailRef };
 
 class Undo extends Error {
   constructor(readonly refusal: string) {

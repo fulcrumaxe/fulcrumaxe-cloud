@@ -9,3 +9,4 @@ export * from "./changeSet.js";
 /** The pinned runner of the version-control tool that the route itself uses, for a caller that builds the repository the route works in (the local runner's run-end hook). */
 export { git as planePushGit } from "./planePushGit.js";
 export * from "./mergeQueueGraphql.js";
+export * from "./coveredCommits.js";

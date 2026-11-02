@@ -1,19 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
+  MAX_CONFLICT_FACT_PATHS,
   MAX_PLANE_MERGE_PATHS,
   PLANE_MERGE_ABORT_CODES,
+  PLANE_MERGE_CONFLICT_VERDICTS,
   PLANE_MERGE_CLAIM_PATH,
   PLANE_MERGE_REPORT_PATH,
   PLANE_MERGE_VERIFY_PATH,
   PlaneMergeClaimMessage,
+  PlaneMergeConflictFacts,
   PlaneMergeReportMessage,
   PlaneMergeVerifyMessage,
   RUNNER_MESSAGES,
 } from "../src/messages.js";
 import { ClaimIdleReply, PlaneMergeClaimReply, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyReply, RUNNER_REPLIES } from "../src/replies.js";
 import { HelloMessage } from "../src/messages.js";
-import { PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, RUNNER_CAPABILITIES } from "../src/job.js";
+import { CONFLICT_FACTS_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, RUNNER_CAPABILITIES } from "../src/job.js";
 import { fieldPaths, g1Violations, nonStrictObjects } from "./helpers/schemaWalk.js";
 
 const ORDER = "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e";
@@ -118,6 +121,64 @@ describe("the three requests", () => {
     }
     expect(PlaneMergeVerifyMessage.safeParse(verify({ token_revoked: CRED })).success).toBe(false);
     expect(PlaneMergeReportMessage.safeParse(report({ token_revoked: CRED })).success).toBe(false);
+  });
+});
+
+// D#519 MQ4-e2-a, C15-16: the conflict verdict is an optional, strict, additive field on the report, only with a refused 405.
+describe("the conflict verdict on a report", () => {
+  const platform = { verdict: "conflict_platform", paths: ["src/a.ts"], base_sha: A, base_ref: "main" };
+  const refused = (conflict: unknown) => report({ result: "refused", http_status: 405, conflict });
+  it("is optional: every report without it still parses, and the capability is the closed value", () => {
+    expect(PlaneMergeReportMessage.safeParse(report()).success).toBe(true);
+    expect(PlaneMergeReportMessage.safeParse(report({ result: "refused", http_status: 405 })).success).toBe(true);
+    expect(CONFLICT_FACTS_CAPABILITY).toBe("conflict_facts_v1");
+    expect(RUNNER_CAPABILITIES).toContain(CONFLICT_FACTS_CAPABILITY);
+  });
+  it("takes a platform or foreign verdict with its paths and base, and an unknown with nothing else", () => {
+    expect(PlaneMergeReportMessage.safeParse(refused(platform)).success).toBe(true);
+    expect(PlaneMergeReportMessage.safeParse(refused({ ...platform, verdict: "conflict_foreign" })).success).toBe(true);
+    expect(PlaneMergeReportMessage.safeParse(refused({ verdict: "unknown", paths: [] })).success).toBe(true);
+    for (const verdict of PLANE_MERGE_CONFLICT_VERDICTS) expect(PlaneMergeConflictFacts.safeParse(verdict === "unknown" ? { verdict, paths: [] } : { ...platform, verdict }).success, verdict).toBe(true);
+  });
+  it("is strict: an unknown key, a clean verdict, a missing base, no paths and a path that is not a plain relative path are all refused", () => {
+    const no = (conflict: unknown, label: string) => expect(PlaneMergeReportMessage.safeParse(refused(conflict)).success, label).toBe(false);
+    no({ ...platform, patch: "x" }, "extra key");
+    no({ ...platform, verdict: "clean" }, "clean is never sent");
+    no({ ...platform, verdict: "maybe" }, "free-text verdict");
+    no({ verdict: "conflict_platform", paths: ["src/a.ts"] }, "no base");
+    no({ ...platform, paths: [] }, "a conflict with no path");
+    no({ verdict: "unknown", paths: ["src/a.ts"] }, "unknown with a path");
+    no({ verdict: "unknown", paths: [], base_sha: A, base_ref: "main" }, "unknown with a base");
+    no({ ...platform, base_sha: "abc" }, "short sha");
+    no({ ...platform, base_ref: "a..b" }, "ref with two dots");
+    no({ ...platform, base_ref: "has space" }, "ref with a space");
+    for (const path of ["/etc/passwd", "../up", "a/../b", "a\\b", "a\nb", "./x", "C:/x", "~/x"]) no({ ...platform, paths: [path] }, `path ${JSON.stringify(path)}`);
+    no({ ...platform, paths: Array.from({ length: MAX_CONFLICT_FACT_PATHS + 1 }, (_, i) => `f${i}`) }, "too many paths");
+    expect(PlaneMergeReportMessage.safeParse(refused({ ...platform, paths: Array.from({ length: MAX_CONFLICT_FACT_PATHS }, (_, i) => `f${i}`) })).success).toBe(true);
+  });
+  it("holds the paths and the ref to the detail table's rules, shared with the pipeline: lone surrogates, the byte bound of a ref, the code-point bound of a path, a repeated path", () => {
+    const no = (conflict: unknown, label: string) => expect(PlaneMergeReportMessage.safeParse(refused(conflict)).success, label).toBe(false);
+    const yes = (conflict: unknown, label: string) => expect(PlaneMergeReportMessage.safeParse(refused(conflict)).success, label).toBe(true);
+    no({ ...platform, paths: ["a\ud800b"] }, "a path with a lone surrogate");
+    no({ ...platform, base_ref: "a\udc00b" }, "a ref with a lone surrogate");
+    yes({ ...platform, base_ref: "\u00e9".repeat(127) }, "a 254-byte ref");
+    no({ ...platform, base_ref: "\u00e9".repeat(200) }, "a 400-byte ref (200 characters) is over 255 bytes");
+    yes({ ...platform, paths: ["a".repeat(512)] }, "512 code points");
+    no({ ...platform, paths: ["a".repeat(513)] }, "513 code points");
+    no({ ...platform, paths: ["\u{1F600}".repeat(257)] }, "513 code points in astral characters");
+    yes({ ...platform, paths: ["\u00e9".repeat(512)] }, "512 code points, 1024 bytes");
+    no({ ...platform, paths: ["\u00e9".repeat(512) + "x"] }, "over the byte bound");
+    no({ ...platform, paths: ["src/a.ts", "src/a.ts"] }, "a path named twice");
+  });
+  it("goes only with a refused 405: every other result or status is refused", () => {
+    for (const over of [{ result: "merged" }, { result: "enqueued" }, { result: "refused", http_status: 409 }, { result: "refused" }, { result: "aborted", abort_code: "internal" }]) {
+      expect(PlaneMergeReportMessage.safeParse(report({ ...over, conflict: platform })).success, JSON.stringify(over)).toBe(false);
+    }
+  });
+  it("holds no field that could carry content, and the schema walk finds it clear", () => {
+    expect(fieldPaths(PlaneMergeReportMessage).filter((n) => /conflict/.test(n)).sort()).toEqual(["conflict", "conflict.base_ref", "conflict.base_sha", "conflict.paths", "conflict.verdict"]);
+    expect(nonStrictObjects(PlaneMergeConflictFacts)).toEqual([]);
+    expect(g1Violations(PlaneMergeConflictFacts)).toEqual([]);
   });
 });
 

@@ -176,7 +176,7 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
   });
 
   it("keeps claiming when the cloud refuses the hello (a cloud that predates facts answers 400, an older still 404)", async () => {
-    // A 400 invalid_message is taken as a cloud from before a newer capability: the hello goes again without discovery_analyst, then plane_merge_queue_v1, then memory_limit_v1, then plane_merge_v1, then, if still refused, wake_v1 too (the first three refusals here, so four hellos in all).
+    // A 400 invalid_message is taken as a cloud from before a newer capability: the hello goes again without conflict_facts_v1, then discovery_analyst, then plane_merge_queue_v1, then memory_limit_v1, then plane_merge_v1, then, if still refused, wake_v1 too (the first three refusals here, so four hellos in all).
     for (let i = 0; i < 3; i++) cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     const run = start();
     await until(() => claims() >= 1);
@@ -189,13 +189,38 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
     expect(await stop(again)).toMatchObject({ code: 0 });
   });
 
+  // D#519 MQ4-e2-a: a merge report carries the conflict verdict only when the cloud's hello kept `conflict_facts_v1`; the dropped list is the whole signal.
+  it("the conflict verdict is allowed only when the hello kept conflict_facts_v1: a cloud that dropped it, one that refused the hello, and one that kept it", async () => {
+    const answers: boolean[] = [];
+    const hooks = { onConflictFactsAccepted: (a: boolean) => void answers.push(a) };
+    // The first 400 drops the newest capability, which is conflict_facts_v1.
+    cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
+    const dropped = start({ hooks });
+    await until(() => answers.length >= 1);
+    expect(hellos()[0]!.body).toMatchObject({ capabilities: expect.arrayContaining(["conflict_facts_v1"]) });
+    expect(HelloMessage.parse(hellos()[1]!.body).capabilities).not.toContain("conflict_facts_v1");
+    expect(answers).toEqual([false]);
+    expect(await stop(dropped)).toMatchObject({ code: 0 });
+    // A hello that failed outright leaves it unsent too.
+    cloud.force.hello.push({ status: 404, body: { error: { code: "not_found", message: "not_found" } } });
+    const failed = start({ hooks });
+    await until(() => answers.length >= 2);
+    expect(answers).toEqual([false, false]);
+    expect(await stop(failed)).toMatchObject({ code: 0 });
+    // A cloud that knows it keeps it.
+    const kept = start({ hooks });
+    await until(() => answers.length >= 3);
+    expect(answers).toEqual([false, false, true]);
+    expect(await stop(kept)).toMatchObject({ code: 0 });
+  });
+
   it("D#6 RUNNER-WAKE: on an older cloud that refuses wake_v1 it says hello again without it and claims as before, with no wake check", async () => {
     cloud.wake.oldCloud = true;
     cloud.wake.enabled = true;
     const run = start();
     await until(() => claims() >= 1);
     const sent = hellos().map((h) => HelloMessage.parse(h.body).capabilities);
-    expect(sent).toEqual([["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1"], ["proposal_verifier", "wake_v1"], ["proposal_verifier"]]);
+    expect(sent).toEqual([["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1"], ["proposal_verifier", "wake_v1"], ["proposal_verifier"]]);
     expect(cloud.seen.some((s) => s.path === "/api/runner/wake")).toBe(false);
     expect(await stop(run)).toMatchObject({ code: 0 });
   });
@@ -907,9 +932,9 @@ describe("7. the memory cap on a resource_limit end follows the hello (D#6 CARD-
   }, 60_000);
 
   it.skipIf(process.platform !== "linux")("a cloud that refused memory_limit_v1 on the hello (but took the rest) gets no cap", async () => {
-    // The analyst capability (D#483 S4-f4) goes first, then the queue capability (D#694 B7-1), so three refusals take the hello down to the memory capability being dropped too.
+    // The conflict capability (D#519 MQ4-e2-a) goes first, then the analyst capability (D#483 S4-f4), then the queue capability (D#694 B7-1), so four refusals take the hello down to the memory capability being dropped too.
     const ended = await endOfKilledJob(() => {
-      for (let i = 0; i < 3; i++) cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
+      for (let i = 0; i < 4; i++) cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     });
     expect(ended).toMatchObject({ type: "run_ended", reason: "resource_limit" });
     expect(ended).not.toHaveProperty("memory_limit_bytes");
