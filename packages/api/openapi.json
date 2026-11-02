@@ -2523,6 +2523,10 @@
           }
         ],
         "x-fx-token-self-only": true,
+        "x-fx-tokens": [
+          "api",
+          "delegation"
+        ],
         "parameters": [
           {
             "name": "id",
@@ -34984,6 +34988,10 @@
             ]
           }
         ],
+        "x-fx-tokens": [
+          "api",
+          "delegation"
+        ],
         "x-fx-idempotency": "optional",
         "parameters": [
           {
@@ -35245,6 +35253,10 @@
             ]
           }
         ],
+        "x-fx-tokens": [
+          "api",
+          "delegation"
+        ],
         "parameters": [
           {
             "name": "id",
@@ -35476,11 +35488,19 @@
       "post": {
         "operationId": "acceptCorrection",
         "summary": "Accept a proposed correction",
-        "description": "Owner or admin session only; a token is refused (403 `session_required`), including one that proposed this correction. An optional `content_hash` must equal the stored text's hash. Accepting a question, pause, priority or new_item correction applies it through the existing writer and stamps it `applied`: a pause asks for the halt (undone only by a person's resume, never by a token), a priority sets the priority, a new_item creates a Discussion. A run note stays `accepted` until a run uses it. A Spec amendment stays `accepted` until the platform publishes the next Spec version (the old text plus the amendment under a labelled heading, with control tokens stripped); it is refused 409 `already_running` while an agent run of the item is live, and `action_not_available` outside Spec ready or Needs a person. Answers 200 with the correction.",
+        "description": "An owner or admin session, or an assistant delegation token (`corrections:write`) whose creator is an owner or admin and which names the correction's `content_hash`. Any other token is refused (403 `session_required`), a delegation token of a member with 403 `insufficient_role`, and a correction in another repo than the token's with 404. An optional `content_hash` (required for a delegation token) must equal the stored text's hash. Accepting a question, pause, priority or new_item correction applies it through the existing writer and stamps it `applied`: a pause asks for the halt (undone only by a person's resume, never by a token), a priority sets the priority, a new_item creates a Discussion. A run note stays `accepted` until a run uses it. A Spec amendment stays `accepted` until the platform publishes the next Spec version (the old text plus the amendment under a labelled heading, with control tokens stripped); it is refused 409 `already_running` while an agent run of the item is live, and `action_not_available` outside Spec ready or Needs a person. Answers 200 with the correction.",
         "security": [
           {
             "session": []
+          },
+          {
+            "token": [
+              "corrections:write"
+            ]
           }
+        ],
+        "x-fx-tokens": [
+          "delegation"
         ],
         "x-fx-idempotency": "optional",
         "parameters": [
@@ -35740,11 +35760,19 @@
       "post": {
         "operationId": "rejectCorrection",
         "summary": "Reject a proposed correction",
-        "description": "Owner or admin session only; a token is refused (403 `session_required`), including one that proposed this correction. An optional `content_hash` must equal the stored text's hash. Rejecting stays possible while a correction is `proposed` or `accepted` and not yet `applied`. Answers 200 with the correction.",
+        "description": "An owner or admin session, or an assistant delegation token (`corrections:write`) whose creator is an owner or admin and which names the correction's `content_hash`. Any other token is refused (403 `session_required`), a delegation token of a member with 403 `insufficient_role`, and a correction in another repo than the token's with 404. An optional `content_hash` (required for a delegation token) must equal the stored text's hash. Rejecting stays possible while a correction is `proposed` or `accepted` and not yet `applied`. Answers 200 with the correction.",
         "security": [
           {
             "session": []
+          },
+          {
+            "token": [
+              "corrections:write"
+            ]
           }
+        ],
+        "x-fx-tokens": [
+          "delegation"
         ],
         "x-fx-idempotency": "optional",
         "parameters": [
@@ -35940,6 +35968,617 @@
           },
           "409": {
             "description": "Error `already_decided` (it already left the state this step needs; nothing changed) or `content_changed` (the `content_hash` is not the stored text's hash; nothing changed).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/tokens": {
+      "post": {
+        "operationId": "mintAssistantToken",
+        "summary": "Mint a delegation token for the assistant",
+        "description": "Session only. Returns a token that lasts an hour, is bound to the given repo and client id, holds `read` and `corrections:write`, and can be revoked like any token (`DELETE /api/v1/tokens/{id}`). What it may do is the creator's current role: it dies with their membership, and a member's token cannot accept a correction. The secret appears only in this response.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "repo_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "client_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9._-]{1,48}$"
+                  }
+                },
+                "required": [
+                  "repo_id",
+                  "client_id"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Mint a delegation token for the assistant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "token": {
+                      "type": "string"
+                    },
+                    "display_hint": {
+                      "type": "string"
+                    },
+                    "scopes": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "read",
+                          "corrections:write"
+                        ]
+                      }
+                    },
+                    "repo_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "client_id": {
+                      "type": "string"
+                    },
+                    "expires_at": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "token",
+                    "display_hint",
+                    "scopes",
+                    "repo_id",
+                    "client_id",
+                    "expires_at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/link": {
+      "post": {
+        "operationId": "startAssistantLink",
+        "summary": "Start a device link for a runner",
+        "description": "No credential: the runner calls this before it has one. Returns a `device_code` the runner keeps secret and polls with, and a short `user_code` a person approves in a workspace session. The code lasts 10 minutes.",
+        "security": [],
+        "x-fx-anonymous": true,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "client_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9._-]{1,48}$"
+                  }
+                },
+                "required": [
+                  "client_id"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Start a device link for a runner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "device_code": {
+                      "type": "string"
+                    },
+                    "user_code": {
+                      "type": "string"
+                    },
+                    "expires_at": {
+                      "type": "string"
+                    },
+                    "interval_seconds": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "device_code",
+                    "user_code",
+                    "expires_at",
+                    "interval_seconds"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/link/poll": {
+      "post": {
+        "operationId": "pollAssistantLink",
+        "summary": "Poll a device link",
+        "description": "No credential; the `device_code` is the credential. `pending` until a person approves, `expired` after 10 minutes (or when the approver is gone). An approved code is redeemed exactly once: the first poll gets the token, every later one 409 `link_already_redeemed`.",
+        "security": [],
+        "x-fx-anonymous": true,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "device_code": {
+                    "type": "string",
+                    "minLength": 20,
+                    "maxLength": 100
+                  }
+                },
+                "required": [
+                  "device_code"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Poll a device link",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "pending",
+                        "expired",
+                        "approved"
+                      ]
+                    },
+                    "token": {
+                      "type": "object",
+                      "properties": {
+                        "token": {
+                          "type": "string"
+                        },
+                        "scopes": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "read",
+                              "corrections:write"
+                            ]
+                          }
+                        },
+                        "repo_id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "client_id": {
+                          "type": "string"
+                        },
+                        "expires_at": {
+                          "type": "string"
+                        },
+                        "token_id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        }
+                      },
+                      "required": [
+                        "token",
+                        "scopes",
+                        "repo_id",
+                        "client_id",
+                        "expires_at",
+                        "token_id"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `link_already_redeemed`: the token was already handed out.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/link/approve": {
+      "post": {
+        "operationId": "approveAssistantLink",
+        "summary": "Approve a device link",
+        "description": "Session only. Binds the runner's code to one repo of this account; the runner's next poll receives a delegation token created by the caller. 404 for an unknown or expired code and for a repo that is not this account's.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "user_code": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 12
+                  },
+                  "repo_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "user_code",
+                  "repo_id"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Approve a device link",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "client_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "client_id"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
             "content": {
               "application/json": {
                 "schema": {

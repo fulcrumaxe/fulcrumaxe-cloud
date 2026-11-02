@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
-import { ForbiddenError } from "@fx/core/src/tenancy/errors.js";
 import { reportError } from "@fx/telemetry";
-import { effectivePrincipals, matchRoute, RawBody, ROLE_RANK, type RouteEntry } from "./registry.js";
+import { matchRoute, RawBody, type RouteEntry } from "./registry.js";
+import { assertRouteAccess } from "./access.js";
 import { ROUTES } from "./routes/index.js";
 import { principalIdOf, resolvePrincipal } from "./principal.js";
-import { ApiError, InsufficientScopeError, SessionRequiredError, mapError } from "./errors.js";
+import { ApiError, RateLimitedError, mapError } from "./errors.js";
 import { withIdempotency } from "./idempotency.js";
-import { enforceTokenRateLimits } from "./ratelimit/limits.js";
+import { bucketKeyForAnonIp, clientIpFromRequest, enforceTokenRateLimits } from "./ratelimit/limits.js";
 import { enforceSessionRateLimits, sessionLimitFor } from "./ratelimit/session.js";
 import { PgRateLimitStore, type RateLimitStore } from "./ratelimit/store.js";
 
@@ -217,6 +217,9 @@ export async function handleApiRequest(
     }
     const { entry, params } = match;
 
+    if (entry.anonymous && entry.anonymousHandler) {
+      return await handleAnonymous(req, entry, entry.anonymousHandler, params, pool, rateLimitStore, requestId);
+    }
     const principal = await resolvePrincipal(req, pool, platformOpsPool, rateLimitStore);
 
     // D#31 API-3d (C13c criteria 1-4, 6), fix round 1 S1 (should-fix,
@@ -238,20 +241,7 @@ export async function handleApiRequest(
       });
     }
 
-    const allowedKinds = effectivePrincipals(entry);
-    if (!allowedKinds.includes(principal.kind)) {
-      throw new SessionRequiredError();
-    }
-    if (principal.kind === "token") {
-      // tokenSelfOnly (registry.ts) admits any token past this check;
-      // the route's own handler enforces the self-only id rule.
-      if (!entry.tokenSelfOnly && (!entry.scope || !principal.scopes.includes(entry.scope))) {
-        throw new InsufficientScopeError();
-      }
-    }
-    if (ROLE_RANK[principal.role] < ROLE_RANK[entry.minRole]) {
-      throw new ForbiddenError(`requires role >= ${entry.minRole}, got ${principal.role}`);
-    }
+    assertRouteAccess(principal, entry);
 
     const isBodyless = req.method === "GET" || req.method === "HEAD";
 
@@ -368,6 +358,32 @@ export async function handleApiRequest(
     if (status >= 500) reportError(err, { stage: "api.dispatch", route: pathOf(req) });
     return jsonResponse(body, status, requestId, undefined, headers);
   }
+}
+
+/** D#597 CC-4: the device link's calls from a runner with no credential. 30 per IP per minute; the body is read like any other. */
+const ANONYMOUS_LIMIT_PER_IP_PER_MINUTE = 30;
+
+async function handleAnonymous(
+  req: Request,
+  entry: RouteEntry,
+  run: NonNullable<RouteEntry["anonymousHandler"]>,
+  params: Record<string, string>,
+  pool: Pool,
+  rateLimitStore: RateLimitStore,
+  requestId: string,
+): Promise<Response> {
+  const decision = await rateLimitStore.checkAndIncrement(bucketKeyForAnonIp(entry.operationId, clientIpFromRequest(req)), ANONYMOUS_LIMIT_PER_IP_PER_MINUTE);
+  if (!decision.allowed) throw new RateLimitedError(decision.retryAfterSeconds);
+  const raw = await readRequestBody(req, entry, MAX_REQUEST_BODY_BYTES);
+  let parsed: unknown;
+  try {
+    parsed = raw ? JSON.parse(raw) : undefined;
+  } catch {
+    throw new ApiError(400, "invalid_request", "request body is not valid JSON");
+  }
+  const body = entry.bodySchema ? entry.bodySchema.parse(parsed) : parsed;
+  const out = await run({ pool }, { params, query: undefined, body });
+  return jsonResponse(out, entry.successStatus ?? 200, requestId, false);
 }
 
 /**

@@ -184,7 +184,7 @@ export function buildOpenApiDocument(routes: readonly RouteEntry[]): OpenApiDocu
     // Session callers have caps too (rate_limited with Retry-After): every session write, and any session read
     // that declares its own `sessionLimit`. The route's own 429 text, when it wrote one, is kept.
     const sessionCapped = (route.principals ?? ["session"]).includes("session") && sessionLimitFor(route) !== undefined;
-    if (sessionCapped || (route.principals ?? ["session"]).includes("token")) {
+    if (sessionCapped || route.anonymous || (route.principals ?? ["session"]).includes("token")) {
       const own = route.extraResponses?.["429"];
       responses["429"] = {
         ...errorResponse(),
@@ -212,6 +212,8 @@ export function buildOpenApiDocument(routes: readonly RouteEntry[]): OpenApiDocu
         [kind]: kind === "token" && route.scope && !route.tokenSelfOnly ? [route.scope] : [],
       })),
       ...(route.tokenSelfOnly ? { "x-fx-token-self-only": true } : {}),
+      ...(route.tokens ? { "x-fx-tokens": route.tokens } : {}),
+      ...(route.anonymous ? { "x-fx-anonymous": true } : {}),
       // Whether the route takes an `Idempotency-Key` ("required" or "optional"); absent means it rejects the header.
       ...(route.idempotency !== "never" ? { "x-fx-idempotency": route.idempotency } : {}),
       ...(parameters.length > 0 ? { parameters } : {}),

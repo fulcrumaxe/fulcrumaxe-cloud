@@ -6,6 +6,7 @@ import type { SessionLimit } from "./ratelimit/session.js";
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 export type PrincipalKind = "session" | "token";
 export type MembershipRole = "owner" | "admin" | "member";
+export type TokenClass = "api" | "delegation";
 export type IdempotencyMode = "required" | "optional" | "never";
 
 /** "Scopes that can be minted in v1" (API-1 only *declares* the shape; API-3b mints them). */
@@ -86,6 +87,18 @@ export interface RouteEntry<
    * OWN handler then enforces the self-only rule (target id === its own).
    */
   tokenSelfOnly?: boolean;
+  /**
+   * D#597 CC-4: which kinds of token the route admits. Default `["api"]` (an ordinary token). A delegation token (the assistant's: one
+   * repo, one hour, read + corrections:write) is admitted only where this lists `"delegation"`, so every older route stays closed to it
+   * without being touched. `["delegation"]` alone admits the assistant's token and refuses an ordinary one (`session_required`).
+   */
+  tokens?: TokenClass[];
+  /**
+   * D#597 CC-4: the device link's two calls, made by a runner that holds no credential yet. Served by `anonymousHandler` (no
+   * principal), charged to a per-IP bucket, and never reachable with a session or a token's rights. `handler` is a refusal.
+   */
+  anonymous?: boolean;
+  anonymousHandler?: (ctx: { pool: Pool }, input: RouteInput<Record<string, string>, unknown, unknown>) => Promise<Response>;
   idempotency: IdempotencyMode;
   rateClass?: string;
   /**

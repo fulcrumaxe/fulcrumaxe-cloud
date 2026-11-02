@@ -13,8 +13,9 @@ import {
   type DecisionResult,
 } from "@fx/core/src/corrections/accept.js";
 import { listCorrectionHistory, type CorrectionHistoryEntry } from "@fx/core/src/corrections/history.js";
-import { ActionNotAvailableError, AlreadyRunningError, ApiError, ExternalRequiresHumanError, NoRepoError, RunActionsUnavailableError, SessionRequiredError } from "../errors.js";
+import { ActionNotAvailableError, AlreadyRunningError, ApiError, ExternalRequiresHumanError, NoRepoError, RunActionsUnavailableError } from "../errors.js";
 import type { RouteContext, RouteEntry } from "../registry.js";
+import { itemInRepo } from "@fx/core/src/tokens/delegation.js";
 import { UUID_RE, mapDbError, notFound, runActionDeps } from "./run-actions.js";
 
 /**
@@ -99,17 +100,21 @@ function requireId(id: string | undefined): string {
 }
 
 /**
- * CLOSED HOOK (D#597 R-597-1). Deciding is a person's act: today only an owner or admin SESSION may accept or reject, and the
- * two routes below list no token principal, so a token is refused with 403 `session_required` before this runs. A token that can
- * propose cannot also approve, whatever hash it sends. When CC-4's delegation token lands (its secret kept from the model and
- * the person's own confirmation drawn by the runner), that kind alone may be allowed here and in the routes' `principals`;
- * until then this stays false and nothing reads it as a setting.
+ * D#597 CC-4: an assistant delegation token is bound to one repo. Its calls on an item of any other repo answer 404, exactly as an
+ * unknown id does. A session, and an ordinary token, are not bound.
  */
-const DELEGATION_TOKEN_MAY_DECIDE = false as boolean;
+async function assertBoundRepo(ctx: RouteContext, ref: { workItemId: string } | { correctionId: string }): Promise<void> {
+  const bound = ctx.principal.delegation;
+  if (bound && !(await itemInRepo(ctx.pool, ctx.principal, ref, bound.repoId))) throw notFound();
+}
 
 async function decide(ctx: RouteContext, id: string, hash: string | undefined, to: "accept" | "reject") {
-  if (ctx.principal.kind === "token" && !DELEGATION_TOKEN_MAY_DECIDE) throw new SessionRequiredError();
-  const input = { id, via: "workspace" as const, contentHash: hash };
+  // Deciding is a person's act. A delegation token reaches here only on the person's own confirmation (the runner draws it), carrying the
+  // hash of the exact text confirmed; the routes' `tokens` list keeps every other token out, and the role gate keeps a member's out.
+  const delegated = ctx.principal.delegation !== undefined;
+  if (delegated && hash === undefined) throw invalid("content_hash");
+  await assertBoundRepo(ctx, { correctionId: id });
+  const input = { id, via: delegated ? ("terminal" as const) : ("workspace" as const), contentHash: hash };
   let result: DecisionResult;
   try {
     if (to === "reject") result = await rejectCorrection(cctx(ctx), input);
@@ -144,6 +149,7 @@ export const correctionRoutes: RouteEntry[] = [
     description:
       "Session, or a token with `corrections:write`. Records the correction as `proposed`; nothing changes until an owner or admin accepts it. A session's correction has origin `person`, a token's has origin `agent`. A `priority` body is `{\"priority\": \"urgent|high|normal|low\"}` and a `new_item` body is `{\"title\", \"kind\", \"body\"}`; both are checked now. The text is at most 4,000 characters.",
     principals: ["session", "token"],
+    tokens: ["api", "delegation"],
     scope: "corrections:write",
     minRole: "member",
     idempotency: "optional",
@@ -154,6 +160,7 @@ export const correctionRoutes: RouteEntry[] = [
     successStatus: 201,
     async handler(ctx, input) {
       const workItemId = requireId(input.params.id);
+      await assertBoundRepo(ctx, { workItemId });
       const body = input.body as z.infer<typeof createBodySchema>;
       try {
         checkBody(body.kind, body.body, DISCUSSION_KINDS);
@@ -176,6 +183,7 @@ export const correctionRoutes: RouteEntry[] = [
     summary: "A work item's corrections, oldest first",
     description: "Session, or a token with `read`. Each entry says who made it and who decided it (\"a former member\" where that person is gone), and `attribution` reads \"<name> via assistant\" for an assistant's proposal or an assistant-token decision.",
     principals: ["session", "token"],
+    tokens: ["api", "delegation"],
     scope: "read",
     minRole: "member",
     idempotency: "never",
@@ -184,6 +192,7 @@ export const correctionRoutes: RouteEntry[] = [
     responseSchema: listSchema,
     async handler(ctx, input) {
       const workItemId = requireId(input.params.id);
+      await assertBoundRepo(ctx, { workItemId });
       const rows = await listCorrectionHistory(cctx(ctx), workItemId);
       return { data: rows.map((r) => dto(r.correction, r)) };
     },
@@ -195,13 +204,15 @@ export const correctionRoutes: RouteEntry[] = [
       operationId: `${verb}Correction`,
       summary: `${verb === "accept" ? "Accept" : "Reject"} a proposed correction`,
       description:
-        `Owner or admin session only; a token is refused (403 \`session_required\`), including one that proposed this correction. An optional \`content_hash\` must equal the stored text's hash. ` +
+        `An owner or admin session, or an assistant delegation token (\`corrections:write\`) whose creator is an owner or admin and which names the correction's \`content_hash\`. Any other token is refused (403 \`session_required\`), a delegation token of a member with 403 \`insufficient_role\`, and a correction in another repo than the token's with 404. An optional \`content_hash\` (required for a delegation token) must equal the stored text's hash. ` +
         (verb === "accept"
           ? "Accepting a question, pause, priority or new_item correction applies it through the existing writer and stamps it `applied`: a pause asks for the halt (undone only by a person's resume, never by a token), a priority sets the priority, a new_item creates a Discussion. A run note stays `accepted` until a run uses it. A Spec amendment stays `accepted` until the platform publishes the next Spec version (the old text plus the amendment under a labelled heading, with control tokens stripped); it is refused 409 `already_running` while an agent run of the item is live, and `action_not_available` outside Spec ready or Needs a person. "
           : "Rejecting stays possible while a correction is `proposed` or `accepted` and not yet `applied`. ") +
         "Answers 200 with the correction.",
       extraResponses: { "409": SHARED, ...(verb === "accept" ? { "503": "Error `run_actions_unavailable` for a pause or a Spec amendment: nothing was decided." } : {}) },
-      principals: ["session"],
+      principals: ["session", "token"],
+      tokens: ["delegation"],
+      scope: "corrections:write",
       minRole: "admin",
       idempotency: "optional",
       rateClass: "write",
