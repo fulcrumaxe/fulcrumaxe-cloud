@@ -82,6 +82,8 @@ export const LIM_COPY = {
   stale: "What the preview showed has changed. Check the new figures, then accept again.",
   failed: "That change couldn't be saved. Try again.",
   forbidden: "Only owners and admins can change these settings.",
+  followUps: "Follow-ups become their own items",
+  followUpsHelp: "When this is off, follow-ups stay as notes on the item.",
 };
 export const BASIS_TEXT = { history: "your recent runs", seed: "the starting estimate", none: "nothing yet, so there is no price" };
 export const SOURCE_TEXT = { setting: "Set by you", plan_data: "The default", none: "Nothing added" };
@@ -164,7 +166,7 @@ export function mountLimits(host) {
   let closed = false;
   let seq = 0;
   let saving = false;
-  let d = {}; // acct, acctHist, repo, repoHist, auto, margin, disc: a response, or null when it could not be read
+  let d = {}; // acct, acctHist, repo, repoHist, auto, margin, disc, follow: a response, or null when it could not be read
   let loaded = false;
   const drafts = new Map();
   const errors = new Map();
@@ -283,6 +285,25 @@ export function mountLimits(host) {
     return row("disc", "Discovery frequency", ...parts);
   }
 
+  // D#483 S5-b2d-2c: whether follow-ups raised on this repo become their own items (on unless a person switched it off). The server's answer is what
+  // the box shows; a failed change leaves it as it was. The way back is the other value. A member sees the box disabled, with the admin-only sentence.
+  function followRow() {
+    const x = d.follow;
+    if (!x) return row("follow", LIM_COPY.followUps, unavailable());
+    return row(
+      "follow",
+      LIM_COPY.followUps,
+      h("span", { class: "au-value", "data-testid": "lim-follow-value" }, "Now: " + (x.children ? "On" : "Off")),
+      h(
+        "label",
+        { class: "au-field" },
+        h("input", { type: "checkbox", checked: x.children, disabled: !can, "aria-label": LIM_COPY.followUps, "aria-describedby": "lim-follow-help", "data-focus": "follow-switch", "data-testid": "lim-follow-switch", onChange: (ev) => putFollow(ev.target.checked) }),
+        h("span", null, x.children ? "On" : "Off")
+      ),
+      h("span", { class: "au-hint au-muted", id: "lim-follow-help", "data-testid": "lim-follow-help" }, LIM_COPY.followUpsHelp, can ? "" : " " + LIM_COPY.readOnly)
+    );
+  }
+
   function render() {
     const at = document.activeElement;
     const focusKey = at && body.contains(at) ? at.getAttribute("data-focus") : null;
@@ -293,7 +314,7 @@ export function mountLimits(host) {
     }
     body.replaceChildren(
       ...(can ? [] : [h("p", { class: "au-line au-muted", "data-testid": "lim-readonly" }, LIM_COPY.readOnly)]),
-      h("ul", { class: "au-list", "data-testid": "lim-rows" }, concurrencyRow("acct", "Builds at once (whole account)", d.acct, d.acctHist), concurrencyRow("repo", "Builds at once (this repo)", d.repo, d.repoHist), weeklyRow(), marginRow(), discoveryRow())
+      h("ul", { class: "au-list", "data-testid": "lim-rows" }, concurrencyRow("acct", "Builds at once (whole account)", d.acct, d.acctHist), concurrencyRow("repo", "Builds at once (this repo)", d.repo, d.repoHist), weeklyRow(), marginRow(), discoveryRow(), followRow())
     );
     focus(focusKey);
   }
@@ -313,7 +334,7 @@ export function mountLimits(host) {
   }
   async function loadAll() {
     const mine = ++seq;
-    const [acct, acctHist, repo, repoHist, auto, margin, disc] = await Promise.all([
+    const [acct, acctHist, repo, repoHist, auto, margin, disc, follow] = await Promise.all([
       read(ACCOUNT + "build-concurrency", isConc),
       read(ACCOUNT + "build-concurrency/history", isHist),
       read(repoPath(repoId, "build-concurrency"), isConc),
@@ -321,9 +342,10 @@ export function mountLimits(host) {
       read(ACCOUNT + "autostart-envelope", (v) => typeof v.amount_usd === "number"),
       read(ACCOUNT + "envelope-margin", (v) => "margin_pct" in v),
       read(repoPath(repoId, "discovery"), (v) => typeof v.frequency === "string"),
+      read(repoPath(repoId, "follow-ups/setting"), (v) => typeof v.children === "boolean"),
     ]);
     if (closed || mine !== seq) return;
-    d = { acct, acctHist, repo, repoHist, auto, margin, disc };
+    d = { acct, acctHist, repo, repoHist, auto, margin, disc, follow };
     loaded = true;
     render();
   }
@@ -426,6 +448,11 @@ export function mountLimits(host) {
     commit("disc", async () => {
       d = { ...d, disc: await api("PUT", repoPath(repoId, "discovery"), { frequency: draft("disc", d.disc.frequency) }) };
     }, "Discovery frequency: saved.");
+
+  const putFollow = (children) =>
+    commit("follow", async () => {
+      d = { ...d, follow: await api("PUT", repoPath(repoId, "follow-ups/setting"), { children }, undefined, { idempotencyKey: crypto.randomUUID() }) };
+    }, "Follow-ups: saved.");
 
   return {
     /** Called by the Autonomy view whenever it has the open repo's settings. Typed drafts survive; a different repo starts clean. */

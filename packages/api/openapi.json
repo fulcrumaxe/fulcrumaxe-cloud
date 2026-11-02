@@ -14928,11 +14928,20 @@
                     "work_item_id": {
                       "type": "string"
                     },
+                    "can_make_item": {
+                      "type": "boolean"
+                    },
+                    "make_item_available": {
+                      "type": "boolean"
+                    },
                     "follow_ups": {
                       "type": "array",
                       "items": {
                         "type": "object",
                         "properties": {
+                          "id": {
+                            "type": "string"
+                          },
                           "title": {
                             "type": "string"
                           },
@@ -14954,15 +14963,32 @@
                           },
                           "created_at": {
                             "type": "string"
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "item",
+                              "pending",
+                              "note",
+                              "parent_closed"
+                            ]
+                          },
+                          "child_id": {
+                            "type": "string"
+                          },
+                          "child_stage": {
+                            "type": "string"
                           }
                         },
                         "required": [
+                          "id",
                           "title",
                           "why",
                           "disposition",
                           "source_role",
                           "source_label",
-                          "created_at"
+                          "created_at",
+                          "state"
                         ],
                         "additionalProperties": false
                       }
@@ -14970,6 +14996,8 @@
                   },
                   "required": [
                     "work_item_id",
+                    "can_make_item",
+                    "make_item_available",
                     "follow_ups"
                   ],
                   "additionalProperties": false
@@ -15019,6 +15047,150 @@
           },
           "429": {
             "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/work-items/{id}/follow-ups/{follow_up_id}/make-item": {
+      "post": {
+        "operationId": "makeFollowUpItem",
+        "summary": "Make a follow-up its own work item",
+        "description": "Owner or admin, session only; a token is refused. `Idempotency-Key` is required. Takes no request body. Creates one child work item for the follow-up (kind `small`, the parent's repo and provenance) and records the signed-in person in the audit log. A follow-up that already has its item answers that item with `created: false`. Closing the child is the undo. 404 for an unknown work item or follow-up; 409 `follow_up_items_unavailable` while follow-ups cannot become items yet (nothing is written), 409 `parent_closed`.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "x-fx-idempotency": "required",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "follow_up_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Make a follow-up its own work item",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "work_item_id": {
+                      "type": "string"
+                    },
+                    "follow_up_id": {
+                      "type": "string"
+                    },
+                    "child_id": {
+                      "type": "string"
+                    },
+                    "created": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "work_item_id",
+                    "follow_up_id",
+                    "child_id",
+                    "created"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error `session_required` or `insufficient_role` (owner or admin only).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such work item or follow-up in this account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `follow_up_items_unavailable` (follow-ups cannot become items yet) or `parent_closed` (the work item closed, so it gets no new item).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
             "content": {
               "application/json": {
                 "schema": {

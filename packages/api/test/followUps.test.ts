@@ -8,6 +8,11 @@ import { generateToken } from '../src/tokens/format.js';
 import { hashToken } from '../src/tokens/resolve.js';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
+import { followUpItemDeps } from '../src/routes/followUps.js';
+import { FOLLOW_UP_CHILD_START_SUPPORTED } from '@fx/pipeline';
+
+// Read at module load, before any beforeAll injects a value: this is the route's own default.
+const ROUTE_DEFAULT_START_SUPPORTED = followUpItemDeps.startSupported;
 import { seedAccountWithMember, seedUser } from './helpers/seed.js';
 
 interface Identity {
@@ -26,6 +31,7 @@ describe('D#483 S5-b2d-1: follow-up routes', () => {
   let platformOpsPool: Pool;
 
   beforeAll(async () => {
+    followUpItemDeps.startSupported = true; // C29: the make-item tests run with the flag injected true; the flag-false test sets it back
     adminPool = createPool(process.env.API_DATABASE_URL!);
     admin = await adminPool.connect();
     appUserPool = createPool(process.env.API_DATABASE_URL_APP_USER!);
@@ -33,6 +39,7 @@ describe('D#483 S5-b2d-1: follow-up routes', () => {
     process.env.FX_SESSION_SECRET = 's'.repeat(32);
   });
   afterAll(async () => {
+    followUpItemDeps.startSupported = false;
     delete process.env.FX_SESSION_SECRET;
     admin.release();
     await Promise.all([adminPool.end(), platformOpsPool.end(), appUserPool.end()]);
@@ -98,8 +105,10 @@ describe('D#483 S5-b2d-1: follow-up routes', () => {
   });
 
   it('the route itself is owner or admin and session only (the definer refusing a member is the second gate, not the only one)', () => {
-    const put = ROUTES.find((r) => r.operationId === 'setFollowUpSetting')!;
-    expect({ minRole: put.minRole, principals: put.principals, idempotency: put.idempotency }).toEqual({ minRole: 'admin', principals: ['session'], idempotency: 'required' });
+    for (const id of ['setFollowUpSetting', 'makeFollowUpItem']) {
+      const w = ROUTES.find((r) => r.operationId === id)!;
+      expect({ minRole: w.minRole, principals: w.principals, idempotency: w.idempotency }).toEqual({ minRole: 'admin', principals: ['session'], idempotency: 'required' });
+    }
     for (const id of ['getFollowUpSetting', 'listWorkItemFollowUps']) {
       const r = ROUTES.find((x) => x.operationId === id)!;
       expect({ minRole: r.minRole, scope: r.scope }).toEqual({ minRole: 'member', scope: 'read' });
@@ -119,11 +128,13 @@ describe('D#483 S5-b2d-1: follow-up routes', () => {
     const f = await fixture();
     const item = (await admin.query<{ id: string }>(`INSERT INTO work_items (account_id, repo_id, kind, title, provenance) VALUES ($1, $2, 'feature', 'parent', 'internal') RETURNING id`, [f.owner.accountId, f.repoId])).rows[0]!.id;
     const run = (await admin.query<{ id: string }>(`INSERT INTO agent_runs (account_id, work_item_id, role, runtime, status) VALUES ($1, $2, 'code-reviewer', 'local', 'succeeded') RETURNING id`, [f.owner.accountId, item])).rows[0]!.id;
+    const ids: string[] = [];
     for (const [title, why, disposition, at] of [['Add a retry', 'flaky network', 'child', '2026-11-01T10:00:00Z'], ['Log it', '', 'note', '2026-11-01T11:00:00Z']] as const) {
-      await admin.query(
-        `INSERT INTO work_item_follow_ups (account_id, work_item_id, source_run_id, source_role, title, why, title_key, disposition, created_at) VALUES ($1, $2, $3, 'code-reviewer', $4, $5, encode(sha256(convert_to($4, 'UTF8')), 'hex'), $6, $7)`,
+      const made = await admin.query<{ id: string }>(
+        `INSERT INTO work_item_follow_ups (account_id, work_item_id, source_run_id, source_role, title, why, title_key, disposition, created_at) VALUES ($1, $2, $3, 'code-reviewer', $4, $5, encode(sha256(convert_to($4, 'UTF8')), 'hex'), $6, $7) RETURNING id`,
         [f.owner.accountId, item, run, title, why, disposition, at],
       );
+      ids.push(made.rows[0]!.id);
     }
     // A second item of the same account with a follow-up of its own: it must not appear in the first item's list.
     const sibling = (await admin.query<{ id: string }>(`INSERT INTO work_items (account_id, repo_id, kind, title, provenance) VALUES ($1, $2, 'feature', 'sibling', 'internal') RETURNING id`, [f.owner.accountId, f.repoId])).rows[0]!.id;
@@ -138,9 +149,11 @@ describe('D#483 S5-b2d-1: follow-up routes', () => {
     const text = await res.text();
     expect(JSON.parse(text)).toEqual({
       work_item_id: item,
+      can_make_item: false,
+      make_item_available: true,
       follow_ups: [
-        { title: 'Add a retry', why: 'flaky network', disposition: 'child', source_role: 'code-reviewer', source_label: 'Code reviewer', created_at: '2026-11-01T10:00:00.000Z' },
-        { title: 'Log it', why: '', disposition: 'note', source_role: 'code-reviewer', source_label: 'Code reviewer', created_at: '2026-11-01T11:00:00.000Z' },
+        { id: ids[0], title: 'Add a retry', why: 'flaky network', disposition: 'child', source_role: 'code-reviewer', source_label: 'Code reviewer', created_at: '2026-11-01T10:00:00.000Z', state: 'pending' },
+        { id: ids[1], title: 'Log it', why: '', disposition: 'note', source_role: 'code-reviewer', source_label: 'Code reviewer', created_at: '2026-11-01T11:00:00.000Z', state: 'note' },
       ],
     });
     expect(text).not.toContain(run);
@@ -149,5 +162,102 @@ describe('D#483 S5-b2d-1: follow-up routes', () => {
     const stranger = await seedAccountWithMember(admin, { role: 'owner' });
     expect((await call(stranger, 'GET', `/work-items/${item}/follow-ups`)).status).toBe(404);
     expect((await call(f.member, 'GET', `/work-items/not-a-uuid/follow-ups`)).status).toBe(404);
+  });
+
+  // ---- D#483 S5-b2d-2c (C28-2c-1): "Make it an item" ----
+  async function parentWithNote(f: Awaited<ReturnType<typeof fixture>>, stage = 'triaged') {
+    const parent = (await admin.query<{ id: string }>(`INSERT INTO work_items (account_id, repo_id, kind, title, provenance, stage) VALUES ($1, $2, 'feature', 'parent', 'internal', $3) RETURNING id`, [f.owner.accountId, f.repoId, stage])).rows[0]!.id;
+    const fu = (
+      await admin.query<{ id: string }>(
+        `INSERT INTO work_item_follow_ups (account_id, work_item_id, source_role, title, why, title_key, disposition) VALUES ($1, $2, 'executor', 'Log the timeout', 'why', repeat('c', 64), 'note') RETURNING id`,
+        [f.owner.accountId, parent],
+      )
+    ).rows[0]!.id;
+    return { parent, fu };
+  }
+  const make = (who: Identity, parent: string, fu: string, key: string | undefined = randomUUID(), bearer?: string) => call(who, 'POST', `/work-items/${parent}/follow-ups/${fu}/make-item`, { key, bearer });
+  const childrenOf = async (fu: string) => (await admin.query(`SELECT id, parent_id, kind FROM work_items WHERE follow_up_id = $1`, [fu])).rows;
+
+  it('make-item by an admin creates one child and records the actor; a repeat with the same key or another answers the same child', async () => {
+    const f = await fixture();
+    const { parent, fu } = await parentWithNote(f);
+    const key = randomUUID();
+    const first = await make(f.admin, parent, fu, key);
+    expect(first.status).toBe(200);
+    const body = (await first.json()) as { child_id: string; created: boolean; work_item_id: string; follow_up_id: string };
+    expect(body).toMatchObject({ work_item_id: parent, follow_up_id: fu, created: true });
+    expect(await childrenOf(fu)).toEqual([{ id: body.child_id, parent_id: parent, kind: 'small' }]);
+    const audit = await admin.query(`SELECT actor, payload FROM audit_log WHERE account_id = $1 AND action = 'follow_up.made_item'`, [f.owner.accountId]);
+    expect(audit.rows).toEqual([{ actor: f.admin.userId, payload: { follow_up_id: fu, child_id: body.child_id } }]);
+    const again = await make(f.admin, parent, fu, key);
+    expect(await again.json()).toEqual(body);
+    const fresh = await make(f.owner, parent, fu);
+    expect(((await fresh.json()) as { child_id: string; created: boolean })).toEqual({ ...body, created: false });
+    expect(await childrenOf(fu)).toHaveLength(1);
+    // The list now links the child.
+    const list = (await (await call(f.admin, 'GET', `/work-items/${parent}/follow-ups`)).json()) as { can_make_item: boolean; follow_ups: { state: string; child_id: string; child_stage: string }[] };
+    expect(list.can_make_item).toBe(true);
+    expect(list.follow_ups[0]).toMatchObject({ state: 'item', child_id: body.child_id, child_stage: 'triaged' });
+  });
+
+  it('make-item by a member is 403 and creates nothing; a token is refused; a missing key is 400', async () => {
+    const f = await fixture();
+    const { parent, fu } = await parentWithNote(f);
+    expect((await make(f.member, parent, fu)).status).toBe(403);
+    const plaintext = generateToken();
+    await insertApiToken(appUserPool, { accountId: f.owner.accountId, createdBy: f.owner.userId, tokenHash: hashToken(plaintext), displayHint: 'fxat_...mk', scopes: ['read'], expiresAt: new Date(Date.now() + 86_400_000) });
+    expect((await make(f.owner, parent, fu, randomUUID(), plaintext)).status).toBe(403);
+    expect((await make(f.admin, parent, fu, '')).status).toBe(400);
+    expect(await childrenOf(fu)).toEqual([]);
+  });
+
+  it('C29: the route\'s default is exactly pipeline\'s flag, not a value of its own (the tests inject true, so this is the only check of the default)', () => {
+    expect(ROUTE_DEFAULT_START_SUPPORTED).toBe(FOLLOW_UP_CHILD_START_SUPPORTED);
+  });
+
+  it('C29-2c-1: with the flag false make-item answers 409 follow_up_items_unavailable, calls no definer and writes nothing; the list says so', async () => {
+    const f = await fixture();
+    const { parent, fu } = await parentWithNote(f);
+    followUpItemDeps.startSupported = false;
+    try {
+      const res = await make(f.admin, parent, fu);
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: { code: string; message: string } }).error).toMatchObject({ code: 'follow_up_items_unavailable', message: 'Follow-ups become items in a later release.' });
+      expect(await childrenOf(fu)).toEqual([]);
+      expect((await admin.query(`SELECT 1 FROM audit_log WHERE account_id = $1 AND action = 'follow_up.made_item'`, [f.owner.accountId])).rowCount).toBe(0);
+      const list = (await (await call(f.admin, 'GET', `/work-items/${parent}/follow-ups`)).json()) as { make_item_available: boolean };
+      expect(list.make_item_available).toBe(false);
+    } finally {
+      followUpItemDeps.startSupported = true;
+    }
+  });
+
+  it('make-item from another account answers 404 not_found, the same as an unknown id, and creates nothing', async () => {
+    const f = await fixture();
+    const { parent, fu } = await parentWithNote(f);
+    const stranger = await seedAccountWithMember(admin, { role: 'owner' });
+    const cross = await make(stranger, parent, fu);
+    const unknown = await make(stranger, parent, randomUUID());
+    expect(cross.status).toBe(404);
+    const strip = (b: { error: Record<string, unknown> }) => ({ ...b.error, request_id: undefined });
+    expect(strip((await cross.json()) as { error: Record<string, unknown> })).toEqual(strip((await unknown.json()) as { error: Record<string, unknown> }));
+    expect(((await (await make(stranger, parent, fu)).json()) as { error: { code: string } }).error.code).toBe('not_found');
+    expect(await childrenOf(fu)).toEqual([]);
+  });
+
+  it('make-item: unknown ids and another item\'s follow-up are 404, a closed parent is 409 and makes nothing', async () => {
+    const f = await fixture();
+    const { parent, fu } = await parentWithNote(f);
+    const other = await parentWithNote(f);
+    expect((await make(f.admin, parent, other.fu)).status).toBe(404);
+    expect((await make(f.admin, parent, randomUUID())).status).toBe(404);
+    expect((await make(f.admin, 'nope', fu)).status).toBe(404);
+    const closed = await parentWithNote(f, 'closed');
+    const res = await make(f.admin, closed.parent, closed.fu);
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('parent_closed');
+    expect(await childrenOf(closed.fu)).toEqual([]);
+    const list = (await (await call(f.admin, 'GET', `/work-items/${closed.parent}/follow-ups`)).json()) as { follow_ups: { state: string }[] };
+    expect(list.follow_ups[0]!.state).toBe('parent_closed');
   });
 });

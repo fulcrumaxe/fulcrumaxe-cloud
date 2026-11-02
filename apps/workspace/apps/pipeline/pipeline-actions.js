@@ -2017,3 +2017,125 @@ export function createOperatorPanel({ call, onDone, sleep } = {}) {
     },
   };
 }
+
+// ---- D#483 S5-b2d-2c: the "Follow-ups" list on an item's detail. It reads the item's follow-ups and shows each as a sentence built from the response's fixed
+// fields; the follow-up's own title and why are model text and are only ever drawn as text nodes (h() never parses markup).
+//   * `state` decides the sentence: item (its own item, with its stage and a way to open it), pending, note (with "Make it an item" for an owner or
+//     admin, the server's `can_make_item`) or parent_closed. Nothing is stored here: a read after any change shows what the server now holds.
+//   * "Make it an item" is one POST with an Idempotency-Key kept until it succeeds, so a retry after a lost answer cannot make a second item. The way
+//     back is closing the item it made; there is no delete.
+
+export const FU_COPY = {
+  heading: "Follow-ups",
+  unavailable: "Follow-ups aren't available right now.",
+  note: "Kept as a note",
+  pending: "Marked to become its own item",
+  parentClosed: "The item closed before this follow-up became its own item.",
+  forbidden: "Only owners and admins can do this.",
+  failed: "That couldn't be done. Try again.",
+  unavailable409: "Follow-ups become items in a later release.",
+};
+
+/** The sentence for one row, from its state and stage only. */
+export function followUpStateText(f) {
+  if (f.state === "item") return "Its own item · " + (STAGE_LABELS[f.child_stage] || "Another stage");
+  if (f.state === "pending") return FU_COPY.pending;
+  if (f.state === "parent_closed") return FU_COPY.parentClosed;
+  return FU_COPY.note;
+}
+
+export function followUpFailureText(e) {
+  if (e && e.status === 403) return FU_COPY.forbidden;
+  if (e && e.status === 409 && e.code === "parent_closed") return FU_COPY.parentClosed;
+  if (e && e.status === 409 && e.code === "follow_up_items_unavailable") return FU_COPY.unavailable409;
+  return FU_COPY.failed;
+}
+
+const fuText = (v) => (typeof v === "string" ? v : "");
+
+export function createFollowUpsPanel({ itemId, onOpenItem }) {
+  let list = null; // the last good response, or "error"
+  let closed = false;
+  let busy = null; // follow-up id of the call in flight
+  const keys = new Map(); // follow-up id -> Idempotency-Key, kept until the call succeeds
+  const errors = new Map();
+  const el = h("section", { class: "pl-followups", "aria-labelledby": "pl-fu-h", "data-testid": "pl-followups", hidden: true });
+
+  function row(f, can, available) {
+    const err = errors.get(f.id);
+    const title = fuText(f.title);
+    return h(
+      "li",
+      { class: "pl-fu-row", "data-testid": "pl-fu-row" },
+      h("span", { class: "pl-fu-title", "data-testid": "pl-fu-title" }, h("bdi", null, title)),
+      h("span", { class: "pl-muted pl-fu-source" }, fuText(f.source_label) || "Reviewer"),
+      fuText(f.why) ? h("span", { class: "pl-muted pl-fu-why", "data-testid": "pl-fu-why" }, h("bdi", null, fuText(f.why))) : null,
+      h("span", { class: "pl-fu-state", "data-testid": "pl-fu-state" }, followUpStateText(f)),
+      f.state === "item" && typeof f.child_id === "string" && onOpenItem
+        ? h("button", { type: "button", class: "pl-btn", "aria-label": "Open the item made from: " + title, "data-testid": "pl-fu-open", onClick: () => onOpenItem(f.child_id) }, "Open the item")
+        : null,
+      f.state === "note" && can
+        ? h("button", { type: "button", class: "pl-btn", disabled: busy !== null || !available, "aria-describedby": available ? null : "pl-fu-later", "aria-label": "Make this follow-up an item: " + title, "data-testid": "pl-fu-make", onClick: () => make(f.id) }, "Make it an item")
+        : null,
+      f.state === "note" && can && !available ? h("span", { class: "pl-muted", id: "pl-fu-later", "data-testid": "pl-fu-later" }, FU_COPY.unavailable409) : null,
+      err ? h("p", { class: "pl-error", role: "alert", "data-testid": "pl-fu-error" }, err) : null
+    );
+  }
+
+  function paint() {
+    if (closed) return;
+    if (list === null) {
+      el.hidden = true;
+      el.replaceChildren();
+      return;
+    }
+    if (list === "error") {
+      el.hidden = false;
+      return el.replaceChildren(h("h3", { class: "pl-detail-sub", id: "pl-fu-h" }, FU_COPY.heading), h("p", { class: "pl-muted", role: "status", "data-testid": "pl-fu-unavailable" }, FU_COPY.unavailable));
+    }
+    el.hidden = list.follow_ups.length === 0;
+    el.replaceChildren(
+      ...(el.hidden ? [] : [h("h3", { class: "pl-detail-sub", id: "pl-fu-h" }, FU_COPY.heading), h("ul", { class: "pl-fu-list", "data-testid": "pl-fu-list" }, list.follow_ups.map((f) => row(f, list.can_make_item === true, list.make_item_available === true)))])
+    );
+  }
+
+  async function load() {
+    try {
+      const v = await api("GET", "/api/v1/work-items/" + encodeURIComponent(itemId) + "/follow-ups");
+      if (closed) return;
+      list = v && Array.isArray(v.follow_ups) ? v : "error";
+    } catch {
+      if (closed) return;
+      list = "error";
+    }
+    paint();
+  }
+
+  async function make(id) {
+    if (busy !== null) return;
+    busy = id;
+    errors.delete(id);
+    if (!keys.has(id)) keys.set(id, crypto.randomUUID());
+    paint();
+    try {
+      await api("POST", "/api/v1/work-items/" + encodeURIComponent(itemId) + "/follow-ups/" + encodeURIComponent(id) + "/make-item", undefined, undefined, { idempotencyKey: keys.get(id) });
+      keys.delete(id);
+    } catch (e) {
+      // A lost answer keeps its key (the retry is the same request); a refusal is final, so the next try is a new one.
+      if (e && e.status >= 400 && e.status < 500) keys.delete(id);
+      errors.set(id, followUpFailureText(e));
+    }
+    busy = null;
+    await load();
+  }
+
+  load();
+  return {
+    el,
+    refresh: load,
+    destroy() {
+      closed = true;
+      el.replaceChildren();
+    },
+  };
+}
