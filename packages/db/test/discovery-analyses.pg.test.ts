@@ -195,21 +195,23 @@ describe('discovery_analyses, analysis_refs, proposal_title_norm and the due lis
 
   describe('discovery_analysis_list_due', () => {
     const due = async () => (await writerPool.query<{ account_id: string; analysis_id: string }>(`SELECT * FROM discovery_analysis_list_due(200)`)).rows;
-    it('lists queued and running analyses of live accounts with a connected sandbox product repo, ids only, and nothing that ended', async () => {
+    it('lists queued and running analyses of live accounts, ids only, and nothing that ended; a repository no longer eligible stays listed so the pass can end it (0959)', async () => {
       const q = (await queueAnalysis(appPool, B.accountId, B.repoId, sha(20)))!;
       const mine = () => due().then((r) => r.filter((x) => x.account_id === B.accountId));
       expect(await mine()).toEqual([{ account_id: B.accountId, analysis_id: q.id }]);
       expect(Object.keys((await mine())[0]!)).toEqual(['account_id', 'analysis_id']);
       await startAnalysis(appPool, B.accountId, q.id);
       expect(await mine()).toHaveLength(1);
-      // 0953 (D#483 S4-f4): a Cloud-verified repository is listed too; a Local-only one is not.
+      // 0953 (D#483 S4-f4): a Cloud-verified repository is listed too. 0959 (S4-f3-f): so are a Local-only, a disconnected and a non-team one.
       await admin.query(`UPDATE repos SET execution_mode = 'runner_verified' WHERE id = $1`, [B.repoId]);
       expect(await mine()).toHaveLength(1);
       await admin.query(`UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1`, [B.repoId]);
-      expect(await mine()).toHaveLength(0);
+      expect(await mine()).toHaveLength(1);
       await admin.query(`UPDATE repos SET execution_mode = 'sandbox', installation_id = NULL WHERE id = $1`, [B.repoId]);
-      expect(await mine()).toHaveLength(0);
-      await admin.query(`UPDATE repos SET installation_id = $2 WHERE id = $1`, [B.repoId, B.installationId]);
+      expect(await mine()).toHaveLength(1);
+      await admin.query(`UPDATE repos SET installation_id = $2, product = 'sitekit' WHERE id = $1`, [B.repoId, B.installationId]);
+      expect(await mine()).toHaveLength(1);
+      await admin.query(`UPDATE repos SET product = 'team' WHERE id = $1`, [B.repoId]);
       expect(await mine()).toHaveLength(1);
       await admin.query(`UPDATE accounts SET deleted_at = now() WHERE id = $1`, [B.accountId]);
       expect(await mine()).toHaveLength(0);
@@ -224,6 +226,18 @@ describe('discovery_analyses, analysis_refs, proposal_title_norm and the due lis
       expect(acl).toEqual(['agent_run_writer', 'discovery_analysis_lister']);
       expect((await admin.query(`SELECT rolcanlogin, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = 'discovery_analysis_lister'`)).rows[0]).toEqual({ rolcanlogin: false, rolsuper: false, rolbypassrls: false });
       expect((await admin.query(`SELECT 1 FROM pg_auth_members WHERE roleid = 'discovery_analysis_lister'::regrole OR member = 'discovery_analysis_lister'::regrole`)).rowCount).toBe(0);
+    });
+    it('0959: one row policy per table for the lister alone; the repos one admits a repository only while one of its analyses waits, and the column grants are 0950\'s', async () => {
+      const policies = (await admin.query<{ t: string; roles: string[]; qual: string }>(`SELECT tablename AS t, roles::text[] AS roles, qual FROM pg_policies WHERE 'discovery_analysis_lister' = ANY(roles) ORDER BY 1`)).rows;
+      expect(policies.map((p) => p.t)).toEqual(['accounts', 'discovery_analyses', 'repos']);
+      for (const p of policies) expect(p.roles).toEqual(['discovery_analysis_lister']);
+      const repos = policies.find((p) => p.t === 'repos')!.qual.replace(/\s+/g, ' ');
+      expect(repos).toContain('FROM discovery_analyses x');
+      expect(repos).toMatch(/x\.state = ANY \(ARRAY\['queued'::text, 'running'::text\]\)/);
+      const cols = (await admin.query<{ c: string }>(`SELECT table_name || '.' || column_name AS c FROM information_schema.column_privileges WHERE grantee = 'discovery_analysis_lister' ORDER BY 1`)).rows.map((r) => r.c);
+      expect(cols).toEqual(['accounts.deleted_at', 'accounts.id', 'discovery_analyses.account_id', 'discovery_analyses.created_at', 'discovery_analyses.id', 'discovery_analyses.repo_id', 'discovery_analyses.state', 'repos.account_id', 'repos.execution_mode', 'repos.id', 'repos.installation_id', 'repos.product']);
+      const fn = (await admin.query<{ cfg: string[]; owner: string; definer: boolean }>(`SELECT proconfig AS cfg, pg_get_userbyid(proowner) AS owner, prosecdef AS definer FROM pg_proc WHERE proname = 'discovery_analysis_list_due'`)).rows;
+      expect(fn).toEqual([{ cfg: ['search_path=pg_catalog, public, pg_temp'], owner: 'discovery_analysis_lister', definer: true }]);
     });
   });
 });
