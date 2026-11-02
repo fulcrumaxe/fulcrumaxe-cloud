@@ -20,7 +20,7 @@ import {
   type UpdateBranchOutcome,
   type RequiredAppCheck,
 } from "./mergeGate.js";
-import { readCleanMerge, type CleanMergeReading } from "./treeMerge.js";
+import { readCleanMerge, readTreeEntries, type CleanMergeReading } from "./treeMerge.js";
 import type { PullRequestRef } from "./types.js";
 
 /**
@@ -204,6 +204,18 @@ export interface DefaultBranchReaderPort {
 }
 
 /**
+ * D#519 MQ5-a: the two reads the ordered-resource check needs, hosted repositories only (both refuse on a `runner_local` repository's allowlist, as `getDefaultBranchTip` does).
+ * `listPullRequestAdds`: the paths the pull request adds (a rename counts as the new name), from the files API, paged by 100 and cut by GitHub at `PULL_FILES_CAP`;
+ * `complete` is false when the list reached that ceiling. `listDefaultBranchPaths`: every path of the default branch's tip; a truncated tree is `ok: false`.
+ */
+export interface OrderedResourceReaderPort {
+  listPullRequestAdds(pr: PullRequestRef): Promise<{ paths: readonly string[]; complete: boolean }>;
+  listDefaultBranchPaths(pr: PullRequestRef): Promise<{ ok: true; branch: string; paths: readonly string[] } | { ok: false }>;
+}
+/** GitHub lists at most this many files of one pull request. */
+export const PULL_FILES_CAP = 3000;
+
+/**
  * D#519 MQ4-a: one commit of a pull request as the commits list reports it. Logins only; a commit whose author or committer resolves to no GitHub
  * account carries null. `truncated` is set when the list is at GitHub's cap of 250 commits (the real list may be longer): it is never complete then.
  */
@@ -256,7 +268,7 @@ function compareFileList(raw: unknown): string[] | null {
   return raw.length >= COMPARE_FILES_CAP ? null : files;
 }
 
-export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateGitHubPort & CommitReaderPort & DefaultBranchReaderPort & ConflictReaderPort {
+export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateGitHubPort & CommitReaderPort & DefaultBranchReaderPort & ConflictReaderPort & OrderedResourceReaderPort {
   async function repoPath(pr: PullRequestRef): Promise<string> {
     if (!Number.isSafeInteger(pr.prNumber) || pr.prNumber <= 0) throw new Error("invalid PR number");
     const { owner, name } = await deps.resolveRepo(pr.repoId);
@@ -317,6 +329,17 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
   }
 
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+  async function defaultBranchTip(pr: PullRequestRef): Promise<{ branch: string; sha: string }> {
+    if (deps.local) throw new Error(`GitHub default branch tip: ${LOCAL_REFUSED}`);
+    const repo = await repoPath(pr);
+    const branch = (await readPr(pr)).state.defaultBranch;
+    const path = `${repo}/git/ref/heads/${branch.split("/").map(encodeURIComponent).join("/")}`;
+    const body = await okBody(await get(path), "get default branch ref");
+    const sha = isObj(body.object) ? body.object.sha : undefined;
+    if (typeof sha !== "string" || !SHA_PATTERN.test(sha)) bad("ref.object.sha");
+    return { branch, sha: sha as string };
+  }
 
   /** Reads until GitHub has computed `mergeable` or the bound is spent; the last read is returned, `null` included. */
   async function readMergeability(pr: PullRequestRef, gatedHeadSha?: string): Promise<PullRequestMergeability> {
@@ -773,15 +796,33 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
       };
     },
 
-    async getDefaultBranchTip(pr) {
-      if (deps.local) throw new Error(`GitHub default branch tip: ${LOCAL_REFUSED}`);
-      const repo = await repoPath(pr);
-      const branch = (await readPr(pr)).state.defaultBranch;
-      const path = `${repo}/git/ref/heads/${branch.split("/").map(encodeURIComponent).join("/")}`;
-      const body = await okBody(await get(path), "get default branch ref");
-      const sha = isObj(body.object) ? body.object.sha : undefined;
-      if (typeof sha !== "string" || !SHA_PATTERN.test(sha)) bad("ref.object.sha");
-      return { branch, sha: sha as string };
+    getDefaultBranchTip: defaultBranchTip,
+
+    async listPullRequestAdds(pr) {
+      if (deps.local) throw new Error(`GitHub pull request files: ${LOCAL_REFUSED}`);
+      const path = `${await repoPath(pr)}/pulls/${pr.prNumber}/files`;
+      const paths: string[] = [];
+      let listed = 0;
+      for (let page = 1; page <= PULL_FILES_CAP / PER_PAGE; page++) {
+        const res = await get(path, { per_page: PER_PAGE, page });
+        if (res.status !== 200 || !Array.isArray(res.body)) throw new Error(`GitHub pull request files: unexpected status ${res.status}`);
+        for (const f of res.body) {
+          if (!isObj(f) || typeof f.filename !== "string" || typeof f.status !== "string") bad("pull.files");
+          if (f.status === "added" || f.status === "renamed" || f.status === "copied") paths.push(f.filename);
+        }
+        listed += res.body.length;
+        if (res.body.length < PER_PAGE) break;
+      }
+      // GitHub lists no more than the cap, so a list that reached it may be cut short: it is not complete.
+      return { paths, complete: listed < PULL_FILES_CAP };
+    },
+
+    async listDefaultBranchPaths(pr) {
+      if (deps.local) throw new Error(`GitHub default branch paths: ${LOCAL_REFUSED}`);
+      const { branch, sha } = await defaultBranchTip(pr);
+      const { owner, name } = await deps.resolveRepo(pr.repoId);
+      const tree = await readTreeEntries(deps.http, { owner, name }, sha);
+      return tree.ok ? { ok: true, branch, paths: [...tree.entries.keys()] } : { ok: false };
     },
 
     async getCiSnapshot(pr, headSha, opts) {

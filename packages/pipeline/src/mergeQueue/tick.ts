@@ -4,8 +4,10 @@ import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, StageInputError } from "@fx/core/src/work-items/stages.js";
 import { reportError } from "@fx/telemetry";
 import { classifyCi, expectedSignalNames, type CiVerdict, type MergeBlockReason, type MergeGateGitHubPort, type PullRequestMergeability } from "../build/mergeGate.js";
+import type { OrderedResourceReaderPort } from "../build/githubMergePort.js";
 import type { PullRequestRef } from "../build/types.js";
 import { guardMain, type MainGuardGitHubPort } from "./mainGuard.js";
+import { clearOrderedStops, orderedStep, type OrderedOutcome } from "./orderedCheck.js";
 import { MERGE_QUEUE_CI_WAIT_MINUTES } from "./policy.js";
 import { runRefreshStep, refreshTip, type RefreshGitHubPort, type StartDeltaReview } from "./refresh.js";
 import { adoptParkedSlot, listConflictRounds, listHeadRefreshes, markMerged, PARKED_PHASE, readHaltedEntries, readHostQueued, readQueue, reclaimExpiredLeases, releaseToQueue, renewSlot, returnToReview, stopEntry, stopOnRemovals, takeSlot } from "./store.js";
@@ -40,7 +42,7 @@ export type QueueGateResult =
   | { outcome: "head_moved" }
   | { outcome: "ready_human_merges"; reasons: readonly string[] };
 
-export type TickGitHubPort = RefreshGitHubPort & MainGuardGitHubPort & Pick<MergeGateGitHubPort, "retargetPullRequest">;
+export type TickGitHubPort = RefreshGitHubPort & MainGuardGitHubPort & Pick<MergeGateGitHubPort, "retargetPullRequest"> & Partial<OrderedResourceReaderPort>;
 
 export interface QueueTickDeps {
   github: TickGitHubPort;
@@ -73,7 +75,7 @@ export interface QueueTickDeps {
 export type TickStep =
   | { step: "idle"; why: "slot_busy" | "nothing_eligible" | "lost_race" | "waiting_mergeability" | "host_queue_full" }
   | { step: "merged"; entryId: string; prNumber: number }
-  | { step: "parked"; entryId: string; why: "ci_pending" | "refresh_pending" | "main_ci_unknown" }
+  | { step: "parked"; entryId: string; why: "ci_pending" | "refresh_pending" | "main_ci_unknown" | "ordered_resource_unknown" }
   /** The holder's slot is gone and nothing more is done with it this pass. */
   | { step: "released"; entryId: string; why: string };
 
@@ -93,6 +95,8 @@ const isUnknown = (m: PullRequestMergeability): boolean => m.mergeable === null 
 
 export async function runQueueTick(deps: QueueTickDeps, input: { accountId: string; repoId: string }): Promise<QueueTickResult> {
   const out: QueueTickResult = { steps: [], conflicted: [], waiting: [] };
+  // D#519 MQ5-a: an entry stopped only for ordering returns to the queue once no ordered resource applies to the repository any more.
+  await clearOrderedStops({ github: deps.github, inTenant: deps.inTenant, ...(deps.now ? { now: deps.now } : {}) }, input);
   for (let pass = 0; pass < (deps.maxPasses ?? 10); pass++) {
     const facts = await recheck(deps, input, out);
     const step = await takeAndRun(deps, input, facts);
@@ -194,12 +198,12 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
     return { step: "idle", why: "host_queue_full" };
   }
   const queueMode = info.mode === "queue";
-  const refresh = await runRefreshStep<QueueGateResult | { outcome: "parked" | "ci_red" | "ci_timeout" }>(
+  const refresh = await runRefreshStep<QueueGateResult | OrderedOutcome | { outcome: "parked" | "ci_red" | "ci_timeout" }>(
     {
       github: deps.github,
       inTenant: deps.inTenant,
       ourLogin: deps.ourLogin,
-      gate: ({ headSha }) => ciThenGate(deps, accountId, held, holder, pr, headSha),
+      gate: ({ headSha }) => orderedThenCi(deps, accountId, held, holder, pr, headSha),
       startDeltaReview: deps.startDeltaReview,
       sleep: deps.sleep,
       ...(queueMode ? { skipBehindRefresh: true } : {}),
@@ -211,7 +215,7 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
 
   // The head the gate ran on (the pull request's live head), for a conflict the gate reports.
   let liveHead: string | undefined;
-  let gate: QueueGateResult | { outcome: "parked" | "ci_red" | "ci_timeout" };
+  let gate: QueueGateResult | OrderedOutcome | { outcome: "parked" | "ci_red" | "ci_timeout" };
   switch (refresh.outcome) {
     case "not_behind":
       liveHead = refresh.headSha;
@@ -219,7 +223,7 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
       break;
     case "refreshed":
       liveHead = refresh.toSha;
-      gate = await ciThenGate(deps, accountId, held, holder, pr, refresh.toSha);
+      gate = await orderedThenCi(deps, accountId, held, holder, pr, refresh.toSha);
       break;
     case "conflict":
       await handleConflict(deps, accountId, held, holder, refresh.headSha);
@@ -246,6 +250,12 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
       return { step: "merged", entryId: held.id, prNumber: held.prNumber };
     case "parked":
       return { step: "parked", entryId: held.id, why: "ci_pending" };
+    case "ordered_waiting":
+      return { step: "parked", entryId: held.id, why: "ordered_resource_unknown" };
+    case "ordered_stopped":
+      return release("ordered_resource_out_of_order");
+    case "ordered_unreadable":
+      return release("ordered_resource_unreadable");
     case "merge_enqueued":
       // D#694 B6-3: the host's queue owns the merge now. The entry gives the slot back and stays `queued`; its facts (the enqueue the gate just wrote) keep it out of every
       // take until an outcome arrives, so the gate is not asked again and nothing is enqueued twice, and the next entry can go while the bound allows.
@@ -314,6 +324,11 @@ async function afterRefusal(deps: QueueTickDeps, accountId: string, entry: Merge
   const reason = stopCode(reasons[0] ?? "merge_call_refused");
   await deps.inTenant(accountId, (c) => stopEntry(c, { accountId, entryId: entry.id, reason, holder }));
   return { step: "released", entryId: entry.id, why: reason };
+}
+
+/** D#519 MQ5-a: the ordered-resource check on the head the refresh step ended on, then (when it passes or does not apply) CI and the gate. */
+async function orderedThenCi(deps: QueueTickDeps, accountId: string, entry: MergeQueueEntry, holder: string, pr: PullRequestRef, headSha: string): Promise<QueueGateResult | OrderedOutcome | { outcome: "parked" | "ci_red" | "ci_timeout" }> {
+  return (await orderedStep({ github: deps.github, inTenant: deps.inTenant, ...(deps.now ? { now: deps.now } : {}) }, { accountId, entry, holder, pr, headSha })) ?? ciThenGate(deps, accountId, entry, holder, pr, headSha);
 }
 
 /**
