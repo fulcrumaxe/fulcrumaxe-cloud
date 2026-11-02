@@ -8,7 +8,7 @@ import type { PullRequestRef } from "../build/types.js";
 import { guardMain, type MainGuardGitHubPort } from "./mainGuard.js";
 import { MERGE_QUEUE_CI_WAIT_MINUTES } from "./policy.js";
 import { runRefreshStep, refreshTip, type RefreshGitHubPort, type StartDeltaReview } from "./refresh.js";
-import { adoptParkedSlot, listHeadRefreshes, markMerged, PARKED_PHASE, readHaltedEntries, readHostQueued, readQueue, reclaimExpiredLeases, releaseToQueue, renewSlot, returnToReview, stopEntry, stopOnRemovals, takeSlot } from "./store.js";
+import { adoptParkedSlot, listConflictRounds, listHeadRefreshes, markMerged, PARKED_PHASE, readHaltedEntries, readHostQueued, readQueue, reclaimExpiredLeases, releaseToQueue, renewSlot, returnToReview, stopEntry, stopOnRemovals, takeSlot } from "./store.js";
 import { handToPerson } from "./events.js";
 import type { MergeQueueEntry, PrFacts } from "./types.js";
 
@@ -319,15 +319,31 @@ async function ciThenGate(
   headSha: string,
 ): Promise<QueueGateResult | { outcome: "parked" | "ci_red" | "ci_timeout" }> {
   const refreshes = await deps.inTenant(accountId, (c) => listHeadRefreshes(c, accountId, entry.id));
-  const expected = headSha === entry.headSha ? [] : expectedSignalNames(await deps.github.getCiSnapshot(pr, entry.headSha));
-  const verdict: CiVerdict = classifyCi(await deps.github.getCiSnapshot(pr, headSha), headSha, expected);
+  // D#519 MQ4-c: a head a conflict round produced is stored as the entry's head (so `headSha === entry.headSha`), yet nobody has seen CI on it: it must show
+  // every signal the round's pre-round head showed, never `[]` (a lone `fulcrumaxe/review` status would otherwise read as green).
+  const rounds = entry.workItemId === null ? [] : (await deps.inTenant(accountId, (c) => listConflictRounds(c, accountId, entry.workItemId!))).filter((r) => r.entryId === entry.id);
+  const round = rounds.find((r) => r.toSha === headSha);
+  // A second round starts from the first round's merge commit, which was pushed while the PR conflicted: GitHub runs no `pull_request` checks on it, so its own
+  // signals can be empty. The signals CI must show are the ones the FIRST round's pre-round head showed: walk the chain back (`prev.toSha === r.fromSha`).
+  let origin = round;
+  for (let hops = 0; origin !== undefined && hops < rounds.length; hops += 1) {
+    const prev = rounds.find((r) => r.id !== origin!.id && r.toSha === origin!.fromSha);
+    if (prev === undefined) break;
+    origin = prev;
+  }
+  const expectedFrom = headSha !== entry.headSha ? entry.headSha : origin?.fromSha;
+  const expected = expectedFrom === undefined ? [] : expectedSignalNames(await deps.github.getCiSnapshot(pr, expectedFrom));
+  let verdict: CiVerdict = classifyCi(await deps.github.getCiSnapshot(pr, headSha), headSha, expected);
+  // A round-produced head with nothing to compare against never reads as green: a lone review status would otherwise pass for CI.
+  if (round !== undefined && headSha === entry.headSha && expected.length === 0 && verdict === "green") verdict = "pending";
   if (verdict === "red") {
     await deps.inTenant(accountId, (c) => stopEntry(c, { accountId, entryId: entry.id, reason: "ci_not_green", holder }));
     return { outcome: "ci_red" };
   }
   if (verdict === "pending") {
     // The wait is measured from the refresh that produced this head; a head nobody refreshed has waited since the slot was first taken.
-    const since = refreshTip(entry.headSha, refreshes) === headSha ? refreshes.find((r) => r.toSha === headSha)?.createdAt : undefined;
+    // A round's head waits from the moment the round ended.
+    const since = round?.endedAt ?? (refreshTip(entry.headSha, refreshes) === headSha ? refreshes.find((r) => r.toSha === headSha)?.createdAt : undefined);
     const started = (since ?? entry.slotTakenAt)?.getTime() ?? (deps.now?.() ?? new Date()).getTime();
     if ((deps.now?.() ?? new Date()).getTime() - started >= MERGE_QUEUE_CI_WAIT_MINUTES * 60_000) {
       await deps.inTenant(accountId, (c) => stopEntry(c, { accountId, entryId: entry.id, reason: "ci_not_green", holder }));

@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
-import { completeDeltaReview, createStartDeltaReview, runQueueTick, type DeltaCompletionPorts, type MergeQueueEntry } from "../../src/mergeQueue/index.js";
+import { completeConflictRound, completeDeltaReview, createOnConflict, createStartDeltaReview, readPlatformCommitProof, runQueueTick, setPlatformCommitProofForTest, type ConflictCompletionPorts, type ConflictPorts, type DeltaCompletionPorts, type MergeQueueEntry, type PlatformPush } from "../../src/mergeQueue/index.js";
 import { pgHarness } from "../helpers/pgHarness.js";
-import { T0, startQueueRepo, type QueueRepo, type RepoCall } from "./helpers/queueRepo.js";
+import { T0, shaOf, startQueueRepo, type QueueRepo, type RepoCall } from "./helpers/queueRepo.js";
 
 /**
  * D#519 acceptance 20, the three-item end-to-end: items A, B and C on one repository are approved in the order A, B, C and their
@@ -21,7 +21,14 @@ const B = 8;
 const C = 9;
 
 let repos: QueueRepo[] = [];
+// D#519 C10: the platform commit proof is the one module-level source, unread until a test sets it. `records` are the platform's pushes (the conflict case below).
+let records: PlatformPush[] = [];
+beforeEach(() => {
+  records = [];
+  setPlatformCommitProofForTest(async (_e, shas) => ({ appLogin: "fulcrumaxe-app[bot]", pushes: records.filter((x) => shas.includes(x.newSha)) }));
+});
 afterEach(async () => {
+  setPlatformCommitProofForTest(null);
   await Promise.all(repos.map((r) => r.close()));
   repos = [];
 });
@@ -241,5 +248,124 @@ describe("D#519 MQ3-b three items end to end [pg]", () => {
       "PUT merge #9",
     ]);
     for (const pr of [A, B, C]) expect(await r.entry(pr)).toMatchObject({ state: "merged", mergedBy: "gate", slotHolder: null });
+  });
+
+  it("C6-c8 and C6-c4: A and B conflict on a platform-authored file after A merges: B gets one round, a delta review and fresh CI (a check green on the old head must post on the new one), and merges after A", async () => {
+    const r = await startQueueRepo(db);
+    repos.push(r);
+    const BOT = "fulcrumaxe-app[bot]";
+    const MAIN_PARENT = "d".repeat(40);
+    // The fake sends a request that names no pull request (the default branch ref) to the FIRST item added, so B is added first: it is the item under test, and
+    // approved_at (not the order added) puts A ahead of it.
+    const mergeBase = shaOf(B, "fresh").replace(/b/g, "d");
+    const tip = shaOf(B, "tip");
+    const bHead = shaOf(B, "head");
+    const bFresh = shaOf(B, "fresh");
+    const commitSha = (i: number) => `${B.toString(16).padStart(2, "0")}${i.toString(16).padStart(2, "0")}`.repeat(10).slice(0, 40);
+    const b = await r.addItem(B, {
+      approvedAt: new Date(T0.getTime() + MIN),
+      world: {
+        files: [{ filename: "src/a.ts" }, { filename: "src/other.ts" }],
+        commits: { [commitSha(0)]: { parents: [mergeBase], authorLogin: BOT, committerLogin: "web-flow", verified: false, files: [{ filename: "src/a.ts" }] } },
+        pullCommits: [{ sha: commitSha(0), authorLogin: BOT, committerLogin: "web-flow" }],
+        compares: {
+          [`${tip}...${bHead}`]: { status: "diverged", aheadBy: 1, behindBy: 1, mergeBaseSha: mergeBase, files: [{ filename: "src/a.ts" }, { filename: "src/other.ts" }] },
+          [`${mergeBase}...${tip}`]: { status: "ahead", aheadBy: 1, behindBy: 0, mergeBaseSha: mergeBase, files: [{ filename: "src/a.ts" }] },
+        },
+        // What was green on the old head. The round's head will show only `build` at first.
+        checkRunsBySha: { [bHead]: [{ name: "build", status: "completed", conclusion: "success" }, { name: "lint", status: "completed", conclusion: "success" }] },
+      },
+    });
+    // The executor's build pushed B's one commit through the proxy: the record that proves it ours.
+    records.push({ oldSha: null, newSha: commitSha(0), startSha: null, runId: randomUUID() });
+    const a = await r.addItem(A, { approvedAt: T0 });
+    const gauge = { now: 0, max: 0 };
+    for (const it of [a, b]) {
+      it.g.world.mergeGauge = gauge;
+      it.g.world.mergeDelayMs = 15;
+      it.g.world.onMerge = () => r.mainMoved(it.pr);
+    }
+    // A's merge is what makes B conflict.
+    a.g.world.onMerge = () => {
+      r.mainMoved(A);
+      b.g.world.conflict = true;
+    };
+
+    // The platform's own conflict decision, over the same strict GitHub port; the round's run is an `agent_runs` row the test ends.
+    const base = r.deps();
+    const roundRuns: string[] = [];
+    const onConflict = createOnConflict({
+      github: base.github as unknown as ConflictPorts["github"],
+      inTenant: base.inTenant,
+      platformCommits: async (entry, shas) => (await readPlatformCommitProof()?.(entry, shas)) ?? null,
+      startConflictRound: async ({ entry }) => {
+        const id = randomUUID();
+        await db.admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, head_sha) VALUES ($1, $2, $3, 'executor', 'production', 'running', $4)`, [id, r.accountId, entry.workItemId, entry.headSha]);
+        roundRuns.push(id);
+        return { ok: true, runId: id };
+      },
+    });
+    const first = await runQueueTick(r.deps({ onConflict }), r);
+    expect(r.mergeCalls()).toEqual([A]);
+    expect(first.conflicted).toEqual([b.entryId]);
+    expect(await r.entry(B)).toMatchObject({ state: "awaiting_work", workKind: "conflict", conflictRounds: 1, slotHolder: null, approvedAt: new Date(T0.getTime() + MIN) });
+    expect(b.g.world.updates).toEqual([]);
+
+    // The executor merges the default branch into the branch and pushes one merge commit; the run ends.
+    b.g.world.commits[bFresh] = { parents: [bHead, MAIN_PARENT], authorLogin: BOT, committerLogin: "web-flow", verified: false, files: [{ filename: "src/a.ts" }] };
+    b.g.world.headSha = bFresh;
+    records.push({ oldSha: bHead, newSha: bFresh, startSha: null, runId: roundRuns[0]! });
+    b.g.world.conflict = false;
+    b.g.world.behindBy = 0;
+    await db.admin.query(`UPDATE agent_runs SET status = 'succeeded' WHERE id = $1`, [roundRuns[0]]);
+
+    const live = async (entry: MergeQueueEntry, sha: string) =>
+      (await db.admin.query(`SELECT DISTINCT ON (role) id, role, status FROM agent_runs WHERE account_id = $1 AND work_item_id = $2 AND head_sha = $3 AND role <> 'executor' ORDER BY role, created_at DESC`, [r.accountId, entry.workItemId, sha])).rows;
+    const startedRoles: string[] = [];
+    const ports: ConflictCompletionPorts = {
+      github: base.github as unknown as ConflictCompletionPorts["github"],
+      inTenant: base.inTenant,
+      plan: async () => ({ ok: true, roles: ["code-reviewer", "acceptance-tester"] }),
+      runs: async (entry, sha) => (await live(entry, sha)).map((x) => ({ role: x.role as string, runId: x.id as string, attempt: 0, reusable: x.status !== "cancelled" })),
+      startRole: async ({ entry, role, delta }) => {
+        startedRoles.push(`${role}:${delta.trigger}`);
+        const id = randomUUID();
+        await db.admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, head_sha) VALUES ($1, $2, $3, $4, 'production', 'running', $5)`, [id, r.accountId, entry.workItemId, role, delta.mergeCommitSha]);
+        return { ok: true, runId: id };
+      },
+      cancelRun: async () => undefined,
+      recordEvent: async () => undefined,
+      outcome: async (_e, runId) => {
+        const x = (await db.admin.query(`SELECT status, envelope FROM agent_runs WHERE id = $1`, [runId])).rows[0];
+        return { done: x.status !== "running", verdict: x.envelope?.verdict ?? "fail", securityNeeded: false, noVerdict: x.status !== "running" && !x.envelope?.verdict };
+      },
+      roundRunEnded: async (_e, runId) => (await db.admin.query(`SELECT status FROM agent_runs WHERE id = $1`, [runId])).rows[0].status !== "running",
+      onConflict,
+    };
+    expect(await completeConflictRound(ports, await r.entry(B))).toEqual({ outcome: "delta_started" });
+    expect(startedRoles).toEqual(["code-reviewer:conflict_resolution", "acceptance-tester:conflict_resolution"]);
+    await db.admin.query(`UPDATE agent_runs SET status = 'succeeded', envelope = '{"verdict":"pass"}' WHERE account_id = $1 AND head_sha = $2 AND role <> 'executor'`, [r.accountId, bFresh]);
+    expect(await completeDeltaReview(ports, await r.entry(B))).toEqual({ outcome: "passed" });
+    expect(await r.entry(B)).toMatchObject({ state: "queued", headSha: bFresh, approvedAt: new Date(T0.getTime() + MIN), slotHolder: null });
+    expect(Number((await db.admin.query(`SELECT count(*)::int AS n FROM head_refreshes WHERE account_id = $1`, [r.accountId])).rows[0].n)).toBe(0);
+
+    // C6-c4 stale green: the new head shows only `build` (and the review status); `lint` was green on the old head and has not posted. No merge.
+    b.g.world.checkRunsBySha![bFresh] = [{ name: "build", status: "completed", conclusion: "success" }];
+    b.g.world.statuses = { "fulcrumaxe/review": "success" };
+    const second = await runQueueTick(r.deps({ onConflict }), r);
+    expect(second.steps.map((s) => s.step)).toEqual(["parked"]);
+    expect(r.mergeCalls()).toEqual([A]);
+    // Once `lint` is green on the new head, it merges there, and nothing ever updated the branch.
+    b.g.world.checkRunsBySha![bFresh] = [{ name: "build", status: "completed", conclusion: "success" }, { name: "lint", status: "completed", conclusion: "success" }];
+    const third = await runQueueTick(r.deps({ onConflict }), r);
+    expect(third.steps.map((s) => s.step)).toEqual(["merged", "idle"]);
+    expect(r.mergeCalls()).toEqual([A, B]);
+    expect(b.g.world.merges.map((m) => m.sha)).toEqual([bFresh]);
+    expect(b.g.world.updates).toEqual([]);
+    expect(gauge.max).toBe(1);
+    // The exact merge-side calls, in order: one conflict round, no update-branch for B, and two merge calls, never overlapping.
+    expect(trace(r.calls).filter((l) => l.startsWith("PUT"))).toEqual(["PUT merge #7", "PUT merge #8"]);
+    for (const pr of [A, B]) expect(await r.entry(pr)).toMatchObject({ state: "merged", mergedBy: "gate", slotHolder: null });
+    expect(roundRuns).toHaveLength(1);
   });
 });

@@ -93,6 +93,17 @@ export function bindCompleteDeltaReview(deps: DeltaReviewBinding): (entry: merge
 
 /** D#519 MQ4-b: shared with the conflict round: everything about the item the queue does not carry, read from the stored rows and GitHub. */
 export async function readEntryContext(deps: DeltaReviewBinding, entry: mergeQueue.MergeQueueEntry): Promise<Loaded | { reason: string }> {
+  const found = await readEntryWho(deps, entry);
+  if (!("who" in found)) return found;
+  const { who, actionId } = found;
+  const ctx = await reviewLoadBody(deps.worker, who, null);
+  if (!ctx.ok) return { reason: ctx.reason };
+  const pr = await findPrBody(deps.open, ctx);
+  return pr.ok ? { who, ctx, pr, actionId } : { reason: "invalid_input" };
+}
+
+/** D#519 MQ4-c: only who acts for the entry (no review context and no open pull request needed), so a run can be cancelled after its pull request ended. */
+export async function readEntryWho(deps: DeltaReviewBinding, entry: mergeQueue.MergeQueueEntry): Promise<{ who: StepWho; actionId: string } | { reason: string }> {
   if (!deps.worker || entry.workItemId === null) return { reason: "worker_unavailable" };
   // The person whose approval started the item's advance, and the item's halt epoch: the same two facts the parked-stage sweep restarts a stage with.
   const facts = await withTenant(deps.pool, entry.accountId, async (c) => ({
@@ -107,9 +118,5 @@ export async function readEntryContext(deps: DeltaReviewBinding, entry: mergeQue
     ).rows[0],
   }));
   if (facts.epoch === undefined || facts.user === undefined) return { reason: "invalid_input" };
-  const who: StepWho = { accountId: entry.accountId, userId: facts.user.u, workItemId: entry.workItemId, haltEpoch: facts.epoch };
-  const ctx = await reviewLoadBody(deps.worker, who, null);
-  if (!ctx.ok) return { reason: ctx.reason };
-  const pr = await findPrBody(deps.open, ctx);
-  return pr.ok ? { who, ctx, pr, actionId: facts.user.id } : { reason: "invalid_input" };
+  return { who: { accountId: entry.accountId, userId: facts.user.u, workItemId: entry.workItemId, haltEpoch: facts.epoch }, actionId: facts.user.id };
 }

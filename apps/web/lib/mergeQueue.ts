@@ -6,7 +6,7 @@ import type { AdvanceReviewDeps, RunnerPlaneMergeStore } from "@fx/worker";
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, MERGE_QUEUE_REMOVAL_DOCUMENT, type GithubWebhookPayload, type GithubWebhookEventName } from "@fx/github";
 import { createReviewDeps } from "./advanceReview";
 import { bindCompleteDeltaReview, bindStartDeltaReview } from "./mergeQueueDeltaReview";
-import { bindOnConflict } from "./mergeQueueConflict";
+import { bindCompleteConflictRound, bindOnConflict } from "./mergeQueueConflict";
 import { getWorker } from "./worker";
 import { openInstallationHttp, readRepoAppLogin } from "./github/installationHttp";
 import { openForRepo } from "./github/localOnlyHttp";
@@ -121,18 +121,25 @@ export async function tickMergeQueueRepo(deps: MergeQueueTickerDeps, target: { a
 }
 
 /**
- * The sweep's look at entries waiting on a delta review: when the workflow that drives the wait died, this is what moves them (a pass, or the
- * `completeDeltaReview` timeout), so an entry cannot stay in `awaiting_work` for good. Idempotent with the workflow's own wait step.
+ * The sweep's look at entries waiting on a delta review or a merge-conflict fix round (D#519 MQ4-c): when the workflow that drives the wait died, this is
+ * what moves them (a pass, the round's end, or a timeout), so an entry cannot stay in `awaiting_work` for good. Idempotent with the workflow's own wait step.
+ * A finished round is taken first, so the delta review it starts is followed in the same sweep.
  */
 export async function completeWaitingDeltaReviews(deps: MergeQueueTickerDeps, target: { accountId: string; repoId: string }): Promise<void> {
   const entries = await withTenant(deps.pool, target.accountId, (c) => mergeQueue.readQueue(c, target.accountId, target.repoId));
-  const waiting = entries.filter((e) => e.state === "awaiting_work" && e.workKind === "delta_review");
+  const waiting = entries.filter((e) => e.state === "awaiting_work" && (e.workKind === "delta_review" || e.workKind === "conflict"));
   if (waiting.length === 0) return;
   const open = deps.open ?? openInstallationHttp;
   const github = await openQueueGitHub(deps.pool, open, target);
   if (!github) return;
-  const complete = bindCompleteDeltaReview({ pool: deps.pool, worker: await getWorker(), open, github });
-  for (const entry of waiting) await complete(entry);
+  const binding = { pool: deps.pool, worker: await getWorker(), open, github };
+  const complete = bindCompleteDeltaReview(binding);
+  const completeRound = bindCompleteConflictRound(binding);
+  for (const first of waiting) {
+    if (first.workKind === "conflict") await completeRound(first);
+    const entry = first.workKind === "conflict" ? await withTenant(deps.pool, target.accountId, (c) => mergeQueue.getEntry(c, target.accountId, first.id)) : first;
+    if (entry?.state === "awaiting_work" && entry.workKind === "delta_review") await complete(entry);
+  }
 }
 
 export function sweepMergeQueue(deps: MergeQueueTickerDeps): Promise<mergeQueue.MergeQueueSweepResult> {

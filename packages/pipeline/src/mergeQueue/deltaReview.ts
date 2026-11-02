@@ -29,6 +29,20 @@ export interface DeltaRunRef {
   reusable: boolean;
 }
 
+/**
+ * D#519 MQ4-c: where a delta review's merge commit comes from. A refresh (a `head_refreshes` row) knows both parents; a conflict round
+ * (`merge_conflict_rounds`) stores only the pre-round head, so its second parent (`baseSha: null`) is read from the commit, which the round's shape check has
+ * already shown to be a default-branch commit. A conflict round never writes a `head_refreshes` row: the gate carries passes across those.
+ */
+export interface DeltaSource {
+  fromSha: string;
+  toSha: string;
+  baseSha: string | null;
+  trigger: DeltaReviewInput["trigger"];
+}
+
+export const refreshSource = (row: HeadRefreshRow): DeltaSource => ({ fromSha: row.fromSha, toSha: row.toSha, baseSha: row.baseSha, trigger: "refresh_overlap" });
+
 export interface DeltaReviewPorts {
   github: Pick<RefreshGitHubPort, "getMergeability" | "getCommit" | "compareToBase">;
   /** The roles the gate requires on the entry's pull request at `headSha` (`reviewPlanFor` over the PR's whole diff), or why they cannot be known. `flagged`: the delta code reviewer asked for a security review. */
@@ -46,22 +60,22 @@ type NotStarted = Extract<Awaited<ReturnType<StartDeltaReview>>, { started: fals
 const KNOWN: readonly NotStarted[] = ["spec_changed", "invalid_input", "worker_unavailable", "head_changed", "waiting_for_capacity"];
 export const fixedReason = (reason: string): NotStarted => ((KNOWN as readonly string[]).includes(reason) ? (reason as NotStarted) : "invalid_input");
 
-/** The merge commit as GitHub has it now: the PR's head, with exactly the row's two parents, and its own file list. */
+/** The merge commit as GitHub has it now: the PR's head, with exactly the source's two parents, and its own file list. */
 export async function readMergeCommit(
   github: DeltaReviewPorts["github"],
   entry: MergeQueueEntry,
-  row: HeadRefreshRow,
-): Promise<{ ok: true; files: readonly string[] } | { ok: false; reason: "head_changed" | "invalid_input" }> {
+  src: DeltaSource,
+): Promise<{ ok: true; files: readonly string[]; baseSha: string } | { ok: false; reason: "head_changed" | "invalid_input" }> {
   const pr = { repoId: entry.repoId, prNumber: entry.prNumber };
-  const now = await github.getMergeability(pr, { gatedHeadSha: row.toSha });
-  if (now.state !== "open" || now.merged || now.headSha !== row.toSha) return { ok: false, reason: "head_changed" };
-  const commit = await github.getCommit(pr, row.toSha);
-  if (commit.parents.length !== 2 || commit.parents[0] !== row.fromSha || commit.parents[1] !== row.baseSha) return { ok: false, reason: "head_changed" };
+  const now = await github.getMergeability(pr, { gatedHeadSha: src.toSha });
+  if (now.state !== "open" || now.merged || now.headSha !== src.toSha) return { ok: false, reason: "head_changed" };
+  const commit = await github.getCommit(pr, src.toSha);
+  if (commit.parents.length !== 2 || commit.parents[0] !== src.fromSha || (src.baseSha !== null && commit.parents[1] !== src.baseSha)) return { ok: false, reason: "head_changed" };
   if (commit.files === null || commit.files.length === 0) return { ok: false, reason: "invalid_input" };
-  return { ok: true, files: commit.files };
+  return { ok: true, files: commit.files, baseSha: commit.parents[1]! };
 }
 
-export const deltaInput = (row: HeadRefreshRow, files: readonly string[]): DeltaReviewInput => ({ mergeCommitSha: row.toSha, parents: [row.fromSha, row.baseSha], parentRoles: ["pr_side", "main_side"], changedFiles: files, trigger: "refresh_overlap" });
+export const deltaInput = (src: DeltaSource, files: readonly string[], baseSha: string): DeltaReviewInput => ({ mergeCommitSha: src.toSha, parents: [src.fromSha, baseSha], parentRoles: ["pr_side", "main_side"], changedFiles: files, trigger: src.trigger });
 
 /** Starts `roles` in order, reusing a role's run that already exists. On a refusal or a throw, cancels the runs THIS call started (never a reused one). */
 export async function startDeltaRoles(
@@ -98,11 +112,25 @@ export async function startDeltaRoles(
   return { ok: true, runIds };
 }
 
+/**
+ * The roles the gate requires for the merge commit, started in delta mode (code reviewer first). The refresh's start and the conflict round's end both use it.
+ * A refused start is `refused_spend`; any other reason is a fixed code.
+ */
+export async function startDeltaForSource(ports: DeltaReviewPorts, entry: MergeQueueEntry, src: DeltaSource, read: { files: readonly string[]; baseSha: string }): Promise<{ ok: true; runIds: string[] } | { ok: false; reason: string }> {
+  const plan = await ports.plan({ entry, headSha: src.toSha });
+  if (!plan.ok) return { ok: false, reason: fixedReason(plan.reason) };
+  const roles = plan.roles.filter((r) => r !== "debater");
+  if (!roles.includes("code-reviewer")) return { ok: false, reason: "invalid_input" };
+  const started = await startDeltaRoles(ports, entry, deltaInput(src, read.files, read.baseSha), ["code-reviewer", ...roles.filter((r) => r !== "code-reviewer")]);
+  return started.ok ? started : { ok: false, reason: started.reason === "refused_spend" ? "refused_spend" : fixedReason(started.reason) };
+}
+
 export function createStartDeltaReview(ports: DeltaReviewPorts): StartDeltaReview {
   return async (client: PoolClient, { entry, toSha }) => {
     const row = (await listHeadRefreshes(client, entry.accountId, entry.id)).find((r) => r.toSha === toSha);
     if (!row) return { started: false, reason: "invalid_input" };
-    const read = await readMergeCommit(ports.github, entry, row);
+    const src = refreshSource(row);
+    const read = await readMergeCommit(ports.github, entry, src);
     if (!read.ok) return { started: false, reason: read.reason };
 
     const own = await ports.github.compareToBase({ repoId: entry.repoId, prNumber: entry.prNumber }, row.toSha, { files: true });
@@ -116,11 +144,7 @@ export function createStartDeltaReview(ports: DeltaReviewPorts): StartDeltaRevie
       }
     }
 
-    const plan = await ports.plan({ entry, headSha: row.toSha });
-    if (!plan.ok) return { started: false, reason: fixedReason(plan.reason) };
-    const roles = plan.roles.filter((r) => r !== "debater");
-    if (!roles.includes("code-reviewer")) return { started: false, reason: "invalid_input" };
-    const started = await startDeltaRoles(ports, entry, deltaInput(row, read.files), ["code-reviewer", ...roles.filter((r) => r !== "code-reviewer")]);
+    const started = await startDeltaForSource(ports, entry, src, read);
     if (!started.ok) return { started: false, reason: started.reason === "refused_spend" ? "refused_spend" : fixedReason(started.reason) };
     return { started: true, runId: started.runIds[0]! };
   };

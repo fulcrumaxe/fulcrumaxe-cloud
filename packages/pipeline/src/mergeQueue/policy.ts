@@ -48,3 +48,9 @@ export const MERGE_QUEUE_RECONCILE_AFTER_MINUTES = 20;
 export const MERGE_QUEUE_RECONCILE_READ_INTERVAL_MINUTES = 10;
 export const MERGE_QUEUE_RECONCILE_NO_ANSWER_HOURS = 6;
 export const MERGE_QUEUE_RECONCILE_READS_PER_SWEEP = 20;
+
+/**
+ * D#519 MQ4-c: the longest a merge-conflict fix round may run. Past it the round's run is cancelled and the entry stops as `merge_conflict` (outcome
+ * `round_timeout`): a run that never ends must not hold a queued entry out of the queue for ever.
+ */
+export const MERGE_QUEUE_CONFLICT_ROUND_MAX_MINUTES = 120;
