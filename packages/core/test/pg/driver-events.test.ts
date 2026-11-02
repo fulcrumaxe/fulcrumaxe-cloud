@@ -145,6 +145,27 @@ describe('work item driver events', () => {
     await expect(withTenant(appUserPool, refs.accountId, (c) => c.query("UPDATE work_item_driver_events SET queue_entry_id = 'MQE_x' WHERE work_item_id = $1", [refs.workItemId]))).rejects.toThrow(/permission denied/);
   });
 
+  it("D#519 MQ4-d-0: a stop's detail is written with its event, once, and every bad path or ref is refused by the table", async () => {
+    const head = 'c'.repeat(40);
+    const base = { workItemId: refs.workItemId, kind: 'stopped' as const, code: 'merge_conflict', headSha: head, prNumber: 4 };
+    const rows = async (key: string) => (await admin.query(`SELECT d.conflict_files, d.base_ref FROM work_item_driver_event_details d JOIN work_item_driver_events e ON e.id = d.driver_event_id WHERE e.dedupe_key = $1`, [key])).rows;
+    await withTenant(appUserPool, refs.accountId, (c) => recordDriverEvent(c, refs.accountId, { ...base, dedupeKey: 'd1', detail: { conflictFiles: ['src/a.ts', 'b/c.md'], baseRef: 'release/1.x' } }));
+    expect(await rows('d1')).toEqual([{ conflict_files: ['src/a.ts', 'b/c.md'], base_ref: 'release/1.x' }]);
+    // A replay writes neither the event nor a second detail; an event with no detail writes none.
+    await withTenant(appUserPool, refs.accountId, (c) => recordDriverEvent(c, refs.accountId, { ...base, dedupeKey: 'd1', detail: { conflictFiles: ['x.ts'], baseRef: 'other' } }));
+    expect(await rows('d1')).toHaveLength(1);
+    await withTenant(appUserPool, refs.accountId, (c) => recordDriverEvent(c, refs.accountId, { ...base, dedupeKey: 'd2', detail: { conflictFiles: [], baseRef: null } }));
+    expect(await rows('d2')).toEqual([]);
+    const write = (key: string, files: string[], ref: string | null) => withTenant(appUserPool, refs.accountId, (c) => recordDriverEvent(c, refs.accountId, { ...base, dedupeKey: key, detail: { conflictFiles: files, baseRef: ref } }));
+    let n = 0;
+    for (const bad of ['/abs/path.ts', 'a/../b', '../x', 'a\\b', 'a\u0000b', 'a\nb', '', 'x'.repeat(513), './a']) await expect(write(`bp${n++}`, [bad], null)).rejects.toThrow(/driver_event_details_files_check|invalid byte|null/);
+    await expect(write('bp100', Array.from({ length: 101 }, (_, i) => `f${i}.ts`), null)).rejects.toThrow(/driver_event_details_files_check/);
+    for (const bad of ['a..b', '-x', 'a b', 'a\tb', 'a\u0000b', 'x~', 'a:b', 'a?b', 'a*b', 'a[b', 'a\\b', 'a^b', 'r'.repeat(256)]) await expect(write(`br${n++}`, [], bad)).rejects.toThrow(/driver_event_details_ref_check|invalid byte|null/);
+    await write('ok-ref', [], 'feature/ok-1.2_x');
+    await expect(withTenant(appUserPool, refs.accountId, (c) => c.query(`UPDATE work_item_driver_event_details SET base_ref = 'x'`))).rejects.toThrow(/permission denied/);
+    await expect(withTenant(appUserPool, refs.accountId, (c) => c.query(`DELETE FROM work_item_driver_event_details`))).rejects.toThrow(/permission denied/);
+  });
+
   it('toCode turns a role or verdict word into a plain code', () => {
     expect(toCode('code-reviewer')).toBe('code_reviewer');
     expect(toCode('needs-fix')).toBe('needs_fix');
