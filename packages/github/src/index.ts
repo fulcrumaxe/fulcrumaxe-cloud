@@ -21,6 +21,7 @@ export * from './runResolver.js';
 export * from './runnerGitResolver.js';
 export * from './publishTargetResolver.js';
 export * from './publishInstallationOwnership.js';
+export * from './platformPushRecorder.js';
 export * from './appCredentials.js';
 export * from './writeInstallation.js';
 export * from './webhookApp.js';

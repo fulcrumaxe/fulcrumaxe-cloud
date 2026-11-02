@@ -557,7 +557,7 @@ export async function startBuildForItem(
       accountId,
       workItemId,
       async (client): Promise<BuildStartResult> => {
-        const started = await ports.startRun({ step, role: "executor", prompt, ...(newRunId ? { runId: newRunId, buildBranch: branch, fixedBranch } : {}), ...(offer ? { decisionSnapshot: offer.snapshot } : {}), contextSections: sections, contextAssembly, ...(spill ? { contextSpill: spill } : {}), ...(memoryAside ? { jobMemory: memoryAside } : {}), memoryTokens: memoryTokensOf(memory?.stable, memory?.item), clone: true, pr: number, exclusive: true, ...(planeBase ? { headSha: planeBase.sha } : {}), expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
+        const started = await ports.startRun({ step, role: "executor", prompt, ...(newRunId ? { runId: newRunId, buildBranch: branch, fixedBranch } : {}), ...(offer ? { decisionSnapshot: offer.snapshot } : {}), contextSections: sections, contextAssembly, ...(spill ? { contextSpill: spill } : {}), ...(memoryAside ? { jobMemory: memoryAside } : {}), memoryTokens: memoryTokensOf(memory?.stable, memory?.item), clone: true, pr: number, exclusive: true, ...(planeBase ? { headSha: planeBase.sha } : stackBase ? { headSha: stackBase.sha } : {}), expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
         // A halt refuses the start itself (the database, not the stage): say so plainly so the workflow ends instead of retrying.
         // D#483 S5-k1: a spend denial is a named pause, not a failure: the item stays where it is and the workflow asks again.
         const pause = started.ok ? null : startWaitFor(started.reason);

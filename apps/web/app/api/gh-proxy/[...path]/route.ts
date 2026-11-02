@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { loadGithubForwardConfig, type GithubForwardConfig } from "@fx/runner";
-import { createPublishInstallationOwnership, createPublishTargetResolver, createRunnerBoundBranchResolver, createRunnerCloneBudget, createRunnerGitResolver, createRunResolver } from "@fx/github";
+import { createPlatformPushRecorder, createPublishInstallationOwnership, createPublishTargetResolver, createRunnerBoundBranchResolver, createRunnerCloneBudget, createRunnerGitResolver, createRunResolver } from "@fx/github";
 import { createPool } from "@fx/db/src/pool";
 import { defaultGhProxyHandlerDeps, ghProxyHandler, type GhProxyHandlerDeps } from "./handler";
 
@@ -70,6 +70,8 @@ function deps(): GhProxyHandlerDeps {
     built.resolvePublishTarget = createPublishTargetResolver(ghProxyPool);
     // The installation GitHub names for that repository must belong to the run's account (any live team installation of it); the same login runs the one function that says so.
     built.ownsPublishInstallation = createPublishInstallationOwnership(ghProxyPool);
+    // D#519 MQ4-b0: the record of each push GitHub accepted, on the same login (EXECUTE on record_platform_ref_push, migration 0956).
+    built.recordPlatformPushes = createPlatformPushRecorder(ghProxyPool);
     cachedDeps = built;
   }
   return cachedDeps;
