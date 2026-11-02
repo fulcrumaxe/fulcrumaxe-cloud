@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AdvanceItem, AdvanceStepResult } from "@fx/worker";
-import { buildBody, buildFailedBody, buildOutcomeBody, cancelRunBody, checkFixBody, decisionBody, panelBody, specBody, stageBody } from "./advanceStageSteps";
+import { buildBody, buildFailedBody, buildOutcomeBody, cancelRunBody, checkFixBody, decisionBody, followUpsBody, panelBody, specBody, stageBody } from "./advanceStageSteps";
 import type { AdvanceWorker } from "./advanceSteps";
 
 const ACCOUNT = "11111111-1111-4111-8111-111111111111";
@@ -171,6 +171,22 @@ describe("D#7 DP4b-2: the decision step hands the workflow one fixed word", () =
   it("answers none when there is no worker, and does not swallow a failure (the step is retried)", async () => {
     expect(await decisionBody(null, WHO, "run-b")).toBe("none");
     await expect(decisionBody({ advanceDecision: async () => { throw new Error("db down"); } }, WHO, "run-b")).rejects.toThrow("db down");
+  });
+});
+
+describe("D#483 S5-b2d-1: the follow-ups step never fails or stalls the advance", () => {
+  it("asks the worker with the run id, and returns nothing", async () => {
+    const advanceRecordFollowUps = vi.fn(async () => undefined);
+    expect(await followUpsBody({ advanceRecordFollowUps }, ACCOUNT, "run-b")).toBeUndefined();
+    expect(advanceRecordFollowUps).toHaveBeenCalledWith(ACCOUNT, "run-b");
+  });
+  it("no worker, or one without the port, is a no-op; a throw is one fixed line with the error class only", async () => {
+    await expect(followUpsBody(null, ACCOUNT, "run-b")).resolves.toBeUndefined();
+    await expect(followUpsBody({}, ACCOUNT, "run-b")).resolves.toBeUndefined();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect(followUpsBody({ advanceRecordFollowUps: async () => { throw new TypeError("db down: detail"); } }, ACCOUNT, "run-b")).resolves.toBeUndefined();
+    expect(warn.mock.calls.map((c) => c[0])).toEqual([JSON.stringify({ event: "follow_ups.record_failed", run_id: "run-b", error: "TypeError" })]);
+    warn.mockRestore();
   });
 });
 

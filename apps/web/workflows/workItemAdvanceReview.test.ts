@@ -172,6 +172,7 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
     advanceBuild: vi.fn(),
     advanceBuildFailed: vi.fn(async () => ({ status: "recorded", stage: "needs_human" })),
     advanceDecision: vi.fn(async (): Promise<DecisionStepCode> => w.decision ?? "none"),
+    advanceRecordFollowUps: vi.fn(async () => undefined),
     advancePrFound: vi.fn(async () => ({ status: "recorded", stage: "pr_opened" })),
     ...(w.listRuns
       ? {
@@ -1160,6 +1161,9 @@ describe("D#7 DP4b-2: the decision read after a succeeded fix round", () => {
     const secondRound = t.worker.advanceStartRun.mock.invocationCallOrder.filter((_o, i) => t.worker.advanceStartRun.mock.calls[i]![0].headSha === H2);
     expect(secondRound.length).toBeGreaterThan(0);
     for (const o of secondRound) expect(o).toBeGreaterThan(asked);
+    // D#483 S5-b2d-1: the succeeded fix round's follow-ups are recorded once, after its pull request was found again and before the next review.
+    expect(t.worker.advanceRecordFollowUps.mock.calls).toEqual([[ACCOUNT, "fix-1"]]);
+    for (const o of secondRound) expect(o).toBeGreaterThan(t.worker.advanceRecordFollowUps.mock.invocationCallOrder[0]!);
   });
 
   it("is never asked for the reviewers' runs, nor for a fix round that did not succeed", async () => {
@@ -1170,6 +1174,7 @@ describe("D#7 DP4b-2: the decision read after a succeeded fix round", () => {
       const t = setup(fixing({ fixOutcome: { status, done: true, envelope: null } }));
       await workItemAdvanceWorkflow(ARGS);
       expect(t.worker.advanceDecision, status).not.toHaveBeenCalled();
+      expect(t.worker.advanceRecordFollowUps, status).not.toHaveBeenCalled();
     }
   });
 
@@ -1688,6 +1693,8 @@ describe("Request changes: a person's fix round comes first", () => {
     expect(t.started.filter((s) => s.headSha === H1)).toEqual([]);
     expect(t.started.filter((s) => s.headSha === H2).map((s) => s.role).sort()).toEqual(["acceptance-tester", "code-reviewer"]);
     expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(1);
+    // D#483 S5-b2d-1: the person's succeeded fix round records its follow-ups once, before the new head is reviewed.
+    expect(t.worker.advanceRecordFollowUps.mock.calls).toEqual([[ACCOUNT, "fix-2"]]);
   });
 
   it("a reviewer that asked for changes on that same head has its findings passed alongside the note", async () => {

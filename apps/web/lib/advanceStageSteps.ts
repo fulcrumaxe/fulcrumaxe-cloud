@@ -131,6 +131,20 @@ export async function buildOutcomeBody(worker: (AdvanceWorker & BuildSettler) | 
   return { status: out.status, done: out.done, hasSummary: typeof summary === "string" && summary.trim().length > 0, queuedOnRunner: isQueuedOnRunner(out), tailRunId: out.tailRunId ?? runId, ...(out.failureReason ? { failureReason: out.failureReason } : {}) };
 }
 
+/**
+ * D#483 S5-b2d-1: a succeeded executor run whose pull request was found records its follow-ups. Nothing comes back into the workflow, and nothing here can fail or
+ * stall the advance: a worker without the port is a no-op, and a throw is one fixed line with the error's class only. A repeat records nothing new.
+ */
+export async function followUpsBody(worker: Partial<Pick<AdvanceFacade, "advanceRecordFollowUps">> | null, accountId: string, runId: string): Promise<void> {
+  if (!worker?.advanceRecordFollowUps) return;
+  try {
+    await worker.advanceRecordFollowUps(accountId, runId);
+  } catch (err) {
+    // fx-swallow-ok: a follow-up is never worth stopping the advance over; the fixed line is the trace
+    console.warn(JSON.stringify({ event: "follow_ups.record_failed", run_id: runId, error: err instanceof Error ? err.name : "unknown" }));
+  }
+}
+
 export type DecisionWorker = Pick<AdvanceFacade, "advanceDecision">;
 
 /**

@@ -31,6 +31,7 @@ import type { AdvanceRunPorts } from "./runPorts.js";
 import { childPromptTitle } from "./childBuild.js";
 import { BUILD_BRANCH_KIND, childEnvelopeBlocker, resolveBuildIdentity, startBuildBranch } from "@fx/core/src/work-items/buildIdentity.js";
 import { recordChildBranch } from "@fx/runner";
+import { EXECUTOR_FOLLOW_UPS_LINE } from "../review/followUps.js";
 
 /**
  * D#483 P2: the build step of the stage driver. For a work item AT `spec_ready` it starts the executor on the published
@@ -211,6 +212,7 @@ export function assembleExecutorPrompt(input: ExecutorPromptInput, options?: Ass
     decisions: decisionsBlock(input.decisions ?? []),
     output: [
       "Your final block must include a `summary`: a plain-text account of the session for the repository owner, no markup needed. Say what you changed and why, the files you touched, the commands you ran to test it and their result, and anything you were unsure about or left out.",
+      EXECUTOR_FOLLOW_UPS_LINE,
       ...agentOutputBlock(paired ? `{"verdict":"done","branch":"${branch}","tests":"passed","summary":"<plain-text summary for the repository owner>"}` : `{"verdict":"done","branch":"${branch}","pr_number":0,"tests":"passed","summary":"<plain-text summary for the repository owner>"}`),
     ].join("\n"),
   }, options);
@@ -256,6 +258,7 @@ function buildRunnerExecutorPrompt(input: ExecutorPromptInput, options?: Assembl
     decisions: decisionsBlock(input.decisions ?? []),
     output: [
       "Your final block must include a `summary`: a plain-text account of the session for the repository owner, no markup needed. Say what you changed and why, the files you touched, the commands you ran to test it and their result, and anything you were unsure about or left out.",
+      EXECUTOR_FOLLOW_UPS_LINE,
       ...agentOutputBlock('{"verdict":"done","tests":"passed","summary":"<plain-text summary for the repository owner>"}'),
     ].join("\n"),
   }, { ...options, memoryAside: true });

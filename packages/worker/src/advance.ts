@@ -17,6 +17,7 @@ import { ITEM_PR_BRANCH, JobMemorySchema, type JobMemory } from "@fulcrumaxe/run
 import { attachRunNotes, correctionReasonCode, listRunNoteIds, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
 import { cancelRun, ensureSpecAnchorRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readSandboxBoundPullRequest, recordSandboxContinuesBound, recordRunStage, insertRunEvent, recordChildPullRequestForItem, readChildBoundPullRequest, recordBuildBranch, DispatchFailedError, JobIssueError, RUNNER_RUN_BRANCH, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { reportError } from "@fx/telemetry";
+import { recordRunFollowUps } from "@fx/pipeline";
 import { checkFixRound, envelopeRunUsd } from "@fx/spend";
 import { checkRoundHeadroom } from "./panelHeadroom.js";
 import type { RaiseEnvelopeAsk } from "./envelopeAsk.js";
@@ -693,6 +694,11 @@ export interface AdvanceFacade {
    * `parked` (an ask is waiting for a person: the workflow ends, the stage stays), `refused` (a field was dropped; carry on), `item_halted` / `halted_since_approval`.
    */
   advanceDecision(accountId: string, userId: string, workItemId: string, haltEpoch: number, runId: string): Promise<DecisionStepCode>;
+  /**
+   * D#483 S5-b2d-1: after a succeeded executor run whose pull request was found, records the follow-ups in its envelope (read here, on the runner login; no model
+   * text crosses into the workflow). Never throws; a repeat records nothing new.
+   */
+  advanceRecordFollowUps(accountId: string, runId: string): Promise<void>;
   /** D#483 P2: records a build that ended without a pull request as `in_progress -> needs_human`. `code` is a fixed word. */
   advanceBuildFailed(accountId: string, workItemId: string, runId: string | null, code: string, attempt?: string): Promise<AdvanceStepResult>;
   /**
@@ -1558,6 +1564,11 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return out;
   }
 
+  async function advanceRecordFollowUps(accountId: string, runId: string): Promise<void> {
+    if (!UUID_RE.test(accountId) || !UUID_RE.test(runId)) return;
+    await recordRunFollowUps(runnerPool, accountId, runId);
+  }
+
   async function advancePrFound(who: AdvanceStepWho, prNumber: number): Promise<AdvanceStepResult> {
     if (!UUID_RE.test(who.accountId) || !UUID_RE.test(who.workItemId) || !Number.isSafeInteger(prNumber) || prNumber <= 0) return { status: "refused", reason: "invalid_input" };
     const bad = await guardStep(who);
@@ -2325,6 +2336,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     advanceBuild,
     advanceBuildFailed,
     advanceDecision,
+    advanceRecordFollowUps,
     advancePrFound,
     advanceLightSpec,
     advanceRespec,

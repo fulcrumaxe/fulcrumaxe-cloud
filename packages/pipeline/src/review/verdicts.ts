@@ -6,6 +6,7 @@ import type { ExecutionTargetRegistry } from "@fx/runner";
 import { recordReviewVerdict } from "../build/fixLoop.js";
 import type { ReviewVerdict, ReviewerAgentRole } from "../build/types.js";
 import { MAX_FINDINGS, MAX_FINDING_CHARS } from "./findingCaps.js";
+import { readFollowUps, recordRunFollowUps, type FollowUp } from "./followUps.js";
 
 /**
  * D#483 P3: what the reviewers said, read and recorded.
@@ -24,6 +25,7 @@ import { MAX_FINDINGS, MAX_FINDING_CHARS } from "./findingCaps.js";
 
 export type VerdictRole = ReviewerAgentRole | "debater";
 
+export { readFollowUps, type FollowUp };
 export { MAX_FINDINGS, MAX_FINDING_CHARS, UNVERIFIABLE_WORD, MAX_UNVERIFIABLE, MAX_UNVERIFIABLE_CHARS, readUnverifiable };
 export type { UnverifiableItem };
 export const MAX_SUMMARY_CHARS = 4000;
@@ -52,6 +54,8 @@ export interface ReadVerdict {
    * `fail` (never a pass), but it must never be recorded or reused as one: the driver runs that reviewer again. A `verdict` key with a wrong word is a verdict (`fail`).
    */
   hasVerdict: boolean;
+  /** D#483 S5-b2d-1: the non-blocking follow-ups the reviewer raised (see `readFollowUps`). Present only when there is one, so every other verdict keeps its shape. */
+  followUps?: FollowUp[];
 }
 
 /** The exact words only. `Pass`, ` pass`, `PASS`, `passed`, `ok`, 1 and true are all `fail`. */
@@ -68,6 +72,7 @@ export function readVerdict(status: string, envelope: Record<string, unknown> | 
   const flag = env && Object.hasOwn(env, "security_review_needed") ? env.security_review_needed : undefined;
   const envFlag = env && Object.hasOwn(env, "environment_failure") ? env.environment_failure : undefined;
   const unverifiable = raw === UNVERIFIABLE_WORD && readUnverifiable(env && Object.hasOwn(env, "unverifiable") ? env.unverifiable : undefined).length > 0;
+  const followUps = readFollowUps(status, envelope);
   const fullFindings = Array.isArray(findingsRaw) ? findingsRaw.filter((f): f is string => typeof f === "string").slice(0, MAX_FINDINGS) : [];
   return {
     verdict: normalizeVerdict(raw),
@@ -79,6 +84,7 @@ export function readVerdict(status: string, envelope: Record<string, unknown> | 
     // Present only when true, so every other verdict keeps exactly the shape it always had.
     ...(unverifiable ? { unverifiable: true as const } : {}),
     hasVerdict: env !== null && Object.hasOwn(env, "verdict"),
+    ...(followUps.length > 0 ? { followUps } : {}),
   };
 }
 
@@ -127,8 +133,16 @@ export interface RecordVerdictsInput {
   skipPasses?: boolean;
 }
 
-/** Records every gathered verdict, passes first. Writes one `review_verdicts` driver event (a replay of the same head writes nothing more). */
-export async function recordVerdictsInOrder(pool: Pool, registry: ExecutionTargetRegistry, input: RecordVerdictsInput): Promise<{ recorded: RecordedVerdict[] }> {
+/**
+ * Records every gathered verdict, passes first. Writes one `review_verdicts` driver event (a replay of the same head writes nothing more). Then, after and
+ * outside those writes, each reviewer run's follow-ups (D#483 S5-b2d-1): `writeFollowUps` never throws, so it cannot undo or fail anything recorded here.
+ */
+export async function recordVerdictsInOrder(
+  pool: Pool,
+  registry: ExecutionTargetRegistry,
+  input: RecordVerdictsInput,
+  writeFollowUps: (pool: Pool, accountId: string, runId: string) => Promise<void> = recordRunFollowUps,
+): Promise<{ recorded: RecordedVerdict[] }> {
   const recorded: RecordedVerdict[] = [];
   for (const v of recordingOrder(input.verdicts)) {
     if (input.skipPasses === true && v.verdict === "pass") continue;
@@ -158,5 +172,7 @@ export async function recordVerdictsInOrder(pool: Pool, registry: ExecutionTarge
       round: Math.min(Math.max(input.round, 0), 20),
     }),
   );
+  // Once per reviewer run of the head; the debater raises none. The definer re-checks each run's role and status, and a replay records nothing new.
+  for (const runId of new Set(input.verdicts.filter((v) => v.role !== "debater").map((v) => v.runId))) await writeFollowUps(pool, input.accountId, runId);
   return { recorded };
 }
