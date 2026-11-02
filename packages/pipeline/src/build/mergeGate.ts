@@ -440,6 +440,8 @@ export type MergeBlockReason =
   | "ordered_resource_out_of_order"
   /** D#598 P5c-b: a plan write-back changes something the platform did not compute; a person looks. */
   | "writeback_content_mismatch"
+  /** The queue entry's pull request is not the one the plan write-back record names; a person looks. */
+  | "writeback_pr_mismatch"
   /** D#598 P5c-b: the comparison for a plan write-back could not finish; nothing merged and a person merges. */
   | "writeback_check_unfinished"
   | "merge_dependency_closed"

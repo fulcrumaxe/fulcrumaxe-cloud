@@ -56,6 +56,8 @@ export interface WritebackComparison {
   behindBy: number;
   /** The paths that differ between the merge base and `head`. */
   files: string[];
+  /** Present (true) only when an entry is a rename: status `renamed` or a `previous_filename`. A rename deletes its source path. */
+  renamed?: true;
   /** The commit messages of the commits `head` has on top of the merge base, oldest first. */
   messages: string[];
   /**
@@ -233,12 +235,13 @@ export function createWritebackGitHub(deps: { http: WritebackHttp; owner: string
       if (!isObj(b) || !isObj(mb) || typeof mb.sha !== "string" || !SHA.test(mb.sha)) return bad();
       if (typeof b.ahead_by !== "number" || typeof b.behind_by !== "number" || !Array.isArray(b.files) || !Array.isArray(b.commits)) return bad();
       const files = b.files.map((f) => (isObj(f) && typeof f.filename === "string" ? f.filename : bad()));
+      const renamed = b.files.some((f) => isObj(f) && (f.status === "renamed" || f.previous_filename !== undefined));
       const messages = b.commits.map((c) => (isObj(c) && isObj(c.commit) && typeof c.commit.message === "string" ? c.commit.message : bad()));
       const email = (who: unknown): string | null => (isObj(who) && typeof who.email === "string" && who.email !== "" ? who.email.toLowerCase() : null);
       const identities = b.commits.map((c) =>
         isObj(c) && isObj(c.commit) ? { authorEmail: email(c.commit.author), committerEmail: email(c.commit.committer) } : bad(),
       );
-      return { mergeBaseSha: mb.sha, aheadBy: b.ahead_by, behindBy: b.behind_by, files, messages, identities };
+      return { mergeBaseSha: mb.sha, aheadBy: b.ahead_by, behindBy: b.behind_by, files, ...(renamed ? { renamed: true as const } : {}), messages, identities };
     },
 
     async openPull(input) {

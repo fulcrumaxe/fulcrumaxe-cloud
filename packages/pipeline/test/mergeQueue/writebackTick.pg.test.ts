@@ -48,6 +48,8 @@ describe("D#598 P5c-b plan write-back in the queue tick [pg]", () => {
     deltaReviews: number;
     deps: QueueTickDeps;
     nextVersion: number;
+    /** Rewrites the strict plan server's compare answer, the way GitHub answers a rename. */
+    compareAs: { renamed: boolean };
   }
 
   const tenant = <T>(w: Pick<World, "accountId">, fn: (c: PoolClient) => Promise<T>) => withTenant(db.runWriterPool, w.accountId, fn);
@@ -71,13 +73,16 @@ describe("D#598 P5c-b plan write-back in the queue tick [pg]", () => {
     const gh = new FakeGitHub({ [PLAN_PATH]: planFile() });
     // The contents and compare API over real TLS: the strict server checks User-Agent, Accept, API version and bearer credentials like the merge fake does, and the
     // route refuses what GitHub refuses (no credential is 401, a verb the API does not have is 404, an error inside the fake is a 500).
+    const compareAs = { renamed: false };
     const plans = await startStrictGithubServer(async (req): Promise<GhReply> => {
       if (!/^(bearer|token) \S+$/i.test(req.headers["authorization"] ?? "")) return ghError(401, "Requires authentication");
       if (req.method !== "GET" && req.method !== "POST" && req.method !== "PUT" && req.method !== "PATCH" && req.method !== "DELETE") return ghError(404, "Not Found");
       try {
         const query = req.query ? Object.fromEntries(new URLSearchParams(req.query)) : undefined;
         const res = await gh.http.request({ method: req.method, path: req.path, ...(query ? { query } : {}), ...(req.body ? { body: JSON.parse(req.body) as unknown } : {}) });
-        return { status: res.status, headers: { "content-type": "application/json; charset=utf-8" }, body: JSON.stringify(res.body) };
+        let body = res.body as { files?: Array<Record<string, unknown>> } | null;
+        if (compareAs.renamed && req.path.includes("/compare/") && Array.isArray(body?.files)) body = { ...body, files: body.files.map((f) => ({ ...f, status: "renamed", previous_filename: "old/roadmap.json" })) };
+        return { status: res.status, headers: { "content-type": "application/json; charset=utf-8" }, body: JSON.stringify(body) };
       } catch {
         return ghError(500, "Server Error");
       }
@@ -100,7 +105,7 @@ describe("D#598 P5c-b plan write-back in the queue tick [pg]", () => {
     const port = createGitHubMergeGatePort({ http: g.http, resolveRepo: async () => ({ owner: OWNER, name: NAME }), markReadyForHumanMerge: async () => undefined, sleep: async () => undefined, mergeablePollLimit: 3 });
     // Without the ordered-resource reads, as the older tick suites run (a plan file is no ordered resource).
     const github: QueueTickDeps["github"] = { ...port, listPullRequestAdds: undefined, listDefaultBranchPaths: undefined };
-    const w: World = { accountId, repoId, prNumber, head: row.head_sha, gh, g, pulls, userId, deltaReviews: 0, nextVersion: 1, deps: undefined as unknown as QueueTickDeps };
+    const w: World = { accountId, repoId, prNumber, head: row.head_sha, gh, g, pulls, userId, deltaReviews: 0, nextVersion: 1, compareAs, deps: undefined as unknown as QueueTickDeps };
     w.deps = {
       github,
       inTenant: (acct, fn) => withTenant(db.runWriterPool, acct, fn),
@@ -129,18 +134,18 @@ describe("D#598 P5c-b plan write-back in the queue tick [pg]", () => {
   describe("P5c-b-8: the setting read under the tick's real login", () => {
     it("reads the current version under the agent-run-writer login; no row is off; another account's tenant reads nothing", async () => {
       const w = await world();
-      expect(await tenant(w, (c) => readAutoMerge(c, w.repoId))).toBe(false);
+      expect(await tenant(w, (c) => readAutoMerge(c, w.accountId, w.repoId))).toBe(false);
       await setToggle(w, true);
-      expect(await tenant(w, (c) => readAutoMerge(c, w.repoId))).toBe(true);
+      expect(await tenant(w, (c) => readAutoMerge(c, w.accountId, w.repoId))).toBe(true);
       await setToggle(w, false);
-      expect(await tenant(w, (c) => readAutoMerge(c, w.repoId))).toBe(false);
+      expect(await tenant(w, (c) => readAutoMerge(c, w.accountId, w.repoId))).toBe(false);
       await setToggle(w, true);
-      expect(await tenant(w, (c) => readAutoMerge(c, w.repoId))).toBe(true);
+      expect(await tenant(w, (c) => readAutoMerge(c, w.accountId, w.repoId))).toBe(true);
       // A tenant that is not the repo's account, and a session with no tenant at all, see no row: off.
-      expect(await withTenant(db.runWriterPool, randomUUID(), (c) => readAutoMerge(c, w.repoId))).toBe(false);
+      expect(await withTenant(db.runWriterPool, randomUUID(), (c) => readAutoMerge(c, w.accountId, w.repoId))).toBe(false);
       const bare = await db.runWriterPool.connect();
       try {
-        expect(await readAutoMerge(bare, w.repoId)).toBe(false);
+        expect(await readAutoMerge(bare, w.accountId, w.repoId)).toBe(false);
       } finally {
         bare.release();
       }
@@ -257,6 +262,30 @@ describe("D#598 P5c-b plan write-back in the queue tick [pg]", () => {
       await onAndReady(w);
       expect((await tick(w)).steps[0]).toMatchObject({ step: "released", why: "writeback_content_mismatch" });
       expect(mergeCalls(w)).toBe(0);
+    });
+
+    it("a compare entry that is a rename (status renamed, previous_filename) is not merged, through the real port over TLS", async () => {
+      const w = await world();
+      await onAndReady(w);
+      w.compareAs.renamed = true;
+      expect((await tick(w)).steps[0]).toMatchObject({ step: "released", why: "writeback_content_mismatch" });
+      expect(mergeCalls(w)).toBe(0);
+      expect(await entry(w)).toMatchObject({ state: "stopped", reason: "writeback_content_mismatch" });
+    });
+
+    it("an entry whose pull request is not the record's stops with its own code and makes no merge call", async () => {
+      const w = await world();
+      await onAndReady(w);
+      // The table refuses a second pull request number (a trigger), so the record is made to disagree with the entry by switching triggers off for this one statement.
+      await db.admin.query("SET session_replication_role = replica");
+      try {
+        await db.admin.query(`UPDATE plan_writebacks SET pr_number = $2 WHERE account_id = $1`, [w.accountId, w.prNumber + 1000]);
+      } finally {
+        await db.admin.query("SET session_replication_role = DEFAULT");
+      }
+      expect((await tick(w)).steps[0]).toMatchObject({ step: "released", why: "writeback_pr_mismatch" });
+      expect(mergeCalls(w)).toBe(0);
+      expect(await entry(w)).toMatchObject({ state: "stopped", reason: "writeback_pr_mismatch" });
     });
 
     it("one byte of difference (a trailing space) is not merged", async () => {

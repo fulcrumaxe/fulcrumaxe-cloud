@@ -411,7 +411,7 @@ export async function requeueOrderedStopped(client: Queryable, input: { accountI
 }
 
 /** D#598 P5c-b: the codes with which a plan write-back stops for a person. */
-export const WRITEBACK_STOP_CODES = ["ready_human_merges", "writeback_content_mismatch", "writeback_check_unfinished"] as const;
+export const WRITEBACK_STOP_CODES = ["ready_human_merges", "writeback_content_mismatch", "writeback_pr_mismatch", "writeback_check_unfinished"] as const;
 export type WritebackStopCode = (typeof WRITEBACK_STOP_CODES)[number];
 
 /**
