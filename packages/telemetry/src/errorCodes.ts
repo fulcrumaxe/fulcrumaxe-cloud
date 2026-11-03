@@ -258,6 +258,13 @@ export const OWN_ERROR_CODES: readonly string[] = [
   // D#6 R5b-3: the key file holds something that is not a key, or is a link, or belongs to another user or is open to other users.
   "api_key_format",
   "api_key_unsafe",
+  // D#597 CC-7a-1: the assistant link and its token file (no token stored, an unsafe file, an expired or revoked token, a refused tool name, a link that did not complete or expired).
+  "assistant_token_missing",
+  "assistant_token_unsafe",
+  "assistant_relink",
+  "assistant_tool_refused",
+  "assistant_link_failed",
+  "assistant_link_expired",
   // R4a-7 watch and take-over: the person's `fx-runner attach --take-over` was not confirmed, is already under way, was not answered by the
   // daemon in time, or the pane command was started for a run that was not handed over.
   "take_over_cancelled",

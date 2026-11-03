@@ -47,6 +47,13 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/config.ts": ["crypto", "fs", "path"],
   "src/keys.ts": ["crypto"],
   "src/credentials.ts": ["crypto", "fs", "path"], // D#6 R5b-3: the API key file: lstat checks, a no-follow open judged by the open handle, a random temp-file name, an exclusive 0600 create and one rename
+  // D#597 CC-7a-1, the assistant link and its local tool proxy.
+  "src/assistant/tokenFile.ts": ["crypto", "fs", "path"], // the token file: lstat checks, a no-follow open judged by the open handle, a random temp-file name, an exclusive 0600 create and one rename
+  "src/assistant/cloudCall.ts": [], // the one cloud call: the injected fetch, a fixed User-Agent, no redirect
+  "src/assistant/link.ts": [], // the device-flow loop over the injected fetch, clock and sleep
+  "src/assistant/proxy.ts": ["crypto", "fs", "http", "path"], // the proxy: a per-session secret (crypto), one 0700 mkdtemp directory holding a Unix socket (fs, path), an http server on that socket only
+  "src/assistant/unlink.ts": [], // the undo: one DELETE over the injected fetch, then the token file removal
+  "src/commands/assistant.ts": [], // `fx-runner assistant link`
   "src/protectionBypass.ts": ["fs", "path"], // the Vercel protection bypass secret file: one no-follow open judged by the open handle, a bounded read, and a real-path check that it lies under the home directory
   "src/codeSource.ts": ["fs"], // D#605 FL-7: the registration code file: one no-follow open judged by the open handle (regular file, mode 0600, owner), a bounded read
   "src/keyring.ts": ["crypto"], // SHA-256 of a cloud address: the pinned-key table is keyed by hash, so no private host name is committed

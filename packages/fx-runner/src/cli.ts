@@ -6,6 +6,7 @@
 import { CliError } from "./cliError.js";
 import { stateDirFor } from "./config.js";
 import type { CommandContext, Flags } from "./context.js";
+import { assistantCommand } from "./commands/assistant.js";
 import { attachCommand } from "./commands/attach.js";
 import { claimingCommand, runnerResetFootprintsCommand, runnerSettingCommand, runnerUnsetCommand } from "./commands/claiming.js";
 import { SETTING_KEYS } from "./runnerSettings.js";
@@ -46,6 +47,8 @@ export interface CliIo {
   stderr: (text: string) => void;
   now?: () => Date;
   fetchFn?: typeof fetch;
+  /** Waits `ms` milliseconds (`assistant link` polls with it); real timers when left out. */
+  sleep?: (ms: number) => Promise<void>;
   /** What `run` needs from the machine. Only `bin/fx-runner.mjs` supplies it. */
   host?: RunHost;
   /** What `doctor` needs from the machine. Only `bin/fx-runner.mjs` supplies it. */
@@ -97,6 +100,8 @@ Commands:
                      The budget is the hard limit one job runs under (memory and processes); a job past it is stopped on its own, others go on.
   config reset footprints
                      Forget the memory each kind of job was learned to need; the estimates start from the defaults again.
+  assistant unlink   Revoke the assistant token on the cloud and remove it from this machine.
+  assistant link     Connect this machine's assistant to a workspace: prints a code a signed-in person approves, then stores the short-lived token (mode 0600) here.
   pause | resume     Stop claiming new jobs (running ones finish), or start again. The runner stays registered and keeps its place.
 `;
 
@@ -120,6 +125,7 @@ const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: re
   pause: { flags: [], switches: [] },
   resume: { flags: [], switches: [] },
   credentials: { flags: [], switches: [] },
+  assistant: { flags: [], switches: [], positionals: 1 },
   // Its own words, parsed in src/vm/command.ts.
   vm: { flags: [], switches: [] },
 };
@@ -179,9 +185,10 @@ export async function runCli(io: CliIo): Promise<number> {
       bypassFile: io.protectionBypassFile,
       uid: io.uid,
       hostname: io.hostname,
+      sleep: io.sleep,
     };
     // A bypass file that cannot be used stops a command that calls the cloud before any request; `doctor` reports it instead.
-    if (command === "register" || command === "revoke" || command === "run") requireUsable(ctx.bypass);
+    if (command === "register" || command === "revoke" || command === "run" || command === "assistant") requireUsable(ctx.bypass);
     // Its words are never echoed or parsed as options: one of them could be a key typed in the wrong place.
     if (command === "credentials") return await credentialsCommand(rest, ctx, io.readSecret);
     if (command === "vm") {
@@ -207,6 +214,7 @@ export async function runCli(io: CliIo): Promise<number> {
       if (io.doctorHost === undefined) throw new CliError("doctor is only available from the fx-runner program");
       return await doctorCommand(ctx, io.doctorHost, { sandboxOnly: flags.has("sandbox-only") });
     }
+    if (command === "assistant") return await assistantCommand(positionals, ctx);
     if (command === "pause" || command === "resume") return claimingCommand(command, ctx);
     if (command === "config" && positionals[0] === "reset" && positionals[1] === "footprints") return runnerResetFootprintsCommand(ctx);
     if (command === "config" && positionals[0] === "unset" && positionals[1] !== undefined && SETTING_KEYS.includes(positionals[1])) return runnerUnsetCommand(positionals[1], ctx);

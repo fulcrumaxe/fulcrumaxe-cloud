@@ -17,6 +17,8 @@ export interface CommandContext {
   uid?: number | undefined;
   /** The machine's host name, looked up by the caller; `os.hostname()` when left out. Tests set it. */
   hostname?: string | undefined;
+  /** Waits `ms` milliseconds; `assistant link` polls with it. Tests supply a fake clock's. */
+  sleep?: ((ms: number) => Promise<void>) | undefined;
 }
 
 /** The flags a command was given, by name without the leading dashes. A flag with no value is `true`. */
