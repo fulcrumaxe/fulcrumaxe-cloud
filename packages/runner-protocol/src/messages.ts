@@ -421,7 +421,14 @@ export const GIT_TICKET_PATH = "/api/runner/git-ticket";
  * D#598 P1f-2: an executor run on a repo paired with a public code repo asks the cloud for the ONE restricted token its run-end hook may push with.
  * The run and generation are checked against the lease; the repo, the branch and the base come from the cloud's own rows, so nothing else travels.
  */
-export const PlanePushTokenMessage = z.object({ run_id: uuid, lease_generation: leaseGeneration }).strict();
+export const PlanePushTokenMessage = z
+  .object({
+    run_id: uuid,
+    lease_generation: leaseGeneration,
+    /** D#598 P1g-3a-3: only from a runner whose latest hello listed `tip_publish_v1`, for a fix round that added no commit. A request for a grant, never the fact: the cloud's own rows decide. */
+    at_tip: z.literal(true).optional(),
+  })
+  .strict();
 
 /** The signed route a runner asks for its one-use public push token on. */
 export const PLANE_PUSH_TOKEN_PATH = "/api/runner/plane-push-token";

@@ -5,7 +5,10 @@
  * workflow's load all ask this one query, so they cannot disagree.
  */
 import type { PoolClient } from 'pg';
-import { REPUBLISH_BRANCH_MOVED } from './baseSync.js';
+import { REPLACE_ROUND_CODES, REPUBLISH_BRANCH_MOVED } from './baseSync.js';
+
+/** The stops that raise the "someone pushed" question (D#598 P1g-3a): a lease that failed at the push, and a Replace round that ended without a landed update (no change, tip moved, any other refusal). Any of them re-enters the review. */
+const BRANCH_QUESTION_CODES: readonly string[] = [REPUBLISH_BRANCH_MOVED, ...REPLACE_ROUND_CODES];
 
 export const NO_VERDICT_ESCALATION_CODE = 'reviewer_no_verdict';
 
@@ -24,7 +27,7 @@ export const QUEUE_ESCALATION_CODES: readonly string[] = ['merge_queue_retry_use
 
 export async function readReviewHold(client: Pick<PoolClient, 'query'>, workItemId: string): Promise<boolean> {
   const code = await readEscalationCode(client, workItemId);
-  return code === NO_VERDICT_ESCALATION_CODE || (code !== null && QUEUE_ESCALATION_CODES.includes(code)) || (code === REPUBLISH_BRANCH_MOVED && (await readBranchAnswerHold(client, workItemId)));
+  return code === NO_VERDICT_ESCALATION_CODE || (code !== null && QUEUE_ESCALATION_CODES.includes(code)) || (code !== null && BRANCH_QUESTION_CODES.includes(code) && (await readBranchAnswerHold(client, workItemId)));
 }
 
 /** The newest escalation's code since the item last reached Needs a person, or null. */
@@ -59,7 +62,8 @@ export async function readBranchAnswerRound(client: Pick<PoolClient, 'query'>, w
 }
 
 async function readAnswered(client: Pick<PoolClient, 'query'>, workItemId: string, replaceOnly: boolean): Promise<boolean> {
-  if ((await readEscalationCode(client, workItemId)) !== REPUBLISH_BRANCH_MOVED) return false;
+  const code = await readEscalationCode(client, workItemId);
+  if (code === null || !BRANCH_QUESTION_CODES.includes(code)) return false;
   const { rows } = await client.query(
     `SELECT 1 FROM work_items w
        JOIN plane_pushes p ON p.account_id = w.account_id AND p.work_item_id = w.id AND p.pr_number IS NOT NULL

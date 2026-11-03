@@ -2,6 +2,7 @@ import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { CHECK_NOT_RUN_REASONS, DoneReply, DoneRetryReply, StopReply, sha256Text, signJob, type Check, type DoneCheck, type Job } from "@fulcrumaxe/runner-protocol";
 import { RUNNER_PUSHING_ROLES } from "@fx/gh-policy";
+import { RUNNER_REPLACE_ROUND_KIND } from "@fx/runner";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import {
   DISPATCH_BASE_KIND,
@@ -78,6 +79,10 @@ describe("done route [pg]", () => {
     call: (over?: { body?: object; deps?: Partial<RunnerCloudDeps> }) => Promise<{ status: number; body: unknown; headers?: Record<string, string> }>;
   }
   interface SceneOptions {
+    /** D#598 P1g-3a-3: the cloud's own marker of the round a person's confirmed Replace started (written in its create transaction). */
+    replaceRound?: boolean;
+    /** D#598 P1g-3a-3: the run's own plane-push attempt, as the report left it: finished `updated`, finished with another outcome, or not finished. None by default. */
+    attempt?: "updated" | "refused" | "open";
     role?: string;
     runtime?: string;
     runMode?: string;
@@ -150,6 +155,19 @@ describe("done route [pg]", () => {
     else await h.admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [A.repoId]);
     if (o.dispatchBase !== undefined && o.dispatchBase !== "unrecorded") {
       await h.admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, $3, $4::jsonb)", [A.accountId, runId, DISPATCH_BASE_KIND, JSON.stringify({ head_oid: o.dispatchBase })]);
+    }
+    if (o.replaceRound) await h.admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 3, $3, '{}'::jsonb)", [A.accountId, runId, RUNNER_REPLACE_ROUND_KIND]);
+    if (o.attempt !== undefined) {
+      await h.admin.query("DELETE FROM plane_pushes WHERE work_item_id = $1", [A.workItemId]);
+      const { rows } = await h.admin.query<{ id: string }>(
+        "INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest) VALUES ($1, $2, $3, 'acme/widgets-public', $4) RETURNING id",
+        [A.accountId, A.workItemId, A.repoId, "f".repeat(64)],
+      );
+      await h.admin.query(
+        `INSERT INTO plane_push_attempts (account_id, plane_push_id, run_id, lease_generation, runtime, kind, attempt_no, token_issued_at, finished_at, outcome)
+         VALUES ($1, $2, $3, $4, 'runner', 'fix_round', 1, now(), ${o.attempt === "open" ? "NULL" : "now()"}, $5)`,
+        [A.accountId, rows[0]!.id, runId, gen, o.attempt === "open" ? null : o.attempt],
+      );
     }
     const port = createRunPullRequestPort({ open: async () => fake, appLogin: async () => FAKE_APP_LOGIN, sleep: async () => undefined });
     return {
@@ -488,6 +506,66 @@ describe("done route [pg]", () => {
     it("a branch that is not ahead of the base stays no_commit", async () => {
       const s = await scene({ ...unmoved, aheadBy: 0 });
       expect(parsedDone(await s.call(withCheck(s, ok))).failure_reason).toBe("no_commit");
+    });
+  });
+
+  // D#598 P1g-3a-3: the round a person's confirmed Replace started adds nothing (the refused round's change is already on the branch) and publishes the branch tip. Only the cloud's marker makes that a success.
+  describe("the fix round a confirmed Replace started, with no new commit", () => {
+    const BRANCH = "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1";
+    const unmoved = { continues: { branch: BRANCH }, dispatchBase: "c".repeat(40), branchOid: "c".repeat(40), aheadBy: 1 } as const;
+
+    it("ends succeeded with the pull request for the existing head, recording the branch and head", async () => {
+      const s = await scene({ ...unmoved, replaceRound: true, attempt: "updated" });
+      expect(parsedDone(await s.call())).toEqual({ continue: false, outcome: "succeeded", failure_reason: null, pr_number: 1 });
+      expect(s.repo.pulls[0]!.head).toBe(BRANCH);
+      expect(verdictOf()).toEqual({ outcome: "succeeded", failureReason: null, prNumber: 1, branch: BRANCH, headOid: "c".repeat(40) });
+    });
+
+    it("still runs the scope test on the pull request's files: an out-of-scope file ends scope_violation and closes it", async () => {
+      const s = await scene({ ...unmoved, replaceRound: true, files: [file("outside/x.ts", "ADDED")], attempt: "updated" });
+      expect(parsedDone(await s.call())).toEqual({ continue: false, outcome: "failed", failure_reason: "scope_violation", pr_number: 1 });
+    });
+
+    // Success follows a landed update: the marked round with an unmoved head and nothing published stays no_commit, as it always was.
+    it("marked, unmoved and nothing published ends no_commit, with no pull request: no attempt, an attempt that ended another way, and one not finished", async () => {
+      for (const attempt of [undefined, "refused", "open"] as const) {
+        const s = await scene({ ...unmoved, replaceRound: true, ...(attempt === undefined ? {} : { attempt }) });
+        expect(parsedDone(await s.call()).failure_reason, String(attempt)).toBe("no_commit");
+        expect(s.repo.pulls, String(attempt)).toHaveLength(0);
+      }
+    });
+
+    it("an updated attempt of another run is not this run's update", async () => {
+      await scene({ ...unmoved, replaceRound: true, attempt: "updated" });
+      const s = await scene({ ...unmoved, replaceRound: true });
+      expect(parsedDone(await s.call()).failure_reason).toBe("no_commit");
+    });
+
+    it("an ordinary round that added nothing stays no_commit, with no pull request", async () => {
+      const s = await scene({ ...unmoved });
+      expect(parsedDone(await s.call()).failure_reason).toBe("no_commit");
+      expect(s.repo.pulls).toHaveLength(0);
+    });
+
+    it("nothing a runner sends makes a round the marked one: a key in the done message is a strict-parse 400, and a runner event that names the marker is only a runner event", async () => {
+      const s = await scene({ ...unmoved });
+      for (const extra of [{ replace_round: true }, { marker: "plane.replace_round" }, { publish_tip: true }]) {
+        expect((await s.call({ body: { run_id: s.runId, lease_generation: s.gen, ...extra } })).status, JSON.stringify(extra)).toBe(400);
+      }
+      await h.admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 3, 'runner.event', $3::jsonb)", [A.accountId, s.runId, JSON.stringify({ type: "replace_round", kind: RUNNER_REPLACE_ROUND_KIND })]);
+      expect(parsedDone(await s.call()).failure_reason).toBe("no_commit");
+    });
+
+    it("the marker is not a pass for anything else: a branch that is not ahead of the base, a missing branch, a round that is not a fix round and a continuation with no recorded dispatch all keep their verdicts", async () => {
+      expect(parsedDone(await (await scene({ ...unmoved, replaceRound: true, attempt: "updated", aheadBy: 0 })).call()).failure_reason).toBe("no_commit");
+      expect(parsedDone(await (await scene({ ...unmoved, replaceRound: true, attempt: "updated", pushed: false })).call()).failure_reason).toBe("no_commit");
+      expect(parsedDone(await (await scene({ ...unmoved, replaceRound: true, attempt: "updated", taskKind: "implement" })).call()).failure_reason).toBe("no_commit");
+      expect(parsedDone(await (await scene({ ...unmoved, replaceRound: true, attempt: "updated", dispatchBase: "unrecorded" })).call()).failure_reason).toBe("internal_error");
+    });
+
+    it("a round that did add a commit is judged as any round is, marker or not", async () => {
+      const s = await scene({ continues: { branch: BRANCH }, dispatchBase: "c".repeat(40), branchOid: "e".repeat(40), aheadBy: 2, replaceRound: true });
+      expect(parsedDone(await s.call())).toEqual({ continue: false, outcome: "succeeded", failure_reason: null, pr_number: 1 });
     });
   });
 

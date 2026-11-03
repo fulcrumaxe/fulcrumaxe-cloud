@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { fileURLToPath } from "node:url";
-import { insertAgentRun, writeRunStatus, type CancelResult, type ExecutionRun, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { RUNNER_REPLACE_ROUND_KIND, insertAgentRun, writeRunStatus, type CancelResult, type ExecutionRun, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { createAdvanceModule, type AdvanceModuleDeps, type AdvanceReviewDeps } from "../src/advance.js";
 import type { SeatResult } from "../src/seat.js";
 import { createPool } from "@fx/db/src/pool.js";
@@ -14,7 +14,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount } from "@fx/db/test/helpers/seed.js";
 import { PUBLIC_BRANCH_MOVED, readPlanePush, recordUpdatedHead } from "@fx/core/src/repos/planePushRecord.js";
 import { advanceActionFor } from "@fx/core/src/work-items/advance.js";
-import { REPUBLISH_BRANCH_MOVED } from "@fx/core/src/work-items/baseSync.js";
+import { REPLACE_ROUND_CODES, REPUBLISH_BRANCH_MOVED } from "@fx/core/src/work-items/baseSync.js";
 import { readBranchAnswerRound, readReviewHold } from "@fx/core/src/work-items/reviewHold.js";
 import { keepBranch, releaseBranch, replaceBranch } from "@fx/core/src/setup-requests/branchPushedAnswer.js";
 import { statusSentence } from "@fx/core/src/setup-requests/copy.js";
@@ -299,7 +299,7 @@ describe("Replace and Keep, from the raised request to the lease push on a bare 
     const registry = { sandbox: { cancel: async (_run: ExecutionRun): Promise<CancelResult> => ({ settled_usd: 0, released_usd: 0 }) } } as unknown as ExecutionTargetRegistry;
 
     /** The scene of a paired sandbox item with a finished build session, whose fix round the lease failure refused. */
-    async function roundScene(stage: string) {
+    async function roundScene(stage: string, crossSide = false) {
       const s = await scene(stage);
       const { accountId, userId, workItemId, repoId } = s.a;
       await admin.query("UPDATE agent_runs SET status = 'cancelled' WHERE account_id = $1 AND status IN ('pending', 'running')", [accountId]);
@@ -318,8 +318,17 @@ describe("Replace and Keep, from the raised request to the lease push on a bare 
         await writeRunStatus(writerPool, { accountId: input.accountId, runId: id, from: "pending", to: "running" });
         return { id, status: "running" };
       });
+      // A cross-side round: the build ran in the sandbox, the item's repository now runs on a runner, so the round starts a fresh runner session through the starter (D#599 PL-2b-2).
+      if (crossSide) await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [repoId]);
       const heads: FixRoundHeadPorts = { publicHead: s.ports.publicHead, privateHead: async () => PRIVATE_HEAD, syncBase: async () => ({ kind: "up_to_date", baseSha: BASE, baseRef: "main", stacked: false }) };
-      const deps: AdvanceModuleDeps = { starter: { async start() { throw new Error("a same-side round never starts a fresh session"); } }, resolveRunSeat: vi.fn(async () => SEAT), startAdvance: async () => undefined, triage: null, registry, review: { ...web.createReviewDeps(), resume } as never, fixHeads: heads };
+      const deps: AdvanceModuleDeps = { starter: crossSide
+          ? {
+              async start(input: StartAgentRunInput) {
+                const { id } = await insertAgentRun(writerPool, { id: randomUUID(), accountId: input.accountId, workItemId: input.workItemId, parentRunId: input.parentRunId, specParentRunId: input.parentRunId ?? null, role: "executor", runtime: "runner", executionMode: "runner_local", dispatchRepoId: input.repoId, dispatchPrNumber: input.pr ?? null, idempotency: input.idempotency, startPrompt: input.prompt, inCreateTransaction: input.inCreateTransaction });
+                return { runId: id };
+              },
+            }
+          : { async start() { throw new Error("a same-side round never starts a fresh session"); } }, resolveRunSeat: vi.fn(async () => SEAT), startAdvance: async () => undefined, triage: null, registry, review: { ...web.createReviewDeps(), resume } as never, fixHeads: heads };
       const module = createAdvanceModule(writerPool, deps);
       const stepWho = { accountId, userId, workItemId, haltEpoch: 0 };
       /** What the workflow does for the answered stop: load the review (the trigger arrives with it), then ask for the person's round. `round` is the 1-based round asked. */
@@ -343,6 +352,7 @@ describe("Replace and Keep, from the raised request to the lease push on a bare 
       expect(await h.stageNow()).toBe("needs_human");
       return { theirs, req: req! };
     }
+    const markersOf = async (runId: string) => (await admin.query<{ payload: unknown }>("SELECT payload FROM run_events WHERE run_id = $1 AND kind = $2", [runId, RUNNER_REPLACE_ROUND_KIND])).rows.map((r) => r.payload);
     const pending = async (h: RoundScene) => (await h.load()).branchAnswerPending === true;
 
     it("Replace: ONE round is started from the answer, its update lands with the lease on the authorized head, and that spends the authorization", async () => {
@@ -365,6 +375,8 @@ describe("Replace and Keep, from the raised request to the lease push on a bare 
       expect(await h.startedRounds()).toBe(1);
       // Signed with the base the round was synced with, so the update can be made at its end.
       expect(await h.republishBases()).toBe(1);
+      // D#598 P1g-3a-3: the round is marked, once, in its own create transaction; that marker is what its end and its public update read.
+      expect(await markersOf(started.runId!)).toEqual([{}]);
       // One round: the trigger is spent, and a repeat of the answer files nothing.
       expect(await pending(h)).toBe(false);
       const again = await replaceBranch({ pool: appUser }, { ...personArgs(h.s, req.id), shownHead: theirs });
@@ -378,6 +390,58 @@ describe("Replace and Keep, from the raised request to the lease push on a bare 
       await withTenant(writerPool, h.s.a.accountId, (c) => recordUpdatedHead(c, { accountId: h.s.a.accountId, id: h.s.pushId, headSha: next, tipSha: h.s.mainTip, sourceHead: null }));
       expect(await row(h.s)).toMatchObject({ state: "pr_opened", headSha: next, replaceAuthorizedHead: null });
       expect(await openRequest(h.s)).toEqual([]);
+    });
+
+    // D#598 P1g-3a-3: a Replace round whose update failed for a reason that is not the branch (GitHub could not be reached) puts the person back at the question; the same head, answered again, starts one round.
+    it.each(REPLACE_ROUND_CODES)("a Replace round that ended as %s: the request is raised again with the live head, and answering Replace again starts exactly one more round", async (endCode) => {
+      const h = await roundScene("changes_requested");
+      const { theirs, req } = await leaseFails(h);
+      await replaceBranch({ pool: appUser }, { ...personArgs(h.s, req.id), shownHead: theirs });
+      const first = await h.ask();
+      expect(first, String(first.reason)).toMatchObject({ ok: true });
+      expect(await h.startedRounds()).toBe(1);
+      // The round ends: its update is refused for a transient reason. The authorization is spent, the item stops, and the question is raised again.
+      await admin.query("UPDATE agent_runs SET status = 'cancelled' WHERE work_item_id = $1 AND status IN ('pending', 'running')", [h.s.a.workItemId]);
+      await withTenant(writerPool, h.s.a.accountId, (c) => recordRepublishRefusal(c, who(h.s), { code: endCode, prNumber: null, moveToNeedsPerson: true, attempt: randomUUID() }));
+      await raiseAfterLeaseFailure(writerPool, h.s.ports.publicHead, who(h.s));
+      expect(await h.stageNow()).toBe("needs_human");
+      expect((await row(h.s))!.replaceAuthorizedHead).toBeNull();
+      const [again] = await openRequest(h.s);
+      expect(again!.seen_head).toBe(theirs);
+      // The old answer does not count for the new question.
+      expect(await pending(h)).toBe(false);
+      const marked = await replaceBranch({ pool: appUser }, { ...personArgs(h.s, again!.id), shownHead: theirs });
+      expect(marked.restart).not.toBeNull();
+      expect(await pending(h)).toBe(true);
+      const second = await h.ask(3);
+      expect(second, String(second.reason)).toMatchObject({ ok: true });
+      expect(await h.startedRounds()).toBe(2);
+      expect(await markersOf(second.runId!)).toEqual([{}]);
+      expect(await pending(h)).toBe(false);
+    });
+
+    // D#598 P1g-3a-3: the fresh-session start (the item's side changed since the build) marks the round in its create transaction too.
+    it("a cross-side Replace round, started in a fresh session, is marked once in its create transaction; an ordinary cross-side round is not", async () => {
+      const h = await roundScene("changes_requested", true);
+      const { theirs, req } = await leaseFails(h);
+      await replaceBranch({ pool: appUser }, { ...personArgs(h.s, req.id), shownHead: theirs });
+      const started = await h.ask();
+      expect(started, String(started.reason)).toMatchObject({ ok: true });
+      expect(await h.startedRounds()).toBe(1);
+      expect(await markersOf(started.runId!)).toEqual([{}]);
+      expect(await pending(h)).toBe(false);
+      const plain = await roundScene("changes_requested", true);
+      const ordinary = await plain.ask();
+      expect(ordinary, String(ordinary.reason)).toMatchObject({ ok: true });
+      expect(await markersOf(ordinary.runId!)).toEqual([]);
+    });
+
+    it("an ordinary round (no answered stop) is not marked, whoever asked for it", async () => {
+      const h = await roundScene("changes_requested");
+      const started = await h.ask();
+      expect(started, String(started.reason)).toMatchObject({ ok: true });
+      expect(await h.startedRounds()).toBe(1);
+      expect(await markersOf(started.runId!)).toEqual([]);
     });
 
     it("a replay of the same press finds the same round and starts no second", async () => {

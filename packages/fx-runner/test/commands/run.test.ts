@@ -218,6 +218,8 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
     const clock = manualClock();
     const hooks = { clock, onOrderedFactsAccepted: (a: boolean) => void ordered.push(a), onConflictFactsAccepted: (a: boolean) => void conflict.push(a) };
     cloud.force.hello.push({ status: 503, body: { error: { code: "unavailable", message: "unavailable" } } });
+    // The newest capability (tip_publish_v1) goes first, then ordered_facts_v1: two refusals.
+    cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     const run = start({ hooks });
     await until(() => claims() >= 1);
@@ -231,13 +233,14 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
   it("the conflict verdict is allowed only when the hello kept conflict_facts_v1: a cloud that dropped it, one that refused the hello, and one that kept it", async () => {
     const answers: boolean[] = [];
     const hooks = { onConflictFactsAccepted: (a: boolean) => void answers.push(a) };
-    // The first 400 drops the newest capability (ordered_facts_v1), the second conflict_facts_v1.
+    // The first 400 drops the newest capability (tip_publish_v1), the second ordered_facts_v1, the third conflict_facts_v1.
+    cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     const dropped = start({ hooks });
     await until(() => answers.length >= 1);
     expect(hellos()[0]!.body).toMatchObject({ capabilities: expect.arrayContaining(["conflict_facts_v1"]) });
-    expect(HelloMessage.parse(hellos()[2]!.body).capabilities).not.toContain("conflict_facts_v1");
+    expect(HelloMessage.parse(hellos()[3]!.body).capabilities).not.toContain("conflict_facts_v1");
     expect(answers).toEqual([false]);
     expect(await stop(dropped)).toMatchObject({ code: 0 });
     // A hello that failed outright leaves it unsent too.
@@ -258,13 +261,14 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
     const ordered: boolean[] = [];
     const conflict: boolean[] = [];
     const hooks = { onOrderedFactsAccepted: (a: boolean) => void ordered.push(a), onConflictFactsAccepted: (a: boolean) => void conflict.push(a) };
-    // One 400 drops the newest capability alone: the conflict verdict stays allowed.
+    // The first 400 drops the newest capability (tip_publish_v1), the second ordered_facts_v1 alone: the conflict verdict stays allowed.
+    cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     const dropped = start({ hooks });
     await until(() => ordered.length >= 1);
     expect(HelloMessage.parse(hellos()[0]!.body).capabilities).toContain("ordered_facts_v1");
-    expect(HelloMessage.parse(hellos()[1]!.body).capabilities).not.toContain("ordered_facts_v1");
-    expect(HelloMessage.parse(hellos()[1]!.body).capabilities).toContain("conflict_facts_v1");
+    expect(HelloMessage.parse(hellos()[2]!.body).capabilities).not.toContain("ordered_facts_v1");
+    expect(HelloMessage.parse(hellos()[2]!.body).capabilities).toContain("conflict_facts_v1");
     expect([ordered, conflict]).toEqual([[false], [true]]);
     expect(await stop(dropped)).toMatchObject({ code: 0 });
     cloud.force.hello.push({ status: 404, body: { error: { code: "not_found", message: "not_found" } } });
@@ -278,13 +282,77 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
     expect(await stop(kept)).toMatchObject({ code: 0 });
   });
 
+  // D#598 P1g-3a-3: a fix round that added no commit asks to publish the branch tip only when the hello kept `tip_publish_v1`; the dropped list is the whole signal.
+  it("the branch tip is asked for only when the hello kept tip_publish_v1: a cloud that dropped it, one that failed the hello, and one that kept it", async () => {
+    const tip: boolean[] = [];
+    const hooks = { onTipPublishAccepted: (a: boolean) => void tip.push(a) };
+    // The first 400 drops the newest capability, tip_publish_v1.
+    cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
+    const dropped = start({ hooks });
+    await until(() => tip.length >= 1);
+    expect(HelloMessage.parse(hellos()[0]!.body).capabilities).toContain("tip_publish_v1");
+    expect(HelloMessage.parse(hellos()[1]!.body).capabilities).not.toContain("tip_publish_v1");
+    expect(tip).toEqual([false]);
+    expect(await stop(dropped)).toMatchObject({ code: 0 });
+    cloud.force.hello.push({ status: 404, body: { error: { code: "not_found", message: "not_found" } } });
+    const failed = start({ hooks });
+    await until(() => tip.length >= 2);
+    expect(tip).toEqual([false, false]);
+    expect(await stop(failed)).toMatchObject({ code: 0 });
+    const kept = start({ hooks });
+    await until(() => tip.length >= 3);
+    expect(tip).toEqual([false, false, true]);
+    expect(await stop(kept)).toMatchObject({ code: 0 });
+  });
+
+  // D#598 P1g-3a-3: the hook the command builds is handed the same answer the hello set. Driving that hook (not a copy of it) is what catches a call that forgets or hard-codes `tipPublish`.
+  it("the plane-push hook the command builds asks for the branch tip only when the hello kept tip_publish_v1", async () => {
+    const BASE = "a".repeat(40);
+    const TIP = "b".repeat(40);
+    const runIds = [randomUUID(), randomUUID()];
+    const driveOnce = async (dropCapability: boolean, runId: string): Promise<{ tokenBodies: unknown[]; reports: unknown[]; outcome: unknown }> => {
+      const tokenBodies: unknown[] = [];
+      const reports: unknown[] = [];
+      const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input instanceof Request ? input.url : input);
+        const body = typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : undefined;
+        if (url.endsWith("/api/runner/plane-push-token")) {
+          tokenBodies.push(body);
+          return new Response(JSON.stringify({ error: { code: "not_paired", message: "not_paired" } }), { status: 403, headers: { "content-type": "application/json" } });
+        }
+        if (url.endsWith("/api/runner/plane-push-report")) {
+          reports.push(body);
+          return new Response(JSON.stringify({ recorded: true }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        return fetch(input, init);
+      }) as typeof fetch;
+      let built: Parameters<NonNullable<RunHooks["onPlanePushBuilt"]>>[0] | undefined;
+      const tip: boolean[] = [];
+      if (dropCapability) cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
+      const run = start({ ctx: { fetchFn }, hooks: { onPlanePushBuilt: (p) => void (built = p), onTipPublishAccepted: (a) => void tip.push(a) } });
+      await until(() => tip.length >= 1 && built !== undefined);
+      expect(tip).toEqual([!dropCapability]);
+      built!.baseLedger.record(runId, BASE);
+      const outcome = await built!.run({ runId, leaseGeneration: 1, repo: { owner: "o", name: "r" }, mirrorDir: path.join(root, "mirror"), privateHead: undefined, tipHead: TIP });
+      expect(await stop(run)).toMatchObject({ code: 0 });
+      return { tokenBodies, reports, outcome };
+    };
+    // A cloud that dropped the capability: nothing is asked, the round is reported as one that changed nothing.
+    const dropped = await driveOnce(true, runIds[0]!);
+    expect(dropped.tokenBodies).toEqual([]);
+    expect(dropped.outcome).toEqual({ kind: "no_change" });
+    // A cloud that kept it: the token request names the tip.
+    const kept = await driveOnce(false, runIds[1]!);
+    expect(kept.tokenBodies).toEqual([{ run_id: runIds[1], lease_generation: 1, at_tip: true }]);
+  });
+
   it("D#6 RUNNER-WAKE: on an older cloud that refuses wake_v1 it says hello again without it and claims as before, with no wake check", async () => {
     cloud.wake.oldCloud = true;
     cloud.wake.enabled = true;
     const run = start();
     await until(() => claims() >= 1);
     const sent = hellos().map((h) => HelloMessage.parse(h.body).capabilities);
-    expect(sent).toEqual([["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1"], ["proposal_verifier", "wake_v1"], ["proposal_verifier"]]);
+    expect(sent).toEqual([["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1"], ["proposal_verifier", "wake_v1"], ["proposal_verifier"]]);
     expect(cloud.seen.some((s) => s.path === "/api/runner/wake")).toBe(false);
     expect(await stop(run)).toMatchObject({ code: 0 });
   });
@@ -996,9 +1064,9 @@ describe("7. the memory cap on a resource_limit end follows the hello (D#6 CARD-
   }, 60_000);
 
   it.skipIf(process.platform !== "linux")("a cloud that refused memory_limit_v1 on the hello (but took the rest) gets no cap", async () => {
-    // The ordering capability (D#483 S5-j2c2) goes first, then the conflict capability (D#519 MQ4-e2-a), then the analyst capability (D#483 S4-f4), then the queue capability (D#694 B7-1), so five refusals take the hello down to the memory capability being dropped too.
+    // The tip-publish capability (D#598 P1g-3a-3) goes first, then the ordering capability (D#483 S5-j2c2), then the conflict capability (D#519 MQ4-e2-a), then the analyst capability (D#483 S4-f4), then the queue capability (D#694 B7-1), so six refusals take the hello down to the memory capability being dropped too.
     const ended = await endOfKilledJob(() => {
-      for (let i = 0; i < 5; i++) cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
+      for (let i = 0; i < 6; i++) cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     });
     expect(ended).toMatchObject({ type: "run_ended", reason: "resource_limit" });
     expect(ended).not.toHaveProperty("memory_limit_bytes");

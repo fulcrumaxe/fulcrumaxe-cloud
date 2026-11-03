@@ -42,10 +42,10 @@ import { createGitPathA } from "../daemon/gitPathA.js";
 import { createSandboxedPurge } from "../daemon/resumePurgeSandbox.js";
 import { createJobHandler } from "../daemon/jobHandler.js";
 import { computeConflictAttestation } from "../daemon/conflictAttest.js";
-import { createPlaneBaseLedger, createPlanePushHook } from "../daemon/planePush.js";
+import { createPlaneBaseLedger, createPlanePushHook, type PlaneBaseLedger } from "../daemon/planePush.js";
 import { createPlanePushGithub } from "../daemon/planePushGithub.js";
 import { createPlaneMergeHandler } from "../daemon/planeMerge.js";
-import { CONFLICT_FACTS_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, type LimitedBy } from "@fulcrumaxe/runner-protocol";
+import { CONFLICT_FACTS_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, type LimitedBy } from "@fulcrumaxe/runner-protocol";
 import { createGitTransport, createPublicHeadsReader } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
@@ -134,6 +134,10 @@ export interface RunHooks {
   onConflictFactsAccepted?: (accepted: boolean) => void;
   /** A test seam: told, once the hello is answered, whether the ordering fact may be computed and sent on a merge order. */
   onOrderedFactsAccepted?: (accepted: boolean) => void;
+  /** A test seam: told, once the hello is answered, whether a fix round that added no commit may ask to publish the branch tip. */
+  onTipPublishAccepted?: (accepted: boolean) => void;
+  /** A test seam: handed the plane-push hook exactly as the command built it, so a test can drive the real construction (the `tipPublish` it was given included). */
+  onPlanePushBuilt?: (planePush: { baseLedger: PlaneBaseLedger; run: ReturnType<typeof createPlanePushHook> }) => void;
 }
 
 /** Whether a process with this pid exists: ESRCH means gone; success and EPERM (another user's process) mean it is there. */
@@ -314,6 +318,10 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     let conflictFactsAccepted = false;
     /** D#483 S5-j2c2: set once the hello is answered; a merge order's verify carries an ordering fact only when the cloud kept `ordered_facts_v1`. */
     let orderedFactsAccepted = false;
+    /** D#598 P1g-3a-3: set once the hello is answered; a fix round that added no commit asks to publish the branch tip only when the cloud kept `tip_publish_v1`. */
+    let tipPublishAccepted = false;
+    /** What the plane-push hook reads before it asks for the branch tip. The test seam below reads this same function, so a hook given anything else is caught. */
+    const tipPublish = (): boolean => tipPublishAccepted;
     const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) });
     // macOS: a resumed workspace's ignored build output is purged in a child under sandbox-exec that can write below the workspace only (D#6 RESUME-CLEAN-MAC).
     const sandboxedPurge = host.platform === "darwin" && host.selfCommand !== undefined ? createSandboxedPurge({ capture: host.engine.capture, selfCommand: host.selfCommand, stateDir, isFile: host.sandbox.isFile }) : undefined;
@@ -356,8 +364,9 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const planeBase = createPlaneBaseLedger();
     const planePush = {
       baseLedger: planeBase,
-      run: createPlanePushHook({ client, github: createPlanePushGithub(), transport: createGitTransport(), baseLedger: planeBase, workRoot: path.join(stateDir, "plane-push"), uid: host.uid, say: (line) => ctx.out(line) }),
+      run: createPlanePushHook({ client, github: createPlanePushGithub(), transport: createGitTransport(), baseLedger: planeBase, workRoot: path.join(stateDir, "plane-push"), uid: host.uid, tipPublish, say: (line) => ctx.out(line) }),
     };
+    hooks.onPlanePushBuilt?.(planePush);
     // D#6 PUBLIC-MERGE PR3: a paired item's public pull request is merged here, with the cloud-minted single-use credential; the order is claimed only after a claim reply says one waits.
     const planeMerge = createPlaneMergeHandler({
       client,
@@ -474,6 +483,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         hooks.onConflictFactsAccepted?.(conflictFactsAccepted);
         orderedFactsAccepted = dropped !== undefined && !dropped.includes(ORDERED_FACTS_CAPABILITY);
         hooks.onOrderedFactsAccepted?.(orderedFactsAccepted);
+        tipPublishAccepted = dropped !== undefined && !dropped.includes(TIP_PUBLISH_CAPABILITY);
+        hooks.onTipPublishAccepted?.(tipPublish());
       };
       takeHello(hello);
       // A hello that was not answered (a 5xx, a network failure) is said again before a later claim, on the poll loop's own pace, until one is answered. The cloud may still list

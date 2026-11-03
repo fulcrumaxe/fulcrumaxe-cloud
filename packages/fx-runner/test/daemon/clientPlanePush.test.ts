@@ -61,6 +61,22 @@ describe("the signed plane-push-token call", () => {
     expect(PlanePushTokenMessage.parse(JSON.parse(seen[0]!.body))).toEqual({ run_id: RUN, lease_generation: 1 });
   });
 
+  // D#598 P1g-3a-3: the daemon-to-cloud seam. Without these, a client that never sent `at_tip` (or never knew `no_changes`) would pass every other test.
+  it("asks for the branch tip with exactly {run_id, lease_generation, at_tip: true}, and sends no at_tip key otherwise", async () => {
+    const tip = clientAnswering(200, tokenBody());
+    await tip.client.planePushToken(RUN, 3, true);
+    expect(JSON.parse(tip.seen[0]!.body)).toEqual({ run_id: RUN, lease_generation: 3, at_tip: true });
+    for (const flag of [undefined]) {
+      const plain = clientAnswering(200, tokenBody());
+      await plain.client.planePushToken(RUN, 3, flag);
+      expect(Object.keys(JSON.parse(plain.seen[0]!.body)).sort()).toEqual(["lease_generation", "run_id"]);
+    }
+  });
+
+  it("a 409 no_changes answer is the refusal no_changes, not an error", async () => {
+    expect(await clientAnswering(409, errorBody("no_changes")).client.planePushToken(RUN, 1, true)).toEqual({ kind: "refused", code: "no_changes" });
+  });
+
   it("a reply without the text or the identity, or with an extra field, is an invalid reply", async () => {
     for (const body of [{ ...tokenBody(), pr: undefined }, { ...tokenBody(), identity: undefined }, tokenBody({ extra: 1 }), tokenBody({ branch: "main" }), tokenBody({ base: "develop" })]) {
       expect(await clientAnswering(200, body).client.planePushToken(RUN, 1)).toMatchObject({ kind: "error", code: "invalid_reply" });

@@ -1,6 +1,6 @@
 import { CHECK_FAILED_FILES_DROPPED, DONE_RETRY_AFTER_SECONDS, DoneMessage, DoneReply, DoneRetryReply, SignedJobSchema, type DoneCheck, type Job } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { RUNNER_RUN_BRANCH, isRunnerMode } from "@fx/runner";
+import { RUNNER_REPLACE_ROUND_KIND, RUNNER_RUN_BRANCH, isRunnerMode } from "@fx/runner";
 import { RUNNER_PUSHING_ROLES } from "@fx/gh-policy";
 import {
   RunnerHttpError,
@@ -140,6 +140,10 @@ interface DoneContext {
   text: RunPullRequestText | null;
   /** The runner sent a `taken_over` event for this run: its owner stopped the agent and took over by hand (D#6 R4a-7). */
   takenOver: boolean;
+  /** D#598 P1g-3a-3: the cloud's own marker, written in the create transaction of the fix round a person's confirmed Replace started. Nothing in a runner's message can set it. */
+  replaceRound: boolean;
+  /** D#598 P1g-3a-3: a finished attempt of this run ended `updated`: the runner's report that the public branch was moved to the round's head, verified by the route before it was recorded. */
+  updateLanded: boolean;
 }
 
 async function loadContext(client: TenantQueryable, i: { accountId: string; runId: string }): Promise<DoneContext | null> {
@@ -158,8 +162,12 @@ async function loadContext(client: TenantQueryable, i: { accountId: string; runI
     [i.accountId, i.runId, DISPATCH_BASE_KIND],
   );
   const taken = await client.query(`SELECT 1 FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = 'runner.event' AND payload->>'type' = 'taken_over' LIMIT 1`, [i.accountId, i.runId]);
+  const replace = await client.query("SELECT 1 FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 LIMIT 1", [i.accountId, i.runId, RUNNER_REPLACE_ROUND_KIND]);
+  const landed = await client.query("SELECT 1 FROM plane_push_attempts WHERE account_id = $1 AND run_id = $2 AND runtime = 'runner' AND kind = 'fix_round' AND finished_at IS NOT NULL AND outcome = 'updated' LIMIT 1", [i.accountId, i.runId]);
   return {
     takenOver: taken.rows.length > 0,
+    replaceRound: replace.rows.length > 0,
+    updateLanded: landed.rows.length > 0,
     role: row.role,
     runtime: row.runtime,
     executionMode: row.execution_mode,
@@ -304,7 +312,11 @@ async function judgeCommit(
     // base; the pull request is opened (or reused) and the scope test runs on its files exactly as for a build that committed.
     const headUnmoved = continuation && state.headOid === ctx.dispatchBase?.oid;
     const unchangedButChecked = headUnmoved && checkPassedOnHead && ctx.role === "executor" && job.task.kind === "fix";
-    const noCommit = !state.exists || state.aheadBy === null || state.aheadBy === 0 || (headUnmoved && !unchangedButChecked);
+    // D#598 P1g-3a-3: the other exception. The one round a person's confirmed Replace started (the cloud's own marker) normally adds nothing: the refused round's change is already on the branch and this round
+    // publishes it. The branch must still exist and be ahead of the base; every later test runs as for a build that committed.
+    // Success needs the update to have landed: a finished attempt of this run that ended `updated` (the runner's report comes before `done`, in sequence). Without it the round stays `no_commit`, as before.
+    const unchangedReplace = headUnmoved && ctx.replaceRound && ctx.updateLanded && ctx.role === "executor" && job.task.kind === "fix";
+    const noCommit = !state.exists || state.aheadBy === null || state.aheadBy === 0 || (headUnmoved && !unchangedButChecked && !unchangedReplace);
     if (noCommit) {
       if (ctx.role !== "docs-writer") return failed("no_commit");
       // A docs-writer that cannot be shown to have made no commit (the comparison could not be read) is not told it succeeded.

@@ -302,7 +302,7 @@ export interface RunnerLeaseOps {
    * D#598 P1f-2: the public-push token and report routes (see packages/worker `RunnerPlanePushFacade`, which this package cannot import). Absent from an
    * older worker: the routes then answer 503 `not_configured`.
    */
-  planePushGrant?(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }): Promise<
+  planePushGrant?(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number; /** D#598 P1g-3a-3: the runner asks to publish the branch tip (a fix round that added no commit). */ atTip?: true }): Promise<
     | { kind: "fenced"; reason: StopReason }
     | { kind: "not_paired" }
     | { kind: "pairing_changed" }

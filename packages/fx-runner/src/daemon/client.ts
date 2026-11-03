@@ -6,7 +6,7 @@
 import {
   ClaimMessage, ClaimRateLimitedReply, type ConflictAttestation, HelloMessage, HelloReply, ClaimReply, WAKE_CAPABILITY, type WakeGrant, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
   GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply,
-  CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, ORDERED_FACTS_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
+  CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, ORDERED_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
   PLANE_PUSH_PAIRING_PATH, PLANE_PUSH_REPORT_PATH, PLANE_PUSH_TOKEN_PATH, PlanePushPairingMessage, PlanePushPairingReply, PlanePushReportMessage, PlanePushReportReply, PlanePushTokenMessage, PlanePushTokenReply, type ClaimCapacity, type ContextLedgerWire, type DoneCheck, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
 } from "@fulcrumaxe/runner-protocol";
 import { errorCodeOf, signedGet, signedPost, type CloudReply } from "../cloud.js";
@@ -77,7 +77,7 @@ export type PlaneMergeVerifyResult =
 export type PlaneMergeReportResult = { kind: "recorded" } | { kind: "retry"; retryAfter: number } | { kind: "fenced"; code?: string } | CallError;
 
 /** The closed codes a token request can be refused with; any other 4xx or 5xx word is a plain `CallError`. */
-const TOKEN_REFUSALS: ReadonlySet<string> = new Set(["pairing_changed", "already_issued", "attempts_exhausted", "app_not_installed", "token_scope_mismatch", "public_unavailable", "not_configured", "republish_base_missing", "republish_pr_closed", "republish_pr_merged", "republish_pairing_off"]);
+const TOKEN_REFUSALS: ReadonlySet<string> = new Set(["pairing_changed", "already_issued", "attempts_exhausted", "app_not_installed", "token_scope_mismatch", "public_unavailable", "not_configured", "republish_base_missing", "republish_pr_closed", "republish_pr_merged", "republish_pairing_off", "no_changes"]);
 
 export interface DoneInput {
   runId: string;
@@ -108,7 +108,8 @@ export interface RunnerClient {
   gitTicket(runId: string, leaseGeneration: number): Promise<GitTicketResult>;
   /** D#598 P1f-3. The run-end hook of an executor run on a repository paired with a public repository. */
   planePushPairing(runId: string, leaseGeneration: number): Promise<PlanePushPairingResult>;
-  planePushToken(runId: string, leaseGeneration: number): Promise<PlanePushTokenResult>;
+  /** `atTip` (D#598 P1g-3a-3): asks to publish the branch tip for a fix round that added no commit; only ever passed after the hello kept `tip_publish_v1`. */
+  planePushToken(runId: string, leaseGeneration: number, atTip?: true): Promise<PlanePushTokenResult>;
   planePushReport(message: PlanePushReportMessage): Promise<PlanePushReportResult>;
   /** D#6 PUBLIC-MERGE PR3. The three signed calls of a merge order on this runner. Used only after a claim reply said `merge_order`. */
   planeMergeClaim(): Promise<PlaneMergeClaimResult>;
@@ -152,8 +153,8 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       // capability is dropped alone first, and `wake_v1` goes too only if the hello is still refused.
       const refused = (r: CloudReply | undefined): boolean => r?.status === 400 && errorCodeOf(r.body) === "invalid_message";
       let dropped: string[] = [];
-      // `ordered_facts_v1` (D#483 S5-j2c2) is the newest, so it goes first (the runner then computes and sends no ordering fact), then `conflict_facts_v1` (D#519 MQ4-e2-a) (no `conflict` field on a merge report), then `discovery_analyst` (D#483 S4-f4) (a cloud without it just never offers the analyst), then `plane_merge_queue_v1` (D#694 B7-1), then `memory_limit_v1` (D#6 CARD-OOM-CAUSE-WORDS): a cloud that knows the others keeps them, and the caller reads the `dropped` list to know not to send the field.
-      for (const drop of [ORDERED_FACTS_CAPABILITY, CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY]) {
+      // `tip_publish_v1` (D#598 P1g-3a-3) is the newest, so it goes first (the runner then never asks to publish the branch tip), then `ordered_facts_v1` (D#483 S5-j2c2) (the runner computes and sends no ordering fact), then `conflict_facts_v1` (D#519 MQ4-e2-a) (no `conflict` field on a merge report), then `discovery_analyst` (D#483 S4-f4) (a cloud without it just never offers the analyst), then `plane_merge_queue_v1` (D#694 B7-1), then `memory_limit_v1` (D#6 CARD-OOM-CAUSE-WORDS): a cloud that knows the others keeps them, and the caller reads the `dropped` list to know not to send the field.
+      for (const drop of [TIP_PUBLISH_CAPABILITY, ORDERED_FACTS_CAPABILITY, CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY]) {
         if (!refused(reply) || !(parsed.capabilities ?? []).includes(drop)) continue;
         dropped = [...dropped, drop];
         reply = await send(HELLO_PATH, { ...parsed, capabilities: (parsed.capabilities ?? []).filter((c) => !dropped.includes(c)) });
@@ -243,8 +244,8 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       return fail(reply);
     },
 
-    async planePushToken(runId, leaseGeneration) {
-      const reply = await send(PLANE_PUSH_TOKEN_PATH, PlanePushTokenMessage.parse({ run_id: runId, lease_generation: leaseGeneration }));
+    async planePushToken(runId, leaseGeneration, atTip) {
+      const reply = await send(PLANE_PUSH_TOKEN_PATH, PlanePushTokenMessage.parse({ run_id: runId, lease_generation: leaseGeneration, ...(atTip === true ? { at_tip: true } : {}) }));
       if (reply?.status === 200) {
         const parsed = PlanePushTokenReply.safeParse(reply.body);
         return parsed.success ? { kind: "token", reply: parsed.data } : fail(reply, "invalid_reply");
