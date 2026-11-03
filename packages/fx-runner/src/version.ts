@@ -1,7 +1,7 @@
 // The version line `fx-runner --version` prints. The release build (scripts/build-sea.mjs) defines __FX_BUILD_EPOCH__ from SOURCE_DATE_EPOCH, so a
 // release says the day it was built and two builds of one commit with one epoch say the same. A run from source has no epoch and says "from source".
 import { CURRENT_PROTOCOL_VERSION } from "@fulcrumaxe/runner-protocol";
-import pkg from "../package.json";
+import pkg from "../package.json" with { type: "json" };
 
 declare const __FX_BUILD_EPOCH__: string | undefined;
 

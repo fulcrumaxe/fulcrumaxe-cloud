@@ -273,6 +273,9 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "assistant_tool_refused",
   "assistant_link_failed",
   "assistant_link_expired",
+  // D#597 CC-7a-2: a read tool's answers (another repo's id, or an unknown one, is "not found"; any other refusal is a fixed read failure).
+  "assistant_not_found",
+  "assistant_read_failed",
   // R4a-7 watch and take-over: the person's `fx-runner attach --take-over` was not confirmed, is already under way, was not answered by the
   // daemon in time, or the pane command was started for a run that was not handed over.
   "take_over_cancelled",

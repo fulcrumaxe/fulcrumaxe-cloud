@@ -32,6 +32,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@fulcrumaxe/fx-runner": "workspace:*",
     "@fx/runner": "workspace:*",
     "@fx/sitekit-checks": "workspace:*",
     "@fx/test-guard": "workspace:*",

@@ -366,6 +366,9 @@ importers:
         specifier: ^4.6.5
         version: 4.6.5
     devDependencies:
+      '@fulcrumaxe/fx-runner':
+        specifier: workspace:*
+        version: link:../fx-runner
       '@fx/runner':
         specifier: workspace:*
         version: link:../runner
@@ -765,6 +768,9 @@ importers:
       '@fx/sitekit-checks':
         specifier: workspace:*
         version: link:../sitekit-checks
+      '@fx/trust':
+        specifier: workspace:*
+        version: link:../trust
       '@tufjs/models':
         specifier: 5.0.0
         version: 5.0.0

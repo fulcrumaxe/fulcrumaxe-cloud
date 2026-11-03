@@ -1,7 +1,7 @@
 /**
  * D#597 CC-7a-1: the local tool proxy, the only thing the assistant's model process talks to. It listens on a Unix socket in a fresh 0700
  * directory and holds the delegation token itself; the model process gets the socket path and a per-session secret (useless against the cloud),
- * never the token. The allowlist is exactly the corrections list and `draft_correction`; any other name is refused here and the cloud sees
+ * never the token. The allowlist is exactly the corrections list, `draft_correction` and the read tools; any other name is refused here and the cloud sees
  * nothing, so no tool can accept, reject, approve, merge, cancel or lift a halt. A 401 (or a token past its time) answers `assistant_relink`
  * and sends nothing more with that token.
  */
@@ -10,10 +10,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import path from "node:path";
 import { assistantCall } from "./cloudCall.js";
+import { fenceJson } from "./fence.js";
+import { READ_TOOLS, readPath } from "./readTools.js";
 import { AssistantError, assertStateDirSafe, readAssistantToken, type AssistantProblem } from "./tokenFile.js";
 
-/** The whole tool list; CC-7a-2 adds the read tools once the cloud's read routes admit a delegation token. */
-export const ALLOWED_TOOLS: readonly string[] = Object.freeze(["list_corrections", "draft_correction"]);
+/** The whole tool list: the corrections list and `draft_correction` (CC-7a-1) and the six read tools (CC-7a-2). Nothing here writes except the proposal. */
+export const ALLOWED_TOOLS: readonly string[] = Object.freeze(["list_corrections", "draft_correction", ...READ_TOOLS]);
 export const PROXY_SOCKET_ENV = "FX_ASSISTANT_PROXY_SOCKET";
 export const PROXY_SECRET_ENV = "FX_ASSISTANT_PROXY_SECRET";
 const MAX_REQUEST_BYTES = 32 * 1024;
@@ -50,12 +52,15 @@ export async function startProxy(o: ProxyOptions): Promise<Proxy> {
 
   async function call(tool: string, args: Record<string, unknown>): Promise<Answer> {
     if (!ALLOWED_TOOLS.includes(tool)) return refuse(403, "assistant_tool_refused");
+    const read = READ_TOOLS.includes(tool);
     const id = args.work_item_id;
-    if (typeof id !== "string" || !ID.test(id)) return refuse(400, "assistant_tool_refused", "work_item_id must be a work item id");
-    let route: { method: "GET" | "POST"; body?: unknown };
-    if (tool === "list_corrections") route = { method: "GET" };
-    else if (typeof args.kind === "string" && /^[a-z_]{1,32}$/.test(args.kind) && typeof args.body === "string") route = { method: "POST", body: { kind: args.kind, body: args.body } };
-    else return refuse(400, "assistant_tool_refused", "draft_correction needs a kind and a text body");
+    let route: { method: "GET" | "POST"; body?: unknown } = { method: "GET" };
+    if (!read) {
+      if (typeof id !== "string" || !ID.test(id)) return refuse(400, "assistant_tool_refused", "work_item_id must be a work item id");
+      if (tool === "list_corrections") route = { method: "GET" };
+      else if (typeof args.kind === "string" && /^[a-z_]{1,32}$/.test(args.kind) && typeof args.body === "string") route = { method: "POST", body: { kind: args.kind, body: args.body } };
+      else return refuse(400, "assistant_tool_refused", "draft_correction needs a kind and a text body");
+    }
     let stored;
     try {
       stored = readAssistantToken(o.stateDir, o.uid);
@@ -64,10 +69,22 @@ export async function startProxy(o: ProxyOptions): Promise<Proxy> {
       throw error;
     }
     if (stored.token === dead || o.now().getTime() >= Date.parse(stored.expires_at)) return refuse(401, "assistant_relink");
-    const reply = await assistantCall({ fetchFn: o.fetchFn, origin: stored.origin, method: route.method, path: `/api/v1/work-items/${id}/corrections`, body: route.body, token: stored.token, bypass: o.bypass });
+    let target = `/api/v1/work-items/${String(id)}/corrections`;
+    if (read) {
+      const planned = readPath(tool, args, stored.repo_id);
+      if ("fault" in planned) return refuse(400, "assistant_tool_refused", planned.fault);
+      target = planned.path;
+    }
+    const reply = await assistantCall({ fetchFn: o.fetchFn, origin: stored.origin, method: route.method, path: target, body: route.body, token: stored.token, bypass: o.bypass });
     if (reply.status === 401) {
       dead = stored.token;
       return refuse(401, "assistant_relink");
+    }
+    // A read answers fenced data or a fixed word: another repo's id is the cloud's 404 ("not found"), and none of the cloud's error body is passed on.
+    if (read || tool === "list_corrections") {
+      if (reply.status === 404) return refuse(404, "assistant_not_found");
+      if (reply.status !== 200 || reply.body === undefined) return refuse(502, "assistant_read_failed");
+      return { status: 200, body: fenceJson(reply.body) };
     }
     return reply;
   }

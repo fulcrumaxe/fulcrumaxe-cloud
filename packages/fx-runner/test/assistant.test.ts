@@ -257,15 +257,15 @@ describe("CC-7a-3 the token file", () => {
 });
 
 describe("CC-7a-2 the proxy allowlist", () => {
-  it("is exactly the corrections list and draft_correction", () => {
-    expect([...ALLOWED_TOOLS]).toEqual(["list_corrections", "draft_correction"]);
+  it("is exactly the corrections list, draft_correction and the six read tools", () => {
+    expect([...ALLOWED_TOOLS]).toEqual(["list_corrections", "draft_correction", "get_item", "get_run_activity", "get_run", "get_run_events", "get_plan", "get_receipts"]);
   });
 
   it("refuses every other tool name locally; the cloud receives 0 requests", async () => {
     await link(0);
     cloud.seen.length = 0;
     const p = await startP();
-    const names = ["accept_correction", "approve", "approve_item", "merge", "merge_pr", "cancel_run", "halt_resume", "lift_halt", "reject_correction", "get_work_item", "list_runs", "LIST_CORRECTIONS", "list_corrections ", "list_corrections_accept", "__proto__", "constructor", ""];
+    const names = ["accept_correction", "approve", "approve_item", "merge", "merge_pr", "cancel_run", "halt_resume", "lift_halt", "reject_correction", "get_work_item", "list_runs", "get_spec", "LIST_CORRECTIONS", "list_corrections ", "list_corrections_accept", "__proto__", "constructor", ""];
     for (const name of names) {
       const r = await toolCall(p, name, { work_item_id: ITEM, kind: "pause", body: "x" });
       expect(r.status, name).toBe(403);
