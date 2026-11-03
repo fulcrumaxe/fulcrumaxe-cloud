@@ -1,10 +1,14 @@
 import type { PoolClient } from "pg";
+import { reportError } from "@fx/telemetry";
+import type { OrderedResourceReaderPort } from "../build/githubMergePort.js";
 import type { PullRequestRef } from "../build/types.js";
-import { CAPACITY_WAIT_REASONS, CONFLICT_FILES_MAX, START_IDLE_TIMEOUT_MS, provePlatformAuthored, type ConflictPorts, type RoundStart } from "./conflict.js";
+import { CAPACITY_WAIT_REASONS, CONFLICT_FILES_MAX, START_IDLE_TIMEOUT_MS, provePlatformAuthored, startEntrylessFromDecision, type ConflictPorts, type EntrylessStart, type RoundStart, type StartDecision } from "./conflict.js";
 import { isSafeRepoPath } from "../discovery/verifierOutput.js";
+import { resolveOrdered, type OrderedDeps } from "./orderedCheck.js";
+import { checkOrdering } from "./orderedResources.js";
 import { MAX_CONFLICT_ROUNDS } from "./policy.js";
 import { recordRoundRun, releaseToQueue, startConflictWork, stopEntry } from "./store.js";
-import { subjectOf, type ConflictRound, type MergeQueueEntry } from "./types.js";
+import { subjectOf, type ConflictRound, type ConflictSubject, type MergeQueueEntry, type RoundSubject } from "./types.js";
 
 /**
  * D#519 MQ5-b1 (C14-3, C16-1): the START of an ordered-resource renumber round. The check (MQ5-a) found that the pull request's new resource files sort at or below
@@ -29,7 +33,7 @@ export interface RenumberAsk {
 export type RenumberNo = "auto_renumber_off" | "stacked" | "rounds_exhausted" | "no_files" | "foreign_commits" | "unreadable" | "identity_unread";
 export type RenumberDecision = { go: true; baseSha: string; baseRef: string } | { go: false; code: RenumberNo };
 
-export interface RenumberPorts<S extends MergeQueueEntry = MergeQueueEntry> {
+export interface RenumberPorts<S extends RoundSubject = MergeQueueEntry> {
   github: ConflictPorts<S>["github"];
   inTenant<T>(accountId: string, fn: (client: PoolClient) => Promise<T>): Promise<T>;
   /** The same proof the conflict round reads (C10); null while unread. */
@@ -42,11 +46,11 @@ export interface RenumberPorts<S extends MergeQueueEntry = MergeQueueEntry> {
  * The decision alone (no write). Allowed only when `autoRenumber` is not off, the entry is not stacked on a parent, the shared bound has a round left, the files are
  * a bounded list of safe paths, and every commit that touches those files is the platform's own (rule (a), the conflict round's proof). Anything unread answers no.
  */
-export async function decideRenumber<S extends MergeQueueEntry>(ports: Pick<RenumberPorts<S>, "github" | "platformCommits">, entry: S, ask: RenumberAsk): Promise<RenumberDecision> {
+export async function decideRenumber<S extends RoundSubject>(ports: Pick<RenumberPorts<S>, "github" | "platformCommits">, entry: S, ask: RenumberAsk): Promise<RenumberDecision> {
   const subject = subjectOf(entry);
   if (subject === null) return { go: false, code: "unreadable" };
   if (!ask.autoRenumber) return { go: false, code: "auto_renumber_off" };
-  if (entry.dependsOnPrNumber !== null) return { go: false, code: "stacked" };
+  if ("dependsOnPrNumber" in entry && entry.dependsOnPrNumber !== null) return { go: false, code: "stacked" };
   if (subject.roundsUsed >= MAX_CONFLICT_ROUNDS) return { go: false, code: "rounds_exhausted" };
   if (ask.files.length === 0 || ask.files.length > CONFLICT_FILES_MAX || !ask.files.every(isSafeRepoPath)) return { go: false, code: "no_files" };
   // Asked before any GitHub read: with the proof unread a decision costs no call at all.
@@ -102,4 +106,44 @@ export function createOnRenumber(ports: RenumberPorts, enabled: boolean = RENUMB
       return false;
     }
   };
+}
+
+/**
+ * D#483 S5-j2e: what the check finds for a pull request with no queue entry, from reads made now (the same ones the tick's ordered step makes). Null when there is nothing to
+ * renumber: no resource applies, every added file is in order, or a read failed (the gate's own stop stands then).
+ */
+export async function readRenumberAsk(deps: OrderedDeps, accountId: string, pr: PullRequestRef): Promise<RenumberAsk | null> {
+  const resolved = await resolveOrdered(deps, accountId, pr);
+  if (resolved.state !== "some" || !deps.github.listPullRequestAdds) return null;
+  try {
+    const adds = await deps.github.listPullRequestAdds(pr);
+    if (!adds.complete) return null;
+    for (const rule of resolved.resources) {
+      const v = checkOrdering(rule, adds.paths, resolved.tip);
+      if (!v.ok) return { autoRenumber: resolved.autoRenumber, resource: rule.name, files: adds.paths.filter((p) => rule.matches(p)), highest: v.highest };
+    }
+  } catch (err) {
+    reportError(err, { stage: "merge_queue.ordered_files" });
+  }
+  return null;
+}
+
+export type EntrylessRenumberPorts = RenumberPorts<ConflictSubject> & { github: Partial<OrderedResourceReaderPort> };
+
+/**
+ * D#483 S5-j2e: the renumber round of a work item with no queue entry (the direct gate answered `ordered_resource_out_of_order`). The same decision (`decideRenumber`: auto-renumber on,
+ * rounds left, every commit that touches the files the platform's own), the same shared round bound, and the same start transaction as the entryless conflict round, with kind `renumber`.
+ * `not_applicable`: the check finds nothing to renumber now, so the gate's stop stands. A stop is recorded under `ordered_resource_out_of_order`, the code the queue's own stop carries.
+ */
+export async function startEntrylessRenumber(ports: EntrylessRenumberPorts, subject: ConflictSubject, enabled: boolean = RENUMBER_START_ENABLED): Promise<EntrylessStart | { outcome: "not_applicable" }> {
+  if (!enabled) return { outcome: "not_applicable" };
+  const ask = await readRenumberAsk(ports, subject.accountId, { repoId: subject.repoId, prNumber: subject.prNumber });
+  if (ask === null) return { outcome: "not_applicable" };
+  const decided = await decideRenumber(ports, subject, ask);
+  const decision: StartDecision = decided.go ? { go: true, files: ask.files, baseSha: decided.baseSha, baseRef: decided.baseRef } : { go: false, code: decided.code, files: ask.files };
+  return startEntrylessFromDecision(ports, subject, decision, {
+    kind: "renumber",
+    eventCode: "ordered_resource_out_of_order",
+    startRun: ({ entry, round }) => ports.startRenumberRound({ entry, round, resource: ask.resource, highest: ask.highest }),
+  });
 }

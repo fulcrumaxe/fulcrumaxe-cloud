@@ -1,7 +1,7 @@
 import { sleep } from "workflow";
 import type { AdvanceContinueOut, ContinuationSite, AdvanceRunStart, AdvanceStartArgs, AdvanceTriageResult, DecisionStepCode, FixGateStepInput, FixGateStepOut, StartGateStepInput, StartGateStepOut } from "@fx/worker";
 import { getWorker } from "../lib/worker";
-import { conflictGateBody, conflictStartBody, conflictWaitBody, enqueueBody, runnerConflictBody, waitBody, type ConflictStartOut, type ConflictWaitOut, type QueueWaitOut } from "../lib/mergeQueueWait";
+import { conflictGateBody, conflictStartBody, conflictWaitBody, enqueueBody, rerouteStartBody, runnerConflictBody, waitBody, type ConflictStartOut, type ConflictWaitOut, type QueueWaitOut } from "../lib/mergeQueueWait";
 import { getIssueReader } from "../lib/github/issueRead";
 import { openInstallationHttp } from "../lib/github/installationHttp";
 import { publishLightSpecBody, startLightSpecBody, type LightPublished } from "../lib/advanceLightSteps";
@@ -99,6 +99,8 @@ const MERGE_REPO_BUSY_POLL_MS = 30_000;
 const MERGE_REPO_BUSY_WAIT_MS = 60 * 60_000;
 /** D#519 MQ4-e1-a: how often a conflict round that cannot be followed is looked for again before the item goes to a person. */
 const CONFLICT_REENTRIES_MAX = 5;
+/** D#483 S5-j2e: the only gate reasons a round is started for (a workflow body imports no value from a package; the gate's own words). */
+const ORDER_REROUTE_REASONS: readonly string[] = ["overlap_unreviewed", "ordered_resource_out_of_order"];
 
 /**
  * D#6 C29: the word a panel or Spec step answers with when it hands control back because its seats or the PM are queued on (or
@@ -489,9 +491,15 @@ export async function advanceMergeQueueWaitStep(accountId: string, userId: strin
 }
 
 /** D#519 MQ4-e1-a: starts the merge-conflict fix round of an item with no queue entry, after the direct gate answered `merge_conflict`. */
-export async function advanceConflictStartStep(accountId: string, userId: string, workItemId: string, haltEpoch: number): Promise<ConflictStartOut> {
+export async function advanceConflictStartStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, expectedHead: string): Promise<ConflictStartOut> {
   "use step";
-  return conflictStartBody(await getWorker(), { accountId, userId, workItemId, haltEpoch });
+  return conflictStartBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, expectedHead);
+}
+
+/** D#483 S5-j2e: starts the round for an item with no queue entry after the direct gate answered `overlap_unreviewed` (the conflict round: the agent merges the default branch) or `ordered_resource_out_of_order` (the renumber round). */
+export async function advanceRerouteStartStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, kind: "overlap" | "renumber", expectedHead: string): Promise<ConflictStartOut> {
+  "use step";
+  return rerouteStartBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, kind, expectedHead);
 }
 
 /** D#519 MQ4-e2-b: starts the round of a `runner_local` item whose merge order the runner ended with a conflict verdict (or stops it, for a foreign one). */
@@ -1823,8 +1831,19 @@ async function mergeAfterPass(args: AdvanceStartArgs, pr: { number: number; head
     return waited.next === "continue" ? null : waited.result;
   }
   // D#519 MQ4-e1-a: the pull request does not merge cleanly. An item with no queue entry and no public copy gets a fix round; any other item stops as it always did.
+  // The round starts from the head the gate read: a start (and every capacity-wait poll) for a different head answers review-again.
+  const gateHead = gate.headSha ?? pr.headSha;
   if (gate.outcome === "ready_human_merges" && gate.reasons.includes("merge_conflict")) {
-    const round = await conflictRound(args, pr, reentries);
+    const round = await conflictRound(args, pr, reentries, (accountId, userId, workItemId, haltEpoch) => advanceConflictStartStep(accountId, userId, workItemId, haltEpoch, gateHead));
+    if (round !== "not_applicable") return round;
+  }
+  // D#483 S5-j2e: a clean overlap with what the default branch gained, or a migration number out of order, goes into the same round, but only when ordering is the SOLE stop: any other
+  // reason (a reviewer, CI, a person's merge setting, the author, a draft, a stacked item) keeps the gate's own stop, so no paid round or platform push runs for an item held for a person.
+  // The start answers `not_applicable` for a public copy or a repository the cloud does not read.
+  const orderOnly = gate.outcome === "ready_human_merges" && gate.reasons.length > 0 && gate.reasons.every((r) => ORDER_REROUTE_REASONS.includes(r));
+  const reroute = orderOnly ? (gate.reasons.includes("overlap_unreviewed") ? "overlap" : "renumber") : null;
+  if (reroute !== null) {
+    const round = await conflictRound(args, pr, reentries, (accountId, userId, workItemId, haltEpoch) => advanceRerouteStartStep(accountId, userId, workItemId, haltEpoch, reroute, gateHead));
     if (round !== "not_applicable") return round;
   }
   if (gate.outcome === "error" || gate.outcome === "refused") await stopped(args, "merge_gate", gate.reasons[0] ?? gate.outcome, { head: pr.headSha, pr: pr.number });
@@ -1835,7 +1854,7 @@ async function mergeAfterPass(args: AdvanceStartArgs, pr: { number: number; head
  * D#519 MQ4-e1-a: the fix round of a pull request that conflicts, for an item with no queue entry. Starts the round, then waits on it (a durable sleep and one read per poll, as the
  * queue wait does). `not_applicable`: not this path's item, so the gate's own stop stands. Null: review the (new) head. A passed delta review of the merge commit re-enters the gate.
  */
-async function conflictRound(args: AdvanceStartArgs, pr: { number: number; headSha: string }, reentries: number, startStep: typeof advanceConflictStartStep = advanceConflictStartStep): Promise<Result | null | "not_applicable"> {
+async function conflictRound(args: AdvanceStartArgs, pr: { number: number; headSha: string }, reentries: number, startStep: (accountId: string, userId: string, workItemId: string, haltEpoch: number) => Promise<ConflictStartOut>): Promise<Result | null | "not_applicable"> {
   const { accountId, userId, workItemId } = args;
   let started = await startStep(accountId, userId, workItemId, args.haltEpoch);
   for (let waited = 0; started.state === "waiting" && waited < MERGE_QUEUE_WAIT_MAX_MS; waited += MERGE_QUEUE_WAIT_POLL_MS) {
@@ -1844,6 +1863,8 @@ async function conflictRound(args: AdvanceStartArgs, pr: { number: number; headS
   }
   await advanceLogStep("advance.merge_conflict", { work_item_id: workItemId, pr: pr.number, state: started.state });
   if (started.state === "not_applicable") return "not_applicable";
+  // The head is not the one the gate read: the review loop reads the new head and goes on from there.
+  if (started.state === "in_review") return null;
   if (started.state === "halted") return haltedEnd(args, "merge_conflict");
   if (started.state === "stopped") {
     await stopped(args, "merge_conflict", started.reason, { head: pr.headSha, pr: pr.number });

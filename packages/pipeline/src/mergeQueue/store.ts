@@ -1122,21 +1122,23 @@ export type StartEntrylessRoundResult = { ok: true; round: ConflictRound } | { o
  */
 export async function startEntrylessConflictRound(
   client: Queryable,
-  input: { accountId: string; workItemId: string; fromSha: string; baseSha: string; baseRef: string; conflictFiles: readonly string[] },
+  input: { accountId: string; workItemId: string; fromSha: string; baseSha: string; baseRef: string; conflictFiles: readonly string[]; kind?: RoundKind },
 ): Promise<StartEntrylessRoundResult> {
+  const kind = input.kind ?? "conflict";
+  if (kind !== "conflict" && kind !== "renumber") throw new MergeQueueError("bad_input");
   assertSha(input.fromSha);
   assertSha(input.baseSha);
   const round = await oneRound(
     client,
-    `INSERT INTO merge_conflict_rounds (account_id, repo_id, work_item_id, entry_id, round, from_sha, base_sha, base_ref, conflict_files)
-     SELECT w.account_id, w.repo_id, w.id, NULL, r.used + 1, $3, $4, $5, $6::text[]
+    `INSERT INTO merge_conflict_rounds (account_id, repo_id, work_item_id, entry_id, round, from_sha, base_sha, base_ref, conflict_files, kind)
+     SELECT w.account_id, w.repo_id, w.id, NULL, r.used + 1, $3, $4, $5, $6::text[], $8::text
        FROM work_items w, LATERAL (SELECT count(*)::int AS used FROM merge_conflict_rounds WHERE account_id = $1 AND work_item_id = $2) r
       WHERE w.account_id = $1 AND w.id = $2 AND w.repo_id IS NOT NULL AND r.used < $7
         AND NOT EXISTS (SELECT 1 FROM merge_conflict_rounds WHERE account_id = $1 AND work_item_id = $2 AND outcome IS NULL)
         AND NOT EXISTS (SELECT 1 FROM merge_queue_entries WHERE account_id = $1 AND work_item_id = $2 AND state NOT IN ('merged', 'closed', 'cancelled'))
      ON CONFLICT (account_id, work_item_id, round) DO NOTHING
      RETURNING ${ROUND_COLUMNS}`,
-    [input.accountId, input.workItemId, input.fromSha, input.baseSha, input.baseRef, [...input.conflictFiles], MAX_CONFLICT_ROUNDS],
+    [input.accountId, input.workItemId, input.fromSha, input.baseSha, input.baseRef, [...input.conflictFiles], MAX_CONFLICT_ROUNDS, kind],
   );
   if (round) return { ok: true, round };
   return { ok: false, reason: (await listConflictRounds(client, input.accountId, input.workItemId)).length >= MAX_CONFLICT_ROUNDS ? "rounds_exhausted" : "not_startable" };

@@ -9,7 +9,7 @@ import { isSafeRepoPath } from "../discovery/verifierOutput.js";
 import { MAX_CONFLICT_ROUNDS } from "./policy.js";
 import { platformRefreshIdentity } from "./refresh.js";
 import { recordRoundRun, releaseToQueue, startConflictWork, startEntrylessConflictRound, stopEntry } from "./store.js";
-import { subjectOf, type ConflictRound, type ConflictSubject, type MergeQueueEntry, type RoundSubject } from "./types.js";
+import { subjectOf, type ConflictRound, type ConflictSubject, type MergeQueueEntry, type RoundKind, type RoundSubject } from "./types.js";
 
 /**
  * D#519 MQ4-b: the real `onConflict`. A queued entry (or the slot holder) whose pull request no longer merges cleanly is given a fix round, but
@@ -230,9 +230,10 @@ export type EntrylessStart = { outcome: "started" | "running" | "waiting" } | { 
 /**
  * D#519 MQ4-e1-a: the same decision and bound as the queue's `onConflict`, for a work item with no queue entry. One transaction inserts the round row (entry_id NULL) and
  * starts the agent run: an `Undo` refusal rolls the round back. There is no slot to give back. The round starts from the live head `subject.headSha`.
+ * D#483 S5-j2e: `eventCode` is the code a stop is recorded under; the direct gate's `overlap_unreviewed` re-route passes its own, so a clean overlap is never worded as a conflict.
  */
-export async function startEntrylessConflict(ports: ConflictPorts<ConflictSubject>, subject: ConflictSubject): Promise<EntrylessStart> {
-  return startEntrylessFromDecision(ports, subject, await decideConflict(ports, subject));
+export async function startEntrylessConflict(ports: ConflictPorts<ConflictSubject>, subject: ConflictSubject, eventCode?: string): Promise<EntrylessStart> {
+  return startEntrylessFromDecision(ports, subject, await decideConflict(ports, subject), eventCode === undefined ? {} : { eventCode });
 }
 
 /**
@@ -268,24 +269,37 @@ export async function startEntrylessFromRunnerFacts(ports: RoundStartPorts, subj
   return startEntrylessFromDecision(ports, subject, decideFromRunnerFacts(facts, subject.roundsUsed));
 }
 
-async function startEntrylessFromDecision(ports: RoundStartPorts, subject: ConflictSubject, decision: ConflictDecision): Promise<EntrylessStart> {
+/** What a start decided, in the one shape both kinds of round use: the files to hand the agent, or a fixed code for why no round starts. */
+export type StartDecision = { go: true; files: readonly string[]; baseSha: string; baseRef: string } | { go: false; code: string; files: readonly string[]; baseRef?: string };
+
+/** D#483 S5-j2e: how a start differs from the conflict round: the code its stops are recorded under, the round's kind, and the run it starts (default: the conflict round's). */
+export interface EntrylessShape {
+  eventCode?: string;
+  kind?: RoundKind;
+  startRun?(args: { entry: ConflictSubject; round: ConflictRound }): Promise<RoundStart>;
+}
+
+export async function startEntrylessFromDecision(ports: Pick<RoundStartPorts, "inTenant"> & Partial<Pick<RoundStartPorts, "startConflictRound">>, subject: ConflictSubject, decision: StartDecision, shape: EntrylessShape = {}): Promise<EntrylessStart> {
   const { accountId } = subject;
-  const stop = async (code: string, eventCode = "merge_conflict", detail?: { baseRef?: string | null; conflictFiles?: readonly string[] }): Promise<EntrylessStart> => {
+  const startRun = shape.startRun ?? ports.startConflictRound;
+  const ev = shape.eventCode ?? "merge_conflict";
+  const stop = async (code: string, eventCode = ev, detail?: { baseRef?: string | null; conflictFiles?: readonly string[] }): Promise<EntrylessStart> => {
     await recordStop(ports, subject, code, subject.headSha, eventCode, detail);
     return { outcome: "stopped", reason: eventCode };
   };
-  if (!decision.go) return stop(decision.code, "merge_conflict", { baseRef: decision.baseRef ?? null, ...(decision.code === "foreign_commits" ? { conflictFiles: decision.files } : {}) });
+  if (!decision.go) return stop(decision.code, ev, { baseRef: decision.baseRef ?? null, ...(decision.code === "foreign_commits" ? { conflictFiles: decision.files } : {}) });
   try {
     const started = await ports.inTenant(accountId, async (c) => {
       await c.query(`SET LOCAL idle_in_transaction_session_timeout = ${START_IDLE_TIMEOUT_MS}`);
-      const s = await startEntrylessConflictRound(c, { accountId, workItemId: subject.workItemId, fromSha: subject.headSha, baseSha: decision.baseSha, baseRef: decision.baseRef, conflictFiles: decision.files });
+      const s = await startEntrylessConflictRound(c, { accountId, workItemId: subject.workItemId, fromSha: subject.headSha, baseSha: decision.baseSha, baseRef: decision.baseRef, conflictFiles: decision.files, ...(shape.kind === undefined ? {} : { kind: shape.kind }) });
       if (!s.ok) return s.reason;
-      const run = await ports.startConflictRound({ entry: { ...subject, roundsUsed: s.round.round }, round: s.round });
+      if (startRun === undefined) throw new Error("no round start bound");
+      const run = await startRun({ entry: { ...subject, roundsUsed: s.round.round }, round: s.round });
       if (!run.ok) throw new Undo(run.reason);
       await recordRoundRun(c, { accountId, roundId: s.round.id, runId: run.runId });
       return "started" as const;
     });
-    if (started === "rounds_exhausted") return stop("rounds_exhausted", "merge_conflict", { baseRef: decision.baseRef });
+    if (started === "rounds_exhausted") return stop("rounds_exhausted", ev, { baseRef: decision.baseRef });
     return { outcome: started === "started" ? "started" : "running" };
   } catch (err) {
     if (!(err instanceof Undo)) throw err;
@@ -293,8 +307,8 @@ async function startEntrylessFromDecision(ports: RoundStartPorts, subject: Confl
     if (err.refusal === REFUSED_SPEND) return stop(REFUSED_SPEND, REFUSED_SPEND);
     // MQ4-e1-b (C11-e1-4b): a public branch that is no longer where the platform left it holds a person's commit: the foreign-commits stop, with the files, in this path only
     // (a review round keeps `public_branch_moved`). Nothing was published and no public ref moved.
-    if (err.refusal === PUBLIC_BRANCH_MOVED) return stop("foreign_commits", "merge_conflict", { baseRef: decision.baseRef, conflictFiles: decision.files });
-    return stop("round_not_started", "merge_conflict", { baseRef: decision.baseRef });
+    if (err.refusal === PUBLIC_BRANCH_MOVED) return stop("foreign_commits", ev, { baseRef: decision.baseRef, conflictFiles: decision.files });
+    return stop("round_not_started", ev, { baseRef: decision.baseRef });
   }
 }
 
