@@ -17894,7 +17894,7 @@
             }
           },
           "409": {
-            "description": "The request is already closed the other way (`setup_request_closed`).",
+            "description": "The request is already closed the other way (`setup_request_closed`), or is a kind that Mark done does not answer (`setup_request_not_markable`).",
             "content": {
               "application/json": {
                 "schema": {

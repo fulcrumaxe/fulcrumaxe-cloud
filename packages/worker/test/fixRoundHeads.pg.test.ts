@@ -120,6 +120,9 @@ describe("fix round: the branch heads on GitHub before a round starts [pg]", { t
   }
   const who = (t: { a: SeedRefs; w: string }) => ({ accountId: t.a.accountId, userId: t.a.userId, workItemId: t.w, haltEpoch: 0 });
   const fixReq = (t: { n: number }) => ({ issue: t.n, headSha: ASKED, prompt: "fix it", round: 1, actionId: randomUUID(), reviewer: "code" as const, failingRunId: randomUUID() });
+  const requests = async (w: string) =>
+    (await admin.query<{ state: string; origin: string; created_by: string | null; seen_head: string; resolution: string | null; resolved_by: string | null }>(
+      "SELECT state, origin, created_by, seen_head, resolution, resolved_by FROM setup_requests WHERE work_item_id = $1 AND kind = 'branch_pushed_by_person' ORDER BY created_at, id", [w])).rows;
   const facts = async (w: string) =>
     (await admin.query<{ kind: string; code: string | null; head_sha: string | null; pr_number: number | null }>("SELECT kind, code, head_sha, pr_number FROM work_item_driver_events WHERE work_item_id = $1 ORDER BY seq", [w])).rows;
   const stages = async (runId: string) => (await admin.query<{ stage: string }>("SELECT payload->>'stage' AS stage FROM run_events WHERE run_id = $1 AND kind = 'run.stage'", [runId])).rows.map((r) => r.stage);
@@ -187,14 +190,78 @@ describe("fix round: the branch heads on GitHub before a round starts [pg]", { t
       const f = await facts(t.w);
       expect(f).toContainEqual({ kind: "stopped", code: PUBLIC_BRANCH_MOVED, head_sha: LIVE, pr_number: 7 });
       expect(f).toContainEqual(expect.objectContaining({ kind: "fix_round_refused", code: PUBLIC_BRANCH_MOVED }));
-      // Only a verified push moves the stamp: resetting the branch to it is what clears the refusal.
-      expect((await admin.query("SELECT head_sha, state FROM plane_pushes WHERE work_item_id = $1", [t.w])).rows[0]).toEqual({ head_sha: PUSHED, state: "pr_opened" });
+      // Only a verified push moves the stamp: resetting the branch to it is what clears the refusal. D#598 P1g-2: the push record waits for a person, and one request holds the head seen.
+      expect((await admin.query("SELECT head_sha, state FROM plane_pushes WHERE work_item_id = $1", [t.w])).rows[0]).toEqual({ head_sha: PUSHED, state: "waiting_person_pushed" });
+      expect(await requests(t.w)).toEqual([expect.objectContaining({ state: "open", origin: "derived", created_by: null, seen_head: LIVE })]);
       expect(await stageOf(t.w)).toBe("pr_opened");
       expect(await liveRuns(t.w)).toBe(0);
 
-      // The branch put back where the platform left it: the next round starts.
+      // The item is paused by the request. Asking again looks at the branch again: the same change asks nothing new.
+      expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "setup_request_open" });
+      expect(await requests(t.w)).toHaveLength(1);
+      // A newer push while it is open moves what the person sees, in the same request.
+      const NEWER = "9".repeat(40);
+      publicHead.mockResolvedValue(NEWER);
+      expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "setup_request_open" });
+      expect(await requests(t.w)).toEqual([expect.objectContaining({ state: "open", seen_head: NEWER })]);
+
+      // The branch put back where the platform left it: the request closes, the pull request is the platform's again, and the next round starts.
       publicHead.mockResolvedValue(PUSHED);
       expect((await h.module.advanceStartFix(who(t), fixReq(t))).ok).toBe(true);
+      expect(await requests(t.w)).toEqual([expect.objectContaining({ state: "done", resolution: "condition_cleared", resolved_by: null })]);
+      expect((await admin.query("SELECT state FROM plane_pushes WHERE work_item_id = $1", [t.w])).rows[0]).toEqual({ state: "pr_opened" });
+    });
+
+    it("D#598 P1g-2: an item held by another kind of request does not read the public branch; one held by a branch request does", async () => {
+      const t = await runnerItem();
+      await paired(t);
+      await admin.query(
+        "INSERT INTO setup_requests (account_id, repo_id, work_item_id, origin, kind, target, env_name, reason, created_by) VALUES ($1, $2, $3, 'agent', 'env_var', 'cloud-staging', 'STRIPE_KEY', 'needed', $4)",
+        [t.a.accountId, t.a.repoId, t.w, t.a.userId],
+      );
+      const publicHead = vi.fn(async () => LIVE);
+      const h = harness({ privateHead: async () => ASKED, publicHead });
+      expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "setup_request_open" });
+      expect(publicHead).not.toHaveBeenCalled();
+      expect(await requests(t.w)).toEqual([]);
+      // The same hold with the push record waiting for a person is the one that looks (control: the condition is what keeps the read away above).
+      await admin.query("UPDATE plane_pushes SET state = 'waiting_person_pushed' WHERE work_item_id = $1", [t.w]);
+      expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "setup_request_open" });
+      expect(publicHead).toHaveBeenCalledTimes(1);
+    });
+
+    it("D#598 P1g-2: a request that cannot be written does not turn the refusal into a throw, and the fact of the refusal stays", async () => {
+      const t = await runnerItem();
+      await paired(t);
+      await admin.query("CREATE OR REPLACE FUNCTION p1g2_no_branch_request() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'p1g2 test: no request'; END $$");
+      await admin.query(`CREATE TRIGGER p1g2_no_branch_request BEFORE INSERT ON setup_requests FOR EACH ROW WHEN (NEW.kind = 'branch_pushed_by_person' AND NEW.account_id = '${t.a.accountId}') EXECUTE FUNCTION p1g2_no_branch_request()`);
+      try {
+        const h = harness({ privateHead: async () => ASKED, publicHead: async () => LIVE });
+        expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: PUBLIC_BRANCH_MOVED });
+        expect(await facts(t.w)).toContainEqual({ kind: "stopped", code: PUBLIC_BRANCH_MOVED, head_sha: LIVE, pr_number: 7 });
+        expect(await requests(t.w)).toEqual([]);
+        expect((await admin.query("SELECT state FROM plane_pushes WHERE work_item_id = $1", [t.w])).rows[0]).toEqual({ state: "pr_opened" });
+      } finally {
+        await admin.query("DROP TRIGGER p1g2_no_branch_request ON setup_requests");
+        await admin.query("DROP FUNCTION p1g2_no_branch_request()");
+      }
+      // Once it can be written, the next round raises it.
+      const h2 = harness({ privateHead: async () => ASKED, publicHead: async () => LIVE });
+      expect(await h2.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: PUBLIC_BRANCH_MOVED });
+      expect(await requests(t.w)).toEqual([expect.objectContaining({ state: "open", seen_head: LIVE })]);
+    });
+
+    it("D#598 P1g-2: a deleted branch is refused but asks nobody (it is not a person's push), and a branch a person already manages raises nothing and does not refuse", async () => {
+      const t = await runnerItem();
+      await paired(t);
+      const h = harness({ privateHead: async () => ASKED, publicHead: async () => null });
+      expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: PUBLIC_BRANCH_MOVED });
+      expect(await requests(t.w)).toEqual([]);
+      const m = await runnerItem();
+      await paired(m, { managed: true });
+      const hm = harness({ privateHead: async () => ASKED, publicHead: async () => LIVE });
+      expect((await hm.module.advanceStartFix(who(m), fixReq(m))).ok).toBe(true);
+      expect(await requests(m.w)).toEqual([]);
     });
 
     it("a public branch that was deleted is a change too; one GitHub cannot read is public_head_unavailable; a port that is missing refuses the same way", async () => {

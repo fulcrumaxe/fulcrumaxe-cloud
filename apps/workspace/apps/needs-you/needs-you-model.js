@@ -118,11 +118,16 @@ export function providerLink(url) {
   return { href: u.href, host: u.hostname };
 }
 
+/** Whether the row offers Mark done: a "someone pushed to the branch" request is not answered by it (the API refuses it), so no button is drawn. */
+export const canMarkDone = (row) => row.setupKind !== "branch_pushed_by_person";
+
 /** One request of the read, or null when it is not usable. Every text field is a string. */
 export function readRequest(r) {
   if (!r || typeof r.id !== "string" || r.id === "" || typeof r.title !== "string" || r.title === "" || !STATES.includes(r.state)) return null;
   return {
     kind: "setup",
+    // The kind of the request, as the API names it: "someone pushed to the branch" is not answered by Mark done.
+    setupKind: typeof r.kind === "string" ? r.kind : "",
     id: r.id,
     title: r.title,
     reason: text(r.reason),

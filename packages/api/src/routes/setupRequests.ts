@@ -147,6 +147,7 @@ function mapError(error: unknown): unknown {
   if (error instanceof SetupRequestError) {
     if (error.code === "already_open") return new ApiError(409, "setup_request_exists", "this step is already requested");
     if (error.code === "not_open") return new ApiError(409, "setup_request_closed", error.message);
+    if (error.code === "not_markable") return new ApiError(409, "setup_request_not_markable", "this request cannot be marked done; withdraw it, or move the branch back on GitHub");
     return new ApiError(422, "invalid_input", error.message, [{ path: error.field ?? "", code: error.code }]);
   }
   // The database's own gate (owner/admin policy, CHECK constraints) as a last line.
@@ -164,7 +165,7 @@ const resolveRoute = (verb: "withdraw" | "done", operationId: string, summary: s
   minRole: "admin",
   idempotency: "never",
   rateClass: "write",
-  extraResponses: { "409": "The request is already closed the other way (`setup_request_closed`)." },
+  extraResponses: { "409": verb === "done" ? "The request is already closed the other way (`setup_request_closed`), or is a kind that Mark done does not answer (`setup_request_not_markable`)." : "The request is already closed the other way (`setup_request_closed`)." },
   paramsSchema: idParamsSchema,
   responseSchema: requestSchema,
   async handler(ctx, input) {

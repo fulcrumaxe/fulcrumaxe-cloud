@@ -99,6 +99,8 @@ describe("a sandbox fix round updates the open public pull request [pg]", () => 
     }
     return id;
   }
+  const branchRequests = async () =>
+    (await admin.query<{ state: string; origin: string; created_by: string | null; seen_head: string }>("SELECT state, origin, created_by, seen_head FROM setup_requests WHERE account_id = $1 AND kind = 'branch_pushed_by_person'", [A.accountId])).rows;
   const settle = (executorRunId: string, over: Partial<PlanePublishDeps> = {}) => worker(over).settlePairedBuild({ accountId: A.accountId, executorRunId });
 
   beforeEach(async () => {
@@ -499,6 +501,23 @@ describe("a sandbox fix round updates the open public pull request [pg]", () => 
       expect(await outcome(run)).toBe("branch_moved");
       expect(writes()).toEqual([]);
       expect([...graph.refs.values()]).toEqual([NEW_TIP, OTHER]);
+      // D#598 P1g-2: the lease failure is asked about. The branch is read on GitHub, and one request holds the head seen (the person's commit); the item waits.
+      expect(await branchRequests()).toEqual([expect.objectContaining({ state: "open", origin: "derived", created_by: null, seen_head: OTHER })]);
+      expect(await planeRow()).toMatchObject({ state: "waiting_person_pushed", head_sha: STAMP });
+    });
+
+    it("D#598 P1g-2: a lease failure whose branch cannot be read on GitHub, or that is back at the stamp, raises nothing and still ends as the refusal", async () => {
+      await pushed(OTHER, [OLD_MAIN]);
+      output = () => say({ phase: "refused", code: "public_branch_moved" });
+      const real = await github();
+      // Main still reads as it does for the round; only the item's own branch cannot be read.
+      const hosted = { ...real, branchHead: async (i: { accountId: string; codeRepo: string; branch: string }) => { if (i.branch === "main") return real.branchHead!(i); throw new Error("public_unavailable"); } };
+      expect((await settle(await fixRound({ conflict: true }), { hosted })).publish).toEqual({ kind: "refused", code: "republish_branch_moved", attemptNo: 1 });
+      expect(await branchRequests()).toEqual([]);
+      expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: STAMP });
+      const back = { ...real, branchHead: async (i: { accountId: string; codeRepo: string; branch: string }) => (i.branch === "main" ? real.branchHead!(i) : STAMP) };
+      expect((await settle(await fixRound({ conflict: true }), { hosted: back })).publish).toMatchObject({ kind: "refused", code: "republish_branch_moved" });
+      expect(await branchRequests()).toEqual([]);
     });
 
     it("the round reads pending while the republish has not finished, and none when the run signed no conflict base", async () => {

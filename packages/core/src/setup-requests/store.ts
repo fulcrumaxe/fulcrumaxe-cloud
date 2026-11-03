@@ -30,9 +30,9 @@ import {
  * person's next `advance_work_item` request after the withdrawal; a done request pauses nothing.
  */
 
-export type SetupRequestErrorCode = 'invalid_input' | 'already_open' | 'not_open' | 'work_item_repo_mismatch';
+export type SetupRequestErrorCode = 'invalid_input' | 'already_open' | 'not_open' | 'work_item_repo_mismatch' | 'not_markable';
 
-/** `invalid_input` and `work_item_repo_mismatch` map to 422, `already_open` and `not_open` to 409. */
+/** `invalid_input` and `work_item_repo_mismatch` map to 422, `already_open`, `not_open` and `not_markable` to 409. */
 export class SetupRequestError extends Error {
   constructor(
     readonly code: SetupRequestErrorCode,
@@ -67,6 +67,8 @@ export interface SetupRequest {
   checkRanAt: Date | null;
   /** When the check after Mark done put the request back; null for one that never was. */
   repausedAt: Date | null;
+  /** `branch_pushed_by_person` only: the public branch head the platform saw when it raised the request (what a confirmed Replace takes its lease on); null for every other kind. */
+  seenHead: string | null;
 }
 
 interface Row {
@@ -90,10 +92,11 @@ interface Row {
   check_reason: string | null;
   check_ran_at: Date | null;
   repaused_at: Date | null;
+  seen_head: string | null;
 }
 
 const COLUMNS = `id, repo_id, work_item_id, origin, kind, target, env_name, target_environment, reason, provider_url, check_kind, state, created_by, created_at,
-  resolution, resolved_by, resolved_at, check_reason, check_ran_at, repaused_at`;
+  resolution, resolved_by, resolved_at, check_reason, check_ran_at, repaused_at, seen_head`;
 
 const map = (r: Row): SetupRequest => ({
   id: r.id,
@@ -116,6 +119,7 @@ const map = (r: Row): SetupRequest => ({
   checkReason: r.check_reason,
   checkRanAt: r.check_ran_at,
   repausedAt: r.repaused_at,
+  seenHead: r.seen_head,
 });
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

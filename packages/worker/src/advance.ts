@@ -38,7 +38,7 @@ import type { SeatRequest, SeatResult } from "./seat.js";
 import { startCheckFixRound } from "./checkFix.js";
 import { CAPACITY_WAIT, CapacityWaitingError, REPO_GONE_REFUSALS, createCapacityGate, type CapacityPort } from "./capacityGate.js";
 import { BASE_SYNCED_PROMPT_LINE, BASE_SYNCED_STAGE, FIX_BASE_EVENT, checkFixBeforeStart, hasPublicCopy, recordBaseSyncUnavailable, republishGate, syncRunBranch } from "./fixRoundBase.js";
-import { BRANCH_MOVED_STAGE, checkPrivateHead, checkPublicBranch, type FixRoundHeadPorts } from "./fixRoundHeads.js";
+import { BRANCH_MOVED_STAGE, checkPrivateHead, checkPublicBranch, refreshWaitingBranch, type FixRoundHeadPorts } from "./fixRoundHeads.js";
 import { RunActionInputError, type PerformResult } from "./runActions.js";
 import { STAGE_RESUME_PASS_SECONDS } from "./stageResume.js";
 
@@ -1397,7 +1397,12 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     });
     if (halt?.halted) return { status: "refused", reason: "item_halted" };
     if (halt && halt.halt_epoch !== who.haltEpoch) return { status: "refused", reason: "halted_since_approval" };
-    const setupHold = await withTenant(runnerPool, who.accountId, who.userId, (client) => setupHoldFor(client, who.workItemId));
+    let setupHold = await withTenant(runnerPool, who.accountId, who.userId, (client) => setupHoldFor(client, who.workItemId));
+    if (setupHold === "setup_request_open") {
+      // D#598 P1g-2: a "someone pushed" request is kept up to date by looking at the branch again; one the branch has answered (it was put back) lifts the hold.
+      await refreshWaitingBranch(runnerPool, deps.fixHeads, who);
+      setupHold = await withTenant(runnerPool, who.accountId, who.userId, (client) => setupHoldFor(client, who.workItemId));
+    }
     if (setupHold) return { status: "refused", reason: setupHold };
     return null;
   }

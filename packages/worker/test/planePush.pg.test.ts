@@ -895,6 +895,28 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       expect(await facts()).toHaveLength(1);
     });
 
+    it("D#598 P1g-2: the same refusal on the runner path asks a person: the branch is read, one request holds the head seen, nothing is overwritten; an unreadable branch raises nothing", async () => {
+      const PERSON = "7".repeat(40);
+      await open();
+      const run = await claimedRun({ continues: { baseSha: BASE } });
+      await askToken(run);
+      const original = port.branchHead;
+      try {
+        port.branchHead = async () => {
+          throw new Error("public_unavailable");
+        };
+        expect((await report(run, { phase: "refused", code: "public_branch_moved" })).status).toBe(200);
+        expect((await admin.query("SELECT 1 FROM setup_requests WHERE account_id = $1 AND kind = 'branch_pushed_by_person'", [A.accountId])).rowCount).toBe(0);
+        port.branchHead = async () => PERSON;
+        await report(run, { phase: "refused", code: "public_branch_moved" });
+      } finally {
+        port.branchHead = original;
+      }
+      const rows = (await admin.query<{ state: string; origin: string; created_by: string | null; seen_head: string }>("SELECT state, origin, created_by, seen_head FROM setup_requests WHERE account_id = $1 AND kind = 'branch_pushed_by_person'", [A.accountId])).rows;
+      expect(rows).toEqual([{ state: "open", origin: "derived", created_by: null, seen_head: PERSON }]);
+      expect(await planeRow()).toMatchObject({ state: "waiting_person_pushed", head_sha: HEAD });
+    });
+
     it("only the run that was granted an update may move the stamp: an update report from a fresh run (a push attempt) records nothing", async () => {
       await open();
       const run = await claimedRun();

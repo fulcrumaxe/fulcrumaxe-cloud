@@ -8,6 +8,7 @@ import { withTenant } from '@fx/db/src/withTenant.js';
 import { insertApiToken } from '@fx/core/src/tokens/service.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
 import { setupHoldFor, syncDerivedSetupRequest } from '@fx/core/src/setup-requests/store.js';
+import { raiseBranchPushedByPerson } from '@fx/core/src/setup-requests/branchPushed.js';
 import { generateToken } from '../src/tokens/format.js';
 import { hashToken } from '../src/tokens/resolve.js';
 import { handleApiRequest } from '../src/handler.js';
@@ -386,6 +387,37 @@ describe('D#598 P8a: setup requests', () => {
     expect((await list(`?repo_id=${f.repoId}`)).truncated).toBe(false);
     expect((await call(f.member, 'GET', '/setup-requests?state=bogus')).status).toBe(422);
     expect((await call(f.member, 'GET', '/setup-requests?work_item_id=nope')).status).toBe(422);
+  });
+
+  it('D#598 P1g-2: Mark done is refused with a fixed 409 for a "someone pushed to the branch" request, and nothing changes; withdraw still answers it', async () => {
+    const f = await fixture();
+    await admin.query('INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, $3, $4)', [f.repoId, f.owner.accountId, 'acme/widgets-public', ['private/**']]);
+    await admin.query(
+      `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state)
+       VALUES ($1, $2, $3, 'acme/widgets-public', $4, $5, $6, 7, 'https://github.com/acme/widgets-public/pull/7', 'pr_opened')`,
+      [f.owner.accountId, f.itemId, f.repoId, 'f'.repeat(64), 'd'.repeat(40), 'e'.repeat(40)],
+    );
+    const out = await withTenant(appUserPool, f.owner.accountId, (c) => raiseBranchPushedByPerson(c, { workItemId: f.itemId, seenHead: 'a'.repeat(40) }));
+    expect(out.kind).toBe('raised');
+    const id = (out as { request: { id: string } }).request.id;
+    const before = await rows(f.owner.accountId);
+    const refused = await call(f.admin, 'POST', `/setup-requests/${id}/done`);
+    expect(refused.status).toBe(409);
+    const body = (await refused.json()) as ErrorBody;
+    expect(body.error.code).toBe('setup_request_not_markable');
+    expect(body.error.message).toBe('this request cannot be marked done; withdraw it, or move the branch back on GitHub');
+    // Nothing changed: the request is still open and unresolved, the push record still waits, no restart was filed, the item is still held.
+    expect(await rows(f.owner.accountId)).toEqual(before);
+    expect((await admin.query('SELECT state FROM plane_pushes WHERE work_item_id = $1', [f.itemId])).rows).toEqual([{ state: 'waiting_person_pushed' }]);
+    expect((await admin.query(`SELECT 1 FROM run_action_requests WHERE account_id = $1 AND kind = 'advance_work_item' AND target_id = $2`, [f.owner.accountId, f.itemId])).rowCount).toBe(0);
+    expect(await withTenant(appUserPool, f.owner.accountId, f.owner.userId, (c) => setupHoldFor(c, f.itemId))).toBe('setup_request_open');
+    // The list says what works today, in words, and never Mark done.
+    const listed = (await (await call(f.member, 'GET', '/setup-requests')).json()) as { requests: Dto[] };
+    const mine = listed.requests.find((r) => r.id === id)!;
+    expect(mine.status_sentence).toBe('The cloud will not change this branch. You can withdraw this request, or move the branch back to where the cloud left it on GitHub and this request closes by itself.');
+    expect(`${mine.status_sentence} ${mine.reason} ${mine.title}`).not.toMatch(/mark done|null|undefined|public_branch_moved|branch_pushed_by_person/i);
+    const wd = await call(f.admin, 'POST', `/setup-requests/${id}/withdraw`);
+    expect(await wd.json()).toMatchObject({ state: 'withdrawn', resolution: 'withdrawn' });
   });
 
   it('AC (undo): mark done resumes at once; withdraw keeps the item paused; repeats answer 200, the opposite on a closed request is 409', async () => {
