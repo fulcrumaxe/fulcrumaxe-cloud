@@ -4,6 +4,8 @@ import {
   MAX_CONFLICT_FACT_PATHS,
   MAX_PLANE_MERGE_PATHS,
   PLANE_MERGE_ABORT_CODES,
+  PLANE_MERGE_ORDERED_VERDICTS,
+  PlaneMergeOrderedFact,
   PLANE_MERGE_CONFLICT_VERDICTS,
   PLANE_MERGE_CLAIM_PATH,
   PLANE_MERGE_REPORT_PATH,
@@ -14,9 +16,9 @@ import {
   PlaneMergeVerifyMessage,
   RUNNER_MESSAGES,
 } from "../src/messages.js";
-import { ClaimIdleReply, PlaneMergeClaimReply, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyReply, RUNNER_REPLIES } from "../src/replies.js";
+import { ClaimIdleReply, PlaneMergeClaimReply, PlaneMergeOrderedConfig, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyReply, RUNNER_REPLIES } from "../src/replies.js";
 import { HelloMessage } from "../src/messages.js";
-import { CONFLICT_FACTS_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, RUNNER_CAPABILITIES } from "../src/job.js";
+import { CONFLICT_FACTS_CAPABILITY, ORDERED_FACTS_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, RUNNER_CAPABILITIES } from "../src/job.js";
 import { fieldPaths, g1Violations, nonStrictObjects } from "./helpers/schemaWalk.js";
 
 const ORDER = "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e";
@@ -179,6 +181,70 @@ describe("the conflict verdict on a report", () => {
     expect(fieldPaths(PlaneMergeReportMessage).filter((n) => /conflict/.test(n)).sort()).toEqual(["conflict", "conflict.base_ref", "conflict.base_sha", "conflict.paths", "conflict.verdict"]);
     expect(nonStrictObjects(PlaneMergeConflictFacts)).toEqual([]);
     expect(g1Violations(PlaneMergeConflictFacts)).toEqual([]);
+  });
+});
+
+// D#483 S5-j2c1: the ordering fact is an optional, strict, additive field on the verify, and the configuration an optional one on the claim reply.
+describe("the ordered facts (ordered_facts_v1)", () => {
+  const fact = (over: Record<string, unknown> = {}) => ({ verdict: "ok", tip_sha: A, behind: false, overlap: false, ...over });
+  it("is a hello capability, once, and gates no role", () => {
+    expect(ORDERED_FACTS_CAPABILITY).toBe("ordered_facts_v1");
+    expect(RUNNER_CAPABILITIES).toContain(ORDERED_FACTS_CAPABILITY);
+    const hello = { protocol_version: 1, binary_version: "0.1.0", model_auth_present: true, isolation: "container" };
+    expect(HelloMessage.safeParse({ ...hello, capabilities: ["plane_merge_v1", "ordered_facts_v1"] }).success).toBe(true);
+    expect(HelloMessage.safeParse({ ...hello, capabilities: ["ordered_facts_v1", "ordered_facts_v1"] }).success).toBe(false);
+  });
+  it("is optional on a verify: every verify without it still parses, and each closed verdict does with it", () => {
+    expect(PlaneMergeVerifyMessage.safeParse(verify()).success).toBe(true);
+    for (const verdict of PLANE_MERGE_ORDERED_VERDICTS) expect(PlaneMergeVerifyMessage.safeParse(verify({ ordered: fact({ verdict }) })).success, verdict).toBe(true);
+    expect(PlaneMergeVerifyMessage.safeParse(verify({ ordered: fact({ verdict: "out_of_order", resource: "migrations", key: "key_0011", highest: "highest_0011", overlap: true, behind: true }) })).success).toBe(true);
+  });
+  it("is strict: an unknown key, a free-text verdict, text in a code field, a missing sha or boolean and a path of its own are all refused", () => {
+    const no = (ordered: unknown, label: string) => expect(PlaneMergeVerifyMessage.safeParse(verify({ ordered })).success, label).toBe(false);
+    no(fact({ paths: ["src/a.ts"] }), "a path of its own");
+    no(fact({ patch: "x" }), "extra key");
+    no(fact({ verdict: "fine" }), "free-text verdict");
+    no(fact({ resource: "Migrations Dir" }), "a resource with a space and capitals");
+    no(fact({ key: "../0011" }), "a key that is a path");
+    no(fact({ highest: "x".repeat(65) }), "an over-long code");
+    no(fact({ resource: "" }), "an empty code");
+    no(fact({ tip_sha: "abc" }), "a short sha");
+    no(fact({ tip_sha: undefined }), "no sha");
+    no(fact({ behind: undefined }), "no behind");
+    no(fact({ overlap: "yes" }), "overlap as text");
+    no("ok", "a bare string");
+  });
+  it("holds no field that could carry content, and the schema walk finds it clear", () => {
+    expect(fieldPaths(PlaneMergeVerifyMessage).filter((n) => /^ordered/.test(n)).sort()).toEqual(["ordered", "ordered.behind", "ordered.highest", "ordered.key", "ordered.overlap", "ordered.resource", "ordered.tip_sha", "ordered.verdict"]);
+    expect(nonStrictObjects(PlaneMergeOrderedFact)).toEqual([]);
+    expect(g1Violations(PlaneMergeOrderedFact)).toEqual([]);
+  });
+  it("adds the base_moved abort code, and only closed codes still abort", () => {
+    expect(PLANE_MERGE_ABORT_CODES).toContain("base_moved");
+    expect(PlaneMergeReportMessage.safeParse(report({ result: "aborted", abort_code: "base_moved" })).success).toBe(true);
+    expect(PlaneMergeReportMessage.safeParse(report({ result: "aborted", abort_code: "base_moved_again" })).success).toBe(false);
+  });
+  it("the claim reply carries ordered_config only as the closed, bounded shape: at most five resources, no other settings key", () => {
+    const resource = { name: "migrations", path_pattern: "packages/db/migrations/*.sql", key_pattern: "^(\\d{4})_", key_kind: "integer" };
+    const config = { configured: true, resources: [resource] };
+    expect(PlaneMergeClaimReply.safeParse(claimed()).success).toBe(true);
+    expect(PlaneMergeClaimReply.safeParse(claimed({ ordered_config: config })).success).toBe(true);
+    expect(PlaneMergeClaimReply.safeParse(claimed({ ordered_config: { configured: false, resources: [] } })).success).toBe(true);
+    const no = (c: unknown, label: string) => expect(PlaneMergeClaimReply.safeParse(claimed({ ordered_config: c })).success, label).toBe(false);
+    no({ ...config, autoRenumber: true }, "another settings key");
+    no({ configured: true, resources: Array.from({ length: 6 }, (_, i) => ({ ...resource, name: `r${i}` })) }, "six resources");
+    no({ configured: true, resources: [{ ...resource, extra: 1 }] }, "extra key on a resource");
+    no({ configured: true, resources: [{ ...resource, key_kind: "float" }] }, "unknown key kind");
+    no({ configured: true, resources: [{ ...resource, path_pattern: "x".repeat(201) }] }, "over-long pattern");
+    no({ configured: true, resources: [{ ...resource, name: "bad name!" }] }, "unusual name");
+    expect(PlaneMergeOrderedConfig.safeParse(config).success).toBe(true);
+    expect(nonStrictObjects(PlaneMergeOrderedConfig)).toEqual([]);
+    expect(g1Violations(PlaneMergeOrderedConfig)).toEqual([]);
+  });
+  it("an older runner's strict parse refuses the new reply key, which is why the cloud sends it only to a capable runner", () => {
+    const oldClaim = (PlaneMergeClaimReply as unknown as z.ZodUnion<[z.ZodObject<z.ZodRawShape>, z.ZodTypeAny]>).options[0].omit({ ordered_config: true }).strict();
+    expect(oldClaim.safeParse(claimed()).success).toBe(true);
+    expect(oldClaim.safeParse(claimed({ ordered_config: { configured: false, resources: [] } })).success).toBe(false);
   });
 });
 

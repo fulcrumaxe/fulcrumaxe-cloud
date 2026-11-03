@@ -108,12 +108,34 @@ describe("R-P1d-1: the merge gate is the only way the product merges", () => {
     // The check is the port the caller hands in, never a call to the queue's `orderedStep` (which stops entries and renews slots).
     expect(src).not.toMatch(/orderedStep/);
     const run = readFileSync(path.join(REPO_ROOT, "packages/pipeline/src/review/mergeGateRun.ts"), "utf8");
-    expect(run).toMatch(/\.\.\.createMergeOrder\(\{ pool, github: mergePort, runnerLocal \}\)/);
+    expect(run).toMatch(/\.\.\.createMergeOrder\(\{ pool, github: mergePort, runnerLocal, paired, attestation: go\?\.attestation \}\)/);
     expect(mentioning(/\bcreateMergeOrder\b/)).toEqual(["packages/pipeline/src/mergeQueue/mergeOrderCheck.ts", "packages/pipeline/src/review/mergeGateRun.ts"]);
     expect(mentioning(/\borderedStep\(/)).toEqual(["packages/pipeline/src/mergeQueue/orderedCheck.ts", "packages/pipeline/src/mergeQueue/tick.ts"]);
     // R-C34-F4: a pull request put in GitHub's merge queue keeps the lease (the one release stays in the finally), and the settle path frees it from the webhook.
     expect(fn.indexOf("lease?.holdForHostQueue")).toBeGreaterThan(fn.indexOf("runMergeGateLeased(deps, input, lease"));
     expect(mentioning(/\breleaseHostQueueLease\b/)).toEqual(["packages/pipeline/src/mergeQueue/events.ts", "packages/pipeline/src/mergeQueue/mergeLease.ts"]);
+  });
+
+  it("D#483 S5-j2c1: the go phase takes an order lease named for its order before anything is read, a hand-over keeps it, every other exit frees it, and only the lease module names the holder", () => {
+    const src = readFileSync(path.join(REPO_ROOT, "packages/pipeline/src/build/mergeGate.ts"), "utf8");
+    const fn = src.slice(src.indexOf("export async function runMergeGate("));
+    const leased = fn.indexOf("async function runMergeGateLeased(");
+    const keep = fn.indexOf('out.outcome === "merge_delegated" && lease?.heldUntilOrderEnds === true');
+    const free = fn.indexOf("if (lease && !heldForHostQueue) await lease.release()");
+    expect(fn.indexOf("deps.acquireMergeLease()")).toBeLessThan(leased);
+    // The hand-over is decided from the gate's own outcome, after the leased run and before the one release in the finally.
+    expect(keep).toBeGreaterThan(fn.indexOf("runMergeGateLeased(deps, input, lease"));
+    expect(free).toBeGreaterThan(keep);
+    expect(fn.match(/lease\.release\(\)/g)).toHaveLength(1);
+    const run = readFileSync(path.join(REPO_ROOT, "packages/pipeline/src/review/mergeGateRun.ts"), "utf8");
+    expect(run).toMatch(/kind: "order" as const, holder: orderHolder\(orderId\)/);
+    expect(run).toMatch(/orderId !== undefined \? \{ heldUntilOrderEnds: true as const \}/);
+    expect(mentioning(/\borderHolder\b/)).toEqual(["packages/pipeline/src/mergeQueue/mergeLease.ts", "packages/pipeline/src/review/mergeGateRun.ts"]);
+    // The order's own ends free it where the order row changes (worker store), by the holder's shape alone.
+    expect(readFileSync(path.join(REPO_ROOT, "packages/worker/src/runnerPlaneMerge.ts"), "utf8").match(/await freeOrderLeases\(/g)).toHaveLength(3);
+    // An order that ended enqueued keeps its lease, and the one caller that turns it into the hold for the host's queue is the cloud's recordEnqueued.
+    expect(readFileSync(path.join(REPO_ROOT, "packages/worker/src/runnerPlaneMerge.ts"), "utf8")).toMatch(/if \(to !== "enqueued" \|\| rows\[0\]!\.ordered_verdict === "none"\) await freeOrderLeases\(/);
+    expect(mentioning(/\bconvertOrderLeaseToHostQueue\b/)).toEqual(["apps/web/lib/planeMerge.ts", "packages/pipeline/src/mergeQueue/mergeLease.ts", "packages/worker/src/runnerPlaneMerge.ts"]);
   });
 
   it("inside the gate, the author reasons are gathered before the stop, and both merge call sites sit after it", () => {

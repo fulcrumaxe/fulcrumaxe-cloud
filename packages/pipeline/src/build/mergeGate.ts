@@ -304,6 +304,8 @@ export interface MergeLeaseHandle {
   release(): Promise<void>;
   holdForHostQueue?(prNumber: number): Promise<void>;
   confirm?(): Promise<boolean>;
+  /** D#483 S5-j2c1: the lease is a runner's order lease: a gate that hands the order over (`merge_delegated`) keeps it until the order ends; every other exit frees it. */
+  heldUntilOrderEnds?: true;
 }
 
 export interface MergeGateDeps {
@@ -852,6 +854,8 @@ export async function runMergeGate(deps: MergeGateDeps, input: MergeGateInput): 
   let heldForHostQueue = false;
   try {
     const out = await runMergeGateLeased(deps, input, lease ?? undefined);
+    // D#483 S5-j2c1: the runner's order now holds the credential and merges on its own clock. The lease stays with the order (freed where the order ends, or when a read of it says it is over).
+    if (out.outcome === "merge_delegated" && lease?.heldUntilOrderEnds === true) heldForHostQueue = true;
     // D#483 S5-j2a2 (R-C34-F4, R-C35-4): a pull request put in GitHub's merge queue that adds an ordered-resource file keeps the lease until its entry settles (the webhook, or a read of
     // the entry after 30 minutes). Any other pull request gives it back at once, so a repository behind GitHub's queue keeps its batching.
     if (out.outcome === "merge_enqueued" && lease?.holdForHostQueue && (await addsOrderedFile(deps, input))) {

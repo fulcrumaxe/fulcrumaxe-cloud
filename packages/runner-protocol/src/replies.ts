@@ -231,6 +231,29 @@ const mergeReason = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/);
 const MergeCredential = z.object({ token: z.string().min(20).max(512).regex(/^[A-Za-z0-9_.-]+$/), expires_at: utcTimestamp }).strict();
 
 /**
+ * D#483 S5-j2c1: the repository's ordered-resource configuration as the cloud's `readOrderedConfig` accepted it (an entry that failed validation is already dropped), and nothing else of the repository's settings.
+ * At most five resources; the runner checks them again with the same compiler. `configured` false means the default (the detected migrations directory) applies.
+ */
+export const PlaneMergeOrderedConfig = z
+  .object({
+    configured: z.boolean(),
+    resources: z
+      .array(
+        z
+          .object({
+            name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9 _.-]{0,39}$/),
+            path_pattern: z.string().min(1).max(200),
+            key_pattern: z.string().min(1).max(120),
+            key_kind: z.enum(["integer", "text"]),
+          })
+          .strict(),
+      )
+      .max(5),
+  })
+  .strict();
+export type PlaneMergeOrderedConfig = z.infer<typeof PlaneMergeOrderedConfig>;
+
+/**
  * 200 from plane-merge-claim: an order and the bound facts, all from the cloud's rows, with the READ credential (the code repository, contents read,
  * at most one per order and lease generation). Or `{ retry_after }` when nothing is waiting for this runner.
  */
@@ -247,6 +270,8 @@ export const PlaneMergeClaimedReply = z
     overlay_globs: z.array(pairingPath).min(1).max(MAX_PLANE_PUSH_GLOBS),
     pairing_digest: z.string().regex(/^[0-9a-f]{64}$/),
     read: MergeCredential,
+    /** D#483 S5-j2c1: only to a runner whose latest hello listed `ordered_facts_v1` (an older runner's strict parse never sees the key). */
+    ordered_config: PlaneMergeOrderedConfig.optional(),
   })
   .strict();
 export const PlaneMergeClaimReply = z.union([PlaneMergeClaimedReply, z.object({ retry_after: retryAfter(3600) }).strict()]);

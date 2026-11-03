@@ -2,7 +2,7 @@ import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { enqueueDedupeKey, listHeadRemovals, recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "@fx/github";
-import { createPgLocalReviewOptIn, createReviewGitHubPort, loadReviewContext, mergeQueue, readItemRecordedPullRequest, readPublicPullRequest, runMergeGateForItem, type GitHubHttp, type MergeBlockReason } from "@fx/pipeline";
+import { createPgLocalReviewOptIn, createReviewGitHubPort, loadReviewContext, mergeQueue, readItemRecordedPullRequest, readPublicPullRequest, readRepoGhId, runMergeGateForItem, type GitHubHttp, type GoAttestation, type MergeBlockReason } from "@fx/pipeline";
 import type { PlaneMergeGoResult, PlaneMergeOrderFacts, PublicPullFacts, PublicQueueFacts } from "@fx/runner-cloud";
 import { mergeGateAuthorTrust } from "./github/authorTrust";
 import { openInstallationHttp } from "./github/installationHttp";
@@ -33,7 +33,7 @@ export interface PlaneMergeOpsDeps {
 interface GoInput {
   accountId: string;
   order: PlaneMergeOrderFacts;
-  attestation: { reviewedHead: string; publicHead: string; same: boolean; incomplete: boolean; paths: readonly string[] };
+  attestation: { reviewedHead: string; publicHead: string; same: boolean; incomplete: boolean; paths: readonly string[]; orderedCapable?: boolean; ordered?: GoAttestation["ordered"] };
   /** The runner listed `plane_merge_queue_v1` (D#694 B7-1); absent is false. */
   queueCapable?: boolean;
   delegate: () => Promise<{ delegated: true } | { delegated: false; reason: string }>;
@@ -88,7 +88,7 @@ export function createPlaneMergeOps(deps: PlaneMergeOpsDeps) {
           return r.delegated ? { delegated: true } : { delegated: false, reason: r.reason as MergeBlockReason };
         },
       },
-      { accountId, workItemId: order.workItemId, prNumber: recorded.number, goPhase: { attestation: input.attestation } },
+      { accountId, workItemId: order.workItemId, prNumber: recorded.number, goPhase: { attestation: input.attestation, orderId: order.id } },
     );
     switch (out.outcome) {
       case "merge_delegated":
@@ -141,6 +141,19 @@ export function createPlaneMergeOps(deps: PlaneMergeOpsDeps) {
   /** The item's `merge_enqueued` fact after a verified enqueue: the public number and head, the key B6-2's webhook writes for the same entry (a head that was removed and queued again gets the next one). */
   async function recordEnqueued(pool: Pool, input: { accountId: string; order: PlaneMergeOrderFacts; entryId: string }): Promise<void> {
     const { accountId, order } = input;
+    // R-C34-F4 / R-C35-4: the order lease becomes the hold for GitHub's queue before anything else, named by the public number and the code repository's id. A doubt leaves the order lease in place.
+    try {
+      const loaded = await loadReviewContext(pool, accountId, order.workItemId);
+      // A runner that attested `none` (no ordered file added) left no hold: the store freed the lease with the order.
+      if (loaded.ok && order.orderedVerdict !== "none") {
+        const code = splitRepo(order.codeRepo);
+        const ghId = await readRepoGhId(await openPublicHttp({ repoId: loaded.ctx.repoId, owner: code.owner, name: code.name, executionMode: loaded.ctx.executionMode }), code.owner, code.name);
+        if (ghId !== null) await mergeQueue.convertOrderLeaseToHostQueue(pool, { accountId, repoId: order.repoId, orderId: order.id, prNumber: order.prNumber, repoGhId: String(ghId), workItemId: order.workItemId });
+      }
+    } catch (error) {
+      // fx-swallow-ok: the order lease stays and still excludes until its bound; a fixed line is logged, never the error text
+      console.warn(JSON.stringify({ event: "plane_merge.hold_convert_failed", work_item_id: order.workItemId, name: error instanceof Error ? error.name.slice(0, 60) : null }));
+    }
     await withTenant(pool, accountId, async (client) => {
       const removals = (await listHeadRemovals(client, accountId, order.workItemId, order.expectedPublicHead, order.prNumber, { all: true })).length;
       await recordDriverEvent(client, accountId, { workItemId: order.workItemId, kind: "merge_enqueued", dedupeKey: enqueueDedupeKey(order.expectedPublicHead, removals), code: "queue", headSha: order.expectedPublicHead, prNumber: order.prNumber, queueEntryId: input.entryId });
@@ -178,9 +191,16 @@ export function createPlaneMergeOps(deps: PlaneMergeOpsDeps) {
     }
   }
 
+  /** D#483 S5-j2c1: the repository's ordered-resource configuration for a runner that listed `ordered_facts_v1`: what `readOrderedConfig` accepted and nothing else of the repository's settings. */
+  async function orderedConfig(pool: Pool, input: { accountId: string; repoId: string }) {
+    const { rows } = await withTenant(pool, input.accountId, (client) => client.query<{ settings: unknown }>("SELECT settings FROM repos WHERE account_id = $1 AND id = $2", [input.accountId, input.repoId]));
+    return mergeQueue.orderedConfigWire(rows[0]?.settings ?? null);
+  }
+
   return {
     openReviewHttp,
     openPublicHttp,
+    orderedConfig: (input: { accountId: string; repoId: string }) => deps.withPool((pool) => orderedConfig(pool, input)),
     goPhase: (input: GoInput): Promise<PlaneMergeGoResult> => deps.withPool((pool) => go(pool, input)),
     readPublicPull: (input: { accountId: string; order: PlaneMergeOrderFacts }): Promise<PublicPullFacts> => deps.withPool((pool) => readPull(pool, input)),
     readPublicQueue: (input: { accountId: string; order: PlaneMergeOrderFacts }): Promise<PublicQueueFacts> => deps.withPool((pool) => readQueue(pool, input)),

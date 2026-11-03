@@ -932,6 +932,134 @@ describe("plane-merge routes [pg]", () => {
     });
   });
 
+  // D#483 S5-j2c1: the ordered_facts_v1 capability. A runner without it is never sent the new key and never accepted with one; every route checks the recorded hello, read now.
+  describe("ordered_facts_v1", () => {
+    const CONFIG = { configured: true, resources: [{ name: "migrations", path_pattern: "db/*.sql", key_pattern: "^(\\d{4})_", key_kind: "integer" as const }] };
+    const FACT = { verdict: "out_of_order", resource: "migrations", key: "key_0011", highest: "highest_0011", tip_sha: "c".repeat(40), behind: true, overlap: false };
+    const setCaps = async (caps: string[]) => void (await admin.query("UPDATE runner_capabilities SET capabilities = $2::text[] WHERE runner_id = $1", [runner, caps]));
+    const configCalls: Array<{ accountId: string; repoId: string }> = [];
+    const withConfig = (): RunnerCloudDeps =>
+      deps({
+        planeMerge: port({
+          orderedConfig: async (input) => {
+            configCalls.push(input);
+            return CONFIG;
+          },
+        }),
+      });
+    beforeEach(() => {
+      configCalls.length = 0;
+    });
+
+    it("the claim reply carries ordered_config only to a runner whose latest hello listed it, read from the repository of the order", async () => {
+      await setCaps(["plane_merge_v1", "ordered_facts_v1"]);
+      await ordered();
+      const res = await claimIt(withConfig());
+      expect(res.status).toBe(200);
+      expect(PlaneMergeClaimReply.parse(res.body)).toMatchObject({ ordered_config: CONFIG });
+      expect(configCalls).toEqual([{ accountId: A.accountId, repoId: A.repoId }]);
+    });
+
+    it("an older runner is never sent the key, and the configuration is not even read for it; an older port sends none either", async () => {
+      await ordered();
+      const res = await claimIt(withConfig());
+      expect(res.status).toBe(200);
+      expect("ordered_config" in (res.body as object)).toBe(false);
+      expect(configCalls).toEqual([]);
+      await setCaps(["plane_merge_v1", "ordered_facts_v1"]);
+      await admin.query("UPDATE plane_merge_orders SET state = 'pending', runner_id = NULL, lease_expires_at = NULL WHERE account_id = $1 AND state = 'claimed'", [A.accountId]);
+      const noPort = await claimIt(deps());
+      expect(noPort.status).toBe(200);
+      expect("ordered_config" in (noPort.body as object)).toBe(false);
+    });
+
+    it("a capability the runner dropped on a later hello stops the key at once (the recorded set is read at every claim)", async () => {
+      await setCaps(["plane_merge_v1", "ordered_facts_v1"]);
+      await ordered();
+      await setCaps(["plane_merge_v1"]);
+      expect("ordered_config" in ((await claimIt(withConfig())).body as object)).toBe(false);
+    });
+
+    it("a verify with ordered from a runner without the capability is a 400 invalid_message: nothing is read, no gate runs, no credential is minted, and the order is still claimed", async () => {
+      const { reply, order } = await claimed();
+      const res = await verifyIt(attestation(reply as Claimed, { ordered: FACT }));
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ error: { code: "invalid_message" } });
+      expect(goCalls).toEqual([]);
+      expect(mints.filter((m) => m.kind === "write")).toEqual([]);
+      expect((await row(order.id)).state).toBe("claimed");
+    });
+
+    it("a verify with ordered from a capable runner reaches the gate with the fact, the capability and nothing else added; a verify without it says the runner is capable and sent none", async () => {
+      await setCaps(["plane_merge_v1", "ordered_facts_v1"]);
+      const { reply } = await claimed();
+      expect((await verifyIt(attestation(reply as Claimed, { ordered: FACT }))).status).toBe(200);
+      expect(goCalls[0]!.attestation).toEqual({ reviewedHead: REVIEWED, publicHead: HEAD, same: true, incomplete: false, paths: ["src/a.ts"], orderedCapable: true, ordered: FACT });
+      const second = await claimed();
+      expect((await verifyIt(attestation(second.reply as Claimed))).status).toBe(200);
+      expect(goCalls[1]!.attestation).toEqual({ reviewedHead: REVIEWED, publicHead: HEAD, same: true, incomplete: false, paths: ["src/a.ts"], orderedCapable: true });
+    });
+
+    it("the verdict is stored with the go (the order's authorization), and only from a capable runner; a verify with none carries it, one without any stores nothing", async () => {
+      await setCaps(["plane_merge_v1", "ordered_facts_v1"]);
+      const a = await claimed();
+      expect((await verifyIt(attestation(a.reply as Claimed, { ordered: { ...FACT, verdict: "none", behind: false } }))).status).toBe(200);
+      expect((await row(a.order.id)).ordered_verdict).toBe("none");
+      const b = await claimed();
+      expect((await verifyIt(attestation(b.reply as Claimed))).status).toBe(200);
+      expect((await row(b.order.id)).ordered_verdict).toBeNull();
+    });
+
+    it("a forged none from a runner without the capability is a 400 and stores nothing: the order stays claimed with no verdict", async () => {
+      const a = await claimed();
+      const res = await verifyIt(attestation(a.reply as Claimed, { ordered: { ...FACT, verdict: "none", behind: false } }));
+      expect(res.status).toBe(400);
+      expect(await row(a.order.id)).toMatchObject({ state: "claimed", ordered_verdict: null });
+    });
+
+    it("a runner without the capability reaches the gate as one: no capability flag and no fact", async () => {
+      const { reply } = await claimed();
+      expect((await verifyIt(attestation(reply as Claimed))).status).toBe(200);
+      expect(goCalls[0]!.attestation).toEqual({ reviewedHead: REVIEWED, publicHead: HEAD, same: true, incomplete: false, paths: ["src/a.ts"] });
+    });
+
+    it("a strict parse still refuses a fact with a key of its own or a path, whatever the runner listed", async () => {
+      await setCaps(["plane_merge_v1", "ordered_facts_v1"]);
+      const { reply } = await claimed();
+      for (const bad of [{ ...FACT, paths: ["src/a.ts"] }, { ...FACT, verdict: "fine" }, { ...FACT, key: "Key 0011" }]) {
+        expect((await verifyIt(attestation(reply as Claimed, { ordered: bad }))).status).toBe(400);
+      }
+      expect(goCalls).toEqual([]);
+    });
+
+    it("base_moved after the go ends the order head_moved with public_base_moved: never a merge, never recorded as one, and the workflow asks the gate again", async () => {
+      await setCaps(["plane_merge_v1", "ordered_facts_v1"]);
+      const a = await authorized();
+      const res = await reportIt(reportBody(a.reply, { result: "aborted", abort_code: "base_moved" }));
+      expect(PlaneMergeReportReply.parse(res.body)).toEqual({ recorded: true });
+      expect(await row(a.order.id)).toMatchObject({ state: "head_moved", outcome_code: "public_base_moved" });
+      expect(recorded).toEqual([]);
+    });
+
+    it("base_moved from a runner without the capability is a 400, and before any go (a tip that was never read) it is a 400 as well", async () => {
+      const a = await authorized();
+      expect((await reportIt(reportBody(a.reply, { result: "aborted", abort_code: "base_moved" }))).status).toBe(400);
+      expect((await row(a.order.id)).state).toBe("authorized");
+      await setCaps(["plane_merge_v1", "ordered_facts_v1"]);
+      const c = await claimed();
+      expect((await reportIt(reportBody(c.reply, { result: "aborted", abort_code: "base_moved" }))).status).toBe(400);
+      expect((await row(c.order.id)).state).toBe("claimed");
+    });
+
+    it("an authorized order that GitHub shows merged is still recorded as merged whatever a late base_moved report says (the cloud reads GitHub, the hint is not the authority)", async () => {
+      await setCaps(["plane_merge_v1", "ordered_facts_v1"]);
+      const a = await authorized();
+      pull = { open: false, merged: true, headSha: HEAD };
+      await reportIt(reportBody(a.reply, { result: "aborted", abort_code: "base_moved" }));
+      expect(await row(a.order.id)).toMatchObject({ state: "merged", outcome_code: "merged" });
+    });
+  });
+
   describe("settleAuthorizedOrder (an authorized order whose lease ran out without a report)", () => {
     it("ends it from GitHub alone: merged at the head -> merged and recorded; open at the head -> failed runner_merge_failed; moved -> head_moved", async () => {
       const merged = await authorized();

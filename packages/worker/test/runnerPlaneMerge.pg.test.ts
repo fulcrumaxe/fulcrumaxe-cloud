@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PLANE_MERGE_LEASE_SECONDS, PLANE_MERGE_MAX_ATTEMPTS, PLANE_MERGE_ORDER_DEADLINE_MINUTES } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { pairingDigest } from "@fx/core/src/repos/planePushRecord.js";
+import { mergeQueue } from "@fx/pipeline";
+import { withTenant } from "@fx/db/src/withTenant.js";
 import { PLANE_MERGE_CODES, createRunnerPlaneMergeStore, type PlaneMergeOrder, type RunnerPlaneMergeStore } from "../src/runnerPlaneMerge.js";
 
 /**
@@ -663,6 +665,178 @@ describe("plane merge order store [pg]", () => {
       expect(second.kind).toBe("placed");
       expect((await store.latestForItem({ accountId: A.accountId, workItemId: w }))?.state).toBe("pending");
       expect(await store.latestForItem({ accountId: B.accountId, workItemId: w })).toBeNull();
+    });
+  });
+  // D#483 S5-j2c1: the repository's order lease (kind `order`, holder `ord:<order id>:<minute>`) is taken at the go and lives while its order is open. The pipeline's lease module and
+  // this store meet on the real tables: every end of an order frees it, and a read of the order row frees one that an end missed.
+  describe("the order lease (S5-j2c1)", () => {
+    const pool = () => appPool;
+    const leaseRows = async (who: SeedRefs = A) => (await admin.query<{ holder: string; kind: string }>("SELECT holder, kind FROM repo_merge_leases WHERE account_id = $1 AND repo_id = $2", [who.accountId, who.repoId])).rows;
+    const takeFor = (o: PlaneMergeOrder, who: SeedRefs = A) =>
+      mergeQueue.acquireMergeLease(pool(), { accountId: who.accountId, repoId: who.repoId, kind: "order", holder: mergeQueue.orderHolder(o.id, new Date(clock)), leaseSeconds: PLANE_MERGE_ORDER_DEADLINE_MINUTES * 60 });
+    const live = (who: SeedRefs = A) => withTenant(pool(), who.accountId, (c) => mergeQueue.hasLiveMergeLease(c, { accountId: who.accountId, repoId: who.repoId }));
+    /** An authorized order of a fresh item with its lease taken, as the go phase leaves them after the hand-over. */
+    async function held(): Promise<PlaneMergeOrder> {
+      await placed(A, await item(A));
+      const claimedOrder = await claimed();
+      const taken = await takeFor(claimedOrder);
+      expect(taken.taken).toBe(true);
+      const authorized = await store.authorize(lease(claimedOrder));
+      if (authorized.kind !== "authorized") throw new Error("not authorized");
+      return authorized.order;
+    }
+
+    it("is taken for the order's id, excludes a direct taker while the order is open, and shows as live to the queue's check", async () => {
+      const o = await held();
+      expect(await leaseRows()).toEqual([{ holder: expect.stringMatching(new RegExp(`^ord:${o.id}:[0-9]+$`)), kind: "order" }]);
+      expect(await mergeQueue.acquireMergeLease(pool(), { accountId: A.accountId, repoId: A.repoId })).toEqual({ taken: false });
+      expect(await live()).toBe(true);
+    });
+
+    it("every end of the order frees it: finish (merged, failed, head_moved, blocked) and the deadline's expiry, each by its own order", async () => {
+      for (const to of ["merged", "failed", "head_moved"] as const) {
+        const o = await held();
+        const done = await store.finish({ accountId: A.accountId, orderId: o.id, to, code: to === "merged" ? "merged" : "x_code", actor: { by: "cloud" } });
+        expect(done.kind, to).toBe("finished");
+        expect(await leaseRows(), to).toEqual([]);
+        expect((await mergeQueue.acquireMergeLease(pool(), { accountId: A.accountId, repoId: A.repoId })).taken, to).toBe(true);
+        await admin.query("DELETE FROM repo_merge_leases WHERE account_id = $1", [A.accountId]);
+      }
+      // blocked: the order is claimed (the gate stopped before any hand-over), and its lease goes with it.
+      await placed(A, await item(A));
+      const claimedOrder = await claimed();
+      expect((await takeFor(claimedOrder)).taken).toBe(true);
+      expect((await store.finish({ accountId: A.accountId, orderId: claimedOrder.id, to: "blocked", code: "merge_repo_busy", actor: { by: "cloud" } })).kind).toBe("finished");
+      expect(await leaseRows()).toEqual([]);
+      // expiry
+      const o = await held();
+      advance(minutes(PLANE_MERGE_ORDER_DEADLINE_MINUTES));
+      expect((await store.expireDue({ accountId: A.accountId })).map((x) => x.id)).toContain(o.id);
+      expect(await leaseRows()).toEqual([]);
+    });
+
+    it("the claim reaper's third failure of a claimed order frees it", async () => {
+      await placed(A, await item(A));
+      for (let i = 1; i <= PLANE_MERGE_MAX_ATTEMPTS; i++) {
+        const o = await claimed();
+        if (i === PLANE_MERGE_MAX_ATTEMPTS) expect((await takeFor(o)).taken).toBe(true);
+        advance(PLANE_MERGE_LEASE_SECONDS * 1000);
+        if (i < PLANE_MERGE_MAX_ATTEMPTS) await store.reapLeases(A.accountId);
+      }
+      expect(await leaseRows()).toHaveLength(1);
+      expect(await store.reapLeases(A.accountId)).toEqual({ requeued: 0, failed: 1 });
+      expect(await leaseRows()).toEqual([]);
+    });
+
+    it("ending one order leaves another order's lease alone", async () => {
+      const first = await held();
+      const rows = await leaseRows();
+      await placed(A, await item(A));
+      const second = await claimed();
+      await store.finish({ accountId: A.accountId, orderId: second.id, to: "blocked", code: "x_code", actor: { by: "cloud" } });
+      expect(await leaseRows()).toEqual(rows);
+      expect(first.state).toBe("authorized");
+    });
+
+    it("a timer alone never ends it: past its lease_until it still holds while the order is open, and a read of the order frees it once the order is over", async () => {
+      const o = await held();
+      const later = new Date(clock + 3 * 3600_000);
+      expect(await mergeQueue.acquireMergeLease(pool(), { accountId: A.accountId, repoId: A.repoId, now: later })).toEqual({ taken: false });
+      // The order ends but its lease row survives (a missed delete): the next taker reads the order, finds it over, clears the row and takes the repository.
+      await admin.query("UPDATE plane_merge_orders SET state = 'failed', outcome_code = 'x_code', finished_at = now() WHERE id = $1", [o.id]);
+      expect(await leaseRows()).toHaveLength(1);
+      expect(await live()).toBe(false);
+      const taken = await mergeQueue.acquireMergeLease(pool(), { accountId: A.accountId, repoId: A.repoId });
+      expect(taken.taken).toBe(true);
+      expect((await leaseRows()).map((r) => r.kind)).toEqual(["direct"]);
+    });
+
+    it("is bounded at 24 hours even for an open order, and an unreadable order row fails closed", async () => {
+      const o = await held();
+      const day = new Date(clock + 24 * 3600_000 + 60_000);
+      expect((await mergeQueue.acquireMergeLease(pool(), { accountId: A.accountId, repoId: A.repoId, now: day })).taken).toBe(true);
+      // Fail closed: a database failure while the order is read throws, never reads as "free".
+      const broken = { connect: async () => { throw new Error("db down"); }, query: async () => { throw new Error("db down"); } } as unknown as Pool;
+      await expect(mergeQueue.acquireMergeLease(broken, { accountId: A.accountId, repoId: A.repoId })).rejects.toThrow();
+      expect(o.id).toBeTruthy();
+    });
+
+    describe("an order that ended enqueued (R-C34-F4, R-C35-4)", () => {
+      const enqueue = async () => {
+        const o = await held();
+        const done = await store.finish({ accountId: A.accountId, orderId: o.id, to: "enqueued", code: "enqueued", actor: { by: "cloud" } });
+        expect(done.kind).toBe("finished");
+        return o;
+      };
+      const convert = (o: PlaneMergeOrder, over: Partial<Parameters<typeof mergeQueue.convertOrderLeaseToHostQueue>[1]> = {}, p: Pool = pool()) =>
+        mergeQueue.convertOrderLeaseToHostQueue(p, { accountId: A.accountId, repoId: A.repoId, orderId: o.id, prNumber: o.prNumber, repoGhId: "4242", workItemId: o.workItemId, ...over });
+
+      it("the runner's attested verdict decides: none frees the lease at enqueued; ok, out_of_order, unknown and no verdict at all (an older runner) hold it", async () => {
+        for (const verdict of ["none", "ok", "out_of_order", "unknown", undefined] as const) {
+          await placed(A, await item(A));
+          const c = await claimed();
+          expect((await takeFor(c)).taken, String(verdict)).toBe(true);
+          const auth = await store.authorize({ ...lease(c), ...(verdict !== undefined ? { orderedVerdict: verdict } : {}) });
+          expect(auth.kind).toBe("authorized");
+          expect((await row(c.id)).ordered_verdict).toBe(verdict ?? null);
+          expect((await store.finish({ accountId: A.accountId, orderId: c.id, to: "enqueued", code: "enqueued", actor: { by: "cloud" } })).kind).toBe("finished");
+          expect(await leaseRows(), String(verdict)).toHaveLength(verdict === "none" ? 0 : 1);
+          await admin.query("DELETE FROM repo_merge_leases WHERE account_id = $1", [A.accountId]);
+        }
+      });
+
+      it("the end keeps the lease (the pull request waits in the host's queue), and it still excludes a later gate", async () => {
+        await enqueue();
+        expect(await leaseRows()).toHaveLength(1);
+        expect(await live()).toBe(true);
+        expect(await mergeQueue.acquireMergeLease(pool(), { accountId: A.accountId, repoId: A.repoId })).toEqual({ taken: false });
+      });
+
+      it("is converted to the ghq hold named by the public number, the code repository's id and the item; a later same-number gate is busy; the webhook's settle frees it", async () => {
+        const o = await enqueue();
+        expect(await convert(o)).toBe(true);
+        const rows = await leaseRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]!.kind).toBe("direct");
+        expect(rows[0]!.holder).toMatch(new RegExp(`^ghq:${o.prNumber}:4242:[0-9]+:${o.workItemId}$`));
+        expect(await mergeQueue.acquireMergeLease(pool(), { accountId: A.accountId, repoId: A.repoId })).toEqual({ taken: false });
+        // The private pull request's number (a paired item has two) frees nothing; the public one, in the code repository, does.
+        await withTenant(pool(), A.accountId, (c) => mergeQueue.releaseHostQueueLease(c, { accountId: A.accountId, repoGhId: 4242, prNumber: o.prNumber + 1 }));
+        expect(await leaseRows()).toHaveLength(1);
+        await withTenant(pool(), A.accountId, (c) => mergeQueue.releaseHostQueueLease(c, { accountId: A.accountId, repoGhId: 4242, prNumber: o.prNumber }));
+        expect(await leaseRows()).toEqual([]);
+        expect((await mergeQueue.acquireMergeLease(pool(), { accountId: A.accountId, repoId: A.repoId })).taken).toBe(true);
+      });
+
+      it("a failed write fails closed: the order lease stays and excludes, even past its lease_until, until its 24-hour bound", async () => {
+        const o = await enqueue();
+        const broken = { connect: async () => { throw new Error("db down"); } } as unknown as Pool;
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+        expect(await convert(o, {}, broken)).toBe(false);
+        warn.mockRestore();
+        expect((await leaseRows())[0]!.holder).toMatch(/^ord:/);
+        const later = new Date(clock + 5 * 3600_000);
+        expect(await mergeQueue.acquireMergeLease(pool(), { accountId: A.accountId, repoId: A.repoId, now: later })).toEqual({ taken: false });
+        const day = new Date(clock + 24 * 3600_000 + 60_000);
+        expect((await mergeQueue.acquireMergeLease(pool(), { accountId: A.accountId, repoId: A.repoId, now: day })).taken).toBe(true);
+      });
+
+      it("converts only an order lease of that order: another order's id, or no lease at all, changes nothing", async () => {
+        const o = await enqueue();
+        expect(await convert(o, { orderId: randomUUID() })).toBe(false);
+        expect((await leaseRows())[0]!.holder).toMatch(/^ord:/);
+        await admin.query("DELETE FROM repo_merge_leases WHERE account_id = $1", [A.accountId]);
+        expect(await convert(o)).toBe(false);
+      });
+    });
+
+    it("a tenant's order never holds another account's repository", async () => {
+      const o = await held();
+      const other = await placed(B, await item(B));
+      expect((await takeFor(other, B)).taken).toBe(true);
+      expect(await leaseRows(B)).toHaveLength(1);
+      expect(await leaseRows(A)).toHaveLength(1);
+      expect(o.accountId).toBe(A.accountId);
     });
   });
 });

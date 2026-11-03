@@ -629,6 +629,52 @@ describe("the order phase: the gate's single merge call hands the merge to the d
     expect(calls).toEqual([]);
   });
 
+  /** A runner of the world's account that covers the repository and lists (or not) ordered_facts_v1, and a live sibling item on the repository. */
+  async function capableRunner(w: World, caps: string[], sibling: boolean) {
+    if (sibling) {
+      const other = await discussingItem(h.runWriterPool, w.accountId, { title: "Other", body: "Other work.", category: "feature", repoId: w.repoId });
+      await h.admin.query("UPDATE work_items SET gh_number = 8, repo_id = $2, stage = 'in_progress', provenance = 'internal' WHERE id = $1", [other.workItemId, w.repoId]);
+    }
+    const runner = (await h.admin.query("SELECT id FROM runners WHERE account_id = $1", [w.accountId])).rows[0].id;
+    await h.admin.query("UPDATE runners SET allowed_repo_ids = ARRAY[$2]::uuid[] WHERE id = $1", [runner, w.repoId]);
+    await h.admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, $3::text[])", [runner, w.accountId, caps]);
+  }
+
+  it("an UNPAIRED runner_local item with a capable runner and a live sibling is refused with runner_ordered_unsupported and no merge call happens (the order phase is not passed on to a go phase it does not have)", async () => {
+    const w = await world({ pairing: false });
+    w.priv.draft = false;
+    await capableRunner(w, ["plane_merge_v1", "ordered_facts_v1"], true);
+    const { run, calls } = delegating(w);
+    expect(await run()).toMatchObject({ outcome: "ready_human_merges", reasons: ["runner_ordered_unsupported"] });
+    expect(calls).toEqual([]);
+    expect(w.priv.merges).toEqual([]);
+  });
+
+  it("an UNPAIRED runner_local item with a capable runner, no sibling and no merge since its start still merges through the fence", async () => {
+    const w = await world({ pairing: false });
+    w.priv.draft = false;
+    await capableRunner(w, ["plane_merge_v1", "ordered_facts_v1"], false);
+    expect(await delegating(w).run()).toMatchObject({ outcome: "merged", headSha: HEAD });
+    expect(w.priv.merges).toEqual([{ sha: HEAD, method: "squash" }]);
+  });
+
+  it("a PAIRED item whose repository has a runner that keeps ordered_facts_v1 passes the order phase with a live sibling and is handed to the delegate (the go phase judges the order); without the capability it stops", async () => {
+    const w = await world();
+    const sibling = await discussingItem(h.runWriterPool, w.accountId, { title: "Other", body: "Other work.", category: "feature", repoId: w.repoId });
+    await h.admin.query("UPDATE work_items SET gh_number = 8, repo_id = $2, stage = 'in_progress', provenance = 'internal' WHERE id = $1", [sibling.workItemId, w.repoId]);
+    const runner = (await h.admin.query("SELECT id FROM runners WHERE account_id = $1", [w.accountId])).rows[0].id;
+    await h.admin.query("UPDATE runners SET allowed_repo_ids = ARRAY[$2]::uuid[] WHERE id = $1", [runner, w.repoId]);
+    await h.admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, ARRAY['plane_merge_v1'])", [runner, w.accountId]);
+    const without = delegating(w);
+    expect(await without.run()).toMatchObject({ outcome: "ready_human_merges", reasons: ["runner_ordered_unsupported"] });
+    expect(without.calls).toEqual([]);
+    await h.admin.query("UPDATE runner_capabilities SET capabilities = ARRAY['plane_merge_v1','ordered_facts_v1'] WHERE runner_id = $1", [runner]);
+    const withCap = delegating(w);
+    expect(await withCap.run()).toMatchObject({ outcome: "merge_delegated", reasons: [] });
+    expect(withCap.calls).toHaveLength(1);
+    expectNoMergeAnywhere(w);
+  });
+
   it("a single-plane runner_local item still merges through the fence (A10 on its own repository); the delegate is not called", async () => {
     const w = await world({ pairing: false });
     w.priv.draft = false;

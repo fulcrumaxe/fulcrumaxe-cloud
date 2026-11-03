@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { PLANE_MERGE_CAPABILITY, PLANE_MERGE_LEASE_SECONDS, PLANE_MERGE_MAX_ATTEMPTS, PLANE_MERGE_ORDER_DEADLINE_MINUTES } from "@fulcrumaxe/runner-protocol";
+import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { pairingDigest } from "@fx/core/src/repos/planePushRecord.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { requireUuid } from "./runActions.js";
@@ -51,6 +52,7 @@ export interface PlaneMergeOrder {
   outcomeCode: string | null;
   deadlineAt: Date;
   finishedAt: Date | null;
+  orderedVerdict: string | null;
 }
 
 /** What the claim reply needs beyond the order: all from our rows. */
@@ -94,6 +96,8 @@ export interface RunnerLease {
   runnerId: string;
   orderId: string;
   leaseGeneration: number;
+  /** D#483 S5-j2c1: the runner's attested migration-order verdict, written with the go (`authorize`). */
+  orderedVerdict?: string;
 }
 
 export type AuthorizeResult = { kind: "authorized"; order: PlaneMergeOrder } | { kind: "already_issued" } | { kind: "fenced"; reason: FenceReason };
@@ -131,6 +135,17 @@ export const CONFLICT_ORDER_CODES = { conflict_platform: "merge_conflict_runner"
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
 /**
+ * D#483 S5-j2c1: an order that ends frees the repository's order lease (`repo_merge_leases`, holder `ord:<order id>:<minute>`, taken at the go and kept while the order is open). Every end
+ * of an order goes through here, in the statement's own transaction: `end` (a runner's or the cloud's finish, the expiry reconcile, head moved, superseded), the claim reaper's third failure and the
+ * deadline's expiry. The lease is also dead by a read of the order row (pipeline `mergeLease.ts`), so a row this misses frees itself; this is what wakes a queue that waited on it.
+ */
+async function freeOrderLeases(client: PoolClient, accountId: string, orderIds: readonly string[]): Promise<void> {
+  if (orderIds.length === 0) return;
+  const freed = await client.query(`DELETE FROM repo_merge_leases WHERE account_id = $1 AND holder LIKE 'ord:%' AND split_part(holder, ':', 2) = ANY($2::text[])`, [accountId, orderIds]);
+  if ((freed.rowCount ?? 0) > 0) void markWorkPending("merge-queue-sweep");
+}
+
+/**
  * The private head the public head was built from, for a push record `p`. A sandbox-built stamp carries it (`source_head`). A RUNNER-built stamp carries none
  * (nothing a runner reports is stored as one): its source head is the branch head the CLOUD read from GitHub when the run that pushed it finished (the `done`
  * event), found through the newest finished runner attempt whose outcome moved the stamp. The attempt is chosen first; a newest run with no succeeded done event
@@ -150,7 +165,7 @@ const sourceHeadSql = (p: string): string =>
       ORDER BY a.finished_at DESC, a.id DESC LIMIT 1
    ))`;
 const COLUMNS = `o.id, o.account_id, o.work_item_id, o.plane_push_id, o.repo_id, o.code_repo, o.pr_number, o.expected_public_head, o.reviewed_head, o.pairing_digest, o.state,
-  o.runner_id, o.lease_generation, o.lease_expires_at, o.attempts, o.read_token_generation, o.write_token_issued_at, o.token_purpose, o.outcome_code, o.deadline_at, o.finished_at`;
+  o.runner_id, o.lease_generation, o.lease_expires_at, o.attempts, o.read_token_generation, o.write_token_issued_at, o.token_purpose, o.outcome_code, o.deadline_at, o.finished_at, o.ordered_verdict`;
 
 interface Row {
   id: string;
@@ -174,6 +189,7 @@ interface Row {
   outcome_code: string | null;
   deadline_at: Date;
   finished_at: Date | null;
+  ordered_verdict: string | null;
 }
 
 const toOrder = (r: Row): PlaneMergeOrder => ({
@@ -198,6 +214,7 @@ const toOrder = (r: Row): PlaneMergeOrder => ({
   outcomeCode: r.outcome_code,
   deadlineAt: r.deadline_at,
   finishedAt: r.finished_at,
+  orderedVerdict: r.ordered_verdict,
 });
 
 export interface RunnerPlaneMergeStore {
@@ -255,11 +272,12 @@ export function createRunnerPlaneMergeStore(pool: Pool, deps: RunnerPlaneMergeDe
   };
 
   const reap = async (client: PoolClient, accountId: string, at: Date) => {
-    const failed = await client.query(
+    const failed = await client.query<{ id: string }>(
       `UPDATE plane_merge_orders SET state = 'failed', outcome_code = $3, finished_at = $2
-        WHERE account_id = $1 AND state = 'claimed' AND lease_expires_at <= $2 AND attempts >= $4`,
+        WHERE account_id = $1 AND state = 'claimed' AND lease_expires_at <= $2 AND attempts >= $4 RETURNING id`,
       [accountId, at, PLANE_MERGE_CODES.failed, PLANE_MERGE_MAX_ATTEMPTS],
     );
+    await freeOrderLeases(client, accountId, failed.rows.map((r) => r.id));
     const requeued = await client.query(
       `UPDATE plane_merge_orders SET state = 'pending', runner_id = NULL, lease_expires_at = NULL
         WHERE account_id = $1 AND state = 'claimed' AND lease_expires_at <= $2 AND attempts < $3`,
@@ -274,6 +292,8 @@ export function createRunnerPlaneMergeStore(pool: Pool, deps: RunnerPlaneMergeDe
         WHERE o.account_id = $1 AND o.id = $2 RETURNING ${COLUMNS}`,
       [accountId, orderId, to, code, at, conflict?.verdict ?? null, conflict?.baseSha ?? null, conflict?.baseRef ?? null, conflict ? [...conflict.files] : null],
     );
+    // An order that ended `enqueued` keeps its lease unless its runner attested `none` (no ordered file added): the pull request waits in GitHub's queue and the cloud turns the lease into a hold for it (pipeline `convertOrderLeaseToHostQueue`).
+    if (to !== "enqueued" || rows[0]!.ordered_verdict === "none") await freeOrderLeases(client, accountId, [orderId]);
     return toOrder(rows[0]!);
   };
 
@@ -399,9 +419,9 @@ export function createRunnerPlaneMergeStore(pool: Pool, deps: RunnerPlaneMergeDe
         if (fenced.kind !== "ok") return fenced;
         if (fenced.order.state !== "claimed" || fenced.order.writeTokenIssuedAt !== null) return { kind: "already_issued" };
         const { rows } = await client.query<Row>(
-          `UPDATE plane_merge_orders o SET state = 'authorized', write_token_issued_at = $3
+          `UPDATE plane_merge_orders o SET state = 'authorized', write_token_issued_at = $3, ordered_verdict = $4
             WHERE o.account_id = $1 AND o.id = $2 AND o.state = 'claimed' AND o.write_token_issued_at IS NULL RETURNING ${COLUMNS}`,
-          [lease.accountId, lease.orderId, at],
+          [lease.accountId, lease.orderId, at, lease.orderedVerdict ?? null],
         );
         return rows[0] ? { kind: "authorized", order: toOrder(rows[0]) } : { kind: "already_issued" };
       });
@@ -436,6 +456,7 @@ export function createRunnerPlaneMergeStore(pool: Pool, deps: RunnerPlaneMergeDe
             WHERE o.account_id = $1 AND o.state IN ('pending', 'claimed', 'authorized') AND o.deadline_at <= $2 AND ($4::uuid IS NULL OR o.id = $4::uuid) RETURNING ${COLUMNS}`,
           [input.accountId, clock(), PLANE_MERGE_CODES.timeout, input.orderId ?? null],
         );
+        await freeOrderLeases(client, input.accountId, rows.map((r) => r.id));
         return rows.map(toOrder);
       }),
 

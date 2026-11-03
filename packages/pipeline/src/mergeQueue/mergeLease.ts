@@ -34,15 +34,31 @@ const HOLDER_SQL = "^ghq:[0-9]{1,9}:[0-9]{1,15}:[0-9]{1,12}:[0-9a-f]{8}-[0-9a-f]
 /** A holder that says it is a hold (`ghq:`) but is not well formed fails closed: it keeps the repository busy for 24 hours after its `lease_until`, which nothing renews, and then ends like any lapsed lease. */
 const MALFORMED_SQL = `holder LIKE 'ghq:%' AND holder !~ '${HOLDER_SQL}'`;
 
+/**
+ * D#483 S5-j2c1: the lease of a runner's merge order (kind `order`) is held until the order ends. Its holder names the order and the minute it began, `ord:<order id>:<start minute>`: digits, colons and a uuid, a fixed length.
+ * It is live while the order is open (a read of the order's own row, `pending`, `claimed` or `authorized`) or `enqueued` (the runner put the pull request in GitHub's queue: the hold is converted to a `ghq:` hold
+ * by `convertOrderLeaseToHostQueue`, and until it is, this one stays) and within the 24-hour bound: a timer alone never ends it, and an order that cannot be read keeps the repository busy.
+ */
+const ORDER_HOLDER_SQL = "^ord:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9]{1,12}$";
+const orderHoldOpenSql = (now: string, bound: string): string =>
+  `(EXISTS (SELECT 1 FROM plane_merge_orders o WHERE o.account_id = repo_merge_leases.account_id AND o.id::text = split_part(holder, ':', 2) AND o.state IN ('pending', 'claimed', 'authorized', 'enqueued'))
+     AND extract(epoch FROM ${now}) / 60 - split_part(holder, ':', 3)::bigint < ${bound})`;
+export const orderHolder = (orderId: string, now: Date = new Date()): string => {
+  const holder = `ord:${orderId.toLowerCase()}:${Math.floor(now.getTime() / 60_000)}`;
+  if (!new RegExp(ORDER_HOLDER_SQL).test(holder)) throw new Error("merge lease: bad order id");
+  return holder;
+};
+
 /** Whether a lease of the repository is live at `now` (the database's clock when absent). Call after `lockRepoMerge`, in the same transaction, for the answer to hold. */
 export async function hasLiveMergeLease(client: Queryable, input: { accountId: string; repoId: string; now?: Date }): Promise<boolean> {
   // A hold for GitHub's queue (`ghq:`) is live whether lapsed or not (D#483 S5-j2a2, R-C35): the tick has no read port, so only a gate's read, the settle or the sweep's read frees it,
   // or its 24 hours.
   const { rows } = await client.query(
     `SELECT 1 FROM repo_merge_leases WHERE account_id = $1 AND repo_id = $2
-        AND (lease_until > COALESCE($3::timestamptz, now())
+        AND ((lease_until > COALESCE($3::timestamptz, now()) AND holder !~ '${ORDER_HOLDER_SQL}')
              OR CASE WHEN holder ~ '${HOLDER_SQL}' THEN extract(epoch FROM COALESCE($3::timestamptz, now())) / 60 - split_part(holder, ':', 4)::bigint < $4
                      WHEN ${MALFORMED_SQL} THEN lease_until + make_interval(mins => $4::int) > COALESCE($3::timestamptz, now())
+                     WHEN holder ~ '${ORDER_HOLDER_SQL}' THEN ${orderHoldOpenSql("COALESCE($3::timestamptz, now())", "$4")}
                      ELSE false END)`,
     [input.accountId, input.repoId, input.now ?? null, HOST_QUEUE_MAX_AGE_MINUTES],
   );
@@ -65,7 +81,7 @@ export interface MergeLeaseInput {
 
 export type MergeLeaseTake =
   | { taken: false; stuck?: true }
-  | { taken: true; holder: string; release(): Promise<void>; holdForHostQueue(prNumber: number, repoGhId: string | null, workItemId: string): Promise<void>; confirm(): Promise<boolean> };
+  | { taken: true; holder: string; kind: MergeLeaseKind; release(): Promise<void>; holdForHostQueue(prNumber: number, repoGhId: string | null, workItemId: string): Promise<void>; confirm(): Promise<boolean> };
 
 /**
  * Takes the repository's merge lease, or answers `taken: false` (busy) while a live lease or an `in_flight` queue entry of the repository exists. An expired lease is
@@ -84,13 +100,17 @@ export async function acquireMergeLease(pool: Pool, input: MergeLeaseInput): Pro
       await reclaimExpiredLeases(client, { accountId: input.accountId, repoId: input.repoId, ...(input.now ? { now: input.now } : {}) });
       const slot = await client.query(`SELECT 1 FROM merge_queue_entries WHERE account_id = $1 AND repo_id = $2 AND state = 'in_flight' LIMIT 1`, [input.accountId, input.repoId]);
       if (slot.rows.length > 0) return "busy";
-      const cur = (await client.query<{ holder: string; expired: boolean; now_min: string; malformed_live: boolean }>(
+      const cur = (await client.query<{ holder: string; expired: boolean; now_min: string; malformed_live: boolean; order_live: boolean | null }>(
         `SELECT holder, lease_until <= COALESCE($3::timestamptz, now()) AS expired, floor(extract(epoch FROM COALESCE($3::timestamptz, now())) / 60)::bigint AS now_min,
-                (${MALFORMED_SQL} AND lease_until + make_interval(mins => $4::int) > COALESCE($3::timestamptz, now())) AS malformed_live
+                (${MALFORMED_SQL} AND lease_until + make_interval(mins => $4::int) > COALESCE($3::timestamptz, now())) AS malformed_live,
+                CASE WHEN holder ~ '${ORDER_HOLDER_SQL}' THEN ${orderHoldOpenSql("COALESCE($3::timestamptz, now())", "$4")} ELSE NULL END AS order_live
            FROM repo_merge_leases WHERE account_id = $1 AND repo_id = $2`,
         [input.accountId, input.repoId, input.now ?? null, HOST_QUEUE_MAX_AGE_MINUTES],
       )).rows[0];
       if (cur?.malformed_live === true) return "busy";
+      // A runner's order holds the repository while the order is open, whatever the clock says; once the order is over (or past 24 hours) its row is dead and is cleared here, under the lock.
+      if (cur?.order_live === true) return "busy";
+      if (cur?.order_live === false) await client.query(`DELETE FROM repo_merge_leases WHERE account_id = $1 AND repo_id = $2 AND holder = $3`, [input.accountId, input.repoId, cur.holder]);
       const held = cur?.expired ? parseHostQueueHolder(cur.holder) : null;
       if (cur !== undefined && held !== null && Number(cur.now_min) - held.startMin >= HOST_QUEUE_MAX_AGE_MINUTES) {
         // 24 hours is the bound whatever else is true: the hold ends, with a recorded event on the item it was held for and a visible note.
@@ -142,9 +162,10 @@ export async function acquireMergeLease(pool: Pool, input: MergeLeaseInput): Pro
   return {
     taken: true,
     holder,
+    kind: input.kind ?? "direct",
     release: () => releaseMergeLease(pool, where),
     holdForHostQueue: (prNumber, repoGhId, workItemId) => holdLeaseForHostQueue(pool, { ...where, prNumber, repoGhId, workItemId }),
-    confirm: () => confirmMergeLease(pool, where),
+    confirm: () => confirmMergeLease(pool, { ...where, seconds: leaseSeconds }),
   };
 }
 
@@ -167,6 +188,30 @@ export async function confirmMergeLease(pool: Pool, input: { accountId: string; 
     });
   } catch (err) {
     reportError(err, { stage: "merge_lease.confirm" });
+    return false;
+  }
+}
+
+/**
+ * D#483 S5-j2c1 (R-C34-F4, R-C35-2, R-C35-4): an order that ended `enqueued` (the runner put its pull request in GitHub's queue) turns the order lease into the same `ghq:` hold a direct gate takes, named by the
+ * PUBLIC pull request's number and the code repository's id, so the webhook's settle frees it and a lapsed one is read against the queue entry. Never throws and never frees: when the write fails (or finds no
+ * order lease) the order lease stays, live because its order row says `enqueued`, until its own 24-hour bound. Answers whether the conversion happened.
+ */
+export async function convertOrderLeaseToHostQueue(pool: Pool, input: { accountId: string; repoId: string; orderId: string; prNumber: number; repoGhId: string | null; workItemId: string; seconds?: number }): Promise<boolean> {
+  try {
+    return await withTenant(pool, input.accountId, async (client) => {
+      await lockRepoMerge(client, input.accountId, input.repoId);
+      const res = await client.query(
+        `UPDATE repo_merge_leases SET kind = 'direct', holder = 'ghq:' || $4::text || ':' || $5::text || ':' || (floor(extract(epoch FROM now()) / 60))::bigint::text || ':' || $7::text, lease_until = now() + make_interval(secs => $6)
+          WHERE account_id = $1 AND repo_id = $2 AND holder ~ '${ORDER_HOLDER_SQL}' AND split_part(holder, ':', 2) = $3::text
+        RETURNING holder`,
+        [input.accountId, input.repoId, input.orderId.toLowerCase(), input.prNumber, idPart(input.repoGhId), input.seconds ?? HOST_QUEUE_LEASE_SECONDS, input.workItemId],
+      );
+      return res.rows.length > 0;
+    });
+  } catch (err) {
+    // fx-swallow-ok: reported with a fixed line; the order lease stays and still excludes (its order row says enqueued), so the enqueue is not lost and nothing is freed on a doubt
+    console.warn(JSON.stringify({ event: "merge_lease.convert_failed", name: typeof (err as { name?: unknown })?.name === "string" ? (err as { name: string }).name.slice(0, 60) : null }));
     return false;
   }
 }

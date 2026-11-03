@@ -31,6 +31,8 @@ export interface ResourceRule {
   matches(path: string): boolean;
   /** The key text of a path's base name, or null when the base name does not match the pattern. */
   rawKey(path: string): string | null;
+  /** The accepted configuration entry this rule was compiled from (absent on the detected default): what the runner is sent to compile again. */
+  spec?: { name: string; pathPattern: string; keyPattern: string; keyKind: KeyKind };
 }
 
 export interface OrderedConfig {
@@ -177,7 +179,7 @@ function toRule(e: unknown): ResourceRule | null {
   const glob = compileGlob(pathPattern);
   const key = compileKeyPattern(keyPattern);
   if (!glob || !key) return null;
-  return { name, keyKind, matches: glob, rawKey: (p) => keyOf(key, p) };
+  return { name, keyKind, matches: glob, rawKey: (p) => keyOf(key, p), spec: { name, pathPattern: pathPattern as string, keyPattern: keyPattern as string, keyKind } };
 }
 
 function keyOf(re: RegExp, path: string): string | null {
@@ -243,4 +245,14 @@ export function checkOrdering(rule: ResourceRule, added: readonly string[], tipP
     seen.add(k);
   }
   return { ok: true };
+}
+
+/**
+ * D#483 S5-j2c1: the configuration as a runner is sent it (`PlaneMergeOrderedConfig`): only what `readOrderedConfig` accepted, at most five resources, and nothing else of `repos.settings`
+ * (not `autoRenumber`, not any other key).
+ */
+export function orderedConfigWire(settings: unknown): { configured: boolean; resources: Array<{ name: string; path_pattern: string; key_pattern: string; key_kind: KeyKind }> } {
+  const config = readOrderedConfig(settings);
+  const resources = config.resources.flatMap((r) => (r.spec ? [{ name: r.spec.name, path_pattern: r.spec.pathPattern, key_pattern: r.spec.keyPattern, key_kind: r.spec.keyKind }] : []));
+  return { configured: config.configured, resources };
 }

@@ -490,7 +490,7 @@ export const PLANE_MERGE_REPORT_PATH = "/api/runner/plane-merge-report";
 /** The paths of a verify: at most this many; a longer change set is sent cut short with `incomplete` true. */
 export const MAX_PLANE_MERGE_PATHS = 3000;
 /** Why the runner stopped before it called merge, a closed set. */
-export const PLANE_MERGE_ABORT_CODES = ["head_moved", "base_retargeted", "pr_not_open", "pr_draft", "read_failed", "internal", "queue_unreadable", "queue_mode_mismatch"] as const;
+export const PLANE_MERGE_ABORT_CODES = ["head_moved", "base_retargeted", "pr_not_open", "pr_draft", "read_failed", "internal", "queue_unreadable", "queue_mode_mismatch", "base_moved"] as const;
 export const PlaneMergeAbortCode = z.enum(PLANE_MERGE_ABORT_CODES);
 export type PlaneMergeAbortCode = z.infer<typeof PlaneMergeAbortCode>;
 
@@ -498,6 +498,27 @@ export type PlaneMergeAbortCode = z.infer<typeof PlaneMergeAbortCode>;
 export const PlaneMergeClaimMessage = z.object({}).strict();
 
 const repoPath = z.string().min(1).max(4096).regex(/^[^\u0000-\u001f\u007f-\u009f\u2028\u2029]+$/);
+
+/** D#483 S5-j2c1: what the runner attests about migration order, a closed set. `none`: no ordered resource applies; `ok`: one applies and the pull request is in order; `unknown`: the runner could not tell. */
+export const PLANE_MERGE_ORDERED_VERDICTS = ["ok", "none", "out_of_order", "unknown"] as const;
+/** The queue's `part()` characters (lower-case letters, digits and underscores), at most 64: a resource name, a key or the highest key, as codes and never as text. */
+const orderedPart = z.string().regex(/^[a-z0-9_]{1,64}$/);
+/**
+ * D#483 S5-j2c1: the runner's ordering fact for the pull request it is about to merge, computed on the code repository's default branch tip it read. Only from a runner that kept `ordered_facts_v1`.
+ * A closed verdict, code characters, the tip's sha and two booleans: no path of its own (an overlap names the files in the verify's `paths`), no content, no diff.
+ */
+export const PlaneMergeOrderedFact = z
+  .object({
+    verdict: z.enum(PLANE_MERGE_ORDERED_VERDICTS),
+    resource: orderedPart.optional(),
+    key: orderedPart.optional(),
+    highest: orderedPart.optional(),
+    tip_sha: gitSha,
+    behind: z.boolean(),
+    overlap: z.boolean(),
+  })
+  .strict();
+export type PlaneMergeOrderedFact = z.infer<typeof PlaneMergeOrderedFact>;
 
 /**
  * The runner's content check, bound to both shas. `same` is the result of the shared change-set comparison (planePush/changeSet.ts); `incomplete`
@@ -514,6 +535,8 @@ export const PlaneMergeVerifyMessage = z
     paths: z.array(repoPath).max(MAX_PLANE_MERGE_PATHS),
     pairing_digest: z.string().regex(/^[0-9a-f]{64}$/),
     token_revoked: z.boolean(),
+    /** D#483 S5-j2c1: only from a runner whose latest hello listed `ordered_facts_v1`; the cloud refuses it from any other (400). */
+    ordered: PlaneMergeOrderedFact.optional(),
   })
   .strict()
   .refine((m) => !(m.same && m.incomplete), { message: "an incomplete check cannot be the same", path: ["same"] });
