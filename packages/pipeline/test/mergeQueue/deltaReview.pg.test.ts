@@ -206,7 +206,7 @@ describe("D#519 MQ3-b-2a delta-review port [pg]", () => {
       expect(await entryRow(s.entry.id)).toMatchObject({ state: "stopped", reason: "refused_spend", slot_holder: null, approved_at: T0 });
       expect(await count(s.accountId, "agent_runs")).toBe(0);
       const gh = createGitHubMergeGatePort({ http: s.g.http, resolveRepo: async () => ({ owner: "acme", name: "widgets" }), markReadyForHumanMerge: async () => undefined, sleep: async () => undefined });
-      const tick = await runQueueTick({ github: gh, inTenant: tenant, ourLogin: BOT, gate: async () => ({ outcome: "head_moved" }), startDeltaReview: s.port, sleep: async () => undefined }, { accountId: s.accountId, repoId: s.repoId });
+      const tick = await runQueueTick({ github: gh, inTenant: tenant, ourLogin: BOT, gate: async () => ({ outcome: "head_moved" }), startDeltaReview: s.port, reviewPlan: async () => ({ ok: true as const, roles: [] }), reviewJudgement: async () => ({ mode: "cloud" as const, flagged: false }), sleep: async () => undefined }, { accountId: s.accountId, repoId: s.repoId });
       expect(tick.steps).toEqual([{ step: "idle", why: "waiting_mergeability" }]);
       expect(s.started).toEqual([]);
       expect(await count(s.accountId, "agent_runs")).toBe(0);

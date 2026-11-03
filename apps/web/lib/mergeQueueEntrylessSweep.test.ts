@@ -19,7 +19,7 @@ vi.mock("@fx/pipeline", () => ({
   mergeQueue: { listOpenEntrylessRounds: async () => h.open, MERGE_QUEUE_LEASE_SECONDS: 30, bindPlatformCommitProof: () => undefined, createPlatformPushReader: () => async () => null },
 }));
 vi.mock("./advanceReview", () => ({ createReviewDeps: () => ({}) }));
-vi.mock("./mergeQueueDeltaReview", () => ({ bindStartDeltaReview: () => async () => undefined, bindCompleteDeltaReview: () => async () => undefined }));
+vi.mock("./mergeQueueDeltaReview", () => ({ bindStartDeltaReview: () => async () => undefined, bindCompleteDeltaReview: () => async () => undefined, deltaReviewPorts: () => ({ plan: async () => ({ ok: true, roles: [] }) }) }));
 vi.mock("./mergeQueueConflict", () => ({
   bindOnConflict: () => async () => false,
   bindCompleteConflictRound: () => async () => undefined,

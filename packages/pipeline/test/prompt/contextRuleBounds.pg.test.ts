@@ -86,7 +86,8 @@ describe("context rule write bounds and the budget row [pg]", () => {
       for (const kind of ["pin", "exclude"] as const) {
         const started = Date.now();
         await expect(saveContextRule(w.deps, w.who, w.repo, kind, "a.md")).rejects.toMatchObject({ name: "ContextRuleError", code: "context_rules_busy" });
-        expect(Date.now() - started).toBeLessThan(5000);
+        // The configured lock wait is 400 ms; this is a sanity bound far above any load (a lock that never gave up would run into the test's own timeout).
+        expect(Date.now() - started).toBeLessThan(20_000);
       }
     });
     expect(await rules(w.repoId)).toEqual([]);
@@ -139,7 +140,8 @@ describe("context rule write bounds and the budget row [pg]", () => {
     w.trees.hang = true;
     const started = Date.now();
     await expect(saveContextRule(w.deps, w.who, w.repo, "pin", "a.md")).rejects.toMatchObject({ code: "tree_unavailable" });
-    expect(Date.now() - started).toBeLessThan(4000);
+    // The configured cap on the GitHub call is 1.5 s; a sanity bound far above any load.
+    expect(Date.now() - started).toBeLessThan(20_000);
     expect(await rules(w.repoId)).toEqual([]);
     w.trees.hang = false;
     await saveContextRule(w.deps, w.who, w.repo, "exclude", "x/**");

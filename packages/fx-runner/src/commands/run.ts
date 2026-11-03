@@ -489,15 +489,23 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       takeHello(hello);
       // A hello that was not answered (a 5xx, a network failure) is said again before a later claim, on the poll loop's own pace, until one is answered. The cloud may still list
       // the capability from an earlier start, so until then the fact stays off and a merge order stops there (fail closed). The answer sets every value the first one would have
-      // (the memory cap and the conflict verdict too) and a wake grant it carries, so the runner ends up as if the first hello had been answered. The first pass is skipped: the hello was just said.
+      // (the memory cap and the conflict verdict too). It takes no wake grant: the tracker was built from the first hello, and the next claim reply brings the grant, as for a runner whose hello had none. The first pass is skipped: the hello was just said.
       let helloAnswered = hello?.kind === "ok";
       let passes = 0;
+      // D#483 S5-j2f: a definite refusal (a 4xx that is not a throttle or a timeout) goes out as the whole ladder of dropped capabilities, up to eight POSTs; said on every pass it is a flood. After one the retry
+      // skips 1, 2, 4 ... up to 32 passes (a count of passes, the loop's own pace), so a cloud that is fixed later still gets its hello.
+      let skip = 0;
+      let backoff = 1;
       const sayHelloAgain = async (): Promise<void> => {
         if (helloAnswered || passes++ === 0) return;
+        if (skip > 0) return void skip--;
         const again = await client.hello(helloMessage).catch(() => undefined);
+        if (again?.kind === "error" && again.status >= 400 && again.status < 500 && again.status !== 408 && again.status !== 429) {
+          skip = backoff;
+          backoff = Math.min(backoff * 2, 32);
+        }
         if (again?.kind !== "ok") return;
         helloAnswered = true;
-        wake.onHello(again.wake);
         takeHello(again);
       };
       const end = await pollLoop({

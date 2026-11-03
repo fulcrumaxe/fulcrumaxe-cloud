@@ -28,7 +28,7 @@ vi.mock("@fx/pipeline", () => ({
   },
 }));
 vi.mock("./advanceReview", () => ({ createReviewDeps: () => ({}) }));
-vi.mock("./mergeQueueDeltaReview", () => ({ bindStartDeltaReview: () => async () => undefined, bindCompleteDeltaReview: () => async () => undefined }));
+vi.mock("./mergeQueueDeltaReview", () => ({ bindStartDeltaReview: () => async () => undefined, bindCompleteDeltaReview: () => async () => undefined, deltaReviewPorts: () => ({ plan: async () => ({ ok: true, roles: [] }) }) }));
 vi.mock("./mergeQueueConflict", () => ({ bindOnConflict: () => async () => false }));
 vi.mock("./worker", () => ({ getWorker: async () => null }));
 vi.mock("./github/installationHttp", () => ({ openInstallationHttp: async () => ({}), readRepoAppLogin: async () => "bot" }));

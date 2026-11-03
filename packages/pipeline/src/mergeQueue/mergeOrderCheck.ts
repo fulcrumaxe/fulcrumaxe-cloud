@@ -54,7 +54,7 @@ export function createMergeOrder(deps: { pool: Pool; github: MergeOrderReads; ru
   const orderedAdds = async (accountId: string, pr: PullRequestRef): Promise<{ state: "none" } | { state: "unknown" } | { state: "some"; adds: readonly string[]; addsOrdered: boolean; resources: Extract<Awaited<ReturnType<typeof resolveOrdered>>, { state: "some" }> }> => {
     const resolved = await resolveOrdered({ github, inTenant }, accountId, pr);
     if (resolved.state !== "some") return { state: resolved.state };
-    const adds = await github.listPullRequestAdds(pr);
+    const adds = await github.listPullRequestAdds(pr, resolved.resources);
     if (!adds.complete) return { state: "unknown" };
     return { state: "some", adds: adds.paths, addsOrdered: adds.paths.some((p) => resolved.resources.some((r) => r.matches(p))), resources: resolved };
   };

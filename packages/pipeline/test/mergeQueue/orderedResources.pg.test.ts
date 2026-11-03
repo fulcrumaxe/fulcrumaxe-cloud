@@ -136,6 +136,43 @@ describe("D#519 MQ5-a ordered resources [pg]", () => {
       expect(await facts(r, "stopped")).toEqual([]);
     });
 
+    // D#483 S5-j2f: a configured glob is never matched against a path past 512 characters, so such a path can neither be checked nor shown to be out of order.
+    const DOCS = { name: "docs", pathPattern: "docs/**", keyPattern: "^(\\d{3})-.+\\.md$", keyKind: "integer" };
+    const LONG = `docs/${"a/".repeat(260)}005-x.md`;
+    it("a path on the default branch's tip past the matcher's length bound, under a configured ** resource: unknown (it waits), not 'none' and not a merge", async () => {
+      const r = await start();
+      await settings(r, { orderedResources: [DOCS] });
+      const a = await item(r, 7, ["docs/002-new.md"], ["docs/003-a.md", `docs/${"a/".repeat(260)}009-x.md`]);
+      const out = await runQueueTick(deps(r), r);
+      expect(out.steps).toEqual([{ step: "parked", entryId: a.entryId, why: "ordered_resource_unknown" }]);
+      expect(r.mergeCalls()).toEqual([]);
+    });
+
+    // The path stays until a person removes the file, so waiting out the unknown bound changes nothing: the entry stops at once, with a fixed code and no path in it.
+    it("a path the pull request adds past the bound, under a configured resource: the entry stops at once with ordered_resource_path_too_long, the slot is free, nothing merges", async () => {
+      const r = await start();
+      await settings(r, { orderedResources: [DOCS] });
+      const a = await item(r, 7, [LONG], ["docs/003-a.md", "docs/004-b.md"]);
+      const out = await runQueueTick(deps(r), r);
+      expect(out.steps[0]).toEqual({ step: "released", entryId: a.entryId, why: "ordered_resource_path_too_long" });
+      expect(r.mergeCalls()).toEqual([]);
+      expect(a.g.world.merges).toEqual([]);
+      expect(await r.entry(7)).toMatchObject({ state: "stopped", reason: "ordered_resource_path_too_long", slotHolder: null, approvedAt: T0 });
+      expect(await facts(r, "stopped")).toEqual([{ code: "ordered_resource_path_too_long", reasons: [], pr_number: 7, dedupe_key: `${a.head}:ordered_resource_path_too_long` }]);
+      expect(await facts(r, "merge_gate")).toEqual([]);
+      // It does not come back by itself when the check is asked again.
+      expect((await runQueueTick(deps(r), r)).steps[0]).toMatchObject({ step: "idle" });
+      expect(await r.entry(7)).toMatchObject({ state: "stopped", reason: "ordered_resource_path_too_long" });
+    });
+
+    it("the same path on the detected default is not held back: the pull request merges as it did", async () => {
+      const r = await start();
+      const a = await item(r, 7, [...mig(713), LONG], mig(711, 712));
+      const out = await runQueueTick(deps(r), r);
+      expect(out.steps.map((s) => s.step)).toEqual(["merged", "idle"]);
+      expect(a.g.world.merges).toEqual([{ sha: a.head, method: "squash" }]);
+    });
+
     it("a file list that cannot be read waits the same way", async () => {
       const r = await start();
       const a = await item(r, 7, mig(713), mig(711, 712));

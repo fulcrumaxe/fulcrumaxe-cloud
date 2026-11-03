@@ -462,6 +462,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "ordered_resource_out_of_order",
   "ordered_resource_unknown",
   "ordered_resource_unreadable",
+  // A pull request adds a file whose path is past the glob matcher's bound under a configured ordered resource: the stop (D#483 S5-j2f).
+  "ordered_resource_path_too_long",
   // The merge gate's order check (D#483 S5-j2a2): a pull request that changes files the base branch changed since its review, and a runner_local item that cannot attest migration order.
   "overlap_unreviewed",
   "ordered_resource_waiting",

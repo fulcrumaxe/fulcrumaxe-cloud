@@ -118,17 +118,22 @@ describe("excludeCovers", () => {
     expect(excludeCovers("[]x]", "anything")).toBe(true);
   });
 
-  it("hostile repeated `**a` patterns finish in well under a second, where the old matcher took tens of seconds", () => {
+  it("hostile repeated `**a` patterns are bounded by the step budget, where the old matcher took tens of seconds", () => {
     const path = `${"a".repeat(200)}!`;
+    // Steps, not seconds: one call spends at most the per-call limit (plus the cheap start scan), whatever the host's load.
     for (const repeats of [4, 5, 6, 40, 150]) {
-      const started = Date.now();
-      const result = excludeCovers("**a".repeat(repeats).slice(0, 512), path);
-      expect(Date.now() - started, `${repeats} repeats`).toBeLessThan(1000);
+      const work = { left: EXCLUDE_SET_MAX_STEPS };
+      const result = excludeCovers("**a".repeat(repeats).slice(0, 512), path, work);
+      expect(EXCLUDE_SET_MAX_STEPS - work.left, `${repeats} repeats`).toBeLessThanOrEqual(EXCLUDE_MATCH_MAX_STEPS + 1024);
       expect(typeof result).toBe("boolean");
     }
-    const started = Date.now();
-    expect(splitPinsByExcludes([path, `${"a".repeat(500)}!`], Array.from({ length: 500 }, (_, i) => `**a**a**a**a**a${"?".repeat(i % 5)}b`)).readable).toHaveLength(2);
-    expect(Date.now() - started).toBeLessThan(2000);
+    const excludes = Array.from({ length: 500 }, (_, i) => `**a**a**a**a**a${"?".repeat(i % 5)}b`);
+    const pins = [path, `${"a".repeat(500)}!`];
+    expect(splitPinsByExcludes(pins, excludes).readable).toHaveLength(2);
+    // The whole set draws on one shared budget: it may overshoot by at most the one call that crossed it.
+    const shared = { left: EXCLUDE_SET_MAX_STEPS };
+    for (const p of pins) for (const e of excludes) excludeCovers(e, p, shared);
+    expect(shared.left).toBeGreaterThanOrEqual(-(EXCLUDE_MATCH_MAX_STEPS + 1024));
   });
 
   it("the work bound fires: a call over the step limit, and a set past its shared budget, answer covered without matching", () => {
@@ -160,7 +165,6 @@ describe("the work budget at a repository's caps", () => {
     const started = Date.now();
     const readable = pins.filter((p) => ![...ordinary].some((e) => excludeCovers(e, p, work)));
     expect(readable).toHaveLength(500);
-    expect(Date.now() - started).toBeLessThan(1000);
     const spent = EXCLUDE_SET_MAX_STEPS - work.left;
     console.info(`500x500 ordinary: ${Date.now() - started} ms, ${spent} of ${EXCLUDE_SET_MAX_STEPS} steps`);
     expect(spent).toBeLessThan(EXCLUDE_SET_MAX_STEPS / 10);

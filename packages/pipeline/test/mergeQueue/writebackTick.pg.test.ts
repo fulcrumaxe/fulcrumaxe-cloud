@@ -117,6 +117,8 @@ describe("D#598 P5c-b plan write-back in the queue tick [pg]", () => {
         w.deltaReviews += 1;
         return { started: false, reason: "worker_unavailable" };
       },
+      reviewPlan: async () => ({ ok: true, roles: [] }),
+      reviewJudgement: async () => ({ mode: "cloud", flagged: false }),
       sleep: async () => undefined,
       pollIntervalMs: 0,
       pollLimit: 3,

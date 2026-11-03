@@ -205,7 +205,7 @@ export async function judgeRenumberRound<S extends RoundSubject>(ports: Conflict
   if (resolved.state === "unknown") return stillRunning();
   if (resolved.state === "none") return { kind: "review", reason: "invalid_input", toSha: head };
   if (!renumberInScope({ changed: read.own, renamed: round.conflictFiles, prFiles: mine.files, isResource: (p) => resolved.resources.some((r) => r.matches(p)) })) return { kind: "stop", reason: "renumber_out_of_scope", outcome: "renumber_out_of_scope" };
-  const adds = await ports.github.listPullRequestAdds?.(pr);
+  const adds = await ports.github.listPullRequestAdds?.(pr, resolved.resources);
   if (!adds?.complete) return stillRunning();
   if (resolved.resources.some((r) => !checkOrdering(r, adds.paths, resolved.tip).ok) && (await ports.github.getDefaultBranchTip(pr)).sha === round.baseSha) return { kind: "stop", reason: "ordered_resource_out_of_order", outcome: "ordered_resource_out_of_order" };
   await ports.inTenant(accountId, (c) => recordRoundHead(c, { accountId, roundId: round.id, toSha: head }));

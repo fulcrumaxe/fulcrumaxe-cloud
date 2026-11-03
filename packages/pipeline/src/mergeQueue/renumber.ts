@@ -116,7 +116,7 @@ export async function readRenumberAsk(deps: OrderedDeps, accountId: string, pr: 
   const resolved = await resolveOrdered(deps, accountId, pr);
   if (resolved.state !== "some" || !deps.github.listPullRequestAdds) return null;
   try {
-    const adds = await deps.github.listPullRequestAdds(pr);
+    const adds = await deps.github.listPullRequestAdds(pr, resolved.resources);
     if (!adds.complete) return null;
     for (const rule of resolved.resources) {
       const v = checkOrdering(rule, adds.paths, resolved.tip);

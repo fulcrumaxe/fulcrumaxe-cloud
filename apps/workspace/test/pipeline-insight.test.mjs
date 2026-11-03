@@ -150,7 +150,7 @@ describe("recorded pipeline steps", () => {
     // D#483 S5-j2a2: the order check's stops. The queue's own sentence for a migration out of order is reused as it is.
     it("the order check's stops have a sentence on the reason line and on the blocking line, never the raw code, null or undefined", () => {
       expect(reasonWord("ordered_resource_out_of_order")).toBe(BLOCKING_SENTENCES.ordered_resource_out_of_order);
-      for (const code of ["ordered_resource_unreadable", "overlap_unreviewed", "runner_ordered_unsupported"]) {
+      for (const code of ["ordered_resource_unreadable", "ordered_resource_path_too_long", "overlap_unreviewed", "runner_ordered_unsupported"]) {
         for (const text of [reasonWord(code), blockingSentence(code), stepView({ kind: "merge_gate", state: "done", result: "ready_human_merges", reasons: [code] }).reasons[0]]) {
           expect(text, code).not.toMatch(/[_<>]|undefined|null/);
           expect(text.length, code).toBeGreaterThan(20);

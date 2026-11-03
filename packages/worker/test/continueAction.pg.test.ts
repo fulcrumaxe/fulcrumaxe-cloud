@@ -5,10 +5,11 @@ import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { recordStage, startAgentRun, writeRunStatus, type ExecutionTargetRegistry } from "@fx/runner";
-import { continueAfterLimit, readBuildWaitReason, runActionSteps, takeBuildSlot, type RunActionsWorker } from "@fx/pipeline";
+import { continueAfterLimit, continueWorkItem, readBuildWaitReason, runActionSteps, takeBuildSlot, type RunActionsWorker } from "@fx/pipeline";
 import { createFakeExecutionTarget } from "../../pipeline/test/build/helpers/fakeExecutionTarget.js";
 import { createSeatResolver, type SeatRequest, type SeatResult } from "../src/seat.js";
 import { createRunActionFacade, type PerformResult } from "../src/runActions.js";
+import { continuationStartInput } from "../src/continuation.js";
 import { CONTINUE_FIXED_CODES, createContinueModule, ContinueBusyError } from "../src/continueAction.js";
 import type { AdvanceStartArgs } from "../src/advance.js";
 
@@ -49,7 +50,7 @@ describe("continue_work_item performer [pg]", { timeout: 90_000 }, () => {
     const registry: ExecutionTargetRegistry = { sandbox: fake.target };
     const advances: AdvanceStartArgs[] = [];
     const startAdvance = vi.fn(async (args: AdvanceStartArgs) => void advances.push(args));
-    const module = createContinueModule(writerPool, registry, { resolveRunSeat: resolve, startAdvance });
+    const module = createContinueModule(writerPool, registry, { resolveRunSeat: resolve, startAdvance, takeBuildSlot: null });
     await toStage(a, "spec_ready");
     await toStage(a, "in_progress");
     return { a, fake, registry, advances, module };
@@ -464,6 +465,35 @@ describe("continue_work_item performer [pg]", { timeout: 90_000 }, () => {
       await limit(w, null, 1);
       await item(w, await newRepo(w), "in_progress");
       await refusedForSlot(w, withClaim(w), "waiting_for_build_slot_account");
+    });
+
+    // D#483 S5-j2f: the replay of a request whose run already started (a crash before the stage move) put the item back In progress with no claim.
+    it("a replay that still has to move the item In progress goes through the claim too: no slot, no move; a free slot, the move", async () => {
+      const w = await world();
+      const parkedRun = await parked(w);
+      const id = await request(w);
+      // The crash: this request's run was started (the library, keyed on the request) and the item was never moved; it is still parked.
+      const resumeInput = await continuationStartInput({ pool: writerPool, resolveRunSeat: resolve }, w.a.accountId, parkedRun);
+      if ("refused" in resumeInput) throw new Error(`test setup: ${resumeInput.refused}`);
+      expect((await continueWorkItem({ pool: writerPool, registry: w.registry }, { accountId: w.a.accountId, workItemId: w.a.workItemId, requestId: id, resumeInput })).outcome).toBe("continued");
+      expect(await stageOf(w)).toBe("needs_human");
+      await limit(w, w.a.repoId, 1);
+      const other = await item(w, w.a.repoId, "pr_opened");
+      const claimed: string[] = [];
+      const module = withClaim(w, async (accountId, itemId, move) => {
+        claimed.push(itemId);
+        return takeBuildSlot(writerPool, accountId, itemId, move);
+      });
+      const before = await runs(w);
+      expect(before).toBe(2);
+      await refusedWith(module.performContinueWorkItem(id), "waiting_for_build_slot_repo");
+      expect(claimed).toEqual([w.a.workItemId]);
+      expect(await stageOf(w)).toBe("needs_human");
+      expect(await runs(w)).toBe(before);
+      await withTenant(writerPool, w.a.accountId, (c) => recordStage(c, { workItemId: other, toStage: "merged", at: new Date(), source: "webhook", sourceRef: `free-${randomUUID()}` }));
+      expect(await module.performContinueWorkItem(id)).toMatchObject({ result: "done" });
+      expect(await stageOf(w)).toBe("in_progress");
+      expect(await runs(w)).toBe(before);
     });
 
     it("a free slot is claimed: the run starts, the item is In progress, and the next item in the repository now waits", async () => {

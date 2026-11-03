@@ -31,8 +31,6 @@ export async function lockRepoMerge(client: Queryable, accountId: string, repoId
 /** The longest a hold for GitHub's queue can last, whatever is read or not: 24 hours. A repository that can no longer be read has bigger problems. */
 export const HOST_QUEUE_MAX_AGE_MINUTES = 1440;
 const HOLDER_SQL = "^ghq:[0-9]{1,9}:[0-9]{1,15}:[0-9]{1,12}:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(:u[0-9]{1,3})?$";
-/** A holder that says it is a hold (`ghq:`) but is not well formed fails closed: it keeps the repository busy for 24 hours after its `lease_until`, which nothing renews, and then ends like any lapsed lease. */
-const MALFORMED_SQL = `holder LIKE 'ghq:%' AND holder !~ '${HOLDER_SQL}'`;
 
 /**
  * D#483 S5-j2c1: the lease of a runner's merge order (kind `order`) is held until the order ends. Its holder names the order and the minute it began, `ord:<order id>:<start minute>`: digits, colons and a uuid, a fixed length.
@@ -40,6 +38,8 @@ const MALFORMED_SQL = `holder LIKE 'ghq:%' AND holder !~ '${HOLDER_SQL}'`;
  * by `convertOrderLeaseToHostQueue`, and until it is, this one stays) and within the 24-hour bound: a timer alone never ends it, and an order that cannot be read keeps the repository busy.
  */
 const ORDER_HOLDER_SQL = "^ord:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9]{1,12}$";
+/** A holder that says it is a hold (`ghq:`) or a runner's order (`ord:`) but is not well formed fails closed: it keeps the repository busy for 24 hours after its `lease_until`, which nothing renews, and then ends like any lapsed lease. */
+const MALFORMED_SQL = `((holder LIKE 'ghq:%' AND holder !~ '${HOLDER_SQL}') OR (holder LIKE 'ord:%' AND holder !~ '${ORDER_HOLDER_SQL}'))`;
 const orderHoldOpenSql = (now: string, bound: string): string =>
   `(EXISTS (SELECT 1 FROM plane_merge_orders o WHERE o.account_id = repo_merge_leases.account_id AND o.id::text = split_part(holder, ':', 2) AND o.state IN ('pending', 'claimed', 'authorized', 'enqueued'))
      AND extract(epoch FROM ${now}) / 60 - split_part(holder, ':', 3)::bigint < ${bound})`;
