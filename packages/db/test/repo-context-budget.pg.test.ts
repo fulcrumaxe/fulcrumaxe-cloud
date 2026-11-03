@@ -64,7 +64,8 @@ describe('migration 0870: repo_context_settings.context_budget_bytes', () => {
       expect((await admin.query(`SELECT has_column_privilege('app_user', 'repo_context_settings', 'context_budget_bytes', $1) AS p`, [priv])).rows[0].p, priv).toBe(false);
     }
     expect((await admin.query(`SELECT has_column_privilege('app_user', 'repo_context_settings', 'context_budget_bytes', 'SELECT') AS p`)).rows[0].p).toBe(true);
-    expect((await admin.query(`SELECT has_column_privilege('repo_context_settings_definer', 'repo_context_settings', 'context_budget_bytes', 'INSERT') AS p`)).rows[0].p).toBe(false);
+    // 0974: the role holds the column grants for the budget's writer (repo_context_budget_apply); the slot's writer (apply) names its own columns only, so a row it makes holds NULL here.
+    expect((await admin.query(`SELECT has_column_privilege('repo_context_settings_definer', 'repo_context_settings', 'context_budget_bytes', 'INSERT') AS p`)).rows[0].p).toBe(true);
     await admin.query('DELETE FROM repo_context_settings WHERE repo_id = $1', [a.repoId]);
     await withTenant(appPool, a.accountId, a.userId, (c) => c.query('SELECT repo_context_settings_apply($1::uuid, 3000)', [a.repoId]));
     expect((await read(a, a.repoId)).rows).toEqual([{ context_budget_bytes: null }]);

@@ -24,12 +24,12 @@ describe('assertContextRulePath', () => {
   };
 
   it('refuses .., absolute, empty, control, backslash and odd segments for both kinds', () => {
-    const bad = ['', '..', '../x', 'a/../b', '/x', '/', '~', '~/x', 'C:/x', 'a\\b', 'a\nb', 'a\u0001b', 'a\u007fb', 'a\u0085b', 'a\u2028b', 'a//b', 'a/', './a', 'a/./b', 'x'.repeat(513), null, undefined, 5];
+    const bad = ['', '..', '../x', 'a/../b', '/x', '/', '~', '~/x', '~foo', '~user/x', 'C:/x', 'a\\b', 'a\nb', 'a\u0001b', 'a\u007fb', 'a\u0085b', 'a\u2028b', 'a//b', 'a/', './a', 'a/./b', 'x'.repeat(513), null, undefined, 5];
     for (const kind of ['pin', 'exclude'] as const) for (const p of bad) expect(refused(kind, p), `${kind} ${JSON.stringify(p)}`).toBe(true);
   });
 
   it('accepts names that only look like the refused ones, at exactly 512 characters', () => {
-    for (const kind of ['pin', 'exclude'] as const) for (const p of ['a..b', '.env', 'dir/.hidden', 'a b/c.txt', '你好/x.md', 'x'.repeat(512), '~user/x', 'c:x']) expect(refused(kind, p), p).toBe(false);
+    for (const kind of ['pin', 'exclude'] as const) for (const p of ['a..b', '.env', 'dir/.hidden', 'a b/c.txt', '你好/x.md', 'x'.repeat(512), 'a/~b', 'c:x']) expect(refused(kind, p), p).toBe(false);
   });
 
   it('* and ? are refused in a pin and accepted in an exclude; [ ] { } are literal in a pin', () => {
@@ -63,6 +63,8 @@ describe('mapRuleDbError', () => {
   it('turns the definer invalid_path into a ContextRuleError and passes everything else through untouched', () => {
     const mapped = mapRuleDbError({ code: '22023', message: 'invalid_path' });
     expect(mapped).toBeInstanceOf(ContextRuleError);
+    // A lock timeout and a deadlock (a save and a remove of one path take their locks in opposite orders) are the same fixed answer: try again.
+    for (const code of ['55P03', '40P01']) expect(mapRuleDbError({ code, message: 'x' })).toMatchObject({ name: 'ContextRuleError', code: 'context_rules_busy' });
     for (const other of [{ code: '22023', message: 'invalid_message' }, { code: '42501', message: 'invalid_path' }, new Error('boom'), null, 'x']) expect(mapRuleDbError(other)).toBe(other);
   });
 });

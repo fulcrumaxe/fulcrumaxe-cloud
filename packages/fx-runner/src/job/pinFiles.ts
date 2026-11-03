@@ -69,6 +69,8 @@ export function checkoutPinSource(root: string, between?: (rel: string) => Promi
 
 /** What the job's pins came to on this machine: the files read and the counts for the ledger. */
 export interface JobPinsRead extends PinFiles {
+  /** Pins held back only because the exclude matcher reached its work bound: never opened, counted apart from a real exclude. */
+  limited: number;
   /** Pins an exclude covers: never opened. */
   excluded: number;
   /** The repository budget the job named, if it did. */
@@ -81,7 +83,7 @@ export interface JobPinsRead extends PinFiles {
  */
 export async function readJobPins(job: Pick<Job, "pins" | "excludes">, workspace: string, source: PinFileSource = checkoutPinSource(workspace)): Promise<JobPinsRead | undefined> {
   if (job.pins === undefined) return undefined;
-  const { readable, excluded } = splitPinsByExcludes(job.pins.paths, job.excludes ?? []);
+  const { readable, excluded, limited } = splitPinsByExcludes(job.pins.paths, job.excludes ?? []);
   let files: PinFiles;
   try {
     files = await readPinFiles(readable, source);
@@ -89,7 +91,7 @@ export async function readJobPins(job: Pick<Job, "pins" | "excludes">, workspace
     // fx-swallow-ok: pins that cannot be read are counted as missing; the run starts without them
     files = { items: [], missing: readable.length, tooLarge: 0 };
   }
-  return { ...files, excluded, ...(job.pins.budget_bytes === undefined ? {} : { budgetBytes: job.pins.budget_bytes }) };
+  return { ...files, excluded, limited, ...(job.pins.budget_bytes === undefined ? {} : { budgetBytes: job.pins.budget_bytes }) };
 }
 
 /**

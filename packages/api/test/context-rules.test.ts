@@ -53,9 +53,9 @@ describe('GET /api/v1/context-rules (D#600 CX-5a)', { timeout: 60_000 }, () => {
     return { ...m, repoId, itemId, rule };
   }
 
-  it('registers one session-only member GET with a read rate class', () => {
-    expect(contextRuleRoutes).toHaveLength(1);
-    const [route] = contextRuleRoutes;
+  it('registers a session-only member GET with a read rate class', () => {
+    expect(contextRuleRoutes.filter((r) => r.method === 'GET')).toHaveLength(1);
+    const route = contextRuleRoutes.find((r) => r.method === 'GET')!;
     expect(route!.method).toBe('GET');
     expect(route!.principals).toEqual(['session']);
     expect(route!.minRole).toBe('member');

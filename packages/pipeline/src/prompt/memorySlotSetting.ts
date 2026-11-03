@@ -3,7 +3,7 @@ import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { MEMORY_SLOT_DEFAULT_BYTES, parseMemorySlotBytes } from "./assemblePrompt.js";
 
 /**
- * D#600 CX-2: a repository's memory slot size (migration 0796). The row IS the setting; no row means the default, so a reset is a delete
+ * D#600 CX-2: a repository's memory slot size (migration 0796). The row IS the setting; no row, or a NULL slot (0974: a row may hold only a budget), means the default, so a reset nulls the slot
  * and nothing about the default is ever stored. Reading is the account's own RLS-scoped select; writing is the one definer function, which
  * re-derives the caller's role and refuses a size outside 1024..8192 with `invalid_message`.
  */
@@ -11,8 +11,8 @@ import { MEMORY_SLOT_DEFAULT_BYTES, parseMemorySlotBytes } from "./assemblePromp
 /** The slot size for a repository: its setting, or the default. */
 export async function readMemorySlotBytes(pool: Pool, accountId: string, repoId: string): Promise<number> {
   return withTenant(pool, accountId, async (client) => {
-    const { rows } = await client.query<{ memory_slot_bytes: number }>("SELECT memory_slot_bytes FROM repo_context_settings WHERE account_id = $1 AND repo_id = $2", [accountId, repoId]);
-    return rows[0] === undefined ? MEMORY_SLOT_DEFAULT_BYTES : Number(rows[0].memory_slot_bytes);
+    const { rows } = await client.query<{ memory_slot_bytes: number | null }>("SELECT memory_slot_bytes FROM repo_context_settings WHERE account_id = $1 AND repo_id = $2", [accountId, repoId]);
+    return rows[0]?.memory_slot_bytes == null ? MEMORY_SLOT_DEFAULT_BYTES : Number(rows[0].memory_slot_bytes);
   });
 }
 

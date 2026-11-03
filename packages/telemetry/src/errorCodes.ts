@@ -440,6 +440,11 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "pins_exceed_budget",
   "tree_truncated",
   "tree_unavailable",
+  // Context rule writes (D#600 CX-9a): the pin ceiling, the exclude cap, a removal that brings pins back over budget, and the repository's rule lock timing out.
+  "pins_exceed_ceiling",
+  "excludes_exceed_cap",
+  "exclude_readds_pins",
+  "context_rules_busy",
   // Merge queue ordered-resource check (D#519 MQ5-a): the stop, the unknown wait's fact, and the stop when the wait is spent.
   "ordered_resource_out_of_order",
   "ordered_resource_unknown",

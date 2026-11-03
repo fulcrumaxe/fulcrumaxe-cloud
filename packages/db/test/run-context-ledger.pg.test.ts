@@ -195,9 +195,9 @@ describe('migration 0875: run_context_ledger_record stores denied_tool_calls and
   it('stores the four pin reasons on a pinned section, and still refuses a reason outside the closed list', async () => {
     const t = await seedAccount(admin, randomUUID());
     const note = (reason: string) => ({ code: 'pinned', bytes: 3, sha256: sha, trimmed_bytes: 0, trimmed_reason: reason });
-    await record(t.accountId, t.runId, 0, [note('pin_missing'), note('pins_over_budget'), note('pin_too_large'), note('pin_excluded')]);
+    await record(t.accountId, t.runId, 0, [note('pin_missing'), note('pins_over_budget'), note('pin_too_large'), note('pin_excluded'), note('pin_match_limit')]);
     const { rows } = await admin.query('SELECT sections FROM run_context_ledger WHERE account_id = $1 AND run_id = $2', [t.accountId, t.runId]);
-    expect(rows[0].sections.map((x: { trimmed_reason: string }) => x.trimmed_reason)).toEqual(['pin_missing', 'pins_over_budget', 'pin_too_large', 'pin_excluded']);
+    expect(rows[0].sections.map((x: { trimmed_reason: string }) => x.trimmed_reason)).toEqual(['pin_missing', 'pins_over_budget', 'pin_too_large', 'pin_excluded', 'pin_match_limit']);
     const u = await seedAccount(admin, randomUUID());
     await expect(record(u.accountId, u.runId, 0, [note('pin_gone')])).rejects.toThrow(/invalid_message/);
   });

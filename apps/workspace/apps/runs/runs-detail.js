@@ -430,7 +430,7 @@ export function contextModel(ctx) {
   const live = ctx.status === "pending" || ctx.status === "running";
   // D#600 CX-5b: two `pinned` entries are notes about the pins, not prompt text: how many pinned files could not be read, and how far the pins stand over the budget
   // (they are included in full either way). They carry a count or a size in `bytes`, so they are not rows with a share.
-  const PIN_NOTE_REASONS = ["pin_missing", "pins_over_budget", "pin_too_large", "pin_excluded"];
+  const PIN_NOTE_REASONS = ["pin_missing", "pins_over_budget", "pin_too_large", "pin_excluded", "pin_match_limit"];
   const notes = ctx.sections.filter((x) => PIN_NOTE_REASONS.includes(x.reason));
   const body = ctx.sections.filter((x) => !notes.includes(x));
   const missing = notes.filter((x) => x.reason === "pin_missing").reduce((n, x) => n + x.bytes, 0);
@@ -441,6 +441,7 @@ export function contextModel(ctx) {
     missing > 0 ? (missing === 1 ? "1 pinned file was not included: it was missing or not text, or GitHub could not be read." : missing + " pinned files were not included: they were missing or not text, or GitHub could not be read.") : null,
     sum("pin_too_large") > 0 ? files(sum("pin_too_large")) + " not included: over the 190,000-character limit for one pinned file. Pins are never cut." : null,
     sum("pin_excluded") > 0 ? files(sum("pin_excluded")) + " not included: the path is also kept out of context, and keeping out wins over pinning." : null,
+    sum("pin_match_limit") > 0 ? files(sum("pin_match_limit")) + " not included: the exclude rules were too many or too complex to check against every pin, so they were left out to be safe." : null,
     over > 0 ? "Pinned files stand " + bytesText(over) + " over this repository's context budget. They are never cut, so they were included in full." : null,
   ].filter((t) => t !== null);
   const secTotal = body.reduce((n, x) => n + x.bytes, 0);

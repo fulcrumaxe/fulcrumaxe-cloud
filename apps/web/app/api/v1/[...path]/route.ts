@@ -16,7 +16,9 @@ import { vercelConnectionDeps } from "@fx/api/src/routes/vercel-connection.js";
 import { createVercelTokenValidator } from "@fx/model-connection";
 import { createPinnedVercelFetch } from "../../../../lib/vercelPinnedFetch";
 import { productionVercelEnvSource, productionVercelNames } from "../../../../lib/setupRequestEnvSource";
-import { liveInstallationTokens } from "@fx/github";
+import { contextRuleDeps } from "@fx/api/src/routes/context-rules.js";
+import { createRepoTreeSource, liveInstallationTokens } from "@fx/github";
+import { openInstallationHttp } from "../../../../lib/github/installationHttp";
 import { parsePreviewResult } from "@fx/pipeline";
 import { operatorMode } from "@fx/worker";
 import { httpRunActionSignalFromEnv } from "@fx/api/src/runActions/httpSignal.js";
@@ -90,6 +92,8 @@ receiptReversalDeps.getPrStateReader = () => createAppPrStateReader();
 vercelConnectionDeps.getNames = () => productionVercelNames;
 // D#601 MEM-4a2b: an edited memory is scanned against this process's live installation tokens, the same source the worker's intake uses.
 memoryEditDeps.liveSecrets = () => liveInstallationTokens();
+// D#600 CX-9a: saving a pin measures the repository's files; the tree is read with the one-repository `repo_map` token (read only), the same reader the prompt's map uses.
+contextRuleDeps.openTree = async (r) => createRepoTreeSource(await openInstallationHttp("repo_map", { repoId: r.repoId, owner: r.owner, name: r.name }), { owner: r.owner, name: r.name });
 onboardingDeps.projectPreviewResult = parsePreviewResult;
 // D#2 H14c-3-3a: the preview is offered only behind the FX_ONBOARDING_PREVIEW flag, on a worker that can run it.
 onboardingDeps.previewAvailable = previewEnabled;
