@@ -165,6 +165,11 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "refused_spend",
   "forbidden",
   "invalid_message",
+  // Model-call streaming (D#597 CC-5a): the provider's stream ended with an error event, and a provider shape with no streaming path.
+  "stream_error",
+  "unsupported_provider",
+  // A streamed tool_use block dropped for a bad shape (D#597 CC-5a): reported with a fixed reason, never the model's words.
+  "tool_call_rejected",
   // Non-ApiError reasons that the sync-failure tag has always reported.
   "mint_failed",
   "mint_timeout",

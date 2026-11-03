@@ -2,7 +2,7 @@ import { withOpenedKey, type KeyAccessCtx } from '@fx/model-connection/keyAccess
 import { matchesShape, redactText, SK_ANT_OAT_PATTERN_SOURCE } from '@fx/runtime/src/redact.js';
 import { requestFor, type RequestParams } from './hosts.js';
 
-export type ModelCallErrorCode = 'forbidden' | 'subscription_credential' | 'key_rejected' | 'timeout' | 'fetch_failed' | 'http_error' | 'credits_exhausted';
+export type ModelCallErrorCode = 'forbidden' | 'subscription_credential' | 'key_rejected' | 'timeout' | 'fetch_failed' | 'http_error' | 'credits_exhausted' | 'unsupported_provider' | 'stream_error';
 
 /** Every message is fixed text or redacted provider text -- never the key, never a raw fetch/undici error. */
 export class ModelCallError extends Error {
@@ -18,16 +18,20 @@ export class ModelCallError extends Error {
 
 const MAX_ERROR_BODY_CHARS = 500;
 
+/** S2g: no API-side subscription path -- an OAuth-token-shaped credential is never sent, on the JSON path or the stream path. */
+function refuseSubscriptionCredential(key: string): void {
+  if (matchesShape(key, SK_ANT_OAT_PATTERN_SOURCE)) {
+    throw new ModelCallError('subscription_credential', 'model-call: subscription credentials are not accepted (bring your own API key)');
+  }
+}
+
 /**
  * S2c: the plaintext key lives only inside this callback's closure -- it builds the request,
  * sends it, and is gone. No module-level state (S2b).
  */
 export async function callWithKey(ctx: KeyAccessCtx, fetchImpl: typeof fetch, timeoutMs: number, p: RequestParams) {
   return withOpenedKey(ctx, async ({ provider, key }) => {
-    // S2g: no API-side subscription path -- an OAuth-token-shaped credential is never sent.
-    if (matchesShape(key, SK_ANT_OAT_PATTERN_SOURCE)) {
-      throw new ModelCallError('subscription_credential', 'model-call: subscription credentials are not accepted (bring your own API key)');
-    }
+    refuseSubscriptionCredential(key);
     const req = requestFor(provider, key, p);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -40,6 +44,38 @@ export async function callWithKey(ctx: KeyAccessCtx, fetchImpl: typeof fetch, ti
       return { provider, status: res.status, text };
     } catch {
       // Never interpolate the underlying error: undici embeds header values (the key) in some messages.
+      if (controller.signal.aborted) throw new ModelCallError('timeout', `model-call: provider call exceeded ${timeoutMs} ms`);
+      throw new ModelCallError('fetch_failed', 'model-call: provider request failed');
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+}
+
+/**
+ * The streaming twin of callWithKey: same key closure, constant host table, redirect 'error', redaction and subscription refusal.
+ * A non-2xx answer comes back as redacted text. A 2xx body is read by `consume` INSIDE the closure, so the key never leaves it.
+ * `build` returns null for a provider shape with no streaming path (the call then sends nothing).
+ */
+export async function streamWithKey<T>(
+  ctx: KeyAccessCtx,
+  fetchImpl: typeof fetch,
+  timeoutMs: number,
+  build: (provider: string, key: string) => { url: string; headers: Record<string, string>; body: string } | null,
+  consume: (body: ReadableStream<Uint8Array> | null, signal: AbortSignal) => Promise<T>,
+): Promise<{ status: number; text: string; value: T | null }> {
+  return withOpenedKey(ctx, async ({ provider, key }) => {
+    refuseSubscriptionCredential(key);
+    const req = build(provider, key);
+    if (!req) throw new ModelCallError('unsupported_provider', 'model-call: streaming is not available for this provider');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetchImpl(req.url, { method: 'POST', headers: req.headers, body: req.body, signal: controller.signal, redirect: 'error' });
+      if (!res.ok) return { status: res.status, text: redactText(await res.text(), [key]).slice(0, MAX_ERROR_BODY_CHARS), value: null };
+      return { status: res.status, text: '', value: await consume(res.body, controller.signal) };
+    } catch (e) {
+      if (e instanceof ModelCallError) throw e;
       if (controller.signal.aborted) throw new ModelCallError('timeout', `model-call: provider call exceeded ${timeoutMs} ms`);
       throw new ModelCallError('fetch_failed', 'model-call: provider request failed');
     } finally {

@@ -1,5 +1,6 @@
 import https from 'node:https';
 import type { AddressInfo } from 'node:net';
+import { answerMessages, newMessagesFake, type MessagesFake } from './anthropicMessagesFake.js';
 import { generateSelfSignedCert } from './selfSignedCert.js';
 
 /**
@@ -17,6 +18,8 @@ import { generateSelfSignedCert } from './selfSignedCert.js';
  *    Authorization header is `Bearer <a known key>`.
  *  - Anthropic: `/v1/models` answers 401 unless `x-api-key` is a known key and `anthropic-version` is present.
  *  - OpenAI: `/v1/models` answers 401 unless the Authorization header is `Bearer <a known key>`; an `x-api-key` header is not accepted.
+ *  - Anthropic POST /v1/messages (opt-in: `anthropic.messages.enabled = true`; otherwise it is refused like any POST): the strict streaming
+ *    messages route of anthropicMessagesFake.ts -- real SSE framing, the real error shapes, request validation including tool_use/tool_result ids.
  *  - Either answers 403, 429, 500, or never answers (a timeout) on demand, per request, through `mode`.
  *
  * Not faked faithfully (the PR says so): the response bodies (every answer is an empty body, since the client reads
@@ -45,6 +48,8 @@ export interface StrictProvider {
   knownKeys: Set<string>;
   /** When set, every request is answered with it (or never answered) instead of by the rules. */
   mode: ProviderMode;
+  /** The Anthropic POST /v1/messages route (CC-5a); off until a test enables it. Present on every provider, used by 'anthropic' only. */
+  messages: MessagesFake;
   close(): Promise<void>;
 }
 
@@ -62,6 +67,7 @@ export async function startStrictProvider(name: ProviderName, knownKeys: string[
     refused: [],
     knownKeys: new Set(knownKeys),
     mode: null,
+    messages: newMessagesFake(),
     close: async () => undefined,
   };
   const hanging: Array<() => void> = [];
@@ -72,12 +78,19 @@ export async function startStrictProvider(name: ProviderName, knownKeys: string[
     const path = new URL(req.url ?? '/', 'https://127.0.0.1').pathname;
     const seen: SeenRequest = { method: req.method ?? 'GET', path, headers, servername: (req.socket as unknown as { servername?: string | false }).servername };
     provider.seen.push(seen);
-    req.resume();
     const reply = (status: number): void => {
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end('{}');
     };
 
+    // The one POST the fakes answer: the opt-in streaming messages route. It reads its own body.
+    if (name === 'anthropic' && provider.messages.enabled && seen.method === 'POST' && path === '/v1/messages' && !provider.mode) {
+      let bodyText = '';
+      req.on('data', (c) => (bodyText += c));
+      req.on('end', () => void answerMessages(provider.messages, provider.knownKeys, headers, bodyText, res));
+      return;
+    }
+    req.resume();
     // The generation guard comes first, and applies in every mode.
     if (seen.method !== 'GET') {
       provider.refused.push(seen);
@@ -111,6 +124,32 @@ export async function startStrictProvider(name: ProviderName, knownKeys: string[
     await new Promise<void>((resolve) => server.close(() => resolve()));
   };
   return provider;
+}
+
+/** A Response whose body is the live socket stream, so a reader sees chunks as the server writes them and a cut connection as an error. */
+function streamingResponse(res: import('node:http').IncomingMessage, status: number): Response {
+  const headers = new Headers();
+  for (const [k, v] of Object.entries(res.headers)) if (typeof v === 'string') headers.set(k, v);
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      let over = false;
+      const end = (e?: Error) => {
+        if (over) return;
+        over = true;
+        if (e) c.error(e);
+        else c.close();
+      };
+      res.on('data', (d: Buffer) => over || c.enqueue(new Uint8Array(d)));
+      res.on('end', () => end());
+      res.on('error', (e) => end(e));
+      res.on('aborted', () => end(new Error('strict transport: connection cut')));
+      res.on('close', () => end(res.complete ? undefined : new Error('strict transport: connection cut')));
+    },
+    cancel() {
+      res.destroy();
+    },
+  });
+  return new Response(body, { status, headers });
 }
 
 export interface StrictProviders {
@@ -163,16 +202,18 @@ export async function startStrictProviders(keys: { ai_gateway?: string[]; anthro
           },
         },
         (res) => {
-          res.resume();
           const status = res.statusCode ?? 0;
           if (init?.redirect === 'error' && status >= 300 && status < 400) {
+            res.resume();
             return reject(new TypeError('strict transport: redirect refused'));
           }
+          if (init?.method === 'POST') return resolve(streamingResponse(res, status));
+          res.resume();
           res.on('end', () => resolve(new Response(null, { status })));
         },
       );
       req.on('error', reject);
-      req.end();
+      req.end(typeof init?.body === 'string' ? init.body : undefined);
     });
   }) as typeof fetch;
 
@@ -188,6 +229,7 @@ export async function startStrictProviders(keys: { ai_gateway?: string[]; anthro
         p.seen.length = 0;
         p.refused.length = 0;
         p.mode = null;
+        p.messages = newMessagesFake();
       }
     },
     close: async () => {
