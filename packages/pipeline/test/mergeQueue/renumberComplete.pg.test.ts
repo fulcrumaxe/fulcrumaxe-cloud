@@ -186,6 +186,24 @@ describe("D#519 MQ5-b2 renumber round end [pg]", () => {
     expect(r.mergeCalls()).toEqual([7]);
   });
 
+  it("D#483: a renumber round that continues a chain of rounds that conflicted again is reviewed from the head the chain began at, and its scope test still reads only its own diff", async () => {
+    const { r, a, round, s } = await running();
+    const origin = "5".repeat(40);
+    const main = "6".repeat(40);
+    // The round starts from a merge commit an earlier round pushed (and that conflicted again): its first parent is the head last fully reviewed.
+    await db.admin.query(
+      `INSERT INTO merge_conflict_rounds (account_id, repo_id, work_item_id, entry_id, round, from_sha, base_sha, base_ref, conflict_files, to_sha, outcome) VALUES ($1, $2, $3, $4, 20, $5, $6, 'main', '{}', $7, 'conflicted_again')`,
+      [r.accountId, r.repoId, a.workItemId, a.entryId, origin, round.baseSha, round.fromSha],
+    );
+    const to = push(a, round, { old: mig(710), neu: mig(713) });
+    a.g.world.commits[round.fromSha] = { parents: [origin, main], authorLogin: BOT, committerLogin: "web-flow", verified: false, files: [{ filename: "src/earlier.ts" }] };
+    const whole = [...mig(713), ...mig(710), REF, "src/earlier.ts", "src/from-main.ts"];
+    a.g.world.compares[`${origin}...${to}`] = { status: "ahead", aheadBy: 3, behindBy: 0, mergeBaseSha: origin, files: whole.map((filename) => ({ filename })) };
+    await s.endRun(round.runId!);
+    expect(await s.complete()).toEqual({ outcome: "delta_started" });
+    for (const x of s.started) expect(x.delta).toEqual({ trigger: "renumber", mergeCommitSha: to, parents: [origin], parentRoles: ["pr_side"], changedFiles: whole, earlierMerges: [round.fromSha] });
+  });
+
   it("MQ5-b2 follow-up: a finished renumber round is not the source of a LATER refresh's delta review", async () => {
     const { r, a, round, s } = await running();
     const to = push(a, round, { old: mig(710), neu: mig(713) });

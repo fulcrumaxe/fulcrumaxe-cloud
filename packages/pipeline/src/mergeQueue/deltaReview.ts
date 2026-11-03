@@ -40,6 +40,30 @@ export interface DeltaSource {
   toSha: string;
   baseSha: string | null;
   trigger: DeltaReviewInput["trigger"];
+  /** D#483: set only when the round continues a chain of rounds that conflicted again: the heads from the last fully reviewed one up to `fromSha`. The review then reads from `chain[0]`. */
+  chain?: readonly string[];
+}
+
+/** Where the review's diff starts: the head last fully reviewed (the chain's origin), else the round's own pre-round head. */
+const readFrom = (src: DeltaSource): string => src.chain?.[0] ?? src.fromSha;
+
+type Github = DeltaReviewPorts["github"];
+
+/** Each merge commit of a chain still has the earlier head as its first parent and two parents: the checks the single round's commit gets, for every link. */
+async function checkChain(github: Github, pr: { repoId: string; prNumber: number }, src: DeltaSource): Promise<"head_changed" | "invalid_input" | null> {
+  const chain = src.chain ?? [];
+  if (chain.length > 0 && chain[chain.length - 1] !== src.fromSha) return "invalid_input";
+  for (let i = 1; i < chain.length; i += 1) {
+    const link = await github.getCommit(pr, chain[i]!);
+    if (link.parents.length !== 2 || link.parents[0] !== chain[i - 1]) return "head_changed";
+  }
+  return null;
+}
+
+/** The files of `from..toSha`; unreadable, not ahead, truncated or empty fails closed. */
+async function diffFiles(github: Github, pr: { repoId: string; prNumber: number }, from: string, toSha: string): Promise<readonly string[] | null> {
+  const diff = await github.compareCommits?.(pr, from, toSha, { files: true });
+  return !diff || diff.status !== "ahead" || diff.files === null || diff.filesTruncated || diff.files.length === 0 ? null : diff.files;
 }
 
 export const refreshSource = (row: HeadRefreshRow): DeltaSource => ({ fromSha: row.fromSha, toSha: row.toSha, baseSha: row.baseSha, trigger: "refresh_overlap" });
@@ -66,14 +90,19 @@ export async function readMergeCommit(
   github: DeltaReviewPorts["github"],
   entry: RoundSubject,
   src: DeltaSource,
-): Promise<{ ok: true; files: readonly string[]; baseSha: string } | { ok: false; reason: "head_changed" | "invalid_input" }> {
+): Promise<{ ok: true; files: readonly string[]; own: readonly string[]; baseSha: string } | { ok: false; reason: "head_changed" | "invalid_input" }> {
   const pr = { repoId: entry.repoId, prNumber: entry.prNumber };
   const now = await github.getMergeability(pr, { gatedHeadSha: src.toSha });
   if (now.state !== "open" || now.merged || now.headSha !== src.toSha) return { ok: false, reason: "head_changed" };
   const commit = await github.getCommit(pr, src.toSha);
   if (commit.parents.length !== 2 || commit.parents[0] !== src.fromSha || (src.baseSha !== null && commit.parents[1] !== src.baseSha)) return { ok: false, reason: "head_changed" };
   if (commit.files === null || commit.files.length === 0) return { ok: false, reason: "invalid_input" };
-  return { ok: true, files: commit.files, baseSha: commit.parents[1]! };
+  // D#483: `own` is the merge commit's own list; `files` is what the review is told, the whole chain's change when the round continues one.
+  if (src.chain === undefined) return { ok: true, files: commit.files, own: commit.files, baseSha: commit.parents[1]! };
+  const bad = await checkChain(github, pr, src);
+  if (bad !== null) return { ok: false, reason: bad };
+  const files = await diffFiles(github, pr, readFrom(src), src.toSha);
+  return files === null ? { ok: false, reason: "invalid_input" } : { ok: true, files, own: commit.files, baseSha: commit.parents[1]! };
 }
 
 /**
@@ -84,23 +113,31 @@ export async function readPlainDiff(
   github: DeltaReviewPorts["github"],
   entry: RoundSubject,
   src: DeltaSource,
-): Promise<{ ok: true; files: readonly string[]; baseSha: string } | { ok: false; reason: "head_changed" | "invalid_input" | "not_a_renumber" }> {
+): Promise<{ ok: true; files: readonly string[]; own: readonly string[]; baseSha: string } | { ok: false; reason: "head_changed" | "invalid_input" | "not_a_renumber" }> {
   const pr = { repoId: entry.repoId, prNumber: entry.prNumber };
   const now = await github.getMergeability(pr, { gatedHeadSha: src.toSha });
   if (now.state !== "open" || now.merged || now.headSha !== src.toSha) return { ok: false, reason: "head_changed" };
   if ((await github.getCommit(pr, src.toSha)).parents.length !== 1) return { ok: false, reason: "not_a_renumber" };
-  const diff = await github.compareCommits?.(pr, src.fromSha, src.toSha, { files: true });
-  if (!diff || diff.status !== "ahead" || diff.files === null || diff.filesTruncated || diff.files.length === 0) return { ok: false, reason: "invalid_input" };
-  return { ok: true, files: diff.files, baseSha: src.fromSha };
+  // D#483: `own` is the round's own diff; `files` is what the review is told, from the head last fully reviewed when the round continues a chain.
+  const own = await diffFiles(github, pr, src.fromSha, src.toSha);
+  if (own === null) return { ok: false, reason: "invalid_input" };
+  if (src.chain === undefined) return { ok: true, files: own, own, baseSha: src.fromSha };
+  const bad = await checkChain(github, pr, src);
+  if (bad !== null) return { ok: false, reason: bad };
+  const files = await diffFiles(github, pr, readFrom(src), src.toSha);
+  return files === null ? { ok: false, reason: "invalid_input" } : { ok: true, files, own, baseSha: src.fromSha };
 }
 
 /** The reader for a source's shape: the merge commit of a refresh or a conflict round, or the plain diff of a renumber round. */
 export const readSourceDiff = (github: DeltaReviewPorts["github"], entry: RoundSubject, src: DeltaSource) => (src.trigger === "renumber" ? readPlainDiff(github, entry, src) : readMergeCommit(github, entry, src));
 
-export const deltaInput = (src: DeltaSource, files: readonly string[], baseSha: string): DeltaReviewInput =>
-  src.trigger === "renumber"
-    ? { mergeCommitSha: src.toSha, parents: [src.fromSha], parentRoles: ["pr_side"], changedFiles: files, trigger: src.trigger }
-    : { mergeCommitSha: src.toSha, parents: [src.fromSha, baseSha], parentRoles: ["pr_side", "main_side"], changedFiles: files, trigger: src.trigger };
+/** `earlierMerges` (a chain only): the heads after the origin, which the prompt names. They are shas the chain checks already read, never text from the pull request. */
+export const deltaInput = (src: DeltaSource, files: readonly string[], baseSha: string): DeltaReviewInput => {
+  const earlierMerges = src.chain !== undefined && src.chain.length > 1 ? { earlierMerges: src.chain.slice(1) } : {};
+  return src.trigger === "renumber"
+    ? { mergeCommitSha: src.toSha, parents: [readFrom(src)], parentRoles: ["pr_side"], changedFiles: files, trigger: src.trigger, ...earlierMerges }
+    : { mergeCommitSha: src.toSha, parents: [readFrom(src), baseSha], parentRoles: ["pr_side", "main_side"], changedFiles: files, trigger: src.trigger, ...earlierMerges };
+};
 
 /** Starts `roles` in order, reusing a role's run that already exists. On a refusal or a throw, cancels the runs THIS call started (never a reused one). */
 export async function startDeltaRoles<S extends RoundSubject>(

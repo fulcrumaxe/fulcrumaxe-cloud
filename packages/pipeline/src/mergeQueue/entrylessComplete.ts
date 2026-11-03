@@ -1,7 +1,7 @@
 import { recordStop } from "./conflict.js";
 import { judgeConflictRound, judgeRenumberRound, type ConflictCompletionPorts } from "./conflictComplete.js";
 import { judgeDeltaReview } from "./deltaComplete.js";
-import type { DeltaSource } from "./deltaReview.js";
+import { roundSource } from "./roundChain.js";
 import { endRound, listConflictRounds, recordRoundHead } from "./store.js";
 import type { ConflictSubject } from "./types.js";
 
@@ -74,7 +74,7 @@ export async function completeEntrylessRound(ports: ConflictCompletionPorts<Conf
 
   if (round.outcome !== "resolved" || round.toSha === null) return { outcome: "not_waiting" };
   const toSha = round.toSha;
-  const src: DeltaSource = { fromSha: round.fromSha, toSha, baseSha: null, trigger: round.kind === "renumber" ? "renumber" : "conflict_resolution" };
+  const src = roundSource(rounds, round, toSha, null);
   const runs = await ports.runs(who, toSha);
   const cancelAll = async () => {
     for (const r of runs) if (r.reusable) await ports.cancelRun(who, r.runId);

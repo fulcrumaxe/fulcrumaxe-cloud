@@ -6,6 +6,7 @@ import { readMergeCommit, readPlainDiff, startDeltaForSource, type DeltaSource }
 import type { DeltaCompletionPorts } from "./deltaComplete.js";
 import { checkOrdering } from "./orderedResources.js";
 import { resolveOrdered } from "./orderedCheck.js";
+import { roundSource } from "./roundChain.js";
 import { renumberInScope, roundOwnPushes } from "./renumberComplete.js";
 import { MERGE_QUEUE_CONFLICT_ROUND_MAX_MINUTES } from "./policy.js";
 import { endRound, finishWork, listConflictRounds, recordRoundHead, returnToReview, settlePullRequest, stopEntry, switchToDeltaReview } from "./store.js";
@@ -125,6 +126,12 @@ async function judgeRoundHead<S extends RoundSubject>(ports: ConflictCompletionP
   return { head, ended, stillRunning };
 }
 
+/** The item's rounds, to find the chain a round continues (none for an entry that is no work item's, which has no rounds). */
+export async function roundsOf<S extends RoundSubject>(ports: ConflictCompletionPorts<S>, who: S): Promise<ConflictRound[]> {
+  const itemId = who.workItemId;
+  return itemId === null ? [] : ports.inTenant(who.accountId, (c) => listConflictRounds(c, who.accountId, itemId));
+}
+
 /** The delta review's start and what a refusal of it means for the entry; one rule for both kinds of round. */
 async function startRoundDelta<S extends RoundSubject>(ports: ConflictCompletionPorts<S>, who: S, src: DeltaSource, read: { files: readonly string[]; baseSha: string }): Promise<RoundVerdict> {
   const started = await startDeltaForSource(ports, who, src, read);
@@ -161,13 +168,13 @@ export async function judgeConflictRound<S extends RoundSubject>(ports: Conflict
   }
   if (fresh.mergeable === false && fresh.mergeableState === "dirty") return { kind: "again", head };
 
-  const src: DeltaSource = { fromSha: round.fromSha, toSha: head, baseSha, trigger: "conflict_resolution" };
+  const src = roundSource(await roundsOf(ports, who), round, head, baseSha);
   await ports.inTenant(accountId, (c) => recordRoundHead(c, { accountId, roundId: round.id, toSha: head }));
   const read = await readMergeCommit(ports.github, who, src);
   if (!read.ok) return { kind: "review", reason: read.reason, toSha: head };
   // R-519-C6-4: a merge commit that touched none of the PR's own files is no resolution of a conflict, and no earlier pass is carried across it.
   const own = await ports.github.compareToBase(pr, head, { files: true });
-  if (own.files !== null && read.files.every((f) => !own.files!.includes(f))) return { kind: "review", reason: "main_side_only", toSha: head };
+  if (own.files !== null && read.own.every((f) => !own.files!.includes(f))) return { kind: "review", reason: "main_side_only", toSha: head };
   return startRoundDelta(ports, who, src, read);
 }
 
@@ -189,7 +196,7 @@ export async function judgeRenumberRound<S extends RoundSubject>(ports: Conflict
   const own = round.runId === null ? "foreign" : await roundOwnPushes(async (sha) => (await readPlatformCommitProof()?.(who, [sha]))?.pushes ?? null, { fromSha: round.fromSha, runId: round.runId }, head);
   if (own === "unread") return { kind: "review", reason: "identity_unread", toSha: head };
   if (own === "foreign") return { kind: "stop", reason: "ordered_resource_out_of_order", outcome: "foreign_commits" };
-  const src: DeltaSource = { fromSha: round.fromSha, toSha: head, baseSha: null, trigger: "renumber" };
+  const src = roundSource(await roundsOf(ports, who), round, head, null);
   const read = await readPlainDiff(ports.github, who, src);
   if (!read.ok) return { kind: "review", reason: read.reason, toSha: head };
   const mine = await ports.github.compareCommits(pr, round.baseSha, round.fromSha, { files: true });
@@ -197,7 +204,7 @@ export async function judgeRenumberRound<S extends RoundSubject>(ports: Conflict
   const resolved = await resolveOrdered({ github: ports.github, inTenant: ports.inTenant }, accountId, pr);
   if (resolved.state === "unknown") return stillRunning();
   if (resolved.state === "none") return { kind: "review", reason: "invalid_input", toSha: head };
-  if (!renumberInScope({ changed: read.files, renamed: round.conflictFiles, prFiles: mine.files, isResource: (p) => resolved.resources.some((r) => r.matches(p)) })) return { kind: "stop", reason: "renumber_out_of_scope", outcome: "renumber_out_of_scope" };
+  if (!renumberInScope({ changed: read.own, renamed: round.conflictFiles, prFiles: mine.files, isResource: (p) => resolved.resources.some((r) => r.matches(p)) })) return { kind: "stop", reason: "renumber_out_of_scope", outcome: "renumber_out_of_scope" };
   const adds = await ports.github.listPullRequestAdds?.(pr);
   if (!adds?.complete) return stillRunning();
   if (resolved.resources.some((r) => !checkOrdering(r, adds.paths, resolved.tip).ok) && (await ports.github.getDefaultBranchTip(pr)).sha === round.baseSha) return { kind: "stop", reason: "ordered_resource_out_of_order", outcome: "ordered_resource_out_of_order" };
