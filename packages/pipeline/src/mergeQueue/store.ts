@@ -180,11 +180,11 @@ export interface EnqueueInput {
 export type EnqueueOutcome =
   /** A new entry. */
   | "created"
-  /** An existing entry went back to `queued` (a new reviewed head, or it was waiting in review). It kept its `approved_at`. */
+  /** An existing entry went back to `queued` (a new reviewed head, it was waiting in review, or its cancelled item was resumed). It kept its `approved_at`. */
   | "requeued"
   /** Nothing to do: the same head is already queued, in flight, waiting for work, or stopped. */
   | "unchanged"
-  /** The entry is final (merged, closed or cancelled). Nothing was changed. */
+  /** The entry is final (merged, closed, or cancelled with its item still halted). Nothing was changed. */
   | "final";
 
 /**
@@ -216,7 +216,21 @@ export async function enqueueEntry(client: Queryable, input: EnqueueInput): Prom
   ]);
   if (!existing) throw new MergeQueueError("bad_input"); // deleted between the two statements; the step retries
   if (existing.repoId !== input.repoId || existing.prNumber !== input.prNumber) throw new MergeQueueError("entry_pr_mismatch");
-  if (existing.state === "merged" || existing.state === "closed" || existing.state === "cancelled") return { entry: existing, outcome: "final" };
+  if (existing.state === "merged" || existing.state === "closed") return { entry: existing, outcome: "final" };
+  if (existing.state === "cancelled") {
+    // A cancel is a driver event, not the end of the pull request: an item that was resumed since goes where a fresh one goes, on its own entry (it keeps
+    // `approved_at`). One that is halted now stays cancelled, and so does an entry that went final under us.
+    const resumed = await one(
+      client,
+      `UPDATE merge_queue_entries e
+          SET state = 'queued', head_sha = $3, depends_on_pr_number = $4, reason = NULL, ${CLEAR_SLOT_AND_WORK}
+        WHERE e.account_id = $1 AND e.id = $2 AND e.state = 'cancelled'
+          AND NOT EXISTS (SELECT 1 FROM work_items w WHERE w.account_id = e.account_id AND w.id = e.work_item_id AND w.halted_at IS NOT NULL)
+        RETURNING ${COLUMNS}`,
+      [input.accountId, existing.id, input.headSha, dependsOn],
+    );
+    return resumed ? { entry: resumed, outcome: "requeued" } : { entry: existing, outcome: "final" };
+  }
 
   const sameHead = existing.headSha === input.headSha && existing.dependsOnPrNumber === dependsOn;
   // D#598 P3c (C25): the person's "Check the merge" (the Review-passed advance) re-files the entry for the same head after a failed base change (the cause was outside the entry), so that one stop is not "unchanged". The gate's automatic re-ask and the parked-stage sweep never reach this.

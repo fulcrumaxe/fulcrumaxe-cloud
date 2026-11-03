@@ -1,4 +1,4 @@
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { ExecutionModeChangedError, WorkItemHaltedError, EXECUTOR_ROLE, recordStage, type ExecutionTargetRegistry } from "@fx/runner";
 import { continueWorkItem, type ContinueAfterLimitResult } from "@fx/pipeline";
@@ -27,6 +27,8 @@ import { RunActionInputError, guarded, type PerformResult } from "./runActions.j
 export const CONTINUE_FIXED_CODES = [
   "not_continuable", "work_item_closed", "work_item_ceiling", "spend", "monthly_budget_reached", "foreign_session", "no_spec_version", "work_item_halted",
   "principal_not_authorised", "kind_mismatch", "target_not_found", "prompt_not_retained", "spec_changed", "no_repo", "execution_mode_changed",
+  // The build slot a Continue needs is not free: the card's three wait codes (nothing was started).
+  "one_build_per_repo_until_d598", "waiting_for_build_slot_repo", "waiting_for_build_slot_account",
 ] as const;
 
 /** Another caller is deciding this item right now and nothing was started: the workflow's `errorCodeFor` maps the name to `busy` and retries. */
@@ -40,6 +42,12 @@ export class ContinueBusyError extends Error {
 export interface ContinueModuleDeps extends Pick<ContinuationDeps, "resolveRunSeat"> {
   /** apps/web starts the advance workflow here. Absent, the run still starts and a person's "Check the build" follows it. */
   startAdvance: ((args: AdvanceStartArgs) => Promise<void>) | null;
+  /**
+   * The pipeline's `takeBuildSlot` (apps/web hands it in; this package cannot import @fx/pipeline). A Continue puts the item back In progress, which holds a build
+   * slot, so it claims one the way a start does: the run start and the stage move happen inside the claim, or nothing starts and the request is refused with the
+   * wait code. Absent: no claim.
+   */
+  takeBuildSlot?: (<T>(accountId: string, workItemId: string, move: () => Promise<T>) => Promise<{ granted: true; value: T } | { granted: false; reason: string }>) | null;
 }
 
 export interface ContinueFacade {
@@ -137,9 +145,21 @@ export function createContinueModule(runnerPool: Pool, registry: ExecutionTarget
     const input = await continuationStartInput({ pool: runnerPool, resolveRunSeat: deps.resolveRunSeat }, accountId, f.latest.id);
     if ("refused" in input) return refused(input.refused === "run_not_found" ? "target_not_found" : CODE_RE.test(input.refused) ? input.refused : "not_continuable");
 
+    const start = () => continueWorkItem({ pool: runnerPool, registry }, { accountId, workItemId: itemId, requestId: actionId, resumeInput: input });
     let result: ContinueAfterLimitResult;
     try {
-      result = await continueWorkItem({ pool: runnerPool, registry }, { accountId, workItemId: itemId, requestId: actionId, resumeInput: input });
+      if (deps.takeBuildSlot) {
+        // The run starts and the item reaches In progress inside one claim, so the next claim (a start, or another Continue) counts this one; a refusal starts nothing.
+        const claim = await deps.takeBuildSlot(accountId, itemId, async () => {
+          const started = await start();
+          if (started.outcome === "continued") await withTenant(runnerPool, accountId, userId, (client) => parkedToInProgress(client, accountId, itemId, actionId, started.resume.id));
+          return started;
+        });
+        if (!claim.granted) return refused(CODE_RE.test(claim.reason) ? claim.reason : "not_continuable");
+        result = claim.value;
+      } else {
+        result = await start();
+      }
     } catch (err) {
       if (err instanceof WorkItemHaltedError) return refused("work_item_halted");
       if (err instanceof ExecutionModeChangedError) return refused("execution_mode_changed");
@@ -165,16 +185,22 @@ export function createContinueModule(runnerPool: Pool, registry: ExecutionTarget
     }
   }
 
+  /** Locks the item and, when it is still parked by a run limit and not halted, moves it to In progress (keyed on the request, so a replay is a no-op). Answers the row as locked. */
+  async function parkedToInProgress(client: PoolClient, accountId: string, itemId: string, actionId: string, runId: string): Promise<{ stage: string; halt_epoch: number; halted: boolean } | undefined> {
+    const item = (await client.query<{ stage: string; halt_epoch: number; halted: boolean }>("SELECT stage, halt_epoch, halted_at IS NOT NULL AS halted FROM work_items WHERE id = $1 AND account_id = $2 FOR UPDATE", [itemId, accountId])).rows[0];
+    // Only an item still parked by a run limit moves (a replay finds it already moved, or moved on by the workflow, and leaves it). A halt since the start leaves it where it is.
+    if (item?.stage === "needs_human" && !item.halted) {
+      const park = (await client.query<{ reason: string | null }>("SELECT payload->>'reason' AS reason FROM domain_events WHERE account_id = $1 AND subject_id = $2 AND type = 'work_item.needs_human' ORDER BY seq DESC LIMIT 1", [accountId, itemId])).rows[0]?.reason;
+      if (park && LIMIT_PARKS.includes(park)) await recordStage(client, { workItemId: itemId, toStage: "in_progress", at: new Date(), source: "control_plane", sourceRef: `continue:${actionId}`, runId });
+    }
+    return item;
+  }
+
   /** The run exists. Move the item back to In progress (keyed on this request, so a replay is a no-op), then follow the run. */
   async function finish(who: PrincipalRow, actionId: string, runId: string, status: string): Promise<PerformResult> {
     const { account_id: accountId, user_id: userId, target_id: itemId } = who;
     const info = await withTenant(runnerPool, accountId, userId!, async (client) => {
-      const item = (await client.query<{ stage: string; halt_epoch: number; halted: boolean }>("SELECT stage, halt_epoch, halted_at IS NOT NULL AS halted FROM work_items WHERE id = $1 AND account_id = $2 FOR UPDATE", [itemId, accountId])).rows[0];
-      // Only an item still parked by a run limit moves (a replay finds it already moved, or moved on by the workflow, and leaves it). A halt since the start leaves it where it is.
-      if (item?.stage === "needs_human" && !item.halted) {
-        const park = (await client.query<{ reason: string | null }>("SELECT payload->>'reason' AS reason FROM domain_events WHERE account_id = $1 AND subject_id = $2 AND type = 'work_item.needs_human' ORDER BY seq DESC LIMIT 1", [accountId, itemId])).rows[0]?.reason;
-        if (park && LIMIT_PARKS.includes(park)) await recordStage(client, { workItemId: itemId, toStage: "in_progress", at: new Date(), source: "control_plane", sourceRef: `continue:${actionId}`, runId });
-      }
+      const item = await parkedToInProgress(client, accountId, itemId, actionId, runId);
       const spec = (await client.query<{ version: number }>("SELECT sv.version FROM agent_runs r JOIN spec_versions sv ON sv.id = r.spec_version_id AND sv.account_id = r.account_id WHERE r.id = $1 AND r.account_id = $2", [runId, accountId])).rows[0];
       return { halted: item?.halted ?? true, haltEpoch: item?.halt_epoch ?? 0, specVersion: spec ? Number(spec.version) : null };
     });

@@ -201,6 +201,7 @@ const REASON_WORDS = {
   // D#598 P3b (C3 R-598-P5b-6). Read through `stackedWords`, which puts the parent's number in; this is the sentence for a stop that carries none.
   stacked_on_open_pr: "This builds on a pull request that hasn't merged yet.",
 };
+const BUILD_WAIT_CODES = new Set(["one_build_per_repo_until_d598", "waiting_for_build_slot_repo", "waiting_for_build_slot_account"]);
 const STACKED_PR_CODE = /^stacked_on_pr_([1-9][0-9]{0,8})$/;
 
 /** The gate's stacked stop in words: with the parent's number when the record carries it, and never a bare "#undefined". Every `stacked_on_pr_*` code is absorbed, valid or not. */
@@ -231,7 +232,8 @@ export function stepView(step, queueWait) {
   if (!step || typeof step.kind !== "string") return null;
   const parts = [KIND_WORDS[step.kind] || plainCode(step.kind), STATE_WORDS[step.state] || plainCode(step.state)];
   if (step.result) parts.push(RESULT_WORDS[step.result] || plainCode(step.result));
-  if (step.code) parts.push("reason: " + plainCode(step.code));
+  // A Continue the build-slot claim refused carries one of the three wait codes: they read in the card's words, not as a code with spaces.
+  if (step.code) parts.push("reason: " + (BUILD_WAIT_CODES.has(step.code) ? REASON_WORDS[step.code] : plainCode(step.code)));
   const stacked = stackedWords(step.reasons);
   const reasons = stacked.codes.map((c) => (c === "stacked_on_open_pr" && stacked.sentence ? stacked.sentence : reasonWord(c, queueWait)));
   return { at: step.at, text: parts.join(" · "), reasons };
