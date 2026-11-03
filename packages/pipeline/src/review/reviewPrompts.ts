@@ -47,6 +47,8 @@ export interface DeltaReviewInput {
   parentRoles: readonly ["pr_side", "main_side"] | readonly ["pr_side"];
   changedFiles: readonly string[];
   trigger: "refresh_overlap" | "conflict_resolution" | "renumber";
+  /** D#483: set only when the review spans a chain of rounds: the earlier merge commits made since the last reviewed head (`parents[0]`), oldest first. Checked shas only. */
+  earlierMerges?: readonly string[];
 }
 
 const DELTA_TRIGGERS: readonly string[] = ["refresh_overlap", "conflict_resolution", "renumber"];
@@ -120,7 +122,8 @@ function checkReviewInput(i: ReviewPromptInput): void {
 
 function checkDelta(i: ReviewPromptInput, d: DeltaReviewInput): void {
   const plain = d.trigger === "renumber";
-  const shas = [d.mergeCommitSha, ...d.parents];
+  const shas = [d.mergeCommitSha, ...d.parents, ...(d.earlierMerges ?? [])];
+  if (d.earlierMerges !== undefined && (!Array.isArray(d.earlierMerges) || d.earlierMerges.length === 0 || d.earlierMerges.length > 10)) throw new ReviewPromptInputError("delta.earlierMerges");
   if (d.parents.length !== (plain ? 1 : 2) || !shas.every((x) => typeof x === "string" && SHA_RE.test(x))) throw new ReviewPromptInputError("delta.sha");
   if (new Set(shas).size !== shas.length) throw new ReviewPromptInputError("delta.parents");
   if (d.parentRoles.length !== d.parents.length || d.parentRoles[0] !== "pr_side" || (!plain && d.parentRoles[1] !== "main_side")) throw new ReviewPromptInputError("delta.parentRoles");
@@ -141,11 +144,18 @@ const DELTA_FOCUS: Record<ReviewPromptRole, string> = {
 function deltaBoundary(i: ReviewPromptInput, d: DeltaReviewInput): string[] {
   const [prSide, mainSide] = d.parents;
   const plain = d.trigger === "renumber";
+  // D#483: after a chain of rounds the diff starts at the last reviewed head, not at "the branch before the merge", and the earlier merge commits are unread until now.
+  const chain = d.earlierMerges !== undefined;
+  const reviewedBefore = chain
+    ? `This review spans the earlier merge commits made since the last reviewed head: ${d.earlierMerges!.join(", ")}. Everything up to ${prSide} was reviewed before.`
+    : "The rest of the pull request was reviewed before.";
   return [
     plain
-      ? `This is a DELTA review of pull request #${i.pr} on ${i.owner}/${i.name}, issue #${i.issue}: the platform renumbered the ordered resource files the pull request adds (${d.trigger}). Review exactly head ${d.mergeCommitSha} and no other. The rest of the pull request was reviewed before.`
-      : `This is a DELTA review of pull request #${i.pr} on ${i.owner}/${i.name}, issue #${i.issue}: the default branch was merged into the branch (${d.trigger}). Review exactly merge commit ${d.mergeCommitSha} and no other. The rest of the pull request was reviewed before.`,
-    plain ? `The diff starts at ${prSide} (pr_side, the branch before the renumber).` : `Parents: ${prSide} (pr_side, the branch before the merge) and ${mainSide} (main_side, the default branch commit that was merged in).`,
+      ? `This is a DELTA review of pull request #${i.pr} on ${i.owner}/${i.name}, issue #${i.issue}: the platform renumbered the ordered resource files the pull request adds (${d.trigger}). Review exactly head ${d.mergeCommitSha} and no other. ${reviewedBefore}`
+      : `This is a DELTA review of pull request #${i.pr} on ${i.owner}/${i.name}, issue #${i.issue}: the default branch was merged into the branch (${d.trigger}). Review exactly merge commit ${d.mergeCommitSha} and no other. ${reviewedBefore}`,
+    plain
+      ? `The diff starts at ${prSide} (pr_side, ${chain ? "the last reviewed head, before the earlier merge commits and the renumber" : "the branch before the renumber"}).`
+      : `Parents: ${prSide} (pr_side, ${chain ? "the last reviewed head, before the earlier merge commits" : "the branch before the merge"}) and ${mainSide} (main_side, the default branch commit that was merged in).`,
     ...(i.runtime === "runner"
       ? [
           `The repository is already checked out at ${d.mergeCommitSha} with a detached HEAD. Do not fetch, check out, switch branches, reset, push, change remotes or call the GitHub API.`,

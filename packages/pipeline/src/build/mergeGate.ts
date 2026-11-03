@@ -745,41 +745,41 @@ export async function carriedRunsHead(client: PoolClient, accountId: string, wor
   return m ? m[1]! : null;
 }
 
-export async function loadRunsOnSha(
-  pool: Pool,
-  accountId: string,
-  workItemId: string,
-  headSha: string,
-): Promise<RunRow[]> {
-  return withTenant(pool, accountId, async (client) => {
-    // D#598 P7c: the runs of the head a merge-only re-check carried forward count for this head too (never more than one extra head).
-    const carried = await carriedRunsHead(client, accountId, workItemId, headSha);
-    const heads = carried === null ? [headSha] : [headSha, carried];
-    // `envelope->>'verdict'` is NULL unless the top-level key exists, so a
-    // nested or renamed verdict never reads as a pass. Rows are matched on
-    // the work item AND the exact head SHA: a run on another item or on an
-    // older commit is invisible here.
-    // Ordering is decided here, not in JS: `created_at` can hold values
-    // (infinity) that node-pg returns as strings, and a throw on one row
-    // must not wedge the step's retry loop.
-    const { rows } = await client.query<RunRow>(
-      `SELECT role, status, runtime, envelope ->> 'verdict' AS verdict,
-              COALESCE(created_at = max(created_at) OVER (PARTITION BY role), false) AS is_latest,
-              COALESCE(
-                (status IS NULL OR status <> ALL($5::text[]))
-                AND created_at = max(created_at) FILTER (WHERE status IS NULL OR status <> ALL($5::text[])) OVER (PARTITION BY role),
-                false
-              ) AS is_latest_terminal,
-              isfinite(created_at) AS ts_ok,
-              COALESCE(${RUNNER_ADMIN_OK_SQL}, false) AS runner_admin_ok
-         FROM agent_runs ar
-        WHERE account_id = $1 AND work_item_id = $2 AND head_sha = ANY($3::text[]) AND role = ANY($4::text[])
-        ORDER BY created_at DESC, id`,
-      [accountId, workItemId, heads, [...ALL_GATED_ROLES], [...NON_TERMINAL_STATUSES]],
-    );
-    return rows;
-  });
+export const loadRunsOnSha = (pool: Pool, accountId: string, workItemId: string, headSha: string): Promise<RunRow[]> =>
+  withTenant(pool, accountId, (client) => readRunsOnSha(client, accountId, workItemId, headSha));
+
+/** `loadRunsOnSha` on a client the caller already holds (the queue tick reads the rows in its own tenant transaction): the one definition of the rows that speak for a head. */
+export async function readRunsOnSha(client: PoolClient, accountId: string, workItemId: string, headSha: string): Promise<RunRow[]> {
+  // D#598 P7c: the runs of the head a merge-only re-check carried forward count for this head too (never more than one extra head).
+  const carried = await carriedRunsHead(client, accountId, workItemId, headSha);
+  const heads = carried === null ? [headSha] : [headSha, carried];
+  // `envelope->>'verdict'` is NULL unless the top-level key exists, so a
+  // nested or renamed verdict never reads as a pass. Rows are matched on
+  // the work item AND the exact head SHA: a run on another item or on an
+  // older commit is invisible here.
+  // Ordering is decided here, not in JS: `created_at` can hold values
+  // (infinity) that node-pg returns as strings, and a throw on one row
+  // must not wedge the step's retry loop.
+  const { rows } = await client.query<RunRow>(
+    `SELECT role, status, runtime, envelope ->> 'verdict' AS verdict,
+            COALESCE(created_at = max(created_at) OVER (PARTITION BY role), false) AS is_latest,
+            COALESCE(
+              (status IS NULL OR status <> ALL($5::text[]))
+              AND created_at = max(created_at) FILTER (WHERE status IS NULL OR status <> ALL($5::text[])) OVER (PARTITION BY role),
+              false
+            ) AS is_latest_terminal,
+            isfinite(created_at) AS ts_ok,
+            COALESCE(${RUNNER_ADMIN_OK_SQL}, false) AS runner_admin_ok
+       FROM agent_runs ar
+      WHERE account_id = $1 AND work_item_id = $2 AND head_sha = ANY($3::text[]) AND role = ANY($4::text[])
+      ORDER BY created_at DESC, id`,
+    [accountId, workItemId, heads, [...ALL_GATED_ROLES], [...NON_TERMINAL_STATUSES]],
+  );
+  return rows;
 }
+
+/** Whether any gated role has a succeeded pass on these rows that the gate would count (a production run, or a trusted runner's). Nothing else is evidence that anyone reviewed the head. */
+export const hasReviewerPass = (rows: readonly RunRow[]): boolean => rows.some((r) => r.status === "succeeded" && r.verdict === "pass" && runtimeCounts(r, true));
 
 /**
  * D#519 MQ3-a: the rows that speak for `headSha`. Its own rows, and, for a role with none, the rows of the head it was refreshed from,

@@ -3,7 +3,7 @@ import type { PoolClient } from "pg";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, StageInputError } from "@fx/core/src/work-items/stages.js";
 import { reportError } from "@fx/telemetry";
-import { classifyCi, expectedSignalNames, type CiVerdict, type MergeBlockReason, type MergeGateGitHubPort, type PullRequestMergeability } from "../build/mergeGate.js";
+import { classifyCi, expectedSignalNames, hasReviewerPass, readRunsOnSha, type CiVerdict, type MergeBlockReason, type MergeGateGitHubPort, type PullRequestMergeability } from "../build/mergeGate.js";
 import type { OrderedResourceReaderPort } from "../build/githubMergePort.js";
 import type { PullRequestRef } from "../build/types.js";
 import { guardMain, type MainGuardGitHubPort } from "./mainGuard.js";
@@ -205,6 +205,13 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
     }
   }
 
+  // D#483: the stored head is the result of a conflict round that conflicted again, and no reviewer passed it: nobody has read it. It goes back to review before any refresh or
+  // ordered step, because both would start from it and the passes they carry or the delta they review would not cover it.
+  if (await conflictedHeadUnreviewed(deps, accountId, held)) {
+    await deps.inTenant(accountId, (c) => returnToReview(c, { accountId, entryId: held.id }));
+    return release("head_unreviewed");
+  }
+
   // D#519 MQ-MAIN-RED-GUARD: no refresh, CI wait or merge while the default branch's newest result is red.
   const main = await guardMain({ github: deps.github, inTenant: deps.inTenant, ...(deps.now ? { now: deps.now } : {}) }, { accountId, entry: held, holder, pr });
   if (main) return main;
@@ -299,6 +306,23 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
     default:
       await deps.inTenant(accountId, (c) => stopEntry(c, { accountId, entryId: held.id, reason: "merge_call_refused", holder }));
       return release("merge_call_refused");
+  }
+}
+
+/**
+ * Whether the entry's stored head is a conflicted-again round's result that no reviewer has passed. The evidence is the gate's own read of the rows that speak for a head
+ * (`readRunsOnSha`), so a head a full review later passed is not caught. A read that fails counts as no evidence: the entry goes back to review.
+ */
+async function conflictedHeadUnreviewed(deps: QueueTickDeps, accountId: string, entry: MergeQueueEntry): Promise<boolean> {
+  if (entry.workItemId === null || entry.entryKind !== "work_item") return false;
+  const workItemId = entry.workItemId;
+  const rounds = await deps.inTenant(accountId, (c) => listConflictRounds(c, accountId, workItemId));
+  if (!rounds.some((r) => r.outcome === "conflicted_again" && r.toSha === entry.headSha)) return false;
+  try {
+    return !hasReviewerPass(await deps.inTenant(accountId, (c) => readRunsOnSha(c, accountId, workItemId, entry.headSha)));
+  } catch (err) {
+    reportError(err, { stage: "merge_queue.conflicted_head" });
+    return true;
   }
 }
 

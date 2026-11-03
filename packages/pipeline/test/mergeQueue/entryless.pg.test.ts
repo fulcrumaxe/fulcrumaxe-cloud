@@ -141,11 +141,12 @@ describe("D#519 MQ4-e1-a conflict round for an item with no queue entry [pg]", (
       refreshRows: async () => Number((await db.admin.query(`SELECT count(*)::int AS n FROM head_refreshes WHERE account_id = $1`, [accountId])).rows[0].n),
       itemStage: async () => (await db.admin.query(`SELECT * FROM work_items WHERE id = $1`, [workItemId])).rows[0] as Record<string, unknown>,
       /** The executor pushes the one merge commit (a record of the round's own run, from the round's head), and the branch merges cleanly again. */
-      async push(over: Partial<{ parents: string[]; files: string[]; author: string; record: false | { runId?: string } }> = {}) {
+      async push(over: Partial<{ sha: string; parents: string[]; files: string[]; author: string; record: false | { runId?: string } }> = {}) {
         const run = executors[executors.length - 1]!;
-        g.world.commits[TO] = { parents: over.parents ?? [FROM, MAIN_PARENT], authorLogin: over.author ?? BOT, committerLogin: "web-flow", verified: false, files: (over.files ?? ["src/a.ts"]).map((filename) => ({ filename })) };
-        if (over.record !== false) records.push({ oldSha: g.world.headSha, newSha: TO, startSha: null, runId: over.record?.runId ?? run });
-        g.world.headSha = TO;
+        const sha = over.sha ?? TO;
+        g.world.commits[sha] = { parents: over.parents ?? [FROM, MAIN_PARENT], authorLogin: over.author ?? BOT, committerLogin: "web-flow", verified: false, files: (over.files ?? ["src/a.ts"]).map((filename) => ({ filename })) };
+        if (over.record !== false) records.push({ oldSha: g.world.headSha, newSha: sha, startSha: null, runId: over.record?.runId ?? run });
+        g.world.headSha = sha;
         g.world.conflict = false;
       },
     };
@@ -332,6 +333,58 @@ describe("D#519 MQ4-e1-a conflict round for an item with no queue entry [pg]", (
     expect(await s.complete()).toEqual({ outcome: "stopped", reason: "merge_conflict" });
     expect(await s.start({ roundsUsed: 2 })).toEqual({ outcome: "stopped", reason: "merge_conflict" });
     expect(await s.rounds()).toHaveLength(2);
+  });
+
+  describe("D#483: a chain of conflict rounds is reviewed from the head last reviewed", () => {
+    const M1 = "7".repeat(40);
+    const OTHER = "9".repeat(40);
+    const file = (filename: string) => ({ filename });
+    /** Round 1 pushes M1 (its resolution plus an edit outside the conflict) and the branch conflicts again; round 2 pushes TO on M1 and merges cleanly. */
+    async function twoRounds(s: Setup, second: Partial<{ parents: string[]; record: false }> = {}) {
+      await s.start();
+      await s.push({ sha: M1, files: ["src/a.ts", "src/extra.ts"] });
+      s.g.world.conflict = true;
+      s.g.world.compares[`${TIP}...${M1}`] = { status: "diverged", aheadBy: 2, behindBy: 1, mergeBaseSha: MERGE_BASE, files: [file("src/a.ts"), file("src/other.ts")] };
+      await s.endRun();
+      expect(await s.complete()).toEqual({ outcome: "new_round" });
+      await s.push({ sha: TO, parents: [M1, MAIN_PARENT], files: ["src/a.ts"], ...second });
+      s.g.world.compares[`${FROM}...${TO}`] = { status: "ahead", aheadBy: 3, behindBy: 0, mergeBaseSha: FROM, files: [file("src/a.ts"), file("src/extra.ts"), file("src/other.ts")] };
+      await s.endRun();
+    }
+
+    it("the delta review of round 2 reads everything since the head the chain began at (the pre-round-1 head), so round 1's edit outside the conflict is in its input; no pass on it, no pass for the item", async () => {
+      const s = await setup({ roles: ["code-reviewer", "debater"] });
+      await twoRounds(s);
+      expect(await s.complete()).toEqual({ outcome: "delta_started" });
+      const want = { trigger: "conflict_resolution", mergeCommitSha: TO, parents: [FROM, MAIN_PARENT], parentRoles: ["pr_side", "main_side"], changedFiles: ["src/a.ts", "src/extra.ts", "src/other.ts"] };
+      expect(s.started.map((x) => x.role)).toEqual(["code-reviewer"]);
+      expect(s.started[0]!.delta).toMatchObject(want);
+      // The follow-up role (started when the first passes) reads the same chain.
+      await s.finish("code-reviewer", pass);
+      expect(await s.complete()).toEqual({ outcome: "waiting" });
+      expect(s.started.map((x) => x.role)).toEqual(["code-reviewer", "debater"]);
+      expect(s.started[1]!.delta).toMatchObject(want);
+      // Nothing passes until every started role has; one that does not pass returns the item to review.
+      expect(await s.complete()).toEqual({ outcome: "waiting" });
+      await s.finish("debater", { verdict: "needs-fix", findings: ["src/extra.ts:1"], summary: "no" });
+      expect(await s.complete()).toEqual({ outcome: "returned", reason: "not_carried" });
+      expect(s.events).toEqual(["not_carried"]);
+    });
+
+    it("a foreign commit between round 1's head and round 2's head is no resolution: back to review, no delta review", async () => {
+      const s = await setup();
+      await twoRounds(s, { parents: [OTHER, MAIN_PARENT] });
+      expect(await s.complete()).toEqual({ outcome: "returned", reason: "not_a_resolution" });
+      expect(s.started).toEqual([]);
+    });
+
+    it("a link of the chain whose first parent is no longer the earlier head stops the delta review (head_changed), as the single round's own parents do", async () => {
+      const s = await setup();
+      await twoRounds(s);
+      s.g.world.commits[M1]!.parents = [OTHER, MAIN_PARENT];
+      expect(await s.complete()).toEqual({ outcome: "returned", reason: "head_changed" });
+      expect(s.started).toEqual([]);
+    });
   });
 
   it("the pull request merged or closed by a person mid-round: settled, the run is cancelled, the round ends", async () => {

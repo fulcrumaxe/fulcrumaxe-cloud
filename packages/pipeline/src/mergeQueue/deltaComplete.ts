@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
 import { MERGE_QUEUE_DELTA_REVIEW_MAX_MINUTES } from "./policy.js";
+import { roundSource } from "./roundChain.js";
 import { deltaInput, fixedReason, readSourceDiff, refreshSource, startDeltaRoles, type DeltaReviewPorts, type DeltaRunRef, type DeltaSource } from "./deltaReview.js";
 import { refreshTip } from "./refresh.js";
 import { finishWork, listConflictRounds, listHeadRefreshes, returnToReview, settlePullRequest, stopEntry } from "./store.js";
@@ -50,7 +51,7 @@ async function sourceOf(ports: DeltaCompletionPorts, entry: MergeQueueEntry): Pr
     // A renumber round starts from the head the refresh step ended on, which can be a refresh tip and not the entry's stored head: it is the CURRENT round only while that
     // tip is its own pre-round head. Once the round has finished the stored head is its result, so a later refresh's tip is no longer its from_sha and the round is not matched.
     const round = rounds.find((r) => r.entryId === entry.id && r.round === entry.conflictRounds && r.fromSha === (r.kind === "renumber" ? toSha : entry.headSha) && r.toSha !== null && r.outcome === "resolved");
-    if (round) return { src: { fromSha: round.fromSha, toSha: round.toSha!, baseSha: null, trigger: round.kind === "renumber" ? "renumber" : "conflict_resolution" }, toSha: round.toSha! };
+    if (round) return { src: roundSource(rounds, round, round.toSha!, null), toSha: round.toSha! };
   }
   const row = refreshes.find((r) => r.toSha === toSha);
   return { src: row ? refreshSource(row) : undefined, toSha };

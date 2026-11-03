@@ -13,6 +13,8 @@ import {
   finishWork,
   getEntry,
   listConflictRounds,
+  endRound,
+  recordRoundHead,
   recordRoundRun,
   setPlatformCommitProofForTest,
   startConflictWork,
@@ -184,6 +186,98 @@ describe("D#519 MQ4-c conflict round completion [pg]", () => {
     // C6-c6: no head_refreshes row, ever, so the gate has nothing to carry a pass across.
     expect(await s.refreshRows()).toBe(0);
     expect(s.putCalls()).toEqual([]);
+  });
+
+  describe("D#483: a chain of conflict rounds is reviewed from the head last reviewed", () => {
+    const M1 = "7".repeat(40);
+    const OTHER = "9".repeat(40);
+    const file = (filename: string) => ({ filename });
+    /** Round 1 pushed M1 (its resolution plus an edit outside the conflict) and the branch conflicted again: round 1 ends conflicted_again, the entry is queued on M1, and round 2 pushes TO on M1. */
+    async function twoRounds(s: Awaited<ReturnType<typeof setup>>, second: Partial<{ parents: string[]; files: string[] }> = {}) {
+      s.push(M1, { files: ["src/a.ts", "src/extra.ts"] });
+      const [r1] = await s.rounds();
+      await tenant(s.accountId, async (c) => {
+        await recordRoundHead(c, { accountId: s.accountId, roundId: r1!.id, toSha: M1 });
+        await endRound(c, { accountId: s.accountId, roundId: r1!.id, outcome: "conflicted_again" });
+        await finishWork(c, { accountId: s.accountId, entryId: s.entryId, headSha: M1 });
+      });
+      const run2 = randomUUID();
+      await db.admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, head_sha) VALUES ($1, $2, $3, 'executor', 'production', 'running', $4)`, [run2, s.accountId, s.workItemId, M1]);
+      await tenant(s.accountId, async (c) => {
+        const started = await startConflictWork(c, { accountId: s.accountId, entryId: s.entryId, fromSha: M1, baseSha: TIP, baseRef: "main", conflictFiles: ["src/a.ts"] });
+        if (!started.ok) throw new Error(started.reason);
+        await recordRoundRun(c, { accountId: s.accountId, roundId: started.round.id, runId: run2 });
+      });
+      s.push(TO, { parents: [M1, MAIN_PARENT], files: ["src/a.ts"], record: { runId: run2, oldSha: M1 }, ...second });
+      s.g.world.compares[`${FROM}...${TO}`] = { status: "ahead", aheadBy: 3, behindBy: 0, mergeBaseSha: FROM, files: [file("src/a.ts"), file("src/extra.ts"), file("src/other.ts")] };
+      await db.admin.query(`UPDATE agent_runs SET status = 'succeeded' WHERE id = $1`, [run2]);
+    }
+
+    it("the delta review of round 2 reads everything since the head the chain began at, so round 1's edit outside the conflict is in its input; no pass on it, the entry does not go back queued", async () => {
+      const s = await setup({ roles: ["code-reviewer", "debater"] });
+      await twoRounds(s);
+      expect(await s.complete()).toEqual({ outcome: "delta_started" });
+      const want = { trigger: "conflict_resolution", mergeCommitSha: TO, parents: [FROM, MAIN_PARENT], parentRoles: ["pr_side", "main_side"], changedFiles: ["src/a.ts", "src/extra.ts", "src/other.ts"], earlierMerges: [M1] };
+      expect(s.started.map((x) => x.role)).toEqual(["code-reviewer"]);
+      expect(s.started[0]!.delta).toMatchObject(want);
+      // The follow-up role reads the same chain (the completion rebuilds the source from the round rows).
+      await s.finish("code-reviewer", pass);
+      expect(await s.completeDelta()).toEqual({ outcome: "waiting" });
+      expect(s.started.map((x) => x.role)).toEqual(["code-reviewer", "debater"]);
+      expect(s.started[1]!.delta).toMatchObject(want);
+      await s.finish("debater", { verdict: "needs-fix", findings: ["src/extra.ts:1"], summary: "no" });
+      expect(await s.completeDelta()).toEqual({ outcome: "not_carried" });
+      expect(await s.row()).toMatchObject({ state: "in_review" });
+    });
+
+    it("the main-side-only test reads the last merge commit's OWN files: M1 touched the PR's files, M2 only the default branch's, so round 2 is no resolution (reading the chain's list would start a review)", async () => {
+      const s = await setup();
+      await twoRounds(s, { files: ["docs/main-only.md"] });
+      expect(await s.complete()).toEqual({ outcome: "returned", reason: "main_side_only" });
+      expect(s.started).toEqual([]);
+    });
+
+    // This is real behaviour that nothing stated: a round only continues a chain, or has a delta source at all, when it starts from the head the entry stores. A round started from any other
+    // head (a person's push, or a refresh tip) has no such source, so its result gets a full review and no delta pass is ever attached to a head the platform did not leave. Do not widen the match.
+    it("a round started from a person's push, or from a refresh tip, goes to a full review (deltaComplete's source match), never to a delta pass", async () => {
+      const PUSHED = "8".repeat(40);
+      const s = await setup();
+      await db.admin.query("UPDATE merge_conflict_rounds SET from_sha = $2 WHERE work_item_id = $1", [s.workItemId, PUSHED]);
+      s.g.world.headSha = PUSHED;
+      s.push(TO, { parents: [PUSHED, MAIN_PARENT] });
+      await s.endRun();
+      expect(await s.complete()).toEqual({ outcome: "delta_started" });
+      await s.finish("code-reviewer", pass);
+      expect(await s.completeDelta()).toEqual({ outcome: "returned", reason: "invalid_input" });
+      expect(await s.row()).toMatchObject({ state: "in_review", head_sha: FROM });
+
+      const t = await setup();
+      const REFRESHED = "6".repeat(40);
+      await db.admin.query("INSERT INTO head_refreshes (account_id, repo_id, work_item_id, entry_id, from_sha, to_sha, base_sha, files_overlap) VALUES ($1, $2, $3, $4, $5, $6, $7, true)", [t.accountId, t.repoId, t.workItemId, t.entryId, FROM, REFRESHED, MAIN_PARENT]);
+      await db.admin.query("UPDATE merge_conflict_rounds SET from_sha = $2 WHERE work_item_id = $1", [t.workItemId, REFRESHED]);
+      t.g.world.headSha = REFRESHED;
+      t.push(TO, { parents: [REFRESHED, MAIN_PARENT] });
+      await t.endRun();
+      expect(await t.complete()).toEqual({ outcome: "delta_started" });
+      await t.finish("code-reviewer", pass);
+      expect(await t.completeDelta()).toMatchObject({ outcome: "returned" });
+      expect(await t.row()).toMatchObject({ state: "in_review", head_sha: FROM });
+    });
+
+    it("a foreign commit between round 1's head and round 2's head is no resolution: back to review, no delta review", async () => {
+      const s = await setup();
+      await twoRounds(s, { parents: [OTHER, MAIN_PARENT] });
+      expect(await s.complete()).toEqual({ outcome: "returned", reason: "not_a_resolution" });
+      expect(s.started).toEqual([]);
+    });
+
+    it("a link of the chain whose first parent is no longer the earlier head stops the delta review (head_changed), as the single round's own parents do", async () => {
+      const s = await setup();
+      await twoRounds(s);
+      s.g.world.commits[M1]!.parents = [OTHER, MAIN_PARENT];
+      expect(await s.complete()).toEqual({ outcome: "returned", reason: "head_changed" });
+      expect(s.started).toEqual([]);
+    });
   });
 
   it("a delta review that does not pass sends the entry back to review with approved_at kept (nothing carried)", async () => {
