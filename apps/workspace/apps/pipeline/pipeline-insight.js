@@ -180,6 +180,8 @@ const REASON_WORDS = {
   human_merge_only: "the operator set this repository so that a person merges",
   local_reviews_passed_advisory: "Reviews passed on your machine. A person merges this pull request.",
   merge_call_refused: "GitHub refused the merge",
+  // D#483 S5-j2a1: another merge on this repository (a direct merge or the queue's slot) holds it for now; this one asks again.
+  merge_repo_busy: "Another merge on this repository is finishing; this one goes next.",
   // D#598 P1d-1: the author of the pull request that would merge. A person reviews and merges an outside author's pull request on GitHub.
   pr_author_untrusted: "This pull request was opened by someone who isn't an admin or maintainer of the repository, or the platform's app. The platform won't merge it. A person can review it and merge it on GitHub.",
   pr_author_unverified: "We couldn't check who opened this pull request, so the platform didn't merge it. It checks again on the next try.",
@@ -613,6 +615,7 @@ export const BLOCKING_SENTENCES = {
   branch_protection_refused: "Branch protection refused the merge",
   merge_queue_waiting: "The pull request is waiting in the merge queue",
   ordered_resource_out_of_order: "Another change has to merge before this one",
+  merge_repo_busy: "Another merge on this repository is finishing; this one goes next.",
   renumber_out_of_scope: "The automatic renumber changed more than the numbered files, so a person needs to look at it",
   merge_dependency_closed: "The pull request it builds on was closed without merging",
   history_rewritten: "The branch history was rewritten after review",

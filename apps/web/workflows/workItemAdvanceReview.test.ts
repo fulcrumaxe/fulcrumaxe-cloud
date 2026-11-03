@@ -732,6 +732,40 @@ describe("what happens after the verdicts are recorded", () => {
     expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "github_unavailable" }));
   });
 
+  // D#483 S5-j2a1: another merge on the repository holds it. The gate says merge_repo_busy; the workflow asks again every 30 seconds for an hour and never marks the item stopped.
+  describe("a repository busy with another merge", () => {
+    const busy = { outcome: "ready_human_merges", reasons: ["merge_repo_busy"] };
+
+    it("busy twice, then merged: two waits, three asks, and the item merges", async () => {
+      const t = setup(fresh({ gates: [busy, busy, { outcome: "merged", reasons: [], status: "posted" }] }));
+      expect(await workItemAdvanceWorkflow(ARGS)).toMatchObject({ status: "merged" });
+      expect(world.sleeps).toBe(2);
+      expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(3);
+    });
+
+    it("always busy: asked again for an hour (120 waits), then the item is waiting, not stopped", async () => {
+      const t = setup(fresh({ gates: [busy] }));
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "waiting", detail: "merge_repo_busy" });
+      expect(world.sleeps).toBe(120);
+      expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(121);
+      expect(t.worker.advanceRecordEvent).not.toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped" }));
+    });
+
+    it("halted in the middle of the wait: the refusal ends it with the one halted stop", async () => {
+      const t = setup(fresh({ gates: [busy, { outcome: "refused", reasons: ["item_halted"] }] }));
+      expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("refused");
+      expect(world.sleeps).toBe(1);
+      expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "halted" }));
+    });
+
+    it("a busy answer that carries any other reason is not waited on", async () => {
+      const t = setup(fresh({ gates: [{ outcome: "ready_human_merges", reasons: ["merge_repo_busy", "ci_not_green"] }] }));
+      expect(await workItemAdvanceWorkflow(ARGS)).toMatchObject({ status: "ready_human_merges" });
+      expect(world.sleeps).toBe(0);
+      expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("a head that moved under the gate is reviewed again on the new head", async () => {
     const w = fresh({ gates: [{ outcome: "head_moved" }, { outcome: "merged", reasons: [], status: "posted" }] });
     const t = setup(w);

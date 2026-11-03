@@ -3,6 +3,7 @@ import { listHeadRemovals } from "@fx/core/src/work-items/driverEvents.js";
 import { isQueuedSql, removalRetryAllowed, removedByPerson } from "@fx/core/src/work-items/mergeReadiness.js";
 import { MAX_CONFLICT_ROUNDS, MERGE_QUEUE_LEASE_SECONDS } from "./policy.js";
 import { eligibilityContext, pickNext } from "./eligibility.js";
+import { hasLiveMergeLease, lockRepoMerge } from "./mergeLease.js";
 import { MergeQueueError, type ConflictRound, type EntryKind, type MergeQueueEntry, type MergedBy, type PrFacts, type QueueState, type RoundKind, type WorkKind } from "./types.js";
 
 /**
@@ -305,11 +306,15 @@ export async function takeSlot(client: Queryable, input: TakeSlotInput): Promise
   assertLease(leaseSeconds);
   if (input.holder.length < 1 || input.holder.length > 100) throw new MergeQueueError("bad_input");
 
+  // D#483 S5-j2a1: the same advisory lock the direct merge gate takes its lease under (this runs in the caller's transaction), so a gate and a tick never both pass.
+  await lockRepoMerge(client, input.accountId, input.repoId);
   const reclaimed = await reclaimExpiredLeases(client, input);
   const stopped = await stopOrphanedDependents(client, input);
   const entries = await readQueue(client, input.accountId, input.repoId);
 
   if (entries.some((e) => e.state === "in_flight")) return { taken: null, skipped: "slot_busy", reclaimed, stopped };
+  // A direct merge holds the repository: the slot waits for its lease to be freed (or to lapse).
+  if (await hasLiveMergeLease(client, { accountId: input.accountId, repoId: input.repoId, ...(input.now ? { now: input.now } : {}) })) return { taken: null, skipped: "slot_busy", reclaimed, stopped };
   const next = pickNext(entries, eligibilityContext(entries, input.facts, input.now));
   if (!next) return { taken: null, skipped: "nothing_eligible", reclaimed, stopped };
 
