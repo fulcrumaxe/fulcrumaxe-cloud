@@ -8,7 +8,7 @@ import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
 import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
-import { REPUBLISH_BRANCH_MOVED_SENTENCE, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
+import { FIX_ROUND_STOP_SENTENCE, REPUBLISH_BRANCH_MOVED_SENTENCE, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE_SENTENCE, REPUBLISH_PAIRING_OFF_SENTENCE, REPUBLISH_TIP_MOVED_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
 import { planePushPairingRun, planePushReportRun, planePushTokenRun, toResponse, type PlanePushHostedPort, type RunnerCloudDeps, type RunnerLeaseOps } from "@fx/runner-cloud";
 import { mergeQueue } from "@fx/pipeline";
 import { createRunnerClaimFacade } from "../src/runnerClaims.js";
@@ -737,6 +737,80 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       expect(res.body).toMatchObject({ error: { code: "republish_base_missing" } });
       expect(github.mints).toEqual([]);
       expect(await attempts()).toEqual([]);
+    });
+
+    it("D#598 P1g-1: a closed or merged public pull request, or a pairing that is off, is refused at the token in words: no token minted, no attempt, the item paused with the fixed sentence", async () => {
+      const cases: Array<[string, string, string, string]> = [
+        ["push row merged", "UPDATE plane_pushes SET state = 'pr_merged' WHERE work_item_id = $1", "republish_pr_merged", "Public PR already merged"],
+        ["push row closed", "UPDATE plane_pushes SET state = 'pr_closed' WHERE work_item_id = $1", "republish_pr_closed", "Public PR closed"],
+        ["item merged", "UPDATE work_items SET stage = 'merged' WHERE id = $1", "republish_pr_merged", "Public PR already merged"],
+        ["item closed unmerged", "UPDATE work_items SET stage = 'closed_unmerged' WHERE id = $1", "republish_pr_closed", "Public PR closed"],
+      ];
+      for (const [name, sql, code, words] of cases) {
+        await admin.query("DELETE FROM work_item_driver_events WHERE work_item_id = $1", [A.workItemId]);
+        await admin.query("DELETE FROM plane_pushes WHERE work_item_id = $1", [A.workItemId]);
+        await open();
+        await admin.query(sql, [A.workItemId]);
+        const run = await claimedRun({ continues: { baseSha: BASE } });
+        const res = await askToken(run);
+        expect(res.status, name).toBe(409);
+        expect(res.body, name).toMatchObject({ error: { code } });
+        expect(await facts(), name).toEqual([{ kind: "escalated", code }]);
+        expect(FIX_ROUND_STOP_SENTENCE[code]!.startsWith(words), name).toBe(true);
+        await finish(run.id);
+      }
+      expect(github.mints).toEqual([]);
+      expect(await attempts()).toEqual([]);
+    });
+
+    it("D#598 P1g-1: a runner's follow-up report after a stop-class token refusal (an old runner says public_unavailable, a new one the stop's own code) does not overwrite the stop", async () => {
+      const cases: Array<[string, string, string]> = [
+        ["pairing off", "SELECT $1::uuid", "republish_pairing_off"],
+        ["push row closed", "UPDATE plane_pushes SET state = 'pr_closed' WHERE work_item_id = $1", "republish_pr_closed"],
+        ["push row merged", "UPDATE plane_pushes SET state = 'pr_merged' WHERE work_item_id = $1", "republish_pr_merged"],
+      ];
+      for (const [name, sql, code] of cases) {
+        for (const reported of ["public_unavailable", code]) {
+          await admin.query("DELETE FROM work_item_driver_events WHERE work_item_id = $1", [A.workItemId]);
+          await admin.query("DELETE FROM plane_pushes WHERE work_item_id = $1", [A.workItemId]);
+          await admin.query("DELETE FROM repo_pairing WHERE repo_id = $1", [A.repoId]);
+          await open();
+          await admin.query(sql, [A.workItemId]);
+          if (code === "republish_pairing_off") await admin.query("DELETE FROM repo_pairing WHERE repo_id = $1", [A.repoId]);
+          const run = await claimedRun({ continues: { baseSha: BASE } });
+          expect((await askToken(run)).status, name).toBe(409);
+          expect((await report(run, { phase: "refused", code: reported })).status, `${name} / ${reported}`).toBe(200);
+          expect(await facts(), `${name} / ${reported}`).toEqual([{ kind: "escalated", code }]);
+          expect(await stageOf(), name).toBe("needs_human");
+          expect((await getWorkItemActivity({ pool: adminPool, principal: { accountId: A.accountId, userId: A.userId } }, A.workItemId)).notice, `${name} / ${reported}`).toEqual({ kind: "public_update_stopped", reason: FIX_ROUND_STOP_SENTENCE[code] });
+          await finish(run.id);
+        }
+      }
+    });
+
+    it("D#598 P1g-1: a pairing that is gone while the public pull request is open: republish_pairing_off at the token, the item in Needs a person with its sentence", async () => {
+      await open();
+      await admin.query("DELETE FROM repo_pairing WHERE repo_id = $1", [A.repoId]);
+      const run = await claimedRun({ continues: { baseSha: BASE } });
+      const res = await askToken(run);
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ error: { code: "republish_pairing_off" } });
+      expect(await facts()).toEqual([{ kind: "escalated", code: "republish_pairing_off" }]);
+      expect(await stageOf()).toBe("needs_human");
+      expect((await getWorkItemActivity({ pool: adminPool, principal: { accountId: A.accountId, userId: A.userId } }, A.workItemId)).notice).toEqual({ kind: "public_update_stopped", reason: REPUBLISH_PAIRING_OFF_SENTENCE });
+      expect(github.mints).toEqual([]);
+      expect(await attempts()).toEqual([]);
+    });
+
+    it("D#598 P1g-1: the hook's second 'public main moved' refusal is recorded as republish_tip_moved with the fixed sentence; the stamp stays", async () => {
+      await open();
+      const run = await claimedRun({ continues: { baseSha: BASE } });
+      await askToken(run);
+      expect((await report(run, { phase: "refused", code: "public_tip_moved" })).status).toBe(200);
+      expect(await facts()).toEqual([{ kind: "escalated", code: "republish_tip_moved" }]);
+      expect(await stageOf()).toBe("needs_human");
+      expect((await getWorkItemActivity({ pool: adminPool, principal: { accountId: A.accountId, userId: A.userId } }, A.workItemId)).notice).toEqual({ kind: "public_update_stopped", reason: REPUBLISH_TIP_MOVED_SENTENCE });
+      expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: HEAD });
     });
 
     it("an unsigned fix round on an open pull request is refused at the token, and its refusal report puts the item in Needs a person", async () => {

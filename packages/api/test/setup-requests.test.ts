@@ -167,10 +167,9 @@ describe('D#598 P8a: setup requests', () => {
     const stored = await rows(f.owner.accountId);
     expect(stored).toHaveLength(1);
     expect(stored[0]).toMatchObject({ account_id: f.owner.accountId, created_by: f.admin.userId, state: 'open' });
-    // The four other kinds take the Spec's own sentences.
+    // The three other kinds take the Spec's own sentences.
     const titles: [string, string, string][] = [
       ['app_not_installed', 'acme/web', 'App not installed on acme/web'],
-      ['branch_pushed_by_person', 'fx/item-1', 'Someone pushed to fx/item-1'],
       ['overlay_path_missing', '.autonomous-team/roadmap.json', 'Add .autonomous-team/roadmap.json to the overlay paths'],
       ['parent_pr_closed', '#12', 'Parent PR closed'],
     ];
@@ -184,6 +183,7 @@ describe('D#598 P8a: setup requests', () => {
     const bad: Record<string, unknown>[] = [
       envBody(f, { kind: 'deploy_key' }),
       envBody(f, { kind: 'parity_drift' }),
+      envBody(f, { kind: 'branch_pushed_by_person' }),
       envBody(f, { kind: 'secret' }),
       envBody(f, { value: 'sk_live_abc' }),
       envBody(f, { secret: 'hunter2' }),

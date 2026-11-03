@@ -6,7 +6,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
 import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
-import { REPUBLISH_BRANCH_MOVED_SENTENCE, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
+import { FIX_ROUND_STOP_SENTENCE, REPUBLISH_BRANCH_MOVED_SENTENCE, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE_SENTENCE, REPUBLISH_PAIRING_OFF_SENTENCE, REPUBLISH_PR_CLOSED_SENTENCE, REPUBLISH_PR_MERGED_SENTENCE, REPUBLISH_TIP_MOVED_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
 import { generateKeyPairSync } from "node:crypto";
 import { createPlanePushApi, createHostedPlanePush, InstallationTokenCache } from "@fx/github";
 import { httpsRoundTrip, startStrictGithubServer, type LocalTlsServer } from "../../github/test/helpers/localTlsServer.js";
@@ -149,7 +149,7 @@ describe("a sandbox fix round updates the open public pull request [pg]", () => 
 
   it("a round that carries no base is not an update (nothing is started), and a round on an item with no open public pull request, or one a person took over, publishes nothing", async () => {
     expect(await settle(await fixRound({ base: false }))).toEqual({ privatePullRequest: "skipped", publish: { kind: "skipped", why: "not_paired" } });
-    for (const state of ["pr_closed", "pr_merged", "refused", "building"]) {
+    for (const state of ["refused", "building"]) {
       await admin.query("UPDATE plane_pushes SET state = $2, code = CASE WHEN $2 = 'refused' THEN 'scan_refused' END, head_sha = CASE WHEN $2 IN ('building', 'refused') THEN NULL ELSE head_sha END, tip_sha = CASE WHEN $2 IN ('building', 'refused') THEN NULL ELSE tip_sha END, pr_number = CASE WHEN $2 IN ('building', 'refused') THEN NULL ELSE pr_number END, pr_url = CASE WHEN $2 IN ('building', 'refused') THEN NULL ELSE pr_url END WHERE work_item_id = $1", [A.workItemId, state]);
       expect((await settle(await fixRound())).publish, state).toMatchObject({ kind: "skipped" });
     }
@@ -160,15 +160,61 @@ describe("a sandbox fix round updates the open public pull request [pg]", () => 
     expect(await facts()).toEqual([]);
   });
 
-  it("an item that left the pull request stages (merged, closed unmerged, closed) is not updated even though the push row still says pr_opened: no sandbox, no attempt, no fact", async () => {
-    for (const stage of ["merged", "closed_unmerged", "closed"]) {
-      await admin.query("UPDATE work_items SET stage = $2 WHERE id = $1", [A.workItemId, stage]);
-      expect((await settle(await fixRound())).publish, stage).toEqual({ kind: "skipped", why: "not_paired" });
+  it("D#598 P1g-1: a merged or closed public pull request is said in words, in both ways it is recorded: no sandbox, no attempt, the push row untouched, and the item shows the sentence", async () => {
+    const cases: Array<[string, string, string, string]> = [
+      ["item merged", "UPDATE work_items SET stage = 'merged' WHERE id = $1", "republish_pr_merged", REPUBLISH_PR_MERGED_SENTENCE],
+      ["item closed unmerged", "UPDATE work_items SET stage = 'closed_unmerged' WHERE id = $1", "republish_pr_closed", REPUBLISH_PR_CLOSED_SENTENCE],
+      ["push row merged", "UPDATE plane_pushes SET state = 'pr_merged' WHERE work_item_id = $1", "republish_pr_merged", REPUBLISH_PR_MERGED_SENTENCE],
+      ["push row closed", "UPDATE plane_pushes SET state = 'pr_closed' WHERE work_item_id = $1", "republish_pr_closed", REPUBLISH_PR_CLOSED_SENTENCE],
+    ];
+    for (const [name, sql, code, sentence] of cases) {
+      await admin.query("DELETE FROM work_item_driver_events WHERE work_item_id = $1", [A.workItemId]);
+      await admin.query("UPDATE work_items SET stage = 'changes_requested' WHERE id = $1", [A.workItemId]);
+      await admin.query("UPDATE plane_pushes SET state = 'pr_opened' WHERE work_item_id = $1", [A.workItemId]);
+      await admin.query(sql, [A.workItemId]);
+      expect((await settle(await fixRound())).publish, name).toEqual({ kind: "refused", code, attemptNo: null });
+      expect(await facts(), name).toEqual([{ kind: "escalated", code }]);
+      expect(sentence.startsWith(code === "republish_pr_merged" ? "Public PR already merged" : "Public PR closed")).toBe(true);
+      if (name.startsWith("push row")) expect(await stageOf(), name).toBe("needs_human");
+      // A terminal item cannot move; its record of the stop is the notice. An item still in review is paused in Needs a person with the same words.
+      expect(await noticeOf(), name).toMatchObject({ kind: "public_update_stopped", reason: sentence });
     }
     expect(fake.state.created).toEqual([]);
     expect(await attempts()).toEqual([]);
+    // A cancelled item stays a quiet skip.
+    await admin.query("DELETE FROM work_item_driver_events WHERE work_item_id = $1", [A.workItemId]);
+    await admin.query("UPDATE plane_pushes SET state = 'pr_opened' WHERE work_item_id = $1", [A.workItemId]);
+    await admin.query("UPDATE work_items SET stage = 'closed' WHERE id = $1", [A.workItemId]);
+    expect((await settle(await fixRound())).publish).toEqual({ kind: "skipped", why: "not_paired" });
     expect(await facts()).toEqual([]);
+  });
+
+  it("D#598 P1g-1: the pairing is off while the public pull request is open: the sentence, a pause in Needs a person, nothing pushed", async () => {
+    await admin.query("DELETE FROM repo_pairing WHERE repo_id = $1", [A.repoId]);
+    expect((await settle(await fixRound())).publish).toEqual({ kind: "refused", code: "republish_pairing_off", attemptNo: null });
+    expect(await facts()).toEqual([{ kind: "escalated", code: "republish_pairing_off" }]);
+    expect(await stageOf()).toBe("needs_human");
+    expect(await noticeOf()).toMatchObject({ kind: "public_update_stopped", reason: REPUBLISH_PAIRING_OFF_SENTENCE });
+    expect(fake.state.created).toEqual([]);
+    expect(await attempts()).toEqual([]);
     expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: STAMP });
+  });
+
+  it("D#598 P1g-1: the public main moved twice (the hook's refusal): republish_tip_moved, said as 'Public main moved, try again', the push row untouched", async () => {
+    output = () => say({ phase: "refused", code: "public_tip_moved" });
+    expect((await settle(await fixRound())).publish).toMatchObject({ kind: "refused", code: "republish_tip_moved" });
+    expect(await facts()).toEqual([{ kind: "escalated", code: "republish_tip_moved" }]);
+    expect(await noticeOf()).toMatchObject({ kind: "public_update_stopped", reason: REPUBLISH_TIP_MOVED_SENTENCE });
+    expect(REPUBLISH_TIP_MOVED_SENTENCE.startsWith("Public main moved, try again")).toBe(true);
+    expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: STAMP, code: null });
+  });
+
+  it("D#598 P1g-1: every new stop has a sentence in the item view's table, with no raw code and no null", () => {
+    for (const code of ["republish_tip_moved", "republish_pr_closed", "republish_pr_merged", "republish_pairing_off"]) {
+      const sentence = FIX_ROUND_STOP_SENTENCE[code]!;
+      expect(sentence, code).toMatch(/^[A-Z]/);
+      expect(sentence, code).not.toMatch(/republish_|undefined|null|_/);
+    }
   });
 
   it("an item closed after the facts were read but before the attempt is created starts no sandbox either", async () => {

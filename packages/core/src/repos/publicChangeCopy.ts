@@ -35,6 +35,7 @@ export const PUBLIC_CHANGE_REFUSAL_REASON: Readonly<Record<string, string>> = {
   app_not_installed: 'the GitHub App is not installed on the public repository',
   token_scope_mismatch: 'the access granted for the public repository was wrong',
   branch_exists: 'the branch already exists in the public repository',
+  republish_tip_moved: 'public main moved, try again',
   public_branch_moved: 'the public branch was changed outside the cloud',
   republish_base_missing: 'the round had no signed base to rebuild the public change from',
   push_failed: 'the push to the public repository failed',

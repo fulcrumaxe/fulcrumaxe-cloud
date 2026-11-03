@@ -14,7 +14,9 @@ import {
 describe('D#598 P8a: setup request vocabulary', () => {
   it('the kinds are exactly the six the Spec names; an agent may propose all but public/private drift', () => {
     expect([...SETUP_REQUEST_KINDS].sort()).toEqual(['app_not_installed', 'branch_pushed_by_person', 'env_var', 'overlay_path_missing', 'parent_pr_closed', 'parity_drift']);
-    expect([...AGENT_PROPOSABLE_KINDS].sort()).toEqual(['app_not_installed', 'branch_pushed_by_person', 'env_var', 'overlay_path_missing', 'parent_pr_closed']);
+    // R-C27-2: only a person answers `branch_pushed_by_person`, so no model may raise or propose it.
+    expect([...AGENT_PROPOSABLE_KINDS].sort()).toEqual(['app_not_installed', 'env_var', 'overlay_path_missing', 'parent_pr_closed']);
+    expect(isAgentProposableKind('branch_pushed_by_person')).toBe(false);
     for (const bad of ['', 'secret', 'api_key', 'ENV_VAR', 'env_var ', null, undefined, 3, {}]) expect(isSetupRequestKind(bad), String(bad)).toBe(false);
     expect(isAgentProposableKind('parity_drift')).toBe(false);
   });

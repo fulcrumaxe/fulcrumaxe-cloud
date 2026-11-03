@@ -12,7 +12,7 @@ import { readPublicChange, type PublicChange } from '../repos/publicChange.js';
 import { readStartDecision, type StartDecision } from './startDecision.js';
 import { readItemReceipts, type ItemReceipts } from './itemReceipts.js';
 import { MONTHLY_BUDGET_PARKED_STOP, RUN_LIMIT_PARKED_STOP, continuationStopSentence } from './continuationStops.js';
-import { BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, BASE_SYNC_UNAVAILABLE_SENTENCE, FIX_ROUND_STOP_SENTENCE, REPUBLISH_BASE_MISSING, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE, REPUBLISH_STACKED_UNSUPPORTED } from './baseSync.js';
+import { BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, BASE_SYNC_UNAVAILABLE_SENTENCE, FIX_ROUND_STOP_SENTENCE, REPUBLISH_BASE_MISSING, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE, REPUBLISH_PAIRING_OFF, REPUBLISH_PR_CLOSED, REPUBLISH_PR_MERGED, REPUBLISH_STACKED_UNSUPPORTED, REPUBLISH_TIP_MOVED } from './baseSync.js';
 import { PUBLIC_BRANCH_MOVED, PUBLIC_BRANCH_MOVED_SENTENCE, PUBLIC_HEAD_UNAVAILABLE, PUBLIC_HEAD_UNAVAILABLE_SENTENCE } from '../repos/planePushRecord.js';
 import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_FAILED_OUTSIDE_CHANGE_SENTENCE } from './checkFailure.js';
 import { UNVERIFIABLE_ESCALATION_CODE } from './reviewHold.js';
@@ -124,7 +124,7 @@ export interface ActivityStep {
 export interface ActivityNotice {
   /** `needs_human` only, and only for an executor run the runner ended `resource_limit`: how it ended. The API route puts the memory-limit sentence in `reason` and drops this; it never leaves the API. */
   ended?: RunEndedWhy;
-  kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed' | 'build_slot_wait' | 'resume_refused' | 'spec_refused' | 'superseded' | 'review_limit_wait';
+  kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed' | 'build_slot_wait' | 'resume_refused' | 'spec_refused' | 'superseded' | 'review_limit_wait' | 'public_update_stopped';
   /** `review_limit_wait` only: when the runner's daily run limit starts again, an ISO instant (the next UTC midnight after the wait fact). The API route puts the sentence in `reason`; the card shows this instant in the viewer's zone. */
   resetsAt?: string;
   /** `superseded` only: the id of the tracked item this request moved to, or '' when that item is not one of this account's (the card then shows the sentence with no link). */
@@ -398,6 +398,19 @@ export function readOutcomeCodes(outcome: unknown): { result: string | null; rea
     ? o.reasons.map(codeOrNull).filter((c): c is string => c !== null).slice(0, ACTIVITY_LIMITS.maxReasons)
     : [];
   return { result: codeOrNull(o.outcome) ?? codeOrNull(o.advance), reasons };
+}
+
+/** The stops of an update of the public pull request that finished the item's round: drawn as what happened, never as a failed build. */
+const PUBLIC_UPDATE_STOP_CODES: readonly string[] = [REPUBLISH_TIP_MOVED, REPUBLISH_PAIRING_OFF, REPUBLISH_PR_CLOSED, REPUBLISH_PR_MERGED];
+
+/** The fixed sentence of the newest "public PR closed / already merged" stop of an item, or null. */
+async function readPublicPrStop(client: PoolClient, workItemId: string): Promise<string | null> {
+  const { rows } = await client.query<{ code: string }>(
+    "SELECT code FROM work_item_driver_events WHERE work_item_id = $1::uuid AND kind = 'escalated' AND code = ANY($2::text[]) ORDER BY seq DESC LIMIT 1",
+    [workItemId, [REPUBLISH_PR_CLOSED, REPUBLISH_PR_MERGED]],
+  );
+  const code = rows[0]?.code;
+  return code !== undefined && Object.hasOwn(FIX_ROUND_STOP_SENTENCE, code) ? FIX_ROUND_STOP_SENTENCE[code]! : null;
 }
 
 /**
@@ -733,6 +746,7 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
     let notice: ActivityNotice | null = null;
     let resumeCode: string | null = null;
     let refusalCode: string | null = null;
+    let publicPrStop: string | null = null;
     const pm = (
       await client.query<{ reason: string | null }>(
         `SELECT left(envelope->>'reason', $2::int) AS reason FROM agent_runs
@@ -762,6 +776,9 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
     } else if (item.stage === 'triaged' && (refusalCode = await readSpecRefusal(client, workItemId)) !== null) {
       // A follow-up child has no issue to edit: every refusal but "too large" reads "approve again to retry" (D#483 S5-b2d-2b).
       notice = { kind: 'spec_refused', reason: item.follow_up && refusalCode !== 'follow_up_too_large' ? 'follow_up_spec_failed' : refusalCode };
+    } else if ((item.stage === 'merged' || item.stage === 'closed_unmerged') && (publicPrStop = await readPublicPrStop(client, workItemId)) !== null) {
+      // A fix round ended on a public pull request that was closed or merged on GitHub: the item cannot move, so the record of the stop is the notice (D#598 P1g-1).
+      notice = { kind: 'public_update_stopped', reason: publicPrStop };
     } else if (item.stage === 'needs_human') {
       // Build again was pressed and the driver stopped before starting anything (an open pull request, or GitHub could not be asked):
       // the newest such stop since the item reached Needs a person, by a fixed code.
@@ -773,13 +790,13 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
               AND CASE WHEN e.kind = 'escalated' THEN e.created_at >= COALESCE((SELECT max(t.created_at) FROM work_item_transitions t WHERE t.work_item_id = $1::uuid AND t.to_stage = 'needs_human'), '-infinity'::timestamptz)
                        ELSE e.created_at > COALESCE((SELECT max(t.created_at) FROM work_item_transitions t WHERE t.work_item_id = $1::uuid AND t.to_stage = 'needs_human'), '-infinity'::timestamptz) END
             ORDER BY e.seq DESC LIMIT 1`,
-          [workItemId, ['rebuild_pr_open', 'rebuild_check_unavailable', CHECK_FIX_BRANCH_STOP_CODE, PUBLIC_BRANCH_MOVED, PUBLIC_HEAD_UNAVAILABLE, BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, REPUBLISH_BASE_MISSING, REPUBLISH_STACKED_UNSUPPORTED, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE, CHECK_FAILED_OUTSIDE_CHANGE, RUN_LIMIT_PARKED_STOP, MONTHLY_BUDGET_PARKED_STOP]],
+          [workItemId, ['rebuild_pr_open', 'rebuild_check_unavailable', CHECK_FIX_BRANCH_STOP_CODE, PUBLIC_BRANCH_MOVED, PUBLIC_HEAD_UNAVAILABLE, BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, REPUBLISH_BASE_MISSING, REPUBLISH_STACKED_UNSUPPORTED, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE, REPUBLISH_TIP_MOVED, REPUBLISH_PAIRING_OFF, REPUBLISH_PR_CLOSED, REPUBLISH_PR_MERGED, CHECK_FAILED_OUTSIDE_CHANGE, RUN_LIMIT_PARKED_STOP, MONTHLY_BUDGET_PARKED_STOP]],
         )
       ).rows[0];
       // C88 section 3: a build parked at a run limit shows the fixed sentence of its refused_by (or "Needs your attention" for one this code does not know).
       const contStopSentence = continuationStopSentence(rebuildStop?.code, rebuildStop?.reasons);
       const rebuildSentence = rebuildStop?.code && Object.hasOwn(CHECK_FAILED_SENTENCES, rebuildStop.code) ? CHECK_FAILED_SENTENCES[rebuildStop.code] : undefined;
-      const branchStop = rebuildStop?.code === CHECK_FIX_BRANCH_STOP_CODE || rebuildStop?.code === PUBLIC_BRANCH_MOVED || rebuildStop?.code === PUBLIC_HEAD_UNAVAILABLE || rebuildStop?.code === BASE_SYNC_CONFLICT || rebuildStop?.code === BASE_SYNC_UNAVAILABLE || rebuildStop?.code === REPUBLISH_BASE_MISSING || rebuildStop?.code === REPUBLISH_STACKED_UNSUPPORTED || rebuildStop?.code === REPUBLISH_BRANCH_MOVED || rebuildStop?.code === REPUBLISH_FAILED || rebuildStop?.code === REPUBLISH_NO_CHANGE || rebuildStop?.code === CHECK_FAILED_OUTSIDE_CHANGE || contStopSentence !== null;
+      const branchStop = rebuildStop?.code === CHECK_FIX_BRANCH_STOP_CODE || rebuildStop?.code === PUBLIC_BRANCH_MOVED || rebuildStop?.code === PUBLIC_HEAD_UNAVAILABLE || rebuildStop?.code === BASE_SYNC_CONFLICT || rebuildStop?.code === BASE_SYNC_UNAVAILABLE || rebuildStop?.code === REPUBLISH_BASE_MISSING || rebuildStop?.code === REPUBLISH_STACKED_UNSUPPORTED || rebuildStop?.code === REPUBLISH_BRANCH_MOVED || rebuildStop?.code === REPUBLISH_FAILED || rebuildStop?.code === REPUBLISH_NO_CHANGE || rebuildStop?.code === REPUBLISH_TIP_MOVED || rebuildStop?.code === REPUBLISH_PAIRING_OFF || rebuildStop?.code === REPUBLISH_PR_CLOSED || rebuildStop?.code === REPUBLISH_PR_MERGED || rebuildStop?.code === CHECK_FAILED_OUTSIDE_CHANGE || contStopSentence !== null;
       // A reviewer that kept ending without a verdict handed the item over: the notice names it and how it ended, never the executor's summary.
       const noVerdict = rebuildSentence || branchStop
         ? undefined
@@ -834,7 +851,7 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
         : contStopSentence !== null
           ? { kind: 'needs_human', reason: contStopSentence }
           : branchStop
-          ? { kind: 'needs_human', reason: rebuildStop?.code && Object.hasOwn(FIX_ROUND_STOP_SENTENCE, rebuildStop.code) ? FIX_ROUND_STOP_SENTENCE[rebuildStop.code]! : rebuildStop?.code === CHECK_FAILED_OUTSIDE_CHANGE ? CHECK_FAILED_OUTSIDE_CHANGE_SENTENCE : rebuildStop?.code === PUBLIC_BRANCH_MOVED ? PUBLIC_BRANCH_MOVED_SENTENCE : rebuildStop?.code === PUBLIC_HEAD_UNAVAILABLE ? PUBLIC_HEAD_UNAVAILABLE_SENTENCE : CHECK_FIX_BRANCH_SENTENCE }
+          ? { kind: rebuildStop?.code && PUBLIC_UPDATE_STOP_CODES.includes(rebuildStop.code) ? 'public_update_stopped' : 'needs_human', reason: rebuildStop?.code && Object.hasOwn(FIX_ROUND_STOP_SENTENCE, rebuildStop.code) ? FIX_ROUND_STOP_SENTENCE[rebuildStop.code]! : rebuildStop?.code === CHECK_FAILED_OUTSIDE_CHANGE ? CHECK_FAILED_OUTSIDE_CHANGE_SENTENCE : rebuildStop?.code === PUBLIC_BRANCH_MOVED ? PUBLIC_BRANCH_MOVED_SENTENCE : rebuildStop?.code === PUBLIC_HEAD_UNAVAILABLE ? PUBLIC_HEAD_UNAVAILABLE_SENTENCE : CHECK_FIX_BRANCH_SENTENCE }
           : unverifiableSentence
           ? { kind: 'needs_human', reason: unverifiableSentence }
           : noVerdictSentence

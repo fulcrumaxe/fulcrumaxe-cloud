@@ -77,7 +77,7 @@ export type PlaneMergeVerifyResult =
 export type PlaneMergeReportResult = { kind: "recorded" } | { kind: "retry"; retryAfter: number } | { kind: "fenced"; code?: string } | CallError;
 
 /** The closed codes a token request can be refused with; any other 4xx or 5xx word is a plain `CallError`. */
-const TOKEN_REFUSALS: ReadonlySet<string> = new Set(["pairing_changed", "already_issued", "attempts_exhausted", "app_not_installed", "token_scope_mismatch", "public_unavailable", "not_configured", "republish_base_missing"]);
+const TOKEN_REFUSALS: ReadonlySet<string> = new Set(["pairing_changed", "already_issued", "attempts_exhausted", "app_not_installed", "token_scope_mismatch", "public_unavailable", "not_configured", "republish_base_missing", "republish_pr_closed", "republish_pr_merged", "republish_pairing_off"]);
 
 export interface DoneInput {
   runId: string;
