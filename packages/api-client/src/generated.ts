@@ -5446,8 +5446,8 @@ export const operations = {
   listWorkItemReceipts: {
     method: "GET",
     path: "/api/v1/work-items/{id}/receipts",
-    tokenAccess: false,
-    scope: null,
+    tokenAccess: true,
+    scope: "read",
     tokenSelfOnly: false,
     idempotency: "never",
     pathParams: ["id"],

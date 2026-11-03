@@ -13,6 +13,7 @@ import {
   type PlanSource,
 } from "@fx/core/src/plan/index.js";
 import type { RouteEntry } from "../registry.js";
+import { assertBoundRepo } from "../boundRepo.js";
 import { ImportRunningApiError, NeverImportedError, PlanImportUnavailableError, RateLimitedError, RepoNotConnectedApiError } from "../errors.js";
 import { SESSION_LIMITS } from "../ratelimit/session.js";
 
@@ -190,6 +191,7 @@ export const planRoutes: RouteEntry[] = [
       "`milestones` lists each milestone with `tasks`, `done` and `remaining`, derived from the task rows on every read (the counts stored on an import are that import's own historical stamp). `tasks` is one page (`milestone`, `status` = `done` or `remaining`, `cursor`, `limit` up to 100) of the tasks, ordered by key; `next_cursor` is null on the last page. " +
       "`?format=full` answers every task in one response (with `next_cursor` null), for the dogfood comparison; it is capped at 5000 tasks, and `tasks_truncated` is true when the cap cut tasks off. `imported_from` is the newest import that succeeded, which the rows came from; `latest_import` is the newest of any state, so a failed re-import is visible while the previous data stays.",
     principals: ["session", "token"],
+    tokens: ["api", "delegation"],
     minRole: "member",
     scope: "read",
     idempotency: "never",
@@ -200,6 +202,7 @@ export const planRoutes: RouteEntry[] = [
     extraResponses: { "404": "Error `not_found`: the repository does not exist in this account." },
     async handler(ctx, input) {
       const q = (input.query ?? {}) as z.infer<typeof planQuery>;
+      await assertBoundRepo(ctx, { repoId: input.params.id! });
       const view = await getPlanView({ pool: ctx.pool, principal: ctx.principal }, input.params.id!, {
         ...(q.milestone !== undefined ? { milestone: q.milestone } : {}),
         ...(q.status !== undefined ? { status: q.status } : {}),

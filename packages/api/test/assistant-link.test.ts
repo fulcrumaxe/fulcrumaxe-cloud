@@ -295,9 +295,17 @@ describe('D#597 CC-4: delegation token and device link', () => {
 
   it('CC-4-5: the routes that allow a delegation token are exactly these, and none of them can clear a halt, approve, merge, cancel or close', async () => {
     const delegation = ROUTES.filter((r) => (r.tokens ?? ['api']).includes('delegation')).map((r) => `${r.method} ${r.path}`).sort();
+    // CC-4b adds the seven reads (the corrections list was already here); every other entry is unchanged
     expect(delegation).toEqual([
       'DELETE /api/v1/tokens/{id}',
+      'GET /api/v1/repos/{id}/plan',
+      'GET /api/v1/runs',
+      'GET /api/v1/runs/{id}',
+      'GET /api/v1/runs/{id}/events',
+      'GET /api/v1/work-items',
+      'GET /api/v1/work-items/{id}',
       'GET /api/v1/work-items/{id}/corrections',
+      'GET /api/v1/work-items/{id}/receipts',
       'POST /api/v1/corrections/{id}/accept',
       'POST /api/v1/corrections/{id}/reject',
       'POST /api/v1/work-items/{id}/corrections',
@@ -329,7 +337,8 @@ describe('D#597 CC-4: delegation token and device link', () => {
     }
     // the stage verbs and the older token routes refuse it by name
     expect(await code(await call(await fresh(), 'POST', `/work-items/${item}/approve`, {}))).toBe('session_required');
-    expect(await code(await call(await fresh(), 'GET', '/work-items'))).toBe('insufficient_scope');
+    // (GET /work-items was this example before CC-4b opened it; /stats stays closed)
+    expect(await code(await call(await fresh(), 'GET', '/stats'))).toBe('insufficient_scope');
   });
 
   it('CC-4-6: a token of account B reads and writes nothing of account A, under the real database login', async () => {

@@ -188,10 +188,13 @@ describe('D#7 DP7-2e: receipts and reversals', () => {
       const rid = await receipt(f, w);
       for (const scope of ['read', 'work_items:write', 'discussions:write', 'corrections:write']) {
         const token = await readToken(f.admin, scope);
-        const reads = scope === 'read' ? [] : [await list(f.admin, w.itemId, token)];
-        for (const res of [...reads, await reverse(f.admin, rid, {}, token), await confirm(f.admin, randomUUID(), 1, token)]) {
+        for (const res of [await reverse(f.admin, rid, {}, token), await confirm(f.admin, randomUUID(), 1, token)]) {
           expect([res.status, (await errOf(res)).error.code], scope).toEqual([403, 'session_required']);
         }
+        // D#597 CC-4b: the list is readable by an assistant delegation token only. An ordinary key with `read` is still refused as a session-only
+        // caller; a key without `read` is refused on the scope first (the route now names a scope, as every token-capable route does).
+        const listed = await list(f.admin, w.itemId, token);
+        expect([listed.status, (await errOf(listed)).error.code], scope).toEqual([403, scope === 'read' ? 'session_required' : 'insufficient_scope']);
       }
       expect(calls).toEqual([]);
       expect(await rowFor(w.itemId)).toEqual([]);

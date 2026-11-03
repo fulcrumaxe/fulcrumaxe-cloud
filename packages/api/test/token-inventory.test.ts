@@ -79,6 +79,41 @@ describe('token-inventory: generic session-only and scope enforcement over the r
     return handleApiRequest(new Request(url, init), appUserPool, platformOpsPool, ROUTES);
   }
 
+  /**
+   * D#597 CC-4 / CC-4b: the routes an assistant delegation token may call. The set is named here on purpose, so a route added to it later fails
+   * until a person lists it. Every one is a read or a correction (the CC-2a verbs); no stage verb, no run start, no other write is on it.
+   */
+  describe('the delegation-token route inventory', () => {
+    const EXPECTED_DELEGATION_ROUTES = [
+      'GET /api/v1/repos/{id}/plan',
+      'GET /api/v1/runs',
+      'GET /api/v1/runs/{id}',
+      'GET /api/v1/runs/{id}/events',
+      'GET /api/v1/work-items',
+      'GET /api/v1/work-items/{id}',
+      'GET /api/v1/work-items/{id}/corrections',
+      'GET /api/v1/work-items/{id}/receipts',
+      'POST /api/v1/corrections/{id}/accept',
+      'POST /api/v1/corrections/{id}/reject',
+      'POST /api/v1/work-items/{id}/corrections',
+      'DELETE /api/v1/tokens/{id}',
+    ].sort();
+
+    it('the routes listing "delegation" are exactly the expected ones', () => {
+      const listed = ROUTES.filter((r) => (r.tokens ?? ['api']).includes('delegation')).map((r) => `${r.method} ${r.path}`).sort();
+      expect(listed).toEqual(EXPECTED_DELEGATION_ROUTES);
+    });
+
+    it('every listed write is a correction verb or the token revoking itself; every other one is a GET', () => {
+      const writes = ROUTES.filter((r) => (r.tokens ?? ['api']).includes('delegation') && r.method !== 'GET').map((r) => r.operationId).sort();
+      expect(writes).toEqual(['acceptCorrection', 'createCorrection', 'deleteToken', 'rejectCorrection']);
+    });
+
+    it('no route that starts a run lists a delegation token', () => {
+      expect(ROUTES.filter((r) => r.startsRun && (r.tokens ?? ['api']).includes('delegation'))).toEqual([]);
+    });
+  });
+
   describe('session-only entries reject an every-scope token', () => {
     const sessionOnlyEntries = ROUTES.filter((r) => !effectivePrincipals(r).includes('token') && !r.anonymous);
 
@@ -170,7 +205,7 @@ describe('token-inventory: write scopes open only the routes that declare them',
       'getRunLimits', 'getRunAction', 'exportRunEvents', 'listDiscussions', 'getDiscussion',
       'listComments', 'listProposals', 'getProposal', 'getLatestPlanImport', 'getRepoPlan', 'getRunnerConcurrency', 'getDiscoverySetting',
       'getAccountBuildConcurrency', 'getAccountBuildConcurrencyHistory', 'getRepoBuildConcurrency', 'getRepoBuildConcurrencyHistory', 'estimateProposals', 'getAutostartEnvelope', 'getEnvelopeMargin',
-      'getFollowUpSetting', 'listWorkItemFollowUps', 'getPlanWritebackSetting',
+      'getFollowUpSetting', 'listWorkItemFollowUps', 'getPlanWritebackSetting', 'listWorkItemReceipts',
     ].map((id) => `${id}:read`);
     expect([...tokenRoutes].sort()).toEqual(
       [

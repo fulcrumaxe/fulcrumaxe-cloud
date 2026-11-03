@@ -2,6 +2,7 @@ import { z } from "zod";
 import { getWorkItem, listWorkItems, OWN_PLAN_USAGE_STATES, WORK_ITEM_PRIORITIES } from "@fx/core/src/work-items/read.js";
 import { WORK_ITEM_STAGES } from "@fx/core/src/work-items/stages.js";
 import type { RouteEntry } from "../registry.js";
+import { assertBoundRepo, boundListRepo } from "../boundRepo.js";
 import { decodeCursor, decodeQueueCursor, encodeCursor, encodeQueueCursor, parseLimit } from "../pagination.js";
 
 /** "The v1 contract" > work item DTO (API-3a criterion 3), corrected by C10: `stage` is `WORK_ITEM_STAGES`, not derived from `work_items.state`. */
@@ -50,6 +51,7 @@ export const workItemRoutes: RouteEntry[] = [
     operationId: "listWorkItems",
     summary: "The caller's own work items, paginated",
     principals: ["session", "token"],
+    tokens: ["api", "delegation"],
     minRole: "member",
     scope: "read",
     idempotency: "never",
@@ -68,7 +70,7 @@ export const workItemRoutes: RouteEntry[] = [
           : (({ created_at, id }) => ({ createdAt: created_at, id }))(decodeCursor(query.cursor)); // fix round 1: no new Date(...)
       const result = await listWorkItems(
         { pool: ctx.pool, principal: ctx.principal },
-        { repoId: query.repo_id, stage: query.stage, limit, sort: query.sort, cursor },
+        { repoId: boundListRepo(ctx.principal, query.repo_id), stage: query.stage, limit, sort: query.sort, cursor },
       );
       const next = result.nextCursor;
       return {
@@ -87,6 +89,7 @@ export const workItemRoutes: RouteEntry[] = [
     operationId: "getWorkItem",
     summary: "A single work item the caller's account owns",
     principals: ["session", "token"],
+    tokens: ["api", "delegation"],
     minRole: "member",
     scope: "read",
     idempotency: "never",
@@ -94,6 +97,7 @@ export const workItemRoutes: RouteEntry[] = [
     paramsSchema: workItemIdParamsSchema,
     responseSchema: workItemResponseSchema,
     async handler(ctx, input) {
+      await assertBoundRepo(ctx, { workItemId: input.params.id! });
       return getWorkItem({ pool: ctx.pool, principal: ctx.principal }, input.params.id!);
     },
   },

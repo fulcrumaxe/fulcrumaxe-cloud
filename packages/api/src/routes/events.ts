@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { InvalidCursorError } from "../errors.js";
-import type { MembershipRole, PrincipalKind, RouteEntry, Scope } from "../registry.js";
+import type { MembershipRole, PrincipalKind, RouteEntry, Scope, TokenClass } from "../registry.js";
+import { assertBoundRepo } from "../boundRepo.js";
 import { parseLimit } from "../pagination.js";
 import { accountEventsPage, chargeJsonPoll, runEventsPage } from "../sse/json.js";
 
@@ -25,6 +26,9 @@ export const EVENT_ROUTE_ACCESS = {
   scope: "read" as Scope,
   minRole: "member" as MembershipRole,
 };
+
+/** The run stream may also be opened by an assistant delegation token, bound to its repo (the stream open checks the run's repo before the first byte). The account stream crosses repos and stays closed to it. */
+export const RUN_EVENT_ROUTE_ACCESS = { ...EVENT_ROUTE_ACCESS, tokens: ["api", "delegation"] as TokenClass[] };
 
 const queryShape = { cursor: z.string().optional(), after_seq: z.string().optional(), limit: z.string().optional() };
 const eventsQuerySchema = z.object({ cursor: z.string().optional(), limit: z.string().optional() });
@@ -88,7 +92,7 @@ export const eventRoutes: RouteEntry[] = [
       description:
         "Server-sent events. Each `run_event` frame has `id` = the event's `seq` (send it back as `Last-Event-ID`) and `data` `{seq, kind, at, payload}`; a payload over 64 KiB is replaced by `{\"truncated\": true, \"original_bytes\": N}` (the JSON mode returns it in full). `end` (`data.status`) is sent and the server closes once the run is terminal. Also sent: `revoked`, `idle`, `error` (`data.code`), and a `: heartbeat` comment every 25 seconds. The server closes each stream after 12 to 13 minutes; reconnect with `Last-Event-ID`.",
     },
-    ...EVENT_ROUTE_ACCESS,
+    ...RUN_EVENT_ROUTE_ACCESS,
     idempotency: "never",
     rateClass: "read",
     paramsSchema: runIdParamsSchema,
@@ -99,6 +103,7 @@ export const eventRoutes: RouteEntry[] = [
       if (query.cursor !== undefined && query.after_seq !== undefined) {
         throw new InvalidCursorError("send either cursor or after_seq, not both");
       }
+      await assertBoundRepo(ctx, { runId: input.params.id! });
       await chargeJsonPoll(ctx.pool, ctx.principal);
       return runEventsPage(
         ctx.pool,

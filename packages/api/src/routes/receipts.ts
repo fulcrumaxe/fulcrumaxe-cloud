@@ -5,6 +5,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { COMPENSATION_COPY, compensationSentence, createLedgerPort, loadReversalPricePort, type ReversalPrice } from "@fx/receipts";
 import { ApiError } from "../errors.js";
 import type { RouteEntry } from "../registry.js";
+import { assertBoundRepo } from "../boundRepo.js";
 import { UUID_RE, idParamsSchema, notFound } from "./run-actions.js";
 import { boundedPrState, type PrStateReader, type RevertPrState } from "./reversalPrState.js";
 
@@ -182,8 +183,12 @@ export const receiptRoutes: RouteEntry[] = [
     operationId: "listWorkItemReceipts",
     summary: "The decision receipts of a work item, with each one's free deadline, live reversal price and reversal state",
     description:
-      "Session only; any member. Newest first, at most 50. Each receipt is named by its owner-approved label and its time to the second. `price_*` is the live price: free until the deadline, then the model spend so far on this item " +
+      "A session of any member, or an assistant delegation token with `read` for an item of its own repo (404 for any other). Newest first, at most 50. Each receipt is named by its owner-approved label and its time to the second. `price_*` is the live price: free until the deadline, then the model spend so far on this item " +
       "(shown for transparency on your own key, never billed). A receipt that reverses another names it by `reverses_text`, or `removed item` when the original is gone. 404 for an unknown work item.",
+    // Today session only. The assistant's delegation token may read it (bound to its repo); an ordinary token stays refused, as before.
+    principals: ["session", "token"],
+    tokens: ["delegation"],
+    scope: "read",
     minRole: "member",
     idempotency: "never",
     rateClass: "read",
@@ -192,6 +197,7 @@ export const receiptRoutes: RouteEntry[] = [
     async handler(ctx, input) {
       const id = input.params.id!;
       if (!UUID_RE.test(id)) throw notFound();
+      await assertBoundRepo(ctx, { workItemId: id });
       const { accountId, userId } = ctx.principal;
       const now = new Date();
       const prices = await loadReversalPricePort(createLedgerPort(ctx.pool), accountId, id, () => now);
