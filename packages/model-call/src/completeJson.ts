@@ -1,8 +1,9 @@
 import type { Pool } from 'pg';
 import type { z } from 'zod';
-import { isCreditsExhaustedAnswer, markBroken, markCreditsExhausted, type KekSource, type Principal } from '@fx/model-connection';
+import type { KekSource, Principal } from '@fx/model-connection';
 import { replyFrom, type RequestParams } from './hosts.js';
 import { callWithKey, ModelCallError } from './keyUse.js';
+import { failOnStatus } from './providerStatus.js';
 
 /** S2a: the account is `principal.accountId` and nothing else -- there is no accountId parameter anywhere. */
 export interface ModelCallCtx {
@@ -41,19 +42,7 @@ export async function completeJson<T>(ctx: ModelCallCtx, p: CompleteJsonParams<T
     throw new ModelCallError('forbidden', 'model-call: FX_FORBID_MODEL_CALLS is set');
   }
   const res = await callWithKey(ctx, ctx.fetchImpl ?? globalThis.fetch, Math.min(p.timeoutMs, HARD_TIMEOUT_MS), p);
-  if (res.status === 401 || res.status === 403) {
-    await markBroken(ctx.platformOpsPool, ctx.principal.accountId, res.status); // S2i
-    throw new ModelCallError('key_rejected', `model-call (${p.role}): provider rejected the key (HTTP ${res.status})`, res.status);
-  }
-  // D#483 S5-k2: the provider says the customer's credits ran out. Not a bad key and not an ordinary HTTP failure: the connection is recorded broken
-  // for credits (the items that would spend then pause, and the reconcile job re-validates it) and the caller gets its own code.
-  if (isCreditsExhaustedAnswer({ status: res.status, text: res.text })) {
-    await markCreditsExhausted(ctx.platformOpsPool, ctx.principal.accountId);
-    throw new ModelCallError('credits_exhausted', `model-call (${p.role}): the account's model credits ran out (HTTP ${res.status})`, res.status);
-  }
-  if (res.status < 200 || res.status >= 300) {
-    throw new ModelCallError('http_error', `model-call (${p.role}): provider returned HTTP ${res.status}: ${res.text}`, res.status);
-  }
+  await failOnStatus(ctx, p.role, res);
   let reply: ReturnType<typeof replyFrom> = null;
   try {
     reply = replyFrom(res.provider, JSON.parse(res.text));

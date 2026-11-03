@@ -39,6 +39,31 @@ export function requestFor(provider: string, key: string, p: RequestParams): { u
   };
 }
 
+export interface StreamToolDef {
+  name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+}
+export type StreamContent = string | Array<{ type: 'text'; text: string } | { type: 'tool_use'; id: string; name: string; input: unknown } | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }>;
+export interface StreamMessage {
+  role: 'user' | 'assistant';
+  content: StreamContent;
+}
+export interface StreamRequestParams extends Omit<RequestParams, 'messages'> {
+  messages: StreamMessage[];
+  tools: StreamToolDef[];
+}
+
+/** The streaming, tool-carrying request (Anthropic messages shape only; the gateway shape is CC-5b). Called only inside the key-holding closure. */
+export function streamRequestFor(provider: string, key: string, p: StreamRequestParams): { url: string; headers: Record<string, string>; body: string } | null {
+  if (provider !== 'anthropic') return null;
+  return {
+    url: `https://${hostFor(provider)}/v1/messages`,
+    headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json', 'user-agent': 'fulcrumaxe-cloud-model-call/0.1', accept: 'text/event-stream' },
+    body: JSON.stringify({ model: p.model ?? DEFAULT_MODEL.anthropic, max_tokens: p.maxOutputTokens, system: p.system, messages: p.messages, stream: true, ...(p.tools.length > 0 ? { tools: p.tools } : {}) }),
+  };
+}
+
 /** Assistant text and token usage from either provider's response JSON; null if the shape is wrong. */
 export function replyFrom(provider: string, json: unknown) {
   const j = (json ?? {}) as { content?: { type?: string; text?: string }[]; choices?: { message?: { content?: string } }[]; usage?: Record<string, number> };
