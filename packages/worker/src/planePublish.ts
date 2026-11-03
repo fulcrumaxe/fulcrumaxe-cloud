@@ -6,7 +6,7 @@ import { safeChildTitle } from "@fx/core/src/work-items/childTitle.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { PRIVATE_READ_CLASS_SENTENCE, PRIVATE_READ_REFUSAL_KIND } from "@fx/core/src/repos/publicChangeCopy.js";
 import { PUBLISH_ATTEMPT_LIMIT, mayRetryPublish, pairingDigest, publicPullRequestUrlMatches, recordUpdatedHead, recordVerifiedOutcome, type PlanePushState, type RetryFacts, type VerifiedOutcome } from "@fx/core/src/repos/planePushRecord.js";
-import { REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE } from "@fx/core/src/work-items/baseSync.js";
+import { REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE, REPUBLISH_PAIRING_OFF, REPUBLISH_PR_CLOSED, REPUBLISH_PR_MERGED, REPUBLISH_TIP_MOVED } from "@fx/core/src/work-items/baseSync.js";
 import { TERMINAL_WORK_ITEM_STAGES } from "@fx/core/src/work-items/stages.js";
 import { resolveBuildIdentity, type BuildIdentity, type BuildPurpose } from "@fx/core/src/work-items/buildIdentity.js";
 import { cleanWorkItemTitle } from "@fx/core/src/work-items/title.js";
@@ -469,7 +469,7 @@ async function verifyUpdate(deps: PlanePublishDeps, accountId: string, facts: Fa
     case "no_change":
       return { kind: "refused", code: REPUBLISH_NO_CHANGE, label: "no_change" };
     case "refused":
-      return line.code === "public_branch_moved" ? { kind: "refused", code: REPUBLISH_BRANCH_MOVED, label: "public_branch_moved" } : failed(line.code !== undefined && (PLANE_REFUSAL_CODES as readonly string[]).includes(line.code) ? line.code : PUBLISH_CODES.reportMismatch);
+      return line.code === "public_branch_moved" ? { kind: "refused", code: REPUBLISH_BRANCH_MOVED, label: "public_branch_moved" } : line.code === "public_tip_moved" ? { kind: "refused", code: REPUBLISH_TIP_MOVED, label: "public_tip_moved" } : failed(line.code !== undefined && (PLANE_REFUSAL_CODES as readonly string[]).includes(line.code) ? line.code : PUBLISH_CODES.reportMismatch);
     case "updated": {
       if (line.head_sha === undefined || line.tip_sha === undefined || (line.branch !== undefined && line.branch !== facts.branch)) return failed(PUBLISH_CODES.reportMismatch);
       try {
@@ -506,9 +506,14 @@ async function republish(deps: PlanePublishDeps, accountId: string, facts: Facts
     return { kind: "refused", code, attemptNo: null };
   };
   // An open, platform-owned pull request; anything else is not ours to update. A replay of this run is not a second update.
-  if (facts.state !== "pr_opened" || facts.managedByPerson || facts.stamp === null || (TERMINAL_WORK_ITEM_STAGES as readonly string[]).includes(facts.itemStage)) return { kind: "skipped", why: "not_paired" };
+  if (!["pr_opened", "pr_closed", "pr_merged"].includes(facts.state) || facts.managedByPerson || facts.stamp === null) return { kind: "skipped", why: "not_paired" };
   if (facts.updateAttempts > 0) return { kind: "skipped", why: "busy" };
-  if (facts.pairing === null || facts.pairing.codeRepo.toLowerCase() !== facts.codeRepo.toLowerCase()) return stopWith(REPUBLISH_FAILED);
+  // D#598 P1g-1: a public pull request that ended (the push row says so, or the item recorded it) is said in words and pauses the item, never skipped quietly. A cancelled item stays a skip.
+  if (facts.state === "pr_merged" || facts.itemStage === "merged") return stopWith(REPUBLISH_PR_MERGED);
+  if (facts.state === "pr_closed" || facts.itemStage === "closed_unmerged") return stopWith(REPUBLISH_PR_CLOSED);
+  if ((TERMINAL_WORK_ITEM_STAGES as readonly string[]).includes(facts.itemStage)) return { kind: "skipped", why: "not_paired" };
+  if (facts.pairing === null) return stopWith(REPUBLISH_PAIRING_OFF);
+  if (facts.pairing.codeRepo.toLowerCase() !== facts.codeRepo.toLowerCase()) return stopWith(REPUBLISH_FAILED);
   const identity = deps.identity();
   if (identity === null) return stopWith(REPUBLISH_FAILED);
   // The round was started through the resolver already; reading it again (`observe`) keeps a parent deleted since from stranding a change that is built and ready to publish.

@@ -490,7 +490,7 @@ export interface Operations {
         finished_at: string | null;
       }>;
       notice: ({
-        kind: "not_feasible" | "needs_human" | "check_failed" | "no_file_list" | "respec_failed" | "build_slot_wait" | "resume_refused" | "spec_refused" | "superseded" | "review_limit_wait";
+        kind: "not_feasible" | "needs_human" | "check_failed" | "no_file_list" | "respec_failed" | "build_slot_wait" | "resume_refused" | "spec_refused" | "superseded" | "review_limit_wait" | "public_update_stopped";
         reason: string;
         resets_at?: string;
       }) | (null);
@@ -1925,7 +1925,7 @@ export interface Operations {
     path: undefined;
     query: undefined;
     body: {
-      kind: "env_var" | "app_not_installed" | "parent_pr_closed" | "branch_pushed_by_person" | "overlay_path_missing";
+      kind: "env_var" | "app_not_installed" | "parent_pr_closed" | "overlay_path_missing";
       repo_id: string;
       work_item_id?: (string) | (null);
       target: string;

@@ -8,8 +8,11 @@
 export const SETUP_REQUEST_KINDS = ['env_var', 'app_not_installed', 'parity_drift', 'parent_pr_closed', 'branch_pushed_by_person', 'overlay_path_missing'] as const;
 export type SetupRequestKind = (typeof SETUP_REQUEST_KINDS)[number];
 
-/** The kinds an agent may propose through the API. Public/private drift is recomputed from current state, never proposed. */
-export const AGENT_PROPOSABLE_KINDS = ['env_var', 'app_not_installed', 'parent_pr_closed', 'branch_pushed_by_person', 'overlay_path_missing'] as const satisfies readonly SetupRequestKind[];
+/**
+ * The kinds an agent may propose through the API. Public/private drift is recomputed from current state, never proposed. `branch_pushed_by_person` is
+ * not here either (D#598 C27 R-C27-2): the platform raises it from what it observes on the public branch, and only a person's click answers it.
+ */
+export const AGENT_PROPOSABLE_KINDS = ['env_var', 'app_not_installed', 'parent_pr_closed', 'overlay_path_missing'] as const satisfies readonly SetupRequestKind[];
 export type AgentProposableKind = (typeof AGENT_PROPOSABLE_KINDS)[number];
 
 /** The only automatic check a request may name so far. It reads an environment variable's NAME on a Vercel project, never its value. */

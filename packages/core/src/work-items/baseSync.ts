@@ -33,6 +33,19 @@ export const REPUBLISH_FAILED_SENTENCE = "The fix round finished, but the cloud 
 export const REPUBLISH_NO_CHANGE = 'republish_no_change';
 export const REPUBLISH_NO_CHANGE_SENTENCE = "The fix round made no changes to publish, so the public pull request is unchanged. Look at the round, then press Build again.";
 
+/**
+ * D#598 P1g-1: the update of the public pull request stopped before anything was pushed. The branch is untouched; each sentence says what happened and what the person can do on GitHub
+ * (reopen and close choices in the cloud arrive later). Recorded as `escalated`.
+ */
+export const REPUBLISH_TIP_MOVED = 'republish_tip_moved';
+export const REPUBLISH_PR_CLOSED = 'republish_pr_closed';
+export const REPUBLISH_PR_MERGED = 'republish_pr_merged';
+export const REPUBLISH_PAIRING_OFF = 'republish_pairing_off';
+export const REPUBLISH_TIP_MOVED_SENTENCE = "Public main moved, try again. The public repository changed twice while the cloud was preparing the update, so the public pull request still shows the earlier change. Press Build again.";
+export const REPUBLISH_PR_CLOSED_SENTENCE = "Public PR closed. The fix round finished, but the public pull request was closed without merging, so it was not updated. To update it, reopen the pull request on GitHub first.";
+export const REPUBLISH_PR_MERGED_SENTENCE = "Public PR already merged. The fix round finished, but the public pull request was already merged, so nothing was pushed. Follow-up work becomes a new item.";
+export const REPUBLISH_PAIRING_OFF_SENTENCE = "Public PR is open but the pairing is off. The fix round finished, but this repository is no longer paired with its public repository, so the open public pull request was not updated. Turn the pairing back on in the repository settings, or leave the pull request as it is.";
+
 /** Every code of this module that stops a fix round, with its fixed sentence (the item view reads this table). */
 export const FIX_ROUND_STOP_SENTENCE: Readonly<Record<string, string>> = {
   [BASE_SYNC_CONFLICT]: BASE_SYNC_CONFLICT_SENTENCE,
@@ -42,4 +55,8 @@ export const FIX_ROUND_STOP_SENTENCE: Readonly<Record<string, string>> = {
   [REPUBLISH_BRANCH_MOVED]: REPUBLISH_BRANCH_MOVED_SENTENCE,
   [REPUBLISH_FAILED]: REPUBLISH_FAILED_SENTENCE,
   [REPUBLISH_NO_CHANGE]: REPUBLISH_NO_CHANGE_SENTENCE,
+  [REPUBLISH_TIP_MOVED]: REPUBLISH_TIP_MOVED_SENTENCE,
+  [REPUBLISH_PR_CLOSED]: REPUBLISH_PR_CLOSED_SENTENCE,
+  [REPUBLISH_PR_MERGED]: REPUBLISH_PR_MERGED_SENTENCE,
+  [REPUBLISH_PAIRING_OFF]: REPUBLISH_PAIRING_OFF_SENTENCE,
 };

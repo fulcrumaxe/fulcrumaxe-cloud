@@ -7,8 +7,8 @@ import { CHILD_BODY_CLOSING_CODE, buildPlanePushText, prFooterSkipReason } from 
 import { safeChildTitle } from "@fx/core/src/work-items/childTitle.js";
 import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
 import { cleanWorkItemTitle } from "@fx/core/src/work-items/title.js";
-import { REPUBLISH_BASE_MISSING, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE } from "@fx/core/src/work-items/baseSync.js";
-import { recordRepublishRefusal } from "./fixRoundBase.js";
+import { REPUBLISH_BASE_MISSING, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE, REPUBLISH_PAIRING_OFF, REPUBLISH_PR_CLOSED, REPUBLISH_PR_MERGED, REPUBLISH_TIP_MOVED } from "@fx/core/src/work-items/baseSync.js";
+import { attemptWord, recordRepublishRefusal } from "./fixRoundBase.js";
 import { guarded } from "./runActions.js";
 import { leaseVerdict, requireLease, stopReasonFor, type HeartbeatRunnerRunInput } from "./runnerClaims.js";
 import { runnerLimits, type RunnerLimitsSource } from "./runnerLimits.js";
@@ -164,6 +164,29 @@ const hasOpenPublicPr = (r: PlanePushRow): boolean => r.state === "pr_opened" &&
 /** Nothing was published yet (the row is in a state a new attempt may replace) and no person has the branch: a fix round publishes it for the first time. */
 const mayFirstPublish = (r: PlanePushRow): boolean => r.managedByPersonAt === null && RESTAMPABLE.includes(r.state);
 
+/** True when this run's token request was refused with one of the three stops, which `updateStop` recorded under the run's own attempt word. */
+async function stoppedAtToken(client: PoolClient, accountId: string, workItemId: string, runId: string): Promise<boolean> {
+  const word = attemptWord(runId);
+  const { rows } = await client.query(
+    "SELECT 1 FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'escalated' AND dedupe_key = ANY($3::text[]) LIMIT 1",
+    [accountId, workItemId, [REPUBLISH_PR_CLOSED, REPUBLISH_PR_MERGED, REPUBLISH_PAIRING_OFF].map((c) => `${c}:${word}`)],
+  );
+  return rows.length > 0;
+}
+
+/** Why the open public pull request of `row` can no longer be updated: merged, closed unmerged, or the repository's pairing is gone (in that order); null when it can. */
+async function updateStop(client: PoolClient, accountId: string, row: PlanePushRow): Promise<string | null> {
+  const { rows } = await client.query<{ stage: string; paired: boolean }>(
+    "SELECT w.stage, EXISTS (SELECT 1 FROM repo_pairing p WHERE p.repo_id = $3 AND p.account_id = $1) AS paired FROM work_items w WHERE w.id = $2 AND w.account_id = $1",
+    [accountId, row.workItemId, row.repoId],
+  );
+  const item = rows[0];
+  if (!item) return null;
+  if (row.state === "pr_merged" || item.stage === "merged") return REPUBLISH_PR_MERGED;
+  if (row.state === "pr_closed" || item.stage === "closed_unmerged") return REPUBLISH_PR_CLOSED;
+  return item.paired ? null : REPUBLISH_PAIRING_OFF;
+}
+
 /** The run is the round of a merge conflict: a round row of its item names it. The marker is the platform's own row, never anything the run said. */
 const isConflictRound = async (client: PoolClient, accountId: string, runId: string): Promise<boolean> =>
   (await client.query("SELECT 1 FROM merge_conflict_rounds WHERE account_id = $1 AND run_id = $2", [accountId, runId])).rows.length > 0;
@@ -205,6 +228,14 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           const found = await runFacts(client, input);
           if (!found) return { kind: "not_paired" };
           const { row } = found;
+          // D#598 P1g-1: a pull request closed or merged on GitHub (the item records it), or a pairing that is gone, is said in words and pauses the item; nothing is pushed.
+          if (found.continues && row.managedByPersonAt === null && row.headSha !== null && ["pr_opened", "pr_closed", "pr_merged"].includes(row.state)) {
+            const stop = await updateStop(client, input.accountId, row);
+            if (stop !== null) {
+              await recordRepublishRefusal(client, { accountId: input.accountId, workItemId: row.workItemId }, { code: stop, prNumber: null, moveToNeedsPerson: true, attempt: input.runId });
+              return { kind: "refused", code: stop };
+            }
+          }
           // FIXROUND-REPUBLISH (R2-c1): a fix round (a continuation) updates the open public pull request or publishes nothing. No open one, or one a person took over: nothing to do. Open, and the round was
           // not signed with a base (the round start refuses that, this asks again): named, and no token.
           // A fix round of an item whose first round never published (its check failed) has no public pull request to update: it publishes one, like a first round (RESTAMPABLE states, no person on the branch).
@@ -336,6 +367,9 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           const found = await runFacts(client, input);
           if (!found || found.row.id !== input.planePushId) return { kind: "not_paired" };
           let recorded = false;
+          // D#598 P1g-1: a round the token request already stopped (closed, merged, pairing off) keeps that stop. A runner's follow-up report (an old runner says `public_unavailable`, a new one the stop's own code) is not
+          // recorded over it: the item would read "Press Build again" instead of what happened.
+          if (found.continues && input.outcome !== undefined && (await stoppedAtToken(client, input.accountId, found.row.workItemId, input.runId))) return { kind: "recorded", recorded: false };
           // Only the run that was granted an update (a continuation, with an attempt of kind fix_round) may move the stamp.
           const granted = found.continues && (await client.query("SELECT 1 FROM plane_push_attempts WHERE account_id = $1 AND run_id = $2 AND lease_generation = $3 AND runtime = 'runner' AND kind = 'fix_round'", [input.accountId, input.runId, input.leaseGeneration])).rows.length > 0;
           if (input.outcome?.state === "updated") {
@@ -344,7 +378,7 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
             recorded = row !== null;
           } else if ((input.outcome?.state === "refused" || input.outcome?.state === "no_public_change") && found.continues && found.row.state === "pr_opened") {
             // The update of the open public pull request was refused: the round's change is on the private branch only. A person decides (nothing is shown as published that is not).
-            const code = input.outcome.state === "no_public_change" ? REPUBLISH_NO_CHANGE : input.outcome.code === "public_branch_moved" ? REPUBLISH_BRANCH_MOVED : input.outcome.code === REPUBLISH_BASE_MISSING ? REPUBLISH_BASE_MISSING : REPUBLISH_FAILED;
+            const code = input.outcome.state === "no_public_change" ? REPUBLISH_NO_CHANGE : input.outcome.code === "public_branch_moved" ? REPUBLISH_BRANCH_MOVED : input.outcome.code === "public_tip_moved" ? REPUBLISH_TIP_MOVED : input.outcome.code === REPUBLISH_BASE_MISSING ? REPUBLISH_BASE_MISSING : REPUBLISH_FAILED;
             await recordRepublishRefusal(client, { accountId: input.accountId, workItemId: found.row.workItemId }, { code, prNumber: null, moveToNeedsPerson: true, attempt: input.runId });
             recorded = true;
           } else if (input.outcome) {

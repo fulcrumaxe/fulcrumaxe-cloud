@@ -592,3 +592,112 @@ describe("the clone must pass an allowlist (config keys and files), failing clos
     expect(existsSync(marker)).toBe(false);
   });
 });
+
+describe("the fix-round update (D#598 P1g-1): fresh-tip rebuild and the lease, on real git", () => {
+  const headOf = (branch: string): string | null => {
+    try {
+      return sh(bare, "rev-parse", "--verify", "-q", `refs/heads/${branch}`);
+    } catch {
+      return null;
+    }
+  };
+  const apiWithHead = (): PublicApi => fakeApi({ async branchHead({ branch }: { branch: string }) { return headOf(branch); } });
+  let first: string;
+
+  beforeEach(async () => {
+    put(priv, { "src/c.ts": "export const c = 1;\n" });
+    commitAll(priv, "work");
+    const r = await routeAndPush(input(), deps({ api: apiWithHead() }));
+    if (r.plane !== "paired") throw new Error("unreachable");
+    first = r.commit;
+    // The fix round: more work on the private branch.
+    put(priv, { "src/c.ts": "export const c = 2;\n" });
+    commitAll(priv, "fix round");
+  });
+
+  /** A transport whose public main advances after each of the first `moves` odd-numbered fetches: the build reads the old tip, then the fresh read before the push sees the move. */
+  const movingTransport = (moves: number): PublicGitTransport => {
+    let calls = 0;
+    let moved = 0;
+    return {
+      push: (i) => transport.push(i),
+      async fetchTip(dir, repo) {
+        const tip = await transport.fetchTip(dir, repo);
+        calls++;
+        if (calls % 2 === 1 && moved < moves) {
+          moved++;
+          put(pubWork, { "README.md": `# moved ${moved}\n` });
+          commitAll(pubWork, `public move ${moved}`);
+          sh(pubWork, "push", "-q", bare, "main");
+        }
+        return tip;
+      },
+    };
+  };
+
+  it("one move of the public main during the scan: exactly one rebuild, and the new commit's parent is the new tip", async () => {
+    let rebuilds = 0;
+    const r = await routeAndPush(input({ updateOf: first }), deps({ api: apiWithHead(), transport: movingTransport(1), onRebuild: () => rebuilds++ }));
+    expect(rebuilds).toBe(1);
+    if (r.plane !== "updated") throw new Error("unreachable");
+    const tipNow = sh(bare, "rev-parse", "main");
+    expect(r.tip).toBe(tipNow);
+    expect(sh(bare, "rev-list", "--parents", "-n1", "item-1")).toBe(`${r.commit} ${tipNow}`);
+    expect(sh(bare, "rev-list", "--count", "main..item-1")).toBe("1");
+    expect(headOf("item-1")).toBe(r.commit);
+  });
+
+  it("a second move refuses with public_tip_moved after exactly one rebuild, and the branch is untouched", async () => {
+    let rebuilds = 0;
+    const e = await refusal(routeAndPush(input({ updateOf: first }), deps({ api: apiWithHead(), transport: movingTransport(2), onRebuild: () => rebuilds++ })));
+    expect(e.code).toBe("public_tip_moved");
+    expect(rebuilds).toBe(1);
+    expect(headOf("item-1")).toBe(first);
+  });
+
+  it("a first push keeps today's plain refusal: no rebuild", async () => {
+    let rebuilds = 0;
+    const e = await refusal(routeAndPush(input({ branch: "item-2" }), deps({ api: apiWithHead(), transport: movingTransport(1), onRebuild: () => rebuilds++ })));
+    expect(e.code).toBe("public_tip_moved");
+    expect(rebuilds).toBe(0);
+    expect(headOf("item-2")).toBeNull();
+  });
+
+  it("a rebuilt commit is scanned again: an identifier added to the fix round refuses before any push", async () => {
+    put(priv, { "src/d.ts": "export const host = 'acme-internal-host';\n" });
+    commitAll(priv, "fix round adds a private identifier");
+    const before = headOf("item-1");
+    const e = await refusal(routeAndPush(input({ updateOf: first }), deps({ api: apiWithHead(), transport: movingTransport(1) })));
+    expect(e.code).toBe("scan_refused");
+    expect(headOf("item-1")).toBe(before);
+    expect(JSON.stringify(e.refusals)).not.toContain("acme-internal-host");
+  });
+
+  it("the lease: a wrong head is refused by the real remote, an empty or malformed one never reaches git, and nothing is overwritten", async () => {
+    const mine = sh(priv, "rev-parse", "HEAD");
+    for (const wrong of [publicTip, "0".repeat(40)]) {
+      await expect(transport.push({ repoDir: priv, codeRepo: "acme/widgets", commit: mine, branch: "item-1", token: TOKEN, expectedHead: wrong })).rejects.toThrow();
+      expect(headOf("item-1")).toBe(first);
+    }
+    const sent = pushes();
+    for (const bad of ["", " ", first.slice(0, 12), `${first}\n`, "HEAD", "--force"]) {
+      await expect(transport.push({ repoDir: priv, codeRepo: "acme/widgets", commit: mine, branch: "item-1", token: TOKEN, expectedHead: bad })).rejects.toThrow(/expected head/);
+    }
+    expect(pushes()).toBe(sent);
+    expect(headOf("item-1")).toBe(first);
+    // The right lease works.
+    await transport.push({ repoDir: priv, codeRepo: "acme/widgets", commit: mine, branch: "item-1", token: TOKEN, expectedHead: first });
+    expect(headOf("item-1")).toBe(mine);
+  });
+
+  it("a person's commit on the branch: the route refuses with public_branch_moved and keeps theirs", async () => {
+    sh(pubWork, "checkout", "-q", "-b", "item-1", "main");
+    put(pubWork, { "person.txt": "mine\n" });
+    commitAll(pubWork, "a person's commit");
+    sh(pubWork, "push", "-q", "-f", bare, "item-1");
+    const theirs = headOf("item-1");
+    const e = await refusal(routeAndPush(input({ updateOf: first }), deps({ api: apiWithHead() })));
+    expect(e.code).toBe("public_branch_moved");
+    expect(headOf("item-1")).toBe(theirs);
+  });
+});

@@ -59,6 +59,7 @@ export const PLANE_PUSH_REPORT_CODES: readonly string[] = [
   "bad_input", "pairing_self", "pairing_changed", "base_diverged", "no_changes", "scan_refused", "scan_identity_mismatch", "public_unavailable",
   "public_tip_moved", "app_not_installed", "token_scope_mismatch", "branch_exists", "push_failed", "pr_failed", "unsafe_git_config", "public_branch_moved", "republish_base_missing",
   "rule_files_not_private", "private_read_failed", "base_not_ancestor",
+  "republish_pr_closed", "republish_pr_merged", "republish_pairing_off",
 ];
 
 function requirePlanePush(deps: RunnerCloudDeps): PlanePushHostedPort {
@@ -115,6 +116,8 @@ export async function planePushTokenRun(deps: RunnerCloudDeps, req: RunnerHttpRe
       throw new RunnerHttpError(409, "attempts_exhausted", "this change has used all its push attempts");
     case "refused":
       // FIXROUND-REPUBLISH (R2-c1): a fix round without a signed base. D#483 S5-b2c-4: or a planned PR child whose build identity was refused; the resolver's fixed code is the status's code.
+      // D#598 P1g-1: the open public pull request was closed or merged, or the pairing is off. The cloud has recorded it for the item; nothing is pushed.
+      if (grant.code === "republish_pr_closed" || grant.code === "republish_pr_merged" || grant.code === "republish_pairing_off") throw new RunnerHttpError(409, grant.code, "the open public pull request cannot be updated; the item says why");
       if (grant.code !== "republish_base_missing") throw new RunnerHttpError(409, grant.code, "this planned PR can no longer publish: its build identity was refused");
       throw new RunnerHttpError(409, "republish_base_missing", "this fix round has no signed base to update the public pull request from");
     case "granted":

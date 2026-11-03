@@ -30,7 +30,7 @@ type Repo = { id: string; owner: string; name: string };
 const SHA = /^[0-9a-f]{40}$/;
 
 /** The fix-round attempt as a short fixed-length word, so every fact and move of one attempt has its own key (a repeat at the same head is a new attempt). */
-const attemptWord = (attempt: string): string => createHash("sha256").update(attempt).digest("hex").slice(0, 32);
+export const attemptWord = (attempt: string): string => createHash("sha256").update(attempt).digest("hex").slice(0, 32);
 
 /** The run line (`run.stage`) a round that followed a base sync carries (@fx/core previewProgress `lineFor`). */
 export const BASE_SYNCED_STAGE = "base_synced";

@@ -57,12 +57,17 @@ export type PlaneRefusalCode =
   | "rule_files_not_private"
   | "private_read_failed"
   | "base_not_ancestor"
-  | "pr_failed";
+  | "pr_failed"
+  | "republish_pr_closed"
+  | "republish_pr_merged"
+  | "republish_pairing_off";
 
 export const PLANE_REFUSAL_CODES: readonly PlaneRefusalCode[] = [
   "bad_input", "pairing_self", "pairing_changed", "base_diverged", "no_changes", "scan_refused", "scan_identity_mismatch", "public_unavailable",
   "public_tip_moved", "app_not_installed", "token_scope_mismatch", "branch_exists", "push_failed", "pr_failed", "unsafe_git_config", "public_branch_moved", "republish_base_missing",
   "rule_files_not_private", "private_read_failed", "base_not_ancestor",
+  // The stops the cloud refuses a fix round's token with (the route never throws them): a new runner reports the code it was refused with.
+  "republish_pr_closed", "republish_pr_merged", "republish_pairing_off",
 ];
 
 export class PlaneRouteError extends Error {
@@ -139,6 +144,8 @@ export interface PlaneRouteDeps {
   loadOwn(): Promise<OwnRepo>;
   api: PublicApi;
   transport: PublicGitTransport;
+  /** Called once when an UPDATE rebuilds because the public main moved while it was being prepared (a counter a test can read). */
+  onRebuild?: () => void;
 }
 
 export type PlaneRouteResult =
@@ -330,7 +337,21 @@ function samePairing(a: RepoPairing, b: RepoPairing): boolean {
   );
 }
 
+/**
+ * A first push keeps today's plain refusal when the public main moves under it. An UPDATE (`updateOf`) rebuilds the commit on the new tip and scans it
+ * again, exactly once; a second move refuses with the same code and there is no further loop.
+ */
 export async function routeAndPush(input: PlaneRouteInput, deps: PlaneRouteDeps): Promise<PlaneRouteResult> {
+  try {
+    return await routeAndPushOnce(input, deps);
+  } catch (err) {
+    if (input.updateOf === undefined || !(err instanceof PlaneRouteError) || err.code !== "public_tip_moved") throw err;
+    deps.onRebuild?.();
+    return routeAndPushOnce(input, deps);
+  }
+}
+
+async function routeAndPushOnce(input: PlaneRouteInput, deps: PlaneRouteDeps): Promise<PlaneRouteResult> {
   const pairing = await deps.loadPairing();
   const own = await deps.loadOwn();
   const decision = routeFor(pairing, own, input.defaultBranch);

@@ -3848,7 +3848,8 @@
                                 "resume_refused",
                                 "spec_refused",
                                 "superseded",
-                                "review_limit_wait"
+                                "review_limit_wait",
+                                "public_update_stopped"
                               ]
                             },
                             "reason": {
@@ -16720,7 +16721,6 @@
                       "env_var",
                       "app_not_installed",
                       "parent_pr_closed",
-                      "branch_pushed_by_person",
                       "overlay_path_missing"
                     ]
                   },

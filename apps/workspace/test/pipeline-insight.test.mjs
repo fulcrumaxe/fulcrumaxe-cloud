@@ -1512,3 +1512,36 @@ describe("D#598 P3c (C25): one line, not two, for a stacked child in a conflict 
     expect(buildInsight({ ...REVIEW_PASSED, ...SPENT, stacked_wait: { state: "waiting", parent_pr: 40 } }, "UTC").conflictLine.kind).toBe("attempts_spent");
   });
 });
+
+describe("D#598 P1g-1: a public pull request update that stopped is drawn as what happened", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal("Node", FakeNode);
+    vi.stubGlobal("document", { hidden: false, activeElement: null, createElement: (t) => new FakeEl(t), createTextNode: (text) => ({ text }) });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+  const SENTENCES_BY_STAGE = [
+    ["merged", "Public PR already merged. The fix round finished, but the public pull request was already merged, so nothing was pushed. Follow-up work becomes a new item."],
+    ["closed_unmerged", "Public PR closed. The fix round finished, but the public pull request was closed without merging, so it was not updated. To update it, reopen the pull request on GitHub first."],
+    ["needs_human", "Public PR is open but the pairing is off. The fix round finished, but this repository is no longer paired with its public repository, so the open public pull request was not updated. Turn the pairing back on in the repository settings, or leave the pull request as it is."],
+  ];
+  it("the banner is the server's whole sentence, with none of the failed-build words", () => {
+    for (const [, reason] of SENTENCES_BY_STAGE) {
+      expect(noticeBanner({ notice: { kind: "public_update_stopped", reason } })).toEqual({ kind: "public_update_stopped", title: "", lead: "", tail: "", reason });
+    }
+  });
+  it("the card for a merged item and for a closed-unmerged item shows the sentence under its own test id, not 'Needs a person'", async () => {
+    for (const [stage, reason] of SENTENCES_BY_STAGE) {
+      const data = { ...structuredClone(OK), stage, notice: { kind: "public_update_stopped", reason } };
+      const panel = createInsightPanel({ call: vi.fn(async () => structuredClone(data)), setInterval: () => 1, clearInterval: () => {} });
+      panel.start("item-1");
+      await flush();
+      expect(byId(panel.el, "pl-public-update-stopped"), stage).toHaveLength(1);
+      expect(byId(panel.el, "pl-needs-human"), stage).toHaveLength(0);
+      expect(byId(panel.el, "pl-notice-reason")[0].textContent, stage).toBe(reason);
+    }
+  });
+});
