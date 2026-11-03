@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { streamTurn, ModelCallError } from '../src/index.js';
+import { streamTurn } from '../src/index.js';
 import { baseParams, fakeKey, startWorld, turnEvents } from './helpers/streamWorld.js';
 
 describe('streamTurn, Anthropic shape, over the strict TLS fake', () => {
@@ -67,13 +67,6 @@ describe('streamTurn, Anthropic shape, over the strict TLS fake', () => {
     vi.stubEnv('FX_FORBID_MODEL_CALLS', '1');
     const t = await w.tenant(fakeKey('api03', 'forbid'));
     await expect(streamTurn({ ...t.ctx, fetchImpl: undefined }, baseParams)).rejects.toMatchObject({ code: 'forbidden' });
-    expect(w.providers.seen()).toEqual([]);
-  });
-
-  it('a gateway-shaped connection has no streaming path yet: unsupported_provider, nothing sent', async () => {
-    const t = await w.tenant(fakeKey('api03', 'gw'), 'ai_gateway');
-    const err = (await streamTurn(t.ctx, baseParams).catch((e) => e)) as ModelCallError;
-    expect(err).toMatchObject({ code: 'unsupported_provider' });
     expect(w.providers.seen()).toEqual([]);
   });
 });

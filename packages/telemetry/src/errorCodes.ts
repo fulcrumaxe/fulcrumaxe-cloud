@@ -173,6 +173,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "invalid_message",
   // Model-call streaming (D#597 CC-5a): the provider's stream ended with an error event, and a provider shape with no streaming path.
   "stream_error",
+  // A gateway model id with no priced mapping (D#597 CC-5b): refused before any call.
+  "unpriced_model",
   "unsupported_provider",
   // A streamed tool_use block dropped for a bad shape (D#597 CC-5a): reported with a fixed reason, never the model's words.
   "tool_call_rejected",

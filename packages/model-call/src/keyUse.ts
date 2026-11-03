@@ -2,7 +2,7 @@ import { withOpenedKey, type KeyAccessCtx } from '@fx/model-connection/keyAccess
 import { matchesShape, redactText, SK_ANT_OAT_PATTERN_SOURCE } from '@fx/runtime/src/redact.js';
 import { requestFor, type RequestParams } from './hosts.js';
 
-export type ModelCallErrorCode = 'forbidden' | 'subscription_credential' | 'key_rejected' | 'timeout' | 'fetch_failed' | 'http_error' | 'credits_exhausted' | 'unsupported_provider' | 'stream_error';
+export type ModelCallErrorCode = 'forbidden' | 'subscription_credential' | 'key_rejected' | 'timeout' | 'fetch_failed' | 'http_error' | 'credits_exhausted' | 'unsupported_provider' | 'stream_error' | 'unpriced_model';
 
 /** Every message is fixed text or redacted provider text -- never the key, never a raw fetch/undici error. */
 export class ModelCallError extends Error {
@@ -62,7 +62,7 @@ export async function streamWithKey<T>(
   fetchImpl: typeof fetch,
   timeoutMs: number,
   build: (provider: string, key: string) => { url: string; headers: Record<string, string>; body: string } | null,
-  consume: (body: ReadableStream<Uint8Array> | null, signal: AbortSignal) => Promise<T>,
+  consume: (body: ReadableStream<Uint8Array> | null, signal: AbortSignal, provider: string) => Promise<T>,
 ): Promise<{ status: number; text: string; value: T | null }> {
   return withOpenedKey(ctx, async ({ provider, key }) => {
     refuseSubscriptionCredential(key);
@@ -73,7 +73,7 @@ export async function streamWithKey<T>(
     try {
       const res = await fetchImpl(req.url, { method: 'POST', headers: req.headers, body: req.body, signal: controller.signal, redirect: 'error' });
       if (!res.ok) return { status: res.status, text: redactText(await res.text(), [key]).slice(0, MAX_ERROR_BODY_CHARS), value: null };
-      return { status: res.status, text: '', value: await consume(res.body, controller.signal) };
+      return { status: res.status, text: '', value: await consume(res.body, controller.signal, provider) };
     } catch (e) {
       if (e instanceof ModelCallError) throw e;
       if (controller.signal.aborted) throw new ModelCallError('timeout', `model-call: provider call exceeded ${timeoutMs} ms`);

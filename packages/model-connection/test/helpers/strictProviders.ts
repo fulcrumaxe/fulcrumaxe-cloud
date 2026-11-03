@@ -1,6 +1,7 @@
 import https from 'node:https';
 import type { AddressInfo } from 'node:net';
 import { answerMessages, newMessagesFake, type MessagesFake } from './anthropicMessagesFake.js';
+import { answerChat, newChatFake, type ChatFake } from './gatewayChatFake.js';
 import { generateSelfSignedCert } from './selfSignedCert.js';
 
 /**
@@ -14,6 +15,7 @@ import { generateSelfSignedCert } from './selfSignedCert.js';
  *  - Only GET on the allowed paths: `/v1/credits` (gateway) and `/v1/models` (Anthropic, OpenAI). ANY other method or path is
  *    refused with 405 or 404 AND recorded in `refused`; a test asserts `refused` is empty, so a request that could
  *    generate (a POST, a chat-completions path) fails the test and never silently "works".
+ *  - Gateway chat (opt-in: `ai_gateway.chat.enabled = true`): the strict streaming chat-completions route of gatewayChatFake.ts.
  *  - Gateway: `/v1/models` answers 200 whatever the auth, as the docs say; `/v1/credits` answers 401 unless the
  *    Authorization header is `Bearer <a known key>`.
  *  - Anthropic: `/v1/models` answers 401 unless `x-api-key` is a known key and `anthropic-version` is present.
@@ -50,6 +52,8 @@ export interface StrictProvider {
   mode: ProviderMode;
   /** The Anthropic POST /v1/messages route (CC-5a); off until a test enables it. Present on every provider, used by 'anthropic' only. */
   messages: MessagesFake;
+  /** The gateway POST /v1/chat/completions route (CC-5b); off until a test enables it. Present on every provider, used by 'ai_gateway' only. */
+  chat: ChatFake;
   close(): Promise<void>;
 }
 
@@ -68,6 +72,7 @@ export async function startStrictProvider(name: ProviderName, knownKeys: string[
     knownKeys: new Set(knownKeys),
     mode: null,
     messages: newMessagesFake(),
+    chat: newChatFake(),
     close: async () => undefined,
   };
   const hanging: Array<() => void> = [];
@@ -88,6 +93,12 @@ export async function startStrictProvider(name: ProviderName, knownKeys: string[
       let bodyText = '';
       req.on('data', (c) => (bodyText += c));
       req.on('end', () => void answerMessages(provider.messages, provider.knownKeys, headers, bodyText, res));
+      return;
+    }
+    if (name === 'ai_gateway' && provider.chat.enabled && seen.method === 'POST' && path === '/v1/chat/completions' && !provider.mode) {
+      let bodyText = '';
+      req.on('data', (c) => (bodyText += c));
+      req.on('end', () => void answerChat(provider.chat, provider.knownKeys, headers, bodyText, res));
       return;
     }
     req.resume();
@@ -230,6 +241,7 @@ export async function startStrictProviders(keys: { ai_gateway?: string[]; anthro
         p.refused.length = 0;
         p.mode = null;
         p.messages = newMessagesFake();
+        p.chat = newChatFake();
       }
     },
     close: async () => {

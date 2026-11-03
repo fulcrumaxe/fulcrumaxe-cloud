@@ -1,7 +1,8 @@
-import { streamRequestFor, type StreamRequestParams } from './hosts.js';
+import { DEFAULT_GATEWAY_MODEL, gatewayPricedModel, streamRequestFor, type StreamRequestParams } from './hosts.js';
 import { ModelCallError, streamWithKey } from './keyUse.js';
 import { failOnStatus } from './providerStatus.js';
-import { SseParser } from './sse.js';
+import { readGatewayStream } from './streamGateway.js';
+import { providerErrorKind, pumpSse, ToolVetter, type StreamOut } from './streamCore.js';
 import type { ModelCallCtx } from './completeJson.js';
 
 export interface StreamTurnParams extends StreamRequestParams {
@@ -10,7 +11,7 @@ export interface StreamTurnParams extends StreamRequestParams {
   timeoutMs: number;
   /** Called with each text fragment as it arrives (inside the key-holding closure; never given the key). */
   onText?: (delta: string) => void;
-  /** Tests lower the byte cap to stay fast; the wall-time deadline is `timeoutMs` (capped at 2 minutes). */
+  /** Tests lower the byte cap to stay fast; a caller can never raise it past 4 MB (clampStreamBytes). The wall-time deadline is `timeoutMs` (capped at 2 minutes). */
   maxStreamBytes?: number;
 }
 
@@ -41,15 +42,14 @@ export interface StreamTurnResult {
   usage: { inputTokens: number; outputTokens: number };
   /** True when the stream ended (cut, timed out, over the size cap) before message_stop. */
   incomplete: boolean;
+  /** Set (true) only when the provider sent no usage: `usage` is then the turn's worst case (the request's size as input tokens, `maxOutputTokens` as output), never zero. */
+  usageEstimated?: true;
 }
 
 const STREAM_HARD_TIMEOUT_MS = 120_000;
-const MAX_STREAM_BYTES = 4 * 1024 * 1024;
-// The provider's error types we echo; anything else is "unknown" so provider text never reaches a message.
-const ERROR_TYPES = ['overloaded_error', 'api_error', 'rate_limit_error', 'invalid_request_error', 'authentication_error', 'permission_error', 'not_found_error', 'request_too_large'];
 
 /**
- * One streaming, tool-carrying model turn over the account's own key (Anthropic messages shape). Inert: nothing in production calls it yet.
+ * One streaming, tool-carrying model turn over the account's own key (Anthropic messages shape or the AI Gateway chat-completions shape). Inert: nothing in production calls it yet.
  * Same rules as completeJson: key only inside the closure, constant host, redirect refused, redacted errors, no OAuth-shaped credential.
  */
 export async function streamTurn(ctx: ModelCallCtx, p: StreamTurnParams): Promise<StreamTurnResult> {
@@ -58,25 +58,23 @@ export async function streamTurn(ctx: ModelCallCtx, p: StreamTurnParams): Promis
     ctx,
     ctx.fetchImpl ?? globalThis.fetch,
     Math.min(p.timeoutMs, STREAM_HARD_TIMEOUT_MS),
-    (provider, key) => streamRequestFor(provider, key, p),
-    (body, signal) => readAnthropicStream(body, signal, p),
+    (provider, key) => {
+      // The check runs before any byte is sent; the key was opened only to learn the provider shape.
+      if (provider === 'ai_gateway' && gatewayPricedModel(p.model ?? DEFAULT_GATEWAY_MODEL) === null) throw new ModelCallError('unpriced_model', `model-call (${p.role}): the model has no price, so no call was made`);
+      return streamRequestFor(provider, key, p);
+    },
+    (body, signal, provider) => (provider === 'ai_gateway' ? readGatewayStream(body, signal, p) : readAnthropicStream(body, signal, p)),
   );
   await failOnStatus(ctx, p.role, res);
   return res.value!;
 }
 
+
 async function readAnthropicStream(body: ReadableStream<Uint8Array> | null, signal: AbortSignal, p: StreamTurnParams): Promise<StreamTurnResult> {
-  const out: StreamTurnResult = { text: '', toolCalls: [], rejectedCalls: [], endedBy: null, stopReason: null, usage: { inputTokens: 0, outputTokens: 0 }, incomplete: true };
-  const parser = new SseParser();
+  const out: StreamOut = { text: '', toolCalls: [], rejectedCalls: [], endedBy: null, stopReason: null, usage: { inputTokens: 0, outputTokens: 0 }, incomplete: true };
   let stopped = false;
-  let poisoned = false;
   const tools = new Map<number, { id: string; name: string; json: string }>();
-  const offered = new Set(p.tools.map((t) => t.name));
-  const usedIds = new Set<string>();
-  let blocks = 0;
-  const reject = (reason: ToolCallRejectReason): void => {
-    out.rejectedCalls.push({ code: 'tool_call_rejected', reason, index: blocks - 1 });
-  };
+  const vetter = new ToolVetter(out, p.tools.map((t) => t.name));
   const fail = (kind: string) => new ModelCallError('stream_error', `model-call (${p.role}): the provider stream ${kind}`);
   const handle = (data: string): void => {
     let ev: Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -115,34 +113,7 @@ async function readAnthropicStream(body: ReadableStream<Uint8Array> | null, sign
         const t = tools.get(Number(ev.index));
         if (!t) break;
         tools.delete(Number(ev.index));
-        blocks++;
-        let input: unknown;
-        try {
-          input = JSON.parse(t.json === '' ? '{}' : t.json);
-        } catch {
-          // fx-swallow-ok: an argument string that is not JSON is not a call; reported as rejected and the turn is marked incomplete
-          poisoned = true;
-          reject('input_not_json');
-          break;
-        }
-        if (typeof input !== 'object' || input === null || Array.isArray(input)) {
-          reject('input_not_object');
-          break;
-        }
-        if (!offered.has(t.name)) {
-          reject('unknown_tool');
-          break;
-        }
-        if (t.id === '') {
-          reject('bad_id');
-          break;
-        }
-        if (usedIds.has(t.id)) {
-          reject('duplicate_id');
-          break;
-        }
-        usedIds.add(t.id);
-        out.toolCalls.push({ id: t.id, name: t.name, input });
+        vetter.close(t.id, t.name, t.json);
         break;
       }
       case 'message_delta':
@@ -152,35 +123,12 @@ async function readAnthropicStream(body: ReadableStream<Uint8Array> | null, sign
       case 'message_stop':
         stopped = true;
         break;
-      case 'error': {
-        const kind = ERROR_TYPES.includes(ev.error?.type) ? ev.error.type : 'unknown';
-        throw fail(`ended with an error (${kind})`);
-      }
+      case 'error':
+        throw fail(`ended with an error (${providerErrorKind(ev.error?.type)})`);
     }
   };
-  if (body) {
-    const reader = body.getReader();
-    let bytes = 0;
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        bytes += value.byteLength;
-        if (bytes > (p.maxStreamBytes ?? MAX_STREAM_BYTES)) {
-          out.endedBy = 'size_cap';
-          break;
-        }
-        for (const e of parser.push(value)) if (e.data !== '') handle(e.data);
-        if (stopped) break;
-      }
-    } catch (e) {
-      if (e instanceof ModelCallError) throw e;
-      // fx-swallow-ok: a read cut short (reset, timeout) is reported as an incomplete turn with what arrived, never a half call
-    } finally {
-      await reader.cancel().catch(() => undefined);
-    }
-  }
-  out.incomplete = !stopped || poisoned;
+  await pumpSse(body, p.maxStreamBytes, out, (e) => e.data !== '' && handle(e.data), () => stopped);
+  out.incomplete = !stopped || vetter.poisoned;
   if (!stopped && out.endedBy === null) out.endedBy = signal.aborted ? 'deadline' : 'cut';
   return out;
 }
