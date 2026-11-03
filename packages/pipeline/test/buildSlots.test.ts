@@ -135,7 +135,7 @@ describe("no plan tier can set a limit (import-graph)", () => {
       }
     };
     visit(join(here, "../src/advance/buildSlots.ts"));
-    // D#483 S5-k1b: the one relative file is the waiting-stage table (stage names and positions; it imports only the driver-event vocabulary), walked by the same rule above.
-    expect([...seen].map((f) => f.slice(f.lastIndexOf("/") + 1)).sort()).toEqual(["buildSlots.ts", "waitingStages.ts"]);
+    // D#483 S5-k1b: one relative file is the waiting-stage table (stage names and positions; it imports only the driver-event vocabulary). S5-j2: the other is the runner-capability read (one query; it imports only the runner protocol's capability name, not the merge gate). Both are walked by the same rule above.
+    expect([...seen].map((f) => f.slice(f.lastIndexOf("/") + 1)).sort()).toEqual(["buildSlots.ts", "runnerOrderCapability.ts", "waitingStages.ts"]);
   });
 });

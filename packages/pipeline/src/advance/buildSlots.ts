@@ -3,6 +3,7 @@ import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { toQueueRank } from "@fx/core/src/work-items/priority.js";
 import { compareQueueOrder } from "@fx/core/src/work-items/queueOrder.js";
 import { effectiveModeSql, isRunnerMode } from "@fx/runner";
+import { repoRunnerCanAttestOrder } from "../mergeQueue/runnerOrderCapability.js";
 import { WAITING_STAGE_POSITIONS, type WaitingStage } from "./waitingStages.js";
 
 /**
@@ -65,19 +66,20 @@ export function resolveBuildLimits(set: { accountValue: number | null; repoValue
   return { repoLimit: clamped ? Math.min(value, RUNNER_UNATTESTED_LIMIT) : value, accountValue: set.accountValue ?? START_BUILDS_PER_ACCOUNT, clampReason: clamped ? RUNNER_ORDER_UNATTESTED : null };
 }
 
-/** SEAM (#706, `ordered-facts-capability`): true once the repo's runner's latest hello lists `ordered_facts_v1`. Until that helper lands no runner can attest, so this is false. */
-export const repoRunnerCanAttestOrder = async (_client: PoolClient, _accountId: string, _repoId: string): Promise<boolean> => false;
-
 /**
- * Which repositories are held to one build because they are `runner_local` and their runner can't attest order. `alsoRunnerLocal`: repositories the caller already
- * knows to be `runner_local` for the item at hand (an item placed on a runner). Read per repository at each call, never assumed.
+ * Which repositories are held to one build. A `runner_local` repository lifts only when it is PAIRED and a usable runner (not revoked, paused or draining) that covers it lists `ordered_facts_v1`:
+ * its merges then take the go phase, which judges order from the runner's fact. An unpaired one has no go phase and keeps the gate's conservative stop (`runner_ordered_unsupported` with a
+ * live sibling), so a second build there would only stop at merge. `alsoRunnerLocal`: repositories the caller already knows to be `runner_local` for the item at hand (an item placed on a
+ * runner); the same rule applies to them. Read per repository at each call, never assumed.
  */
 export async function runnerClampedRepoIds(client: PoolClient, accountId: string, repoIds: readonly string[], alsoRunnerLocal: ReadonlySet<string> = new Set()): Promise<Set<string>> {
   if (repoIds.length === 0) return new Set();
   const { rows } = await client.query<{ id: string }>("SELECT id FROM repos WHERE account_id = $1 AND id = ANY($2::uuid[]) AND execution_mode = 'runner_local'", [accountId, [...repoIds]]);
-  const local = new Set([...rows.map((r) => r.id), ...repoIds.filter((id) => alsoRunnerLocal.has(id))]);
+  const local = [...new Set([...rows.map((r) => r.id), ...repoIds.filter((id) => alsoRunnerLocal.has(id))])];
+  if (local.length === 0) return new Set();
+  const paired = new Set((await client.query<{ repo_id: string }>("SELECT repo_id FROM repo_pairing WHERE account_id = $1 AND repo_id = ANY($2::uuid[])", [accountId, local])).rows.map((r) => r.repo_id));
   const clamped = new Set<string>();
-  for (const id of local) if (!(await repoRunnerCanAttestOrder(client, accountId, id))) clamped.add(id);
+  for (const id of local) if (!paired.has(id) || !(await repoRunnerCanAttestOrder(client, accountId, id, true))) clamped.add(id);
   return clamped;
 }
 
