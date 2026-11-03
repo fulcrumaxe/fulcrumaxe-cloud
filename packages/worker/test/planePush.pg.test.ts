@@ -7,6 +7,10 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
+import { raiseBranchPushedByPerson } from "@fx/core/src/setup-requests/branchPushed.js";
+import { keepBranch, replaceBranch } from "@fx/core/src/setup-requests/branchPushedAnswer.js";
+import { statusSentence } from "@fx/core/src/setup-requests/copy.js";
+import { listSetupRequests } from "@fx/core/src/setup-requests/store.js";
 import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
 import { FIX_ROUND_STOP_SENTENCE, REPUBLISH_BRANCH_MOVED_SENTENCE, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE_SENTENCE, REPUBLISH_PAIRING_OFF_SENTENCE, REPUBLISH_TIP_MOVED_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
 import { planePushPairingRun, planePushReportRun, planePushTokenRun, toResponse, type PlanePushHostedPort, type RunnerCloudDeps, type RunnerLeaseOps } from "@fx/runner-cloud";
@@ -41,6 +45,7 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
   const github = { mints: [] as string[], mintedFor: [] as string[], mintError: null as unknown, pushed: true, pr: { url: "https://github.com/acme/widgets-public/pull/9" } as { url: string } | null, asked: [] as string[], mainTip: "9".repeat(40) as string | null, heads: [] as string[] };
   const port: PlanePushHostedPort = {
     mintToken: async (codeRepo, accountId) => {
+      await duringMint?.();
       github.mints.push(codeRepo);
       github.mintedFor.push(accountId);
       if (github.mintError) throw github.mintError;
@@ -54,7 +59,7 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       github.asked.push("pr");
       return github.pr;
     },
-    revokeToken: async () => true,
+    revokeToken: async (t) => (revoked.push(t), true),
     // The real port reads one branch of the repository in the request (its own token, revoked after).
     branchHead: async ({ codeRepo, branch }) => {
       github.heads.push(`${codeRepo}@${branch}`);
@@ -62,6 +67,9 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
     },
   };
 
+  /** Runs between the grant and the token: what a person can do while the runner waits for its token. */
+  let duringMint: (() => Promise<void>) | null = null;
+  const revoked: string[] = [];
   let identity: { name: string; email: string } | null = { name: "Fulcrumaxe Bot", email: "bot@example.com" };
   const facade = () => createRunnerPlanePushFacade(writerPool, { now: () => clock, publicHead: (i) => port.branchHead!(i) });
   const ops = (): RunnerLeaseOps => ({ ...claims, ...facade() }) as unknown as RunnerLeaseOps;
@@ -90,6 +98,8 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
   });
   beforeEach(async () => {
     clock = T0;
+    duringMint = null;
+    revoked.length = 0;
     identity = { name: "Fulcrumaxe Bot", email: "bot@example.com" };
     github.mints.length = 0;
     github.mintedFor.length = 0;
@@ -717,6 +727,96 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       const [attempt, ...rest] = await attempts();
       expect(rest).toEqual([]);
       expect(attempt).toMatchObject({ run_id: run.id, kind: "fix_round", attempt_no: 1 });
+    });
+
+    it("D#598 P1g-3a: after a confirmed Replace the token names the head the person was shown (no runner capability needed), and a round with no authorization still names the stamp", async () => {
+      await open();
+      const SHOWN = "b".repeat(40);
+      await admin.query("UPDATE plane_pushes SET replace_authorized_head = $2 WHERE work_item_id = $1", [A.workItemId, SHOWN]);
+      const first = await claimedRun({ continues: { baseSha: BASE } });
+      const res = await askToken(first);
+      expect(res.status).toBe(200);
+      expect(PlanePushTokenReply.parse(res.body).replaces_head).toBe(SHOWN);
+      await finish(first.id);
+      await admin.query("UPDATE plane_pushes SET replace_authorized_head = NULL WHERE work_item_id = $1", [A.workItemId]);
+      const again = await askToken(await claimedRun({ continues: { baseSha: BASE } }));
+      expect(PlanePushTokenReply.parse(again.body).replaces_head).toBe(HEAD);
+    });
+
+    describe("a Keep that arrives during a round whose lease is on the person's head (D#598 P1g-3a)", () => {
+      const THEIRS = "7".repeat(40);
+      const person = { accountId: () => A.accountId, userId: () => A.userId };
+      /** A person pushed, the request was raised, and they confirmed Replace: the round's lease is on their head. Returns the request id. */
+      async function replaced(): Promise<string> {
+        await open();
+        const [req] = await withTenant(appPool, A.accountId, async (c) => {
+          const raised = await raiseBranchPushedByPerson(c, { workItemId: A.workItemId, seenHead: THEIRS });
+          return raised.kind === "not_applicable" ? [] : [raised.request];
+        });
+        await replaceBranch({ pool: appPool }, { accountId: person.accountId(), userId: person.userId(), id: req!.id, shownHead: THEIRS });
+        return req!.id;
+      }
+      const keep = (id: string) => keepBranch({ pool: appPool }, { accountId: person.accountId(), userId: person.userId(), id });
+
+      it("between the grant and the token: no token is handed out, the attempt ends with a fixed code, nothing is pushed, and Keep's managed state stands with the stamp untouched", async () => {
+        const id = await replaced();
+        duringMint = async () => void (await keep(id));
+        const run = await claimedRun({ continues: { baseSha: BASE } });
+        const res = await askToken(run);
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({ error: { code: "branch_managed_by_person" } });
+        expect(res.body).not.toHaveProperty("token");
+        // The token that had been minted was revoked, never issued; the attempt is finished and says why.
+        expect(revoked).toEqual([TOKEN]);
+        const [attempt] = await attempts();
+        expect(attempt).toMatchObject({ kind: "fix_round", token_issued_at: null, outcome: "managed_after_grant" });
+        expect(attempt.finished_at).toBeInstanceOf(Date);
+        expect(await planeRow()).toMatchObject({ state: "managed_by_person", head_sha: HEAD, replace_authorized_head: null });
+        expect((await planeRow()).managed_by_person_at).not.toBeNull();
+        // The row is the person's now: a second request for the same run is told there is nothing to push to, and nothing is minted.
+        expect((await askToken(run)).body).toMatchObject({ error: { code: "not_paired" } });
+        expect(github.mints).toHaveLength(1);
+      });
+
+      it("a spent authorization between the grant and the token (the branch was put back) refuses the token the same way, with its own fixed code: nothing is pushed", async () => {
+        await replaced();
+        duringMint = async () => void (await admin.query("UPDATE plane_pushes SET replace_authorized_head = NULL WHERE work_item_id = $1", [A.workItemId]));
+        const res = await askToken(await claimedRun({ continues: { baseSha: BASE } }));
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({ error: { code: "update_lease_changed" } });
+        expect(revoked).toEqual([TOKEN]);
+        expect((await attempts())[0]).toMatchObject({ token_issued_at: null, outcome: "lease_changed_after_grant" });
+        expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: HEAD });
+      });
+
+      it("after the token: the push lands, the update is recorded on the managed row with its new head and a fixed-code event, and the managed line names both commits", async () => {
+        const id = await replaced();
+        const run = await claimedRun({ continues: { baseSha: BASE } });
+        const res = await askToken(run);
+        expect(res.status).toBe(200);
+        expect(PlanePushTokenReply.parse(res.body).replaces_head).toBe(THEIRS);
+        await keep(id);
+        expect((await report(run, { phase: "updated", head_sha: NEW_HEAD, tip_sha: NEW_TIP, branch: (await planeRow()).branch })).status).toBe(200);
+        expect(await planeRow()).toMatchObject({ state: "managed_by_person", head_sha: NEW_HEAD, tip_sha: NEW_TIP, replace_authorized_head: null });
+        expect((await planeRow()).managed_by_person_at).not.toBeNull();
+        expect((await attempts())[0]).toMatchObject({ outcome: "updated" });
+        const events = (await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'plane.updated_after_keep'", [run.id])).rows;
+        expect(events).toEqual([{ payload: { code: "updated_after_keep", head: NEW_HEAD, replaced: THEIRS } }]);
+        const [line] = (await withTenant(appPool, A.accountId, (c) => listSetupRequests(c, { state: "needs_you" }))).requests;
+        const said = statusSentence(line!, { checksAvailable: false })!;
+        expect(said).toContain("before your Keep was seen");
+        expect(said).toContain(THEIRS.slice(0, 7));
+        expect(said).toContain(NEW_HEAD.slice(0, 7));
+      });
+
+      it("a Replace that nobody answered with Keep is unchanged: the token is issued, the update lands, the authorization is spent and the row stays open", async () => {
+        await replaced();
+        const run = await claimedRun({ continues: { baseSha: BASE } });
+        expect((await askToken(run)).status).toBe(200);
+        expect((await report(run, { phase: "updated", head_sha: NEW_HEAD, tip_sha: NEW_TIP, branch: (await planeRow()).branch })).status).toBe(200);
+        expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: NEW_HEAD, replace_authorized_head: null, managed_by_person_at: null });
+        expect((await admin.query("SELECT 1 FROM run_events WHERE run_id = $1 AND kind = 'plane.updated_after_keep'", [run.id])).rowCount).toBe(0);
+      });
     });
 
     it("every fix round has its attempt: the three of a first publish are not a limit on them, and they are numbered on their own", async () => {

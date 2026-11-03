@@ -92,6 +92,12 @@ export interface PlanePushRow {
   code: string | null;
   refusals: PlaneRefusalEntry[];
   managedByPersonAt: Date | null;
+  /** A person's confirmed Replace: the one public head the next fix round may take its lease on (D#598 P1g-3a). Single-use; null otherwise. */
+  replaceAuthorizedHead: string | null;
+  /** The head a person's Keep covered (their commit); null unless the branch is managed by a person. */
+  keptHead: string | null;
+  /** Set when an update landed after the Keep was recorded, replacing the kept commit (the Keep lost to a round already under way). */
+  keptReplacedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -122,11 +128,14 @@ interface Row {
   code: string | null;
   refusals: PlaneRefusalEntry[];
   managed_by_person_at: Date | null;
+  replace_authorized_head: string | null;
+  kept_head: string | null;
+  kept_replaced_at: Date | null;
   created_at: Date;
   updated_at: Date;
 }
 
-const COLUMNS = `id, account_id, work_item_id, repo_id, code_repo, pairing_digest, branch, head_sha, tip_sha, source_head, pr_number, pr_url, state, code, refusals, managed_by_person_at, created_at, updated_at`;
+const COLUMNS = `id, account_id, work_item_id, repo_id, code_repo, pairing_digest, branch, head_sha, tip_sha, source_head, pr_number, pr_url, state, code, refusals, managed_by_person_at, replace_authorized_head, kept_head, kept_replaced_at, created_at, updated_at`;
 
 function toRow(r: Row): PlanePushRow {
   return {
@@ -146,6 +155,9 @@ function toRow(r: Row): PlanePushRow {
     code: r.code,
     refusals: r.refusals,
     managedByPersonAt: r.managed_by_person_at,
+    replaceAuthorizedHead: r.replace_authorized_head,
+    keptHead: r.kept_head,
+    keptReplacedAt: r.kept_replaced_at,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -310,15 +322,26 @@ export async function recordVerifiedOutcome(client: Queryable, input: { accountI
   return rows[0] ? toRow(rows[0]) : null;
 }
 
+/** The fixed code, and the run event that carries it, for an update that landed on a branch a person had already chosen to keep (their Keep lost to a round under way). */
+export const UPDATED_AFTER_KEEP = 'updated_after_keep';
+export const UPDATED_AFTER_KEEP_EVENT = 'plane.updated_after_keep';
+/** The payload of that event: the code, the branch's new head and the person's commit it replaced. Shas only. */
+export function updatedAfterKeepPayload(row: PlanePushRow): { code: string; head: string | null; replaced: string | null } {
+  return { code: UPDATED_AFTER_KEEP, head: row.headSha, replaced: row.keptHead };
+}
+
 /**
- * FIXROUND-REPUBLISH (R2-c1): moves the stamp to the head a fix round's update pushed (verified against GitHub by the caller). Only an open, platform-owned pull request moves: a row a person took over, or one in
- * any other state, is left alone and null comes back. The state stays `pr_opened`: the same pull request, a new head.
+ * FIXROUND-REPUBLISH (R2-c1): moves the stamp to the head a fix round's update pushed (verified against GitHub by the caller). The state stays: the same pull request, a new head.
+ * An open, platform-owned row moves as before. A row a person marked as managed (Keep) while the round was under way moves too, because the push really happened (its lease was
+ * on the person's head): the record must hold the head that is on the branch, and `kept_replaced_at` says the Keep lost, so the page can tell the person. Any other state is left alone and
+ * null comes back. The caller records the fixed-code event when the returned row has `keptReplacedAt`.
  */
 export async function recordUpdatedHead(client: Queryable, input: { accountId: string; id: string; headSha: string; tipSha: string; sourceHead: string | null }): Promise<PlanePushRow | null> {
   if (!SHA.test(input.headSha) || !SHA.test(input.tipSha) || (input.sourceHead !== null && !SHA.test(input.sourceHead))) throw new PlanePushRecordError('bad_outcome', 'plane push update: head and tip must be full shas');
   const { rows } = await client.query<Row>(
-    `UPDATE plane_pushes SET head_sha = $3, tip_sha = $4, source_head = $5
-      WHERE id = $1 AND account_id = $2 AND state = 'pr_opened' AND managed_by_person_at IS NULL
+    `UPDATE plane_pushes SET head_sha = $3, tip_sha = $4, source_head = $5, replace_authorized_head = NULL,
+            kept_replaced_at = CASE WHEN managed_by_person_at IS NOT NULL THEN now() ELSE kept_replaced_at END
+      WHERE id = $1 AND account_id = $2 AND ((state = 'pr_opened' AND managed_by_person_at IS NULL) OR (state = 'managed_by_person' AND managed_by_person_at IS NOT NULL))
       RETURNING ${COLUMNS}`,
     [input.id, input.accountId, input.headSha, input.tipSha, input.sourceHead],
   );

@@ -5,7 +5,7 @@
 // second press is ignored. When a row changes under the person, focus goes to the same control, else to the row's heading.
 import { h } from "../_lib/dom.js";
 import { on, onRefresh } from "../../core/cloud-live.js";
-import { WORDS, canMarkDone, createNeedsYou, notShownWords } from "./needs-you-model.js";
+import { WORDS, canMarkDone, confirmWords, createNeedsYou, isBranchRow, notShownWords, nowAtWords } from "./needs-you-model.js";
 
 const FULC = window.FULC;
 if (!FULC || typeof FULC.register !== "function") {
@@ -36,6 +36,37 @@ function mountApp(contentEl) {
       label
     );
   };
+
+  // A control of the "someone pushed to the branch" request: same shape as the others, its own action.
+  const branchButton = (row, act, label, run) => {
+    const working = list.busyVerb(row.id);
+    return h(
+      "button",
+      { type: "button", class: "ny-btn", "data-testid": "ny-" + act + "-" + row.id, "data-act": act, "aria-disabled": working ? "true" : "false", "aria-label": label + ": " + row.title, onClick: () => { if (!list.busyVerb(row.id)) run(); } },
+      label
+    );
+  };
+
+  // The managed line and the choices of a "someone pushed" request. Replace asks twice: the second question names the head it is about, and only its button sends.
+  function branchBlock(row) {
+    // After an answer one control stays: the undo of Keep, or Keep itself while a Replace waits for its update (Keep wins until a round has taken the head; one already under way can still land first, and then the managed line says so).
+    if (row.state !== "open") return row.branchManaged ? h("div", { class: "ny-actions" }, branchButton(row, "release", WORDS.release, () => list.release(row.id))) : row.replacePending ? h("div", { class: "ny-actions" }, branchButton(row, "keep", WORDS.keep, () => list.keep(row.id))) : null;
+    const head = nowAtWords(row.seenHead);
+    const asking = list.confirmingHead(row.id) !== "";
+    return h(
+      "div",
+      { class: "ny-branch" },
+      head ? h("p", { class: "ny-sentence", "data-testid": "ny-head" }, head) : null,
+      asking ? h("p", { class: "ny-sentence", role: "group", "aria-label": WORDS.replace, "data-testid": "ny-confirm" }, confirmWords(list.confirmingHead(row.id))) : null,
+      h(
+        "div",
+        { class: "ny-actions" },
+        asking
+          ? [branchButton(row, "replace-yes", WORDS.replaceYes, () => list.replace(row.id)), branchButton(row, "replace-cancel", WORDS.cancel, () => list.cancelReplace(row.id))]
+          : [branchButton(row, "keep", WORDS.keep, () => list.keep(row.id)), row.seenHead !== "" ? branchButton(row, "replace", WORDS.replace, () => list.askReplace(row.id)) : null, button(row, "withdraw", WORDS.withdraw)]
+      )
+    );
+  }
 
   // One button per option of an ask, and Deny. The agent's option names are text nodes; the recommended one says so in its accessible name too.
   const choiceButton = (row, choice, label, recommended) => {
@@ -149,11 +180,13 @@ function mountApp(contentEl) {
       "li",
       { class: "ny-row", "data-testid": "ny-row", "data-kind": "setup", "data-id": row.id, "data-state": row.state, "aria-busy": working ? "true" : "false" },
       h("h3", { id: headId, class: "ny-row-title", tabindex: "-1", "data-testid": "ny-title" }, row.title),
-      row.state === "open" ? null : h("p", { class: "ny-state", "data-testid": "ny-state" }, row.state === "done" ? WORDS.done : WORDS.withdrawn),
+      row.state === "open" || (isBranchRow(row) && (row.branchManaged || row.replacePending)) ? null : h("p", { class: "ny-state", "data-testid": "ny-state" }, row.state === "done" ? WORDS.done : WORDS.withdrawn),
       row.reason ? h("p", { class: "ny-reason", "data-testid": "ny-reason" }, row.reason) : null,
       sentence ? h("p", { class: "ny-sentence", "data-testid": "ny-sentence" }, sentence) : null,
       row.link ? h("p", null, h("a", { class: "ny-link", href: row.link.href, target: "_blank", rel: "noopener noreferrer", "aria-describedby": headId, "data-testid": "ny-link" }, row.link.host)) : null,
-      row.state === "open" ? h("div", { class: "ny-actions" }, canMarkDone(row) ? button(row, "done", WORDS.markDone) : null, button(row, "withdraw", WORDS.withdraw)) : null
+      isBranchRow(row)
+        ? branchBlock(row)
+        : row.state === "open" ? h("div", { class: "ny-actions" }, canMarkDone(row) ? button(row, "done", WORDS.markDone) : null, button(row, "withdraw", WORDS.withdraw)) : null
     );
   }
 
@@ -193,7 +226,13 @@ function mountApp(contentEl) {
     if (s.status === "ready" && s.moreAsks) content.appendChild(h("p", { class: "ny-muted", "data-testid": "ny-more-asks" }, WORDS.moreAsks));
     if (s.status === "ready" && s.moreItems) content.appendChild(h("p", { class: "ny-muted", "data-testid": "ny-more-items" }, WORDS.moreItems));
     if (s.status === "ready" && s.truncated) content.appendChild(h("p", { class: "ny-muted", "data-testid": "ny-older" }, WORDS.older));
-    if (focusId !== null) {
+    if (s.focusAct) {
+      // A choice that swaps the buttons (Replace asks, Cancel goes back): focus goes to the control that now answers it.
+      const row = [...content.querySelectorAll("[data-id]")].find((r) => r.getAttribute("data-id") === s.focusAct.id);
+      const target = row ? [...row.querySelectorAll("[data-act]")].find((b) => b.getAttribute("data-act") === s.focusAct.act) : null;
+      (target || (row && row.querySelector("h3")) || heading).focus();
+      list.clearAnnounce();
+    } else if (focusId !== null) {
       // An answered ask left the list: focus goes to the next row's heading, or to the list heading when there is none.
       const next = [...content.querySelectorAll("[data-id]")].find((r) => r.getAttribute("data-id") === focusId);
       (next ? next.querySelector("h3") : heading).focus();

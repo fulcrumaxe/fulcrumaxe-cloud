@@ -3,7 +3,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
 import type { BranchSyncOutcome } from "@fx/github";
 import { PUBLIC_BRANCH_MOVED, PUBLIC_HEAD_UNAVAILABLE, readPlanePush, type BranchHeadPort } from "@fx/core/src/repos/planePushRecord.js";
-import { clearBranchPushedByPerson, raiseBranchPushedByPerson } from "@fx/core/src/setup-requests/branchPushed.js";
+import { clearBranchPushedByPerson, clearReplaceAuthorization, raiseBranchPushedByPerson } from "@fx/core/src/setup-requests/branchPushed.js";
 
 /**
  * FIXROUND-REFRESH-HEAD: what a fix round checks on GitHub before it starts anything.
@@ -61,11 +61,15 @@ export async function checkPublicBranch(pool: Pool, ports: FixRoundHeadPorts | n
   }
   // Anything that is neither a commit id nor "no such branch" is not an answer: fail closed.
   if (live !== null && !SHA.test(live)) return PUBLIC_HEAD_UNAVAILABLE;
+  // D#598 P1g-3a: a person confirmed Replace at one head. A branch still exactly there lets the round go on, and the round takes its lease on that head (both paths); nothing else is allowed.
+  if (row.replaceAuthorizedHead !== null && live === row.replaceAuthorizedHead) return null;
   if (live === row.headSha) {
     // D#598 P1g-2: a person reset the branch to where the platform left it: the request they were asked about closes, and the pull request is updated again.
-    if (row.state === "waiting_person_pushed") await withTenant(pool, who.accountId, (client) => clearBranchPushedByPerson(client, { workItemId: who.workItemId }));
+    if (row.state === "waiting_person_pushed" || row.replaceAuthorizedHead !== null) await withTenant(pool, who.accountId, (client) => clearBranchPushedByPerson(client, { workItemId: who.workItemId }));
     return null;
   }
+  // Anywhere else, an authorization is spent: a push after the confirmation is asked about again (the request below holds the new head).
+  if (row.replaceAuthorizedHead !== null) await withTenant(pool, who.accountId, (client) => clearReplaceAuthorization(client, who.workItemId));
   await withTenant(pool, who.accountId, (client) =>
     recordDriverEvent(client, who.accountId, {
       workItemId: who.workItemId,
@@ -124,11 +128,7 @@ export async function refreshWaitingBranch(pool: Pool, ports: FixRoundHeadPorts 
   if (row !== null && row.state === "waiting_person_pushed") await checkPublicBranch(pool, ports, who);
 }
 
-/**
- * D#598 P1g-2: a fix round's update was refused because the public branch was not where the platform left it (the lease failed at the push). The branch is
- * read now, outside any transaction, and the request is raised with the head seen. A read that fails raises nothing: the item already shows the round's
- * refusal, and the next fix round's own check (above) raises it. Never throws.
- */
+/** The request raised with the head seen, outside the caller's transaction. It never throws: a failure leaves the refusal as it was and the next round raises the request. */
 async function raiseBranchPushed(pool: Pool, who: Who, seenHead: string): Promise<void> {
   try {
     await withTenant(pool, who.accountId, (client) => raiseBranchPushedByPerson(client, { workItemId: who.workItemId, seenHead }));
@@ -138,6 +138,11 @@ async function raiseBranchPushed(pool: Pool, who: Who, seenHead: string): Promis
   }
 }
 
+/**
+ * D#598 P1g-2: a fix round's update was refused because the public branch was not where the platform left it (the lease failed at the push). The branch is
+ * read now, outside any transaction, and the request is raised with the head seen. A read that fails raises nothing: the item already shows the round's
+ * refusal, and the next fix round's own check (above) raises it. Never throws.
+ */
 export async function raiseAfterLeaseFailure(pool: Pool, publicHead: BranchHeadPort["branchHead"] | undefined, who: Who): Promise<void> {
   if (!publicHead) return;
   try {

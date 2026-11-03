@@ -8,6 +8,7 @@ import { IllegalStageTransitionError, WorkItemHaltedError } from "@fx/core/src/w
 import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
 import { BASE_SYNCED, BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, REPUBLISH_BASE_MISSING, REPUBLISH_STACKED_UNSUPPORTED } from "@fx/core/src/work-items/baseSync.js";
 import { readPlanePush } from "@fx/core/src/repos/planePushRecord.js";
+import { clearReplaceAuthorization } from "@fx/core/src/setup-requests/branchPushed.js";
 import { checkPublicBranch, type FixRoundHeadPorts } from "./fixRoundHeads.js";
 
 /**
@@ -136,6 +137,8 @@ export async function refuseRepublish(pool: Pool, who: Who, input: { code: strin
 /** The record of a refusal, inside the caller's tenant transaction (the runner's report writes it in the same one as the run's own state). */
 export async function recordRepublishRefusal(client: PoolClient, who: Who, input: { code: string; prNumber: number | null; moveToNeedsPerson: boolean; attempt: string }): Promise<void> {
   const { code } = input;
+  // D#598 P1g-3a: a refused round spends a person's Replace authorization; the next round asks again.
+  await clearReplaceAuthorization(client, who.workItemId);
   await recordDriverEvent(client, who.accountId, { workItemId: who.workItemId, kind: "escalated", dedupeKey: `${code}:${attemptWord(input.attempt)}`, code, ...(input.prNumber !== null ? { prNumber: input.prNumber } : {}) });
   if (!input.moveToNeedsPerson) return;
   try {

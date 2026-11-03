@@ -44,6 +44,8 @@ interface Opts {
   /** Runner-built stamps: the finished runner attempts that pushed, oldest first, each with the branch head the cloud read when its run finished. */
   runner?: Array<{ kind: "push" | "fix_round"; outcome: string; headOid: string | null }>;
   managed?: boolean;
+  /** D#598 P1g-3a: a person's confirmed Replace, not yet used by an update: the head the authorization names. */
+  authorized?: string;
   pubChecks?: FakeRepoState["checks"];
   pubHead?: string;
 }
@@ -73,6 +75,7 @@ async function world(o: Opts = {}) {
       [accountId, workItemId, repoId, "a".repeat(64), stamp, PUB_PR, o.source === undefined ? HEAD : o.source],
     );
   }
+  if (o.paired !== false && o.authorized !== undefined) await h.admin.query("UPDATE plane_pushes SET replace_authorized_head = $2 WHERE work_item_id = $1", [workItemId, o.authorized]);
   if (o.paired !== false) {
     let no = 0;
     for (const att of o.runner ?? []) {
@@ -161,6 +164,15 @@ describe("a paired item: the gate merges the public pull request", () => {
     const w = await world({ stamp: OTHER });
     const out = await gate(w);
     expect(out).toMatchObject({ outcome: "ready_human_merges", reasons: ["public_head_unrecorded"], status: "skipped" });
+    expect(w.pub.merges).toEqual([]);
+    expect(w.pub.posts).toEqual([]);
+    expect(w.priv.merges).toEqual([]);
+  });
+
+  it("D#598 P1g-3a: after a confirmed Replace and before the update, the person's head is not merged and not blessed: public_head_unrecorded, no status, no merge", async () => {
+    // The stamp is still the platform's older head; the live head is the person's, and it is exactly the head the authorization names.
+    const w = await world({ stamp: OTHER, pubHead: PUB_HEAD, authorized: PUB_HEAD });
+    expect(await gate(w)).toMatchObject({ outcome: "ready_human_merges", reasons: ["public_head_unrecorded"], status: "skipped" });
     expect(w.pub.merges).toEqual([]);
     expect(w.pub.posts).toEqual([]);
     expect(w.priv.merges).toEqual([]);

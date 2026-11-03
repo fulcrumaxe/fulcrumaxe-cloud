@@ -995,3 +995,202 @@ describe("a derived parity request (D#598 P1d-3)", () => {
     expect([row.title, row.reason, row.sentence ?? ""].join("|")).not.toMatch(/null|undefined|NaN/);
   });
 });
+
+// ── D#598 P1g-3a: Keep, Replace with its second confirmation, Withdraw and the managed line ─────────────────────────────────────────────────────────────
+import { releaseUrl as releaseUrl3a, nowAtWords, confirmWords, shortHead } from "../apps/needs-you/needs-you-model.js";
+
+describe("D#598 P1g-3a: a branch someone pushed to", () => {
+  const A = "a".repeat(40);
+  const B = "b".repeat(40);
+  const WI = "9d2c7b1e-5f3a-4e8b-8a6d-1c2b3a4d5e66";
+  const replaceUrl = "/api/v1/setup-requests/" + BASE.id + "/replace";
+  const pushed = (over = {}) =>
+    req({ kind: "branch_pushed_by_person", title: "Someone pushed to fx/p-1 on acme/widgets-public", work_item_id: WI, seen_head: A, branch_managed: false, check_interval_seconds: null, status_sentence: "The cloud will not change this branch while this is open.", ...over });
+  const posts = (f) => f.log.filter(([m]) => m === "POST");
+
+  it("shows the head it is about in words, never the raw value in full", async () => {
+    const f = fakeCall({ ["GET " + LIST_URL]: () => listOf([pushed()]), ["GET " + ME_URL]: { is_admin: true } });
+    const list = createNeedsYou({ call: f.call });
+    await list.load();
+    const row = list.state.rows[0];
+    expect(row.seenHead).toBe(A);
+    expect(nowAtWords(row.seenHead)).toBe("The branch is now at " + "a".repeat(12) + ".");
+    expect(nowAtWords("not a sha")).toBe("");
+    expect(shortHead(null)).toBe("");
+  });
+
+  it("Keep is one bare request; with the branch marked managed the row says so and offers the undo, which leaves the list", async () => {
+    const f = fakeCall({
+      ["GET " + LIST_URL]: () => listOf([pushed()]),
+      ["GET " + ME_URL]: { is_admin: true },
+      ["POST " + actionUrl(BASE.id, "keep")]: () => pushed({ state: "done", resolution: "marked_done", status_sentence: "Public branch managed by a person", branch_managed: true }),
+      ["POST " + releaseUrl3a(WI)]: { released: true },
+    });
+    const list = createNeedsYou({ call: f.call });
+    await list.load();
+    await list.keep(BASE.id);
+    expect(posts(f)).toEqual([["POST", actionUrl(BASE.id, "keep"), undefined]]);
+    expect(list.state.announce).toBe("Public branch managed by a person");
+    expect(list.state.rows[0].branchManaged).toBe(true);
+    await list.release(BASE.id);
+    expect(list.state.announce).toBe(WORDS.released);
+    expect(list.state.rows).toHaveLength(0);
+  });
+
+  it("a Keep that lost to an update already running is announced and shown in the cloud's own words, and the row stays on the list with its undo", async () => {
+    const LOST = "The branch was updated before your Keep was seen. It is now at 9f8e7d6, and the commit you kept (aaaaaaa) is no longer on the branch. It is still in the pull request's history on GitHub. The cloud will not update the branch again unless you undo Keep.";
+    const REASON = "Someone pushed to the public branch fx/p-1 on acme/widgets-public, and you chose to keep their version.";
+    const f = fakeCall({
+      ["GET " + LIST_URL]: () => listOf([pushed()]),
+      ["GET " + ME_URL]: { is_admin: true },
+      ["POST " + actionUrl(BASE.id, "keep")]: () => pushed({ state: "done", resolution: "marked_done", reason: REASON, status_sentence: LOST, branch_managed: true }),
+    });
+    const list = createNeedsYou({ call: f.call });
+    await list.load();
+    await list.keep(BASE.id);
+    expect(list.state.announce).toBe(LOST);
+    expect(list.state.rows[0]).toMatchObject({ branchManaged: true, sentence: LOST, reason: REASON });
+    expect(list.state.rows).toHaveLength(1);
+  });
+
+  it("Keep on a pull request that is no longer open says nothing is marked, instead of the managed line", async () => {
+    const f = fakeCall({ ["GET " + LIST_URL]: () => listOf([pushed()]), ["GET " + ME_URL]: { is_admin: true }, ["POST " + actionUrl(BASE.id, "keep")]: () => pushed({ state: "done", status_sentence: null, branch_managed: false }) });
+    const list = createNeedsYou({ call: f.call });
+    await list.load();
+    await list.keep(BASE.id);
+    expect(list.state.announce).toBe(WORDS.keptNotManaged);
+    expect(list.state.rows[0].branchManaged).toBe(false);
+  });
+
+  it("Replace asks twice: the first press sends nothing, the second sends the head that was on screen with the confirmation, and the row says what happens next", async () => {
+    const f = fakeCall({ ["GET " + LIST_URL]: () => listOf([pushed()]), ["GET " + ME_URL]: { is_admin: true }, ["POST " + replaceUrl]: (b) => pushed({ state: "done", status_sentence: null, seen_head: b.shown_head }) });
+    const list = createNeedsYou({ call: f.call });
+    await list.load();
+    list.askReplace(BASE.id);
+    expect(posts(f)).toHaveLength(0);
+    expect(list.confirmingHead(BASE.id)).toBe(A);
+    expect(confirmWords(A)).toContain("a".repeat(12));
+    await list.replace(BASE.id);
+    expect(posts(f)).toEqual([["POST", replaceUrl, { shown_head: A, confirm: true }]]);
+    expect(list.state.announce).toBe(WORDS.replaceQueued);
+    expect(list.confirmingHead(BASE.id)).toBe("");
+  });
+
+  it("a branch that moved while the question was open withdraws the question: nothing is sent, the new head is shown, and a press has no head to send", async () => {
+    let head = A;
+    const f = fakeCall({ ["GET " + LIST_URL]: () => listOf([pushed({ seen_head: head })]), ["GET " + ME_URL]: { is_admin: true } });
+    const list = createNeedsYou({ call: f.call });
+    await list.load();
+    list.askReplace(BASE.id);
+    head = B;
+    await list.load();
+    expect(list.confirmingHead(BASE.id)).toBe("");
+    expect(list.state.rows[0].seenHead).toBe(B);
+    expect(list.state.announce).toBe(WORDS.headMoved);
+    await list.replace(BASE.id);
+    expect(posts(f)).toHaveLength(0);
+  });
+
+  it("the cloud refusing a stale head (409) shows the moved-again sentence, drops the question and reads the list again", async () => {
+    let head = A;
+    const f = fakeCall({
+      ["GET " + LIST_URL]: () => listOf([pushed({ seen_head: head })]),
+      ["GET " + ME_URL]: { is_admin: true },
+      ["POST " + replaceUrl]: () => {
+        head = B;
+        return fail(409, "setup_request_head_changed");
+      },
+    });
+    const list = createNeedsYou({ call: f.call });
+    await list.load();
+    list.askReplace(BASE.id);
+    await list.replace(BASE.id);
+    expect(list.state.error).toBe(WORDS.headMoved);
+    expect(list.confirmingHead(BASE.id)).toBe("");
+    expect(list.state.rows[0].seenHead).toBe(B);
+    expect(JSON.stringify(list.state)).not.toContain(SERVER_TEXT);
+  });
+
+  const PENDING = "Replace is waiting for the next update. The branch changes when the item's next fix round publishes. Keep their version instead to leave it alone.";
+  const replaced = (over = {}) => pushed({ state: "done", resolution: "marked_done", status_sentence: PENDING, replace_pending: true, ...over });
+
+  it("after Replace the row stays with the waiting line and one control, Keep, which is where focus goes; it is not counted as something that needs a person", async () => {
+    const { readNeedsYouCount } = await import("../apps/needs-you/needs-you-model.js");
+    const f = fakeCall({ ["GET " + LIST_URL]: () => listOf([pushed()]), ["GET " + ME_URL]: { is_admin: true }, ["POST " + replaceUrl]: () => replaced() });
+    const list = createNeedsYou({ call: f.call });
+    await list.load();
+    list.askReplace(BASE.id);
+    await list.replace(BASE.id);
+    const row = list.state.rows[0];
+    expect(row).toMatchObject({ state: "done", replacePending: true, sentence: PENDING });
+    expect(list.state.announce).toBe(PENDING);
+    expect(list.state.focusAct).toEqual({ id: BASE.id, act: "keep" });
+    const g = fakeCall({ ["GET " + LIST_URL]: () => listOf([replaced()]), ["GET " + ME_URL]: { is_admin: true } });
+    expect((await readNeedsYouCount(g.call)).count).toBe(0);
+  });
+
+  it("a Replace waiting for its update survives a re-read of the list, and Keep from it shows the normal Keep result with its undo (focus on the undo)", async () => {
+    let answered = false;
+    const f = fakeCall({
+      ["GET " + LIST_URL]: () => listOf([answered ? pushed({ state: "done", status_sentence: "Public branch managed by a person", branch_managed: true }) : replaced()]),
+      ["GET " + ME_URL]: { is_admin: true },
+      ["POST " + actionUrl(BASE.id, "keep")]: () => {
+        answered = true;
+        return pushed({ state: "done", status_sentence: "Public branch managed by a person", branch_managed: true });
+      },
+    });
+    const list = createNeedsYou({ call: f.call });
+    await list.load();
+    expect(list.state.rows[0].replacePending).toBe(true);
+    await list.keep(BASE.id);
+    expect(list.state.rows[0]).toMatchObject({ branchManaged: true, replacePending: false });
+    expect(list.state.announce).toBe("Public branch managed by a person");
+    expect(list.state.focusAct).toEqual({ id: BASE.id, act: "release" });
+  });
+
+  it("Replace on a request that was Kept meanwhile (409 setup_request_closed) says so, never a success, and reads the list again", async () => {
+    let kept = false;
+    const f = fakeCall({
+      ["GET " + LIST_URL]: () => listOf([kept ? pushed({ state: "done", status_sentence: "Public branch managed by a person", branch_managed: true }) : pushed()]),
+      ["GET " + ME_URL]: { is_admin: true },
+      ["POST " + replaceUrl]: () => {
+        kept = true;
+        return fail(409, "setup_request_closed");
+      },
+    });
+    const list = createNeedsYou({ call: f.call });
+    await list.load();
+    list.askReplace(BASE.id);
+    await list.replace(BASE.id);
+    expect(list.state.error).toBe(WORDS.branchAnswered);
+    expect(list.state.announce).toBe("");
+    expect(list.state.rows[0].branchManaged).toBe(true);
+    expect(JSON.stringify(list.state)).not.toContain(SERVER_TEXT);
+  });
+
+  it("Keep after the Replace was used (409 setup_request_closed) says so and reads the list again", async () => {
+    const f = fakeCall({ ["GET " + LIST_URL]: () => listOf([replaced()]), ["GET " + ME_URL]: { is_admin: true }, ["POST " + actionUrl(BASE.id, "keep")]: () => fail(409, "setup_request_closed") });
+    const list = createNeedsYou({ call: f.call });
+    await list.load();
+    await list.keep(BASE.id);
+    expect(list.state.error).toBe(WORDS.branchAnswered);
+    expect(list.state.announce).toBe("");
+  });
+
+  it("a request with no head (an older one) offers no Replace", async () => {
+    const f = fakeCall({ ["GET " + LIST_URL]: () => listOf([pushed({ seen_head: null })]), ["GET " + ME_URL]: { is_admin: true } });
+    const list = createNeedsYou({ call: f.call });
+    await list.load();
+    list.askReplace(BASE.id);
+    expect(list.confirmingHead(BASE.id)).toBe("");
+  });
+});
+
+describe("D#598 P1g-3a: the managed line is not counted as something that needs a person", () => {
+  it("the entry count leaves out an answered request that only offers its undo", async () => {
+    const { readNeedsYouCount } = await import("../apps/needs-you/needs-you-model.js");
+    const managed = req({ kind: "branch_pushed_by_person", state: "done", branch_managed: true, status_sentence: "Public branch managed by a person", check_interval_seconds: null });
+    const f = fakeCall({ ["GET " + LIST_URL]: () => listOf([managed, req({ id: "3a1f6c52-7a0e-4c1a-9a53-0b1d2e3f4a77" })]), ["GET " + ME_URL]: { is_admin: true } });
+    expect((await readNeedsYouCount(f.call)).count).toBe(1);
+  });
+});

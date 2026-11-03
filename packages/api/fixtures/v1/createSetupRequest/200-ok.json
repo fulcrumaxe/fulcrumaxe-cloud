@@ -20,5 +20,8 @@
   "check_reason": null,
   "check_ran_at": null,
   "status_sentence": "We check for this every 60 seconds. The item continues by itself once it's done, or press Mark done.",
-  "check_interval_seconds": 60
+  "check_interval_seconds": 60,
+  "seen_head": null,
+  "branch_managed": false,
+  "replace_pending": false
 }

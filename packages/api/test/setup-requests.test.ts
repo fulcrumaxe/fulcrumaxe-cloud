@@ -9,6 +9,7 @@ import { insertApiToken } from '@fx/core/src/tokens/service.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
 import { setupHoldFor, syncDerivedSetupRequest } from '@fx/core/src/setup-requests/store.js';
 import { raiseBranchPushedByPerson } from '@fx/core/src/setup-requests/branchPushed.js';
+import { COPY_BRANCH_ANSWER_CLOSED, COPY_BRANCH_PUSHED, COPY_REPLACE_PENDING } from '@fx/core/src/setup-requests/copy.js';
 import { generateToken } from '../src/tokens/format.js';
 import { hashToken } from '../src/tokens/resolve.js';
 import { handleApiRequest } from '../src/handler.js';
@@ -414,10 +415,149 @@ describe('D#598 P8a: setup requests', () => {
     // The list says what works today, in words, and never Mark done.
     const listed = (await (await call(f.member, 'GET', '/setup-requests')).json()) as { requests: Dto[] };
     const mine = listed.requests.find((r) => r.id === id)!;
-    expect(mine.status_sentence).toBe('The cloud will not change this branch. You can withdraw this request, or move the branch back to where the cloud left it on GitHub and this request closes by itself.');
+    expect(mine.status_sentence).toBe(COPY_BRANCH_PUSHED);
+    expect(mine.status_sentence).not.toMatch(/by itself|instantly|at once/i);
     expect(`${mine.status_sentence} ${mine.reason} ${mine.title}`).not.toMatch(/mark done|null|undefined|public_branch_moved|branch_pushed_by_person/i);
     const wd = await call(f.admin, 'POST', `/setup-requests/${id}/withdraw`);
     expect(await wd.json()).toMatchObject({ state: 'withdrawn', resolution: 'withdrawn' });
+  });
+
+  describe('D#598 P1g-3a: Keep, Replace and the undo of managed', () => {
+    const HEAD_A = 'a'.repeat(40);
+    const HEAD_B = 'b'.repeat(40);
+    async function pushedFixture() {
+      const f = await fixture();
+      await admin.query('INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, $3, $4)', [f.repoId, f.owner.accountId, 'acme/widgets-public', ['private/**']]);
+      await admin.query(
+        `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state)
+         VALUES ($1, $2, $3, 'acme/widgets-public', $4, $5, $6, 7, 'https://github.com/acme/widgets-public/pull/7', 'pr_opened')`,
+        [f.owner.accountId, f.itemId, f.repoId, 'f'.repeat(64), 'd'.repeat(40), 'e'.repeat(40)],
+      );
+      const raise = async (head: string) => {
+        const out = await withTenant(appUserPool, f.owner.accountId, (c) => raiseBranchPushedByPerson(c, { workItemId: f.itemId, seenHead: head }));
+        return (out as { request: { id: string } }).request.id;
+      };
+      return { f, raise };
+    }
+    const push = async (itemId: string) => (await admin.query('SELECT state, managed_by_person_at, replace_authorized_head FROM plane_pushes WHERE work_item_id = $1', [itemId])).rows[0] as { state: string; managed_by_person_at: Date | null; replace_authorized_head: string | null };
+
+    it('the request shows the head it asks about; a member can read it, and the full commit id is the only head the API gives', async () => {
+      const { f, raise } = await pushedFixture();
+      const id = await raise(HEAD_A);
+      const dto = (await (await call(f.member, 'GET', `/setup-requests/${id}`)).json()) as Dto & { seen_head: string | null; branch_managed: boolean };
+      expect(dto.seen_head).toBe(HEAD_A);
+      expect(dto.branch_managed).toBe(false);
+      const env = await created(f.admin, envBody(f));
+      expect(((env as unknown) as { seen_head: string | null }).seen_head).toBeNull();
+    });
+
+    it('Replace needs the explicit confirmation and the head shown: a missing or false confirmation, extra fields, a short head and a body-less call are refused and change nothing', async () => {
+      const { f, raise } = await pushedFixture();
+      const id = await raise(HEAD_A);
+      for (const body of [undefined, {}, { shown_head: HEAD_A }, { shown_head: HEAD_A, confirm: false }, { confirm: true }, { shown_head: 'abc', confirm: true }, { shown_head: HEAD_A, confirm: true, force: true }]) {
+        const res = await call(f.admin, 'POST', `/setup-requests/${id}/replace`, body);
+        expect([400, 422]).toContain(res.status);
+      }
+      expect((await push(f.itemId)).replace_authorized_head).toBeNull();
+      expect((await push(f.itemId)).state).toBe('waiting_person_pushed');
+    });
+
+    it('page on one head, branch moved to another: 409 setup_request_head_changed, nothing authorized, and the request now reads the new head (the exact review scenario)', async () => {
+      const { f, raise } = await pushedFixture();
+      const id = await raise(HEAD_A);
+      await raise(HEAD_B); // a step on the held item refreshed it while the page still shows HEAD_A
+      const res = await call(f.admin, 'POST', `/setup-requests/${id}/replace`, { shown_head: HEAD_A, confirm: true });
+      expect(res.status).toBe(409);
+      expect(await code(res)).toBe('setup_request_head_changed');
+      expect((await push(f.itemId)).replace_authorized_head).toBeNull();
+      const now = (await (await call(f.admin, 'GET', `/setup-requests/${id}`)).json()) as Dto & { seen_head: string; state: string };
+      expect(now).toMatchObject({ state: 'open', seen_head: HEAD_B });
+      expect((await admin.query(`SELECT 1 FROM run_action_requests WHERE account_id = $1 AND kind = 'advance_work_item' AND target_id = $2`, [f.owner.accountId, f.itemId])).rowCount).toBe(0);
+    });
+
+    it('a confirmed Replace closes the request as the person\'s answer, authorizes the shown head, restarts the item once and lifts the hold; a repeat changes nothing', async () => {
+      const { f, raise } = await pushedFixture();
+      const id = await raise(HEAD_A);
+      const res = await call(f.admin, 'POST', `/setup-requests/${id}/replace`, { shown_head: HEAD_A, confirm: true });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ state: 'done', resolution: 'marked_done', resolved_by: f.admin.userId, seen_head: HEAD_A });
+      expect(await push(f.itemId)).toMatchObject({ state: 'pr_opened', replace_authorized_head: HEAD_A });
+      const restarts = () => admin.query(`SELECT 1 FROM run_action_requests WHERE account_id = $1 AND kind = 'advance_work_item' AND target_id = $2`, [f.owner.accountId, f.itemId]);
+      expect((await restarts()).rowCount).toBe(1);
+      expect(await withTenant(appUserPool, f.owner.accountId, f.owner.userId, (c) => setupHoldFor(c, f.itemId))).toBeNull();
+      expect((await call(f.owner, 'POST', `/setup-requests/${id}/replace`, { shown_head: HEAD_A, confirm: true })).status).toBe(200);
+      expect((await restarts()).rowCount).toBe(1);
+    });
+
+    it('Keep marks the branch as managed and the list keeps the line with its undo; the undo clears it; a member and a token can do none of them', async () => {
+      const { f, raise } = await pushedFixture();
+      const id = await raise(HEAD_A);
+      expect((await call(f.member, 'POST', `/setup-requests/${id}/keep`)).status).toBe(403);
+      expect((await call(f.member, 'POST', `/setup-requests/${id}/replace`, { shown_head: HEAD_A, confirm: true })).status).toBe(403);
+      expect((await call(f.member, 'POST', `/work-items/${f.itemId}/public-branch/release`)).status).toBe(403);
+      const kept = await call(f.admin, 'POST', `/setup-requests/${id}/keep`);
+      expect(kept.status).toBe(200);
+      expect(await kept.json()).toMatchObject({ state: 'done', branch_managed: true, status_sentence: 'Public branch managed by a person' });
+      expect((await push(f.itemId)).state).toBe('managed_by_person');
+      const listed = (await (await call(f.member, 'GET', '/setup-requests?state=needs_you')).json()) as { requests: (Dto & { branch_managed: boolean })[] };
+      expect(listed.requests.map((r) => [r.id, r.branch_managed])).toEqual([[id, true]]);
+      expect(((await (await call(f.member, 'GET', '/setup-requests')).json()) as { requests: Dto[] }).requests).toEqual([]);
+      const undo = await call(f.admin, 'POST', `/work-items/${f.itemId}/public-branch/release`);
+      expect(undo.status).toBe(200);
+      expect(await undo.json()).toEqual({ released: true });
+      expect((await push(f.itemId)).state).toBe('pr_opened');
+      expect(await (await call(f.admin, 'POST', `/work-items/${f.itemId}/public-branch/release`)).json()).toEqual({ released: false });
+      expect(((await (await call(f.member, 'GET', '/setup-requests?state=needs_you')).json()) as { requests: Dto[] }).requests).toEqual([]);
+    });
+
+    it('Keep on an item whose pull request has closed answers the request without the managed mark, and says nothing about it', async () => {
+      const { f, raise } = await pushedFixture();
+      const id = await raise(HEAD_A);
+      await admin.query("UPDATE plane_pushes SET state = 'pr_closed' WHERE work_item_id = $1", [f.itemId]);
+      const kept = await call(f.admin, 'POST', `/setup-requests/${id}/keep`);
+      expect(kept.status).toBe(200);
+      expect(await kept.json()).toMatchObject({ state: 'done', branch_managed: false, status_sentence: null });
+      expect((await push(f.itemId)).managed_by_person_at).toBeNull();
+    });
+
+    it('Keep after a confirmed Replace wins while the Replace is unused: the same Keep result with its undo, nothing left to overwrite the person\'s commit', async () => {
+      const { f, raise } = await pushedFixture();
+      const id = await raise(HEAD_A);
+      await call(f.admin, 'POST', `/setup-requests/${id}/replace`, { shown_head: HEAD_A, confirm: true });
+      const pending = (await (await call(f.member, 'GET', '/setup-requests?state=needs_you')).json()) as { requests: (Dto & { replace_pending: boolean })[] };
+      expect(pending.requests.map((r) => [r.id, r.replace_pending, r.status_sentence])).toEqual([[id, true, COPY_REPLACE_PENDING]]);
+      const kept = await call(f.admin, 'POST', `/setup-requests/${id}/keep`);
+      expect(kept.status).toBe(200);
+      expect(await kept.json()).toMatchObject({ state: 'done', branch_managed: true, replace_pending: false, status_sentence: 'Public branch managed by a person' });
+      expect(await push(f.itemId)).toMatchObject({ state: 'managed_by_person', replace_authorized_head: null });
+      expect((await call(f.admin, 'POST', `/setup-requests/${id}/keep`)).status).toBe(200);
+      expect(await (await call(f.admin, 'POST', `/work-items/${f.itemId}/public-branch/release`)).json()).toEqual({ released: true });
+    });
+
+    it('Keep after the Replace was used is 409 setup_request_closed with the fixed sentence; Replace after Keep is the same 409, not a success', async () => {
+      const { f, raise } = await pushedFixture();
+      const id = await raise(HEAD_A);
+      await call(f.admin, 'POST', `/setup-requests/${id}/replace`, { shown_head: HEAD_A, confirm: true });
+      await admin.query('UPDATE plane_pushes SET replace_authorized_head = NULL, head_sha = $2 WHERE work_item_id = $1', [f.itemId, 'c'.repeat(40)]);
+      const late = await call(f.admin, 'POST', `/setup-requests/${id}/keep`);
+      expect(late.status).toBe(409);
+      expect((await late.json()) as ErrorBody).toMatchObject({ error: { code: 'setup_request_closed', message: COPY_BRANCH_ANSWER_CLOSED } });
+      expect((await push(f.itemId)).managed_by_person_at).toBeNull();
+
+      const second = await raise(HEAD_B);
+      expect((await call(f.admin, 'POST', `/setup-requests/${second}/keep`)).status).toBe(200);
+      const wrong = await call(f.admin, 'POST', `/setup-requests/${second}/replace`, { shown_head: HEAD_B, confirm: true });
+      expect(wrong.status).toBe(409);
+      expect((await wrong.json()) as ErrorBody).toMatchObject({ error: { code: 'setup_request_closed', message: COPY_BRANCH_ANSWER_CLOSED } });
+    });
+
+    it('only a "someone pushed" request can be kept or replaced', async () => {
+      const f = await fixture();
+      const env = await created(f.admin, envBody(f));
+      expect((await call(f.admin, 'POST', `/setup-requests/${env.id}/keep`)).status).toBe(422);
+      expect((await call(f.admin, 'POST', `/setup-requests/${env.id}/replace`, { shown_head: HEAD_A, confirm: true })).status).toBe(422);
+      expect((await call(f.admin, 'POST', `/work-items/not-an-id/public-branch/release`)).status).toBe(422);
+    });
   });
 
   it('AC (undo): mark done resumes at once; withdraw keeps the item paused; repeats answer 200, the opposite on a closed request is 409', async () => {

@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import type { StopReason } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { RESTAMPABLE, pairingDigest, readPlanePush, recordUpdatedHead, recordVerifiedOutcome, type PlaneRefusalEntry, type PlanePushOutcomeState, type PlanePushRow } from "@fx/core/src/repos/planePushRecord.js";
+import { RESTAMPABLE, pairingDigest, readPlanePush, recordUpdatedHead, recordVerifiedOutcome, UPDATED_AFTER_KEEP_EVENT, updatedAfterKeepPayload, type PlaneRefusalEntry, type PlanePushOutcomeState, type PlanePushRow } from "@fx/core/src/repos/planePushRecord.js";
 import { insertRunEvent, recordChildCodePullRequest } from "@fx/runner";
 import { CHILD_BODY_CLOSING_CODE, buildPlanePushText, prFooterSkipReason } from "@fulcrumaxe/runner-protocol/planePushText";
 import { safeChildTitle } from "@fx/core/src/work-items/childTitle.js";
@@ -105,8 +105,8 @@ export type PlanePushRecordResult = { kind: "fenced"; reason: StopReason } | { k
 export interface RunnerPlanePushFacade {
   planePushGrant(input: PlanePushLeaseInput): Promise<PlanePushGrantResult>;
   planePushPairing(input: PlanePushLeaseInput): Promise<PlanePushPairingResult>;
-  /** True when exactly one unsettled attempt row of this run and generation was updated; false when none matched (the caller must then not hand the token out). */
-  planePushSettleGrant(input: PlanePushLeaseInput & { attemptId: string; issued: true } | PlanePushLeaseInput & { attemptId: string; issued: false; code: string }): Promise<boolean>;
+  /** True when exactly one unsettled attempt row of this run and generation was updated; false when none matched (the caller must then not hand the token out). A refusal (an update whose branch a person took over, or whose lease changed, after the grant) finishes the attempt and carries its fixed code. */
+  planePushSettleGrant(input: PlanePushLeaseInput & { attemptId: string; issued: true } | PlanePushLeaseInput & { attemptId: string; issued: false; code: string }): Promise<boolean | { kind: "refused"; code: string }>;
   planePushReportContext(input: PlanePushLeaseInput): Promise<PlanePushReportContextResult>;
   planePushRecordReport(input: PlanePushRecordInput): Promise<PlanePushRecordResult>;
 }
@@ -194,6 +194,11 @@ const isConflictRound = async (client: PoolClient, accountId: string, runId: str
 
 /** The event a conflict round's grant leaves: the public main tip the cloud read before the runner pushed (the report is compared with it, never trusted). */
 export const ROUND_TIP_EVENT = "plane.round_tip";
+/** The head a fix round's token request was granted its lease on (the person's authorized head, or the stamp); the settle step checks the row still says the same. */
+export const UPDATE_LEASE_EVENT = "plane.update_lease";
+/** The fixed refusals of a token, and the labels the attempt ends with, when the row changed between the grant and the token. */
+export const BRANCH_MANAGED_BY_PERSON = "branch_managed_by_person";
+export const UPDATE_LEASE_CHANGED = "update_lease_changed";
 
 const isPlannedChild = async (client: PoolClient, accountId: string, workItemId: string): Promise<boolean> =>
   (await client.query("SELECT 1 FROM work_items WHERE account_id = $1 AND id = $2 AND planned_pr_key IS NOT NULL", [accountId, workItemId])).rows.length > 0;
@@ -289,8 +294,10 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           // A footer that needs an issue number this item lacks, or that would close a planned PR child's parent, is left off the body; the run says why.
           const skipped = prFooterSkipReason(prFooter, build.issueNumber, { child: build.child });
           if (skipped !== null) await insertRunEvent(client, input.accountId, input.runId, "plane.pr_footer_skipped", { reason: skipped });
+          const leaseOf = update ? (locked!.replaceAuthorizedHead ?? locked!.headSha) : null;
+          if (leaseOf !== null) await insertRunEvent(client, input.accountId, input.runId, UPDATE_LEASE_EVENT, { head: leaseOf });
           const stored = titles[0]?.title ?? "";
-          return { kind: "granted", attemptId: made[0]!.id, itemTitle: build.child ? safeChildTitle(cleanWorkItemTitle(stored)) : stored, prFooter, issueNumber: build.issueNumber, child: build.child, updateOf: update ? locked!.headSha : null, conflictRound: update && (await isConflictRound(client, input.accountId, input.runId)), ...facts(row) };
+          return { kind: "granted", attemptId: made[0]!.id, itemTitle: build.child ? safeChildTitle(cleanWorkItemTitle(stored)) : stored, prFooter, issueNumber: build.issueNumber, child: build.child, updateOf: leaseOf, conflictRound: update && (await isConflictRound(client, input.accountId, input.runId)), ...facts(row) };
         });
       });
 
@@ -320,6 +327,28 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
         return withTenant(runnerPool, input.accountId, async (client) => {
           // Tied to this run, this generation and this account, and only while still unsettled.
           if (input.issued) {
+            // An update's token is the last moment the cloud can still stop the push: under the push row's lock, the row must still be unmanaged and still hold the lease the grant named. A person's Keep
+            // (or a spent authorization) between the grant and here refuses the token with a fixed code and finishes the attempt, so nothing is pushed. After the token the cloud cannot stop the push.
+            const { rows: held } = await client.query<{ kind: string; managed: boolean; lease: string | null }>(
+              `SELECT a.kind, p.managed_by_person_at IS NOT NULL AS managed, COALESCE(p.replace_authorized_head, p.head_sha) AS lease
+                 FROM plane_push_attempts a JOIN plane_pushes p ON p.id = a.plane_push_id AND p.account_id = a.account_id
+                WHERE a.id = $1 AND a.account_id = $2 AND a.run_id = $3 AND a.lease_generation = $4 AND a.runtime = 'runner' AND a.token_issued_at IS NULL AND a.finished_at IS NULL
+                  FOR UPDATE OF p`,
+              [input.attemptId, input.accountId, input.runId, input.leaseGeneration],
+            );
+            const now = held[0];
+            if (now?.kind === "fix_round") {
+              const granted = (await client.query<{ head: string | null }>("SELECT payload->>'head' AS head FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 ORDER BY seq DESC LIMIT 1", [input.accountId, input.runId, UPDATE_LEASE_EVENT])).rows[0]?.head ?? null;
+              const refusal = now.managed ? { code: BRANCH_MANAGED_BY_PERSON, label: "managed_after_grant" } : granted !== null && granted !== now.lease ? { code: UPDATE_LEASE_CHANGED, label: "lease_changed_after_grant" } : null;
+              if (refusal !== null) {
+                await client.query(
+                  `UPDATE plane_push_attempts SET finished_at = now(), outcome = $5
+                    WHERE id = $1 AND account_id = $2 AND run_id = $3 AND lease_generation = $4 AND runtime = 'runner' AND token_issued_at IS NULL AND finished_at IS NULL`,
+                  [input.attemptId, input.accountId, input.runId, input.leaseGeneration, refusal.label],
+                );
+                return { kind: "refused" as const, code: refusal.code };
+              }
+            }
             const done = await client.query(
               `UPDATE plane_push_attempts SET token_issued_at = now()
                 WHERE id = $1 AND account_id = $2 AND run_id = $3 AND lease_generation = $4 AND runtime = 'runner' AND token_issued_at IS NULL AND finished_at IS NULL`,
@@ -379,6 +408,8 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
             // Verified against GitHub by the route. The stamp moves; an update the row no longer accepts (a person took the branch over meanwhile) records nothing.
             const row = !granted ? null : await recordUpdatedHead(client, { accountId: input.accountId, id: found.row.id, headSha: input.outcome.headSha ?? "", tipSha: input.outcome.tipSha ?? "", sourceHead: null });
             recorded = row !== null;
+            // The Keep lost to this update: a fixed-code event on the run says so (the push row holds the new head and the commit it replaced).
+            if (row?.keptReplacedAt) await insertRunEvent(client, input.accountId, input.runId, UPDATED_AFTER_KEEP_EVENT, updatedAfterKeepPayload(row));
           } else if ((input.outcome?.state === "refused" || input.outcome?.state === "no_public_change") && found.continues && found.row.state === "pr_opened") {
             // The update of the open public pull request was refused: the round's change is on the private branch only. A person decides (nothing is shown as published that is not).
             const code = input.outcome.state === "no_public_change" ? REPUBLISH_NO_CHANGE : input.outcome.code === "public_branch_moved" ? REPUBLISH_BRANCH_MOVED : input.outcome.code === "public_tip_moved" ? REPUBLISH_TIP_MOVED : input.outcome.code === REPUBLISH_BASE_MISSING ? REPUBLISH_BASE_MISSING : REPUBLISH_FAILED;

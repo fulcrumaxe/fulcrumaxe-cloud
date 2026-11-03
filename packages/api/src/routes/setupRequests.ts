@@ -13,10 +13,12 @@ import {
   SetupRequestError,
   getSetupRequest,
   listSetupRequests,
+  withManagedFlag,
   proposeSetupRequest,
   resolveSetupRequest,
   type SetupRequest,
 } from "@fx/core/src/setup-requests/store.js";
+import { keepBranch, releaseBranch, replaceBranch } from "@fx/core/src/setup-requests/branchPushedAnswer.js";
 import { markSetupRequestDone } from "@fx/core/src/setup-requests/markDone.js";
 import { unavailableVercelEnvSource, type VercelEnvSource } from "@fx/core/src/setup-requests/checks.js";
 import { checkIntervalFor, statusSentence } from "@fx/core/src/setup-requests/copy.js";
@@ -84,6 +86,12 @@ const requestSchema = z.object({
   status_sentence: z.string().nullable(),
   /** How often an automatic check runs while the request waits (seconds), or null when none runs (no check, or no credential source is bound). */
   check_interval_seconds: z.number().int().nullable(),
+  /** `branch_pushed_by_person` only: the full public branch head the person is being asked about (a 40- or 64-character commit id); null for every other kind. A confirmed Replace sends this value back. */
+  seen_head: z.string().nullable(),
+  /** A "someone pushed" request a person answered with Keep, whose item's branch is still marked as managed by a person: the undo is offered. False otherwise. */
+  branch_managed: z.boolean(),
+  /** A "someone pushed" request a person answered with Replace whose authorization is not used yet: the branch changes when the item's next fix round publishes, and Keep still undoes it. False otherwise. */
+  replace_pending: z.boolean(),
 });
 
 const listResponseSchema = z.object({ requests: z.array(requestSchema), truncated: z.boolean() });
@@ -105,7 +113,7 @@ const createBodySchema = z
   .strict();
 
 const listQuerySchema = z.object({
-  state: z.enum(["open", "all"]).optional(),
+  state: z.enum(["open", "all", "needs_you"]).optional(),
   work_item_id: UUID.optional(),
   repo_id: UUID.optional(),
 });
@@ -140,6 +148,9 @@ const baseDto = (r: SetupRequest): Omit<z.infer<typeof requestSchema>, "status_s
   resolved_at: r.resolvedAt?.toISOString() ?? null,
   check_reason: r.checkReason,
   check_ran_at: r.checkRanAt?.toISOString() ?? null,
+  seen_head: r.seenHead,
+  branch_managed: r.branchManaged,
+  replace_pending: r.replacePending,
 });
 
 /** The core's named errors as API answers. */
@@ -147,6 +158,7 @@ function mapError(error: unknown): unknown {
   if (error instanceof SetupRequestError) {
     if (error.code === "already_open") return new ApiError(409, "setup_request_exists", "this step is already requested");
     if (error.code === "not_open") return new ApiError(409, "setup_request_closed", error.message);
+    if (error.code === "head_changed") return new ApiError(409, "setup_request_head_changed", "the branch moved after the page was shown; the request now shows its new head");
     if (error.code === "not_markable") return new ApiError(409, "setup_request_not_markable", "this request cannot be marked done; withdraw it, or move the branch back on GitHub");
     return new ApiError(422, "invalid_input", error.message, [{ path: error.field ?? "", code: error.code }]);
   }
@@ -189,7 +201,88 @@ const resolveRoute = (verb: "withdraw" | "done", operationId: string, summary: s
   },
 });
 
+const shaSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
+const replaceBodySchema = z.object({ shown_head: shaSchema, confirm: z.literal(true) }).strict();
+const releaseResponseSchema = z.object({ released: z.boolean() });
+
+/** The request as it reads after an answer (the managed mark included). */
+const reread = (ctx: { pool: Parameters<typeof withTenant>[0] }, accountId: string, userId: string, id: string) =>
+  withTenant(ctx.pool, accountId, userId, async (client) => toDto((await withManagedFlag(client, [await getSetupRequest(client, id)]))[0]!));
+
+// D#598 P1g-3a: the person's answers to "someone pushed to the public branch". Session only (a token is not a person) and owner or admin; no worker, model or agent path calls them (R-597-1).
+const answerRoutes: RouteEntry[] = [
+  {
+    method: "POST",
+    path: "/api/v1/setup-requests/{id}/keep",
+    operationId: "keepPublicBranch",
+    summary: "Keep their version of the public branch and stop updating it for this item",
+    description: "Owner or admin, session only. Closes a \"someone pushed to the branch\" request as the person's answer and restarts its item; the pull request stays and the cloud pushes nothing more to the branch until the undo (`releasePublicBranch`). Repeating it changes nothing. After a confirmed Replace, Keep wins until a round has taken the head: it clears the authorization, so no round that has not started yet pushes. A round already under way cannot be stopped, so a Keep that arrives then can lose; the update lands, the record takes the new head, and the request reads, in fixed words, that the branch was updated before the Keep was seen, naming both commits (the replaced one stays in the pull request's history on GitHub). Once the update has landed, or a round was refused, the answer is 409 `setup_request_closed`.",
+    minRole: "admin",
+    idempotency: "never",
+    rateClass: "write",
+    extraResponses: { "409": "The request was already answered another way, or a Replace of it was already used (`setup_request_closed`)." },
+    paramsSchema: idParamsSchema,
+    responseSchema: requestSchema,
+    async handler(ctx, input) {
+      const { accountId, userId } = ctx.principal;
+      try {
+        await keepBranch({ pool: ctx.pool, signal: runActionDeps.getRunActionSignal() }, { accountId, userId, id: input.params.id! });
+        return await reread(ctx, accountId, userId, input.params.id!);
+      } catch (error) {
+        throw mapError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/v1/setup-requests/{id}/replace",
+    operationId: "replacePublicBranch",
+    summary: "Replace their version of the public branch with the item's, after a second confirmation",
+    description:
+      "Owner or admin, session only. `confirm` must be true and `shown_head` the head the page showed. If the request has moved to another head since, nothing happens and the answer is 409 `setup_request_head_changed`; read the request again. " +
+      "Otherwise the request closes, the item restarts, and the next fix round updates the branch with a lease on exactly that head; a push made in between makes that round refuse and ask again. Nothing is pushed by this call.",
+    minRole: "admin",
+    idempotency: "never",
+    rateClass: "write",
+    extraResponses: { "409": "The request is closed the other way (`setup_request_closed`), the branch moved since the page was shown (`setup_request_head_changed`), the pull request is no longer waiting on this branch, or the request was answered with Keep (all `setup_request_closed`)." },
+    paramsSchema: idParamsSchema,
+    bodySchema: replaceBodySchema,
+    responseSchema: requestSchema,
+    async handler(ctx, input) {
+      const { accountId, userId } = ctx.principal;
+      const body = input.body as z.infer<typeof replaceBodySchema>;
+      try {
+        await replaceBranch({ pool: ctx.pool, signal: runActionDeps.getRunActionSignal() }, { accountId, userId, id: input.params.id!, shownHead: body.shown_head });
+        return await reread(ctx, accountId, userId, input.params.id!);
+      } catch (error) {
+        throw mapError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/v1/work-items/{id}/public-branch/release",
+    operationId: "releasePublicBranch",
+    summary: "Undo Keep: let the cloud update the item's public branch again",
+    description: "Owner or admin, session only. Clears \"Public branch managed by a person\". `released` is false when nothing was set. If the branch has moved since, the next fix round asks again.",
+    minRole: "admin",
+    idempotency: "never",
+    rateClass: "write",
+    paramsSchema: idParamsSchema,
+    responseSchema: releaseResponseSchema,
+    async handler(ctx, input) {
+      const { accountId, userId } = ctx.principal;
+      try {
+        return { released: await releaseBranch({ pool: ctx.pool }, { accountId, userId, workItemId: input.params.id! }) };
+      } catch (error) {
+        throw mapError(error);
+      }
+    },
+  },
+];
+
 export const setupRequestRoutes: RouteEntry[] = [
+  ...answerRoutes,
   {
     method: "GET",
     path: "/api/v1/setup-requests",
@@ -231,7 +324,7 @@ export const setupRequestRoutes: RouteEntry[] = [
     responseSchema: requestSchema,
     async handler(ctx, input) {
       const { accountId, userId } = ctx.principal;
-      return withTenant(ctx.pool, accountId, userId, async (client) => toDto(await getSetupRequest(client, input.params.id!)));
+      return withTenant(ctx.pool, accountId, userId, async (client) => toDto((await withManagedFlag(client, [await getSetupRequest(client, input.params.id!)]))[0]!));
     },
   },
   {

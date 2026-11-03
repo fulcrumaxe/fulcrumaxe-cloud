@@ -57,11 +57,30 @@ export const CHECKING_NOW_WINDOW_MS = 120_000;
  * D#598 P1g-2: the line under a "someone pushed to the branch" request. It never says Mark done (that does not answer this request). Until the choices
  * to keep or replace the branch arrive, it says what works today: withdraw, or put the branch back on GitHub, which closes the request by itself.
  */
-export const COPY_BRANCH_PUSHED = "The cloud will not change this branch. You can withdraw this request, or move the branch back to where the cloud left it on GitHub and this request closes by itself.";
+export const COPY_BRANCH_PUSHED = "The cloud will not change this branch while this is open. Keep their version to leave the branch alone and stop updating it, or replace it with this item's version (you will be asked to confirm). If you move the branch back to where the cloud left it on GitHub, this request closes the next time the item is checked. You can also withdraw it.";
+/** The line an item shows once a person chose to keep the branch. */
+export const COPY_BRANCH_MANAGED = "Public branch managed by a person";
+/**
+ * The line an item shows when a person's Keep lost to a round that was already under way (Keep wins until the round has taken the head; the lease is on the person's head, so a
+ * round that started first still pushes). `{kept}` is their commit and `{head}` the branch's head now, seven characters each. Fixed words: nothing from a commit is put in.
+ */
+export const COPY_BRANCH_UPDATED_BEFORE_KEEP = "The branch was updated before your Keep was seen. It is now at {head}, and the commit you kept ({kept}) is no longer on the branch. It is still in the pull request's history on GitHub. The cloud will not update the branch again unless you undo Keep.";
+/** The reason a Keep that lost shows in place of the one written when the request was raised (that one says nothing was overwritten, which is no longer true). `{target}` is `<branch> on <repository>`. */
+export const COPY_BRANCH_KEPT_LOST_REASON = "Someone pushed to the public branch {target}, and you chose to keep their version.";
+/** What Keep or Replace answers (409) when the request was already answered another way. */
+export const COPY_BRANCH_ANSWER_CLOSED = "This request was already answered another way, so this choice no longer applies. If the branch moved again, a new request appears the next time the item is checked.";
+/** The line shown after a confirmed Replace until the update that uses it lands (nothing publishes outside a fix round, so it can wait). Keep still undoes it. */
+export const COPY_REPLACE_PENDING = "Replace is waiting for the next update. The branch changes when the item's next fix round publishes. Keep their version instead to leave it alone.";
 
 export interface StatusSentenceInput {
   /** Only `branch_pushed_by_person` is read, to give it its own sentence. */
   kind?: SetupRequestKind;
+  /** `branch_pushed_by_person` answered with Keep and still managed: the line the item shows. */
+  branchManaged?: boolean;
+  /** `branch_pushed_by_person` answered with Replace, the authorization not yet used: the line the item shows. */
+  replacePending?: boolean;
+  /** `branch_pushed_by_person` managed by a person whose Keep lost to an update that was already running: the commit they kept and the head the branch is at now. */
+  keptReplaced?: { kept: string; head: string } | null;
   state: SetupRequestState;
   checkKind: SetupRequestCheckKind | null;
   /** The code the last check left on an open request, if any. */
@@ -97,6 +116,7 @@ export interface StatusSentenceOptions {
  */
 export function statusSentence(request: StatusSentenceInput, opts: StatusSentenceOptions): string | null {
   if (request.state === 'done') {
+    if (request.kind === 'branch_pushed_by_person') return request.branchManaged === true ? (request.keptReplaced ? fill(COPY_BRANCH_UPDATED_BEFORE_KEEP, { kept: request.keptReplaced.kept.slice(0, 7), head: request.keptReplaced.head.slice(0, 7) }) : COPY_BRANCH_MANAGED) : request.replacePending === true ? COPY_REPLACE_PENDING : null;
     const resolvedAt = request.resolvedAt ?? null;
     const ranAt = request.checkRanAt ?? null;
     const pending =
