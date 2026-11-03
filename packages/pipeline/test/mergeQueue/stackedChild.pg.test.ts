@@ -142,6 +142,28 @@ describe("D#598 P3c stacked child in the merge queue [pg]", () => {
     expect(kid.g.world.baseChanges).toEqual([]);
   });
 
+  it("S5-j2b: a parent that was cancelled and resumed before the tick leaves the child waiting, and both merge in order", async () => {
+    const { r, parent } = await start();
+    await tenant(r, (c) => cancelWorkItemEntry(c, { accountId: r.accountId, workItemId: parent.workItemId }));
+    const back = await tenant(r, (c) => enqueueEntry(c, { accountId: r.accountId, repoId: r.repoId, workItemId: parent.workItemId, prNumber: 7, headSha: parent.head, approvedAt: T0 }));
+    expect(back.outcome).toBe("requeued");
+    await runQueueTick(r.deps(), r);
+    expect(await r.entry(8)).toMatchObject({ state: "merged" });
+    expect(r.mergeCalls()).toEqual([7, 8]);
+  });
+
+  it("S5-j2b: a child already stopped behind the cancelled parent stays stopped (a person's call) when the parent is resumed; the parent merges alone", async () => {
+    const { r, parent } = await start();
+    await tenant(r, (c) => cancelWorkItemEntry(c, { accountId: r.accountId, workItemId: parent.workItemId }));
+    await runQueueTick(r.deps(), r);
+    expect(await r.entry(8)).toMatchObject({ state: "stopped", reason: "merge_dependency_closed" });
+    const back = await tenant(r, (c) => enqueueEntry(c, { accountId: r.accountId, repoId: r.repoId, workItemId: parent.workItemId, prNumber: 7, headSha: parent.head, approvedAt: T0 }));
+    expect(back.outcome).toBe("requeued");
+    await runQueueTick(r.deps(), r);
+    expect(r.mergeCalls()).toEqual([7]);
+    expect(await r.entry(8)).toMatchObject({ state: "stopped", reason: "merge_dependency_closed" });
+  });
+
   it("P3c-6: a parent whose entry ends closed (its pull request closed unmerged) stops the child the same way", async () => {
     const { r, kid } = await start();
     await tenant(r, (c) => settlePullRequest(c, { accountId: r.accountId, repoId: r.repoId, prNumber: 7, merged: false }));

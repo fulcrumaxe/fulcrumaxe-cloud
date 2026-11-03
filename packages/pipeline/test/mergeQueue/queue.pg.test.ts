@@ -627,6 +627,65 @@ describe("D#519 MQ2 merge queue core [pg]", () => {
       ).rejects.toMatchObject({ code: "entry_pr_mismatch" });
     });
 
+    it("D4: a cancelled entry of a resumed item goes back to queued on its own entry, keeping approved_at; one still halted stays cancelled", async () => {
+      const w = await world();
+      const a = await enqueue(w, 1, 0);
+      await take(w, "h", factsFor([a]));
+      await tenant(w.accountId, (c) => cancelWorkItemEntry(c, { accountId: w.accountId, workItemId: a.workItemId! }));
+      const again = () => tenant(w.accountId, (c) => enqueueEntry(c, { accountId: w.accountId, repoId: w.repoId, workItemId: a.workItemId!, prNumber: 1, headSha: sha("f"), approvedAt: at(500) }));
+      // Halted now (a second cancel after the first): nothing changes.
+      await db.admin.query("UPDATE work_items SET halted_at = now(), halt_action_id = gen_random_uuid() WHERE id = $1", [a.workItemId]);
+      const held = await again();
+      expect(held.outcome).toBe("final");
+      expect(held.entry).toMatchObject({ id: a.id, state: "cancelled" });
+      // Resumed: the same entry is queued again, its slot and work cleared, its reason gone.
+      await db.admin.query("UPDATE work_items SET halted_at = NULL, halt_action_id = NULL WHERE id = $1", [a.workItemId]);
+      const r = await again();
+      expect(r.outcome).toBe("requeued");
+      expect(r.entry).toMatchObject({ id: a.id, state: "queued", headSha: sha("f"), reason: null, slotHolder: null, workKind: null });
+      expect(r.entry.approvedAt.getTime()).toBe(a.approvedAt.getTime());
+      expect(await inFlight(w)).toEqual([]);
+    });
+
+    it("D4b: a cancelled entry is not re-queued for another pull request (entry_pr_mismatch stays), and merged and closed stay final", async () => {
+      const w = await world();
+      const a = await enqueue(w, 1, 0);
+      await tenant(w.accountId, (c) => cancelWorkItemEntry(c, { accountId: w.accountId, workItemId: a.workItemId! }));
+      await expect(
+        tenant(w.accountId, (c) => enqueueEntry(c, { accountId: w.accountId, repoId: w.repoId, workItemId: a.workItemId!, prNumber: 2, headSha: sha("e"), approvedAt: at(1) })),
+      ).rejects.toMatchObject({ code: "entry_pr_mismatch" });
+      for (const merged of [true, false]) {
+        const b = await enqueue(w, merged ? 3 : 4, 0);
+        await tenant(w.accountId, (c) => settlePullRequest(c, { accountId: w.accountId, repoId: w.repoId, prNumber: merged ? 3 : 4, merged }));
+        const r = await tenant(w.accountId, (c) => enqueueEntry(c, { accountId: w.accountId, repoId: w.repoId, workItemId: b.workItemId!, prNumber: merged ? 3 : 4, headSha: sha("e"), approvedAt: at(1) }));
+        expect(r.outcome).toBe("final");
+        expect(r.entry.state).toBe(merged ? "merged" : "closed");
+      }
+    });
+
+    it("guard (0976): only cancelled -> queued leaves a final state; merged and closed to queued, cancelled to anything else, and an approved_at change are refused", async () => {
+      const w = await world();
+      const states = async (prNumber: number, how: "merged" | "closed" | "cancelled") => {
+        const e = await enqueue(w, prNumber, 0);
+        if (how === "cancelled") await tenant(w.accountId, (c) => cancelWorkItemEntry(c, { accountId: w.accountId, workItemId: e.workItemId! }));
+        else await tenant(w.accountId, (c) => settlePullRequest(c, { accountId: w.accountId, repoId: w.repoId, prNumber, merged: how === "merged" }));
+        return e;
+      };
+      const tryUpdate = (id: string, set: string) => db.admin.query(`UPDATE merge_queue_entries SET ${set} WHERE id = $1`, [id]);
+      const merged = await states(11, "merged");
+      const closed = await states(12, "closed");
+      const cancelled = await states(13, "cancelled");
+      await expect(tryUpdate(merged.id, "state = 'queued'")).rejects.toThrow(/final entry does not change/);
+      await expect(tryUpdate(closed.id, "state = 'queued'")).rejects.toThrow(/final entry does not change/);
+      for (const to of ["in_flight", "in_review", "stopped", "merged", "closed", "awaiting_work", "cancelled"]) {
+        await expect(tryUpdate(cancelled.id, `state = '${to}'`)).rejects.toThrow(/final entry does not change/);
+      }
+      await expect(tryUpdate(cancelled.id, "reason = 'repo_disconnected'")).rejects.toThrow(/final entry does not change/);
+      await expect(tryUpdate(cancelled.id, "state = 'queued', approved_at = approved_at + interval '1 minute'")).rejects.toThrow(/approved_at are fixed/);
+      await tryUpdate(cancelled.id, "state = 'queued', reason = NULL");
+      expect((await row(cancelled.id)).state).toBe("queued");
+    });
+
     it("cancelling the item ends its entry and frees the slot", async () => {
       const w = await world();
       const a = await enqueue(w, 1, 0);

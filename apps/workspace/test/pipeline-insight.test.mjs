@@ -99,6 +99,11 @@ describe("recorded pipeline steps", () => {
     expect(held.text).toContain("Merge gate: not merged, a person merges");
     expect(held.reasons).toEqual(["auto-merge is not allowed"]);
     expect(stepView({ kind: "continue_work_item", state: "refused", code: "advance_unavailable", result: null, reasons: [], at: "t" }).text).toBe("Continue request · refused · reason: advance unavailable");
+    // A Continue refused for want of a build slot says so in words (S5-j2b), one sentence for each of the three wait codes.
+    const slot = (code) => stepView({ kind: "continue_work_item", state: "refused", code, result: null, reasons: [], at: "t" }).text;
+    expect(slot("one_build_per_repo_until_d598")).toBe("Continue request · refused · reason: this repository builds one item at a time");
+    expect(slot("waiting_for_build_slot_repo")).toBe("Continue request · refused · reason: this repository's build slots are all taken");
+    expect(slot("waiting_for_build_slot_account")).toBe("Continue request · refused · reason: your account's build slots are all taken");
     expect(stepView(null)).toBeNull();
   });
 

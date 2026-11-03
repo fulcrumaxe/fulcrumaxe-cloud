@@ -201,7 +201,7 @@ export interface CreateWorkerOptions {
   /** D#7 DP7-2d: the GitHub clients a reversal closes a pull request or opens a revert with (apps/web/lib/github/reversalGit.ts). Absent, no reversal is carried out. */
   reversal?: ReversalGitOpeners;
   /** D#483 P1: the stage driver's injected pieces (apps/web owns the workflow and the pipeline). Absent, `advance_work_item` is refused `advance_unavailable`. */
-  advance?: Pick<AdvanceModuleDeps, "startAdvance" | "triage" | "panel" | "spec" | "build" | "buildFailed" | "buildWaitReason" | "prState" | "review" | "lightSpec" | "respec" | "amendSpec"> & { capacity?: (pool: Pool) => NonNullable<AdvanceModuleDeps["capacity"]> };
+  advance?: Pick<AdvanceModuleDeps, "startAdvance" | "triage" | "panel" | "spec" | "build" | "buildFailed" | "buildWaitReason" | "prState" | "review" | "lightSpec" | "respec" | "amendSpec"> & { takeBuildSlot?: <T>(pool: Pool, accountId: string, workItemId: string, move: () => Promise<T>) => Promise<{ granted: true; value: T } | { granted: false; reason: string }>; capacity?: (pool: Pool) => NonNullable<AdvanceModuleDeps["capacity"]> };
 }
 
 /**
@@ -449,7 +449,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     // D#7 DP11c: the performer of `resume_decision` starts one run through the advance module's keyed start and a workflow that follows it.
     const resume = createResumeModule(pools.runnerPool, { startRun: advance.advanceStartRun, startFix: advance.advanceStartFix, startAdvance: options.advance?.startAdvance ?? null });
     // D#2 H14c-3-3b-4: the performer of `continue_work_item` (a customer's Continue on an item parked at a run limit).
-    const continuation = createContinueModule(pools.runnerPool, registry, { resolveRunSeat, startAdvance: options.advance?.startAdvance ?? null });
+    const continuation = createContinueModule(pools.runnerPool, registry, { resolveRunSeat, startAdvance: options.advance?.startAdvance ?? null, takeBuildSlot: options.advance?.takeBuildSlot ? (accountId, workItemId, move) => options.advance!.takeBuildSlot!(pools.runnerPool, accountId, workItemId, move) : null });
     // D#483 S4-b2b: the claim verifier's sweep. A sandbox repository's run shares the preview's starter (it refuses a queued run). S4-b2c: a cloud-verified
     // repository's run is a runner job and shares the advance module's starter (its wait is the next pass's status read, which credits queued time).
     const verifySweep =

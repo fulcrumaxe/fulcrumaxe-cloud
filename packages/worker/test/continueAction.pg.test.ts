@@ -5,7 +5,7 @@ import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { recordStage, startAgentRun, writeRunStatus, type ExecutionTargetRegistry } from "@fx/runner";
-import { continueAfterLimit, runActionSteps, type RunActionsWorker } from "@fx/pipeline";
+import { continueAfterLimit, readBuildWaitReason, runActionSteps, takeBuildSlot, type RunActionsWorker } from "@fx/pipeline";
 import { createFakeExecutionTarget } from "../../pipeline/test/build/helpers/fakeExecutionTarget.js";
 import { createSeatResolver, type SeatRequest, type SeatResult } from "../src/seat.js";
 import { createRunActionFacade, type PerformResult } from "../src/runActions.js";
@@ -418,6 +418,71 @@ describe("continue_work_item performer [pg]", { timeout: 90_000 }, () => {
         holder.release();
       }
       seen.push("busy");
+    });
+  });
+
+  describe("S5-j2b: the build slot a Continue needs", () => {
+    /** The same performer with the pipeline's real slot claim (or a stand-in for it). */
+    const withClaim = (w: W, claim?: NonNullable<Parameters<typeof createContinueModule>[2]["takeBuildSlot"]>) =>
+      createContinueModule(writerPool, w.registry, {
+        resolveRunSeat: resolve,
+        startAdvance: async (args: AdvanceStartArgs) => void w.advances.push(args),
+        takeBuildSlot: claim ?? ((accountId, itemId, move) => takeBuildSlot(writerPool, accountId, itemId, move)),
+      });
+    const newRepo = async (w: W) => {
+      const id = randomUUID();
+      await admin.query("INSERT INTO repos (id, account_id, gh_repo_id, product, execution_mode, gh_owner, gh_name) VALUES ($1, $2, $3, 'team', 'sandbox', 'acme', $4)", [id, w.a.accountId, Math.floor(Math.random() * 1_000_000_000), `w${id.slice(0, 8)}`]);
+      return id;
+    };
+    let ghNumber = 7000;
+    const item = async (w: W, repoId: string, stage: string) => {
+      const id = randomUUID();
+      await admin.query("INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number) VALUES ($1, $2, $3, 'feature', 'internal', $4, $5)", [id, w.a.accountId, repoId, stage, ghNumber++]);
+      return id;
+    };
+    const limit = (w: W, repoId: string | null, maxBuilds: number) =>
+      admin.query("INSERT INTO build_concurrency_settings (account_id, repo_id, max_builds, version, changed_by) VALUES ($1, $2, $3, 1, $4)", [w.a.accountId, repoId, maxBuilds, w.a.userId]);
+    const refusedForSlot = async (w: W, module: ReturnType<typeof withClaim>, code: string) => {
+      const before = { runs: await runs(w), reservations: await reservations(w) };
+      await refusedWith(module.performContinueWorkItem(await request(w)), code);
+      await untouched(w, before);
+      expect(w.fake.calls.filter((c) => c.method === "resume")).toEqual([]);
+      expect(await stageOf(w)).toBe("needs_human");
+    };
+
+    it("the repository's slots are all taken: refused waiting_for_build_slot_repo, no run, reservation, stage move or workflow", async () => {
+      const w = await world();
+      await parked(w);
+      await limit(w, w.a.repoId, 1);
+      await item(w, w.a.repoId, "pr_opened");
+      await refusedForSlot(w, withClaim(w), "waiting_for_build_slot_repo");
+    });
+
+    it("the account's slots are all taken (by another repository): refused waiting_for_build_slot_account, nothing started", async () => {
+      const w = await world();
+      await parked(w);
+      await limit(w, null, 1);
+      await item(w, await newRepo(w), "in_progress");
+      await refusedForSlot(w, withClaim(w), "waiting_for_build_slot_account");
+    });
+
+    it("the one-build-per-repository wait is refused with its own code and the library is never called (the claim's stand-in answers it)", async () => {
+      const w = await world();
+      await parked(w);
+      await refusedForSlot(w, withClaim(w, async () => ({ granted: false, reason: "one_build_per_repo_until_d598" })), "one_build_per_repo_until_d598");
+    });
+
+    it("a free slot is claimed: the run starts, the item is In progress, and the next item in the repository now waits", async () => {
+      const w = await world();
+      await parked(w);
+      await limit(w, w.a.repoId, 1);
+      const next = await item(w, w.a.repoId, "spec_ready");
+      expect(await readBuildWaitReason(writerPool, w.a.accountId, next)).toBeNull();
+      const out = await withClaim(w).performContinueWorkItem(await request(w));
+      expect(out).toMatchObject({ result: "done", outcome: { run_id: expect.any(String) } });
+      expect(await stageOf(w)).toBe("in_progress");
+      expect(await runs(w)).toBe(2);
+      expect(await readBuildWaitReason(writerPool, w.a.accountId, next)).toBe("waiting_for_build_slot_repo");
     });
   });
 
