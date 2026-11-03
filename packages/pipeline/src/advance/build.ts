@@ -531,7 +531,7 @@ export async function startBuildForItem(
   // D#600 CX-5b: the item's rules as they stand now (its own over the repository's). The excludes only add a prompt line here (the settings that refuse the reads are written
   // at each launch, from the rules then); the pins are read on the cloud side at the run's start commit and go in full. A runner run gets neither from here (CX-5c).
   const rules = sandboxPrompt && !prior ? await withTenant(pool, accountId, (client) => readItemRules(client, accountId, workItemId)) : [];
-  // An exclude wins over a pin (an admin's exclude is never bypassed by a member's pin): a pin under any exclude of the resolved set is never fetched.
+  // An exclude wins over a pin within the resolved set (item scope overrides repo scope, and excludes are not a security boundary): a pin under any exclude of that set is never fetched.
   const excludePatterns = rules.filter((r) => r.kind === "exclude").map((r) => r.path);
   const allPins = rules.filter((r) => r.kind === "pin").map((r) => r.path);
   const { readable: pinPaths, excluded: excludedPins, limited: limitedPins } = splitPinsByExcludes(allPins, excludePatterns);

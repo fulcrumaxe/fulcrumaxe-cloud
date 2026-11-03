@@ -1,6 +1,6 @@
-import { splitPinsByExcludes } from "@fulcrumaxe/runner-protocol";
+import { MAX_JOB_PINS, splitPinsByExcludes } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { ContextRuleError, mapRuleDbError, readItemRules, readRepoRules, resolveContextRules, type ContextRule } from "@fx/core/src/context/contextRules.js";
+import { CONTEXT_EXCLUDES_MAX, ContextRuleError, mapRuleDbError, readItemRules, readRepoRules, resolveContextRules, type ContextRule } from "@fx/core/src/context/contextRules.js";
 import { effectiveContextBudget } from "./contextBudget.js";
 import { DEFAULT_CONTEXT_RULE_TIMEOUTS, boundTransaction, lockRepoRules, readRepoFacts, readTreeSizes, rolledBack, type RepoFacts, type SaveContextRuleDeps } from "./contextRulesSave.js";
 
@@ -13,7 +13,7 @@ import { DEFAULT_CONTEXT_RULE_TIMEOUTS, boundTransaction, lockRepoRules, readRep
  * after, and the warning fires only when the removal adds bytes AND the result is over budget. Sizes are needed only when the repository has a pin at all.
  * Like a save, the GitHub read is made with no connection held: a first transaction reads what decides whether to ask (and is rolled back), the tree is
  * read, and a second transaction takes the repository lock, measures and removes. If GitHub cannot be asked the warning is skipped and the removal goes
- * ahead (it is advice). The audit row ('context_rule.removed') is written by the definer, only on a real removal, in the removing transaction.
+ * ahead (it is advice). The counts are not advice: a removal that would leave a set over MAX_JOB_PINS pins or CONTEXT_EXCLUDES_MAX excludes is refused whatever `confirm` says. The audit row ('context_rule.removed') is written by the definer, only on a real removal, in the removing transaction.
  */
 const liveBytes = (rules: readonly ContextRule[], sizes: ReadonlyMap<string, number>): number =>
   splitPinsByExcludes(rules.filter((r) => r.kind === "pin").map((r) => r.path), rules.filter((r) => r.kind === "exclude").map((r) => r.path)).readable.reduce((t, p) => t + (sizes.get(p) ?? 0), 0);
@@ -40,15 +40,21 @@ export async function removeContextRuleChecked(deps: SaveContextRuleDeps, who: {
     }
     await withTenant(deps.pool, who.accountId, who.userId, async (client) => {
       await boundTransaction(client, timeouts);
-      if (ask !== null && sizes !== null) {
-        const repoId = ask.facts!.repo_id!;
-        await lockRepoRules(client, repoId);
-        const before = await readItemRules(client, who.accountId, ask.itemId);
-        const after = resolveContextRules(await readRepoRules(client, who.accountId, repoId), before.filter((r) => r.scope === "item" && r.id !== ruleId));
-        const fresh = await readRepoFacts(client, who.accountId, { scope: "item", workItemId: ask.itemId });
-        const budget = effectiveContextBudget(deps.budgetRole ?? "executor", fresh?.context_budget_bytes == null ? null : Number(fresh.context_budget_bytes));
-        const added = liveBytes(after, sizes);
-        if (added > budget && added > liveBytes(before, sizes)) throw new ContextRuleError("exclude_readds_pins");
+      // Counts, for any item rule: removing it can bring a same-path repository rule back. A set over the signed job's limits can never run, so this is refused
+      // outright, `confirm` or not, under the same lock as the byte measure.
+      const item = (await client.query<{ work_item_id: string }>(`SELECT work_item_id FROM context_rules WHERE account_id = $1 AND id = $2 AND scope = 'item'`, [who.accountId, ruleId])).rows[0];
+      const fresh = item === undefined ? undefined : await readRepoFacts(client, who.accountId, { scope: "item", workItemId: item.work_item_id });
+      if (item !== undefined && fresh?.repo_id) {
+        await lockRepoRules(client, fresh.repo_id);
+        const before = await readItemRules(client, who.accountId, item.work_item_id);
+        const after = resolveContextRules(await readRepoRules(client, who.accountId, fresh.repo_id), before.filter((r) => r.scope === "item" && r.id !== ruleId));
+        if (after.filter((r) => r.kind === "pin").length > MAX_JOB_PINS) throw new ContextRuleError("pins_exceed_ceiling");
+        if (after.filter((r) => r.kind === "exclude").length > CONTEXT_EXCLUDES_MAX) throw new ContextRuleError("excludes_exceed_cap");
+        if (ask !== null && sizes !== null) {
+          const budget = effectiveContextBudget(deps.budgetRole ?? "executor", fresh.context_budget_bytes == null ? null : Number(fresh.context_budget_bytes));
+          const added = liveBytes(after, sizes);
+          if (added > budget && added > liveBytes(before, sizes)) throw new ContextRuleError("exclude_readds_pins");
+        }
       }
       await client.query("SELECT context_rule_remove($1::uuid)", [ruleId]);
     });
