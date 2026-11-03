@@ -882,6 +882,9 @@ importers:
       '@fx/runner':
         specifier: workspace:*
         version: link:../runner
+      '@fx/spend':
+        specifier: workspace:*
+        version: link:../spend
       '@fx/test-guard':
         specifier: workspace:*
         version: link:../test-guard

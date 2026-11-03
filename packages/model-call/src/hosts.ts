@@ -3,6 +3,8 @@
 export const MODEL_HOSTS = Object.freeze({ ai_gateway: 'ai-gateway.vercel.sh', anthropic: 'api.anthropic.com' });
 type Provider = keyof typeof MODEL_HOSTS;
 const DEFAULT_MODEL: Record<Provider, string> = { ai_gateway: 'anthropic/claude-sonnet-5.5', anthropic: 'claude-sonnet-5-5' };
+export const DEFAULT_GATEWAY_MODEL = DEFAULT_MODEL.ai_gateway;
+// Each id maps to its own plan-data price row or to nothing: a sibling's price is never borrowed (an id with no exact row is `unpriced_model`).
 
 export interface ProviderMessage {
   role: 'user' | 'assistant';
@@ -54,13 +56,62 @@ export interface StreamRequestParams extends Omit<RequestParams, 'messages'> {
   tools: StreamToolDef[];
 }
 
-/** The streaming, tool-carrying request (Anthropic messages shape only; the gateway shape is CC-5b). Called only inside the key-holding closure. */
+/**
+ * The one table from a gateway model id to the priced model id of the plan-data price source (no price is compiled in: the id is the key).
+ * An id that is not here is unpriced: the caller answers `assistant_unpriced` and no call is made (R-597-C2-5).
+ */
+const GATEWAY_PRICED_MODEL: Readonly<Record<string, string>> = Object.freeze({
+  'anthropic/claude-haiku-4.5': 'haiku-4.5',
+  'anthropic/claude-sonnet-5': 'sonnet-5',
+  'anthropic/claude-opus-5': 'opus-5',
+});
+export function gatewayPricedModel(gatewayModelId: string): string | null {
+  return Object.hasOwn(GATEWAY_PRICED_MODEL, gatewayModelId) ? GATEWAY_PRICED_MODEL[gatewayModelId]! : null;
+}
+
+const STREAM_UA = 'fulcrumaxe-cloud-model-call/0.1';
+
+// The chat-completions form of a messages list: tool_use blocks become assistant tool_calls, tool_result blocks become role "tool" messages.
+function gatewayMessages(system: string, messages: StreamMessage[]): unknown[] {
+  const out: unknown[] = [{ role: 'system', content: system }];
+  for (const m of messages) {
+    if (typeof m.content === 'string') {
+      out.push({ role: m.role, content: m.content });
+      continue;
+    }
+    if (m.role === 'assistant') {
+      const text = m.content.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('');
+      const calls = m.content.flatMap((b) => (b.type === 'tool_use' ? [{ id: b.id, type: 'function', function: { name: b.name, arguments: JSON.stringify(b.input) } }] : []));
+      out.push({ role: 'assistant', content: text === '' && calls.length > 0 ? null : text, ...(calls.length > 0 ? { tool_calls: calls } : {}) });
+      continue;
+    }
+    for (const b of m.content) {
+      if (b.type === 'tool_result') out.push({ role: 'tool', tool_call_id: b.tool_use_id, content: b.content });
+      else if (b.type === 'text') out.push({ role: 'user', content: b.text });
+    }
+  }
+  return out;
+}
+
+/** The streaming, tool-carrying request for either provider shape. Called only inside the key-holding closure. Null when the gateway model id has no priced mapping. */
 export function streamRequestFor(provider: string, key: string, p: StreamRequestParams): { url: string; headers: Record<string, string>; body: string } | null {
-  if (provider !== 'anthropic') return null;
+  // Only the two shapes with a streaming path; any other provider row (openai, an OAuth kind, an unknown name) sends nothing.
+  if (provider !== 'anthropic' && provider !== 'ai_gateway') return null;
+  const host = hostFor(provider);
+  if (provider === 'anthropic') {
+    return {
+      url: `https://${host}/v1/messages`,
+      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json', 'user-agent': STREAM_UA, accept: 'text/event-stream' },
+      body: JSON.stringify({ model: p.model ?? DEFAULT_MODEL.anthropic, max_tokens: p.maxOutputTokens, system: p.system, messages: p.messages, stream: true, ...(p.tools.length > 0 ? { tools: p.tools } : {}) }),
+    };
+  }
+  const model = p.model ?? DEFAULT_MODEL.ai_gateway;
+  if (gatewayPricedModel(model) === null) return null;
+  const tools = p.tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } }));
   return {
-    url: `https://${hostFor(provider)}/v1/messages`,
-    headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json', 'user-agent': 'fulcrumaxe-cloud-model-call/0.1', accept: 'text/event-stream' },
-    body: JSON.stringify({ model: p.model ?? DEFAULT_MODEL.anthropic, max_tokens: p.maxOutputTokens, system: p.system, messages: p.messages, stream: true, ...(p.tools.length > 0 ? { tools: p.tools } : {}) }),
+    url: `https://${host}/v1/chat/completions`,
+    headers: { Authorization: `Bearer ${key}`, 'content-type': 'application/json', 'user-agent': STREAM_UA, accept: 'text/event-stream' },
+    body: JSON.stringify({ model, max_tokens: p.maxOutputTokens, messages: gatewayMessages(p.system, p.messages), stream: true, stream_options: { include_usage: true }, ...(tools.length > 0 ? { tools } : {}) }),
   };
 }
 
