@@ -885,6 +885,9 @@ importers:
       '@fx/db':
         specifier: workspace:*
         version: link:../db
+      '@fx/plan-data':
+        specifier: workspace:*
+        version: link:../plan-data
       '@fx/runner':
         specifier: workspace:*
         version: link:../runner

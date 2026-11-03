@@ -23,6 +23,7 @@
   "devDependencies": {
     "@fx/core": "workspace:*",
     "@fx/db": "workspace:*",
+    "@fx/plan-data": "workspace:*",
     "@fx/runner": "workspace:*",
     "@fx/spend": "workspace:*",
     "@fx/test-guard": "workspace:*",

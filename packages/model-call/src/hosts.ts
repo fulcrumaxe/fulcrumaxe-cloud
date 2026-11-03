@@ -63,6 +63,8 @@ export interface StreamRequestParams extends Omit<RequestParams, 'messages'> {
 const GATEWAY_PRICED_MODEL: Readonly<Record<string, string>> = Object.freeze({
   'anthropic/claude-haiku-4.5': 'haiku-4.5',
   'anthropic/claude-sonnet-5': 'sonnet-5',
+  // Its own exact key, never the sonnet-5 row: with no 'sonnet-5.5' row in the plan data the caller's price lookup misses and the turn is unpriced.
+  'anthropic/claude-sonnet-5.5': 'sonnet-5.5',
   'anthropic/claude-opus-5': 'opus-5',
 });
 export function gatewayPricedModel(gatewayModelId: string): string | null {

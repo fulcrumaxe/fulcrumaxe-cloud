@@ -98,7 +98,8 @@ export const planDataSchema = z
     pricing: z
       .object({
         fetchedAt: z.string().min(1),
-        claude: z.object({ 'haiku-4.5': modelRate, 'sonnet-5': modelRate, 'opus-5': modelRate }).strict(),
+        // 'sonnet-5.5' is optional: data that predates its row still loads, and the gateway's default model is unpriced (refused) until the row exists.
+        claude: z.object({ 'haiku-4.5': modelRate, 'sonnet-5': modelRate, 'sonnet-5.5': modelRate.optional(), 'opus-5': modelRate }).strict(),
         openai: z.object({ 'gpt-5.3-codex': sourcedModelRate }).strict(),
         sandbox: z
           .object({ cpuUsdPerHour: usd, memUsdPerGbHour: usd, dataTransferUsdPerGb: usd })
