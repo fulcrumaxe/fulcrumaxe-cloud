@@ -84,6 +84,13 @@ describe('R6: what counts as stalled', () => {
     expect(s!.why).toBe('This item still has planned pull requests in progress, so the new Spec does not build it. They stay as they are: decide what happens to them, then start the work again.');
   });
 
+  it('an answer to the public-branch request that finds the fix rounds used up says so and what to do', () => {
+    const s = classifyStall(facts({ stage: 'needs_human', last: last('stopped', 'branch_answer_rounds_used') }));
+    expect(s).not.toBeNull();
+    expect(s!.why).toContain('fix rounds are used up');
+    expect(s!.why).toContain('Keep their version');
+  });
+
   it('an escalation to a person is a stop, in words', () => {
     const s = classifyStall(facts({ stage: 'needs_human', last: last('escalated', 'max_fix_rounds') }));
     expect(s).toMatchObject({ code: 'handed_over' });

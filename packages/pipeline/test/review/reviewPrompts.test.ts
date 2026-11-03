@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { UNTRUSTED_DELIMITER_END, UNTRUSTED_DELIMITER_START } from "@fx/trust";
-import { ReviewPromptInputError, buildFixPrompt, buildReviewPrompt, isSafeRef, type ReviewPromptInput } from "../../src/review/reviewPrompts.js";
+import { ReviewPromptInputError, buildFixPrompt, REPLACE_ROUND_SENTENCE, buildReviewPrompt, isSafeRef, type ReviewPromptInput } from "../../src/review/reviewPrompts.js";
 
 /** D#483 P3: the review and fix prompts. Built from platform-held values; everything a person or a model wrote is fenced. */
 const HEAD = "a".repeat(40);
@@ -167,6 +167,15 @@ describe("buildFixPrompt", () => {
     expect(buildFixPrompt({ ...FIX, findings: [], person: true, runtime: "runner" })).toContain("A person who owns this work asked for changes");
     expect(buildFixPrompt({ ...FIX, findings: [], person: true, crossSide: true })).toContain("at the commit the person asked about");
     expect(buildFixPrompt(FIX)).toContain("The reviewers asked for changes");
+  });
+
+  it("the Replace round (D#598 P1g-3a-2) is the fixed sentence in all three variants: no person, no note, no findings, no reviewer words", () => {
+    for (const v of [{}, { runtime: "runner" as const }, { crossSide: true }]) {
+      const p = buildFixPrompt({ ...FIX, ...v, replace: true });
+      expect(p).toContain(REPLACE_ROUND_SENTENCE);
+      expect(p).toContain("An earlier fix round finished on pull request #41");
+      expect(p).not.toMatch(/The reviewers asked|person who owns|their note|the notes after|Fix every finding|REVIEWER FINDINGS|off by one/);
+    }
   });
 
   it("fences each reviewer's findings on their own and defangs a forged envelope in them", () => {

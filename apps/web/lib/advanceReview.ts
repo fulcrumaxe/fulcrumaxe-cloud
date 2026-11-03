@@ -35,7 +35,7 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
       const r = await loadReviewContext(pool, accountId, workItemId);
       if (!r.ok) return { ok: false, reason: r.reason };
       const c = r.ctx;
-      return { ok: true, ctx: { workItemId: c.workItemId, stage: c.stage, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, branch: c.branch, ...(c.child ? { child: true as const } : {}), tier: c.tier, specVersion: c.specVersion, fixRoundsStarted: c.fixRoundsStarted, debaterEnabled: debaterEnabledFor(c.debaterMode, c.tier), personRequestPending: c.personRequestPending } };
+      return { ok: true, ctx: { workItemId: c.workItemId, stage: c.stage, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, branch: c.branch, ...(c.child ? { child: true as const } : {}), tier: c.tier, specVersion: c.specVersion, fixRoundsStarted: c.fixRoundsStarted, debaterEnabled: debaterEnabledFor(c.debaterMode, c.tier), personRequestPending: c.personRequestPending, branchAnswerPending: c.branchAnswerPending } };
     },
     recordRound: (pool, registry, input) =>
       recordRound(

@@ -103,6 +103,8 @@ interface World {
   realDecide?: boolean;
   /** A person's Request changes waits for its fix round (the review load says so), and the fix rounds already started. */
   personRequest?: boolean;
+  /** D#598 P1g-3a-2: a person answered the request of a refused update (the review load says so). */
+  branchAnswer?: boolean;
   fixRoundsStarted?: number;
   /** D#483 S5-b2a part 2: the fix-round gate's answer, per call (the input is what the workflow passes). Absent: the item is not gated. */
   fixGate?: (input: { personFiled: boolean }) => { proceed: boolean; how?: string; announce?: boolean; reason?: string; blockedBy?: string | null };
@@ -140,7 +142,7 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
     advanceLoadItem: vi.fn(async () => item),
     advanceLoadReview: vi.fn(async () =>
       w.loadReview.ok
-        ? { ok: true as const, ctx: { workItemId: ITEM, stage: "pr_opened", repoId: REPO, owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", tier: w.tier, specVersion: w.loadReview.specVersion ?? w.pinned, debaterEnabled: w.debaterEnabled, executionMode: w.mode ?? "sandbox", recordedPr: w.recorded ?? null, fixRoundsStarted: w.fixRoundsStarted ?? 0, ...(w.personRequest ? { personRequestPending: true } : {}) } }
+        ? { ok: true as const, ctx: { workItemId: ITEM, stage: "pr_opened", repoId: REPO, owner: "acme", name: "widgets", issue: 7, branch: "fx/issue-7", tier: w.tier, specVersion: w.loadReview.specVersion ?? w.pinned, debaterEnabled: w.debaterEnabled, executionMode: w.mode ?? "sandbox", recordedPr: w.recorded ?? null, fixRoundsStarted: w.fixRoundsStarted ?? 0, ...(w.personRequest ? { personRequestPending: true } : {}), ...(w.branchAnswer ? { branchAnswerPending: true } : {}) } }
         : { ok: false as const, reason: w.loadReview.reason ?? "no_spec" },
     ),
     advanceLoadSpecText: vi.fn(async (_who: unknown, v: number) => (v === w.pinned ? { version: v, body: "SPEC BODY: the footer shows the year." } : null)),
@@ -1792,6 +1794,38 @@ describe("Request changes: a person's fix round comes first", () => {
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "fix_refused", detail: "max_fix_rounds" });
     expect(t.started).toEqual([]);
     expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "max_fix_rounds" }));
+  });
+
+  // D#598 P1g-3a-2: an item at Needs a person after a refused update, whose "someone pushed" request a person answered (Replace or Keep).
+  describe("an answer to a refused update's request starts ONE fix round before any review", () => {
+    it("the round is the person's, on the current head, numbered after the rounds used; then the reviewers check the new head and the merge is checked", async () => {
+      const t = setup(fresh({ branchAnswer: true, fixRoundsStarted: 1, listRuns: true, realDecide: true, verdict: () => PASS }), AT_CHANGES);
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged", detail: undefined });
+      expect(t.worker.advanceStartFix).toHaveBeenCalledTimes(1);
+      const req = t.worker.advanceStartFix.mock.calls[0]![1];
+      expect(req).toMatchObject({ headSha: H1, round: 2, person: true });
+      // The Replace round's prompt is the fixed sentence: nothing about a person's request or a note, no findings. Only this round carries it.
+      expect(req.prompt.startsWith("You are the executor. An earlier fix round finished on pull request #41")).toBe(true);
+      expect(req.prompt).toContain("a person agreed to replace");
+      expect(req.prompt).not.toMatch(/person who owns|their note|REVIEWER FINDINGS/);
+      expect(t.started.filter((s) => s.headSha === H1)).toEqual([]);
+      expect(t.started.filter((s) => s.headSha === H2).length).toBeGreaterThan(0);
+    });
+
+    it("a round with nothing to add is not a failure (the refused round's change is already on the branch): the review follows on the same head, with no stop", async () => {
+      const t = setup(fresh({ branchAnswer: true, fixPushes: null, listRuns: true, realDecide: true, verdict: () => PASS }), AT_CHANGES);
+      expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+      expect(t.worker.advanceStartFix).toHaveBeenCalledTimes(1);
+      expect(t.started.filter((s) => s.headSha === H1).length).toBeGreaterThan(0);
+      expect(t.worker.advanceRecordEvent).not.toHaveBeenCalledWith(WHO, expect.objectContaining({ code: "person_fix_pushed_nothing" }));
+    });
+
+    it("rounds used up: the stop has its own code, nothing is reviewed, the answer is not spent", async () => {
+      const t = setup(fresh({ branchAnswer: true, fix: { ok: false, reason: "max_fix_rounds" } }), AT_CHANGES);
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "fix_refused", detail: "max_fix_rounds" });
+      expect(t.started).toEqual([]);
+      expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "branch_answer_rounds_used" }));
+    });
   });
 
   it("with no request pending, Continue the review runs the reviewers first, as before", async () => {
