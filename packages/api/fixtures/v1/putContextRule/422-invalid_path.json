@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "invalid_path",
+    "message": "that path cannot be used: it must be a repository-relative path, and a pin cannot contain * or ?",
+    "request_id": "33333333-3333-4333-8333-333333333333"
+  }
+}

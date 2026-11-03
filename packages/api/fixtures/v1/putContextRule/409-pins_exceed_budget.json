@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "pins_exceed_budget",
+    "message": "the pinned files would not fit the repository's context budget",
+    "request_id": "33333333-3333-4333-8333-333333333333"
+  }
+}

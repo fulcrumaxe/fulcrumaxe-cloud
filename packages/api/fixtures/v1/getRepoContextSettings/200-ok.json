@@ -1,0 +1,7 @@
+{
+  "context_budget_bytes": null,
+  "min_bytes": 4096,
+  "max_bytes": 2097152,
+  "role_defaults": { "executor": 35840, "fix": 43008, "code-reviewer": 26624, "acceptance-tester": 27648, "security-reviewer": 27648, "debater": 34816 },
+  "effective_by_role": { "executor": 35840, "fix": 43008, "code-reviewer": 26624, "acceptance-tester": 27648, "security-reviewer": 27648, "debater": 34816 }
+}
