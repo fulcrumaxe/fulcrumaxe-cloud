@@ -1,4 +1,4 @@
-import type { SetupRequestCheckKind, SetupRequestState, TargetEnvironment } from './kinds.js';
+import type { SetupRequestCheckKind, SetupRequestKind, SetupRequestState, TargetEnvironment } from './kinds.js';
 
 /**
  * D#598 P8b: the words a person reads about a setup request's check. One constant per sentence, filled only from structured fields (the
@@ -53,7 +53,15 @@ export function repausedSentence(code: CheckReasonCode, fields: { name: string; 
 /** How long "Checking now." is believed after Mark done: a check that has not answered by then is not still running (its caller died). */
 export const CHECKING_NOW_WINDOW_MS = 120_000;
 
+/**
+ * D#598 P1g-2: the line under a "someone pushed to the branch" request. It never says Mark done (that does not answer this request). Until the choices
+ * to keep or replace the branch arrive, it says what works today: withdraw, or put the branch back on GitHub, which closes the request by itself.
+ */
+export const COPY_BRANCH_PUSHED = "The cloud will not change this branch. You can withdraw this request, or move the branch back to where the cloud left it on GitHub and this request closes by itself.";
+
 export interface StatusSentenceInput {
+  /** Only `branch_pushed_by_person` is read, to give it its own sentence. */
+  kind?: SetupRequestKind;
   state: SetupRequestState;
   checkKind: SetupRequestCheckKind | null;
   /** The code the last check left on an open request, if any. */
@@ -98,6 +106,7 @@ export function statusSentence(request: StatusSentenceInput, opts: StatusSentenc
     return pending ? COPY_CHECKING_NOW : null;
   }
   if (request.state !== 'open') return null;
+  if (request.kind === 'branch_pushed_by_person') return COPY_BRANCH_PUSHED;
   if (request.checkKind === null || !opts.checksAvailable || request.checkReason === 'check_unavailable' || request.checkReason === 'token_rejected') return COPY_WAITING_UNCHECKED;
   if ((request.repausedAt ?? null) !== null && isCheckReasonCode(request.checkReason) && request.target !== undefined && request.targetEnvironment !== undefined) {
     return repausedSentence(request.checkReason, { name: request.envName ?? request.target, project: request.target, environment: request.targetEnvironment });

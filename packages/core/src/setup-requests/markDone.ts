@@ -4,7 +4,7 @@ import type { RunActionSignal } from '../runActions/signal.js';
 import { markWorkPending } from '../pendingWork.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { runSetupRequestCheck, type VercelEnvSource } from './checks.js';
-import { markSetupRequestDoneInTx, reopenSetupRequest, stampMarkDoneCheck, type SetupRequest } from './store.js';
+import { SetupRequestError, getSetupRequest, markSetupRequestDoneInTx, reopenSetupRequest, stampMarkDoneCheck, type SetupRequest } from './store.js';
 import { UNREADABLE_REASONS } from './copy.js';
 
 /**
@@ -51,7 +51,14 @@ export interface MarkDoneResult {
 
 export async function markSetupRequestDone(deps: MarkDoneDeps, input: { accountId: string; userId: string; id: string }): Promise<MarkDoneResult> {
   const log = deps.log ?? ((line: string) => console.info(line));
-  const marked = await withTenant(deps.pool, input.accountId, input.userId, undefined, (client) => markSetupRequestDoneInTx(client, { id: input.id, userId: input.userId }));
+  const marked = await withTenant(deps.pool, input.accountId, input.userId, undefined, async (client) => {
+    // D#598 P1g-2: a person's word that "it is done" does not answer a branch someone pushed to (nothing would re-read the branch). Refused before anything is written;
+    // the person's own choices for it (Keep, Replace, Withdraw) are separate.
+    if ((await getSetupRequest(client, input.id)).kind === 'branch_pushed_by_person') {
+      throw new SetupRequestError('not_markable', 'this request is answered by keeping or replacing the branch, or by withdrawing it, not by marking it done');
+    }
+    return markSetupRequestDoneInTx(client, { id: input.id, userId: input.userId });
+  });
   if (!marked.changed) return { request: marked.request, changed: false, restart: null, check: 'none', foldedInto: null };
   if (marked.restart !== null && !marked.restart.replayed) {
     if (deps.signal) await announceNewRunAction({ signal: deps.signal }, { actionId: marked.restart.actionId, accountId: input.accountId, kind: 'advance_work_item' });

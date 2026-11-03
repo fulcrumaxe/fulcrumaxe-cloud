@@ -11,6 +11,7 @@ import { TERMINAL_WORK_ITEM_STAGES } from "@fx/core/src/work-items/stages.js";
 import { resolveBuildIdentity, type BuildIdentity, type BuildPurpose } from "@fx/core/src/work-items/buildIdentity.js";
 import { cleanWorkItemTitle } from "@fx/core/src/work-items/title.js";
 import { FIX_BASE_EVENT, recordRepublishRefusal } from "./fixRoundBase.js";
+import { raiseAfterLeaseFailure } from "./fixRoundHeads.js";
 
 // The retry predicate and the attempt limit live in @fx/core (the item view and the operator actions list themselves from them); re-exported so this module keeps its names.
 export { PUBLISH_ATTEMPT_LIMIT, mayRetryPublish, type RetryFacts };
@@ -621,6 +622,8 @@ async function republish(deps: PlanePublishDeps, accountId: string, facts: Facts
   if (end.kind === "refused") logPublishRefused(facts.workItemId, end.label, end.failureClass);
   const cost = sandboxRunCost([{ ownDurationMs: seconds * 1000 }], { vcpus: PLANE_PUBLISH_VCPUS });
   await finish(end, { failed: crashed, usd: cost.usd, envelope: { publish: { attempt_no: attemptNo, kind: "fix_round", outcome: end.kind === "updated" ? "updated" : end.label, seconds, vcpus: PLANE_PUBLISH_VCPUS, usd: cost.usd, basis: cost.basis, private_head: head } } });
+  // D#598 P1g-2: a lease that failed because a person pushed to the branch is asked about, not just reported.
+  if (end.kind === "refused" && end.code === REPUBLISH_BRANCH_MOVED) await raiseAfterLeaseFailure(deps.pool, deps.hosted.branchHead, who);
   return end.kind === "updated" ? { kind: "updated", attemptNo } : { kind: "refused", code: end.code, attemptNo };
 }
 

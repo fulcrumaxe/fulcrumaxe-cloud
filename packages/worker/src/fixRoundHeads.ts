@@ -3,6 +3,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
 import type { BranchSyncOutcome } from "@fx/github";
 import { PUBLIC_BRANCH_MOVED, PUBLIC_HEAD_UNAVAILABLE, readPlanePush, type BranchHeadPort } from "@fx/core/src/repos/planePushRecord.js";
+import { clearBranchPushedByPerson, raiseBranchPushedByPerson } from "@fx/core/src/setup-requests/branchPushed.js";
 
 /**
  * FIXROUND-REFRESH-HEAD: what a fix round checks on GitHub before it starts anything.
@@ -60,7 +61,11 @@ export async function checkPublicBranch(pool: Pool, ports: FixRoundHeadPorts | n
   }
   // Anything that is neither a commit id nor "no such branch" is not an answer: fail closed.
   if (live !== null && !SHA.test(live)) return PUBLIC_HEAD_UNAVAILABLE;
-  if (live === row.headSha) return null;
+  if (live === row.headSha) {
+    // D#598 P1g-2: a person reset the branch to where the platform left it: the request they were asked about closes, and the pull request is updated again.
+    if (row.state === "waiting_person_pushed") await withTenant(pool, who.accountId, (client) => clearBranchPushedByPerson(client, { workItemId: who.workItemId }));
+    return null;
+  }
   await withTenant(pool, who.accountId, (client) =>
     recordDriverEvent(client, who.accountId, {
       workItemId: who.workItemId,
@@ -72,6 +77,9 @@ export async function checkPublicBranch(pool: Pool, ports: FixRoundHeadPorts | n
       ...(row.prNumber !== null ? { prNumber: row.prNumber } : {}),
     }),
   );
+  // D#598 P1g-2: a branch that exists and is not where the platform left it is asked about, not just refused. The request holds the head seen; a missing branch is not a person's push.
+  // It is written on its own, after the fact above is committed, and never throws: a failure here leaves the refusal exactly as it was and the next round raises the request.
+  if (live !== null) await raiseBranchPushed(pool, who, live);
   console.info(JSON.stringify({ event: "advance.public_branch_moved", work_item_id: who.workItemId }));
   return PUBLIC_BRANCH_MOVED;
 }
@@ -105,4 +113,41 @@ export async function checkPrivateHead(
   );
   console.info(JSON.stringify({ event: "advance.pr_head_moved", work_item_id: who.workItemId }));
   return { ok: true, moved: true, head: live };
+}
+
+/**
+ * D#598 P1g-2: an item held by a "someone pushed" request still looks at the branch whenever a step is asked of it: a newer push moves what the person
+ * sees (the request is refreshed), and a branch put back where the platform left it closes the request, so the hold lifts without a click.
+ */
+export async function refreshWaitingBranch(pool: Pool, ports: FixRoundHeadPorts | null | undefined, who: Who): Promise<void> {
+  const row = await withTenant(pool, who.accountId, (client) => readPlanePush(client, who.accountId, who.workItemId));
+  if (row !== null && row.state === "waiting_person_pushed") await checkPublicBranch(pool, ports, who);
+}
+
+/**
+ * D#598 P1g-2: a fix round's update was refused because the public branch was not where the platform left it (the lease failed at the push). The branch is
+ * read now, outside any transaction, and the request is raised with the head seen. A read that fails raises nothing: the item already shows the round's
+ * refusal, and the next fix round's own check (above) raises it. Never throws.
+ */
+async function raiseBranchPushed(pool: Pool, who: Who, seenHead: string): Promise<void> {
+  try {
+    await withTenant(pool, who.accountId, (client) => raiseBranchPushedByPerson(client, { workItemId: who.workItemId, seenHead }));
+  } catch {
+    // fx-swallow-ok: the cause can carry a repository name or a token; the round is refused either way and the next round raises the request
+    console.warn(JSON.stringify({ event: "advance.branch_pushed_raise_failed", work_item_id: who.workItemId }));
+  }
+}
+
+export async function raiseAfterLeaseFailure(pool: Pool, publicHead: BranchHeadPort["branchHead"] | undefined, who: Who): Promise<void> {
+  if (!publicHead) return;
+  try {
+    const row = await withTenant(pool, who.accountId, (client) => readPlanePush(client, who.accountId, who.workItemId));
+    if (row === null || row.headSha === null || row.managedByPersonAt !== null) return;
+    const live = await publicHead({ accountId: who.accountId, codeRepo: row.codeRepo, branch: row.branch });
+    if (live === null || !SHA.test(live) || live === row.headSha) return;
+    await raiseBranchPushed(pool, who, live);
+  } catch {
+    // fx-swallow-ok: the cause can carry a repository name or a token; the item already shows the refusal and the next round raises the request
+    console.warn(JSON.stringify({ event: "advance.branch_pushed_raise_failed", work_item_id: who.workItemId }));
+  }
 }

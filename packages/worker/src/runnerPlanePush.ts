@@ -9,6 +9,7 @@ import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
 import { cleanWorkItemTitle } from "@fx/core/src/work-items/title.js";
 import { REPUBLISH_BASE_MISSING, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE, REPUBLISH_PAIRING_OFF, REPUBLISH_PR_CLOSED, REPUBLISH_PR_MERGED, REPUBLISH_TIP_MOVED } from "@fx/core/src/work-items/baseSync.js";
 import { attemptWord, recordRepublishRefusal } from "./fixRoundBase.js";
+import { raiseAfterLeaseFailure } from "./fixRoundHeads.js";
 import { guarded } from "./runActions.js";
 import { leaseVerdict, requireLease, stopReasonFor, type HeartbeatRunnerRunInput } from "./runnerClaims.js";
 import { runnerLimits, type RunnerLimitsSource } from "./runnerLimits.js";
@@ -361,7 +362,9 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
       guarded(async () => {
         requireLease(input);
         if (!LABEL.test(input.label)) throw new Error("planePushRecordReport: bad label");
-        return withTenant(runnerPool, input.accountId, async (client): Promise<PlanePushRecordResult> => {
+        // D#598 P1g-2: set when the round's update failed its lease; the branch is read and the request raised once the report is recorded (no GitHub read inside the transaction).
+        let leaseFailedFor: string | null = null;
+        const result = await withTenant(runnerPool, input.accountId, async (client): Promise<PlanePushRecordResult> => {
           const held = await fence(client, input);
           if (held !== "ok") return { kind: "fenced", reason: stopReasonFor(held) };
           const found = await runFacts(client, input);
@@ -381,6 +384,7 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
             const code = input.outcome.state === "no_public_change" ? REPUBLISH_NO_CHANGE : input.outcome.code === "public_branch_moved" ? REPUBLISH_BRANCH_MOVED : input.outcome.code === "public_tip_moved" ? REPUBLISH_TIP_MOVED : input.outcome.code === REPUBLISH_BASE_MISSING ? REPUBLISH_BASE_MISSING : REPUBLISH_FAILED;
             await recordRepublishRefusal(client, { accountId: input.accountId, workItemId: found.row.workItemId }, { code, prNumber: null, moveToNeedsPerson: true, attempt: input.runId });
             recorded = true;
+            if (code === REPUBLISH_BRANCH_MOVED) leaseFailedFor = found.row.workItemId;
           } else if (input.outcome) {
             const o = input.outcome;
             const row = await recordVerifiedOutcome(client, {
@@ -413,6 +417,8 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           );
           return { kind: "recorded", recorded };
         });
+        if (leaseFailedFor !== null) await raiseAfterLeaseFailure(runnerPool, deps.publicHead, { accountId: input.accountId, workItemId: leaseFailedFor });
+        return result;
       }),
   };
 }

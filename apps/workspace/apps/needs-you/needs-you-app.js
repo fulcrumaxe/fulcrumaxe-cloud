@@ -5,7 +5,7 @@
 // second press is ignored. When a row changes under the person, focus goes to the same control, else to the row's heading.
 import { h } from "../_lib/dom.js";
 import { on, onRefresh } from "../../core/cloud-live.js";
-import { WORDS, createNeedsYou, notShownWords } from "./needs-you-model.js";
+import { WORDS, canMarkDone, createNeedsYou, notShownWords } from "./needs-you-model.js";
 
 const FULC = window.FULC;
 if (!FULC || typeof FULC.register !== "function") {
@@ -153,7 +153,7 @@ function mountApp(contentEl) {
       row.reason ? h("p", { class: "ny-reason", "data-testid": "ny-reason" }, row.reason) : null,
       sentence ? h("p", { class: "ny-sentence", "data-testid": "ny-sentence" }, sentence) : null,
       row.link ? h("p", null, h("a", { class: "ny-link", href: row.link.href, target: "_blank", rel: "noopener noreferrer", "aria-describedby": headId, "data-testid": "ny-link" }, row.link.host)) : null,
-      row.state === "open" ? h("div", { class: "ny-actions" }, button(row, "done", WORDS.markDone), button(row, "withdraw", WORDS.withdraw)) : null
+      row.state === "open" ? h("div", { class: "ny-actions" }, canMarkDone(row) ? button(row, "done", WORDS.markDone) : null, button(row, "withdraw", WORDS.withdraw)) : null
     );
   }
 

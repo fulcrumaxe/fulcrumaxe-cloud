@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { ASKS_FIRST_URL, ASKS_URL, LIST_URL, LIVE_EVENTS, MAX_ASK_PAGES, ME_URL, MERGE_URL, NEEDS_HUMAN_URL, PROVIDER_HOSTS, START_ASK_TYPES, STALLED_URL, WORDS, startAnswerWords, actionUrl, answerUrl, approveUrl, createNeedsYou, failureSentence, notShownWords, providerLink, pullRequestLink, quotedReason, readAsk, readMerge, readPerson, readRequest, readStalled } from "../apps/needs-you/needs-you-model.js";
+import { ASKS_FIRST_URL, ASKS_URL, LIST_URL, LIVE_EVENTS, MAX_ASK_PAGES, ME_URL, MERGE_URL, NEEDS_HUMAN_URL, PROVIDER_HOSTS, START_ASK_TYPES, STALLED_URL, WORDS, startAnswerWords, actionUrl, answerUrl, approveUrl, createNeedsYou, failureSentence, notShownWords, providerLink, pullRequestLink, quotedReason, readAsk, readMerge, readPerson, readRequest, readStalled, canMarkDone } from "../apps/needs-you/needs-you-model.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
 const fixture = (op, name) => JSON.parse(readFileSync(join(PACKAGES, "api", "fixtures", "v1", op, name), "utf8"));
@@ -168,6 +168,24 @@ describe("loading the list", () => {
     release();
     await first;
     expect(list.state.rows.map((r) => r.title)).toEqual(["new"]);
+  });
+});
+
+describe("a request that Mark done does not answer", () => {
+  it("D#598 P1g-2: a branch someone pushed to offers Withdraw and no Mark done; every other kind keeps both", () => {
+    const pushed = readRequest(req({ kind: "branch_pushed_by_person", title: "Someone pushed to fx/p-1 on acme/widgets-public", check_interval_seconds: null, status_sentence: "The cloud will not change this branch. You can withdraw this request, or move the branch back to where the cloud left it on GitHub and this request closes by itself." }));
+    expect(pushed.setupKind).toBe("branch_pushed_by_person");
+    expect(canMarkDone(pushed)).toBe(false);
+    expect(pushed.sentence).not.toMatch(/mark done/i);
+    expect(canMarkDone(readRequest(req()))).toBe(true);
+    expect(canMarkDone(readRequest(req({ kind: "overlay_path_missing" })))).toBe(true);
+    expect(canMarkDone(readRequest({ ...BASE, kind: undefined }))).toBe(true);
+  });
+
+  it("the app draws the Mark done button only through canMarkDone", () => {
+    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "apps", "needs-you", "needs-you-app.js"), "utf8");
+    expect(src).toContain('canMarkDone(row) ? button(row, "done", WORDS.markDone) : null');
+    expect(src.match(/WORDS\.markDone/g)).toHaveLength(1);
   });
 });
 
