@@ -108,6 +108,10 @@ describe("stale pull-request slot reconcile [pg]", { timeout: 60_000 }, () => {
     await admin.query("UPDATE work_items SET stage = 'needs_human' WHERE stage IN ('pr_opened', 'changes_requested', 'review_passed')");
     A = await seedAccount(admin, randomUUID());
     await admin.query("UPDATE repos SET gh_owner = 'acme', gh_name = 'widgets' WHERE id = $1", [A.repoId]);
+    // These cases are about one holder and one waiter on a repository, so the person's repository value is 1 (the starting 2 would let the waiter start).
+    const setBy = randomUUID();
+    await admin.query("INSERT INTO users (id, email) VALUES ($1, $2)", [setBy, `${setBy}@example.test`]);
+    await admin.query("INSERT INTO build_concurrency_settings (account_id, repo_id, max_builds, version, changed_by) VALUES ($1, $2, 1, 1, $3)", [A.accountId, A.repoId, setBy]);
     gh.pulls.length = 0;
     gh.calls.length = 0;
     gh.down = false;
@@ -220,8 +224,8 @@ describe("stale pull-request slot reconcile [pg]", { timeout: 60_000 }, () => {
     gh.pulls.push({ repo: "acme/widgets", number: 3, branch: `fx/issue-${holder.number}`, state: "closed", merged_at: null, closed_at: "2026-10-01T00:00:00Z" });
     gh.pulls.push({ repo: "acme/widgets", number: 4, branch: `fx/issue-${holder.number}`, state: "open", merged_at: null, closed_at: null });
     const m = advance();
-    expect(await m.advanceBuild(who(A, waiter.id), randomUUID())).toEqual({ status: "refused", reason: "one_build_per_repo_until_d598" });
-    expect(await m.advanceBuild(who(A, waiter.id), randomUUID())).toEqual({ status: "refused", reason: "one_build_per_repo_until_d598" });
+    expect(await m.advanceBuild(who(A, waiter.id), randomUUID())).toEqual({ status: "refused", reason: "waiting_for_build_slot_repo" });
+    expect(await m.advanceBuild(who(A, waiter.id), randomUUID())).toEqual({ status: "refused", reason: "waiting_for_build_slot_repo" });
     expect(await stageOf(holder.id)).toBe("changes_requested");
     expect(await movesOf(holder.id)).toEqual([]);
     expect(gh.calls).toHaveLength(1);
@@ -236,7 +240,7 @@ describe("stale pull-request slot reconcile [pg]", { timeout: 60_000 }, () => {
     const waiter = await item(A, "spec_ready");
     gh.pulls.push({ repo: "acme/widgets", number: 7, branch: `fx/issue-${holder.number}`, state: "closed", merged_at: null, closed_at: "2026-10-10T09:00:00Z" });
     gh.down = true;
-    expect(await advance().advanceBuild(who(A, waiter.id), randomUUID())).toEqual({ status: "refused", reason: "one_build_per_repo_until_d598" });
+    expect(await advance().advanceBuild(who(A, waiter.id), randomUUID())).toEqual({ status: "refused", reason: "waiting_for_build_slot_repo" });
     expect(await stageOf(holder.id)).toBe("pr_opened");
     expect(await stageOf(waiter.id)).toBe("spec_ready");
     expect(await movesOf(holder.id)).toEqual([]);

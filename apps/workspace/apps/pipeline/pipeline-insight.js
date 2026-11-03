@@ -170,6 +170,7 @@ const RESULT_WORDS = {
 };
 const REASON_WORDS = {
   pr_draft: "the pull request is a draft",
+  // Retired by D#483 S5-j: nothing emits this now; a step result stored before then still names it and keeps its sentence.
   one_build_per_repo_until_d598: "this repository builds one item at a time",
   waiting_for_build_slot_repo: "this repository's build slots are all taken",
   waiting_for_build_slot_account: "your account's build slots are all taken",

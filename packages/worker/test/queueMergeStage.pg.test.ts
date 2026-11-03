@@ -80,6 +80,8 @@ describe("the queue merge records the work item merged [pg]", { timeout: 90_000 
   async function world(): Promise<{ f: PlannedFixture; api: string; waiter: { id: string; approval: string }; queue: QueueRepo }> {
     const f = await plannedFixture(admin, appPool, { dial: "act", envelopeUsd: 20 });
     const api = f.kids.api!;
+    // These cases are about one holder and one waiter on a repository: the person's repository value is 1 (the starting 2 would let the waiter start beside the holder).
+    await admin.query("INSERT INTO build_concurrency_settings (account_id, repo_id, max_builds, version, changed_by) VALUES ($1, $2, 1, 1, $3)", [f.t.accountId, f.t.repoId, f.t.userId]);
     await admin.query("UPDATE work_items SET gh_number = $2 WHERE id = $1", [f.parent, PARENT_NUMBER]);
     await admin.query("UPDATE work_items SET stage = 'pr_opened' WHERE id = $1", [api]);
     // The child's build recorded its branch and its pull request, as the webhook mapper looks them up.
@@ -98,7 +100,7 @@ describe("the queue merge records the work item merged [pg]", { timeout: 90_000 
        VALUES ($1, $2, 'advance_work_item', $3, $4, 'session', $5, 'done', now() - interval '1 day', $6::jsonb)`,
       [approval, f.t.accountId, waiterId, `session:${f.t.userId}`, "h".repeat(64), JSON.stringify({ work_item_id: waiterId, advance: "started" })],
     );
-    await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, stage, code, attempt, dedupe_key) VALUES ($1, $2, 'stage_waiting', 'build', 'one_build_per_repo_until_d598', 0, $3)", [f.t.accountId, waiterId, randomUUID()]);
+    await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, stage, code, attempt, dedupe_key) VALUES ($1, $2, 'stage_waiting', 'build', 'waiting_for_build_slot_repo', 0, $3)", [f.t.accountId, waiterId, randomUUID()]);
     await admin.query("UPDATE work_item_driver_events SET created_at = now() - interval '1 hour' WHERE work_item_id = $1", [waiterId]);
 
     const queue = await startQueueRepo({ admin, runWriterPool: writerPool, pureAppUserPool: appPool }, { existing: { accountId: f.t.accountId, repoId: f.t.repoId } });

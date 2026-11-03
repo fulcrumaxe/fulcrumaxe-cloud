@@ -268,7 +268,7 @@ describe("S5k: the pause is derived, never stamped", () => {
     const behind = await item(a, r, { priority: 3 });
     // A slot wait ahead makes the one behind give way ...
     await fact(a, ahead, "waiting_for_build_slot_repo");
-    expect(await readBuildWaitReason(h.runWriterPool, a, behind)).toBe("one_build_per_repo_until_d598");
+    expect(await readBuildWaitReason(h.runWriterPool, a, behind)).toBe("waiting_for_build_slot_repo");
     // ... a spend pause ahead does not.
     const a2 = await account();
     const r2 = await repo(a2);

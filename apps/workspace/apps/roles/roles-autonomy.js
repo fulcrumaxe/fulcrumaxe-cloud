@@ -75,7 +75,7 @@ const repoPath = (id, tail) => "/api/v1/repos/" + encodeURIComponent(id) + "/" +
 
 export const LIM_COPY = {
   heading: "Builds, auto-start and discovery",
-  perRepo: "This applies once parallel builds on one repo are supported.",
+  perRepo: "This repository runs on your own machine; it builds one item at a time until its runner is updated.",
   unavailable: "This setting isn't available right now.",
   notChanged: "Not changed yet.",
   readOnly: "Only owners and admins can change these settings.",

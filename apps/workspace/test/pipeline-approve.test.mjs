@@ -428,7 +428,7 @@ describe("D#483: a build that waits for a build slot is not 'Started'", () => {
   const SPEC_READY = { ...ITEM, stage: "spec_ready" };
 
   it("an approve the worker finished as waiting shows the waiting sentence, never the started one", async () => {
-    const call = fakeCall({ action_id: "a1", state: "accepted" }, { state: "done", outcome: { advance: "waiting", reason: "one_build_per_repo_until_d598" } });
+    const call = fakeCall({ action_id: "a1", state: "accepted" }, { state: "done", outcome: { advance: "waiting", reason: "waiting_for_build_slot_repo" } });
     const a = make({ call });
     await a.approve(SPEC_READY);
     expect(a.state.phase).toBe("started");

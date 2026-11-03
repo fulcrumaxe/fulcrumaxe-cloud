@@ -68,7 +68,7 @@ export interface ParkedStageEntryInput {
  * The waits that mean "no build slot yet" (packages/pipeline buildSlots.ts BUILD_WAIT_REASONS; a test holds the two lists equal).
  * A build waits for a slot inside its workflow for at most four hours; this is the wake for the case where that workflow is gone when the slot frees.
  */
-export const SLOT_WAIT_REASONS: readonly string[] = Object.freeze(["one_build_per_repo_until_d598", "waiting_for_build_slot_repo", "waiting_for_build_slot_account"]);
+export const SLOT_WAIT_REASONS: readonly string[] = Object.freeze(["waiting_for_build_slot_repo", "waiting_for_build_slot_account"]);
 
 export interface StageResumeDeps {
   resolveRunSeat: (request: SeatRequest) => Promise<SeatResult>;
@@ -76,6 +76,8 @@ export interface StageResumeDeps {
    * The pipeline's `readBuildWaitReason`: the reason an item's build would still wait for a slot right now, or null (it would get one). Absent: the slot wake is off.
    */
   buildWaitReason?: ((accountId: string, workItemId: string) => Promise<string | null>) | null;
+  /** The pipeline's `readFreeBuildSlots`: how many builds could start now for this item's repository. Absent: one start per repository per pass, as before. */
+  buildFreeSlots?: ((accountId: string, workItemId: string) => Promise<number>) | null;
   startAdvance: ((args: AdvanceStartArgs) => Promise<void>) | null;
   now?: () => number;
   log?: (line: string) => void;
@@ -91,7 +93,7 @@ export interface StageResumeCounts {
   /** Not resumed for a reason that is no failure (approval gone, Spec changed, a run is live, not a pause denial, claimed by another pass...). */
   skipped: number;
   failed: number;
-  /** The slot wake: orphaned waiters listed, and workflows it started (at most one per repository per pass). */
+  /** The slot wake: orphaned waiters listed, and workflows it started (at most one per free slot of a repository per pass). */
   slotListed?: number;
   slotStarted?: number;
 }
@@ -353,17 +355,22 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
       }
     }
     keyed.sort((x, y) => compareQueueOrder(x.key, y.key));
-    const startedRepos = new Set<string>();
+    const startedRepos = new Map<string, number>();
+    const freeFor = new Map<string, number>();
     for (const { c, repoId } of keyed) {
       try {
-        if (repoId !== null && startedRepos.has(`${c.account_id}:${repoId}`)) continue;
+        const repoKey = repoId === null ? null : `${c.account_id}:${repoId}`;
+        // Every free slot of a repository gets its waiter this pass, best-ordered first; the claim still decides each start.
+        if (repoKey !== null && freeFor.get(repoKey) === undefined) freeFor.set(repoKey, deps.buildFreeSlots ? await deps.buildFreeSlots(c.account_id, c.work_item_id) : 1);
+        if (repoKey !== null && (startedRepos.get(repoKey) ?? 0) >= (freeFor.get(repoKey) ?? 1)) continue;
         const planned = await planFor(entry, c.account_id, c.work_item_id);
         if ("skip" in planned) {
           log(JSON.stringify({ event: "slot_wake.skipped", work_item_id: c.work_item_id, reason: planned.skip }));
           continue;
         }
         // Still no slot for it (held, or a better-ordered waiter is alive): the next slot that frees looks again.
-        if ((await wait(c.account_id, c.work_item_id)) !== null) continue;
+        // For the second and later starts in a repository the free-slot bound above is the check: the first start's fresh wait fact would otherwise read as a better waiter ahead.
+        if ((repoKey === null || (startedRepos.get(repoKey) ?? 0) === 0) && (await wait(c.account_id, c.work_item_id)) !== null) continue;
         const { plan } = planned;
         const claimed = await fact(entry, c.account_id, c.work_item_id, c.pause, plan.attempt, `slotwake:${plan.actionId}:${plan.attempt}:${bucket}`, plan.head);
         if (!claimed) continue;
@@ -376,7 +383,7 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
           specVersion: plan.specVersion,
           ...(plan.attempt > 0 ? { startAttempt: plan.attempt } : {}),
         });
-        if (repoId !== null) startedRepos.add(`${c.account_id}:${repoId}`);
+        if (repoKey !== null) startedRepos.set(repoKey, (startedRepos.get(repoKey) ?? 0) + 1);
         out.started += 1;
         log(JSON.stringify({ event: "slot_wake.started", work_item_id: c.work_item_id, attempt: plan.attempt }));
       } catch (err) {

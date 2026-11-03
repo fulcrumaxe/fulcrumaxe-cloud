@@ -2742,7 +2742,7 @@ export interface Operations {
       queue_total_cents?: number;
       basis: "history" | "seed" | "none";
       notes: Array<{
-        code: "nothing_waiting" | "same_total" | "unpriced_items" | "cannot_price" | "one_build_per_repo_until_d598" | "limited_by_repos";
+        code: "nothing_waiting" | "same_total" | "unpriced_items" | "cannot_price" | "limited_by_repos" | "runner_order_unattested";
         text: string;
       }>;
       preview_hash: string;
@@ -2758,7 +2758,7 @@ export interface Operations {
       value: number;
       start_value: number;
       applied_limit: number;
-      clamp_reason: ("one_build_per_repo_until_d598") | (null);
+      clamp_reason: ("runner_order_unattested") | (null);
     };
   };
   putRepoBuildConcurrency: {
@@ -2775,7 +2775,7 @@ export interface Operations {
       value: number;
       start_value: number;
       applied_limit: number;
-      clamp_reason: ("one_build_per_repo_until_d598") | (null);
+      clamp_reason: ("runner_order_unattested") | (null);
       changed: boolean;
     };
   };
@@ -2823,7 +2823,7 @@ export interface Operations {
       queue_total_cents?: number;
       basis: "history" | "seed" | "none";
       notes: Array<{
-        code: "nothing_waiting" | "same_total" | "unpriced_items" | "cannot_price" | "one_build_per_repo_until_d598" | "limited_by_repos";
+        code: "nothing_waiting" | "same_total" | "unpriced_items" | "cannot_price" | "limited_by_repos" | "runner_order_unattested";
         text: string;
       }>;
       preview_hash: string;

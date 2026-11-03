@@ -177,7 +177,7 @@ const BUILD_REAPING_REASON = "start_sandbox_reaping";
  * D#483 S5-c1: the start answered that the item cannot take a build slot yet (packages/pipeline buildSlots.ts BUILD_WAIT_REASONS; a test holds the two lists
  * equal, because the workflow bundle imports no server package). Each poll leaves a `build_waiting` fact, and the slot module counts an item as waiting only while its latest one is under three polls old (a test holds the two numbers together).
  */
-const BUILD_SLOT_WAIT_REASONS: readonly string[] = ["one_build_per_repo_until_d598", "waiting_for_build_slot_repo", "waiting_for_build_slot_account"];
+const BUILD_SLOT_WAIT_REASONS: readonly string[] = ["waiting_for_build_slot_repo", "waiting_for_build_slot_account"];
 const BUILD_SLOT_POLL_MS = 60_000;
 const BUILD_SLOT_WAIT_MS = 4 * 3_600_000;
 /**

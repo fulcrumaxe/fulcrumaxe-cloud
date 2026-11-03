@@ -95,8 +95,8 @@ describe('R6: what counts as stalled', () => {
   });
 
   it('a wait that is not being refreshed any more is stalled; a fresh one is a workflow (or the sweep) still looking', () => {
-    expect(classifyStall(facts({ stage: 'spec_ready', last: last('stage_waiting', 'one_build_per_repo_until_d598', [], STALE_WAIT_MS + MIN) }))).toMatchObject({ code: 'wait_stale' });
-    expect(classifyStall(facts({ stage: 'spec_ready', last: last('stage_waiting', 'one_build_per_repo_until_d598', [], STALE_WAIT_MS - MIN) }))).toBeNull();
+    expect(classifyStall(facts({ stage: 'spec_ready', last: last('stage_waiting', 'waiting_for_build_slot_repo', [], STALE_WAIT_MS + MIN) }))).toMatchObject({ code: 'wait_stale' });
+    expect(classifyStall(facts({ stage: 'spec_ready', last: last('stage_waiting', 'waiting_for_build_slot_repo', [], STALE_WAIT_MS - MIN) }))).toBeNull();
   });
 
   it('silence longer than the longest silent wait (the two-hour CI wait) is stalled; shorter is a workflow waiting for checks', () => {

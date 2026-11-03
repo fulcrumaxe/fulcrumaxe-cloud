@@ -436,9 +436,9 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
 
       // The holder: another item of the repository at pr_opened (issue 65), as in the staging case.
       await admin.query(`INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number) VALUES ($1, $2, $3, 'feature', 'internal', 'pr_opened', 65)`, [randomUUID(), accountId, repoId]);
-      await wait('one_build_per_repo_until_d598', 'w1');
+      await wait('waiting_for_build_slot_repo', 'w1');
       // No standing approval: the sentence says a person has to start the build once the slot is free (nothing will start it).
-      const manual = "Waiting for a build slot. Issue #65 is holding this repository's only build slot, and keeps it until its pull request is merged or closed. This build does not start by itself: a person has to press Approve the Spec and build once the slot is free.";
+      const manual = "Waiting for a build slot. All build slots for this repository are in use; issue #65 is holding one. This build does not start by itself: a person has to press Approve the Spec and build once the slot is free.";
       expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'build_slot_wait', reason: manual });
 
       // A performed approval by a session of a plain member does not count; by an owner it does, and the build starts by itself.
@@ -454,7 +454,7 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       );
       expect((await noticeOf(accountId, userId, itemId))!.reason).toBe(manual);
       await admin.query(`UPDATE account_members SET role = 'owner' WHERE account_id = $1 AND user_id = $2`, [accountId, userId]);
-      const auto = "Waiting for a build slot. Issue #65 is holding this repository's only build slot, and keeps it until its pull request is merged or closed. This build starts by itself after that.";
+      const auto = "Waiting for a build slot. All build slots for this repository are in use; issue #65 is holding one. This build starts by itself after that.";
       expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'build_slot_wait', reason: auto });
       // A Spec written after the approval is a different Spec: the person decides about it again.
       await admin.query(`INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind) VALUES ($1, $2, 2, 'spec2', encode(sha256(convert_to('spec2', 'UTF8')), 'hex'), 'system')`, [accountId, itemId]);
@@ -475,18 +475,32 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
         // created_at is the database's clock whatever an INSERT says (a trigger), so age the row afterwards.
         if (agoSeconds > 0) await admin.query(`UPDATE work_item_driver_events SET created_at = now() - make_interval(secs => $2::int) WHERE work_item_id = $1 AND dedupe_key = $3`, [other, agoSeconds, key]);
       };
-      await otherWait('one_build_per_repo_until_d598', 'o1', 'review');
+      await otherWait('waiting_for_build_slot_repo', 'o1', 'review');
       expect(await noticeOf(accountId, userId, other)).toBeNull();
       await otherWait('account_budget_reached', 'o2', 'build');
       expect(await noticeOf(accountId, userId, other)).toBeNull();
-      await otherWait('one_build_per_repo_until_d598', 'o3', 'build', 600);
+      await otherWait('waiting_for_build_slot_repo', 'o3', 'build', 600);
       expect(await noticeOf(accountId, userId, other)).toBeNull();
 
       // Fresh again, then halted: a halted item is not waiting.
-      await wait('one_build_per_repo_until_d598', 'w6');
+      await wait('waiting_for_build_slot_repo', 'w6');
       expect((await noticeOf(accountId, userId, itemId))!.kind).toBe('build_slot_wait');
       await admin.query('UPDATE work_items SET halted_at = now(), halt_action_id = $2, halt_epoch = 1 WHERE id = $1', [itemId, randomUUID()]);
       expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+    });
+
+    it('a wait fact stored under the retired repository code (built here from parts, never written whole) still renders a real sentence: no undefined, no raw code, no empty text', async () => {
+      const retired = ['one', 'build', 'per', 'repo', 'until', 'd598'].join('_');
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const { itemId, repoId } = await seedItem(accountId, { stage: 'spec_ready' });
+      await admin.query(`INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number) VALUES ($1, $2, $3, 'feature', 'internal', 'pr_opened', 65)`, [randomUUID(), accountId, repoId]);
+      await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, stage, attempt, code, dedupe_key) VALUES ($1, $2, 'stage_waiting', 'build', 0, $3, $4)`, [accountId, itemId, retired, randomUUID()]);
+      const notice = await noticeOf(accountId, userId, itemId);
+      expect(notice).not.toBeNull();
+      expect(notice!.kind).toBe('build_slot_wait');
+      expect(notice!.reason).toContain('All build slots for this repository are in use; issue #65 is holding one.');
+      expect(notice!.reason).not.toMatch(/undefined|null|d598/);
+      expect(notice!.reason.trim().length).toBeGreaterThan(20);
     });
 
     it('resume_refused (D#7 DP11c): an answered question whose resume did not happen shows its fixed CODE (never a sentence) while the item sits at the park and nothing runs; a live run, a newer executor run or another stage shows none', async () => {

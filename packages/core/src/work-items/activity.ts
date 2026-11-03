@@ -130,7 +130,7 @@ export interface ActivityNotice {
   /** `superseded` only: the id of the tracked item this request moved to, or '' when that item is not one of this account's (the card then shows the sentence with no link). */
   reason: string;
   /**
-   * `build_slot_wait` only (D#483): `reason` is the fixed wait code (`one_build_per_repo_until_d598`, `waiting_for_build_slot_repo` or `waiting_for_build_slot_account`;
+   * `build_slot_wait` only (D#483): `reason` is the fixed wait code (`waiting_for_build_slot_repo` or `waiting_for_build_slot_account`, or the retired `one_build_per_repo_until_d598` on a row stored before D#483 S5-j;
    * the API route puts the sentence in) and `holder` is the item that holds the repository's slot, when the wait is for the repository's slot: its issue number
    * (null when it has none) and its stage. Null when no such item is found, and always null for the account wait.
    */
@@ -146,8 +146,10 @@ export interface ActivityNotice {
 /**
  * D#483: the codes of a wait for a build slot, and how long a waiting fact counts as current. These repeat packages/pipeline buildSlots.ts
  * (BUILD_WAIT_REASONS, BUILD_SLOT_STAGES, WAITER_WINDOW_SECONDS); @fx/core cannot import that package, and a test there holds the copies equal.
+ * The list also keeps the one code S5-j retired (`one_build_per_repo_until_d598`): nothing emits it now, but a wait fact stored before then still names it and must
+ * keep reading as a repository wait. A test holds the list to the pipeline's reasons plus exactly that one code.
  */
-export const BUILD_WAIT_NOTICE_CODES: readonly string[] = Object.freeze(['one_build_per_repo_until_d598', 'waiting_for_build_slot_repo', 'waiting_for_build_slot_account']);
+export const BUILD_WAIT_NOTICE_CODES: readonly string[] = Object.freeze(['waiting_for_build_slot_repo', 'waiting_for_build_slot_account', 'one_build_per_repo_until_d598']);
 export const BUILD_SLOT_HOLDING_STAGES: readonly string[] = Object.freeze(['in_progress', 'pr_opened', 'changes_requested', 'review_passed']);
 export const BUILD_WAIT_FRESH_SECONDS = 180;
 /**

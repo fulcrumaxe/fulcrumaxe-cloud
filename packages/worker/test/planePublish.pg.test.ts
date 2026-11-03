@@ -129,6 +129,8 @@ describe("the paired publish step [pg]", () => {
     A = await seedAccount(admin, randomUUID());
     await admin.query("UPDATE repos SET gh_owner = 'acme', gh_name = 'widgets' WHERE id = $1", [A.repoId]);
     await admin.query("UPDATE work_items SET gh_number = 42, title = 'Add a thing' WHERE id = $1", [A.workItemId]);
+    // These cases are about one holder and one waiter on a repository: the person's repository value is 1 (the starting 2 would let the waiter start beside the holder).
+    await admin.query("INSERT INTO build_concurrency_settings (account_id, repo_id, max_builds, version, changed_by) VALUES ($1, $2, 1, 1, $3)", [A.accountId, A.repoId, A.userId]);
     await pair();
     await withTenant(appPool, A.accountId, (c) => stampPlanePush(c, { accountId: A.accountId, workItemId: A.workItemId, repoId: A.repoId }));
     executorRunId = await executorRun("succeeded");

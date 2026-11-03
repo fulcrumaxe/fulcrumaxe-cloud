@@ -18,9 +18,9 @@ import { WAITING_STAGE_POSITIONS, type WaitingStage } from "./waitingStages.js";
  * pass a limit that has room for one.
  *
  * Scopes:
- *  - repository: every item that holds a slot on the repository counts, hosted or runner. The person's repository value applies, but
- *    until D#598 lands (migration order at merge, stacking, rebase) it is clamped to one build per repository
- *    (`ONE_BUILD_PER_REPO_UNTIL_D598`; S5-j removes that clamp). The reason is then `one_build_per_repo_until_d598`.
+ *  - repository: every item that holds a slot on the repository counts, hosted or runner. The person's repository value is the limit,
+ *    read from the current setting at each claim (never stamped on an item), so lowering it cancels nothing: running items keep their
+ *    slots and only the next claim waits. (D#483 S5-j lifted the one-build-per-repository clamp once D#519 and D#598 P3c landed.)
  *  - account: the person's account value, counted over HOSTED items only. A repository on a runner is not held by it; the runner's own
  *    resource-aware admission (D#6 C43) decides how many of its runs proceed.
  *
@@ -35,28 +35,50 @@ import { WAITING_STAGE_POSITIONS, type WaitingStage } from "./waitingStages.js";
 export const START_BUILDS_PER_REPO = 2;
 export const START_BUILDS_PER_ACCOUNT = 4;
 
-/** Until D#598 lands, one build per repository whatever the person's repository value is. S5-j removes this line. */
-export const ONE_BUILD_PER_REPO_UNTIL_D598 = 1;
-
 /** The stages in which an item holds a build slot. */
 export const BUILD_SLOT_STAGES: readonly string[] = Object.freeze(["in_progress", "pr_opened", "changes_requested", "review_passed"]);
 
-export const BUILD_WAIT_REASONS = ["one_build_per_repo_until_d598", "waiting_for_build_slot_repo", "waiting_for_build_slot_account"] as const;
+export const BUILD_WAIT_REASONS = ["waiting_for_build_slot_repo", "waiting_for_build_slot_account"] as const;
 export type BuildWaitReason = (typeof BUILD_WAIT_REASONS)[number];
 
 export const isBuildWaitReason = (reason: unknown): reason is BuildWaitReason => typeof reason === "string" && (BUILD_WAIT_REASONS as readonly string[]).includes(reason);
 
+/**
+ * The one reason the applied repository limit can sit below the person's stored value (D#483 C34 R-C34-F1): a `runner_local` repository can't be read from the
+ * cloud, so the merge check can't attest order for it until its runner says it can. It is a throughput limit, not a safety claim, and the stored value is kept.
+ */
+export const RUNNER_ORDER_UNATTESTED = "runner_order_unattested" as const;
+export const RUNNER_UNATTESTED_LIMIT = 1;
+
 export interface BuildLimits {
-  /** The person's repository value (or the starting value). */
-  repoValue: number;
-  /** What actually applies to a repository now: the value, clamped. */
+  /** What applies to the repository: the person's value (or the starting value), or 1 for a `runner_local` repository whose runner can't attest order yet. */
   repoLimit: number;
   accountValue: number;
+  /** Why `repoLimit` is below the stored value (or would be), else null. */
+  clampReason: typeof RUNNER_ORDER_UNATTESTED | null;
 }
 
-export function resolveBuildLimits(set: { accountValue: number | null; repoValue: number | null }): BuildLimits {
-  const repoValue = set.repoValue ?? START_BUILDS_PER_REPO;
-  return { repoValue, repoLimit: Math.min(repoValue, ONE_BUILD_PER_REPO_UNTIL_D598), accountValue: set.accountValue ?? START_BUILDS_PER_ACCOUNT };
+/** `runnerClamped`: see `runnerClampedRepoIds`. Hosted and hosted-paired repositories are never clamped: the merge check holds order for them. */
+export function resolveBuildLimits(set: { accountValue: number | null; repoValue: number | null; runnerClamped?: boolean }): BuildLimits {
+  const value = set.repoValue ?? START_BUILDS_PER_REPO;
+  const clamped = set.runnerClamped === true;
+  return { repoLimit: clamped ? Math.min(value, RUNNER_UNATTESTED_LIMIT) : value, accountValue: set.accountValue ?? START_BUILDS_PER_ACCOUNT, clampReason: clamped ? RUNNER_ORDER_UNATTESTED : null };
+}
+
+/** SEAM (#706, `ordered-facts-capability`): true once the repo's runner's latest hello lists `ordered_facts_v1`. Until that helper lands no runner can attest, so this is false. */
+export const repoRunnerCanAttestOrder = async (_client: PoolClient, _accountId: string, _repoId: string): Promise<boolean> => false;
+
+/**
+ * Which repositories are held to one build because they are `runner_local` and their runner can't attest order. `alsoRunnerLocal`: repositories the caller already
+ * knows to be `runner_local` for the item at hand (an item placed on a runner). Read per repository at each call, never assumed.
+ */
+export async function runnerClampedRepoIds(client: PoolClient, accountId: string, repoIds: readonly string[], alsoRunnerLocal: ReadonlySet<string> = new Set()): Promise<Set<string>> {
+  if (repoIds.length === 0) return new Set();
+  const { rows } = await client.query<{ id: string }>("SELECT id FROM repos WHERE account_id = $1 AND id = ANY($2::uuid[]) AND execution_mode = 'runner_local'", [accountId, [...repoIds]]);
+  const local = new Set([...rows.map((r) => r.id), ...repoIds.filter((id) => alsoRunnerLocal.has(id))]);
+  const clamped = new Set<string>();
+  for (const id of local) if (!(await repoRunnerCanAttestOrder(client, accountId, id))) clamped.add(id);
+  return clamped;
 }
 
 export interface SlotInputs {
@@ -76,10 +98,9 @@ export type SlotDecision = { granted: true } | { granted: false; reason: BuildWa
 
 /** Pure: the whole decision, from counts. */
 export function decideSlot(i: SlotInputs): SlotDecision {
-  const repoReason: BuildWaitReason = i.limits.repoValue > i.limits.repoLimit ? "one_build_per_repo_until_d598" : "waiting_for_build_slot_repo";
-  if (i.repoHeld >= i.limits.repoLimit) return { granted: false, reason: repoReason };
+  if (i.repoHeld >= i.limits.repoLimit) return { granted: false, reason: "waiting_for_build_slot_repo" };
   if (i.hosted && i.accountHeldHosted >= i.limits.accountValue) return { granted: false, reason: "waiting_for_build_slot_account" };
-  if (i.repoWaiterAhead) return { granted: false, reason: repoReason };
+  if (i.repoWaiterAhead) return { granted: false, reason: "waiting_for_build_slot_repo" };
   if (i.hosted && i.accountWaiterAhead) return { granted: false, reason: "waiting_for_build_slot_account" };
   return { granted: true };
 }
@@ -98,7 +119,8 @@ export const WAITER_WINDOW_SECONDS = 3 * BUILD_SLOT_POLL_SECONDS;
  */
 const waiterSql = (): string => `
   SELECT w.id, w.priority, w.queue_rank, w.created_at, w.repo_id, ${effectiveModeSql("w", "r")} AS mode,
-         (SELECT count(*) FROM work_items h WHERE h.account_id = w.account_id AND h.repo_id = w.repo_id AND h.stage = ANY($3::text[])) AS repo_held
+         (SELECT count(*) FROM work_items h WHERE h.account_id = w.account_id AND h.repo_id = w.repo_id AND h.stage = ANY($3::text[])) AS repo_held,
+         COALESCE((SELECT s.max_builds FROM build_concurrency_settings s WHERE s.account_id = w.account_id AND s.repo_id = w.repo_id ORDER BY s.version DESC LIMIT 1), $8::int) AS repo_limit
     FROM work_items w
     JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
    WHERE w.account_id = $1 AND w.id <> $2
@@ -123,6 +145,8 @@ export interface SlotWaiterRow {
   repo_id: string;
   mode: string;
   repo_held: string;
+  /** The waiter's OWN repository's limit (its current setting, else the starting value): each repository has its own number. */
+  repo_limit: number;
 }
 
 /**
@@ -130,7 +154,7 @@ export interface SlotWaiterRow {
  * stage waits for a slot today; the stage argument is what keeps a fact of another stage (a classify wait) from counting here, and the reverse (a test fixes both).
  */
 export async function listSlotWaiters(client: PoolClient, accountId: string, exceptItemId: string, stage: WaitingStage): Promise<SlotWaiterRow[]> {
-  return (await client.query<SlotWaiterRow>(waiterSql(), [accountId, exceptItemId, [...BUILD_SLOT_STAGES], WAITER_WINDOW_SECONDS, [...BUILD_WAIT_REASONS], stage, [...WAITING_STAGE_POSITIONS[stage]]])).rows;
+  return (await client.query<SlotWaiterRow>(waiterSql(), [accountId, exceptItemId, [...BUILD_SLOT_STAGES], WAITER_WINDOW_SECONDS, [...BUILD_WAIT_REASONS], stage, [...WAITING_STAGE_POSITIONS[stage]], START_BUILDS_PER_REPO])).rows;
 }
 
 interface ItemRow {
@@ -143,8 +167,8 @@ interface ItemRow {
   mode: string;
 }
 
-/** The decision for one item as the database stands now. Read only; the caller holds the account lock when it must be exact. */
-export async function decideBuildSlot(client: PoolClient, accountId: string, workItemId: string): Promise<SlotDecision> {
+/** What the decision and the free-slot read both need, as the database stands now: the item's limits and how many slots are held. Null for a missing item or one with no repository. */
+async function readSlotCounts(client: PoolClient, accountId: string, workItemId: string): Promise<{ item: ItemRow & { repo_id: string }; limits: BuildLimits; hosted: boolean; repoHeld: number; accountHeldHosted: number } | null> {
   const item = (
     await client.query<ItemRow>(
       `SELECT w.id, w.stage, w.repo_id, w.priority, w.queue_rank, w.created_at, ${effectiveModeSql("w", "r")} AS mode
@@ -153,22 +177,22 @@ export async function decideBuildSlot(client: PoolClient, accountId: string, wor
       [workItemId, accountId],
     )
   ).rows[0];
-  // An item that already holds a slot keeps it (a replay of its own start); a missing item or one with no repo is the caller's refusal to make.
-  if (!item || item.repo_id === null || BUILD_SLOT_STAGES.includes(item.stage)) return { granted: true };
-
-  const setting = async (repoId: string | null): Promise<number | null> => {
+  if (!item || item.repo_id === null) return null;
+  const repoId = item.repo_id;
+  const setting = async (id: string | null): Promise<number | null> => {
     const { rows } = await client.query<{ max_builds: number }>(
       `SELECT max_builds FROM build_concurrency_settings
         WHERE account_id = $1 AND repo_id IS NOT DISTINCT FROM $2::uuid ORDER BY version DESC LIMIT 1`,
-      [accountId, repoId],
+      [accountId, id],
     );
     return rows[0] ? Number(rows[0].max_builds) : null;
   };
-  const limits = resolveBuildLimits({ accountValue: await setting(null), repoValue: await setting(item.repo_id) });
+  // Read per repository and per item at each claim: a runner_local item on a runner that can't attest order yet is held to one build (C34 R-C34-F1).
+  const runnerClamped = (await runnerClampedRepoIds(client, accountId, [repoId], item.mode === "runner_local" ? new Set([repoId]) : new Set())).has(repoId);
+  const limits = resolveBuildLimits({ accountValue: await setting(null), repoValue: await setting(repoId), runnerClamped });
   const hosted = !isRunnerMode(item.mode);
-
   const repoHeld = Number(
-    (await client.query<{ n: string }>("SELECT count(*) AS n FROM work_items WHERE account_id = $1 AND repo_id = $2 AND stage = ANY($3::text[]) AND id <> $4", [accountId, item.repo_id, [...BUILD_SLOT_STAGES], workItemId])).rows[0]!.n,
+    (await client.query<{ n: string }>("SELECT count(*) AS n FROM work_items WHERE account_id = $1 AND repo_id = $2 AND stage = ANY($3::text[]) AND id <> $4", [accountId, repoId, [...BUILD_SLOT_STAGES], workItemId])).rows[0]!.n,
   );
   const accountHeldHosted = hosted
     ? Number(
@@ -181,6 +205,27 @@ export async function decideBuildSlot(client: PoolClient, accountId: string, wor
         ).rows[0]!.n,
       )
     : 0;
+  return { item: { ...item, repo_id: repoId }, limits, hosted, repoHeld, accountHeldHosted };
+}
+
+/**
+ * How many more builds could start right now for the item's repository (and, for a hosted item, its account), ignoring who is waiting. The slot wake starts at most this many
+ * orphaned waiters per repository per pass (D#483 S5-j). A read, not a promise: each start still goes through the claim.
+ */
+export async function readFreeBuildSlots(pool: Pool, accountId: string, workItemId: string): Promise<number> {
+  return withTenant(pool, accountId, async (client) => {
+    const c = await readSlotCounts(client, accountId, workItemId);
+    if (c === null) return 0;
+    return Math.max(0, Math.min(c.limits.repoLimit - c.repoHeld, c.hosted ? c.limits.accountValue - c.accountHeldHosted : Number.MAX_SAFE_INTEGER));
+  });
+}
+
+/** The decision for one item as the database stands now. Read only; the caller holds the account lock when it must be exact. */
+export async function decideBuildSlot(client: PoolClient, accountId: string, workItemId: string): Promise<SlotDecision> {
+  const counts = await readSlotCounts(client, accountId, workItemId);
+  // An item that already holds a slot keeps it (a replay of its own start); a missing item or one with no repo is the caller's refusal to make.
+  if (counts === null || BUILD_SLOT_STAGES.includes(counts.item.stage)) return { granted: true };
+  const { item, limits, hosted, repoHeld, accountHeldHosted } = counts;
 
   const me = { id: item.id, priority: item.priority, queueRank: toQueueRank(item.queue_rank), createdAt: item.created_at };
   const waiters = (await listSlotWaiters(client, accountId, workItemId, "build")).filter((w) => compareQueueOrder({ id: w.id, priority: w.priority, queueRank: toQueueRank(w.queue_rank), createdAt: w.created_at }, me) < 0);
@@ -191,7 +236,7 @@ export async function decideBuildSlot(client: PoolClient, accountId: string, wor
     repoHeld,
     accountHeldHosted,
     repoWaiterAhead: waiters.some((w) => w.repo_id === item.repo_id),
-    accountWaiterAhead: waiters.some((w) => !isRunnerMode(w.mode) && Number(w.repo_held) < limits.repoLimit),
+    accountWaiterAhead: waiters.some((w) => !isRunnerMode(w.mode) && Number(w.repo_held) < Number(w.repo_limit)),
   });
 }
 

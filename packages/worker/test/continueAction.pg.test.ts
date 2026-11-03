@@ -466,12 +466,6 @@ describe("continue_work_item performer [pg]", { timeout: 90_000 }, () => {
       await refusedForSlot(w, withClaim(w), "waiting_for_build_slot_account");
     });
 
-    it("the one-build-per-repository wait is refused with its own code and the library is never called (the claim's stand-in answers it)", async () => {
-      const w = await world();
-      await parked(w);
-      await refusedForSlot(w, withClaim(w, async () => ({ granted: false, reason: "one_build_per_repo_until_d598" })), "one_build_per_repo_until_d598");
-    });
-
     it("a free slot is claimed: the run starts, the item is In progress, and the next item in the repository now waits", async () => {
       const w = await world();
       await parked(w);

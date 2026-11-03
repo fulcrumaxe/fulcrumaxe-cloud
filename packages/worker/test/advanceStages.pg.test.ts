@@ -150,14 +150,14 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
       const w = await item(a);
       const started: unknown[] = [];
       const asked: string[] = [];
-      const t = build({ startAdvance: async (args) => void started.push(args), buildWaitReason: async (_pool, _account, id) => (asked.push(id), "one_build_per_repo_until_d598") });
+      const t = build({ startAdvance: async (args) => void started.push(args), buildWaitReason: async (_pool, _account, id) => (asked.push(id), "waiting_for_build_slot_repo") });
       expect(await t.module.performAdvanceWorkItem(await action(a, w))).toEqual({
         result: "done",
-        outcome: { work_item_id: w, advance: "waiting", reason: "one_build_per_repo_until_d598", reasons: ["one_build_per_repo_until_d598"] },
+        outcome: { work_item_id: w, advance: "waiting", reason: "waiting_for_build_slot_repo", reasons: ["waiting_for_build_slot_repo"] },
       });
       expect(asked).toEqual([w]);
       expect(started).toHaveLength(1);
-      expect(await waitingFacts(a, w)).toEqual([{ kind: "stage_waiting", stage: "build", code: "one_build_per_repo_until_d598" }]);
+      expect(await waitingFacts(a, w)).toEqual([{ kind: "stage_waiting", stage: "build", code: "waiting_for_build_slot_repo" }]);
     });
 
     it("a free slot, a check that fails and a code the driver does not know all settle 'started' and record no wait", async () => {
@@ -321,15 +321,15 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
   it("S5-c1: a start that found no build slot leaves one stage_waiting fact (stage build) per poll-minute (no build_refused), so the waiter is live only while it polls", async () => {
     const a = await seedAccount(admin, randomUUID());
     const w = await item(a);
-    const t = build({ build: (async () => ({ status: "refused", reason: "one_build_per_repo_until_d598" })) as never });
+    const t = build({ build: (async () => ({ status: "refused", reason: "waiting_for_build_slot_repo" })) as never });
     const who = { accountId: a.accountId, userId: a.userId, workItemId: w, haltEpoch: 0 };
     const approval = randomUUID();
-    expect(await t.module.advanceBuild(who, approval)).toEqual({ status: "refused", reason: "one_build_per_repo_until_d598" });
+    expect(await t.module.advanceBuild(who, approval)).toEqual({ status: "refused", reason: "waiting_for_build_slot_repo" });
     await t.module.advanceBuild(who, approval);
     const rows = await admin.query("SELECT kind, code FROM work_item_driver_events WHERE work_item_id = $1", [w]);
     // Two polls in one minute are one fact (a minute boundary between them may make it two).
     expect(rows.rowCount).toBeLessThanOrEqual(2);
-    expect(rows.rows.every((r) => r.kind === "stage_waiting" && r.code === "one_build_per_repo_until_d598")).toBe(true);
+    expect(rows.rows.every((r) => r.kind === "stage_waiting" && r.code === "waiting_for_build_slot_repo")).toBe(true);
   });
 
   it("C23-3 (worker): a build start that met a capacity wait leaves a stage_waiting fact (stage build) with that name, never a build_refused, and keeps its attempt", async () => {
