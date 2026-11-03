@@ -49,7 +49,7 @@ export function parseWindow(raw, bounds) {
 // A failed write: a 422 carries the server's own explanation and the field it belongs to; anything else is a fixed sentence.
 export function failureText(e) {
   if (e && e.status === 422) return e.message;
-  if (e && e.status === 403) return NOT_ALLOWED;
+  if (e && e.status === 403) return e.code === "plan_holder_only" && e.message ? e.message : NOT_ALLOWED; // that one carries the server's fixed sentence
   if (e && e.status === 409) return CHANGED;
   return SAVE_FAILED;
 }
@@ -568,7 +568,7 @@ export function mountAutonomy(host, ctx) {
           { class: "au-preview", role: "group", "aria-labelledby": "au-preview-h", "data-testid": "au-preview" },
           h("h4", { class: "au-h", id: "au-preview-h", tabindex: -1, "data-focus": "preview" }, "Switch to " + preview.label + "?"),
           preview.moves.length === 0
-            ? h("p", { class: "au-line", "data-testid": "au-preview-none" }, "Nothing changes. These decisions already match " + preview.label + ".")
+            ? h("p", { class: "au-line", "data-testid": "au-preview-none" }, preview.held ? "Nothing else changes." : "Nothing changes. These decisions already match " + preview.label + ".")
             : h(
                 "ul",
                 { class: "au-list", "data-testid": "au-moves" },
@@ -576,6 +576,7 @@ export function mountAutonomy(host, ctx) {
                   h("li", { class: "au-item", "data-testid": "au-move" }, dialLabel(m.decision_type) + ": " + word(DISPOSITION_TEXT, m.from) + " to " + word(DISPOSITION_TEXT, m.to))
                 )
               ),
+          ...(preview.held || []).map((m) => h("p", { class: "au-line", "data-testid": "au-held" }, dialLabel(m.decision_type) + ": " + m.note)), // a dial the preset would loosen, left as it is
           h("p", { class: "au-line au-muted" }, "Decisions that always ask you stay as they are."),
           h(
             "div",
@@ -946,7 +947,7 @@ export function mountAutonomy(host, ctx) {
       dial = await api("POST", repoPath(repoId, "decision-settings/preset"), { preset: chosen.preset });
       ask = await api("GET", repoPath(repoId, "ask-settings"));
       preview = null;
-    }, () => chosen.label + " applied. " + (dial.moved.length === 1 ? "1 decision changed." : dial.moved.length + " decisions changed."));
+    }, () => chosen.label + " applied. " + (dial.moved.length === 1 ? "1 decision changed." : dial.moved.length + " decisions changed.") + (dial.held ? " " + dial.held.map((m) => dialLabel(m.decision_type) + ": " + m.note).join(" ") : ""));
     // The Switch button is gone once the preview closes, so focus would drop to the page: put it back on the preset that opened the preview (WCAG 2.4.3).
     if (chosen && !preview && !closed) focusAt("preset-" + chosen.preset);
   };

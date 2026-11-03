@@ -1,5 +1,6 @@
 import { isValidRunnerName } from "@fulcrumaxe/runner-protocol";
 import { markRunnerWork, readRunnerReplyHints, recordRunnerCheck, revokeRunnerWake } from "@fx/core/src/pendingWork.js";
+import { assertMayAddReposToRunner, PlanHolderOnlyError } from "@fx/db/src/runnerPlanLoosen.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 import { preReadAddedRepos, refuseUnlessPreRead } from "./repoPrivacy.js";
@@ -25,6 +26,7 @@ const invalid = (): never => {
 /** The one place a database refusal becomes an answer. 55000 is a removed (revoked) runner, whoever asks and whatever they ask (C-605-1). */
 function refusal(error: unknown): unknown {
   if (error instanceof RunnerHttpError) return error;
+  if (error instanceof PlanHolderOnlyError) return new RunnerHttpError(403, error.code, error.message);
   switch (pgCode(error)) {
     case "P0002":
       return new RunnerHttpError(404, "not_found", "no such runner");
@@ -122,6 +124,9 @@ export async function setRunnerRepos(deps: RunnerCloudDeps, principal: SessionPr
     const preRead = await preReadAddedRepos(deps, principal, given as string[], runnerId);
     const repoIds = await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client) => {
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`runner_repos:${runnerId.toLowerCase()}`]);
+      // The lock a registration and a dial loosening also take (runnerPlanLoosen.ts): a runner given a repo is seen by a loosening, or waits for it.
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`runner_register:${principal.accountId}`]);
+      await assertMayAddReposToRunner(client, principal.userId, runnerId, given as string[]);
       await refuseUnlessPreRead(client, given as string[], runnerId, preRead);
       await client.query("SELECT runner_repos_set($1, $2::uuid[])", [runnerId, given]);
       return (await client.query<{ allowed_repo_ids: string[] }>("SELECT allowed_repo_ids FROM runners WHERE id = $1", [runnerId])).rows[0]?.allowed_repo_ids ?? [];

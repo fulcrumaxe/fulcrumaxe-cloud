@@ -11,6 +11,8 @@ import { hashToken } from '../src/tokens/resolve.js';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
 import { invariantLabel } from '../src/routes/decision-labels.js';
+import { insertRunner } from '@fx/db/test/helpers/runnerFixtures.js';
+import { PLAN_HOLDER_ONLY_SENTENCE, PRESET_HELD_SENTENCE } from '@fx/db/src/runnerPlanLoosen.js';
 import { seedAccountWithMember, seedUser } from './helpers/seed.js';
 
 interface Identity {
@@ -192,7 +194,6 @@ describe('D#7 DP10a: decision settings routes', () => {
     expect(autonomous.moves.map((m) => [m.decision_type, m.to])).toEqual([
       ['nonbreaking_refactor_approach', 'act'],
       ['test_strategy_choice', 'act'],
-      ['runner_run_on_member_plan', 'act'],
       ['start_work_small', 'act'],
       ['start_work_bug', 'act'],
       ['start_work_doc', 'act'],
@@ -229,24 +230,88 @@ describe('D#7 DP10a: decision settings routes', () => {
     const res = await call(f.admin, 'POST', `/repos/${f.repoId}/decision-settings/preset`, { preset: 'autonomous' });
     expect(res.status).toBe(200);
     const s = (await res.json()) as Settings;
-    expect(s.active_preset).toBe('autonomous');
+    // The member-plan dial is held back (a preset never loosens it, D#7 DW-R7), so no preset matches the repo as a whole.
+    expect(s.active_preset).toBeNull();
     expect(s.moved!.map((m) => m.decision_type).sort()).toEqual([
-      'launch_sub_item', 'nonbreaking_refactor_approach', 'run_extension', 'runner_run_on_member_plan', 'start_work_bug', 'start_work_doc', 'start_work_small', 'test_strategy_choice', 'tool_call',
+      'launch_sub_item', 'nonbreaking_refactor_approach', 'run_extension', 'start_work_bug', 'start_work_doc', 'start_work_small', 'test_strategy_choice', 'tool_call',
     ]);
     const dials = dialsByType(s);
     expect(dials.nonbreaking_refactor_approach).toMatchObject({ disposition: 'act', source: 'preset', preset: 'autonomous', version: 1 });
     expect(dials.publish_deprecation_notice).toMatchObject({ disposition: 'ask', source: 'default', version: null });
     const rows = await versions(f.repoId);
-    expect(rows).toHaveLength(9);
+    expect(rows).toHaveLength(8);
     for (const r of rows) {
       expect(CLASS_2).toContain(r.decision_type);
       expect(r.changed_by).toBe(f.admin.userId);
       expect(r.preset).toBe('autonomous');
     }
     const audit = await auditRows(f.owner.accountId);
-    expect(audit).toHaveLength(9);
+    expect(audit).toHaveLength(8);
     for (const a of audit) expect(a.actor).toBe(f.admin.userId);
-    expect(audit.find((a) => a.payload.decision_type === 'runner_run_on_member_plan')!.payload).toMatchObject({ previous: 'announce', new: 'act' });
+    expect(audit.find((a) => a.payload.decision_type === 'runner_run_on_member_plan')).toBeUndefined();
+  });
+
+  describe('D#7 DW-R7: the dial for running work on a member\'s plan only gets looser by its plan holder', () => {
+    const RUN = 'runner_run_on_member_plan';
+    const runnerFor = async (f: { owner: Identity; repoId: string }, by: Identity) => {
+      const id = await insertRunner(admin, f.owner.accountId, by.userId);
+      await admin.query('UPDATE runners SET allowed_repo_ids = $2::uuid[] WHERE id = $1', [id, [f.repoId]]);
+      return id;
+    };
+    const runnerRows = async (repoId: string) => (await versions(repoId)).filter((r) => r.decision_type === RUN);
+
+    it('a preset that would loosen it leaves it as it is, and preview and apply both say so per row; the other dials still move', async () => {
+      const f = await fixture();
+      const preview = (await (await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/preset/preview`, { preset: 'autonomous' })).json()) as Preview & { held?: { decision_type: string; from: string; to: string; note: string }[] };
+      expect(preview.moves.map((m) => m.decision_type)).not.toContain(RUN);
+      expect(preview.held).toEqual([{ decision_type: RUN, from: 'announce', to: 'act', note: PRESET_HELD_SENTENCE }]);
+      const res = await call(f.admin, 'POST', `/repos/${f.repoId}/decision-settings/preset`, { preset: 'autonomous' });
+      expect(res.status).toBe(200);
+      const applied = (await res.json()) as Settings & { held?: unknown };
+      expect(applied.held).toEqual(preview.held);
+      expect(applied.moved!.map((m) => m.decision_type)).not.toContain(RUN);
+      expect(applied.moved).toHaveLength(8);
+      expect(dialsByType(applied)[RUN]).toMatchObject({ disposition: 'announce', source: 'default', version: null });
+      expect(applied.active_preset).toBeNull();
+      expect(await runnerRows(f.repoId)).toEqual([]);
+      expect((await auditRows(f.owner.accountId)).map((a) => a.payload.decision_type)).not.toContain(RUN);
+    });
+
+    it('a preset that tightens it still moves it, and a preset with nothing held carries no held list', async () => {
+      const f = await fixture();
+      const cautious = (await (await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/preset`, { preset: 'cautious' })).json()) as Settings & { held?: unknown };
+      expect(cautious.moved!.map((m) => m.decision_type)).toContain(RUN);
+      expect(cautious.held).toBeUndefined();
+      expect(dialsByType(cautious)[RUN]).toMatchObject({ disposition: 'ask', source: 'preset', preset: 'cautious', version: 1 });
+      const balanced = (await (await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/preset`, { preset: 'balanced' })).json()) as Settings & { held?: { decision_type: string }[] };
+      expect(balanced.held!.map((h) => h.decision_type)).toEqual([RUN]);
+      expect(dialsByType(balanced)[RUN]).toMatchObject({ disposition: 'ask', version: 1 });
+    });
+
+    it('a single dial set looser, or the default taken back off ask, is the holders\' alone when a live subscription runner lists the repo: 403 plan_holder_only, nothing written', async () => {
+      const f = await fixture();
+      await runnerFor(f, f.member);
+      expect((await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/dial`, { decision_type: RUN, disposition: 'ask' })).status).toBe(200);
+      const refused = await call(f.admin, 'POST', `/repos/${f.repoId}/decision-settings/dial`, { decision_type: RUN, disposition: 'act' });
+      expect(refused.status).toBe(403);
+      expect(await refused.json()).toMatchObject({ error: { code: 'plan_holder_only', message: PLAN_HOLDER_ONLY_SENTENCE } });
+      const back = await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/reset`, { decision_type: RUN });
+      expect(back.status).toBe(403);
+      expect(((await back.json()) as ErrorBody).error.code).toBe('plan_holder_only');
+      expect(await runnerRows(f.repoId)).toHaveLength(1);
+      // Making it stricter, and every other dial, stay open.
+      expect((await call(f.admin, 'POST', `/repos/${f.repoId}/decision-settings/dial`, { decision_type: 'start_work_small', disposition: 'act' })).status).toBe(200);
+    });
+
+    it('the holder of every live subscription runner on the repo may loosen it, and with no such runner an owner or admin may', async () => {
+      const f = await fixture();
+      await runnerFor(f, f.admin);
+      await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/dial`, { decision_type: RUN, disposition: 'ask' });
+      expect((await call(f.admin, 'POST', `/repos/${f.repoId}/decision-settings/dial`, { decision_type: RUN, disposition: 'act' })).status).toBe(200);
+      const g = await fixture();
+      await call(g.owner, 'POST', `/repos/${g.repoId}/decision-settings/dial`, { decision_type: RUN, disposition: 'ask' });
+      expect((await call(g.admin, 'POST', `/repos/${g.repoId}/decision-settings/dial`, { decision_type: RUN, disposition: 'act' })).status).toBe(200);
+    });
   });
 
   it('re-applying the active preset writes nothing; switching away and back is the undo, and the history keeps every step', async () => {
@@ -260,14 +325,16 @@ describe('D#7 DP10a: decision settings routes', () => {
     await call(f.owner, 'POST', base, { preset: 'cautious' });
     expect((await get(f.owner, f.repoId)).active_preset).toBe('cautious');
     const undone = (await (await call(f.owner, 'POST', base, { preset: 'balanced' })).json()) as Settings;
-    expect(undone.active_preset).toBe('balanced');
+    // Balanced over Cautious would loosen the member-plan dial, which stays ask: no preset matches, and the answer says which dial was held.
+    expect(undone.active_preset).toBeNull();
+    expect((undone as Settings & { held?: { decision_type: string }[] }).held!.map((h) => h.decision_type)).toEqual(['runner_run_on_member_plan']);
 
     const rows = await versions(f.repoId);
     const refactor = rows.filter((r) => r.decision_type === 'nonbreaking_refactor_approach');
     expect(refactor.map((r) => [r.version, r.disposition])).toEqual([[1, 'announce'], [2, 'ask'], [3, 'announce']]);
     // Cautious asks for the runner dial, which was announce by default: moved, and its history starts there.
     const runner = rows.filter((r) => r.decision_type === 'runner_run_on_member_plan');
-    expect(runner.map((r) => [r.version, r.disposition])).toEqual([[1, 'ask'], [2, 'announce']]);
+    expect(runner.map((r) => [r.version, r.disposition])).toEqual([[1, 'ask']]);
     expect((await auditRows(f.owner.accountId)).length).toBe(rows.length);
   });
 
@@ -482,15 +549,15 @@ describe('D#7 DP10a: decision settings routes', () => {
   });
 
   it('each preset differs from the others only on class 2, as the API reports it', async () => {
-    const f = await fixture();
     const table: Record<string, Record<string, string>> = {};
     for (const preset of ['cautious', 'balanced', 'autonomous']) {
+      const f = await fixture(); // a repo of its own each: a preset is never applied over the looser dial another one left
       const s = (await (await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/preset`, { preset })).json()) as Settings;
       table[preset] = Object.fromEntries(s.dials.map((d) => [d.decision_type, d.disposition]));
     }
     expect(table.cautious).toMatchObject({ nonbreaking_refactor_approach: 'ask', test_strategy_choice: 'ask', runner_run_on_member_plan: 'ask', publish_deprecation_notice: 'ask' });
     expect(table.balanced).toMatchObject({ nonbreaking_refactor_approach: 'announce', test_strategy_choice: 'announce', runner_run_on_member_plan: 'announce', publish_deprecation_notice: 'ask' });
-    expect(table.autonomous).toMatchObject({ nonbreaking_refactor_approach: 'act', test_strategy_choice: 'act', runner_run_on_member_plan: 'act', publish_deprecation_notice: 'ask' });
+    expect(table.autonomous).toMatchObject({ nonbreaking_refactor_approach: 'act', test_strategy_choice: 'act', runner_run_on_member_plan: 'announce', publish_deprecation_notice: 'ask' }); // held: a preset never loosens it (D#7 DW-R7)
     for (const type of ['dependency_patch_bump', 'retry_transient_step_failure']) for (const p of Object.keys(table)) expect(table[p]![type]).toBe('act');
     for (const type of ['publish_release_artifact', 'external_paid_api_call']) for (const p of Object.keys(table)) expect(table[p]![type]).toBe('ask');
   });

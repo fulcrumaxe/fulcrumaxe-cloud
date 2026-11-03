@@ -4,6 +4,7 @@ import { CATALOGUE, CATALOGUE_VERSION, PRESETS, decide, getCatalogueEntry, getPr
 import type { CatalogueEntry, Disposition, PresetName } from "@fx/decisions";
 import { DIAL_DEFAULT_MARKER, appendDialVersion, getCurrentDialSetting, type DecisionSetting } from "@fx/db/src/decisions.js";
 import { FIXED_INVARIANTS } from "@fx/db/src/dialInventory.js";
+import { PRESET_HELD_SENTENCE, PlanHolderOnlyError, RUNNER_RUN_DECISION_TYPE, isLoosening } from "@fx/db/src/runnerPlanLoosen.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { assertRepoExists } from "@fx/core/src/role-settings/internal.js";
 import { assertRepoIdShape } from "@fx/core/src/repos/read.js";
@@ -66,6 +67,8 @@ const settingsResponseSchema = z.object({
   /** The fixed list, read from the source the DP5 inventory test reads. It has no write route. */
   invariants: z.array(z.object({ key: z.string(), layer: z.string(), label: z.string() })),
 });
+/** A dial the preset left as it is because it would have loosened it (D#7 DW-R7); absent when none. */
+const heldSchema = moveSchema.extend({ note: z.string() });
 const previewResponseSchema = z.object({
   preset: z.string(),
   label: z.string(),
@@ -73,8 +76,9 @@ const previewResponseSchema = z.object({
   active_preset: z.string().nullable(),
   /** Exactly the class 2 dials this preset would change. Empty when the repo already matches. */
   moves: z.array(moveSchema),
+  held: z.array(heldSchema).optional(),
 });
-const applyResponseSchema = settingsResponseSchema.extend({ moved: z.array(moveSchema) });
+const applyResponseSchema = settingsResponseSchema.extend({ moved: z.array(moveSchema), held: z.array(heldSchema).optional() });
 
 type SettingsResponse = z.infer<typeof settingsResponseSchema>;
 type Move = z.infer<typeof moveSchema>;
@@ -108,14 +112,18 @@ export async function currentRows(client: PoolClient, repoId: string): Promise<M
   return rows;
 }
 
-function movesFor(preset: PresetName, rows: Map<string, DecisionSetting | null>): Move[] {
+/** What a preset changes, and (per row) what it holds back: "run on a member's plan" is never loosened by a preset (D#7 DW-R7). */
+function movesFor(preset: PresetName, rows: Map<string, DecisionSetting | null>): { moves: Move[]; held: (Move & { note: string })[] } {
   const moves: Move[] = [];
+  const held: (Move & { note: string })[] = [];
   for (const entry of classTwo()) {
     const from = effective(entry, rows.get(entry.id) ?? null);
     const to = presetDisposition(entry, preset);
-    if (from !== to) moves.push({ decision_type: entry.id, from, to });
+    if (from === to) continue;
+    if (entry.id === RUNNER_RUN_DECISION_TYPE && isLoosening(from, to)) held.push({ decision_type: entry.id, from, to, note: PRESET_HELD_SENTENCE });
+    else moves.push({ decision_type: entry.id, from, to });
   }
-  return moves;
+  return { moves, held };
 }
 
 function view(repoId: string, canChange: boolean, rows: Map<string, DecisionSetting | null>): SettingsResponse {
@@ -150,6 +158,7 @@ function invalid(path: string, code: string, message: string): ApiError {
 /** The database's own gate (owner/admin INSERT policy, unique version) answering for the route's pre-checks. */
 function mapWriteError(error: unknown): unknown {
   const code = (error as { code?: string } | null)?.code;
+  if (error instanceof PlanHolderOnlyError) return new ApiError(403, error.code, error.message);
   if (code === "42501") return new ForbiddenError("only an owner or admin can change a dial");
   // 23514: the next-version trigger (check_violation) fires when a concurrent writer committed first; same answer as the unique violation.
   if (code === "23505" || code === "23514") return new ApiError(409, "dial_changed", "a dial changed while you saved; reload and try again");
@@ -198,12 +207,14 @@ export const decisionSettingRoutes: RouteEntry[] = [
       return withTenant(ctx.pool, accountId, userId, async (client) => {
         await assertRepoExists(client, repoId);
         const rows = await currentRows(client, repoId);
+        const { moves, held } = movesFor(name, rows);
         return {
           preset: preset.name,
           label: preset.label,
           customer_role: preset.customerRoleDescription,
           active_preset: activePreset(rows),
-          moves: movesFor(name, rows),
+          moves,
+          ...(held.length > 0 ? { held } : {}),
         };
       });
     },
@@ -215,7 +226,7 @@ export const decisionSettingRoutes: RouteEntry[] = [
     summary: "Adopt a preset: one new dial version per class 2 dial it changes, in one transaction",
     description:
       "Appends a `decision_settings` version for each class 2 dial the preset changes, and an audit row naming the previous and new value for each. " +
-      "A repo that already matches writes nothing. Class 1 and class 3 are never touched. Owner or admin, session only.",
+      "A repo that already matches writes nothing. A preset never loosens \"run on a member's plan\": that dial is left as it is and listed in `held` with a sentence. Class 1 and class 3 are never touched. Owner or admin, session only.",
     // principals omitted -> session-only.
     minRole: "admin",
     idempotency: "never",
@@ -233,11 +244,11 @@ export const decisionSettingRoutes: RouteEntry[] = [
         const out = await withTenant(ctx.pool, accountId, userId, async (client) => {
           await assertRepoExists(client, repoId);
           const before = await currentRows(client, repoId);
-          const moved = movesFor(name, before);
+          const { moves: moved, held } = movesFor(name, before);
           for (const move of moved) {
             await appendDialVersion(client, { accountId, repoId, decisionType: move.decision_type, disposition: move.to, preset: name, changedBy: userId });
           }
-          return { ...view(repoId, role === "owner" || role === "admin", await currentRows(client, repoId)), moved };
+          return { ...view(repoId, role === "owner" || role === "admin", await currentRows(client, repoId)), moved, ...(held.length > 0 ? { held } : {}) };
         });
         // D#483 S5-b1a-2: a looser dial can let a waiting proposal start; the auto-start pass wakes now instead of at the backstop.
         if (out.moved.length > 0) void markWorkPending("proposal-verify-sweep");
@@ -258,7 +269,7 @@ export const decisionSettingRoutes: RouteEntry[] = [
     minRole: "admin",
     idempotency: "never",
     rateClass: "write",
-    extraResponses: { "409": "A dial changed while the request was running (`dial_changed`), or the account is not active." },
+    extraResponses: { "403": "Not an owner or admin, or (`plan_holder_only`) a looser \"run on a member's plan\" dial on a repo with a live subscription runner, which only that runner's holder may set. Nothing is written.", "409": "A dial changed while the request was running (`dial_changed`), or the account is not active." },
     paramsSchema: repoIdParamsSchema,
     bodySchema: dialBodySchema,
     responseSchema: settingsResponseSchema,
@@ -303,7 +314,7 @@ export const decisionSettingRoutes: RouteEntry[] = [
     minRole: "admin",
     idempotency: "never",
     rateClass: "write",
-    extraResponses: { "409": "A dial changed while the request was running (`dial_changed`), or the account is not active." },
+    extraResponses: { "403": "Not an owner or admin, or (`plan_holder_only`) a looser \"run on a member's plan\" dial on a repo with a live subscription runner, which only that runner's holder may set. Nothing is written.", "409": "A dial changed while the request was running (`dial_changed`), or the account is not active." },
     paramsSchema: repoIdParamsSchema,
     bodySchema: resetBodySchema,
     responseSchema: settingsResponseSchema,

@@ -36,7 +36,9 @@ export const OFF_QUESTION = "Ask before each run again?";
 export const OFF_TEXT = "Work on this runner's repos will wait for your approval again, unless the repo's setting approves it for you.";
 const named = (p) => (p && typeof p.name === "string" && p.name.trim() !== "" ? p.name.trim() : "");
 const cancelled = (e) => e && e.name === "AbortError";
-const sentence = (table, e) => (e instanceof ApiFailure || (e && typeof e.status === "number") ? table[e.status] : undefined) || table.other;
+// The holders-only refusal (D#7 DW-R7) is a 403 that carries its own fixed sentence and does not mean the viewer lost the control.
+const holderOnly = (e) => e && e.status === 403 && e.code === "plan_holder_only" && !!e.message;
+const sentence = (table, e) => (holderOnly(e) ? e.message : (e instanceof ApiFailure || (e && typeof e.status === "number") ? table[e.status] : undefined) || table.other);
 
 /** One runner row from GET /api/runners, or null when it is not usable. A registrant without a name is left unnamed, never shown as a blank. */
 export function readRunner(r) {
@@ -146,7 +148,7 @@ export function createDialController({ call = api, signal, repoId, onChange = ()
       set({ saving: false, dial: dial || st.dial, error: dial ? "" : DIAL_SENTENCES.other });
     } catch (e) {
       if (cancelled(e)) return;
-      set({ saving: false, error: sentence(DIAL_SENTENCES, e), ...(e && e.status === 403 && st.dial ? { dial: { ...st.dial, canChange: false } } : {}) });
+      set({ saving: false, error: sentence(DIAL_SENTENCES, e), ...(e && e.status === 403 && !holderOnly(e) && st.dial ? { dial: { ...st.dial, canChange: false } } : {}) });
       if (e && e.status === 409) load(true);
     }
   }
@@ -160,7 +162,7 @@ export function createDialController({ call = api, signal, repoId, onChange = ()
       set({ saving: false, dial: dial || st.dial, error: dial ? "" : DIAL_SENTENCES.other });
     } catch (e) {
       if (cancelled(e)) return;
-      set({ saving: false, error: sentence(DIAL_SENTENCES, e), ...(e && e.status === 403 && st.dial ? { dial: { ...st.dial, canChange: false } } : {}) });
+      set({ saving: false, error: sentence(DIAL_SENTENCES, e), ...(e && e.status === 403 && !holderOnly(e) && st.dial ? { dial: { ...st.dial, canChange: false } } : {}) });
       if (e && e.status === 409) load(true);
     }
   }

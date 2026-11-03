@@ -77,16 +77,16 @@ const RUN_COLUMNS = `id, work_item_id, parent_run_id, role, status, runtime, usd
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * The ids, among the given approved runs, that the claim approved by itself: the ones with a `runner_run_on_member_plan` decision receipt.
- * Only the claim's auto-approve definer writes one (through the receipt writer, in the same transaction as `approved_by`), and a manual
- * approval writes none. `app_user` may read receipts under row security for its own account. One query.
+ * The ids, among the given approved runs, that the claim approved by itself: the ones with a `runner_run_on_member_plan` decision receipt whose actor is `policy`.
+ * Only the claim's auto-approve definer writes one (through the receipt writer, in the same transaction as `approved_by`); a manual
+ * approval writes none, and a Yes answered in Needs you writes one in the person's name, which is not the claim's. `app_user` may read receipts under row security for its own account. One query.
  */
 async function autoApprovedIds(client: PoolClient, accountId: string, rows: RunRow[]): Promise<Set<string>> {
   const ids = rows.filter((r) => r.approved_by !== null).map((r) => r.id);
   if (ids.length === 0) return new Set();
   const { rows: found } = await client.query<{ run_id: string }>(
     `SELECT DISTINCT run_id::text AS run_id FROM decision_receipts
-      WHERE account_id = $1 AND decision_type = 'runner_run_on_member_plan' AND class = 'human_over_the_loop' AND run_id = ANY($2::uuid[])`,
+      WHERE account_id = $1 AND decision_type = 'runner_run_on_member_plan' AND class = 'human_over_the_loop' AND actor = 'policy' AND run_id = ANY($2::uuid[])`,
     [accountId, ids],
   );
   return new Set(found.map((r) => r.run_id));

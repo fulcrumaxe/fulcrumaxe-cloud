@@ -104,6 +104,7 @@ import type { FixRoundHeadPorts } from "./fixRoundHeads.js";
 import { createResumeModule, type ResumeFacade } from "./resumeDecision.js";
 import { createContinueModule, type ContinueFacade } from "./continueAction.js";
 import { createEnvelopeAsk } from "./envelopeAsk.js";
+import { createRunnerPlanAsk } from "./runnerPlanAsk.js";
 import { createStartGate } from "./startGateStep.js";
 import { createFixGate } from "./fixGateStep.js";
 import { createDecisionIntake } from "./decisionIntake.js";
@@ -484,7 +485,8 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       },
       onError: (runId) => console.warn(JSON.stringify({ event: "run.handoff_failed", run_id: runId })),
     });
-    const runnerClaims = createRunnerClaimFacade(pools.runnerPool, { visibility: repoVisibility, followUp, wakeEnabled, onError: (runId) => console.warn(JSON.stringify({ event: "runner.follow_up_failed", run_id: runId })), onHandedOff: (i) => runHandoffs.completeRunHandoff({ ...i, forced: false }) });
+    const raiseMemberPlan = createRunnerPlanAsk(pools.receiptPool);
+    const runnerClaims = createRunnerClaimFacade(pools.runnerPool, { visibility: repoVisibility, followUp, wakeEnabled, raiseMemberPlanAsks: (i) => raiseMemberPlan(i).catch((): number => { console.warn(JSON.stringify({ event: "runner.member_plan_ask_failed", runner_id: i.runnerId })); return 0; }), onError: (runId) => console.warn(JSON.stringify({ event: "runner.follow_up_failed", run_id: runId })), onHandedOff: (i) => runHandoffs.completeRunHandoff({ ...i, forced: false }) });
     const runnerDone = createRunnerDoneFacade(pools.runnerPool);
     // D#6 R5a-2b (C27 section 1.6): the ticket key is read here, once. Without it (or without the forward host) the ticket route answers 503 and nothing else changes.
     const gitTicketSigner = loadGitTicketSigner(env);

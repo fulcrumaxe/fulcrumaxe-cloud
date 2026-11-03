@@ -1,7 +1,8 @@
 import type { PoolClient } from "pg";
 import { markRunnerWork } from "@fx/core/src/pendingWork.js";
 import { DIAL_DEFAULT_MARKER, getCurrentDialSetting, writeDialSetting } from "@fx/db/src/decisions.js";
-import { RUNNER_RUN_DECISION_TYPE, defaultDisposition, dispositionForPreset, isPresetName, readRunnerPlanDial, type RunnerPlanDial } from "@fx/db/src/runnerPlanDial.js";
+import { RUNNER_RUN_DECISION_TYPE, defaultDisposition, dispositionForPreset, isPresetName, presetProposal, readRunnerPlanDial, type RunnerPlanDial } from "@fx/db/src/runnerPlanDial.js";
+import { PRESET_HELD_SENTENCE, PlanHolderOnlyError } from "@fx/db/src/runnerPlanLoosen.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 import { requireMemberRole } from "./memberRole.js";
@@ -9,9 +10,9 @@ import { requireMemberRole } from "./memberRole.js";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DISPOSITIONS = ["ask", "announce", "act"] as const;
 
-const body = (repoId: string, dial: RunnerPlanDial, canChange: boolean): RunnerHttpResponse => ({
+const body = (repoId: string, dial: RunnerPlanDial, canChange: boolean, note?: string): RunnerHttpResponse => ({
   status: 200,
-  body: { repo_id: repoId, decision_type: RUNNER_RUN_DECISION_TYPE, disposition: dial.disposition, source: dial.source, preset: dial.preset, version: dial.version, can_change: canChange },
+  body: { repo_id: repoId, decision_type: RUNNER_RUN_DECISION_TYPE, disposition: dial.disposition, source: dial.source, preset: dial.preset, version: dial.version, can_change: canChange, ...(note ? { note } : {}) },
   headers: { "cache-control": "no-store" },
 });
 
@@ -43,6 +44,11 @@ export async function getPlanApprovalDial(deps: RunnerCloudDeps, principal: Sess
  * version, or already on the default, writes nothing); anything else is 400. It goes through `writeDialSetting`, so the write is a new
  * append-only version attributed to the signed-in user (never a field of the request), with the dial audit row, in one transaction. A pending
  * run is not touched: it is re-read at the next claim, so lowering the dial applies from there.
+ *
+ * D#7 DW-R7: a preset only tightens. One that would loosen the dial writes nothing and answers 200 with the dial as it is and `note` (a fixed sentence). An
+ * explicit loosening (or "use the default" off `ask`) on a repo with a live subscription runner is the holders' alone: any other owner or admin gets 403
+ * `plan_holder_only`. The check and the write share one transaction under the runner registration lock (appendDialVersion), so a runner registered between
+ * them cannot slip by.
  */
 export async function setPlanApprovalDial(deps: RunnerCloudDeps, principal: SessionPrincipal, repoId: string, input: unknown): Promise<RunnerHttpResponse> {
   if (!UUID.test(repoId)) throw new RunnerHttpError(404, "not_found", "no such repository");
@@ -53,6 +59,7 @@ export async function setPlanApprovalDial(deps: RunnerCloudDeps, principal: Sess
   const keys = Object.keys(input).join(",");
   const given = input as { disposition?: unknown; preset?: unknown };
   let disposition: (typeof DISPOSITIONS)[number];
+  let presetName: Parameters<typeof presetProposal>[0] | null = null;
   let preset: string | null = null;
   let reset = false;
   if (keys === "reset" && (input as { reset?: unknown }).reset === true) {
@@ -62,8 +69,8 @@ export async function setPlanApprovalDial(deps: RunnerCloudDeps, principal: Sess
   } else if (keys === "disposition" && typeof given.disposition === "string" && (DISPOSITIONS as readonly string[]).includes(given.disposition)) {
     disposition = given.disposition as (typeof DISPOSITIONS)[number];
   } else if (keys === "preset" && isPresetName(given.preset)) {
-    preset = given.preset;
-    disposition = dispositionForPreset(given.preset);
+    preset = presetName = given.preset;
+    disposition = presetProposal(given.preset);
   } else {
     return invalid();
   }
@@ -73,6 +80,11 @@ export async function setPlanApprovalDial(deps: RunnerCloudDeps, principal: Sess
       if (role !== "owner" && role !== "admin") throw new RunnerHttpError(403, "forbidden", "only an owner or admin can change this");
       await requireRepo(client, repoId);
     });
+    if (presetName) {
+      const current = await withTenant(deps.appUserPool, principal.accountId, principal.userId, (client) => readRunnerPlanDial(client, repoId));
+      disposition = dispositionForPreset(presetName, current.disposition);
+      if (disposition !== presetProposal(presetName)) return body(repoId, current, true, PRESET_HELD_SENTENCE);
+    }
     if (reset) {
       // Nothing to undo when no version exists or the current one already is the default: no version, no audit row.
       const current = await withTenant(deps.appUserPool, principal.accountId, principal.userId, (client) => getCurrentDialSetting(client, repoId, RUNNER_RUN_DECISION_TYPE));
@@ -83,6 +95,7 @@ export async function setPlanApprovalDial(deps: RunnerCloudDeps, principal: Sess
     if (disposition !== "ask") void markRunnerWork(principal.accountId);
   } catch (error) {
     if (error instanceof RunnerHttpError) throw error;
+    if (error instanceof PlanHolderOnlyError) throw new RunnerHttpError(403, error.code, error.message);
     switch (pgCode(error)) {
       case "42501":
         throw new RunnerHttpError(403, "forbidden", "only an owner or admin can change this");

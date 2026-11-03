@@ -4,6 +4,7 @@ import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { raiseAsk } from '@fx/db/src/decisionAsks.js';
 import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
+import { insertRunner } from '@fx/db/test/helpers/runnerFixtures.js';
 import { withTenant } from '@fx/core/src/tenancy/withTenant.js';
 import { answerAsk } from '@fx/core/src/decisions/index.js';
 import { insertApiToken } from '@fx/core/src/tokens/service.js';
@@ -133,6 +134,53 @@ describe('D#598 P8c-2a: decision asks', () => {
     });
     return plaintext;
   };
+
+  describe("D#7 DW-R7: a run on a member's plan", () => {
+    /** An ask on a waiting runner run, raised and recorded the way the worker does it: the definer reads the plan holder from the runner. */
+    async function memberPlanAsk() {
+      const f = await fixture();
+      await admin.query(`UPDATE users SET name = 'Priya Raman' WHERE id = $1`, [f.admin.userId]);
+      const runner = await insertRunner(admin, f.refs.accountId, f.admin.userId, { credentialMode: 'subscription' });
+      await admin.query(`UPDATE runners SET allowed_repo_ids = $2::uuid[] WHERE id = $1`, [runner, [f.refs.repoId]]);
+      const run = randomUUID();
+      await admin.query(`INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id, work_item_id, job_signed) VALUES ($1, $2, 'executor', 'runner', 'pending', 'runner_local', $3, $4, '{}'::jsonb)`, [run, f.refs.accountId, f.refs.repoId, f.refs.workItemId]);
+      await admin.query(`INSERT INTO decision_settings (account_id, repo_id, decision_type, disposition, version, changed_by) VALUES ($1, $2, 'runner_run_on_member_plan', 'ask', 1, $3)`, [f.refs.accountId, f.refs.repoId, f.refs.userId]);
+      const id = await withTenant(receiptPool, f.refs.accountId, async (c) => {
+        const ask = await raiseAsk(c, {
+          class: 'human_over_the_loop', decisionType: 'runner_run_on_member_plan', workItemId: f.refs.workItemId, runId: run,
+          options: [{ id: 'approve', label: 'Yes' }, { id: 'decline', label: 'No' }], proposed: 'approve', rationale: FENCED, quotedInputs: [{ trust: 'untrusted', storedBody: FENCED }],
+        });
+        await c.query('SELECT runner_plan_ask_record($1, $2, $3)', [ask, run, runner]);
+        return ask;
+      });
+      return { f, id, run };
+    }
+
+    it('the list names the plan holder and says whether the caller is them; every other ask carries no plan_holder', async () => {
+      const { f, id } = await memberPlanAsk();
+      const other = await raise(f.refs);
+      const forHolder = ((await (await list(f.admin)).json()) as { data: (AskDto & { plan_holder?: unknown })[] }).data;
+      expect(forHolder.find((a) => a.id === id)).toMatchObject({ decision_type: 'runner_run_on_member_plan', label: "Running work on a team member's own plan", plan_holder: { name: 'Priya Raman', is_you: true } });
+      expect(forHolder.find((a) => a.id === other)).not.toHaveProperty('plan_holder');
+      const forMember = ((await (await list(f.member)).json()) as { data: { id: string; plan_holder?: unknown }[] }).data;
+      expect(forMember.find((a) => a.id === id)!.plan_holder).toEqual({ name: 'Priya Raman', is_you: false });
+      expect(JSON.stringify(forHolder)).not.toMatch(/undefined|NaN/);
+    });
+
+    it("another admin is refused 403 and nothing changes; the plan holder's yes approves the run for them", async () => {
+      const { f, id, run } = await memberPlanAsk();
+      const second = await addMember(f.refs.accountId, 'admin');
+      const refused = await answer(second, id, { choice: 'approve' });
+      expect(refused.status).toBe(403);
+      expect(await code(refused)).toBe('forbidden');
+      expect((await readAsk(id)).state).toBe('open');
+      expect((await admin.query(`SELECT approved_by FROM agent_runs WHERE id = $1`, [run])).rows[0].approved_by).toBeNull();
+      const ok = await answer(f.admin, id, { choice: 'approve' });
+      expect(ok.status).toBe(200);
+      expect((await admin.query(`SELECT approved_by FROM agent_runs WHERE id = $1`, [run])).rows[0].approved_by).toBe(f.admin.userId);
+      expect((await readAsk(id)).state).toBe('answered');
+    });
+  });
 
   describe('GET /decision-asks', () => {
     it('any member lists the pending asks with a customer name, the options, the proposal and the rationale as stored', async () => {
