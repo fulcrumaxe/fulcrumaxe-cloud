@@ -1,6 +1,8 @@
 import type { Pool, PoolClient } from 'pg';
 import { withTenant } from './withTenant.js';
 import { getCatalogueEntry } from '@fx/decisions';
+import type { Disposition } from '@fx/decisions';
+import { PlanHolderOnlyError, RUNNER_RUN_DECISION_TYPE, assertMayLoosenRunnerPlanDial, isLoosening } from './runnerPlanLoosen.js';
 
 /**
  * Typed reads and the append-only dial write over the two tables
@@ -274,6 +276,12 @@ export async function appendDialVersion(client: PoolClient, input: AppendDialVer
   );
   const previous = previousRows[0] ? mapDecisionSettingRow(previousRows[0]) : null;
   const nextVersion = previous ? previous.version + 1 : 1;
+  // D#7 DW-R7: a looser "run on a member's plan" dial is the plan holders' to give; the check and this write share the transaction (and the registration lock).
+  if (decisionType === RUNNER_RUN_DECISION_TYPE && isLoosening((previous?.disposition ?? getCatalogueEntry(decisionType)?.defaultDisposition) as Disposition, disposition as Disposition)) {
+    // A preset never loosens it (the routes hold such a move back first; this is the backstop for a dial that changed in between).
+    if (preset !== null && preset !== DIAL_DEFAULT_MARKER) throw new PlanHolderOnlyError();
+    await assertMayLoosenRunnerPlanDial(client, accountId, repoId, changedBy);
+  }
 
   const { rows: insertedRows } = await client.query<DecisionSettingRow>(
     `INSERT INTO decision_settings

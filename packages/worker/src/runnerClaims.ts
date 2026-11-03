@@ -145,6 +145,11 @@ export interface RunnerClaimDeps {
   onError?: (runId: string, error: unknown) => void;
   /** D#599 HO-2b: called once a batch that stored the runner's `run_ended handed_off` has committed, to finish the handoff (read the head, make the child). Its failure is reported through `onError`; the sweep tries again. */
   onHandedOff?: (input: { accountId: string; runId: string }) => Promise<unknown>;
+  /**
+   * D#7 DW-R7: raises the "run on a member's plan" asks that a subscription runner's idle claim leaves unanswered (runnerPlanAsk.ts); the number raised. It reports its own
+   * failure and never throws: the claim's answer does not depend on it.
+   */
+  raiseMemberPlanAsks?: (input: { accountId: string; runnerId: string; roles: readonly string[] }) => Promise<number>;
 }
 
 interface CandidateRow {
@@ -524,6 +529,8 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
           await rederiveDue(accountId);
           return { kind: "claimed", signedJob: parsed.data, runId: candidate.id, leaseGeneration: claimed.generation };
         }
+        // Nothing was handed out: a run on a member's plan under the repo's "ask" setting is why a subscription runner may see none, so that run is asked about (once).
+        if (runner.credential_mode === "subscription" && deps.raiseMemberPlanAsks) await deps.raiseMemberPlanAsks({ accountId, runnerId, roles });
         return idle(accountId);
       }),
 

@@ -60,6 +60,8 @@ describe("failureText", () => {
   it("shows the server's own words for a 422 only, and a fixed sentence otherwise", () => {
     expect(failureText({ status: 422, message: "the answer window must be a whole number of minutes" })).toBe("the answer window must be a whole number of minutes");
     expect(failureText({ status: 403, message: "secret" })).toBe("Only owners and admins can change these settings.");
+    expect(failureText({ status: 403, code: "plan_holder_only", message: "Only the plan holder can." })).toBe("Only the plan holder can.");
+    expect(failureText({ status: 403, code: "plan_holder_only", message: "" })).toBe("Only owners and admins can change these settings.");
     expect(failureText({ status: 409, message: "secret" })).toBe("That changed while you were saving. The latest settings are shown.");
     expect(failureText({ status: 500, message: "secret" })).toBe("That change couldn't be saved. Try again.");
     expect(failureText(null)).toBe("That change couldn't be saved. Try again.");

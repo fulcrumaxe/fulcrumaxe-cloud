@@ -198,6 +198,19 @@ test.describe("D#7 DP10b: Roles, Autonomy", () => {
     await expect(askRow(page, "publish_release_artifact")).toContainText("then keep waiting and flag it as overdue");
   });
 
+  test("a preset that would loosen a dial says, per dial, that it was left as it is, in the preview and after it is applied (D#7 DW-R7)", async ({ page }) => {
+    const HELD_NOTE = "This preset would make \"Running work on a team member's own plan\" looser, so it was left as it is. Only the plan holder can loosen it.";
+    const held = [{ decision_type: "runner_run_on_member_plan", from: "ask", to: "act", note: HELD_NOTE }];
+    await boot(page, { post: (route, tail) => json(route, 200, tail.endsWith("preview") ? { ...PREVIEW, held } : { ...APPLIED, held }) });
+    await openAutonomy(page);
+    await tid(page, "au-preset-balanced").click();
+    await expect(tid(page, "au-held")).toHaveText(["Running work on a team member's own plan: " + HELD_NOTE]);
+    await expect(tid(page, "au-move").filter({ hasText: "team member's own plan" })).toHaveCount(0);
+    await tid(page, "au-preview-apply").click();
+    await expect(tid(page, "au-status")).toContainText("Balanced applied. 6 decisions changed. Running work on a team member's own plan: " + HELD_NOTE);
+    expect(await tid(page, "au-status").innerText()).not.toMatch(/undefined|null|NaN/);
+  });
+
   test("a preset the repo already matches says nothing changes", async ({ page }) => {
     await boot(page, { post: (route) => json(route, 200, { ...PREVIEW, moves: [] }) });
     await openAutonomy(page);

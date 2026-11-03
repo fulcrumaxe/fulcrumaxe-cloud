@@ -261,6 +261,14 @@ describe("Runs: the open run's approval", () => {
     expect(call.log.map((c) => c[1])).toEqual(["/api/runners/approvals"]);
   });
 
+  it("a run its holder approved by a click (approval manual, as the server now reads a Yes in Needs you) shows no 'Approved automatically' on the pane or the card", async () => {
+    const clicked = { ...pendingRun, status: "running", approval: "manual", approved_by: { id: ME, name: "Ada Admin" } };
+    expect(await loadRunApproval(clicked, route())).toEqual({ entry: null, copy: null });
+    expect(approvalLine(clicked, { entry: null, copy: COPY })).toBe("");
+    expect(autoText(clicked, COPY)).toBeNull();
+    expect(autoText({ ...clicked, approval: "auto" }, COPY)).toBe("Approved automatically. It runs on Ada Admin's Claude plan.");
+  });
+
   it("a run that is not pending is not asked about; an automatic one reads the copy and names the person", async () => {
     const done = { ...pendingRun, status: "succeeded", approval: "auto", approved_by: { id: ME, name: "Ada Admin" } };
     const call = route();
@@ -468,6 +476,20 @@ describe("Repos: the runner-run setting", () => {
     await flush();
     expect(b.state.error).toBe(DIAL_SENTENCES[409]);
     expect(b.state.dial.disposition).toBe("act");
+  });
+
+  it("a holders-only refusal (403 plan_holder_only) shows the server's fixed sentence and keeps the control, on a save and on use-the-default", async () => {
+    const SENTENCE = "Only the person whose Claude plan a runner on this repository uses can make this setting looser.";
+    const refuse = () => Promise.reject(Object.assign(new Error(SENTENCE), { status: 403, code: "plan_holder_only" }));
+    const call = fakeCall({ [`GET ${URL}`]: body({ disposition: "ask", source: "override" }), [`PUT ${URL}`]: refuse });
+    const ctl = createDialController({ call, repoId: REPO });
+    await ctl.load();
+    await ctl.save("act");
+    expect(ctl.state.error).toBe(SENTENCE);
+    expect(ctl.state.dial).toMatchObject({ disposition: "ask", canChange: true });
+    await ctl.reset();
+    expect(ctl.state.error).toBe(SENTENCE);
+    expect(ctl.state.dial.canChange).toBe(true);
   });
 
   it("a read that fails, or answers something unknown, is an error state, not a guess", async () => {

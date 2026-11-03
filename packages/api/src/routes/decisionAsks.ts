@@ -51,6 +51,8 @@ const askSchema = z.object({
   answer_due_at: z.string(),
   timeout_outcome: z.enum(["stop_and_flag", "proceed_recommended"]),
   state: z.enum(["open", "overdue"]),
+  /** A "run on a member's plan" ask: whose plan it is (their name, and whether that is the caller) and the only person who may answer it. Absent for every other ask. */
+  plan_holder: z.object({ name: z.string(), is_you: z.boolean() }).optional(),
 });
 
 const listQuerySchema = z.object({ limit: z.string().optional(), cursor: z.string().optional() });
@@ -107,6 +109,7 @@ export const decisionAskRoutes: RouteEntry[] = [
           answer_due_at: a.answerDueAt.toISOString(),
           timeout_outcome: a.timeoutOutcome,
           state: a.state,
+          ...(a.planHolder === null ? {} : { plan_holder: { name: a.planHolder.name, is_you: a.planHolder.id === userId } }),
         })),
       };
     },
@@ -117,7 +120,7 @@ export const decisionAskRoutes: RouteEntry[] = [
     operationId: "answerDecisionAsk",
     summary: "Answer a decision ask with one of its options, or deny; the work item it paused resumes",
     description:
-      "Owner or admin, session only (a token is 403 `session_required`). With an `Idempotency-Key`, a replay returns the first response. `choice` is an option id of the ask, or `deny`. The answer writes the receipt in the person's name and asks the work item to continue once. " +
+      "Owner or admin, session only (a token is 403 `session_required`); a \"run on a member's plan\" ask (`plan_holder` is set) only that person. With an `Idempotency-Key`, a replay returns the first response. `choice` is an option id of the ask, or `deny`. The answer writes the receipt in the person's name and asks the work item to continue once. " +
       "A second answer is 409 `already_answered`; a choice outside the ask's options is 422 `invalid_choice`; an unknown, foreign or malformed id is 404. 503 while no worker is available.",
     minRole: "admin",
     idempotency: "optional",

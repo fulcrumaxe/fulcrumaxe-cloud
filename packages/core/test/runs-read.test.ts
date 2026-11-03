@@ -103,6 +103,18 @@ describe('runs/read (D#31 API-3a)', () => {
       expect((await getRun({ pool: appUserPool, principal: refsA }, other)).approval).toBe('auto');
     });
 
+    it("a run its holder approved by answering Yes in Needs you (a receipt in the person's name, not the claim's) reads manual, on the run and in the list", async () => {
+      const id = await approvedRun(refsA, refsA.userId);
+      await admin.query(
+        `INSERT INTO decision_receipts (account_id, run_id, work_item_id, decision_type, class, chosen, rejected_alternative, actor)
+         VALUES ($1, $2, $3, 'runner_run_on_member_plan', 'human_over_the_loop', 'approve', 'decline', $4)`,
+        [refsA.accountId, id, refsA.workItemId, refsA.userId],
+      );
+      expect((await getRun({ pool: appUserPool, principal: refsA }, id)).approval).toBe('manual');
+      const list = await listRuns({ pool: appUserPool, principal: refsA }, { limit: 50 });
+      expect(list.data.find((r) => r.id === id)?.approval).toBe('manual');
+    });
+
     it('a receipt of another decision type, or a stray audit row, does not make a run auto', async () => {
       const id = await approvedRun(refsA, refsA.userId);
       await admin.query(

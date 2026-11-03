@@ -5,7 +5,8 @@ import { COPY } from "@fulcrumaxe/runner-protocol";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { nextGhInstallationId } from "@fx/db/test/helpers/seed.js";
-import { APPROVALS_LIMIT, approveRun, getPlanApprovalDial, getRunWaitReason, listApprovals, listRunners, setPlanApprovalDial, setPlanConsent } from "../src/index.js";
+import { ADD_REPO_HOLDER_ONLY_SENTENCE, PLAN_HOLDER_ONLY_SENTENCE, PRESET_HELD_SENTENCE } from "@fx/db/src/runnerPlanLoosen.js";
+import { APPROVALS_LIMIT, approveRun, getPlanApprovalDial, getRunWaitReason, listApprovals, listRunners, setPlanApprovalDial, setPlanConsent, setRunnerRepos } from "../src/index.js";
 import { harness, respond, type Harness } from "./helpers.js";
 
 /**
@@ -311,17 +312,178 @@ describe("runner-run approval and the dial [pg]", () => {
       const repo = await newRepo(f);
       const first = await put(f, f.o1, repo, { disposition: "ask" });
       expect(first).toMatchObject({ status: 200, body: { disposition: "ask", source: "override", preset: null, version: 1, can_change: true } });
+      // D#7 DW-R7: a preset can only tighten. Autonomous over ask would loosen it, so the dial stays ask and the answer says so.
       const second = await put(f, f.a1, repo, { preset: "autonomous" });
-      expect(second).toMatchObject({ status: 200, body: { disposition: "act", source: "preset", preset: "autonomous", version: 2 } });
-      expect(await rows(repo)).toEqual([
-        { disposition: "ask", preset: null, version: 1, changed_by: f.o1 },
-        { disposition: "act", preset: "autonomous", version: 2, changed_by: f.a1 },
-      ]);
-      expect((await get(f, f.m1, repo)).body).toMatchObject({ disposition: "act", source: "preset", version: 2, can_change: false });
-      expect(await audits(f)).toEqual([
-        { actor: f.o1, decision_type: "runner_run_on_member_plan", repo_id: repo, previous: "announce", new: "ask" },
-        { actor: f.a1, decision_type: "runner_run_on_member_plan", repo_id: repo, previous: "ask", new: "act" },
-      ]);
+      expect(second).toMatchObject({ status: 200, body: { disposition: "ask", source: "override", preset: null, version: 1, note: PRESET_HELD_SENTENCE } });
+      expect(await rows(repo)).toEqual([{ disposition: "ask", preset: null, version: 1, changed_by: f.o1 }]);
+      expect((await get(f, f.m1, repo)).body).toMatchObject({ disposition: "ask", source: "override", version: 1, can_change: false });
+      expect(await audits(f)).toEqual([{ actor: f.o1, decision_type: "runner_run_on_member_plan", repo_id: repo, previous: "announce", new: "ask" }]);
+    });
+
+    it("a preset that tightens, or matches the dial in force, is written as before and carries no note", async () => {
+      const f = await fresh();
+      const repo = await newRepo(f);
+      await put(f, f.o1, repo, { disposition: "act" });
+      const tighter = await put(f, f.a1, repo, { preset: "balanced" });
+      expect(tighter).toMatchObject({ status: 200, body: { disposition: "announce", source: "preset", preset: "balanced", version: 2 } });
+      expect(tighter.body).not.toHaveProperty("note");
+      expect(await put(f, f.a1, repo, { preset: "cautious" })).toMatchObject({ body: { disposition: "ask", preset: "cautious", version: 3 } });
+      expect(await put(f, f.a1, repo, { preset: "cautious" })).toMatchObject({ body: { disposition: "ask", preset: "cautious", version: 4 } });
+    });
+
+    describe("loosening belongs to the plan holder (D#7 DW-R7)", () => {
+      const noRow = async (repo: string) => expect(await rows(repo)).toEqual([]);
+      it("with a live subscription runner of someone else on the repo, an explicit loosening is a 403 plan_holder_only and nothing is written", async () => {
+        const f = await fresh();
+        const repo = await newRepo(f);
+        await runner(f, f.m1, [repo]);
+        await put(f, f.o1, repo, { disposition: "ask" });
+        for (const [from, to] of [["ask", "announce"], ["ask", "act"], ["announce", "act"]] as const) {
+          await h.admin.query("INSERT INTO decision_settings (account_id, repo_id, decision_type, disposition, version, changed_by) VALUES ($1, $2, 'runner_run_on_member_plan', $3, (SELECT max(version) + 1 FROM decision_settings WHERE repo_id = $2 AND decision_type = 'runner_run_on_member_plan'), $4)", [f.accountId, repo, from, f.o1]);
+          const before = await rows(repo);
+          const refused = await put(f, f.a1, repo, { disposition: to });
+          expect(refused, `${from} to ${to}`).toMatchObject({ status: 403, body: { error: { code: "plan_holder_only", message: PLAN_HOLDER_ONLY_SENTENCE } } });
+          expect(await rows(repo)).toEqual(before);
+        }
+      });
+      it("'use the default' is a loosening off ask and is refused the same way", async () => {
+        const f = await fresh();
+        const repo = await newRepo(f);
+        await runner(f, f.m1, [repo]);
+        await put(f, f.o1, repo, { disposition: "ask" });
+        expect(await put(f, f.o1, repo, { reset: true })).toMatchObject({ status: 403, body: { error: { code: "plan_holder_only" } } });
+        expect(await rows(repo)).toHaveLength(1);
+      });
+      it("the holder of every live subscription runner on the repo may loosen it; the holder of only one of two may not", async () => {
+        const f = await fresh();
+        const repo = await newRepo(f);
+        await runner(f, f.a1, [repo]);
+        await put(f, f.o1, repo, { disposition: "ask" });
+        expect(await put(f, f.a1, repo, { disposition: "act" })).toMatchObject({ status: 200, body: { disposition: "act", source: "override", version: 2 } });
+        const other = await runner(f, f.o1, [repo]);
+        await put(f, f.o1, repo, { disposition: "ask" });
+        expect(await put(f, f.a1, repo, { disposition: "announce" })).toMatchObject({ status: 403, body: { error: { code: "plan_holder_only" } } });
+        expect(await put(f, f.o1, repo, { disposition: "announce" })).toMatchObject({ status: 403, body: { error: { code: "plan_holder_only" } } });
+        await h.admin.query("UPDATE runners SET revoked_at = now() WHERE id = $1", [other]);
+        expect(await put(f, f.a1, repo, { disposition: "announce" })).toMatchObject({ status: 200, body: { disposition: "announce" } });
+      });
+      it("only a live subscription runner that lists this repo counts: a removed one, an api-key one, one of another repo and none at all leave owner or admin free", async () => {
+        const f = await fresh();
+        const repo = await newRepo(f);
+        const elsewhere = await newRepo(f);
+        await runner(f, f.m1, [repo], { revoked: true });
+        await runner(f, f.m1, [repo], { mode: "api_key" });
+        await runner(f, f.m1, [elsewhere]);
+        await put(f, f.o1, repo, { disposition: "ask" });
+        expect(await put(f, f.a1, repo, { disposition: "act" })).toMatchObject({ status: 200, body: { disposition: "act" } });
+        const bare = await newRepo(f);
+        await put(f, f.o1, bare, { disposition: "ask" });
+        expect(await put(f, f.a1, bare, { disposition: "act" })).toMatchObject({ status: 200 });
+      });
+      it("tightening stays open to an owner or admin even with another member's runner on the repo; existing values are not rewritten", async () => {
+        const f = await fresh();
+        const repo = await newRepo(f);
+        await h.admin.query("INSERT INTO decision_settings (account_id, repo_id, decision_type, disposition, version, changed_by) VALUES ($1, $2, 'runner_run_on_member_plan', 'act', 1, $3)", [f.accountId, repo, f.o1]);
+        await runner(f, f.m1, [repo]);
+        expect(await rows(repo)).toEqual([{ disposition: "act", preset: null, version: 1, changed_by: f.o1 }]);
+        expect(await put(f, f.a1, repo, { disposition: "announce" })).toMatchObject({ status: 200, body: { disposition: "announce", version: 2 } });
+        expect(await put(f, f.a1, repo, { preset: "cautious" })).toMatchObject({ status: 200, body: { disposition: "ask", version: 3 } });
+        expect(await put(f, f.a1, repo, { disposition: "ask" })).toMatchObject({ status: 200, body: { disposition: "ask" } });
+      });
+      it("a runner registering while the loosening runs cannot slip past the check: the write waits on the registration lock and then sees the runner", async () => {
+        const f = await fresh();
+        const repo = await newRepo(f);
+        await put(f, f.o1, repo, { disposition: "ask" });
+        const registering = await h.adminPool.connect();
+        try {
+          // The registration functions hold this lock until their commit; here a transaction plays the registration.
+          await registering.query("BEGIN");
+          await registering.query("SELECT pg_advisory_xact_lock(hashtextextended('runner_register:' || $1::text, 0))", [f.accountId]);
+          const loosening = put(f, f.a1, repo, { disposition: "act" });
+          for (let i = 0; i < 400; i++) {
+            const waiting = await h.admin.query("SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted");
+            if (waiting.rowCount) break;
+            await new Promise((r) => setTimeout(r, 25));
+          }
+          expect((await h.admin.query("SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted")).rowCount).toBe(1);
+          await insertRunner(registering, f.accountId, f.m1);
+          await registering.query("UPDATE runners SET allowed_repo_ids = $1::uuid[] WHERE account_id = $2", [[repo], f.accountId]);
+          await registering.query("COMMIT");
+          expect(await loosening).toMatchObject({ status: 403, body: { error: { code: "plan_holder_only" } } });
+        } finally {
+          await registering.query("ROLLBACK").catch(() => undefined);
+          registering.release();
+        }
+        expect(await rows(repo)).toHaveLength(1);
+      });
+      describe("adding a repository to someone else's subscription runner", () => {
+        const SENTENCE = ADD_REPO_HOLDER_ONLY_SENTENCE;
+        const setRepos = (f: F2Fixture, user: string, id: string, ids: string[]) => respond(() => setRunnerRepos(h.deps({ repoVisibility: async () => "private" }), { accountId: f.accountId, userId: user }, id, { repo_ids: ids }));
+        const listed = async (id: string) => (await h.admin.query("SELECT allowed_repo_ids FROM runners WHERE id = $1", [id])).rows[0].allowed_repo_ids;
+        it("narrow, loosen, re-add: someone else is refused 403 plan_holder_only and the list stays as it was; the registrant can add their own", async () => {
+          const f = await fresh();
+          const repo = await newRepo(f);
+          const id = await runner(f, f.a1, [repo]);
+          await put(f, f.o1, repo, { disposition: "ask" });
+          expect((await setRepos(f, f.o1, id, [])).status).toBe(200);
+          expect(await put(f, f.o1, repo, { disposition: "act" })).toMatchObject({ status: 200, body: { disposition: "act" } });
+          expect(await setRepos(f, f.o1, id, [repo])).toMatchObject({ status: 403, body: { error: { code: "plan_holder_only", message: SENTENCE } } });
+          expect(await listed(id)).toEqual([]);
+          expect(await setRepos(f, f.a1, id, [repo])).toMatchObject({ status: 200, body: { repo_ids: [repo] } });
+        });
+        it("loosen with no runner listing it, then add: refused the same way; a repository on ask, or with no dial row, is added as before", async () => {
+          const f = await fresh();
+          const loose = await newRepo(f);
+          const asking = await newRepo(f);
+          const untouched = await newRepo(f);
+          const id = await runner(f, f.a1, []);
+          await put(f, f.o1, loose, { disposition: "announce" });
+          await put(f, f.o1, asking, { disposition: "ask" });
+          expect(await setRepos(f, f.o1, id, [loose])).toMatchObject({ status: 403, body: { error: { code: "plan_holder_only" } } });
+          expect(await setRepos(f, f.o1, id, [loose, asking])).toMatchObject({ status: 403 });
+          expect(await listed(id)).toEqual([]);
+          expect(await setRepos(f, f.o1, id, [asking, untouched])).toMatchObject({ status: 200 });
+          // Keeping a repository the runner already lists is not adding it, whatever its dial says.
+          expect(await setRepos(f, f.a1, id, [asking, untouched, loose])).toMatchObject({ status: 200 });
+          expect(await setRepos(f, f.o1, id, [asking, loose])).toMatchObject({ status: 200 });
+        });
+        it("an api-key runner is not covered: the plan at stake is a subscription one", async () => {
+          const f = await fresh();
+          const repo = await newRepo(f);
+          const id = await runner(f, f.a1, [], { mode: "api_key" });
+          await put(f, f.o1, repo, { disposition: "act" });
+          expect((await setRepos(f, f.o1, id, [repo])).status).toBe(200);
+        });
+      });
+      it("a runner being given the repo waits for a loosening in progress, because the repo-edit route takes the same lock", async () => {
+        const f = await fresh();
+        const repo = await newRepo(f);
+        const id = await runner(f, f.m1, []);
+        const loosening = await h.adminPool.connect();
+        try {
+          await loosening.query("BEGIN");
+          await loosening.query("SELECT pg_advisory_xact_lock(hashtextextended('runner_register:' || $1::text, 0))", [f.accountId]);
+          const adding = respond(() => setRunnerRepos(h.deps({ repoVisibility: async () => "private" }), { accountId: f.accountId, userId: f.o1 }, id, { repo_ids: [repo] }));
+          for (let i = 0; i < 400; i++) {
+            if ((await h.admin.query("SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted")).rowCount) break;
+            await new Promise((r) => setTimeout(r, 25));
+          }
+          expect((await h.admin.query("SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted")).rowCount).toBe(1);
+          expect((await h.admin.query("SELECT allowed_repo_ids FROM runners WHERE id = $1", [id])).rows[0].allowed_repo_ids).toEqual([]);
+          await loosening.query("COMMIT");
+          expect(await adding).toMatchObject({ status: 200, body: { repo_ids: [repo] } });
+        } finally {
+          await loosening.query("ROLLBACK").catch(() => undefined);
+          loosening.release();
+        }
+      });
+      it("a member who is not an owner or admin still gets forbidden, not plan_holder_only", async () => {
+        const f = await fresh();
+        const repo = await newRepo(f);
+        await runner(f, f.m1, [repo]);
+        expect(await put(f, f.m1, repo, { disposition: "act" })).toMatchObject({ status: 403, body: { error: { code: "forbidden" } } });
+        await noRow(repo);
+      });
     });
 
     it("use the default: set, reset, read back source default (announce); one more version and audit row; again is a no-op; a later write is an override", async () => {
@@ -355,12 +517,12 @@ describe("runner-run approval and the dial [pg]", () => {
       expect(await rows(repo)).toHaveLength(1);
     });
 
-    it("the three presets write ask, announce and act", async () => {
+    it("the three presets mean ask, announce and act, and only the ones that do not loosen the dial in force are written", async () => {
       const f = await fresh();
-      const repo = await newRepo(f);
-      for (const [preset, disposition] of [["cautious", "ask"], ["balanced", "announce"], ["autonomous", "act"]] as const) {
-        expect((await put(f, f.o1, repo, { preset })).body).toMatchObject({ disposition, preset });
-      }
+      // Over the default (announce): Cautious tightens, Balanced matches, Autonomous would loosen and is held.
+      expect((await put(f, f.o1, await newRepo(f), { preset: "cautious" })).body).toMatchObject({ disposition: "ask", preset: "cautious" });
+      expect((await put(f, f.o1, await newRepo(f), { preset: "balanced" })).body).toMatchObject({ disposition: "announce", preset: "balanced" });
+      expect((await put(f, f.o1, await newRepo(f), { preset: "autonomous" })).body).toMatchObject({ disposition: "announce", source: "default", note: PRESET_HELD_SENTENCE });
     });
 
     it("a member who is neither owner nor admin gets 403 and no row or audit is written", async () => {

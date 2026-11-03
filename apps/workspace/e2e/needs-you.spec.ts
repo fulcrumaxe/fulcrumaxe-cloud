@@ -643,6 +643,31 @@ test.describe("D#598 P8c: Needs you", () => {
     await clean(page, errors);
   });
 
+  // D#7 DW-R7: a run on a member's plan is answered by that person alone. The click is the answer; the row leaves and nothing more is asked.
+  const PLAN_ASK = { decision_type: "runner_run_on_member_plan", label: "Running work on a team member's own plan", options: [{ id: "approve", label: "Yes, use my plan for this run" }, { id: "decline", label: "No, don't run it" }], proposed: "approve", timeout_outcome: "stop_and_flag", rationale: "<<UNTRUSTED EXTERNAL CONTENT>>\nA run in acme/app is waiting to use Priya Raman's Claude plan. It starts only if Priya Raman says yes here. If nobody answers in time, it stays stopped.\n<<END UNTRUSTED>>" };
+  test("DW-R7: the plan holder sees the ask with the repo and their name, answers once, and the row leaves with the answer said", async ({ page }) => {
+    const { mock, errors } = await setup(page, { requests: [], asks: [ask({ ...PLAN_ASK, plan_holder: { name: "Priya Raman", is_you: true } })], answerReply: { ask_id: A1, receipt_id: "e1b7c3d4-2f58-4a09-8c6b-7d3e9f1a2b45", answered_option: "approve" } });
+    await open(page);
+    await expect(t(page, "ny-title")).toHaveText("Running work on a team member's own plan");
+    await expect(t(page, "ny-reason")).toHaveText("A run in acme/app is waiting to use Priya Raman's Claude plan. It starts only if Priya Raman says yes here. If nobody answers in time, it stays stopped.");
+    await expect(t(page, "ny-timeout")).toHaveText("If nobody answers in time, the work stays paused until someone answers.");
+    await expect(t(page, "ny-waiting")).toHaveCount(0);
+    await t(page, `ny-choice-${A1}-approve`).click();
+    await expect(t(page, "ny-live")).toHaveText("Answered: Yes, use my plan for this run.");
+    expect(mock.answers).toEqual([{ path: `/api/v1/decision-asks/${A1}/answer`, body: { choice: "approve" } }]);
+    await expect(t(page, "ny-row")).toHaveCount(0);
+    await clean(page, errors);
+  });
+
+  test("DW-R7: another owner or admin sees whose answer it waits for, no buttons, and nothing can be sent", async ({ page }) => {
+    const { mock, errors } = await setup(page, { requests: [], asks: [ask({ ...PLAN_ASK, plan_holder: { name: "Priya Raman", is_you: false } })], admin: true });
+    await open(page);
+    await expect(t(page, "ny-waiting")).toHaveText("Waiting for Priya Raman to answer. It is their Claude plan, so only they can say yes or no.");
+    await expect(t(page, "ny-row").locator("button")).toHaveCount(0);
+    expect(mock.answers).toEqual([]);
+    await clean(page, errors);
+  });
+
   test("E6: a network error then a second press resends the same Idempotency-Key, and the replayed answer removes the row and names the response's option", async ({ page }) => {
     const { mock, errors } = await setup(page, { requests: [], asks: [ask()], dropAnswers: 1, answerReply: { ask_id: A1, receipt_id: "e1b7c3d4-2f58-4a09-8c6b-7d3e9f1a2b45", answered_option: "leave_it" } });
     await open(page);

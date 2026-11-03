@@ -13462,6 +13462,43 @@
                         ],
                         "additionalProperties": false
                       }
+                    },
+                    "held": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "decision_type": {
+                            "type": "string"
+                          },
+                          "from": {
+                            "type": "string",
+                            "enum": [
+                              "ask",
+                              "announce",
+                              "act"
+                            ]
+                          },
+                          "to": {
+                            "type": "string",
+                            "enum": [
+                              "ask",
+                              "announce",
+                              "act"
+                            ]
+                          },
+                          "note": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "decision_type",
+                          "from",
+                          "to",
+                          "note"
+                        ],
+                        "additionalProperties": false
+                      }
                     }
                   },
                   "required": [
@@ -13552,7 +13589,7 @@
       "post": {
         "operationId": "applyDecisionPreset",
         "summary": "Adopt a preset: one new dial version per class 2 dial it changes, in one transaction",
-        "description": "Appends a `decision_settings` version for each class 2 dial the preset changes, and an audit row naming the previous and new value for each. A repo that already matches writes nothing. Class 1 and class 3 are never touched. Owner or admin, session only.",
+        "description": "Appends a `decision_settings` version for each class 2 dial the preset changes, and an audit row naming the previous and new value for each. A repo that already matches writes nothing. A preset never loosens \"run on a member's plan\": that dial is left as it is and listed in `held` with a sentence. Class 1 and class 3 are never touched. Owner or admin, session only.",
         "security": [
           {
             "session": []
@@ -13763,6 +13800,43 @@
                           "decision_type",
                           "from",
                           "to"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "held": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "decision_type": {
+                            "type": "string"
+                          },
+                          "from": {
+                            "type": "string",
+                            "enum": [
+                              "ask",
+                              "announce",
+                              "act"
+                            ]
+                          },
+                          "to": {
+                            "type": "string",
+                            "enum": [
+                              "ask",
+                              "announce",
+                              "act"
+                            ]
+                          },
+                          "note": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "decision_type",
+                          "from",
+                          "to",
+                          "note"
                         ],
                         "additionalProperties": false
                       }
@@ -14083,7 +14157,7 @@
             }
           },
           "403": {
-            "description": "Error",
+            "description": "Not an owner or admin, or (`plan_holder_only`) a looser \"run on a member's plan\" dial on a repo with a live subscription runner, which only that runner's holder may set. Nothing is written.",
             "content": {
               "application/json": {
                 "schema": {
@@ -14360,7 +14434,7 @@
             }
           },
           "403": {
-            "description": "Error",
+            "description": "Not an owner or admin, or (`plan_holder_only`) a looser \"run on a member's plan\" dial on a repo with a live subscription runner, which only that runner's holder may set. Nothing is written.",
             "content": {
               "application/json": {
                 "schema": {
@@ -18880,6 +18954,22 @@
                               "open",
                               "overdue"
                             ]
+                          },
+                          "plan_holder": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string"
+                              },
+                              "is_you": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "name",
+                              "is_you"
+                            ],
+                            "additionalProperties": false
                           }
                         },
                         "required": [
@@ -18989,7 +19079,7 @@
       "post": {
         "operationId": "answerDecisionAsk",
         "summary": "Answer a decision ask with one of its options, or deny; the work item it paused resumes",
-        "description": "Owner or admin, session only (a token is 403 `session_required`). With an `Idempotency-Key`, a replay returns the first response. `choice` is an option id of the ask, or `deny`. The answer writes the receipt in the person's name and asks the work item to continue once. A second answer is 409 `already_answered`; a choice outside the ask's options is 422 `invalid_choice`; an unknown, foreign or malformed id is 404. 503 while no worker is available.",
+        "description": "Owner or admin, session only (a token is 403 `session_required`); a \"run on a member's plan\" ask (`plan_holder` is set) only that person. With an `Idempotency-Key`, a replay returns the first response. `choice` is an option id of the ask, or `deny`. The answer writes the receipt in the person's name and asks the work item to continue once. A second answer is 409 `already_answered`; a choice outside the ask's options is 422 `invalid_choice`; an unknown, foreign or malformed id is 404. 503 while no worker is available.",
         "security": [
           {
             "session": []

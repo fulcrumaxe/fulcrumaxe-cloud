@@ -5,6 +5,8 @@ import { DIAL_VERSION_CATALOGUE_DEFAULT, ReceiptWriteError, writeReceipt } from 
 import { emitDomainEvent } from '../domain-events/emit.js';
 import { announceNewRunAction, type RunActionSignal } from '../runActions/index.js';
 import { withTenant } from '../tenancy/withTenant.js';
+import { markRunnerWork } from '../pendingWork.js';
+import { answerMemberPlanAsk, isMemberPlanAsk } from './memberPlanAnswer.js';
 import { answerStartAsk } from './startAnswer.js';
 import { approveSubItemIn, SubItemApprovalError } from './approveSubItem.js';
 import { FIX_ASK_START } from './fixRoundGate.js';
@@ -86,6 +88,7 @@ export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promi
   let resumeActionId: string | null = null;
   let startActionId: string | null = null;
   let receiptWorkItemId: string | null = null;
+  let wakeRunners = false;
   // 1. Principal checks.
   if (tokenId !== undefined) throw new AskAnswerError(403, 'session_required');
   try {
@@ -105,6 +108,10 @@ export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promi
       // 3-5. Only a pending ask; a choice of this ask's or 'deny'; a run to hang the receipt on (DP-C3 3b-2).
       if (ask.state !== 'open' && ask.state !== 'overdue') throw new AskAnswerError(409, 'already_answered');
       if (typeof choice !== 'string' || (choice !== 'deny' && !ask.options.some((o) => o.id === choice))) throw new AskAnswerError(422, 'invalid_choice');
+      // A member-plan ask (D#7 DW-R7): only the plan holder answers, and "approve" approves the run for them. No resume request: the claim takes an approved run.
+      if (isMemberPlanAsk(ask.decision_type)) {
+        wakeRunners = await answerMemberPlanAsk(client, { askId: ask.id, runId: ask.run_id, userId, choice }, (why) => (why === 'moot' ? new AskAnswerError(409, 'already_answered') : new AskAnswerError(403, 'forbidden')));
+      }
       // A fix-round ask (D#483 S5-b2a part 2). Starting it IS the sub-item approval (the card's Approve runs the same function): the keyed receipt in the person's name,
       // the ask closed, and one advance request that re-enters the workflow waiting on it. A hold or a deny takes the generic path below, which files no resume.
       if (ask.decision_type === 'launch_sub_item') {
@@ -151,7 +158,7 @@ export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promi
         if (choice === REVERSAL_ASK_ALLOW && await fileAllowedReversal(client, ctx.reversal, { id: ask.id, accountId, workItemId: ask.work_item_id }) === null) {
           throw new AskAnswerError(409, 'ask_receipt_mismatch');
         }
-      } else if (ask.decision_type !== 'launch_sub_item') {
+      } else if (ask.decision_type !== 'launch_sub_item' && !isMemberPlanAsk(ask.decision_type)) {
         // The resume request (DP11c), in this same transaction: the person's own request, one per ask, so a replay gets the same action. A held fix round has no run to resume.
         const resume = await client.query<{ action_id: string; replayed: boolean }>('SELECT action_id, replayed FROM run_action_request($1, $2, $3, $4)',
           ['resume_decision', ask.id, `ask:${ask.id}`, `resume:${ask.id}`]);
@@ -170,6 +177,8 @@ export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promi
       return { askId: ask.id, receiptId: receipt.id, answeredOption: choice };
     });
     await runAfterReceipt(ctx.afterReceipt, accountId, receiptWorkItemId);
+    // The approved run is the runner's to claim now: the hint tells it so without waiting for its next poll (a lost hint costs only that wait).
+    if (wakeRunners) void markRunnerWork(accountId);
     if (resumeActionId !== null && ctx.signal) await announceNewRunAction({ signal: ctx.signal }, { actionId: resumeActionId, accountId, kind: 'resume_decision' });
     if (startActionId !== null && ctx.signal) await announceNewRunAction({ signal: ctx.signal }, { actionId: startActionId, accountId, kind: 'advance_work_item' });
     return result;

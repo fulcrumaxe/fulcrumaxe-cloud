@@ -98,6 +98,9 @@ export function dueTime(iso) {
   return Number.isFinite(ms) ? new Intl.DateTimeFormat(undefined, DUE_FORMAT).format(new Date(ms)) : "";
 }
 
+/** A member-plan ask waits for its plan holder alone (D#7 DW-R7): the name is theirs, never an id. */
+export const waitingHolderWords = (name) => "Waiting for " + name + " to answer. It is their Claude plan, so only they can say yes or no.";
+
 /** The sentence for an ask that goes ahead with its recommended option when nobody answers. */
 export const proceedWords = (name) => "If nobody answers in time, the agent goes ahead with: " + name + ".";
 
@@ -196,6 +199,8 @@ export function readAsk(a) {
     options,
     proposed: proposed ? proposed.id : "",
     proposedLabel: proposed ? proposed.label : "",
+    // D#7 DW-R7: a "run on a member's plan" ask is answered by that person alone; the cloud says whose plan it is and whether the viewer is them.
+    ...(a.plan_holder && typeof a.plan_holder.name === "string" && a.plan_holder.name !== "" ? { planHolder: { name: a.plan_holder.name, isYou: a.plan_holder.is_you === true } } : {}),
     sentence: "",
   };
 }
@@ -457,7 +462,7 @@ export function createNeedsYou({ call = api, signal, onChange = () => {} } = {})
    */
   async function answer(id, choice) {
     const row = open.find((r) => r.id === id && r.kind === "ask");
-    if (!row || busy.has(id) || !st.isAdmin) return;
+    if (!row || busy.has(id) || !st.isAdmin || (row.planHolder && !row.planHolder.isYou)) return;
     if (choice !== "deny" && !row.options.some((o) => o.id === choice)) return;
     // One key per ask and choice, kept until the answer settles: a press again after a network error or a 5xx replays the same answer.
     let k = keys.get(id);

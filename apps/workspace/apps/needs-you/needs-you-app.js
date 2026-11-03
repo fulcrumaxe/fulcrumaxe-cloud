@@ -5,7 +5,7 @@
 // second press is ignored. When a row changes under the person, focus goes to the same control, else to the row's heading.
 import { h } from "../_lib/dom.js";
 import { on, onRefresh } from "../../core/cloud-live.js";
-import { WORDS, canMarkDone, confirmWords, createNeedsYou, isBranchRow, notShownWords, nowAtWords } from "./needs-you-model.js";
+import { WORDS, canMarkDone, confirmWords, createNeedsYou, isBranchRow, notShownWords, nowAtWords, waitingHolderWords } from "./needs-you-model.js";
 
 const FULC = window.FULC;
 if (!FULC || typeof FULC.register !== "function") {
@@ -101,8 +101,10 @@ function mountApp(contentEl) {
       // The agent's reason is a quotation: a text node inside a blockquote, never markup and never an instruction.
       row.reason ? h("blockquote", { class: "ny-quote", "data-testid": "ny-reason" }, row.reason) : null,
       row.timeout ? h("p", { class: "ny-sentence", "data-testid": "ny-timeout" }, row.timeout) : null,
-      // Only an owner or admin sees the buttons (the server stays the judge); anyone else is told whose answer it waits for.
-      list.state.isAdmin
+      // Only an owner or admin sees the buttons (the server stays the judge); anyone else is told whose answer it waits for. A member-plan ask waits for its plan holder alone.
+      row.planHolder && !row.planHolder.isYou
+        ? h("p", { class: "ny-sentence", "data-testid": "ny-waiting" }, waitingHolderWords(row.planHolder.name))
+        : list.state.isAdmin
         ? h("div", { class: "ny-actions" }, row.options.map((o) => choiceButton(row, o.id, o.label, o.id === row.proposed)).concat(choiceButton(row, "deny", WORDS.deny, false)))
         : h("p", { class: "ny-sentence", "data-testid": "ny-waiting" }, WORDS.waitingAdmin)
     );

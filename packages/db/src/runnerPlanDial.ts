@@ -1,6 +1,9 @@
 import type { PoolClient } from 'pg';
 import { CATALOGUE_VERSION, getCatalogueEntry, getPreset, type Disposition, type PresetName } from '@fx/decisions';
 import { DIAL_DEFAULT_MARKER, getCurrentDialSetting, type DecisionSetting } from './decisions.js';
+import { RUNNER_RUN_DECISION_TYPE, isLoosening } from './runnerPlanLoosen.js';
+
+export { RUNNER_RUN_DECISION_TYPE };
 
 /**
  * The dial for `runner_run_on_member_plan` (D#6 R2b-4a, C31 section 2.1): whether a runner run that uses another member's Claude
@@ -11,7 +14,6 @@ import { DIAL_DEFAULT_MARKER, getCurrentDialSetting, type DecisionSetting } from
  * migration 0767), which reads the same row and treats no row as `announce`; a test pins that constant to the catalogue. This file
  * is what the dial's own route shows and writes.
  */
-export const RUNNER_RUN_DECISION_TYPE = 'runner_run_on_member_plan';
 
 /** The catalogue version this build resolves with, stamped on a claim's receipt. Re-exported so a package that does not depend on the catalogue can pass it. */
 export const RUNNER_RUN_CATALOGUE_VERSION = CATALOGUE_VERSION;
@@ -30,12 +32,18 @@ export interface RunnerPlanDial {
 const PRESET_NAMES: readonly string[] = ['cautious', 'balanced', 'autonomous'];
 export const isPresetName = (value: unknown): value is PresetName => typeof value === 'string' && PRESET_NAMES.includes(value);
 
-/** What this decision does under a named preset: the preset's class 2 disposition, clamped to what the entry allows. */
-export function dispositionForPreset(name: PresetName): Disposition {
+/** What a named preset proposes for this decision: its class 2 disposition, clamped to what the entry allows. */
+export function presetProposal(name: PresetName): Disposition {
   const entry = getCatalogueEntry(RUNNER_RUN_DECISION_TYPE);
   if (!entry) throw new Error('runner_run_on_member_plan is not in the catalogue');
   const proposed = getPreset(name).dispositions[entry.class];
   return entry.allowedDispositions.includes(proposed) ? proposed : entry.defaultDisposition;
+}
+
+/** What this decision becomes under a preset over the dial in force: the proposal, unless that would loosen the dial (a preset only tightens, D#7 DW-R7), then `current`. */
+export function dispositionForPreset(name: PresetName, current: Disposition): Disposition {
+  const proposed = presetProposal(name);
+  return isLoosening(current, proposed) ? current : proposed;
 }
 
 /** Pure. The dial a stored row means, or the catalogue's default for none. A stored disposition the entry does not allow fails closed to `ask`. */

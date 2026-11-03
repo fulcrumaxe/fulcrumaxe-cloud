@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dispositionForPreset, isPresetName, resolveStoredDial, RUNNER_RUN_CATALOGUE_VERSION, RUNNER_RUN_DECISION_TYPE } from '../src/runnerPlanDial.js';
+import { dispositionForPreset, isPresetName, presetProposal, resolveStoredDial, RUNNER_RUN_CATALOGUE_VERSION, RUNNER_RUN_DECISION_TYPE } from '../src/runnerPlanDial.js';
 import { CATALOGUE_VERSION } from '@fx/decisions';
 
 /** D#6 R2b-4a (C31 section 2.1 and 3, item 7): what the runner-run dial means, as data. */
@@ -22,10 +22,24 @@ describe('the runner-run dial', () => {
     expect(resolveStoredDial({ disposition: 'maybe', preset: null, version: 2 }).disposition).toBe('ask');
   });
 
-  it('the three presets resolve to ask, announce and act', () => {
-    expect(dispositionForPreset('cautious')).toBe('ask');
-    expect(dispositionForPreset('balanced')).toBe('announce');
-    expect(dispositionForPreset('autonomous')).toBe('act');
+  it('the three presets propose ask, announce and act', () => {
+    expect(presetProposal('cautious')).toBe('ask');
+    expect(presetProposal('balanced')).toBe('announce');
+    expect(presetProposal('autonomous')).toBe('act');
+  });
+
+  it('a preset can only tighten: over any dial it never gives a looser one (D#7 DW-R7)', () => {
+    const order = ['ask', 'announce', 'act'] as const;
+    for (const name of ['cautious', 'balanced', 'autonomous'] as const) {
+      for (const current of order) {
+        const next = dispositionForPreset(name, current);
+        expect(order.indexOf(next), `${name} over ${current}`).toBeLessThanOrEqual(order.indexOf(current));
+        expect(next).toBe(order.indexOf(presetProposal(name)) > order.indexOf(current) ? current : presetProposal(name));
+      }
+    }
+    expect(dispositionForPreset('autonomous', 'ask')).toBe('ask');
+    expect(dispositionForPreset('balanced', 'ask')).toBe('ask');
+    expect(dispositionForPreset('cautious', 'act')).toBe('ask');
   });
 
   it('knows exactly the three preset names', () => {

@@ -3,7 +3,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '../src/pool.js';
 import { withTenant } from '../src/withTenant.js';
-import { writeDialSetting } from '../src/decisions.js';
+import { appendDialVersion, writeDialSetting } from '../src/decisions.js';
+import { PlanHolderOnlyError } from '../src/runnerPlanLoosen.js';
 import { seedAccount, type SeedRefs } from './helpers/seed.js';
 import { PG_ERROR } from './helpers/pgErrors.js';
 
@@ -425,6 +426,31 @@ describe('writeDialSetting: owner/admin only, append-only, audited', () => {
         },
       );
       expect(second.version).toBe(2);
+    });
+  });
+
+  /** D#7 DW-R7: the writer itself refuses a preset write that would loosen the member-plan dial (the backstop behind the routes' hold), whoever calls. */
+  describe('appendDialVersion: a preset never loosens the member-plan dial', () => {
+    const RUN = 'runner_run_on_member_plan';
+    const write = (r: SeedRefs, disposition: string, preset: string | null) =>
+      withTenant(appUserPool, r.accountId, r.userId, (client) => appendDialVersion(client, { accountId: r.accountId, repoId: r.repoId, decisionType: RUN, disposition, preset, changedBy: r.userId }));
+    const versions = async (r: SeedRefs) => (await admin.query('SELECT disposition, preset FROM decision_settings WHERE repo_id = $1 AND decision_type = $2 ORDER BY version', [r.repoId, RUN])).rows;
+
+    it('a preset write that loosens is refused and writes nothing, over the default and over ask', async () => {
+      const r = await seedAccount(admin, randomUUID());
+      await expect(write(r, 'act', 'autonomous')).rejects.toBeInstanceOf(PlanHolderOnlyError);
+      expect(await versions(r)).toEqual([]);
+      await write(r, 'ask', 'cautious');
+      await expect(write(r, 'announce', 'balanced')).rejects.toBeInstanceOf(PlanHolderOnlyError);
+      expect(await versions(r)).toEqual([{ disposition: 'ask', preset: 'cautious' }]);
+    });
+
+    it('a preset write that tightens or keeps the value, and an explicit loosening with no runner on the repo, are written', async () => {
+      const r = await seedAccount(admin, randomUUID());
+      await write(r, 'announce', 'balanced');
+      await write(r, 'ask', 'cautious');
+      await write(r, 'act', null);
+      expect((await versions(r)).map((v) => v.disposition)).toEqual(['announce', 'ask', 'act']);
     });
   });
 });

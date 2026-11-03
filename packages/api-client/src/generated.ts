@@ -1533,6 +1533,12 @@ export interface Operations {
         from: "ask" | "announce" | "act";
         to: "ask" | "announce" | "act";
       }>;
+      held?: Array<{
+        decision_type: string;
+        from: "ask" | "announce" | "act";
+        to: "ask" | "announce" | "act";
+        note: string;
+      }>;
     };
   };
   applyDecisionPreset: {
@@ -1573,6 +1579,12 @@ export interface Operations {
         decision_type: string;
         from: "ask" | "announce" | "act";
         to: "ask" | "announce" | "act";
+      }>;
+      held?: Array<{
+        decision_type: string;
+        from: "ask" | "announce" | "act";
+        to: "ask" | "announce" | "act";
+        note: string;
       }>;
     };
   };
@@ -2171,6 +2183,10 @@ export interface Operations {
         answer_due_at: string;
         timeout_outcome: "stop_and_flag" | "proceed_recommended";
         state: "open" | "overdue";
+        plan_holder?: {
+          name: string;
+          is_you: boolean;
+        };
       }>;
       next_cursor: string | null;
     };

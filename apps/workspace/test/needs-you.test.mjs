@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { ASKS_FIRST_URL, ASKS_URL, LIST_URL, LIVE_EVENTS, MAX_ASK_PAGES, ME_URL, MERGE_URL, NEEDS_HUMAN_URL, PROVIDER_HOSTS, START_ASK_TYPES, STALLED_URL, WORDS, startAnswerWords, actionUrl, answerUrl, approveUrl, createNeedsYou, failureSentence, notShownWords, providerLink, pullRequestLink, quotedReason, readAsk, readMerge, readPerson, readRequest, readStalled, canMarkDone } from "../apps/needs-you/needs-you-model.js";
+import { ASKS_FIRST_URL, ASKS_URL, LIST_URL, LIVE_EVENTS, MAX_ASK_PAGES, ME_URL, MERGE_URL, NEEDS_HUMAN_URL, PROVIDER_HOSTS, START_ASK_TYPES, STALLED_URL, WORDS, startAnswerWords, actionUrl, answerUrl, approveUrl, createNeedsYou, failureSentence, notShownWords, providerLink, pullRequestLink, quotedReason, readAsk, readMerge, readPerson, readRequest, readStalled, canMarkDone, waitingHolderWords } from "../apps/needs-you/needs-you-model.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
 const fixture = (op, name) => JSON.parse(readFileSync(join(PACKAGES, "api", "fixtures", "v1", op, name), "utf8"));
@@ -473,6 +473,45 @@ describe("decision asks", () => {
       expect(list.state.rows).toEqual([]);
       expect(list.state.announce).toBe(said + (said.endsWith(".") ? "" : "."));
     }
+  });
+
+  // D#7 DW-R7: a run on a member's plan is answered by that person alone.
+  describe("a run on a member's plan", () => {
+    const PLAN = { id: "33333333-3333-4333-8333-333333333333", decision_type: "runner_run_on_member_plan", options: [{ id: "approve", label: "Yes, use my plan for this run" }, { id: "decline", label: "No, don't run it" }], proposed: "approve" };
+    const callFor = (a, calls = []) => async (method, path, body) => {
+      calls.push([method, path, body]);
+      return method === "POST" ? { ask_id: a.id, receipt_id: "r1", answered_option: body.choice } : path === ASKS_FIRST_URL ? asksOf([a]) : path === LIST_URL ? setups : path === NEEDS_HUMAN_URL ? asksOf([]) : path === ME_URL ? { is_admin: true } : { items: [], not_shown: 0 };
+    };
+    it("the row carries the holder's name and whether the viewer is them; a bad or missing holder is none (the key is absent), never a placeholder", () => {
+      expect(readAsk(ask({ ...PLAN, plan_holder: { name: "Priya Raman", is_you: true } })).planHolder).toEqual({ name: "Priya Raman", isYou: true });
+      expect(readAsk(ask({ ...PLAN, plan_holder: { name: "Priya Raman", is_you: false } })).planHolder).toEqual({ name: "Priya Raman", isYou: false });
+      for (const bad of [undefined, null, {}, { name: "", is_you: true }, { name: 7, is_you: true }, "Priya"]) expect(readAsk(ask({ ...PLAN, plan_holder: bad })).planHolder).toBeUndefined();
+      expect(readAsk(ask({ ...PLAN, plan_holder: { name: "Priya Raman" } })).planHolder.isYou).toBe(false);
+    });
+    it("the words name the person and never carry an id, null or undefined", () => {
+      expect(waitingHolderWords("Priya Raman")).toBe("Waiting for Priya Raman to answer. It is their Claude plan, so only they can say yes or no.");
+      expect(waitingHolderWords("a former team member")).not.toMatch(/null|undefined|NaN|[0-9a-f]{8}-/);
+    });
+    it("the holder answers: one request with the chosen option, the row leaves, and the outcome is said in the option's words", async () => {
+      const a = ask({ ...PLAN, plan_holder: { name: "Priya Raman", is_you: true } });
+      const calls = [];
+      const list = createNeedsYou({ call: callFor(a, calls) });
+      await list.load();
+      await list.answer(a.id, "approve");
+      expect(calls.filter(([m]) => m === "POST")).toEqual([["POST", answerUrl(a.id), { choice: "approve" }]]);
+      expect(list.state.rows).toEqual([]);
+      expect(list.state.announce).toBe("Answered: Yes, use my plan for this run.");
+    });
+    it("anyone else, even an owner or admin, sends nothing", async () => {
+      const a = ask({ ...PLAN, plan_holder: { name: "Priya Raman", is_you: false } });
+      const calls = [];
+      const list = createNeedsYou({ call: callFor(a, calls) });
+      await list.load();
+      expect(list.state.isAdmin).toBe(true);
+      for (const choice of ["approve", "decline", "deny"]) await list.answer(a.id, choice);
+      expect(calls.filter(([m]) => m === "POST")).toEqual([]);
+      expect(list.state.rows).toHaveLength(1);
+    });
   });
 
   it("the reason is only ever text: markup, a command and a link stay characters, and the fence is removed only at the ends", () => {
