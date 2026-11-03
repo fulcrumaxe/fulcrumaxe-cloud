@@ -88,6 +88,10 @@ export interface FakeRepoState {
   compareFilesFail?: number;
   /** Compare reads answered with this status. */
   compareFails?: number;
+  /** D#483 S5-j2a2: commits the default branch has that the head lacks (`behind_by` of a compare against the default branch). Default 0. */
+  behindBy?: number;
+  /** D#483 S5-j2a2: the files a compare of the head to the default branch's tip lists (what the tip gained since the merge base). Default none. */
+  tipGained?: FakeFile[];
   /** D#6 R3c: the pull request's head branch as the local-only fake lists it (a runner run's `fx/<run>-g<n>`). */
   runBranch?: string;
   /**
@@ -279,9 +283,15 @@ export function fakeGitHubRest(s: FakeRepoState): GitHubHttp {
         const from = compare[1]!;
         if (!/^[0-9a-f]{40}$/.test(from) && from !== (s.defaultBranch ?? "main")) return json(404, { message: "Not Found" });
         if (s.compareFilesFail && /^[0-9a-f]{40}$/.test(from)) return json(s.compareFilesFail, { message: "Server Error" });
-        return json(200, { status: "ahead", merge_base_commit: { sha: FAKE_MERGE_BASE }, total_commits: 1, // GitHub lists at most 300 files in a compare and does not page them (paging applies to its commits).
-        files: (s.compareFiles ?? s.files).slice(0, 300) });
+        // The default branch's tip is the commit `FAKE_MERGE_BASE`: a compare of a head to it lists what the tip gained (`tipGained`), counted as `behindBy` commits.
+        const toTip = /^[0-9a-f]{40}$/.test(from) && compare[2] === FAKE_MERGE_BASE;
+        return json(200, { status: toTip ? "ahead" : (s.behindBy ?? 0) > 0 ? "diverged" : "ahead", ahead_by: toTip ? (s.behindBy ?? 0) : 1, behind_by: toTip ? 0 : (s.behindBy ?? 0), merge_base_commit: { sha: FAKE_MERGE_BASE }, total_commits: 1, // GitHub lists at most 300 files in a compare and does not page them (paging applies to its commits).
+        files: (toTip ? (s.tipGained ?? []) : (s.compareFiles ?? s.files)).slice(0, 300) });
       }
+      // D#483 S5-j2a2: the default branch's tip (the commit `FAKE_MERGE_BASE`) and a commit's tree id (the data API; the tree id is the commit sha here).
+      if (req.method === "GET" && path === `${base}/git/ref/heads/${s.defaultBranch ?? "main"}`) return json(200, { ref: `refs/heads/${s.defaultBranch ?? "main"}`, object: { sha: FAKE_MERGE_BASE, type: "commit" } });
+      const dataCommit = /^\/repos\/[^/]+\/[^/]+\/git\/commits\/([0-9a-f]{40})$/.exec(path);
+      if (req.method === "GET" && dataCommit) return json(200, { sha: dataCommit[1], tree: { sha: dataCommit[1] }, parents: [] });
       const tree = /^\/repos\/[^/]+\/[^/]+\/git\/trees\/([0-9a-f]{40})$/.exec(path);
       if (req.method === "GET" && tree) {
         const sha = tree[1]!;

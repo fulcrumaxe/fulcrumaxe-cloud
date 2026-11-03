@@ -9,7 +9,7 @@ import { ENQUEUE_PULL_REQUEST_DOCUMENT } from "../../../github/src/mergeGateGrap
 import { applyQueueEvent, enqueueEntry, returnToReview, runQueueTick, type QueueGateResult, type QueueTickDeps } from "../../src/mergeQueue/index.js";
 import { fakeGitHubRest, freshRepo, type FakeRepoState } from "../review/helpers/fakeGitHubRest.js";
 import { pgHarness } from "../helpers/pgHarness.js";
-import { startQueueRepo, type QueueRepo } from "./helpers/queueRepo.js";
+import { shaOf, startQueueRepo, type QueueRepo } from "./helpers/queueRepo.js";
 
 /**
  * D#694 B6-3: the number of pull requests of one repository waiting in the host's merge queue is bounded by the rule's `max_entries_to_build` (1 when it cannot be read),
@@ -27,12 +27,13 @@ describe("host-queue bound and retry through the tick [pg]", () => {
   const tenant = <T>(r: QueueRepo, fn: (c: PoolClient) => Promise<T>) => withTenant(db.pureAppUserPool, r.accountId, fn);
 
   /** One strict GitHub fake per pull request; the gate stub is the production gate's enqueue step: the pinned mutation, then the driver fact. */
-  const world = async (prs: number[], queueInfo: QueueTickDeps["queueInfo"]) => {
+  const world = async (prs: number[], queueInfo: QueueTickDeps["queueInfo"], opts: { adds?: Record<number, string[]> } = {}) => {
     const r = await startQueueRepo(db);
     repos.push(r);
     const gh = new Map<number, FakeRepoState>();
     for (const pr of prs) {
-      const it = await r.addItem(pr);
+      const it = await r.addItem(pr, opts.adds ? { world: { pullFiles: (opts.adds[pr] ?? []).map((filename) => ({ filename, status: "added" })) } } : {});
+      if (opts.adds) r.setTip(pr, shaOf(pr, "tip"), ["sql/0711_a.sql", "sql/0712_a.sql"]);
       gh.set(pr, freshRepo({ prNumber: pr, headSha: it.head, mergeQueue: { exists: true, mutations: [] } }));
     }
     const enqueues = () => [...gh.values()].flatMap((s) => s.mergeQueue!.mutations.filter((m) => m.kind === "enqueue").map(() => s.prNumber));
@@ -45,7 +46,7 @@ describe("host-queue bound and retry through the tick [pg]", () => {
       );
       return { outcome: "merge_enqueued" };
     };
-    const tick = () => runQueueTick(r.deps({ gate, ...(queueInfo ? { queueInfo } : {}) }), r);
+    const tick = () => runQueueTick(r.deps({ gate, ...(opts.adds ? { ordered: true } : {}), ...(queueInfo ? { queueInfo } : {}) }), r);
     return { r, gh, enqueues, tick };
   };
   const webhook = (r: QueueRepo, payload: unknown) => tenant(r, (c) => applyQueueEvent(c, { accountId: r.accountId, repoId: r.repoId, eventName: "pull_request", payload }));
@@ -65,6 +66,33 @@ describe("host-queue bound and retry through the tick [pg]", () => {
     await webhook(w.r, { action: "closed", pull_request: { number: 7, merged: true, head: { sha: it7.head } } });
     await w.tick();
     expect(w.enqueues()).toEqual([7, 8, 9]);
+  });
+
+  it("D#483 S5-j2a2 (R-C35-3): at a batch size of 5, two entries that both add 0713 are not both enqueued: the second waits while the first is in GitHub's queue; an entry with no numbered file still batches", async () => {
+    const w = await world([7, 8, 9], async () => ({ mode: "queue", maxEntries: 5 }), { adds: { 7: ["sql/0713_a.sql"], 8: ["sql/0713_b.sql"], 9: ["docs/readme.md"] } });
+    const out = await w.tick();
+    expect(out.steps.map((s) => (s.step === "released" ? s.why : s.step === "idle" ? s.why : s.step))).toEqual(["host_queued", "ordered_resource_waiting", "host_queued", "waiting_mergeability"]);
+    expect(w.enqueues()).toEqual([7, 9]);
+    expect(await w.r.entry(8)).toMatchObject({ state: "queued", slotHolder: null });
+    const { rows } = await db.admin.query("SELECT code, reasons FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'merge_gate'", [w.r.items.get(8)!.workItemId]);
+    expect(rows).toEqual([{ code: "ordered_resource_waiting", reasons: ["ordered_resource_waiting"] }]);
+    // Asked again with the first still waiting, it waits again and nothing more is enqueued.
+    await w.tick();
+    expect(w.enqueues()).toEqual([7, 9]);
+    // The first one merges through GitHub's queue: the tip now holds 0713, so the second is out of order (it is stopped, not enqueued on the old tip).
+    const it7 = w.r.items.get(7)!;
+    await tenant(w.r, (c) => recordDriverEvent(c, w.r.accountId, { workItemId: it7.workItemId, kind: "merged_via_queue", dedupeKey: "m7", headSha: it7.head, prNumber: 7 }));
+    await webhook(w.r, { action: "closed", pull_request: { number: 7, merged: true, head: { sha: it7.head } } });
+    // Any pull request in GitHub's queue holds it, numbered or not: the plain one has to settle too.
+    await w.tick();
+    expect(await w.r.entry(8)).toMatchObject({ state: "queued" });
+    const it9 = w.r.items.get(9)!;
+    await tenant(w.r, (c) => recordDriverEvent(c, w.r.accountId, { workItemId: it9.workItemId, kind: "merged_via_queue", dedupeKey: "m9", headSha: it9.head, prNumber: 9 }));
+    await webhook(w.r, { action: "closed", pull_request: { number: 9, merged: true, head: { sha: it9.head } } });
+    for (const pr of [7, 8, 9]) w.r.setTip(pr, shaOf(pr, "tip"), ["sql/0711_a.sql", "sql/0712_a.sql", "sql/0713_a.sql"]);
+    await w.tick();
+    expect(w.enqueues()).toEqual([7, 9]);
+    expect(await w.r.entry(8)).toMatchObject({ state: "stopped", reason: "ordered_resource_out_of_order" });
   });
 
   it("a batch size that cannot be read is 1: one enqueue, the others wait", async () => {

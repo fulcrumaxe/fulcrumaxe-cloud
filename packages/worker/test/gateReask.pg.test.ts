@@ -73,6 +73,14 @@ describe("the merge gate re-ask [pg]", { timeout: 60_000 }, () => {
     expect((await ask(started, w, a.accountId)).started).toBe(true);
   });
 
+  it("D#483 S5-j2a2: an unreadable migration-order check is a transient answer: the event that follows asks the gate again; with another stop beside it, it does not", async () => {
+    const { a, w } = await atGate({ reasons: ["ordered_resource_unreadable"] });
+    const started: AdvanceStartArgs[] = [];
+    expect((await ask(started, w, a.accountId)).started).toBe(true);
+    const mixed = await atGate({ reasons: ["ordered_resource_unreadable", "head_sha_malformed"] });
+    expect(await ask([], mixed.w, mixed.a.accountId)).toMatchObject({ started: false, reason: "not_transient" });
+  });
+
   it("a replay, a second event and two deliveries at once start one workflow: the claim belongs to the gate answer, not the delivery", async () => {
     const { a, w } = await atGate();
     const started: AdvanceStartArgs[] = [];

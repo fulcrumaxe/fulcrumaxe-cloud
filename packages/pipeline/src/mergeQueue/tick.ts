@@ -104,10 +104,14 @@ export async function runQueueTick(deps: QueueTickDeps, input: { accountId: stri
   // D#519 MQ5-a: an entry stopped only for ordering returns to the queue once no ordered resource applies to the repository any more.
   await clearOrderedStops({ github: deps.github, inTenant: deps.inTenant, ...(deps.now ? { now: deps.now } : {}) }, input);
   await reopenReadyWritebacks(deps, input);
+  // D#483 S5-j2a2 (R-C35-3): an entry that waits for a pull request in GitHub's queue is left alone for the rest of this call, so it is not taken again at once.
+  const waitingForHost = new Set<string>();
   for (let pass = 0; pass < (deps.maxPasses ?? 10); pass++) {
     const facts = await recheck(deps, input, out);
+    for (const id of waitingForHost) facts.delete(id);
     const step = await takeAndRun(deps, input, facts);
     out.steps.push(step);
+    if (step.step === "released" && step.why === "ordered_resource_waiting") waitingForHost.add(step.entryId);
     // A merge moved main and a release let the next entry go: both recheck everyone and go on. Waiting ends the call.
     // A red or unreadable default branch ends the call too: every entry would meet the same answer (MQ-MAIN-RED-GUARD).
     if (step.step === "idle" || step.step === "parked" || (step.step === "released" && (step.why === "main_red" || step.why === "main_ci_unknown"))) break;
@@ -268,6 +272,8 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
       return { step: "parked", entryId: held.id, why: "ci_pending" };
     case "ordered_waiting":
       return { step: "parked", entryId: held.id, why: "ordered_resource_unknown" };
+    case "ordered_host_wait":
+      return release("ordered_resource_waiting");
     case "ordered_renumbering":
       return release("ordered_resource_renumbering");
     case "ordered_stopped":

@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
+import { reportError } from "@fx/telemetry";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { createGitHubMergeGatePort, mergeQueue, mergeRecordedHead, type GitHubHttp } from "@fx/pipeline";
 import type { AdvanceReviewDeps, RunnerPlaneMergeStore } from "@fx/worker";
@@ -186,8 +187,24 @@ export function sweepMergeQueue(deps: MergeQueueTickerDeps): Promise<mergeQueue.
     listTargets: (now, limit) => mergeQueue.listMergeQueueSweepTargets(deps.pool, now, limit),
     inTenant: (accountId, fn) => withTenant(deps.pool, accountId, fn),
     // D#694 B6-4: the backstop for a lost merge or removal delivery; the client opens only when an entry is due for a read.
-    reconcile: (target, maxReads) =>
-      mergeQueue.reconcileHostQueued(
+    reconcile: async (target, maxReads) => {
+      // D#483 S5-j2a2: a hold for GitHub's queue that has lapsed is read here too, for a repository whose queue has only tick entries and so no gate to ask. Only the repository's own
+      // holds can be read from this client; a hold for another repository (a code repository) waits for its webhook, a gate, or its 24 hours.
+      try {
+        await mergeQueue.reapLapsedHostHold(deps.pool, {
+          ...target,
+          hostQueueEntry: async (prNumber, repoGhId, holdWorkItemId) => {
+            const own = await withTenant(deps.pool, target.accountId, (c) => c.query<{ id: string | null }>("SELECT gh_repo_id::text AS id FROM repos WHERE id = $1", [target.repoId]));
+            if (repoGhId === "0" || own.rows[0]?.id !== repoGhId) return "unreadable";
+            const github = await openQueueGitHub(deps.pool, deps.open ?? openInstallationHttp, target);
+            if (!github?.getQueueEntry) return "unreadable";
+            return mergeQueue.readHostHoldState(deps.pool, { accountId: target.accountId, workItemId: holdWorkItemId, read: () => github.getQueueEntry!({ repoId: target.repoId, prNumber }) });
+          },
+        });
+      } catch (err) {
+        reportError(err, { stage: "merge_queue.reap_hold" });
+      }
+      return mergeQueue.reconcileHostQueued(
         {
           github: async () => {
             const github = await openQueueGitHub(deps.pool, deps.open ?? openInstallationHttp, target);
@@ -196,7 +213,8 @@ export function sweepMergeQueue(deps: MergeQueueTickerDeps): Promise<mergeQueue.
           inTenant: (accountId, fn) => withTenant(deps.pool, accountId, fn),
         },
         { ...target, maxReads },
-      ),
+      );
+    },
     tick: async (target) => {
       await completeEntrylessRounds(deps, target);
       await completeWaitingDeltaReviews(deps, target);
