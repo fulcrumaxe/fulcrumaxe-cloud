@@ -1,3 +1,4 @@
+import { assertNoRoleInBatch } from './evidence.js';
 import { MemoryInputError, assertUuid, inSession, readEntries, type MemoryAuthorKind, type MemoryCtx, type MemoryEntry } from './index.js';
 
 /**
@@ -36,6 +37,7 @@ export async function decideMemoryBatch(ctx: ReadCtx, input: { ids: readonly str
   if (input.ids.length > MEMORY_BATCH_MAX) throw new MemoryInputError('invalid_message', `a batch holds at most ${MEMORY_BATCH_MAX} entries`);
   for (const id of input.ids) assertUuid('memory entry', id);
   return inSession(ctx, async (client) => {
+    if (input.to === 'approved') await assertNoRoleInBatch(client, input.ids);
     const { rows } = await client.query<{ n: number }>('SELECT memory_decide_batch($1::uuid[], $2) AS n', [[...input.ids], input.to]);
     return { decided: rows[0]!.n, entries: await readEntries(client, input.ids) };
   });

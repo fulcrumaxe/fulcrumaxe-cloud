@@ -175,6 +175,8 @@ function mountApp(contentEl) {
 
   const q = mountQueue({
     host: queueHost,
+    // A blocked Approve says why once, in the page's polite status line (emptied first, so the same words are read again).
+    announce: (words) => { status.textContent = ""; setTimeout(() => (status.textContent = words), 50); },
     countFor: (place, cards) => {
       if (!place) return cards.length;
       if (counts === null) return null;

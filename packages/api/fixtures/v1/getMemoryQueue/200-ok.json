@@ -23,7 +23,9 @@
       "evidence": "",
       "age": "1 day ago",
       "open_state": "unopened",
-      "scope_label": "acme/widgets"
+      "scope_label": "acme/widgets",
+      "evidence_repos": 0,
+      "needs_second_repo": false
     },
     {
       "entry": {
@@ -48,7 +50,9 @@
       "evidence": "Seen in two runs of the same item",
       "age": "2 hours ago",
       "open_state": "not_required",
-      "scope_label": "#42 Add the thing"
+      "scope_label": "#42 Add the thing",
+      "evidence_repos": 0,
+      "needs_second_repo": false
     }
   ],
   "truncated": false

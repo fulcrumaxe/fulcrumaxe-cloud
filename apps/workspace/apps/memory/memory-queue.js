@@ -17,7 +17,7 @@ const isField = (el) => !!el && (el.tagName === "TEXTAREA" || el.tagName === "IN
  * reload(focusId): re-read everything, then focus that card (or the queue heading when it is gone). get: the fetch helper (the shared api by default).
  * onDecided({ ids, to }): a decision went through (for the Undo toast; a batch is one call).
  */
-export function mountQueue({ host, countFor, reload, get, onDecided }) {
+export function mountQueue({ host, countFor, reload, get, onDecided, announce }) {
   let cards = [];
   let phase = "loading"; // loading | ready | error
   let truncated = false;
@@ -126,7 +126,11 @@ export function mountQueue({ host, countFor, reload, get, onDecided }) {
     const working = busy.has(id);
     const shut = gated && !opened;
     const disabled = working ? { "aria-disabled": "true" } : {};
-    const act1 = (label, key, testid, fn) => h("button", { type: "button", class: "mem-btn", "aria-keyshortcuts": key.toUpperCase(), "data-testid": testid, ...disabled, onClick: () => !working && fn(card) }, label);
+    // MEM-9: an agent-proposed role lesson with evidence from one repo only cannot be approved yet. The control stays in the tab order (aria-disabled, not
+    // `disabled`), says why in words next to it, and does nothing; the server refuses the same call.
+    const needsRepo = card.needs_second_repo === true;
+    const act1 = (label, key, testid, fn, blocked) =>
+      h("button", { type: "button", class: "mem-btn", "aria-keyshortcuts": key.toUpperCase(), "data-testid": testid, ...(blocked ? { "aria-disabled": "true", "aria-describedby": "mem-need-" + id } : disabled), onClick: () => (blocked ? announce && announce(COPY.needsSecondRepo) : !working && fn(card)) }, label);
     const why = text(e.why);
     const evidence = text(card.evidence);
     return h(
@@ -145,8 +149,10 @@ export function mountQueue({ host, countFor, reload, get, onDecided }) {
           ev.preventDefault();
           if (working) return;
           if (shut) return void open(card); // the first key on a card nobody opened opens it; the next one acts
-          if (k === "a") approve(card);
-          else if (k === "e") startEdit(card);
+          if (k === "a") {
+            if (!needsRepo) approve(card);
+            else if (announce) announce(COPY.needsSecondRepo);
+          } else if (k === "e") startEdit(card);
           else reject(card);
         },
       },
@@ -163,7 +169,7 @@ export function mountQueue({ host, countFor, reload, get, onDecided }) {
             { class: "mem-actions" },
             shut
               ? h("button", { type: "button", class: "mem-btn", "data-testid": "mem-open", ...disabled, onClick: () => !working && open(card) }, COPY.openCard)
-              : [act1(COPY.approve, "a", "mem-approve", approve), act1(COPY.editThenApprove, "e", "mem-edit", startEdit), act1(COPY.reject, "r", "mem-reject", reject)]
+              : [act1(COPY.approve, "a", "mem-approve", approve, needsRepo), needsRepo ? h("span", { id: "mem-need-" + id, class: "mem-need", "data-testid": "mem-need-repo" }, COPY.needsSecondRepo) : null, act1(COPY.editThenApprove, "e", "mem-edit", startEdit), act1(COPY.reject, "r", "mem-reject", reject)]
           ),
       working ? h("p", { class: "mem-muted", role: "status" }, "Working…") : null,
       cardErrors.has(id) ? h("p", { class: "mem-error", role: "alert", "data-testid": "mem-card-error" }, cardErrors.get(id)) : null
@@ -230,12 +236,13 @@ export function mountQueue({ host, countFor, reload, get, onDecided }) {
 
   function batchBar(batch) {
     if (batch.size < 2) return null;
+    const hasRole = batch.cards.some((c) => c.entry && c.entry.scope === "role"); // role lessons are approved one at a time: the bar keeps Reject only
     const blocked = batch.unopened > 0 || batch.size > 20;
     const mk = (verb, to, testid) => {
       const b = h("button", { type: "button", class: "mem-btn", "data-testid": testid, "aria-disabled": blocked ? "true" : "false", disabled: blocked, onClick: (ev) => !blocked && openBatch(batch, to, ev.currentTarget) }, batchButtonWords(batch, verb));
       return b;
     };
-    return h("div", { class: "mem-batch", "data-testid": "mem-batch", "data-source": batch.source }, h("span", { class: "mem-muted" }, batch.source + " · " + batch.size + " cards"), mk("Approve", "approved", "mem-batch-approve"), mk("Reject", "rejected", "mem-batch-reject"));
+    return h("div", { class: "mem-batch", "data-testid": "mem-batch", "data-source": batch.source }, h("span", { class: "mem-muted" }, batch.source + " · " + batch.size + " cards"), hasRole ? null : mk("Approve", "approved", "mem-batch-approve"), mk("Reject", "rejected", "mem-batch-reject"));
   }
 
   function paint() {

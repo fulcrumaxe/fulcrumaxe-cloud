@@ -17,6 +17,7 @@ import {
   type MemoryStatus,
 } from './index.js';
 import { MEMORY_GATED_AUTHOR_KINDS } from './batch.js';
+import { MEMORY_ROLE_EVIDENCE_MIN_REPOS, evidenceRepoCounts } from './evidence.js';
 import { MEMORY_RUN_COUNT_MAX_IDS, memoryRunCounts } from './runCounts.js';
 import {
   formatItemGroup,
@@ -111,6 +112,11 @@ interface ListRow {
   item_number: string | null;
   item_title: string | null;
   receipt_missing: boolean;
+  /** MEM-9, role entries only: the run the lesson came from, read live (a status is never stamped on the entry). */
+  src_status: string | null;
+  src_stage: string | null;
+  src_owner: string | null;
+  src_name: string | null;
 }
 
 const SCOPE_ORDER: Readonly<Record<MemoryScope, number>> = { repo: 0, item: 1, role: 2, account: 3 };
@@ -144,13 +150,31 @@ const LABEL_JOINS = `
        AND i.gh_installation_id::text = split_part(m.scope_ref, '@', 2)
      LIMIT 1
   ) rp ON true
-  LEFT JOIN work_items w ON m.scope = 'item' AND w.account_id = m.account_id AND w.id = (CASE WHEN m.scope = 'item' THEN m.scope_ref::uuid END)`;
+  LEFT JOIN work_items w ON m.scope = 'item' AND w.account_id = m.account_id AND w.id = (CASE WHEN m.scope = 'item' THEN m.scope_ref::uuid END)
+  LEFT JOIN LATERAL (
+    SELECT sr.status AS src_status, sw.stage AS src_stage, rr.gh_owner AS src_owner, rr.gh_name AS src_name
+      FROM agent_runs sr
+      LEFT JOIN work_items sw ON sw.account_id = sr.account_id AND sw.id = sr.work_item_id
+      LEFT JOIN repos rr ON rr.account_id = sr.account_id AND rr.id = COALESCE(sw.repo_id, sr.dispatch_repo_id)
+     WHERE m.scope = 'role' AND sr.account_id = m.account_id AND sr.id = (CASE WHEN m.scope = 'role' AND (m.provenance ->> 'source_run_id') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (m.provenance ->> 'source_run_id')::uuid END)
+  ) src ON true`;
 // D#601 MEM-8b: an entry that names a decision receipt whose row is gone (only the case where the receipt cannot be read; the entry itself is untouched).
 const RECEIPT_ID_SQL = `CASE WHEN (m.provenance ->> 'receipt_id') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (m.provenance ->> 'receipt_id')::uuid END`;
-const LABEL_COLUMNS = `rp.id AS repo_id, rp.gh_owner, rp.gh_name, w.gh_number::text AS item_number, w.title AS item_title,
+const LABEL_COLUMNS = `src.src_status, src.src_stage, src.src_owner, src.src_name, rp.id AS repo_id, rp.gh_owner, rp.gh_name, w.gh_number::text AS item_number, w.title AS item_title,
   (m.provenance ? 'receipt_id' AND NOT EXISTS (SELECT 1 FROM decision_receipts dr WHERE dr.account_id = m.account_id AND dr.id = ${RECEIPT_ID_SQL})) AS receipt_missing`;
 /** What the Memory tab calls an entry whose receipt can no longer be read. */
 export const RECEIPT_MISSING_TITLE = 'Receipt no longer available';
+
+/**
+ * MEM-9: where a role lesson came from, for the list and the card: the repository of the run that proposed it and, when that run failed or its
+ * item was closed without a merge ("sent back"), the label "from a failed run". Never blank, never null: a repo that is gone says so.
+ */
+function roleOrigin(r: ListRow, withRun = false): string {
+  const run = memoryText(r.provenance.source_run_id);
+  if (r.scope !== 'role' || run === '') return '';
+  const repo = r.src_owner && r.src_name ? `${r.src_owner}/${r.src_name}` : 'a repo that is not connected';
+  return `${withRun ? ` (run ${run.slice(0, 8)})` : ''} in ${repo}${r.src_status === 'failed' || r.src_stage === 'closed_unmerged' ? ' (from a failed run)' : ''}`;
+}
 
 function groupLabel(r: ListRow): { label: string; targetId: string | null } {
   switch (r.scope) {
@@ -240,7 +264,7 @@ export async function listMemory(ctx: ReadCtx, filter: MemoryScopeFilter = {}, n
       statusDisplay: formatMemoryStatus(r.status),
       title: r.receipt_missing ? RECEIPT_MISSING_TITLE : formatMemoryTitle(r.body, r.scope, r.kind),
       authorKind: r.author_kind,
-      source: formatMemorySource(r.author_kind, r.provenance),
+      source: formatMemorySource(r.author_kind, r.provenance) + roleOrigin(r, true),
       version: Number(r.version),
       createdAt: r.created_at,
       deletedAt: r.deleted_at ?? null,
@@ -269,6 +293,10 @@ export interface MemoryQueueCard {
   /** Opened by THIS caller, for THIS version's text. An edit makes a new version, which is `unopened` again. */
   openState: MemoryOpenState;
   scopeLabel: string;
+  /** MEM-9: distinct repositories behind an agent-written role entry's runs; 0 for any other card. */
+  evidenceRepos: number;
+  /** MEM-9: the card is an agent-written role entry with fewer than two repositories of evidence, so Approve is disabled. */
+  needsSecondRepo: boolean;
 }
 
 interface QueueRow extends ListRow {
@@ -282,10 +310,10 @@ interface QueueRow extends ListRow {
  */
 export async function memoryQueue(ctx: ReadCtx, filter: Omit<MemoryScopeFilter, 'statuses' | 'kinds'> = {}, now: Date = new Date()): Promise<{ cards: MemoryQueueCard[]; truncated: boolean }> {
   const limit = Math.min(Math.max(Math.floor(filter.limit ?? MEMORY_LIST_MAX), 1), MEMORY_LIST_MAX);
-  const { rows, entries } = await inSession(ctx, async (client) => {
+  const { rows, entries, repos } = await inSession(ctx, async (client) => {
     const params: unknown[] = [ctx.principal.userId];
     const where = await scopeConditions(client, filter, params);
-    if (where === null) return { rows: [] as QueueRow[], entries: [] as MemoryEntry[] };
+    if (where === null) return { rows: [] as QueueRow[], entries: [] as MemoryEntry[], repos: {} as Record<string, number> };
     where.push(`m.status = 'proposed'`);
     params.push(limit + 1);
     const found = (
@@ -300,7 +328,7 @@ export async function memoryQueue(ctx: ReadCtx, filter: Omit<MemoryScopeFilter, 
       )
     ).rows;
     const page = found.slice(0, limit);
-    return { rows: found, entries: await readEntries(client, page.map((r) => r.id)) };
+    return { rows: found, entries: await readEntries(client, page.map((r) => r.id)), repos: await evidenceRepoCounts(client, page.filter((r) => r.scope === 'role').map((r) => r.id)) };
   });
   const truncated = rows.length > limit;
   const byId = new Map(entries.map((e) => [e.id, e]));
@@ -314,11 +342,13 @@ export async function memoryQueue(ctx: ReadCtx, filter: Omit<MemoryScopeFilter, 
         title: formatMemoryTitle(r.body, r.scope, r.kind),
         kindLabel: formatMemoryKind(r.kind),
         source: formatMemorySource(r.author_kind, r.provenance),
-        proposedBy: formatMemoryProposedBy(r.author_kind, r.provenance),
+        proposedBy: formatMemoryProposedBy(r.author_kind, r.provenance) + roleOrigin(r),
         evidence: memoryText(r.provenance.evidence),
         age: formatMemoryAge(r.created_at, now),
         openState: !gated ? 'not_required' : r.opened ? 'opened' : 'unopened',
         scopeLabel: groupLabel(r).label,
+        evidenceRepos: repos[r.id] ?? 0,
+        needsSecondRepo: r.scope === 'role' && r.author_kind !== 'person' && (repos[r.id] ?? 0) < MEMORY_ROLE_EVIDENCE_MIN_REPOS,
       },
     ];
   });

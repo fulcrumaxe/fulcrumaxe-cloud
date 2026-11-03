@@ -1,3 +1,4 @@
+import { assertRoleRoomForStep } from './evidence.js';
 import { NotFoundError } from '../tenancy/errors.js';
 import { MemoryInputError, assertUuid, editMemory, inSession, readEntries, type MemoryCtx, type MemoryEntry } from './index.js';
 
@@ -41,6 +42,7 @@ export async function revertMemory(ctx: ReadCtx, input: { ids: readonly string[]
     for (const e of found) {
       if (e.status !== step.from) throw new MemoryInputError('invalid_transition', `only ${step.from} entries can be moved by ${input.action}`);
     }
+    await assertRoleRoomForStep(client, ids, step.to);
     let changed = 0;
     for (const id of ids) {
       const { rows } = await client.query<{ r: string }>('SELECT memory_decide($1::uuid, $2) AS r', [id, step.to]);

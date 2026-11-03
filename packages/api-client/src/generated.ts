@@ -4241,6 +4241,8 @@ export interface Operations {
         age: string;
         open_state: "not_required" | "opened" | "unopened";
         scope_label: string;
+        evidence_repos: number;
+        needs_second_repo: boolean;
       }>;
       truncated: boolean;
     };
