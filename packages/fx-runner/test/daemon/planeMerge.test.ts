@@ -6,11 +6,11 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeVerifyMessage } from "@fulcrumaxe/runner-protocol";
+import { PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeVerifyMessage, type PlaneMergeOrderedConfig } from "@fulcrumaxe/runner-protocol";
 import { ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, createPublicHeadsReader, planePushGit, diffTreeEntries, sameChangeKeys, treeFromEntries } from "@fulcrumaxe/runner-protocol/planePush";
 import type { PlaneMergeClaimResult, PlaneMergeOrder, PlaneMergeReportResult, PlaneMergeVerifyResult } from "../../src/daemon/client.js";
 import type { FactsGit } from "../../src/daemon/conflictFacts.js";
-import { checkContent, createPlaneMergeHandler, readTree, type PlaneMergeOutcome } from "../../src/daemon/planeMerge.js";
+import { checkContent, createPlaneMergeHandler, readOrderedFact, readTree, type PlaneMergeOutcome } from "../../src/daemon/planeMerge.js";
 import { createPushLog, type PushLog } from "../../src/daemon/pushLog.js";
 import { ledgerOptions } from "../helpers/ledgerOptions.js";
 import { createPlanePushGithub } from "../../src/daemon/planePushGithub.js";
@@ -159,6 +159,8 @@ interface FakeGithub {
   /** Makes the next merge call fail with this status once (e.g. 500). */
   failMerge: number | undefined;
   failGet: number | undefined;
+  /** D#483 S5-j2c2: makes the default branch's ref read fail with this status. */
+  failRef: number | undefined;
   close(): Promise<void>;
 }
 
@@ -173,6 +175,7 @@ async function startGithub(head: string): Promise<FakeGithub> {
     afterGet: undefined,
     failMerge: undefined,
     failGet: undefined,
+    failRef: undefined,
     close: async () => undefined,
   };
   const server = http.createServer((req, res) => {
@@ -190,6 +193,11 @@ async function startGithub(head: string): Promise<FakeGithub> {
       if (req.method === "DELETE" && p === "/installation/token") {
         state.live.delete(bearer);
         return void res.writeHead(204).end();
+      }
+      // The default branch's ref, read from the public repository itself: the sha is whatever the bare repository holds now.
+      if (req.method === "GET" && p === "/repos/acme/widgets/git/ref/heads/main") {
+        if (state.failRef !== undefined) return json(state.failRef, { message: "boom" });
+        return json(200, { ref: "refs/heads/main", object: { sha: sh(world.bare, "rev-parse", "refs/heads/main"), type: "commit" } });
       }
       const pr = state.pull;
       if (req.method === "GET" && p === `/repos/acme/widgets/pulls/${pr.number}`) {
@@ -261,7 +269,7 @@ const enqueueCalls = (g: FakeGithub) => g.seen.filter((s) => s.method === "POST"
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 // The cloud's three order routes, at the protocol level, holding the schemas strictly.
 
-const orderFor = (publicHead: string, reviewedHead: string): PlaneMergeOrder => {
+const orderFor = (publicHead: string, reviewedHead: string, orderedConfig?: PlaneMergeOrderedConfig): PlaneMergeOrder => {
   const parsed = PlaneMergeClaimReply.parse({
     order_id: ORDER_ID,
     lease_generation: 1,
@@ -274,6 +282,7 @@ const orderFor = (publicHead: string, reviewedHead: string): PlaneMergeOrder => 
     overlay_globs: OVERLAY_GLOBS,
     pairing_digest: "d".repeat(64),
     read: { token: READ, expires_at: new Date(Date.now() + 3_000_000).toISOString() },
+    ...(orderedConfig === undefined ? {} : { ordered_config: orderedConfig }),
   });
   if (!("order_id" in parsed)) throw new Error("not an order");
   return parsed;
@@ -287,6 +296,8 @@ interface CloudScript {
   mode?: "queue" | "direct";
   /** D#519 MQ4-e2-a: whether the runner's latest hello listed `conflict_facts_v1`, as the route reads it. A `conflict` from a runner without it is a 400. */
   conflictCapable?: boolean;
+  /** D#483 S5-j2c2: whether the runner's latest hello listed `ordered_facts_v1`, as the route reads it. An `ordered` fact from a runner without it is a 400. */
+  orderedCapable?: boolean;
 }
 function fakeCloud(order: PlaneMergeOrder, script: CloudScript = {}) {
   const log: string[] = [];
@@ -311,7 +322,10 @@ function fakeCloud(order: PlaneMergeOrder, script: CloudScript = {}) {
         return { kind: "fenced", code: "order_mismatch" };
       }
       if (authorized) return { kind: "fenced", code: "already_issued" };
-      const answer = script.verify ? script.verify(parsed, verifyCalls) : parsed.same && !parsed.incomplete ? goWith(WRITE, script.mode) : { kind: "no_go" as const, reasons: ["public_head_not_reviewed"] };
+      if (parsed.ordered !== undefined && script.orderedCapable !== true) return { kind: "error", status: 400, code: "invalid_message" };
+      // As the gate reads a fact: only ok and none pass, and an overlap does not.
+      const orderedOk = parsed.ordered === undefined || ((parsed.ordered.verdict === "ok" || parsed.ordered.verdict === "none") && !parsed.ordered.overlap);
+      const answer = script.verify ? script.verify(parsed, verifyCalls) : parsed.same && !parsed.incomplete && orderedOk ? goWith(WRITE, script.mode) : { kind: "no_go" as const, reasons: ["public_head_not_reviewed"] };
       if (answer.kind === "go") {
         authorized = true;
         // The cloud mints the write credential at this moment: it is live on GitHub from here until the runner revokes it.
@@ -339,7 +353,7 @@ interface Harness {
   lines: string[];
   cloud: ReturnType<typeof fakeCloud>;
 }
-function harness(order: PlaneMergeOrder, script: CloudScript = {}, over: { syncMirror?: () => Promise<{ dir: string }>; sleeps?: number[]; facts?: { send: boolean; pushLog?: Pick<PushLog, "records">; git?: FactsGit } } = {}): Harness {
+function harness(order: PlaneMergeOrder, script: CloudScript = {}, over: { syncMirror?: () => Promise<{ dir: string }>; sleeps?: number[]; ordered?: boolean; facts?: { send: boolean; pushLog?: Pick<PushLog, "records">; git?: FactsGit } } = {}): Harness {
   const cloud = fakeCloud(order, script);
   const lines: string[] = [];
   const handler = createPlaneMergeHandler({
@@ -348,6 +362,7 @@ function harness(order: PlaneMergeOrder, script: CloudScript = {}, over: { syncM
     reader: createPublicHeadsReader({ origin: world.server.origin }),
     syncMirror: over.syncMirror ?? (async () => ({ dir: world.mirror })),
     workRoot: world.workRoot,
+    ...(over.ordered === undefined ? {} : { sendOrderedFacts: () => over.ordered! }),
     ...(over.facts === undefined ? {} : { sendConflictFacts: () => over.facts!.send, ...(over.facts.pushLog === undefined ? {} : { pushLog: over.facts.pushLog }), ...(over.facts.git === undefined ? {} : { factsGit: over.facts.git }) }),
     sleep: async (ms) => void over.sleeps?.push(ms),
     say: (l) => lines.push(l),
@@ -1007,5 +1022,196 @@ describe("the conflict verdict on the merge report", () => {
     await h.run();
     expect(h.cloud.reports.some((r) => r.conflict !== undefined)).toBe(true);
     expect(h.cloud.log.filter((l) => l.startsWith("report"))).toHaveLength(1);
+  }, T);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// D#483 S5-j2c2: the ordering fact on the verify message, and the default branch's tip read again after the go.
+
+const MIG = { name: "migrations", path_pattern: "db/migrations/*.sql", key_pattern: "^(\\d{4})_.+\\.sql$", key_kind: "integer" as const };
+const SEEDS = { name: "seeds", path_pattern: "db/seeds/*.sql", key_pattern: "^(\\d{3})-.+\\.sql$", key_kind: "integer" as const };
+const CONFIG: PlaneMergeOrderedConfig = { configured: true, resources: [MIG] };
+const TIP_FILES = { "db/migrations/0001_init.sql": "create 1;\n", "db/migrations/0002_users.sql": "create 2;\n", "db/seeds/001-a.sql": "seed 1;\n" };
+
+/** A commit on the public default branch, pushed: the tip moves on. */
+function advanceMain(files: Record<string, string | Buffer>): string {
+  sh(world.pubWork, "checkout", "-q", "-B", "main", world.mainTip);
+  put(world.pubWork, files);
+  world.mainTip = commitAll(world.pubWork, "public main moves on");
+  sh(world.pubWork, "push", "-q", world.bare, "HEAD:refs/heads/main");
+  return world.mainTip;
+}
+const refReads = (g: FakeGithub) => g.seen.filter((s) => s.method === "GET" && s.path.includes("/git/ref/"));
+
+describe("the ordering fact (ordered_facts_v1)", () => {
+  async function order(files: Record<string, string>, config: PlaneMergeOrderedConfig | null = CONFIG, over: { ordered?: boolean; script?: CloudScript } = {}) {
+    const head = publicPr(files);
+    const reviewed = privateRun(files);
+    gh = await startGithub(head);
+    return harness(orderFor(head, reviewed, config ?? undefined), { orderedCapable: true, ...over.script }, { ordered: over.ordered ?? true });
+  }
+
+  it("a key above the tip's highest: ok, computed at the tip it read; the tip is read again with the write credential before the one merge call", async () => {
+    advanceMain(TIP_FILES);
+    const h = await order({ "db/migrations/0003_next.sql": "create 3;\n" });
+    expect(await h.run()).toBe("merged");
+    expect(h.cloud.verifies[0]!.ordered).toEqual({ verdict: "ok", tip_sha: world.mainTip, behind: false, overlap: false });
+    expect(refReads(gh!)).toHaveLength(1);
+    expect(refReads(gh!)[0]!.authorization).toBe(`Bearer ${WRITE}`);
+    // The read comes after the pull request read and before the merge call.
+    const at = (m: string, frag: string) => gh!.seen.findIndex((s) => s.method === m && s.path.includes(frag));
+    expect(at("GET", "/git/ref/")).toBeGreaterThan(at("GET", "/pulls/"));
+    expect(at("GET", "/git/ref/")).toBeLessThan(at("PUT", "/merge"));
+    bothRevoked();
+  }, T);
+
+  it.each([
+    ["a duplicate key", { "db/migrations/0003_a.sql": "a;\n", "db/migrations/0003_b.sql": "b;\n" }, "key_0003"],
+    ["a key below the tip's highest", { "db/migrations/0001_other.sql": "x;\n" }, "key_0001"],
+  ])("%s: out_of_order, named by codes; no go, no merge call, no tip read", async (_name, files, key) => {
+    advanceMain(TIP_FILES);
+    const h = await order(files);
+    expect(await h.run()).toBe("blocked");
+    expect(h.cloud.verifies[0]!.ordered).toEqual({ verdict: "out_of_order", resource: "resource_migrations", key, highest: "highest_0002", tip_sha: world.mainTip, behind: false, overlap: false });
+    expect(mergeCalls(gh!)).toHaveLength(0);
+    expect(refReads(gh!)).toHaveLength(0);
+    bothRevoked();
+  }, T);
+
+  it("several resources: each is checked, and the first one out of order names itself", async () => {
+    advanceMain(TIP_FILES);
+    const h = await order({ "db/migrations/0003_next.sql": "c;\n", "db/seeds/001-again.sql": "s;\n" }, { configured: true, resources: [MIG, SEEDS] });
+    expect(await h.run()).toBe("blocked");
+    expect(h.cloud.verifies[0]!.ordered).toMatchObject({ verdict: "out_of_order", resource: "resource_seeds", key: "key_001", highest: "highest_001" });
+  }, T);
+
+  it("no resource applies (an empty configured list): none, and the pull request merges", async () => {
+    advanceMain(TIP_FILES);
+    const h = await order({ "db/migrations/0001_other.sql": "x;\n" }, { configured: true, resources: [] });
+    expect(await h.run()).toBe("merged");
+    expect(h.cloud.verifies[0]!.ordered).toMatchObject({ verdict: "none", tip_sha: world.mainTip });
+  }, T);
+
+  it("nothing configured: the detected migrations directory applies, as the cloud's own default does", async () => {
+    advanceMain(TIP_FILES);
+    const h = await order({ "db/migrations/0003_next.sql": "c;\n" }, { configured: false, resources: [] });
+    expect(await h.run()).toBe("merged");
+    expect(h.cloud.verifies[0]!.ordered).toMatchObject({ verdict: "ok" });
+  }, T);
+
+  it("behind the tip and sharing a file with what the tip gained: overlap, no go; behind with a disjoint change: no overlap, and it merges", async () => {
+    advanceMain(TIP_FILES);
+    const shared = publicPr({ "src/a.ts": "export const a = 2;\n" });
+    const oldTip = world.mainTip;
+    advanceMain({ "src/a.ts": "export const a = 3;\n" });
+    const reviewed = privateRun({ "src/a.ts": "export const a = 2;\n" });
+    gh = await startGithub(shared);
+    const h = harness(orderFor(shared, reviewed, CONFIG), { orderedCapable: true }, { ordered: true });
+    expect(await h.run()).toBe("blocked");
+    expect(h.cloud.verifies[0]!.ordered).toMatchObject({ verdict: "none", behind: true, overlap: true, tip_sha: world.mainTip });
+    expect(world.mainTip).not.toBe(oldTip);
+    bothRevoked();
+    await gh.close();
+    // A change to another file: behind, but clean.
+    const disjoint = publicPr({ "src/c.ts": "export const c = 3;\n" }, [], { parent: oldTip });
+    const reviewed2 = privateRun({ "src/c.ts": "export const c = 3;\n" });
+    gh = await startGithub(disjoint);
+    const h2 = harness(orderFor(disjoint, reviewed2, CONFIG), { orderedCapable: true }, { ordered: true });
+    expect(await h2.run()).toBe("merged");
+    expect(h2.cloud.verifies[0]!.ordered).toEqual({ verdict: "none", behind: true, overlap: false, tip_sha: world.mainTip });
+  }, T);
+
+  it("a path that is not UTF-8: unknown, and the fact carries no path", async () => {
+    advanceMain(TIP_FILES);
+    sh(world.pubWork, "checkout", "-q", "-B", BRANCH, world.mainTip);
+    put(world.pubWork, CHANGE);
+    putBadName(world.pubWork);
+    const head = commitAll(world.pubWork, "public change");
+    sh(world.pubWork, "push", "-q", "-f", world.bare, `HEAD:refs/heads/${BRANCH}`);
+    const reviewed = privateRun(CHANGE, [], { bad: true });
+    gh = await startGithub(head);
+    const h = harness(orderFor(head, reviewed, CONFIG), { orderedCapable: true }, { ordered: true });
+    expect(await h.run()).toBe("blocked");
+    expect(h.cloud.verifies[0]!.ordered).toEqual({ verdict: "unknown", tip_sha: world.mainTip, behind: false, overlap: false });
+    expect(mergeCalls(gh)).toHaveLength(0);
+    bothRevoked();
+  }, T);
+
+  it("a tree that cannot be read whole (a tree object missing from the store) is unknown, never in order", async () => {
+    const dir = path.join(world.root, "broken");
+    mkdirSync(dir);
+    sh(dir, "init", "-q", "-b", "main");
+    put(dir, TIP_FILES);
+    const tip = commitAll(dir, "tip");
+    put(dir, { "db/migrations/0003_next.sql": "c;\n" });
+    const head = commitAll(dir, "head");
+    expect(await readOrderedFact(dir, head, tip, CONFIG)).toEqual({ verdict: "ok", tip_sha: tip, behind: false, overlap: false });
+    // The loose tree object of a directory is gone: the listing fails, and that is "could not know".
+    const seeds = sh(dir, "rev-parse", `${tip}:db/seeds`);
+    rmSync(path.join(dir, ".git", "objects", seeds.slice(0, 2), seeds.slice(2)));
+    expect(await readOrderedFact(dir, head, tip, CONFIG)).toEqual({ verdict: "unknown", tip_sha: tip, behind: false, overlap: false });
+    // And a repository that is not there at all.
+    expect(await readOrderedFact(path.join(world.root, "does-not-exist"), head, tip, CONFIG)).toEqual({ verdict: "unknown", tip_sha: tip, behind: false, overlap: false });
+  }, T);
+
+  it("the default branch's tip moves between the facts and the merge step: base_moved, no merge or enqueue call, both credentials revoked", async () => {
+    advanceMain(TIP_FILES);
+    const h = await order({ "db/migrations/0003_next.sql": "create 3;\n" });
+    gh!.afterGet = () => void advanceMain({ "db/migrations/0003_theirs.sql": "theirs;\n" });
+    expect(await h.run()).toBe("aborted");
+    expect(h.cloud.reports[0]).toMatchObject({ result: "aborted", abort_code: "base_moved", token_revoked: true });
+    expect(mergeCalls(gh!)).toHaveLength(0);
+    expect(enqueueCalls(gh!)).toHaveLength(0);
+    bothRevoked();
+  }, T);
+
+  it("the same on a repository behind GitHub's merge queue: nothing is enqueued", async () => {
+    advanceMain(TIP_FILES);
+    const h = await order({ "db/migrations/0003_next.sql": "create 3;\n" }, CONFIG, { script: { mode: "queue" } });
+    gh!.queue.graphql = true;
+    gh!.queue.rules = true;
+    gh!.afterGet = () => void advanceMain({ "db/migrations/0003_theirs.sql": "theirs;\n" });
+    expect(await h.run()).toBe("aborted");
+    expect(h.cloud.reports[0]).toMatchObject({ result: "aborted", abort_code: "base_moved" });
+    expect(enqueueCalls(gh!)).toHaveLength(0);
+    bothRevoked();
+  }, T);
+
+  it("a tip read that fails is read_failed: nothing is merged", async () => {
+    advanceMain(TIP_FILES);
+    const h = await order({ "db/migrations/0003_next.sql": "create 3;\n" });
+    gh!.failRef = 500;
+    expect(await h.run()).toBe("aborted");
+    expect(h.cloud.reports[0]).toMatchObject({ result: "aborted", abort_code: "read_failed" });
+    expect(mergeCalls(gh!)).toHaveLength(0);
+    bothRevoked();
+  }, T);
+
+  it("a cloud without the capability (the hello dropped it): the claim carries nothing to use, the verify has no ordered key, the tip is not read, and it merges as before", async () => {
+    advanceMain(TIP_FILES);
+    const h = await order({ "db/migrations/0003_next.sql": "create 3;\n" }, CONFIG, { ordered: false, script: { orderedCapable: false } });
+    expect(await h.run()).toBe("merged");
+    expect("ordered" in h.cloud.verifies[0]!).toBe(false);
+    expect(refReads(gh!)).toHaveLength(0);
+    bothRevoked();
+  }, T);
+
+  it("a claim reply with no ordered_config (the fake cloud says go): no ordered key is sent and no tip is read", async () => {
+    advanceMain(TIP_FILES);
+    const h = await order({ "db/migrations/0003_next.sql": "create 3;\n" }, null);
+    expect(await h.run()).toBe("merged");
+    expect("ordered" in h.cloud.verifies[0]!).toBe(false);
+    expect(refReads(gh!)).toHaveLength(0);
+    bothRevoked();
+  }, T);
+
+  it("the write credential is in no line, fact, message or report on any of these paths", async () => {
+    advanceMain(TIP_FILES);
+    const h = await order({ "db/migrations/0003_next.sql": "create 3;\n" });
+    gh!.afterGet = () => void advanceMain({ "db/migrations/0003_theirs.sql": "theirs;\n" });
+    await h.run();
+    const everything = JSON.stringify([h.lines, h.cloud.verifies, h.cloud.reports]);
+    expect(everything).not.toContain(WRITE);
+    expect(everything).not.toContain(READ);
   }, T);
 });

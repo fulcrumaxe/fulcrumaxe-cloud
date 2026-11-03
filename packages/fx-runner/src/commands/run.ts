@@ -45,7 +45,7 @@ import { computeConflictAttestation } from "../daemon/conflictAttest.js";
 import { createPlaneBaseLedger, createPlanePushHook } from "../daemon/planePush.js";
 import { createPlanePushGithub } from "../daemon/planePushGithub.js";
 import { createPlaneMergeHandler } from "../daemon/planeMerge.js";
-import { CONFLICT_FACTS_CAPABILITY, MEMORY_LIMIT_CAPABILITY, type LimitedBy } from "@fulcrumaxe/runner-protocol";
+import { CONFLICT_FACTS_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, type LimitedBy } from "@fulcrumaxe/runner-protocol";
 import { createGitTransport, createPublicHeadsReader } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
@@ -132,6 +132,8 @@ export interface RunHooks {
   jobLimits?: { enforced: boolean; limits?: JobLimits; reason?: string };
   /** A test seam: told, once the hello is answered, whether the conflict verdict may be sent on a merge report. */
   onConflictFactsAccepted?: (accepted: boolean) => void;
+  /** A test seam: told, once the hello is answered, whether the ordering fact may be computed and sent on a merge order. */
+  onOrderedFactsAccepted?: (accepted: boolean) => void;
 }
 
 /** Whether a process with this pid exists: ESRCH means gone; success and EPERM (another user's process) mean it is there. */
@@ -310,6 +312,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     let memoryLimitAccepted = false;
     /** D#519 MQ4-e2-a: set once the hello is answered; a merge report carries a conflict verdict only when the cloud kept `conflict_facts_v1`. */
     let conflictFactsAccepted = false;
+    /** D#483 S5-j2c2: set once the hello is answered; a merge order's verify carries an ordering fact only when the cloud kept `ordered_facts_v1`. */
+    let orderedFactsAccepted = false;
     const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) });
     // macOS: a resumed workspace's ignored build output is purged in a child under sandbox-exec that can write below the workspace only (D#6 RESUME-CLEAN-MAC).
     const sandboxedPurge = host.platform === "darwin" && host.selfCommand !== undefined ? createSandboxedPurge({ capture: host.engine.capture, selfCommand: host.selfCommand, stateDir, isFile: host.sandbox.isFile }) : undefined;
@@ -365,6 +369,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       },
       workRoot: path.join(stateDir, "plane-merge"),
       sendConflictFacts: () => conflictFactsAccepted,
+      sendOrderedFacts: () => orderedFactsAccepted,
       ...(pushLog === undefined ? {} : { pushLog }),
       uid: host.uid,
       say: (line) => ctx.out(line),
@@ -457,15 +462,33 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       // D#605 FL-2: say what this build and machine are, once per start, before the first claim. Best effort and no gate: a cloud that is older, a network
       // that is down or a 426 changes nothing here (the claim loop answers all of them in its own words), and no job decision reads the facts.
       const facts = readHostFacts();
-      const hello = await client
-        .hello({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: credentials.mode === "api_key", isolation: "host_sandbox", ...(facts === undefined ? {} : { facts }), capabilities: RUNNER_BUILD_CAPABILITIES })
-        .catch(() => undefined);
+      const helloMessage = { protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: credentials.mode === "api_key", isolation: "host_sandbox" as const, ...(facts === undefined ? {} : { facts }), capabilities: RUNNER_BUILD_CAPABILITIES };
+      const hello = await client.hello(helloMessage).catch(() => undefined);
       // D#6 RUNNER-WAKE: the hello's grant, if the cloud sent one, seeds the wake state; every claim reply refreshes it.
       const wake = new WakeTracker(hello?.kind === "ok" ? hello.wake : undefined);
-      // An answer that failed, or one that dropped the capability, leaves the field unsent: the card then keeps its plain sentence.
-      memoryLimitAccepted = hello?.kind === "ok" && !(hello.dropped ?? []).includes(MEMORY_LIMIT_CAPABILITY);
-      conflictFactsAccepted = hello?.kind === "ok" && !(hello.dropped ?? []).includes(CONFLICT_FACTS_CAPABILITY);
-      hooks.onConflictFactsAccepted?.(conflictFactsAccepted);
+      // What the hello's answer decides. An answer that failed, or one that dropped the capability, leaves the field unsent: the card then keeps its plain sentence.
+      const takeHello = (answer: typeof hello): void => {
+        const dropped = answer?.kind === "ok" ? (answer.dropped ?? []) : undefined;
+        memoryLimitAccepted = dropped !== undefined && !dropped.includes(MEMORY_LIMIT_CAPABILITY);
+        conflictFactsAccepted = dropped !== undefined && !dropped.includes(CONFLICT_FACTS_CAPABILITY);
+        hooks.onConflictFactsAccepted?.(conflictFactsAccepted);
+        orderedFactsAccepted = dropped !== undefined && !dropped.includes(ORDERED_FACTS_CAPABILITY);
+        hooks.onOrderedFactsAccepted?.(orderedFactsAccepted);
+      };
+      takeHello(hello);
+      // A hello that was not answered (a 5xx, a network failure) is said again before a later claim, on the poll loop's own pace, until one is answered. The cloud may still list
+      // the capability from an earlier start, so until then the fact stays off and a merge order stops there (fail closed). The answer sets every value the first one would have
+      // (the memory cap and the conflict verdict too) and a wake grant it carries, so the runner ends up as if the first hello had been answered. The first pass is skipped: the hello was just said.
+      let helloAnswered = hello?.kind === "ok";
+      let passes = 0;
+      const sayHelloAgain = async (): Promise<void> => {
+        if (helloAnswered || passes++ === 0) return;
+        const again = await client.hello(helloMessage).catch(() => undefined);
+        if (again?.kind !== "ok") return;
+        helloAnswered = true;
+        wake.onHello(again.wake);
+        takeHello(again);
+      };
       const end = await pollLoop({
         client,
         wake,
@@ -485,20 +508,18 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         }),
         onClaimed: (claimed) => jobs.track(() => handle(claimed)),
         onMergeOrder: async () => ((await jobs.track(() => planeMerge())) === "none" ? "none" : "handled"),
-        ...(autoUpdate === undefined || updateHost === undefined
-          ? {}
-          : {
-              betweenJobs: async () => {
-                const outcome = await autoUpdate.tick();
-                if (outcome.kind !== "applied") return undefined;
-                if (updateHost.inService) {
-                  ctx.out(`fx-runner: updated to ${outcome.version}; restarting on it`);
-                  return "restart" as const;
-                }
-                ctx.out(`Updated to ${outcome.version}. Restart \`fx-runner run\` to use it.`);
-                return undefined;
-              },
-            }),
+        betweenJobs: async () => {
+          await sayHelloAgain();
+          if (autoUpdate === undefined || updateHost === undefined) return undefined;
+          const outcome = await autoUpdate.tick();
+          if (outcome.kind !== "applied") return undefined;
+          if (updateHost.inService) {
+            ctx.out(`fx-runner: updated to ${outcome.version}; restarting on it`);
+            return "restart" as const;
+          }
+          ctx.out(`Updated to ${outcome.version}. Restart \`fx-runner run\` to use it.`);
+          return undefined;
+        },
         log: (event) => {
           // Said when the answer changes, not on every poll.
           const reason = event.event === "sandbox_unavailable" ? event.reason : event.event === "idle" || event.event === "rate_limited" ? undefined : lastReason;
