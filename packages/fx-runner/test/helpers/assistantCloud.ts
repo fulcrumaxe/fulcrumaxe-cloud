@@ -104,7 +104,7 @@ export async function startAssistantCloud(now: () => number): Promise<AssistantC
         if (token === undefined || req.headers.authorization !== `Bearer ${token.value}` || token.revoked || now() >= token.expires) return fail(401, "unauthorized");
         if (req.method === "GET") return send(200, served.get(url) ?? { data: [] });
         if (!strict(["kind", "body"]) || !KINDS.includes(String(json.kind)) || typeof json.body !== "string" || json.body.length > 4000) return fail(400, "invalid_message");
-        return send(201, { id: "33333333-3333-4333-8333-333333333333", work_item_id: m[1], status: "proposed", origin: "agent" });
+        return send(201, { id: "33333333-3333-4333-8333-333333333333", work_item_id: m[1], status: "proposed", origin: "agent", kind: json.kind, body: json.body });
       }
       return fail(404, "not_found");
     });

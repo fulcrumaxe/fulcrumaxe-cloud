@@ -16,6 +16,8 @@ import { AssistantError, assertStateDirSafe, readAssistantToken, type AssistantP
 
 /** The whole tool list: the corrections list and `draft_correction` (CC-7a-1) and the six read tools (CC-7a-2). Nothing here writes except the proposal. */
 export const ALLOWED_TOOLS: readonly string[] = Object.freeze(["list_corrections", "draft_correction", ...READ_TOOLS]);
+/** The argument names of the two correction tools (`call` below reads exactly these), for the name cross-check against the hosted registry. */
+export const CORRECTION_TOOL_ARGS: Readonly<Record<string, readonly string[]>> = Object.freeze({ list_corrections: ["work_item_id"], draft_correction: ["work_item_id", "kind", "body"] });
 export const PROXY_SOCKET_ENV = "FX_ASSISTANT_PROXY_SOCKET";
 export const PROXY_SECRET_ENV = "FX_ASSISTANT_PROXY_SECRET";
 const MAX_REQUEST_BYTES = 32 * 1024;
@@ -86,7 +88,10 @@ export async function startProxy(o: ProxyOptions): Promise<Proxy> {
       if (reply.status !== 200 || reply.body === undefined) return refuse(502, "assistant_read_failed");
       return { status: 200, body: fenceJson(reply.body) };
     }
-    return reply;
+    // The proposal is answered as a fixed sentence and the id (the hosted tool's words), never the cloud's reply, which carries the model's own body back.
+    const made = typeof reply.body === "object" && reply.body !== null ? (reply.body as { id?: unknown }).id : undefined;
+    if (reply.status < 200 || reply.status > 299 || typeof made !== "string" || !ID.test(made)) return refuse(502, "assistant_read_failed");
+    return { status: reply.status, body: { message: `correction ${made} is proposed. A person must accept it before anything happens.` } };
   }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {

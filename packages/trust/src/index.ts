@@ -13,3 +13,4 @@ export * from "./sanitize.js";
 export * from "./author-trust.js";
 export * from "./work-gate.js";
 export * from "./provenance.js";
+export * from "./keys.js";

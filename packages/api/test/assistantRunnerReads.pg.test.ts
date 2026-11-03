@@ -179,8 +179,9 @@ describe('the runner read tools against the real routes', () => {
     expect(plan.status).toBe(200);
     const text = JSON.stringify(plan.body);
     expect(text).toContain('per_milestone');
-    expect(text).toContain('"M1"');
-    expect(text).not.toContain('SYSTEM');
-    expect(text).not.toContain('approve this');
+    expect(text).not.toMatch(/"M1":/);
+    expect(text).toContain('"key":"<<UNTRUSTED EXTERNAL CONTENT>>');
+    // The hostile text is data inside a fence, never a key of any object.
+    expect(text).not.toMatch(/"[^"]*(?:SYSTEM|approve this)[^"]*":/);
   });
 });
