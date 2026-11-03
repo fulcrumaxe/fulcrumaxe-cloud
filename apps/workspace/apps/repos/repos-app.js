@@ -6,7 +6,7 @@
 // server's message. The install URL carries a signed state: it is navigated to
 // and never written into the page, storage or a log. Live: the list re-reads on
 // refresh and on the install / repo-sync events.
-import { h } from "../_lib/dom.js";
+import { h, mountRepoRules } from "../_lib/dom.js";
 import { api, ApiFailure, createRetryGate, isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
 import { on, onRefresh } from "../../core/cloud-live.js";
 import { autoMergeDisabled, lockNote } from "./repos-lock.js";
@@ -107,6 +107,14 @@ function mountRepos(host, installNote) {
   const runners = createRunnersSection({ signal: abort.signal, onData: () => (dial && dial.repaint(), allowances.repaint()) });
   // dom-insert-ok: runners.el is the section element createRunnersSection built with h()
   root.append(runners.el);
+  // D#600 CX-9b: the open repo's context rules and budget (apps/_lib/dom.js). The slot keeps its own state across the detail rebuild.
+  const ctxSlot = h("div", { "data-testid": "repos-context-slot" });
+  let ctx = null;
+  const mountContext = () => {
+    if (ctx) ctx.destroy();
+    ctx = st.openId ? mountRepoRules(ctxSlot, { repoId: st.openId }) : null;
+    if (!ctx) ctxSlot.replaceChildren();
+  };
   const makeDial = () => {
     dial = st.openId ? createDialControl({ signal: abort.signal, repoId: st.openId, data: runners.data }) : null;
     if (dial) dial.load();
@@ -240,6 +248,10 @@ function mountRepos(host, installNote) {
     );
     // dom-insert-ok: allowances.el is the section element createAllowancePanel built with h(); it keeps its own state across this rebuild
     detailEl.append(allowances.el);
+    // dom-insert-ok: ctxSlot is an element built above with h(); the rules panel fills it and keeps its own state; a held focus inside it is put back
+    const held = ctxSlot.contains(document.activeElement) ? document.activeElement : null;
+    detailEl.append(ctxSlot);
+    if (held) held.focus();
   }
 
   function render() {
@@ -272,7 +284,7 @@ function mountRepos(host, installNote) {
       st.loadFailed = true;
     }
     st.loading = false;
-    if (st.openId && !openRepo()) { st.openId = null; dial = null; mode = null; autoMerge = null; planWriteback = null; }
+    if (st.openId && !openRepo()) { st.openId = null; dial = null; mode = null; autoMerge = null; planWriteback = null; mountContext(); }
     render();
   }
 
@@ -307,6 +319,7 @@ function mountRepos(host, installNote) {
     st.openId = id;
     st.pendingOff = false; st.ack = false; st.ackError = false; st.saveError = "";
     makeDial();
+    mountContext();
     loadSettings(id, false);
     allowances.show(openRepo());
   }
@@ -368,6 +381,7 @@ function mountRepos(host, installNote) {
     destroy() {
       destroyed = true;
       allowances.clear();
+      if (ctx) ctx.destroy();
       runners.destroy();
       gate.cancel();
       abort.abort();

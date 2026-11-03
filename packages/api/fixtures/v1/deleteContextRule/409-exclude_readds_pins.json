@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "exclude_readds_pins",
+    "message": "removing this exclude puts pinned files back in this item's runs and they no longer fit the budget; repeat with confirm=true to remove it anyway",
+    "request_id": "33333333-3333-4333-8333-333333333333"
+  }
+}

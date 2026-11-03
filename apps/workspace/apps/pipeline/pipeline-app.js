@@ -7,7 +7,7 @@
 //
 // Registration goes through the FULC global (see the Developer app's header
 // comment: an ES import of the SDK would blow the boot request budget).
-import { h, timeNode } from "../_lib/dom.js";
+import { h, mountItemRules, timeNode } from "../_lib/dom.js";
 import { on, onRefresh } from "../../core/cloud-live.js";
 import {
   COLUMNS,
@@ -222,6 +222,15 @@ function mountApp(contentEl, launchArg) {
 
   // The approve button lives in a slot of its own, so a change of "a run is live" redraws it WITHOUT rebuilding the Runs
   // section beside it (a rebuild there would lose the keyboard focus a person holds on a run's control).
+  // D#600 CX-9b: this item's context rules (apps/_lib/dom.js).
+  const ctxSlot = h("div", { "data-testid": "pl-context-slot" });
+  let ctxPanel = null;
+  function mountCtx(item) {
+    if (ctxPanel) ctxPanel.destroy();
+    const ok = item && /^[0-9a-f-]{36}$/i.test(item.id) && /^[0-9a-f-]{36}$/i.test(item.repo_id || "");
+    ctxPanel = ok ? mountItemRules(ctxSlot, { repoId: item.repo_id, itemId: item.id }) : null;
+    if (!ok) ctxSlot.replaceChildren();
+  }
   const approveSlot = h("div", { "data-testid": "pl-approve-slot" });
   function syncApprove() {
     const live = !!runs && runs.hasLive();
@@ -267,6 +276,7 @@ function mountApp(contentEl, launchArg) {
       );
     }
     syncApprove();
+    const ctxHeld = ctxSlot.contains(document.activeElement) ? document.activeElement : null; // a repaint must not lose a focus held in the rules
     detail.replaceChildren(
       h("button", { type: "button", class: "pl-back", "data-testid": "pl-back", onClick: close }, "← Back"),
       h("h2", { class: "pl-detail-title", "data-testid": "pl-detail-title" }, repo ? [h("bdi", null, repo), number ? " " : null] : null, number),
@@ -289,11 +299,14 @@ function mountApp(contentEl, launchArg) {
       ...(runs ? [runs.el] : []),
       // dom-insert-ok: createFollowUpsPanel (pipeline-actions.js) always returns a panel with its el set
       ...(followUps ? [followUps.el] : []),
+      // dom-insert-ok: ctxSlot is an element built above with h(); the rules panel fills it
+      ctxSlot,
       h("h3", { class: "pl-detail-sub" }, "History"),
       body
     );
     detail.hidden = false;
     fitDetail();
+    if (ctxHeld) ctxHeld.focus();
     if (hadFocus) detail.querySelector(".pl-back").focus();
   }
 
@@ -328,6 +341,7 @@ function mountApp(contentEl, launchArg) {
       },
     });
     insight.start(item.id);
+    mountCtx(item);
     paintDetail();
     detail.querySelector(".pl-back").focus();
     const ac = (historyAc = new AbortController());
@@ -366,6 +380,7 @@ function mountApp(contentEl, launchArg) {
     if (runs) runs.destroy();
     if (followUps) followUps.destroy();
     insight.stop();
+    mountCtx(null);
     openId = openItem = history = runs = followUps = null;
     syncOperator();
     paintDetail();
@@ -438,6 +453,7 @@ function mountApp(contentEl, launchArg) {
       operator.destroy();
       if (historyAc) historyAc.abort();
       if (runs) runs.destroy();
+      mountCtx(null);
       board.destroy();
       contentEl.replaceChildren();
     },
