@@ -50,6 +50,8 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   // D#597 CC-7a-1, the assistant link and its local tool proxy.
   "src/assistant/tokenFile.ts": ["crypto", "fs", "path"], // the token file: lstat checks, a no-follow open judged by the open handle, a random temp-file name, an exclusive 0600 create and one rename
   "src/assistant/cloudCall.ts": [], // the one cloud call: the injected fetch, a fixed User-Agent, no redirect
+  "src/assistant/fence.ts": [], // pure text work: the untrusted-content fence over a reply
+  "src/assistant/readTools.ts": [], // pure: the read tools' argument checks and route paths
   "src/assistant/link.ts": [], // the device-flow loop over the injected fetch, clock and sleep
   "src/assistant/proxy.ts": ["crypto", "fs", "http", "path"], // the proxy: a per-session secret (crypto), one 0700 mkdtemp directory holding a Unix socket (fs, path), an http server on that socket only
   "src/assistant/unlink.ts": [], // the undo: one DELETE over the injected fetch, then the token file removal

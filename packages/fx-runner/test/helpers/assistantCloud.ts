@@ -26,6 +26,8 @@ export interface AssistantCloud {
   issuedToken(): string | undefined;
   /** From now on the token revoke route answers 403. */
   refuseRevoke: boolean;
+  /** Serves `body` (200) on a read route's path; a path never served answers 404, as another repo's id does on the real route. */
+  serve(pathname: string, body: unknown): void;
   /** From now on a started link claims an expiry a day away (a bad `expires_at`). */
   farExpiry: boolean;
   close(): Promise<void>;
@@ -38,6 +40,7 @@ export async function startAssistantCloud(now: () => number): Promise<AssistantC
   const seen: Seen[] = [];
   let link: { client: string; device: string; user: string; expires: number; approved: boolean; redeemed: boolean } | undefined;
   const flags = { refuseRevoke: false, farExpiry: false };
+  const served = new Map<string, unknown>();
   let token: { value: string; expires: number; revoked: boolean } | undefined;
 
   const server = createServer({ key: cert.keyPem, cert: cert.certPem }, (req, res) => {
@@ -87,10 +90,19 @@ export async function startAssistantCloud(now: () => number): Promise<AssistantC
         res.writeHead(204);
         return void res.end();
       }
+      // The CC-4b read routes: GET only, the bound token, and only the query keys the real routes take (an unknown key is a 422 there, a 400 here).
+      const read = /^\/api\/v1\/(?:work-items\/[0-9a-f-]{36}(?:\/receipts)?|runs(?:\/[0-9a-f-]{36}(?:\/events)?)?|repos\/[0-9a-f-]{36}\/plan)$/.exec(url.split("?")[0]!);
+      if (read !== null && !url.includes("/corrections")) {
+        if (req.method !== "GET" || body !== "") return fail(405, "method_not_allowed");
+        if (token === undefined || req.headers.authorization !== `Bearer ${token.value}` || token.revoked || now() >= token.expires) return fail(401, "unauthorized");
+        for (const key of new URL(url, "https://x").searchParams.keys()) if (!["limit", "work_item_id", "after_seq", "milestone", "status"].includes(key)) return fail(400, "validation_failed");
+        const hit = served.get(url.split("?")[0]!);
+        return hit === undefined ? fail(404, "not_found") : send(200, hit);
+      }
       const m = /^\/api\/v1\/work-items\/([0-9a-f-]{36})\/corrections$/.exec(url);
       if (m !== null) {
         if (token === undefined || req.headers.authorization !== `Bearer ${token.value}` || token.revoked || now() >= token.expires) return fail(401, "unauthorized");
-        if (req.method === "GET") return send(200, { data: [] });
+        if (req.method === "GET") return send(200, served.get(url) ?? { data: [] });
         if (!strict(["kind", "body"]) || !KINDS.includes(String(json.kind)) || typeof json.body !== "string" || json.body.length > 4000) return fail(400, "invalid_message");
         return send(201, { id: "33333333-3333-4333-8333-333333333333", work_item_id: m[1], status: "proposed", origin: "agent" });
       }
@@ -107,6 +119,7 @@ export async function startAssistantCloud(now: () => number): Promise<AssistantC
     set refuseRevoke(v) { flags.refuseRevoke = v; },
     get farExpiry() { return flags.farExpiry; },
     set farExpiry(v) { flags.farExpiry = v; },
+    serve: (pathname, value) => void served.set(pathname, value),
     approve: () => void (link && (link.approved = true)),
     redeemElsewhere: () => void (link && (link.redeemed = true)),
     revokeToken: () => void (token && (token.revoked = true)),

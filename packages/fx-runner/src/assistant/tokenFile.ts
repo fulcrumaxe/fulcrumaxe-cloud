@@ -11,7 +11,7 @@ export const ASSISTANT_DIR = "assistant";
 export const TOKEN_FILE = "token";
 const TOKEN_FILE_MAX_BYTES = 4096;
 
-export type AssistantProblem = "assistant_token_missing" | "assistant_token_unsafe" | "assistant_relink" | "assistant_tool_refused" | "assistant_link_failed" | "assistant_link_expired";
+export type AssistantProblem = "assistant_token_missing" | "assistant_token_unsafe" | "assistant_relink" | "assistant_tool_refused" | "assistant_link_failed" | "assistant_link_expired" | "assistant_not_found" | "assistant_read_failed";
 
 const TEXT: Readonly<Record<AssistantProblem, string>> = {
   assistant_token_missing: "no assistant token is stored on this machine; run: fx-runner assistant link",
@@ -20,6 +20,8 @@ const TEXT: Readonly<Record<AssistantProblem, string>> = {
   assistant_tool_refused: "that tool is not available to the assistant",
   assistant_link_failed: "the cloud did not complete the link; run: fx-runner assistant link again",
   assistant_link_expired: "the link code expired before it was approved; run: fx-runner assistant link again",
+  assistant_not_found: "not found",
+  assistant_read_failed: "the cloud could not answer that read; try again later",
 };
 
 /** The message is `<code>: <fixed text>`; it never holds the token. */

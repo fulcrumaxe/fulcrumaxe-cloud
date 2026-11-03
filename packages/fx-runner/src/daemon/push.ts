@@ -171,7 +171,7 @@ export async function planChunks(git: Git, mirrorDir: string, base: string, sha:
   if (largest > budget) throw new GitPathError("push_too_large", sizeMbOf(largest));
   const ends: string[] = [];
   let used = 0;
-  commits.forEach((commit, index) => {
+  commits.forEach((_commit, index) => {
     const size = sizes[index]!;
     if (used > 0 && used + size > budget) ends.push(commits[index - 1]!);
     used = used > 0 && used + size <= budget ? used + size : size;
