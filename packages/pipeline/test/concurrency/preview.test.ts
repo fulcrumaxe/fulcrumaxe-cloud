@@ -67,7 +67,7 @@ describe("S5c2-1: the figures, by hand", () => {
     expect(p.extra_per_day_cents).toBe(2400);
   });
 
-  it("with the one-per-repo clamp, the account value cannot pass the number of repos with work, and the preview says so", () => {
+  it("with every repo's own value at 1, the account value cannot pass the number of repos with work, and the preview says so", () => {
     const p = assemblePreview(base({ from: 4, to: 10, repoLimits: limits(1) }));
     expect(p.effective_limit_old).toBe(3);
     expect(p.effective_limit_new).toBe(3);
@@ -76,7 +76,7 @@ describe("S5c2-1: the figures, by hand", () => {
     expect(p.extra_per_hour_cents).toBe(0);
     expect(p.extra_per_day_cents).toBe(0);
     const note = p.notes.find((n) => n.code === "limited_by_repos");
-    expect(note?.text).toBe("Only 3 repos have work, and each repo builds one item at a time for now, so at most 3 builds run at once.");
+    expect(note?.text).toBe("With the work there is, at most 3 builds run at once.");
   });
 
   it("a lowering shows a saving as a negative figure and carries no 'same total' sentence", () => {
@@ -98,24 +98,38 @@ describe("S5c2-1: the figures, by hand", () => {
     expect(p.extra_per_hour_cents).toBe(0);
   });
 
-  it("repo scope while the clamp holds shows no speed-up and no extra spend, with the reason", () => {
+  it("S5j: repo scope uses the same formulas over that repo's items, with real figures", () => {
+    // n = 3 (one holds, two wait). L_eff(2) = min(2, 3) = 2 and L_eff(5) = min(5, 3) = 3.
+    // clear: ceil(3/2) x 60 = 120 minutes, then ceil(3/3) x 60 = 60 minutes.
+    // extra per hour: one more build at the mean slot price (0.50) over a one-hour hold, so the hourly figure is that price in cents and the daily figure is 24 times it.
+    // Queue total: three items at 0.40 each.
     const items = [item("R", false, 0.4), item("R", true, 0.4), item("R", true, 0.4)];
-    const p = assemblePreview(base({ scope: { kind: "repo", repoId: "R" }, from: 2, to: 5, items, repoLimits: limits(1) }));
-    expect(p.repo_id).toBe("R");
-    expect(p.effective_limit_old).toBe(1);
-    expect(p.effective_limit_new).toBe(1);
-    expect(p.clear_minutes_old).toBe(p.clear_minutes_new);
-    expect(p.clear_minutes_new).toBe(3 * 60);
-    expect(p.extra_per_hour_cents).toBe(0);
-    expect(p.extra_per_day_cents).toBe(0);
-    expect(p.queue_total_cents).toBe(120);
-    const note = p.notes.find((n) => n.code === "one_build_per_repo_until_d598");
-    expect(note?.text).toBe("This applies once parallel builds on one repo are supported.");
+    const p = assemblePreview(base({ scope: { kind: "repo", repoId: "R" }, from: 2, to: 5, items, repoLimits: limits(5) }));
+    expect(p).toMatchObject({ repo_id: "R", items: 3, effective_limit_old: 2, effective_limit_new: 3, clear_minutes_old: 120, clear_minutes_new: 60, extra_per_hour_cents: 50, extra_per_day_cents: 1200, queue_total_cents: 120 });
+    expect(p.notes.map((n) => n.code)).toEqual(["same_total"]);
   });
 
-  it("repo scope with a value of 1 raises nothing and carries no clamp sentence", () => {
-    const p = assemblePreview(base({ scope: { kind: "repo", repoId: "R" }, from: 2, to: 1, items: [item("R", true, 0.4)], repoLimits: limits(1) }));
-    expect(p.notes.map((n) => n.code)).not.toContain("one_build_per_repo_until_d598");
+  it("C34: a runner_local repo whose runner cannot attest order shows no speed-up and no extra spend, with the sentence", () => {
+    const items = [item("R", false, 0.4), item("R", true, 0.4), item("R", true, 0.4)];
+    const p = assemblePreview(base({ scope: { kind: "repo", repoId: "R" }, from: 2, to: 5, items, repoLimits: limits(1), clampedRepos: new Set(["R"]) }));
+    expect(p).toMatchObject({ effective_limit_old: 1, effective_limit_new: 1, clear_minutes_old: 180, clear_minutes_new: 180, extra_per_hour_cents: 0, extra_per_day_cents: 0 });
+    expect(p.notes.find((n) => n.code === "runner_order_unattested")?.text).toBe("This repository runs on your own machine; it builds one item at a time until its runner is updated.");
+  });
+
+  it("C34: in the account preview a clamped runner_local repo counts one toward the number of builds at once", () => {
+    // R direct with 3 items (limit 1), S queue with 3 items (limit 5): reach = 1 + 3 = 4.
+    const items = [item("R", true, 0.4), item("R", true, 0.4), item("R", true, 0.4), item("S", true, 0.4), item("S", true, 0.4), item("S", true, 0.4)];
+    const p = assemblePreview(base({ from: 2, to: 10, items, repoLimits: new Map([["R", 1], ["S", 5]]), clampedRepos: new Set(["R"]) }));
+    expect(p).toMatchObject({ effective_limit_old: 2, effective_limit_new: 4 });
+  });
+
+  it("repo scope lowered from 2 to 1 shows the saving as a negative figure and carries no note", () => {
+    // One item: L_eff(2) = L_eff(1) = 1, so nothing changes; three items: L_eff 2 -> 1, clear 120 -> 180, one build fewer at the mean slot price, so the hourly figure is minus that price in cents.
+    const one = assemblePreview(base({ scope: { kind: "repo", repoId: "R" }, from: 2, to: 1, items: [item("R", true, 0.4)], repoLimits: limits(1) }));
+    expect(one).toMatchObject({ kind: "lower", effective_limit_old: 1, effective_limit_new: 1, extra_per_hour_cents: 0 });
+    expect(one.notes).toEqual([]);
+    const three = assemblePreview(base({ scope: { kind: "repo", repoId: "R" }, from: 2, to: 1, items: [item("R", false, 0.4), item("R", true, 0.4), item("R", true, 0.4)], repoLimits: limits(1) }));
+    expect(three).toMatchObject({ effective_limit_old: 2, effective_limit_new: 1, clear_minutes_old: 120, clear_minutes_new: 180, extra_per_hour_cents: -50, extra_per_day_cents: -1200 });
   });
 });
 

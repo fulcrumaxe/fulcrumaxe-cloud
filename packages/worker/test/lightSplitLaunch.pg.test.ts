@@ -94,6 +94,8 @@ describe("a short Spec that plans two pull requests launches both children after
     const a = await seedAccount(admin, randomUUID());
     await admin.query("UPDATE repos SET gh_owner = 'acme', gh_name = 'widgets' WHERE id = $1", [a.repoId]);
     await admin.query("UPDATE accounts SET model_budget_usd_month = 600 WHERE id = $1", [a.accountId]);
+    // These cases are about one holder and one waiter on a repository: the person's repository value is 1 (the starting 2 would let the waiter start beside the holder).
+    await admin.query("INSERT INTO build_concurrency_settings (account_id, repo_id, max_builds, version, changed_by) VALUES ($1, $2, 1, 1, $3)", [a.accountId, a.repoId, a.userId]);
     await admin.query(`INSERT INTO approval_envelopes (id, account_id, repo_id, scope, amount_usd, version, created_by) VALUES ($1, $2, NULL, 'weekly_autostart', 50, 1, $3)`, [randomUUID(), a.accountId, a.userId]);
     await admin.query(`INSERT INTO decision_settings (account_id, repo_id, decision_type, disposition, preset, version, changed_by) VALUES ($1, $2, 'launch_sub_item', 'act', 'autonomous', 1, $3)`, [a.accountId, a.repoId, a.userId]);
     return a;
@@ -489,7 +491,7 @@ describe("a short Spec that plans two pull requests launches both children after
     expect((await approveByRoute(a, workItemId)).status).toBe(202);
     const [kid] = await kidsOf(workItemId);
     // Its waiting fact exists, with no launch behind it.
-    await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, stage, code, attempt, dedupe_key) VALUES ($1, $2, 'stage_waiting', 'build', 'one_build_per_repo_until_d598', 0, $3)", [a.accountId, kid!.id, randomUUID()]);
+    await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, stage, code, attempt, dedupe_key) VALUES ($1, $2, 'stage_waiting', 'build', 'waiting_for_build_slot_repo', 0, $3)", [a.accountId, kid!.id, randomUUID()]);
     expect((await cardOf(a, kid!.id)).notice).toMatchObject({ kind: "build_slot_wait", autoStart: false });
     await orphan([kid!.id]);
     await freeSlot(a, holder);
@@ -649,7 +651,7 @@ describe("a short Spec that plans two pull requests launches both children after
   it("the slot wake never restarts a split parent: its old waiting fact is skipped, and the waiting child takes the freed slot", async () => {
     const { a, workItemId, holder, kids } = await waitingChildren();
     // The parent's own old waiting fact, from before a split parent stopped waiting for the slot.
-    await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, stage, code, attempt, dedupe_key) VALUES ($1, $2, 'stage_waiting', 'build', 'one_build_per_repo_until_d598', 0, $3)", [a.accountId, workItemId, randomUUID()]);
+    await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, stage, code, attempt, dedupe_key) VALUES ($1, $2, 'stage_waiting', 'build', 'waiting_for_build_slot_repo', 0, $3)", [a.accountId, workItemId, randomUUID()]);
     await orphan([workItemId, ...kids.map((k) => k.id)]);
     await freeSlot(a, holder);
     const started: AdvanceStartArgs[] = [];

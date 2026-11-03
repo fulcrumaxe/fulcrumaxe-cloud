@@ -134,16 +134,17 @@ describe("S5c2-1: the preview is S5-p's arithmetic over the fixture, and changes
     expect(p.notes[0]).toEqual({ code: "nothing_waiting", text: "Nothing is waiting for a build slot." });
   });
 
-  it("repo scope shows no speed-up and no extra spend while the one-per-repo rule holds", async () => {
+  it("repo scope uses the same formulas over that repo's items: a raise from 2 to 5 over three items shows a real speed-up", async () => {
     const a = await account();
     const r = await repo(a.id);
     await item(a.id, r);
     await item(a.id, r, { waiting: true });
     await item(a.id, r, { waiting: true });
     const p = await preview(a.id, { kind: "repo", repoId: r }, 5);
-    expect(p).toMatchObject({ scope: "repo", repo_id: r, from: 2, to: 5, items: 3, effective_limit_old: 1, effective_limit_new: 1, extra_per_hour_cents: 0, extra_per_day_cents: 0 });
-    expect(p.clear_minutes_old).toBe(p.clear_minutes_new);
-    expect(p.notes.find((n) => n.code === "one_build_per_repo_until_d598")?.text).toBe("This applies once parallel builds on one repo are supported.");
+    expect(p).toMatchObject({ scope: "repo", repo_id: r, from: 2, to: 5, items: 3, effective_limit_old: 2, effective_limit_new: 3 });
+    expect(p.clear_minutes_new).toBeLessThan(p.clear_minutes_old);
+    expect(p.extra_per_hour_cents).toBeGreaterThan(0);
+    expect(p.notes.map((n) => n.code)).not.toContain("limited_by_repos");
   });
 });
 
@@ -381,8 +382,25 @@ describe("S5c2-2: the write is one version row and one audit row, bound to the p
     expect(await versions(a.id, other)).toHaveLength(0);
     expect(await versions(a.id, null)).toHaveLength(0);
     expect(await audits(a.id)).toEqual([{ actor: a.owner, payload: { scope: "repo", repo_id: r, from: 2, to: 5, preview_hash: shown.preview_hash } }]);
-    expect(await withTenant(h.pureAppUserPool, a.id, (c) => readRepoConcurrency(c, a.id, r))).toEqual({ value: 5, start_value: 2, applied_limit: 1, clamp_reason: "one_build_per_repo_until_d598" });
-    expect(await withTenant(h.pureAppUserPool, a.id, (c) => readRepoConcurrency(c, a.id, other))).toEqual({ value: 2, start_value: 2, applied_limit: 1, clamp_reason: "one_build_per_repo_until_d598" });
+    expect(await withTenant(h.pureAppUserPool, a.id, (c) => readRepoConcurrency(c, a.id, r))).toEqual({ value: 5, start_value: 2, applied_limit: 5, clamp_reason: null });
+    expect(await withTenant(h.pureAppUserPool, a.id, (c) => readRepoConcurrency(c, a.id, other))).toEqual({ value: 2, start_value: 2, applied_limit: 2, clamp_reason: null });
+  });
+
+  it("C34: a runner_local repo reads an applied limit of 1 and the clamp reason, the stored value kept, and the preview shows the clamp; a paired hosted repo reads its value", async () => {
+    const a = await account();
+    const local = await repo(a.id, "runner_local");
+    const paired = await repo(a.id);
+    await h.admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, $3, $4)", [paired, a.id, `acme-pub/p${paired.slice(0, 8)}`, [".autonomous-team/**"]]);
+    expect(await withTenant(h.pureAppUserPool, a.id, (c) => readRepoConcurrency(c, a.id, paired))).toEqual({ value: 2, start_value: 2, applied_limit: 2, clamp_reason: null });
+    for (const r of [local]) {
+      expect(await withTenant(h.pureAppUserPool, a.id, (c) => readRepoConcurrency(c, a.id, r))).toEqual({ value: 2, start_value: 2, applied_limit: 1, clamp_reason: "runner_order_unattested" });
+      await item(a.id, r);
+      await item(a.id, r, { waiting: true });
+      const p = await preview(a.id, { kind: "repo", repoId: r }, 5);
+      expect(p).toMatchObject({ items: 2, effective_limit_old: 1, effective_limit_new: 1, extra_per_hour_cents: 0, extra_per_day_cents: 0 });
+      expect(p.clear_minutes_old).toBe(p.clear_minutes_new);
+      expect(p.notes.find((n) => n.code === "runner_order_unattested")?.text).toBe("This repository runs on your own machine; it builds one item at a time until its runner is updated.");
+    }
   });
 
   it("the account and a repo hold separate version counters", async () => {

@@ -30,6 +30,10 @@ async function repo(accountId: string, mode = "sandbox"): Promise<string> {
   return id;
 }
 
+/** The repository is paired with a public one: its merges take the direct gate (C32). */
+const pair = (repoId: string, accountId: string) =>
+  h.admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, $3, $4)", [repoId, accountId, `acme-pub/p${repoId.slice(0, 8)}`, [".autonomous-team/**"]]);
+
 async function user(): Promise<string> {
   const id = randomUUID();
   await h.admin.query("INSERT INTO users (id, email) VALUES ($1, $2)", [id, `${id}@example.test`]);
@@ -101,16 +105,41 @@ describe("S5c1-1: parallel claims never pass a limit", () => {
     expect(await heldCount(a)).toBe(4);
   });
 
-  it("eight claims at once on one repository take exactly one, whatever the repository value", async () => {
+  it("S5j-1: eight claims at once on one repository with the starting value of 2 take exactly two, and the other six wait with the repository reason", async () => {
     const a = await account();
     const r = await repo(a);
-    await setting(a, r, 8);
+    const ids: string[] = [];
+    for (let i = 0; i < 8; i++) ids.push(await item(a, r));
+    const results = await Promise.all(ids.map((id) => claim(a, id)));
+    expect(results.filter((x) => x.granted)).toHaveLength(2);
+    for (const x of results) if (!x.granted) expect(x.reason).toBe("waiting_for_build_slot_repo");
+    expect(await heldCount(a)).toBe(2);
+  });
+
+  it("eight claims at once on one repository take exactly the repository value, whatever the account value is above it", async () => {
+    const a = await account();
+    const r = await repo(a);
+    await setting(a, r, 3);
     await setting(a, null, 8);
     const ids: string[] = [];
     for (let i = 0; i < 8; i++) ids.push(await item(a, r));
     const results = await Promise.all(ids.map((id) => claim(a, id)));
-    expect(results.filter((x) => x.granted)).toHaveLength(1);
-    expect(await heldCount(a)).toBe(1);
+    expect(results.filter((x) => x.granted)).toHaveLength(3);
+    expect(await heldCount(a)).toBe(3);
+  });
+
+  it("S5j-1: two claims race for a repository's last slot while one item already holds the other: exactly one wins, and the loser waits with the repository reason", async () => {
+    for (let round = 0; round < 5; round++) {
+      const a = await account();
+      const r = await repo(a);
+      expect((await claim(a, await item(a, r))).granted).toBe(true);
+      const [x, y] = [await item(a, r), await item(a, r)];
+      const [rx, ry] = await Promise.all([claim(a, x), claim(a, y)]);
+      expect([rx.granted, ry.granted].sort()).toEqual([false, true]);
+      const lost = rx.granted ? ry : rx;
+      expect(lost).toEqual({ granted: false, reason: "waiting_for_build_slot_repo" });
+      expect(await heldCount(a)).toBe(2);
+    }
   });
 
   it("eight claims on eight repositories with an account value of 8 all start", async () => {
@@ -133,15 +162,17 @@ describe("S5c1-1: parallel claims never pass a limit", () => {
 });
 
 describe("S5c1-2: the starting values, and the person's value on every plan", () => {
-  it("with no setting rows: a second item on a repository waits (clamped to one), and a fifth hosted item on the account waits", async () => {
+  it("with no setting rows: a second item on a repository builds, a third waits, and a fifth hosted item on the account waits", async () => {
     const a = await account();
     const r1 = await repo(a);
     const first = await item(a, r1);
     expect((await claim(a, first)).granted).toBe(true);
     const second = await item(a, r1);
-    expect(await readBuildWaitReason(h.runWriterPool, a, second)).toBe("one_build_per_repo_until_d598");
+    expect(await readBuildWaitReason(h.runWriterPool, a, second)).toBeNull();
+    expect((await claim(a, second)).granted).toBe(true);
+    expect(await readBuildWaitReason(h.runWriterPool, a, await item(a, r1))).toBe("waiting_for_build_slot_repo");
     const others: string[] = [];
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 2; i++) {
       const id = await item(a, await repo(a));
       others.push(id);
       expect((await claim(a, id)).granted).toBe(true);
@@ -170,28 +201,39 @@ describe("S5c1-2: the starting values, and the person's value on every plan", ()
   });
 });
 
-describe("S5c1-3: one build per repository until D#598, and the higher-priority waiter takes the slot", () => {
-  it("a second item waits with the D#598 reason even when the repository value is 5; the reason is derived and disappears when the first merges", async () => {
+describe("S5c1-3 and S5j-1: the repository value is the limit, and the higher-priority waiter takes the slot", () => {
+  it("S5j-1: with the value at 2 two items build and a third waits with the repository reason; the reason is derived and disappears when one of the two merges", async () => {
+    const a = await account();
+    const r = await repo(a);
+    await setting(a, r, 2);
+    const first = await item(a, r);
+    const second = await item(a, r);
+    expect((await claim(a, first)).granted).toBe(true);
+    expect((await claim(a, second)).granted).toBe(true);
+    const third = await item(a, r);
+    expect(await readBuildWaitReason(h.runWriterPool, a, third)).toBe("waiting_for_build_slot_repo");
+    const denied = await claim(a, third);
+    expect(denied).toEqual({ granted: false, reason: "waiting_for_build_slot_repo" });
+    expect(await stageOf(third)).toBe("spec_ready");
+    // The first goes through its stages: it still holds its slot until it merges.
+    for (const stage of ["pr_opened", "changes_requested", "review_passed"]) {
+      await setStage(first, stage);
+      expect(await readBuildWaitReason(h.runWriterPool, a, third)).toBe("waiting_for_build_slot_repo");
+    }
+    await setStage(first, "merged");
+    expect(await readBuildWaitReason(h.runWriterPool, a, third)).toBeNull();
+  });
+
+  it("a value above 2 applies as set: five items build on a repository whose value is 5 and a sixth waits", async () => {
     const a = await account();
     const r = await repo(a);
     await setting(a, r, 5);
-    const first = await item(a, r);
-    expect((await claim(a, first)).granted).toBe(true);
-    const second = await item(a, r);
-    expect(await readBuildWaitReason(h.runWriterPool, a, second)).toBe("one_build_per_repo_until_d598");
-    const denied = await claim(a, second);
-    expect(denied).toEqual({ granted: false, reason: "one_build_per_repo_until_d598" });
-    expect(await stageOf(second)).toBe("spec_ready");
-    // The first goes through its stages: it still holds the slot until it merges.
-    for (const stage of ["pr_opened", "changes_requested", "review_passed"]) {
-      await setStage(first, stage);
-      expect(await readBuildWaitReason(h.runWriterPool, a, second)).toBe("one_build_per_repo_until_d598");
-    }
-    await setStage(first, "merged");
-    expect(await readBuildWaitReason(h.runWriterPool, a, second)).toBeNull();
+    await setting(a, null, 8);
+    for (let i = 0; i < 5; i++) expect((await claim(a, await item(a, r))).granted).toBe(true);
+    expect(await readBuildWaitReason(h.runWriterPool, a, await item(a, r))).toBe("waiting_for_build_slot_repo");
   });
 
-  it("with the repository value set to one the reason is the plain repository one", async () => {
+  it("with the repository value set to one the second item waits with the repository reason", async () => {
     const a = await account();
     const r = await repo(a);
     await setting(a, r, 1);
@@ -199,16 +241,38 @@ describe("S5c1-3: one build per repository until D#598, and the higher-priority 
     expect(await readBuildWaitReason(h.runWriterPool, a, await item(a, r))).toBe("waiting_for_build_slot_repo");
   });
 
-  it("when the holder merges, the waiter with the better queue order takes the slot and the other keeps waiting", async () => {
+  it("lowering the value from 2 to 1 while two items hold slots: both keep their slots, nothing is moved, and the next claim waits until both are gone (the limit is read at each claim, never stamped on an item)", async () => {
     const a = await account();
     const r = await repo(a);
-    const holder = await item(a, r);
-    expect((await claim(a, holder)).granted).toBe(true);
+    await setting(a, r, 2, 1);
+    const [first, second] = [await item(a, r), await item(a, r)];
+    expect((await claim(a, first)).granted).toBe(true);
+    expect((await claim(a, second)).granted).toBe(true);
+    await setting(a, r, 1, 2);
+    expect([await stageOf(first), await stageOf(second)]).toEqual(["in_progress", "in_progress"]);
+    expect(await heldCount(a)).toBe(2);
+    const third = await item(a, r);
+    expect(await claim(a, third)).toEqual({ granted: false, reason: "waiting_for_build_slot_repo" });
+    await setStage(first, "merged");
+    expect(await readBuildWaitReason(h.runWriterPool, a, third)).toBe("waiting_for_build_slot_repo");
+    await setStage(second, "closed_unmerged");
+    expect((await claim(a, third)).granted).toBe(true);
+    // Raising it again makes room at once.
+    await setting(a, r, 2, 3);
+    expect((await claim(a, await item(a, r))).granted).toBe(true);
+  });
+
+  it("when a holder merges, the waiter with the better queue order takes the slot and the other keeps waiting", async () => {
+    const a = await account();
+    const r = await repo(a);
+    await setting(a, r, 2);
+    const holders = [await item(a, r), await item(a, r)];
+    for (const holder of holders) expect((await claim(a, holder)).granted).toBe(true);
     const normal = await item(a, r, { priority: 2, waiting: true });
     const urgent = await item(a, r, { priority: 0, waiting: true });
-    await setStage(holder, "merged");
+    await setStage(holders[0]!, "merged");
     // The normal one asks first and gives way: the urgent one is waiting.
-    expect(await claim(a, normal)).toEqual({ granted: false, reason: "one_build_per_repo_until_d598" });
+    expect(await claim(a, normal)).toEqual({ granted: false, reason: "waiting_for_build_slot_repo" });
     expect((await claim(a, urgent)).granted).toBe(true);
     expect(await stageOf(urgent)).toBe("in_progress");
     expect(await stageOf(normal)).toBe("spec_ready");
@@ -233,7 +297,7 @@ describe("S5c1-3: one build per repository until D#598, and the higher-priority 
     const a = await account();
     const r = await repo(a);
     await item(a, r, { priority: 0, waiting: 170 });
-    expect(await readBuildWaitReason(h.runWriterPool, a, await item(a, r, { priority: 2 }))).toBe("one_build_per_repo_until_d598");
+    expect(await readBuildWaitReason(h.runWriterPool, a, await item(a, r, { priority: 2 }))).toBe("waiting_for_build_slot_repo");
     const b = await account();
     const rb = await repo(b);
     await item(b, rb, { priority: 0, waiting: 190 });
@@ -247,6 +311,7 @@ describe("S5c1-3: one build per repository until D#598, and the higher-priority 
   it("a better waiter held by its own repository does not hold up the account's free slot", async () => {
     const a = await account();
     const busy = await repo(a);
+    await setting(a, busy, 1);
     await claim(a, await item(a, busy));
     await item(a, busy, { priority: 0, waiting: true });
     const other = await repo(a);
@@ -254,8 +319,84 @@ describe("S5c1-3: one build per repository until D#598, and the higher-priority 
   });
 });
 
+describe("C34: a runner_local repository builds one item at a time until its runner can attest order, whatever value is stored; hosted and paired repositories get their value", () => {
+  const cases: Array<[string, (a: string) => Promise<string>]> = [
+    ["runner_local", (a) => repo(a, "runner_local")],
+  ];
+  it.each(cases)("%s: with no setting the applied limit is 1, so a second item waits with the repository reason", async (_n, make) => {
+    const a = await account();
+    const r = await make(a);
+    expect((await claim(a, await item(a, r))).granted).toBe(true);
+    expect(await claim(a, await item(a, r))).toEqual({ granted: false, reason: "waiting_for_build_slot_repo" });
+    expect(await heldCount(a)).toBe(1);
+  });
+
+  it.each(cases)("%s: with a stored value of 5 the applied limit is still 1, and the stored value is untouched", async (_n, make) => {
+    const a = await account();
+    const r = await make(a);
+    await setting(a, r, 5);
+    await setting(a, null, 8);
+    expect((await claim(a, await item(a, r))).granted).toBe(true);
+    expect(await readBuildWaitReason(h.runWriterPool, a, await item(a, r))).toBe("waiting_for_build_slot_repo");
+    const stored = await h.admin.query<{ max_builds: number }>("SELECT max_builds FROM build_concurrency_settings WHERE account_id = $1 AND repo_id = $2", [a, r]);
+    expect(stored.rows.map((x) => x.max_builds)).toEqual([5]);
+  });
+
+  it.each(cases)("%s: eight racing claims give exactly one winner", async (_n, make) => {
+    const a = await account();
+    const r = await make(a);
+    await setting(a, r, 5);
+    const ids: string[] = [];
+    for (let i = 0; i < 8; i++) ids.push(await item(a, r));
+    const results = await Promise.all(ids.map((id) => claim(a, id)));
+    expect(results.filter((x) => x.granted)).toHaveLength(1);
+    expect(await heldCount(a)).toBe(1);
+  });
+
+  it("a paired hosted repository gets its stored value: two items build, a third waits; with no value, the starting 2", async () => {
+    const a = await account();
+    const r = await repo(a);
+    await pair(r, a);
+    expect((await claim(a, await item(a, r))).granted).toBe(true);
+    expect((await claim(a, await item(a, r))).granted).toBe(true);
+    expect(await claim(a, await item(a, r))).toEqual({ granted: false, reason: "waiting_for_build_slot_repo" });
+    const b = await account();
+    const rb = await repo(b);
+    await pair(rb, b);
+    await setting(b, rb, 3);
+    for (let i = 0; i < 3; i++) expect((await claim(b, await item(b, rb))).granted).toBe(true);
+    expect(await readBuildWaitReason(h.runWriterPool, b, await item(b, rb))).toBe("waiting_for_build_slot_repo");
+  });
+
+  it("a runner_local item placed on a hosted queue repository is a clamped item: it takes one slot and its sibling waits", async () => {
+    const a = await account();
+    const r = await repo(a);
+    const [x, y] = [await item(a, r), await item(a, r)];
+    await h.admin.query("UPDATE work_items SET placement = 'runner' WHERE id = ANY($1::uuid[])", [[x, y]]);
+    expect((await claim(a, x)).granted).toBe(true);
+    expect((await claim(a, y)).granted).toBe(false);
+  });
+
+  it("a better waiter on a direct-merge repository that holds one slot does not hold up the account's free slot (its own limit is 1)", async () => {
+    const a = await account();
+    const direct = await repo(a, "runner_local");
+    await claim(a, await item(a, direct));
+    await item(a, direct, { priority: 0, waiting: true });
+    const queued = await repo(a);
+    expect((await claim(a, await item(a, queued, { priority: 2 }))).granted).toBe(true);
+  });
+
+  it("a hosted, unpaired queue repository still gets the starting 2", async () => {
+    const a = await account();
+    const r = await repo(a);
+    expect((await claim(a, await item(a, r))).granted).toBe(true);
+    expect((await claim(a, await item(a, r))).granted).toBe(true);
+    expect(await heldCount(a)).toBe(2);
+  });
+});
+
 describe("S5c1-4: a runner repository is not held by the account value", () => {
-  it("with the account at its value of 1 and a busy hosted repository, a runner repository's item still takes a slot; the one-per-repository rule still applies to it", async () => {
+  it("with the account at its value of 1 and a busy hosted repository, a runner_local repository's item still takes a slot (the account value does not bind it) but only one: its runner cannot attest order yet, so the applied limit is 1 (C34)", async () => {
     const a = await account();
     await setting(a, null, 1);
     expect((await claim(a, await item(a, await repo(a)))).granted).toBe(true);
@@ -263,7 +404,15 @@ describe("S5c1-4: a runner repository is not held by the account value", () => {
     expect(await readBuildWaitReason(h.runWriterPool, a, hostedNext)).toBe("waiting_for_build_slot_account");
     const runnerRepo = await repo(a, "runner_local");
     expect((await claim(a, await item(a, runnerRepo))).granted).toBe(true);
-    expect(await readBuildWaitReason(h.runWriterPool, a, await item(a, runnerRepo))).toBe("one_build_per_repo_until_d598");
+    expect(await readBuildWaitReason(h.runWriterPool, a, await item(a, runnerRepo))).toBe("waiting_for_build_slot_repo");
+  });
+
+  it("a runner_verified repository is not a direct-merge repository: it takes up to its own value (2), and a third waits", async () => {
+    const a = await account();
+    const verified = await repo(a, "runner_verified");
+    expect((await claim(a, await item(a, verified))).granted).toBe(true);
+    expect((await claim(a, await item(a, verified))).granted).toBe(true);
+    expect(await readBuildWaitReason(h.runWriterPool, a, await item(a, verified))).toBe("waiting_for_build_slot_repo");
   });
 
   it("runner items do not count toward the account value", async () => {
@@ -367,24 +516,25 @@ class Ports implements AdvanceRunPorts {
 }
 
 describe("startBuildForItem takes a slot", () => {
-  it("the first item starts; the second on the same repository is refused with the wait reason, starts no run and stays at Spec ready; it starts once the first has merged", async () => {
+  it("S5j-1: the first two items on a repository start; the third is refused with the wait reason, starts no run and stays at Spec ready; it starts once one of the two has merged", async () => {
     const a = await account();
     const r = await repo(a);
     const first = await item(a, r, { withSpec: true });
     const second = await item(a, r, { withSpec: true });
-    const p1 = new Ports(a, first);
-    const p2 = new Ports(a, second);
+    const third = await item(a, r, { withSpec: true });
+    const [p1, p2, p3] = [new Ports(a, first), new Ports(a, second), new Ports(a, third)];
     expect(await startBuildForItem(h.runWriterPool, a, first, randomUUID(), p1)).toMatchObject({ status: "started" });
-    expect(await stageOf(first)).toBe("in_progress");
+    expect(await startBuildForItem(h.runWriterPool, a, second, randomUUID(), p2)).toMatchObject({ status: "started" });
+    expect([await stageOf(first), await stageOf(second)]).toEqual(["in_progress", "in_progress"]);
 
-    expect(await startBuildForItem(h.runWriterPool, a, second, randomUUID(), p2)).toEqual({ status: "refused", reason: "one_build_per_repo_until_d598" });
-    expect(p2.requests).toEqual([]);
-    expect(await stageOf(second)).toBe("spec_ready");
-    expect((await h.admin.query("SELECT 1 FROM agent_runs WHERE work_item_id = $1", [second])).rowCount).toBe(0);
+    expect(await startBuildForItem(h.runWriterPool, a, third, randomUUID(), p3)).toEqual({ status: "refused", reason: "waiting_for_build_slot_repo" });
+    expect(p3.requests).toEqual([]);
+    expect(await stageOf(third)).toBe("spec_ready");
+    expect((await h.admin.query("SELECT 1 FROM agent_runs WHERE work_item_id = $1", [third])).rowCount).toBe(0);
 
     await setStage(first, "merged");
-    expect(await startBuildForItem(h.runWriterPool, a, second, randomUUID(), p2)).toMatchObject({ status: "started" });
-    expect(await stageOf(second)).toBe("in_progress");
+    expect(await startBuildForItem(h.runWriterPool, a, third, randomUUID(), p3)).toMatchObject({ status: "started" });
+    expect(await stageOf(third)).toBe("in_progress");
   });
 
   it("a replay of an item already at in_progress needs no slot, even when it is the only one over the limit", async () => {
@@ -398,24 +548,25 @@ describe("startBuildForItem takes a slot", () => {
     expect(await startBuildForItem(h.runWriterPool, a, only, approval, ports)).toMatchObject({ status: "started" });
   });
 
-  it("two starts at once on one repository: one run, one refusal", async () => {
+  it("S5j-1: three starts at once on one repository: two runs, one refusal", async () => {
     const a = await account();
     const r = await repo(a);
-    const ids = [await item(a, r, { withSpec: true }), await item(a, r, { withSpec: true })];
+    const ids = [await item(a, r, { withSpec: true }), await item(a, r, { withSpec: true }), await item(a, r, { withSpec: true })];
     const ports = ids.map((id) => new Ports(a, id));
     const out = await Promise.all(ids.map((id, i) => startBuildForItem(h.runWriterPool, a, id, randomUUID(), ports[i]!)));
-    expect(out.filter((x) => x.status === "started")).toHaveLength(1);
-    expect(out.filter((x) => x.status === "refused")).toEqual([{ status: "refused", reason: "one_build_per_repo_until_d598" }]);
-    expect(ports.reduce((n, p) => n + p.requests.length, 0)).toBe(1);
+    expect(out.filter((x) => x.status === "started")).toHaveLength(2);
+    expect(out.filter((x) => x.status === "refused")).toEqual([{ status: "refused", reason: "waiting_for_build_slot_repo" }]);
+    expect(ports.reduce((n, p) => n + p.requests.length, 0)).toBe(2);
   });
 
   it("a Build again for an item at Needs a person takes a slot too", async () => {
     const a = await account();
     const r = await repo(a);
     await claim(a, await item(a, r));
+    await claim(a, await item(a, r));
     const again = await item(a, r, { stage: "needs_human", withSpec: true });
     const ports = new Ports(a, again);
-    expect(await startBuildForItem(h.runWriterPool, a, again, randomUUID(), ports)).toEqual({ status: "refused", reason: "one_build_per_repo_until_d598" });
+    expect(await startBuildForItem(h.runWriterPool, a, again, randomUUID(), ports)).toEqual({ status: "refused", reason: "waiting_for_build_slot_repo" });
     expect(ports.requests).toEqual([]);
   });
 });

@@ -279,14 +279,14 @@ describe("the build for an item at Spec ready", () => {
   });
 
   it("S5-c1: a start with no build slot waits a minute at a time with no error and no failed record, and starts when the slot frees", async () => {
-    const full: AdvanceStepResult = { status: "refused", reason: "one_build_per_repo_until_d598" };
+    const full: AdvanceStepResult = { status: "refused", reason: "waiting_for_build_slot_repo" };
     const w = setup({ item: AT_SPEC, buildSequence: [full, { status: "refused", reason: "waiting_for_build_slot_account" }, full], stages: ["pr_opened"] });
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual(REVIEW_STOPS);
     expect(w.advanceBuild).toHaveBeenCalledTimes(4);
     expect(world.sleeps).toBe(3);
     expect(w.advanceBuildFailed).not.toHaveBeenCalled();
     expect(events().slice(0, 4)).toEqual(["advance.build_waiting", "advance.build_waiting", "advance.build_waiting", "advance.build_started"]);
-    expect(logs[0]).toMatchObject({ at: "build_start", reason: "one_build_per_repo_until_d598" });
+    expect(logs[0]).toMatchObject({ at: "build_start", reason: "waiting_for_build_slot_repo" });
   });
 
   it("S5-c1: a slot that never frees is given up on after four hours with the wait reason, and the item stays approvable", async () => {

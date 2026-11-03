@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { ONE_BUILD_PER_REPO_UNTIL_D598, START_BUILDS_PER_ACCOUNT, START_BUILDS_PER_REPO, resolveBuildLimits } from "../advance/buildSlots.js";
+import { runnerClampedRepoIds, START_BUILDS_PER_ACCOUNT, START_BUILDS_PER_REPO, resolveBuildLimits } from "../advance/buildSlots.js";
 import { computeConcurrencyPreview, currentConcurrency, type ConcurrencyPreview, type ConcurrencyScope } from "./preview.js";
 
 /**
@@ -55,9 +55,10 @@ export interface AccountConcurrency {
 export interface RepoConcurrency {
   value: number;
   start_value: number;
-  /** What the slot code applies now: the value, clamped. */
+  /** What the slot code applies now: the value, or 1 for such a repository. */
   applied_limit: number;
-  clamp_reason: "one_build_per_repo_until_d598" | null;
+  /** Set when the repository is `runner_local` and its runner cannot attest order yet: the applied limit is 1 whatever the stored value is. */
+  clamp_reason: "runner_order_unattested" | null;
 }
 
 export async function readAccountConcurrency(client: PoolClient, accountId: string): Promise<AccountConcurrency> {
@@ -68,8 +69,9 @@ export async function readAccountConcurrency(client: PoolClient, accountId: stri
 
 export async function readRepoConcurrency(client: PoolClient, accountId: string, repoId: string): Promise<RepoConcurrency> {
   const { value } = await currentConcurrency(client, accountId, repoId);
-  const limits = resolveBuildLimits({ accountValue: null, repoValue: value });
-  return { value, start_value: START_BUILDS_PER_REPO, applied_limit: limits.repoLimit, clamp_reason: value > ONE_BUILD_PER_REPO_UNTIL_D598 ? "one_build_per_repo_until_d598" : null };
+  const runnerClamped = (await runnerClampedRepoIds(client, accountId, [repoId])).has(repoId);
+  const limits = resolveBuildLimits({ accountValue: null, repoValue: value, runnerClamped });
+  return { value, start_value: START_BUILDS_PER_REPO, applied_limit: limits.repoLimit, clamp_reason: limits.clampReason };
 }
 
 /** The same lock S5-c1's `takeBuildSlot` takes. */

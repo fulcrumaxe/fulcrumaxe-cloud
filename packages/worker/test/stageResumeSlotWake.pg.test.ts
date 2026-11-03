@@ -9,7 +9,7 @@ import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
 import { buildWaitSentence } from "@fx/api/src/routes/work-item-activity.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { applyMappedEvent, type MappedEvent } from "@fx/github";
-import { BUILD_SLOT_STAGES, BUILD_WAIT_REASONS, PARKED_STAGE_REGISTRY, readBuildWaitReason } from "@fx/pipeline";
+import { BUILD_SLOT_STAGES, BUILD_WAIT_REASONS, PARKED_STAGE_REGISTRY, readBuildWaitReason, readFreeBuildSlots } from "@fx/pipeline";
 import { SLOT_HOLDING_STAGES } from "@fx/core/src/work-items/recordStage.js";
 import { createStageResume, SLOT_WAIT_REASONS, STAGE_RESUME_ORPHAN_AFTER_SECONDS } from "../src/stageResume.js";
 import type { AdvanceStartArgs } from "../src/advance.js";
@@ -48,7 +48,10 @@ describe("the slot wake [pg]", { timeout: 60_000 }, () => {
   let n = 9000;
 
   async function account(): Promise<SeedRefs> {
-    return seedAccount(admin, randomUUID());
+    const a = await seedAccount(admin, randomUUID());
+    // These cases are about one holder and one waiter on a repository: the person's repository value is 1 (the starting 2 would let the waiter start beside the holder).
+    await admin.query("INSERT INTO build_concurrency_settings (account_id, repo_id, max_builds, version, changed_by) VALUES ($1, $2, 1, 1, $3)", [a.accountId, a.repoId, a.userId]);
+    return a;
   }
   /** An item holding the repository's only build slot. */
   async function holder(a: SeedRefs, stage = "pr_opened"): Promise<string> {
@@ -70,7 +73,7 @@ describe("the slot wake [pg]", { timeout: 60_000 }, () => {
         [approval, a.accountId, id, `session:${a.userId}`, "h".repeat(64), JSON.stringify({ work_item_id: id, advance: "started" })],
       );
     }
-    await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, stage, code, attempt, dedupe_key) VALUES ($1, $2, 'stage_waiting', 'build', $3, 0, $4)", [a.accountId, id, o.reason ?? "one_build_per_repo_until_d598", randomUUID()]);
+    await admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, stage, code, attempt, dedupe_key) VALUES ($1, $2, 'stage_waiting', 'build', $3, 0, $4)", [a.accountId, id, o.reason ?? "waiting_for_build_slot_repo", randomUUID()]);
     await admin.query("UPDATE work_item_driver_events SET created_at = now() - make_interval(secs => $2::int) WHERE work_item_id = $1", [id, o.ageSeconds ?? 3600]);
     return { id, approval };
   }
@@ -89,6 +92,7 @@ describe("the slot wake [pg]", { timeout: 60_000 }, () => {
       },
       startAdvance: async (args) => void started.push(args),
       buildWaitReason: (accountId, workItemId) => readBuildWaitReason(writerPool, accountId, workItemId),
+      buildFreeSlots: (accountId, workItemId) => readFreeBuildSlots(writerPool, accountId, workItemId),
       log: () => undefined,
     });
   }
@@ -168,6 +172,34 @@ describe("the slot wake [pg]", { timeout: 60_000 }, () => {
     const started: AdvanceStartArgs[] = [];
     await sweeper(started).sweepParkedStages([entry]);
     expect(mine(started, a).map((s) => s.workItemId)).toEqual([w.id]);
+  });
+
+  /** The person's repository value, as a newer version than the helper's 1. */
+  const raise = (a: SeedRefs, value: number) => admin.query("INSERT INTO build_concurrency_settings (account_id, repo_id, max_builds, version, changed_by) VALUES ($1, $2, $3, 2, $4)", [a.accountId, a.repoId, value, a.userId]);
+
+  it("S5-j: three free slots start three orphaned waiters, in queue order, in one pass", async () => {
+    const a = await account();
+    await raise(a, 3);
+    const ws = [await waiter(a), await waiter(a), await waiter(a)];
+    const started: AdvanceStartArgs[] = [];
+    await sweeper(started).sweepParkedStages([entry]);
+    expect(mine(started, a).map((s) => s.workItemId).sort()).toEqual(ws.map((w) => w.id).sort());
+  });
+
+  it("S5-j: four waiters and three free slots start three; the fourth keeps waiting. With one slot already held, two start", async () => {
+    const a = await account();
+    await raise(a, 3);
+    for (let i = 0; i < 4; i++) await waiter(a);
+    const started: AdvanceStartArgs[] = [];
+    await sweeper(started).sweepParkedStages([entry]);
+    expect(mine(started, a)).toHaveLength(3);
+    const b = await account();
+    await raise(b, 3);
+    await holder(b);
+    for (let i = 0; i < 4; i++) await waiter(b);
+    const startedB: AdvanceStartArgs[] = [];
+    await sweeper(startedB).sweepParkedStages([entry]);
+    expect(mine(startedB, b)).toHaveLength(2);
   });
 
   it("two waiters: only the oldest starts, and the other keeps waiting for the next slot", async () => {

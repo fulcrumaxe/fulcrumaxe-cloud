@@ -125,7 +125,7 @@ describe('D#483 S5-c2: build concurrency routes', () => {
     }
     const repoRes = await call(f.member, 'GET', `/repos/${f.repos[0]}/build-concurrency`);
     expect(repoRes.status).toBe(200);
-    expect(await repoRes.json()).toEqual({ value: 2, start_value: 2, applied_limit: 1, clamp_reason: 'one_build_per_repo_until_d598' });
+    expect(await repoRes.json()).toEqual({ value: 2, start_value: 2, applied_limit: 2, clamp_reason: null });
     const token = await tokenFor(f.owner);
     expect((await call(f.owner, 'GET', '/account/build-concurrency', undefined, token)).status).toBe(200);
     expect((await call(f.owner, 'GET', `/repos/${f.repos[0]}/build-concurrency`, undefined, token)).status).toBe(200);
@@ -219,19 +219,19 @@ describe('D#483 S5-c2: build concurrency routes', () => {
     expect((await call(f.owner, 'PUT', '/account/build-concurrency', { max_builds: 4 })).status).toBe(409);
   });
 
-  it('the repo routes: a raise is previewed with no speed-up, accepted, recorded for that repo, and the applied limit stays 1', async () => {
+  it('the repo routes: a raise is previewed (one item has nothing to speed up), accepted, recorded for that repo, and the applied limit is the new value', async () => {
     const f = await fixture();
     const repo = f.repos[0]!;
     const res = await call(f.owner, 'POST', `/repos/${repo}/build-concurrency/preview`, { max_builds: 5 });
     expect(res.status).toBe(200);
     const p = (await res.json()) as Preview;
     expect(p).toMatchObject({ scope: 'repo', repo_id: repo, from: 2, to: 5, items: 1, extra_per_hour_cents: 0, extra_per_day_cents: 0 });
-    expect(p.notes.map((n) => n.code)).toContain('one_build_per_repo_until_d598');
+    expect(p.notes.map((n) => n.code)).toEqual(['same_total']);
 
     expect((await call(f.owner, 'PUT', `/repos/${repo}/build-concurrency`, { max_builds: 5 })).status).toBe(409);
     const ok = await call(f.owner, 'PUT', `/repos/${repo}/build-concurrency`, { max_builds: 5, accept: true, preview_hash: p.preview_hash });
     expect(ok.status).toBe(200);
-    expect(await ok.json()).toEqual({ value: 5, start_value: 2, applied_limit: 1, clamp_reason: 'one_build_per_repo_until_d598', changed: true });
+    expect(await ok.json()).toEqual({ value: 5, start_value: 2, applied_limit: 5, clamp_reason: null, changed: true });
     expect(await versions(f.owner.accountId, repo)).toHaveLength(1);
     expect(await versions(f.owner.accountId, null)).toEqual([]);
     expect(await audits(f.owner.accountId)).toEqual([{ actor: f.owner.userId, payload: { scope: 'repo', repo_id: repo, from: 2, to: 5, preview_hash: p.preview_hash } }]);

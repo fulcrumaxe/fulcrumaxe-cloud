@@ -1519,7 +1519,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
   }
 
   /** The refusals that mean "no build slot yet" (packages/pipeline buildSlots.ts BUILD_WAIT_REASONS; a test holds the lists equal). */
-  const BUILD_SLOT_WAIT_REASONS: readonly string[] = ["one_build_per_repo_until_d598", "waiting_for_build_slot_repo", "waiting_for_build_slot_account"];
+  const BUILD_SLOT_WAIT_REASONS: readonly string[] = ["waiting_for_build_slot_repo", "waiting_for_build_slot_account"];
   /** How long after a limit pause is first seen the sweep first looks: a workflow's own wait is four hours, so the sweep's first look is just after it (apps/web BUILD_SPEND_WAIT_MS). */
   const STAGE_RESUME_FIRST_LOOK_MS = 4 * 3_600_000;
 

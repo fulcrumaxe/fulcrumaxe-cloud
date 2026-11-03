@@ -172,9 +172,9 @@ describe('R6: stalled items list', () => {
   it('a wait nobody refreshes any more is listed; a fresh one is not', async () => {
     const f = await fixture();
     const stale = await item(f.refs, 'spec_ready');
-    await fact(f.refs, stale, 'stage_waiting', { code: 'one_build_per_repo_until_d598', stage: 'build', attempt: 1, ageMinutes: 45 });
+    await fact(f.refs, stale, 'stage_waiting', { code: 'waiting_for_build_slot_repo', stage: 'build', attempt: 1, ageMinutes: 45 });
     const fresh = await item(f.refs, 'spec_ready');
-    await fact(f.refs, fresh, 'stage_waiting', { code: 'one_build_per_repo_until_d598', stage: 'build', attempt: 1, ageMinutes: 1 });
+    await fact(f.refs, fresh, 'stage_waiting', { code: 'waiting_for_build_slot_repo', stage: 'build', attempt: 1, ageMinutes: 1 });
     expect((await read(f.who)).items.map((i) => i.work_item_id)).toEqual([stale]);
   });
 

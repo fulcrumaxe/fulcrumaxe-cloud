@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { isRunnerMode, effectiveModeSql } from "@fx/runner";
-import { BUILD_SLOT_STAGES, ONE_BUILD_PER_REPO_UNTIL_D598, START_BUILDS_PER_ACCOUNT, START_BUILDS_PER_REPO, listSlotWaiters, resolveBuildLimits } from "../advance/buildSlots.js";
+import { BUILD_SLOT_STAGES, runnerClampedRepoIds, START_BUILDS_PER_ACCOUNT, START_BUILDS_PER_REPO, listSlotWaiters, resolveBuildLimits } from "../advance/buildSlots.js";
 import { estimateItem, type EstimateBasis } from "../estimate/estimateItem.js";
 import { runPlanFor } from "../estimate/runPlan.js";
 import { SLOT_HOLD_SAMPLE, SLOT_HOLD_STAGES, slotHoldMinutes } from "../estimate/slotHold.js";
@@ -13,8 +13,8 @@ import { SLOT_HOLD_SAMPLE, SLOT_HOLD_STAGES, slotHoldMinutes } from "../estimate
  * (comment 18966288, section 3), written once, as a pure function (`assemblePreview`) so a test can hold it to hand-computed figures:
  *
  *   items            hosted items holding a slot + hosted items waiting for one (account scope); every item of the repo (repo scope)
- *   L_eff(L)         account: min(L, sum over repos with items of min(repoLimit_r, n_r)); repo: min(clamped L, n)
- *                    While the one-per-repo clamp holds this can never pass the number of repos with work, and the preview says so.
+ *   L_eff(L)         account: min(L, sum over repos with items of min(repoLimit_r, n_r)); repo: min(L, n)
+ *                    Each repo's own value is its limit, so L_eff can pass the number of repos with work only when a repo has several items.
  *   clear_minutes(L) ceil(items / L_eff(L)) x slot-hold minutes, or 0 when nothing is waiting or holding
  *   S-bar            mean slot-phase price of the waiting items that have an estimate; else the mean ACTUAL slot-phase spend of the account's
  *                    last 50 items that left a slot; else there is no source and the spend fields are absent (D#483 C3: no seed price of a
@@ -33,7 +33,7 @@ export type PreviewBasis = EstimateBasis;
 
 export interface PreviewNote {
   /** Stable, for a client to branch on. */
-  code: "nothing_waiting" | "same_total" | "unpriced_items" | "cannot_price" | "one_build_per_repo_until_d598" | "limited_by_repos";
+  code: "nothing_waiting" | "same_total" | "unpriced_items" | "cannot_price" | "limited_by_repos" | "runner_order_unattested";
   /** The sentence the person reads. */
   text: string;
 }
@@ -48,7 +48,7 @@ export interface ConcurrencyPreview {
   items: number;
   /** Waiting items with no estimate (`basis: "none"`); they count in `items` and are left out of the price. */
   unpriced_items: number;
-  /** What the value really allows now, after the per-repo clamp and the number of repos with work. */
+  /** What the value really allows now, given each repo's own value and the number of items there are. */
   effective_limit_old: number;
   effective_limit_new: number;
   clear_minutes_old: number;
@@ -82,8 +82,10 @@ export interface PreviewInputs {
   from: number;
   to: number;
   items: readonly PreviewItem[];
-  /** Each repo's clamped limit (`resolveBuildLimits(...).repoLimit`), for the repos named by `items`. */
+  /** Each repo's limit (`resolveBuildLimits(...).repoLimit`), for the repos named by `items`. */
   repoLimits: ReadonlyMap<string, number>;
+  /** `runner_local` repos whose runner cannot attest order yet: their applied limit is 1 whatever the number is (D#483 C34 R-C34-F1). */
+  clampedRepos?: ReadonlySet<string>;
   holdMinutes: number;
   holdBasis: "history" | "seed";
   /** Null when no source exists at all. Not read when no item is waiting or holding. */
@@ -135,9 +137,9 @@ export function assemblePreview(i: PreviewInputs): ConcurrencyPreview {
 
   const effective = (limit: number): number => {
     if (total === 0) return 0;
-    if (i.scope.kind === "repo") return Math.min(Math.min(limit, ONE_BUILD_PER_REPO_UNTIL_D598), total);
+    if (i.scope.kind === "repo") return Math.min(i.clampedRepos?.has(i.scope.repoId) === true ? Math.min(limit, 1) : limit, total);
     let reach = 0;
-    for (const [repo, n] of perRepo) reach += Math.min(i.repoLimits.get(repo) ?? ONE_BUILD_PER_REPO_UNTIL_D598, n);
+    for (const [repo, n] of perRepo) reach += Math.min(i.repoLimits.get(repo) ?? START_BUILDS_PER_REPO, n);
     return Math.min(limit, reach);
   };
   const hold = Math.max(finite(i.holdMinutes), MIN_HOLD_MINUTES);
@@ -173,19 +175,12 @@ export function assemblePreview(i: PreviewInputs): ConcurrencyPreview {
   if (unpriced > 0) notes.push({ code: "unpriced_items", text: `${unpriced} waiting ${unpriced === 1 ? "item" : "items"} can't be priced yet.` });
   if (total > 0 && basis === "none") notes.push({ code: "cannot_price", text: "We can't price this yet: nothing waiting has an estimate and this account has no finished builds." });
   if (queueTotal !== undefined && total > 0 && kind === "raise") notes.push({ code: "same_total", text: "The same work costs the same in total. A higher limit spends it sooner." });
-  if (i.scope.kind === "repo" && i.to > ONE_BUILD_PER_REPO_UNTIL_D598) {
-    notes.push({ code: "one_build_per_repo_until_d598", text: "This applies once parallel builds on one repo are supported." });
+  if (i.scope.kind === "repo" && i.to > 1 && i.clampedRepos?.has(i.scope.repoId) === true) {
+    notes.push({ code: "runner_order_unattested", text: "This repository runs on your own machine; it builds one item at a time until its runner is updated." });
   }
   if (i.scope.kind === "account" && total > 0 && leffNew < i.to) {
-    const repos = perRepo.size;
-    const clamped = [...perRepo.keys()].every((r) => (i.repoLimits.get(r) ?? ONE_BUILD_PER_REPO_UNTIL_D598) <= ONE_BUILD_PER_REPO_UNTIL_D598);
     const atOnce = `${leffNew} ${leffNew === 1 ? "build runs" : "builds run"} at once`;
-    notes.push({
-      code: "limited_by_repos",
-      text: clamped
-        ? `Only ${repos} ${repos === 1 ? "repo has" : "repos have"} work, and each repo builds one item at a time for now, so at most ${atOnce}.`
-        : `With the work there is, at most ${atOnce}.`,
-    });
+    notes.push({ code: "limited_by_repos", text: `With the work there is, at most ${atOnce}.` });
   }
 
   const hashed = {
@@ -262,8 +257,8 @@ async function loadItems(client: PoolClient, accountId: string, scope: Concurren
   return facts;
 }
 
-/** Each named repo's clamped limit under its own current value. */
-async function loadRepoLimits(client: PoolClient, accountId: string, repoIds: readonly string[]): Promise<Map<string, number>> {
+/** Each named repo's limit under its own current value. */
+async function loadRepoLimits(client: PoolClient, accountId: string, repoIds: readonly string[], direct: ReadonlySet<string>): Promise<Map<string, number>> {
   const limits = new Map<string, number>();
   if (repoIds.length === 0) return limits;
   const { rows } = await client.query<{ repo_id: string; max_builds: number }>(
@@ -271,7 +266,7 @@ async function loadRepoLimits(client: PoolClient, accountId: string, repoIds: re
     [accountId, [...repoIds]],
   );
   const values = new Map(rows.map((r) => [r.repo_id, Number(r.max_builds)]));
-  for (const id of repoIds) limits.set(id, resolveBuildLimits({ accountValue: null, repoValue: values.get(id) ?? null }).repoLimit);
+  for (const id of repoIds) limits.set(id, resolveBuildLimits({ accountValue: null, repoValue: values.get(id) ?? null, runnerClamped: direct.has(id) }).repoLimit);
   return limits;
 }
 
@@ -347,6 +342,8 @@ export async function computeConcurrencyPreview(client: PoolClient, accountId: s
     }
   }
 
-  const repoLimits = await loadRepoLimits(client, accountId, [...new Set(facts.map((f) => f.repo_id))]);
-  return assemblePreview({ scope, from, to, items, repoLimits, holdMinutes: hold.minutes, holdBasis: hold.basis, sBar });
+  const repoIds = [...new Set([...facts.map((f) => f.repo_id), ...(scope.kind === "repo" ? [scope.repoId] : [])])];
+  const clampedRepos = await runnerClampedRepoIds(client, accountId, repoIds);
+  const repoLimits = await loadRepoLimits(client, accountId, repoIds, clampedRepos);
+  return assemblePreview({ scope, from, to, items, repoLimits, clampedRepos, holdMinutes: hold.minutes, holdBasis: hold.basis, sBar });
 }

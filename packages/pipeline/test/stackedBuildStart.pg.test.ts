@@ -63,8 +63,8 @@ async function item(accountId: string, repoId: string, ghNumber: number, stage: 
 }
 
 /**
- * `parentStage` defaults to `needs_human`: an item with an open pull request that holds no build slot. Until D#483 S5-j lifts the
- * one-build-per-repository clamp, a parent in `pr_opened` holds the repository's only slot and the child's start waits (the last test pins that).
+ * `parentStage` defaults to `needs_human`: an item with an open pull request that holds no build slot. A parent in `pr_opened` holds one of the
+ * repository's slots, and the child counts as its own item (the two tests after the start tests pin both sides of that).
  */
 async function stackedWorld(opts: { parentPr?: number | null; executionMode?: string; parentStage?: string } = {}) {
   const accountId = randomUUID();
@@ -194,9 +194,20 @@ describe("D#598 P3b: a stacked child's executor starts from the parent's open pu
     expect(gh.reads).toEqual([]);
   });
 
-  it("while the parent holds the repository's only build slot (pr_opened), the start waits on the existing slot rule, after the stack check passed; nothing is built", async () => {
+  it("S5j: a parent at pr_opened holds one slot and the child takes the second: the child is counted once, as its own item, and starts", async () => {
     const t = await stackedWorld({ parentStage: "pr_opened" });
-    expect(await start(t, new Github(() => openParent()))).toEqual({ status: "refused", reason: "one_build_per_repo_until_d598" });
+    expect(await start(t, new Github(() => openParent()))).toMatchObject({ status: "started" });
+    expect(await stageOf(t.childId)).toBe("in_progress");
+    const held = await h.admin.query<{ n: string }>("SELECT count(*) AS n FROM work_items WHERE account_id = $1 AND repo_id = $2 AND stage = ANY($3::text[])", [t.accountId, t.repoId, ["in_progress", "pr_opened", "changes_requested", "review_passed"]]);
+    expect(Number(held.rows[0]!.n)).toBe(2);
+  });
+
+  it("with the repository value at 1, a parent at pr_opened holds the only slot: the start waits on the slot rule after the stack check passed, and nothing is built", async () => {
+    const t = await stackedWorld({ parentStage: "pr_opened" });
+    const u = randomUUID();
+    await h.admin.query("INSERT INTO users (id, email) VALUES ($1, $2)", [u, `${u}@example.test`]);
+    await h.admin.query("INSERT INTO build_concurrency_settings (account_id, repo_id, max_builds, version, changed_by) VALUES ($1, $2, 1, 1, $3)", [t.accountId, t.repoId, u]);
+    expect(await start(t, new Github(() => openParent()))).toEqual({ status: "refused", reason: "waiting_for_build_slot_repo" });
     expect(t.world.requests).toEqual([]);
     expect(await stageOf(t.childId)).toBe("spec_ready");
   });

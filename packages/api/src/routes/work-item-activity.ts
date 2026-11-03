@@ -144,8 +144,8 @@ export function buildWaitSentence(code: string, holder: { issue_number: number |
   // What happens once the slot is free depends on the item: with a person's approval standing the build starts by itself; without it a person has to start it.
   const after = autoStart ? "starts by itself" : "does not start by itself: a person has to press Approve the Spec and build once the slot is free";
   if (code === "waiting_for_build_slot_account") return `Waiting for a build slot. Your account is already building as many items at once as its limit allows. This build ${after}${autoStart ? " when one of them is done" : ""}.`;
-  const who = holder !== null && holder.issue_number !== null ? `Issue #${holder.issue_number}` : "Another item in this repository";
-  return `Waiting for a build slot. ${who} is holding this repository's only build slot, and keeps it until its pull request is merged or closed. This build ${after}${autoStart ? " after that" : ""}.`;
+  const who = holder !== null && holder.issue_number !== null ? `issue #${holder.issue_number}` : "another item";
+  return `Waiting for a build slot. All build slots for this repository are in use; ${who} is holding one. This build ${after}${autoStart ? " after that" : ""}.`;
 }
 
 /** The reason the runner gave for a check it could not run safely, as the run_checks row recorded it; a result with no reason (or no row yet) carries none. */

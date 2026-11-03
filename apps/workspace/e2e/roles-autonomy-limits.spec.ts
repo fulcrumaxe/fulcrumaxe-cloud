@@ -41,6 +41,7 @@ interface Change {
 }
 interface World {
   canChange: boolean;
+  direct?: boolean;
   conc: Record<"acct" | "repo", { value: number; start: number; changes: Change[] }>;
   auto: typeof AUTO_OFF;
   margin: typeof MARGIN;
@@ -89,7 +90,7 @@ async function boot(page: Page, over: Partial<World> = {}): Promise<World> {
   page.on("pageerror", (e) => w.appErrors.push(`pageerror: ${e.message}`));
   const concurrency = async (route: Route, key: "acct" | "repo", tail: string, method: string, body: Record<string, unknown>) => {
     const c = w.conc[key];
-    const clamp = key === "repo" ? { applied_limit: 1, clamp_reason: "one_build_per_repo_until_d598" } : { history_count: c.changes.length };
+    const clamp = key === "repo" ? w.direct ? { applied_limit: 1, clamp_reason: "runner_order_unattested" } : { applied_limit: c.value, clamp_reason: null } : { history_count: c.changes.length };
     if (tail === "history") return json(route, 200, { changes: [...c.changes].reverse() });
     if (tail === "preview") {
       w.previews++;
@@ -236,10 +237,16 @@ test.describe("D#483 S5-h: Autonomy, builds at once and the other limits", () =>
     expect(w.writes.map((x) => x.body.preview_hash)).toEqual(["h4-9-1", "h4-9-3"]);
   });
 
-  test("the repo row carries the one-build-per-repo sentence; cancel writes nothing; the same number is refused naming the field", async ({ page }) => {
+  test("a runner_local repo whose runner cannot attest order says so in one fixed sentence", async ({ page }) => {
+    await boot(page, { direct: true });
+    const row = rowOf(page, "repo");
+    await expect(row.getByTestId("lim-repo-scope")).toHaveText("This repository runs on your own machine; it builds one item at a time until its runner is updated.");
+  });
+
+  test("the repo row shows no clamp sentence; cancel writes nothing; the same number is refused naming the field", async ({ page }) => {
     const w = await boot(page);
     const row = rowOf(page, "repo");
-    await expect(row.getByTestId("lim-repo-scope")).toHaveText("This applies once parallel builds on one repo are supported.");
+    await expect(row.getByTestId("lim-repo-scope")).toHaveCount(0);
     await row.getByTestId("lim-repo-input").fill("2");
     await row.getByTestId("lim-repo-review").click();
     await expect(row.getByTestId("lim-error")).toHaveText("Builds at once: that is already the number in force.");

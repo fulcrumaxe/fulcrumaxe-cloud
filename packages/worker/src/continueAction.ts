@@ -28,7 +28,7 @@ export const CONTINUE_FIXED_CODES = [
   "not_continuable", "work_item_closed", "work_item_ceiling", "spend", "monthly_budget_reached", "foreign_session", "no_spec_version", "work_item_halted",
   "principal_not_authorised", "kind_mismatch", "target_not_found", "prompt_not_retained", "spec_changed", "no_repo", "execution_mode_changed",
   // The build slot a Continue needs is not free: the card's three wait codes (nothing was started).
-  "one_build_per_repo_until_d598", "waiting_for_build_slot_repo", "waiting_for_build_slot_account",
+  "waiting_for_build_slot_repo", "waiting_for_build_slot_account",
 ] as const;
 
 /** Another caller is deciding this item right now and nothing was started: the workflow's `errorCodeFor` maps the name to `busy` and retries. */

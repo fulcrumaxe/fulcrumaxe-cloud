@@ -23735,8 +23735,8 @@
                               "same_total",
                               "unpriced_items",
                               "cannot_price",
-                              "one_build_per_repo_until_d598",
-                              "limited_by_repos"
+                              "limited_by_repos",
+                              "runner_order_unattested"
                             ]
                           },
                           "text": {
@@ -23900,7 +23900,7 @@
                         {
                           "type": "string",
                           "enum": [
-                            "one_build_per_repo_until_d598"
+                            "runner_order_unattested"
                           ]
                         },
                         {
@@ -24069,7 +24069,7 @@
                         {
                           "type": "string",
                           "enum": [
-                            "one_build_per_repo_until_d598"
+                            "runner_order_unattested"
                           ]
                         },
                         {
@@ -24338,7 +24338,7 @@
       "post": {
         "operationId": "previewRepoBuildConcurrency",
         "summary": "What setting a repo's build limit to a number would do. Changes nothing",
-        "description": "While one build per repo is the rule, a higher repo number shows no speed-up and no extra spend, with the reason. Send the returned `preview_hash` with `accept: true` to the matching PUT. Owner or admin, session only.",
+        "description": "A higher repo number shows the speed-up and extra spend over that repo's own items. Send the returned `preview_hash` with `accept: true` to the matching PUT. Owner or admin, session only.",
         "security": [
           {
             "session": []
@@ -24481,8 +24481,8 @@
                               "same_total",
                               "unpriced_items",
                               "cannot_price",
-                              "one_build_per_repo_until_d598",
-                              "limited_by_repos"
+                              "limited_by_repos",
+                              "runner_order_unattested"
                             ]
                           },
                           "text": {

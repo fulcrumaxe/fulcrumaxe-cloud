@@ -48,7 +48,7 @@ const putBodySchema = z
   .strict();
 
 const noteSchema = z.object({
-  code: z.enum(["nothing_waiting", "same_total", "unpriced_items", "cannot_price", "one_build_per_repo_until_d598", "limited_by_repos"]),
+  code: z.enum(["nothing_waiting", "same_total", "unpriced_items", "cannot_price", "limited_by_repos", "runner_order_unattested"]),
   /** The sentence the person reads. */
   text: z.string(),
 });
@@ -62,7 +62,7 @@ export const concurrencyPreviewSchema = z.object({
   items: z.number().int(),
   /** Waiting items with no estimate: counted in `items`, left out of the price. */
   unpriced_items: z.number().int(),
-  /** What the number really allows now, after the one-build-per-repo clamp and the number of repos with work. */
+  /** What the number really allows now, given each repo's own number and the number of items there are. */
   effective_limit_old: z.number().int(),
   effective_limit_new: z.number().int(),
   clear_minutes_old: z.number().int(),
@@ -96,9 +96,10 @@ const accountChangeSchema = accountValueSchema.extend({ changed: z.boolean() });
 const repoValueSchema = z.object({
   value: z.number().int(),
   start_value: z.number().int(),
-  /** What the build slots apply now: the value, clamped while parallel builds on one repo are not supported. */
+  /** What the build slots apply now: the repository's value. */
   applied_limit: z.number().int(),
-  clamp_reason: z.enum(["one_build_per_repo_until_d598"]).nullable(),
+  /** Set when the repository is `runner_local` and its runner cannot attest order yet: the applied limit is 1 whatever the value is. */
+  clamp_reason: z.enum(["runner_order_unattested"]).nullable(),
 });
 const repoChangeSchema = repoValueSchema.extend({ changed: z.boolean() });
 
@@ -267,7 +268,7 @@ export const buildConcurrencyRoutes: RouteEntry[] = [
     operationId: "previewRepoBuildConcurrency",
     summary: "What setting a repo's build limit to a number would do. Changes nothing",
     description:
-      "While one build per repo is the rule, a higher repo number shows no speed-up and no extra spend, with the reason. " +
+      "A higher repo number shows the speed-up and extra spend over that repo's own items. " +
       "Send the returned `preview_hash` with `accept: true` to the matching PUT. Owner or admin, session only.",
     minRole: "admin",
     idempotency: "never",

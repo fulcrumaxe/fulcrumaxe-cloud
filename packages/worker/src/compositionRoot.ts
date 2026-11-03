@@ -201,7 +201,7 @@ export interface CreateWorkerOptions {
   /** D#7 DP7-2d: the GitHub clients a reversal closes a pull request or opens a revert with (apps/web/lib/github/reversalGit.ts). Absent, no reversal is carried out. */
   reversal?: ReversalGitOpeners;
   /** D#483 P1: the stage driver's injected pieces (apps/web owns the workflow and the pipeline). Absent, `advance_work_item` is refused `advance_unavailable`. */
-  advance?: Pick<AdvanceModuleDeps, "startAdvance" | "triage" | "panel" | "spec" | "build" | "buildFailed" | "buildWaitReason" | "prState" | "review" | "lightSpec" | "respec" | "amendSpec"> & { takeBuildSlot?: <T>(pool: Pool, accountId: string, workItemId: string, move: () => Promise<T>) => Promise<{ granted: true; value: T } | { granted: false; reason: string }>; capacity?: (pool: Pool) => NonNullable<AdvanceModuleDeps["capacity"]> };
+  advance?: Pick<AdvanceModuleDeps, "startAdvance" | "triage" | "panel" | "spec" | "build" | "buildFailed" | "buildWaitReason" | "prState" | "review" | "lightSpec" | "respec" | "amendSpec"> & { buildFreeSlots?: (pool: Pool, accountId: string, workItemId: string) => Promise<number>; takeBuildSlot?: <T>(pool: Pool, accountId: string, workItemId: string, move: () => Promise<T>) => Promise<{ granted: true; value: T } | { granted: false; reason: string }>; capacity?: (pool: Pool) => NonNullable<AdvanceModuleDeps["capacity"]> };
 }
 
 /**
@@ -470,7 +470,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       ? createAutoStartSweep({ receiptPool: pools.receiptPool, firstRunUsd: options.autoStart.firstRunUsd, ...(options.autoStart.child ? { child: options.autoStart.child } : {}), ...(options.autoStart.followUp ? { followUp: options.autoStart.followUp } : {}) }).sweepAutoStart
       : async (): Promise<AutoStartCounts> => ({ idle: "not_configured", listed: 0, started: 0, asked: 0, held_by_rule: 0, no_room: 0, not_ready: 0, replayed: 0, failed: 0 });
     // D#483 S5-k1b: the parked-stage sweep restarts a stage whose workflow gave up waiting for a spending limit, once the limit allows it.
-    const stageResume = createStageResume(pools.runnerPool, { resolveRunSeat, startAdvance: options.advance?.startAdvance ?? null, buildWaitReason: options.advance?.buildWaitReason ? (accountId, workItemId) => options.advance!.buildWaitReason!(pools.runnerPool, accountId, workItemId) : null });
+    const stageResume = createStageResume(pools.runnerPool, { resolveRunSeat, startAdvance: options.advance?.startAdvance ?? null, buildWaitReason: options.advance?.buildWaitReason ? (accountId, workItemId) => options.advance!.buildWaitReason!(pools.runnerPool, accountId, workItemId) : null, buildFreeSlots: options.advance?.buildFreeSlots ? (accountId, workItemId) => options.advance!.buildFreeSlots!(pools.runnerPool, accountId, workItemId) : null });
     // D#6 GATE-REASK-ON-PUBLIC-OPEN: the webhook's wake for a merge gate that stopped on something time clears.
     const gateReask = createGateReask(pools.runnerPool, { startAdvance: options.advance?.startAdvance ?? null });
     // D#6 R2b-3 (C21 section 4): the run after a lost lease or a usage limit is dispatched through the runner target; a second loss fails the work item through the stage driver.

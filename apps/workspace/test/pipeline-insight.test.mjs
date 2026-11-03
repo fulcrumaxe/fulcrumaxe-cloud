@@ -99,9 +99,8 @@ describe("recorded pipeline steps", () => {
     expect(held.text).toContain("Merge gate: not merged, a person merges");
     expect(held.reasons).toEqual(["auto-merge is not allowed"]);
     expect(stepView({ kind: "continue_work_item", state: "refused", code: "advance_unavailable", result: null, reasons: [], at: "t" }).text).toBe("Continue request · refused · reason: advance unavailable");
-    // A Continue refused for want of a build slot says so in words (S5-j2b), one sentence for each of the three wait codes.
+    // A Continue refused for want of a build slot says so in words (S5-j2b), one sentence for each of the two wait codes.
     const slot = (code) => stepView({ kind: "continue_work_item", state: "refused", code, result: null, reasons: [], at: "t" }).text;
-    expect(slot("one_build_per_repo_until_d598")).toBe("Continue request · refused · reason: this repository builds one item at a time");
     expect(slot("waiting_for_build_slot_repo")).toBe("Continue request · refused · reason: this repository's build slots are all taken");
     expect(slot("waiting_for_build_slot_account")).toBe("Continue request · refused · reason: your account's build slots are all taken");
     expect(stepView(null)).toBeNull();
@@ -340,15 +339,15 @@ describe("D#6: a review waiting for the runner's daily limit", () => {
 });
 
 describe("D#483: a build waiting for a slot", () => {
-  const WAITING = { notice: { kind: "build_slot_wait", reason: "Waiting for a build slot. Issue #65 is holding this repository's only build slot, and keeps it until its pull request is merged or closed. This build starts by itself after that." } };
+  const WAITING = { notice: { kind: "build_slot_wait", reason: "Waiting for a build slot. All build slots for this repository are in use; issue #65 is holding one. This build starts by itself after that." } };
   it("the banner is the server's whole sentence, with no words of the card's own", () => {
     expect(noticeBanner(WAITING)).toEqual({ kind: "build_slot_wait", title: "", lead: "", tail: "", reason: WAITING.notice.reason });
   });
   it("the timeline row says waiting, with the reason in words, never 'the pipeline started'", () => {
-    const row = stepView({ kind: "advance_work_item", state: "done", code: null, result: "waiting", reasons: ["one_build_per_repo_until_d598"], at: "t" });
+    const row = stepView({ kind: "advance_work_item", state: "done", code: null, result: "waiting", reasons: ["waiting_for_build_slot_repo"], at: "t" });
     expect(row.text).toContain("the build is waiting for a build slot");
     expect(row.text).not.toContain("the pipeline started");
-    expect(row.reasons).toEqual(["this repository builds one item at a time"]);
+    expect(row.reasons).toEqual(["this repository's build slots are all taken"]);
   });
 });
 

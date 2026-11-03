@@ -183,10 +183,7 @@ describe("a planned PR child's build [pg]", { timeout: 60_000 }, () => {
     const w2 = new World(k.f.t.accountId, other);
     const a = await start(k);
     expect(a).toMatchObject({ status: "started", branch: "fx/41-api" });
-    // One build per repository: the second child starts once the first has left the slot-holding stages (here it ended without a pull request).
-    const waiting = await startBuildForItem(h.runWriterPool, k.f.t.accountId, other, randomUUID(), w2, {});
-    expect(waiting.status).toBe("refused");
-    await h.admin.query("UPDATE work_items SET stage = 'needs_human' WHERE id = $1", [k.childId]);
+    // The repository's value (starting 2) lets the second child build beside the first, each on its own branch.
     const b = await startBuildForItem(h.runWriterPool, k.f.t.accountId, other, randomUUID(), w2, {});
     expect(b).toMatchObject({ status: "started", branch: "fx/41-docs" });
     expect(b).not.toMatchObject({ runId: (a as { runId: string }).runId });
