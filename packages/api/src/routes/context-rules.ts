@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Pool } from "pg";
-import { ContextRuleError, listContextRules, type ContextRuleErrorCode } from "@fx/core/src/context/contextRules.js";
+import { MAX_JOB_PINS } from "@fulcrumaxe/runner-protocol";
+import { CONTEXT_EXCLUDES_MAX, ContextRuleError, listContextRules, type ContextRuleErrorCode } from "@fx/core/src/context/contextRules.js";
 import { ForbiddenError, NotFoundError } from "@fx/core/src/tenancy/errors.js";
 import { DEFAULT_CONTEXT_RULE_TIMEOUTS, removeContextRuleChecked, saveContextRule, type ContextRuleTimeouts, type PinTreeSource, type SaveContextRuleDeps } from "@fx/pipeline";
 import { ApiError } from "../errors.js";
@@ -33,8 +34,8 @@ export const saveDeps = (pool: Pool): SaveContextRuleDeps => ({
 const REFUSALS: Record<ContextRuleErrorCode, [number, string]> = {
   invalid_path: [422, "that path cannot be used: it must be a repository-relative path, and a pin cannot contain * or ?"],
   pins_exceed_budget: [409, "the pinned files would not fit the repository's context budget"],
-  pins_exceed_ceiling: [409, "a run could not carry that many pinned files"],
-  excludes_exceed_cap: [409, "a run can hold at most 500 excluded paths"],
+  pins_exceed_ceiling: [409, `a run can carry at most ${MAX_JOB_PINS} pinned files`],
+  excludes_exceed_cap: [409, `a run can hold at most ${CONTEXT_EXCLUDES_MAX} excluded paths`],
   exclude_readds_pins: [409, "removing this exclude puts pinned files back in this item's runs and they no longer fit the budget; repeat with confirm=true to remove it anyway"],
   context_rules_busy: [409, "another change to this repository's rules is in progress; try again"],
   tree_truncated: [409, "the repository is too large to measure its pins; nothing was saved"],

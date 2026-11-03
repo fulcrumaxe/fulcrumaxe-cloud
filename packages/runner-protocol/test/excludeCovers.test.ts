@@ -174,8 +174,10 @@ describe("the work budget at a repository's caps", () => {
       const split2 = splitPinsByExcludes(heavyPins, heavy);
       for (const e of heavy.slice(0, 3)) excludeCovers(e, heavyPins[0]!, w);
       console.info(`500x500 vendor/**/genN/*.ts ${label}: ${Date.now() - t0} ms, limited ${split2.limited}`);
-      expect(split2.limited).toBe(0);
-      expect(split2.readable).toHaveLength(500);
+      // At the 8 Mi budget a cap-length set of this shape reports `pin_match_limit` visibly (the accepted cost of the lower cap); a realistic one reads every pin.
+      if (padTo === 0) expect(split2.limited).toBe(0);
+      else expect(split2.limited).toBeGreaterThan(0);
+      expect(split2.readable.length + split2.limited).toBe(500);
     }
     // The same set with real covers among the pins: exactly those are excluded, none limited.
     const covered = [...pins.slice(0, 10), ...pins.slice(10)];
@@ -198,10 +200,16 @@ describe("the work budget at a repository's caps", () => {
     const hostile = Array.from({ length: 500 }, () => "**a".repeat(8));
     const aPins = Array.from({ length: 500 }, () => `${"a".repeat(511)}!`);
     const started = Date.now();
-    splitPinsByExcludes(aPins, hostile);
-    const took = Date.now() - started;
-    console.info(`hostile whole-set call at the budget: ${took} ms`);
-    expect(took).toBeLessThan(900);
+    const split = splitPinsByExcludes(aPins, hostile);
+    console.info(`hostile whole-set call at the budget: ${Date.now() - started} ms`);
+    // The bound is the step budget, which does not depend on host load: the shared work is spent to zero and the rest of the pairs are held back as limited.
+    const work = { left: EXCLUDE_SET_MAX_STEPS };
+    for (const e of hostile) if (aPins.some((p) => excludeCovers(e, p, work)) && work.left <= 0) break;
+    expect(work.left).toBeLessThanOrEqual(0);
+    expect(EXCLUDE_SET_MAX_STEPS).toBe(8 * 1_048_576);
+    expect(split.limited).toBeGreaterThan(0);
+    // A sanity bound only, far above any load this runs under.
+    expect(Date.now() - started).toBeLessThan(30_000);
   });
 });
 

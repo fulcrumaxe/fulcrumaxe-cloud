@@ -270,6 +270,28 @@ describe('context rule and context budget write routes (D#600 CX-9a)', { timeout
       expect((await call(w.member, 'DELETE', `/context-rules/${randomUUID()}?confirm=maybe`)).status).toBe(422);
     });
 
+    it('a remove that would bring a same-path repo rule back and leave 501 pins or 501 excludes is refused outright, confirm or not, and removes nothing', async () => {
+      for (const [repoKind, itemKind, code] of [['pin', 'exclude', 'pins_exceed_ceiling'], ['exclude', 'pin', 'excludes_exceed_cap']] as const) {
+        const w = await world();
+        await admin.query(
+          `INSERT INTO context_rules (account_id, scope, repo_id, kind, path, created_by) SELECT $1, 'repo', $2, $3, 'gen/' || g, $4 FROM generate_series(1, 500) g`,
+          [w.owner.accountId, w.repoId, repoKind, w.owner.userId],
+        );
+        const put = (kind: string, path: string) => call(w.member, 'PUT', '/context-rules', { scope: 'item', work_item_id: w.itemId, kind, path });
+        // The item's rule on a repo path replaces it (one fewer of the repo's kind), which leaves room for one more of that kind.
+        const shadow = (await (await put(itemKind, 'gen/1')).json()) as { id: string };
+        expect((await put(repoKind, 'extra')).status).toBe(200);
+        const rulesBefore = await w.rules();
+        for (const suffix of ['', '?confirm=true']) {
+          const res = await call(w.member, 'DELETE', `/context-rules/${shadow.id}${suffix}`);
+          expect(res.status).toBe(409);
+          expect(((await res.json()) as { error: { code: string } }).error.code).toBe(code);
+        }
+        expect(await w.rules()).toEqual(rulesBefore);
+        expect(await w.audit('context_rule.removed')).toEqual([]);
+      }
+    });
+
     it('with room in the budget, or with the code host down, the remove goes straight through (the warning is advice)', async () => {
       const w = await world();
       trees.entries = [{ path: 'big.md', type: 'blob', size: 100 }];

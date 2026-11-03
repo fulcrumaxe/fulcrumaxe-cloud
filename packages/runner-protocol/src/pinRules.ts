@@ -31,7 +31,7 @@ export function isPinPath(path: string): boolean {
 /** Work one `excludeCovers` call may spend (token x position steps) before it gives up and answers "covered". A legitimate call is at most 513 x 513 steps. */
 export const EXCLUDE_MATCH_MAX_STEPS = 1_048_576;
 /** Work a whole set of pins x excludes may spend, shared through `ExcludeWork`; when it is gone every further pair answers "covered". */
-export const EXCLUDE_SET_MAX_STEPS = 40 * 1_048_576;
+export const EXCLUDE_SET_MAX_STEPS = 8 * 1_048_576;
 export interface ExcludeWork {
   left: number;
 }
