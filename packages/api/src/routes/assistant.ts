@@ -1,9 +1,14 @@
 import { createHash, randomBytes } from "node:crypto";
+import type { Pool } from "pg";
 import { z } from "zod";
+import { envKekSource, type KekSource } from "@fx/model-connection";
 import { DELEGATION_SCOPES, DELEGATION_TTL_MS, approveLink } from "@fx/core/src/tokens/delegation.js";
 import { insertApiToken, type Scope as CoreScope } from "@fx/core/src/tokens/service.js";
 import { NotFoundError } from "@fx/core/src/tenancy/errors.js";
-import type { RouteEntry } from "../registry.js";
+import { RawBody, type RouteEntry } from "../registry.js";
+import { MAX_CONTENT_CHARS, MAX_MESSAGES, runAssistantTurn, TURN_STATES, type TurnEvent } from "../assistant/turn.js";
+import { toSseFrames } from "../assistant/sse.js";
+import { platformOpsPool } from "../sse/pools.js";
 import { ApiError, UnauthenticatedError } from "../errors.js";
 import { displayHint, generateToken } from "../tokens/format.js";
 import { hashToken } from "../tokens/resolve.js";
@@ -50,7 +55,79 @@ async function noPrincipal(): Promise<never> {
   throw new UnauthenticatedError();
 }
 
+/** D#597 CC-5e: the messages route. A person's turn: `conversation_id` (or a `repo_id` to start one), the conversation so far, and the new message last. The client holds the turns. */
+const messageSchema = z.object({ role: z.enum(["user", "assistant"]), content: z.string().min(1).max(MAX_CONTENT_CHARS) }).strict();
+const messagesBodySchema = z
+  .object({
+    conversation_id: z.string().uuid().optional(),
+    repo_id: z.string().uuid().optional(),
+    work_item_id: z.string().uuid().optional(),
+    messages: z.array(messageSchema).min(1).max(MAX_MESSAGES),
+  })
+  .strict()
+  .refine((b) => (b.conversation_id === undefined) !== (b.repo_id === undefined), { message: "send conversation_id, or repo_id to start one" })
+  .refine((b) => b.messages[b.messages.length - 1]!.role === "user", { message: "the last message must be the person's" });
+const messagesResponseSchema = z.object({
+  conversation_id: z.string().uuid().optional(),
+  state: z.enum(TURN_STATES),
+  code: z.string().optional(),
+  text: z.string(),
+  spent_micro_usd: z.number().int().optional(),
+  cap_micro_usd: z.number().int().optional(),
+});
+
+/** Test seam: the key-encryption source, the provider transport and the platform_ops pool. Production leaves all unset (the environment's KEK, the global fetch, the shared pool). */
+export const assistantDeps: { kek?: KekSource; fetchImpl?: typeof fetch; platformOpsPool?: Pool } = {};
+
 export const assistantRoutes: RouteEntry[] = [
+  {
+    method: "POST",
+    path: "/api/v1/assistant/messages",
+    operationId: "sendAssistantMessage",
+    summary: "Send a message to the assistant",
+    description:
+      "Session only: no token of any kind. The assistant answers from the person's own model key and can only read, or propose a correction a person must still accept. With `Accept: text/event-stream` the answer arrives as events `conversation`, `text`, `tool` and `done`; otherwise as one JSON body with the same text and state. The conversation has a dollar cap fixed when it starts. States: `ok`, `stopped`, `incomplete`, `tool_limit`, `unconfigured`, `no_key`, `budget_reached`, `unpriced`, `unavailable`. `code` accompanies a state that names a cause: `assistant_unconfigured`, `assistant_no_key` and `assistant_unpriced` for the three answers that make no model call, and the provider failure code for `unavailable`. No message text is stored: send the turns so far each time.",
+    minRole: "member",
+    idempotency: "never",
+    rateClass: "write",
+    bodySchema: messagesBodySchema,
+    responseSchema: messagesResponseSchema,
+    rawResponse: {
+      contentType: "text/event-stream",
+      description: "Server-sent events: `conversation` {conversation_id}, `text` {delta}, `tool` {name}, then `done` {state, code, spent_micro_usd, cap_micro_usd}. Closing the request stops the turn and settles what was used.",
+      headers: {},
+      alsoJson: true,
+    },
+    async handler(ctx, input) {
+      const body = input.body as z.infer<typeof messagesBodySchema>;
+      const signal = ctx.signal ?? new AbortController().signal;
+      const deps = {
+        pool: ctx.pool,
+        platformOpsPool: assistantDeps.platformOpsPool ?? platformOpsPool(),
+        kek: assistantDeps.kek ?? envKekSource(),
+        ...(assistantDeps.fetchImpl ? { fetchImpl: assistantDeps.fetchImpl } : {}),
+      };
+      const turn = {
+        principal: { accountId: ctx.principal.accountId, userId: ctx.principal.userId, role: ctx.principal.role },
+        ...(body.conversation_id ? { conversationId: body.conversation_id } : {}),
+        ...(body.repo_id ? { repoId: body.repo_id } : {}),
+        ...(body.work_item_id ? { workItemId: body.work_item_id } : {}),
+        messages: body.messages,
+      };
+      if (ctx.wantsStream) {
+        // Nothing is sent until the first event: an error before it (an unknown conversation) is the ordinary JSON envelope.
+        return new RawBody("text/event-stream; charset=utf-8", { "X-Accel-Buffering": "no" }, await toSseFrames((emit, stop) => runAssistantTurn(deps, turn, stop, emit), signal));
+      }
+      let text = "";
+      const out: Record<string, unknown> = {};
+      await runAssistantTurn(deps, turn, signal, (e: TurnEvent) => {
+        if (e.event === "text") text += String(e.data.delta);
+        else if (e.event === "conversation") out.conversation_id = e.data.conversation_id;
+        else if (e.event === "done") Object.assign(out, e.data);
+      });
+      return { ...out, text };
+    },
+  },
   {
     method: "POST",
     path: "/api/v1/assistant/tokens",

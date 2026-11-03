@@ -6,4 +6,5 @@ export type { StreamTurnParams, StreamTurnResult, ToolCall, RejectedToolCall, To
 export type { StreamMessage, StreamToolDef, StreamContent } from './hosts.js';
 export { ModelCallError } from './keyUse.js';
 export type { ModelCallErrorCode } from './keyUse.js';
-export { MODEL_HOSTS } from './hosts.js';
+export { MODEL_HOSTS, defaultModelFor, pricedModelOf } from './hosts.js';
+export { TOOL_PREAMBLE_OVERHEAD_TOKENS } from './streamGateway.js';

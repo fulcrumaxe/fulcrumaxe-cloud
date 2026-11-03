@@ -63,6 +63,7 @@ export async function streamWithKey<T>(
   timeoutMs: number,
   build: (provider: string, key: string) => { url: string; headers: Record<string, string>; body: string } | null,
   consume: (body: ReadableStream<Uint8Array> | null, signal: AbortSignal, provider: string) => Promise<T>,
+  stop?: AbortSignal,
 ): Promise<{ status: number; text: string; value: T | null }> {
   return withOpenedKey(ctx, async ({ provider, key }) => {
     refuseSubscriptionCredential(key);
@@ -70,6 +71,9 @@ export async function streamWithKey<T>(
     if (!req) throw new ModelCallError('unsupported_provider', 'model-call: streaming is not available for this provider');
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const onStop = () => controller.abort();
+    if (stop?.aborted) controller.abort();
+    stop?.addEventListener('abort', onStop, { once: true });
     try {
       const res = await fetchImpl(req.url, { method: 'POST', headers: req.headers, body: req.body, signal: controller.signal, redirect: 'error' });
       if (!res.ok) return { status: res.status, text: redactText(await res.text(), [key]).slice(0, MAX_ERROR_BODY_CHARS), value: null };
@@ -80,6 +84,7 @@ export async function streamWithKey<T>(
       throw new ModelCallError('fetch_failed', 'model-call: provider request failed');
     } finally {
       clearTimeout(timer);
+      stop?.removeEventListener('abort', onStop);
     }
   });
 }

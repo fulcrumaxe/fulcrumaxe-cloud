@@ -147,7 +147,10 @@ export function buildOpenApiDocument(routes: readonly RouteEntry[]): OpenApiDocu
         headers: Object.fromEntries(
           Object.entries(route.rawResponse.headers).map(([name, description]) => [name, { description, schema: { type: "string" } }]),
         ),
-        content: { [route.rawResponse.contentType]: { schema: { type: "string", description: route.rawResponse.description } } },
+        content: {
+          ...(route.rawResponse.alsoJson ? { "application/json": { schema: z.toJSONSchema(route.responseSchema, { target: "draft-2020-12" }) } } : {}),
+          [route.rawResponse.contentType]: { schema: { type: "string", description: route.rawResponse.description } },
+        },
       };
     }
     for (const status of COMMON_ERROR_STATUSES) {

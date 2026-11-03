@@ -1,7 +1,7 @@
 import { DEFAULT_GATEWAY_MODEL, gatewayPricedModel, streamRequestFor, type StreamRequestParams } from './hosts.js';
 import { ModelCallError, streamWithKey } from './keyUse.js';
 import { failOnStatus } from './providerStatus.js';
-import { readGatewayStream } from './streamGateway.js';
+import { readGatewayStream, worstCaseUsage } from './streamGateway.js';
 import { providerErrorKind, pumpSse, ToolVetter, type StreamOut } from './streamCore.js';
 import type { ModelCallCtx } from './completeJson.js';
 
@@ -11,8 +11,12 @@ export interface StreamTurnParams extends StreamRequestParams {
   timeoutMs: number;
   /** Called with each text fragment as it arrives (inside the key-holding closure; never given the key). */
   onText?: (delta: string) => void;
+  /** Called with each fragment of a tool call's streamed input as it arrives (so a caller can count the bytes of a turn that is stopped). */
+  onToolInput?: (fragment: string) => void;
   /** Tests lower the byte cap to stay fast; a caller can never raise it past 4 MB (clampStreamBytes). The wall-time deadline is `timeoutMs` (capped at 2 minutes). */
   maxStreamBytes?: number;
+  /** The caller's Stop: aborting it ends the read like a deadline would (the text so far comes back, `incomplete`, `endedBy: 'deadline'`). */
+  signal?: AbortSignal;
 }
 
 /** Why a tool_use block was dropped. Fixed words only: nothing the model wrote (name, id, input) is carried. */
@@ -64,6 +68,7 @@ export async function streamTurn(ctx: ModelCallCtx, p: StreamTurnParams): Promis
       return streamRequestFor(provider, key, p);
     },
     (body, signal, provider) => (provider === 'ai_gateway' ? readGatewayStream(body, signal, p) : readAnthropicStream(body, signal, p)),
+    p.signal,
   );
   await failOnStatus(ctx, p.role, res);
   return res.value!;
@@ -73,6 +78,8 @@ export async function streamTurn(ctx: ModelCallCtx, p: StreamTurnParams): Promis
 async function readAnthropicStream(body: ReadableStream<Uint8Array> | null, signal: AbortSignal, p: StreamTurnParams): Promise<StreamTurnResult> {
   const out: StreamOut = { text: '', toolCalls: [], rejectedCalls: [], endedBy: null, stopReason: null, usage: { inputTokens: 0, outputTokens: 0 }, incomplete: true };
   let stopped = false;
+  let startUsage = false;
+  let deltaUsage = false;
   const tools = new Map<number, { id: string; name: string; json: string }>();
   const vetter = new ToolVetter(out, p.tools.map((t) => t.name));
   const fail = (kind: string) => new ModelCallError('stream_error', `model-call (${p.role}): the provider stream ${kind}`);
@@ -85,6 +92,7 @@ async function readAnthropicStream(body: ReadableStream<Uint8Array> | null, sign
     }
     switch (ev.type) {
       case 'message_start':
+        startUsage = ev.message?.usage?.input_tokens !== undefined;
         out.usage.inputTokens = Number(ev.message?.usage?.input_tokens) || 0;
         out.usage.outputTokens = Number(ev.message?.usage?.output_tokens) || 0;
         break;
@@ -106,6 +114,7 @@ async function readAnthropicStream(body: ReadableStream<Uint8Array> | null, sign
         } else if (d?.type === 'input_json_delta' && typeof d.partial_json === 'string') {
           const t = tools.get(Number(ev.index));
           if (t) t.json += d.partial_json;
+          p.onToolInput?.(d.partial_json);
         }
         break;
       }
@@ -118,6 +127,7 @@ async function readAnthropicStream(body: ReadableStream<Uint8Array> | null, sign
       }
       case 'message_delta':
         if (typeof ev.delta?.stop_reason === 'string') out.stopReason = ev.delta.stop_reason;
+        if (ev.usage?.output_tokens !== undefined) deltaUsage = true;
         if (ev.usage?.output_tokens !== undefined) out.usage.outputTokens = Number(ev.usage.output_tokens) || 0;
         break;
       case 'message_stop':
@@ -130,5 +140,10 @@ async function readAnthropicStream(body: ReadableStream<Uint8Array> | null, sign
   await pumpSse(body, p.maxStreamBytes, out, (e) => e.data !== '' && handle(e.data), () => stopped);
   out.incomplete = !stopped || vetter.poisoned;
   if (!stopped && out.endedBy === null) out.endedBy = signal.aborted ? 'deadline' : 'cut';
+  if (stopped && !(startUsage && deltaUsage)) {
+    // A finished stream that did not report its usage is metered at the worst case, as the gateway reader does.
+    out.usage = worstCaseUsage(p);
+    out.usageEstimated = true;
+  }
   return out;
 }

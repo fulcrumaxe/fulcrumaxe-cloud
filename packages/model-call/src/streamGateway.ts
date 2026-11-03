@@ -7,6 +7,10 @@ import { providerErrorKind, pumpSse, ToolVetter, type StreamOut } from './stream
  */
 export const TOOL_PREAMBLE_OVERHEAD_TOKENS = 1500;
 
+/** A turn's worst-case usage: the request's size in bytes as input tokens (a token is never more than a byte), the tool preamble allowance when tools are sent, and the full output allowance. */
+export function worstCaseUsage(p: Pick<StreamTurnParams, 'system' | 'messages' | 'tools' | 'maxOutputTokens'>): { inputTokens: number; outputTokens: number } {
+  return { inputTokens: Buffer.byteLength(JSON.stringify([p.system, p.messages, p.tools])) + (p.tools.length > 0 ? TOOL_PREAMBLE_OVERHEAD_TOKENS : 0), outputTokens: p.maxOutputTokens };
+}
 
 const STOP_REASONS: Record<string, string> = { stop: 'end_turn', tool_calls: 'tool_use', length: 'max_tokens' };
 
@@ -53,7 +57,10 @@ export async function readGatewayStream(body: ReadableStream<Uint8Array> | null,
         const t = pending.get(index) ?? { id: '', name: '', json: '' };
         if (typeof tc.id === 'string' && tc.id !== '') t.id = tc.id;
         if (typeof tc.function?.name === 'string') t.name += tc.function.name;
-        if (typeof tc.function?.arguments === 'string') t.json += tc.function.arguments;
+        if (typeof tc.function?.arguments === 'string') {
+          t.json += tc.function.arguments;
+          p.onToolInput?.(tc.function.arguments);
+        }
         pending.set(index, t);
       }
     }
@@ -73,7 +80,7 @@ export async function readGatewayStream(body: ReadableStream<Uint8Array> | null,
   if (!done && out.endedBy === null) out.endedBy = signal.aborted ? 'deadline' : 'cut';
   if (!usageSeen) {
     // No usage chunk: meter the turn at its worst case, the request's size as input tokens (a token is never more than a byte, so bytes bound the tokens from above) plus the tool preamble allowance and the full output allowance.
-    out.usage = { inputTokens: Buffer.byteLength(JSON.stringify([p.system, p.messages, p.tools])) + (p.tools.length > 0 ? TOOL_PREAMBLE_OVERHEAD_TOKENS : 0), outputTokens: p.maxOutputTokens };
+    out.usage = worstCaseUsage(p);
     out.usageEstimated = true;
   }
   return out;
