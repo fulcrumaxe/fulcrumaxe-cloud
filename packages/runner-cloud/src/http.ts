@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import { CURRENT_PROTOCOL_VERSION, MAX_CREATED_SKEW_SECONDS, MIN_SUPPORTED_PROTOCOL_VERSION, type ClaimCapacity, type ContextLedgerBody, type DoneCheck, type Job, type LocalOnlyEvent, type SignedJob, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { CURRENT_PROTOCOL_VERSION, MAX_CREATED_SKEW_SECONDS, MIN_SUPPORTED_PROTOCOL_VERSION, type ClaimCapacity, type ContextLedgerBody, type DoneCheck, type Job, type LocalOnlyEvent, type PlaneMergeOrderedConfig, type PlaneMergeOrderedFact, type SignedJob, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { reportError } from "@fx/telemetry";
 import type { RunPullRequestPort } from "./runPullRequest.js";
 import type { RunnerSeenReader } from "./wakeSeen.js";
@@ -200,12 +200,16 @@ export interface PlaneMergeOrderFacts {
   leaseGeneration: number;
   writeTokenIssuedAt: Date | null;
   outcomeCode: string | null;
+  /** D#483 S5-j2c1: the verdict the runner attested with the go; `none` frees the lease when the order ends enqueued, anything else (or null) holds it. */
+  orderedVerdict?: string | null;
 }
 export interface PlaneMergeLease {
   accountId: string;
   runnerId: string;
   orderId: string;
   leaseGeneration: number;
+  /** D#483 S5-j2c1: the runner's attested migration-order verdict, stored with the go. */
+  orderedVerdict?: string;
 }
 /** The order store (packages/worker `RunnerPlaneMergeStore`), as the routes use it. */
 export interface PlaneMergeStorePort {
@@ -244,11 +248,13 @@ export interface PlaneMergePort {
   goPhase(input: {
     accountId: string;
     order: PlaneMergeOrderFacts;
-    attestation: { reviewedHead: string; publicHead: string; same: boolean; incomplete: boolean; paths: readonly string[] };
+    attestation: { reviewedHead: string; publicHead: string; same: boolean; incomplete: boolean; paths: readonly string[]; ordered?: PlaneMergeOrderedFact; orderedCapable?: boolean };
     /** The runner listed `plane_merge_queue_v1`: only such a runner is given a queue repository's order (D#694 B7-1). */
     queueCapable: boolean;
     delegate: () => Promise<{ delegated: true } | { delegated: false; reason: string }>;
   }): Promise<PlaneMergeGoResult>;
+  /** D#483 S5-j2c1: the repository's ordered-resource configuration for a runner that listed `ordered_facts_v1` (only what `readOrderedConfig` accepted). Absent from an older port: no key is sent. */
+  orderedConfig?(input: { accountId: string; repoId: string }): Promise<PlaneMergeOrderedConfig>;
   /** The public pull request, read through the fenced client. Throws when GitHub cannot be asked. */
   readPublicPull(input: { accountId: string; order: PlaneMergeOrderFacts }): Promise<PublicPullFacts>;
   /** The public pull request with its queue entry, for a runner's `enqueued` report. Throws when GitHub cannot be asked. */

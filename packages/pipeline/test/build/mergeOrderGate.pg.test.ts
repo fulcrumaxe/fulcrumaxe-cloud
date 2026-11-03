@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { GitHubHttp } from "../../src/build/githubMergePort.js";
 import { runMergeGate } from "../../src/build/mergeGate.js";
 import { createMergeOrder } from "../../src/mergeQueue/mergeOrderCheck.js";
-import { runMergeGateForItem } from "../../src/review/mergeGateRun.js";
+import { runMergeGateForItem, type GoAttestation } from "../../src/review/mergeGateRun.js";
+import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { discussingItem } from "../plan/helpers/panelFixtures.js";
 import { startMergeTlsGitHub, type MergeTlsGitHub, type MergeWorld } from "../review/helpers/fakeGitHubMergeTls.js";
 import { pgHarness } from "../helpers/pgHarness.js";
@@ -392,5 +393,108 @@ describe("a tick entry waiting in GitHub's queue (R-C35-3): a direct pull reques
     expect(reasonsOf(await gate(r, ordered))).toEqual(["merge_repo_busy"]);
     expect(merged(ordered)).toBe(false);
     expect(await gate(r, plain)).toMatchObject({ outcome: "merged" });
+  });
+});
+
+describe("a runner that attests the order (S5-j2c1, C34 D9 cloud part and D10): its fact is a hint the cloud combines with its own lease and gate", () => {
+  const stuck: GitHubHttp = { request: async () => { throw new Error("a runner_local repository is never read by the cloud"); } };
+  const TIP = "c".repeat(40);
+  type Fact = NonNullable<GoAttestation["ordered"]>;
+  const fact = (over: Partial<Fact> = {}): Fact => ({ verdict: "ok", tip_sha: TIP, behind: false, overlap: false, ...over });
+  const att = (over: Partial<GoAttestation> = {}): GoAttestation => ({ reviewedHead: "a".repeat(40), publicHead: "b".repeat(40), same: true, incomplete: false, paths: ["src/a.ts"], ...over });
+  const ask = (r: Repo, it: Item, attestation?: GoAttestation) =>
+    createMergeOrder({ pool: h.runWriterPool, github: stuck as never, runnerLocal: true, attestation }).mergeOrder({ accountId: r.accountId, workItemId: it.workItemId, pr: { repoId: r.repoId, prNumber: it.pr }, headSha: it.head });
+  /** A repository with a live sibling, so that a runner without the capability is stopped. */
+  async function crowded() {
+    const r = await newRepo({ executionMode: "runner_local" });
+    const mine = await addItem(r, 41, [`${MIG}/0011_a.sql`]);
+    await addItem(r, 42, [`${MIG}/0011_b.sql`], { stage: "in_progress" });
+    return { r, mine };
+  }
+  async function runnerFor(r: Repo, o: { caps?: string[]; scope?: string[]; revoked?: boolean } = {}): Promise<string> {
+    const user = randomUUID();
+    await h.admin.query("INSERT INTO users (id, email) VALUES ($1, $2)", [user, `${user}@example.test`]);
+    const id = await insertRunner(h.admin, r.accountId, user);
+    await h.admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[], revoked_at = $3 WHERE id = $1", [id, o.scope ?? [r.repoId], o.revoked ? new Date() : null]);
+    await h.admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, $3::text[])", [id, r.accountId, o.caps ?? ["plane_merge_v1", "ordered_facts_v1"]]);
+    return id;
+  }
+
+  it("a capable runner's ok or none fact stands in for the stop: no reason, with a live sibling, and the cloud reads nothing", async () => {
+    const { r, mine } = await crowded();
+    for (const verdict of ["ok", "none"] as const) expect(await ask(r, mine, att({ orderedCapable: true, ordered: fact({ verdict }) })), verdict).toEqual([]);
+  });
+
+  it("an out-of-order fact, an overlap and an unknown give the reasons the cloud's own reads give; a capable runner with no fact is unknown", async () => {
+    const { r, mine } = await crowded();
+    expect(await ask(r, mine, att({ orderedCapable: true, ordered: fact({ verdict: "out_of_order", resource: "migrations", key: "key_0011", highest: "highest_0011" }) }))).toEqual(["ordered_resource_out_of_order"]);
+    expect(await ask(r, mine, att({ orderedCapable: true, ordered: fact({ behind: true, overlap: true }) }))).toEqual(["overlap_unreviewed"]);
+    expect(await ask(r, mine, att({ orderedCapable: true, ordered: fact({ verdict: "out_of_order", behind: true, overlap: true }) }))).toEqual(["ordered_resource_out_of_order", "overlap_unreviewed"]);
+    expect(await ask(r, mine, att({ orderedCapable: true, ordered: fact({ verdict: "unknown" }) }))).toEqual(["ordered_resource_unreadable"]);
+    expect(await ask(r, mine, att({ orderedCapable: true }))).toEqual(["ordered_resource_unreadable"]);
+  });
+
+  it("a runner without the capability is judged as before whatever it sent: a live sibling is runner_ordered_unsupported, and a lone item is waived", async () => {
+    const { r, mine } = await crowded();
+    expect(await ask(r, mine, att({ ordered: fact() }))).toEqual(["runner_ordered_unsupported"]);
+    expect(await ask(r, mine, att({ orderedCapable: false, ordered: fact() }))).toEqual(["runner_ordered_unsupported"]);
+    const alone = await newRepo({ executionMode: "runner_local" });
+    const only = await addItem(alone, 41, [`${MIG}/0011_a.sql`]);
+    expect(await ask(alone, only, att())).toEqual([]);
+  });
+
+  it("a runner that says ok when it cannot be trusted stays a hint: a repository with another pull request waiting in GitHub's queue still waits for an ordered file", async () => {
+    const { r, mine } = await crowded();
+    const queued = [...r.items.values()].find((i) => i.pr === 42)!;
+    await h.admin.query("INSERT INTO merge_queue_entries (account_id, repo_id, work_item_id, pr_number, head_sha, state, approved_at) VALUES ($1, $2, $3, 42, $4, 'queued', now())", [r.accountId, r.repoId, queued.workItemId, queued.head]);
+    await h.admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key, code, head_sha, pr_number) VALUES ($1, $2, 'merge_enqueued', $3, 'queue', $4, 42)", [r.accountId, queued.workItemId, `enqueued:${queued.head}`, queued.head]);
+    expect(await ask(r, mine, att({ orderedCapable: true, ordered: fact({ verdict: "ok" }) }))).toEqual(["merge_repo_busy"]);
+    expect(await ask(r, mine, att({ orderedCapable: true, ordered: fact({ verdict: "none" }) }))).toEqual([]);
+  });
+
+  it("a runner that loses the capability between the order and the go is stopped at the go: the order phase let the item through, the go reads the recorded hello again", async () => {
+    const { r, mine } = await crowded();
+    const runner = await runnerFor(r);
+    expect(await askPaired(r, mine, true)).toEqual([]);
+    // The runner's next hello no longer lists it (a downgrade); the go carries what the route read now: no capability.
+    await h.admin.query("UPDATE runner_capabilities SET capabilities = '{plane_merge_v1}' WHERE runner_id = $1", [runner]);
+    expect(await askPaired(r, mine, true)).toEqual(["runner_ordered_unsupported"]);
+    expect(await ask(r, mine, att({ ordered: fact() }))).toEqual(["runner_ordered_unsupported"]);
+  });
+
+  it("the order phase of a PAIRED item (no attestation yet) lets it through when a runner of the repository can attest, and only then; the go phase judges it", async () => {
+    const { r, mine } = await crowded();
+    expect(await askPaired(r, mine, true)).toEqual(["runner_ordered_unsupported"]);
+    await runnerFor(r, { caps: ["plane_merge_v1"] });
+    expect(await askPaired(r, mine, true)).toEqual(["runner_ordered_unsupported"]);
+    await runnerFor(r, { scope: [randomUUID()] });
+    expect(await askPaired(r, mine, true)).toEqual(["runner_ordered_unsupported"]);
+    await runnerFor(r, { revoked: true });
+    expect(await askPaired(r, mine, true)).toEqual(["runner_ordered_unsupported"]);
+    await runnerFor(r);
+    expect(await askPaired(r, mine, true)).toEqual([]);
+    // Another account's capable runner is no help to this repository.
+    const other = await newRepo({ executionMode: "runner_local" });
+    const otherMine = await addItem(other, 41, [`${MIG}/0011_a.sql`]);
+    await addItem(other, 42, [`${MIG}/0011_b.sql`], { stage: "in_progress" });
+    expect(await askPaired(other, otherMine, true)).toEqual(["runner_ordered_unsupported"]);
+  });
+
+  /** The order phase for an item with the given pairing. */
+  const askPaired = (r: Repo, it: Item, paired: boolean) =>
+    createMergeOrder({ pool: h.runWriterPool, github: stuck as never, runnerLocal: true, paired }).mergeOrder({ accountId: r.accountId, workItemId: it.workItemId, pr: { repoId: r.repoId, prNumber: it.pr }, headSha: it.head });
+
+  it("an UNPAIRED item is never passed on to a go phase it does not have: with a capable runner and a live sibling it is runner_ordered_unsupported (order check)", async () => {
+    const { r, mine } = await crowded();
+    await runnerFor(r);
+    expect(await askPaired(r, mine, false)).toEqual(["runner_ordered_unsupported"]);
+    expect(await askPaired(r, mine, true)).toEqual([]);
+  });
+
+  it("an unpaired item with a capable runner, no sibling and no merge since its start still passes the order check (the gate-level cases are in mergeGatePairedLocal.pg.test.ts, which has the local-only client)", async () => {
+    const r = await newRepo({ executionMode: "runner_local" });
+    const only = await addItem(r, 41, [`${MIG}/0011_a.sql`]);
+    await runnerFor(r);
+    expect(await askPaired(r, only, false)).toEqual([]);
   });
 });

@@ -177,6 +177,33 @@ describe('migration 0893: runner_capabilities and runner_capabilities_record [pg
     expect(String(rows[0].acl)).toContain('app_user=X');
   });
 
+  // D#483 S5-j2c1 (0978): ordered_facts_v1 is the eighth closed code, through the definer and under the CHECK alike.
+  it('0978: stores ordered_facts_v1, alone or with the others, and still refuses a repeat or a near miss', async () => {
+    await record(['ordered_facts_v1']);
+    expect(await stored()).toEqual(['ordered_facts_v1']);
+    const all = ['proposal_verifier', 'wake_v1', 'plane_merge_v1', 'memory_limit_v1', 'plane_merge_queue_v1', 'discovery_analyst', 'conflict_facts_v1', 'ordered_facts_v1'];
+    await record(all);
+    expect(await stored()).toEqual(all);
+    for (const bad of [['ordered_facts_v1', 'ordered_facts_v1'], ['ordered_facts_v2'], ['Ordered_facts_v1'], ['ordered_facts_v1', 'shell']]) {
+      await expect(record(bad), JSON.stringify(bad)).rejects.toMatchObject({ code: '22023' });
+    }
+    const other = await insertRunner(admin, a.accountId, a.userId);
+    await admin.query(`INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, '{ordered_facts_v1,wake_v1}')`, [other, a.accountId]);
+    await expect(admin.query(`UPDATE runner_capabilities SET capabilities = '{ordered_facts_v1,ordered_facts_v2}' WHERE runner_id = $1`, [other])).rejects.toMatchObject({ code: '23514' });
+    await record(['proposal_verifier']);
+  });
+
+  it('0978 changes exactly one value of the CHECK and of the closed list: the rest of the statement is 0968 verbatim', () => {
+    const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
+    const body = (file: string): string => {
+      const text = readFileSync(path.join(dir, file), 'utf8');
+      return text.slice(text.indexOf('ALTER TABLE runner_capabilities DROP CONSTRAINT'));
+    };
+    const new0978 = body('0978_runner_ordered_facts_capability.sql');
+    expect(new0978.split("'ordered_facts_v1'")).toHaveLength(3);
+    expect(new0978.replaceAll(", 'ordered_facts_v1'", '').trim()).toBe(body('0968_runner_conflict_facts_capability.sql').trim());
+  });
+
   it('names the runner from the session only: none, a malformed one, an unknown one, a revoked one or another account’s is refused (42501)', async () => {
     const before = await stored();
     for (const runnerId of [null, 'not-a-uuid', randomUUID()]) await expect(record(['proposal_verifier'], { runnerId }), String(runnerId)).rejects.toMatchObject({ code: '42501' });

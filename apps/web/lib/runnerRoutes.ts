@@ -72,7 +72,7 @@ function livePlaneMerge(): PlaneMergePort {
     runnerTrusted: async (input) => (await requireWorker()).planeMerge.runnerTrusted(input),
     runnerHasCapability: async (input) => (await requireWorker()).planeMerge.runnerHasCapability(input),
   };
-  return { store, goPhase: ops.goPhase, readPublicPull: ops.readPublicPull, readPublicQueue: ops.readPublicQueue, recordEnqueued: ops.recordEnqueued, recordMerged: ops.recordMerged };
+  return { store, goPhase: ops.goPhase, readPublicPull: ops.readPublicPull, readPublicQueue: ops.readPublicQueue, orderedConfig: ops.orderedConfig, recordEnqueued: ops.recordEnqueued, recordMerged: ops.recordMerged };
 }
 
 async function requireWorker() {

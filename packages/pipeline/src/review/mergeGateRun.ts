@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import { PLANE_MERGE_ORDER_DEADLINE_MINUTES } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { enqueueDedupeKey, listHeadRemovals, recordDriverEvent, toCode } from "@fx/core/src/work-items/driverEvents.js";
 import { PERSON_REQUEUE_REASON, queueAgainPending } from "@fx/core/src/work-items/queueIntent.js";
@@ -12,7 +13,7 @@ import { carriedRunsHead, gateReviewerReasons, loadRunsOnSha, runMergeGate, RUNN
 import { listChangedFiles, listChangedFilesLocal, postReviewStatus, type ListFilesResult } from "./githubReads.js";
 import type { ChangedFile } from "./securityTrigger.js";
 import { checkPublicContent, type ContentCheck } from "./publicContentMatch.js";
-import { acquireMergeLease, readHostHoldState } from "../mergeQueue/mergeLease.js";
+import { acquireMergeLease, orderHolder, readHostHoldState } from "../mergeQueue/mergeLease.js";
 import { createMergeOrder } from "../mergeQueue/mergeOrderCheck.js";
 import { loadReviewContext, type ReviewContext } from "./context.js";
 import type { PublicPullRequest, PublicPullRequestLookup } from "./publicPullRequest.js";
@@ -64,7 +65,7 @@ export interface MergeGateRunInput {
    * shas. The security trigger and the tier come from `attestation.paths`; `same: false` adds `public_head_not_reviewed`; the live public head must be the
    * attested one and the live private head the attested reviewed head (else `head_moved`). No `fulcrumaxe/review` status is posted and none is read as authority.
    */
-  goPhase?: { attestation: GoAttestation };
+  goPhase?: { attestation: GoAttestation; orderId?: string };
   /** D#519 MQ3-b: the signals that were green on the reviewed head, for a head the queue refreshed (see `missingExpectedSignals`). */
   expectedSignals?: readonly string[];
   /**
@@ -79,6 +80,9 @@ export interface MergeGateRunInput {
    */
   underQueueSlot?: true;
 }
+
+/** D#483 S5-j2c1: how long a runner's order lease is written for: the order's own deadline. A read of the order, not this length, decides whether it still holds. */
+const ORDER_LEASE_SECONDS = PLANE_MERGE_ORDER_DEADLINE_MINUTES * 60;
 
 export type StatusOutcome = "posted" | "skipped" | "failed";
 
@@ -98,6 +102,12 @@ export interface GoAttestation {
   same: boolean;
   incomplete: boolean;
   paths: readonly string[];
+  /**
+   * D#483 S5-j2c1: the runner's latest hello listed `ordered_facts_v1`, and, when it sent one, its ordering fact (shas, a closed verdict and code characters; its word is a hint, combined with
+   * the cloud's own lease and gate). A capable runner with no fact is read as `unknown`. Absent `orderedCapable`: a runner without the capability.
+   */
+  orderedCapable?: boolean;
+  ordered?: { verdict: "ok" | "none" | "out_of_order" | "unknown"; resource?: string; key?: string; highest?: string; tip_sha: string; behind: boolean; overlap: boolean };
 }
 
 /**
@@ -206,7 +216,7 @@ export interface AuthorTrustInputs {
 
 export type MergeGateRunDeps = { pool: Pool; http: GitHubHttp; localReviewOptIn?: LocalReviewOptInPort; publicPlane?: PublicPlanePort; mergeDelegate?: MergeDelegate; queueDocuments?: MergeQueueDocuments; authorTrust?: AuthorTrustInputs };
 
-export function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGateRunInput & { goPhase: { attestation: GoAttestation } }): Promise<MergeGateGoResult>;
+export function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGateRunInput & { goPhase: { attestation: GoAttestation; orderId?: string } }): Promise<MergeGateGoResult>;
 export function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGateRunInput): Promise<MergeGateRunResult>;
 export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGateRunInput): Promise<MergeGateRunResult> {
   const { pool, http } = deps;
@@ -373,9 +383,12 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
         ? {}
         : {
             acquireMergeLease: async () => {
+              // D#483 S5-j2c1: the go phase of a runner's merge order takes an `order` lease named for the order; a gate that hands the credential over keeps it until the order ends.
+              const orderId = go?.orderId;
               const lease = await acquireMergeLease(pool, {
                 accountId,
                 repoId: ctx.repoId,
+                ...(orderId !== undefined ? { kind: "order" as const, holder: orderHolder(orderId), leaseSeconds: ORDER_LEASE_SECONDS } : {}),
                 // R-C35-2: a lapsed hold for GitHub's queue is read against the pull request's queue entry (awaiting checks included); a hold taken for another repository cannot be read from here.
                 // A hold with no repository id (0), or for another repository, is not read from here: it stays, and counts toward its 24 hours.
                 hostQueueEntry: async (n, repoGhId, holdWorkItemId) => {
@@ -383,11 +396,12 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
                   return readHostHoldState(pool, { accountId, workItemId: holdWorkItemId, read: () => mergePort.getQueueEntry!({ repoId: ctx.repoId, prNumber: n }) });
                 },
               });
-              return lease.taken === false ? (lease.stuck === true ? "unreadable_hold" : null) : { release: lease.release, confirm: lease.confirm, holdForHostQueue: (n: number) => lease.holdForHostQueue(n, mergeGhId, workItemId) };
+              if (lease.taken === false) return lease.stuck === true ? "unreadable_hold" : null;
+              return { release: lease.release, confirm: lease.confirm, holdForHostQueue: (n: number) => lease.holdForHostQueue(n, mergeGhId, workItemId), ...(orderId !== undefined ? { heldUntilOrderEnds: true as const } : {}) };
             },
           }),
       // D#483 S5-j2a2: the ordering and overlap check, read on the client that reads the repository that merges (the public one for a paired item), whatever the caller.
-      ...createMergeOrder({ pool, github: mergePort, runnerLocal }),
+      ...createMergeOrder({ pool, github: mergePort, runnerLocal, paired, attestation: go?.attestation }),
       // @fx/trust's autoMergeAllowed over the repository's guard settings, exactly. Never wrapped in a try that could read as true.
       isAutoMergeAllowed: async () => autoMergeAllowed({ provenance: ctx.provenance }, { autoMerge: ctx.autoMerge, blockExternalAutoMerge: ctx.blockExternalAutoMerge }),
       // The driver reviews the head itself; nothing is dispatched from inside the gate.
@@ -468,7 +482,7 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
 }
 
 /** The GitHub id of a repository (`GET /repos/{owner}/{repo}`, allowlisted as A2 for a runner_local repo). Null when the answer carries no usable id: the lock then counts it as listed. */
-async function readRepoGhId(http: GitHubHttp, owner: string, name: string): Promise<number | null> {
+export async function readRepoGhId(http: GitHubHttp, owner: string, name: string): Promise<number | null> {
   const res = await http.request({ method: "GET", path: `/repos/${owner}/${name}` });
   if (res.status !== 200) throw new Error(`merge gate: repository read answered ${res.status}`);
   const id = typeof res.body === "object" && res.body !== null ? (res.body as { id?: unknown }).id : undefined;

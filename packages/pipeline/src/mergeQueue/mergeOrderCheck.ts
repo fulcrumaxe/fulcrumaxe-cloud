@@ -4,6 +4,8 @@ import { reportError } from "@fx/telemetry";
 import type { ConflictReaderPort, DefaultBranchReaderPort, OrderedResourceReaderPort } from "../build/githubMergePort.js";
 import type { MergeBlockReason, MergeGateDeps, MergeGateGitHubPort } from "../build/mergeGate.js";
 import type { PullRequestRef } from "../build/types.js";
+import type { GoAttestation } from "../review/mergeGateRun.js";
+import { ORDERED_FACTS_CAPABILITY } from "@fulcrumaxe/runner-protocol";
 import { resolveOrdered } from "./orderedCheck.js";
 import { checkOrdering } from "./orderedResources.js";
 import { readHostQueued } from "./store.js";
@@ -23,6 +25,10 @@ import { readHostQueued } from "./store.js";
  * `runner_local` item: the cloud never reads the repository (the fence). Until the runner attests migration order (rows c1 to d), an item with another live item on its repository,
  * or one that saw another item of the repository reach `merged` after its own build started (that item's file is on a tip the cloud cannot read), is `runner_ordered_unsupported`.
  * The only item, and items built one after another, are waived. The reads are made under the lease.
+ *
+ * D#483 S5-j2c1: a runner that kept `ordered_facts_v1` attests the order itself (the go phase's `attestation`), and its word replaces that stop: an out-of-order fact, an overlap and an unknown are the same
+ * reasons the cloud's own reads give, and a capable runner with no fact is unknown. It is a hint, never the control: the lease, the gate's other reasons and the runner's own tip re-read after the go
+ * stand beside it. The order phase (no attestation yet) lets a PAIRED item through when the repository has a runner that can attest, and the go phase judges it (an unpaired item has no go phase and keeps the check below); a runner without the capability is judged as before.
  */
 
 export type MergeOrderReads = Pick<MergeGateGitHubPort, "compareToBase"> & OrderedResourceReaderPort & DefaultBranchReaderPort & Pick<ConflictReaderPort, "compareCommits">;
@@ -30,7 +36,29 @@ export type MergeOrderReads = Pick<MergeGateGitHubPort, "compareToBase"> & Order
 /** The stages in which an item holds a build slot or an open pull request that can still reach a merge. `needs_human` holds no slot: the look-back below catches it if it merges. */
 const LIVE_STAGES = ["in_progress", "pr_opened", "changes_requested", "review_passed"] as const;
 
-export function createMergeOrder(deps: { pool: Pool; github: MergeOrderReads; runnerLocal: boolean }): { mergeOrder: NonNullable<MergeGateDeps["mergeOrder"]>; addsOrderedFile: NonNullable<MergeGateDeps["addsOrderedFile"]> } {
+/**
+ * D#483 S5-j2c1 (R-C34-F1): whether a live runner of the account that covers the repository has a latest hello listing `ordered_facts_v1`. The capability, not a release, is the signal, so a runner built from
+ * source counts. The order phase uses it to let an item through to the go; the repository's build limit follows it.
+ */
+export async function repoRunnerCanAttestOrder(client: Pick<PoolClient, "query">, accountId: string, repoId: string): Promise<boolean> {
+  const { rows } = await client.query(
+    `SELECT 1 FROM runners rn JOIN runner_capabilities cap ON cap.account_id = rn.account_id AND cap.runner_id = rn.id
+      WHERE rn.account_id = $1 AND rn.revoked_at IS NULL AND $2::uuid = ANY(rn.allowed_repo_ids) AND $3::text = ANY(cap.capabilities) LIMIT 1`,
+    [accountId, repoId, ORDERED_FACTS_CAPABILITY],
+  );
+  return rows.length > 0;
+}
+
+/** The reasons a runner's ordering fact gives. A missing fact from a capable runner, and an `unknown` one, are unreadable: nothing is read as in order on a doubt. */
+function factReasons(fact: GoAttestation["ordered"]): MergeBlockReason[] {
+  if (fact === undefined || fact.verdict === "unknown") return ["ordered_resource_unreadable"];
+  const reasons: MergeBlockReason[] = [];
+  if (fact.verdict === "out_of_order") reasons.push("ordered_resource_out_of_order");
+  if (fact.overlap) reasons.push("overlap_unreviewed");
+  return reasons;
+}
+
+export function createMergeOrder(deps: { pool: Pool; github: MergeOrderReads; runnerLocal: boolean; paired?: boolean | undefined; attestation?: GoAttestation | undefined }): { mergeOrder: NonNullable<MergeGateDeps["mergeOrder"]>; addsOrderedFile: NonNullable<MergeGateDeps["addsOrderedFile"]> } {
   const { pool, github } = deps;
   const inTenant = <T>(id: string, fn: (c: PoolClient) => Promise<T>): Promise<T> => withTenant(pool, id, fn);
   /** Whether the pull request adds a file of an ordered resource, and the resolved resources. Unknown is its own answer. */
@@ -43,6 +71,18 @@ export function createMergeOrder(deps: { pool: Pool; github: MergeOrderReads; ru
   };
   const mergeOrder: NonNullable<MergeGateDeps["mergeOrder"]> = async ({ accountId, workItemId, pr, headSha }) => {
     if (deps.runnerLocal) {
+      const attested = deps.attestation;
+      if (attested?.orderedCapable === true) {
+        const reasons = factReasons(attested.ordered);
+        // A pull request that adds an ordered file while another one of the repository waits in GitHub's queue waits too (R-C35-3): that one has not moved the tip yet.
+        if (reasons.length === 0 && attested.ordered?.verdict === "ok" && (await inTenant(accountId, (c) => readHostQueued(c, accountId, pr.repoId))).length > 0) return ["merge_repo_busy"];
+        return reasons;
+      }
+      if (attested === undefined && deps.paired === true) {
+        // The order phase of a paired item: nothing is attested yet. A repository with a runner that can attest is judged at the go, which only a paired item has;
+        // an unpaired item is merged by this gate with no go phase after it, so it keeps the conservative check below whatever its runner lists.
+        if (await inTenant(accountId, (c) => repoRunnerCanAttestOrder(c, accountId, pr.repoId))) return [];
+      }
       const { rows } = await inTenant(accountId, (c) =>
         c.query(
           `SELECT EXISTS (SELECT 1 FROM work_items o WHERE o.account_id = $1 AND o.repo_id = $2 AND o.id <> $3 AND o.stage = ANY($4::text[])) AS live,

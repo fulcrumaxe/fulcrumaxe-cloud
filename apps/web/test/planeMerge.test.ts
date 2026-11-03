@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -83,7 +86,17 @@ describe("goPhase", () => {
     expect(await t.o.goPhase({ accountId: ACCOUNT, order, attestation, delegate })).toEqual({ kind: "go", mergeMode: "direct" });
     expect(delegate).toHaveBeenCalledTimes(1);
     const [, input] = mocks.runMergeGateForItem.mock.calls[0]!;
-    expect(input).toEqual({ accountId: ACCOUNT, workItemId: ITEM, prNumber: 7, goPhase: { attestation } });
+    // S5-j2c1: the gate is also told which order it is for, so it can take the order's lease.
+    expect(input).toEqual({ accountId: ACCOUNT, workItemId: ITEM, prNumber: 7, goPhase: { attestation, orderId: order.id } });
+  });
+
+  it("D#483 S5-j2c1: the runner's ordering fact and its capability reach the gate as they were sent, and nothing else is added", async () => {
+    const t = ops();
+    mocks.runMergeGateForItem.mockResolvedValue({ outcome: "ready_human_merges", headSha: PUB, reasons: ["ordered_resource_out_of_order"], status: "skipped" });
+    const ordered = { verdict: "out_of_order" as const, resource: "migrations", key: "key_0011", highest: "highest_0011", tip_sha: "d".repeat(40), behind: true, overlap: false };
+    expect(await t.o.goPhase({ accountId: ACCOUNT, order, attestation: { ...attestation, orderedCapable: true, ordered }, delegate: async () => ({ delegated: true }) })).toEqual({ kind: "blocked", reasons: ["ordered_resource_out_of_order"] });
+    const [, input] = mocks.runMergeGateForItem.mock.calls.at(-1)!;
+    expect(input.goPhase).toEqual({ attestation: { ...attestation, orderedCapable: true, ordered }, orderId: order.id });
   });
 
   it("a delegate that refuses becomes the gate's reason, and the gate's stops come back as they are", async () => {
@@ -125,6 +138,38 @@ describe("goPhase", () => {
 });
 
 // D#694 B7-1: the gate reads the CODE repository's mode and hands the delegate what it read; the go carries it, and a queue repository's order goes only to a runner that can enqueue.
+describe("orderedConfig (D#483 S5-j2c1)", () => {
+  const read = async (settings: unknown) => {
+    const queries: Array<{ sql: string; params: unknown[] | undefined }> = [];
+    const client = { query: async (sql: string, params?: unknown[]) => (queries.push({ sql, params }), /FROM repos/.test(sql) ? { rows: settings === undefined ? [] : [{ settings }], rowCount: settings === undefined ? 0 : 1 } : { rows: [], rowCount: 0 }), release: () => undefined };
+    const o = createPlaneMergeOps({ open: vi.fn() as never, withPool: (fn) => fn({ connect: async () => client } as never) });
+    return { out: await o.orderedConfig({ accountId: ACCOUNT, repoId: REPO }), queries };
+  };
+
+  it("sends what readOrderedConfig accepted and nothing else of the settings: an invalid entry is dropped, the sixth is ignored, other keys never leave", async () => {
+    const entry = (i: number) => ({ name: `r${i}`, pathPattern: "db/*.sql", keyPattern: "^(\\d{4})_", keyKind: "integer" });
+    const { out, queries } = await read({ autoMerge: true, autoRenumber: false, secretish: "x", orderedResources: [entry(1), { name: "bad", pathPattern: "/abs", keyPattern: "^(.*)", keyKind: "integer" }, entry(2), entry(3), entry(4), entry(5), entry(6)] });
+    expect(out.configured).toBe(true);
+    expect(out.resources.map((r) => r.name)).toEqual(["r1", "r2", "r3", "r4"]);
+    expect(Object.keys(out).sort()).toEqual(["configured", "resources"]);
+    expect(Object.keys(out.resources[0]!).sort()).toEqual(["key_kind", "key_pattern", "name", "path_pattern"]);
+    expect(JSON.stringify(out)).not.toMatch(/secretish|autoMerge|autoRenumber/);
+    // Read by the account and the repository of the order, in the account's own transaction.
+    expect(queries.find((q) => /FROM repos/.test(q.sql))?.params).toEqual([ACCOUNT, REPO]);
+  });
+
+  it("an unconfigured repository, a missing one and settings of the wrong shape send the default: not configured, no resources", async () => {
+    for (const settings of [{ autoMerge: true }, undefined, "text", null, []]) expect((await read(settings)).out, JSON.stringify(settings)).toEqual({ configured: false, resources: [] });
+  });
+});
+
+describe("the live port (D#483 S5-j2c1)", () => {
+  it("hands the runner routes the ordered-config read: without it no claim reply would ever carry ordered_config in production", () => {
+    const src = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "lib", "runnerRoutes.ts"), "utf8");
+    expect(src).toMatch(/return \{ store, goPhase: ops\.goPhase,[^}]*orderedConfig: ops\.orderedConfig,/);
+  });
+});
+
 describe("goPhase and a merge-conflict fix round (D#519 MQ4-e1-a)", () => {
   it("while the item's newest round has no outcome, go answers no-go conflict_round_running: the gate is not run, no client is opened and the credential's mint is never called", async () => {
     const t = ops({ rounds: [roundRow(null)] });
@@ -205,6 +250,41 @@ describe("readPublicQueue and recordEnqueued", () => {
     expect(event?.params).toEqual([ACCOUNT, ITEM, "merge_enqueued", "queue", [], PUB, 12, null, null, `enqueued:${PUB}`, null, null, "MQE_kwDOAAAAAQ"]);
     expect(t.f.statements.some((s) => s.params?.includes("merged_by_gate"))).toBe(false);
     expect(t.reconcile).not.toHaveBeenCalled();
+  });
+});
+
+describe("recordEnqueued and the repository's lease (D#483 S5-j2c1)", () => {
+  const converted = (t: ReturnType<typeof ops>) => t.f.statements.filter((s) => /UPDATE repo_merge_leases/.test(s.sql));
+
+  it("turns the order lease into the hold for GitHub's queue, named by the PUBLIC number, the code repository's id and the item", async () => {
+    const t = ops();
+    t.plain.request.mockResolvedValue({ status: 200, body: { id: 4242 } } as never);
+    await t.o.recordEnqueued({ accountId: ACCOUNT, order, entryId: "MQE_kwDOAAAAAQ" });
+    expect(converted(t)).toHaveLength(1);
+    expect(converted(t)[0]!.params).toEqual([ACCOUNT, REPO, order.id, 12, "4242", 1800, ITEM]);
+    expect(t.plain.request).toHaveBeenCalledWith({ method: "GET", path: "/repos/acme/widgets-public" });
+  });
+
+  it("an order whose runner attested none left no hold to convert: the repository is not even read", async () => {
+    const t = ops();
+    t.plain.request.mockResolvedValue({ status: 200, body: { id: 4242 } } as never);
+    await t.o.recordEnqueued({ accountId: ACCOUNT, order: { ...order, orderedVerdict: "none" }, entryId: "MQE_kwDOAAAAAQ" });
+    expect(converted(t)).toEqual([]);
+    expect(t.plain.request).not.toHaveBeenCalled();
+    await t.o.recordEnqueued({ accountId: ACCOUNT, order: { ...order, orderedVerdict: "ok" }, entryId: "MQE_kwDOAAAAAQ" });
+    expect(converted(t)).toHaveLength(1);
+  });
+
+  it("a repository id that cannot be read, or a read that throws, converts nothing (the order lease stays) and still records the fact", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    for (const answer of [{ status: 200, body: [] }, { status: 500, body: {} }]) {
+      const t = ops();
+      t.plain.request.mockResolvedValue(answer as never);
+      await t.o.recordEnqueued({ accountId: ACCOUNT, order, entryId: "MQE_kwDOAAAAAQ" });
+      expect(converted(t)).toEqual([]);
+      expect(t.f.statements.some((s) => /INSERT INTO work_item_driver_events/.test(s.sql))).toBe(true);
+    }
+    warn.mockRestore();
   });
 });
 

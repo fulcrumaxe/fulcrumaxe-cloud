@@ -1,6 +1,7 @@
 import {
   CLAIM_IDLE_RETRY_AFTER_SECONDS,
   CONFLICT_FACTS_CAPABILITY,
+  ORDERED_FACTS_CAPABILITY,
   PLANE_MERGE_CLAIM_PATH,
   PLANE_MERGE_QUEUE_CAPABILITY,
   PLANE_MERGE_REPORT_PATH,
@@ -86,6 +87,9 @@ export async function planeMergeClaimRun(deps: RunnerCloudDeps, req: RunnerHttpR
   if (claimed.kind === "none") return { status: 200, body: PlaneMergeClaimReply.parse({ retry_after: CLAIM_IDLE_RETRY_AFTER_SECONDS }), headers: { ...NO_STORE, "retry-after": String(CLAIM_IDLE_RETRY_AFTER_SECONDS) } };
   const { order, facts } = claimed;
   const lease = leaseOf(runner, order.id, order.leaseGeneration);
+  // D#483 S5-j2c1: the repository's ordered-resource configuration goes only to a runner whose latest hello listed `ordered_facts_v1`; any other never sees the key. Read before the credential is granted, so a failure burns no grant.
+  const orderedCapable = merge.orderedConfig !== undefined && (await asRunner(() => merge.store.runnerHasCapability({ accountId: runner.accountId, runnerId: runner.runnerId, capability: ORDERED_FACTS_CAPABILITY })));
+  const orderedConfig = orderedCapable ? await asRunner(() => merge.orderedConfig!({ accountId: runner.accountId, repoId: order.repoId })) : undefined;
   // One read credential per (order, lease generation): the grant is written BEFORE the mint, so a second ask mints nothing.
   const grant = await asRunner(() => merge.store.grantReadToken(lease));
   if (grant.kind === "fenced") throw fenced(grant.reason);
@@ -112,6 +116,7 @@ export async function planeMergeClaimRun(deps: RunnerCloudDeps, req: RunnerHttpR
         overlay_globs: facts.overlayGlobs,
         pairing_digest: order.pairingDigest,
         read: { token: minted.token, expires_at: minted.expiresAt.toISOString() },
+        ...(orderedConfig !== undefined ? { ordered_config: orderedConfig } : {}),
       }),
       headers: NO_STORE,
     };
@@ -126,6 +131,9 @@ export async function planeMergeVerifyRun(deps: RunnerCloudDeps, req: RunnerHttp
   const message = parseMessage(PlaneMergeVerifyMessage, parseJsonBody(req));
   const { merge, hosted } = requirePlaneMerge(deps);
   const lease = leaseOf(runner, message.order_id, message.lease_generation);
+  // D#483 S5-j2c1: the ordering fact is accepted only from a runner whose latest hello listed `ordered_facts_v1`; from any other it is a forgery or a bug, refused before anything is read.
+  const orderedCapable = await asRunner(() => merge.store.runnerHasCapability({ accountId: runner.accountId, runnerId: runner.runnerId, capability: ORDERED_FACTS_CAPABILITY }));
+  if (message.ordered !== undefined && !orderedCapable) throw new RunnerHttpError(400, "invalid_message", "the message does not match the protocol");
   const fence = await asRunner(() => merge.store.fence(lease));
   if (fence.kind === "fenced") throw fenced(fence.reason);
   const order = fence.order;
@@ -147,7 +155,7 @@ export async function planeMergeVerifyRun(deps: RunnerCloudDeps, req: RunnerHttp
   const delegate = async (): Promise<{ delegated: true }> => {
     // The gate reached its merge call: nothing blocks. Trust once more (the gate took time), then the grant, then the mint.
     if (!(await trustedNow())) throw new RunnerHttpError(403, "runner_not_trusted", "this runner may not act on this order now");
-    const granted = await asRunner(() => merge.store.authorize(lease));
+    const granted = await asRunner(() => merge.store.authorize({ ...lease, ...(message.ordered !== undefined ? { orderedVerdict: message.ordered.verdict } : {}) }));
     if (granted.kind === "fenced") throw fenced(granted.reason);
     if (granted.kind === "already_issued") throw new RunnerHttpError(409, "already_issued", "a write credential was already issued for this order");
     try {
@@ -168,7 +176,7 @@ export async function planeMergeVerifyRun(deps: RunnerCloudDeps, req: RunnerHttp
       accountId: runner.accountId,
       order,
       queueCapable,
-      attestation: { reviewedHead: message.reviewed_head, publicHead: message.public_head, same: message.same, incomplete: message.incomplete, paths: message.paths },
+      attestation: { reviewedHead: message.reviewed_head, publicHead: message.public_head, same: message.same, incomplete: message.incomplete, paths: message.paths, ...(orderedCapable ? { orderedCapable: true } : {}), ...(message.ordered !== undefined ? { ordered: message.ordered } : {}) },
       delegate,
     });
   } catch (error) {
@@ -268,6 +276,8 @@ export async function settleAuthorizedOrder(port: PlaneMergePort, accountId: str
   if (hint?.result === "merged") return end("failed", "runner_report_mismatch");
   // The verdict is used only here: GitHub, read by the cloud, shows the pull request open at the order's head and not merged, and the runner's merge call was refused. A report with no verdict is today's stop.
   if (hint?.result === "refused") return hint.conflict !== undefined ? end("failed", CONFLICT_CODES[hint.conflict.verdict], hint.conflict) : end("failed", "merge_call_refused");
+  // D#483 S5-j2c1: the runner re-read the code repository's tip after the go and it had moved: no merge call was made. The item is judged again against the new tip, as for a moved head.
+  if (hint?.result === "aborted" && hint.abortCode === "base_moved") return end("head_moved", "public_base_moved");
   if (hint?.result === "aborted") return end("failed", hint.abortCode === "base_retargeted" ? "stacked_on_open_pr" : hint.abortCode === "pr_draft" ? "pr_draft" : "runner_merge_failed");
   return end("failed", "runner_merge_failed");
 }
@@ -280,6 +290,11 @@ export async function planeMergeReportRun(deps: RunnerCloudDeps, req: RunnerHttp
   // D#519 MQ4-e2-a: the conflict verdict is accepted only from a runner whose latest hello listed `conflict_facts_v1` (the message schema already limits it to a refused 405).
   if (message.conflict !== undefined) {
     const capable = await asRunner(() => merge.store.runnerHasCapability({ accountId: runner.accountId, runnerId: runner.runnerId, capability: CONFLICT_FACTS_CAPABILITY }));
+    if (!capable) throw new RunnerHttpError(400, "invalid_message", "the message does not match the protocol");
+  }
+  // D#483 S5-j2c1: `base_moved` is the answer of the tip re-read, which only a runner that kept `ordered_facts_v1` makes.
+  if (message.abort_code === "base_moved") {
+    const capable = await asRunner(() => merge.store.runnerHasCapability({ accountId: runner.accountId, runnerId: runner.runnerId, capability: ORDERED_FACTS_CAPABILITY }));
     if (!capable) throw new RunnerHttpError(400, "invalid_message", "the message does not match the protocol");
   }
   // D#519 MQ4-e2-b: `unknown` carries nothing and is not stored (the order ends as a refused call always did); the other two are stored on the order's end, by `settleAuthorizedOrder`.
@@ -313,7 +328,7 @@ export async function planeMergeReportRun(deps: RunnerCloudDeps, req: RunnerHttp
 
   if (order.state === "claimed") {
     // A verdict about a refused merge call cannot come before any merge call could be made.
-    if (message.conflict !== undefined) throw new RunnerHttpError(400, "invalid_message", "the message does not match the protocol");
+    if (message.conflict !== undefined || message.abort_code === "base_moved") throw new RunnerHttpError(400, "invalid_message", "the message does not match the protocol");
     // No go was ever issued: nothing was merged, and a report that says it was cannot be true.
     if (message.result !== "aborted") throw new RunnerHttpError(409, "not_authorized", "no write credential was issued for this order");
     const moved = message.abort_code === "head_moved" || message.abort_code === "base_retargeted";
