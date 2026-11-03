@@ -147,6 +147,12 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "work_item_cap_exceeded",
   "envelope_exceeded",
   "model_budget_exceeded",
+  // The assistant (D#597 CC-5c): a conversation at its cap, a model with no price, no model key, and no cap in the plan data.
+  "budget_reached",
+  "assistant_unpriced",
+  "assistant_no_key",
+  "assistant_unconfigured",
+  "assistant_hold_refused",
   "compute_cap_exceeded",
   // The runner's daily run limit (the admit refusal of RunnerTarget; also the code of the waiting fact a review parked for it leaves).
   "runner_daily_limit",

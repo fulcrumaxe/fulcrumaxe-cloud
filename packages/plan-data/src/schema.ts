@@ -137,6 +137,11 @@ export const planDataSchema = z
       .object({ hostedSandboxConcurrency: z.number().int().positive(), provisional: z.boolean(), source: z.string().min(1) })
       .strict()
       .optional(),
+    /**
+     * D#597 CC-5c: the assistant's per-conversation dollar cap (`assistant.conversation_cap_usd`). Optional so data that predates it loads; a
+     * missing block means the assistant is unavailable (`assistant_unconfigured`), there is no default figure and no setting that stands in.
+     */
+    assistant: z.object({ conversation_cap_usd: z.number().finite().positive() }).strict().optional(),
   })
   .strict();
 

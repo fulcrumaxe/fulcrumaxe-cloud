@@ -144,3 +144,19 @@ export function hostedSandboxCapacityStatus(): 'ok' | 'hosted_sandbox_capacity_u
     throw error;
   }
 }
+
+export type AssistantSettings = { on: true; conversationCapUsd: number } | { on: false; code: 'assistant_unconfigured' };
+
+/**
+ * D#597 CC-5c: the assistant's per-conversation cap, read fail-closed. Plan data that is unavailable, or carries no `assistant` block, gives
+ * `{ on: false, code: 'assistant_unconfigured' }` and the assistant is unavailable. There is no default figure. Never throws on missing data.
+ */
+export function assistantSettings(): AssistantSettings {
+  try {
+    const a = loadPlanData().assistant;
+    return a === undefined ? { on: false, code: 'assistant_unconfigured' } : { on: true, conversationCapUsd: a.conversation_cap_usd };
+  } catch (error) {
+    if (error instanceof PlanDataMissingError) return { on: false, code: 'assistant_unconfigured' };
+    throw error;
+  }
+}
