@@ -31,11 +31,28 @@ describe("D#598 P3b: no repo, pairing, plan or account gate on the stacked paths
     expect(codeOf(read(rel))).not.toMatch(FORBIDDEN);
   });
 
+  /**
+   * The one deliberate exception (STACK-ON-REFUSED-PARENT): `parentPublishRefused` reads the parent's newest push row and whether the repository is still paired, ONLY to expire a stale
+   * refusal. It never turns stacking on or off for a repository, a plan or an account. Everything else it names is scanned like the other stacked files; the three allowed words are
+   * the `readPlanePush` import and call, and the single `repo_pairing` read.
+   */
+  it("stackParentPublish.ts: the exception is exactly the push-row read and the one pairing read; any other forbidden term turns this red", () => {
+    const code = codeOf(read("../../core/src/work-items/stackParentPublish.ts"));
+    expect(code.match(/repo_pairing/g)).toHaveLength(1);
+    expect(code.match(/readPlanePush/g)).toHaveLength(2);
+    const rest = code.replace(/import \{ readPlanePush \} from '\.\.\/repos\/planePushRecord\.js';/, "").replace(/readPlanePush\(/g, "").replace(/FROM repo_pairing WHERE repo_id = \$1 AND account_id = \$2/, "");
+    expect(rest).not.toMatch(FORBIDDEN);
+    expect(rest.length).toBeGreaterThan(150);
+  });
+
   it("build.ts: the stacked-start function and the prompt branch", () => {
     const build = read("../src/advance/build.ts");
     // `resolveStackBase` reads the repository's coordinates only to pass them to the reader; it tests none of them against a name.
     const fn = between(build, "async function resolveStackBase(", "export type BuildStartResult");
     expect(fn.replace(/facts\.gh_owner|facts\.gh_name/g, "")).not.toMatch(FORBIDDEN);
+    // The named exception: this one call (see above) is the only place the refusal is reached from, and it passes the parent's id and nothing about the repository or plan.
+    expect(fn.match(/parentPublishRefused\(/g)).toHaveLength(1);
+    expect(fn).toContain("parentPublishRefused(client, accountId, parent.parentId)");
     // The region ends where the CX-4a budget code begins (it used to end at the prompt assembly, which that code now precedes); the budget code is not scanned.
     const start = between(build, "if (facts.stack_parent_id !== null && !prior) {", "// D#600 CX-4a: a sandbox prompt over its budget");
     // The scan must still cover the stacked start itself: the call, its refusal and the base it sets.

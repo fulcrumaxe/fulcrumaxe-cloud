@@ -12,6 +12,7 @@ import { isBuildableKind } from "@fx/discussions";
 import { EXCLUDE_PROMPT_LINE, effectiveModeSql, isRunnerMode, runsInOurSandbox } from "@fx/runner";
 import { attachRunNotes, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
 import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js";
+import { parentPublishRefused } from "@fx/core/src/work-items/stackParentPublish.js";
 import { readItemRules } from "@fx/core/src/context/contextRules.js";
 import { decideStackStart, type StackBasePort, type StackParentFacts, type StackStartRefusal } from "./stackBase.js";
 import { agentOutputBlock } from "../plan/envelope.js";
@@ -370,6 +371,8 @@ async function resolveStackBase(
 ): Promise<{ ok: true; base: { branch: string; sha: string } | null } | { ok: false; reason: StackStartRefusal }> {
   if (isRunnerMode(executionMode)) return { ok: false, reason: "stack_runtime_unsupported" };
   const parent = await withTenant(pool, accountId, (client) => readStackParentPull(client, workItemId));
+  // A parent whose public change was refused is not a base to stack on. Derived from the parent's current push row on each start (a retried parent clears it); only a start with no run yet gets here.
+  if (parent !== null && (await withTenant(pool, accountId, (client) => parentPublishRefused(client, accountId, parent.parentId)))) return { ok: false, reason: "stack_parent_publish_refused" };
   if (parent === null || parent.prNumber === null) return { ok: false, reason: "stack_parent_no_pull_request" };
   if (port === undefined || facts.repo_id === null || !facts.gh_owner || !facts.gh_name) return { ok: false, reason: "stack_base_unavailable" };
   let read: StackParentFacts;
@@ -499,7 +502,7 @@ export async function startBuildForItem(
   const mapMs = performance.now() - mapStarted;
   const map = mapAnswer ? { version: mapAnswer.version, text: mapAnswer.text } : undefined;
   // D#598 P3b: an item with a stack parent starts from the parent's open pull request head, or is refused with a reason. A replay of a step that already
-  // started its run reads nothing (the run exists and its prompt is not used again). Same rules for every repository: no pairing, plan or account test here.
+  // started its run reads nothing (the run exists and its prompt is not used again). Same rules for every repository: no repository, plan or account test here. The one pairing read (`parentPublishRefused`) only expires a stale refusal of the parent's public change; it never turns stacking on or off.
   let stackBase: { branch: string; sha: string } | undefined;
   if (facts.stack_parent_id !== null && !prior) {
     const stack = await resolveStackBase(pool, accountId, workItemId, facts, executionMode, options.stackBase);
