@@ -10,7 +10,7 @@ import { CURRENT_PROTOCOL_VERSION, HelloMessage } from "@fulcrumaxe/runner-proto
 import { spillRootFor } from "../../src/job/spillFiles.js";
 import { CliError } from "../../src/cliError.js";
 import { readHostFacts } from "../../src/hostFacts.js";
-import { RUNNER_VERSION } from "../../src/version.js";
+import { RUNNER_BUILD_CAPABILITIES, RUNNER_VERSION } from "../../src/version.js";
 import { loadRegistration, saveRegistration } from "../../src/config.js";
 import { writeApiKey } from "../../src/credentials.js";
 import type { CommandContext } from "../../src/context.js";
@@ -226,6 +226,28 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
     while (ordered.length < 2) await clock.advance(5000);
     expect(ordered).toEqual([false, false]);
     expect(conflict).toEqual([false, true]);
+    expect(await stop(run)).toMatchObject({ code: 0 });
+  });
+
+  // D#483 S5-j2f: a hello the cloud keeps refusing with a 4xx goes out as the whole ladder of dropped capabilities each time (one POST per droppable capability, plus the last one that has nothing left to drop); said on every pass that is a flood.
+  it("a hello that keeps being refused with a 4xx is said again less and less often, not on every pass", async () => {
+    // Every capability but the base role (`proposal_verifier`, which the ladder never drops) is droppable, so the count follows the list and a new capability does not break this test.
+    const droppable = RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "proposal_verifier").length;
+    const perAttempt = droppable + 1;
+    expect(droppable).toBeGreaterThan(0);
+    const refusal = { status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } };
+    for (let i = 0; i < 400; i++) cloud.force.hello.push(refusal);
+    const clock = manualClock();
+    const run = start({ hooks: { clock } });
+    await until(() => claims() >= 1);
+    const first = hellos().length;
+    expect(first).toBe(perAttempt);
+    const from = claims();
+    while (claims() < from + 20) await clock.advance(5000);
+    const later = hellos().length - first;
+    // The retry is not given up on (a cloud that is fixed later still gets its hello), and it is not made on every one of the 20 passes (20 attempts' worth of POSTs).
+    expect(later).toBeGreaterThanOrEqual(perAttempt);
+    expect(later).toBeLessThanOrEqual(perAttempt * 5);
     expect(await stop(run)).toMatchObject({ code: 0 });
   });
 

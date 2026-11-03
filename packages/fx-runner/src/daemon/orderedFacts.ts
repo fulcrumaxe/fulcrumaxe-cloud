@@ -5,7 +5,7 @@
  * cloud's reads do. What leaves the machine is a closed verdict, `part()` codes for the first offending resource and key, the tip's sha and two booleans: no path of its own, no
  * content, no diff. A path git and GitHub might read differently (not valid UTF-8), a tree that cannot be read whole and a missing merge base are `unknown`, never a guess.
  */
-import { checkOrdering, detectResource, orderedCode, readOrderedConfig, type PlaneMergeOrderedConfig, type PlaneMergeOrderedFact, type ResourceRule } from "@fulcrumaxe/runner-protocol";
+import { checkOrdering, detectResource, hasUnmatchablePath, orderedCode, readOrderedConfig, type PlaneMergeOrderedConfig, type PlaneMergeOrderedFact, type ResourceRule } from "@fulcrumaxe/runner-protocol";
 import { diffTreeEntries, type TreeMap } from "@fulcrumaxe/runner-protocol/planePush";
 
 type Verdict = Pick<PlaneMergeOrderedFact, "verdict" | "resource" | "key" | "highest">;
@@ -62,6 +62,8 @@ export function orderedFactOf(input: OrderedFactsInput): PlaneMergeOrderedFact {
   const behind = input.mergeBase !== input.tip;
   const mine = diffTreeEntries(input.baseTree, input.headTree, () => true).paths;
   const added = mine.filter((p) => !input.baseTree.has(p));
+  // A path a configured glob cannot be matched against (past 512 characters) is invisible to the check, on the tip or in the pull request: that is not 'none' and not 'ok'.
+  if (hasUnmatchablePath(resources, added) || hasUnmatchablePath(resources, tipPaths)) return unknownFact(input.tip);
   const overlap = behind && pathsOverlap(diffTreeEntries(input.baseTree, input.tipTree, () => true).paths, mine);
   return { ...decideOrdered(resources, tipPaths, added), tip_sha: input.tip, behind, overlap };
 }

@@ -2396,6 +2396,18 @@ describe("a round for an overlap or an out-of-order number, for an item with no 
     }
   });
 
+  // D#483 S5-j2f: the gate read H2 while the review loop's head is H1: every start is pinned to what the gate read, never to the review's own head.
+  it.each([
+    ["an order stop (overlap)", { reroute: [{ state: "started" }], looks: [{ state: "merged" }] }, { outcome: "ready_human_merges", reasons: ["overlap_unreviewed"], status: "posted" }],
+    ["an order stop (renumber)", { reroute: [{ state: "started" }], looks: [{ state: "merged" }] }, { outcome: "ready_human_merges", reasons: ["ordered_resource_out_of_order"], status: "posted" }],
+    ["a merge conflict", { start: [{ state: "in_review" }] }, { outcome: "ready_human_merges", reasons: ["merge_conflict"], status: "posted" }],
+  ] as const)("the gate's head (H2) differs from the review's (H1): %s starts pinned to [H2]", async (_name, world, gate) => {
+    Object.assign(conflict, { reroute: [{ state: "not_applicable" }], start: [{ state: "not_applicable" }], looks: [{ state: "waiting" }], ...world, pins: [] });
+    setup(fresh({ gates: [{ ...gate, reasons: [...gate.reasons], headSha: H2 }, merged] }));
+    await workItemAdvanceWorkflow(ARGS);
+    expect(conflict.pins).toEqual([H2]);
+  });
+
   it("a gate that names no head is pinned to the head the review loop passed it", async () => {
     conflict.reroute = [{ state: "started" }];
     conflict.looks = [{ state: "merged" }];

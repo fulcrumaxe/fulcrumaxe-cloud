@@ -214,6 +214,24 @@ export interface AuthorTrustInputs {
   allowlist(): readonly string[] | null;
 }
 
+/** D#6 R3b: how a repo's reviews are judged. Only a runner_local repo with the admin's opt-in on is "on"; a failed read is off. The gate and the merge queue's tick both read it here. */
+export async function reviewModeOf(optIn: LocalReviewOptInPort | undefined, accountId: string, ctx: Pick<ReviewContext, "executionMode" | "repoId">): Promise<ReviewMode> {
+  if (ctx.executionMode !== "runner_local") return "cloud";
+  const optedIn = await (optIn ?? localReviewOptInOff).enabled({ accountId, repoId: ctx.repoId }).then((v) => v === true, () => false);
+  return optedIn ? "runner_local_on" : "runner_local_off";
+}
+
+/**
+ * D#483 S5-j2f: what the merge gate reads about an item's reviews before it judges a head: the review mode, and the security flag the head's code reviewer set. The merge queue's tick
+ * asks it for the head a conflict round left, so it judges that head by the gate's own rule. A context that cannot be loaded throws: the caller reads that as no evidence.
+ */
+export async function readReviewJudgement(pool: Pool, optIn: LocalReviewOptInPort | undefined, input: { accountId: string; workItemId: string; headSha: string }): Promise<{ mode: ReviewMode; flagged: boolean }> {
+  const loaded = await loadReviewContext(pool, input.accountId, input.workItemId);
+  if (!loaded.ok) throw new Error(`review judgement: ${loaded.reason}`);
+  const mode = await reviewModeOf(optIn, input.accountId, loaded.ctx);
+  return { mode, flagged: await reviewerFlaggedSecurity(pool, input.accountId, input.workItemId, input.headSha, mode === "runner_local_on") };
+}
+
 export type MergeGateRunDeps = { pool: Pool; http: GitHubHttp; localReviewOptIn?: LocalReviewOptInPort; publicPlane?: PublicPlanePort; mergeDelegate?: MergeDelegate; queueDocuments?: MergeQueueDocuments; authorTrust?: AuthorTrustInputs };
 
 export function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGateRunInput & { goPhase: { attestation: GoAttestation; orderId?: string } }): Promise<MergeGateGoResult>;
@@ -225,11 +243,7 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
   if (!loaded.ok) return { outcome: "refused", reason: loaded.reason };
   const ctx = loaded.ctx;
   // D#6 R3b: how this repo's reviews are judged. Only a runner_local repo with the admin's opt-in on is "on"; a failed read is off.
-  let reviewMode: ReviewMode = "cloud";
-  if (ctx.executionMode === "runner_local") {
-    const optedIn = await (deps.localReviewOptIn ?? localReviewOptInOff).enabled({ accountId, repoId: ctx.repoId }).then((v) => v === true, () => false);
-    reviewMode = optedIn ? "runner_local_on" : "runner_local_off";
-  }
+  const reviewMode = await reviewModeOf(deps.localReviewOptIn, accountId, ctx);
   const debaterEnabled = ctx.debaterMode === "always" || ctx.debaterMode === "feature_critical";
 
   const pr = { repoId: ctx.repoId, prNumber };

@@ -59,10 +59,11 @@ describe("parseWakeReply: strict, exactly {epoch, due_at}", () => {
 });
 
 describe("WakeTracker: the tier state machine", () => {
-  it("holds no grant until a hello or claim brings one, and a claim without one drops it", () => {
+  it("holds no grant until the hello that built it or a claim brings one, and a claim without one drops it", () => {
     const t = new WakeTracker();
     expect(t.mode()).toEqual({ kind: "none" });
-    t.onHello(grant());
+    expect(new WakeTracker(grant()).mode()).toMatchObject({ kind: "poll" });
+    t.onClaim(grant(), T0);
     expect(t.mode()).toMatchObject({ kind: "poll" });
     t.onClaim(undefined, T0);
     expect(t.mode()).toEqual({ kind: "none" });

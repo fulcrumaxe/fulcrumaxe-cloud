@@ -72,6 +72,21 @@ describe("orderedFactOf", () => {
     expect(orderedFactOf({ config: CONFIG, tip: TIP, mergeBase: BASE, baseTree: base, headTree: new Map(head).set("src/new.ts", entry(93)), tipTree: tip })).toEqual({ verdict: "none", tip_sha: TIP, behind: true, overlap: true });
   });
 
+  // D#483 S5-j2f: a configured glob never matches a path past 512 characters, so the check cannot see it: the fact says so instead of 'none'.
+  it("a path past the matcher's length bound under a configured resource is unknown, whether the pull request adds it or the tip holds it; the detected default is unaffected", () => {
+    const docs: PlaneMergeOrderedConfig = { configured: true, resources: [{ name: "docs", path_pattern: "docs/**", key_pattern: "^(\\d{3})-.+\\.md$", key_kind: "integer" }] };
+    const long = `docs/${"a/".repeat(260)}005-x.md`;
+    const base = tree(["docs/001-a.md", "src/a.ts"]);
+    const added = orderedFactOf({ config: docs, tip: TIP, mergeBase: TIP, baseTree: base, headTree: new Map(base).set(long, entry(99)), tipTree: base });
+    expect(added).toEqual({ verdict: "unknown", tip_sha: TIP, behind: false, overlap: false });
+    const onTip = orderedFactOf({ config: docs, tip: TIP, mergeBase: TIP, baseTree: base, headTree: new Map(base).set("docs/002-b.md", entry(98)), tipTree: new Map(base).set(long, entry(97)) });
+    expect(onTip.verdict).toBe("unknown");
+    // Short paths: still decided. And a repository with no configuration keeps its detected default, which has no length bound of its own.
+    expect(orderedFactOf({ config: docs, tip: TIP, mergeBase: TIP, baseTree: base, headTree: new Map(base).set("docs/002-b.md", entry(96)), tipTree: base }).verdict).toBe("ok");
+    const migs = tree(["db/migrations/0001_a.sql", "db/migrations/0002_b.sql", `${"x/".repeat(260)}y.ts`]);
+    expect(orderedFactOf({ config: { configured: false, resources: [] }, tip: TIP, mergeBase: TIP, baseTree: migs, headTree: new Map(migs).set("db/migrations/0003_c.sql", entry(95)), tipTree: migs }).verdict).toBe("ok");
+  });
+
   it("an added key is a path in the head tree and not in the merge base's: a changed existing file is not an added key", () => {
     const base = tree(TIP_PATHS);
     const input = { config: CONFIG, tip: TIP, mergeBase: TIP, baseTree: base, tipTree: base };

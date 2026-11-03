@@ -3,7 +3,7 @@ import { recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
 import { reportError } from "@fx/telemetry";
 import type { OrderedResourceReaderPort } from "../build/githubMergePort.js";
 import type { PullRequestRef } from "../build/types.js";
-import { checkOrdering, detectResource, orderedCode as part, readOrderedConfig, type ResourceRule } from "./orderedResources.js";
+import { checkOrdering, detectResource, hasUnmatchablePath, orderedCode as part, readOrderedConfig, type ResourceRule } from "./orderedResources.js";
 import { MERGE_QUEUE_CI_WAIT_MINUTES } from "./policy.js";
 import { MAIN_GUARD_PARK_LEASE_SECONDS } from "./mainGuard.js";
 import type { RenumberAsk } from "./renumber.js";
@@ -32,7 +32,7 @@ export interface OrderedDeps {
 }
 
 /** `ordered_host_wait` (D#483 S5-j2a2, R-C35-3): the pull request adds an ordered file while another one of the repository waits in GitHub's queue, so the tip has not moved for it yet. */
-export type OrderedOutcome = { outcome: "ordered_host_wait" } | { outcome: "ordered_renumbering" } | { outcome: "ordered_stopped" } | { outcome: "ordered_waiting" } | { outcome: "ordered_unreadable" };
+export type OrderedOutcome = { outcome: "ordered_host_wait" } | { outcome: "ordered_renumbering" } | { outcome: "ordered_stopped" } | { outcome: "ordered_path_too_long" } | { outcome: "ordered_waiting" } | { outcome: "ordered_unreadable" };
 
 export type Resolved = { state: "none" } | { state: "unknown" } | { state: "some"; resources: ResourceRule[]; branch: string; tip: readonly string[]; autoRenumber: boolean };
 
@@ -49,6 +49,8 @@ export async function resolveOrdered(deps: OrderedDeps, accountId: string, pr: P
     const tree = await read.listDefaultBranchPaths(pr);
     if (!tree.ok) return { state: "unknown" };
     const resources = config.configured ? config.resources : [detectResource(tree.paths)].filter((r): r is ResourceRule => r !== null);
+    // A tip path past the glob's bound is invisible to a configured resource: the highest key could be wrong, so the check cannot be made.
+    if (hasUnmatchablePath(resources, tree.paths)) return { state: "unknown" };
     return resources.length === 0 ? { state: "none" } : { state: "some", resources, branch: tree.branch, tip: tree.paths, autoRenumber: config.autoRenumber };
   } catch (err) {
     reportError(err, { stage: "merge_queue.ordered_resources" });
@@ -71,9 +73,12 @@ export async function orderedStep(deps: OrderedDeps, args: { accountId: string; 
   if (resolved.state === "none") return null;
   let bad: { rule: ResourceRule; key: string; highest: string; files: string[] } | null = null;
   let hostWait = false;
+  let pathTooLong = false;
   if (resolved.state === "some") {
     try {
-      const adds = await deps.github.listPullRequestAdds(pr);
+      const adds = await deps.github.listPullRequestAdds(pr, resolved.resources);
+      // A path past the glob's bound is no transient read: it stays until a person removes the file, so the entry stops at once instead of waiting out the unknown bound.
+      pathTooLong = !adds.complete && adds.incompleteBecause === "path_too_long";
       if (adds.complete) {
         for (const rule of resolved.resources) {
           const v = checkOrdering(rule, adds.paths, resolved.tip);
@@ -96,6 +101,13 @@ export async function orderedStep(deps: OrderedDeps, args: { accountId: string; 
   }
   const event = (c: PoolClient, code: string, reasons: string[]): Promise<unknown> =>
     entry.workItemId === null ? Promise.resolve() : recordDriverEvent(c, accountId, { workItemId: entry.workItemId, kind: code === "ordered_resource_unknown" || code === "ordered_resource_waiting" ? "merge_gate" : "stopped", dedupeKey: `${headSha}:${code}`, code, reasons, headSha, prNumber: entry.prNumber });
+  if (pathTooLong) {
+    await deps.inTenant(accountId, async (c) => {
+      await stopEntry(c, { accountId, entryId: entry.id, reason: "ordered_resource_path_too_long", holder });
+      await event(c, "ordered_resource_path_too_long", []);
+    });
+    return { outcome: "ordered_path_too_long" };
+  }
   if (hostWait) {
     await deps.inTenant(accountId, async (c) => {
       await event(c, "ordered_resource_waiting", ["ordered_resource_waiting"]);

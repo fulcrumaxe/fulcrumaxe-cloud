@@ -20,6 +20,7 @@ import {
   type UpdateBranchOutcome,
   type RequiredAppCheck,
 } from "./mergeGate.js";
+import { hasUnmatchablePath, MAX_PATH, type ResourceRule } from "../mergeQueue/orderedResources.js";
 import { readCleanMerge, readTreeEntries, type CleanMergeReading } from "./treeMerge.js";
 import type { PullRequestRef } from "./types.js";
 
@@ -206,10 +207,12 @@ export interface DefaultBranchReaderPort {
 /**
  * D#519 MQ5-a: the two reads the ordered-resource check needs, hosted repositories only (both refuse on a `runner_local` repository's allowlist, as `getDefaultBranchTip` does).
  * `listPullRequestAdds`: the paths the pull request adds (a rename counts as the new name), from the files API, paged by 100 and cut by GitHub at `PULL_FILES_CAP`;
- * `complete` is false when the list reached that ceiling. `listDefaultBranchPaths`: every path of the default branch's tip; a truncated tree is `ok: false`.
+ * `complete` is false when the list reached that ceiling (`incompleteBecause: "files_cap"`), or when a path is past the glob matcher's bound (`MAX_PATH`) and a configured resource applies
+ * (`"path_too_long"`): a configured glob never matches such a path, so the list cannot be order-checked. Given the repository's `resources`, only a configured one (one with a `spec`) counts, as in the
+ * runner's check; the detected default has no such bound. Not given, any path past the bound counts (fail closed). `listDefaultBranchPaths`: every path of the default branch's tip; a truncated tree is `ok: false`.
  */
 export interface OrderedResourceReaderPort {
-  listPullRequestAdds(pr: PullRequestRef): Promise<{ paths: readonly string[]; complete: boolean }>;
+  listPullRequestAdds(pr: PullRequestRef, resources?: readonly ResourceRule[]): Promise<{ paths: readonly string[]; complete: boolean; incompleteBecause?: "files_cap" | "path_too_long" }>;
   listDefaultBranchPaths(pr: PullRequestRef): Promise<{ ok: true; branch: string; paths: readonly string[] } | { ok: false }>;
 }
 /** GitHub lists at most this many files of one pull request. */
@@ -798,7 +801,7 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
 
     getDefaultBranchTip: defaultBranchTip,
 
-    async listPullRequestAdds(pr) {
+    async listPullRequestAdds(pr, resources) {
       if (deps.local) throw new Error(`GitHub pull request files: ${LOCAL_REFUSED}`);
       const path = `${await repoPath(pr)}/pulls/${pr.prNumber}/files`;
       const paths: string[] = [];
@@ -814,7 +817,11 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
         if (res.body.length < PER_PAGE) break;
       }
       // GitHub lists no more than the cap, so a list that reached it may be cut short: it is not complete.
-      return { paths, complete: listed < PULL_FILES_CAP };
+      // A path past the glob matcher's bound (512 characters) is never matched by a configured resource, so a list holding one cannot be order-checked: not complete either. Only a configured
+      // resource has that bound (`hasUnmatchablePath`), so a repository on the detected default is not held back by one, as on the runner. Without the resources, any such path counts.
+      const capped = listed >= PULL_FILES_CAP;
+      const tooLong = resources === undefined ? paths.some((p) => p.length > MAX_PATH) : hasUnmatchablePath(resources, paths);
+      return { paths, complete: !capped && !tooLong, ...(capped ? { incompleteBecause: "files_cap" as const } : tooLong ? { incompleteBecause: "path_too_long" as const } : {}) };
     },
 
     async listDefaultBranchPaths(pr) {

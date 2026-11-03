@@ -3,9 +3,10 @@ import type { PoolClient } from "pg";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, StageInputError } from "@fx/core/src/work-items/stages.js";
 import { reportError } from "@fx/telemetry";
-import { classifyCi, expectedSignalNames, hasReviewerPass, readRunsOnSha, type CiVerdict, type MergeBlockReason, type MergeGateGitHubPort, type PullRequestMergeability } from "../build/mergeGate.js";
+import { classifyCi, expectedSignalNames, gateReviewerReasons, readRunsOnSha, roleReasons, type CiVerdict, type GatedRole, type MergeBlockReason, type MergeGateGitHubPort, type PullRequestMergeability, type ReviewMode } from "../build/mergeGate.js";
 import type { OrderedResourceReaderPort } from "../build/githubMergePort.js";
 import type { PullRequestRef } from "../build/types.js";
+import type { DeltaReviewPorts } from "./deltaReview.js";
 import { guardMain, type MainGuardGitHubPort } from "./mainGuard.js";
 import { clearOrderedStops, orderedStep, type OrderedDeps, type OrderedOutcome } from "./orderedCheck.js";
 import { MERGE_QUEUE_CI_WAIT_MINUTES } from "./policy.js";
@@ -63,6 +64,10 @@ export interface QueueTickDeps {
   writeback?: WritebackTickPort;
   /** MQ3-a's port, bound by the caller to the real reviewer start. */
   startDeltaReview: StartDeltaReview;
+  /** D#483 S5-j2f: the roles the merge gate requires for the entry's pull request at a head: the same port the delta review reads them from (`DeltaReviewPorts.plan`). */
+  reviewPlan: DeltaReviewPorts["plan"];
+  /** D#483 S5-j2f: how the merge gate judges this entry's reviews, read as the gate reads them: the item's review mode (a `runner_local` repository's opt-in decides whether a runner's pass counts), and whether the head's code reviewer set the security flag, which adds a required role. */
+  reviewJudgement(args: { entry: MergeQueueEntry; headSha: string }): Promise<{ mode: ReviewMode; flagged: boolean }>;
   /**
    * MQ4's port: a real conflict. Called for a queued entry as soon as a recheck sees it, and for the holder when update-branch or the
    * merge reports one. Answers whether a fix round was started. Absent, or `false`: the entry stops with `merge_conflict`.
@@ -205,12 +210,18 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
     }
   }
 
-  // D#483: the stored head is the result of a conflict round that conflicted again, and no reviewer passed it: nobody has read it. It goes back to review before any refresh or
-  // ordered step, because both would start from it and the passes they carry or the delta they review would not cover it.
-  if (await conflictedHeadUnreviewed(deps, accountId, held)) {
+  // D#483: the stored head is the result of a conflict round that conflicted again. Three answers, by the gate's own rule over the rows that speak for that head:
+  //   read: every role the gate requires has a pass it counts, so the entry goes on;
+  //   unread: a required role has no counted pass and no row the gate ignores explains it, so it goes back to review before any refresh or ordered step (both would start from
+  //     this head, and the passes they carry or the delta they review would not cover it);
+  //   not counted: the head has reviews the gate does not count (a runner nobody registered, or a rejection by a role it does not require), and nothing else is missing. Reviewing
+  //     again cannot change that, and a refresh would start from a head no trusted reviewer read, so the entry stops for a person with the reason the gate would give.
+  const head = await conflictedHeadAnswer(deps, accountId, held);
+  if (head.answer === "review") {
     await deps.inTenant(accountId, (c) => returnToReview(c, { accountId, entryId: held.id }));
     return release("head_unreviewed");
   }
+  if (head.answer === "stop") return afterRefusal(deps, accountId, held, holder, head.reasons, undefined);
 
   // D#519 MQ-MAIN-RED-GUARD: no refresh, CI wait or merge while the default branch's newest result is red.
   const main = await guardMain({ github: deps.github, inTenant: deps.inTenant, ...(deps.now ? { now: deps.now } : {}) }, { accountId, entry: held, holder, pr });
@@ -285,6 +296,8 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
       return release("ordered_resource_renumbering");
     case "ordered_stopped":
       return release("ordered_resource_out_of_order");
+    case "ordered_path_too_long":
+      return release("ordered_resource_path_too_long");
     case "ordered_unreadable":
       return release("ordered_resource_unreadable");
     case "merge_enqueued":
@@ -309,22 +322,41 @@ async function takeAndRun(deps: QueueTickDeps, input: { accountId: string; repoI
   }
 }
 
+type ConflictedHead = { answer: "read" } | { answer: "review" } | { answer: "stop"; reasons: MergeBlockReason[] };
+
 /**
- * Whether the entry's stored head is a conflicted-again round's result that no reviewer has passed. The evidence is the gate's own read of the rows that speak for a head
- * (`readRunsOnSha`), so a head a full review later passed is not caught. A read that fails counts as no evidence: the entry goes back to review.
+ * What to do with an entry whose stored head is a conflicted-again round's result (D#483). The evidence is the gate's own rule over the gate's own read of the rows that speak for
+ * the head: `readRunsOnSha`, the roles the plan port names (asked with the security flag the gate reads), and the item's real review mode, so what counts here is what counts there.
+ *  - `read`: `reviewerReasons` is empty.
+ *  - `review`: some required role has no counted pass and no row the gate ignores explains it (no run, or a counted run that failed or did not pass).
+ *  - `stop`: every required role either passed or has only rows the gate does not count, and the head still does not clear (an untrusted pass, a rejection by a role the gate does not
+ *    require, an invalid timestamp). The reasons are the gate's, for the entry's usual stop.
+ * Any read that fails (the rounds, the rows, the plan, the judgement) counts as no evidence: the entry goes back to review.
  */
-async function conflictedHeadUnreviewed(deps: QueueTickDeps, accountId: string, entry: MergeQueueEntry): Promise<boolean> {
-  if (entry.workItemId === null || entry.entryKind !== "work_item") return false;
+async function conflictedHeadAnswer(deps: QueueTickDeps, accountId: string, entry: MergeQueueEntry): Promise<ConflictedHead> {
+  if (entry.workItemId === null || entry.entryKind !== "work_item") return { answer: "read" };
   const workItemId = entry.workItemId;
-  const rounds = await deps.inTenant(accountId, (c) => listConflictRounds(c, accountId, workItemId));
-  if (!rounds.some((r) => r.outcome === "conflicted_again" && r.toSha === entry.headSha)) return false;
   try {
-    return !hasReviewerPass(await deps.inTenant(accountId, (c) => readRunsOnSha(c, accountId, workItemId, entry.headSha)));
+    const rounds = await deps.inTenant(accountId, (c) => listConflictRounds(c, accountId, workItemId));
+    if (!rounds.some((r) => r.outcome === "conflicted_again" && r.toSha === entry.headSha)) return { answer: "read" };
+    const { mode, flagged } = await deps.reviewJudgement({ entry, headSha: entry.headSha });
+    const plan = await deps.reviewPlan({ entry, headSha: entry.headSha, flagged });
+    if (!plan.ok) return { answer: "review" };
+    const roles = plan.roles.filter((r): r is GatedRole => GATED_ROLES.includes(r));
+    const rows = await deps.inTenant(accountId, (c) => readRunsOnSha(c, accountId, workItemId, entry.headSha));
+    const reasons = gateReviewerReasons(roles, rows, mode);
+    if (reasons.length === 0) return { answer: "read" };
+    for (const role of roles) {
+      const why = roleReasons(role, rows, mode === "runner_local_on");
+      if (why.length > 0 && !why.some((r) => r.startsWith("run_not_production_") || r.startsWith("runner_not_trusted_"))) return { answer: "review" };
+    }
+    return { answer: "stop", reasons };
   } catch (err) {
     reportError(err, { stage: "merge_queue.conflicted_head" });
-    return true;
+    return { answer: "review" };
   }
 }
+const GATED_ROLES: readonly string[] = ["code-reviewer", "security-reviewer", "acceptance-tester", "debater"];
 
 /** The queue answer for a pull request; absent, or a failed read, is `unknown` with a bound of 1 (nothing is skipped and no second entry goes in). */
 async function queueInfoOf(deps: QueueTickDeps, pr: PullRequestRef): Promise<{ mode: "queue" | "direct" | "unknown"; maxEntries: number }> {

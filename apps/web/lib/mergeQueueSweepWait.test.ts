@@ -28,6 +28,7 @@ vi.mock("./advanceReview", () => ({ createReviewDeps: () => ({}) }));
 vi.mock("./mergeQueueDeltaReview", () => ({
   bindStartDeltaReview: () => async () => undefined,
   bindCompleteDeltaReview: () => async (entry: { id: string }) => void h.completed.push(`delta:${entry.id}`),
+  deltaReviewPorts: () => ({ plan: async () => ({ ok: true, roles: [] }) }),
 }));
 vi.mock("./mergeQueueConflict", () => ({
   bindOnConflict: () => async () => false,

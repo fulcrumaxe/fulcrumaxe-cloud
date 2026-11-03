@@ -20,7 +20,7 @@ export const MAX_GLOB = 200;
 export const MAX_KEY_INPUT = 256;
 export const KEY_PATTERN_COST_LIMIT = 100_000;
 const MAX_REPEAT = 64;
-const MAX_PATH = 512;
+export const MAX_PATH = 512;
 
 export type KeyKind = "integer" | "text";
 export type Key = number | string;
@@ -171,6 +171,12 @@ export function compileGlob(glob: unknown): ((path: string) => boolean) | null {
     return go(0, 0);
   };
 }
+
+/**
+ * D#483 S5-j2f: a configured glob never matches a path past `MAX_PATH` (the matcher refuses it to stay bounded), so such a path is never ordered and a pull request that adds one reads as adding
+ * no ordered file. True when a rule compiled from a tenant's glob applies and a path is past the bound: the answer for that set is "cannot tell", never "none" or "ok". The detected default has no such bound.
+ */
+export const hasUnmatchablePath = (resources: readonly ResourceRule[], paths: readonly string[]): boolean => resources.some((r) => r.spec !== undefined) && paths.some((p) => p.length > MAX_PATH);
 
 function toRule(e: unknown): ResourceRule | null {
   if (e === null || typeof e !== "object" || Array.isArray(e)) return null;

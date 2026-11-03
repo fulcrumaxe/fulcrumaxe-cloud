@@ -45,9 +45,9 @@ export interface ContinueModuleDeps extends Pick<ContinuationDeps, "resolveRunSe
   /**
    * The pipeline's `takeBuildSlot` (apps/web hands it in; this package cannot import @fx/pipeline). A Continue puts the item back In progress, which holds a build
    * slot, so it claims one the way a start does: the run start and the stage move happen inside the claim, or nothing starts and the request is refused with the
-   * wait code. Absent: no claim.
+   * wait code. REQUIRED (D#483 S5-j2f): a caller that has no claim says so with `null`, so dropping the hand-over is a type error, not a silent skip of the slot clamp.
    */
-  takeBuildSlot?: (<T>(accountId: string, workItemId: string, move: () => Promise<T>) => Promise<{ granted: true; value: T } | { granted: false; reason: string }>) | null;
+  takeBuildSlot: (<T>(accountId: string, workItemId: string, move: () => Promise<T>) => Promise<{ granted: true; value: T } | { granted: false; reason: string }>) | null;
 }
 
 export interface ContinueFacade {
@@ -133,7 +133,9 @@ export function createContinueModule(runnerPool: Pool, registry: ExecutionTarget
     if (f.own) {
       if (f.own.status === "refused_spend") return refused(f.park === "monthly_budget_reached" ? "monthly_budget_reached" : "spend");
       if (f.own.status === "cancelled") return refused("not_continuable");
-      return finish(who, actionId, f.own.id, f.own.status);
+      // The run exists but the item may still be parked (a crash between the two): the move In progress holds a slot, so it goes through the claim like the start's did.
+      const held = await claimMove(f, accountId, userId, itemId, actionId, f.own.id);
+      return held ?? finish(who, actionId, f.own.id, f.own.status);
     }
 
     if (CLOSED_STAGES.includes(f.item.stage)) return refused("work_item_closed");
@@ -170,8 +172,10 @@ export function createContinueModule(runnerPool: Pool, registry: ExecutionTarget
         return finish(who, actionId, result.resume.id, result.resume.status);
       case "duplicate": {
         // Another caller's continuation of this run is live or finished; this request's own key started nothing.
-        const own = (await load(accountId, userId, itemId, actionId)).own;
-        return own && own.status !== "refused_spend" && own.status !== "cancelled" ? finish(who, actionId, own.id, own.status) : refused("not_continuable");
+        const again = await load(accountId, userId, itemId, actionId);
+        const own = again.own;
+        if (!own || own.status === "refused_spend" || own.status === "cancelled") return refused("not_continuable");
+        return (await claimMove(again, accountId, userId, itemId, actionId, own.id)) ?? finish(who, actionId, own.id, own.status);
       }
       case "busy":
         throw new ContinueBusyError();
@@ -183,6 +187,13 @@ export function createContinueModule(runnerPool: Pool, registry: ExecutionTarget
       default:
         return refused("not_continuable");
     }
+  }
+
+  /** When the item is still parked by a run limit, the move In progress through the build-slot claim; a refusal (no slot) is the answer, anything else is null (nothing left to claim, or no claim to take). */
+  async function claimMove(f: Facts, accountId: string, userId: string, itemId: string, actionId: string, runId: string): Promise<PerformResult | null> {
+    if (!deps.takeBuildSlot || f.item?.stage !== "needs_human" || f.item.halted || f.park === undefined || !LIMIT_PARKS.includes(f.park)) return null;
+    const claim = await deps.takeBuildSlot(accountId, itemId, () => withTenant(runnerPool, accountId, userId, (client) => parkedToInProgress(client, accountId, itemId, actionId, runId)));
+    return claim.granted ? null : refused(CODE_RE.test(claim.reason) ? claim.reason : "not_continuable");
   }
 
   /** Locks the item and, when it is still parked by a run limit and not halted, moves it to In progress (keyed on the request, so a replay is a no-op). Answers the row as locked. */

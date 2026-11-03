@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createGitHubMergeGatePort, PULL_FILES_CAP } from "../../src/build/githubMergePort.js";
+import { detectResource, readOrderedConfig } from "../../src/mergeQueue/orderedResources.js";
 import { startMergeTlsGitHub, type MergeTlsGitHub, type MergeWorld } from "../review/helpers/fakeGitHubMergeTls.js";
 
 /**
@@ -47,6 +48,33 @@ describe("listPullRequestAdds", () => {
     expect(cut.paths).toHaveLength(PULL_FILES_CAP);
     expect(pages(big.g)).toHaveLength(30);
     expect((await (await github({ pullFiles: files(2999) })).port.listPullRequestAdds(PR)).complete).toBe(true);
+  });
+
+  // D#483 S5-j2f: only a configured resource has the matcher's length bound, so only under one is the list incomplete; the runner's check says the same (`hasUnmatchablePath`).
+  it("a path past 512 characters makes the list incomplete under a configured resource only; the detected default has no such bound, and without the resources it is incomplete (fail closed)", async () => {
+    const long = `db/${"a/".repeat(260)}0001_f.sql`;
+    const { port } = await github({ pullFiles: [...files(3), { filename: long, status: "added" }] });
+    const configured = readOrderedConfig({ orderedResources: [{ name: "db", pathPattern: "db/**", keyPattern: "^(\\d{4})_.+\\.sql$", keyKind: "integer" }] }).resources;
+    const detected = [detectResource(["db/0001_a.sql", "db/0002_b.sql"])!];
+    expect(configured).toHaveLength(1);
+    const under = await port.listPullRequestAdds(PR, configured);
+    expect(under).toMatchObject({ complete: false, incompleteBecause: "path_too_long" });
+    expect(under.paths).toHaveLength(4);
+    expect(await port.listPullRequestAdds(PR, detected)).toMatchObject({ complete: true });
+    expect((await port.listPullRequestAdds(PR, detected)).incompleteBecause).toBeUndefined();
+    expect(await port.listPullRequestAdds(PR, [])).toMatchObject({ complete: true });
+    expect(await port.listPullRequestAdds(PR)).toMatchObject({ complete: false, incompleteBecause: "path_too_long" });
+    // The bound itself: 512 characters is matchable, 513 is not.
+    const edge = await github({ pullFiles: [{ filename: "a".repeat(512), status: "added" }] });
+    expect((await edge.port.listPullRequestAdds(PR, configured)).complete).toBe(true);
+    expect((await edge.port.listPullRequestAdds(PR)).complete).toBe(true);
+    const past = await github({ pullFiles: [{ filename: "a".repeat(513), status: "added" }] });
+    expect((await past.port.listPullRequestAdds(PR, configured)).complete).toBe(false);
+  });
+
+  it("a list cut at GitHub's ceiling says so, and says so before any path length", async () => {
+    const { port } = await github({ pullFiles: files(PULL_FILES_CAP + 5) });
+    expect(await port.listPullRequestAdds(PR, [])).toMatchObject({ complete: false, incompleteBecause: "files_cap" });
   });
 
   it("a failed read is an error, never an empty list; a malformed file throws", async () => {

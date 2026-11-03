@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkOrdering, compileGlob, compileKeyPattern, detectResource, MAX_KEY_INPUT, parseKey, readOrderedConfig } from "../../src/mergeQueue/orderedResources.js";
+import { checkOrdering, compileGlob, compileKeyPattern, detectResource, hasUnmatchablePath, MAX_KEY_INPUT, parseKey, readOrderedConfig } from "../../src/mergeQueue/orderedResources.js";
 
 /**
  * D#519 MQ5-a: the pure half of the ordered-resource check. The key pattern of a configuration is tenant text, so the first block is the ReDoS bound: a pattern outside the
@@ -133,6 +133,17 @@ describe("globs and the detected default", () => {
     const deep = compileGlob("**/*a*a")!;
     expect(deep(`${"x/".repeat(200)}${"a".repeat(100)}`)).toBe(true);
     expect(performance.now() - t0).toBeLessThan(10);
+  });
+
+  it("a path past the glob's length bound never matches it, and hasUnmatchablePath says so for a configured resource only", () => {
+    const cfg = readOrderedConfig({ orderedResources: [{ name: "docs", pathPattern: "docs/**", keyPattern: "^(\\d+)-.+$", keyKind: "integer" }] });
+    const long = `docs/${"a/".repeat(260)}1-x.md`;
+    expect(cfg.resources[0]!.matches(long)).toBe(false);
+    expect(hasUnmatchablePath(cfg.resources, ["docs/1-a.md", long])).toBe(true);
+    expect(hasUnmatchablePath(cfg.resources, ["docs/1-a.md", "a".repeat(512)])).toBe(false);
+    expect(hasUnmatchablePath(cfg.resources, ["a".repeat(513)])).toBe(true);
+    expect(hasUnmatchablePath([], [long])).toBe(false);
+    expect(hasUnmatchablePath([detectResource(["db/0001_a.sql", "db/0002_b.sql"])!], [long])).toBe(false);
   });
 
   it("detects migrations from the directory with at least two NNNN_*.sql files, keyed on the prefix", () => {

@@ -110,11 +110,6 @@ export class WakeTracker {
     this.failures = 0;
   }
 
-  /** A hello reply: its grant, if any, replaces the one held. A hello without one leaves the state alone (the claim decides). */
-  onHello(grant: WakeGrant | undefined): void {
-    if (grant) this.take(grant);
-  }
-
   /** A 200 claim reply (idle or claimed), sent at `nowMs`. Its grant replaces the one held and ends a fallback; none drops the grant. */
   onClaim(grant: WakeGrant | undefined, nowMs: number): void {
     const seen = this.seen;

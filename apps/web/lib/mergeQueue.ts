@@ -2,11 +2,11 @@ import type { Pool } from "pg";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { reportError } from "@fx/telemetry";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { createGitHubMergeGatePort, mergeQueue, mergeRecordedHead, type GitHubHttp } from "@fx/pipeline";
+import { createGitHubMergeGatePort, createPgLocalReviewOptIn, mergeQueue, mergeRecordedHead, readReviewJudgement, type GitHubHttp } from "@fx/pipeline";
 import type { AdvanceReviewDeps, RunnerPlaneMergeStore } from "@fx/worker";
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT, MERGE_QUEUE_REMOVAL_DOCUMENT, type GithubWebhookPayload, type GithubWebhookEventName } from "@fx/github";
 import { createReviewDeps } from "./advanceReview";
-import { bindCompleteDeltaReview, bindStartDeltaReview } from "./mergeQueueDeltaReview";
+import { bindCompleteDeltaReview, bindStartDeltaReview, deltaReviewPorts } from "./mergeQueueDeltaReview";
 import { bindCompleteConflictRound, bindCompleteEntryless, bindOnConflict, completeRunnerEntryless, endRoundWithoutPr, endRunnerRoundIfTargetChanged, readEntrylessSubject } from "./mergeQueueConflict";
 import { RUNNER_CONFLICT_START_ENABLED } from "./mergeQueueWait";
 import { bindOnRenumber } from "./mergeQueueRenumber";
@@ -40,6 +40,9 @@ export interface MergeQueueTickerDeps {
   appLogin?: (repoId: string) => Promise<string>;
   /** MQ3-a's delta-review start. Absent: the real one, bound to the reviewer start (mergeQueueDeltaReview.ts). */
   startDeltaReview?: mergeQueue.StartDeltaReview;
+  reviewPlan?: mergeQueue.QueueTickDeps["reviewPlan"];
+  /** The review mode and the security flag the gate would read for an entry. Absent: read from the item, as the gate does. */
+  reviewJudgement?: mergeQueue.QueueTickDeps["reviewJudgement"];
   /** MQ4-b: the conflict decision and round start. Absent: the real one (mergeQueueConflict.ts). */
   onConflict?: mergeQueue.QueueTickDeps["onConflict"];
   onRenumber?: mergeQueue.QueueTickDeps["onRenumber"];
@@ -130,6 +133,10 @@ export async function tickMergeQueueRepo(deps: MergeQueueTickerDeps, target: { a
       // D#694 B6-3: the rule's batch size bounds how many entries wait in the host's queue, and a queue branch is never updated by the product.
       queueInfo: (pr) => github.getMergeQueueInfo!(pr),
       startDeltaReview: deps.startDeltaReview ?? bindStartDeltaReview({ pool, worker: await getWorker(), open, github }),
+      // D#483 S5-j2f: the roles the gate requires, from the same port the delta review reads them from (a head a conflict round left is judged by the gate's own rule).
+      reviewPlan: deps.reviewPlan ?? deltaReviewPorts({ pool, worker: await getWorker(), open, github }).plan,
+      // The review mode and the security flag, read as the gate reads them (a head a conflict round left is judged by the gate's own rule).
+      reviewJudgement: deps.reviewJudgement ?? (({ entry, headSha }) => readReviewJudgement(pool, createPgLocalReviewOptIn(pool), { accountId: entry.accountId, workItemId: entry.workItemId!, headSha })),
       onConflict: deps.onConflict ?? bindOnConflict({ pool, worker: await getWorker(), open, github }),
       onRenumber: deps.onRenumber ?? bindOnRenumber({ pool, worker: await getWorker(), open, github }),
       sleep: deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),

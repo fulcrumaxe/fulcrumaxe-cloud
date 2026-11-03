@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { runMergeGate, type MergeGateDeps, type MergeGateInput } from "../../src/build/mergeGate.js";
-import { acquireMergeLease, hasLiveMergeLease, holdLeaseForHostQueue, lockRepoMerge, reapLapsedHostHold, releaseHostQueueLease, releaseMergeLease, type HostQueueEntryState } from "../../src/mergeQueue/mergeLease.js";
+import { acquireMergeLease, hasLiveMergeLease, holdLeaseForHostQueue, lockRepoMerge, orderHolder, reapLapsedHostHold, releaseHostQueueLease, releaseMergeLease, type HostQueueEntryState } from "../../src/mergeQueue/mergeLease.js";
 import { MERGE_QUEUE_LEASE_SECONDS } from "../../src/mergeQueue/policy.js";
 import { enqueueEntry, takeSlot } from "../../src/mergeQueue/store.js";
 import type { PrFacts } from "../../src/mergeQueue/types.js";
@@ -276,6 +276,50 @@ describe("D#483 S5-j2a1 merge lease [pg]", () => {
         expect((await acquireMergeLease(db.pureAppUserPool, { ...w, ...reader }) ).taken, bad).toBe(true);
       }
       expect(reads).toEqual([]);
+    });
+
+    it("a holder that says it is a runner's order but is not well formed fails closed the same way: busy for 24 hours after its lease_until, for a gate and for the tick", async () => {
+      const ORDER = "11111111-2222-4333-8444-555555555555";
+      for (const bad of ["ord:garbage", `ord:${ORDER}`, `ord:${ORDER}:`, `ord:${ORDER}:12x`, `ord:not-a-uuid:${nowMin()}`, `ord:${ORDER}:${nowMin()}:extra`]) {
+        const w = await world();
+        const entry = await queued(w, 31);
+        await db.admin.query("INSERT INTO repo_merge_leases (account_id, repo_id, holder, kind, lease_until) VALUES ($1, $2, $3, 'direct', now() - interval '1 second')", [w.accountId, w.repoId, bad]);
+        expect(await acquireMergeLease(db.pureAppUserPool, { ...w }), bad).toEqual({ taken: false });
+        expect(await take(w, entry.id), bad).toMatchObject({ taken: null, skipped: "slot_busy" });
+        expect((await leaseRows(w))[0]!.holder).toBe(bad);
+        await db.admin.query("UPDATE repo_merge_leases SET lease_until = now() - interval '25 hours' WHERE repo_id = $1", [w.repoId]);
+        expect((await acquireMergeLease(db.pureAppUserPool, { ...w })).taken, bad).toBe(true);
+      }
+    });
+
+    // A retry of an order whose lease is still held waits for the order's end or its deadline: it never replaces the holder (a replaced holder in the same minute is identical, so the old gate's confirm would stay true).
+    it("a retry of a live order, in the same minute or a later one, and at any state before the hand-over, answers busy and leaves the first holder's lease alone", async () => {
+      const w = await world();
+      const item = randomUUID();
+      await seedWorkItem(db.admin, w.accountId, item, w.repoId, { ghNumber: 5 });
+      const push = randomUUID();
+      await db.admin.query("INSERT INTO plane_pushes (id, account_id, work_item_id, repo_id, code_repo, pairing_digest, state) VALUES ($1, $2, $3, $4, 'acme/widgets-public', $5, 'building')", [push, w.accountId, item, w.repoId, "a".repeat(64)]);
+      const order = (await db.admin.query(`INSERT INTO plane_merge_orders (account_id, work_item_id, plane_push_id, repo_id, code_repo, pr_number, expected_public_head, reviewed_head, pairing_digest, deadline_at)
+                                           VALUES ($1, $2, $3, $4, 'acme/widgets-public', 7, $5, $5, $6, now() + interval '1 hour') RETURNING id`, [w.accountId, item, push, w.repoId, HEAD, "a".repeat(64)])).rows[0].id as string;
+      const asOrder = (id: string, ageMinutes = 0) => acquireMergeLease(db.pureAppUserPool, { ...w, kind: "order", holder: orderHolder(id, new Date(Date.now() - ageMinutes * 60_000)), leaseSeconds: 3600 });
+      const first = await asOrder(order, 5);
+      expect(first.taken).toBe(true);
+      if (!first.taken) throw new Error("unreachable");
+      // Another order (no row of its own) and a plain direct gate wait.
+      expect((await asOrder(randomUUID())).taken).toBe(false);
+      expect((await acquireMergeLease(db.pureAppUserPool, { ...w })).taken).toBe(false);
+      // The same order asking again, in the same minute and in a later one, waits: pending, then claimed (nothing handed over yet), then authorized.
+      for (const state of ["pending", "claimed", "authorized"]) {
+        if (state === "claimed") await db.admin.query("UPDATE plane_merge_orders SET state = 'claimed', lease_generation = 1, lease_expires_at = now() + interval '1 hour' WHERE id = $1", [order]);
+        if (state === "authorized") await db.admin.query("UPDATE plane_merge_orders SET state = 'authorized', write_token_issued_at = now() WHERE id = $1", [order]);
+        expect((await asOrder(order, 5)).taken, `${state} same minute`).toBe(false);
+        expect((await asOrder(order)).taken, `${state} later minute`).toBe(false);
+        expect(await first.confirm(), state).toBe(true);
+        expect(await leaseRows(w), state).toEqual([{ holder: first.holder, kind: "order" }]);
+      }
+      // The first gate's own release frees it, and only then.
+      await first.release();
+      expect(await leaseRows(w)).toEqual([]);
     });
 
     it("the queue tick treats a hold as busy whether lapsed or not, until a gate's read, the settle, the sweep or the 24 hours frees it; the sweep's read frees a lapsed one that is gone, and keeps one still queued", async () => {

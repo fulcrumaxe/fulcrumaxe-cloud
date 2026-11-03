@@ -141,6 +141,9 @@ export async function startQueueRepo(db: { admin: PoolClient; runWriterPool: Poo
           return out;
         },
         startDeltaReview: opts.onDeltaReview ?? (async () => ({ started: true, runId: randomUUID() })),
+        // The roles the gate asks of a "small" item: what the world's seeded passes cover.
+        reviewPlan: async () => ({ ok: true as const, roles: ["code-reviewer", "acceptance-tester"] }),
+        reviewJudgement: async () => ({ mode: "cloud" as const, flagged: false }),
         sleep: async () => undefined,
         pollIntervalMs: 0,
         pollLimit: 4,

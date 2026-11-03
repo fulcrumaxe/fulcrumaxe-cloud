@@ -10,6 +10,8 @@ export {
   compileGlob,
   compileKeyPattern,
   detectResource,
+  hasUnmatchablePath,
+  MAX_PATH,
   orderedCode,
   orderedConfigWire,
   parseKey,

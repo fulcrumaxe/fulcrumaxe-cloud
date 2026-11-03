@@ -465,6 +465,8 @@ export type MergeBlockReason =
   | "ordered_resource_out_of_order"
   /** D#483 S5-j2a2: the ordered-resource check could not read what it needs (a failed read, a cut-short tree or file list); nothing merges, and the next ask reads again. */
   | "ordered_resource_unreadable"
+  /** D#483 S5-j2f: the pull request adds a file whose path is past the glob matcher's bound under a configured ordered resource; the queue entry stops, and the card shows the sentence of this code. */
+  | "ordered_resource_path_too_long"
   /** D#483 S5-j2a2: the base branch gained changes to files this pull request changes since its merge base, and no review covers them. */
   | "overlap_unreviewed"
   /** D#483 S5-j2a2: a `runner_local` item with another live item on its repository, until the runner can attest migration order. */
@@ -777,9 +779,6 @@ export async function readRunsOnSha(client: PoolClient, accountId: string, workI
   );
   return rows;
 }
-
-/** Whether any gated role has a succeeded pass on these rows that the gate would count (a production run, or a trusted runner's). Nothing else is evidence that anyone reviewed the head. */
-export const hasReviewerPass = (rows: readonly RunRow[]): boolean => rows.some((r) => r.status === "succeeded" && r.verdict === "pass" && runtimeCounts(r, true));
 
 /**
  * D#519 MQ3-a: the rows that speak for `headSha`. Its own rows, and, for a role with none, the rows of the head it was refreshed from,

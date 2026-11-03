@@ -647,6 +647,21 @@ describe("D#519 MQ2 merge queue core [pg]", () => {
       expect(await inFlight(w)).toEqual([]);
     });
 
+    // D#483 S5-j2f: the one move out of `cancelled` is for an item's own entry; a plan write-back's entry that was cancelled (the platform replaced it) stays final in the database itself.
+    it("D4c: a cancelled plan write-back entry cannot move to queued, whoever writes; a cancelled work-item entry still can", async () => {
+      const w = await world();
+      const wb = randomUUID();
+      await db.admin.query(`INSERT INTO plan_writebacks (id, account_id, repo_id, plan_path, branch) VALUES ($1, $2, $3, 'docs/plan.md', 'fulcrumaxe/plan-update-d4c')`, [wb, w.accountId, w.repoId]);
+      const row = (await db.admin.query(`INSERT INTO merge_queue_entries (account_id, repo_id, work_item_id, plan_writeback_id, entry_kind, pr_number, head_sha, approved_at, state)
+                                         VALUES ($1, $2, NULL, $3, 'plan_writeback', 9, $4, now(), 'queued') RETURNING id`, [w.accountId, w.repoId, wb, sha("a")])).rows[0];
+      await db.admin.query(`UPDATE merge_queue_entries SET state = 'cancelled', reason = 'replaced' WHERE id = $1`, [row.id]);
+      await expect(db.admin.query(`UPDATE merge_queue_entries SET state = 'queued', reason = NULL WHERE id = $1`, [row.id])).rejects.toMatchObject({ code: "23514" });
+      expect((await db.admin.query(`SELECT state FROM merge_queue_entries WHERE id = $1`, [row.id])).rows[0].state).toBe("cancelled");
+      const a = await enqueue(w, 1, 0);
+      await tenant(w.accountId, (c) => cancelWorkItemEntry(c, { accountId: w.accountId, workItemId: a.workItemId! }));
+      expect((await db.admin.query(`UPDATE merge_queue_entries SET state = 'queued', reason = NULL WHERE id = $1`, [a.id])).rowCount).toBe(1);
+    });
+
     it("D4b: a cancelled entry is not re-queued for another pull request (entry_pr_mismatch stays), and merged and closed stay final", async () => {
       const w = await world();
       const a = await enqueue(w, 1, 0);
