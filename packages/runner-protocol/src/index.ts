@@ -9,6 +9,7 @@ export * from "./detailRules.js";
 export * from "./messages.js";
 export * from "./replies.js";
 export * from "./job.js";
+export * from "./orderedResources.js";
 export * from "./sandboxAllowances.js";
 export * from "./jobSignature.js";
 export * from "./httpSignature.js";

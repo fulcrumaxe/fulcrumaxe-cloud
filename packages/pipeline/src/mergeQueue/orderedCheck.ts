@@ -3,7 +3,7 @@ import { recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
 import { reportError } from "@fx/telemetry";
 import type { OrderedResourceReaderPort } from "../build/githubMergePort.js";
 import type { PullRequestRef } from "../build/types.js";
-import { checkOrdering, detectResource, readOrderedConfig, type ResourceRule } from "./orderedResources.js";
+import { checkOrdering, detectResource, orderedCode as part, readOrderedConfig, type ResourceRule } from "./orderedResources.js";
 import { MERGE_QUEUE_CI_WAIT_MINUTES } from "./policy.js";
 import { MAIN_GUARD_PARK_LEASE_SECONDS } from "./mainGuard.js";
 import type { RenumberAsk } from "./renumber.js";
@@ -36,7 +36,7 @@ export type OrderedOutcome = { outcome: "ordered_host_wait" } | { outcome: "orde
 
 export type Resolved = { state: "none" } | { state: "unknown" } | { state: "some"; resources: ResourceRule[]; branch: string; tip: readonly string[]; autoRenumber: boolean };
 
-const part = (prefix: string, v: string): string => `${prefix}_${v.toLowerCase().replace(/[^a-z0-9_]+/g, "_")}`.slice(0, 64);
+// `part` is the protocol module's `orderedCode`: the runner writes the same codes (D#483 S5-j2c2).
 
 /** Which resources apply to the repository now, with the tip's paths. Anything unreadable is `unknown`. */
 export async function resolveOrdered(deps: OrderedDeps, accountId: string, pr: PullRequestRef): Promise<Resolved> {

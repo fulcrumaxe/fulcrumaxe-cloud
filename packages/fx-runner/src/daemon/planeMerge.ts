@@ -25,10 +25,11 @@
  */
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import path from "node:path";
-import { MAX_PLANE_MERGE_PATHS, type PlaneMergeAbortCode, type PlaneMergeReportMessage, type PlaneMergeVerifyMessage } from "@fulcrumaxe/runner-protocol";
+import { MAX_PLANE_MERGE_PATHS, type PlaneMergeAbortCode, type PlaneMergeOrderedConfig, type PlaneMergeOrderedFact, type PlaneMergeReportMessage, type PlaneMergeVerifyMessage } from "@fulcrumaxe/runner-protocol";
 import { PUBLIC_BASE_BRANCH, compileOverlay, diffTreeEntries, planePushGit, sameChangeKeys, treeFromLsTree, type PublicHeadsReader, type TreeEntry } from "@fulcrumaxe/runner-protocol/planePush";
 import type { PlaneMergeOrder, RunnerClient } from "./client.js";
 import { computeConflictFacts, type FactsGit } from "./conflictFacts.js";
+import { orderedFactOf, unknownFact } from "./orderedFacts.js";
 import type { PushLog } from "./pushLog.js";
 import type { PlanePushGithub } from "./planePushGithub.js";
 
@@ -90,6 +91,24 @@ async function singleParentIs(dir: string, commit: string, parent: string): Prom
   } catch {
     // fx-swallow-ok: an unreadable commit is not a single-parent commit
     return false;
+  }
+}
+
+/**
+ * D#483 S5-j2c2: the ordering fact for the public head against the default tip, from the three trees of objects this machine fetched. Any read that fails is the unknown fact at the tip;
+ * the decision itself is the pure `orderedFactOf`. Never throws.
+ */
+export async function readOrderedFact(dir: string, head: string, tip: string, config: PlaneMergeOrderedConfig): Promise<PlaneMergeOrderedFact> {
+  try {
+    const mergeBase = await mergeBaseOf(dir, tip, head);
+    if (mergeBase === null) return unknownFact(tip);
+    const baseTree = await readTree(dir, mergeBase);
+    const headTree = await readTree(dir, head);
+    const tipTree = await readTree(dir, tip);
+    return baseTree === null || headTree === null || tipTree === null ? unknownFact(tip) : orderedFactOf({ config, tip, mergeBase, baseTree, headTree, tipTree });
+  } catch {
+    // fx-swallow-ok: a read this machine could not make is the answer "unknown", which the cloud treats as unreadable
+    return unknownFact(tip);
   }
 }
 
@@ -159,6 +178,8 @@ export interface PlaneMergeDeps {
   workRoot: string;
   /** D#519 MQ4-e2-a: whether the cloud's hello kept `conflict_facts_v1`; read when a 405 comes back. Absent is false: nothing is computed and nothing new is sent. */
   sendConflictFacts?: () => boolean;
+  /** D#483 S5-j2c2: whether the cloud's hello kept `ordered_facts_v1`. Absent is false: no ordering fact is computed or sent, and the default branch's tip is not re-read after the go. */
+  sendOrderedFacts?: () => boolean;
   /** The runner's push log (rule (a) of the conflict facts). Absent or closed: the verdict is "unknown". */
   pushLog?: Pick<PushLog, "records">;
   /** Replaceable so a test can watch the version-control calls the facts make. */
@@ -248,7 +269,7 @@ export function createPlaneMergeHandler(deps: PlaneMergeDeps): () => Promise<Pla
   sweepMergeWorkRoot(deps.workRoot);
 
   /** The content check for a claimed order, with the read credential revoked as soon as the fetch is over. `moved` when the branch is not at the order's head. */
-  async function inspect(order: PlaneMergeOrder): Promise<{ check: ContentCheck; moved: boolean; readRevoked: boolean; privateDir?: string }> {
+  async function inspect(order: PlaneMergeOrder): Promise<{ check: ContentCheck; moved: boolean; readRevoked: boolean; privateDir?: string; ordered?: PlaneMergeOrderedFact }> {
     let work: string | undefined;
     let readRevoked = false;
     let tips: { head: string; defaultTip: string } | undefined;
@@ -277,7 +298,9 @@ export function createPlaneMergeHandler(deps: PlaneMergeDeps): () => Promise<Pla
         return { check: NOT_KNOWN, moved: false, readRevoked };
       }
       const check = await checkContent({ publicDir: work, publicHead: tips.head, publicDefault: tips.defaultTip, privateDir, reviewedHead: order.reviewed_head, overlayGlobs: order.overlay_globs }).catch(() => NOT_KNOWN);
-      return { check, moved: false, readRevoked, privateDir };
+      // Only when the cloud kept the capability and sent the configuration; an old claim reply (no `ordered_config`) gets no fact.
+      const ordered = deps.sendOrderedFacts?.() === true && order.ordered_config !== undefined ? await readOrderedFact(work, tips.head, tips.defaultTip, order.ordered_config) : undefined;
+      return { check, moved: false, readRevoked, privateDir, ...(ordered === undefined ? {} : { ordered }) };
     } finally {
       if (work !== undefined && isOwnDirectory(deps.workRoot, work)) {
         try {
@@ -320,7 +343,7 @@ export function createPlaneMergeHandler(deps: PlaneMergeDeps): () => Promise<Pla
   }
 
   /** The write credential's one use: read the pull request again, then the one merge call. Returns what to report; never throws. */
-  async function merge(order: PlaneMergeOrder, go: { token: string; expiresAt: string; sha: string; mergeMode?: "queue" | "direct" }): Promise<MergeReport> {
+  async function merge(order: PlaneMergeOrder, go: { token: string; expiresAt: string; sha: string; mergeMode?: "queue" | "direct" }, orderedTip?: string): Promise<MergeReport> {
     const aborted = (abort_code: PlaneMergeAbortCode): MergeReport => ({ result: "aborted", abort_code });
     if (go.sha !== order.expected_public_head || Date.parse(go.expiresAt) - now().getTime() < MIN_TOKEN_LIFE_MS) return aborted("internal");
     let pull: Awaited<ReturnType<PlanePushGithub["getPull"]>>;
@@ -340,6 +363,17 @@ export function createPlaneMergeHandler(deps: PlaneMergeDeps): () => Promise<Pla
     const mode = await deps.github.getMergeQueueMode({ codeRepo: order.code_repo, branch: pull.defaultBranch, token: go.token });
     if (mode === "unknown") return aborted("queue_unreadable");
     if (mode !== (go.mergeMode ?? "direct")) return aborted("queue_mode_mismatch");
+    // D#483 S5-j2c2: the ordering fact was computed at a tip. Read the default branch's tip again with this credential, as late as possible; a different one means the fact is stale, so nothing is merged or enqueued.
+    if (orderedTip !== undefined) {
+      let tipNow: string | null;
+      try {
+        tipNow = await deps.github.branchHead({ codeRepo: order.code_repo, branch: pull.defaultBranch, token: go.token });
+      } catch {
+        // fx-swallow-ok: replaced by the closed abort code
+        return aborted("read_failed");
+      }
+      if (tipNow !== orderedTip) return aborted("base_moved");
+    }
     if (mode === "queue") {
       if (pull.nodeId === "") return aborted("internal");
       try {
@@ -396,6 +430,7 @@ export function createPlaneMergeHandler(deps: PlaneMergeDeps): () => Promise<Pla
       paths: seen.check.paths,
       pairing_digest: order.pairing_digest,
       token_revoked: seen.readRevoked,
+      ...(seen.ordered === undefined ? {} : { ordered: seen.ordered }),
     };
     let verdict = await deps.client.planeMergeVerify(message);
     for (let attempt = 1; verdict.kind === "error" && (verdict.status === 0 || verdict.status >= 500) && attempt < CALL_TRIES; attempt++) {
@@ -411,7 +446,7 @@ export function createPlaneMergeHandler(deps: PlaneMergeDeps): () => Promise<Pla
     let outcome: MergeReport = { result: "aborted", abort_code: "internal" };
     let revoked = false;
     try {
-      outcome = await merge(order, verdict);
+      outcome = await merge(order, verdict, seen.ordered?.tip_sha);
     } catch {
       // fx-swallow-ok: `merge` does not throw; this keeps the revoke below certain whatever happens
       outcome = { result: "aborted", abort_code: "internal" };
