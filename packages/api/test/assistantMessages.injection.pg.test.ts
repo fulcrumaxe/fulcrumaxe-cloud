@@ -70,7 +70,7 @@ describe('assistant messages: injection cannot make the assistant act', () => {
     expect(JSON.stringify(second)).not.toContain(p.accountId);
   });
 
-  it('draft_correction writes one proposed correction, origin person, by the caller; a repeat in the turn writes none', async () => {
+  it('draft_correction writes one proposed correction, origin agent, by the caller; a repeat in the turn writes none', async () => {
     const input = { item_id: item, kind: 'question', body: 'Why has this item not started?' };
     chat().replies.push({ kind: 'stream', chunks: chatTurnChunks({ tools: [{ id: 'c1', name: 'draft_correction', input }, { id: 'c2', name: 'draft_correction', input }] }) });
     chat().replies.push({ kind: 'stream', chunks: chatTurnChunks({ text: ['Drafted.'] }) });
@@ -78,7 +78,7 @@ describe('assistant messages: injection cannot make the assistant act', () => {
     expect(r.json()).toMatchObject({ state: 'ok' });
     const rows = (await corrections()).filter((c) => c.id !== xId);
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ status: 'proposed', origin: 'person', created_by: p.userId, kind: 'question', body: input.body });
+    expect(rows[0]).toMatchObject({ status: 'proposed', origin: 'agent', created_by: p.userId, kind: 'question', body: input.body });
     expect((await corrections()).find((c) => c.id === xId)!.status).toBe('proposed');
   });
 
@@ -97,7 +97,7 @@ describe('assistant messages: injection cannot make the assistant act', () => {
     await ask('Open a new item');
     const rows = await corrections();
     expect(rows).toHaveLength(before + 1);
-    expect(rows[rows.length - 1]).toMatchObject({ kind: 'new_item', status: 'proposed', origin: 'person' });
+    expect(rows[rows.length - 1]).toMatchObject({ kind: 'new_item', status: 'proposed', origin: 'agent' });
   });
 
   it('the Anthropic shape behaves the same: an unknown tool is dropped and X stays proposed', async () => {

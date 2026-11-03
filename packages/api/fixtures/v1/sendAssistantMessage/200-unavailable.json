@@ -1,0 +1,8 @@
+{
+  "conversation_id": "c0c0c0c0-0000-4000-8000-000000000001",
+  "state": "unavailable",
+  "code": "key_rejected",
+  "text": "The assistant could not reach your model provider. Check your model key and try again.",
+  "spent_micro_usd": 0,
+  "cap_micro_usd": 2000000
+}

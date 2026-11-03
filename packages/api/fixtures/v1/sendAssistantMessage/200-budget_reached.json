@@ -1,0 +1,7 @@
+{
+  "conversation_id": "c0c0c0c0-0000-4000-8000-000000000001",
+  "state": "budget_reached",
+  "text": "This conversation has reached its spending limit. Start a new conversation to continue.",
+  "spent_micro_usd": 1990000,
+  "cap_micro_usd": 2000000
+}

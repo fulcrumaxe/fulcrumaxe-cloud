@@ -13,8 +13,9 @@
 //  - No new live subscription: the app hands run.status_changed and refresh
 //    to live() from the subscriptions the board already holds.
 import { h, timeNode } from "../_lib/dom.js";
-import { api, createRetryGate, isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
+import { OFFLINE_MESSAGE, SERVER_ERROR_MESSAGE, TIMEOUT_MESSAGE, api, createRetryGate, isRateLimited, parseRetryAfter, retryWords, waitSeconds } from "../_lib/api.js";
 import { STAGE_LABELS } from "./pipeline-storage.js";
+import { apiFetch, createSseParser } from "../../core/cloud-live.js";
 
 export const LIVE_STATUSES = ["pending", "running", "paused"];
 export const RETRYABLE_STATUSES = ["failed", "timed_out", "killed_spend", "refused_spend", "cancelled"];
@@ -1448,6 +1449,531 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
   };
 }
 
+// --- Assistant (D#597 CC-6a-2): the data side. The boot-file budget is full, so it is folded in here, between the inbox and the approve code (neither source guard reads it).
+// ── the assistant panel's data side ───────────────────────────────────────────────
+// No DOM. R-597-1: the assistant answers and proposes; only a person's click acts. Nothing the model or a tool returns is
+// ever a label or a control here: the conversation is text, the cards come from the corrections route, and every sentence a
+// person reads is in ASSISTANT_COPY or CORRECTION_COPY below. The stream is read the way the route sends it
+// (POST /api/v1/assistant/messages, events conversation, text, tool, done, and error after a started stream).
+export const ASSISTANT_URL = "/api/v1/assistant/messages";
+export const ASSISTANT_MAX_MESSAGES = 40; // the route's own limits (packages/api/src/assistant/turn.ts)
+export const ASSISTANT_MAX_CHARS = 8000;
+export const ASSISTANT_COPY = Object.freeze({
+  heading: "Assistant",
+  empty: "Ask about this item: its Spec, verdicts, runs or the plan. I can read and propose a correction; a person decides.",
+  label: "Ask the assistant", send: "Send", stop: "Stop", retry: "Try again", fresh: "New conversation", openKeys: "Open model keys", you: "You", assistant: "Assistant",
+  working: "The assistant is answering.",
+  ready: "The answer is ready.",
+  unconfigured: "The assistant is not available right now.",
+  no_key: "Add a model key to use the assistant",
+  budget_reached: "This conversation has reached its spending limit. Start a new conversation to continue.",
+  unpriced: "The assistant cannot price the model on your key, so it did not run.",
+  unavailable: "The assistant could not reach your model provider. Check your model key and try again.",
+  stopped: "Stopped.",
+  incomplete: "The answer was cut short. Send the message again to continue.",
+  tool_limit: "I stopped looking things up for this message. Ask again to go further.",
+  failed: "That message did not go through. Try again.",
+  gone: "That conversation is no longer available. Start a new conversation.",
+  too_long: "This conversation is too long to continue. Start a new conversation.",
+  noRunData: "Run details aren't available here yet. I can see the Spec and verdicts.",
+  noRunActivity: "No step-by-step activity has been recorded for this run. I can see the Spec and verdicts.",
+});
+/** What a tool call is called in the note under an answer; a name outside this list reads as TOOL_OTHER. */
+export const TOOL_WORDS = Object.freeze({ get_item: "the item", get_spec: "the Spec", get_run_activity: "run activity", get_verdicts: "the verdicts", get_plan: "the plan", list_corrections: "the corrections", draft_correction: "a draft correction" });
+const TOOL_OTHER = "something else";
+/** What one `agent.activity` row says, by its fixed `tool` kind (packages/runner/src/runProgress.ts). */
+export const ACTIVITY_WORDS = Object.freeze({ read: "Reading files", list: "Listing files", search: "Searching the code", test: "Running tests", command: "Running a command" });
+const STOP_NOTICES = new Set(["stopped", "incomplete", "tool_limit", "unconfigured", "no_key", "budget_reached", "unpriced", "unavailable"]);
+
+/** One formatter for money on this panel: dollars from micro-dollars, or "" when the number is not usable. Never null, undefined or NaN as text. */
+export const microUsd = (n) => (Number.isFinite(n) && n >= 0 ? "$" + (n / 1e6).toFixed(2) : "");
+/** The text of a value that may be anything: a string stays, everything else is empty. */
+export const textOf = (v) => (typeof v === "string" ? v : "");
+/** Display only (the stored text and its hash are untouched): invisible, format and control characters become [U+XXXX] markers, newline and tab kept. Ordinary text is not marked: a joiner or a variation selector that an emoji sequence or a script that uses joiners needs stays quiet. */
+const HIDDEN = /[\p{Cf}\p{Cc}\u034F\u115F\u1160\u17B4\u17B5\u180B-\u180D\u2028\u2029\u2800\u3164\uFE00-\uFE0F\uFFA0\u{E0100}-\u{E01EF}]/gu;
+/** The scripts whose ordinary spelling uses U+200C or U+200D between two of their letters (Persian and Arabic, and the Indic scripts). Latin, Cyrillic and every other script are not listed: there a joiner is a hidden character. */
+const JOINER_SCRIPTS = ["Arabic", "Devanagari", "Bengali", "Gurmukhi", "Gujarati", "Oriya", "Tamil", "Telugu", "Kannada", "Malayalam", "Sinhala"].map((name) => new RegExp("^(?=[\\p{L}\\p{M}])\\p{scx=" + name + "}$", "u"));
+const PICTO = /^\p{Extended_Pictographic}$/u;
+const SKIN = /^\p{Emoji_Modifier}$/u;
+const codePointsBefore = (s, from, n = 8) => [...s.slice(Math.max(0, from - n), from)];
+/** True when the emoji that ends right before index i is a pictograph or a skin tone, with at most one U+FE0F after it (a run of them is not one emoji). */
+function emojiBefore(all, i) {
+  const cps = codePointsBefore(all, i);
+  let k = cps.length - 1;
+  if (k >= 0 && cps[k] === "\uFE0F") k--;
+  return k >= 0 && (PICTO.test(cps[k]) || SKIN.test(cps[k]));
+}
+/** True when a joiner already sits in the run of marks and joiners that ends right before index i: one joiner per run is spelling, a second one in the run is a channel. */
+function joinerInRun(all, i) {
+  const cps = codePointsBefore(all, i, 24);
+  for (let k = cps.length - 1; k >= 0; k--) {
+    if (cps[k] === "\u200C" || cps[k] === "\u200D") return true;
+    if (!/^\p{M}$/u.test(cps[k])) return false;
+  }
+  return false;
+}
+const sameJoinerScript = (a, b) => JOINER_SCRIPTS.some((re) => re.test(a) && re.test(b));
+/** True when this character is part of ordinary text there: U+FE0F after an emoji (or a digit key cap), U+200D between two emoji, U+200C or U+200D between two letters of one joiner script. */
+function ordinary(c, i, all) {
+  const before = codePointsBefore(all, i);
+  const prev = before[before.length - 1] || "";
+  const nextCp = all.codePointAt(i + c.length);
+  const next = nextCp === undefined ? "" : String.fromCodePoint(nextCp);
+  if (c === "\uFE0F") return PICTO.test(prev) || SKIN.test(prev) || (/^[0-9#*]$/.test(prev) && next === "\u20E3");
+  if (c === "\u200D" && emojiBefore(all, i) && PICTO.test(next)) return true;
+  if (c === "\u200C" || c === "\u200D") return prev !== "" && next !== "" && sameJoinerScript(prev, next) && !joinerInRun(all, i);
+  return false;
+}
+export function visibleText(v) {
+  let hidden = false;
+  const text = textOf(v).replace(HIDDEN, (c, i, all) => {
+    if (c === "\n" || c === "\t" || (c === "\r" && all[i + 1] === "\n")) return c;
+    if (ordinary(c, i, all)) return c;
+    hidden = true;
+    return "[U+" + c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0") + "]";
+  });
+  return { text, hidden };
+}
+/** True when a top-level key of this valid JSON object text appears twice (compared decoded): JSON.parse keeps the last, so the text read would not be the text applied. The server refuses it too. */
+function repeatsKey(text) {
+  const seen = new Set();
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === "{" || c === "[") depth++;
+    else if (c === "}" || c === "]") depth--;
+    else if (c === '"') {
+      let j = i + 1;
+      while (text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      let k = j + 1;
+      while (" \t\r\n".includes(text[k])) k++;
+      if (depth === 1 && text[k] === ":") {
+        const key = JSON.parse(text.slice(i, j + 1));
+        if (seen.has(key)) return true;
+        seen.add(key);
+      }
+      i = j;
+    }
+  }
+  return false;
+}
+/** The fields accepting a new_item or priority draft would use, parsed as the server parses them: [[label, value]...]; null when the server would refuse the body; undefined for any other kind. */
+export function parseCorrectionFields(kind, body) {
+  if (kind !== "new_item" && kind !== "priority") return undefined;
+  let v;
+  try { v = JSON.parse(body); } catch { return null; }
+  const keys = kind === "priority" ? ["priority"] : ["title", "kind", "body"];
+  if (!v || typeof v !== "object" || Array.isArray(v) || Object.keys(v).length !== keys.length || !keys.every((k) => Object.hasOwn(v, k)) || repeatsKey(body)) return null;
+  if (kind === "priority") return ["urgent", "high", "normal", "low"].includes(v.priority) ? [["Priority", v.priority]] : null;
+  return typeof v.title === "string" && v.title.length >= 1 && v.title.length <= 256 && typeof v.kind === "string" && typeof v.body === "string" ? [["Title", v.title], ["Kind", v.kind], ["Body", v.body]] : null;
+}
+export const toolWord = (name) => (typeof name === "string" && Object.hasOwn(TOOL_WORDS, name) ? TOOL_WORDS[name] : TOOL_OTHER);
+
+/** The history the route is sent: each answered exchange, then the new message. An unanswered message (a failed turn) is left out, so roles alternate. Null when it is over the route's limit. */
+export function assistantHistory(messages, text) {
+  const out = [];
+  for (let i = 0; i + 1 < messages.length; i++) {
+    const m = messages[i], r = messages[i + 1];
+    if (m.role === "user" && r.role === "assistant" && r.text) out.push({ role: "user", content: m.text.slice(0, ASSISTANT_MAX_CHARS) }, { role: "assistant", content: r.text.slice(0, ASSISTANT_MAX_CHARS) });
+  }
+  out.push({ role: "user", content: text });
+  return out.length > ASSISTANT_MAX_MESSAGES ? null : out;
+}
+
+/** The fixed question "Ask why" sends. Only the two ids are filled in, and only when both are UUIDs: nothing from the card's own text goes in. */
+export function askWhyText(correction) {
+  if (!correction || !isUuid(correction.id) || !isUuid(correction.work_item_id)) return "";
+  return "Why did you draft correction " + correction.id + " for work item " + correction.work_item_id + "? Please explain what in the item or its runs led to it.";
+}
+
+/**
+ * The conversation. State is replaced on every change and handed to onChange. `doFetch` is the live client's apiFetch (a refused session asks the
+ * server whether the session ended); `repoId` is a UUID or a function that resolves one, and is read only when a conversation starts.
+ * mode: "ready" | "off" (the route said unconfigured) | "capped" (budget_reached). notice: a key of ASSISTANT_COPY, or "".
+ */
+export function createAssistantChat({ doFetch = apiFetch, repoId, itemId = "", onChange = () => {} } = {}) {
+  let ac = null;
+  let gen = 0; // New conversation ends the turn that was running: whatever it still delivers is dropped
+  let st = { messages: [], conversationId: "", phase: "idle", mode: "ready", notice: "", retryAfter: 0, spent: null, cap: null, drafted: false };
+  const set = (patch) => { st = { ...st, ...patch }; onChange(st); };
+  const patchLast = (fn) => { const m = st.messages.slice(); m[m.length - 1] = fn(m[m.length - 1]); set({ messages: m }); };
+
+  async function run(history) {
+    ac = new AbortController();
+    const mine = ac, g = gen;
+    set({ phase: "streaming", notice: "", retryAfter: 0, drafted: false });
+    let done = null, errored = false, outcome = "failed", seconds = 0;
+    const onFrame = (f) => {
+      if (g !== gen) return;
+      let d = null;
+      try { d = JSON.parse(f.data); } catch { /* not a frame we know */ }
+      if (!d || typeof d !== "object") return;
+      if (f.event === "conversation" && isUuid(d.conversation_id)) st = { ...st, conversationId: d.conversation_id };
+      else if (f.event === "text" && typeof d.delta === "string") patchLast((m) => ({ ...m, parts: [...m.parts, d.delta], text: m.text + d.delta }));
+      else if (f.event === "tool" && typeof d.name === "string") {
+        if (d.name === "draft_correction") st = { ...st, drafted: true };
+        patchLast((m) => ({ ...m, tools: m.tools.includes(toolWord(d.name)) ? m.tools : [...m.tools, toolWord(d.name)] }));
+      } else if (f.event === "done") done = d;
+      else if (f.event === "error") errored = true;
+    };
+    try {
+      const rid = typeof repoId === "function" ? await repoId(mine.signal) : repoId;
+      const body = st.conversationId ? { conversation_id: st.conversationId, messages: history } : { repo_id: rid, ...(isUuid(itemId) ? { work_item_id: itemId } : {}), messages: history };
+      const res = await doFetch(ASSISTANT_URL, { method: "POST", credentials: "same-origin", cache: "no-store", headers: { Accept: "text/event-stream", "Content-Type": "application/json" }, body: JSON.stringify(body), signal: mine.signal });
+      const type = String((res.headers && res.headers.get && res.headers.get("content-type")) || "").toLowerCase();
+      if (res.status === 404) outcome = "gone";
+      else if (res.status === 429) { outcome = "rate"; seconds = parseRetryAfter(res.headers && res.headers.get && res.headers.get("Retry-After")); }
+      else if (res.ok && res.body && type.startsWith("text/event-stream")) {
+        const reader = res.body.getReader();
+        const parser = createSseParser(onFrame);
+        try { for (;;) { const r = await reader.read(); if (r.done) break; parser.push(r.value); } } finally { reader.cancel().catch(() => {}); }
+        outcome = done && !errored ? "done" : "failed"; // a stream that ends with no done event was cut: a failed turn
+      }
+    } catch (e) {
+      outcome = (e && e.name === "AbortError") || mine.signal.aborted ? "stopped" : "failed";
+    }
+    if (mine.signal.aborted && outcome !== "done") outcome = "stopped";
+    if (g === gen) settle(outcome, done, seconds);
+  }
+
+  function settle(outcome, done, seconds) {
+    const state = outcome === "done" && typeof done.state === "string" ? done.state : outcome;
+    // The route sends the fixed sentence of a state as the last text event just before `done`; the panel shows its own table, so that one is dropped.
+    // Dropped only when it is the panel's own sentence for the state: if the route's words ever change, a duplicate shows rather than answer text being lost.
+    if (outcome === "done" && state !== "ok") patchLast((m) => { if (m.parts.at(-1) !== ASSISTANT_COPY[state]) return m; const parts = m.parts.slice(0, -1); return { ...m, parts, text: parts.join("") }; });
+    const money = outcome === "done" ? { spent: Number.isFinite(done.spent_micro_usd) ? done.spent_micro_usd : st.spent, cap: Number.isFinite(done.cap_micro_usd) ? done.cap_micro_usd : st.cap } : {};
+    set({
+      phase: "idle", ...money,
+      mode: state === "unconfigured" ? "off" : state === "budget_reached" ? "capped" : "ready",
+      notice: state === "ok" ? "" : STOP_NOTICES.has(state) || state === "gone" || state === "rate" ? state : "failed",
+      retryAfter: seconds,
+      conversationId: state === "gone" ? "" : st.conversationId,
+      messages: st.messages.map((m, i) => (i === st.messages.length - 1 ? { ...m, open: false } : m)),
+    });
+    ac = null;
+  }
+
+  return {
+    getState: () => st,
+    /** Sends a message. False when it cannot be sent now (busy, off, capped, empty, over the route's limits). */
+    send(text) {
+      const t = textOf(text).trim();
+      if (st.phase !== "idle" || st.mode !== "ready" || t === "" || t.length > ASSISTANT_MAX_CHARS) return false;
+      const history = assistantHistory(st.messages, t);
+      if (history === null) { set({ notice: "too_long" }); return false; }
+      st = { ...st, messages: [...st.messages, { role: "user", text: t, parts: [], tools: [], open: false }, { role: "assistant", text: "", parts: [], tools: [], open: true }] };
+      run(history);
+      return true;
+    },
+    /** Sends the last message again (after a failed, stopped or cut-short turn). */
+    retry() {
+      const i = st.messages.map((m) => m.role).lastIndexOf("user");
+      if (st.phase !== "idle" || i < 0) return false;
+      const text = st.messages[i].text;
+      st = { ...st, messages: st.messages.slice(0, i) };
+      return this.send(text);
+    },
+    stop() { if (ac) ac.abort(); },
+    fresh() { gen++; if (ac) ac.abort(); ac = null; st ={ ...st, messages: [], conversationId: "", phase: "idle", mode: "ready", notice: "", retryAfter: 0, spent: null, cap: null, drafted: false }; onChange(st); },
+    destroy() { onChange = () => {}; if (ac) ac.abort(); },
+  };
+}
+
+// ── the correction cards ─────────────────────────────────────────────────────────────────────────
+export const CORRECTION_KINDS = Object.freeze({ question: "Question", run_note: "Note for the next run", spec_amend: "Spec amendment", new_item: "New item", pause: "Pause request", priority: "Priority change" });
+/** What accepting does, by kind: the confirm text drawn above the buttons. run_note says "applies to the next run" (D#597 CC-6a). */
+export const CORRECTION_EFFECTS = Object.freeze({
+  question: "Accepting records this question on the item.",
+  run_note: "Accepting makes this note apply to the next run.",
+  spec_amend: "Accepting adds this to the next Spec version. It is refused while an agent is working on the item.",
+  new_item: "Accepting creates a new item from the text below.",
+  pause: "Accepting asks the pipeline to pause this item. Only a person can resume it.",
+  priority: "Accepting changes the item's priority.",
+});
+export const CORRECTION_COPY = Object.freeze({
+  heading: "Drafts to decide", loading: "Loading drafts…", error: "Drafts aren't available right now.", none: "No drafts waiting for a decision.",
+  assistant: "Drafted by the assistant", person: "Proposed by ", new_item: "Accepting creates this", priority: "Accepting changes the priority to this",
+  hidden: "This text has hidden characters. They are shown as [U+XXXX] markers. Read it with care before you decide.", full: "Full text of the draft, shown as plain text:",
+  member: "An owner or admin can accept or reject this.",
+  accept: "Accept", reject: "Reject", withdraw: "Withdraw", why: "Ask why",
+  proposed: "Waiting for a decision.", accepted: "Accepted. Not applied yet. You can withdraw it until then.", applied: "Accepted and applied.", rejected: "Rejected.", superseded: "Replaced by a newer draft.",
+  sending: "Sending…",
+});
+/** Every code the accept and reject routes can answer, as the sentence a person reads (test/assistant-codes.test.mjs reads the codes from the route source). */
+export const CORRECTION_SENTENCES = Object.freeze({
+  already_decided: "Someone already decided this. Nothing was changed.",
+  content_changed: "This draft changed after you opened it. Read it again before deciding.",
+  forbidden: "Only an owner or admin can accept or reject this.", insufficient_role: "Only an owner or admin can accept or reject this.", session_required: "Only an owner or admin can accept or reject this.",
+  not_found: "This draft is no longer there.",
+  already_running: "An agent is working on this item right now. Try again when it finishes.",
+  action_not_available: "This can't be applied at this stage of the item.",
+  external_requires_human: "This item came from outside, so a person has to move it themselves.",
+  no_repo: "This item has no repository connected.",
+  run_actions_unavailable: "Pausing and Spec changes aren't available right now. Nothing was decided.",
+  apply_failed: "It could not be applied. Check the item before deciding again.",
+  validation_failed: "This draft can't be applied as written. Reject it instead.",
+});
+const CORRECTION_GENERIC = "That didn't work. Nothing was changed.";
+export function correctionSentence(e) {
+  if (isRateLimited(e)) return retryWords(waitSeconds(e));
+  const code = e && typeof e.code === "string" ? e.code : "";
+  if (Object.hasOwn(CORRECTION_SENTENCES, code)) return CORRECTION_SENTENCES[code];
+  if (code === "offline") return OFFLINE_MESSAGE; // api.js's own fixed sentences
+  if (code === "timeout") return TIMEOUT_MESSAGE;
+  return e && e.kind === "server_error" ? SERVER_ERROR_MESSAGE : CORRECTION_GENERIC;
+}
+const HASH = /^[0-9a-f]{64}$/;
+const validCorrection = (c) => c && typeof c === "object" && isUuid(c.id) && isUuid(c.work_item_id) && Object.hasOwn(CORRECTION_KINDS, c.kind) && ["proposed", "accepted", "applied", "rejected", "superseded"].includes(c.status) && typeof c.body === "string" && HASH.test(c.content_hash || "");
+
+/**
+ * The cards. Derived, not stamped: every status shown is what the list route last said, re-read after each click. A card that was
+ * waiting for a decision stays listed (with its new status) until the panel closes, so "already decided" has a card to sit on. The
+ * model's text never becomes a card: only rows of the route do. Who wrote a draft is the row's own `origin` (the assistant's drafts are
+ * stored origin=agent), read the same way in every session; nothing is guessed from what happened in a turn.
+ */
+export function createCorrectionCards({ call = api, itemId, onChange = () => {} }) {
+  const ac = new AbortController();
+  let st = { status: "loading", rows: [], admin: null, busy: new Set(), notes: new Map(), seen: new Set() };
+  const set = (patch) => { st = { ...st, ...patch }; onChange(st); };
+  async function refresh() {
+    try {
+      const body = await call("GET", "/api/v1/work-items/" + itemId + "/corrections", undefined, ac.signal);
+      if (ac.signal.aborted) return;
+      const rows = (Array.isArray(body && body.data) ? body.data : []).filter(validCorrection);
+      const seen = new Set(st.seen);
+      for (const r of rows) if (r.status === "proposed" || r.status === "accepted") seen.add(r.id);
+      set({ status: "ready", rows, seen });
+    } catch {
+      if (!ac.signal.aborted && st.status !== "ready") set({ status: "error" }); // a failed re-read keeps what is shown
+    }
+  }
+  async function loadRole() {
+    try {
+      const me = await call("GET", "/api/cloud/auth/me", undefined, ac.signal);
+      set({ admin: !!(me && me.is_admin) });
+    } catch {
+      if (!ac.signal.aborted) set({ admin: false }); // cosmetic: the route enforces the role
+    }
+  }
+  return {
+    getState: () => st,
+    start() { loadRole(); return refresh(); },
+    refresh,
+    visible: () => st.rows.filter((r) => st.seen.has(r.id)),
+    /** Accept or reject one card, by the row's own id and its own content hash (so only the text shown can be approved). */
+    async decide(id, verb) {
+      const row = st.rows.find((r) => r.id === id);
+      if (!row || st.busy.has(id) || (verb !== "accept" && verb !== "reject")) return;
+      const notes = new Map(st.notes);
+      notes.delete(id);
+      set({ busy: new Set(st.busy).add(id), notes });
+      try {
+        await call("POST", "/api/v1/corrections/" + id + "/" + verb, { content_hash: row.content_hash }, ac.signal);
+      } catch (e) {
+        if (ac.signal.aborted) return;
+        set({ notes: new Map(st.notes).set(id, correctionSentence(e)) });
+      }
+      const busy = new Set(st.busy);
+      busy.delete(id);
+      set({ busy });
+      await refresh();
+    },
+    destroy() { ac.abort(); onChange = () => {}; },
+  };
+}
+
+/** The Runs panel's activity line: a count and the latest kind of `agent.activity` row, or null while no row has been seen. */
+export function activitySummary(events) {
+  const rows = (Array.isArray(events) ? events : []).filter((e) => e && e.kind === "agent.activity");
+  if (rows.length === 0) return null;
+  const tool = rows[rows.length - 1].payload && rows[rows.length - 1].payload.tool;
+  return { count: rows.length, latest: Object.hasOwn(ACTIVITY_WORDS, tool) ? ACTIVITY_WORDS[tool] : "" };
+}
+
+// ── D#597 CC-6a-2: the assistant panel (the view) ────────
+// Drawn in the Pipeline detail and in the Runs detail (runs-app.js imports it from here). Every string from the model, a tool, a
+// run or a person is a text node; every sentence is from a table. R-597-1: nothing here acts unless a person clicks, and the only
+// buttons that decide are on cards built from rows of the corrections route (never from text in the conversation).
+let assistantSeq = 0;
+export function createAssistantPanel({ itemId, repoId, call = api, doFetch, openKeys = () => window.FULCWM && window.FULCWM.open("model-key") }) {
+  const n = ++assistantSeq;
+  const COPY = ASSISTANT_COPY;
+  const CARD = CORRECTION_COPY;
+  let drawn = null; // the messages array last drawn: the log is rebuilt only when it changed
+  let queued = { chat: false, cards: false };
+  let runEvents = null; // null: not a run's panel; otherwise the run's events seen so far
+  let wasStreaming = false;
+  let askKey = ""; // the Ask why buttons are drawn again only when the conversation's state changes
+  const later = (which, fn) => { if (queued[which]) return; queued[which] = true; queueMicrotask(() => { queued[which] = false; fn(); }); };
+
+  const cards = createCorrectionCards({ call, itemId, onChange: () => later("cards", paintCards) });
+  const chat = createAssistantChat({
+    doFetch, repoId, itemId,
+    onChange: (st) => {
+      const streaming = st.phase === "streaming";
+      if (!streaming && wasStreaming && st.drafted) cards.refresh(); // a turn that called draft_correction: read the list again
+      wasStreaming = streaming;
+      later("chat", paintChat);
+    },
+  });
+
+  const runLine = h("p", { class: "pl-muted", role: "status", hidden: true, "data-testid": "asst-run" });
+  const log = h("div", { class: "asst-log", role: "log", "aria-live": "off", "aria-label": "Conversation", tabindex: "0", "data-testid": "asst-log" });
+  const notice = h("p", { class: "asst-notice", role: "status", "data-testid": "asst-notice" });
+  const noticeActions = h("div", { class: "asst-row", "data-testid": "asst-notice-actions" });
+  const box = h("textarea", { id: "asst-box-" + n, class: "pl-note-box asst-box", rows: 3, maxlength: ASSISTANT_MAX_CHARS, "data-testid": "asst-input" });
+  const sendBtn = h("button", { type: "submit", class: "pl-act", "data-testid": "asst-send" }, COPY.send);
+  /** New conversation: the composer is turned on before it gets focus (the repaint that enables it runs later), so focus does not fall to the page when the button leaves. */
+  const startFresh = () => { chat.fresh(); box.disabled = false; box.focus(); };
+  const stopBtn = h("button", { type: "button", class: "pl-act", "data-testid": "asst-stop", onClick: () => { chat.stop(); box.focus(); } }, COPY.stop); // the Stop button leaves the row: focus goes to the composer, not the page
+  const freshBtn = h("button", { type: "button", class: "pl-act", "data-testid": "asst-new", onClick: () => startFresh() }, COPY.fresh);
+  const buttons = h("div", { class: "asst-row" }, sendBtn); // Stop and New conversation are in it only when they can be used: no hidden controls
+  let buttonsKey = "";
+  const usage = h("p", { class: "pl-muted", "data-testid": "asst-usage" });
+  const submit = () => { if (chat.send(box.value)) { box.value = ""; box.focus(); } };
+  const form = h(
+    "form",
+    { class: "asst-form", onSubmit: (e) => { e.preventDefault(); submit(); } },
+    h("label", { for: "asst-box-" + n }, COPY.label),
+    box,
+    buttons
+  );
+  box.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(); } });
+  const cardNote = h("p", { class: "pl-muted", role: "status", "data-testid": "asst-cards-status" });
+  const cardList = h("ul", { class: "asst-cards", "aria-label": CARD.heading, "data-testid": "asst-cards" });
+  const el = h(
+    "section", { class: "asst", "aria-labelledby": "asst-h-" + n, "data-testid": "asst" },
+    h("h3", { class: "pl-detail-sub", id: "asst-h-" + n }, COPY.heading), runLine, log, notice, noticeActions, form, usage,
+    h("h4", { class: "pl-detail-sub" }, CARD.heading), cardNote, cardList
+  );
+
+  const act = (testid, text, fn) => h("button", { type: "button", class: "pl-act", "data-testid": testid, onClick: fn }, text);
+  const message = (m) => {
+    if (m.role === "assistant" && !m.text && !m.open && m.tools.length === 0) return null; // a turn that said nothing: no empty bubble
+    return h(
+      "p", { class: "asst-msg", "data-role": m.role, "data-testid": "asst-msg" },
+      h("strong", null, m.role === "user" ? COPY.you : COPY.assistant, ": "),
+      h("span", { class: "asst-text", "data-testid": "asst-text" }, m.text || (m.open ? "…" : "")),
+      m.tools.length ? h("span", { class: "pl-muted asst-tools", "data-testid": "asst-tools" }, " Looked at " + m.tools.join(", ") + ".") : null
+    );
+  };
+
+  function paintChat() {
+    const st = chat.getState();
+    const streaming = st.phase === "streaming";
+    if (st.messages !== drawn) {
+      const near = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+      // dom-insert-ok: filter(Boolean) drops the null that message() returns for a turn that said nothing, before the insert
+      log.replaceChildren(...(st.messages.length ? st.messages.map(message).filter(Boolean) : [h("p", { class: "pl-muted", "data-testid": "asst-empty" }, COPY.empty)]));
+      if (near) log.scrollTop = log.scrollHeight;
+      drawn = st.messages;
+    }
+    log.setAttribute("aria-busy", String(streaming));
+    const last = st.messages[st.messages.length - 1];
+    const sentence = streaming ? COPY.working : st.notice === "rate" ? retryWords(st.retryAfter) : st.notice ? COPY[st.notice] : last && last.role === "assistant" ? COPY.ready : "";
+    notice.textContent = textOf(sentence);
+    notice.className = "asst-notice" + (!streaming && !st.notice && sentence ? " pl-sr" : "");
+    notice.dataset.state = streaming ? "working" : st.notice || (sentence ? "ready" : "");
+    const retryable = !streaming && ["stopped", "incomplete", "failed", "unavailable", "rate"].includes(st.notice);
+    const fresh = !streaming && ["budget_reached", "gone", "too_long"].includes(st.notice);
+    noticeActions.replaceChildren(
+      ...(retryable ? [act("asst-retry", COPY.retry, () => { chat.retry(); box.focus(); })] : []),
+      ...(st.notice === "no_key" ? [act("asst-keys", COPY.openKeys, () => openKeys())] : []),
+      ...(fresh ? [act("asst-fresh", COPY.fresh, () => startFresh())] : [])
+    );
+    const open = st.mode === "ready";
+    box.disabled = !open;
+    sendBtn.disabled = !open || streaming;
+    const withNew = !streaming && st.messages.length > 0;
+    const rowKey = (streaming ? "s" : "") + (withNew ? "n" : "");
+    if (rowKey !== buttonsKey) { // the row is rebuilt only when its set changes, so a focused Send keeps focus
+      buttonsKey = rowKey;
+      buttons.replaceChildren(sendBtn, ...(streaming ? [stopBtn] : []), ...(withNew ? [freshBtn] : []));
+    }
+    const line = Number.isFinite(st.spent) && Number.isFinite(st.cap) ? "Used " + microUsd(st.spent) + " of " + microUsd(st.cap) + " in this conversation." : "";
+    usage.textContent = line;
+    usage.hidden = line === "";
+    const key = st.phase + st.mode;
+    if (key !== askKey) { askKey = key; paintCards(); }
+  }
+
+  function paintRun() {
+    runLine.hidden = runEvents === null;
+    if (runEvents === null) return;
+    const s = activitySummary(runEvents);
+    const none = runEvents.length > 0 ? "no_activity" : "no_data"; // other events but no activity rows: not "no details", the run just recorded no steps
+    runLine.dataset.state = s ? "activity" : none;
+    runLine.textContent = s ? "Run activity: " + s.count + (s.count === 1 ? " step" : " steps") + " so far." + (s.latest ? " Latest: " + s.latest + "." : "") : none === "no_data" ? COPY.noRunData : COPY.noRunActivity;
+  }
+
+  function card(row, cs, chatState) {
+    const open = row.status === "proposed" || row.status === "accepted";
+    const label = CORRECTION_KINDS[row.kind];
+    const by = row.origin === "agent" ? CARD.assistant : [CARD.person, h("bdi", null, textOf(row.created_by_name) || "someone")];
+    const fields = parseCorrectionFields(row.kind, row.body); // null: the server would refuse this body, so there is no Accept
+    const raw = visibleText(row.body);
+    const shown = fields ? fields.map(([k, v]) => [k, visibleText(v)]) : null;
+    const hidden = raw.hidden || (shown !== null && shown.some(([, v]) => v.hidden));
+    const busy = cs.busy.has(row.id);
+    const note = cs.notes.get(row.id);
+    const asks = open && askWhyText(row) !== "";
+    return h(
+      "li", { class: "asst-card", tabindex: "-1", "data-testid": "asst-card", "data-id": row.id, "data-status": row.status, "data-by": row.origin === "agent" ? "assistant" : "other" },
+      h("p", { class: "asst-card-head" }, h("strong", null, label), " · ", by),
+      row.status === "proposed" ? h("p", { "data-testid": "asst-effect" }, shown ? CARD[row.kind] : CORRECTION_EFFECTS[row.kind]) : null,
+      row.status === "proposed" && shown ? h("dl", { class: "asst-fields", "data-testid": "asst-fields" }, ...shown.flatMap(([k, v]) => [h("dt", null, k), h("dd", { class: "asst-body", "data-testid": "asst-field" }, v.text)])) : null,
+      row.status === "proposed" && fields === null ? h("p", { class: "pl-error", "data-testid": "asst-unparsed" }, CORRECTION_SENTENCES.validation_failed) : null,
+      hidden ? h("p", { class: "pl-error", "data-testid": "asst-hidden" }, CARD.hidden) : null,
+      h("p", { class: "pl-muted" }, CARD.full),
+      h("pre", { class: "asst-body", "data-testid": "asst-body" }, raw.text),
+      h("p", { "data-testid": "asst-status" }, busy ? CARD.sending : CARD[row.status]),
+      note ? h("p", { class: "pl-error", role: "alert", "data-testid": "asst-card-note" }, note) : null,
+      cs.admin === false && open ? h("p", { class: "pl-muted", "data-testid": "asst-member-line" }, CARD.member) : null,
+      h(
+        "div", { class: "asst-row" },
+        ...(cs.admin === true && row.status === "proposed" && fields !== null ? [h("button", { type: "button", class: "pl-act", disabled: busy, "aria-label": CARD.accept + ": " + label, "data-testid": "asst-accept", onClick: () => cards.decide(row.id, "accept") }, CARD.accept)] : []),
+        ...(cs.admin === true && open ? [h("button", { type: "button", class: "pl-act", disabled: busy, "aria-label": (row.status === "proposed" ? CARD.reject : CARD.withdraw) + ": " + label, "data-testid": "asst-reject", onClick: () => cards.decide(row.id, "reject") }, row.status === "proposed" ? CARD.reject : CARD.withdraw)] : []),
+        ...(asks ? [h("button", { type: "button", class: "pl-act", disabled: chatState.phase !== "idle" || chatState.mode !== "ready", "aria-label": CARD.why + ": " + label, "data-testid": "asst-why", onClick: () => { if (chat.send(askWhyText(row))) box.focus(); } }, CARD.why)] : [])
+      )
+    );
+  }
+
+  function paintCards() {
+    const cs = cards.getState();
+    const shown = cards.visible();
+    cardNote.textContent = cs.status === "loading" ? CARD.loading : cs.status === "error" ? CARD.error : shown.length === 0 ? CARD.none : "";
+    const a = document.activeElement;
+    const had = cardList.contains(a) && a.closest("[data-id]") ? { id: a.closest("[data-id]").dataset.id, tid: a.dataset.testid } : null;
+    cardList.replaceChildren(...shown.map((r) => card(r, cs, chat.getState())));
+    if (had) {
+      const li = cardList.querySelector('[data-id="' + had.id + '"]');
+      const again = li && (li.querySelector('[data-testid="' + had.tid + '"]:not(:disabled)') || li);
+      if (again) again.focus({ preventScroll: true });
+    }
+  }
+
+  paintChat();
+  paintRun();
+  cards.start();
+  return {
+    el,
+    /** Runs only: the run's events as loaded, then each live one. The panel opens no stream of its own (one run stream per tab). */
+    setRunEvents(events) { runEvents = Array.isArray(events) ? events.slice() : []; paintRun(); },
+    pushRunEvent(ev) { if (runEvents !== null) { runEvents.push(ev); paintRun(); } },
+    /** Called before the host redraws around the panel (which moves it): returns the function that puts back focus, caret and scroll. */
+    hold() {
+      const a = document.activeElement, inside = el.contains(a) ? a : null, top = log.scrollTop, from = box.selectionStart, to = box.selectionEnd;
+      return () => {
+        log.scrollTop = top;
+        if (!inside || !inside.isConnected) return;
+        inside.focus({ preventScroll: true });
+        if (inside === box) box.setSelectionRange(from, to);
+      };
+    },
+    destroy() { chat.destroy(); cards.destroy(); el.remove(); },
+  };
+}
+
 // --- Approve and start (folded in from pipeline-approve.js to keep the app within the boot-file budget) ---
 // D#483 P1 + P2 + P3: the approve button on the Pipeline detail for an internal work item. One click asks the server to
 // start the next part of the pipeline for the item, and WHICH part depends on the stage:
@@ -2139,3 +2665,4 @@ export function createFollowUpsPanel({ itemId, onOpenItem }) {
     },
   };
 }
+

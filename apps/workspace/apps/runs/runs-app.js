@@ -9,9 +9,11 @@ import { h, timeNode } from "../_lib/dom.js";
 import { renderMarkdown } from "../_lib/markdown.js";
 import { crossesBoundary, displayText, hasToolName, nextCarry } from "./runs-display-filter.js";
 import { openRunStream } from "../_lib/stream.js";
+// D#597 CC-6a-2: the assistant panel. The boot budget is full (130 of 130 files), so it lives with the Pipeline detail panels it sits beside.
+import { createAssistantPanel } from "../pipeline/pipeline-actions.js";
 import { exportLink, foldBox, guardToolName, headLinks, headMeta, readContext, readInsight, renderInsight, runnerEventLine, runnerHeadTotal, runnerNotes, titleOf } from "./runs-detail.js";
 import {
-  EVENT_CAP, STATUS_LABELS, approvalLine, approveRunnerRun, coalesce, loadRunApproval, formatUsd, isLiveStatus, isTruncated, launchRunId, loadRun, loadRunContext, loadRunDetail, loadRunEvent, loadRunInsight, loadRunsPage, mergeFirstPage, upsertRow, watchAccount,
+  EVENT_CAP, STATUS_LABELS, approvalLine, approveRunnerRun, coalesce, loadRunApproval, formatUsd, isLiveStatus, isTruncated, isUuid, launchRunId, loadRun, loadWorkItemRepoId, loadRunContext, loadRunDetail, loadRunEvent, loadRunInsight, loadRunsPage, mergeFirstPage, upsertRow, watchAccount,
 } from "./runs-storage.js";
 
 const FULC = window.FULC;
@@ -271,6 +273,7 @@ function mountApp(contentEl, launchArg) {
         h("div", { class: "runs-links" }, exportLink(run.id)),
         ins ? headLinks(ins, { openPipeline: () => window.FULCWM && window.FULCWM.open("pipeline", { workItemId: ins.work_item.id }) }) : null,
         insight,
+        detail.assistant ? detail.assistant.el : null,
         foldBox(
           detail.ui,
           "runs-eventlog",
@@ -282,8 +285,10 @@ function mountApp(contentEl, launchArg) {
         ),
       ];
     }
+    const restoreAssistant = detail.assistant ? detail.assistant.hold() : null; // the panel is moved by this redraw: keep its focus, caret and scroll
     pane.replaceChildren(h("div", { class: "runs-detail-body" }, back, content));
     if (detail.status === "ready") guardToolName(pane);
+    if (restoreAssistant) restoreAssistant();
     pane.hidden = false;
   }
 
@@ -292,13 +297,14 @@ function mountApp(contentEl, launchArg) {
     const a = document.activeElement;
     const had = pane.contains(a);
     const top = pane.scrollTop;
+    const inAssistant = had && !!detail && !!detail.assistant && detail.assistant.el.contains(a); // paintDetail puts its focus back
     // A focused fold header (Run facts, Event log ...) stays focused across the redraw; anything else falls back to Back.
     const fold = had && a.tagName === "SUMMARY" && a.parentElement ? a.parentElement.dataset.testid : "";
     // A control inside the context panel (its Retry button, its loading line) hands focus to the panel's heading when the redraw replaces it, not to Back.
     const keep = had && a.dataset && a.dataset.keep ? a.dataset.keep : "";
     paintDetail();
     pane.scrollTop = top;
-    if (!had) return;
+    if (!had || inAssistant) return;
     const again = fold ? pane.querySelector('[data-testid="' + fold + '"] > summary') : keep ? pane.querySelector('[data-keep-target="' + keep + '"]') : null;
     (again || pane.querySelector(".runs-back")).focus({ preventScroll: true });
   }
@@ -401,6 +407,7 @@ function mountApp(contentEl, launchArg) {
   function onLive(ev, mine) {
     if (detail !== mine || mine.events.length >= EVENT_CAP) return;
     mine.events.push(ev);
+    if (mine.assistant) mine.assistant.pushRunEvent(ev); // the one run stream is shared: the panel opens none of its own
     if (mine.reinsight) mine.reinsight();
     paintEvents();
     if (!isTruncated(ev.payload)) return;
@@ -410,8 +417,10 @@ function mountApp(contentEl, launchArg) {
     }, () => {});
   }
 
+  const dropAssistant = () => { if (detail && detail.assistant) detail.assistant.destroy(); };
   function open(id) {
     stopStream();
+    dropAssistant();
     if (detail && detail.reinsight) detail.reinsight.cancel();
     if (detailAc) detailAc.abort();
     openId = id;
@@ -425,6 +434,10 @@ function mountApp(contentEl, launchArg) {
         const mine = (detail = { status: "ready", run: d.run, events: d.events.slice(0, EVENT_CAP), capped: d.capped, insight: undefined, ui: {} });
         mine.approval = { entry: null, copy: null, phase: null };
         mine.context = undefined;
+        if (isUuid(d.run.work_item_id)) {
+          mine.assistant = createAssistantPanel({ itemId: d.run.work_item_id, repoId: (signal) => loadWorkItemRepoId(d.run.work_item_id, undefined, signal) });
+          mine.assistant.setRunEvents(mine.events);
+        }
         mine.reinsight = coalesce(() => loadInsight(mine, id), 5000);
         mine.reinsight();
         loadContext(mine, id);
@@ -452,6 +465,7 @@ function mountApp(contentEl, launchArg) {
   function close() {
     const id = openId;
     stopStream();
+    dropAssistant();
     if (detail && detail.reinsight) detail.reinsight.cancel();
     if (detailAc) detailAc.abort();
     detailAc = null;
@@ -471,6 +485,7 @@ function mountApp(contentEl, launchArg) {
     show,
     destroy() {
       stopStream();
+      dropAssistant();
       unwatch();
       refresh.cancel();
       liveAc.abort();

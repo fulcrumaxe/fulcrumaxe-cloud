@@ -153,9 +153,27 @@ describe('D#597 CC-2a: correction routes', () => {
     expect((await call(o, 'POST', url, { kind: 'priority', body: '{"priority":"now"}' })).status).toBe(422);
     expect((await call(o, 'POST', url, { kind: 'priority', body: 'urgent' })).status).toBe(422);
     expect((await call(o, 'POST', url, { kind: 'new_item', body: '{"title":"t","kind":"nope","body":"b"}' })).status).toBe(422);
+    // a repeated key is refused (JSON.parse keeps the last, so the text read would not be the text applied)
+    expect((await call(o, 'POST', url, { kind: 'new_item', body: '{"title":"Fix typo","kind":"feature","body":"Small","body":"HOSTILE"}' })).status).toBe(422);
+    expect((await call(o, 'POST', url, { kind: 'priority', body: '{"priority":"low","priority":"urgent"}' })).status).toBe(422);
     expect((await call(o, 'POST', `/work-items/${foreign}/corrections`, { kind: 'question', body: 'x' })).status).toBe(404);
     // a read of another account's item sees nothing (row security), not an error that confirms it exists
     expect(((await (await call(o, 'GET', `/work-items/${foreign}/corrections`)).json()) as { data: unknown[] }).data).toEqual([]);
+  });
+
+  it('accept refuses a stored row whose body repeats a key, and the row stays proposed', async () => {
+    const o = await owner();
+    const item = await seedItem(o.accountId);
+    const body = '{"title":"Fix typo","kind":"feature","body":"Small","body":"HOSTILE"}';
+    const { rows } = await admin.query(
+      `INSERT INTO work_item_corrections (account_id, work_item_id, origin, kind, body, content_hash, created_by)
+       VALUES ($1, $2, 'agent', 'new_item', $3, encode(sha256(convert_to($3, 'UTF8')), 'hex'), $4) RETURNING id, content_hash`,
+      [o.accountId, item, body, o.userId],
+    );
+    const res = await call(o, 'POST', `/corrections/${rows[0].id}/accept`, { content_hash: rows[0].content_hash });
+    expect(res.status).toBe(422);
+    expect((await row(rows[0].id)).status).toBe('proposed');
+    expect((await admin.query(`SELECT 1 FROM discussions WHERE account_id = $1`, [o.accountId])).rows).toEqual([]);
   });
 
   it('accept: a hash that does not match is 409 content_changed and changes nothing; a member session is refused', async () => {

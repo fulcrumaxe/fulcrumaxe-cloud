@@ -176,3 +176,10 @@ export function launchRunId(arg) {
   const id = arg && typeof arg === "object" && typeof arg.runId === "string" ? arg.runId : "";
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? id.toLowerCase() : "";
 }
+
+/** D#597 CC-6a-2: the repository of a run's work item, for the assistant panel (a conversation starts on a repository). Throws when the item has none. */
+export async function loadWorkItemRepoId(id, get = api, signal) {
+  const item = await get("GET", "/api/v1/work-items/" + encodeURIComponent(id), undefined, signal);
+  if (!item || !isUuid(item.repo_id)) throw new Error("no repository");
+  return item.repo_id;
+}
