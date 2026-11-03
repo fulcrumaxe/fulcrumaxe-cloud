@@ -230,6 +230,13 @@ describe("memory recall (D#601 MEM-3)", () => {
       expect(Buffer.byteLength(renderMemorySlot(item, 1024).text, "utf8")).toBeLessThanOrEqual(1024);
     });
 
+    it("a row holding only a context budget (NULL memory slot, migration 0974) reads as the default slot, not as zero or an error", async () => {
+      const w = await world();
+      await h.admin.query("INSERT INTO repo_context_settings (account_id, repo_id, updated_by, context_budget_bytes) VALUES ($1, $2, $3, 20000)", [w.accountId, w.repoId, w.ownerId]);
+      for (let i = 0; i < 12; i += 1) await put(w, { scope: "repo", body: `short rule ${i}` });
+      expect(await recall(w, "stable")).toHaveLength(12);
+    });
+
     it("when everything fits, everything is used", async () => {
       const w = await world();
       for (let i = 0; i < 12; i += 1) await put(w, { scope: i % 2 === 0 ? "repo" : "account", body: `short rule ${i}` });

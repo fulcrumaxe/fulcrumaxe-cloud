@@ -347,6 +347,9 @@ describe('session rate limits', () => {
         getRepoPairing: 'pairing-github',
         putRepoPairing: 'pairing-github',
         listPairingCandidates: 'pairing-picker',
+        putContextRule: 'context-rule-write',
+        deleteContextRule: 'context-rule-write',
+        putRepoContextSettings: 'context-rule-write',
       });
     });
   });

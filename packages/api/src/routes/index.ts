@@ -8,6 +8,7 @@ import { statsRoutes } from "./stats.js";
 import { workItemActivityRoutes } from "./work-item-activity.js";
 import { runContextRoutes } from "./run-context.js";
 import { contextRuleRoutes } from "./context-rules.js";
+import { contextSettingsRoutes } from "./context-settings.js";
 import { runInsightRoutes } from "./run-insight.js";
 import { webhookEndpointRoutes } from "./webhook-endpoints.js";
 import { eventRoutes } from "./events.js";
@@ -82,6 +83,7 @@ export const ROUTES: RouteEntry[] = [
   ...runInsightRoutes,
   ...runContextRoutes,
   ...contextRuleRoutes,
+  ...contextSettingsRoutes,
   ...webhookEndpointRoutes,
   ...eventRoutes,
   ...modelConnectionRoutes,

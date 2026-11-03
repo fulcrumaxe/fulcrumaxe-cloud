@@ -534,9 +534,9 @@ export async function startBuildForItem(
   // An exclude wins over a pin (an admin's exclude is never bypassed by a member's pin): a pin under any exclude of the resolved set is never fetched.
   const excludePatterns = rules.filter((r) => r.kind === "exclude").map((r) => r.path);
   const allPins = rules.filter((r) => r.kind === "pin").map((r) => r.path);
-  const { readable: pinPaths, excluded: excludedPins } = splitPinsByExcludes(allPins, excludePatterns);
+  const { readable: pinPaths, excluded: excludedPins, limited: limitedPins } = splitPinsByExcludes(allPins, excludePatterns);
   const fetched = pinPaths.length === 0 || facts.repo_id === null ? undefined : await readPins(options.pins, { accountId, repoId: facts.repo_id, owner: facts.gh_owner, name: facts.gh_name, paths: pinPaths, ...(stackBase ? { sha: stackBase.sha } : planeBase ? { sha: planeBase.sha } : {}) });
-  const pinRead = allPins.length === 0 || facts.repo_id === null ? undefined : { ...(fetched ?? { items: [], missing: 0, tooLarge: 0 }), excluded: excludedPins };
+  const pinRead = allPins.length === 0 || facts.repo_id === null ? undefined : { ...(fetched ?? { items: [], missing: 0, tooLarge: 0 }), excluded: excludedPins, limited: limitedPins };
   // D#7 DP4b-3: the decisions this run is offered, resolved from the repository's dials now (the sandbox and the runner prompt both carry them). The snapshot goes to
   // the run's create transaction with the start below; a replay that finds its run reads nothing and writes nothing. A port that fails fails the step: a run never starts
   // without the snapshot its prompt's keys map to.

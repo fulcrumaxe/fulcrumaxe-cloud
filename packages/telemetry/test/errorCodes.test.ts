@@ -86,6 +86,15 @@ describe("the error-code allowlist", () => {
     expect(source).toContain("// Context rules (D#600 CX-5a)");
   });
 
+  it("keeps the context rule write codes (D#600 CX-9a) instead of folding them into other, in a block of their own", () => {
+    const codes = ["pins_exceed_ceiling", "excludes_exceed_cap", "exclude_readds_pins", "context_rules_busy"];
+    for (const code of codes) expect(errorCodeOrOther(code), code).toBe(code);
+    const first = OWN_ERROR_CODES.indexOf(codes[0]!);
+    expect(OWN_ERROR_CODES.slice(first, first + codes.length)).toEqual(codes);
+    const source = readFileSync(path.join(REPO_ROOT, "packages", "telemetry", "src", "errorCodes.ts"), "utf8");
+    expect(source).toContain("// Context rule writes (D#600 CX-9a)");
+  });
+
   it("keeps the weekly auto-start confirmation code (D#483 S5-e2) instead of folding it into other, in a block of its own", () => {
     expect(errorCodeOrOther("confirmation_required")).toBe("confirmation_required");
     expect(OWN_ERROR_CODES[OWN_ERROR_CODES.length - 1]).toBe("confirmation_required");

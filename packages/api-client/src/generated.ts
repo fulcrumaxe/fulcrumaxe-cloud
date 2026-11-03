@@ -831,7 +831,7 @@ export interface Operations {
         code: "card" | "boundary" | "map" | "memory_stable" | "memory_item" | "spec" | "note" | "corrections" | "findings" | "decisions" | "output" | "repo_instructions" | "pinned";
         bytes: number;
         trimmed_bytes: number;
-        trimmed_reason?: "findings_cap" | "memory_slot" | "over_budget" | "pin_missing" | "pins_over_budget" | "pin_too_large" | "pin_excluded";
+        trimmed_reason?: "findings_cap" | "memory_slot" | "over_budget" | "pin_missing" | "pins_over_budget" | "pin_too_large" | "pin_excluded" | "pin_match_limit";
       }>;
       first_turn_input_tokens: (number) | (null);
       peak_context_tokens: (number) | (null);
@@ -876,6 +876,97 @@ export interface Operations {
         repo_id: (string) | (null);
         work_item_id: (string) | (null);
       }>;
+    };
+  };
+  putContextRule: {
+    path: undefined;
+    query: undefined;
+    body: {
+      scope: "repo" | "item";
+      repo_id?: string;
+      work_item_id?: string;
+      kind: "pin" | "exclude";
+      path: string;
+    };
+    response: {
+      id: string;
+      scope: "repo" | "item";
+      kind: "pin" | "exclude";
+      path: string;
+      repo_id: (string) | (null);
+      work_item_id: (string) | (null);
+    };
+  };
+  deleteContextRule: {
+    path: {
+      id: string;
+    };
+    query: {
+      confirm?: "true";
+    };
+    body: undefined;
+    response: {
+      removed: true;
+    };
+  };
+  getRepoContextSettings: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      context_budget_bytes: (number) | (null);
+      min_bytes: number;
+      max_bytes: number;
+      role_defaults: {
+        executor: number;
+        fix: number;
+        "code-reviewer": number;
+        "acceptance-tester": number;
+        "security-reviewer": number;
+        debater: number;
+      };
+      effective_by_role: {
+        executor: number;
+        fix: number;
+        "code-reviewer": number;
+        "acceptance-tester": number;
+        "security-reviewer": number;
+        debater: number;
+      };
+    };
+  };
+  putRepoContextSettings: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      context_budget_bytes: (number) | (null);
+    };
+    response: {
+      context_budget_bytes: (number) | (null);
+      min_bytes: number;
+      max_bytes: number;
+      role_defaults: {
+        executor: number;
+        fix: number;
+        "code-reviewer": number;
+        "acceptance-tester": number;
+        "security-reviewer": number;
+        debater: number;
+      };
+      effective_by_role: {
+        executor: number;
+        fix: number;
+        "code-reviewer": number;
+        "acceptance-tester": number;
+        "security-reviewer": number;
+        debater: number;
+      };
+      changed: boolean;
+      pins_status: "fit" | "over_budget" | "not_measured";
     };
   };
   listWebhookEndpoints: {
@@ -4869,6 +4960,50 @@ export const operations = {
     pathParams: [],
     queryParams: ["repo_id","work_item_id"],
     hasBody: false,
+  },
+  putContextRule: {
+    method: "PUT",
+    path: "/api/v1/context-rules",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
+  },
+  deleteContextRule: {
+    method: "DELETE",
+    path: "/api/v1/context-rules/{id}",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: ["confirm"],
+    hasBody: false,
+  },
+  getRepoContextSettings: {
+    method: "GET",
+    path: "/api/v1/repos/{id}/context-settings",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  putRepoContextSettings: {
+    method: "PUT",
+    path: "/api/v1/repos/{id}/context-settings",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
   },
   listWebhookEndpoints: {
     method: "GET",

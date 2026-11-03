@@ -26,7 +26,19 @@ export interface ContextRule {
 export const CONTEXT_RULE_PATH_MAX_CHARS = 512;
 
 /** A refused rule. The code is the one the database's definer raises for the same input, or one the application's own check adds. */
-export type ContextRuleErrorCode = 'invalid_path' | 'pins_exceed_budget' | 'tree_truncated' | 'tree_unavailable' | 'repo_not_connected';
+export type ContextRuleErrorCode =
+  | 'invalid_path'
+  | 'pins_exceed_budget'
+  | 'pins_exceed_ceiling'
+  | 'excludes_exceed_cap'
+  | 'exclude_readds_pins'
+  | 'context_rules_busy'
+  | 'tree_truncated'
+  | 'tree_unavailable'
+  | 'repo_not_connected';
+
+/** The most excludes one resolved set may hold (D#600 C4 CX-9 brief items): a 501st is refused at save, nothing written. */
+export const CONTEXT_EXCLUDES_MAX = 500;
 
 export class ContextRuleError extends Error {
   readonly code: ContextRuleErrorCode;
@@ -48,7 +60,7 @@ const GLOB_RE = /[*?]/;
  */
 export function assertContextRulePath(kind: ContextRuleKind, path: unknown): asserts path is string {
   if (typeof path !== 'string' || path === '' || [...path].length > CONTEXT_RULE_PATH_MAX_CHARS || CONTROL_RE.test(path)) throw new ContextRuleError('invalid_path');
-  if (path.startsWith('/') || /^~(\/|$)/.test(path) || /^[A-Za-z]:\//.test(path)) throw new ContextRuleError('invalid_path');
+  if (path.startsWith('/') || path.startsWith('~') || /^[A-Za-z]:\//.test(path)) throw new ContextRuleError('invalid_path');
   if (path.split('/').some((s) => s === '' || s === '.' || s === '..')) throw new ContextRuleError('invalid_path');
   if (kind === 'pin' && GLOB_RE.test(path)) throw new ContextRuleError('invalid_path');
 }
@@ -119,10 +131,12 @@ interface PgLikeError {
   message?: unknown;
 }
 
-/** The definer's `invalid_path` becomes a ContextRuleError; every other database error (42501, P0002, 22023 invalid_message) passes through as it is. */
+/** The definer's `invalid_path`, a lock timeout (55P03) and a deadlock (40P01) become a ContextRuleError; every other database error (42501, P0002, 22023 invalid_message) passes through as it is. */
 export function mapRuleDbError(err: unknown): unknown {
   const e = err as PgLikeError | null;
-  return e !== null && typeof e === 'object' && e.code === '22023' && e.message === 'invalid_path' ? new ContextRuleError('invalid_path') : err;
+  if (e === null || typeof e !== 'object') return err;
+  if (e.code === '55P03' || e.code === '40P01') return new ContextRuleError('context_rules_busy');
+  return e.code === '22023' && e.message === 'invalid_path' ? new ContextRuleError('invalid_path') : err;
 }
 
 export type ContextRuleTarget = { scope: 'repo'; repoId: string } | { scope: 'item'; workItemId: string };

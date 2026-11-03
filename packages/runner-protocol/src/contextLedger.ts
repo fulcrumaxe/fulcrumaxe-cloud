@@ -42,8 +42,9 @@ export type ContextSectionCode = (typeof CONTEXT_SECTION_CODES)[number];
  * (how many pinned files the run could not read: deleted, renamed, not text, or GitHub unreachable), `pin_too_large` (how many were over the run-time cap of
  * 190,000 characters, below the 200,000 the prompt fence can hold, so they were skipped rather than cut), `pin_excluded` (how many sat under an exclude, which wins
  * over a pin, and were never fetched) and `pins_over_budget` (how many bytes the pins stand over the repository's budget; they are still included in full).
+ * `pin_match_limit` (how many pins were held back, and not read, only because the exclude matcher reached its work bound; they are not real excludes).
  */
-export const CONTEXT_TRIMMED_REASONS = ["findings_cap", "memory_slot", "over_budget", "pin_missing", "pins_over_budget", "pin_too_large", "pin_excluded"] as const;
+export const CONTEXT_TRIMMED_REASONS = ["findings_cap", "memory_slot", "over_budget", "pin_missing", "pins_over_budget", "pin_too_large", "pin_excluded", "pin_match_limit"] as const;
 export type ContextTrimmedReason = (typeof CONTEXT_TRIMMED_REASONS)[number];
 
 /** The tools a tool result is attributed to; anything else is `other`. */

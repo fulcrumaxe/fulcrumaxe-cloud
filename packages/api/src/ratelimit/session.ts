@@ -107,6 +107,8 @@ export const SESSION_LIMITS = {
   pairingGithub: { name: "pairing-github", account: [{ limit: 60, seconds: 60 }] },
   /** The picker asks GitHub about up to 30 repos per call: 6 a minute per account. */
   pairingPicker: { name: "pairing-picker", account: [{ limit: 6, seconds: 60 }] },
+  /** Saving or removing a context rule, and writing the context budget, may read the repository's tree from the code host to measure pins: 60 a minute per account. */
+  contextRuleWrite: { name: "context-rule-write", account: [{ limit: 60, seconds: 60 }] },
   /** A signed-in browser's error report to `POST /api/rum`: 30 a minute per account (the report is a log line and one coalesced upsert). */
   rumClientError: { name: "rum-client-error", account: [{ limit: 30, seconds: 60 }] },
   /** Redeeming an invitation token: a guessing path, so capped per user as well as per account. */
