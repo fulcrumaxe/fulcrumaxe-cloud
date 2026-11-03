@@ -36,6 +36,9 @@ const SHAPES: Record<string, Shape> = {
   get_receipts: { fields: { item_id: "id" }, required: ["item_id"], build: (a) => `/api/v1/work-items/${a.item_id}/receipts` },
 };
 
+/** The argument names each read tool takes (read from the shapes above), for the name cross-check against the hosted registry. */
+export const READ_TOOL_ARGS: Readonly<Record<string, readonly string[]>> = Object.freeze(Object.fromEntries(Object.entries(SHAPES).map(([name, s]) => [name, Object.keys(s.fields)])));
+
 /** The route path for a validated call, or the first fault in fixed words (never the input's own text). */
 export function readPath(tool: string, args: Record<string, unknown>, repoId: string): { path: string } | { fault: string } {
   const shape = Object.hasOwn(SHAPES, tool) ? SHAPES[tool] : undefined;

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { Pool } from 'pg';
-import { sanitize, stripControlTokens } from '@fx/trust';
+import { sanitize, stripControlTokens, structuralValue } from '@fx/trust';
 import { checkBody } from '../corrections/body.js';
 import { CORRECTION_BODY_MAX, CORRECTION_KINDS, CorrectionInputError, createCorrection, listCorrections } from '../corrections/index.js';
 import { NotFoundError } from '../tenancy/errors.js';
@@ -67,6 +67,14 @@ function w(v: unknown): string {
   const s = String(v);
   return s.trim() === '' ? TOOL_NONE : s;
 }
+/**
+ * A code-like field (a stage, a role, a status, a state, a result): raw only when a plain identifier, else fenced as data (the shared key rule in
+ * `@fx/trust`). Every field that is not a number, a date or an id goes through `ident` or `data`; a test fails on any other use of `w`.
+ */
+function ident(v: unknown): string {
+  const s = w(v);
+  return s === TOOL_NONE ? s : structuralValue(s);
+}
 /** Free text from the repo, an issue, GitHub or a model: capped, then defanged and fenced as data. */
 function data(v: unknown): string {
   const s = w(v);
@@ -91,8 +99,8 @@ const TOOLS: readonly Tool[] = [
     async run(ctx, _st, i) {
       const it = await loadItem(ctx, i.item_id!);
       return [
-        `id: ${it.id}`, `title: ${data(it.title)}`, `stage: ${w(it.stage)}`, `kind: ${w(it.kind)}`, `issue_number: ${w(it.issue_number)}`,
-        `provenance: ${w(it.provenance)}`, `priority: ${w(it.priority)}`, `cost_usd: ${w(it.cost_usd)}`, `updated_at: ${w(it.updated_at)}`,
+        `id: ${it.id}`, `title: ${data(it.title)}`, `stage: ${ident(it.stage)}`, `kind: ${ident(it.kind)}`, `issue_number: ${w(it.issue_number)}`,
+        `provenance: ${ident(it.provenance)}`, `priority: ${ident(it.priority)}`, `cost_usd: ${w(it.cost_usd)}`, `updated_at: ${w(it.updated_at)}`,
       ];
     },
   },
@@ -118,9 +126,9 @@ const TOOLS: readonly Tool[] = [
     async run(ctx, _st, i) {
       await loadItem(ctx, i.item_id!);
       const a = await getWorkItemActivity(ctx, i.item_id!);
-      const out = [`stage: ${w(a.stage)}`, `pr_number: ${w(a.pr_number)}`];
-      for (const r of a.runs) out.push(`run ${r.id} role=${w(r.role)} status=${w(r.status)} usd=${w(r.usd)} at=${w(r.created_at)} summary: ${data(r.summary)}`);
-      for (const s of a.steps) out.push(`step ${w(s.kind)} state=${w(s.state)} result=${w(s.result)} at=${w(s.at)}`);
+      const out = [`stage: ${ident(a.stage)}`, `pr_number: ${w(a.pr_number)}`];
+      for (const r of a.runs) out.push(`run ${r.id} role=${ident(r.role)} status=${ident(r.status)} usd=${w(r.usd)} at=${w(r.created_at)} summary: ${data(r.summary)}`);
+      for (const s of a.steps) out.push(`step ${ident(s.kind)} state=${ident(s.state)} result=${ident(s.result)} at=${w(s.at)}`);
       return out;
     },
   },
@@ -134,7 +142,7 @@ const TOOLS: readonly Tool[] = [
       const a = await getWorkItemActivity(ctx, i.item_id!);
       const out = a.runs
         .filter((r) => VERDICT_ROLES.includes(r.role))
-        .map((r) => `verdict run ${r.id} role=${w(r.role)} status=${w(r.status)} at=${w(r.created_at)} summary: ${data(r.summary)}`);
+        .map((r) => `verdict run ${r.id} role=${ident(r.role)} status=${ident(r.status)} at=${w(r.created_at)} summary: ${data(r.summary)}`);
       return out.length === 0 ? ['no verdicts yet'] : out;
     },
   },
@@ -148,7 +156,7 @@ const TOOLS: readonly Tool[] = [
       const p = await getPlanView(ctx, ctx.repoId, q);
       const out = [`totals: ${p.totals.tasks} tasks, ${p.totals.done} done, ${p.totals.remaining} remaining`];
       for (const m of p.milestones) out.push(`milestone ${data(m.key)} ${data(m.title)} done=${m.done} remaining=${m.remaining}`);
-      for (const t of p.tasks) out.push(`task ${data(t.task_key)} ${data(t.title)} status=${w(t.status)} planned_prs=${t.planned_prs} merged_prs=${t.merged_prs.join(',') || TOOL_NONE}`);
+      for (const t of p.tasks) out.push(`task ${data(t.task_key)} ${data(t.title)} status=${ident(t.status)} planned_prs=${t.planned_prs} merged_prs=${t.merged_prs.join(',') || TOOL_NONE}`);
       if (p.next_cursor !== null) out.push('more tasks exist; narrow by milestone or status');
       return out;
     },
@@ -161,7 +169,7 @@ const TOOLS: readonly Tool[] = [
     async run(ctx, _st, i) {
       await loadItem(ctx, i.item_id!);
       const rows = await listCorrections(ctx, i.item_id!);
-      const out = rows.map((c) => `correction ${c.id} kind=${c.kind} origin=${c.origin} status=${c.status} at=${c.createdAt.toISOString()} body: ${data(c.body)}`);
+      const out = rows.map((c) => `correction ${c.id} kind=${ident(c.kind)} origin=${ident(c.origin)} status=${ident(c.status)} at=${c.createdAt.toISOString()} body: ${data(c.body)}`);
       return out.length === 0 ? ['no corrections'] : out;
     },
   },
