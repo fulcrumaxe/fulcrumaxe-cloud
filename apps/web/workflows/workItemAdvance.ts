@@ -1677,7 +1677,7 @@ const PERSON_FIX_NO_CHANGE = "person_fix_pushed_nothing";
  * note the worker adds and stamps applied) and the findings of any reviewer that asked for changes on this head. The round counts toward the item's fix
  * rounds and waits on spending limits as every fix round does. Answers the context to review the new head with, or the end of the workflow.
  */
-async function personFixRound(args: AdvanceStartArgs, ctx: ReviewCtx): Promise<{ ctx: ReviewCtx } | { end: Result }> {
+async function personFixRound(args: AdvanceStartArgs, ctx: ReviewCtx, answered = false): Promise<{ ctx: ReviewCtx } | { end: Result }> {
   const { accountId, userId, workItemId, actionId } = args;
   const found = await advanceFindPrStep(ctx);
   if (!found.ok) {
@@ -1687,20 +1687,25 @@ async function personFixRound(args: AdvanceStartArgs, ctx: ReviewCtx): Promise<{
   const pr = { number: found.number, headSha: found.headSha, branch: found.branch };
   // Reviewers that asked for changes on this very head: their findings go to the executor with the note. A pass, or a run with no verdict, adds nothing.
   const failing: Array<{ role: string; runId: string }> = [];
-  for (const r of await advanceReviewRunsStep(accountId, userId, workItemId, args.haltEpoch, pr.headSha, 0)) {
+  // The Replace round (D#598 P1g-3a-2) carries no finding: its prompt is fixed words only.
+  for (const r of answered ? [] : await advanceReviewRunsStep(accountId, userId, workItemId, args.haltEpoch, pr.headSha, 0)) {
     const o = await advanceReviewerOutcomeStep(accountId, r.runId);
     if (o.done && !o.noVerdict && !o.environmentFailure && o.unverifiable !== true && o.verdict === "needs-fix") failing.push({ role: r.role, runId: r.runId });
   }
   const round = (ctx.fixRoundsStarted ?? 0) + 1;
-  const ask = await askFixUntilAllowed(args, ctx, pr, round, failing, 0, true);
+  // D#598 P1g-3a-2: the Replace round's context carries the flag that gives its prompt the fixed words; the context the review goes on with never does.
+  const roundCtx = <C extends ReviewCtx>(c: C): C => (answered ? { ...c, replaceRound: true as const } : c);
+  const ask = await askFixUntilAllowed(args, roundCtx(ctx), pr, round, failing, 0, true);
   if (ask.pause !== null) return { end: await pausedEnd(workItemId, "fix_round", ask.pause, ask.attempt) };
   if (isHaltReason(ask.fix.reason)) return { end: await haltedEnd(args, "person_fix") };
   if (!ask.fix.ok || ask.fix.runId === null) {
-    await stopped(args, "person_fix", ask.fix.reason ?? "refused", { head: pr.headSha, pr: pr.number, round });
+    // D#598 P1g-3a-2: rounds used up, for the round an answer asks for: the answer stays waiting and the stop says so.
+    const code = answered && ask.fix.reason === "max_fix_rounds" ? "branch_answer_rounds_used" : (ask.fix.reason ?? "refused");
+    await stopped(args, "person_fix", code, { head: pr.headSha, pr: pr.number, round });
     return { end: { status: "fix_refused", detail: ask.fix.reason ?? undefined } };
   }
   const next: ReviewCtx = { ...ctx, fixRoundsStarted: round };
-  const { runId, fixed, end } = await followFix(args, next, pr, round, failing, 0, ask.fix.runId, ask.attempt, true);
+  const { runId, fixed, end } = await followFix(args, roundCtx(next), pr, round, failing, 0, ask.fix.runId, ask.attempt, true);
   if (end) return { end };
   const failed = async (code: string): Promise<{ end: Result }> => {
     await advanceEventStep(accountId, userId, workItemId, { kind: "fix_round_failed", dedupeKey: `fixfail:${pr.headSha}:${actionId}`, code, headSha: pr.headSha, runId });
@@ -1725,6 +1730,11 @@ async function personFixRound(args: AdvanceStartArgs, ctx: ReviewCtx): Promise<{
   }
   // D#483 S5-b2d-1: a succeeded fix round whose pull request is found again records its follow-ups.
   if (fixed.status === "succeeded") await advanceFollowUpsStep(accountId, fixed.tailRunId);
+  if (after.headSha === pr.headSha && answered) {
+    // The refused round's change is already on the private branch, so a round with nothing more to add is not a failure: the sandbox's end publishes it, and the review follows.
+    await advanceLogStep("advance.fix_no_change", { work_item_id: workItemId, run_id: runId, run_status: fixed.status, head: pr.headSha.slice(0, 12), roles: "answer" });
+    return { ctx: next };
+  }
   if (after.headSha === pr.headSha) {
     // Nothing was pushed for the person's request: stop and say so. The reviewers do not look again at a commit the person asked to change.
     await advanceEventStep(accountId, userId, workItemId, { kind: "fix_pushed_nothing", dedupeKey: `nothing:${pr.headSha}:${actionId}:person`, code: "person_request", headSha: pr.headSha, prNumber: pr.number, runId });
@@ -1909,8 +1919,9 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
   }
   let ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, fixRoundsStarted: loaded.fixRoundsStarted, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode, branch: loaded.branch, ...(loaded.child ? { child: true as const } : {}) };
   // A person pressed Request changes: their fix round comes first, on the pull request's current head. The review below then checks the new head, as after any fix.
-  if (loaded.personRequestPending) {
-    const person = await personFixRound(args, ctx);
+  // D#598 P1g-3a-2: the same round, for a person's answer to a refused update's request: Replace publishes at its end, Keep never touches the public branch.
+  if (loaded.personRequestPending || loaded.branchAnswerPending) {
+    const person = await personFixRound(args, ctx, loaded.branchAnswerPending);
     if ("end" in person) return person.end;
     ctx = person.ctx;
   }

@@ -70,6 +70,7 @@ const STOP_WORDS: Readonly<Record<string, string>> = Object.freeze({
   build_wait_timeout: 'The build ran out of time and was stopped.',
   build_check_rounds_used: "The build's checks kept failing and the automatic fixes are used up.",
   max_fix_rounds: 'The reviewers asked for changes more times than the automatic fix rounds allow.',
+  branch_answer_rounds_used: "Your answer about the public branch was recorded, but the automatic fix rounds are used up, so the pull request was not updated. Keep their version, or update the branch yourself.",
   fix_no_change_repeated: "Two fix rounds in a row changed nothing, so the pipeline stopped trying.",
   reviewer_fail: 'A reviewer could not approve this change.',
   reviewer_no_verdict: 'A reviewer kept ending without a verdict.',

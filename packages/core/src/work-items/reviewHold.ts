@@ -5,6 +5,7 @@
  * workflow's load all ask this one query, so they cannot disagree.
  */
 import type { PoolClient } from 'pg';
+import { REPUBLISH_BRANCH_MOVED } from './baseSync.js';
 
 export const NO_VERDICT_ESCALATION_CODE = 'reviewer_no_verdict';
 
@@ -23,7 +24,7 @@ export const QUEUE_ESCALATION_CODES: readonly string[] = ['merge_queue_retry_use
 
 export async function readReviewHold(client: Pick<PoolClient, 'query'>, workItemId: string): Promise<boolean> {
   const code = await readEscalationCode(client, workItemId);
-  return code === NO_VERDICT_ESCALATION_CODE || (code !== null && QUEUE_ESCALATION_CODES.includes(code));
+  return code === NO_VERDICT_ESCALATION_CODE || (code !== null && QUEUE_ESCALATION_CODES.includes(code)) || (code === REPUBLISH_BRANCH_MOVED && (await readBranchAnswerHold(client, workItemId)));
 }
 
 /** The newest escalation's code since the item last reached Needs a person, or null. */
@@ -36,4 +37,39 @@ export async function readEscalationCode(client: Pick<PoolClient, 'query'>, work
     [workItemId],
   );
   return rows[0]?.code ?? null;
+}
+
+/**
+ * D#598 P1g-3a-2: an item at Needs a person because a fix round's update was refused at the push (the lease failed: `republish_branch_moved`), whose "someone pushed to
+ * the public branch" request a person has since answered (Replace or Keep) and nothing has answered again. Derived from the rows, never stamped, so it ends by itself: a review
+ * or round moves the item out of Needs a person, a later stop needs its own answer (the answer must be newer than the stop), a new question (an open request), a withdrawal or
+ * the undo of Keep (the push record no longer follows the answered request) all turn it off. Either answer re-enters the review (`readReviewHold` counts it); the private
+ * change the refused round made is already on the private branch.
+ */
+export async function readBranchAnswerHold(client: Pick<PoolClient, 'query'>, workItemId: string): Promise<boolean> {
+  return readAnswered(client, workItemId, false);
+}
+
+/**
+ * The same, for Replace only: the push record holds the authorization the person confirmed. That is the one answer that asks for a fix round, because only a round's end
+ * publishes (with the lease on that head). Keep marks the branch as managed, nothing can publish to it, and a paid round would do nothing: it gets the plain review.
+ */
+export async function readBranchAnswerRound(client: Pick<PoolClient, 'query'>, workItemId: string): Promise<boolean> {
+  return readAnswered(client, workItemId, true);
+}
+
+async function readAnswered(client: Pick<PoolClient, 'query'>, workItemId: string, replaceOnly: boolean): Promise<boolean> {
+  if ((await readEscalationCode(client, workItemId)) !== REPUBLISH_BRANCH_MOVED) return false;
+  const { rows } = await client.query(
+    `SELECT 1 FROM work_items w
+       JOIN plane_pushes p ON p.account_id = w.account_id AND p.work_item_id = w.id AND p.pr_number IS NOT NULL
+       JOIN setup_requests q ON q.id = p.answered_request_id AND q.kind = 'branch_pushed_by_person' AND q.state = 'done' AND q.resolution = 'marked_done'
+      WHERE w.id = $1::uuid AND w.stage = 'needs_human'
+        AND ($2::boolean = false OR (p.replace_authorized_head IS NOT NULL AND p.managed_by_person_at IS NULL))
+        AND q.resolved_at >= COALESCE((SELECT max(t.created_at) FROM work_item_transitions t WHERE t.work_item_id = w.id AND t.to_stage = 'needs_human'), '-infinity'::timestamptz)
+        AND NOT EXISTS (SELECT 1 FROM setup_requests o WHERE o.work_item_id = w.id AND o.kind = 'branch_pushed_by_person' AND o.state = 'open')
+      LIMIT 1`,
+    [workItemId, replaceOnly],
+  );
+  return rows.length > 0;
 }

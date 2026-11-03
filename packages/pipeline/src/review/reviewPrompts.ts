@@ -296,6 +296,22 @@ export interface FixPromptInput {
    * run note (it is never put in this text). `findings` may then be empty (no reviewer asked for changes on the head); any that are listed are fixed too.
    */
   person?: boolean;
+  /**
+   * D#598 P1g-3a-2: the round a confirmed Replace asks for. The earlier round's change is already on the branch and the update will replace a version a person agreed to replace;
+   * nothing a person or a reviewer wrote is in the prompt. Takes the place of `person` (there is no note and no finding).
+   */
+  replace?: boolean;
+}
+
+/** The fixed words of the Replace round. */
+export const REPLACE_ROUND_SENTENCE = "The change from the earlier round is ready on this branch, and the platform's update will replace a version of the public branch that a person agreed to replace. There is normally nothing to add: change nothing unless you find a real defect in the earlier change, and say so in your summary.";
+
+/** The Replace round: the reviewers' words are replaced by the fixed sentence. */
+function replaceLine(line: string): string {
+  return line
+    .replace("The reviewers asked for changes on", "An earlier fix round finished on")
+    .replace("at the commit the reviewers judged", "at the commit the earlier round left")
+    .replace(/Fix every finding below,[^\n]*?until they pass\./, REPLACE_ROUND_SENTENCE);
 }
 
 /** A person's round: who asked, and what to do, in place of the reviewers' words. */
@@ -361,7 +377,9 @@ export function assembleFixPrompt(input: FixPromptInput, options?: AssembleOptio
       ];
   if (input.child === true) lines.splice(1, 0, `This pull request is one planned PR of issue #${input.issue}: its description references the issue with \`Refs #${input.issue}\`. Leave that line as it is, and never add a closing keyword before an issue number.`);
   if (input.person === true) lines.splice(0, lines.length, ...lines.map(personLine));
-  const items = input.findings.map((f) => {
+  if (input.replace === true) lines.splice(0, lines.length, ...lines.map(replaceLine));
+  // The Replace round lists no finding, whatever it is given: its words are fixed.
+  const items = (input.replace === true ? [] : input.findings).map((f) => {
     const source = f.fullFindings ?? f.findings;
     const bullets = source.slice(0, MAX_FINDINGS_PER_REVIEWER).map((x) => `- ${String(x).slice(0, MAX_FINDING_CHARS)}`);
     const body = [...bullets, ...(f.summary ? [`summary: ${f.summary.slice(0, MAX_SUMMARY_CHARS)}`] : [])].join("\n");
@@ -376,9 +394,9 @@ export function assembleFixPrompt(input: FixPromptInput, options?: AssembleOptio
     memoryStable: input.memory?.stable,
     memoryItem: input.memory?.item,
     notes: input.notes,
-    ...(items.length > 0 || input.person !== true ? { findings: { heading: "REVIEWER FINDINGS:", items } } : {}),
+    ...(items.length > 0 || (input.person !== true && input.replace !== true) ? { findings: { heading: "REVIEWER FINDINGS:", items } } : {}),
     output: [
-      input.person === true ? "Your final block must include a `summary`: what you changed for the person's note and for each finding, and how you tested it." : "Your final block must include a `summary`: what you changed for each finding, and how you tested it.",
+      input.replace === true ? "Your final block must include a `summary`: what you changed, or that nothing needed changing, and how you tested it." : input.person === true ? "Your final block must include a `summary`: what you changed for the person's note and for each finding, and how you tested it." : "Your final block must include a `summary`: what you changed for each finding, and how you tested it.",
       ...agentOutputBlock(runner ? '{"verdict":"done","tests":"passed","summary":"<per finding: what you changed; the commands you ran>"}' : `{"verdict":"done","branch":"${branch}","tests":"passed","summary":"<per finding: what you changed; the commands you ran>"}`),
     ].join("\n"),
   }, options);

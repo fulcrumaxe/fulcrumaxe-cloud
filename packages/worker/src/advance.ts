@@ -5,7 +5,7 @@ import { advanceActionFor, type AdvanceAction } from "@fx/core/src/work-items/ad
 import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
-import { NO_VERDICT_ESCALATION_CODE, readReviewHold } from "@fx/core/src/work-items/reviewHold.js";
+import { NO_VERDICT_ESCALATION_CODE, readBranchAnswerRound, readReviewHold } from "@fx/core/src/work-items/reviewHold.js";
 import { VERDICT_ROLES } from "@fx/core/src/work-items/verdictRoles.js";
 import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError, hasLivePlannedChildSql, readsOwnSpecSql, specOfItemSql } from "@fx/core/src/work-items/stages.js";
 import { MAX_WAITING_ATTEMPT, assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
@@ -339,6 +339,8 @@ export interface AdvanceReviewContext extends AdvancePrSource {
   debaterEnabled: boolean;
   /** A person's Request changes is waiting for its fix round (the pipeline's loader derives it). The driver starts that round before any review. */
   personRequestPending?: boolean;
+  /** D#598 P1g-3a-2: a person answered the "someone pushed" request of a refused update (Needs a person): the driver starts ONE fix round before any review. */
+  branchAnswerPending?: boolean;
 }
 export type AdvanceReviewLoad = { ok: true; ctx: AdvanceReviewContext } | { ok: false; reason: string };
 
@@ -440,7 +442,7 @@ export interface AdvanceFixRequest {
   failingRunId?: string;
   /**
    * A person pressed Request changes: their note reaches the run as an accepted run note (fenced, like every run note), and the item is already at
-   * Changes requested (the press moved it). Never set by a reviewer's round.
+   * Changes requested (the press moved it); also the one round a confirmed Replace asks for, from Needs a person (D#598 P1g-3a-2). Never set by a reviewer's round.
    */
   person?: boolean;
   /** D#6 R4d-1 (C32): the repository's execution mode the fix prompt was built for. Another mode at start refuses `execution_mode_changed`. */
@@ -1811,7 +1813,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (state.live) return refuse("already_running");
     if (state.repoId === null) return refuse("no_repo");
     // Only a pull request that is still under review gets a fix round (not one that merged, closed or went to a person).
-    if (state.stage !== "pr_opened" && state.stage !== "changes_requested" && state.stage !== "review_passed") return refuse(`stage_${state.stage ?? "gone"}`.replace(/[^a-z0-9_]/g, "_"));
+    // D#598 P1g-3a-2: the one other stage a round starts from is Needs a person after the lease failure, once the person confirmed Replace on the request it raised (the derived trigger); the round moves the item to Changes requested below.
+    const answered = state.stage === "needs_human" && req.person === true && (await withTenant(runnerPool, who.accountId, (client) => readBranchAnswerRound(client, who.workItemId)));
+    if (state.stage !== "pr_opened" && state.stage !== "changes_requested" && state.stage !== "review_passed" && !answered) return refuse(`stage_${state.stage ?? "gone"}`.replace(/[^a-z0-9_]/g, "_"));
 
     // FIXROUND-REFRESH-HEAD: the branches as GitHub has them now, before anything is started or moved. A public branch changed outside the cloud refuses the
     // round; a private branch that moved is recorded and the round goes on from its latest commit (the issuer reads the tip at dispatch, and the runner resumes

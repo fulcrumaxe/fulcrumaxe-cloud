@@ -5,6 +5,7 @@ import type { WorkItemTier } from "../build/types.js";
 import { tierOfKind } from "./reviewPlan.js";
 import { resolveBuildIdentity, type BuildIdentityRefusal } from "@fx/core/src/work-items/buildIdentity.js";
 import { specOfItemSql } from "@fx/core/src/work-items/stages.js";
+import { readBranchAnswerRound } from "@fx/core/src/work-items/reviewHold.js";
 import { reviewFixRoundsSql } from "@fx/core/src/work-items/driverEvents.js";
 
 /**
@@ -45,6 +46,11 @@ export interface ReviewContext {
    * names a run note (`request_changes:<id>`) that is still `accepted`. Derived from the rows, never stamped: the fix run stamps the note `applied`.
    */
   personRequestPending: boolean;
+  /**
+   * D#598 P1g-3a-2: the item is at Needs a person because a fix round's update met a public branch a person had pushed to, and the person has confirmed Replace. The driver
+   * starts ONE fix round before any review: the round whose end publishes with the lease on the head the person saw. Keep never sets it (plain review). Derived (`readBranchAnswerRound`).
+   */
+  branchAnswerPending: boolean;
 }
 
 export type ReviewContextRefusal = BuildIdentityRefusal | "external_requires_human" | "no_repo" | "tier_unknown" | "no_spec";
@@ -95,10 +101,10 @@ export async function loadReviewContext(pool: Pool, accountId: string, workItemI
     const found = rows[0];
     if (found === undefined) return null;
     // The issue number and the branch are the build identity's. This is a read of what exists (the reviews and the merge gate of a pull request already open), so it runs no launch check.
-    return { found, identity: await resolveBuildIdentity(client, accountId, workItemId, "observe") };
+    return { found, identity: await resolveBuildIdentity(client, accountId, workItemId, "observe"), branchAnswer: found.stage === "needs_human" && (await readBranchAnswerRound(client, workItemId)) };
   });
   if (row === null) return { ok: false, reason: "not_found" };
-  const { found: item, identity } = row;
+  const { found: item, identity, branchAnswer } = row;
   // Fail closed, as the intake gate does: only the exact literal "internal" is internal.
   if (item.provenance !== "internal") return { ok: false, reason: "external_requires_human" };
   if (!item.repo_id || !item.gh_owner || !item.gh_name) return { ok: false, reason: "no_repo" };
@@ -127,6 +133,7 @@ export async function loadReviewContext(pool: Pool, accountId: string, workItemI
       autoMerge: item.auto_merge,
       blockExternalAutoMerge: item.block_external,
       personRequestPending: item.person_request === true,
+      branchAnswerPending: branchAnswer,
     },
   };
 }
