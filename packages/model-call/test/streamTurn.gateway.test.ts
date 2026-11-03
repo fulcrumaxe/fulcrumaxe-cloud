@@ -1,11 +1,13 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { ModelCallError, streamTurn } from '../src/index.js';
-import { gatewayPricedModel, streamRequestFor } from '../src/hosts.js';
+import { DEFAULT_GATEWAY_MODEL, gatewayPricedModel, streamRequestFor } from '../src/hosts.js';
 import { TOOL_PREAMBLE_OVERHEAD_TOKENS } from '../src/streamGateway.js';
 import { clampStreamBytes } from '../src/streamCore.js';
 import { validateChatRequest } from '../../model-connection/test/helpers/gatewayChatFake.js';
 import { CREDITS_EXHAUSTED_ANSWERS } from '../../model-connection/test/helpers/creditsAnswers.js';
-import { isPriced } from '../../spend/src/tables/index.js';
+import { isPriced, priceFor } from '../../spend/src/tables/index.js';
+import { resetPlanDataCache } from '../../plan-data/src/index.js';
+import { readFileSync } from 'node:fs';
 import { baseParams, chatTurnChunks, fakeKey, startWorld } from './helpers/streamWorld.js';
 
 const gwParams = { ...baseParams, model: 'anthropic/claude-sonnet-5' };
@@ -259,12 +261,45 @@ describe('streamTurn, gateway shape, over the strict TLS fake', () => {
   describe('the price table (R-597-C2-5)', () => {
     it('maps gateway ids to the plan-data price ids and refuses an unknown id, including inherited names', () => {
       expect(gatewayPricedModel('anthropic/claude-sonnet-5')).toBe('sonnet-5');
-      // No exact plan-data row for 5.5: never priced as its sibling.
-      expect(gatewayPricedModel('anthropic/claude-sonnet-5.5')).toBeNull();
+      // 5.5 has its own exact key, never its sibling's.
+      expect(gatewayPricedModel('anthropic/claude-sonnet-5.5')).toBe('sonnet-5.5');
       expect(gatewayPricedModel('anthropic/claude-opus-5')).toBe('opus-5');
       // Every mapped id is a model the plan-data price source prices: a table entry cannot drift ahead of the prices.
       for (const id of ['anthropic/claude-haiku-4.5', 'anthropic/claude-sonnet-5', 'anthropic/claude-opus-5']) expect(isPriced('claude-code', gatewayPricedModel(id)!)).toBe(true);
       for (const id of ['openai/gpt-9', 'anthropic/claude-haiku-5', 'anthropic/claude-opus-5.5', '', 'constructor', '__proto__', 'toString']) expect(gatewayPricedModel(id)).toBeNull();
+    });
+
+    describe('the Sonnet 5.5 default has its own price key', () => {
+      const saved = process.env.FX_PLAN_DATA;
+      const withData = (mutate: (d: any) => void) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+        const d = JSON.parse(readFileSync(new URL('../../plan-data/fixtures/plan-data.fixture.json', import.meta.url), 'utf8'));
+        mutate(d);
+        process.env.FX_PLAN_DATA = JSON.stringify(d);
+        resetPlanDataCache();
+      };
+      afterEach(() => {
+        if (saved === undefined) delete process.env.FX_PLAN_DATA;
+        else process.env.FX_PLAN_DATA = saved;
+        resetPlanDataCache();
+      });
+
+      it('with no sonnet-5.5 row the default is unpriced, and sonnet-5 is not borrowed', () => {
+        withData((d) => void delete d.pricing.claude['sonnet-5.5']);
+        const key = gatewayPricedModel(DEFAULT_GATEWAY_MODEL)!;
+        expect(key).toBe('sonnet-5.5');
+        expect(isPriced('claude-code', key)).toBe(false);
+        expect(priceFor('claude-code', key)).toBeUndefined();
+        expect(isPriced('claude-code', 'sonnet-5')).toBe(true);
+      });
+
+      it('with a sonnet-5.5 row the default is priced from exactly that row', () => {
+        withData((d) => {
+          d.pricing.claude['sonnet-5.5'] = { ...d.pricing.claude['sonnet-5'], inputUsdPerMTok: 71, outputUsdPerMTok: 73, cacheWriteUsdPerMTok: 79, cacheReadUsdPerMTok: 83 };
+        });
+        const rate = priceFor('claude-code', gatewayPricedModel(DEFAULT_GATEWAY_MODEL)!)!;
+        expect(rate).toMatchObject({ inputUsdPerMTok: 71, outputUsdPerMTok: 73, cacheWriteUsdPerMTok: 79, cacheReadUsdPerMTok: 83 });
+        expect(rate.inputUsdPerMTok).not.toBe(priceFor('claude-code', 'sonnet-5')!.inputUsdPerMTok);
+      });
     });
 
     it('an unpriced model id answers unpriced_model before any request is sent', async () => {

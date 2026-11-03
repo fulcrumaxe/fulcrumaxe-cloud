@@ -43,14 +43,24 @@ export function pricingFetchedAt(): string {
   return loadPlanData().pricing.fetchedAt;
 }
 
+/**
+ * The claude-code model ids, an explicit list and never the price table's keys: the table may carry pricing-only keys (the gateway's 'sonnet-5.5')
+ * that are not models this system selects. Adding a model id means adding it here and to `ModelId`.
+ */
+const CLAUDE_MODEL_IDS = ['haiku-4.5', 'sonnet-5', 'opus-5'] as const satisfies readonly ModelId[];
+type MissingModelId = Exclude<ModelId, (typeof CLAUDE_MODEL_IDS)[number]>;
+const noMissingModelId: [MissingModelId] extends [never] ? true : false = true;
+void noMissingModelId;
+
 /** The ids of every claude-code model that has a price. */
 export function claudeModelIds(): ModelId[] {
-  return Object.keys(claudePricing()) as ModelId[];
+  const table = claudePricing();
+  return CLAUDE_MODEL_IDS.filter((id) => Object.hasOwn(table, id));
 }
 
-/** True for an id that has a claude-code price (own-property check, so 'constructor' is not one). */
+/** True for a model id that is in the `ModelId` union and has a claude-code price. A pricing-only key is not one. */
 export function isClaudeModelId(model: string): model is ModelId {
-  return Object.hasOwn(claudePricing(), model);
+  return (claudeModelIds() as string[]).includes(model);
 }
 
 const MTOK = 1_000_000;

@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { afterEach, describe, expect, it } from 'vitest';
+import { resetPlanDataCache } from '@fx/plan-data';
 import {
   claudeModelIds,
   claudePricing,
@@ -57,5 +59,37 @@ describe('pricing: sandbox compute rates', () => {
   it('scales linearly with seconds', () => {
     const full = computeComputeUsd(3600, 2, 4);
     expect(computeComputeUsd(1800, 2, 4)).toBeCloseTo(full / 2, 4);
+  });
+});
+
+describe("a pricing-only 'sonnet-5.5' row is not a model id", () => {
+  const saved = process.env.FX_PLAN_DATA;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.FX_PLAN_DATA;
+    else process.env.FX_PLAN_DATA = saved;
+    resetPlanDataCache();
+  });
+  const withRow = (): void => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const d: any = JSON.parse(readFileSync(new URL('../../plan-data/fixtures/plan-data.fixture.json', import.meta.url), 'utf8'));
+    d.pricing.claude['sonnet-5.5'] = { ...d.pricing.claude['opus-5'], inputUsdPerMTok: 900, outputUsdPerMTok: 900, cacheWriteUsdPerMTok: 900, cacheReadUsdPerMTok: 900 };
+    process.env.FX_PLAN_DATA = JSON.stringify(d);
+    resetPlanDataCache();
+  };
+
+  it('claudeModelIds stays the three ids and isClaudeModelId refuses the key', () => {
+    withRow();
+    expect(claudePricing()).toHaveProperty(['sonnet-5.5']);
+    expect(claudeModelIds().sort()).toEqual(['haiku-4.5', 'opus-5', 'sonnet-5']);
+    expect(isClaudeModelId('sonnet-5.5')).toBe(false);
+    expect(isClaudeModelId('opus-5')).toBe(true);
+  });
+
+  it('the dearest-model pick (the sandbox target reduce over claudeModelIds) is unchanged, even with a dearer 5.5 row', () => {
+    const usage = { inputTokens: 1e6, outputTokens: 1e6, cacheWriteTokens: 1e6, cacheReadTokens: 1e6 };
+    const dearest = (): string => claudeModelIds().reduce((a, b) => (computeModelUsd(b, usage) > computeModelUsd(a, usage) ? b : a));
+    const before = dearest();
+    withRow();
+    expect(dearest()).toBe(before);
   });
 });

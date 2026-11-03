@@ -114,6 +114,25 @@ describe('loadPlanData', () => {
     expect(loadPlanData().pricing.claude['sonnet-5'].contextWindowTokens).toBeUndefined();
   });
 
+  it("pricing.claude['sonnet-5.5'] is optional and, when present, strict", () => {
+    const d = fixture();
+    delete d.pricing.claude['sonnet-5.5'];
+    process.env.FX_PLAN_DATA = JSON.stringify(d);
+    resetPlanDataCache();
+    expect(loadPlanData().pricing.claude['sonnet-5.5']).toBeUndefined();
+    const ok = fixture();
+    ok.pricing.claude['sonnet-5.5'] = { ...ok.pricing.claude['sonnet-5'], inputUsdPerMTok: 7 };
+    process.env.FX_PLAN_DATA = JSON.stringify(ok);
+    resetPlanDataCache();
+    expect(loadPlanData().pricing.claude['sonnet-5.5']?.inputUsdPerMTok).toBe(7);
+    const extra = fixture();
+    extra.pricing.claude['sonnet-5.5'] = { ...extra.pricing.claude['sonnet-5'], surprise: 1 };
+    expect(fail(extra).message).toContain('pricing.claude.sonnet-5.5.surprise');
+    const neg = fixture();
+    neg.pricing.claude['sonnet-5.5'] = { ...neg.pricing.claude['sonnet-5'], inputUsdPerMTok: -1 };
+    expect(fail(neg).message).toContain('pricing.claude.sonnet-5.5.inputUsdPerMTok');
+  });
+
   it('rejects negative numbers, naming the path', () => {
     const d = fixture();
     d.caps.featureUsd = -1;
