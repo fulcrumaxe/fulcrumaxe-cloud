@@ -18,6 +18,7 @@
     "@fx/db": "workspace:*",
     "@fx/decisions": "workspace:*",
     "@fx/discussions": "workspace:*",
+    "@fx/model-call": "workspace:*",
     "@fx/model-connection": "workspace:*",
     "@fx/model-router": "workspace:*",
     "@fx/pipeline": "workspace:*",

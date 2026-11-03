@@ -69,6 +69,7 @@ shell/session/route.ts
 stripe/webhook/route.ts
 system/mode/route.ts
 v1/[...path]/route.ts
+v1/assistant/messages/route.ts
 v1/events/route.ts
 v1/openapi.json/route.ts
 v1/runs/[id]/events/route.ts

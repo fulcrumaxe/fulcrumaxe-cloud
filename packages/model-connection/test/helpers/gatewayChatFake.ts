@@ -15,7 +15,7 @@ import type http from 'node:http';
  */
 export type ChatChunk = unknown | '[DONE]';
 export type ChatReply =
-  | { kind: 'stream'; chunks: ChatChunk[]; /** Destroy the connection after this many whole chunks. */ cutAfter?: number; /** Destroy halfway through the next chunk's bytes. */ cutMidEvent?: boolean }
+  | { kind: 'stream'; chunks: ChatChunk[]; /** Destroy the connection after this many whole chunks. */ cutAfter?: number; /** Destroy halfway through the next chunk's bytes. */ cutMidEvent?: boolean; /** After the chunks, keep sending SSE comment keep-alives until the client hangs up (an endless stream; no finish and no [DONE]). */ endless?: boolean }
   | { kind: 'status'; status: number; errorType: string; message?: string; headers?: Record<string, string> };
 
 export interface ChatCall {
@@ -30,8 +30,10 @@ export interface ChatFake {
   unscripted: number;
   /** Write the stream in slices of this many bytes (0 = one write per chunk), so chunks split mid-event and mid-JSON-string. */
   chunkBytes: number;
+  /** Endless streams the client hung up on (the provider request was aborted). */
+  hangups: number;
 }
-export const newChatFake = (): ChatFake => ({ enabled: false, replies: [], calls: [], unscripted: 0, chunkBytes: 0 });
+export const newChatFake = (): ChatFake => ({ enabled: false, replies: [], calls: [], unscripted: 0, chunkBytes: 0, hangups: 0 });
 
 type Refusal = { status: number; type: string; message: string };
 const bad = (message: string): Refusal => ({ status: 400, type: 'invalid_request_error', message });
@@ -125,6 +127,15 @@ export async function answerChat(fake: ChatFake, knownKeys: Set<string>, headers
       res.write(wire);
       await pause();
     }
+  }
+  if (reply.endless) {
+    let closed = false;
+    res.on('close', () => ((closed = true), fake.hangups++));
+    while (!closed && !res.destroyed) {
+      res.write(': keep-alive\n\n');
+      await pause();
+    }
+    return;
   }
   if (reply.cutMidEvent) {
     const next = reply.chunks[chunks.length];

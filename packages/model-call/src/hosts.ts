@@ -71,6 +71,25 @@ export function gatewayPricedModel(gatewayModelId: string): string | null {
   return Object.hasOwn(GATEWAY_PRICED_MODEL, gatewayModelId) ? GATEWAY_PRICED_MODEL[gatewayModelId]! : null;
 }
 
+/** The same mapping for the direct Anthropic ids (the provider's own spelling, dashes). */
+const ANTHROPIC_PRICED_MODEL: Readonly<Record<string, string>> = Object.freeze({
+  'claude-haiku-4-5': 'haiku-4.5',
+  'claude-sonnet-5': 'sonnet-5',
+  'claude-sonnet-5-5': 'sonnet-5.5',
+  'claude-opus-5': 'opus-5',
+});
+
+/** The model a streaming turn uses when none is named, for a provider with a streaming path; null for any other provider row. */
+export function defaultModelFor(provider: string): string | null {
+  return provider === 'anthropic' || provider === 'ai_gateway' ? DEFAULT_MODEL[provider] : null;
+}
+
+/** The plan-data price key of a model id on a provider, or null when the id has no mapping (the caller answers unpriced and sends nothing). */
+export function pricedModelOf(provider: string, model: string): string | null {
+  if (provider === 'ai_gateway') return gatewayPricedModel(model);
+  return provider === 'anthropic' && Object.hasOwn(ANTHROPIC_PRICED_MODEL, model) ? ANTHROPIC_PRICED_MODEL[model]! : null;
+}
+
 const STREAM_UA = 'fulcrumaxe-cloud-model-call/0.1';
 
 // The chat-completions form of a messages list: tool_use blocks become assistant tool_calls, tool_result blocks become role "tool" messages.

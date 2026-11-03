@@ -40,6 +40,10 @@ export interface RouteContext {
   idempotencyKey?: string | null;
   /** A handler that itself replayed an earlier request calls this so the response carries `Idempotent-Replayed: true`. */
   markReplayed?: () => void;
+  /** The request's own abort signal (a client that hangs up or presses Stop). Absent in direct calls. */
+  signal?: AbortSignal;
+  /** True when the request asked for `text/event-stream` (and not JSON): a route with both forms answers a `RawBody` of SSE frames. */
+  wantsStream?: boolean;
 }
 
 export interface RouteInput<Params, Query, Body> {
@@ -130,7 +134,7 @@ export interface RouteEntry<
    * place of `application/json`, with `description` as the body's schema
    * description and `headers` as its documented response headers.
    */
-  rawResponse?: { contentType: string; description: string; headers: Record<string, string> };
+  rawResponse?: { contentType: string; description: string; headers: Record<string, string>; /** The route also answers JSON (`Accept: application/json`): keep its schema in the document beside the raw body. */ alsoJson?: true };
   handler: (ctx: RouteContext, input: RouteInput<Params, Query, Body>) => Promise<Response>;
 }
 

@@ -4080,6 +4080,27 @@ export interface Operations {
       applied_at: string | null;
     };
   };
+  sendAssistantMessage: {
+    path: undefined;
+    query: undefined;
+    body: {
+      conversation_id?: string;
+      repo_id?: string;
+      work_item_id?: string;
+      messages: Array<{
+        role: "user" | "assistant";
+        content: string;
+      }>;
+    };
+    response: {
+      conversation_id?: string;
+      state: "ok" | "stopped" | "incomplete" | "tool_limit" | "unconfigured" | "no_key" | "budget_reached" | "unpriced" | "unavailable";
+      code?: string;
+      text: string;
+      spent_micro_usd?: number;
+      cap_micro_usd?: number;
+    };
+  };
   mintAssistantToken: {
     path: undefined;
     query: undefined;
@@ -6353,6 +6374,17 @@ export const operations = {
     tokenSelfOnly: false,
     idempotency: "optional",
     pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  sendAssistantMessage: {
+    method: "POST",
+    path: "/api/v1/assistant/messages",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
     queryParams: [],
     hasBody: true,
   },

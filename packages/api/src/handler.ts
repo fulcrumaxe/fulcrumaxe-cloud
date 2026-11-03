@@ -339,6 +339,8 @@ export async function handleApiRequest(
             markReplayed: () => {
               handlerReplayed = true;
             },
+            signal: req.signal,
+            wantsStream: (req.headers.get("accept") ?? "").toLowerCase().includes("text/event-stream"),
           },
           { params: parsedParams, query, body },
         );
