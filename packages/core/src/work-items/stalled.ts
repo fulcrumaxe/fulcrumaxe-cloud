@@ -39,11 +39,12 @@ export const SILENT_MS = 150 * 60_000;
  * Gate reasons that time or a later step can clear: the pull request is still a draft, its checks have not finished, or the public copy is not open yet.
  * A gate answer with one of these is not "ready": it ended before it could pass, and it is asked again by the event that clears the reason (packages/worker gateReask.ts), or by pressing the card's button.
  */
-export const TRANSIENT_GATE_REASONS: readonly string[] = Object.freeze(['pr_draft', 'ci_not_green', 'public_pr_not_open', 'public_head_unrecorded', 'merge_queue_unreadable', 'pr_author_unverified']);
+export const TRANSIENT_GATE_REASONS: readonly string[] = Object.freeze(['pr_draft', 'ci_not_green', 'public_pr_not_open', 'public_head_unrecorded', 'merge_queue_unreadable', 'pr_author_unverified', 'merge_repo_busy']);
 
 /** D#694 B5: gate reasons with a sentence of their own (every other code is shown with its underscores as spaces). */
 const GATE_REASON_WORDS: Readonly<Record<string, string>> = Object.freeze({
   merge_queue_unreadable: "GitHub's merge queue state could not be read; try again or merge by hand",
+  merge_repo_busy: 'another merge on this repository was still finishing',
 });
 
 /** The label of the card's top button, per stage (the Pipeline app's own words; a test pins the two lists equal). */

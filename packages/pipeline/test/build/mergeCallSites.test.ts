@@ -65,6 +65,27 @@ describe("R-P1d-1: the merge gate is the only way the product merges", () => {
     expect(readFileSync(path.join(REPO_ROOT, "packages/pipeline/src/review/mergeGateRun.ts"), "utf8")).toMatch(/pullRequestAuthorTrust:\s*createPullRequestAuthorTrust\(/);
   });
 
+  it("D#483 S5-j2a1: the merge lease is taken before the gate reads anything, freed in the one finally, and only the gate, its caller and the lease module name acquireMergeLease", () => {
+    expect(mentioning(/\bacquireMergeLease\b/)).toEqual(["packages/pipeline/src/build/mergeGate.ts", "packages/pipeline/src/mergeQueue/mergeLease.ts", "packages/pipeline/src/review/mergeGateRun.ts"]);
+    const src = readFileSync(path.join(REPO_ROOT, "packages/pipeline/src/build/mergeGate.ts"), "utf8");
+    const fn = src.slice(src.indexOf("export async function runMergeGate("));
+    const lease = fn.indexOf("deps.acquireMergeLease()");
+    const inner = fn.indexOf("runMergeGateLeased(deps, input)");
+    const release = fn.indexOf("lease.release()");
+    const firstRead = fn.indexOf("deps.github.getPullRequest(");
+    expect(lease).toBeGreaterThan(0);
+    expect(inner).toBeGreaterThan(lease);
+    expect(release).toBeGreaterThan(inner);
+    // Nothing is read for the decision, and nothing merges, before the lease: every read and both merge call sites sit in the leased function, after the finally that frees it.
+    expect(firstRead).toBeGreaterThan(release);
+    expect(fn.indexOf("deps.github.mergePullRequest(")).toBeGreaterThan(release);
+    expect(fn.indexOf("enqueueIntoQueue(deps")).toBeGreaterThan(release);
+    expect(fn.match(/lease\.release\(\)/g)).toHaveLength(1);
+    // The caller wires the lease for every caller but the queue tick, which holds the slot.
+    expect(readFileSync(path.join(REPO_ROOT, "packages/pipeline/src/review/mergeGateRun.ts"), "utf8")).toMatch(/input\.underQueueSlot === true \? \{\} : \{ acquireMergeLease:/);
+    expect(mentioning(/\bunderQueueSlot: true\b/)).toEqual(["apps/web/lib/mergeQueue.ts"]);
+  });
+
   it("inside the gate, the author reasons are gathered before the stop, and both merge call sites sit after it", () => {
     const src = readFileSync(path.join(REPO_ROOT, "packages/pipeline/src/build/mergeGate.ts"), "utf8");
     const fn = src.slice(src.indexOf("export async function runMergeGate("));

@@ -94,6 +94,9 @@ const RUNNER_PENDING_CEILING_MS = 73 * 3_600_000;
 /** How often, and for how long, the workflow looks at its merge queue entry. After the bound the entry stays in the queue and the tick still merges it. */
 const MERGE_QUEUE_WAIT_POLL_MS = 2 * 60_000;
 const MERGE_QUEUE_WAIT_MAX_MS = 24 * 60 * 60_000;
+/** D#483 S5-j2a1: how often, and for how long, the direct merge gate is asked again while another merge holds the repository. */
+const MERGE_REPO_BUSY_POLL_MS = 30_000;
+const MERGE_REPO_BUSY_WAIT_MS = 60 * 60_000;
 /** D#519 MQ4-e1-a: how often a conflict round that cannot be followed is looked for again before the item goes to a person. */
 const CONFLICT_REENTRIES_MAX = 5;
 
@@ -1798,6 +1801,13 @@ async function mergeAfterPass(args: AdvanceStartArgs, pr: { number: number; head
   }
   const askGate = () => (afterConflict ? advanceConflictGateStep(accountId, userId, workItemId, args.haltEpoch, pr.number) : advanceMergeGateStep(accountId, userId, workItemId, args.haltEpoch, pr.number));
   let gate = await askGate();
+  // D#483 S5-j2a1: another merge on this repository (a direct merge, or the queue's slot) holds it. A wait, not a stop: ask again a short while later, for a bounded time.
+  const busy = () => gate.outcome === "ready_human_merges" && gate.reasons.length === 1 && gate.reasons[0] === "merge_repo_busy";
+  for (let waited = 0; busy() && waited < MERGE_REPO_BUSY_WAIT_MS; waited += MERGE_REPO_BUSY_POLL_MS) {
+    await sleep(MERGE_REPO_BUSY_POLL_MS);
+    gate = await askGate();
+  }
+  if (busy()) return { status: "waiting", detail: "merge_repo_busy" };
   // A head a conflict round produced has had no CI yet: wait for it (same cadence and limit as a review's), and ask the gate again when it is the only thing missing.
   for (let waited = 0; afterConflict && gate.outcome === "ready_human_merges" && gate.reasons.length === 1 && gate.reasons[0] === "ci_not_green" && waited < CI_WAIT_MS; ) {
     const pause = waited < CI_POLL_FAST_FOR_MS ? CI_POLL_MS : CI_POLL_SLOW_MS;

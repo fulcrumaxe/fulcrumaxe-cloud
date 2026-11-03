@@ -318,6 +318,11 @@ export interface MergeGateDeps {
    * and for any pull request GitHub reports in a public repository. Absent, or a throw, or any answer but the three words: `unverified` (nothing merges).
    */
   pullRequestAuthorTrust?(pr: PullRequestRef, author: { login: string | null; repoPublic: boolean | null }): Promise<PullRequestAuthorTrust>;
+  /**
+   * D#483 S5-j2a1: takes the repository's merge lease, or answers null while another merge holds the repository (a live lease, or an `in_flight` queue entry). The gate takes it
+   * before it reads anything for the merge decision and calls `release` on every exit. Absent: no lease (a test double, or the queue tick, whose slot is the exclusion).
+   */
+  acquireMergeLease?(): Promise<{ release(): Promise<void> } | null>;
 }
 
 export interface MergeGateInput {
@@ -438,6 +443,8 @@ export type MergeBlockReason =
   | "conflict_round_running"
   | "branch_protection_refused"
   | "ordered_resource_out_of_order"
+  /** D#483 S5-j2a1: another merge on this repository (a direct merge, or the queue's slot) is finishing; nothing was read or merged, and the next ask goes again. A wait, not a stop for a person. */
+  | "merge_repo_busy"
   /** D#519 MQ5-b2: the renumber round changed paths outside the renamed resource files and the files that refer to them. */
   | "renumber_out_of_scope"
   /** D#598 P5c-b: a plan write-back changes something the platform did not compute; a person looks. */
@@ -812,6 +819,18 @@ export function mergeRecordedHead(port: Pick<MergeGateGitHubPort, "mergePullRequ
  * never read as permission to merge.
  */
 export async function runMergeGate(deps: MergeGateDeps, input: MergeGateInput): Promise<MergeGateResult> {
+  // D#483 S5-j2a1: the repository's merge lease comes first, before the gate reads anything for the decision, and goes back on every exit: merged, stopped, thrown,
+  // head moved, enqueued, delegated. The `finally` below is the only place it is freed. A busy repository is a wait (no marking, no merge): the caller asks again.
+  const lease = deps.acquireMergeLease ? await deps.acquireMergeLease() : undefined;
+  if (lease === null) return { outcome: "ready_human_merges", headSha: input.expectedHeadSha ?? "", reasons: ["merge_repo_busy"] };
+  try {
+    return await runMergeGateLeased(deps, input);
+  } finally {
+    if (lease) await lease.release();
+  }
+}
+
+async function runMergeGateLeased(deps: MergeGateDeps, input: MergeGateInput): Promise<MergeGateResult> {
   const pr = await deps.github.getPullRequest(input.pr);
   const headSha = pr.headSha;
   const reasons: MergeBlockReason[] = [];

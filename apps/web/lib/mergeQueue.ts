@@ -108,7 +108,7 @@ export async function tickMergeQueueRepo(deps: MergeQueueTickerDeps, target: { a
       inTenant,
       ourLogin: await (deps.appLogin ?? readRepoAppLogin)(target.repoId),
       gate: async ({ entry, headSha, expectedSignals }) => {
-        const res = await review.mergeGate(pool, { accountId: target.accountId, workItemId: entry.workItemId!, prNumber: entry.prNumber, expectedSignals, expectedHeadSha: headSha }, { orders });
+        const res = await review.mergeGate(pool, { accountId: target.accountId, workItemId: entry.workItemId!, prNumber: entry.prNumber, expectedSignals, expectedHeadSha: headSha, underQueueSlot: true }, { orders });
         // A GitHub read that failed or a refused context is a throw: the step retries, the lease lapses, nothing is read as permission to merge.
         if (res.outcome === "refused" || res.outcome === "error") throw new Error(`merge queue: gate ${res.outcome}`);
         switch (res.outcome) {

@@ -12,6 +12,7 @@ import { carriedRunsHead, gateReviewerReasons, loadRunsOnSha, runMergeGate, RUNN
 import { listChangedFiles, listChangedFilesLocal, postReviewStatus, type ListFilesResult } from "./githubReads.js";
 import type { ChangedFile } from "./securityTrigger.js";
 import { checkPublicContent, type ContentCheck } from "./publicContentMatch.js";
+import { acquireMergeLease } from "../mergeQueue/mergeLease.js";
 import { loadReviewContext, type ReviewContext } from "./context.js";
 import type { PublicPullRequest, PublicPullRequestLookup } from "./publicPullRequest.js";
 import { reviewPlanFor } from "./reviewPlan.js";
@@ -71,6 +72,11 @@ export interface MergeGateRunInput {
    * item's own binding (below) takes precedence.
    */
   expectedHeadSha?: string;
+  /**
+   * D#483 S5-j2a1: the caller is the merge queue's tick, which already holds the repository's slot (an `in_flight` entry); the slot is its exclusion, so the gate takes no
+   * merge lease. Every other caller takes one: a direct merge and a queue slot exclude each other on a repository.
+   */
+  underQueueSlot?: true;
 }
 
 export type StatusOutcome = "posted" | "skipped" | "failed";
@@ -357,6 +363,8 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
     {
       pool,
       github: mergePort,
+      // D#483 S5-j2a1: the repository's merge lease, taken before the gate reads anything and freed on every exit. The queue tick holds the slot instead and takes none.
+      ...(input.underQueueSlot === true ? {} : { acquireMergeLease: async () => { const lease = await acquireMergeLease(pool, { accountId, repoId: ctx.repoId }); return lease.taken ? lease : null; } }),
       // @fx/trust's autoMergeAllowed over the repository's guard settings, exactly. Never wrapped in a try that could read as true.
       isAutoMergeAllowed: async () => autoMergeAllowed({ provenance: ctx.provenance }, { autoMerge: ctx.autoMerge, blockExternalAutoMerge: ctx.blockExternalAutoMerge }),
       // The driver reviews the head itself; nothing is dispatched from inside the gate.
@@ -397,7 +405,10 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
 
   // 5. The outcome, as facts.
   const reasons = out.outcome === "ready_human_merges" ? out.reasons : [];
-  const outHead = out.outcome === "head_moved" ? out.staleHeadSha : out.headSha;
+  // D#483 S5-j2a1: another merge on the repository holds it. The gate read nothing, so it has no head of its own to report: the head this call read stands in. The fact gets its own dedupe
+  // key (below), so it is recorded once per head, shows the person why nothing moved, and can never hide a later real stop on the same head.
+  const busy = out.outcome === "ready_human_merges" && out.reasons.includes("merge_repo_busy");
+  const outHead = busy ? mergeHead : out.outcome === "head_moved" ? out.staleHeadSha : out.headSha;
   // The card's rows speak of the head the reviewers judged and the item's own pull request; a paired item's public head rides in the dedupe key.
   const headForRow = publicPr !== null ? (SHA_PATTERN.test(headSha) ? headSha : null) : SHA_PATTERN.test(outHead) ? outHead : null;
   const keyHead = publicPr !== null ? `${headForRow ?? "nohead"}:${SHA_PATTERN.test(outHead) ? outHead : "nopublic"}` : (headForRow ?? "nohead");
@@ -405,7 +416,7 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
     await recordDriverEvent(client, accountId, {
       workItemId,
       kind: "merge_gate",
-      dedupeKey: `${keyHead}:${go !== undefined ? "go:" : ""}${out.outcome}`,
+      dedupeKey: `${keyHead}:${go !== undefined ? "go:" : ""}${out.outcome}${busy ? ":merge_repo_busy" : ""}`,
       code: toCode(out.outcome),
       reasons: reasons.map((r) => toCode(r)),
       headSha: headForRow,

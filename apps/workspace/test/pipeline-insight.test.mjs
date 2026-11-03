@@ -140,6 +140,7 @@ describe("recorded pipeline steps", () => {
 
     it("a person-readable stop for the reason code alone", () => {
       expect(reasonWord("stacked_on_open_pr")).toBe("This builds on a pull request that hasn't merged yet.");
+      expect(reasonWord("merge_repo_busy")).toBe("Another merge on this repository is finishing; this one goes next.");
     });
 
     it("the two-plane stops have sentences, never raw codes", () => {
@@ -240,6 +241,7 @@ describe("the Ready to merge banner is honest about what still blocks the merge"
     ["branch_protection_refused", "Branch protection refused the merge"],
     ["merge_queue_waiting", "The pull request is waiting in the merge queue"],
     ["ordered_resource_out_of_order", "Another change has to merge before this one"],
+    ["merge_repo_busy", "Another merge on this repository is finishing; this one goes next."],
     ["renumber_out_of_scope", "The automatic renumber changed more than the numbered files, so a person needs to look at it"],
     ["merge_dependency_closed", "The pull request it builds on was closed without merging"],
     ["pairing_changed", "The public repository's pairing changed"],

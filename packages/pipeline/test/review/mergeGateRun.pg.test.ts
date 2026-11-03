@@ -88,6 +88,33 @@ describe("a repository with no CI of its own (the platform's status is the signa
     expect(ev[2]).toMatchObject({ head_sha: HEAD });
   });
 
+  it("D#483 S5-j2a1: while another merge holds the repository the gate answers merge_repo_busy, merges nothing and records no merge_gate fact; the queue tick's call takes no lease", async () => {
+    const w = await world();
+    await passBoth(w);
+    await h.admin.query("INSERT INTO repo_merge_leases (account_id, repo_id, holder, kind, lease_until) VALUES ($1, $2, 'other-gate', 'direct', now() + interval '5 minutes')", [w.accountId, w.repoId]);
+    const out = await gate(w);
+    expect(out).toMatchObject({ outcome: "ready_human_merges", headSha: HEAD, reasons: ["merge_repo_busy"] });
+    // The person is told why nothing moved: one merge_gate fact with the busy reason, recorded once per head however often the gate is asked.
+    await gate(w);
+    const gateFacts = (await events(w)).filter((e) => e.kind === "merge_gate");
+    expect(gateFacts).toHaveLength(1);
+    expect(gateFacts[0]).toMatchObject({ code: "ready_human_merges", reasons: ["merge_repo_busy"], head_sha: HEAD });
+    expect(w.gh.merges ?? []).toEqual([]);
+    // A tick holds the slot, which is its exclusion: it does not look at the lease, and the lease it did not take is left as it was.
+    // The lease is freed and a real stop on the same head (CI not green) still records its own fact, beside the busy one.
+    await h.admin.query("DELETE FROM repo_merge_leases WHERE repo_id = $1", [w.repoId]);
+    w.gh.checks[HEAD] = [{ name: "ci", status: "completed", conclusion: "failure" }];
+    await gate(w);
+    const after = (await events(w)).filter((e) => e.kind === "merge_gate");
+    expect(after.map((e) => e.reasons)).toEqual([["merge_repo_busy"], expect.arrayContaining(["ci_not_green"])]);
+    w.gh.checks[HEAD] = [];
+    await h.admin.query("INSERT INTO repo_merge_leases (account_id, repo_id, holder, kind, lease_until) VALUES ($1, $2, 'other-gate', 'direct', now() + interval '5 minutes')", [w.accountId, w.repoId]);
+    const viaTick = await runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(w.gh) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber, underQueueSlot: true });
+    expect(viaTick.outcome).toBe("merged");
+    const { rows } = await h.admin.query("SELECT holder FROM repo_merge_leases WHERE repo_id = $1", [w.repoId]);
+    expect(rows).toEqual([{ holder: "other-gate" }]);
+  });
+
   it("auto-merge off (the default): the status is posted, the gate does NOT merge, and its reasons are recorded", async () => {
     const w = await world({ settings: {} });
     await passBoth(w);
