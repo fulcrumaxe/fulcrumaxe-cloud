@@ -141,6 +141,8 @@ export async function getRun(ctx: RunsReadCtx, id: string): Promise<RunDTO> {
 
 export interface ListRunsInput {
   workItemId?: string;
+  /** Only runs of work items in this repo (a run with no work item has no repo and is left out). Applied in the query, so a page and its cursor never count another repo's rows. */
+  repoId?: string;
   status?: string;
   /** Already validated (1..MAX_LIMIT) by `packages/api/src/pagination.ts`'s `parseLimit`. */
   limit: number;
@@ -162,16 +164,17 @@ export interface ListRunsResult {
  */
 export async function listRuns(ctx: RunsReadCtx, input: ListRunsInput): Promise<ListRunsResult> {
   const { accountId, userId } = ctx.principal;
-  const { workItemId, status, limit, cursor } = input;
+  const { workItemId, repoId, status, limit, cursor } = input;
   return withTenant(ctx.pool, accountId, userId, async (client) => {
     const { rows } = await client.query<RunRow>(
       `SELECT ${RUN_COLUMNS} FROM agent_runs
         WHERE ($1::uuid IS NULL OR work_item_id = $1::uuid)
           AND ($2::text IS NULL OR status = $2::text)
           AND ($3::timestamptz IS NULL OR (created_at, id) < ($3::timestamptz, $4::uuid))
+          AND ($6::uuid IS NULL OR work_item_id IN (SELECT w.id FROM work_items w WHERE w.repo_id = $6::uuid))
         ORDER BY created_at DESC, id DESC
         LIMIT $5::int`,
-      [workItemId ?? null, status ?? null, cursor?.createdAt ?? null, cursor?.id ?? null, limit + 1],
+      [workItemId ?? null, status ?? null, cursor?.createdAt ?? null, cursor?.id ?? null, limit + 1, repoId ?? null],
     );
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;

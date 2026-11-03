@@ -15,7 +15,7 @@ import {
 import { listCorrectionHistory, type CorrectionHistoryEntry } from "@fx/core/src/corrections/history.js";
 import { ActionNotAvailableError, AlreadyRunningError, ApiError, ExternalRequiresHumanError, NoRepoError, RunActionsUnavailableError } from "../errors.js";
 import type { RouteContext, RouteEntry } from "../registry.js";
-import { itemInRepo } from "@fx/core/src/tokens/delegation.js";
+import { assertBoundRepo } from "../boundRepo.js";
 import { UUID_RE, mapDbError, notFound, runActionDeps } from "./run-actions.js";
 
 /**
@@ -97,15 +97,6 @@ const cctx = (ctx: RouteContext) => ({ pool: ctx.pool, principal: { accountId: c
 function requireId(id: string | undefined): string {
   if (id === undefined || !UUID_RE.test(id)) throw notFound();
   return id;
-}
-
-/**
- * D#597 CC-4: an assistant delegation token is bound to one repo. Its calls on an item of any other repo answer 404, exactly as an
- * unknown id does. A session, and an ordinary token, are not bound.
- */
-async function assertBoundRepo(ctx: RouteContext, ref: { workItemId: string } | { correctionId: string }): Promise<void> {
-  const bound = ctx.principal.delegation;
-  if (bound && !(await itemInRepo(ctx.pool, ctx.principal, ref, bound.repoId))) throw notFound();
 }
 
 async function decide(ctx: RouteContext, id: string, hash: string | undefined, to: "accept" | "reject") {

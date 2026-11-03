@@ -14,7 +14,8 @@ import { PgRateLimitStore, type RateLimitStore } from "../ratelimit/store.js";
 import { assertRouteAccess } from "../access.js";
 import { ROLE_RANK } from "../registry.js";
 import { hashToken } from "../tokens/resolve.js";
-import { EVENT_ROUTE_ACCESS } from "../routes/events.js";
+import { EVENT_ROUTE_ACCESS, RUN_EVENT_ROUTE_ACCESS } from "../routes/events.js";
+import { assertBoundRepo } from "../boundRepo.js";
 import { realClock, type Clock } from "./clock.js";
 import { extractCredential, isCrossSiteCookieOpen, type StreamCredential } from "./credentials.js";
 import { isCursorStale, openCursor, parseRunCursor, sealCursor, type CursorEnv } from "./cursor.js";
@@ -170,7 +171,7 @@ export async function handleEventsRequest(req: Request, target: StreamTarget, de
   }
 }
 
-async function authenticate(req: Request, deps: StreamDeps): Promise<Principal> {
+async function authenticate(req: Request, deps: StreamDeps, target: StreamTarget): Promise<Principal> {
   const store = deps.rateLimitStore ?? new PgRateLimitStore(deps.pool);
   const principal = await resolvePrincipal(req, deps.pool, deps.platformOpsPool, store);
   if (principal.kind === "token") {
@@ -179,7 +180,7 @@ async function authenticate(req: Request, deps: StreamDeps): Promise<Principal> 
       tokenBucketKey: principalIdOf(principal),
     });
   }
-  assertRouteAccess(principal, EVENT_ROUTE_ACCESS);
+  assertRouteAccess(principal, target.kind === "run" ? RUN_EVENT_ROUTE_ACCESS : EVENT_ROUTE_ACCESS);
   return principal;
 }
 
@@ -192,7 +193,7 @@ async function openStream(req: Request, target: StreamTarget, deps: StreamDeps, 
   if (early?.kind === "session" && isCrossSiteCookieOpen(req)) {
     throw new CrossSiteRefusedError();
   }
-  const principal = await authenticate(req, deps);
+  const principal = await authenticate(req, deps, target);
   const credential = extractCredential(req);
   if (!credential) {
     // resolvePrincipal succeeded, so a credential exists; this is a defensive fail-closed.
@@ -221,7 +222,8 @@ async function openStream(req: Request, target: StreamTarget, deps: StreamDeps, 
     sealCursor({ accountId: principal.accountId, serial: accountStart.afterSeq, issuedAtMs: clock.now() }, env);
   } else {
     const afterSeq = lastEventId ? parseRunCursor(lastEventId) : 0;
-    // 404 for a missing run, another account's run, or a malformed id -- all identical, all before a byte.
+    // 404 for a missing run, another account's run, a run outside a delegation token's repo, or a malformed id -- all identical, all before a byte.
+    await assertBoundRepo({ pool: deps.pool, principal }, { runId: target.runId });
     const run = await getRun({ pool: deps.pool, principal }, target.runId);
     runStart = { afterSeq, status: run.status };
   }

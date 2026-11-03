@@ -516,6 +516,10 @@
             ]
           }
         ],
+        "x-fx-tokens": [
+          "api",
+          "delegation"
+        ],
         "parameters": [
           {
             "name": "work_item_id",
@@ -848,6 +852,10 @@
             ]
           }
         ],
+        "x-fx-tokens": [
+          "api",
+          "delegation"
+        ],
         "parameters": [
           {
             "name": "id",
@@ -1134,6 +1142,10 @@
               "read"
             ]
           }
+        ],
+        "x-fx-tokens": [
+          "api",
+          "delegation"
         ],
         "parameters": [
           {
@@ -1467,6 +1479,10 @@
               "read"
             ]
           }
+        ],
+        "x-fx-tokens": [
+          "api",
+          "delegation"
         ],
         "parameters": [
           {
@@ -8941,6 +8957,10 @@
               "read"
             ]
           }
+        ],
+        "x-fx-tokens": [
+          "api",
+          "delegation"
         ],
         "parameters": [
           {
@@ -17756,11 +17776,19 @@
       "get": {
         "operationId": "listWorkItemReceipts",
         "summary": "The decision receipts of a work item, with each one's free deadline, live reversal price and reversal state",
-        "description": "Session only; any member. Newest first, at most 50. Each receipt is named by its owner-approved label and its time to the second. `price_*` is the live price: free until the deadline, then the model spend so far on this item (shown for transparency on your own key, never billed). A receipt that reverses another names it by `reverses_text`, or `removed item` when the original is gone. 404 for an unknown work item.",
+        "description": "A session of any member, or an assistant delegation token with `read` for an item of its own repo (404 for any other). Newest first, at most 50. Each receipt is named by its owner-approved label and its time to the second. `price_*` is the live price: free until the deadline, then the model spend so far on this item (shown for transparency on your own key, never billed). A receipt that reverses another names it by `reverses_text`, or `removed item` when the original is gone. 404 for an unknown work item.",
         "security": [
           {
             "session": []
+          },
+          {
+            "token": [
+              "read"
+            ]
           }
+        ],
+        "x-fx-tokens": [
+          "delegation"
         ],
         "parameters": [
           {
@@ -18005,6 +18033,25 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
                 }
               }
             }
@@ -29476,6 +29523,10 @@
               "read"
             ]
           }
+        ],
+        "x-fx-tokens": [
+          "api",
+          "delegation"
         ],
         "parameters": [
           {

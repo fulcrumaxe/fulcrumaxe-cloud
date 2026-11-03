@@ -1,0 +1,24 @@
+{
+  "total": 1,
+  "receipts": [
+    {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "label": "Start small work",
+      "class": 2,
+      "at": "2026-10-20T10:00:00.000Z",
+      "name": "Start small work, 2026-10-20 10:00:00 UTC",
+      "by": "policy",
+      "chosen": "start",
+      "rejected": "hold",
+      "reverses_receipt_id": null,
+      "reverses_text": "",
+      "free_until": "2026-10-21T10:00:00.000Z",
+      "deadline_text": "Free to reverse until 2026-10-21 10:00:00 UTC.",
+      "price_kind": "free_until",
+      "price_usd": null,
+      "price_text": "Free to reverse until 2026-10-21 10:00:00 UTC.",
+      "can_reverse": true,
+      "reversal": null
+    }
+  ]
+}

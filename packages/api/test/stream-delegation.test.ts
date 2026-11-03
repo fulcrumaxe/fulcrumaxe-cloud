@@ -39,6 +39,14 @@ describe('streams refuse a delegation token (real Postgres)', () => {
     await Promise.all([adminPool.end(), app.end(), ops.end()]);
   });
 
+  async function seedRun(accountId: string, repoId: string): Promise<string> {
+    const item = randomUUID();
+    const run = randomUUID();
+    await admin.query(`INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage) VALUES ($1, $2, $3, 'feature', 'internal', 'in_progress')`, [item, accountId, repoId]);
+    await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'build', 'local', 'running')`, [run, accountId, item]);
+    return run;
+  }
+
   async function open(auth: { token: string } | { session: { accountId: string; userId: string } }, target: StreamTarget) {
     const h = new Headers({ accept: 'text/event-stream' });
     if ('token' in auth) h.set('authorization', `Bearer ${auth.token}`);
@@ -49,22 +57,37 @@ describe('streams refuse a delegation token (real Postgres)', () => {
     return res;
   }
 
-  it('a delegation token gets 403 on the account stream and on a run stream, while a session opens both', async () => {
+  it("a delegation token gets 403 on the account stream, opens its own repo's run stream and gets 404 for any other run; a session opens all", async () => {
     const o = await seedAccountWithMember(admin, { role: 'owner' });
     const repo = randomUUID();
+    const other = randomUUID();
     await admin.query(`INSERT INTO repos (id, account_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, 810000001, 'team', 'acme', 'widgets')`, [repo, o.accountId]);
-    const run = randomUUID();
-    await admin.query(`INSERT INTO agent_runs (id, account_id, role, runtime, status) VALUES ($1, $2, 'build', 'local', 'running')`, [run, o.accountId]);
+    await admin.query(`INSERT INTO repos (id, account_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, 810000002, 'team', 'acme', 'gadgets')`, [other, o.accountId]);
+    const runIn = await seedRun(o.accountId, repo);
+    const runOut = await seedRun(o.accountId, other);
+    const orphan = randomUUID();
+    await admin.query(`INSERT INTO agent_runs (id, account_id, role, runtime, status) VALUES ($1, $2, 'build', 'local', 'running')`, [orphan, o.accountId]);
     const plaintext = generateToken();
     await insertApiToken(app, {
       accountId: o.accountId, createdBy: o.userId, tokenHash: hashToken(plaintext), displayHint: 'fxat_...test', scopes: ['read', 'corrections:write'],
       expiresAt: new Date(Date.now() + 3_000_000), delegation: { repoId: repo, clientId: 'stream-probe' },
     });
-    for (const target of [{ kind: 'account' } as const, { kind: 'run', runId: run } as const]) {
-      const refused = await open({ token: plaintext }, target);
-      expect(refused.status, target.kind).toBe(403);
-      expect(refused.headers.get('content-type'), target.kind).not.toContain('text/event-stream');
-      expect((await open({ session: o }, target)).status, target.kind).toBe(200);
+    const account = { kind: 'account' } as const;
+    const refused = await open({ token: plaintext }, account);
+    expect(refused.status).toBe(403);
+    expect(refused.headers.get('content-type')).not.toContain('text/event-stream');
+    // the only stream a delegation token opens: a run of its own repo
+    const allowed = await open({ token: plaintext }, { kind: 'run', runId: runIn });
+    expect(allowed.status).toBe(200);
+    expect(allowed.headers.get('content-type')).toContain('text/event-stream');
+    // another repo's run, a run with no work item and an id nothing has all answer 404, before any stream byte
+    for (const runId of [runOut, orphan, randomUUID()]) {
+      const r = await open({ token: plaintext }, { kind: 'run', runId });
+      expect(r.status, runId).toBe(404);
+      expect(r.headers.get('content-type'), runId).not.toContain('text/event-stream');
+    }
+    for (const target of [account, { kind: 'run', runId: runIn } as const, { kind: 'run', runId: runOut } as const]) {
+      expect((await open({ session: o }, target)).status, JSON.stringify(target)).toBe(200);
     }
   });
 });

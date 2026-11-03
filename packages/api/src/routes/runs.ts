@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { getRun, listRuns } from "@fx/core/src/runs/read.js";
 import type { RouteEntry } from "../registry.js";
+import { assertBoundRepo, boundListRepo } from "../boundRepo.js";
 import { decodeCursor, encodeCursor, parseLimit } from "../pagination.js";
 
 /** D#6 R2b-5a: the API-equivalent usage of a run on the person's own machine. `api_equivalent_usd` is null for a model with no price row. */
@@ -57,6 +58,7 @@ export const runRoutes: RouteEntry[] = [
     operationId: "listRuns",
     summary: "The caller's own runs, paginated",
     principals: ["session", "token"],
+    tokens: ["api", "delegation"],
     minRole: "member",
     scope: "read",
     idempotency: "never",
@@ -66,11 +68,16 @@ export const runRoutes: RouteEntry[] = [
     async handler(ctx, input) {
       const query = (input.query ?? {}) as z.infer<typeof listRunsQuerySchema>;
       const limit = parseLimit(query.limit);
+      // A delegation token reads its own repo's runs only: the repo is part of the query, not a filter on the page. A work item it names must be
+      // in that repo, and an unknown one answers the same 404, so the answer never says whether the item exists.
+      const repoId = boundListRepo(ctx.principal, undefined);
+      if (repoId !== undefined && query.work_item_id !== undefined) await assertBoundRepo(ctx, { workItemId: query.work_item_id });
       const cursor = query.cursor ? decodeCursor(query.cursor) : undefined;
       const result = await listRuns(
         { pool: ctx.pool, principal: ctx.principal },
         {
           workItemId: query.work_item_id,
+          repoId,
           status: query.status,
           limit,
           cursor: cursor ? { createdAt: cursor.created_at, id: cursor.id } : undefined, // fix round 1: no new Date(...)
@@ -88,6 +95,7 @@ export const runRoutes: RouteEntry[] = [
     operationId: "getRun",
     summary: "A single run the caller's account owns",
     principals: ["session", "token"],
+    tokens: ["api", "delegation"],
     minRole: "member",
     scope: "read",
     idempotency: "never",
@@ -95,6 +103,7 @@ export const runRoutes: RouteEntry[] = [
     paramsSchema: runIdParamsSchema,
     responseSchema: runResponseSchema,
     async handler(ctx, input) {
+      await assertBoundRepo(ctx, { runId: input.params.id! });
       return getRun({ pool: ctx.pool, principal: ctx.principal }, input.params.id!);
     },
   },

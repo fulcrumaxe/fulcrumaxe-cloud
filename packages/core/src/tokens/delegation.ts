@@ -14,14 +14,20 @@ export const DELEGATION_TTL_MS = 60 * 60 * 1000;
 export async function itemInRepo(
   pool: Pool,
   ctx: { accountId: string; userId: string },
-  ref: { workItemId: string } | { correctionId: string },
+  ref: { workItemId: string } | { correctionId: string } | { runId: string },
   repoId: string,
 ): Promise<boolean> {
   return withTenant(pool, ctx.accountId, ctx.userId, async (client) => {
     const { rows } =
       'workItemId' in ref
         ? await client.query<{ repo_id: string | null }>('SELECT repo_id FROM work_items WHERE id = $1', [ref.workItemId])
-        : await client.query<{ repo_id: string | null }>(
+        : 'runId' in ref
+          ? // A run belongs to the repo of its work item; a run with no work item belongs to no repo, so a bound token cannot reach it.
+            await client.query<{ repo_id: string | null }>(
+              'SELECT w.repo_id FROM agent_runs r JOIN work_items w ON w.id = r.work_item_id WHERE r.id = $1',
+              [ref.runId],
+            )
+          : await client.query<{ repo_id: string | null }>(
             'SELECT w.repo_id FROM work_item_corrections c JOIN work_items w ON w.id = c.work_item_id WHERE c.id = $1',
             [ref.correctionId],
           );
