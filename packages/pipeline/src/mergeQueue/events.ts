@@ -2,6 +2,7 @@ import type { PoolClient } from "pg";
 import { DEQUEUE_SUCCESS_CODES, dequeueReasonCode, personRequeueCycle, queueEscalationKey, recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, StageInputError } from "@fx/core/src/work-items/stages.js";
+import { releaseHostQueueLease } from "./mergeLease.js";
 import { HOST_RETRY_USED_REASON, requeueCiStopped, settleHostDequeue, settlePullRequest } from "./store.js";
 
 /**
@@ -42,6 +43,10 @@ export async function applyQueueEvent(client: PoolClient, input: { accountId: st
   const relevant = ciDone || closed || eventName === "push" || (eventName === "pull_request" && typeof p.action === "string" && PR_ACTIONS.has(p.action));
   if (!relevant) return false;
 
+  // D#483 S5-j2a2: a direct merge that went into GitHub's queue holds the repository's lease until its entry settles: a close (merged or not), or a removal that is not the queue's own success.
+  // The lease names the pull request by the repository the event is for (the code repository of a paired item), so no pairing lookup is needed. The lease is named by the repository's numeric id, which a rename does not change.
+  const eventRepo = typeof input.payload === "object" && input.payload !== null ? (input.payload as { repository?: { id?: unknown } }).repository?.id : undefined;
+  if ((closed || (dequeued && !DEQUEUE_SUCCESS_CODES.includes(dequeueReasonCode(p.reason)))) && typeof eventRepo === "number" && Number.isSafeInteger(eventRepo) && eventRepo > 0) await releaseHostQueueLease(client, { accountId, repoGhId: eventRepo, prNumber: prNumber as number });
   if (closed) await settlePullRequest(client, { accountId, repoId, prNumber: prNumber as number, merged: p.pull_request?.merged === true });
   if (dequeued && !DEQUEUE_SUCCESS_CODES.includes(dequeueReasonCode(p.reason))) {
     const settled = await settleHostDequeue(client, { accountId, repoId, prNumber: prNumber as number, headSha: dequeuedHead as string });

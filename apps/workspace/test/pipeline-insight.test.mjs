@@ -148,6 +148,26 @@ describe("recorded pipeline steps", () => {
       expect(reasonWord("merge_repo_busy")).toBe("Another merge on this repository is finishing; this one goes next.");
     });
 
+    // D#483 S5-j2a2: the order check's stops. The queue's own sentence for a migration out of order is reused as it is.
+    it("the order check's stops have a sentence on the reason line and on the blocking line, never the raw code, null or undefined", () => {
+      expect(reasonWord("ordered_resource_out_of_order")).toBe(BLOCKING_SENTENCES.ordered_resource_out_of_order);
+      for (const code of ["ordered_resource_unreadable", "overlap_unreviewed", "runner_ordered_unsupported"]) {
+        for (const text of [reasonWord(code), blockingSentence(code), stepView({ kind: "merge_gate", state: "done", result: "ready_human_merges", reasons: [code] }).reasons[0]]) {
+          expect(text, code).not.toMatch(/[_<>]|undefined|null/);
+          expect(text.length, code).toBeGreaterThan(20);
+        }
+        expect(Object.hasOwn(BLOCKING_SENTENCES, code), code).toBe(true);
+        expect(PERSON_MERGES_REASONS).not.toContain(code);
+      }
+      expect(blockingSentence("runner_ordered_unsupported")).toBe("Update the runner on your machine so it can check migration order.");
+      expect(reasonWord("overlap_unreviewed")).toMatch(/fresh review/);
+      // The queue tick's wait for a pull request ahead in GitHub's queue is a step fact, not a gate stop: it has a reason line and no blocking sentence.
+      expect(reasonWord("merge_hold_expired")).toMatch(/24 hours/);
+      expect(reasonWord("merge_hold_expired")).not.toMatch(/[_<>]|undefined|null/);
+      expect(reasonWord("ordered_resource_waiting")).toBe("Waiting for a pull request ahead of it in GitHub's merge queue, so the migration numbers stay in order.");
+      expect(stepView({ kind: "merge_gate", state: "done", reasons: ["ordered_resource_waiting"] }).reasons[0]).not.toMatch(/[_<>]|undefined|null/);
+    });
+
     it("the two-plane stops have sentences, never raw codes", () => {
       expect(reasonWord("public_pr_not_open")).toMatch(/public pull request is not open/);
       expect(reasonWord("runner_merge_unavailable")).toMatch(/A person merges the public pull request/);

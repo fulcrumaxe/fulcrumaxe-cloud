@@ -12,7 +12,8 @@ import { carriedRunsHead, gateReviewerReasons, loadRunsOnSha, runMergeGate, RUNN
 import { listChangedFiles, listChangedFilesLocal, postReviewStatus, type ListFilesResult } from "./githubReads.js";
 import type { ChangedFile } from "./securityTrigger.js";
 import { checkPublicContent, type ContentCheck } from "./publicContentMatch.js";
-import { acquireMergeLease } from "../mergeQueue/mergeLease.js";
+import { acquireMergeLease, readHostHoldState } from "../mergeQueue/mergeLease.js";
+import { createMergeOrder } from "../mergeQueue/mergeOrderCheck.js";
 import { loadReviewContext, type ReviewContext } from "./context.js";
 import type { PublicPullRequest, PublicPullRequestLookup } from "./publicPullRequest.js";
 import { reviewPlanFor } from "./reviewPlan.js";
@@ -249,6 +250,8 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
   let mergeBaseRef = head.baseRef;
   const extraBlockReasons: MergeBlockReason[] = [];
   let humanLocked = humanMergeOnly(ctx.ghRepoId);
+  // The numeric GitHub id of the repository that merges (the code repository for a paired item): what a hold for GitHub's queue is keyed on, so a rename changes nothing.
+  let mergeGhId: string | null = ctx.ghRepoId;
   // A paired item merges its public pull request or nothing: the private copy is never the fallback.
   if (paired && publicPr === null) extraBlockReasons.push("public_pr_not_open");
   if (publicPr !== null && deps.publicPlane !== undefined) {
@@ -256,7 +259,9 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
     mergeTarget = { owner: publicPr.owner, name: publicPr.name, prNumber: publicPr.number };
     mergePort = createReviewGitHubPort({ pool, http: mergeHttp, pairedQueueReads: true, ...(deps.queueDocuments !== undefined ? { queueDocuments: deps.queueDocuments } : {}) }, { ...ctx, owner: publicPr.owner, name: publicPr.name }, { accountId, workItemId, prNumber: publicPr.number, recordedBranch: publicPr.branch });
     // The operator's lock names a repository by its GitHub id: either half of the pairing listed means a person merges.
-    if (!humanLocked) humanLocked = humanMergeOnly(await readRepoGhId(mergeHttp, publicPr.owner, publicPr.name));
+    const publicGhId = await readRepoGhId(mergeHttp, publicPr.owner, publicPr.name);
+    mergeGhId = publicGhId === null ? null : String(publicGhId);
+    if (!humanLocked) humanLocked = humanMergeOnly(publicGhId);
     // Defence in depth for `runner_local`: the cloud never calls merge on this pull request, whatever client it was given. The gate's merge call site is the
     // delegate (an order, or the single write credential) when one is wired, and a refusal to merge otherwise.
     if (runnerLocal) {
@@ -364,7 +369,25 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
       pool,
       github: mergePort,
       // D#483 S5-j2a1: the repository's merge lease, taken before the gate reads anything and freed on every exit. The queue tick holds the slot instead and takes none.
-      ...(input.underQueueSlot === true ? {} : { acquireMergeLease: async () => { const lease = await acquireMergeLease(pool, { accountId, repoId: ctx.repoId }); return lease.taken ? lease : null; } }),
+      ...(input.underQueueSlot === true
+        ? {}
+        : {
+            acquireMergeLease: async () => {
+              const lease = await acquireMergeLease(pool, {
+                accountId,
+                repoId: ctx.repoId,
+                // R-C35-2: a lapsed hold for GitHub's queue is read against the pull request's queue entry (awaiting checks included); a hold taken for another repository cannot be read from here.
+                // A hold with no repository id (0), or for another repository, is not read from here: it stays, and counts toward its 24 hours.
+                hostQueueEntry: async (n, repoGhId, holdWorkItemId) => {
+                  if (mergeGhId === null || repoGhId === "0" || repoGhId !== mergeGhId || mergePort.getQueueEntry === undefined) return "unreadable";
+                  return readHostHoldState(pool, { accountId, workItemId: holdWorkItemId, read: () => mergePort.getQueueEntry!({ repoId: ctx.repoId, prNumber: n }) });
+                },
+              });
+              return lease.taken === false ? (lease.stuck === true ? "unreadable_hold" : null) : { release: lease.release, confirm: lease.confirm, holdForHostQueue: (n: number) => lease.holdForHostQueue(n, mergeGhId, workItemId) };
+            },
+          }),
+      // D#483 S5-j2a2: the ordering and overlap check, read on the client that reads the repository that merges (the public one for a paired item), whatever the caller.
+      ...createMergeOrder({ pool, github: mergePort, runnerLocal }),
       // @fx/trust's autoMergeAllowed over the repository's guard settings, exactly. Never wrapped in a try that could read as true.
       isAutoMergeAllowed: async () => autoMergeAllowed({ provenance: ctx.provenance }, { autoMerge: ctx.autoMerge, blockExternalAutoMerge: ctx.blockExternalAutoMerge }),
       // The driver reviews the head itself; nothing is dispatched from inside the gate.
@@ -416,7 +439,7 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
     await recordDriverEvent(client, accountId, {
       workItemId,
       kind: "merge_gate",
-      dedupeKey: `${keyHead}:${go !== undefined ? "go:" : ""}${out.outcome}${busy ? ":merge_repo_busy" : ""}`,
+      dedupeKey: `${keyHead}:${go !== undefined ? "go:" : ""}${out.outcome}${busy ? (out.outcome === "ready_human_merges" && out.reasons.includes("ordered_resource_unreadable") ? ":merge_repo_busy_unreadable" : ":merge_repo_busy") : ""}`,
       code: toCode(out.outcome),
       reasons: reasons.map((r) => toCode(r)),
       headSha: headForRow,

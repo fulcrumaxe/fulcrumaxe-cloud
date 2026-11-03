@@ -5,13 +5,14 @@ import { listDriverEvents, listHeadRemovals } from "@fx/core/src/work-items/driv
 import { queueAgainPending } from "@fx/core/src/work-items/queueIntent.js";
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "../../../github/src/mergeGateGraphql.js";
 import { clearMergeQueueModeCache } from "../../src/build/githubMergePort.js";
+import { applyQueueEvent } from "../../src/mergeQueue/index.js";
 import { runMergeGateForItem } from "../../src/review/mergeGateRun.js";
 import { loadReviewContext, loadSpecText } from "../../src/review/context.js";
 import { REVIEW_STATUS_CONTEXT } from "../../src/review/githubReads.js";
 import { discussingItem } from "../plan/helpers/panelFixtures.js";
 import { seedAccount, seedRepo } from "../build/helpers/seed.js";
 import { pgHarness } from "../helpers/pgHarness.js";
-import { fakeGitHubRest, freshRepo, type FakeRepoState } from "./helpers/fakeGitHubRest.js";
+import { FAKE_MERGE_BASE, fakeGitHubRest, freshRepo, type FakeRepoState } from "./helpers/fakeGitHubRest.js";
 
 /**
  * D#483 P3 [pg]: the merge gate for one work item with the real GitHub port, over a fake GitHub that answers like the
@@ -605,6 +606,8 @@ describe("D#694 B5: a base branch behind GitHub's merge queue", () => {
       h.admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key, code, reasons, head_sha, pr_number) VALUES ($1, $2, 'merge_dequeued', $3, 'ci_failure', ARRAY['actor_app'], $4, $5)`, [w.accountId, w.workItemId, `d${i}`, HEAD, w.gh.prNumber]);
     await removal(1);
     await removal(2);
+    // D#483 S5-j2a2: the removals above stand for GitHub's webhooks, which also free the lease the first enqueue holds (see the settle tests below).
+    await h.admin.query("DELETE FROM repo_merge_leases WHERE repo_id = $1", [w.repoId]);
     const pressed = () =>
       h.admin.query(`INSERT INTO audit_log (account_id, actor, action, payload) VALUES ($1, 'tester', 'work_item.sent_back', $2::jsonb)`, [w.accountId, JSON.stringify({ action: "queue_again", work_item_id: w.workItemId, pr_number: w.gh.prNumber, head_sha: HEAD })]);
     const enqueues = async () => (await h.admin.query<{ dedupe_key: string; reasons: string[] }>(`SELECT dedupe_key, reasons FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'merge_enqueued' ORDER BY seq`, [w.workItemId])).rows;
@@ -640,6 +643,169 @@ describe("D#694 B5: a base branch behind GitHub's merge queue", () => {
     await ev("merge_enqueued", "e", ["person_requeue"]);
     await ev("merge_dequeued", "c", ["actor_app"]);
     expect(await withTenant(h.runWriterPool, w.accountId, (c) => listHeadRemovals(c, w.accountId, w.workItemId, HEAD, w.gh.prNumber))).toHaveLength(1);
+  });
+
+  describe("D#483 S5-j2a2 (R-C34-F4, R-C35): the lease is held while the entry waits in GitHub's queue", () => {
+    const lease = async (w: World) => (await h.admin.query<{ holder: string; secs: number }>("SELECT holder, extract(epoch FROM lease_until - now())::float AS secs FROM repo_merge_leases WHERE repo_id = $1", [w.repoId])).rows;
+    // The repository's numeric GitHub id: what the hold is named by and what a webhook carries as `repository.id`.
+    const ghId = async (w: World) => Number((await h.admin.query("SELECT gh_repo_id FROM repos WHERE id = $1", [w.repoId])).rows[0].gh_repo_id);
+    const holderRe = (pr: number, id: number) => new RegExp(`^ghq:${pr}:${id}:\\d+:[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}(:u\\d+)?$`);
+    const webhook = (w: World, payload: Record<string, unknown>) =>
+      withTenant(h.runWriterPool, w.accountId, async (c) => applyQueueEvent(c, { accountId: w.accountId, repoId: w.repoId, eventName: "pull_request", payload: { repository: { id: await ghId(w) }, ...payload } }));
+    // The pull request adds a numbered file (0011) to a tip that holds 0009 and 0010: the lease is held for it. `ordered: false` leaves the default file, which is not numbered.
+    const entry = (path: string) => ({ path, mode: "100644", type: "blob", sha: "f".repeat(40) });
+    const enqueued = async (ordered = true, repo: Partial<FakeRepoState> = {}) => {
+      const w = await world({
+        repo: {
+          ...withQueue(),
+          ...(ordered ? { files: [{ filename: "sql/0011_a.sql", status: "added", sha: "f".repeat(40), changes: 1 }], trees: { [FAKE_MERGE_BASE]: ["sql/0009_x.sql", "sql/0010_a.sql"].map(entry) } } : {}),
+          ...repo,
+        },
+      });
+      await passBoth(w);
+      if (ordered) await run(w, "security-reviewer", "pass");
+      expect(await queued(w)).toMatchObject({ outcome: "merge_enqueued" });
+      return w;
+    };
+
+    it("an enqueue keeps the repository's lease for 30 minutes, named for the pull request and the repository's id, and a second direct merge on the repository waits (merge_repo_busy)", async () => {
+      const w = await enqueued();
+      const rows = await lease(w);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.holder).toMatch(holderRe(41, await ghId(w)));
+      expect(rows[0]!.secs).toBeGreaterThan(29 * 60);
+      expect(rows[0]!.secs).toBeLessThanOrEqual(30 * 60);
+      expect(await queued(w)).toMatchObject({ outcome: "ready_human_merges", reasons: ["merge_repo_busy"] });
+    });
+
+    it("the entry's merge frees it, so does a close without a merge and a removal that is not the queue's own success; the success removal and another pull request's events leave it", async () => {
+      const closed = (merged: boolean, number = 41) => ({ action: "closed", pull_request: { number, merged, head: { sha: HEAD } } });
+      const dequeued = (reason: string, number = 41) => ({ action: "dequeued", reason, pull_request: { number, merged: false, head: { sha: HEAD } } });
+      const w = await enqueued();
+      await webhook(w, closed(true, 99));
+      await webhook(w, dequeued("CI_FAILURE", 99));
+      await webhook(w, dequeued("MERGE"));
+      await webhook(w, { ...closed(true), repository: { id: (await ghId(w)) + 1 } });
+      expect((await lease(w)).map((r) => r.holder)).toEqual([expect.stringMatching(holderRe(41, await ghId(w)))]);
+      await webhook(w, closed(true));
+      expect(await lease(w)).toEqual([]);
+      for (const settle of [closed(false), dequeued("CI_FAILURE"), dequeued("ALREADY_MERGED_BY_HAND")]) {
+        const again = await enqueued();
+        await webhook(again, settle);
+        expect(await lease(again), JSON.stringify(settle)).toEqual([]);
+      }
+    });
+
+    it("a rename of the repository during the hold changes nothing: the webhook (by id) frees it, and a lapsed hold is read under the new name", async () => {
+      const w = await enqueued();
+      await h.admin.query("UPDATE repos SET gh_name = 'widgets-renamed' WHERE id = $1", [w.repoId]);
+      w.gh.name = "widgets-renamed";
+      w.gh.mergeQueue = { ...w.gh.mergeQueue!, entry: { id: "MQE_kwDOfake1", state: "QUEUED", position: 1 } };
+      await h.admin.query("UPDATE repo_merge_leases SET lease_until = now() - interval '1 second' WHERE repo_id = $1", [w.repoId]);
+      expect(await queued(w)).toMatchObject({ reasons: ["merge_repo_busy"] });
+      expect(await lease(w)).toHaveLength(1);
+      await webhook(w, { action: "closed", pull_request: { number: 41, merged: true, head: { sha: HEAD } } });
+      expect(await lease(w)).toEqual([]);
+    });
+
+    it("R-C35-4: a pull request that adds no numbered file gives the lease back at the enqueue, so a repository behind GitHub's queue keeps its batching", async () => {
+      const w = await enqueued(false);
+      expect(await lease(w)).toEqual([]);
+      expect(await queued(w)).toMatchObject({ outcome: "merge_enqueued" });
+    });
+
+    const lapseHold = (w: World) => h.admin.query("UPDATE repo_merge_leases SET lease_until = now() - interval '1 second' WHERE repo_id = $1", [w.repoId]);
+    const entryOf = (state: string) => ({ id: "MQE_kwDOfake1", state, position: 1 });
+
+    it("R-C35-2, with no webhook at all: past 30 minutes the pull request's queue entry is read. In the queue, awaiting checks included: the hold is renewed and the repository stays busy", async () => {
+      for (const state of ["QUEUED", "AWAITING_CHECKS", "MERGEABLE"]) {
+        const w = await enqueued(true);
+        w.gh.mergeQueue = { ...w.gh.mergeQueue!, entry: entryOf(state) };
+        await lapseHold(w);
+        expect(await queued(w), state).toMatchObject({ outcome: "ready_human_merges", reasons: ["merge_repo_busy"] });
+        const rows = await lease(w);
+        expect(rows.map((r) => r.holder), state).toEqual([expect.stringMatching(holderRe(41, await ghId(w)))]);
+        expect(rows[0]!.secs).toBeGreaterThan(29 * 60);
+        expect(w.gh.merges).toEqual([]);
+      }
+    });
+
+    it("R-C35-2: removed from the queue and still open, no webhook: the lapsed hold is gone and the next gate runs (it queues the pull request again and holds again)", async () => {
+      const w = await enqueued(true);
+      expect(w.gh.state).toBe("open");
+      w.gh.mergeQueue = { ...w.gh.mergeQueue!, entry: null };
+      await lapseHold(w);
+      expect(await queued(w)).toMatchObject({ outcome: "merge_enqueued" });
+      expect((await lease(w)).map((r) => r.holder)).toEqual([expect.stringMatching(holderRe(41, await ghId(w)))]);
+    });
+
+    it("R-C35-2: a pull request that closed is gone as well, and the lease is free for the gate that finds it closed", async () => {
+      const w = await enqueued(true);
+      await lapseHold(w);
+      w.gh.state = "closed";
+      w.gh.merged = true;
+      w.gh.mergeQueue = { ...w.gh.mergeQueue!, entry: null };
+      expect(await queued(w)).toMatchObject({ outcome: "pr_not_open" });
+      expect(await lease(w)).toEqual([]);
+    });
+
+    it("R-C35: a pull request waiting on auto-merge (the queue refused the enqueue) has no entry until its checks pass: its lapsed hold is not gone while it is open; closed, it is", async () => {
+      const w = await enqueued(true, { mergeQueue: { exists: true, mutations: [], enqueue: "forbidden" } });
+      const { rows } = await h.admin.query("SELECT code FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'merge_enqueued'", [w.workItemId]);
+      expect(rows).toEqual([{ code: "auto_merge" }]);
+      expect(w.gh.mergeQueue!.mutations.map((m) => m.kind)).toEqual(["enqueue", "auto_merge"]);
+      await lapseHold(w);
+      expect(await queued(w)).toMatchObject({ outcome: "ready_human_merges", reasons: ["merge_repo_busy"] });
+      expect(await lease(w)).toHaveLength(1);
+      await lapseHold(w);
+      w.gh.state = "closed";
+      w.gh.merged = true;
+      expect(await queued(w)).toMatchObject({ outcome: "pr_not_open" });
+      expect(await lease(w)).toEqual([]);
+    });
+
+    it("R-C35-2: a read that keeps failing is not renewed in silence: busy twice, then the third time the item is shown ordered_resource_unreadable and the hold is read again within minutes", async () => {
+      const w = await enqueued(true);
+      w.gh.mergeQueue = { ...w.gh.mergeQueue!, readFails: true };
+      for (let n = 1; n <= 2; n++) {
+        await lapseHold(w);
+        expect(await queued(w), String(n)).toMatchObject({ outcome: "ready_human_merges", reasons: ["merge_repo_busy"] });
+      }
+      await lapseHold(w);
+      const third = await queued(w);
+      expect(third).toMatchObject({ outcome: "ready_human_merges", reasons: ["merge_repo_busy", "ordered_resource_unreadable"] });
+      expect((await lease(w))[0]!.secs).toBeLessThan(6 * 60);
+      expect(w.gh.merges).toEqual([]);
+      // The fact is on the item with the reason's words; a person sees it.
+      const { rows } = await h.admin.query("SELECT reasons FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'merge_gate' ORDER BY seq DESC LIMIT 1", [w.workItemId]);
+      expect(rows[0].reasons).toEqual(["merge_repo_busy", "ordered_resource_unreadable"]);
+    });
+
+    it("a hold with no repository id (0) is read by no asker: it stays busy and counts toward its 24 hours", async () => {
+      const w = await enqueued(true);
+      w.gh.mergeQueue = { ...w.gh.mergeQueue!, entry: null };
+      await h.admin.query("UPDATE repo_merge_leases SET holder = regexp_replace(holder, '^(ghq:[0-9]+:)[0-9]+', '\\10'), lease_until = now() - interval '1 second' WHERE repo_id = $1", [w.repoId]);
+      const before = w.gh.requests.length;
+      expect(await queued(w)).toMatchObject({ outcome: "ready_human_merges", reasons: ["merge_repo_busy"] });
+      expect(w.gh.requests.slice(before).some((r) => r.path === "/graphql")).toBe(false);
+      expect((await lease(w))[0]!.holder).toMatch(/^ghq:41:0:\d+:[0-9a-f-]{36}:u1$/);
+    });
+
+    it("the absolute bound: a hold past 24 hours ends at the next gate, whatever the queue says, and the item it was held for gets a recorded event with a card sentence", async () => {
+      const w = await enqueued(true);
+      w.gh.mergeQueue = { ...w.gh.mergeQueue!, entry: entryOf("QUEUED") };
+      await h.admin.query("UPDATE repo_merge_leases SET lease_until = now() - interval '1 second', holder = regexp_replace(holder, '^(ghq:[0-9]+:[0-9]+:)[0-9]+', '\\1' || (floor(extract(epoch FROM now()) / 60) - 1500)::bigint::text) WHERE repo_id = $1", [w.repoId]);
+      expect(await queued(w)).toMatchObject({ outcome: "merge_enqueued" });
+      const { rows } = await h.admin.query("SELECT code, reasons FROM work_item_driver_events WHERE work_item_id = $1 AND code = 'merge_hold_expired'", [w.workItemId]);
+      expect(rows).toEqual([{ code: "merge_hold_expired", reasons: ["merge_hold_expired"] }]);
+    });
+
+    it("a gate that did not enqueue frees its lease as before (merged, stopped)", async () => {
+      const w = await world({ repo: withQueue() });
+      await run(w, "code-reviewer", "needs-fix");
+      expect(await queued(w)).toMatchObject({ outcome: "ready_human_merges" });
+      expect(await lease(w)).toEqual([]);
+    });
   });
 });
 

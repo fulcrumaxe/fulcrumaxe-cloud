@@ -21,3 +21,4 @@ export * from "./renumber.js";
 export * from "./renumberComplete.js";
 export * from "./writeback.js";
 export * from "./roundGithub.js";
+export * from "./mergeLease.js";

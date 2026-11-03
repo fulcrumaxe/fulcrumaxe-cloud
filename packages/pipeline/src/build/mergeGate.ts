@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
+import { reportError } from "@fx/telemetry";
 import { MAX_REFRESHES } from "../mergeQueue/policy.js";
 import { effectiveRunRows, type HeadRuns } from "../mergeQueue/carryForward.js";
 import { requiredReviewers, shouldDispatchDebater } from "./requiredReviewers.js";
@@ -298,6 +299,13 @@ export interface MergeGateGitHubPort {
   getLastQueueRemoval?(pr: PullRequestRef): Promise<QueueRemovalReading | null>;
 }
 
+/** The lease the gate holds while it runs: freed on every exit, re-confirmed right before the merge call, and optionally held on for an entry waiting in GitHub's queue. */
+export interface MergeLeaseHandle {
+  release(): Promise<void>;
+  holdForHostQueue?(prNumber: number): Promise<void>;
+  confirm?(): Promise<boolean>;
+}
+
 export interface MergeGateDeps {
   pool: Pool;
   github: MergeGateGitHubPort;
@@ -322,7 +330,17 @@ export interface MergeGateDeps {
    * D#483 S5-j2a1: takes the repository's merge lease, or answers null while another merge holds the repository (a live lease, or an `in_flight` queue entry). The gate takes it
    * before it reads anything for the merge decision and calls `release` on every exit. Absent: no lease (a test double, or the queue tick, whose slot is the exclusion).
    */
-  acquireMergeLease?(): Promise<{ release(): Promise<void> } | null>;
+  acquireMergeLease?(): Promise<MergeLeaseHandle | null | "unreadable_hold">;
+  /**
+   * D#483 S5-j2a2: the ordering and overlap check of the merge, from reads made now under the lease. Answers reasons only (`MERGE_ORDER_REASONS`); it never merges, stops an entry or
+   * writes. A throw, or an answer outside that list, is `ordered_resource_unreadable`. Absent: no check (a test double; production always wires it in `runMergeGateForItem`).
+   */
+  mergeOrder?(input: { accountId: string; workItemId: string; pr: PullRequestRef; headSha: string }): Promise<readonly MergeBlockReason[]>;
+  /**
+   * D#483 S5-j2a2 (R-C35-4): whether the pull request adds an ordered-resource file. Asked once, after the gate put it in GitHub's merge queue: only then is the lease held until the entry settles.
+   * Absent, a throw, or an unreadable list is `true` (the lease is held).
+   */
+  addsOrderedFile?(input: { accountId: string; workItemId: string; pr: PullRequestRef }): Promise<boolean>;
 }
 
 export interface MergeGateInput {
@@ -443,6 +461,12 @@ export type MergeBlockReason =
   | "conflict_round_running"
   | "branch_protection_refused"
   | "ordered_resource_out_of_order"
+  /** D#483 S5-j2a2: the ordered-resource check could not read what it needs (a failed read, a cut-short tree or file list); nothing merges, and the next ask reads again. */
+  | "ordered_resource_unreadable"
+  /** D#483 S5-j2a2: the base branch gained changes to files this pull request changes since its merge base, and no review covers them. */
+  | "overlap_unreviewed"
+  /** D#483 S5-j2a2: a `runner_local` item with another live item on its repository, until the runner can attest migration order. */
+  | "runner_ordered_unsupported"
   /** D#483 S5-j2a1: another merge on this repository (a direct merge, or the queue's slot) is finishing; nothing was read or merged, and the next ask goes again. A wait, not a stop for a person. */
   | "merge_repo_busy"
   /** D#519 MQ5-b2: the renumber round changed paths outside the renamed resource files and the files that refer to them. */
@@ -823,14 +847,50 @@ export async function runMergeGate(deps: MergeGateDeps, input: MergeGateInput): 
   // head moved, enqueued, delegated. The `finally` below is the only place it is freed. A busy repository is a wait (no marking, no merge): the caller asks again.
   const lease = deps.acquireMergeLease ? await deps.acquireMergeLease() : undefined;
   if (lease === null) return { outcome: "ready_human_merges", headSha: input.expectedHeadSha ?? "", reasons: ["merge_repo_busy"] };
+  // D#483 S5-j2a2 (R-C35-2): a hold for GitHub's queue whose entry could not be read three times running. Busy, and put before a person in the words of `ordered_resource_unreadable`.
+  if (lease === "unreadable_hold") return { outcome: "ready_human_merges", headSha: input.expectedHeadSha ?? "", reasons: ["merge_repo_busy", "ordered_resource_unreadable"] };
+  let heldForHostQueue = false;
   try {
-    return await runMergeGateLeased(deps, input);
+    const out = await runMergeGateLeased(deps, input, lease ?? undefined);
+    // D#483 S5-j2a2 (R-C34-F4, R-C35-4): a pull request put in GitHub's merge queue that adds an ordered-resource file keeps the lease until its entry settles (the webhook, or a read of
+    // the entry after 30 minutes). Any other pull request gives it back at once, so a repository behind GitHub's queue keeps its batching.
+    if (out.outcome === "merge_enqueued" && lease?.holdForHostQueue && (await addsOrderedFile(deps, input))) {
+      await lease.holdForHostQueue(input.pr.prNumber);
+      heldForHostQueue = true;
+    }
+    return out;
   } finally {
-    if (lease) await lease.release();
+    if (lease && !heldForHostQueue) await lease.release();
   }
 }
 
-async function runMergeGateLeased(deps: MergeGateDeps, input: MergeGateInput): Promise<MergeGateResult> {
+/** The reasons `mergeOrder` may answer. Anything else it answers is read as unreadable, never as "nothing". */
+export const MERGE_ORDER_REASONS: readonly MergeBlockReason[] = ["merge_repo_busy", "ordered_resource_out_of_order", "ordered_resource_unreadable", "overlap_unreviewed", "runner_ordered_unsupported"];
+
+/** D#483 S5-j2a2: the order check's reasons. A failed check is a stop (`ordered_resource_unreadable`), never a pass. */
+async function mergeOrderReasons(deps: MergeGateDeps, input: MergeGateInput, headSha: string): Promise<MergeBlockReason[]> {
+  if (deps.mergeOrder === undefined) return [];
+  try {
+    const got = await deps.mergeOrder({ accountId: input.accountId, workItemId: input.workItemId, pr: input.pr, headSha });
+    return Array.isArray(got) && got.every((r) => MERGE_ORDER_REASONS.includes(r)) ? [...got] : ["ordered_resource_unreadable"];
+  } catch (err) {
+    reportError(err, { stage: "merge_gate.merge_order" });
+    return ["ordered_resource_unreadable"];
+  }
+}
+
+/** Whether the pull request adds an ordered-resource file; anything but a clear "no" is yes. */
+async function addsOrderedFile(deps: MergeGateDeps, input: MergeGateInput): Promise<boolean> {
+  if (deps.addsOrderedFile === undefined) return true;
+  try {
+    return (await deps.addsOrderedFile({ accountId: input.accountId, workItemId: input.workItemId, pr: input.pr })) !== false;
+  } catch (err) {
+    reportError(err, { stage: "merge_gate.adds_ordered_file" });
+    return true;
+  }
+}
+
+async function runMergeGateLeased(deps: MergeGateDeps, input: MergeGateInput, lease?: MergeLeaseHandle): Promise<MergeGateResult> {
   const pr = await deps.github.getPullRequest(input.pr);
   const headSha = pr.headSha;
   const reasons: MergeBlockReason[] = [];
@@ -894,6 +954,9 @@ async function runMergeGateLeased(deps: MergeGateDeps, input: MergeGateInput): P
   // D#6 M1G-a: the operator's lock. A reason is always added, so the merge call below is unreachable for a locked repo.
   if (input.humanMergeOnly === true) reasons.push("human_merge_only");
   for (const r of input.extraBlockReasons ?? []) if (!reasons.includes(r)) reasons.push(r);
+  // D#483 S5-j2a2: the order check, under the lease, before the stop. Its reasons join the others and the merge call below is unreachable with one. A pull request that is not on the
+  // default branch is stopped above (`stacked_on_open_pr`) and is judged against the default branch once it is retargeted.
+  if (!reasons.includes("stacked_on_open_pr")) for (const r of await mergeOrderReasons(deps, input, headSha)) if (!reasons.includes(r)) reasons.push(r);
 
   if (reasons.length > 0) {
     return markHuman(deps, input.pr, headSha, reasons);
@@ -904,6 +967,8 @@ async function runMergeGateLeased(deps: MergeGateDeps, input: MergeGateInput): P
   // D#694 B5: a base branch behind GitHub's merge queue is never merged directly, even where the app could bypass the queue. An unreadable queue state stops here.
   const queue = await readQueueMode(deps.github, input.pr, pr.baseRef);
   if (queue === "unknown") return markHuman(deps, input.pr, headSha, ["merge_queue_unreadable"]);
+  // D#483 S5-j2a2 (R-C35-5): the lease is renewed and re-confirmed right before the merge or the enqueue. A gate that stalled and lost it merges nothing.
+  if (lease?.confirm && !(await lease.confirm())) return { outcome: "ready_human_merges", headSha, reasons: ["merge_repo_busy"] };
   if (queue === "queue") return enqueueIntoQueue(deps, input.pr, headSha);
 
   const outcome = await deps.github.mergePullRequest(input.pr, { sha: headSha });

@@ -182,6 +182,12 @@ const REASON_WORDS = {
   merge_call_refused: "GitHub refused the merge",
   // D#483 S5-j2a1: another merge on this repository (a direct merge or the queue's slot) holds it for now; this one asks again.
   merge_repo_busy: "Another merge on this repository is finishing; this one goes next.",
+  // D#483 S5-j2a2: the order check of the merge. `ordered_resource_out_of_order` keeps the queue's sentence (see FIELD_SENTENCES and BLOCKING_SENTENCES).
+  ordered_resource_unreadable: "We couldn't read this repository to check the order of its migrations, so the platform didn't merge. It checks again on the next try.",
+  merge_hold_expired: "This repository was held for a pull request in GitHub's merge queue for 24 hours; the hold was ended so other merges can go.",
+  ordered_resource_waiting: "Waiting for a pull request ahead of it in GitHub's merge queue, so the migration numbers stay in order.",
+  overlap_unreviewed: "The base branch changed files this pull request also changes after it was last reviewed. It needs a fresh review before it merges.",
+  runner_ordered_unsupported: "Update the runner on your machine so it can check migration order.",
   // D#598 P1d-1: the author of the pull request that would merge. A person reviews and merges an outside author's pull request on GitHub.
   pr_author_untrusted: "This pull request was opened by someone who isn't an admin or maintainer of the repository, or the platform's app. The platform won't merge it. A person can review it and merge it on GitHub.",
   pr_author_unverified: "We couldn't check who opened this pull request, so the platform didn't merge it. It checks again on the next try.",
@@ -618,6 +624,9 @@ export const BLOCKING_SENTENCES = {
   merge_queue_waiting: "The pull request is waiting in the merge queue",
   ordered_resource_out_of_order: "Another change has to merge before this one",
   merge_repo_busy: "Another merge on this repository is finishing; this one goes next.",
+  ordered_resource_unreadable: "Couldn't check the order of this repository's migrations",
+  overlap_unreviewed: "Files it changes were also changed on the base branch after its last review",
+  runner_ordered_unsupported: "Update the runner on your machine so it can check migration order.",
   renumber_out_of_scope: "The automatic renumber changed more than the numbered files, so a person needs to look at it",
   merge_dependency_closed: "The pull request it builds on was closed without merging",
   history_rewritten: "The branch history was rewritten after review",

@@ -7,7 +7,7 @@ import { checkOrdering, detectResource, readOrderedConfig, type ResourceRule } f
 import { MERGE_QUEUE_CI_WAIT_MINUTES } from "./policy.js";
 import { MAIN_GUARD_PARK_LEASE_SECONDS } from "./mainGuard.js";
 import type { RenumberAsk } from "./renumber.js";
-import { PARKED_PHASE, readOrderedStops, renewSlot, requeueOrderedStopped, stopEntry } from "./store.js";
+import { PARKED_PHASE, readHostQueued, readOrderedStops, releaseToQueue, renewSlot, requeueOrderedStopped, stopEntry } from "./store.js";
 import type { MergeQueueEntry } from "./types.js";
 
 /**
@@ -31,7 +31,8 @@ export interface OrderedDeps {
   onRenumber?(entry: MergeQueueEntry, holder: string, ask: RenumberAsk, headSha: string): Promise<boolean>;
 }
 
-export type OrderedOutcome = { outcome: "ordered_renumbering" } | { outcome: "ordered_stopped" } | { outcome: "ordered_waiting" } | { outcome: "ordered_unreadable" };
+/** `ordered_host_wait` (D#483 S5-j2a2, R-C35-3): the pull request adds an ordered file while another one of the repository waits in GitHub's queue, so the tip has not moved for it yet. */
+export type OrderedOutcome = { outcome: "ordered_host_wait" } | { outcome: "ordered_renumbering" } | { outcome: "ordered_stopped" } | { outcome: "ordered_waiting" } | { outcome: "ordered_unreadable" };
 
 export type Resolved = { state: "none" } | { state: "unknown" } | { state: "some"; resources: ResourceRule[]; branch: string; tip: readonly string[]; autoRenumber: boolean };
 
@@ -69,6 +70,7 @@ export async function orderedStep(deps: OrderedDeps, args: { accountId: string; 
   const resolved = await resolveOrdered(deps, accountId, pr);
   if (resolved.state === "none") return null;
   let bad: { rule: ResourceRule; key: string; highest: string; files: string[] } | null = null;
+  let hostWait = false;
   if (resolved.state === "some") {
     try {
       const adds = await deps.github.listPullRequestAdds(pr);
@@ -80,14 +82,27 @@ export async function orderedStep(deps: OrderedDeps, args: { accountId: string; 
             break;
           }
         }
-        if (bad === null) return null;
+        if (bad === null) {
+          // Batching stays for a pull request that adds no numbered file. One that does waits while another is in GitHub's queue: that one has not moved the tip, and the same number would pass.
+          if (resolved.resources.some((rule) => adds.paths.some((p) => rule.matches(p)))) {
+            hostWait = (await deps.inTenant(accountId, (c) => readHostQueued(c, accountId, pr.repoId))).some((w) => w.prNumber !== entry.prNumber);
+          }
+          if (!hostWait) return null;
+        }
       }
     } catch (err) {
       reportError(err, { stage: "merge_queue.ordered_files" });
     }
   }
   const event = (c: PoolClient, code: string, reasons: string[]): Promise<unknown> =>
-    entry.workItemId === null ? Promise.resolve() : recordDriverEvent(c, accountId, { workItemId: entry.workItemId, kind: code === "ordered_resource_unknown" ? "merge_gate" : "stopped", dedupeKey: `${headSha}:${code}`, code, reasons, headSha, prNumber: entry.prNumber });
+    entry.workItemId === null ? Promise.resolve() : recordDriverEvent(c, accountId, { workItemId: entry.workItemId, kind: code === "ordered_resource_unknown" || code === "ordered_resource_waiting" ? "merge_gate" : "stopped", dedupeKey: `${headSha}:${code}`, code, reasons, headSha, prNumber: entry.prNumber });
+  if (hostWait) {
+    await deps.inTenant(accountId, async (c) => {
+      await event(c, "ordered_resource_waiting", ["ordered_resource_waiting"]);
+      await releaseToQueue(c, { accountId, entryId: entry.id, holder });
+    });
+    return { outcome: "ordered_host_wait" };
+  }
   if (bad !== null && resolved.state === "some") {
     // MQ5-b1: a round, when one is allowed and the start is on; otherwise the stop below (MQ5-a's behaviour).
     if (deps.onRenumber && (await deps.onRenumber(entry, holder, { autoRenumber: resolved.autoRenumber, resource: bad.rule.name, files: bad.files, highest: bad.highest }, headSha))) return { outcome: "ordered_renumbering" };

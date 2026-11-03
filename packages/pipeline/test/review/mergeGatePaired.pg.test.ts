@@ -2,13 +2,16 @@ import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { listDriverEvents } from "@fx/core/src/work-items/driverEvents.js";
+import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "../../../github/src/mergeGateGraphql.js";
+import { clearMergeQueueModeCache } from "../../src/build/githubMergePort.js";
+import { applyQueueEvent } from "../../src/mergeQueue/index.js";
 import { readPublicPullRequest } from "../../src/review/publicPullRequest.js";
 import { runMergeGateForItem } from "../../src/review/mergeGateRun.js";
 import { REVIEW_STATUS_CONTEXT } from "../../src/review/githubReads.js";
 import { discussingItem } from "../plan/helpers/panelFixtures.js";
 import { seedAccount, seedRepo } from "../build/helpers/seed.js";
 import { pgHarness } from "../helpers/pgHarness.js";
-import { FAKE_MERGE_BASE, fakeGitHubRest, freshRepo, type FakeRepoState } from "./helpers/fakeGitHubRest.js";
+import { FAKE_MERGE_BASE, defaultGhId, fakeGitHubRest, freshRepo, type FakeRepoState } from "./helpers/fakeGitHubRest.js";
 
 /** D#598 P1d-1: the platform's own App bot opened the public pull request (the normal case), so the author rule trusts it without a permission read. */
 const BOT_LOGIN = "fulcrumaxe-app[bot]";
@@ -481,7 +484,9 @@ describe("the public pull request must hold exactly what was reviewed (content b
   it("each side's trees are read once per gate pass", async () => {
     const w = await world();
     await gate(w);
-    for (const repo of [w.priv, w.pub]) expect(repo.requests.filter((r) => r.path.includes("/git/trees/")).length).toBe(2);
+    // The code repository (public) also has its default branch's tree read once for the order check (D#483 S5-j2a2).
+    expect(w.priv.requests.filter((r) => r.path.includes("/git/trees/")).length).toBe(2);
+    expect(w.pub.requests.filter((r) => r.path.includes("/git/trees/")).length).toBe(3);
   });
 });
 
@@ -539,5 +544,199 @@ describe("a single-plane item is unchanged", () => {
     expect(out).toMatchObject({ outcome: "merged", headSha: HEAD });
     expect(w.priv.merges).toEqual([{ sha: HEAD, method: "squash" }]);
     expect(w.pub.requests).toEqual([]);
+  });
+});
+
+describe("D#483 S5-j2a2: the order check of a paired item reads the code repository, on the public client", () => {
+  const MIGS = ["sql/0009_x.sql", "sql/0010_a.sql"];
+  const entry = (path: string) => ({ path, mode: "100644", type: "blob", sha: BLOB });
+  const HEAD2 = "e".repeat(40);
+  const PUB_HEAD2 = "1".repeat(40);
+
+  /** A second work item on the first one's repository, with its private copy (PR 42) and its public pull request (13). Unpaired until `pair` is called. */
+  async function sibling(w: World) {
+    const { workItemId } = await discussingItem(h.runWriterPool, w.accountId, { title: "Add a header", body: "Show the year in the header.", category: "feature", repoId: w.repoId });
+    await h.admin.query("UPDATE work_items SET gh_number = 8, repo_id = $2, stage = 'pr_opened', provenance = 'internal' WHERE id = $1", [workItemId, w.repoId]);
+    const body = "1. The header shows the year.";
+    await h.admin.query("INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind) VALUES ($1, $2, 1, $3, $4, 'system')", [w.accountId, workItemId, body, createHash("sha256").update(body).digest("hex")]);
+    // A migration file in the diff brings the security reviewer in.
+    for (const role of ["code-reviewer", "acceptance-tester", "security-reviewer"]) {
+      await h.admin.query("INSERT INTO agent_runs (account_id, work_item_id, role, runtime, status, envelope, head_sha) VALUES ($1, $2, $3, 'production', 'succeeded', $4::jsonb, $5)", [w.accountId, workItemId, role, JSON.stringify({ verdict: "pass" }), HEAD2]);
+    }
+    await h.admin.query("INSERT INTO agent_runs (account_id, work_item_id, role, runtime, status, envelope, head_sha) VALUES ($1, $2, 'security-reviewer', 'production', 'succeeded', $3::jsonb, $4)", [w.accountId, w.workItemId, JSON.stringify({ verdict: "pass" }), HEAD]);
+    const priv = freshRepo({ headSha: HEAD2, prNumber: 42, checks: { [HEAD2]: [] }, files: [file("sql/0011_b.sql", { status: "added" })] });
+    const pub = freshRepo({ owner: "acme", name: "widgets-public", prNumber: 13, isPublic: true, authorLogin: BOT_LOGIN, headSha: PUB_HEAD2, checks: { [PUB_HEAD2]: green }, files: [file("sql/0011_b.sql", { status: "added" })] });
+    return { workItemId, priv, pub, pubHead: PUB_HEAD2, head: HEAD2 };
+  }
+  type Sibling = Awaited<ReturnType<typeof sibling>>;
+
+  /** The repository has a pairing from now on, and the platform pushed both public pull requests (the stamps). */
+  async function pair(w: World, s: Sibling) {
+    await h.admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, 'acme/widgets-public', ARRAY['.autonomous-team/**'])", [w.repoId, w.accountId]);
+    const push = (workItemId: string, pubHead: string, pr: number, source: string) =>
+      h.admin.query(
+        `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, state, head_sha, tip_sha, pr_number, pr_url, source_head)
+         VALUES ($1, $2, $3, 'acme/widgets-public', $4, 'pr_opened', $5, $5, $6, $7, $8)`,
+        [w.accountId, workItemId, w.repoId, "a".repeat(64), pubHead, pr, `https://github.com/acme/widgets-public/pull/${pr}`, source],
+      );
+    await push(w.workItemId, PUB_HEAD, PUB_PR, HEAD);
+    await push(s.workItemId, s.pubHead, 13, s.head);
+  }
+
+  /** The default branch of the code repository holds `paths`, on both planes (the content check compares their base trees, which must agree). */
+  const setTip = (fakes: FakeRepoState[], paths: string[]) => {
+    for (const f of fakes) f.trees = { ...f.trees, [FAKE_MERGE_BASE]: paths.map(entry) };
+  };
+  const gateOf = (w: World, workItemId: string, priv: FakeRepoState, pub: FakeRepoState) =>
+    runMergeGateForItem(
+      { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: fakeGitHubRest(priv), publicPlane: { open: async () => fakeGitHubRest(pub), read: readPublicPullRequest(h.runWriterPool) } },
+      { accountId: w.accountId, workItemId, prNumber: priv.prNumber },
+    );
+
+  it("pairing after claims: two hosted items start unpaired, a pairing row is added, both reach the gate: exactly one merges, the other is stopped on the code repository's tip", async () => {
+    const w = await world({ paired: false });
+    w.priv.files = [file("sql/0011_a.sql", { status: "added" })];
+    w.pub.files = [file("sql/0011_a.sql", { status: "added" })];
+    const s = await sibling(w);
+    await pair(w, s);
+    setTip([w.priv, w.pub, s.priv, s.pub], MIGS);
+    const first = await gateOf(w, w.workItemId, w.priv, w.pub);
+    expect(first).toMatchObject({ outcome: "merged", headSha: PUB_HEAD });
+    // The first one landed on the code repository's default branch.
+    setTip([s.priv, s.pub], [...MIGS, "sql/0011_a.sql"]);
+    const second = await gateOf(w, s.workItemId, s.priv, s.pub);
+    expect(second).toMatchObject({ outcome: "ready_human_merges", reasons: ["ordered_resource_out_of_order"] });
+    expect(s.pub.merges).toEqual([]);
+    expect(s.priv.merges).toEqual([]);
+  });
+
+  it("the tip and the pull request's adds come from the code repository through the public client; the private repository is not asked", async () => {
+    const w = await world();
+    await h.admin.query("INSERT INTO agent_runs (account_id, work_item_id, role, runtime, status, envelope, head_sha) VALUES ($1, $2, 'security-reviewer', 'production', 'succeeded', $3::jsonb, $4)", [w.accountId, w.workItemId, JSON.stringify({ verdict: "pass" }), HEAD]);
+    w.priv.files = [file("sql/0011_a.sql", { status: "added" })];
+    w.pub.files = [file("sql/0011_a.sql", { status: "added" })];
+    setTip([w.priv, w.pub], MIGS);
+    expect(await gateOf(w, w.workItemId, w.priv, w.pub)).toMatchObject({ outcome: "merged" });
+    expect(w.pub.requests.some((r) => r.path.includes("/git/trees/"))).toBe(true);
+    expect(w.pub.requests.some((r) => /\/pulls\/12\/files$/.test(r.path))).toBe(true);
+    expect(w.priv.requests.some((r) => r.path.includes("/git/ref/") || /\/pulls\/\d+\/files$/.test(r.path))).toBe(false);
+  });
+
+  describe("a paired item behind the code repository's own merge queue holds the lease until the code repository's webhook settles it", () => {
+    const docs = { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT };
+    const enqueuedPaired = async (queueOver: Partial<NonNullable<FakeRepoState["mergeQueue"]>> = {}) => {
+      clearMergeQueueModeCache();
+      const w = await world();
+      // A numbered file on a tip that holds 0009 and 0010: the lease is held for it (R-C35-4).
+      await h.admin.query("INSERT INTO agent_runs (account_id, work_item_id, role, runtime, status, envelope, head_sha) VALUES ($1, $2, 'security-reviewer', 'production', 'succeeded', $3::jsonb, $4)", [w.accountId, w.workItemId, JSON.stringify({ verdict: "pass" }), HEAD]);
+      w.priv.files = [file("sql/0011_a.sql", { status: "added" })];
+      w.pub.files = [file("sql/0011_a.sql", { status: "added" })];
+      setTip([w.priv, w.pub], MIGS);
+      w.pub.mergeQueue = { exists: true, mutations: [], ...queueOver };
+      w.pub.rulesetRules = [{ type: "merge_queue", enforcement: "active" }];
+      const out = await runMergeGateForItem(
+        { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: fakeGitHubRest(w.priv), queueDocuments: docs, publicPlane: { open: async () => fakeGitHubRest(w.pub), read: readPublicPullRequest(h.runWriterPool) } },
+        { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber },
+      );
+      expect(out.outcome).toBe("merge_enqueued");
+      return w;
+    };
+    const holders = async (w: World) => (await h.admin.query<{ holder: string }>("SELECT holder FROM repo_merge_leases WHERE repo_id = $1", [w.repoId])).rows.map((r) => r.holder);
+    // The event is the code repository's: its repository id is not the private one, and its payload names the code repository.
+    const hook = (w: World, payload: Record<string, unknown>) =>
+      withTenant(h.runWriterPool, w.accountId, (c) => applyQueueEvent(c, { accountId: w.accountId, repoId: randomUUID(), eventName: "pull_request", payload: { repository: { id: defaultGhId("acme", "widgets-public") }, ...payload } }));
+
+    it("the hold is named for the public pull request; sibling direct merges see merge_repo_busy meanwhile; a close of it frees the lease at once", async () => {
+      const w = await enqueuedPaired();
+      expect(await holders(w)).toEqual([expect.stringMatching(new RegExp(`^ghq:${PUB_PR}:${defaultGhId("acme", "widgets-public")}:\\d+:[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$`))]);
+      expect(await gateOf(w, w.workItemId, w.priv, w.pub)).toMatchObject({ outcome: "ready_human_merges", reasons: ["merge_repo_busy"] });
+      // The private copy's number and another repository's event leave it.
+      await hook(w, { action: "closed", pull_request: { number: 41, merged: true, head: { sha: HEAD } } });
+      await hook(w, { action: "closed", repository: { id: 1 }, pull_request: { number: PUB_PR, merged: true, head: { sha: HEAD } } });
+      expect(await holders(w)).toHaveLength(1);
+      await hook(w, { action: "closed", pull_request: { number: PUB_PR, merged: true, head: { sha: PUB_HEAD } } });
+      expect(await holders(w)).toEqual([]);
+    });
+
+    const lapse = (w: World) => h.admin.query("UPDATE repo_merge_leases SET lease_until = now() - interval '1 second' WHERE repo_id = $1", [w.repoId]);
+    const reread = (w: World) =>
+      runMergeGateForItem(
+        { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: fakeGitHubRest(w.priv), queueDocuments: docs, publicPlane: { open: async () => fakeGitHubRest(w.pub), read: readPublicPullRequest(h.runWriterPool) } },
+        { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber },
+      );
+    // The private pull request is 41 and the public one 12: the facts of the item carry 41, the hold carries 12 and the item's id. Another item whose private number is 12 is never the one read.
+    const decoy = async (w: World, code: string) => {
+      const s = await sibling(w);
+      await h.admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key, code, head_sha, pr_number) VALUES ($1, $2, 'merge_enqueued', 'decoy', $3, $4, $5)", [w.accountId, s.workItemId, code, s.head, PUB_PR]);
+      return s;
+    };
+
+    it("a paired item that fell back to auto-merge holds past its lapse while the public pull request is open (the hold is read by the item, not by a pull request number), and frees when it closes", async () => {
+      const w = await enqueuedPaired({ enqueue: "forbidden" });
+      const { rows } = await h.admin.query("SELECT code, pr_number FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'merge_enqueued'", [w.workItemId]);
+      expect(rows).toEqual([{ code: "auto_merge", pr_number: 41 }]);
+      await lapse(w);
+      expect(await reread(w)).toMatchObject({ outcome: "ready_human_merges", reasons: ["merge_repo_busy"] });
+      expect(await holders(w)).toHaveLength(1);
+      await lapse(w);
+      w.pub.state = "closed";
+      w.pub.merged = true;
+      expect(await reread(w)).toMatchObject({ outcome: "pr_not_open" });
+      expect(await holders(w)).toEqual([]);
+    });
+
+    it("another item whose private number equals the public one is never read: its auto-merge fact does not keep a queued item's lapsed hold, and a queued item's own lapsed hold is gone once it left the queue", async () => {
+      const w = await enqueuedPaired({ entry: undefined });
+      await decoy(w, "auto_merge");
+      w.pub.mergeQueue = { ...w.pub.mergeQueue!, entry: null };
+      await lapse(w);
+      expect(await reread(w)).toMatchObject({ outcome: "merge_enqueued" });
+    });
+
+    it("the 24-hour end is recorded on the item the hold names, not on another item with the same number", async () => {
+      const w = await enqueuedPaired();
+      const other = await decoy(w, "queue");
+      await h.admin.query("UPDATE repo_merge_leases SET lease_until = now() - interval '1 second', holder = regexp_replace(holder, '^(ghq:[0-9]+:[0-9]+:)[0-9]+', '\\1' || (floor(extract(epoch FROM now()) / 60) - 1500)::bigint::text) WHERE repo_id = $1", [w.repoId]);
+      expect(await reread(w)).toMatchObject({ outcome: "merge_enqueued" });
+      const on = async (id: string) => (await h.admin.query("SELECT 1 FROM work_item_driver_events WHERE work_item_id = $1 AND code = 'merge_hold_expired'", [id])).rows.length;
+      expect([await on(w.workItemId), await on(other.workItemId)]).toEqual([1, 0]);
+    });
+
+    it("unreadable reads of a paired hold are counted and surface at the third; still in the queue stays busy; out of the queue and open frees it", async () => {
+      const w = await enqueuedPaired();
+      w.pub.mergeQueue = { ...w.pub.mergeQueue!, readFails: true };
+      for (let n = 1; n <= 2; n++) {
+        await lapse(w);
+        expect(await reread(w), String(n)).toMatchObject({ reasons: ["merge_repo_busy"] });
+      }
+      await lapse(w);
+      expect(await reread(w)).toMatchObject({ reasons: ["merge_repo_busy", "ordered_resource_unreadable"] });
+      await lapse(w);
+      w.pub.mergeQueue = { exists: true, mutations: [], entry: { id: "MQE_kwDOfake1", state: "AWAITING_CHECKS", position: 1 } };
+      expect(await reread(w)).toMatchObject({ reasons: ["merge_repo_busy"] });
+      await lapse(w);
+      w.pub.mergeQueue = { exists: true, mutations: [], entry: null };
+      expect(await reread(w)).toMatchObject({ outcome: "merge_enqueued" });
+    });
+
+    it("a removal from the queue that is not its own success frees it as well", async () => {
+      const w = await enqueuedPaired();
+      await hook(w, { action: "dequeued", reason: "MERGE", pull_request: { number: PUB_PR, merged: false, head: { sha: PUB_HEAD } } });
+      expect(await holders(w)).toHaveLength(1);
+      await hook(w, { action: "dequeued", reason: "CI_FAILURE", pull_request: { number: PUB_PR, merged: false, head: { sha: PUB_HEAD } } });
+      expect(await holders(w)).toEqual([]);
+    });
+  });
+
+  it("the code repository's tip that cannot be read stops the paired item; nothing is merged", async () => {
+    const w = await world();
+    await h.admin.query("INSERT INTO agent_runs (account_id, work_item_id, role, runtime, status, envelope, head_sha) VALUES ($1, $2, 'security-reviewer', 'production', 'succeeded', $3::jsonb, $4)", [w.accountId, w.workItemId, JSON.stringify({ verdict: "pass" }), HEAD]);
+    w.priv.files = [file("sql/0011_a.sql", { status: "added" })];
+    w.pub.files = [file("sql/0011_a.sql", { status: "added" })];
+    setTip([w.priv, w.pub], MIGS);
+    w.pub.treesTruncated = true;
+    const out = await gateOf(w, w.workItemId, w.priv, w.pub);
+    expect(out.outcome === "ready_human_merges" && out.reasons).toContain("ordered_resource_unreadable");
+    expect(w.pub.merges).toEqual([]);
   });
 });

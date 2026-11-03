@@ -70,7 +70,7 @@ describe("R-P1d-1: the merge gate is the only way the product merges", () => {
     const src = readFileSync(path.join(REPO_ROOT, "packages/pipeline/src/build/mergeGate.ts"), "utf8");
     const fn = src.slice(src.indexOf("export async function runMergeGate("));
     const lease = fn.indexOf("deps.acquireMergeLease()");
-    const inner = fn.indexOf("runMergeGateLeased(deps, input)");
+    const inner = fn.indexOf("runMergeGateLeased(deps, input, lease");
     const release = fn.indexOf("lease.release()");
     const firstRead = fn.indexOf("deps.github.getPullRequest(");
     expect(lease).toBeGreaterThan(0);
@@ -82,8 +82,38 @@ describe("R-P1d-1: the merge gate is the only way the product merges", () => {
     expect(fn.indexOf("enqueueIntoQueue(deps")).toBeGreaterThan(release);
     expect(fn.match(/lease\.release\(\)/g)).toHaveLength(1);
     // The caller wires the lease for every caller but the queue tick, which holds the slot.
-    expect(readFileSync(path.join(REPO_ROOT, "packages/pipeline/src/review/mergeGateRun.ts"), "utf8")).toMatch(/input\.underQueueSlot === true \? \{\} : \{ acquireMergeLease:/);
+    expect(readFileSync(path.join(REPO_ROOT, "packages/pipeline/src/review/mergeGateRun.ts"), "utf8")).toMatch(/input\.underQueueSlot === true\s*\?\s*\{\}\s*:\s*\{\s*acquireMergeLease:/);
     expect(mentioning(/\bunderQueueSlot: true\b/)).toEqual(["apps/web/lib/mergeQueue.ts"]);
+  });
+
+  it("D#483 S5-j2a2: the order check runs under the lease, its reasons are gathered before the stop, the merge call sits after both, and the caller wires it for every merge", () => {
+    const src = readFileSync(path.join(REPO_ROOT, "packages/pipeline/src/build/mergeGate.ts"), "utf8");
+    const fn = src.slice(src.indexOf("export async function runMergeGate("));
+    const leased = fn.indexOf("async function runMergeGateLeased(");
+    const confirm = fn.indexOf("await lease.confirm()");
+    const call = fn.indexOf("await mergeOrderReasons(deps, input, headSha)");
+    const stop = fn.indexOf("if (reasons.length > 0) {");
+    expect(leased).toBeGreaterThan(0);
+    expect(fn.indexOf("deps.acquireMergeLease()")).toBeLessThan(leased);
+    expect(call).toBeGreaterThan(leased);
+    expect(stop).toBeGreaterThan(call);
+    expect(fn.indexOf("deps.github.mergePullRequest(")).toBeGreaterThan(stop);
+    expect(fn.indexOf("enqueueIntoQueue(deps")).toBeGreaterThan(stop);
+    // R-C35-5: the lease is renewed and re-confirmed after the stop and before both the enqueue and the merge call.
+    expect(confirm).toBeGreaterThan(stop);
+    expect(fn.indexOf("deps.github.mergePullRequest(")).toBeGreaterThan(confirm);
+    expect(fn.indexOf("enqueueIntoQueue(deps")).toBeGreaterThan(confirm);
+    expect(fn.match(/lease\.confirm\(\)/g)).toHaveLength(1);
+    expect(fn.match(/await mergeOrderReasons\(/g)).toHaveLength(1);
+    // The check is the port the caller hands in, never a call to the queue's `orderedStep` (which stops entries and renews slots).
+    expect(src).not.toMatch(/orderedStep/);
+    const run = readFileSync(path.join(REPO_ROOT, "packages/pipeline/src/review/mergeGateRun.ts"), "utf8");
+    expect(run).toMatch(/\.\.\.createMergeOrder\(\{ pool, github: mergePort, runnerLocal \}\)/);
+    expect(mentioning(/\bcreateMergeOrder\b/)).toEqual(["packages/pipeline/src/mergeQueue/mergeOrderCheck.ts", "packages/pipeline/src/review/mergeGateRun.ts"]);
+    expect(mentioning(/\borderedStep\(/)).toEqual(["packages/pipeline/src/mergeQueue/orderedCheck.ts", "packages/pipeline/src/mergeQueue/tick.ts"]);
+    // R-C34-F4: a pull request put in GitHub's merge queue keeps the lease (the one release stays in the finally), and the settle path frees it from the webhook.
+    expect(fn.indexOf("lease?.holdForHostQueue")).toBeGreaterThan(fn.indexOf("runMergeGateLeased(deps, input, lease"));
+    expect(mentioning(/\breleaseHostQueueLease\b/)).toEqual(["packages/pipeline/src/mergeQueue/events.ts", "packages/pipeline/src/mergeQueue/mergeLease.ts"]);
   });
 
   it("inside the gate, the author reasons are gathered before the stop, and both merge call sites sit after it", () => {

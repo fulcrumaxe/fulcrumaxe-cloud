@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { runMergeGate, type MergeGateDeps, type MergeGateInput } from "../../src/build/mergeGate.js";
-import { acquireMergeLease, hasLiveMergeLease, lockRepoMerge, releaseMergeLease } from "../../src/mergeQueue/mergeLease.js";
+import { acquireMergeLease, hasLiveMergeLease, holdLeaseForHostQueue, lockRepoMerge, reapLapsedHostHold, releaseHostQueueLease, releaseMergeLease, type HostQueueEntryState } from "../../src/mergeQueue/mergeLease.js";
 import { MERGE_QUEUE_LEASE_SECONDS } from "../../src/mergeQueue/policy.js";
 import { enqueueEntry, takeSlot } from "../../src/mergeQueue/store.js";
 import type { PrFacts } from "../../src/mergeQueue/types.js";
@@ -19,6 +19,7 @@ import { pgHarness } from "../helpers/pgHarness.js";
 vi.mock("@fx/core/src/pendingWork.js", () => ({ markWorkPending: vi.fn(async () => undefined) }));
 
 const HEAD = "a".repeat(40);
+const ITEM = "00000000-0000-4000-8000-000000000001";
 const T0 = new Date("2026-11-03T10:00:00Z");
 const at = (seconds: number) => new Date(T0.getTime() + seconds * 1000);
 const open: PrFacts = { open: true, draft: false };
@@ -133,6 +134,174 @@ describe("D#483 S5-j2a1 merge lease [pg]", () => {
     expect(mark).not.toHaveBeenCalled();
   });
 
+  describe("D#483 S5-j2a2 (R-C35): a hold for GitHub's queue is named by the repository's numeric id, read when it lapses, bounded at 24 hours, and kept by the tick until then", () => {
+    const nowMin = () => Math.floor(Date.now() / 60_000);
+    /** A lapsed hold for pull request `pr` of the repository with GitHub id `id`, begun `ageMin` minutes ago. */
+    const lapsed = async (w: World, pr = 7, id = "4242", ageMin = 1, item = ITEM) => {
+      const holder = `ghq:${pr}:${id}:${nowMin() - ageMin}:${item}`;
+      await db.admin.query("INSERT INTO repo_merge_leases (account_id, repo_id, holder, kind, lease_until) VALUES ($1, $2, $3, 'direct', now() - interval '1 second')", [w.accountId, w.repoId, holder]);
+      return holder;
+    };
+    const secsLeft = async (w: World) => Number((await db.admin.query("SELECT extract(epoch FROM lease_until - now()) AS s FROM repo_merge_leases WHERE repo_id = $1", [w.repoId])).rows[0].s);
+    const lapse = (w: World) => db.admin.query("UPDATE repo_merge_leases SET lease_until = now() - interval '1 second' WHERE repo_id = $1", [w.repoId]);
+
+    it.each<[string, HostQueueEntryState | "throws" | "absent"]>([["still waiting", "queued"], ["unreadable", "unreadable"], ["the read throws", "throws"], ["no reader at all", "absent"]])("%s: the repository stays busy and the hold is renewed", async (_n, state) => {
+      const w = await world();
+      const holder = await lapsed(w);
+      const seen: Array<[number, string]> = [];
+      const reader = state === "absent" ? {} : { hostQueueEntry: async (n: number, id: string) => (seen.push([n, id]), state === "throws" ? Promise.reject(new Error("GitHub down")) : state) };
+      expect(await acquireMergeLease(db.pureAppUserPool, { ...w, ...reader })).toEqual({ taken: false });
+      // A read that said "still waiting" leaves the hold as it was; one that could not say counts as the first miss (see below).
+      expect(await leaseRows(w)).toEqual([{ holder: state === "queued" ? holder : `${holder}:u1`, kind: "direct" }]);
+      expect(await secsLeft(w)).toBeGreaterThan(29 * 60);
+      if (state !== "absent") expect(seen).toEqual([[7, "4242"]]);
+    });
+
+    it("an unreadable read cannot renew a hold forever: the third in a row stays busy but is put before a person (stuck) and is read again within minutes; a read that says it is still waiting starts the count again", async () => {
+      const w = await world();
+      const holder = await lapsed(w);
+      const unreadable = { hostQueueEntry: async () => "unreadable" as const };
+      expect(await acquireMergeLease(db.pureAppUserPool, { ...w, ...unreadable })).toEqual({ taken: false });
+      await lapse(w);
+      expect(await acquireMergeLease(db.pureAppUserPool, { ...w, ...unreadable })).toEqual({ taken: false });
+      expect((await leaseRows(w))[0]!.holder).toBe(`${holder}:u2`);
+      // A readable answer in between: still waiting, the count starts again.
+      await lapse(w);
+      expect(await acquireMergeLease(db.pureAppUserPool, { ...w, hostQueueEntry: async () => "queued" as const })).toEqual({ taken: false });
+      expect((await leaseRows(w))[0]!.holder).toBe(holder);
+      for (const n of [1, 2]) {
+        await lapse(w);
+        expect(await acquireMergeLease(db.pureAppUserPool, { ...w, ...unreadable }), String(n)).toEqual({ taken: false });
+      }
+      await lapse(w);
+      expect(await acquireMergeLease(db.pureAppUserPool, { ...w, ...unreadable })).toEqual({ taken: false, stuck: true });
+      expect((await leaseRows(w))[0]!.holder).toBe(`${holder}:u3`);
+      expect(await secsLeft(w)).toBeLessThan(6 * 60);
+      // It keeps surfacing until the entry can be read, and the read that finds it gone frees the repository.
+      await lapse(w);
+      expect(await acquireMergeLease(db.pureAppUserPool, { ...w, ...unreadable })).toEqual({ taken: false, stuck: true });
+      await lapse(w);
+      expect((await acquireMergeLease(db.pureAppUserPool, { ...w, hostQueueEntry: async () => "gone" as const })).taken).toBe(true);
+    });
+
+    it("the count has no ceiling that ends the hold: past ten (and past a hundred) unreadable reads it still parses, stays busy and stuck, and only a gone read frees it", async () => {
+      const w = await world();
+      const holder = await lapsed(w);
+      const unreadable = { hostQueueEntry: async () => "unreadable" as const };
+      for (let n = 1; n <= 12; n++) {
+        if (n > 1) await lapse(w);
+        const take = await acquireMergeLease(db.pureAppUserPool, { ...w, ...unreadable });
+        expect(take.taken, String(n)).toBe(false);
+      }
+      expect((await leaseRows(w))[0]!.holder).toBe(`${holder}:u12`);
+      await db.admin.query("UPDATE repo_merge_leases SET holder = $2 WHERE repo_id = $1", [w.repoId, `${holder}:u999`]);
+      await lapse(w);
+      expect(await acquireMergeLease(db.pureAppUserPool, { ...w, ...unreadable })).toEqual({ taken: false, stuck: true });
+      expect((await leaseRows(w))[0]!.holder).toBe(`${holder}:u999`);
+      await lapse(w);
+      expect((await acquireMergeLease(db.pureAppUserPool, { ...w, hostQueueEntry: async () => "gone" as const })).taken).toBe(true);
+    });
+
+    it("gone (the pull request left the queue): the next taker takes the repository", async () => {
+      const w = await world();
+      await lapsed(w);
+      const take = await acquireMergeLease(db.pureAppUserPool, { ...w, hostQueueEntry: async () => "gone" });
+      expect(take.taken).toBe(true);
+      expect(await leaseRows(w)).toEqual([{ holder: take.taken ? take.holder : "", kind: "direct" }]);
+    });
+
+    it("a hold that has not lapsed is not read, and an ordinary lapsed lease is overwritten without a read", async () => {
+      const w = await world();
+      const reads: number[] = [];
+      const reader = { hostQueueEntry: async (n: number) => (reads.push(n), "gone" as const) };
+      await db.admin.query("INSERT INTO repo_merge_leases (account_id, repo_id, holder, kind, lease_until) VALUES ($1, $2, $3, 'direct', now() + interval '5 minutes')", [w.accountId, w.repoId, `ghq:7:4242:${nowMin()}:${ITEM}`]);
+      expect(await acquireMergeLease(db.pureAppUserPool, { ...w, ...reader })).toEqual({ taken: false });
+      await db.admin.query("UPDATE repo_merge_leases SET holder = 'lease-old', lease_until = now() - interval '1 second' WHERE repo_id = $1", [w.repoId]);
+      expect((await acquireMergeLease(db.pureAppUserPool, { ...w, ...reader })).taken).toBe(true);
+      expect(reads).toEqual([]);
+    });
+
+    it("the holder is digits and colons only, with the largest pull request number and repository id it can carry; a rename changes nothing, and the settle finds it by id, case folded away, and frees a counted hold too", async () => {
+      const w = await world();
+      const take = await acquireMergeLease(db.pureAppUserPool, w);
+      expect(take.taken).toBe(true);
+      if (take.taken) await take.holdForHostQueue(123456789, "123456789012345", ITEM);
+      const rows = await leaseRows(w);
+      expect(rows[0]!.holder).toMatch(new RegExp(`^ghq:123456789:123456789012345:\\d+:${ITEM}$`));
+      expect(rows[0]!.holder.length).toBeLessThan(100);
+      await db.admin.query("UPDATE repo_merge_leases SET holder = holder || ':u12' WHERE repo_id = $1", [w.repoId]);
+      // Another pull request number that starts the same, and another repository's id that does, leave it.
+      await tenant(w.accountId, (c) => releaseHostQueueLease(c, { accountId: w.accountId, repoGhId: "123456789012345", prNumber: 12345678 }));
+      await tenant(w.accountId, (c) => releaseHostQueueLease(c, { accountId: w.accountId, repoGhId: "12345678901234", prNumber: 123456789 }));
+      expect(await leaseRows(w)).toHaveLength(1);
+      await tenant(w.accountId, (c) => releaseHostQueueLease(c, { accountId: w.accountId, repoGhId: 123456789012345, prNumber: 123456789 }));
+      expect(await leaseRows(w)).toEqual([]);
+      void holdLeaseForHostQueue;
+    });
+
+    it("the 24-hour bound: a hold that began more than a day ago ends at the next take with no read at all, and the item it was held for gets an event for it", async () => {
+      const w = await world();
+      const workItemId = randomUUID();
+      await seedWorkItem(db.admin, w.accountId, workItemId, w.repoId, { ghNumber: 7 });
+      await db.admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key, code, head_sha, pr_number) VALUES ($1, $2, 'merge_enqueued', 'e1', 'queue', $3, 7)", [w.accountId, workItemId, HEAD]);
+      // Another item whose own pull request number is also 7 (a paired item has two numbers) is not the one the hold names.
+      const other = randomUUID();
+      await seedWorkItem(db.admin, w.accountId, other, w.repoId, { ghNumber: 8 });
+      await db.admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, dedupe_key, code, head_sha, pr_number) VALUES ($1, $2, 'merge_enqueued', 'e2', 'auto_merge', $3, 7)", [w.accountId, other, HEAD]);
+      await lapsed(w, 7, "4242", 1441, workItemId);
+      const reads: number[] = [];
+      const take = await acquireMergeLease(db.pureAppUserPool, { ...w, hostQueueEntry: async (n) => (reads.push(n), "queued" as const) });
+      expect(take.taken).toBe(true);
+      expect(reads).toEqual([]);
+      const { rows } = await db.admin.query("SELECT code, reasons, pr_number FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'merge_gate'", [workItemId]);
+      expect(rows).toEqual([{ code: "merge_hold_expired", reasons: ["merge_hold_expired"], pr_number: 7 }]);
+      expect((await db.admin.query("SELECT 1 FROM work_item_driver_events WHERE work_item_id = $1 AND code = 'merge_hold_expired'", [other])).rows).toEqual([]);
+      // Just under a day it is still read, not ended.
+      const w2 = await world();
+      await lapsed(w2, 7, "4242", 1439);
+      expect((await acquireMergeLease(db.pureAppUserPool, { ...w2, hostQueueEntry: async () => "queued" as const })).taken).toBe(false);
+    });
+
+    it("a holder that says it is a hold but is not well formed fails closed: busy, never read as an ordinary lease, for 24 hours after its lease_until (which nothing renews), for a gate and for the tick alike", async () => {
+      const reads: number[] = [];
+      const reader = { hostQueueEntry: async (n: number) => (reads.push(n), "gone" as const) };
+      for (const bad of ["ghq:garbage", `ghq:7:4242:${nowMin()}`, `ghq:7:4242:${nowMin()}:not-a-uuid`, `ghq:7:4242:${nowMin()}:${ITEM}:u1000`, `ghq:7:4242:${nowMin()}:${ITEM}:u`]) {
+        const w = await world();
+        const entry = await queued(w, 31);
+        await db.admin.query("INSERT INTO repo_merge_leases (account_id, repo_id, holder, kind, lease_until) VALUES ($1, $2, $3, 'direct', now() - interval '1 second')", [w.accountId, w.repoId, bad]);
+        expect(await acquireMergeLease(db.pureAppUserPool, { ...w, ...reader }), bad).toEqual({ taken: false });
+        expect(await take(w, entry.id), bad).toMatchObject({ taken: null, skipped: "slot_busy" });
+        expect((await leaseRows(w))[0]!.holder).toBe(bad);
+        await db.admin.query("UPDATE repo_merge_leases SET lease_until = now() - interval '25 hours' WHERE repo_id = $1", [w.repoId]);
+        expect((await acquireMergeLease(db.pureAppUserPool, { ...w, ...reader }) ).taken, bad).toBe(true);
+      }
+      expect(reads).toEqual([]);
+    });
+
+    it("the queue tick treats a hold as busy whether lapsed or not, until a gate's read, the settle, the sweep or the 24 hours frees it; the sweep's read frees a lapsed one that is gone, and keeps one still queued", async () => {
+      const w = await world();
+      const entry = await queued(w, 31);
+      await lapsed(w, 7, "4242", 1);
+      expect(await take(w, entry.id)).toMatchObject({ taken: null, skipped: "slot_busy" });
+      // Nobody asks: the sweep reads it. Still queued: it stays, and the tick is still held off.
+      await reapLapsedHostHold(db.pureAppUserPool, { ...w, hostQueueEntry: async () => "queued" });
+      expect(await leaseRows(w)).toHaveLength(1);
+      expect(await take(w, entry.id)).toMatchObject({ taken: null, skipped: "slot_busy" });
+      // Gone: freed, and the queue is woken.
+      vi.mocked(markWorkPending).mockClear();
+      await lapse(w);
+      await reapLapsedHostHold(db.pureAppUserPool, { ...w, hostQueueEntry: async () => "gone" });
+      expect(await leaseRows(w)).toEqual([]);
+      expect(markWorkPending).toHaveBeenCalledWith("merge-queue-sweep");
+      expect((await take(w, entry.id)).taken?.id).toBe(entry.id);
+      // A hold past 24 hours no longer holds the tick off, even if nothing read it.
+      const old = await world();
+      const entry2 = await queued(old, 32);
+      await lapsed(old, 7, "4242", 1500);
+      expect((await take(old, entry2.id)).taken?.id).toBe(entry2.id);
+    });
+  });
+
   it("a lapsed lease is dead: the next taker overwrites it, and the old holder's release leaves the new lease alone", async () => {
     const w = await world();
     const first = await acquireMergeLease(db.pureAppUserPool, { ...w, now: T0, leaseSeconds: 60 });
@@ -198,7 +367,7 @@ describe("D#483 S5-j2a1 merge lease [pg]", () => {
       requestReviews: async () => undefined,
       acquireMergeLease: async () => {
         const lease = await acquireMergeLease(db.pureAppUserPool, w);
-        return lease.taken ? lease : null;
+        return lease.taken ? { release: lease.release, confirm: lease.confirm, holdForHostQueue: (n: number) => lease.holdForHostQueue(n, "4242", ITEM) } : null;
       },
       ...over,
     });
@@ -250,7 +419,6 @@ describe("D#483 S5-j2a1 merge lease [pg]", () => {
       ["stopped (a draft)", () => fake(prOf({ draft: true })), {}, "ready_human_merges"],
       ["head moved (the caller's head is not the pull request's)", () => fake(), { expectedHeadSha: "b".repeat(40) }, "head_moved"],
       ["the pull request is closed", () => fake(prOf({ state: "closed" })), {}, "pr_not_open"],
-      ["enqueued in GitHub's queue", () => fake(prOf(), { queueMode: "queue" as const }), {}, "merge_enqueued"],
       [
         "delegated to a runner",
         () => {
@@ -266,6 +434,77 @@ describe("D#483 S5-j2a1 merge lease [pg]", () => {
       const github = make();
       expect((await runMergeGate(gateDeps(w, github), inputOf(w, over as Partial<MergeGateInput>))).outcome).toBe(outcome);
       expect(await leaseRows(w)).toEqual([]);
+    });
+
+    it("enqueued in GitHub's queue: the lease is not freed but held for that pull request (D#483 S5-j2a2, R-C34-F4; the settle tests are in mergeGateRun.pg.test.ts)", async () => {
+      const w = await gateWorld();
+      expect((await runMergeGate(gateDeps(w, fake(prOf(), { queueMode: "queue" as const })), inputOf(w))).outcome).toBe("merge_enqueued");
+      expect(await leaseRows(w)).toEqual([{ holder: expect.stringMatching(new RegExp(`^ghq:7:4242:\\d+:${ITEM}$`)), kind: "direct" }]);
+    });
+
+    it("D#483 S5-j2a2: the hold for GitHub's queue wakes nothing, and neither a competing take nor a lapsed in-flight reclaim removes it; only the settle (or its 30 minutes) frees it", async () => {
+      const w = await gateWorld();
+      const sibling = await queued(w, 9);
+      vi.mocked(markWorkPending).mockClear();
+      expect((await runMergeGate(gateDeps(w, fake(prOf(), { queueMode: "queue" as const })), inputOf(w))).outcome).toBe("merge_enqueued");
+      expect(markWorkPending).not.toHaveBeenCalled();
+      // Another direct merge and the reclaim run in `acquireMergeLease` leave the held lease as it was.
+      expect(await acquireMergeLease(db.pureAppUserPool, w)).toEqual({ taken: false });
+      expect(await leaseRows(w)).toEqual([{ holder: expect.stringMatching(new RegExp(`^ghq:7:4242:\\d+:${ITEM}$`)), kind: "direct" }]);
+      // The queue's slot is excluded meanwhile, with its entry still queued.
+      expect(await take(w, sibling.id)).toMatchObject({ taken: null, skipped: "slot_busy" });
+      expect((await tenant(w.accountId, (c) => c.query("SELECT state FROM merge_queue_entries WHERE id = $1", [sibling.id]))).rows).toEqual([{ state: "queued" }]);
+      // Settling it frees the repository: the queue's slot is taken.
+      await tenant(w.accountId, (c) => releaseHostQueueLease(c, { accountId: w.accountId, repoGhId: 4242, prNumber: 7 }));
+      expect((await take(w, sibling.id)).taken?.id).toBe(sibling.id);
+    });
+
+    it("D#483 S5-j2a2 (R-C35-4): the hold is only for a pull request that adds an ordered file; any other direct item gives the lease back at the enqueue; a doubt holds", async () => {
+      const queue = () => fake(prOf(), { queueMode: "queue" as const });
+      for (const [adds, held] of [[async () => false, false], [async () => true, true], [async () => { throw new Error("tree unreadable"); }, true], [undefined, true]] as const) {
+        const w = await gateWorld();
+        const out = await runMergeGate(gateDeps(w, queue(), adds === undefined ? {} : { addsOrderedFile: adds }), inputOf(w));
+        expect(out.outcome).toBe("merge_enqueued");
+        expect((await leaseRows(w)).length, String(adds)).toBe(held ? 1 : 0);
+      }
+    });
+
+    it("D#483 S5-j2a2 (R-C35-5): a gate whose lease was taken over just before the merge call merges nothing and answers merge_repo_busy", async () => {
+      const w = await gateWorld();
+      const github = fake();
+      // The last read before the merge call: another taker has the repository by then (this gate stalled past its lease).
+      github.getMergeQueueMode = async () => {
+        await db.admin.query("UPDATE repo_merge_leases SET holder = 'thief' WHERE account_id = $1 AND repo_id = $2", [w.accountId, w.repoId]);
+        return { mode: "direct", source: "fake" };
+      };
+      expect(await runMergeGate(gateDeps(w, github), inputOf(w))).toMatchObject({ outcome: "ready_human_merges", reasons: ["merge_repo_busy"] });
+      expect(github.mergeCalls).toEqual([]);
+      expect(await leaseRows(w)).toEqual([{ holder: "thief", kind: "direct" }]);
+    });
+
+    it("D#483 S5-j2a2 (R-C35): a lease that lapsed and that nobody overwrote is lost as well: a tick may have come and gone, so the gate merges nothing", async () => {
+      const w = await gateWorld();
+      const github = fake();
+      github.getMergeQueueMode = async () => {
+        await db.admin.query("UPDATE repo_merge_leases SET lease_until = now() - interval '1 second' WHERE account_id = $1 AND repo_id = $2", [w.accountId, w.repoId]);
+        return { mode: "direct", source: "fake" };
+      };
+      expect(await runMergeGate(gateDeps(w, github), inputOf(w))).toMatchObject({ outcome: "ready_human_merges", reasons: ["merge_repo_busy"] });
+      expect(github.mergeCalls).toEqual([]);
+    });
+
+    it("the same for the enqueue into GitHub's queue, and a lease that is intact is renewed and merges", async () => {
+      const w = await gateWorld();
+      const github = fake(prOf(), { queueMode: "queue" as const });
+      const read = github.getMergeQueueMode!.bind(github);
+      github.getMergeQueueMode = async (...a) => {
+        await db.admin.query("DELETE FROM repo_merge_leases WHERE account_id = $1 AND repo_id = $2", [w.accountId, w.repoId]);
+        return read(...a);
+      };
+      expect(await runMergeGate(gateDeps(w, github), inputOf(w))).toMatchObject({ reasons: ["merge_repo_busy"] });
+      expect(github.enqueueCalls).toEqual([]);
+      const w2 = await gateWorld();
+      expect(await runMergeGate(gateDeps(w2, fake()), inputOf(w2))).toMatchObject({ outcome: "merged" });
     });
 
     it("the lease is free again when the gate throws", async () => {

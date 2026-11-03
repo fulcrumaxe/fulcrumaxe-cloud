@@ -143,6 +143,48 @@ describe("runner_local: every condition met", () => {
   });
 });
 
+describe("D#483 S5-j2a2 (fork F2): a runner_local item cannot be checked for migration order by the cloud", () => {
+  const sibling = async (w: World, stage: string) => {
+    const { workItemId } = await discussingItem(h.runWriterPool, w.accountId, { title: "Add a header", body: "Show the year in the header.", category: "feature", repoId: w.repoId });
+    await h.admin.query("UPDATE work_items SET gh_number = 8, repo_id = $2, stage = $3, provenance = 'internal' WHERE id = $1", [workItemId, w.repoId, stage]);
+    return workItemId;
+  };
+
+  it("another live item on the repository: runner_ordered_unsupported, nothing merged, and the repository's contents are never read", async () => {
+    const w = await world();
+    await passBoth(w);
+    await sibling(w, "in_progress");
+    const out = await gate(w);
+    expect(reasonsOf(out)).toEqual(["runner_ordered_unsupported"]);
+    expect(w.gh.merges).toEqual([]);
+    expect(w.gh.requests.some((r) => r.path.includes("/git/trees/") || r.path.includes("/git/ref/") || r.path.includes("/compare/"))).toBe(false);
+  });
+
+  const moved = (w: World, workItemId: string, from: string, to: string, minutes: number) =>
+    h.admin.query("INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, $3, $4, now() + ($5::int * interval '1 minute'), 'control_plane', $6)", [w.accountId, workItemId, from, to, minutes, randomUUID()]);
+
+  it("the only live item is waived, and so is one built after its sibling merged: it merges as before", async () => {
+    const w = await world();
+    await passBoth(w);
+    const done = await sibling(w, "merged");
+    await moved(w, done, "review_passed", "merged", -120);
+    await moved(w, w.workItemId, "spec_ready", "in_progress", -60);
+    expect(await gate(w)).toMatchObject({ outcome: "merged" });
+    expect(w.gh.merges).toEqual([{ sha: HEAD, method: "squash" }]);
+  });
+
+  it("a sibling that merged after this item's build began stops it, though the sibling is no longer live", async () => {
+    const w = await world();
+    await passBoth(w);
+    const other = await sibling(w, "merged");
+    await moved(w, w.workItemId, "spec_ready", "in_progress", -60);
+    await moved(w, other, "review_passed", "merged", -30);
+    const out = await gate(w);
+    expect(reasonsOf(out)).toEqual(["runner_ordered_unsupported"]);
+    expect(w.gh.merges).toEqual([]);
+  });
+});
+
 describe("(a) the opt-in", () => {
   it("off (the port R2b will replace says off today): verdicts that all pass get NO merge call", async () => {
     const w = await world();
