@@ -38,6 +38,7 @@ export const STACK_START_REFUSALS = [
   "stack_parent_branch_unusable",
   "stack_parent_head_moved",
   "stack_parent_unreadable",
+  "stack_parent_publish_refused",
   "stack_base_unavailable",
   "stack_runtime_unsupported",
 ] as const;

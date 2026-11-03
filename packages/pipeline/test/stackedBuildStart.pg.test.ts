@@ -212,6 +212,69 @@ describe("D#598 P3b: a stacked child's executor starts from the parent's open pu
     expect(await stageOf(t.childId)).toBe("spec_ready");
   });
 
+  /** A paired repository with a push row for the parent in `state` (a `refused` row carries its code, as the schema requires). */
+  async function pushRow(t: Awaited<ReturnType<typeof stackedWorld>>, state: string, paired = true): Promise<void> {
+    if (paired) await h.admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, 'acme/widgets-public', ARRAY['private/**']) ON CONFLICT (repo_id) DO NOTHING", [t.repoId, t.accountId]);
+    await h.admin.query(
+      `INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state, code, managed_by_person_at)
+       VALUES ($1, $2, $3, 'acme/widgets-public', $4, $5, $6, 7, 'https://github.com/acme/widgets-public/pull/7', $7, $8, $9)`,
+      [t.accountId, t.parentId, t.repoId, "f".repeat(64), "e".repeat(40), "d".repeat(40), state, state === "refused" ? "scan_refused" : null, state === "managed_by_person" ? new Date() : null],
+    );
+  }
+
+  it("STACK-ON-REFUSED-PARENT: a parent whose public change was refused does not start the child: the fixed code, no run, no branch, no private pull request, GitHub not asked", async () => {
+    const t = await stackedWorld();
+    await pushRow(t, "refused");
+    const gh = new Github(() => openParent());
+    expect(await start(t, gh)).toEqual({ status: "refused", reason: "stack_parent_publish_refused" });
+    expect(t.world.requests).toEqual([]);
+    expect(gh.reads).toEqual([]);
+    expect(await stageOf(t.childId)).toBe("spec_ready");
+    expect((await h.admin.query("SELECT 1 FROM agent_runs WHERE work_item_id = $1", [t.childId])).rowCount).toBe(0);
+    expect((await h.admin.query("SELECT 1 FROM plane_pushes WHERE work_item_id = $1", [t.childId])).rowCount).toBe(0);
+  });
+
+  it.each(["building", "scanning", "pushed", "pr_opened", "pushed_pr_not_opened", "no_public_change", "updating", "updated", "waiting_person_pushed", "managed_by_person", "pr_closed", "pr_merged"])(
+    "STACK-ON-REFUSED-PARENT: a parent whose push row is %s starts the child as before",
+    async (state) => {
+      const t = await stackedWorld();
+      await pushRow(t, state);
+      expect(await start(t, new Github(() => openParent()))).toMatchObject({ status: "started" });
+    },
+  );
+
+  it("STACK-ON-REFUSED-PARENT: a parent with no push row starts the child as before", async () => {
+    const t = await stackedWorld();
+    await h.admin.query("INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, 'acme/widgets-public', ARRAY['private/**'])", [t.repoId, t.accountId]);
+    expect(await start(t, new Github(() => openParent()))).toMatchObject({ status: "started" });
+  });
+
+  it("STACK-ON-REFUSED-PARENT: a repository that is not paired starts the child as before, even with a refused row left behind from an earlier pairing", async () => {
+    const t = await stackedWorld();
+    await pushRow(t, "refused", false);
+    expect(await start(t, new Github(() => openParent()))).toMatchObject({ status: "started" });
+  });
+
+  it("STACK-ON-REFUSED-PARENT: the refusal is derived on each start: once the parent's push is tried again and leaves refused, the child's next start goes through with no step on the child; refused again, it is refused again", async () => {
+    const t = await stackedWorld();
+    await pushRow(t, "refused");
+    expect(await start(t, new Github(() => openParent()))).toEqual({ status: "refused", reason: "stack_parent_publish_refused" });
+    await h.admin.query("UPDATE plane_pushes SET state = 'building', code = NULL WHERE work_item_id = $1", [t.parentId]);
+    expect(await start(t, new Github(() => openParent()))).toMatchObject({ status: "started" });
+    const again = await stackedWorld();
+    await pushRow(again, "refused");
+    expect(await start(again, new Github(() => openParent()))).toEqual({ status: "refused", reason: "stack_parent_publish_refused" });
+    await h.admin.query("DELETE FROM repo_pairing WHERE repo_id = $1", [again.repoId]);
+    expect(await start(again, new Github(() => openParent()))).toMatchObject({ status: "started" });
+  });
+
+  it("STACK-ON-REFUSED-PARENT: a refused push row of another account's item changes nothing for this child", async () => {
+    const t = await stackedWorld();
+    const other = await stackedWorld();
+    await pushRow(other, "refused");
+    expect(await start(t, new Github(() => openParent()))).toMatchObject({ status: "started" });
+  });
+
   it("another account cannot be read through the link: a parent in another account is not a parent (row security)", async () => {
     const t = await stackedWorld();
     const other = await stackedWorld();

@@ -4,6 +4,8 @@ import { InstallationTokenCache, type AccessTokenRequester } from "../../github/
 import { createInstallationHttp } from "../../github/src/installationHttp.js";
 import { strictGithubFetch } from "../../github/test/helpers/strictGithub.js";
 import { buildExecutorPrompt } from "../src/advance/build.js";
+import { classifyStall } from "@fx/core/src/work-items/stalled.js";
+import { errorCodeOrOther } from "@fx/telemetry";
 import { createStackBasePort, decideStackStart, isSafeBranchName, STACK_START_REFUSALS, type StackParentFacts } from "../src/advance/stackBase.js";
 
 /**
@@ -174,5 +176,34 @@ describe("createStackBasePort over the real installation client", () => {
     await expect(t.port.readParent({ ...TARGET, owner: "../evil" })).rejects.toThrow("invalid repository");
     await expect(t.port.readParent({ ...TARGET, prNumber: 0 })).rejects.toThrow("invalid repository");
     expect(t.calls).toEqual([]);
+  });
+});
+
+describe("STACK-ON-REFUSED-PARENT: every stack refusal is a closed code with a plain sentence", () => {
+  it("the refusal list includes the publish-refused code", () => {
+    expect(STACK_START_REFUSALS).toContain("stack_parent_publish_refused");
+  });
+
+  it.each([...STACK_START_REFUSALS])("%s is a telemetry code and the stalled item says one sentence about what to do, never the code", (code) => {
+    expect(errorCodeOrOther(code)).toBe(code);
+    const at = new Date("2026-11-03T10:00:00Z");
+    const stall = classifyStall({ stage: "spec_ready", halted: false, liveRun: false, pendingRequest: false, waitingAsk: false, last: { kind: "build_refused", code, reasons: [], at }, lastActivity: at, now: new Date("2026-11-03T10:10:00Z") });
+    expect(stall).toMatchObject({ code: "refused" });
+    const why = stall!.why;
+    expect(why).toMatch(/^[A-Z][^_]+[.]$/);
+    expect(why).not.toMatch(/null|undefined|NaN|stack parent|stack base/);
+    // A step that exists, or a plain "nothing can be done from here". No control to take an item off its stack exists, so no sentence may offer one.
+    expect(why).toMatch(/start (this one |it )?again|Nothing can be done from here/i);
+    expect(why).not.toMatch(/off (its|the|a) stack|unstack|remove .*stack|stack(ed)? (parent|link)/i);
+    expect(why).not.toContain(`(${code.replace(/_/g, " ")})`);
+  });
+
+  // The push retry is hidden after three attempts, on a runner push and when a person manages the branch (`mayRetryPublish`), so the sentence names both controls a parent can offer.
+  it("the publish-refused sentence names both controls the refused parent may offer, whichever it shows", () => {
+    const at = new Date("2026-11-03T10:00:00Z");
+    const why = classifyStall({ stage: "spec_ready", halted: false, liveRun: false, pendingRequest: false, waitingAsk: false, last: { kind: "build_refused", code: "stack_parent_publish_refused", reasons: [], at }, lastActivity: at, now: new Date("2026-11-03T10:10:00Z") })!.why;
+    expect(why).toContain("Try the push again");
+    expect(why).toContain("Build again");
+    expect(why).toContain("whichever it offers");
   });
 });
