@@ -5,9 +5,9 @@ import type { ConflictReaderPort, DefaultBranchReaderPort, OrderedResourceReader
 import type { MergeBlockReason, MergeGateDeps, MergeGateGitHubPort } from "../build/mergeGate.js";
 import type { PullRequestRef } from "../build/types.js";
 import type { GoAttestation } from "../review/mergeGateRun.js";
-import { ORDERED_FACTS_CAPABILITY } from "@fulcrumaxe/runner-protocol";
 import { resolveOrdered } from "./orderedCheck.js";
 import { checkOrdering } from "./orderedResources.js";
+import { repoRunnerCanAttestOrder } from "./runnerOrderCapability.js";
 import { readHostQueued } from "./store.js";
 
 /**
@@ -36,18 +36,7 @@ export type MergeOrderReads = Pick<MergeGateGitHubPort, "compareToBase"> & Order
 /** The stages in which an item holds a build slot or an open pull request that can still reach a merge. `needs_human` holds no slot: the look-back below catches it if it merges. */
 const LIVE_STAGES = ["in_progress", "pr_opened", "changes_requested", "review_passed"] as const;
 
-/**
- * D#483 S5-j2c1 (R-C34-F1): whether a live runner of the account that covers the repository has a latest hello listing `ordered_facts_v1`. The capability, not a release, is the signal, so a runner built from
- * source counts. The order phase uses it to let an item through to the go; the repository's build limit follows it.
- */
-export async function repoRunnerCanAttestOrder(client: Pick<PoolClient, "query">, accountId: string, repoId: string): Promise<boolean> {
-  const { rows } = await client.query(
-    `SELECT 1 FROM runners rn JOIN runner_capabilities cap ON cap.account_id = rn.account_id AND cap.runner_id = rn.id
-      WHERE rn.account_id = $1 AND rn.revoked_at IS NULL AND $2::uuid = ANY(rn.allowed_repo_ids) AND $3::text = ANY(cap.capabilities) LIMIT 1`,
-    [accountId, repoId, ORDERED_FACTS_CAPABILITY],
-  );
-  return rows.length > 0;
-}
+export { repoRunnerCanAttestOrder };
 
 /** The reasons a runner's ordering fact gives. A missing fact from a capable runner, and an `unknown` one, are unreadable: nothing is read as in order on a doubt. */
 function factReasons(fact: GoAttestation["ordered"]): MergeBlockReason[] {
