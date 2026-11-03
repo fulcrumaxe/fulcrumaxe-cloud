@@ -26,6 +26,9 @@ const h = vi.hoisted(() => ({
   subject: { id: "item", headSha: "c".repeat(40) } as Record<string, unknown>,
   startOut: { outcome: "started" } as { outcome: string; reason?: string },
   started: [] as unknown[],
+  /** S5-j2e: the code a re-routed overlap start was told to record its stops under, and the renumber starts. */
+  eventCodes: [] as unknown[],
+  renumbers: [] as unknown[],
   entrylessDone: { outcome: "waiting" } as Record<string, unknown>,
   subjectCalls: [] as unknown[][],
   endedWithoutPr: 0,
@@ -50,7 +53,8 @@ vi.mock("@fx/pipeline", () => ({
     enqueueEntry: async (_c: unknown, input: unknown) => (h.enqueue.push(input), { entry: { id: "entry-1" }, outcome: h.enqueueOutcome }),
     getEntryByWorkItem: async () => (h.roundDone > 0 && h.afterRound ? h.afterRound : h.entry),
     cancelWorkItemEntry: async (_c: unknown, input: unknown) => void h.cancelled.push(input),
-    startEntrylessConflict: async (_ports: unknown, subject: unknown) => (h.started.push(subject), h.startOut),
+    startEntrylessConflict: async (_ports: unknown, subject: unknown, eventCode?: unknown) => (h.started.push(subject), h.eventCodes.push(eventCode), h.startOut),
+    startEntrylessRenumber: async (_ports: unknown, subject: unknown) => (h.renumbers.push(subject), h.startOut),
     recordStop: async (...a: unknown[]) => void h.stops.push(a),
     startEntrylessFromRunnerFacts: async (_ports: unknown, subject: unknown, facts: unknown) => (h.runnerStarts.push([subject, facts]), h.startOut),
   },
@@ -65,14 +69,18 @@ vi.mock("./mergeQueueConflict", () => ({
   endRunnerRoundIfTargetChanged: async () => h.targetChanged,
   bindCompleteEntryless: () => async () => h.entrylessDone,
 }));
+vi.mock("./mergeQueueRenumber", () => ({ entrylessRenumberPorts: () => ({}) }));
 vi.mock("./mergeQueueDeltaReview", () => ({ bindCompleteDeltaReview: () => async () => (h.completed++, h.completion) }));
 vi.mock("./github/installationHttp", () => ({ openInstallationHttp: async () => ({}) }));
 
-import { RUNNER_CONFLICT_START_ENABLED, conflictStartBody, conflictWaitBody, enqueueBody, runnerConflictBody as runnerConflictBodyWith, waitBody, type QueueWorker } from "./mergeQueueWait";
+import { RUNNER_CONFLICT_START_ENABLED, conflictStartBody, conflictWaitBody, enqueueBody, rerouteStartBody, runnerConflictBody as runnerConflictBodyWith, waitBody, type QueueWorker } from "./mergeQueueWait";
 
 const WHO = { accountId: "acct", userId: "u", workItemId: "item", haltEpoch: 0 };
 const worker = { withRunnerPool: async (fn: (pool: unknown) => unknown) => fn({}) } as unknown as QueueWorker;
 const INPUT = { prNumber: 41, headSha: "a".repeat(40) };
+/** The head `h.subject` reads as (the live head), which the direct gate's answer names. */
+const HEAD = "c".repeat(40);
+const MOVED = "d".repeat(40);
 
 beforeEach(() => {
   h.halt = { halted: false, halt_epoch: 0 };
@@ -93,6 +101,8 @@ beforeEach(() => {
   h.github = {};
   h.startOut = { outcome: "started" };
   h.started = [];
+  h.eventCodes = [];
+  h.renumbers = [];
   h.entrylessDone = { outcome: "waiting" };
   h.subjectCalls = [];
   h.endedWithoutPr = 0;
@@ -262,28 +272,92 @@ describe("conflictStartBody", () => {
   it("starts the round for the item's own subject, and reports the start's answer (started, running, waiting, or a stop with its fixed code)", async () => {
     for (const outcome of ["started", "running", "waiting"]) {
       h.startOut = { outcome };
-      expect(await conflictStartBody(worker, WHO)).toEqual({ state: outcome });
+      expect(await conflictStartBody(worker, WHO, HEAD)).toEqual({ state: outcome });
     }
     h.startOut = { outcome: "stopped", reason: "refused_spend" };
-    expect(await conflictStartBody(worker, WHO)).toEqual({ state: "stopped", reason: "refused_spend" });
+    expect(await conflictStartBody(worker, WHO, HEAD)).toEqual({ state: "stopped", reason: "refused_spend" });
     expect(h.started).toHaveLength(4);
     expect(h.started[0]).toBe(h.subject);
   });
 
   it("not this path's item (a public copy, no pull request, a repository the cloud does not read), or no worker: nothing starts", async () => {
     h.subject = { reason: "conflict_public_copy" };
-    expect(await conflictStartBody(worker, WHO)).toEqual({ state: "not_applicable" });
+    expect(await conflictStartBody(worker, WHO, HEAD)).toEqual({ state: "not_applicable" });
     h.subject = { id: "item", headSha: "c".repeat(40) };
     h.github = null;
-    expect(await conflictStartBody(worker, WHO)).toEqual({ state: "not_applicable" });
-    expect(await conflictStartBody(null, WHO)).toEqual({ state: "not_applicable" });
+    expect(await conflictStartBody(worker, WHO, HEAD)).toEqual({ state: "not_applicable" });
+    expect(await conflictStartBody(null, WHO, HEAD)).toEqual({ state: "not_applicable" });
     expect(h.started).toEqual([]);
+  });
+
+  it("D#483 S5-j2e: the round starts only from the head the gate read; a head that moved since is review-again and starts nothing", async () => {
+    expect(await conflictStartBody(worker, WHO, MOVED)).toEqual({ state: "in_review" });
+    expect(h.started).toEqual([]);
+    expect(await conflictStartBody(worker, WHO, HEAD)).toEqual({ state: "started" });
+    expect(h.started).toHaveLength(1);
   });
 
   it("a halted item starts nothing", async () => {
     h.halt = { halted: true, halt_epoch: 0 };
-    expect(await conflictStartBody(worker, WHO)).toEqual({ state: "halted" });
+    expect(await conflictStartBody(worker, WHO, HEAD)).toEqual({ state: "halted" });
     expect(h.started).toEqual([]);
+  });
+});
+
+// D#483 S5-j2e: the direct gate's overlap and out-of-order answers start the same entryless round.
+describe("rerouteStartBody", () => {
+  it("overlap starts the conflict round under the gate's own code; out of order starts the renumber round; both report the start's answer and stop with its fixed code", async () => {
+    for (const outcome of ["started", "running", "waiting"]) {
+      h.startOut = { outcome };
+      expect(await rerouteStartBody(worker, WHO, "overlap", HEAD)).toEqual({ state: outcome });
+      expect(await rerouteStartBody(worker, WHO, "renumber", HEAD)).toEqual({ state: outcome });
+    }
+    h.startOut = { outcome: "stopped", reason: "ordered_resource_out_of_order" };
+    expect(await rerouteStartBody(worker, WHO, "renumber", HEAD)).toEqual({ state: "stopped", reason: "ordered_resource_out_of_order" });
+    h.startOut = { outcome: "not_applicable" };
+    expect(await rerouteStartBody(worker, WHO, "renumber", HEAD)).toEqual({ state: "not_applicable" });
+    expect(h.started).toHaveLength(3);
+    expect(h.eventCodes).toEqual(["overlap_unreviewed", "overlap_unreviewed", "overlap_unreviewed"]);
+    expect(h.renumbers).toHaveLength(5);
+  });
+
+  it.each([
+    ["a paired item (its gate read the code repository, not this one)", () => void (h.paired = { paired: true, pr: null })],
+    ["a stacked item", () => void (h.stackParent = { parentId: "p", parentRepoId: "repo-1", prNumber: 40 })],
+    ["a repository the cloud does not read (runner_local)", () => void (h.github = null)],
+    ["an item that is not this path's (no open pull request)", () => void (h.subject = { reason: "no_open_pr" })],
+  ])("%s: nothing starts and the gate's stop stands", async (_name, arrange) => {
+    arrange();
+    for (const kind of ["overlap", "renumber"] as const) expect(await rerouteStartBody(worker, WHO, kind, HEAD)).toEqual({ state: "not_applicable" });
+    expect(await rerouteStartBody(null, WHO, "overlap", HEAD)).toEqual({ state: "not_applicable" });
+    expect(h.started).toEqual([]);
+    expect(h.renumbers).toEqual([]);
+  });
+
+  it("a head that moved since the gate read it: review-again, no round of either kind starts (the renumber path included)", async () => {
+    for (const kind of ["overlap", "renumber"] as const) expect(await rerouteStartBody(worker, WHO, kind, MOVED)).toEqual({ state: "in_review" });
+    expect(h.started).toEqual([]);
+    expect(h.renumbers).toEqual([]);
+  });
+
+  it("the capacity-wait poll is pinned too: a poll after the head moved answers review-again instead of starting from the new head", async () => {
+    h.startOut = { outcome: "waiting" };
+    for (const kind of ["overlap", "renumber"] as const) {
+      h.subject = { id: "item", headSha: HEAD };
+      expect(await rerouteStartBody(worker, WHO, kind, HEAD)).toEqual({ state: "waiting" });
+      h.subject = { id: "item", headSha: MOVED };
+      expect(await rerouteStartBody(worker, WHO, kind, HEAD)).toEqual({ state: "in_review" });
+    }
+    expect(h.started).toHaveLength(1);
+    expect(h.renumbers).toHaveLength(1);
+  });
+
+  it("a halted item starts nothing", async () => {
+    h.halt = { halted: true, halt_epoch: 0 };
+    expect(await rerouteStartBody(worker, WHO, "overlap", HEAD)).toEqual({ state: "halted" });
+    expect(await rerouteStartBody(worker, WHO, "renumber", HEAD)).toEqual({ state: "halted" });
+    expect(h.started).toEqual([]);
+    expect(h.renumbers).toEqual([]);
   });
 });
 
@@ -322,7 +396,7 @@ describe("conflictWaitBody", () => {
 describe("the subject readers' seams", () => {
   it("the wait follows a round that is open, so it reads the subject in the 'ended' mode (the stored-row fallback); the start never does", async () => {
     await conflictWaitBody(worker, WHO);
-    await conflictStartBody(worker, WHO);
+    await conflictStartBody(worker, WHO, HEAD);
     expect(h.subjectCalls).toEqual([["acct", "item", true], ["acct", "item"]]);
   });
 
@@ -435,7 +509,7 @@ describe("D#519 MQ4-e2-c3 (C18-14, C18-15): what the constant touches, and a run
 
   it("conflictStartBody (the direct gate's hosted decision) never starts a runner_local repository: no hosted client, so nothing starts", async () => {
     h.github = null;
-    expect(await conflictStartBody(worker, WHO)).toEqual({ state: "not_applicable" });
+    expect(await conflictStartBody(worker, WHO, HEAD)).toEqual({ state: "not_applicable" });
     expect(h.started).toEqual([]);
     expect(h.runnerStarts).toEqual([]);
   });

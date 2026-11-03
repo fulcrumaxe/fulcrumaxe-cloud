@@ -20,14 +20,16 @@ vi.mock("workflow/api", () => ({ resumeHook: vi.fn(), start: vi.fn() }));
 // so every test below keeps the direct gate it always had.
 const queue = vi.hoisted(() => ({ queued: false, looks: [{ state: "waiting" }] as Array<Record<string, unknown>>, enqueues: [] as unknown[], waits: 0 }));
 // D#519 MQ4-e1-a: the two steps of a merge-conflict round for an item with no queue entry are scripted the same way (bodies: lib/mergeQueueWait.test.ts).
-const conflict = vi.hoisted(() => ({ start: [{ state: "not_applicable" }] as Array<Record<string, unknown>>, looks: [{ state: "waiting" }] as Array<Record<string, unknown>>, starts: 0, waits: 0, runner: [{ state: "not_applicable" }] as Array<Record<string, unknown>>, runnerStarts: 0 }));
+const conflict = vi.hoisted(() => ({ start: [{ state: "not_applicable" }] as Array<Record<string, unknown>>, looks: [{ state: "waiting" }] as Array<Record<string, unknown>>, starts: 0, waits: 0, runner: [{ state: "not_applicable" }] as Array<Record<string, unknown>>, runnerStarts: 0, reroute: [{ state: "not_applicable" }] as Array<Record<string, unknown>>, reroutes: [] as string[], pins: [] as unknown[] }));
 vi.mock("../lib/mergeQueueWait", async (orig) => ({
   ...(await orig<typeof import("../lib/mergeQueueWait")>()),
   // The gate asked again for a round's merge commit: its CI rule (the round's first head's signals) is tested in lib/mergeQueueEntryless.test.ts; here it is the worker's gate.
   conflictGateBody: async (w: { advanceMergeGate(who: unknown, pr: number, signals?: string[]): Promise<unknown> }, who: unknown, pr: number) => w.advanceMergeGate(who, pr, ["conflict-gate-stub"]),
-  conflictStartBody: async () => (conflict.starts++, conflict.start.length > 1 ? conflict.start.shift()! : conflict.start[0]!),
+  conflictStartBody: async (_w: unknown, _who: unknown, expectedHead: unknown) => (conflict.starts++, conflict.pins.push(expectedHead), conflict.start.length > 1 ? conflict.start.shift()! : conflict.start[0]!),
   // D#519 MQ4-e2-b: the start from a runner_local order's stored verdict (body: lib/mergeQueueWait.test.ts).
   runnerConflictBody: async () => (conflict.runnerStarts++, conflict.runner.length > 1 ? conflict.runner.shift()! : conflict.runner[0]!),
+  // D#483 S5-j2e: the start of the round an overlap or an out-of-order number is re-routed into (body: lib/mergeQueueWait.test.ts).
+  rerouteStartBody: async (_w: unknown, _who: unknown, kind: string, expectedHead: unknown) => (conflict.reroutes.push(kind), conflict.pins.push(expectedHead), conflict.reroute.length > 1 ? conflict.reroute.shift()! : conflict.reroute[0]!),
   conflictWaitBody: async () => (conflict.waits++, conflict.looks.length > 1 ? conflict.looks.shift()! : conflict.looks[0]!),
   enqueueBody: async (_w: unknown, _who: unknown, input: unknown) => (queue.enqueues.push(input), { queued: queue.queued }),
   waitBody: async () => (queue.waits++, queue.looks.length > 1 ? queue.looks.shift()! : queue.looks[0]!),
@@ -76,7 +78,7 @@ interface World {
   /** What the fix run does to the head when it ends. */
   fixPushes: string | null;
   fixOutcome: AdvanceRunOutcome;
-  gates: Array<{ outcome: string; reasons?: string[]; status?: string }>;
+  gates: Array<{ outcome: string; reasons?: string[]; status?: string; headSha?: string }>;
   /** D#6 PUBLIC-MERGE PR2b: where the item's merge order stands at each look (the last one repeats). Absent: no order. */
   orders?: Array<{ state: string; code: string | null; gateRecorded?: boolean }>;
   refuseStart: Set<string>;
@@ -240,7 +242,7 @@ let logs: Array<Record<string, unknown>>;
 beforeEach(() => {
   world.sleeps = 0;
   Object.assign(queue, { queued: false, looks: [{ state: "waiting" }], enqueues: [], waits: 0 });
-  Object.assign(conflict, { start: [{ state: "not_applicable" }], looks: [{ state: "waiting" }], starts: 0, waits: 0, runner: [{ state: "not_applicable" }], runnerStarts: 0 });
+  Object.assign(conflict, { start: [{ state: "not_applicable" }], looks: [{ state: "waiting" }], starts: 0, waits: 0, runner: [{ state: "not_applicable" }], runnerStarts: 0, reroute: [{ state: "not_applicable" }], reroutes: [], pins: [] });
   logs = [];
   vi.spyOn(console, "info").mockImplementation((line: unknown) => void logs.push(JSON.parse(String(line))));
 });
@@ -2224,5 +2226,188 @@ describe("a merge-conflict round for an item with no queue entry", () => {
     setup(fresh({ gates: [{ outcome: "ready_human_merges", reasons: ["branch_behind"], status: "posted" }] }));
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "ready_human_merges", detail: "branch_behind" });
     expect(conflict.starts).toBe(0);
+  });
+});
+
+// D#483 S5-j2e: the direct gate answers overlap_unreviewed or ordered_resource_out_of_order for an item with no queue entry: the same entryless round.
+describe("a round for an overlap or an out-of-order number, for an item with no queue entry", () => {
+  const overlap = { outcome: "ready_human_merges", reasons: ["overlap_unreviewed"], status: "posted" };
+  const order = { outcome: "ready_human_merges", reasons: ["ordered_resource_out_of_order"], status: "posted" };
+  const noCi = { outcome: "ready_human_merges", reasons: ["ci_not_green"], status: "posted" };
+  const merged = { outcome: "merged", reasons: [], status: "posted" };
+
+  it("C34 D5 with a round: an overlap is reviewed on the merge commit and then merged; the round is waited on durably and the gate is asked again through the round's own step", async () => {
+    conflict.reroute = [{ state: "started" }];
+    conflict.looks = [{ state: "waiting" }, { state: "passed", headSha: H2 }];
+    const t = setup(fresh({ gates: [overlap, noCi, merged] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged", detail: undefined });
+    expect(conflict.reroutes).toEqual(["overlap"]);
+    expect(conflict.starts).toBe(0);
+    expect(conflict.waits).toBe(2);
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(3);
+    expect(t.worker.advanceMergeGate.mock.calls.map((c: unknown[]) => c.length === 3)).toEqual([false, true, true]);
+    expect(t.worker.advanceMergeOrder).not.toHaveBeenCalled();
+    expect(events()).toContain("advance.merge_conflict");
+  });
+
+  it("an out-of-order number is renamed by the round and the item is then merged", async () => {
+    conflict.reroute = [{ state: "started" }];
+    conflict.looks = [{ state: "passed", headSha: H2 }];
+    const t = setup(fresh({ gates: [order, noCi, merged] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged", detail: undefined });
+    expect(conflict.reroutes).toEqual(["renumber"]);
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(3);
+  });
+
+  it("both reasons at once: the merge goes first (the renumber then reads the moved tip); a merge conflict keeps its own start", async () => {
+    conflict.reroute = [{ state: "started" }];
+    conflict.looks = [{ state: "merged" }];
+    setup(fresh({ gates: [{ outcome: "ready_human_merges", reasons: ["ordered_resource_out_of_order", "overlap_unreviewed"], status: "posted" }] }));
+    await workItemAdvanceWorkflow(ARGS);
+    expect(conflict.reroutes).toEqual(["overlap"]);
+
+    conflict.reroutes = [];
+    conflict.start = [{ state: "started" }];
+    setup(fresh({ gates: [{ outcome: "ready_human_merges", reasons: ["merge_conflict", "overlap_unreviewed"], status: "posted" }] }));
+    await workItemAdvanceWorkflow(ARGS);
+    expect(conflict.starts).toBe(1);
+    expect(conflict.reroutes).toEqual([]);
+  });
+
+  it.each([
+    ["overlap_unreviewed", overlap],
+    ["ordered_resource_out_of_order", order],
+  ])("a start that stops (rounds spent, autoRenumber off, a foreign commit, a refused spend) is Needs a person with its fixed code (%s); nothing is waited on", async (reason, gate) => {
+    conflict.reroute = [{ state: "stopped", reason }];
+    const t = setup(fresh({ gates: [gate] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: reason });
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: reason }));
+    expect(conflict.waits).toBe(0);
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(1);
+  });
+
+  it("a start that cannot run (a public copy, a stacked item, a repository the cloud does not read, nothing to renumber now) leaves the gate's own fixed-code stop exactly as it was", async () => {
+    for (const gate of [overlap, order]) {
+      conflict.reroute = [{ state: "not_applicable" }];
+      const t = setup(fresh({ gates: [gate] }));
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "ready_human_merges", detail: gate.reasons[0] });
+      expect(conflict.waits).toBe(0);
+      expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("a stacked item (its gate stops it before any order check) and the other order stops are never re-routed", async () => {
+    for (const reasons of [["stacked_on_open_pr", "overlap_unreviewed"], ["stacked_on_open_pr", "ordered_resource_out_of_order"], ["ordered_resource_unreadable"], ["runner_ordered_unsupported"], ["branch_behind"]]) {
+      conflict.reroute = [{ state: "started" }];
+      setup(fresh({ gates: [{ outcome: "ready_human_merges", reasons, status: "posted" }] }));
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "ready_human_merges", detail: reasons.join(",") });
+    }
+    expect(conflict.reroutes).toEqual([]);
+  });
+
+  it("the round never weakens the stop: a gate that still answers overlap after the round gets the next round, and the bound ends it as a stop for a person", async () => {
+    conflict.reroute = [{ state: "started" }, { state: "started" }, { state: "stopped", reason: "overlap_unreviewed" }];
+    conflict.looks = [{ state: "passed", headSha: H2 }];
+    const t = setup(fresh({ gates: [overlap, overlap, overlap] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "overlap_unreviewed" });
+    expect(conflict.reroutes).toEqual(["overlap", "overlap", "overlap"]);
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(3);
+    expect(t.worker.advanceMergeOrder).not.toHaveBeenCalled();
+  });
+
+  it("a head that moves while the round runs is reviewed afresh: the review loop reads the head again before any merge", async () => {
+    conflict.reroute = [{ state: "started" }];
+    conflict.looks = [{ state: "in_review" }];
+    const t = setup(fresh({ gates: [overlap, merged] }));
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+    expect(t.worker.advanceRecordRound).toHaveBeenCalledTimes(2);
+  });
+
+  it("a round that stops while it is followed (history rewritten, a foreign push, the round timeout) is Needs a person with that code", async () => {
+    conflict.reroute = [{ state: "started" }];
+    conflict.looks = [{ state: "waiting" }, { state: "stopped", reason: "ordered_resource_out_of_order" }];
+    setup(fresh({ gates: [order] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "ordered_resource_out_of_order" });
+  });
+
+  // D#483 S5-j2e: a round starts only when ordering is the sole stop; any other reason keeps the gate's own stop (no paid round, no platform push).
+  it.each([
+    ["a reviewer that has not passed", ["run_not_succeeded_cr", "overlap_unreviewed"]],
+    ["a reviewer that has not passed (out of order)", ["verdict_not_pass_sr", "ordered_resource_out_of_order"]],
+    ["ci_not_green", ["ci_not_green", "overlap_unreviewed"]],
+    ["auto_merge_not_allowed (the default setting: a person merges)", ["auto_merge_not_allowed", "overlap_unreviewed"]],
+    ["auto_merge_not_allowed (out of order)", ["auto_merge_not_allowed", "ordered_resource_out_of_order"]],
+    ["human_merge_only", ["human_merge_only", "overlap_unreviewed"]],
+    ["pr_author_untrusted", ["pr_author_untrusted", "overlap_unreviewed"]],
+    ["pr_author_unverified", ["pr_author_unverified", "ordered_resource_out_of_order"]],
+    ["pr_draft", ["pr_draft", "overlap_unreviewed"]],
+    ["both order reasons and one more", ["ordered_resource_out_of_order", "overlap_unreviewed", "auto_merge_not_allowed"]],
+  ])("%s beside the order reason: no round, no start step, the gate's stop stands", async (_name, reasons) => {
+    conflict.reroute = [{ state: "started" }];
+    const t = setup(fresh({ gates: [{ outcome: "ready_human_merges", reasons, status: "posted" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "ready_human_merges", detail: reasons.join(",") });
+    expect(conflict.reroutes).toEqual([]);
+    expect(conflict.pins).toEqual([]);
+    expect(conflict.waits).toBe(0);
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(1);
+  });
+
+  it("only order reasons at the gate's own head: the round starts, pinned to the head the gate read", async () => {
+    for (const [reasons, kind] of [[["overlap_unreviewed"], "overlap"], [["ordered_resource_out_of_order"], "renumber"], [["ordered_resource_out_of_order", "overlap_unreviewed"], "overlap"]] as const) {
+      Object.assign(conflict, { reroute: [{ state: "started" }], looks: [{ state: "merged" }], reroutes: [], pins: [] });
+      setup(fresh({ gates: [{ outcome: "ready_human_merges", reasons: [...reasons], status: "posted", headSha: H1 }] }));
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged" });
+      expect(conflict.reroutes).toEqual([kind]);
+      expect(conflict.pins).toEqual([H1]);
+    }
+  });
+
+  it("a gate that names no head is pinned to the head the review loop passed it", async () => {
+    conflict.reroute = [{ state: "started" }];
+    conflict.looks = [{ state: "merged" }];
+    setup(fresh({ gates: [overlap] }));
+    await workItemAdvanceWorkflow(ARGS);
+    expect(conflict.pins).toEqual([H1]);
+  });
+
+  it.each([
+    ["overlap", overlap],
+    ["renumber", order],
+  ])("a head that moved between the gate and the start (%s): the start answers review-again, no round runs, the head is reviewed afresh", async (_kind, gate) => {
+    conflict.reroute = [{ state: "in_review" }];
+    conflict.looks = [{ state: "waiting" }];
+    const t = setup(fresh({ gates: [{ ...gate, headSha: H1 }, merged] }));
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+    expect(conflict.reroutes).toHaveLength(1);
+    expect(conflict.waits).toBe(0);
+    expect(t.worker.advanceRecordRound).toHaveBeenCalledTimes(2);
+  });
+
+  it("a head that moved between the gate and a merge-conflict start: review-again, and the start was pinned to the gate's head", async () => {
+    conflict.start = [{ state: "in_review" }];
+    const t = setup(fresh({ gates: [{ outcome: "ready_human_merges", reasons: ["merge_conflict"], status: "posted", headSha: H1 }, merged] }));
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+    expect(conflict.pins).toEqual([H1]);
+    expect(conflict.waits).toBe(0);
+    expect(t.worker.advanceRecordRound).toHaveBeenCalledTimes(2);
+  });
+
+  it("a head that moved during the capacity wait: every poll carries the same pin, and the poll that finds a new head sends the item back to review", async () => {
+    conflict.reroute = [{ state: "waiting" }, { state: "waiting" }, { state: "in_review" }];
+    const t = setup(fresh({ gates: [{ ...overlap, headSha: H1 }, merged] }));
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+    expect(conflict.reroutes).toEqual(["overlap", "overlap", "overlap"]);
+    expect(conflict.pins).toEqual([H1, H1, H1]);
+    expect(conflict.waits).toBe(0);
+    expect(t.worker.advanceRecordRound).toHaveBeenCalledTimes(2);
+  });
+
+  it("a capacity wait at the start is asked again after a durable sleep", async () => {
+    conflict.reroute = [{ state: "waiting" }, { state: "started" }];
+    conflict.looks = [{ state: "merged" }];
+    setup(fresh({ gates: [overlap] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged" });
+    expect(conflict.reroutes).toEqual(["overlap", "overlap"]);
+    expect(world.sleeps).toBe(1);
   });
 });

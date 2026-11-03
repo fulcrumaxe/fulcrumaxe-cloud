@@ -1,5 +1,5 @@
 import { recordStop } from "./conflict.js";
-import { judgeConflictRound, type ConflictCompletionPorts } from "./conflictComplete.js";
+import { judgeConflictRound, judgeRenumberRound, type ConflictCompletionPorts } from "./conflictComplete.js";
 import { judgeDeltaReview } from "./deltaComplete.js";
 import type { DeltaSource } from "./deltaReview.js";
 import { endRound, listConflictRounds, recordRoundHead } from "./store.js";
@@ -11,7 +11,7 @@ import type { ConflictSubject } from "./types.js";
  * (`judgeConflictRound`, `judgeDeltaReview`); only the moves differ: a write to the round row and a fixed driver event. A return to review leaves the item where it is
  * (the workflow reviews the new head), a stop is a driver event (Needs a person), and nothing here writes a `head_refreshes` row or carries a pass (R-519-C6-2).
  *
- *  - newest round open: the round's end (`judgeConflictRound`); a resolved one ends `resolved` and its delta review starts, with the item's roles.
+ *  - newest round open: the round's end (`judgeConflictRound`, or `judgeRenumberRound` for a renumber round); a resolved one ends `resolved` and its delta review starts, with the item's roles.
  *  - newest round `resolved`: the delta review's runs (`judgeDeltaReview`). `passed` changes nothing, so asking again is harmless; the caller re-enters the gate.
  *  - anything else: `not_waiting`.
  */
@@ -37,7 +37,8 @@ export async function completeEntrylessRound(ports: ConflictCompletionPorts<Conf
   const finish = (outcome: string) => ports.inTenant(accountId, (c) => endRound(c, { accountId, roundId: round.id, outcome }));
 
   if (round.outcome === null) {
-    const v = await judgeConflictRound(ports, who, round);
+    // D#483 S5-j2e: a renumber round (kind `renumber`) is judged by its own checks and ends in the same delta review; it never "conflicts again", so it has no `again` move.
+    const v = round.kind === "renumber" ? await judgeRenumberRound(ports, who, round) : await judgeConflictRound(ports, who, round);
     switch (v.kind) {
       case "review":
         await cancel();
@@ -73,7 +74,7 @@ export async function completeEntrylessRound(ports: ConflictCompletionPorts<Conf
 
   if (round.outcome !== "resolved" || round.toSha === null) return { outcome: "not_waiting" };
   const toSha = round.toSha;
-  const src: DeltaSource = { fromSha: round.fromSha, toSha, baseSha: null, trigger: "conflict_resolution" };
+  const src: DeltaSource = { fromSha: round.fromSha, toSha, baseSha: null, trigger: round.kind === "renumber" ? "renumber" : "conflict_resolution" };
   const runs = await ports.runs(who, toSha);
   const cancelAll = async () => {
     for (const r of runs) if (r.reusable) await ports.cancelRun(who, r.runId);

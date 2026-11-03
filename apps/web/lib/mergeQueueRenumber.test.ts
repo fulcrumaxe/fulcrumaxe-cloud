@@ -28,7 +28,7 @@ vi.mock("./advanceReviewSteps", () => ({
   reviewerOutcomeBody: async () => ({}),
 }));
 
-import { bindOnRenumber, renumberPorts } from "./mergeQueueRenumber";
+import { bindOnRenumber, entrylessRenumberPorts, renumberPorts } from "./mergeQueueRenumber";
 
 const SHA = (c: string) => c.repeat(40);
 const entry = { id: "e1", accountId: "acct", workItemId: "item", headSha: SHA("a"), prNumber: 41 } as mergeQueue.MergeQueueEntry;
@@ -88,5 +88,29 @@ describe("MQ5-b1: the renumber round's start ports", () => {
       mergeQueue.setPlatformCommitProofForTest(null);
     }
     expect(advanceStartFix).not.toHaveBeenCalled();
+  });
+});
+
+describe("D#483 S5-j2e: the same start for an item with no queue entry", () => {
+  const subject: mergeQueue.ConflictSubject = { id: "item", accountId: "acct", repoId: "r", workItemId: "item", prNumber: 41, headSha: SHA("a"), entryId: null, roundsUsed: 1 };
+  const files = ["packages/db/migrations/0710_x.sql"];
+
+  it("starts the worker's renumber round for the subject, with the renumber prompt, and reads the ordered files from the client the gate used", async () => {
+    const advanceStartFix = vi.fn(async () => ({ ok: true, runId: "run-9" }));
+    const github = { listPullRequestAdds: async () => ({ complete: true, paths: files }) };
+    const ports = entrylessRenumberPorts({ pool: {} as never, worker: { advanceStartFix } as never, open: (async () => ({})) as never, github: github as never });
+    expect(ports.github).toBe(github);
+    expect(await ports.startRenumberRound({ entry: subject, round: { ...round, conflictFiles: files }, resource: "migrations", highest: "0712" })).toEqual({ ok: true, runId: "run-9" });
+    const [who, req] = advanceStartFix.mock.calls[0]! as unknown as [unknown, Record<string, unknown>];
+    expect(who).toEqual({ accountId: "acct", userId: "user-1", workItemId: "item", haltEpoch: 4 });
+    expect(req).toMatchObject({ kind: "renumber", headSha: SHA("a"), pr: { number: 41, branch: "fx/issue-7" } });
+    expect(req["prompt"]).toContain("latest key on main: 0712");
+  });
+
+  it("a spend refusal stays refused_spend and a capacity wait stays a wait", async () => {
+    for (const [reason, want] of [["refused_spend", "refused_spend"], ["waiting_for_capacity", "waiting_for_capacity"]] as const) {
+      const ports = entrylessRenumberPorts({ pool: {} as never, worker: { advanceStartFix: async () => ({ ok: false, reason }) } as never, open: (async () => ({})) as never, github: {} as never });
+      expect(await ports.startRenumberRound({ entry: subject, round, resource: "migrations", highest: "0712" })).toEqual({ ok: false, reason: want });
+    }
   });
 });

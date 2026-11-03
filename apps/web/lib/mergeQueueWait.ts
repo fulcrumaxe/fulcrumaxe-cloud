@@ -5,6 +5,7 @@ import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { expectedSignalNames, loadReviewContext, mergeQueue, readPublicPullRequest } from "@fx/pipeline";
 import { bindCompleteConflictRound, bindCompleteEntryless, completeRunnerEntryless, endRoundWithoutPr, endRunnerRoundIfTargetChanged, entrylessStartPorts, openRunnerRound, readEntrylessSubject, runnerStartPorts } from "./mergeQueueConflict";
 import { bindCompleteDeltaReview } from "./mergeQueueDeltaReview";
+import { entrylessRenumberPorts } from "./mergeQueueRenumber";
 import { openQueueGitHub } from "./mergeQueue";
 import { openInstallationHttp } from "./github/installationHttp";
 import { mergeGateBody, type GateOut, type ReviewWorker } from "./advanceReviewSteps";
@@ -97,20 +98,50 @@ export async function waitBody(worker: QueueWorker | null, who: StepWho): Promis
  * D#519 MQ4-e1-a: the direct gate answered `merge_conflict` for an item with no queue entry. `not_applicable`: this is not the path for the item (a public copy, no repository
  * the cloud reads, no worker): the existing stop stands. `started`/`running`/`waiting`: a round is open or will be asked for again; `stopped`: the decision stopped it.
  */
-export type ConflictStartOut = { state: "not_applicable" | "started" | "running" | "waiting" | "halted" } | { state: "stopped"; reason: string };
+export type ConflictStartOut = { state: "not_applicable" | "started" | "running" | "waiting" | "halted" | "in_review" } | { state: "stopped"; reason: string };
 
-export async function conflictStartBody(worker: QueueWorker | null, who: StepWho): Promise<ConflictStartOut> {
+/**
+ * `expectedHead` is the head the direct gate read. A round starts from the subject's live head and the platform's proof covers only the commits that touch the conflicting files, so a
+ * start for a head the gate never read is answered `in_review` (review the new head) and nothing starts. Asked again on every capacity-wait poll.
+ */
+export async function conflictStartBody(worker: QueueWorker | null, who: StepWho, expectedHead: string): Promise<ConflictStartOut> {
   if (!worker?.withRunnerPool) return { state: "not_applicable" };
   return worker.withRunnerPool(async (pool) => {
     if ((await haltState(pool, who)).stale) return { state: "halted" };
     const base = { pool, worker, open: openInstallationHttp };
     const subject = await readEntrylessSubject(base, who.accountId, who.workItemId);
     if (!("id" in subject)) return { state: "not_applicable" };
+    if (subject.headSha !== expectedHead) return { state: "in_review" };
     const github = await openQueueGitHub(pool, openInstallationHttp, subject);
     // A `runner_local` repository is never started from here: this decision reads the pull request's commits and compares, which the fence has no document for. Its round is started
     // from the runner's own stored facts (`runnerConflictBody`) and followed through the adapter (`conflictWaitBody`); the hosted sandbox starter is never reached (R-519-C15-7).
     if (!github) return { state: "not_applicable" };
     const out = await mergeQueue.startEntrylessConflict(entrylessStartPorts({ ...base, github }), subject);
+    return out.outcome === "stopped" ? { state: "stopped", reason: out.reason } : { state: out.outcome };
+  });
+}
+
+/**
+ * D#483 S5-j2e: the direct gate answered `overlap_unreviewed` (a clean merge that overlaps what the default branch gained) or `ordered_resource_out_of_order` for an item with no queue entry.
+ * The round is the one `conflictStartBody` starts (the agent merges the default branch; for a number out of order, `renumber`), with the same end, the same delta review of what it pushed,
+ * and the same bounds. `not_applicable` leaves the gate's own fixed-code stop as it was: an item with a public copy (its gate read the code repository, not this one), a stacked item, a
+ * `runner_local` repository (the runner's facts carry no overlap or number yet), or a check that finds nothing to renumber now. A start that stops records its stop under the gate's code.
+ * `in_review`: the head is no longer the one the gate read.
+ */
+export async function rerouteStartBody(worker: QueueWorker | null, who: StepWho, kind: "overlap" | "renumber", expectedHead: string): Promise<ConflictStartOut> {
+  if (!worker?.withRunnerPool) return { state: "not_applicable" };
+  return worker.withRunnerPool(async (pool) => {
+    if ((await haltState(pool, who)).stale) return { state: "halted" };
+    if ((await readPublicPullRequest(pool)(who.accountId, who.workItemId)) !== null) return { state: "not_applicable" };
+    if ((await withTenant(pool, who.accountId, (c) => readStackParentPull(c, who.workItemId))) !== null) return { state: "not_applicable" };
+    const base = { pool, worker, open: openInstallationHttp };
+    const subject = await readEntrylessSubject(base, who.accountId, who.workItemId);
+    if (!("id" in subject)) return { state: "not_applicable" };
+    // The round starts from the head the gate read (see `conflictStartBody`): a head that moved since is reviewed afresh, for both kinds and on every capacity-wait poll.
+    if (subject.headSha !== expectedHead) return { state: "in_review" };
+    const github = await openQueueGitHub(pool, openInstallationHttp, subject);
+    if (!github) return { state: "not_applicable" };
+    const out = kind === "overlap" ? await mergeQueue.startEntrylessConflict(entrylessStartPorts({ ...base, github }), subject, "overlap_unreviewed") : await mergeQueue.startEntrylessRenumber(entrylessRenumberPorts({ ...base, github }), subject);
     return out.outcome === "stopped" ? { state: "stopped", reason: out.reason } : { state: out.outcome };
   });
 }

@@ -7,7 +7,7 @@ import type { ConflictBinding } from "./mergeQueueConflict";
  * D#519 MQ5-b1: the renumber round's start ports. The same context lookup, proof and run start as the conflict round; the prompt is the renumber one and the worker
  * round is `renumber` (no base sync, no merge). The start is on (`mergeQueue.RENUMBER_START_ENABLED`, turned on by MQ5-b2).
  */
-export function renumberPorts(deps: ConflictBinding): mergeQueue.RenumberPorts {
+export function renumberPorts<S extends mergeQueue.RoundSubject = mergeQueue.MergeQueueEntry>(deps: ConflictBinding): mergeQueue.RenumberPorts<S> {
   return {
     github: deps.github,
     inTenant: (accountId, fn) => withTenant(deps.pool, accountId, fn),
@@ -61,4 +61,9 @@ export function renumberPorts(deps: ConflictBinding): mergeQueue.RenumberPorts {
 export function bindOnRenumber(deps: ConflictBinding, enabled?: boolean): NonNullable<mergeQueue.QueueTickDeps["onRenumber"]> {
   // Built at the call, not at the bind: the tick binds it for every repository, and a start that is off should cost nothing.
   return (entry, holder, ask, headSha) => mergeQueue.createOnRenumber(renumberPorts(deps), enabled)(entry, holder, ask, headSha);
+}
+
+/** D#483 S5-j2e: the same ports for a work item with no queue entry; the ordered-resource reads come from the same merge-gate client the gate itself used. */
+export function entrylessRenumberPorts(deps: ConflictBinding): mergeQueue.EntrylessRenumberPorts {
+  return { ...renumberPorts<mergeQueue.ConflictSubject>(deps), github: deps.github };
 }
