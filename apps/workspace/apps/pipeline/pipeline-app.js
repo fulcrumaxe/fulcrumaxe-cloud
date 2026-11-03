@@ -21,7 +21,7 @@ import {
   kindLabel,
   verdictFor,
 } from "./pipeline-storage.js";
-import { createFollowUpsPanel, createOperatorPanel, createRunsPanel } from "./pipeline-actions.js";
+import { createAssistantPanel, createFollowUpsPanel, createOperatorPanel, createRunsPanel } from "./pipeline-actions.js";
 import { api } from "../_lib/api.js";
 import { NEEDS_YOU_APP, createInsightPanel, createPlan } from "./pipeline-insight.js";
 // One source for the count: the Needs you app's own reads and row rules (D#37 C47). Nothing of them is copied here.
@@ -51,6 +51,7 @@ function mountApp(contentEl, launchArg) {
   let historyAc = null;
   let runs = null; // the open detail's Runs panel (pipeline-actions.js)
   let followUps = null; // the open detail's Follow-ups list (pipeline-actions.js)
+  let assistant = null; // the open detail's assistant panel (pipeline-actions.js, D#597 CC-6a-2)
   let activity = null; // the open item's last activity read: the action buttons are drawn from its `actions`
   // What the pipeline is doing for the open item (pipeline-insight.js). Every answer also feeds the action buttons.
   const insight = createInsightPanel({
@@ -277,6 +278,7 @@ function mountApp(contentEl, launchArg) {
     }
     syncApprove();
     const ctxHeld = ctxSlot.contains(document.activeElement) ? document.activeElement : null; // a repaint must not lose a focus held in the rules
+    const restoreAssistant = assistant ? assistant.hold() : null; // the panel is moved by this redraw: keep its focus, caret and scroll
     detail.replaceChildren(
       h("button", { type: "button", class: "pl-back", "data-testid": "pl-back", onClick: close }, "← Back"),
       h("h2", { class: "pl-detail-title", "data-testid": "pl-detail-title" }, repo ? [h("bdi", null, repo), number ? " " : null] : null, number),
@@ -299,6 +301,8 @@ function mountApp(contentEl, launchArg) {
       ...(runs ? [runs.el] : []),
       // dom-insert-ok: createFollowUpsPanel (pipeline-actions.js) always returns a panel with its el set
       ...(followUps ? [followUps.el] : []),
+      // dom-insert-ok: createAssistantPanel (pipeline-actions.js) always returns a panel with its el set
+      ...(assistant ? [assistant.el] : []),
       // dom-insert-ok: ctxSlot is an element built above with h(); the rules panel fills it
       ctxSlot,
       h("h3", { class: "pl-detail-sub" }, "History"),
@@ -307,6 +311,7 @@ function mountApp(contentEl, launchArg) {
     detail.hidden = false;
     fitDetail();
     if (ctxHeld) ctxHeld.focus();
+    if (restoreAssistant) restoreAssistant();
     if (hadFocus) detail.querySelector(".pl-back").focus();
   }
 
@@ -322,6 +327,8 @@ function mountApp(contentEl, launchArg) {
     if (runs) runs.destroy();
     if (followUps) followUps.destroy();
     followUps = createFollowUpsPanel({ itemId: item.id, onOpenItem: (id) => select(id) });
+    if (assistant) assistant.destroy();
+    assistant = createAssistantPanel({ itemId: item.id, repoId: item.repo_id });
     // The board repaints on a label change; the detail (the approve button hides while a run is live) on a change of that too.
     // The action buttons come from the activity read, and the server offers them only while no run is live: when a run starts
     // or ends (a cancel, a finish), the activity is read again at once so the buttons follow without reopening the card.
@@ -379,9 +386,10 @@ function mountApp(contentEl, launchArg) {
     activity = null;
     if (runs) runs.destroy();
     if (followUps) followUps.destroy();
+    if (assistant) assistant.destroy();
     insight.stop();
     mountCtx(null);
-    openId = openItem = history = runs = followUps = null;
+    openId = openItem = history = runs = followUps = assistant = null;
     syncOperator();
     paintDetail();
     const el = id && columns.querySelector('[data-id="' + id + '"]');
@@ -454,6 +462,7 @@ function mountApp(contentEl, launchArg) {
       if (historyAc) historyAc.abort();
       if (runs) runs.destroy();
       mountCtx(null);
+      if (assistant) assistant.destroy();
       board.destroy();
       contentEl.replaceChildren();
     },

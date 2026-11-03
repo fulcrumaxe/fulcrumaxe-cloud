@@ -1,0 +1,8 @@
+{
+  "conversation_id": "c0c0c0c0-0000-4000-8000-000000000001",
+  "state": "unpriced",
+  "code": "assistant_unpriced",
+  "text": "The assistant cannot price the model on your key, so it did not run.",
+  "spent_micro_usd": 0,
+  "cap_micro_usd": 2000000
+}

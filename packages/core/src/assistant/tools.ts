@@ -13,7 +13,7 @@ import { getPlanView } from '../plan/read.js';
  * D#597 CC-5d: the assistant's closed tool registry. R-597-1: the assistant answers and proposes; only a person's click acts.
  * Every tool reads in-process through the existing @fx/core reads (no HTTP) under the caller's own principal, and a read of
  * another repo's item answers "not found". `draft_correction` is the only write: it creates a `proposed` correction with
- * origin `person`, attributed to the caller, from model text with its control tokens defanged. Repo, issue and GitHub text in
+ * origin `agent` (the panel labels it from the row), created_by the caller, from model text with its control tokens defanged. Repo, issue and GitHub text in
  * a result is sanitised (D#1588: defanged and fenced as data). Inert until the route (CC-5e) imports it.
  */
 
@@ -188,7 +188,7 @@ const TOOLS: readonly Tool[] = [
       const key = createHash('sha256').update(`${i.item_id}\n${i.kind}\n${body}`).digest('hex');
       let id = st.drafts.get(key);
       if (id === undefined) {
-        const c = await createCorrection(ctx, { workItemId: i.item_id!, kind: i.kind as (typeof CORRECTION_KINDS)[number], body, origin: 'person' });
+        const c = await createCorrection(ctx, { workItemId: i.item_id!, kind: i.kind as (typeof CORRECTION_KINDS)[number], body, origin: 'agent' });
         id = c.id;
         st.drafts.set(key, id);
       }

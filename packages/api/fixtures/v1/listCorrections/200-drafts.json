@@ -1,0 +1,38 @@
+{
+  "data": [
+    {
+      "id": "3f2b8c1e-5a4d-4e2b-9c6a-1d7e8f9a0b21",
+      "work_item_id": "22222222-2222-4222-8222-222222222222",
+      "origin": "person",
+      "kind": "run_note",
+      "body": "<img src=x onerror=alert(1)>\nUse the existing theme tokens.",
+      "status": "proposed",
+      "content_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "decided_via": null,
+      "applied_run_id": null,
+      "created_by_name": "Ada",
+      "decided_by_name": null,
+      "attribution": null,
+      "created_at": "2026-11-03T09:00:00.000Z",
+      "decided_at": null,
+      "applied_at": null
+    },
+    {
+      "id": "3f2b8c1e-5a4d-4e2b-9c6a-1d7e8f9a0b22",
+      "work_item_id": "22222222-2222-4222-8222-222222222222",
+      "origin": "person",
+      "kind": "priority",
+      "body": "{\"priority\":\"high\"}",
+      "status": "proposed",
+      "content_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "decided_via": null,
+      "applied_run_id": null,
+      "created_by_name": "Bo",
+      "decided_by_name": null,
+      "attribution": null,
+      "created_at": "2026-11-03T09:05:00.000Z",
+      "decided_at": null,
+      "applied_at": null
+    }
+  ]
+}
