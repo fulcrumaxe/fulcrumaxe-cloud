@@ -102,7 +102,7 @@ export async function planePushTokenRun(deps: RunnerCloudDeps, req: RunnerHttpRe
   }
   const lease = { accountId: runner.accountId, runnerId: runner.runnerId, runId, leaseGeneration: message.lease_generation };
 
-  const grant = await asRunner(() => ops.planePushGrant(lease));
+  const grant = await asRunner(() => ops.planePushGrant(message.at_tip === true ? { ...lease, atTip: true } : lease));
   switch (grant.kind) {
     case "fenced":
       return stopReply(grant.reason);
@@ -115,6 +115,8 @@ export async function planePushTokenRun(deps: RunnerCloudDeps, req: RunnerHttpRe
     case "attempts_exhausted":
       throw new RunnerHttpError(409, "attempts_exhausted", "this change has used all its push attempts");
     case "refused":
+      // D#598 P1g-3a-3: an `at_tip` request of a run that is not the round of a confirmed Replace (or of a runner without `tip_publish_v1`). Nothing was written; the runner reports no change, as it would have without asking.
+      if (message.at_tip === true && grant.code === "no_changes") throw new RunnerHttpError(409, "no_changes", "this run has nothing to publish at the branch tip");
       // FIXROUND-REPUBLISH (R2-c1): a fix round without a signed base. D#483 S5-b2c-4: or a planned PR child whose build identity was refused; the resolver's fixed code is the status's code.
       // D#598 P1g-1: the open public pull request was closed or merged, or the pairing is off. The cloud has recorded it for the item; nothing is pushed.
       if (grant.code === "republish_pr_closed" || grant.code === "republish_pr_merged" || grant.code === "republish_pairing_off") throw new RunnerHttpError(409, grant.code, "the open public pull request cannot be updated; the item says why");

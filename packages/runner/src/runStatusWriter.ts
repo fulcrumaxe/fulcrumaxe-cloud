@@ -613,6 +613,8 @@ export async function readBoundItemBranch(client: PoolClient, p: { accountId: st
 
 /** The `run_events` kind that records a continuation's branch head at dispatch (D#6 R2b-3f, C22 section 2). */
 export const RUNNER_DISPATCH_BASE_KIND = "runner.dispatch_base";
+/** D#598 P1g-3a-3: written once, in the create transaction of the fix round a person's confirmed Replace started (`startFix`), never anywhere else and never from a runner's message. The run's end and its public update read it. */
+export const RUNNER_REPLACE_ROUND_KIND = "plane.replace_round";
 
 /**
  * D#6 R2b-3f (C21 section 5.3, C22 section 2): the head of the branch a continuation (a fix round, or the follow-up of one) works

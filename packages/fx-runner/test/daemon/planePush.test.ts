@@ -113,23 +113,26 @@ const tokenResult = (over: Record<string, unknown> = {}): PlanePushTokenResult =
 
 interface Script {
   pairing?: (call: number) => PlanePushPairingResult;
-  token?: () => PlanePushTokenResult;
+  token?: (atTip: boolean) => PlanePushTokenResult;
   report?: (message: PlanePushReportMessage) => PlanePushReportResult;
 }
 function fakeClient(script: Script = {}) {
   const events: string[] = [];
   const reports: PlanePushReportMessage[] = [];
   const state = { pairing: 0, token: 0 };
+  /** One entry per token request: whether it asked for the branch tip (`at_tip`). */
+  const asks: boolean[] = [];
   const client = {
     async planePushPairing(): Promise<PlanePushPairingResult> {
       state.pairing++;
       events.push(`pairing#${state.pairing}`);
       return script.pairing ? script.pairing(state.pairing) : pairingResult();
     },
-    async planePushToken(): Promise<PlanePushTokenResult> {
+    async planePushToken(_runId?: string, _generation?: number, atTip?: true): Promise<PlanePushTokenResult> {
       state.token++;
+      asks.push(atTip === true);
       events.push("token");
-      return script.token ? script.token() : tokenResult();
+      return script.token ? script.token(atTip === true) : tokenResult();
     },
     async planePushReport(message: PlanePushReportMessage): Promise<PlanePushReportResult> {
       events.push(`report:${message.phase}`);
@@ -137,7 +140,7 @@ function fakeClient(script: Script = {}) {
       return script.report ? script.report(message) : { kind: "recorded" };
     },
   };
-  return { client, events, reports, state };
+  return { client, events, reports, state, asks };
 }
 
 interface Harness {
@@ -146,11 +149,13 @@ interface Harness {
   events: string[];
   reports: PlanePushReportMessage[];
   state: { pairing: number; token: number };
+  /** Whether each token request asked for the branch tip. */
+  asks: boolean[];
   /** True when the token was found in the throwaway repository's files right after the push (it must not be). */
   tokenInRepo: () => boolean;
   ledger: ReturnType<typeof createPlaneBaseLedger>;
 }
-function harness(script: Script = {}, over: { transport?: (real: PublicGitTransport, events: string[]) => PublicGitTransport; base?: string | null } = {}): Harness {
+function harness(script: Script = {}, over: { transport?: (real: PublicGitTransport, events: string[]) => PublicGitTransport; base?: string | null; tipPublish?: boolean } = {}): Harness {
   const c = fakeClient(script);
   const lines: string[] = [];
   const ledger = createPlaneBaseLedger();
@@ -174,6 +179,7 @@ function harness(script: Script = {}, over: { transport?: (real: PublicGitTransp
     transport: over.transport ? over.transport(logging, c.events) : logging,
     baseLedger: ledger,
     workRoot: world.workRoot,
+    ...(over.tipPublish === undefined ? {} : { tipPublish: () => over.tipPublish === true }),
     sleep: async () => undefined,
     say: (line) => lines.push(line),
   });
@@ -183,6 +189,7 @@ function harness(script: Script = {}, over: { transport?: (real: PublicGitTransp
     events: c.events,
     reports: c.reports,
     state: c.state,
+    asks: c.asks,
     tokenInRepo: () => found,
     ledger,
   };
@@ -891,5 +898,130 @@ describe("a fix round updates the open public pull request (FIXROUND-REPUBLISH R
     const h = harness(withStamp(stamp), { base: base2 });
     expect(await h.run(head2)).toMatchObject({ kind: "refused", code: "bad_input" });
     expect(sh(world.bare, "rev-parse", BRANCH)).toBe(stamp);
+  });
+
+  // D#598 P1g-3a-3: the round a person's confirmed Replace started adds nothing, because the refused round's change is already on the private branch (`head2`).
+  describe("a fix round that added no commit publishes the branch tip when the cloud says so (tip_publish_v1)", () => {
+    /** A person's commit on the public branch (what the refused update ran into); the cloud then holds the lease for the Replace on exactly that head. */
+    function personPushes(name: string): string {
+      put(world.pubWork, { [`src/${name}.ts`]: `export const ${name} = 1;\n` });
+      const sha = commitAll(world.pubWork, `a person's commit ${name}`);
+      sh(world.pubWork, "push", "-q", "-f", world.bare, `${sha}:refs/heads/${BRANCH}`);
+      return sha;
+    }
+    /** The cloud as it answers once it has marked the round: a grant with the lease on the authorized head. */
+    const grantsTip = (authorized: string) => ({ token: () => tokenResult({ replaces_head: authorized, token: TOKEN2 }) });
+
+    it("asks for the tip, publishes the branch tip it fetched as ONE commit with the lease on the authorized head, and the diff is the one the private branch holds", async () => {
+      const { stamp } = await published();
+      const { base2, tip2, head2 } = fixRound();
+      const person = personPushes("person");
+      world.tokens.set(TOKEN2, ["acme/widgets"]);
+      const h = harness(grantsTip(person), { base: base2, tipPublish: true });
+      // The round added nothing: no `privateHead`; the tip is what the daemon fetched when the round started.
+      expect(await h.run(undefined, { tipHead: head2 })).toMatchObject({ kind: "updated" });
+      expect(h.asks).toEqual([true]);
+      const commit = sh(world.bare, "rev-parse", BRANCH);
+      expect(commit).not.toBe(person);
+      expect(commit).not.toBe(stamp);
+      expect(sh(world.bare, "rev-list", "--parents", "-n1", BRANCH)).toBe(`${commit} ${tip2}`);
+      // The same diff as a round that committed it (the first test of this describe): the item's paths against the public tip, nothing the sync brought in.
+      expect(sh(world.bare, "diff", "--name-only", tip2, commit).split("\n").sort()).toEqual(["src/a.ts", "src/new/c.ts", "src/new/d.ts"]);
+      for (const f of ["src/a.ts", "src/new/c.ts", "src/new/d.ts"]) expect(sh(world.bare, "show", `${commit}:${f}`)).toBe(sh(world.mirror, "show", `${head2}:${f}`));
+      expect(() => sh(world.bare, "cat-file", "-e", `${commit}:src/person.ts`)).toThrow();
+      expect(() => sh(world.bare, "cat-file", "-e", `${commit}:docs/ops/plan.md`)).toThrow();
+      // The same reports and token handling as an ordinary update: scanning, then updated with the new head, and the token revoked.
+      expect(h.reports.map((r) => r.phase)).toEqual(["scanning", "updated"]);
+      expect(last(h.reports)).toMatchObject({ phase: "updated", branch: BRANCH, head_sha: commit, tip_sha: tip2, token_revoked: true });
+      expect(h.tokenInRepo()).toBe(false);
+    });
+
+    it("the lease is on the authorized head: a commit that lands after the person confirmed Replace is kept and the update is refused public_branch_moved", async () => {
+      await published();
+      const { base2, head2 } = fixRound();
+      const person = personPushes("person");
+      let later = "";
+      const h = harness(grantsTip(person), {
+        base: base2,
+        tipPublish: true,
+        transport: (real) => ({
+          fetchTip: (d, r) => real.fetchTip(d, r),
+          async push(i) {
+            later = personPushes("later");
+            await real.push(i);
+          },
+        }),
+      });
+      world.tokens.set(TOKEN2, ["acme/widgets"]);
+      expect(await h.run(undefined, { tipHead: head2 })).toMatchObject({ kind: "refused", code: "public_branch_moved" });
+      expect(sh(world.bare, "rev-parse", BRANCH)).toBe(later);
+      expect(last(h.reports)).toMatchObject({ phase: "refused", code: "public_branch_moved" });
+    });
+
+    it("a daemon that did not keep the capability (or a build without it) never asks: the round is reported as no change, nothing is pushed and no token is requested", async () => {
+      const { stamp } = await published();
+      const { base2, head2 } = fixRound();
+      const person = personPushes("person");
+      for (const tipPublish of [undefined, false]) {
+        const h = harness(grantsTip(person), { base: base2, ...(tipPublish === undefined ? {} : { tipPublish }) });
+        expect(await h.run(undefined, { tipHead: head2 })).toMatchObject({ kind: "no_change" });
+        expect(h.asks).toEqual([]);
+        expect(h.state.token).toBe(0);
+        expect(h.reports.map((r) => r.phase)).toEqual(["no_change"]);
+        expect(h.events).not.toContain("push");
+        expect(sh(world.bare, "rev-parse", BRANCH)).toBe(person);
+      }
+      expect(person).not.toBe(stamp);
+    });
+
+    it("an ordinary round that added nothing: the cloud refuses the request (no_changes), the run is reported as no change exactly as without asking, and nothing is pushed; a failed request is reported refused public_unavailable", async () => {
+      const { stamp } = await published();
+      const { base2, head2 } = fixRound();
+      const h = harness({ token: () => ({ kind: "refused", code: "no_changes" }) }, { base: base2, tipPublish: true });
+      expect(await h.run(undefined, { tipHead: head2 })).toMatchObject({ kind: "no_change" });
+      expect(h.asks).toEqual([true]);
+      expect(h.reports.map((r) => r.phase)).toEqual(["no_change"]);
+      expect(h.events).not.toContain("push");
+      expect(sh(world.bare, "rev-parse", BRANCH)).toBe(stamp);
+      // A failed request (a network error, a 5xx, a reply no schema describes) is not "no changes": it is reported refused public_unavailable, so the person is not told the round changed nothing for an outage. Nothing is pushed.
+      for (const answer of [{ kind: "error", status: 0 }, { kind: "error", status: 503 }, { kind: "error", status: 200, code: "invalid_reply" }] as const) {
+        const again = harness({ token: () => answer }, { base: base2, tipPublish: true });
+        expect(await again.run(undefined, { tipHead: head2 })).toMatchObject({ kind: "refused", code: "public_unavailable" });
+        expect(again.asks).toEqual([true]);
+        expect(again.reports.map((r) => [r.phase, r.code])).toEqual([["refused", "public_unavailable"]]);
+        expect(again.events).not.toContain("push");
+        expect(sh(world.bare, "rev-parse", BRANCH)).toBe(stamp);
+      }
+    });
+
+    it("a stop or an unpaired answer ends the hook as for any token request; a refusal the cloud recorded (a closed pull request) is reported, not turned into no change", async () => {
+      await published();
+      const { base2, head2 } = fixRound();
+      expect(await harness({ token: () => ({ kind: "stop", reason: "lease_expired" }) }, { base: base2, tipPublish: true }).run(undefined, { tipHead: head2 })).toEqual({ kind: "stopped", reason: "lease_expired" });
+      expect(await harness({ token: () => ({ kind: "not_paired" }) }, { base: base2, tipPublish: true }).run(undefined, { tipHead: head2 })).toEqual({ kind: "not_entered", why: "unpaired" });
+      const closed = harness({ token: () => ({ kind: "refused", code: "republish_pr_closed" }) }, { base: base2, tipPublish: true });
+      await closed.run(undefined, { tipHead: head2 });
+      expect(closed.asks).toEqual([true]);
+      expect(closed.reports.map((r) => r.phase)).toEqual(["refused"]);
+    });
+
+    it("a round that added a commit publishes it as before: the request does not ask for the tip, and the tip it also holds is not used", async () => {
+      await published();
+      const { base2, tip2, head2 } = fixRound();
+      const person = personPushes("person");
+      world.tokens.set(TOKEN2, ["acme/widgets"]);
+      const h = harness(grantsTip(person), { base: base2, tipPublish: true });
+      expect(await h.run(head2, { tipHead: sh(world.mirror, "rev-parse", `${head2}^`) })).toMatchObject({ kind: "updated" });
+      expect(h.asks).toEqual([false]);
+      expect(sh(world.bare, "diff", "--name-only", tip2, sh(world.bare, "rev-parse", BRANCH)).split("\n").sort()).toEqual(["src/a.ts", "src/new/c.ts", "src/new/d.ts"]);
+    });
+
+    it("a tip that is the signed base itself is nothing to publish: no request is made", async () => {
+      await published();
+      const { base2 } = fixRound();
+      const h = harness(grantsTip(personPushes("person")), { base: base2, tipPublish: true });
+      expect(await h.run(undefined, { tipHead: base2 })).toMatchObject({ kind: "no_change" });
+      expect(h.asks).toEqual([]);
+    });
   });
 });

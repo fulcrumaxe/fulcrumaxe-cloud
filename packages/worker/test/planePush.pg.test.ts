@@ -12,9 +12,10 @@ import { keepBranch, replaceBranch } from "@fx/core/src/setup-requests/branchPus
 import { statusSentence } from "@fx/core/src/setup-requests/copy.js";
 import { listSetupRequests } from "@fx/core/src/setup-requests/store.js";
 import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
-import { FIX_ROUND_STOP_SENTENCE, REPUBLISH_BRANCH_MOVED_SENTENCE, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE_SENTENCE, REPUBLISH_PAIRING_OFF_SENTENCE, REPUBLISH_TIP_MOVED_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
+import { FIX_ROUND_STOP_SENTENCE, REPUBLISH_BRANCH_MOVED_SENTENCE, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE_SENTENCE, REPUBLISH_REPLACE_NO_CHANGE_SENTENCE, REPUBLISH_REPLACE_FAILED_SENTENCE, REPUBLISH_PAIRING_OFF_SENTENCE, REPUBLISH_TIP_MOVED_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
 import { planePushPairingRun, planePushReportRun, planePushTokenRun, toResponse, type PlanePushHostedPort, type RunnerCloudDeps, type RunnerLeaseOps } from "@fx/runner-cloud";
 import { mergeQueue } from "@fx/pipeline";
+import { RUNNER_REPLACE_ROUND_KIND, insertRunEvent } from "@fx/runner";
 import { createRunnerClaimFacade } from "../src/runnerClaims.js";
 import { createRunnerPlanePushFacade } from "../src/runnerPlanePush.js";
 import { ORIGIN, newKey, signed, type TestKey } from "../../runner-cloud/test/helpers.js";
@@ -946,6 +947,194 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       const [attempt] = await attempts();
       expect(attempt).toMatchObject({ kind: "fix_round", token_issued_at: null, outcome: "code_repo_installation_not_owned" });
       expect(await planeRow()).toMatchObject({ head_sha: HEAD });
+    });
+
+    // D#598 P1g-3a-3: the round a person's confirmed Replace started adds nothing and publishes the branch tip. The marker is the cloud's own run event, written in the round's create transaction (startFix);
+    // here it is written the same way. A runner can only ASK (`at_tip`), and only a runner that listed `tip_publish_v1` is ever answered.
+    describe("the branch tip is granted to the marked round only (tip_publish_v1)", () => {
+      const SHOWN = "b".repeat(40);
+      const capable = (caps: string[] = ["tip_publish_v1"]) => admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, $3::text[]) ON CONFLICT (runner_id) DO UPDATE SET capabilities = EXCLUDED.capabilities", [runner, A.accountId, caps]);
+      const mark = (id: string) => withTenant(writerPool, A.accountId, (c) => insertRunEvent(c, A.accountId, id, RUNNER_REPLACE_ROUND_KIND, {}));
+      const askTip = (run: { id: string; generation: number }, extra: Record<string, unknown> = {}) => token({ run_id: run.id, lease_generation: run.generation, at_tip: true, ...extra });
+      const eventsOf = async (id: string, kind: string) => (await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = $2", [id, kind])).rows.map((r) => r.payload);
+      const nothingWritten = async (id: string) => {
+        expect(await attempts()).toEqual([]);
+        expect(github.mints).toEqual([]);
+        expect(await eventsOf(id, "plane.update_lease")).toEqual([]);
+      };
+
+      it("the marked round of a runner that listed the capability is granted an update with the lease on the head the person was shown; the report then moves the stamp and spends the authorization", async () => {
+        await open();
+        await admin.query("UPDATE plane_pushes SET replace_authorized_head = $2 WHERE work_item_id = $1", [A.workItemId, SHOWN]);
+        await capable();
+        const run = await claimedRun({ continues: { baseSha: BASE } });
+        await mark(run.id);
+        const res = await askTip(run);
+        expect(res.status).toBe(200);
+        expect(PlanePushTokenReply.parse(res.body).replaces_head).toBe(SHOWN);
+        expect(await eventsOf(run.id, "plane.update_lease")).toEqual([{ head: SHOWN }]);
+        const [attempt, ...rest] = await attempts();
+        expect(rest).toEqual([]);
+        expect(attempt).toMatchObject({ run_id: run.id, kind: "fix_round", attempt_no: 1 });
+        expect((await report(run, { phase: "updated", head_sha: NEW_HEAD, tip_sha: NEW_TIP, branch: (await planeRow()).branch })).status).toBe(200);
+        expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: NEW_HEAD, tip_sha: NEW_TIP, replace_authorized_head: null });
+        expect((await attempts())[0]).toMatchObject({ outcome: "updated" });
+      });
+
+      it("an ordinary round that asks for the tip is refused no_changes with nothing written: no attempt, no mint, no lease event, and the item is left as it was", async () => {
+        await open();
+        await capable();
+        const run = await claimedRun({ continues: { baseSha: BASE } });
+        const res = await askTip(run);
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({ error: { code: "no_changes" } });
+        await nothingWritten(run.id);
+        expect(await facts()).toEqual([]);
+        expect(await stageOf()).toBe("changes_requested");
+        // The same round, asking the ordinary way, is still granted exactly as before.
+        expect((await askToken(run)).status).toBe(200);
+      });
+
+      it("the marked round of a runner that did NOT list the capability (an older daemon, a lapsed hello) is refused the same way", async () => {
+        await open();
+        const run = await claimedRun({ continues: { baseSha: BASE } });
+        await mark(run.id);
+        for (const caps of [null, [], ["plane_merge_v1", "ordered_facts_v1"]]) {
+          await admin.query("DELETE FROM runner_capabilities WHERE runner_id = $1", [runner]);
+          if (caps !== null) await capable(caps);
+          const res = await askTip(run);
+          expect(res.status, JSON.stringify(caps)).toBe(409);
+          expect(res.body).toMatchObject({ error: { code: "no_changes" } });
+        }
+        await nothingWritten(run.id);
+      });
+
+      it("a runner cannot make a round the marked one: only `at_tip: true` is accepted, and a key that names the marker, a head or a branch is a strict-parse 400", async () => {
+        await open();
+        await capable();
+        const run = await claimedRun({ continues: { baseSha: BASE } });
+        for (const extra of [{ replace_round: true }, { marker: "plane.replace_round" }, { head_sha: HEAD }, { replaces_head: SHOWN }, { at_tip: false }, { at_tip: "true" }]) {
+          const res = await askTip(run, extra);
+          expect(res.status, JSON.stringify(extra)).toBe(400);
+        }
+        // The claim in the message changes nothing: the unmarked round is refused, whatever it said.
+        expect((await askTip(run)).status).toBe(409);
+        await nothingWritten(run.id);
+        // And a run event a runner could post (the `runner.event` kind) is not the marker.
+        await withTenant(writerPool, A.accountId, (c) => insertRunEvent(c, A.accountId, run.id, "runner.event", { type: RUNNER_REPLACE_ROUND_KIND }));
+        expect((await askTip(run)).status).toBe(409);
+      });
+
+      it("an older daemon (no request) on the marked round: the round is reported as no change and the item stops for a person with the fixed sentence; nothing is minted or published", async () => {
+        await open();
+        await capable();
+        const run = await claimedRun({ continues: { baseSha: BASE } });
+        await mark(run.id);
+        expect((await report(run, { phase: "no_change" })).status).toBe(200);
+        await nothingWritten(run.id);
+        // The Replace round has its own sentence: it does not say to build again (the Replace is spent and a rebuild is refused while the pull request is open).
+        expect(await facts()).toEqual([{ kind: "escalated", code: "republish_replace_no_change" }]);
+        expect(await stageOf()).toBe("needs_human");
+        expect((await getWorkItemActivity({ pool: adminPool, principal: { accountId: A.accountId, userId: A.userId } }, A.workItemId)).notice).toEqual({ kind: "needs_human", reason: REPUBLISH_REPLACE_NO_CHANGE_SENTENCE });
+        expect(REPUBLISH_REPLACE_NO_CHANGE_SENTENCE).not.toMatch(/Build again/);
+        expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: HEAD });
+      });
+
+      it("a head that moved since the person confirmed (the remote refuses the lease) is reported refused public_branch_moved: the stale authorization is cleared and the request is raised again with the head seen", async () => {
+        const PERSON = "7".repeat(40);
+        await open();
+        await admin.query("UPDATE plane_pushes SET replace_authorized_head = $2 WHERE work_item_id = $1", [A.workItemId, SHOWN]);
+        await capable();
+        const run = await claimedRun({ continues: { baseSha: BASE } });
+        await mark(run.id);
+        expect((await askTip(run)).status).toBe(200);
+        const original = port.branchHead;
+        try {
+          port.branchHead = async () => PERSON;
+          expect((await report(run, { phase: "refused", code: "public_branch_moved" })).status).toBe(200);
+        } finally {
+          port.branchHead = original;
+        }
+        expect(await facts()).toEqual([{ kind: "escalated", code: "republish_branch_moved" }]);
+        // The stale authorization is cleared and the record waits for a new answer; nothing was published.
+        expect(await planeRow()).toMatchObject({ state: "waiting_person_pushed", head_sha: HEAD, replace_authorized_head: null });
+        const raised = await admin.query("SELECT seen_head FROM setup_requests WHERE account_id = $1 AND kind = 'branch_pushed_by_person' AND state = 'open'", [A.accountId]);
+        expect(raised.rows).toEqual([{ seen_head: PERSON }]);
+      });
+
+      // D#598 P1g-3a-3: a refusal that is not about the branch (GitHub could not be reached) must not strand a person whose Replace it just spent: the question is asked again, with the branch as it is now.
+      describe("a refusal that maps to republish_failed", () => {
+        const PERSON = "7".repeat(40);
+        const openRequests = async () => (await admin.query("SELECT seen_head FROM setup_requests WHERE account_id = $1 AND kind = 'branch_pushed_by_person' AND state = 'open'", [A.accountId])).rows;
+        const roundsOf = async () => Number((await admin.query("SELECT (SELECT count(*) FROM agent_runs WHERE work_item_id = $1) + (SELECT count(*) FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'fix_round_started') AS n", [A.workItemId])).rows[0].n);
+        const refuse = async (run: { id: string; generation: number }) => {
+          const original = port.branchHead;
+          try {
+            port.branchHead = async () => PERSON;
+            return await report(run, { phase: "refused", code: "public_unavailable" });
+          } finally {
+            port.branchHead = original;
+          }
+        };
+
+        it("on the round a person's Replace started: the authorization is spent, one request is open with the live head, no round is started, and the sentence does not say to build again", async () => {
+          await open();
+          await admin.query("UPDATE plane_pushes SET replace_authorized_head = $2 WHERE work_item_id = $1", [A.workItemId, SHOWN]);
+          await capable();
+          const run = await claimedRun({ continues: { baseSha: BASE } });
+          await mark(run.id);
+          expect((await askTip(run)).status).toBe(200);
+          const rounds = await roundsOf();
+          expect((await refuse(run)).status).toBe(200);
+          expect(await facts()).toEqual([{ kind: "escalated", code: "republish_replace_failed" }]);
+          expect(await stageOf()).toBe("needs_human");
+          expect(await planeRow()).toMatchObject({ state: "waiting_person_pushed", head_sha: HEAD, replace_authorized_head: null });
+          expect(await openRequests()).toEqual([{ seen_head: PERSON }]);
+          expect(await roundsOf()).toBe(rounds);
+          const notice = (await getWorkItemActivity({ pool: adminPool, principal: { accountId: A.accountId, userId: A.userId } }, A.workItemId)).notice;
+          expect(notice).toEqual({ kind: "needs_human", reason: REPUBLISH_REPLACE_FAILED_SENTENCE });
+          expect(REPUBLISH_REPLACE_FAILED_SENTENCE).not.toMatch(/Build again/);
+          // The same refusal said again raises nothing new: still one open request.
+          expect((await refuse(run)).status).toBe(200);
+          expect(await openRequests()).toEqual([{ seen_head: PERSON }]);
+        });
+
+        // D#598 P1g-3a-3: the same rule for every end of a marked round that is not a landed update.
+        it.each([
+          ["a round that made no change", { phase: "no_change" }, "republish_replace_no_change"],
+          ["the public main moving twice", { phase: "refused", code: "public_tip_moved" }, "republish_replace_tip_moved"],
+        ])("on the round a person's Replace started, %s: recorded as %s's code, one request is open with the live head, and the sentence does not say to build again", async (_label, body, code) => {
+          await open();
+          await admin.query("UPDATE plane_pushes SET replace_authorized_head = $2 WHERE work_item_id = $1", [A.workItemId, SHOWN]);
+          await capable();
+          const run = await claimedRun({ continues: { baseSha: BASE } });
+          await mark(run.id);
+          const original = port.branchHead;
+          try {
+            port.branchHead = async () => PERSON;
+            expect((await report(run, body)).status).toBe(200);
+          } finally {
+            port.branchHead = original;
+          }
+          expect(await facts()).toEqual([{ kind: "escalated", code }]);
+          expect(await planeRow()).toMatchObject({ state: "waiting_person_pushed", replace_authorized_head: null });
+          expect(await openRequests()).toEqual([{ seen_head: PERSON }]);
+          expect(FIX_ROUND_STOP_SENTENCE[code]).toBeDefined();
+          expect(FIX_ROUND_STOP_SENTENCE[code]).not.toMatch(/Build again/);
+          expect((await getWorkItemActivity({ pool: adminPool, principal: { accountId: A.accountId, userId: A.userId } }, A.workItemId)).notice).toMatchObject({ reason: FIX_ROUND_STOP_SENTENCE[code] });
+        });
+
+        it("on an ordinary round (no marker) it stays as it was: the old sentence, nothing raised, the record still follows the pull request", async () => {
+          await open();
+          const run = await claimedRun({ continues: { baseSha: BASE } });
+          expect((await askToken(run)).status).toBe(200);
+          expect((await refuse(run)).status).toBe(200);
+          expect(await facts()).toEqual([{ kind: "escalated", code: "republish_failed" }]);
+          expect(await openRequests()).toEqual([]);
+          expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: HEAD });
+          expect((await getWorkItemActivity({ pool: adminPool, principal: { accountId: A.accountId, userId: A.userId } }, A.workItemId)).notice).toEqual({ kind: "needs_human", reason: REPUBLISH_FAILED_SENTENCE });
+        });
+      });
     });
 
     it("a fresh run (not a continuation) is granted as it always was: no head to replace, a push attempt", async () => {

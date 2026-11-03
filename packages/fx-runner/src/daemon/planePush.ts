@@ -47,7 +47,7 @@ import {
   type RepoPairing,
 } from "@fulcrumaxe/runner-protocol/planePush";
 import type { PlanePushReportMessage, PlanePushTokenReply, StopReason } from "@fulcrumaxe/runner-protocol";
-import type { RunnerClient } from "./client.js";
+import type { PlanePushTokenResult, RunnerClient } from "./client.js";
 import type { PlanePushGithub } from "./planePushGithub.js";
 
 /** The daemon's record of the commit each run started from, written before the agent starts and read at run end. The checkout is never asked. */
@@ -95,6 +95,11 @@ export interface PlanePushRunEnd {
   mirrorDir: string;
   /** The commit the run published to its private branch, or undefined when it added none. */
   privateHead: string | undefined;
+  /**
+   * D#598 P1g-3a-3: set for a fix round that republishes and added no commit: the branch tip the daemon itself fetched when the round started. It is used only when the cloud answers an `at_tip` token
+   * request with a grant (its own marker decides, never this value), and then it is the head: the same diff the private branch holds. Nothing the cloud names is ever the head.
+   */
+  tipHead?: string | undefined;
   signal?: AbortSignal | undefined;
 }
 
@@ -105,6 +110,8 @@ export interface PlanePushHookDeps {
   baseLedger: PlaneBaseLedger;
   /** A directory in the runner's private state where the throwaway repositories are built (made 0700). */
   workRoot: string;
+  /** D#598 P1g-3a-3: true once the hello kept `tip_publish_v1`. Without it (or when absent) a round that added no commit is reported as no change and nothing is asked. */
+  tipPublish?: () => boolean;
   /** The runner's user id, when the platform has one: the work root must belong to it. */
   uid?: number | undefined;
   now?: () => Date;
@@ -223,7 +230,17 @@ export function createPlanePushHook(deps: PlanePushHookDeps): (input: PlanePushR
     const base = deps.baseLedger.read(runId);
     if (base === undefined) return { kind: "not_entered", why: "no_base" };
     if (input.signal?.aborted) return { kind: "not_entered", why: "aborted" };
-    const head = input.privateHead ?? base;
+    let head = input.privateHead ?? base;
+    // D#598 P1g-3a-3: a fix round that added no commit may ask to publish the branch tip it fetched. The cloud grants it only to the one round it marked itself; any other answer leaves the run exactly as it was.
+    let asked: PlanePushTokenResult | undefined;
+    if (head === base && input.tipHead !== undefined && input.tipHead !== base && deps.tipPublish?.() === true) {
+      const tipAsk = await deps.client.planePushToken(runId, leaseGeneration, true);
+      if (tipAsk.kind === "token") head = input.tipHead;
+      // An ordinary round's `no_changes` refusal is "nothing to publish" and falls through to the no-change report below. A failed request (a network error, a 5xx, a reply no schema describes) is not that: the cloud may
+      // have minted a token whose reply was lost (it lapses unused; this daemon never saw it), so the round is reported refused `public_unavailable` (the code the ordinary token path uses), not as a round that changed nothing.
+      if (tipAsk.kind === "error") asked = { kind: "refused", code: "public_unavailable" };
+      else if (!(tipAsk.kind === "refused" && tipAsk.code === "no_changes")) asked = tipAsk;
+    }
 
     /** One report, tried again on a network failure or a 5xx. A stop reply is returned to the caller; every other failure is dropped (a report is a hint). */
     async function report(message: Omit<PlanePushReportMessage, "run_id" | "lease_generation">): Promise<"recorded" | "not_paired" | { stop: StopReason } | "failed"> {
@@ -242,7 +259,7 @@ export function createPlanePushHook(deps: PlanePushHookDeps): (input: PlanePushR
     }
 
     // A run that added no commit has nothing to publish. It reports so without asking for a token; a run that is not paired is told 403 and is done.
-    if (head === base) {
+    if (head === base && asked === undefined) {
       const told = await report({ phase: "no_change" });
       if (told === "not_paired") return { kind: "not_entered", why: "unpaired" };
       if (typeof told === "object") return { kind: "stopped", reason: told.stop };
@@ -250,7 +267,7 @@ export function createPlanePushHook(deps: PlanePushHookDeps): (input: PlanePushR
     }
 
     // The token request is what "is this run paired" is answered by: 403 `not_paired` ends the hook before anything is built.
-    const asked = await deps.client.planePushToken(runId, leaseGeneration);
+    asked ??= await deps.client.planePushToken(runId, leaseGeneration);
     if (asked.kind === "not_paired") return { kind: "not_entered", why: "unpaired" };
     if (asked.kind === "stop") return { kind: "stopped", reason: asked.reason };
     if (asked.kind === "error") return { kind: "not_entered", why: "unavailable" };

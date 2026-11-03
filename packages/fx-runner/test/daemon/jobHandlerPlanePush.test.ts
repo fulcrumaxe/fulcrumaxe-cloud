@@ -216,6 +216,32 @@ describe("the start commit is the daemon's record (P1f-3-d)", () => {
     }
   });
 
+  // D#598 P1g-3a-3: the hook is told the tip only for a republishing round that added no commit; it is what lets the cloud publish an unchanged branch.
+  it("a republishing round that added no commit gives the hook tipHead: the commit the round started at, whatever the checkout moved to", async () => {
+    const CHOSEN = "c".repeat(40);
+    const item = { continues: { parent_run_id: "22222222-2222-4222-8222-222222222222", session_id: null, branch: "fx/issue-12", pr_number: 7, base_sha: CHOSEN } };
+    const r = rig({ published: { pushed: false }, onStart: () => { r.checkout.head = MOVED; } });
+    await r.handle(await r.claim(jobFor(item)));
+    expect(r.asked).toHaveLength(1);
+    expect(r.asked[0]!.tipHead).toBe(BASE);
+    expect(r.asked[0]!.privateHead).toBeUndefined();
+  });
+
+  it("a round that committed, and a run that is not a republish, give the hook no tipHead", async () => {
+    const CHOSEN = "c".repeat(40);
+    const republish = { continues: { parent_run_id: "22222222-2222-4222-8222-222222222222", session_id: null, branch: "fx/issue-12", pr_number: 7, base_sha: CHOSEN } };
+    const committed = rig();
+    await committed.handle(await committed.claim(jobFor(republish)));
+    expect(committed.asked.map((a) => a.tipHead)).toEqual([undefined]);
+    // A first round that added nothing, and a fix round with no signed base that added nothing.
+    const fresh = rig({ published: { pushed: false } });
+    await fresh.handle(await fresh.claim(jobFor()));
+    expect(fresh.asked.map((a) => a.tipHead)).toEqual([undefined]);
+    const unsigned = rig({ mergeBase: "e".repeat(40), published: { pushed: false } });
+    await unsigned.handle(await unsigned.claim(jobFor({ continues: { parent_run_id: "22222222-2222-4222-8222-222222222222", session_id: null, branch: "fx/33333333-3333-4333-8333-333333333333-g1" } })));
+    expect(unsigned.asked.map((a) => a.tipHead)).toEqual([undefined]);
+  });
+
   it("a fix round with no signed base records nothing", async () => {
     const plain = { continues: { parent_run_id: "22222222-2222-4222-8222-222222222222", session_id: null, branch: "fx/issue-12", pr_number: 7 } };
     const r = rig();

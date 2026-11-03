@@ -1077,6 +1077,8 @@ export async function switchToDeltaReview(client: Queryable, input: { accountId:
  * (a sandbox round that republishes, or a runner round whose signed job carries a base), and the newest fix-round attempt of a run that is its child (a runner round: of the run itself) carries the label the publish verified.
  */
 export type RepublishOutcome = "none" | "pending" | "done" | "branch_moved" | "history_rewritten" | "failed";
+/** What a recorded refusal code means for a round: only a round with nothing to publish lets it go on, a moved branch is its own stop, and every other code (the Replace forms of a person's answered round included) is a failure. */
+export const republishOutcomeOfRefusal = (code: string): RepublishOutcome => (code === "republish_no_change" ? "done" : code === "republish_branch_moved" ? "branch_moved" : "failed");
 export async function readRepublishOutcome(client: Queryable, round: ConflictRound): Promise<RepublishOutcome> {
   if (round.runId === null) return "none";
   const { rows } = await client.query<{ signed: boolean; outcome: string | null; finished: boolean | null; refusal: string | null; managed: boolean | null; state: string | null }>(
@@ -1099,7 +1101,7 @@ export async function readRepublishOutcome(client: Queryable, round: ConflictRou
   if (!row?.signed) return "none";
   // Only an update (or a round with nothing to publish) lets the round go on; every other end is a stop, and the item's own refusal record stands.
   if (row.finished === true) return row.outcome === "updated" || row.outcome === "no_change" ? "done" : row.outcome === "public_branch_moved" ? "branch_moved" : row.outcome === "history_rewritten" ? "history_rewritten" : "failed";
-  if (row.refusal !== null) return row.refusal === "republish_no_change" ? "done" : row.refusal === "republish_branch_moved" ? "branch_moved" : "failed";
+  if (row.refusal !== null) return republishOutcomeOfRefusal(row.refusal);
   // No attempt ran: a copy a person took over, or one that is no longer an open pull request, is never going to be updated.
   if (row.managed === true) return "branch_moved";
   if (row.state !== null && row.state !== "pr_opened" && row.state !== "updating") return "failed";

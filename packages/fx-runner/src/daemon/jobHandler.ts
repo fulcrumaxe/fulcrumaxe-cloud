@@ -699,7 +699,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       // A run the cloud has already ended, or a daemon that is shutting down, asks for nothing: the hook's first call would be a token request.
       if (deps.planePush !== undefined && mirrorDir !== undefined && lease.ended() === undefined && !stopRun.aborted) {
         const outcome = await deps.planePush
-          .run({ runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, repo: { owner: job.repo.owner, name: job.repo.name }, mirrorDir, privateHead: published.pushed ? published.sha : firstPublishes(job) ? started.base : undefined, signal: stopRun })
+          .run({ runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, repo: { owner: job.repo.owner, name: job.repo.name }, mirrorDir, privateHead: published.pushed ? published.sha : firstPublishes(job) ? started.base : undefined, ...(!published.pushed && republishes(job) ? { tipHead: started.base } : {}), signal: stopRun })
           .catch((): PlanePushOutcome => ({ kind: "failed" }));
         if (outcome.kind === "stopped") return { status: "stopped", reason: outcome.reason };
       }

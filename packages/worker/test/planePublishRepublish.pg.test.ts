@@ -17,7 +17,7 @@ import { createPlanePushApi, createHostedPlanePush, InstallationTokenCache } fro
 import { httpsRoundTrip, startStrictGithubServer, type LocalTlsServer } from "../../github/test/helpers/localTlsServer.js";
 import { ghError, type GhReply } from "../../github/test/helpers/strictGithub.js";
 import { mergeQueue } from "@fx/pipeline";
-import { createFakeSandbox, type AgentRuntime, type NetworkPolicyRule, type PlanePublishLine } from "@fx/runner";
+import { RUNNER_REPLACE_ROUND_KIND, createFakeSandbox, type AgentRuntime, type NetworkPolicyRule, type PlanePublishLine } from "@fx/runner";
 import { phaseLine } from "../../runner/src/planePublish/protocol.js";
 import { FIX_BASE_EVENT } from "../src/fixRoundBase.js";
 import { createPlanePublish, createPublishSettler, type PlanePublishDeps } from "../src/planePublish.js";
@@ -294,6 +294,64 @@ describe("a sandbox fix round updates the open public pull request [pg]", () => 
     expect((await settle(await fixRound())).publish).toEqual({ kind: "skipped", why: "not_paired" });
     expect(fake.state.created).toEqual([]);
     expect(await attempts()).toEqual([]);
+  });
+
+  // D#598 P1g-3a-3: a round a person's Replace started that ends without a landed update is recorded under its Replace code, says so without "Build again", and asks the question again at the live head.
+  describe("the round a person's Replace started, ended without a landed update", () => {
+    const PERSON = "7".repeat(40);
+    const markedRound = async () => {
+      const run = await fixRound();
+      await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 2, $3, '{}')", [A.accountId, run, RUNNER_REPLACE_ROUND_KIND]);
+      return run;
+    };
+    /** The item's own branch reads as a person's commit; everything else is the default stand-in. */
+    const personPushed = async () => ({ ...deps().hosted, branchHead: async () => PERSON });
+    it.each([
+      ["no change to publish", "republish_replace_no_change", () => say({ phase: "no_change" })],
+      ["the public main moved twice", "republish_replace_tip_moved", () => say({ phase: "refused", code: "public_tip_moved" })],
+      ["a scan refusal", "republish_replace_failed", () => say({ phase: "refused", code: "scan_refused", refusals: [{ kind: "identifier_hit", place: "src/a.ts:2", rule_key: "identifier-rule#1" }] })],
+      ["a hook that crashed", "republish_replace_failed", () => ({ exitCode: 1, stdout: "" })],
+    ])("%s: recorded as %s, the authorization is spent, one request is open with the live head, and the sentence does not say to build again", async (_label, code, hook) => {
+      output = hook;
+      await admin.query("UPDATE plane_pushes SET replace_authorized_head = $2 WHERE work_item_id = $1", [A.workItemId, PERSON]);
+      expect((await settle(await markedRound(), { hosted: await personPushed() })).publish).toMatchObject({ kind: "refused", code });
+      expect(await facts()).toEqual([{ kind: "escalated", code }]);
+      expect(await branchRequests()).toEqual([expect.objectContaining({ state: "open", origin: "derived", seen_head: PERSON })]);
+      expect(await planeRow()).toMatchObject({ state: "waiting_person_pushed", head_sha: STAMP, replace_authorized_head: null });
+      expect(await noticeOf()).toMatchObject({ reason: FIX_ROUND_STOP_SENTENCE[code] });
+      expect(FIX_ROUND_STOP_SENTENCE[code]).not.toMatch(/Build again/);
+    });
+
+    it("the publish run cannot start (pending to running is refused): the same Replace code is returned, and the question is raised again", async () => {
+      await admin.query("UPDATE plane_pushes SET replace_authorized_head = $2 WHERE work_item_id = $1", [A.workItemId, PERSON]);
+      await admin.query("CREATE OR REPLACE FUNCTION pp_block_start() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.role = 'plane_publish' AND NEW.status = 'running' THEN RETURN NULL; END IF; RETURN NEW; END $$");
+      await admin.query("CREATE TRIGGER pp_block_start BEFORE UPDATE ON agent_runs FOR EACH ROW EXECUTE FUNCTION pp_block_start()");
+      try {
+        expect((await settle(await markedRound(), { hosted: await personPushed() })).publish).toMatchObject({ kind: "refused", code: "republish_replace_failed" });
+      } finally {
+        await admin.query("DROP TRIGGER pp_block_start ON agent_runs");
+        await admin.query("DROP FUNCTION pp_block_start()");
+      }
+      expect(await facts()).toEqual([{ kind: "escalated", code: "republish_replace_failed" }]);
+      expect(await branchRequests()).toEqual([expect.objectContaining({ state: "open", seen_head: PERSON })]);
+      expect(await planeRow()).toMatchObject({ state: "waiting_person_pushed", replace_authorized_head: null });
+    });
+
+    it("refused before any sandbox starts (no platform identity): the same Replace code and the same question again", async () => {
+      identityMissing = true;
+      await admin.query("UPDATE plane_pushes SET replace_authorized_head = $2 WHERE work_item_id = $1", [A.workItemId, PERSON]);
+      expect((await settle(await markedRound(), { hosted: await personPushed() })).publish).toMatchObject({ kind: "refused", code: "republish_replace_failed" });
+      expect(await publishRuns()).toEqual([]);
+      expect(await facts()).toEqual([{ kind: "escalated", code: "republish_replace_failed" }]);
+      expect(await branchRequests()).toEqual([expect.objectContaining({ state: "open", seen_head: PERSON })]);
+    });
+
+    it("an ordinary round (no marker) with the same endings keeps its code, its sentence, and raises nothing", async () => {
+      output = () => say({ phase: "no_change" });
+      expect((await settle(await fixRound(), { hosted: await personPushed() })).publish).toMatchObject({ kind: "refused", code: "republish_no_change" });
+      expect(await branchRequests()).toEqual([]);
+      expect(await planeRow()).toMatchObject({ state: "pr_opened" });
+    });
   });
 
   describe("every other ending sends the item to a person with a fixed sentence and leaves the push row as it was", () => {

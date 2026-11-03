@@ -6,7 +6,7 @@ import { safeChildTitle } from "@fx/core/src/work-items/childTitle.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { PRIVATE_READ_CLASS_SENTENCE, PRIVATE_READ_REFUSAL_KIND } from "@fx/core/src/repos/publicChangeCopy.js";
 import { PUBLISH_ATTEMPT_LIMIT, mayRetryPublish, pairingDigest, publicPullRequestUrlMatches, recordUpdatedHead, recordVerifiedOutcome, UPDATED_AFTER_KEEP_EVENT, updatedAfterKeepPayload, type PlanePushState, type RetryFacts, type VerifiedOutcome } from "@fx/core/src/repos/planePushRecord.js";
-import { REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE, REPUBLISH_PAIRING_OFF, REPUBLISH_PR_CLOSED, REPUBLISH_PR_MERGED, REPUBLISH_TIP_MOVED } from "@fx/core/src/work-items/baseSync.js";
+import { REPLACE_ROUND_CODES, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE, REPUBLISH_PAIRING_OFF, REPUBLISH_PR_CLOSED, REPUBLISH_PR_MERGED, REPUBLISH_TIP_MOVED } from "@fx/core/src/work-items/baseSync.js";
 import { TERMINAL_WORK_ITEM_STAGES } from "@fx/core/src/work-items/stages.js";
 import { resolveBuildIdentity, type BuildIdentity, type BuildPurpose } from "@fx/core/src/work-items/buildIdentity.js";
 import { cleanWorkItemTitle } from "@fx/core/src/work-items/title.js";
@@ -441,7 +441,7 @@ export function createPublishSettler(deps: { pool: Pool; port: SandboxPort; now?
       const update = row.kind === "fix_round";
       await finishAttempt(deps.pool, run.accountId, {
         pushId: row.plane_push_id, attemptId: row.attempt_id, runId: run.id, outcome: update ? null : { state: "refused", code: PUBLISH_CODES.hookCrashed }, label: PUBLISH_CODES.hookCrashed, failed: true, usd: 0, envelope: null,
-        ...(update ? { after: (client: PoolClient) => recordRepublishRefusal(client, { accountId: run.accountId, workItemId: row.work_item_id }, { code: REPUBLISH_FAILED, prNumber: null, moveToNeedsPerson: true, attempt: row.parent_run_id ?? run.id }) } : {}),
+        ...(update ? { after: async (client: PoolClient) => void (await recordRepublishRefusal(client, { accountId: run.accountId, workItemId: row.work_item_id }, { code: REPUBLISH_FAILED, prNumber: null, moveToNeedsPerson: true, attempt: row.parent_run_id ?? run.id, keepCode: true })) } : {}),
       });
       return "settled";
     },
@@ -503,8 +503,10 @@ async function republish(deps: PlanePublishDeps, accountId: string, facts: Facts
   const fixBase = facts.fixBase!;
   const who = { accountId, workItemId: facts.workItemId };
   const stopWith = async (code: string): Promise<PublishResult> => {
-    await withTenant(deps.pool, accountId, (c) => recordRepublishRefusal(c, who, { code, prNumber: null, moveToNeedsPerson: true, attempt: facts.runId }));
-    return { kind: "refused", code, attemptNo: null };
+    const recorded = await withTenant(deps.pool, accountId, (c) => recordRepublishRefusal(c, who, { code, prNumber: null, moveToNeedsPerson: true, attempt: facts.runId }));
+    // D#598 P1g-3a-3: a round a person's Replace started is recorded under its Replace code, and the question is raised again.
+    if (REPLACE_ROUND_CODES.includes(recorded)) await raiseAfterLeaseFailure(deps.pool, deps.hosted.branchHead, who);
+    return { kind: "refused", code: recorded, attemptNo: null };
   };
   // An open, platform-owned pull request; anything else is not ours to update. A replay of this run is not a second update.
   if (!["pr_opened", "pr_closed", "pr_merged"].includes(facts.state) || facts.managedByPerson || facts.stamp === null) return { kind: "skipped", why: "not_paired" };
@@ -583,6 +585,7 @@ async function republish(deps: PlanePublishDeps, accountId: string, facts: Facts
     pairing: { overlayGlobs: pairing.overlayGlobs, identifierRulesPath: pairing.identifierRulesPath, planDataRulesPath: pairing.planDataRulesPath },
   };
   const sourceHead: string = head;
+  let recorded: string | null = null;
   const finish = (end: UpdateEnd, extra: { failed: boolean; usd: number; envelope: Record<string, unknown> | null }) =>
     finishAttempt(deps.pool, accountId, {
       pushId: facts.pushId, attemptId, runId: publishRunId, outcome: null, label: end.kind === "updated" ? "updated" : end.label, ...extra,
@@ -593,14 +596,20 @@ async function republish(deps: PlanePublishDeps, accountId: string, facts: Facts
           const moved = await recordUpdatedHead(client, { accountId, id: facts.pushId, headSha: end.headSha, tipSha: end.tipSha, sourceHead });
           if (moved?.keptReplacedAt) await insertRunEvent(client, accountId, facts.runId, UPDATED_AFTER_KEEP_EVENT, updatedAfterKeepPayload(moved));
         } else {
-          await recordRepublishRefusal(client, who, { code: end.code, prNumber: null, moveToNeedsPerson: true, attempt: facts.runId });
+          recorded = await recordRepublishRefusal(client, who, { code: end.code, prNumber: null, moveToNeedsPerson: true, attempt: facts.runId });
         }
       },
     });
+  /** The one ending of an attempt, after `finish`: a lease that failed because a person pushed to the branch (D#598 P1g-2), and a Replace round that ended without a landed update (recorded under its Replace code), are asked about again. */
+  const conclude = async (end: UpdateEnd): Promise<PublishResult> => {
+    if (end.kind === "refused" && (end.code === REPUBLISH_BRANCH_MOVED || (recorded !== null && REPLACE_ROUND_CODES.includes(recorded)))) await raiseAfterLeaseFailure(deps.pool, deps.hosted.branchHead, who);
+    return end.kind === "updated" ? { kind: "updated", attemptNo } : { kind: "refused", code: recorded ?? end.code, attemptNo };
+  };
   const began = await writeRunStatus(deps.pool, { accountId, runId: publishRunId, from: "pending", to: "running" });
   if (!began.updated) {
-    await finish({ kind: "refused", code: REPUBLISH_FAILED, label: PUBLISH_CODES.hookCrashed }, { failed: true, usd: 0, envelope: null });
-    return { kind: "refused", code: REPUBLISH_FAILED, attemptNo };
+    const refused: UpdateEnd = { kind: "refused", code: REPUBLISH_FAILED, label: PUBLISH_CODES.hookCrashed };
+    await finish(refused, { failed: true, usd: 0, envelope: null });
+    return conclude(refused);
   }
   const started = now();
   let end: UpdateEnd;
@@ -624,9 +633,7 @@ async function republish(deps: PlanePublishDeps, accountId: string, facts: Facts
   if (end.kind === "refused") logPublishRefused(facts.workItemId, end.label, end.failureClass);
   const cost = sandboxRunCost([{ ownDurationMs: seconds * 1000 }], { vcpus: PLANE_PUBLISH_VCPUS });
   await finish(end, { failed: crashed, usd: cost.usd, envelope: { publish: { attempt_no: attemptNo, kind: "fix_round", outcome: end.kind === "updated" ? "updated" : end.label, seconds, vcpus: PLANE_PUBLISH_VCPUS, usd: cost.usd, basis: cost.basis, private_head: head } } });
-  // D#598 P1g-2: a lease that failed because a person pushed to the branch is asked about, not just reported.
-  if (end.kind === "refused" && end.code === REPUBLISH_BRANCH_MOVED) await raiseAfterLeaseFailure(deps.pool, deps.hosted.branchHead, who);
-  return end.kind === "updated" ? { kind: "updated", attemptNo } : { kind: "refused", code: end.code, attemptNo };
+  return conclude(end);
 }
 
 /** The hook's terminal line becomes an outcome only after GitHub confirms it (report verification, C4 point 1a). Anything doubtful is `report_mismatch`, storing nothing from the line. */

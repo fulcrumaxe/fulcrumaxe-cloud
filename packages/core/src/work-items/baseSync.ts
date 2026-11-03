@@ -31,6 +31,15 @@ export const REPUBLISH_BRANCH_MOVED_SENTENCE = "The fix round finished, but the 
 export const REPUBLISH_FAILED_SENTENCE = "The fix round finished, but the cloud couldn't update the public pull request, so it still shows the earlier change. Nothing in the private repository was lost. Press Build again to try once more.";
 /** The fix round ended with nothing to publish (it added no commit, or its change is already in the public tip), so the public pull request is unchanged. Recorded as `escalated`. */
 export const REPUBLISH_NO_CHANGE = 'republish_no_change';
+/** D#598 P1g-3a-3: the same end for the round a person's confirmed Replace started. The Replace is spent and a rebuild is refused while the pull request is open, so the sentence does not say to build again. */
+export const REPUBLISH_REPLACE_NO_CHANGE = 'republish_replace_no_change';
+/**
+ * D#598 P1g-3a-3: the update of the round a person's confirmed Replace started was refused for a reason that is not about the branch (GitHub or the pairing could not be reached). The Replace is spent, a rebuild is
+ * refused while the pull request is open, and the question is raised again with the branch as it is now, so the person answers it again at once.
+ */
+export const REPUBLISH_REPLACE_FAILED = 'republish_replace_failed';
+export const REPUBLISH_REPLACE_FAILED_SENTENCE = "The replacement round finished, but the cloud couldn't update the public pull request just now, so it still shows the earlier change. Nothing was sent and your answer is used up. Answer the question again, or update the branch yourself.";
+export const REPUBLISH_REPLACE_NO_CHANGE_SENTENCE = "The replacement round made no change to publish. Nothing was sent, and the public pull request still shows the earlier change. Answer again, or update the branch yourself.";
 export const REPUBLISH_NO_CHANGE_SENTENCE = "The fix round made no changes to publish, so the public pull request is unchanged. Look at the round, then press Build again.";
 
 /**
@@ -38,6 +47,9 @@ export const REPUBLISH_NO_CHANGE_SENTENCE = "The fix round made no changes to pu
  * (reopen and close choices in the cloud arrive later). Recorded as `escalated`.
  */
 export const REPUBLISH_TIP_MOVED = 'republish_tip_moved';
+/** D#598 P1g-3a-3: the same end for the round a person's confirmed Replace started: the answer is used up and the question is raised again, so the sentence does not say to build again. */
+export const REPUBLISH_REPLACE_TIP_MOVED = 'republish_replace_tip_moved';
+export const REPUBLISH_REPLACE_TIP_MOVED_SENTENCE = "Public main moved, try again. The public repository changed twice while the cloud was preparing the update, so the public pull request still shows the earlier change. Nothing was sent and your answer is used up. Answer the question again, or update the branch yourself.";
 export const REPUBLISH_PR_CLOSED = 'republish_pr_closed';
 export const REPUBLISH_PR_MERGED = 'republish_pr_merged';
 export const REPUBLISH_PAIRING_OFF = 'republish_pairing_off';
@@ -45,6 +57,17 @@ export const REPUBLISH_TIP_MOVED_SENTENCE = "Public main moved, try again. The p
 export const REPUBLISH_PR_CLOSED_SENTENCE = "Public PR closed. The fix round finished, but the public pull request was closed without merging, so it was not updated. To update it, reopen the pull request on GitHub first.";
 export const REPUBLISH_PR_MERGED_SENTENCE = "Public PR already merged. The fix round finished, but the public pull request was already merged, so nothing was pushed. Follow-up work becomes a new item.";
 export const REPUBLISH_PAIRING_OFF_SENTENCE = "Public PR is open but the pairing is off. The fix round finished, but this repository is no longer paired with its public repository, so the open public pull request was not updated. Turn the pairing back on in the repository settings, or leave the pull request as it is.";
+
+/**
+ * D#598 P1g-3a-3: a round a person's Replace started that ends without a landed update is recorded under the Replace form of its code (the marker on its run decides), and the
+ * "someone pushed" question is raised again. `republish_branch_moved` is the same question's other way in and keeps its own code.
+ */
+export const REPLACE_ROUND_CODE_OF: Readonly<Record<string, string>> = {
+  [REPUBLISH_NO_CHANGE]: REPUBLISH_REPLACE_NO_CHANGE,
+  [REPUBLISH_TIP_MOVED]: REPUBLISH_REPLACE_TIP_MOVED,
+  [REPUBLISH_FAILED]: REPUBLISH_REPLACE_FAILED,
+};
+export const REPLACE_ROUND_CODES: readonly string[] = Object.values(REPLACE_ROUND_CODE_OF);
 
 /** Every code of this module that stops a fix round, with its fixed sentence (the item view reads this table). */
 export const FIX_ROUND_STOP_SENTENCE: Readonly<Record<string, string>> = {
@@ -55,6 +78,9 @@ export const FIX_ROUND_STOP_SENTENCE: Readonly<Record<string, string>> = {
   [REPUBLISH_BRANCH_MOVED]: REPUBLISH_BRANCH_MOVED_SENTENCE,
   [REPUBLISH_FAILED]: REPUBLISH_FAILED_SENTENCE,
   [REPUBLISH_NO_CHANGE]: REPUBLISH_NO_CHANGE_SENTENCE,
+  [REPUBLISH_REPLACE_NO_CHANGE]: REPUBLISH_REPLACE_NO_CHANGE_SENTENCE,
+  [REPUBLISH_REPLACE_FAILED]: REPUBLISH_REPLACE_FAILED_SENTENCE,
+  [REPUBLISH_REPLACE_TIP_MOVED]: REPUBLISH_REPLACE_TIP_MOVED_SENTENCE,
   [REPUBLISH_TIP_MOVED]: REPUBLISH_TIP_MOVED_SENTENCE,
   [REPUBLISH_PR_CLOSED]: REPUBLISH_PR_CLOSED_SENTENCE,
   [REPUBLISH_PR_MERGED]: REPUBLISH_PR_MERGED_SENTENCE,

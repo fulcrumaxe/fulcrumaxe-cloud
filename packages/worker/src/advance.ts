@@ -15,7 +15,7 @@ import { setupHoldFor } from "@fx/core/src/setup-requests/store.js";
 import { markCorrectionApplied } from "@fx/core/src/corrections/index.js";
 import { ITEM_PR_BRANCH, JobMemorySchema, type JobMemory } from "@fulcrumaxe/runner-protocol";
 import { attachRunNotes, correctionReasonCode, listRunNoteIds, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
-import { cancelRun, ensureSpecAnchorRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readSandboxBoundPullRequest, recordSandboxContinuesBound, recordRunStage, insertRunEvent, recordChildPullRequestForItem, readChildBoundPullRequest, recordBuildBranch, DispatchFailedError, JobIssueError, RUNNER_RUN_BRANCH, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { cancelRun, ensureSpecAnchorRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readSandboxBoundPullRequest, recordSandboxContinuesBound, recordRunStage, insertRunEvent, recordChildPullRequestForItem, readChildBoundPullRequest, recordBuildBranch, DispatchFailedError, JobIssueError, RUNNER_RUN_BRANCH, RUNNER_REPLACE_ROUND_KIND, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { reportError } from "@fx/telemetry";
 import { recordRunFollowUps } from "@fx/pipeline";
 import { checkFixRound, envelopeRunUsd } from "@fx/spend";
@@ -2008,7 +2008,15 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           ...(assemblyOf(req.contextAssembly) ? { contextAssembly: assemblyOf(req.contextAssembly) } : {}),
           ...(freshSpill ? { contextSpill: freshSpill } : {}),
           ...(continues ? { continues, parentRunId: parent } : {}),
-          inCreateTransaction: dec.inCreateTransaction(bindTransaction),
+          // D#598 P1g-3a-3: the fresh-session start of a confirmed Replace's round carries the same marker as a resumed one, in the same create transaction.
+          inCreateTransaction: dec.inCreateTransaction(
+            answered
+              ? async (client: PoolClient, runId: string) => {
+                  await bindTransaction?.(client, runId);
+                  await insertRunEvent(client, who.accountId, runId, RUNNER_REPLACE_ROUND_KIND, {});
+                }
+              : bindTransaction,
+          ),
           ...(conflict && req.conflictRound ? { conflictRound: req.conflictRound } : {}),
           // A fresh session: the repository is cloned into the workdir, as for a build.
           workdir: PREVIEW_WORKDIR,
@@ -2038,7 +2046,15 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
             prompt,
             ...(republishes ? { base: { sha: baseTip!, branch: syncedBranch! } } : {}),
             ...(conflict && req.conflictRound ? { conflictRound: req.conflictRound } : {}),
-            inCreateTransaction: dec.inCreateTransaction(sandboxRepublish ? (client: PoolClient, runId: string) => insertRunEvent(client, who.accountId, runId, FIX_BASE_EVENT, { base_sha: baseTip!, branch: syncedBranch!, ...(conflict ? { conflict: true } : {}) }) : undefined),
+            // D#598 P1g-3a-3: the round a person's confirmed Replace started is marked here, in its create transaction: the one server fact its end and its public update read.
+            inCreateTransaction: dec.inCreateTransaction(
+              sandboxRepublish || answered
+                ? async (client: PoolClient, runId: string) => {
+                    if (sandboxRepublish) await insertRunEvent(client, who.accountId, runId, FIX_BASE_EVENT, { base_sha: baseTip!, branch: syncedBranch!, ...(conflict ? { conflict: true } : {}) });
+                    if (answered) await insertRunEvent(client, who.accountId, runId, RUNNER_REPLACE_ROUND_KIND, {});
+                  }
+                : undefined,
+            ),
             ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
             ...(sections ? { contextSections: sections } : {}),
             ...(assemblyOf(req.contextAssembly) ? { contextAssembly: assemblyOf(req.contextAssembly) } : {}),

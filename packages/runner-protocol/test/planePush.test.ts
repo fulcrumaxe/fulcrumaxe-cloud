@@ -3,6 +3,7 @@ import { z } from "zod";
 import { MAX_PLANE_PUSH_REFUSALS, PLANE_PUSH_PAIRING_PATH, PLANE_PUSH_PHASES, PLANE_PUSH_REPORT_PATH, PLANE_PUSH_TOKEN_PATH, PlanePushPairingMessage, PlanePushReportMessage, PlanePushTokenMessage, RUNNER_MESSAGES } from "../src/messages.js";
 import { MAX_PLANE_PUSH_GLOBS, PlanePushPairingReply, PlanePushReportReply, PlanePushTokenReply, RUNNER_REPLIES } from "../src/replies.js";
 import { pairingDigest } from "../src/pairingDigest.js";
+import { RUNNER_CAPABILITIES, TIP_PUBLISH_CAPABILITY } from "../src/job.js";
 import { fieldPaths, g1Violations, nonStrictObjects } from "./helpers/schemaWalk.js";
 
 /** D#598 P1f-2: the two public-push messages and their replies. */
@@ -21,6 +22,16 @@ describe("the token request", () => {
     for (const bad of [{}, { run_id: RUN }, { run_id: RUN, lease_generation: 1, repo: "a/b" }, { run_id: RUN, lease_generation: 1, branch: "x" }, { run_id: "x", lease_generation: 1 }]) {
       expect(PlanePushTokenMessage.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
     }
+  });
+
+  // D#598 P1g-3a-3: the one optional, additive key. It asks for a grant and names nothing: no sha, no branch, no marker.
+  it("takes only `at_tip: true` besides the run and generation, and it is a hello capability", () => {
+    expect(PlanePushTokenMessage.safeParse({ run_id: RUN, lease_generation: 1, at_tip: true }).success).toBe(true);
+    for (const bad of [{ at_tip: false }, { at_tip: "yes" }, { at_tip: SHA_A }, { replace_round: true }, { tip: SHA_A }, { head_sha: SHA_A }]) {
+      expect(PlanePushTokenMessage.safeParse({ run_id: RUN, lease_generation: 1, ...bad }).success, JSON.stringify(bad)).toBe(false);
+    }
+    expect(TIP_PUBLISH_CAPABILITY).toBe("tip_publish_v1");
+    expect(RUNNER_CAPABILITIES).toContain(TIP_PUBLISH_CAPABILITY);
   });
 });
 

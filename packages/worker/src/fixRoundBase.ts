@@ -6,8 +6,9 @@ import { recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
-import { BASE_SYNCED, BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, REPUBLISH_BASE_MISSING, REPUBLISH_STACKED_UNSUPPORTED } from "@fx/core/src/work-items/baseSync.js";
+import { BASE_SYNCED, BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, REPLACE_ROUND_CODE_OF, REPUBLISH_BASE_MISSING, REPUBLISH_STACKED_UNSUPPORTED } from "@fx/core/src/work-items/baseSync.js";
 import { readPlanePush } from "@fx/core/src/repos/planePushRecord.js";
+import { RUNNER_REPLACE_ROUND_KIND } from "@fx/runner";
 import { clearReplaceAuthorization } from "@fx/core/src/setup-requests/branchPushed.js";
 import { checkPublicBranch, type FixRoundHeadPorts } from "./fixRoundHeads.js";
 
@@ -134,13 +135,19 @@ export async function refuseRepublish(pool: Pool, who: Who, input: { code: strin
   return input.code;
 }
 
-/** The record of a refusal, inside the caller's tenant transaction (the runner's report writes it in the same one as the run's own state). */
-export async function recordRepublishRefusal(client: PoolClient, who: Who, input: { code: string; prNumber: number | null; moveToNeedsPerson: boolean; attempt: string }): Promise<void> {
-  const { code } = input;
-  // D#598 P1g-3a: a refused round spends a person's Replace authorization; the next round asks again.
+const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The record of a refusal, inside the caller's tenant transaction (the runner's report writes it in the same one as the run's own state). Returns the code recorded: a round a person's
+ * Replace started (the cloud's marker on the run `attempt` names) that ends with no change, a moved tip or any other failed update is recorded under the Replace form of the code, whose
+ * sentence does not say to build again; the caller raises the question again for it (`raiseAfterLeaseFailure`).
+ */
+export async function recordRepublishRefusal(client: PoolClient, who: Who, input: { code: string; prNumber: number | null; moveToNeedsPerson: boolean; attempt: string; keepCode?: true }): Promise<string> {
+  const marked = input.keepCode !== true && Object.hasOwn(REPLACE_ROUND_CODE_OF, input.code) && RUN_ID.test(input.attempt) && (await client.query("SELECT 1 FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 LIMIT 1", [who.accountId, input.attempt, RUNNER_REPLACE_ROUND_KIND])).rows.length > 0;
+  const code = marked ? REPLACE_ROUND_CODE_OF[input.code]! : input.code;
   await clearReplaceAuthorization(client, who.workItemId);
   await recordDriverEvent(client, who.accountId, { workItemId: who.workItemId, kind: "escalated", dedupeKey: `${code}:${attemptWord(input.attempt)}`, code, ...(input.prNumber !== null ? { prNumber: input.prNumber } : {}) });
-  if (!input.moveToNeedsPerson) return;
+  if (!input.moveToNeedsPerson) return code;
   try {
     const moved = await recordStage(client, { workItemId: who.workItemId, toStage: "needs_human", at: new Date(), source: "control_plane", sourceRef: `${code}-${attemptWord(input.attempt)}` });
     if (moved.recorded) await emitDomainEvent(client, { type: "work_item.needs_human", accountId: who.accountId, subjectId: who.workItemId, payload: { workItemId: who.workItemId, reason: code } });
@@ -148,6 +155,7 @@ export async function recordRepublishRefusal(client: PoolClient, who: Who, input
     // A halted item, or one that already left the review stages, stays where it is; the fact above is the record.
     if (!(err instanceof WorkItemHaltedError) && !(err instanceof IllegalStageTransitionError)) throw err;
   }
+  return code;
 }
 
 /** After the sync: a round that must republish with no signed base is refused `republish_base_missing`; null when it may go on. */

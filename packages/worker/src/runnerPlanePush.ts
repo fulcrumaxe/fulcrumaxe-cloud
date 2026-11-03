@@ -1,13 +1,13 @@
 import type { Pool, PoolClient } from "pg";
-import type { StopReason } from "@fulcrumaxe/runner-protocol";
+import { TIP_PUBLISH_CAPABILITY, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RESTAMPABLE, pairingDigest, readPlanePush, recordUpdatedHead, recordVerifiedOutcome, UPDATED_AFTER_KEEP_EVENT, updatedAfterKeepPayload, type PlaneRefusalEntry, type PlanePushOutcomeState, type PlanePushRow } from "@fx/core/src/repos/planePushRecord.js";
-import { insertRunEvent, recordChildCodePullRequest } from "@fx/runner";
+import { RUNNER_REPLACE_ROUND_KIND, insertRunEvent, recordChildCodePullRequest } from "@fx/runner";
 import { CHILD_BODY_CLOSING_CODE, buildPlanePushText, prFooterSkipReason } from "@fulcrumaxe/runner-protocol/planePushText";
 import { safeChildTitle } from "@fx/core/src/work-items/childTitle.js";
 import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
 import { cleanWorkItemTitle } from "@fx/core/src/work-items/title.js";
-import { REPUBLISH_BASE_MISSING, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE, REPUBLISH_PAIRING_OFF, REPUBLISH_PR_CLOSED, REPUBLISH_PR_MERGED, REPUBLISH_TIP_MOVED } from "@fx/core/src/work-items/baseSync.js";
+import { REPUBLISH_BASE_MISSING, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE, REPUBLISH_PAIRING_OFF, REPLACE_ROUND_CODES, REPUBLISH_PR_CLOSED, REPUBLISH_PR_MERGED, REPUBLISH_TIP_MOVED } from "@fx/core/src/work-items/baseSync.js";
 import { attemptWord, recordRepublishRefusal } from "./fixRoundBase.js";
 import { raiseAfterLeaseFailure } from "./fixRoundHeads.js";
 import { guarded } from "./runActions.js";
@@ -103,7 +103,8 @@ export interface PlanePushRecordInput extends PlanePushLeaseInput {
 export type PlanePushRecordResult = { kind: "fenced"; reason: StopReason } | { kind: "not_paired" } | { kind: "recorded"; recorded: boolean };
 
 export interface RunnerPlanePushFacade {
-  planePushGrant(input: PlanePushLeaseInput): Promise<PlanePushGrantResult>;
+  /** `atTip`: the runner asks to publish the branch tip because its fix round added no commit (D#598 P1g-3a-3). Only a round started by a confirmed Replace, on a runner that listed `tip_publish_v1`, is granted one; any other is `refused` with `NO_TIP_ROUND` and nothing is written. */
+  planePushGrant(input: PlanePushLeaseInput & { atTip?: true }): Promise<PlanePushGrantResult>;
   planePushPairing(input: PlanePushLeaseInput): Promise<PlanePushPairingResult>;
   /** True when exactly one unsettled attempt row of this run and generation was updated; false when none matched (the caller must then not hand the token out). A refusal (an update whose branch a person took over, or whose lease changed, after the grant) finishes the attempt and carries its fixed code. */
   planePushSettleGrant(input: PlanePushLeaseInput & { attemptId: string; issued: true } | PlanePushLeaseInput & { attemptId: string; issued: false; code: string }): Promise<boolean | { kind: "refused"; code: string }>;
@@ -199,6 +200,14 @@ export const UPDATE_LEASE_EVENT = "plane.update_lease";
 /** The fixed refusals of a token, and the labels the attempt ends with, when the row changed between the grant and the token. */
 export const BRANCH_MANAGED_BY_PERSON = "branch_managed_by_person";
 export const UPDATE_LEASE_CHANGED = "update_lease_changed";
+/** The fixed refusal of an `at_tip` request for a run that is not the round of a confirmed Replace (or a runner that did not list `tip_publish_v1`): no attempt, no grant, no token. */
+export const NO_TIP_ROUND = "no_changes";
+
+/** True only for the fix round a person's confirmed Replace started (the marker event the round's create transaction wrote) on a runner whose latest hello listed `tip_publish_v1`. Never from anything a runner sent. */
+const isTipRound = async (client: PoolClient, input: PlanePushLeaseInput, continues: boolean): Promise<boolean> =>
+  continues &&
+  (await client.query("SELECT 1 FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 LIMIT 1", [input.accountId, input.runId, RUNNER_REPLACE_ROUND_KIND])).rows.length > 0 &&
+  (await client.query("SELECT 1 FROM runner_capabilities WHERE account_id = $1 AND runner_id = $2 AND $3::text = ANY(capabilities)", [input.accountId, input.runnerId, TIP_PUBLISH_CAPABILITY])).rows.length > 0;
 
 const isPlannedChild = async (client: PoolClient, accountId: string, workItemId: string): Promise<boolean> =>
   (await client.query("SELECT 1 FROM work_items WHERE account_id = $1 AND id = $2 AND planned_pr_key IS NOT NULL", [accountId, workItemId])).rows.length > 0;
@@ -225,7 +234,7 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
     await withTenant(runnerPool, input.accountId, (client) => insertRunEvent(client, input.accountId, input.runId, ROUND_TIP_EVENT, { tip }));
   };
 
-  const grant = (input: PlanePushLeaseInput): Promise<PlanePushGrantResult> =>
+  const grant = (input: PlanePushLeaseInput & { atTip?: true }): Promise<PlanePushGrantResult> =>
       guarded(async () => {
         requireLease(input);
         return withTenant(runnerPool, input.accountId, async (client): Promise<PlanePushGrantResult> => {
@@ -233,6 +242,8 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           if (held !== "ok") return { kind: "fenced", reason: stopReasonFor(held) };
           const found = await runFacts(client, input);
           if (!found) return { kind: "not_paired" };
+          // D#598 P1g-3a-3: before anything else is read or written, so an ordinary round that asked for the tip leaves no trace.
+          if (input.atTip === true && !(await isTipRound(client, input, found.continues))) return { kind: "refused", code: NO_TIP_ROUND };
           const { row } = found;
           // D#598 P1g-1: a pull request closed or merged on GitHub (the item records it), or a pairing that is gone, is said in words and pauses the item; nothing is pushed.
           if (found.continues && row.managedByPersonAt === null && row.headSha !== null && ["pr_opened", "pr_closed", "pr_merged"].includes(row.state)) {
@@ -413,9 +424,11 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           } else if ((input.outcome?.state === "refused" || input.outcome?.state === "no_public_change") && found.continues && found.row.state === "pr_opened") {
             // The update of the open public pull request was refused: the round's change is on the private branch only. A person decides (nothing is shown as published that is not).
             const code = input.outcome.state === "no_public_change" ? REPUBLISH_NO_CHANGE : input.outcome.code === "public_branch_moved" ? REPUBLISH_BRANCH_MOVED : input.outcome.code === "public_tip_moved" ? REPUBLISH_TIP_MOVED : input.outcome.code === REPUBLISH_BASE_MISSING ? REPUBLISH_BASE_MISSING : REPUBLISH_FAILED;
-            await recordRepublishRefusal(client, { accountId: input.accountId, workItemId: found.row.workItemId }, { code, prNumber: null, moveToNeedsPerson: true, attempt: input.runId });
+            // D#598 P1g-3a-3: the round a person's Replace started is recorded under the Replace form of the code (the cloud's marker on the run decides), which spends the answer.
+            const wrote = await recordRepublishRefusal(client, { accountId: input.accountId, workItemId: found.row.workItemId }, { code, prNumber: null, moveToNeedsPerson: true, attempt: input.runId });
             recorded = true;
-            if (code === REPUBLISH_BRANCH_MOVED) leaseFailedFor = found.row.workItemId;
+            // The question again: a lease that failed at the push, and a Replace round that ended without a landed update (nothing else would put the person back at it).
+            if (wrote === REPUBLISH_BRANCH_MOVED || REPLACE_ROUND_CODES.includes(wrote)) leaseFailedFor = found.row.workItemId;
           } else if (input.outcome) {
             const o = input.outcome;
             const row = await recordVerifiedOutcome(client, {

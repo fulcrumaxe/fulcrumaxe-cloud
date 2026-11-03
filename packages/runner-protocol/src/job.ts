@@ -71,7 +71,7 @@ export const jobCarriesPinnedCommit = (role: string): boolean => PINNED_COMMIT_J
  * role out for a runner that did not advertise the capability on its latest hello. A role not named here needs none.
  * D#6 RUNNER-WAKE R3a: `wake_v1` gates no role. It tells the cloud the runner can read a `wake` grant on its hello and claim replies (wake.ts).
  */
-export const RUNNER_CAPABILITIES = ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1"] as const;
+export const RUNNER_CAPABILITIES = ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1"] as const;
 /** D#6 PUBLIC-MERGE PR2a: `plane_merge_v1` gates no role either. A runner that lists it can claim and execute a merge order (messages.ts, plane-merge-*). */
 export const PLANE_MERGE_CAPABILITY = "plane_merge_v1" as const;
 /**
@@ -96,6 +96,12 @@ export const CONFLICT_FACTS_CAPABILITY = "conflict_facts_v1" as const;
  * `ordered` fact on its plane-merge-verify. A cloud that predates the field refuses the capability on the hello (400), the runner drops it and sends no field; a runner without it is never sent the key. The protocol version does not move.
  */
 export const ORDERED_FACTS_CAPABILITY = "ordered_facts_v1" as const;
+/**
+ * D#598 P1g-3a-3: `tip_publish_v1` gates no role. A runner that kept it after its hello may put `at_tip: true` on the plane-push-token request of a fix round that added no commit, and the cloud then
+ * grants an update only to the one round it started after a person confirmed Replace; the runner publishes the branch tip it fetched. A cloud that predates the field refuses the capability on the hello (400),
+ * the runner drops it and sends no field; a runner without it is never granted one. The protocol version does not move.
+ */
+export const TIP_PUBLISH_CAPABILITY = "tip_publish_v1" as const;
 export type RunnerCapability = (typeof RUNNER_CAPABILITIES)[number];
 export const RUNNER_CAPABILITY_FOR_ROLE: Readonly<Partial<Record<(typeof RUNNER_ELIGIBLE_ROLES)[number], RunnerCapability>>> = Object.freeze({ [PROPOSAL_VERIFIER_ROLE]: "proposal_verifier", [DISCOVERY_ANALYST_ROLE]: "discovery_analyst" });
 
