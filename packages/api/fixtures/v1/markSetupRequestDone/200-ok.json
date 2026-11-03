@@ -20,5 +20,8 @@
   "check_reason": null,
   "check_ran_at": "2026-10-16T20:05:01.000Z",
   "status_sentence": null,
-  "check_interval_seconds": null
+  "check_interval_seconds": null,
+  "seen_head": null,
+  "branch_managed": false,
+  "replace_pending": false
 }

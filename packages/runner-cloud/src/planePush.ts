@@ -151,6 +151,8 @@ export async function planePushTokenRun(deps: RunnerCloudDeps, req: RunnerHttpRe
   // From here the token exists and nobody has it. Anything that stops it reaching the runner revokes it first, so no token outlives a failed hand-over.
   try {
     const settled = await asRunner(() => ops.planePushSettleGrant({ ...lease, attemptId: grant.attemptId, issued: true }));
+    // A person's Keep between the grant and now: no token is handed out (the catch below revokes the minted one), and the runner is told in a fixed code.
+    if (typeof settled === "object" && settled !== null) throw new RunnerHttpError(409, settled.code, "the public branch changed after the update was granted; nothing was pushed");
     if (!settled) throw new RunnerHttpError(500, "internal", "internal error");
     return {
       status: 200,
@@ -254,7 +256,8 @@ async function decide(m: PlanePushReportMessage, plane: { codeRepo: string; bran
       if (!attempt?.tokenIssued || (m.branch !== undefined && m.branch !== plane.branch)) return MISMATCH;
       const input = { accountId, codeRepo: plane.codeRepo, branch: plane.branch, headSha: m.head_sha, tipSha: m.tip_sha };
       // An update is only ever of a pull request that is open (the grant gave the hook no token otherwise); the same read of GitHub as a first push decides it: head, its single parent, that parent in public main.
-      if (m.phase === "updated" && plane.state !== "pr_opened") return MISMATCH;
+      // A person may have chosen Keep after the token was issued: the push still happened, so a managed row is reported like an open one (the record then says the Keep lost).
+      if (m.phase === "updated" && plane.state !== "pr_opened" && plane.state !== "managed_by_person") return MISMATCH;
       // D#519 MQ4-E1-B-RUNNER-ROUND-END (C11-e1-4c): a conflict round's republish must sit on the public main tip the CLOUD recorded at the grant (or reads now), never on the one the hook names.
       // Anything else, or a head GitHub does not confirm, is a rewritten history; the attempt keeps that label and the round's end reads it.
       if (m.phase === "updated" && conflictRound) {

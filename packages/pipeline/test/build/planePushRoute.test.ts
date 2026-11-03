@@ -700,4 +700,50 @@ describe("the fix-round update (D#598 P1g-1): fresh-tip rebuild and the lease, o
     expect(e.code).toBe("public_branch_moved");
     expect(headOf("item-1")).toBe(theirs);
   });
+
+  describe("D#598 P1g-3a: a confirmed Replace takes the lease on the head the person was shown", () => {
+    const personPushes = (name: string): string => {
+      put(pubWork, { [`${name}.txt`]: "theirs\n" });
+      commitAll(pubWork, `a person's commit ${name}`);
+      sh(pubWork, "push", "-q", "-f", bare, "HEAD:refs/heads/item-1");
+      return headOf("item-1")!;
+    };
+    beforeEach(() => {
+      sh(pubWork, "checkout", "-q", "-b", "item-1", "main");
+    });
+
+    it("the lease on the seen head replaces their commit with the item's one commit on the public tip, in one update", async () => {
+      const seen = personPushes("one");
+      const r = await routeAndPush(input({ updateOf: seen }), deps({ api: apiWithHead() }));
+      expect(r.plane).toBe("updated");
+      const now = headOf("item-1")!;
+      expect(now).not.toBe(seen);
+      expect(now).not.toBe(first);
+      expect(sh(bare, "rev-list", "--parents", "-n1", now).split(" ")).toHaveLength(2);
+      expect(sh(bare, "rev-parse", `${now}^`)).toBe(publicTip);
+    });
+
+    it("a push after the head was shown (the person pushes again before the round) refuses, and the newer commit is kept", async () => {
+      const seen = personPushes("one");
+      const later = personPushes("two");
+      expect(later).not.toBe(seen);
+      const e = await refusal(routeAndPush(input({ updateOf: seen }), deps({ api: apiWithHead() })));
+      expect(e.code).toBe("public_branch_moved");
+      expect(headOf("item-1")).toBe(later);
+    });
+
+    it("a push that lands after the route read the branch but before the push is refused by the remote itself", async () => {
+      const seen = personPushes("one");
+      let later = "";
+      const racing: PublicGitTransport = {
+        ...transport,
+        push: async (i) => {
+          later = personPushes("two");
+          return transport.push(i);
+        },
+      };
+      await refusal(routeAndPush(input({ updateOf: seen }), deps({ api: apiWithHead(), transport: racing })));
+      expect(headOf("item-1")).toBe(later);
+    });
+  });
 });

@@ -365,6 +365,10 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "republish_pr_closed",
   "republish_pr_merged",
   "republish_pairing_off",
+  // D#598 P1g-3a: a Keep that lost to a round already under way, and a token refused because the row changed after the grant.
+  "updated_after_keep",
+  "branch_managed_by_person",
+  "update_lease_changed",
   // A check that failed only in test files the change did not touch (no fix round is started).
   "check_failed_outside_change",
   "public_branch_moved",
@@ -387,6 +391,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "setup_request_exists",
   "setup_request_closed",
   "setup_request_not_markable",
+  "setup_request_head_changed",
   // Approval rules (D#7 AAP-a2): a rule set saved over a newer version, and a rollback to a version the scope never had.
   "action_rules_changed",
   "action_rules_version_not_found",

@@ -269,7 +269,7 @@ describe("a paired item: the wait reads the public pull request's CI", () => {
   const PUB_REPO = { owner: "customer-co", name: "storefront-public" };
   const green = [{ name: "build", status: "completed", conclusion: "success" }];
 
-  async function pairedWorld(opts: { priv?: FakeRepoState["checks"]; pub?: FakeRepoState["checks"]; prNumber?: number | null; stamp?: string | null; state?: string; managed?: boolean; pubHead?: string; pairing?: boolean; pairedWith?: string; local?: boolean }) {
+  async function pairedWorld(opts: { priv?: FakeRepoState["checks"]; pub?: FakeRepoState["checks"]; prNumber?: number | null; stamp?: string | null; state?: string; managed?: boolean; pubHead?: string; pairing?: boolean; pairedWith?: string; local?: boolean; authorized?: string }) {
     const privChecks = opts.priv ?? { [HEAD]: [{ name: "build", status: "queued", conclusion: null }] };
     const w = opts.local === true ? await localWorld({ checks: privChecks }) : await world({ repo: { checks: privChecks } });
     const pubHead = opts.pubHead ?? PUB_HEAD;
@@ -283,6 +283,8 @@ describe("a paired item: the wait reads the public pull request's CI", () => {
        VALUES ($1, $2, $3, 'customer-co/storefront-public', $4, ${withPr ? `'${opts.state ?? "pr_opened"}', $5, $5, $6, $7` : "'building'"}${opts.managed ? ", now()" : ""})`,
       withPr ? [w.accountId, w.workItemId, repoId, "a".repeat(64), stamp, opts.prNumber ?? PUB_PR, `https://github.com/customer-co/storefront-public/pull/${opts.prNumber ?? PUB_PR}`] : [w.accountId, w.workItemId, repoId, "a".repeat(64)],
     );
+    // D#598 P1g-3a: a person's confirmed Replace, not yet used by an update.
+    if (opts.authorized !== undefined) await h.admin.query("UPDATE plane_pushes SET replace_authorized_head = $2 WHERE work_item_id = $1", [w.workItemId, opts.authorized]);
     const opened: string[] = [];
     const privLocal = opts.local === true ? fakeGitHubLocal(w.gh) : null;
     const privHttp = privLocal !== null ? privLocal.http : fakeGitHubRest(w.gh);
@@ -345,6 +347,17 @@ describe("a paired item: the wait reads the public pull request's CI", () => {
     await expectNothingRecorded(t.w);
     const mine = await pairedWorld({ pubHead: moved, pub: { [moved]: green }, managed: true });
     expect((await record(mine.w, PASS_BOTH, mine.gate)).decision).toBe("all_passed");
+  });
+
+  it("D#598 P1g-3a: after a confirmed Replace and before the update, the person's head on the public branch is a wait (wrong_head): nothing recorded, whatever its checks say", async () => {
+    const theirs = "d".repeat(40);
+    for (const checks of [green, [{ name: "build", status: "queued", conclusion: null }]]) {
+      const t = await pairedWorld({ pubHead: theirs, pub: { [theirs]: checks }, authorized: theirs });
+      expect(await record(t.w, PASS_BOTH, t.gate)).toMatchObject({ decision: "ci_pending", recorded: [] });
+      await expectNothingRecorded(t.w);
+    }
+    const settled = await pairedWorld({ pubHead: theirs, pub: { [theirs]: green }, authorized: theirs });
+    expect(await record(settled.w, PASS_BOTH, settled.gate)).toMatchObject({ decision: "ci_pending", ciReasons: ["wrong_head"] });
   });
 
   // The push state and the stamp are read from our own row. A pending answer reads the live head only: no checks and no status call (C22-6).

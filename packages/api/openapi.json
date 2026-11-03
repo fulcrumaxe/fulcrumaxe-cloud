@@ -16394,6 +16394,765 @@
         }
       }
     },
+    "/api/v1/setup-requests/{id}/keep": {
+      "post": {
+        "operationId": "keepPublicBranch",
+        "summary": "Keep their version of the public branch and stop updating it for this item",
+        "description": "Owner or admin, session only. Closes a \"someone pushed to the branch\" request as the person's answer and restarts its item; the pull request stays and the cloud pushes nothing more to the branch until the undo (`releasePublicBranch`). Repeating it changes nothing. After a confirmed Replace, Keep wins until a round has taken the head: it clears the authorization, so no round that has not started yet pushes. A round already under way cannot be stopped, so a Keep that arrives then can lose; the update lands, the record takes the new head, and the request reads, in fixed words, that the branch was updated before the Keep was seen, naming both commits (the replaced one stays in the pull request's history on GitHub). Once the update has landed, or a round was refused, the answer is 409 `setup_request_closed`.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Keep their version of the public branch and stop updating it for this item",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "repo_id": {
+                      "type": "string"
+                    },
+                    "work_item_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "env_var",
+                        "app_not_installed",
+                        "parity_drift",
+                        "parent_pr_closed",
+                        "branch_pushed_by_person",
+                        "overlay_path_missing"
+                      ]
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "target": {
+                      "type": "string"
+                    },
+                    "env_name": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "target_environment": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "production",
+                            "preview",
+                            "development"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reason": {
+                      "type": "string"
+                    },
+                    "provider_url": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "env_var_present"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "open",
+                        "done",
+                        "withdrawn"
+                      ]
+                    },
+                    "origin": {
+                      "type": "string",
+                      "enum": [
+                        "agent",
+                        "derived"
+                      ]
+                    },
+                    "created_by": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "resolution": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "marked_done",
+                            "check_passed",
+                            "condition_cleared",
+                            "withdrawn"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "resolved_by": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "resolved_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check_reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check_ran_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "status_sentence": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check_interval_seconds": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "seen_head": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "branch_managed": {
+                      "type": "boolean"
+                    },
+                    "replace_pending": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "repo_id",
+                    "work_item_id",
+                    "kind",
+                    "title",
+                    "target",
+                    "env_name",
+                    "target_environment",
+                    "reason",
+                    "provider_url",
+                    "check",
+                    "state",
+                    "origin",
+                    "created_by",
+                    "created_at",
+                    "resolution",
+                    "resolved_by",
+                    "resolved_at",
+                    "check_reason",
+                    "check_ran_at",
+                    "status_sentence",
+                    "check_interval_seconds",
+                    "seen_head",
+                    "branch_managed",
+                    "replace_pending"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request was already answered another way, or a Replace of it was already used (`setup_request_closed`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/setup-requests/{id}/replace": {
+      "post": {
+        "operationId": "replacePublicBranch",
+        "summary": "Replace their version of the public branch with the item's, after a second confirmation",
+        "description": "Owner or admin, session only. `confirm` must be true and `shown_head` the head the page showed. If the request has moved to another head since, nothing happens and the answer is 409 `setup_request_head_changed`; read the request again. Otherwise the request closes, the item restarts, and the next fix round updates the branch with a lease on exactly that head; a push made in between makes that round refuse and ask again. Nothing is pushed by this call.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "shown_head": {
+                    "type": "string",
+                    "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+                  },
+                  "confirm": {
+                    "type": "boolean",
+                    "const": true
+                  }
+                },
+                "required": [
+                  "shown_head",
+                  "confirm"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Replace their version of the public branch with the item's, after a second confirmation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "repo_id": {
+                      "type": "string"
+                    },
+                    "work_item_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "env_var",
+                        "app_not_installed",
+                        "parity_drift",
+                        "parent_pr_closed",
+                        "branch_pushed_by_person",
+                        "overlay_path_missing"
+                      ]
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "target": {
+                      "type": "string"
+                    },
+                    "env_name": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "target_environment": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "production",
+                            "preview",
+                            "development"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reason": {
+                      "type": "string"
+                    },
+                    "provider_url": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "env_var_present"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "open",
+                        "done",
+                        "withdrawn"
+                      ]
+                    },
+                    "origin": {
+                      "type": "string",
+                      "enum": [
+                        "agent",
+                        "derived"
+                      ]
+                    },
+                    "created_by": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "resolution": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "marked_done",
+                            "check_passed",
+                            "condition_cleared",
+                            "withdrawn"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "resolved_by": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "resolved_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check_reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check_ran_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "status_sentence": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check_interval_seconds": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "seen_head": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "branch_managed": {
+                      "type": "boolean"
+                    },
+                    "replace_pending": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "repo_id",
+                    "work_item_id",
+                    "kind",
+                    "title",
+                    "target",
+                    "env_name",
+                    "target_environment",
+                    "reason",
+                    "provider_url",
+                    "check",
+                    "state",
+                    "origin",
+                    "created_by",
+                    "created_at",
+                    "resolution",
+                    "resolved_by",
+                    "resolved_at",
+                    "check_reason",
+                    "check_ran_at",
+                    "status_sentence",
+                    "check_interval_seconds",
+                    "seen_head",
+                    "branch_managed",
+                    "replace_pending"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request is closed the other way (`setup_request_closed`), the branch moved since the page was shown (`setup_request_head_changed`), the pull request is no longer waiting on this branch, or the request was answered with Keep (all `setup_request_closed`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/work-items/{id}/public-branch/release": {
+      "post": {
+        "operationId": "releasePublicBranch",
+        "summary": "Undo Keep: let the cloud update the item's public branch again",
+        "description": "Owner or admin, session only. Clears \"Public branch managed by a person\". `released` is false when nothing was set. If the branch has moved since, the next fix round asks again.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Undo Keep: let the cloud update the item's public branch again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "released": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "released"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/setup-requests": {
       "get": {
         "operationId": "listSetupRequests",
@@ -16412,7 +17171,8 @@
               "type": "string",
               "enum": [
                 "open",
-                "all"
+                "all",
+                "needs_you"
               ]
             }
           },
@@ -16604,6 +17364,18 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "seen_head": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "branch_managed": {
+                            "type": "boolean"
+                          },
+                          "replace_pending": {
+                            "type": "boolean"
                           }
                         },
                         "required": [
@@ -16628,7 +17400,10 @@
                           "check_reason",
                           "check_ran_at",
                           "status_sentence",
-                          "check_interval_seconds"
+                          "check_interval_seconds",
+                          "seen_head",
+                          "branch_managed",
+                          "replace_pending"
                         ],
                         "additionalProperties": false
                       }
@@ -16977,6 +17752,18 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "seen_head": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "branch_managed": {
+                      "type": "boolean"
+                    },
+                    "replace_pending": {
+                      "type": "boolean"
                     }
                   },
                   "required": [
@@ -17001,7 +17788,10 @@
                     "check_reason",
                     "check_ran_at",
                     "status_sentence",
-                    "check_interval_seconds"
+                    "check_interval_seconds",
+                    "seen_head",
+                    "branch_managed",
+                    "replace_pending"
                   ],
                   "additionalProperties": false
                 }
@@ -17271,6 +18061,18 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "seen_head": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "branch_managed": {
+                      "type": "boolean"
+                    },
+                    "replace_pending": {
+                      "type": "boolean"
                     }
                   },
                   "required": [
@@ -17295,7 +18097,10 @@
                     "check_reason",
                     "check_ran_at",
                     "status_sentence",
-                    "check_interval_seconds"
+                    "check_interval_seconds",
+                    "seen_head",
+                    "branch_managed",
+                    "replace_pending"
                   ],
                   "additionalProperties": false
                 }
@@ -17537,6 +18342,18 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "seen_head": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "branch_managed": {
+                      "type": "boolean"
+                    },
+                    "replace_pending": {
+                      "type": "boolean"
                     }
                   },
                   "required": [
@@ -17561,7 +18378,10 @@
                     "check_reason",
                     "check_ran_at",
                     "status_sentence",
-                    "check_interval_seconds"
+                    "check_interval_seconds",
+                    "seen_head",
+                    "branch_managed",
+                    "replace_pending"
                   ],
                   "additionalProperties": false
                 }
@@ -17832,6 +18652,18 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "seen_head": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "branch_managed": {
+                      "type": "boolean"
+                    },
+                    "replace_pending": {
+                      "type": "boolean"
                     }
                   },
                   "required": [
@@ -17856,7 +18688,10 @@
                     "check_reason",
                     "check_ran_at",
                     "status_sentence",
-                    "check_interval_seconds"
+                    "check_interval_seconds",
+                    "seen_head",
+                    "branch_managed",
+                    "replace_pending"
                   ],
                   "additionalProperties": false
                 }

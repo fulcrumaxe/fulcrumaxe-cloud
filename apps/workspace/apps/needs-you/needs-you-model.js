@@ -15,9 +15,12 @@
 // checked again here against the fixed host list. Nothing here puts null or undefined on a screen: every text function returns a string.
 import { api, isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
 
-export const LIST_URL = "/api/v1/setup-requests?state=open";
+// The open requests, plus the "someone pushed" ones a person answered with Keep whose branch is still marked as managed (so the undo stays on the list).
+export const LIST_URL = "/api/v1/setup-requests?state=needs_you";
 // The done and withdraw routes take no request body at all (the API answers 400 to any body), so these two POSTs are sent bare.
 export const actionUrl = (id, verb) => "/api/v1/setup-requests/" + encodeURIComponent(id) + "/" + verb;
+/** The undo of Keep: clears "Public branch managed by a person" for one item. */
+export const releaseUrl = (workItemId) => "/api/v1/work-items/" + encodeURIComponent(workItemId) + "/public-branch/release";
 export const ASKS_URL = "/api/v1/decision-asks";
 export const answerUrl = (id) => "/api/v1/decision-asks/" + encodeURIComponent(id) + "/answer";
 /** The asks arrive in pages (API-1 cursor); this many pages are read before the screen says the rest are not shown. */
@@ -55,6 +58,17 @@ export const WORDS = {
   stopOverdue: "The work is paused until someone answers.",
   markDone: "Mark done",
   withdraw: "Withdraw",
+  keep: "Keep their version",
+  replace: "Replace with this item's version",
+  replaceYes: "Yes, replace it",
+  cancel: "Cancel",
+  release: "Let the cloud update it again",
+  headMoved: "The branch moved again, so nothing was replaced. The new head is shown; check it and choose again.",
+  replaceQueued: "Done. Their version is replaced the next time the item publishes an update. Until then you can still keep it instead.",
+  branchAnswered: "That request was already answered another way, so your choice was not applied. The list now shows what is current.",
+  keptNotManaged: "Done. The pull request is no longer open on this branch, so nothing is marked as managed.",
+  released: "The cloud can update this branch again.",
+  releasedNothing: "Nothing was marked as managed any more.",
   done: "Done",
   withdrawn: "Withdrawn",
   checkingNow: "Checking now.",
@@ -118,6 +132,12 @@ export function providerLink(url) {
   return { href: u.href, host: u.hostname };
 }
 
+/** A commit id is shown by its first twelve characters, enough to tell two heads apart; a value that is not a commit id is not shown. */
+export const shortHead = (v) => (typeof v === "string" && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(v) ? v.slice(0, 12) : "");
+export const nowAtWords = (head) => (shortHead(head) === "" ? "" : "The branch is now at " + shortHead(head) + ".");
+export const confirmWords = (head) => "This puts the item's version over what was pushed" + (shortHead(head) === "" ? "" : " (the branch is at " + shortHead(head) + ")") + ". If someone pushes again before the update, nothing is overwritten and you are asked again. Replace it?";
+export const isBranchRow = (row) => row.setupKind === "branch_pushed_by_person";
+
 /** Whether the row offers Mark done: a "someone pushed to the branch" request is not answered by it (the API refuses it), so no button is drawn. */
 export const canMarkDone = (row) => row.setupKind !== "branch_pushed_by_person";
 
@@ -135,6 +155,10 @@ export function readRequest(r) {
     sentence: text(r.status_sentence),
     hasCheck: Number.isInteger(r.check_interval_seconds),
     link: providerLink(r.provider_url),
+    workItemId: typeof r.work_item_id === "string" ? r.work_item_id : "",
+    seenHead: shortHead(r.seen_head) === "" ? "" : r.seen_head,
+    branchManaged: r.branch_managed === true,
+    replacePending: r.replace_pending === true,
   };
 }
 
@@ -283,7 +307,7 @@ export async function readAll(call, signal) {
     stalled: stalled.items.map(readStalled).filter(Boolean),
     people: items.data.map(readPerson).filter(Boolean),
     merges: merges.items.map(readMerge).filter(Boolean),
-    requests: data.requests.map(readRequest).filter((r) => r && r.state === "open"),
+    requests: data.requests.map(readRequest).filter((r) => r && (r.state === "open" || r.branchManaged || r.replacePending)),
   });
   const notShown = [merges, stalled].reduce((n, r) => n + (Number.isInteger(r.not_shown) && r.not_shown > 0 ? r.not_shown : 0), 0);
   return { rows, truncated: data.truncated === true, moreAsks: asks.more, moreItems: items.more, notShown };
@@ -292,7 +316,8 @@ export async function readAll(call, signal) {
 /** The Pipeline board's number: the same reads and row rules as the list. `more` is true when a page cap was reached or rows are not shown. */
 export async function readNeedsYouCount(call = api, signal) {
   const r = await readAll(call, signal);
-  return { count: r.rows.length + r.notShown, more: r.moreAsks || r.moreItems || r.notShown > 0 };
+  // A line that only offers the undo of an answer (Keep, or a Replace waiting for its update) is not something that needs a person, so it is not counted.
+  return { count: r.rows.filter((row) => !row.branchManaged && !row.replacePending).length + r.notShown, more: r.moreAsks || r.moreItems || r.notShown > 0 };
 }
 
 /** The board button's words: no number while the count is unknown (loading or failed). */
@@ -307,12 +332,13 @@ export function entryLabel(c) {
  * by a failed check is open again and so is simply in the open part). `state` is { status, rows, truncated, announce, error }.
  */
 export function createNeedsYou({ call = api, signal, onChange = () => {} } = {}) {
-  let st = { status: "loading", rows: [], truncated: false, moreAsks: false, moreItems: false, notShown: 0, isAdmin: false, announce: "", focusId: null, error: "" };
+  let st = { status: "loading", rows: [], truncated: false, moreAsks: false, moreItems: false, notShown: 0, isAdmin: false, announce: "", focusId: null, focusAct: null, error: "" };
   // Who may answer is read once per window open, beside the first list read. A failed read means "not an admin", never the list's error.
   let adminRead = null;
   const keys = new Map(); // ask id -> { choice, key }: the Idempotency-Key of an answer that has not settled yet
   const closed = new Map(); // id -> row closed here, shown until the window closes
-  const busy = new Map(); // id -> "done" | "withdraw"
+  const busy = new Map(); // id -> "done" | "withdraw" | "keep" | "replace" | "release"
+  const confirming = new Map(); // id -> the head the person is being asked to replace (what is on screen)
   let open = [];
   let gen = 0;
   const merge = () => {
@@ -328,6 +354,14 @@ export function createNeedsYou({ call = api, signal, onChange = () => {} } = {})
       if (mine !== gen) return;
       open = all.rows;
       for (const r of open) closed.delete(r.id);
+      // A confirmation is only valid for the head it was shown with: if the request has moved on, or is gone, the question is withdrawn and the new head is on screen.
+      for (const [cid, head] of [...confirming]) {
+        const now = open.find((r) => r.id === cid);
+        if (!now || now.seenHead !== head) {
+          confirming.delete(cid);
+          if (now) st = { ...st, announce: WORDS.headMoved };
+        }
+      }
       st = { ...st, status: "ready", isAdmin, truncated: all.truncated, moreAsks: all.moreAsks, moreItems: all.moreItems, notShown: all.notShown };
       merge();
     } catch (e) {
@@ -337,26 +371,80 @@ export function createNeedsYou({ call = api, signal, onChange = () => {} } = {})
     onChange();
   }
 
-  /** verb: "done" (Mark done) or "withdraw". A second press while one is in flight is ignored. */
-  async function act(id, verb) {
+  /** verb: "done" (Mark done), "withdraw" or "keep". A second press while one is in flight is ignored. */
+  async function act(id, verb, body, said) {
     if (busy.has(id)) return;
     busy.set(id, verb);
     st = { ...st, error: "", announce: "" };
     onChange();
     try {
-      const row = readRequest(await call("POST", actionUrl(id, verb), undefined, signal));
+      const row = readRequest(await call("POST", actionUrl(id, verb), body, signal));
       if (!row) throw new Error("shape");
+      confirming.delete(id);
       open = open.filter((r) => r.id !== id);
       closed.delete(id);
       if (row.state === "open") open = [row, ...open];
       else closed.set(id, row);
-      st = { ...st, announce: row.sentence };
+      // Keep says what it did: the managed line, or that nothing was marked because the pull request is no longer open on this branch.
+      const sentence = said ? said(row) : row.sentence;
+      if (said) row.sentence = sentence;
+      // The answer leaves a row with one control that takes it back (Keep: the undo; Replace waiting for its update: Keep). Focus goes there, as it does when Replace asks again.
+      st = { ...st, announce: sentence, focusAct: isBranchRow(row) && row.branchManaged ? { id, act: "release" } : isBranchRow(row) && row.replacePending ? { id, act: "keep" } : st.focusAct };
       merge();
     } catch (e) {
       busy.delete(id);
       if (cancelled(e)) return;
-      st = { ...st, error: failureSentence(e) };
+      confirming.delete(id);
+      st = { ...st, error: e && e.status === 409 && e.code === "setup_request_head_changed" ? WORDS.headMoved : e && e.status === 409 && e.code === "setup_request_closed" && (verb === "keep" || verb === "replace") ? WORDS.branchAnswered : failureSentence(e) };
       await load(); // a refused action may mean the request changed under the person: show what is true now
+      return;
+    }
+    busy.delete(id);
+    onChange();
+  }
+
+  /** Keep their version: one bare POST; the answer names whether the branch is now marked as managed. */
+  const keep = (id) => act(id, "keep", undefined, (row) => (row.branchManaged ? row.sentence || WORDS.keptNotManaged : WORDS.keptNotManaged));
+
+  /** The first step of Replace: ask once more, showing the head the question is about. Nothing is sent. */
+  function askReplace(id) {
+    const row = open.find((r) => r.id === id && isBranchRow(r) && r.state === "open");
+    if (!row || busy.has(id) || row.seenHead === "") return;
+    confirming.set(id, row.seenHead);
+    st = { ...st, error: "", announce: "", focusAct: { id, act: "replace-yes" } };
+    onChange();
+  }
+  function cancelReplace(id) {
+    if (!confirming.delete(id)) return;
+    st = { ...st, focusAct: { id, act: "replace" } };
+    onChange();
+  }
+  /** The second step: sends the head that was on screen with the explicit confirmation. A branch that moved is refused by the cloud and the page reads again. */
+  function replace(id) {
+    const head = confirming.get(id);
+    if (head === undefined) return Promise.resolve();
+    return act(id, "replace", { shown_head: head, confirm: true }, (row) => (row.replacePending ? row.sentence || WORDS.replaceQueued : WORDS.replaceQueued));
+  }
+
+  /** The undo of Keep: the row leaves the list. */
+  async function release(id) {
+    const row = [...open, ...closed.values()].find((r) => r.id === id && r.branchManaged && r.workItemId !== "");
+    if (!row || busy.has(id)) return;
+    busy.set(id, "release");
+    st = { ...st, error: "", announce: "" };
+    onChange();
+    try {
+      const res = await call("POST", releaseUrl(row.workItemId), undefined, signal);
+      if (!res || typeof res.released !== "boolean") throw new Error("shape");
+      open = open.filter((r) => r.id !== id);
+      closed.delete(id);
+      merge();
+      st = { ...st, announce: res.released ? WORDS.released : WORDS.releasedNothing, focusId: "" };
+    } catch (e) {
+      busy.delete(id);
+      if (cancelled(e)) return;
+      st = { ...st, error: failureSentence(e) };
+      await load();
       return;
     }
     busy.delete(id);
@@ -427,7 +515,7 @@ export function createNeedsYou({ call = api, signal, onChange = () => {} } = {})
 
   /** The app has put the announcement on the page: it is said once, so it is not kept for the next draw. Does not redraw. */
   const clearAnnounce = () => {
-    st = { ...st, announce: "", focusId: null };
+    st = { ...st, announce: "", focusId: null, focusAct: null };
   };
 
   // Live events and the timer read through refresh(): one read in flight, and events that arrive during it cause one more read after it.
@@ -473,5 +561,5 @@ export function createNeedsYou({ call = api, signal, onChange = () => {} } = {})
     stopFn = null;
   }
 
-  return { load, act, answer, unstick, start, stop, clearAnnounce, anyBusy: () => busy.size > 0, busyVerb: (id) => busy.get(id) || "", get state() { return st; } };
+  return { load, act, keep, askReplace, cancelReplace, replace, release, confirmingHead: (id) => confirming.get(id) ?? "", answer, unstick, start, stop, clearAnnounce, anyBusy: () => busy.size > 0, busyVerb: (id) => busy.get(id) || "", get state() { return st; } };
 }

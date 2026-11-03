@@ -35,6 +35,14 @@ const request = (over: Req = {}): Req => ({
   state: "open", origin: "agent", created_by: null, created_at: "2026-10-16T20:00:00.000Z", resolution: null, resolved_by: null, resolved_at: null, check_reason: null, check_ran_at: null,
   status_sentence: S1, check_interval_seconds: 60, ...over,
 });
+const WAITING = "Replace is waiting for the next update. The branch changes when the item's next fix round publishes. Keep their version instead to leave it alone.";
+const LOST_SENTENCE = "The branch was updated before your Keep was seen. It is now at 9f8e7d6, and the commit you kept (a1b2c3d) is no longer on the branch. It is still in the pull request's history on GitHub. The cloud will not update the branch again unless you undo Keep.";
+const LOST_REASON = "Someone pushed to the public branch fx/p-7 on acme/widgets-public, and you chose to keep their version.";
+const HEAD_A = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+const HEAD_B = "b2c3d4e5f60718293a4b5c6d7e8f901234567890";
+const pushed = (over: Req = {}): Req =>
+  request({ id: R2, kind: "branch_pushed_by_person", title: "Someone pushed to fx/p-7 on acme/widgets-public", target: "fx/p-7 on acme/widgets-public", env_name: null, target_environment: null, provider_url: null, check: null, origin: "derived", seen_head: HEAD_A, branch_managed: false,
+    reason: "Someone pushed to the public branch fx/p-7 of acme/widgets-public. It is now at a1b2c3d; the cloud last pushed ddddddd. Nothing was overwritten, and the item is paused.", status_sentence: "The cloud will not change this branch while this is open. Choose Keep or Replace, or withdraw it.", check_interval_seconds: null, ...over });
 const A1 = "5c0d9e2a-8b41-4f6e-9a37-2d1e4c6b8a90";
 const ask = (over: Req = {}): Req => ({
   id: A1, work_item_id: "9d2c7b1e-5f3a-4e8b-8a6d-1c2b3a4d5e66", decision_type: "dependency_patch_bump", label: "Patch-level dependency updates",
@@ -83,6 +91,14 @@ interface Mock {
   delay: number;
   retryAfter?: string;
   posts: string[];
+  /** D#598 P1g-3a: the Keep, Replace and undo POSTs, with their bodies; the head the cloud holds now (Replace answers 409 when the page's differs). */
+  branchPosts: { path: string; body: unknown }[];
+  branchHead: string;
+  keepManaged: boolean;
+  /** The Keep lost to an update that was already running: the managed row says so, with the cloud's fixed words. */
+  keepLost?: boolean;
+  /** Every Keep or Replace answers 409 setup_request_closed (the request was answered another way meanwhile). */
+  answeredElsewhere: boolean;
 }
 /** The ask list as the API pages it: one ask a page, the cursor is the index of the next one, so the app must follow it to show them all. */
 const askPage = (asks: unknown[], cursor: string | null) => {
@@ -100,7 +116,7 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
   page.on("console", (m) => m.type() === "error" && !m.text().startsWith("Failed to load resource") && errors.push(m.text()));
   page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
   await page.addInitScript(() => document.addEventListener("securitypolicyviolation", (e) => console.error(`CSP ${e.violatedDirective}`)));
-  const mock: Mock = { requests: [request()], asks: [], merges: [], stalled: [], answerReply: { ask_id: A1, receipt_id: "e1b7c3d4-2f58-4a09-8c6b-7d3e9f1a2b45", answered_option: "bump_now" }, answers: [], notShown: 0, items: [], itemsMore: false, admin: true, me: "ok", fail: [], keys: [], dropAnswers: 0, streaming: false, streamFrame: null, listStatus: 200, doneAnswer: closed("done"), withdrawAnswer: closed("withdrawn"), delay: 0, posts: [], ...tweak };
+  const mock: Mock = { requests: [request()], asks: [], merges: [], stalled: [], answerReply: { ask_id: A1, receipt_id: "e1b7c3d4-2f58-4a09-8c6b-7d3e9f1a2b45", answered_option: "bump_now" }, answers: [], notShown: 0, items: [], itemsMore: false, admin: true, me: "ok", fail: [], keys: [], dropAnswers: 0, streaming: false, streamFrame: null, listStatus: 200, doneAnswer: closed("done"), withdrawAnswer: closed("withdrawn"), delay: 0, posts: [], branchPosts: [], branchHead: HEAD_A, keepManaged: true, answeredElsewhere: false, ...tweak };
   await page.route((u) => u.pathname === "/", async (route) => {
     const res = await route.fetch();
     await route.fulfill({ response: res, headers: { ...res.headers(), "content-security-policy": CSP } });
@@ -130,7 +146,7 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
     }
     if (p === "/api/v1/setup-requests" && req.method() === "GET") {
       if (mock.listStatus !== 200) return json(route, mock.listStatus, { error: { code: "server_error", message: SERVER_TEXT, request_id: "r" } });
-      return json(route, 200, { requests: mock.requests.filter((r) => r.state === "open"), truncated: false });
+      return json(route, 200, { requests: mock.requests.filter((r) => r.state === "open" || r.branch_managed === true || r.replace_pending === true).map((r) => (r.kind === "branch_pushed_by_person" && r.state === "open" ? { ...r, seen_head: mock.branchHead } : r)), truncated: false });
     }
     if (p === "/api/v1/decision-asks" && req.method() === "GET") return json(route, 200, askPage(mock.asks, new URL(req.url()).searchParams.get("cursor")));
     if (p === "/api/v1/merge-ready" && req.method() === "GET") return json(route, 200, { items: mock.merges, not_shown: mock.notShown });
@@ -147,6 +163,23 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
       if (typeof mock.answerReply === "number") return json(route, mock.answerReply, { error: { code: mock.answerReply === 403 ? "forbidden" : mock.answerReply === 409 ? "already_answered" : "x", message: SERVER_TEXT, request_id: "r" } });
       mock.asks = mock.asks.filter((a) => a.id !== answerMatch[1]);
       return json(route, 200, mock.answerReply);
+    }
+    const branch = p.match(/^\/api\/v1\/setup-requests\/([^/]+)\/(keep|replace)$/);
+    if (branch && req.method() === "POST") {
+      mock.branchPosts.push({ path: p, body: req.postDataJSON() });
+      const current = mock.requests.find((r) => r.id === branch[1]);
+      if (branch[2] === "replace" && (req.postDataJSON() as { shown_head?: string } | null)?.shown_head !== mock.branchHead) return json(route, 409, { error: { code: "setup_request_head_changed", message: SERVER_TEXT, request_id: "r" } });
+      if (mock.answeredElsewhere) return json(route, 409, { error: { code: "setup_request_closed", message: SERVER_TEXT, request_id: "r" } });
+      const replacing = branch[2] === "replace";
+      const answered = { ...current, state: "done", resolution: "marked_done", ...(branch[2] === "keep" && mock.keepLost ? { reason: LOST_REASON } : {}), status_sentence: replacing ? WAITING : branch[2] === "keep" && mock.keepLost ? LOST_SENTENCE : branch[2] === "keep" && mock.keepManaged ? "Public branch managed by a person" : null, branch_managed: branch[2] === "keep" && (mock.keepManaged || mock.keepLost === true), replace_pending: replacing };
+      mock.requests = mock.requests.map((r) => (r.id === branch[1] ? answered : r));
+      return json(route, 200, answered);
+    }
+    const release = p.match(/^\/api\/v1\/work-items\/([^/]+)\/public-branch\/release$/);
+    if (release && req.method() === "POST") {
+      mock.branchPosts.push({ path: p, body: req.postDataJSON() });
+      mock.requests = mock.requests.filter((r) => r.branch_managed !== true);
+      return json(route, 200, { released: true });
     }
     const act = p.match(/^\/api\/v1\/setup-requests\/([^/]+)\/(done|withdraw)$/);
     if (act && req.method() === "POST") {
@@ -695,4 +728,160 @@ test.describe("D#598 P8c: Needs you", () => {
       }
     });
   }
+  // ── D#598 P1g-3a: Keep, Replace with its second confirmation, Withdraw and the managed line ─────────────────────────────────────────────────────────────
+  test("P1g-3a: a branch someone pushed to shows the head, and Replace asks a second time before anything is sent; Cancel sends nothing and returns focus", async ({ page }) => {
+    const { mock, errors } = await setup(page, { requests: [pushed()] });
+    await open(page);
+    await expect(t(page, "ny-head")).toHaveText("The branch is now at a1b2c3d4e5f6.");
+    await expect(t(page, "ny-keep-" + R2)).toBeVisible();
+    await expect(t(page, "ny-replace-" + R2)).toBeVisible();
+    await expect(t(page, "ny-withdraw-" + R2)).toBeVisible();
+    await expect(page.locator(`${WIN} [data-act="done"]`)).toHaveCount(0);
+    await press(t(page, "ny-replace-" + R2));
+    await expect(t(page, "ny-confirm")).toContainText("a1b2c3d4e5f6");
+    expect(mock.branchPosts).toEqual([]);
+    await expect(t(page, "ny-replace-yes-" + R2)).toBeFocused();
+    await press(t(page, "ny-replace-cancel-" + R2));
+    await expect(t(page, "ny-confirm")).toHaveCount(0);
+    await expect(t(page, "ny-replace-" + R2)).toBeFocused();
+    expect(mock.branchPosts).toEqual([]);
+    await clean(page, errors);
+  });
+
+  test("P1g-3a: the second confirmation sends the head that was on screen once, closes the request, and says what happens next", async ({ page }) => {
+    const { mock, errors } = await setup(page, { requests: [pushed()] });
+    await open(page);
+    await press(t(page, "ny-replace-" + R2));
+    await press(t(page, "ny-replace-yes-" + R2));
+    await expect(t(page, "ny-sentence")).toHaveText(WAITING);
+    expect(mock.branchPosts).toEqual([{ path: `/api/v1/setup-requests/${R2}/replace`, body: { shown_head: HEAD_A, confirm: true } }]);
+    await expect(t(page, "ny-live")).toHaveText(WAITING);
+    // The one control left takes the choice back, and focus is on it.
+    await expect(t(page, "ny-keep-" + R2)).toBeFocused();
+    await expect(page.locator(`${WIN} [data-act="replace"]`)).toHaveCount(0);
+    await clean(page, errors);
+  });
+
+  test("P1g-3a: after Replace the waiting line outlives a fresh window; Keep from it shows the managed line with its undo and focus lands on the undo", async ({ page }) => {
+    const { mock, errors } = await setup(page, { requests: [pushed()] });
+    await open(page);
+    await press(t(page, "ny-replace-" + R2));
+    await press(t(page, "ny-replace-yes-" + R2));
+    await closeWin(page);
+    await open(page);
+    await expect(t(page, "ny-sentence")).toHaveText(WAITING);
+    await press(t(page, "ny-keep-" + R2));
+    await expect(t(page, "ny-sentence")).toHaveText("Public branch managed by a person");
+    await expect(t(page, "ny-release-" + R2)).toBeFocused();
+    expect(mock.branchPosts.map((b) => b.path)).toEqual([`/api/v1/setup-requests/${R2}/replace`, `/api/v1/setup-requests/${R2}/keep`]);
+    await clean(page, errors);
+  });
+
+  test("P1g-3a: an answer refused because the request was answered another way meanwhile is said in words, never shown as done", async ({ page }) => {
+    const { mock, errors } = await setup(page, { requests: [pushed()] });
+    await open(page);
+    mock.answeredElsewhere = true;
+    await press(t(page, "ny-replace-" + R2));
+    await press(t(page, "ny-replace-yes-" + R2));
+    await expect(t(page, "ny-action-error")).toHaveText("That request was already answered another way, so your choice was not applied. The list now shows what is current.");
+    await expect(t(page, "ny-live")).toHaveText("");
+    await expect(page.locator(`${WIN} [data-testid="ny-state"]`)).toHaveCount(0);
+    await clean(page, errors);
+  });
+
+  test("P1g-3a: the branch moving while the question is open withdraws the question and shows the new head; a stale head sent anyway is refused in words", async ({ page }) => {
+    const { mock, errors } = await setup(page, { requests: [pushed()] });
+    await open(page);
+    await press(t(page, "ny-replace-" + R2));
+    await expect(t(page, "ny-confirm")).toBeVisible();
+    mock.branchHead = HEAD_B;
+    // A stale confirmation reaching the cloud is the 409: the sentence, the new head, no replace.
+    await press(t(page, "ny-replace-yes-" + R2));
+    await expect(t(page, "ny-action-error")).toHaveText("The branch moved again, so nothing was replaced. The new head is shown; check it and choose again.");
+    await expect(t(page, "ny-head")).toHaveText("The branch is now at b2c3d4e5f607.");
+    await expect(t(page, "ny-confirm")).toHaveCount(0);
+    expect(mock.branchPosts).toHaveLength(1);
+    await clean(page, errors);
+  });
+
+  test("P1g-3a: Keep shows the managed line with its undo; the undo clears it and the row leaves; both are one request each", async ({ page }) => {
+    const { mock, errors } = await setup(page, { requests: [pushed()] });
+    await open(page);
+    await press(t(page, "ny-keep-" + R2));
+    await expect(t(page, "ny-sentence")).toHaveText("Public branch managed by a person");
+    await expect(t(page, "ny-release-" + R2)).toBeVisible();
+    expect(mock.branchPosts).toEqual([{ path: `/api/v1/setup-requests/${R2}/keep`, body: null }]);
+    // A fresh window still lists the managed line, so the undo is not lost with the window.
+    await closeWin(page);
+    await open(page);
+    await expect(t(page, "ny-sentence")).toHaveText("Public branch managed by a person");
+    await press(t(page, "ny-release-" + R2));
+    await expect(t(page, "ny-live")).toHaveText("The cloud can update this branch again.");
+    await expect(t(page, "ny-row")).toHaveCount(0);
+    expect(mock.branchPosts.map((b) => b.path)).toEqual([`/api/v1/setup-requests/${R2}/keep`, "/api/v1/work-items/9d2c7b1e-5f3a-4e8b-8a6d-1c2b3a4d5e66/public-branch/release"]);
+    await clean(page, errors);
+  });
+
+  test("P1g-3a: Keep on a pull request that is no longer open says nothing is marked, and offers no undo", async ({ page }) => {
+    const { errors } = await setup(page, { requests: [pushed()], keepManaged: false });
+    await open(page);
+    await press(t(page, "ny-keep-" + R2));
+    await expect(t(page, "ny-sentence")).toHaveText("Done. The pull request is no longer open on this branch, so nothing is marked as managed.");
+    await expect(page.locator(`${WIN} [data-act="release"]`)).toHaveCount(0);
+    await clean(page, errors);
+  });
+
+  test("P1g-3a: axe finds nothing serious or critical on the choices, the second question and the managed line, under every theme", async ({ page }) => {
+    await setup(page, { requests: [pushed()] });
+    await open(page);
+    for (const theme of THEMES) {
+      await applyTheme(page, theme);
+      expect(await axeSeriousOrCritical(page), `${theme}: choices`).toEqual([]);
+    }
+    await press(t(page, "ny-replace-" + R2));
+    for (const theme of THEMES) {
+      await applyTheme(page, theme);
+      expect(await axeSeriousOrCritical(page), `${theme}: second question`).toEqual([]);
+    }
+    await press(t(page, "ny-replace-yes-" + R2));
+    for (const theme of THEMES) {
+      await applyTheme(page, theme);
+      expect(await axeSeriousOrCritical(page), `${theme}: waiting line`).toEqual([]);
+    }
+    await press(t(page, "ny-keep-" + R2));
+    for (const theme of THEMES) {
+      await applyTheme(page, theme);
+      expect(await axeSeriousOrCritical(page), `${theme}: managed line`).toEqual([]);
+    }
+  });
+
+  test("P1g-3a: a Keep that lost to an update already running says so in the cloud's words, under every state and theme, with the undo still offered, no sideways scrolling, and focus on the undo", async ({ page }) => {
+    // The row as the list loads it later (managed, lost): its own words, and the undo.
+    const { errors } = await setup(page, { requests: [pushed({ state: "done", resolution: "marked_done", branch_managed: true, reason: LOST_REASON, status_sentence: LOST_SENTENCE })] });
+    await open(page);
+    await expect(t(page, "ny-sentence")).toHaveText(LOST_SENTENCE);
+    await expect(t(page, "ny-reason")).toHaveText(LOST_REASON);
+    await expect(t(page, "ny-release-" + R2)).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    for (const theme of THEMES) {
+      await applyTheme(page, theme);
+      expect(await axeSeriousOrCritical(page), `${theme}: loaded`).toEqual([]);
+    }
+    await clean(page, errors);
+  });
+
+  test("P1g-3a: pressing Keep on a request whose update was already running shows the lost-Keep words at once, and focus lands on the undo", async ({ page }) => {
+    const { errors } = await setup(page, { requests: [pushed()], keepLost: true });
+    await open(page);
+    await press(t(page, "ny-keep-" + R2));
+    await expect(t(page, "ny-sentence")).toHaveText(LOST_SENTENCE);
+    await expect(t(page, "ny-reason")).toHaveText(LOST_REASON);
+    await expect(t(page, "ny-release-" + R2)).toBeFocused();
+    await expect(t(page, "ny-live")).toHaveText(LOST_SENTENCE);
+    for (const theme of THEMES) {
+      await applyTheme(page, theme);
+      expect(await axeSeriousOrCritical(page), `${theme}: after Keep`).toEqual([]);
+    }
+    await clean(page, errors);
+  });
 });

@@ -5,6 +5,11 @@ import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
+import { raiseBranchPushedByPerson } from "@fx/core/src/setup-requests/branchPushed.js";
+import { keepBranch, releaseBranch, replaceBranch } from "@fx/core/src/setup-requests/branchPushedAnswer.js";
+import { statusSentence } from "@fx/core/src/setup-requests/copy.js";
+import { listSetupRequests } from "@fx/core/src/setup-requests/store.js";
+import { checkPublicBranch } from "../src/fixRoundHeads.js";
 import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
 import { FIX_ROUND_STOP_SENTENCE, REPUBLISH_BRANCH_MOVED_SENTENCE, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE_SENTENCE, REPUBLISH_PAIRING_OFF_SENTENCE, REPUBLISH_PR_CLOSED_SENTENCE, REPUBLISH_PR_MERGED_SENTENCE, REPUBLISH_TIP_MOVED_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
 import { generateKeyPairSync } from "node:crypto";
@@ -42,6 +47,8 @@ describe("a sandbox fix round updates the open public pull request [pg]", () => 
   let fake: ReturnType<typeof createFakeSandbox>;
   let output: () => { exitCode: number; stdout: string };
   let identityMissing = false;
+  /** Runs while the sandbox is being started: what a person can do during a round (the round does not look at the row again until it ends). */
+  let duringRound: (() => Promise<void>) | null = null;
   let privateHeadOf: () => Promise<string | null>;
   const updated = (): PlanePublishLine => ({ phase: "updated", head_sha: NEW_HEAD, tip_sha: NEW_TIP });
   const say = (...lines: PlanePublishLine[]) => ({ exitCode: 0, stdout: lines.map((l) => phaseLine(l)).join("\n") + "\n" });
@@ -51,7 +58,7 @@ describe("a sandbox fix round updates the open public pull request [pg]", () => 
     const port = fake.port;
     return {
       pool: writerPool,
-      port: { ...port, createSandbox: async (o) => (fake.scriptCommand(o.sandboxName, output()), port.createSandbox(o)) } as PlanePublishDeps["port"],
+      port: { ...port, createSandbox: async (o) => (await duringRound?.(), fake.scriptCommand(o.sandboxName, output()), port.createSandbox(o)) } as PlanePublishDeps["port"],
       hook: () => "// the built hook",
       networkPolicy: async () => POLICY,
       identity: () => (identityMissing ? null : { name: "Fulcrumaxe Bot", email: "bot@example.com" }),
@@ -107,6 +114,7 @@ describe("a sandbox fix round updates the open public pull request [pg]", () => 
     fake = createFakeSandbox(noRuntime);
     output = () => say(updated());
     identityMissing = false;
+    duringRound = null;
     privateHeadOf = async () => PRIVATE_HEAD;
     Object.assign(gh, { pushed: true, verified: [], opened: 0 });
     A = await seedAccount(admin, randomUUID());
@@ -227,6 +235,55 @@ describe("a sandbox fix round updates the open public pull request [pg]", () => 
     expect((await settle(await fixRound())).publish).toEqual({ kind: "skipped", why: "not_paired" });
     expect(fake.state.created).toEqual([]);
     expect(await attempts()).toEqual([]);
+  });
+
+  it("D#598 P1g-3a: a Keep that arrives during the sandbox run loses to the push, and says so: the update is recorded on the managed row with its new head and a fixed-code event, the managed line names both commits, and the undo asks nobody", async () => {
+    const THEIRS = "7".repeat(40);
+    const asPerson = { pool: appPool };
+    // A person pushed; the request was raised; they confirmed Replace, so the round's lease is on their head.
+    const [req] = await withTenant(appPool, A.accountId, async (c) => {
+      const raised = await raiseBranchPushedByPerson(c, { workItemId: A.workItemId, seenHead: THEIRS });
+      return raised.kind === "not_applicable" ? [] : [raised.request];
+    });
+    await replaceBranch(asPerson, { accountId: A.accountId, userId: A.userId, id: req!.id, shownHead: THEIRS });
+    duringRound = async () => void (await keepBranch(asPerson, { accountId: A.accountId, userId: A.userId, id: req!.id }));
+    const run = await fixRound();
+    expect(await settle(run)).toMatchObject({ publish: { kind: "updated", attemptNo: 1 } });
+    expect(inputOf()).toMatchObject({ updateOf: THEIRS });
+    // Keep's managed state stands, and the record is not stale: it holds the head the round put on the branch.
+    expect(await planeRow()).toMatchObject({ state: "managed_by_person", head_sha: NEW_HEAD, tip_sha: NEW_TIP, replace_authorized_head: null });
+    expect((await planeRow()).managed_by_person_at).not.toBeNull();
+    const events = (await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'plane.updated_after_keep'", [run])).rows;
+    expect(events).toEqual([{ payload: { code: "updated_after_keep", head: NEW_HEAD, replaced: THEIRS } }]);
+    const [line] = (await withTenant(appPool, A.accountId, (c) => listSetupRequests(c, { state: "needs_you" }))).requests;
+    const said = statusSentence(line!, { checksAvailable: false })!;
+    expect(said).toContain("before your Keep was seen");
+    expect(said).toContain(THEIRS.slice(0, 7));
+    expect(said).toContain(NEW_HEAD.slice(0, 7));
+    expect(line!.reason).not.toContain("Nothing was overwritten");
+    // The undo: the branch is where the record says, so nobody is asked and the cloud's own commit is not called theirs.
+    expect(await releaseBranch(asPerson, { accountId: A.accountId, userId: A.userId, workItemId: A.workItemId })).toBe(true);
+    expect(await checkPublicBranch(writerPool, { publicHead: async () => NEW_HEAD }, { accountId: A.accountId, workItemId: A.workItemId })).toBeNull();
+    expect(await branchRequests()).toMatchObject([{ state: "done" }]);
+    expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: NEW_HEAD, kept_head: null, kept_replaced_at: null });
+  });
+
+  it("D#598 P1g-3a: after a confirmed Replace the hook's lease is the head the person was shown, not the stamp; the update that lands spends the authorization", async () => {
+    const SHOWN = "b".repeat(40);
+    await admin.query("UPDATE plane_pushes SET replace_authorized_head = $2 WHERE work_item_id = $1", [A.workItemId, SHOWN]);
+    const r = await settle(await fixRound());
+    expect(r.publish).toEqual({ kind: "updated", attemptNo: 1 });
+    expect(inputOf()).toMatchObject({ updateOf: SHOWN });
+    expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: NEW_HEAD, replace_authorized_head: null });
+  });
+
+  it("D#598 P1g-3a: a push after the confirmation makes the hook's lease fail: the round is refused, the authorization is spent", async () => {
+    const SHOWN = "b".repeat(40);
+    await admin.query("UPDATE plane_pushes SET replace_authorized_head = $2 WHERE work_item_id = $1", [A.workItemId, SHOWN]);
+    output = () => say({ phase: "refused", code: "public_branch_moved" });
+    expect((await settle(await fixRound())).publish).toEqual({ kind: "refused", code: "republish_branch_moved", attemptNo: 1 });
+    expect(inputOf()).toMatchObject({ updateOf: SHOWN });
+    expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: STAMP, replace_authorized_head: null });
   });
 
   it("the record changing under the attempt (a person takes the branch over, or the stamp moves) after the facts were read starts no sandbox", async () => {

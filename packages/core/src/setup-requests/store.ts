@@ -4,7 +4,7 @@ import { redactShapes } from '@fx/runtime/src/redact.js';
 import { markWorkPending } from '../pendingWork.js';
 import { NotFoundError } from '../tenancy/errors.js';
 import type { CheckOutcome } from './checks.js';
-import type { CheckReasonCode } from './copy.js';
+import { COPY_BRANCH_KEPT_LOST_REASON, type CheckReasonCode } from './copy.js';
 import {
   ENV_NAME_RE,
   DEFAULT_TARGET_ENVIRONMENT,
@@ -30,7 +30,7 @@ import {
  * person's next `advance_work_item` request after the withdrawal; a done request pauses nothing.
  */
 
-export type SetupRequestErrorCode = 'invalid_input' | 'already_open' | 'not_open' | 'work_item_repo_mismatch' | 'not_markable';
+export type SetupRequestErrorCode = 'invalid_input' | 'already_open' | 'not_open' | 'work_item_repo_mismatch' | 'not_markable' | 'head_changed';
 
 /** `invalid_input` and `work_item_repo_mismatch` map to 422, `already_open`, `not_open` and `not_markable` to 409. */
 export class SetupRequestError extends Error {
@@ -69,6 +69,12 @@ export interface SetupRequest {
   repausedAt: Date | null;
   /** `branch_pushed_by_person` only: the public branch head the platform saw when it raised the request (what a confirmed Replace takes its lease on); null for every other kind. */
   seenHead: string | null;
+  /** `branch_pushed_by_person` only, on a request a person answered with Keep: the item's public branch is still marked as managed by a person (the undo is offered). Filled by {@link withManagedFlag}. */
+  branchManaged: boolean;
+  /** `branch_pushed_by_person` only, on the request a person answered with Replace whose authorization is not yet used: the update that uses it has not been published. Filled by {@link withManagedFlag}. */
+  replacePending: boolean;
+  /** `branch_pushed_by_person`, managed by a person, whose Keep lost to an update that was already running: their commit and the head the branch is at now. Filled by {@link withManagedFlag}. */
+  keptReplaced: { kept: string; head: string } | null;
 }
 
 interface Row {
@@ -120,6 +126,9 @@ const map = (r: Row): SetupRequest => ({
   checkRanAt: r.check_ran_at,
   repausedAt: r.repaused_at,
   seenHead: r.seen_head,
+  branchManaged: false,
+  replacePending: false,
+  keptReplaced: null,
 });
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -202,8 +211,8 @@ export function markSetupRequestCheckPending(): void {
 }
 
 export interface ListSetupRequestsInput {
-  /** `open` (default): requests waiting for a person. `all`: every state, newest first. */
-  state?: 'open' | 'all';
+  /** `open` (default): requests waiting for a person. `all`: every state, newest first. `needs_you`: the open ones, plus the one "someone pushed" request per item that a person answered and the push record still follows: Keep while the branch is marked as managed (so the undo stays on the list), Replace while its authorization is unused (so the waiting line and Keep stay on the list). */
+  state?: 'open' | 'all' | 'needs_you';
   workItemId?: string;
   repoId?: string;
   limit?: number;
@@ -220,14 +229,39 @@ export async function listSetupRequests(client: PoolClient, input: ListSetupRequ
   }
   const { rows } = await client.query<Row>(
     `SELECT ${COLUMNS} FROM setup_requests
-      WHERE ($1::text = 'all' OR state = 'open')
+      WHERE ($1::text = 'all' OR state = 'open'
+             OR ($1::text = 'needs_you' AND kind = 'branch_pushed_by_person' AND state = 'done' AND resolution = 'marked_done'
+                 AND EXISTS (SELECT 1 FROM plane_pushes p WHERE p.answered_request_id = setup_requests.id AND (p.managed_by_person_at IS NOT NULL OR p.replace_authorized_head IS NOT NULL))))
         AND ($2::uuid IS NULL OR work_item_id = $2::uuid)
         AND ($3::uuid IS NULL OR repo_id = $3::uuid)
       ORDER BY created_at DESC, id
       LIMIT $4::integer`,
     [input.state ?? 'open', input.workItemId ?? null, input.repoId ?? null, limit + 1],
   );
-  return { requests: rows.slice(0, limit).map(map), truncated: rows.length > limit };
+  return { requests: await withManagedFlag(client, rows.slice(0, limit).map(map)), truncated: rows.length > limit };
+}
+
+/**
+ * Marks the answered "someone pushed" request that the push record follows: `branchManaged` while the branch is still marked as managed by a person (Keep), and
+ * `replacePending` while a confirmed Replace waits for the next update. Only the request the push record names (`answered_request_id`) is marked, never every
+ * closed request of the item.
+ */
+export async function withManagedFlag(client: PoolClient, requests: SetupRequest[]): Promise<SetupRequest[]> {
+  const ids = requests.filter((r) => r.kind === 'branch_pushed_by_person' && r.state === 'done').map((r) => r.id);
+  if (ids.length === 0) return requests;
+  const { rows } = await client.query<{ id: string; managed: boolean; pending: boolean; kept: string | null; head: string | null; replaced: boolean }>(
+    `SELECT answered_request_id AS id, managed_by_person_at IS NOT NULL AS managed, replace_authorized_head IS NOT NULL AS pending, kept_head AS kept, head_sha AS head,
+            kept_replaced_at IS NOT NULL AS replaced FROM plane_pushes WHERE answered_request_id = ANY($1::uuid[])`,
+    [ids],
+  );
+  const by = new Map(rows.map((r) => [r.id, r]));
+  return requests.map((r) => {
+    const flag = by.get(r.id);
+    if (!flag || r.kind !== 'branch_pushed_by_person' || r.state !== 'done') return r;
+    // A Keep that lost: the reason written when the request was raised ("nothing was overwritten") is no longer true, so the answered request reads the fixed words instead.
+    const lost = flag.managed && flag.replaced && flag.kept !== null && flag.head !== null;
+    return { ...r, branchManaged: flag.managed, replacePending: !flag.managed && flag.pending, keptReplaced: lost ? { kept: flag.kept!, head: flag.head! } : null, ...(lost ? { reason: COPY_BRANCH_KEPT_LOST_REASON.replace('{target}', r.target) } : {}) };
+  });
 }
 
 export async function getSetupRequest(client: PoolClient, id: string): Promise<SetupRequest> {

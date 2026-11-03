@@ -20,5 +20,8 @@
   "check_reason": null,
   "check_ran_at": null,
   "status_sentence": null,
-  "check_interval_seconds": null
+  "check_interval_seconds": null,
+  "seen_head": null,
+  "branch_managed": false,
+  "replace_pending": false
 }

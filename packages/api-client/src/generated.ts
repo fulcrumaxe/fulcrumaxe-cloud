@@ -1885,10 +1885,91 @@ export interface Operations {
       default: boolean;
     };
   };
+  keepPublicBranch: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      id: string;
+      repo_id: string;
+      work_item_id: string | null;
+      kind: "env_var" | "app_not_installed" | "parity_drift" | "parent_pr_closed" | "branch_pushed_by_person" | "overlay_path_missing";
+      title: string;
+      target: string;
+      env_name: string | null;
+      target_environment: ("production" | "preview" | "development") | (null);
+      reason: string;
+      provider_url: string | null;
+      check: ("env_var_present") | (null);
+      state: "open" | "done" | "withdrawn";
+      origin: "agent" | "derived";
+      created_by: string | null;
+      created_at: string;
+      resolution: ("marked_done" | "check_passed" | "condition_cleared" | "withdrawn") | (null);
+      resolved_by: string | null;
+      resolved_at: string | null;
+      check_reason: string | null;
+      check_ran_at: string | null;
+      status_sentence: string | null;
+      check_interval_seconds: (number) | (null);
+      seen_head: string | null;
+      branch_managed: boolean;
+      replace_pending: boolean;
+    };
+  };
+  replacePublicBranch: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      shown_head: string;
+      confirm: true;
+    };
+    response: {
+      id: string;
+      repo_id: string;
+      work_item_id: string | null;
+      kind: "env_var" | "app_not_installed" | "parity_drift" | "parent_pr_closed" | "branch_pushed_by_person" | "overlay_path_missing";
+      title: string;
+      target: string;
+      env_name: string | null;
+      target_environment: ("production" | "preview" | "development") | (null);
+      reason: string;
+      provider_url: string | null;
+      check: ("env_var_present") | (null);
+      state: "open" | "done" | "withdrawn";
+      origin: "agent" | "derived";
+      created_by: string | null;
+      created_at: string;
+      resolution: ("marked_done" | "check_passed" | "condition_cleared" | "withdrawn") | (null);
+      resolved_by: string | null;
+      resolved_at: string | null;
+      check_reason: string | null;
+      check_ran_at: string | null;
+      status_sentence: string | null;
+      check_interval_seconds: (number) | (null);
+      seen_head: string | null;
+      branch_managed: boolean;
+      replace_pending: boolean;
+    };
+  };
+  releasePublicBranch: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      released: boolean;
+    };
+  };
   listSetupRequests: {
     path: undefined;
     query: {
-      state?: "open" | "all";
+      state?: "open" | "all" | "needs_you";
       work_item_id?: string;
       repo_id?: string;
     };
@@ -1917,6 +1998,9 @@ export interface Operations {
         check_ran_at: string | null;
         status_sentence: string | null;
         check_interval_seconds: (number) | (null);
+        seen_head: string | null;
+        branch_managed: boolean;
+        replace_pending: boolean;
       }>;
       truncated: boolean;
     };
@@ -1958,6 +2042,9 @@ export interface Operations {
       check_ran_at: string | null;
       status_sentence: string | null;
       check_interval_seconds: (number) | (null);
+      seen_head: string | null;
+      branch_managed: boolean;
+      replace_pending: boolean;
     };
   };
   getSetupRequest: {
@@ -1989,6 +2076,9 @@ export interface Operations {
       check_ran_at: string | null;
       status_sentence: string | null;
       check_interval_seconds: (number) | (null);
+      seen_head: string | null;
+      branch_managed: boolean;
+      replace_pending: boolean;
     };
   };
   withdrawSetupRequest: {
@@ -2020,6 +2110,9 @@ export interface Operations {
       check_ran_at: string | null;
       status_sentence: string | null;
       check_interval_seconds: (number) | (null);
+      seen_head: string | null;
+      branch_managed: boolean;
+      replace_pending: boolean;
     };
   };
   markSetupRequestDone: {
@@ -2051,6 +2144,9 @@ export interface Operations {
       check_ran_at: string | null;
       status_sentence: string | null;
       check_interval_seconds: (number) | (null);
+      seen_head: string | null;
+      branch_managed: boolean;
+      replace_pending: boolean;
     };
   };
   listDecisionAsks: {
@@ -5499,6 +5595,39 @@ export const operations = {
     pathParams: ["id"],
     queryParams: [],
     hasBody: true,
+  },
+  keepPublicBranch: {
+    method: "POST",
+    path: "/api/v1/setup-requests/{id}/keep",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  replacePublicBranch: {
+    method: "POST",
+    path: "/api/v1/setup-requests/{id}/replace",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  releasePublicBranch: {
+    method: "POST",
+    path: "/api/v1/work-items/{id}/public-branch/release",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
   },
   listSetupRequests: {
     method: "GET",

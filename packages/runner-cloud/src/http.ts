@@ -320,7 +320,7 @@ export interface RunnerLeaseOps {
   >;
   planePushSettleGrant?(
     input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number; attemptId: string } & ({ issued: true } | { issued: false; code: string }),
-  ): Promise<boolean>;
+  ): Promise<boolean | { kind: "refused"; code: string }>;
   planePushReportContext?(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }): Promise<
     | { kind: "fenced"; reason: StopReason }
     | { kind: "not_paired" }

@@ -5,7 +5,7 @@ import { CHILD_BODY_CLOSING_CODE, buildPlanePushText, prFooterSkipReason } from 
 import { safeChildTitle } from "@fx/core/src/work-items/childTitle.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { PRIVATE_READ_CLASS_SENTENCE, PRIVATE_READ_REFUSAL_KIND } from "@fx/core/src/repos/publicChangeCopy.js";
-import { PUBLISH_ATTEMPT_LIMIT, mayRetryPublish, pairingDigest, publicPullRequestUrlMatches, recordUpdatedHead, recordVerifiedOutcome, type PlanePushState, type RetryFacts, type VerifiedOutcome } from "@fx/core/src/repos/planePushRecord.js";
+import { PUBLISH_ATTEMPT_LIMIT, mayRetryPublish, pairingDigest, publicPullRequestUrlMatches, recordUpdatedHead, recordVerifiedOutcome, UPDATED_AFTER_KEEP_EVENT, updatedAfterKeepPayload, type PlanePushState, type RetryFacts, type VerifiedOutcome } from "@fx/core/src/repos/planePushRecord.js";
 import { REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_NO_CHANGE, REPUBLISH_PAIRING_OFF, REPUBLISH_PR_CLOSED, REPUBLISH_PR_MERGED, REPUBLISH_TIP_MOVED } from "@fx/core/src/work-items/baseSync.js";
 import { TERMINAL_WORK_ITEM_STAGES } from "@fx/core/src/work-items/stages.js";
 import { resolveBuildIdentity, type BuildIdentity, type BuildPurpose } from "@fx/core/src/work-items/buildIdentity.js";
@@ -157,7 +157,7 @@ async function readFacts(client: PoolClient, accountId: string, which: { runId: 
   );
   const p = pairs[0];
   const { rows: pushes } = await client.query(
-    `SELECT id, code_repo, branch, pairing_digest, state, head_sha, managed_by_person_at IS NOT NULL AS managed FROM plane_pushes
+    `SELECT id, code_repo, branch, pairing_digest, state, head_sha, replace_authorized_head, managed_by_person_at IS NOT NULL AS managed FROM plane_pushes
       WHERE account_id = $1 AND work_item_id = $2 AND repo_id = $3
       ORDER BY COALESCE(lower(code_repo) = lower($4::text), false) DESC, created_at DESC, id LIMIT 1`,
     [accountId, r.work_item_id, r.dispatch_repo_id, p?.code_repo ?? null],
@@ -185,7 +185,7 @@ async function readFacts(client: PoolClient, accountId: string, which: { runId: 
   );
   return {
     itemStage: r.item_stage as string,
-    stamp: typeof push.head_sha === "string" ? push.head_sha : null, fixBase, updateAttempts: updates[0]?.n ?? 0,
+    stamp: typeof push.replace_authorized_head === "string" ? push.replace_authorized_head : typeof push.head_sha === "string" ? push.head_sha : null, fixBase, updateAttempts: updates[0]?.n ?? 0,
     runId: r.run_id, status: r.status, sandboxSide: r.sandbox_side === true, baseSha: buildBase, workItemId: r.work_item_id,
     repo: { id: r.dispatch_repo_id, owner: r.gh_owner, name: r.gh_name }, title: r.title,
     pushId: push.id, codeRepo: push.code_repo, branch: push.branch, stampedDigest: push.pairing_digest, state: push.state, managedByPerson: push.managed === true,
@@ -550,13 +550,13 @@ async function republish(deps: PlanePublishDeps, accountId: string, facts: Facts
       await insertAgentRun(deps.pool, {
         id: randomUUID(), accountId, workItemId: facts.workItemId, parentRunId: facts.runId, role: PLANE_PUBLISH_ROLE, runtime: "production", dispatchRepoId: facts.repo.id,
         inCreateTransaction: async (client, runId) => {
-          const { rows: locked } = await client.query<{ state: string; managed: boolean; head_sha: string | null }>(
-            "SELECT state, managed_by_person_at IS NOT NULL AS managed, head_sha FROM plane_pushes WHERE account_id = $1 AND id = $2 FOR UPDATE",
+          const { rows: locked } = await client.query<{ state: string; managed: boolean; head_sha: string | null; replace_authorized_head: string | null }>(
+            "SELECT state, managed_by_person_at IS NOT NULL AS managed, head_sha, replace_authorized_head FROM plane_pushes WHERE account_id = $1 AND id = $2 FOR UPDATE",
             [accountId, facts.pushId],
           );
           // The facts were read before this lock: act only on what is true now (still open, still ours, still at the head read above).
           const row = locked[0];
-          if (!row || row.managed || row.state !== "pr_opened" || row.head_sha !== stamp) throw new PushRowChanged();
+          if (!row || row.managed || row.state !== "pr_opened" || (row.replace_authorized_head ?? row.head_sha) !== stamp) throw new PushRowChanged();
           // The item may have been closed or merged since the facts were read.
           const { rows: item } = await client.query<{ stage: string }>("SELECT stage FROM work_items WHERE account_id = $1 AND id = $2", [accountId, facts.workItemId]);
           if (!item[0] || (TERMINAL_WORK_ITEM_STAGES as readonly string[]).includes(item[0].stage)) throw new PushRowChanged();
@@ -588,8 +588,10 @@ async function republish(deps: PlanePublishDeps, accountId: string, facts: Facts
       pushId: facts.pushId, attemptId, runId: publishRunId, outcome: null, label: end.kind === "updated" ? "updated" : end.label, ...extra,
       after: async (client) => {
         if (end.kind === "updated") {
-          // Only an open, platform-owned row moves; a person who took the branch over meanwhile keeps it.
-          await recordUpdatedHead(client, { accountId, id: facts.pushId, headSha: end.headSha, tipSha: end.tipSha, sourceHead });
+          // An open, platform-owned row moves. A row a person chose to keep during the run moves too (the push happened, the lease being on their head): the record must hold the head that is on
+          // the branch, and a fixed-code event on the executor run says the Keep lost.
+          const moved = await recordUpdatedHead(client, { accountId, id: facts.pushId, headSha: end.headSha, tipSha: end.tipSha, sourceHead });
+          if (moved?.keptReplacedAt) await insertRunEvent(client, accountId, facts.runId, UPDATED_AFTER_KEEP_EVENT, updatedAfterKeepPayload(moved));
         } else {
           await recordRepublishRefusal(client, who, { code: end.code, prNumber: null, moveToNeedsPerson: true, attempt: facts.runId });
         }
