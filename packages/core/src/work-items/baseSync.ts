@@ -40,6 +40,9 @@ export const REPUBLISH_STACKED_UNSUPPORTED = 'republish_stacked_unsupported';
 export const REPUBLISH_STACK_PARENT_ENDED = 'republish_stack_parent_ended';
 /** D#6 FIXROUND-REPUBLISH-STACKED: the pull request a change is stacked on was closed without merging. The change's branch still holds that closed work, so a round is refused before any merge, whatever the pull request's base now is. Recorded as `escalated`. */
 export const REPUBLISH_STACK_PARENT_CLOSED = 'republish_stack_parent_closed';
+/** D#6 FIXROUND-RETARGET-OPEN-PARENT: this change's pull request targets main while the pull request it is stacked on is still open, so its branch holds that unmerged work and a round would publish it. Refused before any merge; recorded as `escalated`. */
+export const REPUBLISH_STACK_PARENT_OPEN = 'republish_stack_parent_open';
+export const REPUBLISH_STACK_PARENT_OPEN_SENTENCE = "The pull request this change is stacked on is still open, but this pull request's base is main, and this change's branch holds that unmerged work, so another round would publish it. Nothing was started. Change this pull request's base back to the branch it is stacked on, on GitHub; then an owner or admin can press Request changes, once no agents are working, to run another round.";
 export const REPUBLISH_BASE_MISSING_SENTENCE = "The cloud couldn't tell which commit of main this change builds on, so it can't update the public pull request safely. Nothing was started. Ask a person to look at the branch, then press Build again.";
 export const REPUBLISH_STACKED_UNSUPPORTED_SENTENCE = "This change is stacked on another pull request, and the cloud updates the public copy of a stacked change only from a review or check fix round that runs in the cloud's sandbox. Nothing was started. Merge the pull request it is stacked on and change this pull request's base to main on GitHub; then an owner or admin can press Request changes, once no agents are working, to run another round.";
 export const REPUBLISH_STACK_PARENT_ENDED_SENTENCE = "The pull request this change is stacked on has been merged, but this one still points at its branch. Nothing was started. Change this pull request's base to main on GitHub; then an owner or admin can press Request changes, once no agents are working, to run another round.";
@@ -109,6 +112,7 @@ export const FIX_ROUND_STOP_SENTENCE: Readonly<Record<string, string>> = {
   [REPUBLISH_STACKED_UNSUPPORTED]: REPUBLISH_STACKED_UNSUPPORTED_SENTENCE,
   [REPUBLISH_STACK_PARENT_ENDED]: REPUBLISH_STACK_PARENT_ENDED_SENTENCE,
   [REPUBLISH_STACK_PARENT_CLOSED]: REPUBLISH_STACK_PARENT_CLOSED_SENTENCE,
+  [REPUBLISH_STACK_PARENT_OPEN]: REPUBLISH_STACK_PARENT_OPEN_SENTENCE,
   [REPUBLISH_BRANCH_MOVED]: REPUBLISH_BRANCH_MOVED_SENTENCE,
   [REPUBLISH_FAILED]: REPUBLISH_FAILED_SENTENCE,
   [REPUBLISH_NO_CHANGE]: REPUBLISH_NO_CHANGE_SENTENCE,

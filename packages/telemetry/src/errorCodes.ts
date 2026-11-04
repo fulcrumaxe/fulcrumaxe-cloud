@@ -369,6 +369,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "republish_stacked_unsupported",
   "republish_stack_parent_ended",
   "republish_stack_parent_closed",
+  "republish_stack_parent_open",
   "republish_branch_moved",
   "republish_failed",
   "republish_no_change",

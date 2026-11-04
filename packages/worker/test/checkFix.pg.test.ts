@@ -532,6 +532,30 @@ describe("check fix round [pg]", () => {
         expect(resumed).toHaveLength(0);
       });
 
+      // D#6 FIXROUND-RETARGET-OPEN-PARENT: the parent has not ended in our rows (it looks open), and the pull request targets main.
+      it.each([
+        ["sandbox", "still open on GitHub", async () => open, "republish_stack_parent_open"],
+        ["runner", "still open on GitHub", async () => open, "republish_stack_parent_open"],
+        ["sandbox", "closed on GitHub, the item still looks open", async () => ({ ...open, state: "closed", merged: false }), "republish_stack_parent_closed"],
+        ["runner", "closed on GitHub, the item still looks open", async () => ({ ...open, state: "closed", merged: false }), "republish_stack_parent_closed"],
+        ["sandbox", "unreadable", async () => { throw new Error("boom ghp_000"); }, "base_sync_unavailable"],
+        ["runner", "unreadable", async () => { throw new Error("boom ghp_000"); }, "base_sync_unavailable"],
+      ] as const)("a retargeted %s change whose parent is %s is refused %s: no merge, nothing started", async (side, _l, read, code) => {
+        const refused = await stackedRound(side, read as never, { retargeted: true });
+        expect(refused.out).toEqual({ ok: false, reason: code });
+        expect(refused.merges).not.toHaveBeenCalled();
+        expect(refused.sync.mock.calls.every((c) => c[0].readOnly === true)).toBe(true);
+        expect(refused.readParent).toHaveBeenCalledTimes(1);
+        expect(resumed).toHaveLength(0);
+      });
+
+      it.each(["sandbox", "runner"] as const)("a retargeted %s change whose parent merged on GitHub while our rows still say open goes on: the live read allows it, one merge of main", async (side) => {
+        const ok = await stackedRound(side, async () => ({ ...open, state: "closed", merged: true }), { retargeted: true });
+        expect(ok.out.ok).toBe(true);
+        expect(ok.merges).toHaveBeenCalledTimes(1);
+        expect(ok.readParent).toHaveBeenCalledTimes(1);
+      });
+
       it("a retargeted change whose parent merged goes on: one merge of main", async () => {
         const ok = await stackedRound("sandbox", async () => open, { stage: "merged", retargeted: true });
         expect(ok.out.ok).toBe(true);
