@@ -216,6 +216,20 @@ describe('memory queue and list (D#601 MEM-4a1)', () => {
       expect((await find(ctx(a.accountId, aAdmin), v2.id)).openState).toBe('unopened');
       expect((await memoryQueue(ctx(a.accountId, aAdmin), { repoId: a.repoId })).cards.map((c) => c.entry.id)).not.toContain(imp);
     });
+    it('leaves out a proposal whose expiry has passed, before the sweep marks it expired, and keeps one that has not expired', async () => {
+      const old = await proposal(a.accountId, { author: 'agent', prov: { source_run_id: 'run-exp-1' } });
+      const fresh = await proposal(a.accountId, { author: 'agent', prov: { source_run_id: 'run-exp-2' } });
+      const ids = async () => (await memoryQueue(ctx(a.accountId, aAdmin), { repoId: a.repoId })).cards.map((c) => c.entry.id);
+      const badge = async () => (await memoryPendingCounts(ctx(a.accountId, aAdmin), { repoIds: [a.repoId] })).repos[a.repoId]!;
+      expect(await ids()).toEqual(expect.arrayContaining([old, fresh]));
+      const before = await badge();
+      await admin.query(`UPDATE memory_entries SET expires_at = now() - interval '1 second' WHERE id = $1`, [old]);
+      const after = await ids();
+      expect(after).not.toContain(old);
+      expect(after).toContain(fresh);
+      expect(await badge()).toBe(before - 1);
+      expect((await admin.query(`SELECT status FROM memory_entries WHERE id = $1`, [old])).rows[0].status).toBe('proposed');
+    });
     it('keeps "Proposed by agent (run <id>)" after a person edits an agent proposal', async () => {
       const agent = await proposal(a.accountId, { author: 'agent', prov: { source_run_id: 'run-edit-1' } });
       const v2 = await editMemory(ctx(a.accountId, aAdmin), { id: agent, body: text('person edit of an agent proposal') });
