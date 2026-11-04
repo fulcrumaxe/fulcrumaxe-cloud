@@ -143,6 +143,25 @@ describe("branch sync: stacked pull requests (R2-c0)", () => {
     // A change on the default branch is never refused by the flag.
     expect(await ask2(setup(world()), true)).toMatchObject({ kind: "merged", stacked: false });
   });
+
+  // D#6 FIXROUND-REPUBLISH-STACKED: the caller verified the parent is open and names its branch; the port goes on only when that is the pull request's base.
+  it("stackBranch equal to the base goes on to the merge by sha (parents checked); an unequal or absent one is answered stacked with no ref read and no merge; a change on the default branch is unchanged", async () => {
+    const w = world();
+    stack(w);
+    const t = setup(w);
+    expect(await t.port.sync({ repo: REPO, branch: BRANCH, prNumber: 12, publicCopy: true, stackBranch: "fx/parent" })).toMatchObject({ kind: "merged", baseSha: hex("4"), baseRef: "fx/parent", stacked: true, parents: [hex("2"), hex("4")] });
+    expect(t.bodies).toEqual([{ base: BRANCH, head: hex("4"), commit_message: `Bring ${BRANCH} up to date with fx/parent` }]);
+    for (const stackBranch of ["fx/other", "main", undefined]) {
+      const other = world();
+      stack(other);
+      const o = setup(other);
+      expect(await o.port.sync({ repo: REPO, branch: BRANCH, prNumber: 12, publicCopy: true, ...(stackBranch === undefined ? {} : { stackBranch }) })).toEqual({ kind: "stacked", baseRef: "fx/parent" });
+      expect(o.log).toEqual([`GET /repos/acme/widgets/pulls/12`, `DELETE /installation/token`]);
+      expect(o.bodies).toEqual([]);
+    }
+    const plain = setup(world());
+    expect(await plain.port.sync({ repo: REPO, branch: BRANCH, prNumber: 12, publicCopy: true, stackBranch: "fx/parent" })).toMatchObject({ kind: "merged", baseRef: "main", stacked: false });
+  });
 });
 
 describe("branch sync: read only (D#519 MQ4-e1-b)", () => {

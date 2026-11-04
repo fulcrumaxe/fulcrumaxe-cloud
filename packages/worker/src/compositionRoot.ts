@@ -328,6 +328,7 @@ export function fixRoundHeadPorts(ports: Pick<WorkerPorts, "continuationBase" | 
     ...(base ? { privateHead: (input: { repo: { id: string; owner: string; name: string }; branch: string }) => base.headOid(input) } : {}),
     ...(ports.branchSync ? { syncBase: (input: Parameters<BranchSyncPort["sync"]>[0]) => ports.branchSync!.sync(input) } : {}),
     ...(hosted?.branchHead ? { publicHead: hosted.branchHead.bind(hosted) } : {}),
+    ...(ports.planePublish?.stackBase ? { stackBase: ports.planePublish.stackBase } : {}),
   };
 }
 

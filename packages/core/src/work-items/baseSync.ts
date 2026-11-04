@@ -18,8 +18,14 @@ export const BASE_SYNC_UNAVAILABLE_SENTENCE = "Couldn't bring the branch up to d
  */
 export const REPUBLISH_BASE_MISSING = 'republish_base_missing';
 export const REPUBLISH_STACKED_UNSUPPORTED = 'republish_stacked_unsupported';
+/** D#6 FIXROUND-REPUBLISH-STACKED: the pull request a change is stacked on was merged or closed, but this change's own pull request still points at its branch. Refused before any merge; recorded as `escalated`. */
+export const REPUBLISH_STACK_PARENT_ENDED = 'republish_stack_parent_ended';
+/** D#6 FIXROUND-REPUBLISH-STACKED: the pull request a change is stacked on was closed without merging. The change's branch still holds that closed work, so a round is refused before any merge, whatever the pull request's base now is. Recorded as `escalated`. */
+export const REPUBLISH_STACK_PARENT_CLOSED = 'republish_stack_parent_closed';
 export const REPUBLISH_BASE_MISSING_SENTENCE = "The cloud couldn't tell which commit of main this change builds on, so it can't update the public pull request safely. Nothing was started. Ask a person to look at the branch, then press Build again.";
-export const REPUBLISH_STACKED_UNSUPPORTED_SENTENCE = "This change is stacked on another pull request, and the cloud can't update the public copy of a stacked change yet. Nothing was started. Merge the pull request it is stacked on, then press Build again.";
+export const REPUBLISH_STACKED_UNSUPPORTED_SENTENCE = "This change is stacked on another pull request, and the cloud updates the public copy of a stacked change only from a review or check fix round that runs in the cloud's sandbox. Nothing was started. Merge the pull request it is stacked on and change this pull request's base to main on GitHub; then an owner or admin can press Request changes, once no agents are working, to run another round.";
+export const REPUBLISH_STACK_PARENT_ENDED_SENTENCE = "The pull request this change is stacked on has been merged, but this one still points at its branch. Nothing was started. Change this pull request's base to main on GitHub; then an owner or admin can press Request changes, once no agents are working, to run another round.";
+export const REPUBLISH_STACK_PARENT_CLOSED_SENTENCE = "The pull request this change is stacked on was closed without being merged, and this change's branch still holds that closed work, so changing this pull request's base to main would publish it. Nothing was started. Reopen the closed pull request on GitHub (restore its branch first if it was deleted) and make sure this pull request's base is that branch; then an owner or admin can press Request changes, once no agents are working, to run another round.";
 
 /**
  * FIXROUND-REPUBLISH (R2-c1): the fix round finished and its change is on the private branch, but the public pull request could not be updated from it. Recorded as `escalated`; the item goes to a person.
@@ -83,6 +89,8 @@ export const FIX_ROUND_STOP_SENTENCE: Readonly<Record<string, string>> = {
   [BASE_SYNC_UNAVAILABLE]: BASE_SYNC_UNAVAILABLE_SENTENCE,
   [REPUBLISH_BASE_MISSING]: REPUBLISH_BASE_MISSING_SENTENCE,
   [REPUBLISH_STACKED_UNSUPPORTED]: REPUBLISH_STACKED_UNSUPPORTED_SENTENCE,
+  [REPUBLISH_STACK_PARENT_ENDED]: REPUBLISH_STACK_PARENT_ENDED_SENTENCE,
+  [REPUBLISH_STACK_PARENT_CLOSED]: REPUBLISH_STACK_PARENT_CLOSED_SENTENCE,
   [REPUBLISH_BRANCH_MOVED]: REPUBLISH_BRANCH_MOVED_SENTENCE,
   [REPUBLISH_FAILED]: REPUBLISH_FAILED_SENTENCE,
   [REPUBLISH_NO_CHANGE]: REPUBLISH_NO_CHANGE_SENTENCE,

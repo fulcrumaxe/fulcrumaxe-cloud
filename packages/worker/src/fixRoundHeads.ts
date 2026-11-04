@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
 import type { BranchSyncOutcome } from "@fx/github";
+import type { StackBasePort } from "@fx/pipeline";
 import { PUBLIC_BRANCH_MOVED, PUBLIC_HEAD_UNAVAILABLE, readPlanePush, type BranchHeadPort } from "@fx/core/src/repos/planePushRecord.js";
 import { clearBranchPushedByPerson, clearReplaceAuthorization, raiseBranchPushedByPerson } from "@fx/core/src/setup-requests/branchPushed.js";
 
@@ -29,7 +30,9 @@ export interface FixRoundHeadPorts {
   /** The paired public branch's head now, or null when the branch does not exist. A throw is "GitHub could not be asked". */
   publicHead?: BranchHeadPort["branchHead"];
   /** FIXROUND-BASE-SYNC: merges the pull request's base branch into its private branch (fixRoundBase.ts). A throw is "GitHub could not be asked". */
-  syncBase?: (input: { repo: { id: string; owner: string; name: string }; branch: string; prNumber: number; publicCopy?: boolean; readOnly?: boolean }) => Promise<BranchSyncOutcome>;
+  syncBase?: (input: { repo: { id: string; owner: string; name: string }; branch: string; prNumber: number; publicCopy?: boolean; readOnly?: boolean; stackBranch?: string }) => Promise<BranchSyncOutcome>;
+  /** D#6 FIXROUND-REPUBLISH-STACKED: reads the pull request a stacked change is stacked on, so a sandbox fix round can go on while it is open. Absent: a stacked change with a public copy is refused. */
+  stackBase?: StackBasePort;
 }
 
 export const PR_HEAD_UNAVAILABLE = "pr_head_unavailable";

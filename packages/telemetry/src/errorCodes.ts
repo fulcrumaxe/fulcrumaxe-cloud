@@ -367,6 +367,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "base_sync_unavailable",
   "republish_base_missing",
   "republish_stacked_unsupported",
+  "republish_stack_parent_ended",
+  "republish_stack_parent_closed",
   "republish_branch_moved",
   "republish_failed",
   "republish_no_change",

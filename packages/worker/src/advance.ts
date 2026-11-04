@@ -1866,7 +1866,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         // FIXROUND-BASE-SYNC: bring the branch up to date with its base before anything starts; a conflict goes to a person, any other failure refuses the round.
         // A conflict round skips the sync (D#519 R-519-C6-1): the executor merges the default branch itself, and a conflict there is the very work it was asked to do.
         if (!conflict) {
-          const sync = await syncRunBranch(runnerPool, deps.fixHeads, who, { repo: { id: repoId, owner: found.coords.gh_owner, name: found.coords.gh_name }, pr, liveHead: head.head, moveToNeedsPerson: true, attempt: attemptKey, publicCopy });
+          const sync = await syncRunBranch(runnerPool, deps.fixHeads, who, { repo: { id: repoId, owner: found.coords.gh_owner, name: found.coords.gh_name }, pr, liveHead: head.head, moveToNeedsPerson: true, attempt: attemptKey, publicCopy, stackedOk: !runnerSide });
           if (!sync.ok) return refuse(sync.reason);
           baseSynced = sync.synced;
           // The base is signed only for the branch that was synced: the issuer compares it with the branch it resolves for the job.
