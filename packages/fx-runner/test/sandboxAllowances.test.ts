@@ -95,6 +95,8 @@ describe("R7b: the per-job environment", () => {
       XDG_CACHE_HOME: "/t/rn-1/xdg-cache",
       pnpm_config_store_dir: "/c/pnpm-store/acme__widgets",
       pnpm_config_verify_store_integrity: "true",
+      pnpm_config_pm_on_fail: "ignore",
+      npm_config_manage_package_manager_versions: "false",
       BASH_DEFAULT_TIMEOUT_MS: "900000",
       BASH_MAX_TIMEOUT_MS: "900000",
       BASH_MAX_OUTPUT_LENGTH: "30000",

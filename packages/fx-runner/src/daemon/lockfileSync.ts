@@ -29,7 +29,7 @@ import { chmodSync, closeSync, constants, lstatSync, mkdirSync, mkdtempSync, ope
 import path from "node:path";
 import { JSON_SCHEMA, load } from "js-yaml";
 import { redactShapes } from "@fulcrumaxe/runner-protocol";
-import { MAX_LOCKFILE_BYTES, projectIsPlain, readRootFile, registryUrlOf, settingsRefusal, TAIL_SHOWN_CHARS, type DepsRefusal } from "./depsInstall.js";
+import { MAX_LOCKFILE_BYTES, PM_ON_FAIL_FLAG, projectIsPlain, readRootFile, registryUrlOf, settingsRefusal, TAIL_SHOWN_CHARS, type DepsRefusal } from "./depsInstall.js";
 import type { InstallCapture } from "./engineKit.js";
 import { GitPathError } from "./git.js";
 import { findTool } from "./nixShell.js";
@@ -78,7 +78,7 @@ export interface LockfileSyncDeps {
 export function lockSyncArgs(input: { registry: string; storeDir: string; cacheDir: string }): string[] {
   return [
     "install", "--lockfile-only", "--offline", "--no-frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile", `--registry=${input.registry}`,
-    "--config.manage-package-manager-versions=false", "--config.confirm-modules-purge=false", `--config.store-dir=${input.storeDir}`, `--config.cache-dir=${input.cacheDir}`, "--reporter=append-only",
+    "--config.manage-package-manager-versions=false", PM_ON_FAIL_FLAG, "--config.confirm-modules-purge=false", `--config.store-dir=${input.storeDir}`, `--config.cache-dir=${input.cacheDir}`, "--reporter=append-only",
   ];
 }
 
@@ -292,6 +292,7 @@ export function createLockfileSync(deps: LockfileSyncDeps): LockfileSync {
         npm_config_ignore_scripts: "true",
         npm_config_update_notifier: "false",
         npm_config_manage_package_manager_versions: "false",
+        pnpm_config_pm_on_fail: "ignore",
       });
       const binary = findTool("pnpm", env.PATH ?? "");
       if (binary === undefined) {

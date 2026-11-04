@@ -202,11 +202,21 @@ function recordNoPnpmfiles(modules: string): void {
  */
 export function pnpmArgs(input: { registry: string; storeDir: string; cacheDir: string }): string[] {
   return [
-    "install", "--frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile", `--registry=${input.registry}`, "--config.manage-package-manager-versions=false",
+    "install", "--frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile", `--registry=${input.registry}`, "--config.manage-package-manager-versions=false", PM_ON_FAIL_FLAG,
     "--config.confirm-modules-purge=false", "--config.modules-dir=node_modules", "--config.virtual-store-dir=node_modules/.pnpm", `--config.store-dir=${input.storeDir}`,
     `--config.cache-dir=${input.cacheDir}`, "--reporter=append-only",
   ];
 }
+
+/**
+ * pnpm 11 removed `manage-package-manager-versions`; `pm-on-fail` replaced it, and its default ("download") fetches and runs the pnpm that a repo's
+ * `packageManager` or `devEngines` names. Given as a flag here it outranks the repo's `.npmrc`, `pnpm-workspace.yaml` and `package.json` (proved with a real pnpm 11.27).
+ */
+export const PM_ON_FAIL_FLAG = "--config.pm-on-fail=ignore";
+
+/** pnpm's answer when a lockfile is from a pnpm major it cannot read: the repo names another pnpm, and the runner did not switch to it. */
+const LOCKFILE_OTHER_PNPM = /ERR_PNPM_LOCKFILE_BREAKING_CHANGE/;
+export const LOCKFILE_OTHER_PNPM_LINE = "the lockfile was written by a pnpm major this runner's pnpm cannot read; regenerate it with the runner's pnpm version";
 
 /** The pinned registry address for a host. */
 export const registryUrlOf = (host: string): string => `https://${host}/`;
@@ -277,6 +287,7 @@ export function createDepsInstaller(deps: DepsInstallerDeps): DepsInstaller {
         npm_config_fund: "false",
         npm_config_audit: "false",
         npm_config_manage_package_manager_versions: "false",
+        pnpm_config_pm_on_fail: "ignore",
       });
       const binary = findTool(manager, env.PATH ?? "");
       const clearScratch = (): void => {
@@ -324,7 +335,8 @@ export function createDepsInstaller(deps: DepsInstallerDeps): DepsInstaller {
       }
       const why: DepsFailure = out.aborted ? "aborted" : out.timedOut ? "timeout" : "exit";
       const shown = redactShapes(out.tail).split(workspace).join("<workspace>").replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, " ").trim().slice(-TAIL_SHOWN_CHARS);
-      deps.say(`fx-runner: dependency install failed (deps_install_failed: ${why}${out.code === null ? "" : `, exit ${String(out.code)}`})${shown === "" ? "" : `: ${shown}`}`);
+      const detail = LOCKFILE_OTHER_PNPM.test(out.tail) ? LOCKFILE_OTHER_PNPM_LINE : shown;
+      deps.say(`fx-runner: dependency install failed (deps_install_failed: ${why}${out.code === null ? "" : `, exit ${String(out.code)}`})${detail === "" ? "" : `: ${detail}`}`);
       return { kind: "failed", why };
     },
   };

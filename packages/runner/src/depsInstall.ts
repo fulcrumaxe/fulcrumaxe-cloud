@@ -62,7 +62,7 @@ export const INSTALL_SCRIPT = [
   'cd "$1"',
   'case "$2" in',
   // The settings are flags as well as env: a repo's own workspace settings cannot outrank a command-line flag.
-  '  pnpm) pnpm install --frozen-lockfile --config.manage-package-manager-versions=false --config.store-dir="$1/node_modules/.pnpm-store" --config.cache-dir="$1/node_modules/.pnpm-cache" ;;',
+  '  pnpm) pnpm install --frozen-lockfile --config.manage-package-manager-versions=false --config.pm-on-fail=ignore --config.store-dir="$1/node_modules/.pnpm-store" --config.cache-dir="$1/node_modules/.pnpm-cache" ;;',
   '  npm) npm ci --cache "$1/node_modules/.npm-cache" --no-fund --no-audit --no-update-notifier ;;',
   "  *) exit 2 ;;",
   "esac",
@@ -89,7 +89,7 @@ export function depsPromptLine(outcome: DepsOutcome): string | undefined {
 /**
  * The install command's env: the system CA variables, a fixed set of tool settings, and caches under the
  * workspace's own `node_modules`. No variable from the run's env is copied, so no model-key slot, token or
- * customer value can reach it. `manage-package-manager-versions=false` stops pnpm fetching another pnpm into the
+ * customer value can reach it. `pm-on-fail=ignore` (pnpm 11) and `manage-package-manager-versions=false` (pnpm 10) stop pnpm fetching another pnpm into the
  * home directory; the store and cache sit in the workspace so nothing is installed outside it.
  */
 export function installEnv(workdir: string): Record<string, string> {
@@ -99,6 +99,7 @@ export function installEnv(workdir: string): Record<string, string> {
     npm_config_store_dir: `${workdir}/node_modules/.pnpm-store`,
     npm_config_cache: `${workdir}/node_modules/.npm-cache`,
     npm_config_manage_package_manager_versions: "false",
+    pnpm_config_pm_on_fail: "ignore",
     npm_config_update_notifier: "false",
     npm_config_fund: "false",
     npm_config_audit: "false",
