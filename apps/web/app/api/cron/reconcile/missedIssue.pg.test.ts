@@ -30,6 +30,11 @@ describe("a missed issues.opened delivery is repaired by a reconcile pass [pg]",
   let gh: StrictGithubApps;
   let region: FakeRegion;
   const reports: unknown[] = [];
+  // An idle pool client the cluster drops (admin shutdown, 57P01) emits `error` on its pool; with no listener that is an unhandled error that fails the whole run.
+  // Once teardown starts, that one code is expected and ignored; any other error, or any error before teardown, is kept and fails the test.
+  let tearingDown = false;
+  const stray: unknown[] = [];
+  const watch = (p: Pool): Pool => p.on("error", (e: Error & { code?: string }) => void (tearingDown && e.code === "57P01" ? 0 : stray.push(e)));
   let accountId: string;
   let installationId: string;
   let repoId: string;
@@ -39,14 +44,16 @@ describe("a missed issues.opened delivery is repaired by a reconcile pass [pg]",
 
   beforeAll(async () => {
     pg = await provisionEphemeralPostgres({ database: "fx_web_missed_issue_test", tmpPrefix: "fx-web-missed-issue-" });
-    admin = createPool(pg.url);
+    admin = watch(createPool(pg.url));
     await runMigrations(admin);
-    platformOps = createPool(pg.platformOpsUrl);
-    appUser = createPool(pg.appUserUrl);
+    platformOps = watch(createPool(pg.platformOpsUrl));
+    appUser = watch(createPool(pg.appUserUrl));
   }, 180_000);
   afterAll(async () => {
+    tearingDown = true;
     for (const p of [platformOps, appUser, admin]) await p?.end();
     pg?.cleanup();
+    expect(stray).toEqual([]);
   });
 
   beforeEach(async () => {
@@ -77,6 +84,7 @@ describe("a missed issues.opened delivery is repaired by a reconcile pass [pg]",
     await admin.query(`UPDATE reconcile_jobs SET next_due_at = now() + interval '30 days', lease_owner = NULL, lease_expires_at = NULL`);
   });
   afterEach(async () => {
+    expect(stray).toEqual([]);
     await gh.close();
     setPendingHooks(null);
     vi.useRealTimers();

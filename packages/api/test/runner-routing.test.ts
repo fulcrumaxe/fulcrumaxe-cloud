@@ -81,7 +81,8 @@ describe('D#605 FL-4: the routing rules routes', () => {
     const itemRes = await put(adminUser, f.itemPath, { require: { os: 'linux' } });
     expect(itemRes.status).toBe(200);
     expect(await stored('work_items', f.itemId)).toEqual({ require: { os: 'linux' } });
-    expect((await audits(f.owner.accountId)).map((r) => r.actor)).toEqual([f.owner.userId, adminUser.userId]);
+    // Both rows can carry the same created_at, so audit_log has no stable insert order to assert: compare the set of actors.
+    expect((await audits(f.owner.accountId)).map((r) => r.actor).sort()).toEqual([f.owner.userId, adminUser.userId].sort());
   });
 
   it('{} clears the rules (stored as none), which is how an item goes back to the repo default', async () => {
