@@ -33,6 +33,7 @@ const EXPECTED_V1_IDS = [
   "dependency_patch_bump",
   "external_paid_api_call",
   "launch_sub_item",
+  "memory_auto_approve",
   "merge_after_reviews",
   "nonbreaking_refactor_approach",
   "publish_deprecation_notice",
@@ -168,6 +169,16 @@ describe("DP12a-1: timeoutOutcomes (DP-C5 R2)", () => {
     const entry = getCatalogueEntry("merge_after_reviews")!;
     const request = { type: "merge_after_reviews", options: [], proposed: "", rationale: "" };
     expect(PRESETS.map((p) => decide(entry, { preset: p.name }, request).disposition)).toEqual(["ask", "announce", "act"]);
+  });
+
+  it("MEM-10: memory_auto_approve defaults to ask, and can be raised only to announce", () => {
+    const entry = getCatalogueEntry("memory_auto_approve")!;
+    expect(entry.class).toBe("human_over_the_loop");
+    expect(entry.defaultDisposition).toBe("ask");
+    expect([...entry.allowedDispositions].sort()).toEqual(["announce", "ask"]);
+    expect(entry.allowedDispositions).not.toContain("act");
+    expect(entry.reversal.availability).not.toBe("not_reversible");
+    expect(entry.reversalWindowHours).toBe(24);
   });
 
   it("DW-R4: the three person-driven pipeline actions (asking for changes, building again, rechecking the merge) are not catalogue entries", () => {

@@ -4662,6 +4662,29 @@ export interface Operations {
         needs_second_repo: boolean;
       }>;
       truncated: boolean;
+      auto_approved: Array<{
+        entry: {
+          id: string;
+          scope: "account" | "repo" | "item" | "role";
+          kind: "convention" | "command" | "fact" | "gotcha" | "preference" | "decision";
+          body: string;
+          why: string | null;
+          author_kind: "person" | "agent" | "assistant" | "import" | "runner_agent";
+          status: "proposed" | "approved" | "rejected" | "expired" | "retired" | "deleted" | "archived" | "superseded";
+          version: number;
+          content_sha256: string;
+          created_at: string;
+          updated_at: string;
+          approved_at: string | null;
+          expires_at: string | null;
+        };
+        title: string;
+        kind_label: string;
+        proposed_by: string;
+        scope_label: string;
+        approved_age: string;
+      }>;
+      auto_approved_truncated: boolean;
     };
   };
   openMemoryCard: {

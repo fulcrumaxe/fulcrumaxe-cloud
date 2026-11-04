@@ -23,6 +23,7 @@ const APPROVED: Record<string, string> = {
   spend_past_envelope: "Spending past an item's budget",
   run_extension: "Extending a run past its limit",
   merge_after_reviews: "Merging a pull request once its reviews pass",
+  memory_auto_approve: "Approving a fact or command an agent suggests remembering",
   start_after_reclassify: "Starting an item that was later judged larger",
   reversal_recorded: "Undoing an earlier decision",
   reversal_over_cap: "Undoing a decision again after two undos",

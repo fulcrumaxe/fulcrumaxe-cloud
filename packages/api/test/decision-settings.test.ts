@@ -13,6 +13,7 @@ import { ROUTES } from '../src/routes/index.js';
 import { invariantLabel } from '../src/routes/decision-labels.js';
 import { insertRunner } from '@fx/db/test/helpers/runnerFixtures.js';
 import { PLAN_HOLDER_ONLY_SENTENCE, PRESET_HELD_SENTENCE } from '@fx/db/src/runnerPlanLoosen.js';
+import { PRESET_FIXED_HELD_SENTENCE } from '../src/routes/decision-settings.js';
 import { seedAccountWithMember, seedUser } from './helpers/seed.js';
 
 interface Identity {
@@ -49,7 +50,7 @@ interface ErrorBody {
   details?: { path: string; code: string }[];
 }
 
-const CLASS_2 = ['nonbreaking_refactor_approach', 'test_strategy_choice', 'runner_run_on_member_plan', 'publish_deprecation_notice', 'start_work_small', 'start_work_bug', 'start_work_doc', 'launch_sub_item', 'tool_call', 'run_extension', 'merge_after_reviews'];
+const CLASS_2 = ['nonbreaking_refactor_approach', 'test_strategy_choice', 'runner_run_on_member_plan', 'publish_deprecation_notice', 'start_work_small', 'start_work_bug', 'start_work_doc', 'launch_sub_item', 'tool_call', 'run_extension', 'merge_after_reviews', 'memory_auto_approve'];
 
 /**
  * D#7 DP10a: the Autonomy settings API, called through the real `handleApiRequest` against real Postgres (RLS, the owner/admin INSERT
@@ -146,7 +147,7 @@ describe('D#7 DP10a: decision settings routes', () => {
     expect(s.presets.map((p) => p.name)).toEqual(['cautious', 'balanced', 'autonomous']);
     expect(new Set(s.presets.map((p) => p.customer_role)).size).toBe(3);
     const dials = dialsByType(s);
-    expect(s.dials).toHaveLength(20);
+    expect(s.dials).toHaveLength(21);
     for (const type of CLASS_2) expect(dials[type], type).toMatchObject({ adjustable: true, source: 'default', preset: null, version: null });
     expect(dials.runner_run_on_member_plan!.disposition).toBe('announce');
     // The dials the runtime reads as Balanced with no row show announce; a dial no runtime path reads keeps the catalogue default.
@@ -515,6 +516,8 @@ describe('D#7 DP10a: decision settings routes', () => {
       ...FIXED_INVARIANTS.map((i): [unknown, string, string] => [{ decision_type: i.key, disposition: 'act' }, 'decision_type', 'unknown_decision_type']),
       [{ decision_type: 'publish_deprecation_notice', disposition: 'act' }, 'disposition', 'not_allowed'],
       [{ decision_type: 'publish_deprecation_notice', disposition: 'announce' }, 'disposition', 'not_allowed'],
+      // MEM-10: the memory dial can be raised only as far as announce.
+      [{ decision_type: 'memory_auto_approve', disposition: 'act' }, 'disposition', 'not_allowed'],
     ];
     for (const [body, path, code] of cases) {
       const res = await call(f.owner, 'POST', url, body);
@@ -592,5 +595,38 @@ describe('D#7 DP10a: decision settings routes', () => {
     expect(table.autonomous).toMatchObject({ nonbreaking_refactor_approach: 'act', test_strategy_choice: 'act', runner_run_on_member_plan: 'announce', publish_deprecation_notice: 'ask' }); // held: a preset never loosens it (D#7 DW-R7)
     for (const type of ['dependency_patch_bump', 'retry_transient_step_failure']) for (const p of Object.keys(table)) expect(table[p]![type]).toBe('act');
     for (const type of ['publish_release_artifact', 'external_paid_api_call']) for (const p of Object.keys(table)) expect(table[p]![type]).toBe('ask');
+    // MEM-10: no preset moves the memory dial.
+    for (const p of Object.keys(table)) expect(table[p]!.memory_auto_approve, p).toBe('ask');
+  });
+
+  it('MEM-10: memory_auto_approve defaults to ask, takes announce and never act, and no preset moves it, raised or not; a raised dial is reported as held, not turned off', async () => {
+    const f = await fixture();
+    const url = `/repos/${f.repoId}/decision-settings`;
+    const dial = async () => dialsByType((await (await call(f.owner, 'GET', url)).json()) as Settings).memory_auto_approve!;
+    expect(await dial()).toMatchObject({ adjustable: true, disposition: 'ask', allowed_dispositions: ['announce', 'ask'], source: 'default', version: null });
+    // Unset: every preset leaves it with no version and nothing to report; it never decides which preset is active.
+    for (const preset of ['cautious', 'balanced', 'autonomous']) {
+      const prev = (await (await call(f.owner, 'POST', `${url}/preset/preview`, { preset })).json()) as Preview & { held?: unknown[] };
+      expect(prev.moves.map((m) => m.decision_type), preset).not.toContain('memory_auto_approve');
+      expect((prev.held ?? []).map((h) => (h as { decision_type: string }).decision_type), preset).not.toContain('memory_auto_approve');
+    }
+    expect(((await (await call(f.owner, 'GET', url)).json()) as Settings).active_preset).toBe('balanced');
+    // Raised by a person: one version, an audit row, and still the same preset (the dial is outside the comparison).
+    const raised = (await (await call(f.owner, 'POST', `${url}/dial`, { decision_type: 'memory_auto_approve', disposition: 'announce' })).json()) as Settings;
+    expect(dialsByType(raised).memory_auto_approve).toMatchObject({ disposition: 'announce', source: 'override', version: 1 });
+    expect(raised.active_preset).toBe('balanced');
+    for (const preset of ['cautious', 'balanced', 'autonomous']) {
+      const prev = (await (await call(f.owner, 'POST', `${url}/preset/preview`, { preset })).json()) as Preview & { held?: { decision_type: string; from: string; to: string; note: string }[] };
+      expect(prev.moves.map((m) => m.decision_type), preset).not.toContain('memory_auto_approve');
+      expect(prev.held!.filter((h) => h.decision_type === 'memory_auto_approve'), preset).toEqual([{ decision_type: 'memory_auto_approve', from: 'announce', to: 'ask', note: PRESET_FIXED_HELD_SENTENCE }]);
+      const applied = (await (await call(f.owner, 'POST', `${url}/preset`, { preset })).json()) as Settings & { held?: { decision_type: string }[] };
+      expect(dialsByType(applied).memory_auto_approve, preset).toMatchObject({ disposition: 'announce', version: 1 });
+      expect(applied.held?.map((h) => h.decision_type), preset).toContain('memory_auto_approve');
+    }
+    expect(PRESET_FIXED_HELD_SENTENCE).toMatch(/Cautious does not turn it off/);
+    expect((await versions(f.repoId)).filter((v) => v.decision_type === 'memory_auto_approve')).toHaveLength(1);
+    // A person lowers it, and "use the default" puts it back to ask.
+    const lowered = (await (await call(f.owner, 'POST', `${url}/dial`, { decision_type: 'memory_auto_approve', disposition: 'ask' })).json()) as Settings;
+    expect(dialsByType(lowered).memory_auto_approve).toMatchObject({ disposition: 'ask', version: 2 });
   });
 });

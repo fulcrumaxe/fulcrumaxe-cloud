@@ -411,7 +411,9 @@ describe('memory_entries (D#601 MEM-1)', () => {
       // 0900 (D#601 MEM-4b1) adds the sweep role's three, pinned in memory-sweeps.pg.test.ts.
       expect(rows.map((r) => `${r.cmd} ${r.roles.join(',')}`).sort()).toEqual(
         [`INSERT ${ROLE}`, `SELECT ${ROLE}`, 'SELECT app_user', `UPDATE ${ROLE}`, 'SELECT memory_recall_definer', 'UPDATE memory_recall_definer',
-          'SELECT memory_sweep_definer', 'UPDATE memory_sweep_definer', 'DELETE memory_sweep_definer'].sort(),
+          'SELECT memory_sweep_definer', 'UPDATE memory_sweep_definer', 'DELETE memory_sweep_definer',
+          // 0986 (D#601 MEM-10) adds the auto-approve role's two, pinned in memory-auto-approve.pg.test.ts.
+          'SELECT memory_auto_approve_definer', 'UPDATE memory_auto_approve_definer'].sort(),
       );
     });
     it('the role may write audit_log only for the nine memory actions', async () => {

@@ -32,6 +32,8 @@ interface E {
   version: number;
   before?: string;
   deletedDaysAgo?: number;
+  /** Approved by the person's own autonomy setting (MEM-10). */
+  auto?: boolean;
 }
 interface Mock {
   requests: string[];
@@ -105,7 +107,10 @@ async function mockApi(page: Page, mock: Mock) {
         .filter((g) => g.entries.length > 0 || g.scope === "repo");
       return ok({ groups, truncated: false });
     }
-    if (path === "/queue") return ok({ cards: mock.entries.filter((e) => e.status === "proposed").map(cardDto), truncated: false });
+    if (path === "/queue") {
+      const autoDto = (e: E) => ({ entry: entryDto(e), title: e.title, kind_label: "Command", proposed_by: "Proposed by agent (run 8b2c5e74)", scope_label: REPO_NAME, approved_age: "2 hours ago" });
+      return ok({ cards: mock.entries.filter((e) => e.status === "proposed").map(cardDto), truncated: false, auto_approved: mock.entries.filter((e) => e.auto && e.status === "approved").map(autoDto), auto_approved_truncated: false });
+    }
     if (path === "/pending-counts") return ok({ repos: { [REPO_ID]: mock.entries.filter((e) => e.status === "proposed").length }, items: {} });
     if (path === "/decide-batch") {
       for (const id of body.ids) byId(id)!.status = body.to;
@@ -209,6 +214,27 @@ test.describe("D#601 MEM-4b3: undo, delete and restore, history, export", () => 
     await expect(tid(page, "mem-undo")).toHaveCount(0);
     expect(mock.requests).toContain(`POST /api/v1/memory/revert {"ids":["${uuid(1)}"],"action":"undo_approve"}`);
     expect(mock.entries.find((e) => e.id === uuid(1))!.status).toBe("proposed");
+    expect(errors).toEqual([]);
+  });
+
+  test("MEM-10: an entry the autonomy setting approved is listed under its own heading with its place and run; Undo retires it and says so", async ({ page }) => {
+    const { mock, errors } = await setup(page, (m) => m.entries.push({ id: uuid(40), scope: "repo", status: "approved", title: "Run pnpm test before pushing", version: 1, auto: true }));
+    await expect(tid(page, "mem-auto-heading")).toHaveText("Approved by your autonomy setting");
+    const auto = tid(page, "mem-auto-card");
+    await expect(auto).toHaveCount(1);
+    await expect(auto).toContainText("Run pnpm test before pushing");
+    await expect(auto).toContainText(REPO_NAME);
+    await expect(auto).toContainText("Proposed by agent (run 8b2c5e74)");
+    await expect(auto).not.toContainText(/null|undefined|NaN/);
+    await press(page, tid(page, "mem-auto-undo"));
+    await expect(toast(page)).toHaveText("Undone. It is no longer used in runs.");
+    expect(mock.requests).toContain(`POST /api/v1/memory/revert {"ids":["${uuid(40)}"],"action":"retire"}`);
+    expect(mock.entries.find((e) => e.id === uuid(40))!.status).toBe("retired");
+    await expect(tid(page, "mem-auto-card")).toHaveCount(0);
+    await expect(tid(page, "mem-auto-heading")).toHaveCount(0);
+    // The toast's own Undo restores it, and it is approved again (by a person's restore, so the setting no longer lists it).
+    await press(page, tid(page, "mem-undo"));
+    expect(mock.entries.find((e) => e.id === uuid(40))!.status).toBe("approved");
     expect(errors).toEqual([]);
   });
 

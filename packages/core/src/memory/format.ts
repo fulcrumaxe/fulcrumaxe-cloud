@@ -161,6 +161,6 @@ export function formatMemoryHistoryAction(action: unknown): string {
 /** Who did a history event, as words. A person is "A member" here; the screen swaps in the name it holds for the user id. */
 export function formatMemoryHistoryActor(actor: { kind: 'person' } | { kind: 'system'; source: string } | { kind: 'unknown' }): string {
   if (actor.kind === 'person') return 'A member';
-  if (actor.kind === 'system') return actor.source === 'memory_sweep' ? 'Memory sweep' : 'The pipeline';
+  if (actor.kind === 'system') return actor.source === 'memory_sweep' ? 'Memory sweep' : actor.source === 'autonomy_setting' ? 'Your autonomy setting' : 'The pipeline';
   return 'Unknown';
 }

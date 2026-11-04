@@ -433,3 +433,63 @@ export async function memoryMoveRef(ctx: ReadCtx, target: MemoryMoveTarget): Pro
 function assertEnumScope(scope: unknown): void {
   if (typeof scope !== 'string' || !(MEMORY_SCOPES as readonly string[]).includes(scope)) throw new MemoryInputError('invalid_message', 'unknown scope');
 }
+
+/** MEM-10: how long a dial-approved entry stays on the review screen's "Approved by your autonomy setting" list after it was approved. */
+export const MEMORY_AUTO_APPROVED_DAYS = 7;
+
+/** An entry the autonomy setting approved, shown with Undo (which retires it). Same labels as a queue card: its place and its run, never null. */
+export interface MemoryAutoApprovedCard {
+  entry: MemoryEntry;
+  title: string;
+  kindLabel: string;
+  /** "Proposed by agent (run <id>)": the run that proposed it. */
+  proposedBy: string;
+  scopeLabel: string;
+  /** How long ago the setting approved it, in words. */
+  approvedAge: string;
+}
+
+/**
+ * The entries the `memory_auto_approve` dial approved in the last 7 days that are still approved, newest first. Derived each time from the audit row
+ * of the step that put the entry in force (the policy's, and not a person's restore after it), never stamped on the entry: a lowered dial changes
+ * nothing here, and a retired entry drops out. The audit lookup runs inside the database function `memory_auto_approved_ids` (migration 0986), which reads the account's audit rows for each candidate entry (approved by no person, in the last 7 days), so its cost grows with the audit log until an index covers it.
+ */
+export async function memoryAutoApproved(ctx: ReadCtx, filter: Omit<MemoryScopeFilter, 'statuses' | 'kinds'> = {}, now: Date = new Date()): Promise<{ cards: MemoryAutoApprovedCard[]; truncated: boolean }> {
+  const limit = Math.min(Math.max(Math.floor(filter.limit ?? MEMORY_LIST_MAX), 1), MEMORY_LIST_MAX);
+  const { rows, entries } = await inSession(ctx, async (client) => {
+    const params: unknown[] = [MEMORY_AUTO_APPROVED_DAYS];
+    const where = await scopeConditions(client, filter, params);
+    if (where === null) return { rows: [] as AutoApprovedRow[], entries: [] as MemoryEntry[] };
+    where.push(
+      `m.status = 'approved'`,
+      `m.approved_by IS NULL`,
+      `m.author_kind IN ('agent', 'assistant')`,
+      `m.kind IN ('fact', 'command')`,
+      `m.scope IN ('item', 'repo')`,
+      `m.approved_at > now() - make_interval(days => $1::int)`,
+    );
+    params.push(limit + 1);
+    const found = (
+      await client.query<AutoApprovedRow>(
+        `SELECT m.id, m.scope, m.scope_ref, m.kind, m.body, m.author_kind, m.provenance, m.status, m.version, m.created_at, m.approved_at, ${LABEL_COLUMNS}
+           FROM memory_entries m ${LABEL_JOINS}
+          WHERE ${where.map((w) => `(${w})`).join(' AND ')}
+            AND m.id IN (SELECT entry_id FROM memory_auto_approved_ids($1::int))
+          ORDER BY m.approved_at DESC, m.id
+          LIMIT $${params.length}::int`,
+        params,
+      )
+    ).rows;
+    return { rows: found, entries: await readEntries(client, found.slice(0, limit).map((r) => r.id)) };
+  });
+  const byId = new Map(entries.map((e) => [e.id, e]));
+  const cards = rows.slice(0, limit).flatMap((r): MemoryAutoApprovedCard[] => {
+    const entry = byId.get(r.id);
+    if (entry === undefined) return [];
+    return [{ entry, title: formatMemoryTitle(r.body, r.scope, r.kind), kindLabel: formatMemoryKind(r.kind), proposedBy: formatMemoryProposedBy(r.author_kind, r.provenance), scopeLabel: groupLabel(r).label, approvedAge: formatMemoryAge(r.approved_at, now) }];
+  });
+  return { cards, truncated: rows.length > limit };
+}
+interface AutoApprovedRow extends ListRow {
+  approved_at: Date;
+}

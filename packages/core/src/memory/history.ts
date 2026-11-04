@@ -32,7 +32,7 @@ export const MEMORY_HISTORY_MAX_EVENTS = 500;
 /** Who did it. A person is a user id (render the name, or "a former member" once the user is gone); the rest are fixed system sources. */
 export type MemoryHistoryActor =
   | { kind: 'person'; userId: string }
-  | { kind: 'system'; source: 'pipeline' | 'memory_sweep' }
+  | { kind: 'system'; source: 'pipeline' | 'memory_sweep' | 'autonomy_setting' }
   /** An actor text this reader does not know. Never shown as raw text. */
   | { kind: 'unknown' };
 
@@ -58,6 +58,8 @@ export function memoryHistoryActor(actor: string | null): MemoryHistoryActor {
   if (actor !== null && UUID_RE.test(actor)) return { kind: 'person', userId: actor.toLowerCase() };
   if (actor === 'system:pipeline') return { kind: 'system', source: 'pipeline' };
   if (actor === 'system:memory_sweep') return { kind: 'system', source: 'memory_sweep' };
+  // MEM-10: the autonomy setting approved it (migration 0986); the person's own setting, not a person's click.
+  if (actor === 'policy:memory_auto_approve') return { kind: 'system', source: 'autonomy_setting' };
   return { kind: 'unknown' };
 }
 
