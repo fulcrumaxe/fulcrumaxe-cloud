@@ -509,6 +509,9 @@ export interface Operations {
         head_sha: string | null;
         actions: Array<"retry_push" | "open_pr" | "build_again">;
       }) | (null);
+      branch_cleanup?: {
+        sentence: string;
+      };
       merge_queue?: {
         state: "queued" | "removed" | "not_in_queue" | "no_answer";
         position?: number;

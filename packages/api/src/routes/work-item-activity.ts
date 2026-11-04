@@ -80,6 +80,8 @@ export const activityResponseSchema = z.object({
     })
     .nullable()
     .optional(),
+  // D#598 P1f-5d-ui: what the branch cleanup of the item's current close did; absent until it has recorded a branch outcome. `sentence` is fixed words.
+  branch_cleanup: z.object({ sentence: z.string() }).optional(),
   // D#694 B6-5: the item's merge-queue state, derived on this read from its facts (never stored), the same function the merge-ready list, Inbox and the stalled list use. Absent when the item was never queued. `at` is an ISO instant for the viewer's zone.
   merge_queue: z
     .object({ state: z.enum(["queued", "removed", "not_in_queue", "no_answer"]), position: z.number().int().optional(), removed_by: z.enum(["you", "person", "github"]).optional(), reason: z.string().optional(), at: z.string() })
@@ -182,7 +184,7 @@ export const workItemActivityRoutes: RouteEntry[] = [
       // The review section's line for a merge-only re-check is written once, in the runner protocol's copy.
       // The field is present only when there is a line to show, so every other answer keeps the shape it had.
       // `public_change`, `start_decision` and `setup_pause` follow the same rule: absent when there is nothing to show, so every other answer keeps its shape.
-      const { review_recheck: recheck, public_change: publicChange, setup_pause: pause, start_decision: startDecision, receipts, ...rest } = read;
+      const { review_recheck: recheck, public_change: publicChange, branch_cleanup: branchCleanup, setup_pause: pause, start_decision: startDecision, receipts, ...rest } = read;
       // The pause line is the held request's own status sentence, worded exactly as the setup-requests routes word it; absent when nothing holds the item.
       const setupPause = pause === null ? {} : {
         setup_pause: {
@@ -201,7 +203,7 @@ export const workItemActivityRoutes: RouteEntry[] = [
       const stackedWait = queued ? await withTenant(ctx.pool, accountId, userId, tokenId, (client) => readStackedWait(client, accountId, input.params.id!)) : null;
       const conflict = queued ? await withTenant(ctx.pool, accountId, userId, tokenId, (client) => readConflictState(client, accountId, input.params.id!, mergeQueue.MAX_CONFLICT_ROUNDS)) : null;
       const queueWait = queued ? await withTenant(ctx.pool, accountId, userId, tokenId, (client) => readQueueWait(client, accountId, input.params.id!, mergeQueue.countAhead)) : null;
-      const activity = { ...rest, ...childLaunch, ...(queueWait === null ? {} : { queue_wait: queueWait }), ...(queueState === null ? {} : { merge_queue: queueState }), ...(stackedWait === null ? {} : { stacked_wait: stackedWait }), ...(conflict ?? {}), runs, ...(publicChange === null ? {} : { public_change: publicChange }), ...(startDecision === null ? {} : { start_decision: startDecision }), ...(receipts === null ? {} : { receipts: receipts.receipts, ...(receipts.total > receipts.receipts.length ? { receipts_total: receipts.total } : {}) }), ...(recheck === null ? {} : { review_recheck: { kind: recheck.kind, sentence: COPY.reviewMergeOnlyRecheck } }), ...setupPause };
+      const activity = { ...rest, ...childLaunch, ...(queueWait === null ? {} : { queue_wait: queueWait }), ...(queueState === null ? {} : { merge_queue: queueState }), ...(stackedWait === null ? {} : { stacked_wait: stackedWait }), ...(conflict ?? {}), runs, ...(publicChange === null ? {} : { public_change: publicChange }), ...(branchCleanup === null ? {} : { branch_cleanup: branchCleanup }),...(startDecision === null ? {} : { start_decision: startDecision }), ...(receipts === null ? {} : { receipts: receipts.receipts, ...(receipts.total > receipts.receipts.length ? { receipts_total: receipts.total } : {}) }), ...(recheck === null ? {} : { review_recheck: { kind: recheck.kind, sentence: COPY.reviewMergeOnlyRecheck } }), ...setupPause };
       // The Re-spec notices carry the KEY of their sentence out of @fx/core; the words are written once, in the runner protocol's copy.
       const n = activity.notice;
       // A build the runner ended at its memory limit: the same sentence the run's own line has, naming the cap when the runner sent one. The raw end never leaves.

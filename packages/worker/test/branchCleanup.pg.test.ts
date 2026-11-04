@@ -6,7 +6,8 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
 import { localOnlyGithub } from "@fx/runner-cloud";
-import { InstallationTokenCache, createInstallationHttp, type AccessTokenRequester, type RunnerGitTicketSigner } from "@fx/github";
+import { InstallationTokenCache, createInstallationHttp, type AccessTokenRequester, type BranchDeleteOutcome, type RunnerGitTicketSigner } from "@fx/github";
+import { BRANCH_CLEANUP_SENTENCE } from "@fx/core/src/work-items/activity.js";
 import { strictGithubFetch } from "../../github/test/helpers/strictGithub.js";
 import { sweepBranchCleanups, type BranchCleanupCounts } from "../src/branchCleanup.js";
 import type { PrCloseOpen } from "../src/privatePrClose.js";
@@ -535,5 +536,13 @@ describe("branch cleanup sweep [pg]", () => {
     expect(gh.calls).toEqual([]);
     expect(await cleanup(A)).toBeUndefined();
     expect(await sweep()).toMatchObject({ listed: 1, deleted: 1 });
+  });
+});
+
+/** D#598 P1f-5d-ui: every outcome the sweep records for a branch has a sentence on the item's activity read. A new member of the union fails the typecheck here until it is listed. */
+describe("branch cleanup outcomes have sentences", () => {
+  const RECORDED: Record<BranchDeleteOutcome | "no_installation" | "gave_up", true> = { deleted: true, already_gone: true, head_changed: true, protected: true, default_branch: true, repo_gone: true, no_installation: true, gave_up: true };
+  it.each(Object.keys(RECORDED))("%s", (outcome) => {
+    expect(BRANCH_CLEANUP_SENTENCE[outcome]).toMatch(/^Branch cleanup .+\.$/);
   });
 });

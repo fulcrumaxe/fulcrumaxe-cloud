@@ -227,6 +227,8 @@ export interface WorkItemActivity {
   review_recheck: { kind: 'merge_only' } | null;
   /** D#598 P1f-6a: the item's change to its paired public repository, or null for an item with none. */
   public_change: PublicChange | null;
+  /** D#598 P1f-5d-ui: what the branch cleanup of the item's current close did, or null when it has not recorded anything. */
+  branch_cleanup: { sentence: string } | null;
   /** D#7 start gate (c): how the item's start was decided (asked, started by a person or by the dial, held, withdrawn), in fixed sentences. Null for an item that never went through the gate. */
   start_decision: StartDecision | null;
   /** D#7 DW-R5: the item's class 2 and class 3 receipts, newest first (at most 50), or null when it has none. */
@@ -649,6 +651,42 @@ async function readFileListNotice(
   return run.rowCount === 1 ? { kind: 'no_file_list', reason: FILE_LIST_NOTICE_COPY_KEY.no_file_list } : null;
 }
 
+/**
+ * D#598 P1f-5d-ui: what the branch cleanup of the item's current close left, as one fixed sentence. Keys are the outcomes `branch_cleanups.outcomes` records for a branch
+ * (packages/worker/src/branchCleanup.ts: the delete outcomes, `no_installation`, `gave_up`) plus `retrying` for a row not yet final. A new outcome there needs a sentence here.
+ */
+export const BRANCH_CLEANUP_SENTENCE: Readonly<Record<string, string>> = Object.freeze({
+  gave_up: 'Branch cleanup failed after several tries, so a branch the platform pushed may still be on GitHub.',
+  head_changed: 'Branch cleanup left a branch in place because its latest commit is not the one the platform recorded.',
+  protected: 'Branch cleanup left a branch in place because GitHub protects it.',
+  default_branch: "Branch cleanup left a branch in place because it is the repository's default branch.",
+  no_installation: 'Branch cleanup removed nothing because the GitHub App is no longer installed on the repository.',
+  repo_gone: 'Branch cleanup removed nothing because the repository is no longer there.',
+  // A branch that was already gone counts as removed (the sweep says the same), so both read alike.
+  already_gone: 'Branch cleanup is done: the branches the platform pushed for this item were removed.',
+  deleted: 'Branch cleanup is done: the branches the platform pushed for this item were removed.',
+  retrying: 'Branch cleanup could not reach GitHub and will try again.',
+});
+/** The outcome that decides the sentence when an item had several branches: the worst one first. */
+const BRANCH_CLEANUP_ORDER = ['gave_up', 'head_changed', 'protected', 'default_branch', 'no_installation', 'repo_gone', 'already_gone', 'deleted'] as const;
+
+/** The cleanup of the item's CURRENT close (its newest move into a final stage), or null: not closed, or no cleanup row yet, or no branch outcome in it. Derived on this read, so a reopened item shows nothing. */
+async function readBranchCleanup(client: PoolClient, workItemId: string, stage: string): Promise<{ sentence: string } | null> {
+  if (!['merged', 'closed_unmerged', 'closed'].includes(stage)) return null;
+  const { rows } = await client.query<{ state: string; outcomes: Array<{ branch?: unknown; outcome?: unknown }> }>(
+    `SELECT c.state, c.outcomes FROM branch_cleanups c
+      WHERE c.work_item_id = $1::uuid AND c.transition_id IS NOT DISTINCT FROM
+            (SELECT t.id FROM work_item_transitions t WHERE t.work_item_id = $1::uuid AND t.to_stage IN ('merged', 'closed_unmerged', 'closed') ORDER BY t.created_at DESC, t.id DESC LIMIT 1)`,
+    [workItemId],
+  );
+  const row = rows[0];
+  if (row === undefined) return null;
+  if (row.state === 'retrying') return { sentence: BRANCH_CLEANUP_SENTENCE.retrying! };
+  const seen = new Set(row.outcomes.filter((o) => typeof o.branch === 'string' && !o.branch.startsWith('pr:')).map((o) => o.outcome));
+  const worst = BRANCH_CLEANUP_ORDER.find((k) => seen.has(k));
+  return worst === undefined ? null : { sentence: BRANCH_CLEANUP_SENTENCE[worst]! };
+}
+
 export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string): Promise<WorkItemActivity> {
   if (!UUID_RE.test(workItemId)) throw new NotFoundError(`work item ${workItemId} not found`);
   const { accountId, userId } = ctx.principal;
@@ -967,6 +1005,7 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       notice: notice?.kind === 'needs_human' && notice.reason === REPUBLISH_FAILED_SENTENCE ? { ...notice, reason: republishFailedSentence(changeVerdict?.ok === true, requestChangesBlocked === 'rounds') } : notice,
       review_recheck: reviewRecheck,
       public_change: await readPublicChange(client, accountId, workItemId, facts),
+      branch_cleanup: await readBranchCleanup(client, workItemId, item.stage),
       start_decision: await readStartDecision(client, workItemId),
       receipts: await readItemReceipts(client, workItemId),
       setup_pause: await setupPauseFor(client, workItemId),

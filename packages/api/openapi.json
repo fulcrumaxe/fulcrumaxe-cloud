@@ -3980,6 +3980,18 @@
                         }
                       ]
                     },
+                    "branch_cleanup": {
+                      "type": "object",
+                      "properties": {
+                        "sentence": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "sentence"
+                      ],
+                      "additionalProperties": false
+                    },
                     "merge_queue": {
                       "type": "object",
                       "properties": {

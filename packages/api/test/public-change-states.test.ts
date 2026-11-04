@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
-import { getWorkItemActivity } from '@fx/core/src/work-items/activity.js';
+import { BRANCH_CLEANUP_SENTENCE, getWorkItemActivity } from '@fx/core/src/work-items/activity.js';
 import { PUBLIC_CHANGE_STATES, PUBLIC_CHANGE_UNKNOWN_REFUSAL } from '@fx/core/src/repos/publicChangeCopy.js';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
@@ -150,6 +150,44 @@ describe('public_change through getWorkItemActivity (D#598 P1f-6a)', { timeout: 
     const body = await getJson(itemId);
     expect(Object.hasOwn(body, 'public_change')).toBe(false);
     expect(activityResponseSchema.safeParse(body).success).toBe(true);
+  });
+
+  /** D#598 P1f-5d-ui: the branch cleanup line, read through the real route. `state`/`outcomes` are the row the sweep records; `stage` is where the item sits now. */
+  const CLEANUP: Array<[string, string, string, Array<[string, string]>, string | null]> = [
+    ['all deleted', 'merged', 'final', [['fx/a', 'deleted'], ['fx/b', 'already_gone']], BRANCH_CLEANUP_SENTENCE.deleted!],
+    ['already gone', 'closed', 'final', [['fx/a', 'already_gone']], BRANCH_CLEANUP_SENTENCE.already_gone!],
+    ['head differs beats deleted', 'merged', 'final', [['fx/a', 'deleted'], ['fx/b', 'head_changed']], BRANCH_CLEANUP_SENTENCE.head_changed!],
+    ['protected', 'closed_unmerged', 'final', [['fx/a', 'protected']], BRANCH_CLEANUP_SENTENCE.protected!],
+    ['default branch', 'merged', 'final', [['fx/a', 'default_branch']], BRANCH_CLEANUP_SENTENCE.default_branch!],
+    ['no installation', 'merged', 'final', [['fx/a', 'no_installation']], BRANCH_CLEANUP_SENTENCE.no_installation!],
+    ['repository gone', 'merged', 'final', [['fx/a', 'repo_gone']], BRANCH_CLEANUP_SENTENCE.repo_gone!],
+    ['gave up beats the rest', 'merged', 'final', [['fx/a', 'head_changed'], ['fx/b', 'gave_up']], BRANCH_CLEANUP_SENTENCE.gave_up!],
+    ['not final yet', 'merged', 'retrying', [['fx/a', 'deleted']], BRANCH_CLEANUP_SENTENCE.retrying!],
+    ['private pull request outcomes alone say nothing', 'merged', 'final', [['pr:7', 'private_pr_closed']], null],
+    ['an outcome from the future alone says nothing', 'merged', 'final', [['fx/a', 'a_code_from_the_future']], null],
+    ['a reopened item shows nothing', 'in_progress', 'final', [['fx/a', 'deleted']], null],
+  ];
+  it.each(CLEANUP)('branch_cleanup: %s', async (name, stage, state, outcomes, expected) => {
+    const n = 200 + CLEANUP.findIndex((c) => c[0] === name);
+    const itemId = await seedItem(n);
+    await admin.query(`UPDATE work_items SET stage = $2 WHERE id = $1`, [itemId, stage]);
+    const t = await admin.query<{ id: string }>(
+      `INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'in_progress', 'merged', now(), 'control_plane', 'x') RETURNING id`,
+      [me.accountId, itemId],
+    );
+    await admin.query(`INSERT INTO branch_cleanups (account_id, work_item_id, transition_id, state, next_attempt_at, outcomes) VALUES ($1, $2, $3, $4, $5, $6::jsonb)`, [
+      me.accountId, itemId, t.rows[0]!.id, state, state === 'retrying' ? new Date(Date.now() + 60_000) : null, JSON.stringify(outcomes.map(([branch, outcome]) => ({ branch, outcome }))),
+    ]);
+    const body = await getJson(itemId);
+    expect(activityResponseSchema.safeParse(body).success).toBe(true);
+    if (expected === null) expect(Object.hasOwn(body, 'branch_cleanup')).toBe(false);
+    else expect(body.branch_cleanup).toEqual({ sentence: expected });
+    expect(JSON.stringify(body.branch_cleanup ?? '')).not.toMatch(/null|undefined|_/);
+  });
+  it('branch_cleanup: a closed item with no cleanup row yet has no line', async () => {
+    const itemId = await seedItem(250);
+    await admin.query(`UPDATE work_items SET stage = 'merged' WHERE id = $1`, [itemId]);
+    expect(Object.hasOwn(await getJson(itemId), 'branch_cleanup')).toBe(false);
   });
 
   it('private_read_failed: an owner reads the closed class as fixed text after the sentence; a member reads the sentence alone; an unknown stored class shows nothing', async () => {
