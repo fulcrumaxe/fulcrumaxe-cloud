@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { insertAgentRun, writeRunStatus, type CancelResult, type ExecutionRun, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
-import { BASE_SYNC_CONFLICT_SENTENCE, BASE_SYNC_UNAVAILABLE_SENTENCE, REPUBLISH_STACKED_UNSUPPORTED_SENTENCE, REPUBLISH_STACK_PARENT_ENDED_SENTENCE, REPUBLISH_STACK_PARENT_CLOSED_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
+import { BASE_SYNC_CONFLICT_SENTENCE, BASE_SYNC_UNAVAILABLE_SENTENCE, REPUBLISH_STACKED_UNSUPPORTED_SENTENCE, REPUBLISH_STACK_PARENT_ENDED_SENTENCE, REPUBLISH_STACK_PARENT_CLOSED_SENTENCE, REPUBLISH_STACK_PARENT_OPEN_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
 import type { StackParentFacts } from "@fx/pipeline";
 import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
 import { createAdvanceModule, type AdvanceModuleDeps, type AdvanceReviewDeps } from "../src/advance.js";
@@ -544,7 +544,7 @@ describe("FIXROUND-BASE-SYNC-SANDBOX: the sandbox side gets the same base sync [
       expect(out.ok).toBe(true);
       const tip = "tip" in over ? over.tip : PARENT_TIP;
       const repo = { id: t.a.repoId, owner: "acme", name: "widgets" };
-      expect(syncBase.mock.calls.map((c) => c[0])).toEqual([{ repo, branch: t.branch, prNumber: PR, publicCopy: true }, { repo, branch: t.branch, prNumber: PR, publicCopy: true, stackBranch: "fx/parent" }]);
+      expect(syncBase.mock.calls.map((c) => c[0])).toEqual([{ repo, branch: t.branch, prNumber: PR, publicCopy: true, readOnly: true }, { repo, branch: t.branch, prNumber: PR, publicCopy: true, stackBranch: "fx/parent" }]);
       expect(stackBase.readParent).toHaveBeenCalledWith({ repoId: t.a.repoId, owner: "acme", name: "widgets", prNumber: PARENT_PR });
       expect(merges).toHaveBeenCalledTimes(mergeCount);
       expect(h.resumed[0]!.base).toEqual({ sha: tip, branch: t.branch });
@@ -653,6 +653,90 @@ describe("FIXROUND-BASE-SYNC-SANDBOX: the sandbox side gets the same base sync [
       }
     });
 
+    // D#6 FIXROUND-RETARGET-OPEN-PARENT: the two states #731 read as ordinary rounds. The child's pull request targets main, and the parent either is still open or was closed on GitHub before our rows say so.
+    const conflictReqOf = (t: { n: number; branch: string }) => ({ kind: "conflict" as const, issue: t.n, headSha: ASKED, prompt: "merge main", round: 1, actionId: randomUUID(), baseSha: "1".repeat(40), pr: { number: PR, branch: t.branch } });
+    type Round = (h: ReturnType<typeof harness>, t: Awaited<ReturnType<typeof stacked>>) => Promise<unknown>;
+    const rounds: Array<[string, "sandbox" | "runner", Round]> = [
+      ["sandbox review round", "sandbox", (h, t) => h.module.advanceStartFix(who(t), fixReq(t))],
+      ["runner round", "runner", (h, t) => h.module.advanceStartFix(who(t), fixReq(t))],
+      ["conflict round", "sandbox", (h, t) => h.module.advanceStartFix(who(t), conflictReqOf(t))],
+    ];
+
+    it.each([
+      ["still open on GitHub (state 1)", openParent, "republish_stack_parent_open"],
+      ["closed on GitHub, the item still looks open (state 2)", closedOnGithub, "republish_stack_parent_closed"],
+    ])("a child retargeted to main whose parent is %s: every round path is refused %s with zero merges and nothing started or published", async (_label, read, code) => {
+      for (const [name, side, run] of rounds) {
+        const t = await stacked(side);
+        await admin.query("UPDATE account_members SET role = 'owner' WHERE account_id = $1 AND user_id = $2", [t.a.accountId, t.a.userId]);
+        const merges = vi.fn();
+        const syncBase = retargeted(merges);
+        const stackBase = parentPort(async () => read);
+        const h = harness({ privateHead: async () => ASKED, syncBase, stackBase });
+        const before = await runs(t.w);
+        expect(await run(h, t), name).toEqual({ ok: false, reason: code });
+        expect(merges, name).not.toHaveBeenCalled();
+        expect(syncBase.mock.calls.every((c) => (c[0] as { readOnly?: boolean }).readOnly === true), name).toBe(true);
+        expect(stackBase.readParent, name).toHaveBeenCalledWith({ repoId: t.a.repoId, owner: "acme", name: "widgets", prNumber: PARENT_PR });
+        expect(h.resume, name).not.toHaveBeenCalled();
+        expect(await runs(t.w), name).toBe(before);
+        expect((await admin.query("SELECT 1 FROM agent_runs WHERE work_item_id = $1 AND role = 'plane_publish'", [t.w])).rows, name).toEqual([]);
+        expect(await codes(t.w), name).toEqual([["escalated", code]]);
+        const card = await getWorkItemActivity({ pool: adminPool, principal: { accountId: t.a.accountId, userId: t.a.userId, role: "owner" } }, t.w);
+        expect(card.actions, name).toContain("request_changes");
+      }
+    });
+
+    it("the open-parent sentence names the step that works (base back to the parent's branch, then Request changes) and nothing that would publish the parent's work", async () => {
+      const t = await stacked();
+      const h = harness({ privateHead: async () => ASKED, syncBase: retargeted(vi.fn()), stackBase: parentPort(async () => openParent) });
+      await h.module.advanceStartFix(who(t), fixReq(t));
+      expect(await noticeOf(t)).toEqual({ kind: "needs_human", reason: REPUBLISH_STACK_PARENT_OPEN_SENTENCE });
+      expect(REPUBLISH_STACK_PARENT_OPEN_SENTENCE).toMatch(/base back to the branch it is stacked on/);
+      expect(REPUBLISH_STACK_PARENT_OPEN_SENTENCE).toContain("Request changes");
+      expect(REPUBLISH_STACK_PARENT_OPEN_SENTENCE).not.toMatch(/Build again|null|undefined|republish_|base to main on GitHub/);
+    });
+
+    it("a retargeted child whose parent merged on GitHub while our rows still say open goes on: the live read allows it, one merge of main, the run records main's tip (every path)", async () => {
+      for (const [name, side, run] of rounds) {
+        const t = await stacked(side);
+        const merges = vi.fn();
+        const h = harness({ privateHead: async () => ASKED, syncBase: retargeted(merges), stackBase: parentPort(async () => ({ ...closedOnGithub, merged: true })) });
+        expect(((await run(h, t)) as { ok: boolean }).ok, name).toBe(true);
+        expect(merges, name).toHaveBeenCalledTimes(name === "conflict round" ? 0 : 1);
+        expect(h.resumed[0]!.base, name).toEqual(name === "conflict round" ? { sha: "1".repeat(40), branch: t.branch } : { sha: BASE, branch: t.branch });
+      }
+    });
+
+    it.each([
+      ["GitHub cannot be asked", { read: async () => { throw new Error("boom ghp_000"); } }],
+      ["GitHub answers a state that is neither open nor closed", { read: async () => ({ ...openParent, state: "draft" as never }) }],
+      ["the parent has no recorded pull request", { read: async () => openParent, parentPr: null }],
+      ["no parent port is wired", { read: null }],
+    ] as Array<[string, { read: (() => Promise<StackParentFacts>) | null; parentPr?: number | null }]>)("a retargeted child whose parent cannot be read (%s): refused base_sync_unavailable on every path, zero merges, nothing started", async (_label, over) => {
+      for (const [name, side, run] of rounds) {
+        const t = await stacked(side, "parentPr" in over ? over.parentPr : PARENT_PR);
+        const merges = vi.fn();
+        const stackBase = over.read === null ? undefined : parentPort(over.read);
+        const h = harness({ privateHead: async () => ASKED, syncBase: retargeted(merges), ...(stackBase ? { stackBase } : {}) });
+        expect(await run(h, t), name).toEqual({ ok: false, reason: "base_sync_unavailable" });
+        expect(merges, name).not.toHaveBeenCalled();
+        expect(h.resume, name).not.toHaveBeenCalled();
+        expect((await codes(t.w)).map((c) => c[1]), name).toEqual(["base_sync_unavailable"]);
+      }
+    });
+
+    it("a change with no public copy is not asked about its parent (nothing is published, so nothing is at risk)", async () => {
+      const t = await item("sandbox");
+      const parent = randomUUID();
+      await admin.query("INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number) VALUES ($1, $2, $3, 'issue', 'internal', 'pr_opened', $4)", [parent, t.a.accountId, t.a.repoId, nextNumber++]);
+      await admin.query("UPDATE work_items SET stack_parent_id = $1 WHERE id = $2", [parent, t.w]);
+      const stackBase = parentPort(async () => openParent);
+      const h = harness({ privateHead: async () => ASKED, syncBase: vi.fn(async () => merged()), stackBase });
+      expect((await h.module.advanceStartFix(who(t), fixReq(t))).ok).toBe(true);
+      expect(stackBase.readParent).not.toHaveBeenCalled();
+    });
+
     it("a parent reopened on GitHub (the item row still says closed) with this change still on its branch goes on: the live read decides, the parent's tip is merged", async () => {
       const t = await stacked();
       await setParentStage(t, "closed_unmerged");
@@ -747,6 +831,7 @@ describe("FIXROUND-BASE-SYNC-SANDBOX: the sandbox side gets the same base sync [
 
     it("a change on the default branch (the parent merged and the pull request was retargeted) is not stacked: one sync call, the parent is never read", async () => {
       const t = await stacked();
+      await setParentStage(t, "merged");
       const stackBase = parentPort(async () => openParent);
       const syncBase = vi.fn(async () => merged());
       const h = harness({ privateHead: async () => ASKED, syncBase, stackBase });
