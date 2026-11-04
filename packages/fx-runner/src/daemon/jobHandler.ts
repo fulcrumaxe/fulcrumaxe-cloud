@@ -86,6 +86,11 @@ export interface JobHandlerDeps {
    */
   planePush?: { baseLedger: PlaneBaseLedger; run: (input: PlanePushRunEnd) => Promise<PlanePushOutcome> };
   /**
+   * D#601 MEM-6: offers the run's `memory_proposals` to the person, after `done` was accepted. The array is always taken out of the envelope before `done` is sent, whether or not this is wired, so
+   * the agent's proposed text is in no request body. Absent (or no terminal): the proposals are neither offered nor sent. The function never throws.
+   */
+  memoryOffer?: (runId: string, proposals: unknown) => Promise<void>;
+  /**
    * D#519 MQ4-e2-c1: computes a conflict round's attestation from the mirror, the pushed head and the job's signed `conflict_round`. The wiring supplies it (it holds the push log, which this
    * handler never sees). Absent: a conflict round attests nothing and the cloud reads that as missing.
    */
@@ -781,9 +786,13 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     // Integers, enums and hashes only (C8 section 6). The one section the runner knows is the repository map it built (D#600 CX-3b): a byte count and the
     // text's sha256, never a path or any of the text. The other sections are the cloud's, which sent the prompt.
     const contextLedger = result.contextLedger === undefined ? undefined : contextLedgerToWire(result.contextLedger, sections);
+    // D#601 MEM-6: the agent's memory proposals never go to the cloud inside `done`; they are offered to the person on this machine once `done` is accepted.
+    const { memory_proposals: proposals, ...envelope } = result.agentOutput ?? {};
+    const agentOutput = result.agentOutput === undefined ? undefined : envelope;
     for (let attempt = 1; attempt <= attempts; attempt++) {
-      const reply = await clientOf(claimed.runId).done({ runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, sessionId: result.sessionId, agentOutput: result.agentOutput, contextLedger, check, conflictAttest });
+      const reply = await clientOf(claimed.runId).done({ runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, sessionId: result.sessionId, agentOutput, contextLedger, check, conflictAttest });
       if (reply.kind === "done") {
+        if (proposals !== undefined) await deps.memoryOffer?.(claimed.runId, proposals);
         if (result.sessionId !== undefined && result.workspace !== undefined) {
           await deps.recordSession(result.sessionId, result.workspace).catch(() => undefined);
         }

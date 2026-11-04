@@ -220,6 +220,13 @@ export type PlanePushPairingReply = z.infer<typeof PlanePushPairingReply>;
 export const PlanePushReportReply = z.object({ recorded: z.literal(true) }).strict();
 export type PlanePushReportReply = z.infer<typeof PlanePushReportReply>;
 
+/**
+ * D#601 MEM-6: 200 from memory-proposals. Counts only: how many proposals were stored as pending entries and how many the cloud's checks refused (the same checks any proposal meets).
+ * `already_ingested` means the run's proposals were taken in before; nothing was written now. No reason text, so nothing from the cloud reaches the person's screen but the runner's own sentences.
+ */
+export const MemoryProposalsReply = z.object({ status: z.enum(["ingested", "already_ingested"]), stored: z.number().int().min(0).max(3), refused: z.number().int().min(0).max(3) }).strict();
+export type MemoryProposalsReply = z.infer<typeof MemoryProposalsReply>;
+
 /** D#6 PUBLIC-MERGE PR2a: an order lasts at most this long from its placement; a runner holds a claim for at most the lease. */
 export const PLANE_MERGE_ORDER_DEADLINE_MINUTES = 60;
 export const PLANE_MERGE_LEASE_SECONDS = 600;
@@ -304,6 +311,7 @@ export const RUNNER_REPLIES = {
   plane_push_token: PlanePushTokenReply,
   plane_push_pairing: PlanePushPairingReply,
   plane_push_report: PlanePushReportReply,
+  memory_proposals: MemoryProposalsReply,
   plane_merge_claim: PlaneMergeClaimReply,
   plane_merge_verify: PlaneMergeVerifyReply,
   plane_merge_report: PlaneMergeReportReply,

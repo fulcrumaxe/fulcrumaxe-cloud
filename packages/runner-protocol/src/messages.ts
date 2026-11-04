@@ -487,6 +487,40 @@ export type PlanePushReportMessage = z.infer<typeof PlanePushReportMessage>;
 export const PLANE_PUSH_REPORT_PATH = "/api/runner/plane-push-report";
 
 /**
+ * D#601 MEM-6: the memory proposals a person said yes to on their own terminal, sent once, after the run ended. A proposal is a scope, a kind and the
+ * body the person saw; `body_sha256` is the sha256 of that body's UTF-8 bytes, which the cloud recomputes and refuses on any difference. There is no
+ * transcript, path, reason text or environment value here, and no field the run or the model names beyond the three the person read. Control and
+ * format characters are refused in the body, so what the person read is what is stored. The run and the runner are named by the signed request and
+ * the cloud's own rows, never by this body.
+ */
+export const MEMORY_PROPOSAL_SCOPES = ["item", "repo", "role"] as const;
+export const MEMORY_PROPOSAL_KINDS = ["convention", "command", "fact", "gotcha", "preference", "decision"] as const;
+export const MAX_MEMORY_PROPOSALS_PER_RUN = 3;
+export const MEMORY_PROPOSAL_BODY_MAX_BYTES = 1024;
+/** Text a person can read as it is: no control character, no format character (bidi marks, zero-width), no line or paragraph separator. */
+export const MEMORY_PROPOSAL_TEXT = new RegExp(
+  // Refused: control, format (bidi marks, zero-width, soft hyphen, tags), private-use, unassigned and surrogate code points, line and paragraph separators, variation selectors,
+  // and the characters that draw as blanks (Hangul fillers, the braille blank, the combining grapheme joiner). Allowed in their place: a joiner between two pictographs and the
+  // emoji variation selector after one, so ordinary emoji and joined emoji sequences still pass.
+  "^(?:[^\\p{Cc}\\p{Cf}\\p{Co}\\p{Cn}\\p{Cs}\\u2028\\u2029\\u034f\\u115f\\u1160\\u2800\\u3164\\uffa0\\ufe00-\\ufe0f\\u{e0100}-\\u{e01ef}]"
+    + "|(?<=\\p{Extended_Pictographic})\\ufe0f|(?<=\\p{Extended_Pictographic}\\ufe0f?)\\u200d(?=\\p{Extended_Pictographic}))+$",
+  "u",
+);
+export const MemoryProposalItem = z
+  .object({
+    scope: z.enum(MEMORY_PROPOSAL_SCOPES),
+    kind: z.enum(MEMORY_PROPOSAL_KINDS),
+    body: z.string().min(1).max(MEMORY_PROPOSAL_BODY_MAX_BYTES).regex(MEMORY_PROPOSAL_TEXT).refine((b) => new TextEncoder().encode(b).length <= MEMORY_PROPOSAL_BODY_MAX_BYTES),
+    body_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  })
+  .strict();
+export type MemoryProposalItem = z.infer<typeof MemoryProposalItem>;
+export const MemoryProposalsMessage = z.object({ run_id: uuid, proposals: z.array(MemoryProposalItem).min(1).max(MAX_MEMORY_PROPOSALS_PER_RUN) }).strict();
+export type MemoryProposalsMessage = z.infer<typeof MemoryProposalsMessage>;
+/** The signed route a runner sends the consented proposals of a finished run on. */
+export const MEMORY_PROPOSALS_PATH = "/api/runner/memory-proposals";
+
+/**
  * D#6 PUBLIC-MERGE PR2a: the three messages of a merge order on the local runner (design: the cloud decides, the runner checks content and merges,
  * GitHub enforces the sha). Nothing a runner sends names a repository, branch, pull request or sha that is then USED: every such value is compared with
  * the order's own row. There is no field that can hold file content, a diff, a patch or a token (test/planeMerge.test.ts walks the schemas).
@@ -798,6 +832,7 @@ export const RUNNER_MESSAGES = {
   plane_push_token: PlanePushTokenMessage,
   plane_push_pairing: PlanePushPairingMessage,
   plane_push_report: PlanePushReportMessage,
+  memory_proposals: MemoryProposalsMessage,
   plane_merge_claim: PlaneMergeClaimMessage,
   plane_merge_verify: PlaneMergeVerifyMessage,
   plane_merge_report: PlaneMergeReportMessage,

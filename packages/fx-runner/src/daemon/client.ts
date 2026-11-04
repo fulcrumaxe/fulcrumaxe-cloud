@@ -6,7 +6,7 @@
 import {
   ClaimMessage, ClaimRateLimitedReply, type ConflictAttestation, HelloMessage, HelloReply, ClaimReply, WAKE_CAPABILITY, type WakeGrant, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
   GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply,
-  CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, ORDERED_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
+  CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, ORDERED_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, MEMORY_PROPOSALS_PATH, MemoryProposalsMessage, MemoryProposalsReply, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
   PLANE_PUSH_PAIRING_PATH, PLANE_PUSH_REPORT_PATH, PLANE_PUSH_TOKEN_PATH, PlanePushPairingMessage, PlanePushPairingReply, PlanePushReportMessage, PlanePushReportReply, PlanePushTokenMessage, PlanePushTokenReply, type ClaimCapacity, type ContextLedgerWire, type DoneCheck, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
 } from "@fulcrumaxe/runner-protocol";
 import { errorCodeOf, signedGet, signedPost, type CloudReply } from "../cloud.js";
@@ -63,6 +63,8 @@ export type PlanePushTokenResult =
   | { kind: "refused"; code: string }
   | { kind: "stop"; reason: StopReason }
   | CallError;
+/** D#601 MEM-6. `refused` is the cloud's 403 for a run that is not this runner's, 409 for one not finished; anything else is a call error. Counts only: no cloud text reaches the person. */
+export type MemoryProposalsResult = { kind: "sent"; status: "ingested" | "already_ingested"; stored: number; refused: number } | { kind: "refused"; code: "run_not_yours" | "run_not_finished" | "capability_missing" } | CallError;
 /** D#598 P1f-3: a report is a hint; `recorded` is all the reply says. */
 export type PlanePushReportResult = { kind: "recorded" } | { kind: "not_paired" } | { kind: "stop"; reason: StopReason } | CallError;
 
@@ -113,6 +115,8 @@ export interface RunnerClient {
   /** `atTip` (D#598 P1g-3a-3): asks to publish the branch tip for a fix round that added no commit; only ever passed after the hello kept `tip_publish_v1`. */
   planePushToken(runId: string, leaseGeneration: number, atTip?: true): Promise<PlanePushTokenResult>;
   planePushReport(message: PlanePushReportMessage): Promise<PlanePushReportResult>;
+  /** D#601 MEM-6. Only ever called after the hello kept `mem_proposal_v1`, and only with proposals a person said yes to. Never retried by the client. */
+  memoryProposals(message: MemoryProposalsMessage): Promise<MemoryProposalsResult>;
   /** D#6 PUBLIC-MERGE PR3. The three signed calls of a merge order on this runner. Used only after a claim reply said `merge_order`. */
   planeMergeClaim(): Promise<PlaneMergeClaimResult>;
   planeMergeVerify(message: PlaneMergeVerifyMessage): Promise<PlaneMergeVerifyResult>;
@@ -155,8 +159,8 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       // capability is dropped alone first, and `wake_v1` goes too only if the hello is still refused.
       const refused = (r: CloudReply | undefined): boolean => r?.status === 400 && errorCodeOf(r.body) === "invalid_message";
       let dropped: string[] = [];
-      // `tip_publish_v1` (D#598 P1g-3a-3) is the newest, so it goes first (the runner then never asks to publish the branch tip), then `ordered_facts_v1` (D#483 S5-j2c2) (the runner computes and sends no ordering fact), then `conflict_facts_v1` (D#519 MQ4-e2-a) (no `conflict` field on a merge report), then `discovery_analyst` (D#483 S4-f4) (a cloud without it just never offers the analyst), then `plane_merge_queue_v1` (D#694 B7-1), then `memory_limit_v1` (D#6 CARD-OOM-CAUSE-WORDS): a cloud that knows the others keeps them, and the caller reads the `dropped` list to know not to send the field.
-      for (const drop of [TIP_PUBLISH_CAPABILITY, ORDERED_FACTS_CAPABILITY, CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY]) {
+      // `mem_proposal_v1` (D#601 MEM-6) is the newest, so it goes first (the runner then offers no memory proposal), then `tip_publish_v1` (D#598 P1g-3a-3) (the runner then never asks to publish the branch tip), then `ordered_facts_v1` (D#483 S5-j2c2) (the runner computes and sends no ordering fact), then `conflict_facts_v1` (D#519 MQ4-e2-a) (no `conflict` field on a merge report), then `discovery_analyst` (D#483 S4-f4) (a cloud without it just never offers the analyst), then `plane_merge_queue_v1` (D#694 B7-1), then `memory_limit_v1` (D#6 CARD-OOM-CAUSE-WORDS): a cloud that knows the others keeps them, and the caller reads the `dropped` list to know not to send the field.
+      for (const drop of [MEM_PROPOSAL_CAPABILITY, TIP_PUBLISH_CAPABILITY, ORDERED_FACTS_CAPABILITY, CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY]) {
         if (!refused(reply) || !(parsed.capabilities ?? []).includes(drop)) continue;
         dropped = [...dropped, drop];
         reply = await send(HELLO_PATH, { ...parsed, capabilities: (parsed.capabilities ?? []).filter((c) => !dropped.includes(c)) });
@@ -272,6 +276,19 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
         const stop = StopReply.safeParse(reply.body);
         if (stop.success) return { kind: "stop", reason: stop.data.reason };
       }
+      return fail(reply);
+    },
+
+    async memoryProposals(message) {
+      const parsed = MemoryProposalsMessage.safeParse(message);
+      if (!parsed.success) return fail(undefined, "invalid_message");
+      const reply = await send(MEMORY_PROPOSALS_PATH, parsed.data);
+      if (reply?.status === 200) {
+        const body = MemoryProposalsReply.safeParse(reply.body);
+        return body.success ? { kind: "sent", ...body.data } : fail(reply, "invalid_reply");
+      }
+      const code = reply === undefined ? undefined : errorCodeOf(reply.body);
+      if ((reply?.status === 403 || reply?.status === 409) && (code === "run_not_yours" || code === "run_not_finished" || code === "capability_missing")) return { kind: "refused", code };
       return fail(reply);
     },
 

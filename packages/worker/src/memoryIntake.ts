@@ -64,6 +64,13 @@ export async function resolveRunRepoScopeRef(client: PoolClient, accountId: stri
   return row?.gh_node_id && row.gh_installation_id ? repoScopeRef(row.gh_node_id, row.gh_installation_id) : null;
 }
 
+/** MEM-9: whether the run's work item has reached a terminal stage, asked on the intake's own client (inside its lock). */
+const itemTerminalOf = (accountId: string, workItemId: string | null) => async (client: PoolClient): Promise<boolean> => {
+  if (workItemId === null) return false;
+  const { rows } = await client.query<{ stage: string }>("SELECT stage FROM work_items WHERE id = $1 AND account_id = $2", [workItemId, accountId]);
+  return rows[0] !== undefined && (TERMINAL_WORK_ITEM_STAGES as readonly string[]).includes(rows[0].stage);
+};
+
 export async function ingestRunMemoryProposals(input: RunMemoryIntakeInput): Promise<IngestRunResult> {
   if (input.envelope === null || input.envelope.memory_proposals === undefined) return { status: "none" };
   const facts = await withTenant(input.pool, input.accountId, async (client) => {
@@ -83,11 +90,7 @@ export async function ingestRunMemoryProposals(input: RunMemoryIntakeInput): Pro
     // MEM-9: agent-proposed role lessons are accepted (as pending entries only) once the run's work item is done.
     allowRoleScope: true,
     // Read inside the intake lock, in the intake's own transaction, so a merge landing between this call and the lock is not missed.
-    itemTerminal: async (client) => {
-      if (facts.work_item_id === null) return false;
-      const { rows } = await client.query<{ stage: string }>("SELECT stage FROM work_items WHERE id = $1 AND account_id = $2", [facts.work_item_id, input.accountId]);
-      return rows[0] !== undefined && (TERMINAL_WORK_ITEM_STAGES as readonly string[]).includes(rows[0].stage);
-    },
+    itemTerminal: itemTerminalOf(input.accountId, facts.work_item_id),
     envelope: input.envelope,
     liveSecrets: input.liveSecrets ?? defaultLiveSecrets,
     resolveRepoScopeRef: (client) => resolveRunRepoScopeRef(client, input.accountId, input.runId),
@@ -96,3 +99,53 @@ export async function ingestRunMemoryProposals(input: RunMemoryIntakeInput): Pro
 }
 
 export type IngestRunResult = IngestMemoryProposalsResult | { status: "skipped_runner" };
+
+export const MEM_PROPOSAL_CAPABILITY = "mem_proposal_v1";
+
+export interface RunnerMemoryInput {
+  pool: Pool;
+  accountId: string;
+  runnerId: string;
+  runId: string;
+  /** Scope, kind and body only: what the person read and said yes to. Nothing else of a proposal crosses. */
+  proposals: ReadonlyArray<{ scope: string; kind: string; body: string }>;
+  liveSecrets?: LiveSecretsSource;
+}
+
+export type RunnerMemoryResult =
+  | { kind: "run_not_yours" | "run_not_finished" | "capability_missing" }
+  | { kind: "ingested" | "already_ingested"; stored: number; refused: number };
+
+/**
+ * D#601 MEM-6: the proposals a person said yes to on their own machine, after a run of that runner ended. This is the only path a runner run's memory takes into
+ * the intake (`ingestRunMemoryProposals` above still skips every runner run). The run must be this runner's own row in this account (the repository, the item and the
+ * role are read from our rows, never from the message), must have ended, and the runner's latest hello must have listed `mem_proposal_v1`. Then the same intake runs
+ * (secret scan against live tokens, size cap, duplicate and pending-cap checks, three per run) with the author kind `runner_agent`, and nothing is auto-approved.
+ */
+export async function ingestRunnerMemoryProposals(input: RunnerMemoryInput): Promise<RunnerMemoryResult> {
+  const facts = await withTenant(input.pool, input.accountId, async (client) => {
+    const { rows } = await client.query<RunFacts>("SELECT ar.role, ar.work_item_id, ar.runtime, ar.status, w.stage FROM agent_runs ar LEFT JOIN work_items w ON w.account_id = ar.account_id AND w.id = ar.work_item_id WHERE ar.id = $1 AND ar.account_id = $2 AND ar.runner_id = $3 AND ar.runtime = 'runner'", [input.runId, input.accountId, input.runnerId]);
+    if (rows[0] === undefined) return null;
+    const capable = await client.query("SELECT 1 FROM runner_capabilities WHERE account_id = $1 AND runner_id = $2 AND $3::text = ANY(capabilities)", [input.accountId, input.runnerId, MEM_PROPOSAL_CAPABILITY]);
+    return { run: rows[0], capable: capable.rows.length > 0 };
+  });
+  if (facts === null) return { kind: "run_not_yours" };
+  if (!facts.capable) return { kind: "capability_missing" };
+  if (facts.run.status !== "succeeded" && facts.run.status !== "failed") return { kind: "run_not_finished" };
+  const done = await ingestMemoryProposals({
+    pool: input.pool,
+    accountId: input.accountId,
+    runId: input.runId,
+    workItemId: facts.run.work_item_id,
+    role: facts.run.role,
+    source: "runner_agent",
+    allowRoleScope: true,
+    itemTerminal: itemTerminalOf(input.accountId, facts.run.work_item_id),
+    envelope: { memory_proposals: input.proposals.map(({ scope, kind, body }) => ({ scope, kind, body })) },
+    liveSecrets: input.liveSecrets ?? defaultLiveSecrets,
+    resolveRepoScopeRef: (client) => resolveRunRepoScopeRef(client, input.accountId, input.runId),
+    recordEvent: (client, event) => recordMemoryProposalsEvent(client, { accountId: input.accountId, runId: input.runId, payload: { ...event } }),
+  });
+  if (done.status === "ingested") return { kind: "ingested", stored: done.stored.length, refused: done.refused.length };
+  return { kind: "already_ingested", stored: 0, refused: 0 };
+}

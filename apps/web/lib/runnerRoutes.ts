@@ -44,6 +44,7 @@ const leases: RunnerLeaseOps = {
   planePushSettleGrant: async (input) => (await requireWorker()).planePushSettleGrant(input),
   planePushReportContext: async (input) => (await requireWorker()).planePushReportContext(input),
   planePushRecordReport: async (input) => (await requireWorker()).planePushRecordReport(input),
+  memoryProposals: async (input) => (await requireWorker()).memoryProposals(input),
 };
 
 /** The live GitHub side of an executor's `done` (D#6 R2b-3f). Built once; it opens a client per call, so nothing is read from the environment until a `done` needs one. */

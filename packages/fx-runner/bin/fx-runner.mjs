@@ -13,6 +13,7 @@ import { runCli } from "../src/cli.js";
 import { RUNNER_VERSION } from "../src/version.js";
 import { API_KEY_MAX_BYTES } from "../src/credentials.js";
 import { readSecret } from "../src/secretInput.js";
+import { askOnTerminal } from "../src/ttyAsk.js";
 import { CODE_MAX_BYTES } from "../src/codeSource.js";
 import { CliError } from "../src/cliError.js";
 import { createClaudeKit } from "../src/engines/claude/kit.js";
@@ -126,6 +127,8 @@ runCli({
     xdgRuntimeDir: process.env.XDG_RUNTIME_DIR,
     // The take-over confirmation must be typed by a person: a piped stdin is not one.
     interactive: process.stdin.isTTY === true,
+    // D#601 MEM-6: the memory-proposal question; the answer is read from the terminal only (src/ttyAsk.ts), and a timeout or a closed input is no answer.
+    askTimed: (question, timeoutMs, signal) => askOnTerminal(process.stdin, (text) => process.stdout.write(text), question, timeoutMs, signal),
     ask: async (question) => {
       const lines = createInterface({ input: process.stdin, output: process.stdout });
       try {

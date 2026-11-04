@@ -1,9 +1,10 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
   CLAIM_IDLE_RETRY_AFTER_SECONDS, ClaimMessage, ClaimReply, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage, HelloMessage,
   HeartbeatReply, HelloReply, SeqNotIncreasingReply, StopReply, WAKE_CAPABILITY, WakeGrant, jwkThumbprint, verifyRunnerRequest, type Ed25519Jwk, type LocalOnlyEvent,
+  MEM_PROPOSAL_CAPABILITY, MEMORY_PROPOSALS_PATH, MemoryProposalsMessage, MemoryProposalsReply,
   type SignedJob, type StopReason,
 } from "@fulcrumaxe/runner-protocol";
 
@@ -14,6 +15,21 @@ import {
  * `enabled` the hello and claim replies carry a grant for a runner whose latest hello listed `wake_v1`. With `oldCloud` the hello refuses
  * `wake_v1` as a cloud built before it does (its capability list is a strict enum: 400 invalid_message, nothing recorded).
  */
+/**
+ * D#601 MEM-6: the memory-proposals half of the fake, against the contract the real route is built to (packages/runner-cloud memoryProposals.ts): POST on the one path, the runner's
+ * signature, a nonce spent once, the STRICT message, the body hash recomputed (400 on any difference), a run this cloud knows (else 403 `run_not_yours`), one that has ended (else 409
+ * `run_not_finished`), a hello that listed `mem_proposal_v1` (else 403 `capability_missing`), and a counts-only reply built with the protocol's reply schema. `oldCloud` makes the
+ * hello refuse `mem_proposal_v1` (a cloud built before it: 400 invalid_message). `refuse` lists bodies the real intake would refuse (its checks are tested in packages/worker, not faked here);
+ * `taken` is every proposal accepted, per run, as the cloud would store it; a second upload for a run is `already_ingested`.
+ */
+export interface FakeMemory {
+  oldCloud: boolean;
+  refuse: string[];
+  taken: Map<string, Array<{ scope: string; kind: string; body: string }>>;
+  /** Answer the next upload with this status and code instead (consumed once). */
+  forceError: { status: number; code: string } | undefined;
+}
+
 export interface FakeWake {
   enabled: boolean;
   oldCloud: boolean;
@@ -72,6 +88,7 @@ export interface StrictRunnerCloud {
   /** Where the next `done` for a run answers 503 `{retry_after}` and writes nothing: this many times. */
   githubDown: number;
   wake: FakeWake;
+  memory: FakeMemory;
   close(): Promise<void>;
 }
 
@@ -113,10 +130,13 @@ export async function startStrictRunnerCloud(): Promise<StrictRunnerCloud> {
     },
     githubDown: 0,
     wake: { enabled: false, oldCloud: false, epoch: 0, dueAt: null, pollSeconds: 20, tokens: [], failNext: 0 },
+    memory: { oldCloud: false, refuse: [], taken: new Map(), forceError: undefined },
     close: async () => undefined,
   };
   /** Whether the runner's latest accepted hello listed `wake_v1` (the real cloud keeps this in runner_capabilities). */
   let helloAskedWake = false;
+  /** Whether the runner's latest accepted hello listed `mem_proposal_v1`. */
+  let helloAskedMemory = false;
   const grant = (): { wake?: WakeGrant } => {
     if (!state.wake.enabled || !helloAskedWake) return {};
     const token = `${randomBytes(24).toString("base64url")}.${randomBytes(32).toString("base64url")}`;
@@ -153,6 +173,45 @@ export async function startStrictRunnerCloud(): Promise<StrictRunnerCloud> {
           return refuse(503, "unavailable");
         }
         return send(200, { epoch: state.wake.epoch, due_at: state.wake.dueAt });
+      }
+      if (path === MEMORY_PROPOSALS_PATH) {
+        if (req.method !== "POST") return refuse(405, "method_not_allowed");
+        const raw = await readBody(req);
+        if (!raw) return refuse(413, "body_too_large");
+        const headers = Object.fromEntries(Object.entries(req.headers).map(([k, v]) => [k, Array.isArray(v) ? v.join(", ") : v]));
+        let verified;
+        try {
+          verified = await verifyRunnerRequest({ method: "POST", url: `${state.origin}${path}`, headers: headers as Record<string, string | undefined>, body: raw.toString("utf8") }, (keyid) => jwks.get(keyid));
+        } catch {
+          return refuse(401, "unauthorized");
+        }
+        if (!keys.has(verified.keyid)) return refuse(401, "unauthorized");
+        if (!verified.nonce || nonces.has(verified.nonce)) return refuse(409, "nonce_reused");
+        nonces.add(verified.nonce);
+        let json: unknown;
+        try {
+          json = JSON.parse(raw.toString("utf8"));
+        } catch {
+          // fx-swallow-ok: a body that is not JSON fails the schema parse below as invalid_message
+          json = undefined;
+        }
+        state.seen.push({ path, body: json, nonce: verified.nonce });
+        if (state.memory.forceError) {
+          const { status, code } = state.memory.forceError;
+          state.memory.forceError = undefined;
+          return refuse(status, code);
+        }
+        const message = MemoryProposalsMessage.safeParse(json);
+        if (!message.success) return refuse(400, "invalid_message");
+        if (message.data.proposals.some((p) => createHash("sha256").update(p.body, "utf8").digest("hex") !== p.body_sha256)) return refuse(400, "invalid_message");
+        const run = state.runs.get(message.data.run_id);
+        if (!run) return refuse(403, "run_not_yours");
+        if (!helloAskedMemory) return refuse(403, "capability_missing");
+        if (!run.over) return refuse(409, "run_not_finished");
+        if (state.memory.taken.has(message.data.run_id)) return send(200, MemoryProposalsReply.parse({ status: "already_ingested", stored: 0, refused: 0 }));
+        const accepted = message.data.proposals.filter((p) => !state.memory.refuse.includes(p.body));
+        state.memory.taken.set(message.data.run_id, accepted.map(({ scope, kind, body }) => ({ scope, kind, body })));
+        return send(200, MemoryProposalsReply.parse({ status: "ingested", stored: accepted.length, refused: message.data.proposals.length - accepted.length }));
       }
       const match = /^\/api\/runner\/(?:(hello|claim|heartbeat)|runs\/([^/]+)\/(events|done))$/.exec(path);
       if (req.method !== "POST" || !match) return refuse(404, "not_found");
@@ -191,6 +250,9 @@ export async function startStrictRunnerCloud(): Promise<StrictRunnerCloud> {
         const asked = ((message.data as { capabilities?: string[] }).capabilities ?? []).includes(WAKE_CAPABILITY);
         if (asked && state.wake.oldCloud) return refuse(400, "invalid_message");
         helloAskedWake = asked;
+        const askedMemory = ((message.data as { capabilities?: string[] }).capabilities ?? []).includes(MEM_PROPOSAL_CAPABILITY);
+        if (askedMemory && state.memory.oldCloud) return refuse(400, "invalid_message");
+        helloAskedMemory = askedMemory;
         return send(200, HelloReply.parse({ protocol_version: 1, ...grant() }));
       }
       if (route === "claim") {

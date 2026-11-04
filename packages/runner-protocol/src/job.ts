@@ -71,7 +71,7 @@ export const jobCarriesPinnedCommit = (role: string): boolean => PINNED_COMMIT_J
  * role out for a runner that did not advertise the capability on its latest hello. A role not named here needs none.
  * D#6 RUNNER-WAKE R3a: `wake_v1` gates no role. It tells the cloud the runner can read a `wake` grant on its hello and claim replies (wake.ts).
  */
-export const RUNNER_CAPABILITIES = ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1"] as const;
+export const RUNNER_CAPABILITIES = ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1"] as const;
 /** D#6 PUBLIC-MERGE PR2a: `plane_merge_v1` gates no role either. A runner that lists it can claim and execute a merge order (messages.ts, plane-merge-*). */
 export const PLANE_MERGE_CAPABILITY = "plane_merge_v1" as const;
 /**
@@ -102,6 +102,11 @@ export const ORDERED_FACTS_CAPABILITY = "ordered_facts_v1" as const;
  * the runner drops it and sends no field; a runner without it is never granted one. The protocol version does not move.
  */
 export const TIP_PUBLISH_CAPABILITY = "tip_publish_v1" as const;
+/**
+ * D#601 MEM-6: `mem_proposal_v1` gates no role. A runner that kept it after its hello may send the memory proposals a person said yes to, at a terminal, on the memory-proposals route. A cloud that predates the route
+ * refuses the capability on the hello (400), the runner drops it and offers nothing; a runner without it never offers, so the route never sees it. The protocol version does not move.
+ */
+export const MEM_PROPOSAL_CAPABILITY = "mem_proposal_v1" as const;
 export type RunnerCapability = (typeof RUNNER_CAPABILITIES)[number];
 export const RUNNER_CAPABILITY_FOR_ROLE: Readonly<Partial<Record<(typeof RUNNER_ELIGIBLE_ROLES)[number], RunnerCapability>>> = Object.freeze({ [PROPOSAL_VERIFIER_ROLE]: "proposal_verifier", [DISCOVERY_ANALYST_ROLE]: "discovery_analyst" });
 
