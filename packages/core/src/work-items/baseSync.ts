@@ -28,7 +28,15 @@ export const REPUBLISH_STACKED_UNSUPPORTED_SENTENCE = "This change is stacked on
 export const REPUBLISH_BRANCH_MOVED = 'republish_branch_moved';
 export const REPUBLISH_FAILED = 'republish_failed';
 export const REPUBLISH_BRANCH_MOVED_SENTENCE = "The fix round finished, but the public pull request's branch was changed outside the cloud, so it was not updated. Close it or reset its branch, then press Build again.";
-export const REPUBLISH_FAILED_SENTENCE = "The fix round finished, but the cloud couldn't update the public pull request, so it still shows the earlier change. Nothing in the private repository was lost. Press Build again to try once more.";
+const REPUBLISH_FAILED_LEAD = "The fix round finished, but the cloud couldn't update the public pull request, so it still shows the earlier change. Nothing in the private repository was lost.";
+/** Build again cannot help here (an open pull request stops a rebuild), so the one step is Request changes: a new fix round that publishes again. The generic sentence is true for any viewer; the other two are chosen from what the viewer's card offers. */
+export const REPUBLISH_FAILED_SENTENCE = `${REPUBLISH_FAILED_LEAD} An owner or admin can press Request changes, once no agents are working, to run another round that tries to update it again.`;
+export const REPUBLISH_FAILED_PRESS_SENTENCE = `${REPUBLISH_FAILED_LEAD} Press Request changes to run another round that tries to update it again.`;
+export const REPUBLISH_FAILED_ROUNDS_SENTENCE = `${REPUBLISH_FAILED_LEAD} All of this pull request's fix rounds are used, so the cloud can't run another. Update the public branch yourself, or close this item.`;
+/** The `republish_failed` sentence for a viewer: the step it names is the one that viewer's card lists (`request_changes` offered, or refused because the rounds are used). */
+export function republishFailedSentence(canRequestChanges: boolean, roundsUsed: boolean): string {
+  return canRequestChanges ? REPUBLISH_FAILED_PRESS_SENTENCE : roundsUsed ? REPUBLISH_FAILED_ROUNDS_SENTENCE : REPUBLISH_FAILED_SENTENCE;
+}
 /** The fix round ended with nothing to publish (it added no commit, or its change is already in the public tip), so the public pull request is unchanged. Recorded as `escalated`. */
 export const REPUBLISH_NO_CHANGE = 'republish_no_change';
 /** D#598 P1g-3a-3: the same end for the round a person's confirmed Replace started. The Replace is spent and a rebuild is refused while the pull request is open, so the sentence does not say to build again. */
