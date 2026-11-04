@@ -2,6 +2,7 @@ import type { PoolClient } from "pg";
 import { removeIntentRecent } from "@fx/core/src/work-items/queueIntent.js";
 import { DEQUEUE_SUCCESS_CODES, dequeueReasonCode, enqueueDedupeKey, listHeadRemovals, personRequeueCycle, queueEscalationKey, queueRemovalActor, recordDriverEvent, removalFactReason } from "@fx/core/src/work-items/driverEvents.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
+import { recordMergeReceiptOn } from "@fx/db/src/mergeReceipt.js";
 import { IllegalStageTransitionError, StageInputError } from "@fx/core/src/work-items/stages.js";
 import { reportError } from "@fx/telemetry";
 import type { QueueEntryReading, QueueRemovalReading } from "../build/mergeGate.js";
@@ -163,6 +164,8 @@ async function settle(client: PoolClient, a: { accountId: string; repoId: string
     // The queue's merge, as the webhook records it: one row per pull request and head, the entry settled as the gate's, then the item.
     const merged = reading.headSha;
     await recordDriverEvent(client, accountId, { ...base, kind: "merged_via_queue", dedupeKey: `mergedq:${row.prNumber}:${merged}`, headSha: merged, ...(row.queueEntryId !== null ? { queueEntryId: row.queueEntryId } : {}) });
+    // D#7 DW-R4: the receipt for the queue's merge, as the webhook writes it (one per merge; a replay answers the first). A miss is reported and never stops the settle.
+    await recordMergeReceiptOn(client, { accountId, workItemId: row.workItemId, eventHead: merged, reviewHeads: [merged, row.headSha], outcome: "merged", decidedBy: { kind: "merge_enqueued", head: row.headSha } });
     if (merged !== row.headSha) {
       const { recorded } = await recordDriverEvent(client, accountId, { ...base, kind: "escalated", dedupeKey: `merged_head_differs:${row.prNumber}:${merged}`, code: "merged_head_differs", headSha: merged });
       if (recorded) reportError(new Error("merged head differs from the head the merge gate sent to the merge queue"), { stage: "github.merged_head_differs" });

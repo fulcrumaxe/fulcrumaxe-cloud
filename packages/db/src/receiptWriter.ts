@@ -324,3 +324,39 @@ export async function writeReversalReceipt(client: PoolClient, input: WriteRever
     throw err;
   }
 }
+
+export interface MergeReceiptInput {
+  workItemId: string;
+  /** The head the gate's own facts name (`merged_by_gate` for a merge, `merge_gate` for a hold): the database refuses a head with no such fact. */
+  headSha: string;
+  /** A review run on the merged head: the receipt's run. */
+  runId: string;
+  /** `merged`: the gate merged by policy. `ready`: the policy alone left the merge to a person. */
+  outcome: 'merged' | 'ready';
+  /** `act` or `announce` for a merge (the dial's word at the version named), `ask` for a hold. */
+  chosen: 'act' | 'announce' | 'ask';
+  /** The merge dial's version, 0 when the repository has no row and the catalogue default applied. */
+  dialVersion: number;
+}
+
+const HEAD_SHA = /^([0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/**
+ * D#7 DW-R4 (migration 0983): the class 2 receipt behind a merge by policy, or behind a pull request the policy left for a person, written by the
+ * app login through the one definer `merge_receipt_write` (which writes through `decision_receipt_write` and refuses a merge that was not recorded). The
+ * account and the actor (`policy`) come from the session. At most one per merge: a replay answers the first receipt. The type cannot be reversed, so
+ * no deadline is stamped.
+ */
+export async function writeMergeReceipt(client: PoolClient, input: MergeReceiptInput): Promise<{ id: string; replayed: boolean }> {
+  if (!isText(input.runId) || !isText(input.workItemId)) throw new ReceiptWriteError('receipt_missing_run_id');
+  const entry = CATALOGUE.find((e) => e.id === 'merge_after_reviews');
+  if (!entry || entry.class !== 'human_over_the_loop') throw new ReceiptWriteError('receipt_unknown_decision_type');
+  const chosenOk = input.outcome === 'merged' ? input.chosen === 'act' || input.chosen === 'announce' : input.outcome === 'ready' && input.chosen === 'ask';
+  if (!HEAD_SHA.test(input.headSha) || !chosenOk) throw new ReceiptWriteError('receipt_chosen_invalid');
+  if (!Number.isInteger(input.dialVersion) || input.dialVersion < DIAL_VERSION_CATALOGUE_DEFAULT || input.dialVersion > INT4_MAX) throw new ReceiptWriteError('receipt_invalid_dial_version');
+  const { rows } = await withReversalWindow(client, 'merge_after_reviews', () => client.query<{ o_id: string; o_replayed: boolean }>(
+    'SELECT o_id, o_replayed FROM merge_receipt_write($1::uuid, $2::text, $3::uuid, $4::text, $5::text, $6::integer, $7::integer)',
+    [input.workItemId, input.headSha, input.runId, input.outcome, input.chosen, input.dialVersion, CATALOGUE_VERSION],
+  ));
+  return { id: rows[0]!.o_id, replayed: rows[0]!.o_replayed };
+}

@@ -1160,6 +1160,45 @@ check_sandbox_net_role_shape() {
   fi
 }
 
+# D#7 DW-R4 (0983): role shape of a definer role that is a member of exactly one invoker role (merge_receipt_definer, a member of receipt_writer_invoker,
+# whose only privilege is EXECUTE on the receipt definers: how its body writes a receipt with no INSERT on decision_receipts of its own). Called as
+# check_invoker_member_role_shape <db> <role> <invoker role> <variable prefix>; the rest is check_sandbox_net_role_shape (exact privileges, owned functions, no CREATE).
+check_invoker_member_role_shape() {
+  local dbname="$1" role="$2" memberof="$3" prefix="$4" out rc=0 problems expected owned count
+  local privileges_var="${prefix}_PRIVILEGES" functions_var="${prefix}_FUNCTIONS"
+  expected="${!privileges_var}"
+  owned="${!functions_var}"
+  count="$(awk -F, '{print NF}' <<<"$expected")"
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    WITH r AS (SELECT * FROM pg_roles WHERE rolname = '$role'),
+    held AS (
+      SELECT 'table ' || c.relname || ' ' || a.privilege_type AS x FROM pg_class c, aclexplode(c.relacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'column ' || c.relname || '.' || t.attname || ' ' || a.privilege_type
+        FROM pg_class c JOIN pg_attribute t ON t.attrelid = c.oid, aclexplode(t.attacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'schema ' || n.nspname || ' ' || a.privilege_type FROM pg_namespace n, aclexplode(n.nspacl) a, r WHERE a.grantee = r.oid AND n.nspname = 'public')
+    SELECT concat_ws('; ',
+      CASE WHEN r.rolcanlogin OR r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls THEN 'privileged attribute' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = r.oid AND member <> 'fx_migrator'::regrole) THEN 'has a member besides the migration role' END,
+      CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
+                OR pg_has_role('fx_migrator', '$role', 'USAGE') THEN 'fx_migrator holds a live membership' END,
+      CASE WHEN (SELECT coalesce(array_agg(DISTINCT pg_get_userbyid(roleid)::text), '{}') FROM pg_auth_members WHERE member = r.oid) <> ARRAY['$memberof']::text[] THEN 'is not a member of exactly $memberof' END,
+      CASE WHEN (SELECT count(*) FROM held) <> $count OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the $count granted by its migration' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_proc p WHERE p.proowner = r.oid AND NOT (p.pronamespace = 'public'::regnamespace AND p.proname IN ($owned)))
+              OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'owns an object beyond its listed functions' END,
+      CASE WHEN has_schema_privilege('$role', 'public', 'CREATE') THEN 'still has CREATE on public' END)
+    FROM r;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check '$role-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  problems="$out"
+  if [ -n "$problems" ]; then
+    echo "neon-shape ($dbname): $role role shape wrong: $problems" >&2
+    exit 1
+  fi
+}
+
 # D#7 AAP-d1 (0837): the SECURITY DEFINER functions owned by one role, each executable by one named invoker role and nobody else.
 # Called as check_invoker_exception_shape <db> <role> <invoker> <quoted, comma-separated exact function names>. Prints the oids, comma
 # separated, when every definer the role owns is one of the named functions, pinned to search_path=pg_catalog, public, pg_temp, with an

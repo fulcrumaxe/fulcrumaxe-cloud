@@ -153,6 +153,21 @@
       "version": null
     },
     {
+      "decision_type": "merge_after_reviews",
+      "label": "Merging a pull request once its reviews pass",
+      "class": "human_over_the_loop",
+      "adjustable": true,
+      "disposition": "announce",
+      "allowed_dispositions": [
+        "act",
+        "announce",
+        "ask"
+      ],
+      "source": "preset",
+      "preset": "balanced",
+      "version": 1
+    },
+    {
       "decision_type": "publish_deprecation_notice",
       "label": "Publishing a deprecation notice",
       "class": "human_over_the_loop",
@@ -245,7 +260,7 @@
     {
       "key": "merge_or_protection_change",
       "layer": "packages/gh-policy/src/mergeProtection.ts: isMergeOrProtectionPath (H03 criterion 4)",
-      "label": "Merging, and changing branch protection, is always a person's call"
+      "label": "Changing branch protection is always a person's call, and so is any merge you haven't set to merge automatically"
     },
     {
       "key": "untrusted_work_creation",
@@ -267,6 +282,11 @@
     {
       "decision_type": "start_work_doc",
       "from": "announce",
+      "to": "announce"
+    },
+    {
+      "decision_type": "merge_after_reviews",
+      "from": "act",
       "to": "announce"
     }
   ]

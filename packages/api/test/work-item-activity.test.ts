@@ -903,6 +903,31 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
     expect(((await (await get(external.itemId, { accountId, userId })).json()) as Activity).auto_merge).toBe(true);
   });
 
+  it('auto_merge follows the merge dial too: on only when the role setting is on and the dial does not say ask (no row, act, announce and a use-the-default version are on)', async () => {
+    const { accountId, userId } = await seedAccountWithMember(admin);
+    const { itemId, repoId } = await seedItem(accountId, { autoMerge: true });
+    const activity = async () => ((await (await get(itemId, { accountId, userId })).json()) as Activity).auto_merge;
+    const dial = (disposition: string, preset: string | null) =>
+      admin.query(
+        `INSERT INTO decision_settings (account_id, repo_id, decision_type, disposition, preset, version, changed_by)
+         VALUES ($1, $2, 'merge_after_reviews', $3, $4, (SELECT coalesce(max(version), 0) + 1 FROM decision_settings WHERE repo_id = $2 AND decision_type = 'merge_after_reviews'), $5)`,
+        [accountId, repoId, disposition, preset, userId],
+      );
+    expect(await activity()).toBe(true);
+    await dial('ask', 'cautious');
+    expect(await activity()).toBe(false);
+    await dial('announce', 'balanced');
+    expect(await activity()).toBe(true);
+    await dial('ask', null);
+    expect(await activity()).toBe(false);
+    await dial('ask', 'default');
+    expect(await activity()).toBe(true);
+    await dial('ask', 'cautious');
+    await admin.query(`UPDATE repos SET settings = '{"autoMerge":false}'::jsonb WHERE id = $1`, [repoId]);
+    await dial('act', 'autonomous');
+    expect(await activity()).toBe(false);
+  });
+
   it('never shows a stored command that holds a credentialed URL, a placeholder or a control character', async () => {
     const { accountId, userId } = await seedAccountWithMember(admin);
     const { itemId } = await seedItem(accountId);

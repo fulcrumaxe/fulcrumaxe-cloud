@@ -549,14 +549,14 @@ describe("the auto-start sweep [pg]", { timeout: 90_000 }, () => {
       const after = await settings(f.t, "POST", "/preset", { preset: "balanced" });
       expect(after.active_preset).toBe("balanced");
       expect(after.dials.find((d) => d.decision_type === "start_work_small")).toMatchObject({ disposition: "announce", source: "preset" });
-      expect((await admin.query("SELECT decision_type FROM decision_settings WHERE repo_id = $1 ORDER BY decision_type", [f.t.repoId])).rows.map((r) => r.decision_type)).toEqual(["start_work_bug", "start_work_doc", "start_work_small"]);
+      expect((await admin.query("SELECT decision_type FROM decision_settings WHERE repo_id = $1 ORDER BY decision_type", [f.t.repoId])).rows.map((r) => r.decision_type)).toEqual(["merge_after_reviews", "start_work_bug", "start_work_doc", "start_work_small"]);
       expect(await gate.gateProposal(f.t.accountId, f.proposal)).toBe("started");
     });
 
     it("the preview says what is written, and a second Balanced writes nothing more", async () => {
       const f = await fixture({ disposition: null });
       const preview = await settings(f.t, "POST", "/preset/preview", { preset: "balanced" });
-      expect(preview).toMatchObject({ moves: [{ from: "announce", to: "announce" }, { from: "announce", to: "announce" }, { from: "announce", to: "announce" }] });
+      expect(preview).toMatchObject({ moves: [{ from: "announce", to: "announce" }, { from: "announce", to: "announce" }, { from: "announce", to: "announce" }, { decision_type: "merge_after_reviews", from: "act", to: "announce" }] });
       expect((await admin.query("SELECT 1 FROM decision_settings WHERE repo_id = $1", [f.t.repoId])).rowCount).toBe(0);
       await settings(f.t, "POST", "/preset", { preset: "balanced" });
       const again = (await settings(f.t, "POST", "/preset/preview", { preset: "balanced" })) as unknown as { moves: unknown[] };

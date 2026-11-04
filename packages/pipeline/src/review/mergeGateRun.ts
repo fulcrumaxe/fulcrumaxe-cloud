@@ -5,6 +5,9 @@ import { enqueueDedupeKey, listHeadRemovals, recordDriverEvent, toCode } from "@
 import { PERSON_REQUEUE_REASON, queueAgainPending } from "@fx/core/src/work-items/queueIntent.js";
 import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js";
 import { humanMergeOnly } from "@fx/db/src/humanMergeOnly.js";
+import { reportError } from "@fx/telemetry";
+import { readMergeDial, type MergeDial } from "@fx/db/src/mergeDial.js";
+import { recordMergeReceiptOn, type MergeReceiptCall, type MergeReceiptResult } from "@fx/db/src/mergeReceipt.js";
 import { autoMergeAllowed } from "@fx/trust";
 import { readRecordedRunnerPullRequest } from "@fx/runner";
 import { createGitHubMergeGatePort, isLocalGitHubHttp, type GitHubHttp, type LocalGitHubHttp, type MergeQueueDocuments } from "../build/githubMergePort.js";
@@ -388,6 +391,8 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
   }
 
   // 4. The gate. It merges (bound to the head's sha) or marks the PR for a person.
+  // The merge dial as the gate read it (D#7 DW-R4); what the receipt names. No row: the catalogue default at version 0.
+  let mergeDial: MergeDial = { disposition: "act", version: 0 };
   const out = await runMergeGate(
     {
       pool,
@@ -416,8 +421,12 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
           }),
       // D#483 S5-j2a2: the ordering and overlap check, read on the client that reads the repository that merges (the public one for a paired item), whatever the caller.
       ...createMergeOrder({ pool, github: mergePort, runnerLocal, paired, attestation: go?.attestation }),
-      // @fx/trust's autoMergeAllowed over the repository's guard settings, exactly. Never wrapped in a try that could read as true.
-      isAutoMergeAllowed: async () => autoMergeAllowed({ provenance: ctx.provenance }, { autoMerge: ctx.autoMerge, blockExternalAutoMerge: ctx.blockExternalAutoMerge }),
+      // @fx/trust's autoMergeAllowed over the repository's guard settings, exactly, AND the merge dial (D#7 DW-R4): both must allow, and `ask` leaves the merge to a person.
+      // A failed dial read throws (the step retries); it is never read as an `act`.
+      isAutoMergeAllowed: async () => {
+        mergeDial = await withTenant(pool, accountId, (client) => readMergeDial(client, ctx.repoId));
+        return mergeDial.disposition !== "ask" && autoMergeAllowed({ provenance: ctx.provenance }, { autoMerge: ctx.autoMerge, blockExternalAutoMerge: ctx.blockExternalAutoMerge });
+      },
       // The driver reviews the head itself; nothing is dispatched from inside the gate.
       requestReviews: async () => undefined,
       // D#598 P3b: the parent's pull request number, for the sentence on a stacked stop. Our rows only; no GitHub call.
@@ -459,6 +468,8 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
   // D#483 S5-j2a1: another merge on the repository holds it. The gate read nothing, so it has no head of its own to report: the head this call read stands in. The fact gets its own dedupe
   // key (below), so it is recorded once per head, shows the person why nothing moved, and can never hide a later real stop on the same head.
   const busy = out.outcome === "ready_human_merges" && out.reasons.includes("merge_repo_busy");
+  // A hold whose only reason is the auto-merge rule: its own fact key, so a head first seen with other reasons (CI still red) and later held only by that rule is recorded again, and the receipt can name it.
+  const policyHold = out.outcome === "ready_human_merges" && out.reasons.length === 1 && out.reasons[0] === "auto_merge_not_allowed";
   const outHead = busy ? mergeHead : out.outcome === "head_moved" ? out.staleHeadSha : out.headSha;
   // The card's rows speak of the head the reviewers judged and the item's own pull request; a paired item's public head rides in the dedupe key.
   const headForRow = publicPr !== null ? (SHA_PATTERN.test(headSha) ? headSha : null) : SHA_PATTERN.test(outHead) ? outHead : null;
@@ -467,7 +478,7 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
     await recordDriverEvent(client, accountId, {
       workItemId,
       kind: "merge_gate",
-      dedupeKey: `${keyHead}:${go !== undefined ? "go:" : ""}${out.outcome}${busy ? (out.outcome === "ready_human_merges" && out.reasons.includes("ordered_resource_unreadable") ? ":merge_repo_busy_unreadable" : ":merge_repo_busy") : ""}`,
+      dedupeKey: `${keyHead}:${go !== undefined ? "go:" : ""}${out.outcome}${policyHold ? ":policy_hold" : ""}${busy ? (out.outcome === "ready_human_merges" && out.reasons.includes("ordered_resource_unreadable") ? ":merge_repo_busy_unreadable" : ":merge_repo_busy") : ""}`,
       code: toCode(out.outcome),
       reasons: reasons.map((r) => toCode(r)),
       headSha: headForRow,
@@ -492,7 +503,29 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
       });
     }
   });
+  // 6. The receipt (D#7 DW-R4), after the facts: a merge the gate made, or a pull request the policy alone left for a person. It never fails or undoes the merge.
+  // A hold is receipted only when the merge dial itself says ask: a hold the role setting alone causes names no dial, so it gets none.
+  if (headForRow !== null && (out.outcome === "merged" || (policyHold && mergeDial.disposition === "ask"))) {
+    await recordMergeReceipt(pool, { accountId, workItemId, eventHead: headForRow, reviewHeads: [headSha], outcome: out.outcome === "merged" ? "merged" : "ready", dial: mergeDial });
+  }
   return { outcome: out.outcome, headSha: outHead, reasons, status };
+}
+
+/**
+ * D#7 DW-R4: writes the receipt behind a merge by policy (`merged`) or behind a pull request the policy left for a person (`ready`), through the database's
+ * `merge_receipt_write` (see `recordMergeReceiptOn` in @fx/db, which the webhook and the queue reconcile use for the host queue's merge). It runs AFTER the
+ * gate's facts are recorded, which is what the database checks, and it can not fail the merge: a miss is reported through the closed telemetry set and the merge
+ * stands. A merge with a fact and no receipt is a missed one. `dial` is what the gate read when it decided; a caller that did not leaves it out and the dial that
+ * stood at `decidedBy` (else now) is used.
+ */
+export async function recordMergeReceipt(pool: Pool, input: MergeReceiptCall & { accountId: string }): Promise<MergeReceiptResult> {
+  try {
+    return await withTenant(pool, input.accountId, (client) => recordMergeReceiptOn(client, input));
+  } catch (error) {
+    // A connection, BEGIN or COMMIT failure after a real merge: the merge stands, the miss is reported.
+    reportError(error, { stage: "merge.receipt", code: "merge_receipt_failed" });
+    return "failed";
+  }
 }
 
 /** The GitHub id of a repository (`GET /repos/{owner}/{repo}`, allowlisted as A2 for a runner_local repo). Null when the answer carries no usable id: the lock then counts it as listed. */

@@ -666,11 +666,14 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
     }>(
       `SELECT w.stage, w.halted_at IS NOT NULL AS halted, w.repo_id, (w.follow_up_id IS NOT NULL) AS follow_up, w.discussion_id, w.gh_number, r.gh_owner, r.gh_name,
               -- The merge gate's own rule (@fx/trust autoMergeAllowed): the JSON boolean true, and for external work also
-              -- the JSON boolean false on blockExternalAutoMerge. A string "true" is not true.
+              -- the JSON boolean false on blockExternalAutoMerge. A string "true" is not true. And the repository's merge dial
+              -- (merge_after_reviews) must not say ask: both must allow, as in the gate. No row, or a "use the default" version, is act.
               ((r.settings->'autoMerge') = 'true'::jsonb
-                AND (w.provenance = 'internal' OR (r.settings->'blockExternalAutoMerge') = 'false'::jsonb)) AS auto_merge
+                AND (w.provenance = 'internal' OR (r.settings->'blockExternalAutoMerge') = 'false'::jsonb)
+                AND NOT (COALESCE(d.disposition = 'ask' AND d.preset IS DISTINCT FROM 'default', false))) AS auto_merge
          FROM work_items w
          LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
+         LEFT JOIN LATERAL (SELECT s.disposition, s.preset FROM decision_settings s WHERE s.repo_id = w.repo_id AND s.decision_type = 'merge_after_reviews' ORDER BY s.version DESC LIMIT 1) d ON true
         WHERE w.id = $1::uuid`,
       [workItemId],
     );

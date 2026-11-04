@@ -20,6 +20,8 @@ export const DECISION_LABELS: Readonly<Record<string, string>> = {
   start_parent_item: "Starting a new feature, project or critical item",
   spend_past_envelope: "Spending past an item's budget",
   run_extension: "Extending a run past its limit",
+  // Owner copy, proposed (DW-R4): the owner signs this off before the merge.
+  merge_after_reviews: "Merging a pull request once its reviews pass",
   start_after_reclassify: "Starting an item that was later judged larger",
   reversal_recorded: "Undoing an earlier decision",
   reversal_over_cap: "Undoing a decision again after two undos",

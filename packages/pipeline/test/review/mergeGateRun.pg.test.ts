@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { reportError } from "@fx/telemetry";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { listDriverEvents, listHeadRemovals } from "@fx/core/src/work-items/driverEvents.js";
 import { queueAgainPending } from "@fx/core/src/work-items/queueIntent.js";
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "../../../github/src/mergeGateGraphql.js";
 import { clearMergeQueueModeCache } from "../../src/build/githubMergePort.js";
 import { applyQueueEvent } from "../../src/mergeQueue/index.js";
-import { runMergeGateForItem } from "../../src/review/mergeGateRun.js";
+import { recordMergeReceipt, runMergeGateForItem } from "../../src/review/mergeGateRun.js";
 import { loadReviewContext, loadSpecText } from "../../src/review/context.js";
 import { REVIEW_STATUS_CONTEXT } from "../../src/review/githubReads.js";
 import { discussingItem } from "../plan/helpers/panelFixtures.js";
@@ -21,6 +22,8 @@ import { FAKE_MERGE_BASE, fakeGitHubRest, freshRepo, type FakeRepoState } from "
  * still needs CI (a repository's own checks must pass too), the repository's auto-merge setting exactly true, and
  * every outcome is recorded as facts.
  */
+vi.mock("@fx/telemetry", async (original) => ({ ...(await original<typeof import("@fx/telemetry")>()), reportError: vi.fn() }));
+
 const h = pgHarness();
 const HEAD = "a".repeat(40);
 const OTHER = "b".repeat(40);
@@ -810,3 +813,169 @@ describe("D#694 B5: a base branch behind GitHub's merge queue", () => {
 });
 
 const queueAgainPendingFor = (w: World) => withTenant(h.runWriterPool, w.accountId, (c) => queueAgainPending(c, w.accountId, w.workItemId, w.gh.prNumber, HEAD));
+
+describe("D#7 DW-R4: the merge dial and the receipt behind a merge by policy", () => {
+  const receipts = async (w: World) => (await h.admin.query("SELECT chosen, rejected_alternative, dial_version, actor, run_id, class, catalogue_version FROM decision_receipts WHERE work_item_id = $1 AND decision_type = 'merge_after_reviews' ORDER BY created_at", [w.workItemId])).rows;
+  const setDial = async (w: World, disposition: string, version: number, preset: string | null = null) => {
+    const user = randomUUID();
+    await h.admin.query("INSERT INTO users (id, email) VALUES ($1, $2)", [user, `${user}@example.test`]);
+    await h.admin.query(
+      "INSERT INTO decision_settings (account_id, repo_id, decision_type, disposition, preset, version, changed_by) VALUES ($1, $2, 'merge_after_reviews', $3, $4, $5, $6)",
+      [w.accountId, w.repoId, disposition, preset, version, user],
+    );
+  };
+  const reviewRun = async (w: World) => (await h.admin.query("SELECT id FROM agent_runs WHERE work_item_id = $1 AND role = 'code-reviewer' AND head_sha = $2", [w.workItemId, HEAD])).rows[0].id as string;
+  const record = (w: World, head: string) => recordMergeReceipt(h.runWriterPool, { accountId: w.accountId, workItemId: w.workItemId, eventHead: head, reviewHeads: [head], outcome: "merged" });
+
+  it("a repository with no dial row behaves as before and the merge leaves exactly one receipt that names the dial's default at version 0; a replay writes no second", async () => {
+    const w = await world();
+    await passBoth(w);
+    expect(await gate(w)).toMatchObject({ outcome: "merged", reasons: [] });
+    expect(w.gh.merges).toEqual([{ sha: HEAD, method: "squash" }]);
+    expect(await receipts(w)).toEqual([{ chosen: "act", rejected_alternative: "ask", dial_version: 0, actor: "policy", run_id: await reviewRun(w), class: "human_over_the_loop", catalogue_version: expect.any(Number) }]);
+    expect(await record(w, HEAD)).toBe("replayed");
+    expect(await receipts(w)).toHaveLength(1);
+  });
+
+  it("announce merges and names its version; a 'use the default' version is an act", async () => {
+    const w = await world();
+    await passBoth(w);
+    await setDial(w, "announce", 1, "balanced");
+    expect(await gate(w)).toMatchObject({ outcome: "merged" });
+    expect(await receipts(w)).toMatchObject([{ chosen: "announce", dial_version: 1, actor: "policy" }]);
+    const d = await world();
+    await passBoth(d);
+    await setDial(d, "act", 1, "default");
+    expect(await gate(d)).toMatchObject({ outcome: "merged" });
+    expect(await receipts(d)).toMatchObject([{ chosen: "act", dial_version: 1 }]);
+  });
+
+  it("ask leaves the merge to a person even with auto-merge on: nothing merges, one 'ask' receipt names the dial version, a second look writes no second", async () => {
+    const w = await world();
+    await passBoth(w);
+    await setDial(w, "ask", 1, "cautious");
+    expect(await gate(w)).toMatchObject({ outcome: "ready_human_merges", reasons: ["auto_merge_not_allowed"] });
+    expect(await gate(w)).toMatchObject({ outcome: "ready_human_merges" });
+    expect(w.gh.merges ?? []).toEqual([]);
+    expect(await receipts(w)).toMatchObject([{ chosen: "ask", rejected_alternative: "act", dial_version: 1, actor: "policy" }]);
+    // The dial moved to act while the pull request waits: the next look follows it (derived, not stamped), and the old receipt stays.
+    await setDial(w, "act", 2, null);
+    expect(await gate(w)).toMatchObject({ outcome: "merged" });
+    expect((await receipts(w)).map((r) => [r.chosen, r.dial_version])).toEqual([["ask", 1], ["act", 2]]);
+  });
+
+  it("both must allow: auto-merge off with the dial on act is still a person's merge, and the dial never loosens the role setting; the hold the role setting alone causes names no dial, so it gets no receipt", async () => {
+    const w = await world({ settings: {} });
+    await passBoth(w);
+    await setDial(w, "act", 1, "autonomous");
+    expect(await gate(w)).toMatchObject({ outcome: "ready_human_merges", reasons: ["auto_merge_not_allowed"] });
+    expect(w.gh.merges ?? []).toEqual([]);
+    expect(await receipts(w)).toEqual([]);
+    const bare = await world({ settings: {} });
+    await passBoth(bare);
+    expect(await gate(bare)).toMatchObject({ outcome: "ready_human_merges", reasons: ["auto_merge_not_allowed"] });
+    expect(await receipts(bare)).toEqual([]);
+  });
+
+  it("red then green: a head first held with other reasons and then held only by the dial gets its hold receipt, once, however often the gate looks", async () => {
+    const w = await world();
+    await passBoth(w);
+    await setDial(w, "ask", 1, "cautious");
+    w.gh.checks[HEAD] = [{ name: "ci", status: "completed", conclusion: "failure" }];
+    expect(await gate(w)).toMatchObject({ outcome: "ready_human_merges", reasons: expect.arrayContaining(["ci_not_green", "auto_merge_not_allowed"]) });
+    expect(await receipts(w)).toEqual([]);
+    w.gh.checks[HEAD] = [];
+    expect(await gate(w)).toMatchObject({ outcome: "ready_human_merges", reasons: ["auto_merge_not_allowed"] });
+    expect(await gate(w)).toMatchObject({ outcome: "ready_human_merges", reasons: ["auto_merge_not_allowed"] });
+    expect(await receipts(w)).toMatchObject([{ chosen: "ask", dial_version: 1 }]);
+    expect(vi.mocked(reportError)).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: "merge_receipt_failed" }));
+    // The facts: the stale one is kept, the policy-only one is its own row.
+    const holds = (await events(w)).filter((e) => e.kind === "merge_gate");
+    expect(holds.map((e) => e.reasons)).toEqual([expect.arrayContaining(["ci_not_green"]), ["auto_merge_not_allowed"]]);
+  });
+
+  it("a dial read that fails stops the gate: it throws, nothing merges, and the failure never reads as an act", async () => {
+    const w = await world();
+    await passBoth(w);
+    await h.admin.query("REVOKE SELECT ON decision_settings FROM app_user");
+    try {
+      await expect(gate(w)).rejects.toThrow();
+    } finally {
+      await h.admin.query("GRANT SELECT ON decision_settings TO app_user");
+    }
+    expect(w.gh.merges ?? []).toEqual([]);
+    expect(await receipts(w)).toEqual([]);
+  });
+
+  it("the receipt's run is a finished one on the merged head, not just the newest run on it", async () => {
+    const w = await world();
+    await passBoth(w);
+    await run(w, "code-reviewer", null, { status: "failed" });
+    await h.admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, head_sha, pr_number, dedupe_key) VALUES ($1, $2, 'merged_by_gate', $3, 7, $4)", [w.accountId, w.workItemId, HEAD, `merged:${HEAD}`]);
+    expect(await record(w, HEAD)).toBe("written");
+    const [r] = await receipts(w);
+    const { rows } = await h.admin.query("SELECT status, role FROM agent_runs WHERE id = $1", [r.run_id]);
+    expect(rows).toEqual([{ status: "succeeded", role: "code-reviewer" }]);
+  });
+
+  it("the runner's merge is receipted with the dial that stood when the gate delegated it: moved to ask since, the receipt is still written", async () => {
+    const w = await world();
+    await passBoth(w);
+    await setDial(w, "announce", 1, "balanced");
+    await h.admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, reasons, head_sha, pr_number, dedupe_key) VALUES ($1, $2, 'merge_gate', 'merge_delegated', '{}', $3, 7, 'delegated')", [w.accountId, w.workItemId, HEAD]);
+    await h.admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, head_sha, pr_number, dedupe_key) VALUES ($1, $2, 'merged_by_gate', $3, 7, $4)", [w.accountId, w.workItemId, HEAD, `merged:${OTHER}`]);
+    await setDial(w, "ask", 2, "cautious");
+    const call = { accountId: w.accountId, workItemId: w.workItemId, eventHead: HEAD, reviewHeads: [HEAD], outcome: "merged" as const };
+    expect(await recordMergeReceipt(h.runWriterPool, { ...call, decidedBy: { kind: "merge_gate", head: HEAD, code: "merge_delegated" } })).toBe("written");
+    expect(await receipts(w)).toMatchObject([{ chosen: "announce", dial_version: 1 }]);
+    // Without the decision time the dial now is read, and a merge cannot be receipted under ask.
+    const late = await world();
+    await passBoth(late);
+    await setDial(late, "ask", 1, "cautious");
+    await h.admin.query("INSERT INTO work_item_driver_events (account_id, work_item_id, kind, head_sha, pr_number, dedupe_key) VALUES ($1, $2, 'merged_by_gate', $3, 7, $4)", [late.accountId, late.workItemId, HEAD, `merged:${HEAD}`]);
+    expect(await recordMergeReceipt(h.runWriterPool, { accountId: late.accountId, workItemId: late.workItemId, eventHead: HEAD, reviewHeads: [HEAD], outcome: "merged" })).toBe("failed");
+  });
+
+  it("recordMergeReceipt never rejects: a pool that can not connect is reported and answers failed", async () => {
+    const down = { connect: async () => { throw new Error("connection refused"); } } as never;
+    expect(await recordMergeReceipt(down, { accountId: randomUUID(), workItemId: randomUUID(), eventHead: HEAD, reviewHeads: [HEAD], outcome: "merged" })).toBe("failed");
+    expect(vi.mocked(reportError)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: "merge_receipt_failed" }));
+  });
+
+  it("no receipt for a hold that has other reasons (CI not green): only the policy-only hold is receipted", async () => {
+    const w = await world({ settings: {} });
+    await passBoth(w);
+    w.gh.checks[HEAD] = [{ name: "ci", status: "completed", conclusion: "failure" }];
+    expect(await gate(w)).toMatchObject({ outcome: "ready_human_merges", reasons: expect.arrayContaining(["ci_not_green", "auto_merge_not_allowed"]) });
+    expect(await receipts(w)).toEqual([]);
+  });
+
+  it("a stopped gate (a reviewer asks for a fix) leaves no receipt at all", async () => {
+    const w = await world();
+    await run(w, "code-reviewer", "needs-fix");
+    await gate(w);
+    expect(await receipts(w)).toEqual([]);
+  });
+
+  it("a failed receipt write after a real merge does not fail or undo the merge, and is reported rather than swallowed", async () => {
+    const w = await world();
+    await passBoth(w);
+    await h.admin.query("REVOKE EXECUTE ON FUNCTION merge_receipt_write(uuid, text, uuid, text, text, integer, integer) FROM app_user");
+    try {
+      expect(await gate(w)).toMatchObject({ outcome: "merged" });
+    } finally {
+      await h.admin.query("GRANT EXECUTE ON FUNCTION merge_receipt_write(uuid, text, uuid, text, text, integer, integer) TO app_user");
+    }
+    expect(w.gh.merges).toEqual([{ sha: HEAD, method: "squash" }]);
+    expect((await events(w)).map((e) => e.kind)).toContain("merged_by_gate");
+    expect(await receipts(w)).toEqual([]);
+  });
+
+  it("recordMergeReceipt: a merge nobody recorded, or a head with no review run, writes nothing and says why", async () => {
+    const w = await world();
+    await passBoth(w);
+    expect(await record(w, HEAD)).toBe("failed");
+    expect(await record(w, OTHER)).toBe("no_run");
+    expect(await receipts(w)).toEqual([]);
+  });
+});
