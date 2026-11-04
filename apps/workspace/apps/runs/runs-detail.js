@@ -341,6 +341,8 @@ export const CONTEXT_WORDS = {
   runnerHelp: "This run ran on your runner, so only sizes and counts reach the cloud.",
   partial: "Estimated: this run's usage was only partly measured, so the shares below are estimates.",
   rescanUnavailable: "Memory was not used in this run because secrets couldn't be checked.",
+  // D#600 CX-12: which level set the size this run's prompt was held to (nothing is shown when the role default applied).
+  budget: { item: "Context budget: set for this item.", role: "Context budget: set for this role.", repo: "Context budget: set for this repository." },
 };
 
 /** D#601 MEM-4b3: why memory entries were held back from a run, from two counts and a flag: never an entry's text. Empty when nothing was held back. */
@@ -411,6 +413,7 @@ export function readContext(raw) {
     repo_map_version: typeof b.repo_map_version === "string" && b.repo_map_version !== "" ? b.repo_map_version : null,
     rescan_skipped: countOrNull(b.rescan_skipped),
     rescan_unavailable: b.rescan_unavailable === true,
+    budget_source: b.budget_source === "item" || b.budget_source === "role" || b.budget_source === "repo" ? b.budget_source : null,
   };
 }
 
@@ -472,6 +475,7 @@ export function contextModel(ctx) {
     memory: { tokens: ctx.memory_tokens === null ? null : tokenText(ctx.memory_tokens), items: [...ctx.recalled_memory.map((m) => ({ name: m.name, ref: m.id.slice(0, 8) + "@" + m.version, title: m.id + "@" + m.version })), ...(ctx.item_sources ?? []).map((x) => ({ name: x.label + (x.cut === true ? " (cut)" : ""), ref: x.id.slice(0, 8), title: x.id }))] },
     mapVersion: runner ? null : ctx.repo_map_version,
     rescanNotes: rescanNotes(ctx.rescan_skipped, ctx.rescan_unavailable),
+    budgetLine: ctx.budget_source ? CONTEXT_WORDS.budget[ctx.budget_source] : null,
   };
 }
 
@@ -516,6 +520,7 @@ export function contextSection(context, retry) {
         )
       : null,
     ...m.rescanNotes.map((t) => h("p", { class: "runs-muted", role: "status", "data-testid": "runs-ctx-rescan" }, t)),
+    m.budgetLine ? h("p", { class: "runs-muted", "data-testid": "runs-ctx-budget" }, m.budgetLine) : null,
     m.mapVersion ? h("p", { class: "runs-muted", "data-testid": "runs-ctx-map" }, "Repo map version: ", h("code", null, m.mapVersion)) : null
   );
 }

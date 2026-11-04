@@ -1,8 +1,7 @@
 import { MAX_JOB_PINS, splitPinsByExcludes } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { CONTEXT_EXCLUDES_MAX, ContextRuleError, mapRuleDbError, readItemRules, readRepoRules, resolveContextRules, type ContextRule } from "@fx/core/src/context/contextRules.js";
-import { effectiveContextBudget } from "./contextBudget.js";
-import { DEFAULT_CONTEXT_RULE_TIMEOUTS, boundTransaction, lockRepoRules, readRepoFacts, readTreeSizes, rolledBack, type RepoFacts, type SaveContextRuleDeps } from "./contextRulesSave.js";
+import { DEFAULT_CONTEXT_RULE_TIMEOUTS, boundTransaction, lockRepoRules, pinBudgetOf, readRepoFacts, readTreeSizes, rolledBack, type RepoFacts, type SaveContextRuleDeps } from "./contextRulesSave.js";
 
 /**
  * D#600 CX-9a: removing a rule, with the one warning C4 asks for. An exclude wins over a pin (ruling 7), so taking an item's exclude away can bring a
@@ -51,7 +50,7 @@ export async function removeContextRuleChecked(deps: SaveContextRuleDeps, who: {
         if (after.filter((r) => r.kind === "pin").length > MAX_JOB_PINS) throw new ContextRuleError("pins_exceed_ceiling");
         if (after.filter((r) => r.kind === "exclude").length > CONTEXT_EXCLUDES_MAX) throw new ContextRuleError("excludes_exceed_cap");
         if (ask !== null && sizes !== null) {
-          const budget = effectiveContextBudget(deps.budgetRole ?? "executor", fresh.context_budget_bytes == null ? null : Number(fresh.context_budget_bytes));
+          const budget = await pinBudgetOf(client, who.accountId, deps.budgetRole ?? "executor", fresh, item.work_item_id);
           const added = liveBytes(after, sizes);
           if (added > budget && added > liveBytes(before, sizes)) throw new ContextRuleError("exclude_readds_pins");
         }

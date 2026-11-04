@@ -26,5 +26,6 @@
   "item_sources": [],
   "repo_map_version": null,
   "rescan_skipped": null,
-  "rescan_unavailable": null
+  "rescan_unavailable": null,
+  "budget_source": null
 }

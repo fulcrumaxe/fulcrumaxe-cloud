@@ -70,6 +70,11 @@ export interface RunContextPanel {
    */
   rescan_skipped: number | null;
   rescan_unavailable: boolean | null;
+  /**
+   * D#600 CX-12: the level the run's context budget came from: `item`, `role` or `repo` (an override someone set). Null when the role's default applied, for a run that
+   * predates the record, and for a run with no ledger.
+   */
+  budget_source: 'item' | 'role' | 'repo' | null;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -96,6 +101,7 @@ interface Row {
   has_inputs: boolean;
   rescan_skipped: number | null;
   rescan_unavailable: boolean | null;
+  budget_source: string | null;
 }
 
 interface EntryRow {
@@ -133,7 +139,7 @@ export async function getRunContext(ctx: RunsReadCtx, id: string): Promise<RunCo
                 l.first_turn_input_tokens, l.peak_context_tokens, l.cache_read_tokens, l.cache_write_tokens, l.memory_tokens,
                 l.tool_output_bytes, l.compactions, l.denied_tool_calls,
                 i.recalled_entry_ids AS recalled_ids, i.recalled_entry_versions AS recalled_versions, i.map_version, i.map_sha256,
-                (i.run_id IS NOT NULL) AS has_inputs, i.rescan_skipped, i.rescan_unavailable
+                (i.run_id IS NOT NULL) AS has_inputs, i.rescan_skipped, i.rescan_unavailable, i.budget_source
            FROM agent_runs r
            LEFT JOIN run_context_ledger l ON l.account_id = r.account_id AND l.run_id = r.id
            LEFT JOIN run_context_inputs i ON i.account_id = r.account_id AND i.run_id = r.id
@@ -163,6 +169,7 @@ export async function getRunContext(ctx: RunsReadCtx, id: string): Promise<RunCo
         repo_map_version: null,
         rescan_skipped: null,
         rescan_unavailable: null,
+        budget_source: null,
       };
     }
 
@@ -205,6 +212,7 @@ export async function getRunContext(ctx: RunsReadCtx, id: string): Promise<RunCo
       repo_map_version,
       rescan_skipped: r.has_inputs ? count(r.rescan_skipped) : null,
       rescan_unavailable: r.has_inputs ? r.rescan_unavailable === true : null,
+      budget_source: r.budget_source === 'item' || r.budget_source === 'role' || r.budget_source === 'repo' ? r.budget_source : null,
     };
   });
 }

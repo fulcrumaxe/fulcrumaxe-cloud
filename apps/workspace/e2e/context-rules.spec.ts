@@ -256,8 +256,8 @@ test.describe("D#600 CX-9b: the Repos app's context rules (mocked API)", () => {
     const m = newContextMock({ rules: pins, size: { "a/x.ts": 3000, "a/y.ts": 3000 } });
     await setupRepos(page, m);
     const defaults = t(page, REPO_APP, "ctx-defaults");
-    await expect(defaults.locator("dt")).toHaveText(["Executor", "Fix", "Code reviewer", "Acceptance tester", "Security reviewer", "Debater"]);
-    await expect(defaults.locator("dd")).toHaveText(["35 KiB", "42 KiB", "26 KiB", "27 KiB", "27 KiB", "34 KiB"]);
+    await expect(defaults.locator("dt")).toHaveText(["Executor"]); // CX-12: only roles whose runs use a budget
+    await expect(defaults.locator("dd")).toHaveText(["35 KiB · role default"]);
     await expect(defaults.locator("input, button")).toHaveCount(0); // read-only
     await expect(t(page, REPO_APP, "ctx-budget-now")).toHaveText("Now: each role's default.");
     await expect(t(page, REPO_APP, "ctx-budget-reset")).toHaveAttribute("aria-disabled", "true");
@@ -317,7 +317,7 @@ test.describe("D#600 CX-9b: the Repos app's context rules (mocked API)", () => {
     await expect(t(page, REPO_APP, "ctx-budget-admin-only")).toHaveText("Only owners and admins can change this.");
     for (const id of ["ctx-path", "ctx-kind", "ctx-add", "ctx-budget-input", "ctx-budget-save", "ctx-budget-reset", "ctx-switch", "ctx-remove"]) await expect(t(page, REPO_APP, id)).toHaveCount(0);
     await expect(t(page, REPO_APP, "ctx-budget-now")).toHaveText("Now: 8192 bytes.");
-    await expect(t(page, REPO_APP, "ctx-defaults").locator("dt")).toHaveCount(6);
+    await expect(t(page, REPO_APP, "ctx-defaults").locator("dt")).toHaveCount(1);
   });
 
   test("demoted under the screen: the server's 403 turns the controls into the read-only view", async ({ page }) => {
@@ -361,8 +361,8 @@ test.describe("D#600 CX-9b: the Repos app's context rules (mocked API)", () => {
     expect(m1.pageScroll[0], "the page does not scroll sideways").toBeLessThanOrEqual(m1.pageScroll[1]);
     expect(m1.widestRow).toBeLessThanOrEqual(m1.rowClient);
     expect(m1.smallest, "every button, field and select is at least 44 px tall").toBeGreaterThanOrEqual(44);
-    // 83 rows x (switch + remove), path + kind + add, budget input + save + reset, and the error's Retry
-    expect(m1.controls).toBe(83 * 2 + 3 + 3 + 1);
+    // 83 rows x (switch + remove), path + kind + add, budget level + input + save + reset, and the error's Retry
+    expect(m1.controls).toBe(83 * 2 + 3 + 4 + 1);
     const axe = await new AxeBuilder({ page }).include(`${REPO_APP} [data-testid="ctx"]`).withTags(["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"]).analyze();
     expect(axe.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(" | ")}`)).toEqual([]);
   });
@@ -426,6 +426,7 @@ test.describe("D#600 CX-9b: the Repos app's context rules (mocked API)", () => {
     }, REPO_APP);
     measure({ test: "names", controls: found.length, found });
     expect(found).toEqual([
+      { tag: "select", role: null, name: "Budget for" },
       { tag: "input", role: null, name: "Budget in bytes" },
       { tag: "button", role: null, name: "Save budget" },
       { tag: "button", role: null, name: "Reset to default" },
@@ -505,7 +506,7 @@ test.describe("D#600 CX-9b: this item's context rules in the Pipeline item pane 
     await expect(rowsOf(page, PL_APP).filter({ hasText: "a.ts" }).locator("button")).toHaveCount(2);
     await add(page, PL_APP, "b.ts");
     expect(m.bodies.at(-1)).toEqual({ scope: "item", work_item_id: ITEM.id, kind: "pin", path: "b.ts" });
-    await expect(t(page, PL_APP, "ctx-budget")).toHaveCount(0); // the budget is the repository's, in the Repos app
+    await expect(t(page, PL_APP, "ctx-budget-admin-only")).toHaveText("Only owners and admins can change this."); // CX-12: the item's budget is read-only for a member
   });
 
   test("removing an item exclude that would put pinned files over budget warns (role=alert) and removes nothing; Keep it leaves it; the confirm repeats with confirm=true", async ({ page }) => {
@@ -562,5 +563,221 @@ test.describe("D#600 CX-9b: this item's context rules in the Pipeline item pane 
     }
     const w = await page.evaluate((app) => { const d = document.querySelector(`${app} [data-testid="pl-detail"]`)!; return [d.scrollWidth, d.clientWidth]; }, PL_APP);
     expect(w[0]).toBeLessThanOrEqual(w[1]);
+  });
+});
+
+// ── D#600 CX-12: a budget per role and per item ────────────────────────────
+const dd = (page: Page, app: string) => t(page, app, "ctx-defaults").locator("dd");
+const level = (page: Page, app: string) => t(page, app, "ctx-budget-level");
+const save = async (page: Page, app: string, value: string) => {
+  await t(page, app, "ctx-budget-input").fill(value);
+  await t(page, app, "ctx-budget-save").click();
+};
+/** Every budget control's height and the box the block takes, for the report; the block must not scroll sideways. */
+const budgetFit = (page: Page, app: string, inner: string) =>
+  page.evaluate(([a, inner, controls]) => {
+    const block = document.querySelector(`${a} [data-testid="ctx-budget"]`) as HTMLElement;
+    const win = document.querySelector(`${a} ${inner}`) as HTMLElement;
+    const right = block.getBoundingClientRect().right;
+    const els = [...block.querySelectorAll<HTMLElement>(controls)];
+    return {
+      viewport: window.innerWidth, blockWidth: Math.round(block.getBoundingClientRect().width), blockScroll: [block.scrollWidth, block.clientWidth], appScroll: [win.scrollWidth, win.clientWidth],
+      doc: document.documentElement.scrollWidth - document.documentElement.clientWidth, past: [...block.querySelectorAll("*")].filter((n) => n.getBoundingClientRect().width > 0 && n.getBoundingClientRect().right > right + 1).map((n) => n.tagName),
+      controls: els.length, smallest: Math.min(...els.map((b) => Math.round(b.getBoundingClientRect().height))), widest: Math.max(...els.map((b) => Math.round(b.getBoundingClientRect().width))),
+      order: els.map((b) => b.getAttribute("data-testid") ?? b.tagName.toLowerCase()),
+    };
+  }, [app, inner, CONTROLS] as const);
+
+test.describe("D#600 CX-12: a role's budget in the Repos app (mocked API)", () => {
+  test("pick a role, set it within its bound, reload and read it back, then reset it; the screen names the level of every number", async ({ page }) => {
+    const m = newContextMock({ budget: 20000 });
+    const errors = await setupRepos(page, m);
+    await expect(level(page, REPO_APP).locator("option")).toHaveText(["Whole repository", "Executor"]);
+    await expect(dd(page, REPO_APP).first()).toHaveText("20000 bytes · set for this repository");
+    await level(page, REPO_APP).selectOption("executor");
+    await expect(t(page, REPO_APP, "ctx-budget-now")).toHaveText("Now: none set for this role.");
+    await expect(t(page, REPO_APP, "ctx-budget-reset")).toHaveAttribute("aria-disabled", "true");
+    await expect(t(page, REPO_APP, "ctx-budget-input")).toHaveAttribute("max", "71680");
+    await save(page, REPO_APP, "8192");
+    await expect(t(page, REPO_APP, "ctx-budget-status")).toHaveText("Your pins fit this budget.");
+    await expect(t(page, REPO_APP, "ctx-budget-now")).toHaveText("Now: 8192 bytes.");
+    await expect(dd(page, REPO_APP)).toHaveText(["8 KiB · set for this role"]);
+    expect(m.roles.executor).toBe(8192);
+    expect(m.bodies).toEqual([{ budget_bytes: 8192 }]);
+    await reloadRepos(page);
+    await level(page, REPO_APP).selectOption("executor");
+    await expect(t(page, REPO_APP, "ctx-budget-input")).toHaveValue("8192");
+    await expect(dd(page, REPO_APP).first()).toHaveText("8 KiB · set for this role");
+    // Undo: Reset removes this role's override only; the repository's number stays.
+    await t(page, REPO_APP, "ctx-budget-reset").click();
+    await expect(t(page, REPO_APP, "ctx-budget-now")).toHaveText("Now: none set for this role.");
+    await expect(dd(page, REPO_APP).first()).toHaveText("20000 bytes · set for this repository");
+    expect(m.roles.executor).toBeNull();
+    expect(m.budget).toBe(20000);
+    expect(m.bodies.at(-1)).toEqual({ budget_bytes: null });
+    expect(errors).toEqual([]);
+  });
+
+  test("each level is held to its own bound: a role's is its default times 2, the repository's is unchanged; a server refusal keeps the old number", async ({ page }) => {
+    const m = newContextMock({ roles: { executor: 9000 } });
+    await setupRepos(page, m);
+    await level(page, REPO_APP).selectOption("executor");
+    await expect(t(page, REPO_APP, "ctx-budget-input")).toHaveValue("9000");
+    for (const [value, range] of [["71681", "4096 to 71680"], ["4095", "4096 to 71680"]] as const) {
+      await save(page, REPO_APP, value);
+      await expect(t(page, REPO_APP, "ctx-budget-error")).toHaveText(`Enter a whole number from ${range}.`);
+    }
+    expect(m.bodies).toEqual([]); // nothing was sent
+    await save(page, REPO_APP, "71680");
+    await expect(t(page, REPO_APP, "ctx-budget-now")).toHaveText("Now: 71680 bytes.");
+    await save(page, REPO_APP, "4096");
+    await expect(t(page, REPO_APP, "ctx-budget-now")).toHaveText("Now: 4096 bytes.");
+    m.forced["PUT role"] = [{ status: 422, code: "budget_out_of_range" }];
+    await save(page, REPO_APP, "5000");
+    await expect(t(page, REPO_APP, "ctx-budget-error")).toContainText("That size is outside the allowed range, so nothing was saved.");
+    await expect(t(page, REPO_APP, "ctx-budget-now")).toHaveText("Now: 4096 bytes.");
+    await level(page, REPO_APP).selectOption("repo");
+    await expect(t(page, REPO_APP, "ctx-budget-error")).toHaveCount(0);
+    await expect(t(page, REPO_APP, "ctx-budget-input")).toHaveAttribute("max", "2097152");
+    await save(page, REPO_APP, "2097152");
+    await expect(t(page, REPO_APP, "ctx-budget-now")).toHaveText("Now: 2097152 bytes.");
+  });
+
+  test("a budget set below the pins is accepted and reported, never refused", async ({ page }) => {
+    const m = newContextMock({ rules: [ruleOf("repo", "pin", "a/x.ts")], size: { "a/x.ts": 6000 } });
+    await setupRepos(page, m);
+    await level(page, REPO_APP).selectOption("executor");
+    await save(page, REPO_APP, "5000");
+    await expect(t(page, REPO_APP, "ctx-budget-status")).toHaveText("Your pins are over this budget. They are never cut to fit it during a run.");
+    expect(m.roles.executor).toBe(5000);
+  });
+
+  test("a member sees every number and its level, and no field, select or save", async ({ page }) => {
+    const m = newContextMock({ isAdmin: false, budget: 20000, roles: { executor: 7000 } });
+    await setupRepos(page, m);
+    await expect(t(page, REPO_APP, "ctx-budget-admin-only")).toHaveText("Only owners and admins can change this.");
+    await expect(dd(page, REPO_APP).first()).toHaveText("7000 bytes · set for this role");
+    await expect(level(page, REPO_APP)).toHaveCount(0);
+    await expect(t(page, REPO_APP, "ctx-budget-input")).toHaveCount(0);
+  });
+
+  test("the budget block fits, scrolls nowhere sideways, and every control is 44 px tall in a sensible order; axe is clean; no null, undefined or NaN", async ({ page }) => {
+    const m = newContextMock({ budget: 20000, roles: { executor: 8192 } });
+    await setupRepos(page, m);
+    await level(page, REPO_APP).selectOption("executor");
+    await save(page, REPO_APP, "71681");
+    const text = await t(page, REPO_APP, "ctx-budget").innerText();
+    expect(text).not.toMatch(/\b(null|undefined|NaN)\b/);
+    const fit = await budgetFit(page, REPO_APP, ".repos-app");
+    measure({ test: "role budget block", ...fit });
+    expect(fit.blockScroll[0]).toBeLessThanOrEqual(fit.blockScroll[1]);
+    expect(fit.appScroll[0]).toBeLessThanOrEqual(fit.appScroll[1]);
+    expect(fit.doc).toBeLessThanOrEqual(0);
+    expect(fit.past).toEqual([]);
+    expect(fit.smallest).toBeGreaterThanOrEqual(44);
+    expect(fit.order).toEqual(["ctx-budget-level", "ctx-budget-input", "ctx-budget-save", "ctx-budget-reset"]);
+    await page.setViewportSize({ width: 375, height: 800 });
+    const narrow = await budgetFit(page, REPO_APP, ".repos-app");
+    measure({ test: "role budget block 375", ...narrow });
+    expect(narrow.blockScroll[0]).toBeLessThanOrEqual(narrow.blockScroll[1]);
+    expect(narrow.doc).toBeLessThanOrEqual(0);
+    expect(narrow.past).toEqual([]);
+    expect(narrow.smallest).toBeGreaterThanOrEqual(44);
+    const axe = await new AxeBuilder({ page }).include(`${REPO_APP} [data-testid="ctx-budget"]`).withTags(["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"]).analyze();
+    expect(axe.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(" | ")}`)).toEqual([]);
+  });
+});
+
+test.describe("D#600 CX-12: only roles whose runs use a budget are shown (mocked API)", () => {
+  const OTHER = ["Fix", "Code reviewer", "Acceptance tester", "Security reviewer", "Debater"];
+  test("Repos: the plain sentence is shown, the select offers the repository and the executor only, and no other role appears anywhere in the block", async ({ page }) => {
+    const m = newContextMock({ budget: 20000, roles: { fix: 7000 } }); // a stored number for a role nobody reads yet
+    await setupRepos(page, m);
+    await expect(t(page, REPO_APP, "ctx-budget-consumers")).toHaveText("Today only the build's prompt uses a budget.");
+    await expect(level(page, REPO_APP).locator("option")).toHaveText(["Whole repository", "Executor"]);
+    await expect(dd(page, REPO_APP)).toHaveCount(1);
+    const text = await t(page, REPO_APP, "ctx-budget").innerText();
+    for (const name of OTHER) expect(text, name).not.toContain(name);
+    measure({ test: "consumers sentence", options: 2, rows: 1 });
+  });
+
+  test("Pipeline: the item's block carries the same sentence and lists the executor only", async ({ page }) => {
+    const m = newContextMock({ budget: 20000 });
+    await setupPipeline(page, m);
+    await expect(t(page, PL_APP, "ctx-budget-consumers")).toHaveText("Today only the build's prompt uses a budget.");
+    await expect(dd(page, PL_APP)).toHaveCount(1);
+    await expect(t(page, PL_APP, "ctx-defaults").locator("dt")).toHaveText(["Executor"]);
+    const text = await t(page, PL_APP, "ctx-budget").innerText();
+    for (const name of OTHER) expect(text, name).not.toContain(name);
+  });
+});
+
+test.describe("D#600 CX-12: an item's budget in the Pipeline item pane (mocked API)", () => {
+  async function reopenItem(page: Page) {
+    await page.reload();
+    await waitForDesktop(page);
+    await page.locator('.dock-icon[data-app-id="pipeline"]').click();
+    await expect(page.locator(PL_APP)).toBeVisible();
+    await page.locator(`${PL_APP} [data-testid="pl-card"]`).first().click();
+    await expect(t(page, PL_APP, "ctx-applies")).toBeVisible();
+    await expect(t(page, PL_APP, "ctx-loading")).toHaveCount(0);
+  }
+
+  test("set the item's budget, see every role held to it with the level named, reload and read it back, then reset it", async ({ page }) => {
+    const m = newContextMock({ budget: 20000, roles: { executor: 8192 } });
+    const errors = await setupPipeline(page, m);
+    await expect(level(page, PL_APP)).toHaveCount(0); // one level here
+    await expect(t(page, PL_APP, "ctx-budget-now")).toHaveText("Now: none set for this item.");
+    await expect(dd(page, PL_APP).first()).toHaveText("8 KiB · set for this role");
+    await expect(t(page, PL_APP, "ctx-budget-reset")).toHaveAttribute("aria-disabled", "true");
+    await expect(t(page, PL_APP, "ctx-budget-input")).toHaveAttribute("max", "86016");
+    await save(page, PL_APP, "6000");
+    await expect(t(page, PL_APP, "ctx-budget-now")).toHaveText("Now: 6000 bytes.");
+    await expect(dd(page, PL_APP)).toHaveText(["6000 bytes · set for this item"]);
+    expect(m.itemBudget).toBe(6000);
+    expect(m.bodies.at(-1)).toEqual({ budget_bytes: 6000 });
+    await reopenItem(page);
+    await expect(t(page, PL_APP, "ctx-budget-input")).toHaveValue("6000");
+    await expect(dd(page, PL_APP).first()).toHaveText("6000 bytes · set for this item");
+    await t(page, PL_APP, "ctx-budget-reset").click();
+    await expect(t(page, PL_APP, "ctx-budget-now")).toHaveText("Now: none set for this item.");
+    await expect(dd(page, PL_APP).first()).toHaveText("8 KiB · set for this role"); // the role's number comes back; the repository's stays under it
+    expect(m.itemBudget).toBeNull();
+    expect(m.roles.executor).toBe(8192);
+    expect(errors).toEqual([]);
+  });
+
+  test("the item's bound is the largest role bound; the shown run is held to its own role's limit; a failed save keeps the old number", async ({ page }) => {
+    const m = newContextMock();
+    await setupPipeline(page, m);
+    await save(page, PL_APP, "86017");
+    await expect(t(page, PL_APP, "ctx-budget-error")).toHaveText("Enter a whole number from 4096 to 86016.");
+    expect(m.bodies).toEqual([]);
+    await save(page, PL_APP, "86016");
+    await expect(t(page, PL_APP, "ctx-budget-now")).toHaveText("Now: 86016 bytes.");
+    // The item's number is held to the running role's own limit (the executor's is 71680), and that is what the run is shown with.
+    await expect(dd(page, PL_APP)).toHaveText(["70 KiB · set for this item"]);
+    m.forced["PUT item settings"] = [{ status: 500, code: "internal" }];
+    await save(page, PL_APP, "5000");
+    await expect(t(page, PL_APP, "ctx-budget-error")).toContainText("That change couldn't be saved. Try again.");
+    await expect(t(page, PL_APP, "ctx-budget-now")).toHaveText("Now: 86016 bytes.");
+  });
+
+  test("a member reads the item's numbers and the admin-only sentence, with no field; the pane fits at every width with 44 px controls and axe clean", async ({ page }) => {
+    const m = newContextMock({ isAdmin: false, itemBudget: 6000 });
+    await setupPipeline(page, m);
+    await expect(t(page, PL_APP, "ctx-budget-admin-only")).toHaveText("Only owners and admins can change this.");
+    await expect(dd(page, PL_APP).first()).toHaveText("6000 bytes · set for this item");
+    await expect(t(page, PL_APP, "ctx-budget-input")).toHaveCount(0);
+    m.isAdmin = true;
+    await reopenItem(page);
+    const fit = await budgetFit(page, PL_APP, '[data-testid="pl-detail"]');
+    measure({ test: "item budget block", ...fit });
+    expect(fit.blockScroll[0]).toBeLessThanOrEqual(fit.blockScroll[1]);
+    expect(fit.past).toEqual([]);
+    expect(fit.smallest).toBeGreaterThanOrEqual(44);
+    expect(fit.order).toEqual(["ctx-budget-input", "ctx-budget-save", "ctx-budget-reset"]);
+    const axe = await new AxeBuilder({ page }).include(`${PL_APP} [data-testid="ctx-budget"]`).withTags(["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"]).analyze();
+    expect(axe.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(" | ")}`)).toEqual([]);
   });
 });

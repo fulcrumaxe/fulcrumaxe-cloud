@@ -95,6 +95,12 @@ describe("the error-code allowlist", () => {
     expect(source).toContain("// Context rule writes (D#600 CX-9a)");
   });
 
+  it("keeps the context budget range code (D#600 CX-12) instead of folding it into other", () => {
+    expect(errorCodeOrOther("budget_out_of_range")).toBe("budget_out_of_range");
+    const source = readFileSync(path.join(REPO_ROOT, "packages", "telemetry", "src", "errorCodes.ts"), "utf8");
+    expect(source).toContain("// A role or item context budget outside its range (D#600 CX-12)");
+  });
+
   it("keeps the weekly auto-start confirmation code (D#483 S5-e2) instead of folding it into other, in a block of its own", () => {
     expect(errorCodeOrOther("confirmation_required")).toBe("confirmation_required");
     expect(OWN_ERROR_CODES[OWN_ERROR_CODES.length - 1]).toBe("confirmation_required");

@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "budget_out_of_range",
+    "message": "The budget must be a whole number of bytes from 4096 to 86016.",
+    "request_id": "33333333-3333-4333-8333-333333333333"
+  }
+}

@@ -57,7 +57,9 @@ describe("the copy tables", () => {
     const at = route.indexOf("const REFUSALS");
     const served = [...route.slice(at, route.indexOf("\n};", at)).matchAll(/^\s+([a-z_]+): \[\d+,/gm)].map((m) => m[1]);
     expect(served.length).toBe(9);
-    const wire = [...new Set([...served, "insufficient_role", "not_found"])];
+    // budget_out_of_range is sent by the role and item budget writes (context-settings.ts), not by the rule routes
+    expect(read("api/src/routes/context-settings.ts")).toContain('"budget_out_of_range"');
+    const wire = [...new Set([...served, "budget_out_of_range", "insufficient_role", "not_found"])];
     expect(Object.keys(REFUSALS).sort()).toEqual(wire.sort()); // a code with no sentence, or a sentence for no code, fails here
     for (const code of wire) {
       // insufficient_role is sent by the API's role check (errors.ts), the rest are OWN_ERROR_CODES entries
@@ -86,6 +88,9 @@ describe("the copy tables", () => {
       expect(text).not.toMatch(/\{|\}|%s|\$\{/);
     }
     expect(COPY.budgetNow(null)).toBe("Now: each role's default.");
+    expect(COPY.budgetNow(null, "role")).toBe("Now: none set for this role.");
+    expect(COPY.budgetNow(null, "item")).toBe("Now: none set for this item.");
+    expect(Object.keys(COPY.sources)).toEqual(["item", "role", "repo", "default"]);
     expect(budgetStatusLine("anything else")).toBe("");
   });
 
@@ -393,7 +398,7 @@ describe("the budget controller", () => {
     expect(call.log.find((a) => a[0] === "GET" && a[1].includes("context-settings"))[1]).toBe("/api/v1/repos/" + REPO + "/context-settings");
     expect(ctl.state.load).toBe("ok");
     expect(ctl.state.view.bytes).toBeNull();
-    expect(ctl.state.view.defaults.map((d) => d[0])).toEqual(["executor", "fix", "code-reviewer", "acceptance-tester", "security-reviewer", "debater"]);
+    expect(ctl.state.view.defaults.map((d) => d[0])).toEqual(["executor"]); // only roles whose runs use a budget are shown
   });
 
   it("a malformed answer is the error state, never a screen of blanks", async () => {
@@ -452,5 +457,133 @@ describe("the budget controller", () => {
     expect(budgetInput("4096", v)).toEqual({ ok: true, bytes: 4096 });
     expect(budgetInput("2097152", v)).toEqual({ ok: true, bytes: 2097152 });
     expect(budgetInput("0", v).ok).toBe(false);
+  });
+});
+
+describe("the budget controller, per role and per item (D#600 CX-12)", () => {
+  const repoView = (over = {}) => ({ ...fixture("getRepoContextSettings", "200-ok.json"), ...over });
+  const ITEM = "22222222-2222-4222-8222-222222222222";
+  const itemView = (over = {}) => ({ ...fixture("getWorkItemContextBudget", "200-ok.json"), ...over });
+
+  function repoWorld(state = {}) {
+    const s = { repo: null, roles: { executor: null }, ...state };
+    const view = () => {
+      const eff = {}, src = {};
+      for (const r of Object.keys(ROLES)) { const own = s.roles[r] ?? null; eff[r] = own ?? s.repo ?? ROLES[r]; src[r] = own !== null ? "role" : s.repo !== null ? "repo" : "default"; }
+      return repoView({ consuming_roles: ["executor"], context_budget_bytes: s.repo, role_budgets: { ...Object.fromEntries(Object.keys(ROLES).map((r) => [r, s.roles[r] ?? null])) }, effective_by_role: eff, source_by_role: src });
+    };
+    const call = fakeCall({
+      "GET /api/v1/repos/:id/context-settings": () => view(),
+      "PUT /api/v1/repos/:id/context-settings": (b) => ((s.repo = b.context_budget_bytes), { ...view(), changed: true, pins_status: "fit" }),
+    });
+    const wrapped = async (m, p, b) => {
+      const role = /\/roles\/([a-z-]+)$/.exec(p);
+      if (m === "PUT" && role) { call.log.push([m, p, b]); s.roles[role[1]] = b.budget_bytes; return { ...view(), changed: true, pins_status: "over_budget" }; }
+      return call(m, p, b);
+    };
+    wrapped.log = call.log;
+    return { s, call: wrapped };
+  }
+  const ROLES = { executor: 35840, fix: 43008, "code-reviewer": 26624, "acceptance-tester": 27648, "security-reviewer": 27648, debater: 34816 };
+
+  it("the repository view offers the repository and each role as levels, each with its own bounds, and names where every number comes from", async () => {
+    const { call } = repoWorld({ repo: 20000, roles: { executor: 8192 } });
+    const ctl = createBudgetController({ call, getAdmin: admin(true), repoId: REPO });
+    await ctl.start();
+    const v = ctl.state.view;
+    expect(v.levels.map((l) => [l.key, l.scope, l.bytes, l.min, l.max])).toEqual([["repo", "repo", 20000, 4096, 2097152], ["executor", "role", 8192, 4096, 71680]]);
+    expect(v.effective.map((e) => [e[0], e[1], e[2]])).toEqual([["executor", 8192, COPY.sources.role]]);
+    expect(JSON.stringify(v)).not.toMatch(/undefined|NaN/);
+  });
+
+  it("set a role's budget, reload, read it back, then reset it: the PUT goes to the role's address and the number comes back from a fresh read", async () => {
+    const world = repoWorld();
+    const ctl = createBudgetController({ call: world.call, getAdmin: admin(true), repoId: REPO });
+    await ctl.start();
+    ctl.setLevel("executor");
+    expect(ctl.level().scope).toBe("role");
+    expect(await ctl.save("8192")).toBe(true);
+    const put = world.call.log.filter((a) => a[0] === "PUT")[0];
+    expect(put[1]).toBe("/api/v1/repos/" + REPO + "/context-settings/roles/executor");
+    expect(put[2]).toEqual({ budget_bytes: 8192 });
+    expect(ctl.state.status).toBe("over_budget"); // accepted and reported, never refused
+    const reloaded = createBudgetController({ call: world.call, getAdmin: admin(true), repoId: REPO });
+    await reloaded.start();
+    reloaded.setLevel("executor");
+    expect(reloaded.level().bytes).toBe(8192);
+    expect(await reloaded.reset()).toBe(true);
+    expect(world.call.log.filter((a) => a[0] === "PUT")[1][2]).toEqual({ budget_bytes: null });
+    expect(reloaded.level().bytes).toBeNull();
+    expect(reloaded.state.view.effective[0].slice(1)).toEqual([35840, COPY.sources.default]);
+  });
+
+  it("each level is checked against its own bound before anything is sent: a role's is its default times 2, the repository's keeps 2097152", async () => {
+    const world = repoWorld();
+    const ctl = createBudgetController({ call: world.call, getAdmin: admin(true), repoId: REPO });
+    await ctl.start();
+    ctl.setLevel("executor");
+    expect(await ctl.save("71681")).toBe(false);
+    expect(ctl.state.error.text).toBe(COPY.budgetRange(4096, 71680));
+    expect(await ctl.save("4095")).toBe(false);
+    expect(world.call.log.filter((a) => a[0] === "PUT")).toEqual([]);
+    expect(await ctl.save("71680")).toBe(true);
+    ctl.setLevel("repo");
+    expect(ctl.state.error).toBeNull(); // changing level clears the other level's message
+    expect(await ctl.save("2097152")).toBe(true);
+  });
+
+  it("the server's budget_out_of_range gets its own sentence and keeps the old number", async () => {
+    const call = fakeCall({
+      "GET /api/v1/work-items/:id/context-settings": () => itemView(),
+      "PUT /api/v1/work-items/:id/context-settings": () => fail(422, "budget_out_of_range"),
+    });
+    const ctl = createBudgetController({ call, getAdmin: admin(true), repoId: REPO, itemId: ITEM });
+    await ctl.start();
+    expect(await ctl.save("5000")).toBe(false);
+    expect(ctl.state.error.text).toBe(REFUSALS.budget_out_of_range);
+    expect(ctl.state.view.bytes).toBe(6000);
+  });
+
+  it("an item controller reads and writes the item's own address, has one level, and shows every role as held to the item's size", async () => {
+    let stored = 6000;
+    const call = fakeCall({
+      "GET /api/v1/work-items/:id/context-settings": () => itemView({ item_budget_bytes: stored }),
+      "PUT /api/v1/work-items/:id/context-settings": (b) => ((stored = b.budget_bytes), { ...itemView({ item_budget_bytes: stored }), changed: true, pins_status: "fit" }),
+    });
+    const ctl = createBudgetController({ call, getAdmin: admin(true), repoId: REPO, itemId: ITEM });
+    await ctl.start();
+    expect(call.log[0][1]).toBe("/api/v1/work-items/" + ITEM + "/context-settings");
+    expect(ctl.state.view.levels.map((l) => [l.key, l.scope, l.min, l.max])).toEqual([["item", "item", 4096, 86016]]);
+    expect(ctl.state.view.effective.map((e) => [e[0], e[2]])).toEqual([["executor", COPY.sources.item]]);
+    expect(await ctl.save("86017")).toBe(false);
+    expect(await ctl.save("86016")).toBe(true);
+    expect(ctl.state.view.bytes).toBe(86016);
+    expect(await ctl.reset()).toBe(true);
+    expect(call.log.filter((a) => a[0] === "PUT").map((a) => a[2])).toEqual([{ budget_bytes: 86016 }, { budget_bytes: null }]);
+    expect(ctl.state.view.bytes).toBeNull();
+  });
+
+  it("only the roles the server names as consumers are offered or shown; an answer naming none is the error state; the sentence is in the table", async () => {
+    const more = repoView({ consuming_roles: ["executor"], role_budgets: { executor: null, fix: 7000 }, role_max: { executor: 71680, fix: 86016 } });
+    const call = fakeCall({ "GET /api/v1/repos/:id/context-settings": () => more });
+    const ctl = createBudgetController({ call, getAdmin: admin(true), repoId: REPO });
+    await ctl.start();
+    expect(ctl.state.view.levels.map((l) => l.key)).toEqual(["repo", "executor"]);
+    expect(ctl.state.view.effective.map((e) => e[0])).toEqual(["executor"]);
+    const none = createBudgetController({ call: fakeCall({ "GET /api/v1/repos/:id/context-settings": () => repoView({ consuming_roles: [] }) }), getAdmin: admin(true), repoId: REPO });
+    await none.start();
+    expect(none.state.load).toBe("error");
+    expect(COPY.consumers).toBe("Today only the build's prompt uses a budget.");
+  });
+
+  it("a member sees the numbers and the admin-only sentence; a malformed item answer is the error state", async () => {
+    const call = fakeCall({ "GET /api/v1/work-items/:id/context-settings": () => itemView() });
+    const ctl = createBudgetController({ call, getAdmin: admin(false), repoId: REPO, itemId: ITEM });
+    await ctl.start();
+    expect(ctl.state.isAdmin).toBe(false);
+    expect(ctl.state.view.effective).toHaveLength(1);
+    const bad = createBudgetController({ call: fakeCall({ "GET /api/v1/work-items/:id/context-settings": () => ({ item_budget_bytes: "x" }) }), getAdmin: admin(true), repoId: REPO, itemId: ITEM });
+    await bad.start();
+    expect(bad.state.load).toBe("error");
   });
 });

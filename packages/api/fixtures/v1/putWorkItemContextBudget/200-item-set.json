@@ -1,0 +1,33 @@
+{
+  "item_budget_bytes": 6000,
+  "min_bytes": 4096,
+  "max_bytes": 86016,
+  "role_defaults": {
+    "executor": 35840,
+    "fix": 43008,
+    "code-reviewer": 26624,
+    "acceptance-tester": 27648,
+    "security-reviewer": 27648,
+    "debater": 34816
+  },
+  "effective_by_role": {
+    "executor": 6000,
+    "fix": 6000,
+    "code-reviewer": 6000,
+    "acceptance-tester": 6000,
+    "security-reviewer": 6000,
+    "debater": 6000
+  },
+  "source_by_role": {
+    "executor": "item",
+    "fix": "item",
+    "code-reviewer": "item",
+    "acceptance-tester": "item",
+    "security-reviewer": "item",
+    "debater": "item"
+  },
+  "changed": true,
+  "pins_status": "fit",
+  "consuming_roles": ["executor"],
+  "applies_to_runs": true
+}

@@ -23,7 +23,7 @@ import { clampAssemblyMs } from "./assemblyClock.js";
 import { assemblePrompt, decisionsBlock, renderMemorySlot, MEMORY_MARKER_ROOM, type DecisionLine, type PinnedItem, type AssembledPrompt, type AssembleOptions, type MemoryPort, type NoteItem, type RenderedMemory } from "../prompt/assemblePrompt.js";
 import { createMemoryPort, guardMemoryPort, memoryTokensOf, type RecallSkip } from "../prompt/memoryRecall.js";
 import { readMemorySlotBytes } from "../prompt/memorySlotSetting.js";
-import { effectiveContextBudget, readContextBudgetBytes } from "../prompt/contextBudget.js";
+import { resolveRunContextBudget } from "../prompt/contextBudget.js";
 import type { RepoMapPort } from "../prompt/repoMap.js";
 import { type PinContentPort } from "../prompt/pinContent.js";
 import { pinLedgerNotes, pinnedBody, pinnedLabel, splitPinsByExcludes } from "@fulcrumaxe/runner-protocol";
@@ -512,7 +512,9 @@ export async function startBuildForItem(
   // D#600 CX-4a: a sandbox prompt over its budget spills what it cuts to /fx/context. The budget is the repository's setting, else the role's default, derived now and never stored.
   // CX-4b: a runner prompt spills too: the cut text rides in the signed job and the runner writes it under its own spill root (the memory travels in the job and is never cut).
   const sandboxPrompt = promptRuntimeOf(executionMode) === "sandbox";
-  const budgetBytes = facts.repo_id !== null && !prior ? effectiveContextBudget("executor", await readContextBudgetBytes(pool, accountId, facts.repo_id)) : undefined;
+  // CX-12: item, then role, then repository, then the default; the level that said so is recorded on the run's inputs (the panel shows it).
+  const budget = facts.repo_id !== null && !prior ? await resolveRunContextBudget(pool, accountId, facts.repo_id, workItemId, "executor") : undefined;
+  const budgetBytes = budget?.bytes;
   // D#598 P1f-5c: a paired repository's sandbox build is published by the platform. The run starts from a recorded commit (its `head_sha`), and the prompt has no
   // pull request step. A stacked item starts from its parent's verified head, which is that commit. A replay that finds its run reads nothing. Fails closed:
   // without a head to record the publish step could not run, so the build does not start.
@@ -592,7 +594,7 @@ export async function startBuildForItem(
         // D#600 CX-8b: which memory entries and which map this prompt carried, for the context panel. A replay of a started step keeps the first record
         // (it built no map this time and may have recalled something else). Fails closed: a failed insert rolls the start back (D#601 C2).
         if (!prior) {
-          await recordRunContextInputs(client, accountId, started.runId, { entries: recalledEntriesOf(memory?.stable, memory?.item), map: map ? { version: map.version, sha256: mapIdentityOf(map.text) } : null, rescan });
+          await recordRunContextInputs(client, accountId, started.runId, { entries: recalledEntriesOf(memory?.stable, memory?.item), map: map ? { version: map.version, sha256: mapIdentityOf(map.text) } : null, rescan, ...(budget && budget.source !== "default" ? { budgetSource: budget.source } : {}) });
           // D#601 MEM-8b: the item's own records the prompt carried (applied notes, a handoff note): ids, the hash of the text as rendered and whether it was cut. No text.
           await recordRunItemSources(client, accountId, started.runId, memory?.sources ?? []);
         }

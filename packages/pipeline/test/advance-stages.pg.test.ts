@@ -702,6 +702,47 @@ describe("the build", () => {
       expect(req.contextSections!.some((s) => s.trimmed_reason === "pin_missing")).toBe(false);
     });
 
+    it("D#600 CX-12: a run is held to the item's budget, else the role's, else the repository's, else the default; the level is recorded; a later change reaches the next run only", async () => {
+      const w = await world();
+      const gh = new FakeGithub();
+      const big = `${"pinned line of text\n".repeat(400)}THE END`;
+      const size = Buffer.byteLength(big, "utf8");
+      gh.files.set("notes/big.md", big);
+      await w.rule("repo", "pin", "notes/big.md");
+      const set = (scope: "role" | "item", bytes: number) =>
+        scope === "role"
+          ? h.admin.query("INSERT INTO context_budget_overrides (account_id, scope, repo_id, role, bytes, updated_by) VALUES ($1, 'role', $2, 'executor', $3, $4) ON CONFLICT (account_id, repo_id, role) WHERE scope = 'role' DO UPDATE SET bytes = EXCLUDED.bytes", [w.t.accountId, w.repo, bytes, w.user])
+          : h.admin.query("INSERT INTO context_budget_overrides (account_id, scope, work_item_id, bytes, updated_by) VALUES ($1, 'item', $2, $3, $4) ON CONFLICT (account_id, work_item_id) WHERE scope = 'item' DO UPDATE SET bytes = EXCLUDED.bytes", [w.t.accountId, w.t.workItemId, bytes, w.user]);
+      const sourceRows = async () => (await h.admin.query("SELECT budget_source FROM run_context_inputs WHERE account_id = $1 ORDER BY recorded_at, run_id", [w.t.accountId])).rows.map((r) => r.budget_source);
+      const run = async (): Promise<{ over: number | undefined; sources: Array<string | null> }> => {
+        await h.admin.query("UPDATE work_items SET stage = 'spec_ready' WHERE id = $1", [w.t.workItemId]);
+        expect(await w.build(port(gh))).toMatchObject({ status: "started" });
+        const req = w.t.world.requests.at(-1)!;
+        return { over: req.contextSections!.find((s) => s.trimmed_reason === "pins_over_budget")?.bytes, sources: await sourceRows() };
+      };
+
+      // The default (about 35 KiB) holds the pins: no overage note, and the default records no source.
+      expect(await run()).toEqual({ over: undefined, sources: [] });
+      await h.admin.query("INSERT INTO repo_context_settings (account_id, repo_id, memory_slot_bytes, updated_by, context_budget_bytes) VALUES ($1, $2, 2048, $3, 4096)", [w.t.accountId, w.repo, w.user]);
+      expect(await run()).toEqual({ over: size - 4096, sources: ["repo"] });
+      await set("role", 5000);
+      expect(await run()).toEqual({ over: size - 5000, sources: ["repo", "role"] });
+      await set("item", 6000);
+      expect(await run()).toEqual({ over: size - 6000, sources: ["repo", "role", "item"] });
+      // Lowering the item's budget after that run started leaves its recorded assembly as it was; the next run uses the new value.
+      const first = w.t.world.requests.at(-1)!.contextSections!.find((s) => s.trimmed_reason === "pins_over_budget")!.bytes;
+      await set("item", 4096);
+      expect(w.t.world.requests.at(-1)!.contextSections!.find((s) => s.trimmed_reason === "pins_over_budget")!.bytes).toBe(first);
+      expect((await run()).over).toBe(size - 4096);
+      // Undo: removing the item's override falls back to the role's, then the role's to the repository's.
+      await h.admin.query("DELETE FROM context_budget_overrides WHERE scope = 'item'");
+      expect((await run()).over).toBe(size - 5000);
+      await h.admin.query("DELETE FROM context_budget_overrides WHERE scope = 'role'");
+      const last = await run();
+      expect(last.over).toBe(size - 4096);
+      expect(last.sources.at(-1)).toBe("repo");
+    });
+
     it("GitHub unreachable: every pin is skipped and counted, the run still starts, and the excludes' prompt line is unaffected", async () => {
       const w = await world();
       const gh = new FakeGithub();

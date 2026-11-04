@@ -1,0 +1,51 @@
+{
+  "context_budget_bytes": 20000,
+  "min_bytes": 4096,
+  "max_bytes": 2097152,
+  "role_defaults": {
+    "executor": 35840,
+    "fix": 43008,
+    "code-reviewer": 26624,
+    "acceptance-tester": 27648,
+    "security-reviewer": 27648,
+    "debater": 34816
+  },
+  "effective_by_role": {
+    "executor": 20000,
+    "fix": 7000,
+    "code-reviewer": 20000,
+    "acceptance-tester": 20000,
+    "security-reviewer": 20000,
+    "debater": 20000
+  },
+  "role_budgets": {
+    "executor": null,
+    "fix": 7000,
+    "code-reviewer": null,
+    "acceptance-tester": null,
+    "security-reviewer": null,
+    "debater": null
+  },
+  "role_max": {
+    "executor": 71680,
+    "fix": 86016,
+    "code-reviewer": 53248,
+    "acceptance-tester": 55296,
+    "security-reviewer": 55296,
+    "debater": 69632
+  },
+  "source_by_role": {
+    "executor": "repo",
+    "fix": "role",
+    "code-reviewer": "repo",
+    "acceptance-tester": "repo",
+    "security-reviewer": "repo",
+    "debater": "repo"
+  },
+  "changed": true,
+  "pins_status": null,
+  "consuming_roles": [
+    "executor"
+  ],
+  "applies_to_runs": false
+}

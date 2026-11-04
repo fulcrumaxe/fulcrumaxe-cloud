@@ -2,7 +2,7 @@ import type { Pool, PoolClient } from "pg";
 import { MAX_JOB_PINS } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { CONTEXT_EXCLUDES_MAX, ContextRuleError, mapRuleDbError, readItemRules, readRepoPinSets, resolveContextRules, saveContextRuleOn, type ContextRule, type ContextRuleKind, type ContextRuleTarget } from "@fx/core/src/context/contextRules.js";
-import { effectiveContextBudget, type ContextBudgetRole } from "./contextBudget.js";
+import { readBudgetLevels, resolveContextBudget, type ContextBudgetRole } from "./contextBudget.js";
 
 /**
  * D#600 CX-5a: saving a pin or an exclude. The database's definer (migration 0871) decides who may write and what a path may be; this adds the one
@@ -61,6 +61,31 @@ export interface RepoFacts {
   gh_name: string | null;
   installation_id: string | null;
   context_budget_bytes: number | null;
+}
+
+/** What the pins are held to: the role's budget by the one precedence (item, role, repository, default), read in the save's own transaction. */
+export async function pinBudgetOf(client: PoolClient, accountId: string, role: ContextBudgetRole, facts: RepoFacts | undefined, workItemId: string | null): Promise<number> {
+  return resolveContextBudget(role, facts?.repo_id ? await readBudgetLevels(client, accountId, facts.repo_id, workItemId, role) : { item: null, role: null, repo: null }).bytes;
+}
+
+/** A resolved pin set and the budget its own runs are held to (an item with a budget of its own is measured against that, not the repository's). */
+export interface BudgetedSet { rules: ContextRule[]; budget: number }
+
+/** The sets a target's pins must fit, each with its own budget. A repository target covers its own set, every item with rules, and every item with a budget of its own. */
+export async function readBudgetedSets(client: PoolClient, accountId: string, target: ContextRuleTarget, role: ContextBudgetRole, facts: RepoFacts | undefined): Promise<BudgetedSet[]> {
+  if (target.scope === "item") return [{ rules: (await readResolvedSets(client, accountId, target))[0]!, budget: await pinBudgetOf(client, accountId, role, facts, target.workItemId) }];
+  const v = await readRepoPinSets(client, accountId, target.repoId);
+  const levels = await readBudgetLevels(client, accountId, target.repoId, null, role);
+  const own = await client.query<{ work_item_id: string; bytes: number }>(
+    `SELECT o.work_item_id, o.bytes FROM context_budget_overrides o JOIN work_items w ON w.account_id = o.account_id AND w.id = o.work_item_id WHERE o.account_id = $1 AND o.scope = 'item' AND w.repo_id = $2`,
+    [accountId, target.repoId],
+  );
+  const itemBytes = new Map(own.rows.map((r) => [r.work_item_id, Number(r.bytes)]));
+  const ids = new Set([...v.items.keys(), ...itemBytes.keys()]);
+  return [
+    { rules: v.repo, budget: resolveContextBudget(role, levels).bytes },
+    ...[...ids].map((id) => ({ rules: resolveContextRules(v.repo, v.items.get(id) ?? []), budget: resolveContextBudget(role, { ...levels, item: itemBytes.get(id) ?? null }).bytes })),
+  ];
 }
 
 /** Sets the transaction's `lock_timeout` and `idle_in_transaction_session_timeout` (local to it). */
@@ -190,8 +215,8 @@ export async function saveContextRule(
         return { id };
       }
       if (sets.some((rules) => rules.filter((r) => r.kind === "pin").length > MAX_JOB_PINS)) throw new ContextRuleError("pins_exceed_ceiling");
-      const budget = effectiveContextBudget(deps.budgetRole ?? "executor", facts?.context_budget_bytes == null ? null : Number(facts.context_budget_bytes));
-      if (sets.some((rules) => pinBytes(rules, sizes) > budget)) throw new ContextRuleError("pins_exceed_budget");
+      const budgeted = await readBudgetedSets(client, who.accountId, target, deps.budgetRole ?? "executor", facts);
+      if (budgeted.some((s) => pinBytes(s.rules, sizes) > s.budget)) throw new ContextRuleError("pins_exceed_budget");
       return { id };
     });
   } catch (err) {

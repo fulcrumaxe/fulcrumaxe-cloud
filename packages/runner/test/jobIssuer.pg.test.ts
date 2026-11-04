@@ -1,6 +1,6 @@
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL, CONTEXT_WINDOW_JOB_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, SPILL_JOB_MIN_PROTOCOL, trimmedMarker, REVIEW_JOB_ROLES, RUNNER_ELIGIBLE_ROLES, canonicalJson, jobDigestMismatches, sha256Text, verifyJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { BASE_SHA_RUN_BRANCH_JOB_MIN_PROTOCOL, CONTEXT_WINDOW_JOB_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, PINS_JOB_MIN_PROTOCOL, SPILL_JOB_MIN_PROTOCOL, trimmedMarker, pinLedgerNotes, REVIEW_JOB_ROLES, RUNNER_ELIGIBLE_ROLES, canonicalJson, jobDigestMismatches, sha256Text, verifyJob, type Job } from "@fulcrumaxe/runner-protocol";
 import type { ExecutionRun } from "../src/executionTarget.js";
 import { toolsForRole } from "../src/agentConfig.js";
 import { JobIssueError, createJobIssuer, createJobSigner, createPgJobContext, roleToolsDigest, type ContinuationBasePort, type JobContextPort } from "../src/targets/jobIssuer.js";
@@ -335,6 +335,37 @@ describe("JobIssuer [pg]", () => {
       await rule(w, "repo", "pin", "docs/a.md");
       await db.admin.query("INSERT INTO repo_context_settings (account_id, repo_id, memory_slot_bytes, context_budget_bytes, updated_by) VALUES ($1, $2, 4096, 8192, $3)", [w.accountId, w.repoId, w.userId]);
       expect((await issued(w)).job.pins).toEqual({ paths: ["docs/a.md"], budget_bytes: 8192 });
+    });
+
+    it("D#600 CX-12: the signed pin budget is the item's, else the executor role's, else the repository's, and the ledger note measures the pins against exactly that", async () => {
+      const w = await world();
+      await rule(w, "repo", "pin", "docs/a.md");
+      const setRole = (role: string, bytes: number) =>
+        db.admin.query("INSERT INTO context_budget_overrides (account_id, scope, repo_id, role, bytes, updated_by) VALUES ($1, 'role', $2, $3, $4, $5) ON CONFLICT (account_id, repo_id, role) WHERE scope = 'role' DO UPDATE SET bytes = EXCLUDED.bytes", [w.accountId, w.repoId, role, bytes, w.userId]);
+      const setItem = (bytes: number) =>
+        db.admin.query("INSERT INTO context_budget_overrides (account_id, scope, work_item_id, bytes, updated_by) VALUES ($1, 'item', $2, $3, $4) ON CONFLICT (account_id, work_item_id) WHERE scope = 'item' DO UPDATE SET bytes = EXCLUDED.bytes", [w.accountId, w.workItemId, bytes, w.userId]);
+      const PIN_BYTES = 10_000;
+      const note = (budget: number | undefined) => pinLedgerNotes({ items: [{ text: "x".repeat(PIN_BYTES) }], missing: 0, tooLarge: 0, excluded: 0 } as never, budget).find((n) => n.trimmed_reason === "pins_over_budget");
+      const budgetOf = async () => (await issued(w)).job.pins?.budget_bytes;
+
+      expect(await budgetOf()).toBe(35_840);
+      await db.admin.query("INSERT INTO repo_context_settings (account_id, repo_id, memory_slot_bytes, context_budget_bytes, updated_by) VALUES ($1, $2, 4096, 8192, $3)", [w.accountId, w.repoId, w.userId]);
+      expect(await budgetOf()).toBe(8192);
+      expect(note(8192)?.bytes).toBe(PIN_BYTES - 8192);
+      await setRole("fix", 5000); // another role's budget is not the executor's
+      expect(await budgetOf()).toBe(8192);
+      await setRole("executor", 7000);
+      expect(await budgetOf()).toBe(7000);
+      await setItem(6000);
+      const item = await budgetOf();
+      expect(item).toBe(6000);
+      expect(note(item)?.bytes).toBe(PIN_BYTES - 6000); // the overage the runner records
+      await setItem(2_000_000); // held to the executor's default times 2
+      expect(await budgetOf()).toBe(71_680);
+      await db.admin.query("DELETE FROM context_budget_overrides WHERE scope = 'item'");
+      expect(await budgetOf()).toBe(7000);
+      await db.admin.query("DELETE FROM context_budget_overrides WHERE scope = 'role'");
+      expect(await budgetOf()).toBe(8192);
     });
 
     it("an item with no pin gets a job with no pins key and no pins gate, exactly as before", async () => {

@@ -93,7 +93,13 @@ describe('context rule and context budget write routes (D#600 CX-9a)', { timeout
       expect(r.idempotency).toBe('never');
     }
     expect(contextRuleRoutes.slice(1).map((r) => [r.minRole, r.rateClass])).toEqual([['member', 'write'], ['member', 'write']]);
-    expect(contextSettingsRoutes.map((r) => [r.method, r.minRole])).toEqual([['GET', 'member'], ['PUT', 'admin']]);
+    expect(contextSettingsRoutes.map((r) => [r.method, r.path, r.minRole])).toEqual([
+      ['GET', '/api/v1/repos/{id}/context-settings', 'member'],
+      ['PUT', '/api/v1/repos/{id}/context-settings', 'admin'],
+      ['PUT', '/api/v1/repos/{id}/context-settings/roles/{role}', 'admin'],
+      ['GET', '/api/v1/work-items/{id}/context-settings', 'member'],
+      ['PUT', '/api/v1/work-items/{id}/context-settings', 'admin'],
+    ]);
   });
 
   describe('PUT /context-rules', () => {
@@ -311,7 +317,7 @@ describe('context rule and context budget write routes (D#600 CX-9a)', { timeout
       const w = await world();
       const body = (await (await call(w.member, 'GET', url(w.repoId))).json()) as Record<string, unknown>;
       expect(body).toMatchObject({ context_budget_bytes: null, min_bytes: 4096, max_bytes: 2097152, role_defaults: ROLE_CONTEXT_DEFAULTS, effective_by_role: ROLE_CONTEXT_DEFAULTS });
-      expect(JSON.stringify({ ...body, context_budget_bytes: 0 })).not.toContain('null');
+      expect(JSON.stringify({ ...body, context_budget_bytes: 0, role_budgets: {} })).not.toContain('null');
     });
 
     it('criterion 4: an owner writes the range ends, a reset writes NULL, each change writes one audit row and an equal value writes none', async () => {
@@ -360,6 +366,150 @@ describe('context rule and context budget write routes (D#600 CX-9a)', { timeout
       trees.fail = false;
       expect(await (await call(w.owner, 'PUT', url(w.repoId), { context_budget_bytes: null })).json()).toMatchObject({ pins_status: 'fit' });
       expect((await w.audit('context_budget.%')).length).toBe(3);
+    });
+  });
+  describe('role and item budgets (D#600 CX-12)', () => {
+    const url = (repoId: string) => `/repos/${repoId}/context-settings`;
+    const roleUrl = (repoId: string, role: string) => `/repos/${repoId}/context-settings/roles/${role}`;
+    const itemUrl = (itemId: string) => `/work-items/${itemId}/context-settings`;
+    const json = async (r: Response) => (await r.json()) as Record<string, unknown> & { error: { code: string; message: string }; role_max: Record<string, number> };
+
+    it('an owner sets a role budget and an item budget, reads each back, and resets each; the levels are named and every figure is filled in', async () => {
+      const w = await world();
+      expect(await json(await call(w.member, 'GET', itemUrl(w.itemId)))).toMatchObject({ item_budget_bytes: null, min_bytes: 4096, max_bytes: 86016, source_by_role: { executor: 'default', debater: 'default' } });
+      const role = await json(await call(w.owner, 'PUT', roleUrl(w.repoId, 'executor'), { budget_bytes: 8192 }));
+      expect(role).toMatchObject({ changed: true, pins_status: 'fit', context_budget_bytes: null, role_budgets: { executor: 8192, fix: null }, effective_by_role: { executor: 8192, fix: ROLE_CONTEXT_DEFAULTS.fix }, source_by_role: { executor: 'role', fix: 'default' } });
+      expect(role.role_max.executor).toBe(ROLE_CONTEXT_DEFAULTS.executor * 2);
+      await call(w.owner, 'PUT', url(w.repoId), { context_budget_bytes: 20000 });
+      expect(await json(await call(w.member, 'GET', url(w.repoId)))).toMatchObject({ effective_by_role: { executor: 8192, fix: 20000 }, source_by_role: { executor: 'role', fix: 'repo' } });
+      const item = await json(await call(w.owner, 'PUT', itemUrl(w.itemId), { budget_bytes: 6000 }));
+      expect(item).toMatchObject({ changed: true, item_budget_bytes: 6000, effective_by_role: { executor: 6000, fix: 6000 }, source_by_role: { executor: 'item', debater: 'item' } });
+      expect(JSON.stringify(await json(await call(w.member, 'GET', itemUrl(w.itemId))))).not.toMatch(/null|undefined|NaN/);
+      // Reset: the item leaves the role and repository levels, the role leaves the repository's.
+      expect(await json(await call(w.owner, 'PUT', itemUrl(w.itemId), { budget_bytes: null }))).toMatchObject({ item_budget_bytes: null, effective_by_role: { executor: 8192, fix: 20000 }, source_by_role: { executor: 'role', fix: 'repo' } });
+      expect(await json(await call(w.owner, 'PUT', roleUrl(w.repoId, 'executor'), { budget_bytes: null }))).toMatchObject({ role_budgets: { executor: null }, source_by_role: { executor: 'repo' } });
+      // Reload: a fresh read shows the same.
+      expect(await json(await call(w.member, 'GET', url(w.repoId)))).toMatchObject({ context_budget_bytes: 20000, role_budgets: { executor: null }, source_by_role: { executor: 'repo' } });
+    });
+
+    it('each real change writes one audit row with the ids, the role and the old and new size; an equal value or a reset of nothing writes none', async () => {
+      const w = await world();
+      const put = (p: string, v: number | null) => call(w.owner, 'PUT', p, { budget_bytes: v });
+      expect((await json(await put(roleUrl(w.repoId, 'debater'), 10000))).changed).toBe(true);
+      expect((await json(await put(roleUrl(w.repoId, 'debater'), 10000))).changed).toBe(false);
+      expect((await json(await put(itemUrl(w.itemId), null))).changed).toBe(false);
+      await put(itemUrl(w.itemId), 4096);
+      await put(roleUrl(w.repoId, 'debater'), null);
+      const rows = await w.audit('context_budget.%');
+      expect(rows.map((r) => [r.payload.scope, r.payload.role, r.payload.from, r.payload.to])).toEqual([['role', 'debater', null, 10000], ['item', null, null, 4096], ['role', 'debater', 10000, null]]);
+      expect(rows.every((r) => r.actor === w.owner.userId)).toBe(true);
+      expect(rows[1]!.payload).toMatchObject({ work_item_id: w.itemId, repo_id: null });
+    });
+
+    it('bounds: a role to its default times 2, an item to the largest of those, both from 4096; outside is 422 budget_out_of_range with the bound in the message and nothing written', async () => {
+      const w = await world();
+      const max = ROLE_CONTEXT_DEFAULTS.executor * 2;
+      expect((await call(w.owner, 'PUT', roleUrl(w.repoId, 'executor'), { budget_bytes: 4096 })).status).toBe(200);
+      expect((await call(w.owner, 'PUT', roleUrl(w.repoId, 'executor'), { budget_bytes: max })).status).toBe(200);
+      expect((await call(w.owner, 'PUT', itemUrl(w.itemId), { budget_bytes: 4096 })).status).toBe(200);
+      expect((await call(w.owner, 'PUT', itemUrl(w.itemId), { budget_bytes: 86016 })).status).toBe(200);
+      const before = (await w.audit('context_budget.%')).length;
+      for (const [path, bad, bound] of [[roleUrl(w.repoId, 'executor'), max + 1, max], [roleUrl(w.repoId, 'executor'), 4095, max], [roleUrl(w.repoId, 'code-reviewer'), ROLE_CONTEXT_DEFAULTS['code-reviewer'] * 2 + 1, ROLE_CONTEXT_DEFAULTS['code-reviewer'] * 2], [itemUrl(w.itemId), 86017, 86016], [itemUrl(w.itemId), 0, 86016]] as const) {
+        const res = await call(w.owner, 'PUT', path, { budget_bytes: bad });
+        expect(res.status, `${path} ${bad}`).toBe(422);
+        const body = await json(res);
+        expect(body.error.code).toBe('budget_out_of_range');
+        expect(body.error.message).toContain(String(bound));
+        expect(body.error.message).toContain('4096');
+      }
+      for (const body of [{ budget_bytes: 5000.5 }, { budget_bytes: '5000' }, {}, { budget_bytes: 5000, extra: 1 }]) expect((await call(w.owner, 'PUT', itemUrl(w.itemId), body)).status, JSON.stringify(body)).toBe(422);
+      expect((await w.audit('context_budget.%')).length).toBe(before);
+    });
+
+    it('a member gets 403 on every write and may read; another account gets 404 on both, never 403; an unknown role is 404', async () => {
+      const a = await world();
+      const b = await world();
+      expect((await call(a.member, 'PUT', roleUrl(a.repoId, 'executor'), { budget_bytes: 8192 })).status).toBe(403);
+      expect((await call(a.member, 'PUT', itemUrl(a.itemId), { budget_bytes: 8192 })).status).toBe(403);
+      expect((await call(a.member, 'GET', itemUrl(a.itemId))).status).toBe(200);
+      for (const [method, path, body] of [['PUT', roleUrl(a.repoId, 'executor'), { budget_bytes: 8192 }], ['PUT', itemUrl(a.itemId), { budget_bytes: 8192 }], ['GET', itemUrl(a.itemId), undefined]] as const) {
+        expect((await call(b.owner, method, path, body)).status, `${method} ${path}`).toBe(404);
+      }
+      expect((await call(a.owner, 'PUT', roleUrl(a.repoId, 'planner'), { budget_bytes: 8192 })).status).toBe(404);
+      expect((await call(a.owner, 'PUT', itemUrl('not-a-uuid'), { budget_bytes: 8192 })).status).toBe(404);
+      expect((await admin.query(`SELECT 1 FROM context_budget_overrides WHERE account_id = ANY($1)`, [[a.owner.accountId, b.owner.accountId]])).rows).toEqual([]);
+      expect(await a.audit('context_budget.%')).toEqual([]);
+    });
+
+    it('a budget set under existing pins is accepted and reported, for a role and for an item; GitHub down gives not_measured and the write stands', async () => {
+      const w = await world();
+      trees.entries = [{ path: 'a.md', type: 'blob', size: 6000 }];
+      expect((await call(w.owner, 'PUT', '/context-rules', { scope: 'repo', repo_id: w.repoId, kind: 'pin', path: 'a.md' })).status).toBe(200);
+      expect(await json(await call(w.owner, 'PUT', roleUrl(w.repoId, 'executor'), { budget_bytes: 5000 }))).toMatchObject({ changed: true, pins_status: 'over_budget' });
+      expect(await json(await call(w.owner, 'PUT', roleUrl(w.repoId, 'executor'), { budget_bytes: 7000 }))).toMatchObject({ pins_status: 'fit' });
+      expect(await json(await call(w.owner, 'PUT', itemUrl(w.itemId), { budget_bytes: 5000 }))).toMatchObject({ item_budget_bytes: 5000, pins_status: 'over_budget' });
+      trees.fail = true;
+      expect(await json(await call(w.owner, 'PUT', itemUrl(w.itemId), { budget_bytes: 5500 }))).toMatchObject({ item_budget_bytes: 5500, pins_status: 'not_measured' });
+      expect(await w.rules()).toEqual([{ scope: 'repo', kind: 'pin', path: 'a.md' }]);
+    });
+
+    it('saving a pin is held to the same precedence: an item budget smaller than the pin refuses it (pins_exceed_budget), and removing the item budget lets it save', async () => {
+      const w = await world();
+      trees.entries = [{ path: 'a.md', type: 'blob', size: 6000 }];
+      await call(w.owner, 'PUT', itemUrl(w.itemId), { budget_bytes: 5000 });
+      const refused = await call(w.owner, 'PUT', '/context-rules', { scope: 'item', work_item_id: w.itemId, kind: 'pin', path: 'a.md' });
+      expect(refused.status).toBe(409);
+      expect((await json(refused)).error.code).toBe('pins_exceed_budget');
+      expect(await w.rules()).toEqual([]);
+      await call(w.owner, 'PUT', itemUrl(w.itemId), { budget_bytes: null });
+      expect((await call(w.owner, 'PUT', '/context-rules', { scope: 'item', work_item_id: w.itemId, kind: 'pin', path: 'a.md' })).status).toBe(200);
+    });
+
+    it('names the roles whose runs use a budget; a write for a role that uses none is stored and answers that it does not apply, with no pins verdict', async () => {
+      const w = await world();
+      trees.entries = [{ path: 'a.md', type: 'blob', size: 6000 }];
+      await call(w.owner, 'PUT', '/context-rules', { scope: 'repo', repo_id: w.repoId, kind: 'pin', path: 'a.md' });
+      expect((await json(await call(w.member, 'GET', url(w.repoId)))).consuming_roles).toEqual(['executor']);
+      expect((await json(await call(w.member, 'GET', itemUrl(w.itemId)))).consuming_roles).toEqual(['executor']);
+      const calls = trees.calls;
+      const fix = await json(await call(w.owner, 'PUT', roleUrl(w.repoId, 'fix'), { budget_bytes: 4096 }));
+      expect(fix).toMatchObject({ changed: true, applies_to_runs: false, pins_status: null, role_budgets: { fix: 4096 } });
+      expect(trees.calls).toBe(calls); // nothing to measure: GitHub was not asked
+      expect(await json(await call(w.owner, 'PUT', roleUrl(w.repoId, 'executor'), { budget_bytes: 5000 }))).toMatchObject({ applies_to_runs: true, pins_status: 'over_budget' });
+      expect(await json(await call(w.owner, 'PUT', itemUrl(w.itemId), { budget_bytes: 9000 }))).toMatchObject({ applies_to_runs: true, pins_status: 'fit' });
+    });
+
+    it('a repository write measures each item against its own budget: a smaller item budget reads over_budget, a larger one does not make the repository refuse', async () => {
+      const w = await world();
+      trees.entries = [{ path: 'a.md', type: 'blob', size: 4500 }, { path: 'b.md', type: 'blob', size: 4000 }];
+      await call(w.owner, 'PUT', '/context-rules', { scope: 'repo', repo_id: w.repoId, kind: 'pin', path: 'a.md' });
+      await call(w.owner, 'PUT', itemUrl(w.itemId), { budget_bytes: 4096 });
+      // The repository's own budget holds the pin, but this item's smaller one does not.
+      expect(await json(await call(w.owner, 'PUT', url(w.repoId), { context_budget_bytes: 8000 }))).toMatchObject({ pins_status: 'over_budget' });
+      await call(w.owner, 'PUT', itemUrl(w.itemId), { budget_bytes: null });
+      expect(await json(await call(w.owner, 'PUT', url(w.repoId), { context_budget_bytes: 8000 }))).toMatchObject({ pins_status: 'fit' });
+      // An item with a larger budget of its own keeps its item pin: the repository's smaller budget does not measure it.
+      await call(w.owner, 'PUT', itemUrl(w.itemId), { budget_bytes: 9000 });
+      expect((await call(w.owner, 'PUT', '/context-rules', { scope: 'item', work_item_id: w.itemId, kind: 'pin', path: 'b.md' })).status).toBe(200);
+      expect(await json(await call(w.owner, 'PUT', url(w.repoId), { context_budget_bytes: 5000 }))).toMatchObject({ pins_status: 'fit' });
+    });
+
+    it('an item with no repository still reads the budget stored for it', async () => {
+      const w = await world();
+      const loose = randomUUID();
+      await admin.query(`INSERT INTO work_items (id, account_id, kind, state, provenance) VALUES ($1, $2, 'feature', 'running', 'internal')`, [loose, w.owner.accountId]);
+      await admin.query(`INSERT INTO context_budget_overrides (account_id, scope, work_item_id, bytes, updated_by) VALUES ($1, 'item', $2, 6000, $3)`, [w.owner.accountId, loose, w.owner.userId]);
+      expect(await json(await call(w.member, 'GET', itemUrl(loose)))).toMatchObject({ item_budget_bytes: 6000, source_by_role: { executor: 'item' } });
+    });
+
+    it('a removed item or repository takes its budgets with it: the item reads 404 and its override row is gone', async () => {
+      const w = await world();
+      await call(w.owner, 'PUT', itemUrl(w.itemId), { budget_bytes: 6000 });
+      await call(w.owner, 'PUT', roleUrl(w.repoId, 'fix'), { budget_bytes: 6000 });
+      await admin.query('DELETE FROM context_rules WHERE account_id = $1', [w.owner.accountId]);
+      await admin.query('DELETE FROM work_items WHERE id = $1', [w.itemId]);
+      expect((await call(w.owner, 'GET', itemUrl(w.itemId))).status).toBe(404);
+      expect((await admin.query('SELECT scope FROM context_budget_overrides WHERE account_id = $1', [w.owner.accountId])).rows).toEqual([{ scope: 'role' }]);
     });
   });
 });

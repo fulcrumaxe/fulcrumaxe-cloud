@@ -19,6 +19,8 @@ export interface RunContextInputs {
   map: { version: string; sha256: string } | null;
   /** D#601 MEM-RECALL-RESCAN: how many candidates the recall's secret re-check left out, and whether the check could not be made (then nothing was recalled). Counts only. */
   rescan?: { skipped: number; unavailable: boolean };
+  /** D#600 CX-12: which level the run's budget came from, when it was not the role default. */
+  budgetSource?: "item" | "role" | "repo";
 }
 
 /** The raw map text's identity: the sha256 of its UTF-8 bytes (the same value `repo_context_maps.body_sha256` holds). */
@@ -46,11 +48,11 @@ export function recalledEntriesOf(...slots: ReadonlyArray<Pick<RenderedMemory, "
  */
 export async function recordRunContextInputs(client: PoolClient, accountId: string, runId: string, inputs: RunContextInputs): Promise<boolean> {
   const rescan = inputs.rescan ?? { skipped: 0, unavailable: false };
-  if (inputs.entries.length === 0 && inputs.map === null && rescan.skipped === 0 && !rescan.unavailable) return false;
+  if (inputs.entries.length === 0 && inputs.map === null && rescan.skipped === 0 && !rescan.unavailable && inputs.budgetSource === undefined) return false;
   await client.query(
-    `INSERT INTO run_context_inputs (account_id, run_id, recalled_entry_ids, recalled_entry_versions, map_version, map_sha256, rescan_skipped, rescan_unavailable)
-     VALUES ($1::uuid, $2::uuid, $3::uuid[], $4::integer[], $5, $6, $7::integer, $8::boolean) ON CONFLICT (account_id, run_id) DO NOTHING`,
-    [accountId, runId, inputs.entries.map((e) => e.id), inputs.entries.map((e) => e.version), inputs.map?.version ?? null, inputs.map?.sha256 ?? null, Math.min(rescan.skipped, 100000), rescan.unavailable],
+    `INSERT INTO run_context_inputs (account_id, run_id, recalled_entry_ids, recalled_entry_versions, map_version, map_sha256, rescan_skipped, rescan_unavailable, budget_source)
+     VALUES ($1::uuid, $2::uuid, $3::uuid[], $4::integer[], $5, $6, $7::integer, $8::boolean, $9) ON CONFLICT (account_id, run_id) DO NOTHING`,
+    [accountId, runId, inputs.entries.map((e) => e.id), inputs.entries.map((e) => e.version), inputs.map?.version ?? null, inputs.map?.sha256 ?? null, Math.min(rescan.skipped, 100000), rescan.unavailable, inputs.budgetSource ?? null],
   );
   return true;
 }

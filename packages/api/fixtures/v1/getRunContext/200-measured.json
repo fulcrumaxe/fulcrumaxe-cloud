@@ -37,5 +37,6 @@
   ],
   "repo_map_version": "v1 · 3f9a1c07b2d4",
   "rescan_skipped": 0,
-  "rescan_unavailable": false
+  "rescan_unavailable": false,
+  "budget_source": null
 }
