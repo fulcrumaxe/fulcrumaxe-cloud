@@ -9,8 +9,26 @@ export const BASE_SYNC_CONFLICT = 'base_sync_conflict';
 export const BASE_SYNC_UNAVAILABLE = 'base_sync_unavailable';
 /** The code of the `pr_head_pushed` fact the sync's merge commit leaves. */
 export const BASE_SYNCED = 'base_synced';
-export const BASE_SYNC_CONFLICT_SENTENCE = "Main has changed in the same places as this change, so the cloud couldn't bring the branch up to date. Nothing was started. Update the branch on GitHub (fix the conflict there), then press Build again.";
-export const BASE_SYNC_UNAVAILABLE_SENTENCE = "Couldn't bring the branch up to date on GitHub, so the fix round was not started. Nothing was changed. Press Build again in a moment.";
+/**
+ * D#6 STOP-SENTENCE-BUILD-AGAIN: these stops end a fix round, which only runs while the pull request is open, and Build again stops at an open pull request. So each ends on the one step that works,
+ * Request changes (a new fix round), as `republish_failed` does. The sentence is true for any viewer; `openPrStopSentence` swaps the last step for the one the viewer's card lists.
+ */
+const STEP_ANY = "An owner or admin can press Request changes, once no agents are working, to run another round.";
+const STEP_PRESS = "Press Request changes to run another round.";
+const STEP_ROUNDS = "All of this pull request's fix rounds are used, so the cloud can't run another. Update the public branch yourself, or close this item.";
+const OPEN_PR_LEADS = {
+  conflict: "Main has changed in the same places as this change, so the cloud couldn't bring the branch up to date. Nothing was started. Update the branch on GitHub (fix the conflict there).",
+  unavailable: "Couldn't bring the branch up to date on GitHub, so the fix round was not started. Nothing was changed.",
+  noChange: "The fix round made no changes to publish, so the public pull request is unchanged. Look at the round.",
+  tipMoved: "Public main moved, try again. The public repository changed twice while the cloud was preparing the update, so the public pull request still shows the earlier change.",
+} as const;
+/** The sentence a viewer sees for a stop above: `sentence` is its generic form; any other text is returned as it is. */
+export function openPrStopSentence(sentence: string, canRequestChanges: boolean, roundsUsed: boolean): string {
+  const lead = Object.values(OPEN_PR_LEADS).find((l) => sentence === `${l} ${STEP_ANY}`);
+  return lead === undefined ? sentence : `${lead} ${canRequestChanges ? STEP_PRESS : roundsUsed ? STEP_ROUNDS : STEP_ANY}`;
+}
+export const BASE_SYNC_CONFLICT_SENTENCE = `${OPEN_PR_LEADS.conflict} ${STEP_ANY}`;
+export const BASE_SYNC_UNAVAILABLE_SENTENCE = `${OPEN_PR_LEADS.unavailable} ${STEP_ANY}`;
 
 /**
  * FIXROUND-REPUBLISH (R2-c0): a fix round on an item whose public pull request is open must end by republishing that pull request from a base the cloud signed. A round that cannot be signed with one, or whose
@@ -48,7 +66,7 @@ export const REPUBLISH_REPLACE_NO_CHANGE = 'republish_replace_no_change';
 export const REPUBLISH_REPLACE_FAILED = 'republish_replace_failed';
 export const REPUBLISH_REPLACE_FAILED_SENTENCE = "The replacement round finished, but the cloud couldn't update the public pull request just now, so it still shows the earlier change. Nothing was sent and your answer is used up. Answer the question again, or update the branch yourself.";
 export const REPUBLISH_REPLACE_NO_CHANGE_SENTENCE = "The replacement round made no change to publish. Nothing was sent, and the public pull request still shows the earlier change. Answer again, or update the branch yourself.";
-export const REPUBLISH_NO_CHANGE_SENTENCE = "The fix round made no changes to publish, so the public pull request is unchanged. Look at the round, then press Build again.";
+export const REPUBLISH_NO_CHANGE_SENTENCE = `${OPEN_PR_LEADS.noChange} ${STEP_ANY}`;
 
 /**
  * D#598 P1g-1: the update of the public pull request stopped before anything was pushed. The branch is untouched; each sentence says what happened and what the person can do on GitHub
@@ -61,7 +79,7 @@ export const REPUBLISH_REPLACE_TIP_MOVED_SENTENCE = "Public main moved, try agai
 export const REPUBLISH_PR_CLOSED = 'republish_pr_closed';
 export const REPUBLISH_PR_MERGED = 'republish_pr_merged';
 export const REPUBLISH_PAIRING_OFF = 'republish_pairing_off';
-export const REPUBLISH_TIP_MOVED_SENTENCE = "Public main moved, try again. The public repository changed twice while the cloud was preparing the update, so the public pull request still shows the earlier change. Press Build again.";
+export const REPUBLISH_TIP_MOVED_SENTENCE = `${OPEN_PR_LEADS.tipMoved} ${STEP_ANY}`;
 export const REPUBLISH_PR_CLOSED_SENTENCE = "Public PR closed. The fix round finished, but the public pull request was closed without merging, so it was not updated. To update it, reopen the pull request on GitHub first.";
 export const REPUBLISH_PR_MERGED_SENTENCE = "Public PR already merged. The fix round finished, but the public pull request was already merged, so nothing was pushed. Follow-up work becomes a new item.";
 export const REPUBLISH_PAIRING_OFF_SENTENCE = "Public PR is open but the pairing is off. The fix round finished, but this repository is no longer paired with its public repository, so the open public pull request was not updated. Turn the pairing back on in the repository settings, or leave the pull request as it is.";

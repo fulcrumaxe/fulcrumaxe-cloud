@@ -29,6 +29,7 @@ import { startStrictRunnerCloud, type StrictRunnerCloud } from "../helpers/stric
 import { KEY_ID, KEYRING, OTHER_KEYRING, signedJob } from "../helpers/signedJob.js";
 import { PACKAGE_DIR } from "../helpers/srcFiles.js";
 import { testLaunch } from "../helpers/launch.js";
+import { VERCEL_PROTECTED_BODY } from "../helpers/vercelProtected.js";
 
 let root: string;
 let home: string;
@@ -1099,4 +1100,28 @@ describe("7. the memory cap on a resource_limit end follows the hello (D#6 CARD-
     expect(ended).toMatchObject({ type: "run_ended", reason: "resource_limit" });
     expect(ended).not.toHaveProperty("memory_limit_bytes");
   }, 60_000);
+});
+
+// D#6 RUNNER-401-MESSAGE: a 401 from the cloud's own routes means the key is refused; Vercel's Deployment Protection 401 means a missing or stale bypass. Both reach the run command over real HTTP.
+describe("a 401 on the claim poll", () => {
+  const SECRET = "bypass-secret-value-0123456789";
+  const headers = { server: "Vercel" };
+  it("the cloud's own 401 says the key is refused and names the revoke step", async () => {
+    cloud.force.claim.push({ status: 401, body: { error: { code: "runner_revoked", message: "runner_revoked" } }, headers });
+    const result = await start().done;
+    expect(result.code).not.toBe(0);
+    expect(result.message).toContain("no longer accepts this runner's key");
+    expect(result.message).toContain("fx-runner revoke --local");
+  });
+
+  it.each([{ label: "a stale bypass", bypass: { kind: "ok" as const, secret: SECRET }, says: "was not accepted" }, { label: "no bypass", bypass: undefined, says: "is not set" }])("Vercel's protection 401 with $label names the setting, never suggests revoking, and prints no secret", async ({ bypass, says }) => {
+    cloud.force.claim.push({ status: 401, body: VERCEL_PROTECTED_BODY, headers });
+    const result = await start({ ctx: { bypass } }).done;
+    expect(result.code).not.toBe(0);
+    expect(result.message).toContain("FX_RUNNER_PROTECTION_BYPASS_FILE");
+    expect(result.message).toContain(says);
+    expect(result.message).not.toMatch(/revoke --local|register again|no longer accepts/);
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+    expect(claims()).toBe(1);
+  });
 });

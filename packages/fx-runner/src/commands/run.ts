@@ -20,7 +20,7 @@
  */
 import path from "node:path";
 import { CliError } from "../cliError.js";
-import { requireUsable } from "../protectionBypass.js";
+import { BYPASS_ENV_NAME, requireUsable } from "../protectionBypass.js";
 import { loadRegistration, type Registration } from "../config.js";
 import type { CommandContext } from "../context.js";
 import { ApiKeyError, perJobApiKey, readApiKey } from "../credentials.js";
@@ -550,6 +550,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       });
       if (end === "restart") return EXIT_RESTART_FOR_UPDATE;
       if (end === "unauthorized") throw new CliError("the cloud no longer accepts this runner's key; run: fx-runner revoke --local, then register again");
+      // Vercel's Deployment Protection answered, not the cloud: the key is fine, so this says what to set and never to revoke. The process ends, as for a refused key.
+      if (end === "protected") throw new CliError(`Vercel Deployment Protection refused the request before it reached the runner API, so the runner's key was not judged and must not be revoked: ${ctx.bypass?.kind === "ok" ? `the secret in the file ${BYPASS_ENV_NAME} names was not accepted` : `${BYPASS_ENV_NAME} is not set`}. Set it to a file holding the project's Protection Bypass for Automation secret, then start fx-runner again (run: fx-runner doctor)`);
       return 0;
     } finally {
       if (vmStatTimer !== undefined) clearInterval(vmStatTimer);
