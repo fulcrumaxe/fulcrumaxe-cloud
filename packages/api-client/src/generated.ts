@@ -861,6 +861,7 @@ export interface Operations {
       repo_map_version: (string) | (null);
       rescan_skipped: (number) | (null);
       rescan_unavailable: boolean | null;
+      budget_source: ("item" | "role" | "repo") | (null);
     };
   };
   listContextRules: {
@@ -938,6 +939,31 @@ export interface Operations {
         "security-reviewer": number;
         debater: number;
       };
+      role_budgets: {
+        executor: (number) | (null);
+        fix: (number) | (null);
+        "code-reviewer": (number) | (null);
+        "acceptance-tester": (number) | (null);
+        "security-reviewer": (number) | (null);
+        debater: (number) | (null);
+      };
+      role_max: {
+        executor: number;
+        fix: number;
+        "code-reviewer": number;
+        "acceptance-tester": number;
+        "security-reviewer": number;
+        debater: number;
+      };
+      source_by_role: {
+        executor: "item" | "role" | "repo" | "default";
+        fix: "item" | "role" | "repo" | "default";
+        "code-reviewer": "item" | "role" | "repo" | "default";
+        "acceptance-tester": "item" | "role" | "repo" | "default";
+        "security-reviewer": "item" | "role" | "repo" | "default";
+        debater: "item" | "role" | "repo" | "default";
+      };
+      consuming_roles: Array<"executor" | "fix" | "code-reviewer" | "acceptance-tester" | "security-reviewer" | "debater">;
     };
   };
   putRepoContextSettings: {
@@ -968,8 +994,172 @@ export interface Operations {
         "security-reviewer": number;
         debater: number;
       };
+      role_budgets: {
+        executor: (number) | (null);
+        fix: (number) | (null);
+        "code-reviewer": (number) | (null);
+        "acceptance-tester": (number) | (null);
+        "security-reviewer": (number) | (null);
+        debater: (number) | (null);
+      };
+      role_max: {
+        executor: number;
+        fix: number;
+        "code-reviewer": number;
+        "acceptance-tester": number;
+        "security-reviewer": number;
+        debater: number;
+      };
+      source_by_role: {
+        executor: "item" | "role" | "repo" | "default";
+        fix: "item" | "role" | "repo" | "default";
+        "code-reviewer": "item" | "role" | "repo" | "default";
+        "acceptance-tester": "item" | "role" | "repo" | "default";
+        "security-reviewer": "item" | "role" | "repo" | "default";
+        debater: "item" | "role" | "repo" | "default";
+      };
+      consuming_roles: Array<"executor" | "fix" | "code-reviewer" | "acceptance-tester" | "security-reviewer" | "debater">;
       changed: boolean;
-      pins_status: "fit" | "over_budget" | "not_measured";
+      pins_status: ("fit" | "over_budget" | "not_measured") | (null);
+      applies_to_runs: boolean;
+    };
+  };
+  putRepoRoleContextBudget: {
+    path: {
+      id: string;
+      role: string;
+    };
+    query: undefined;
+    body: {
+      budget_bytes: (number) | (null);
+    };
+    response: {
+      context_budget_bytes: (number) | (null);
+      min_bytes: number;
+      max_bytes: number;
+      role_defaults: {
+        executor: number;
+        fix: number;
+        "code-reviewer": number;
+        "acceptance-tester": number;
+        "security-reviewer": number;
+        debater: number;
+      };
+      effective_by_role: {
+        executor: number;
+        fix: number;
+        "code-reviewer": number;
+        "acceptance-tester": number;
+        "security-reviewer": number;
+        debater: number;
+      };
+      role_budgets: {
+        executor: (number) | (null);
+        fix: (number) | (null);
+        "code-reviewer": (number) | (null);
+        "acceptance-tester": (number) | (null);
+        "security-reviewer": (number) | (null);
+        debater: (number) | (null);
+      };
+      role_max: {
+        executor: number;
+        fix: number;
+        "code-reviewer": number;
+        "acceptance-tester": number;
+        "security-reviewer": number;
+        debater: number;
+      };
+      source_by_role: {
+        executor: "item" | "role" | "repo" | "default";
+        fix: "item" | "role" | "repo" | "default";
+        "code-reviewer": "item" | "role" | "repo" | "default";
+        "acceptance-tester": "item" | "role" | "repo" | "default";
+        "security-reviewer": "item" | "role" | "repo" | "default";
+        debater: "item" | "role" | "repo" | "default";
+      };
+      consuming_roles: Array<"executor" | "fix" | "code-reviewer" | "acceptance-tester" | "security-reviewer" | "debater">;
+      changed: boolean;
+      pins_status: ("fit" | "over_budget" | "not_measured") | (null);
+      applies_to_runs: boolean;
+    };
+  };
+  getWorkItemContextBudget: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      item_budget_bytes: (number) | (null);
+      min_bytes: number;
+      max_bytes: number;
+      role_defaults: {
+        executor: number;
+        fix: number;
+        "code-reviewer": number;
+        "acceptance-tester": number;
+        "security-reviewer": number;
+        debater: number;
+      };
+      effective_by_role: {
+        executor: number;
+        fix: number;
+        "code-reviewer": number;
+        "acceptance-tester": number;
+        "security-reviewer": number;
+        debater: number;
+      };
+      source_by_role: {
+        executor: "item" | "role" | "repo" | "default";
+        fix: "item" | "role" | "repo" | "default";
+        "code-reviewer": "item" | "role" | "repo" | "default";
+        "acceptance-tester": "item" | "role" | "repo" | "default";
+        "security-reviewer": "item" | "role" | "repo" | "default";
+        debater: "item" | "role" | "repo" | "default";
+      };
+      consuming_roles: Array<"executor" | "fix" | "code-reviewer" | "acceptance-tester" | "security-reviewer" | "debater">;
+    };
+  };
+  putWorkItemContextBudget: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      budget_bytes: (number) | (null);
+    };
+    response: {
+      item_budget_bytes: (number) | (null);
+      min_bytes: number;
+      max_bytes: number;
+      role_defaults: {
+        executor: number;
+        fix: number;
+        "code-reviewer": number;
+        "acceptance-tester": number;
+        "security-reviewer": number;
+        debater: number;
+      };
+      effective_by_role: {
+        executor: number;
+        fix: number;
+        "code-reviewer": number;
+        "acceptance-tester": number;
+        "security-reviewer": number;
+        debater: number;
+      };
+      source_by_role: {
+        executor: "item" | "role" | "repo" | "default";
+        fix: "item" | "role" | "repo" | "default";
+        "code-reviewer": "item" | "role" | "repo" | "default";
+        "acceptance-tester": "item" | "role" | "repo" | "default";
+        "security-reviewer": "item" | "role" | "repo" | "default";
+        debater: "item" | "role" | "repo" | "default";
+      };
+      consuming_roles: Array<"executor" | "fix" | "code-reviewer" | "acceptance-tester" | "security-reviewer" | "debater">;
+      changed: boolean;
+      pins_status: ("fit" | "over_budget" | "not_measured") | (null);
+      applies_to_runs: boolean;
     };
   };
   listWebhookEndpoints: {
@@ -5112,6 +5302,39 @@ export const operations = {
   putRepoContextSettings: {
     method: "PUT",
     path: "/api/v1/repos/{id}/context-settings",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  putRepoRoleContextBudget: {
+    method: "PUT",
+    path: "/api/v1/repos/{id}/context-settings/roles/{role}",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id","role"],
+    queryParams: [],
+    hasBody: true,
+  },
+  getWorkItemContextBudget: {
+    method: "GET",
+    path: "/api/v1/work-items/{id}/context-settings",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  putWorkItemContextBudget: {
+    method: "PUT",
+    path: "/api/v1/work-items/{id}/context-settings",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,

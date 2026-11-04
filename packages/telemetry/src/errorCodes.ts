@@ -462,6 +462,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "pins_exceed_budget",
   "tree_truncated",
   "tree_unavailable",
+  // A role or item context budget outside its range (D#600 CX-12); the message states the bound.
+  "budget_out_of_range",
   // Context rule writes (D#600 CX-9a): the pin ceiling, the exclude cap, a removal that brings pins back over budget, and the repository's rule lock timing out.
   "pins_exceed_ceiling",
   "excludes_exceed_cap",

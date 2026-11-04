@@ -30,7 +30,7 @@ import {
   type Job,
   type SignedJob,
 } from "@fulcrumaxe/runner-protocol";
-import { effectiveContextBudget, readContextBudgetBytes } from "@fx/core/src/context/contextBudget.js";
+import { resolveRunContextBudget } from "@fx/core/src/context/contextBudget.js";
 import { readItemRules } from "@fx/core/src/context/contextRules.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
@@ -456,10 +456,10 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
       }
 
       let pinBudget: number | undefined;
-      // The repository's prompt budget now (its stored size, else the executor default), which the runner compares the pins with to record `pins_over_budget`. A read that fails leaves it out; a pin is never refused for it.
+      // The repository's prompt budget now (item, role, repository, else the executor default), which the runner compares the pins with to record `pins_over_budget`. A read that fails leaves it out; a pin is never refused for it.
       if (pinPaths.length > 0) {
         try {
-          pinBudget = effectiveContextBudget("executor", await readContextBudgetBytes(deps.pool, run.accountId, run.repoId));
+          pinBudget = (await resolveRunContextBudget(deps.pool, run.accountId, run.repoId, run.workItemId ?? null, "executor")).bytes;
         } catch {
           // fx-swallow-ok: the budget only drives the overage note in the ledger; without it the job carries none
         }

@@ -197,6 +197,21 @@ describe("the model, per state", () => {
     expect(panelText(drawn(RUNNER))).not.toMatch(BAD);
   });
 
+  it("D#600 CX-12: the panel says which level set the run's budget, and says nothing when the role default applied or the record is missing", () => {
+    for (const [source, words] of [["item", "set for this item"], ["role", "set for this role"], ["repo", "set for this repository"]]) {
+      const model = contextModel(readContext({ ...MEASURED, budget_source: source }));
+      expect(model.budgetLine).toBe(CONTEXT_WORDS.budget[source]);
+      expect(model.budgetLine).toContain(words);
+      expect(panelText(drawn({ ...MEASURED, budget_source: source }))).toContain(words);
+    }
+    for (const none of [null, undefined, "default", "other", 7]) {
+      const body = { ...MEASURED, budget_source: none };
+      expect(contextModel(readContext(body)).budgetLine, String(none)).toBeNull();
+      expect(panelText(drawn(body))).not.toContain("Context budget");
+    }
+    expect(panelText(drawn(RUNNER))).not.toMatch(BAD);
+  });
+
   it("D#600 CX-5b: pinned files are a row with their size; the two pin notes are sentences, not rows, and say which happened", () => {
     const pins = (extra) => ({
       ...MEASURED,

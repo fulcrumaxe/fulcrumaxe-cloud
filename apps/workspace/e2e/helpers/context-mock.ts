@@ -22,6 +22,9 @@ export interface Rule { id: string; scope: "repo" | "item"; kind: "pin" | "exclu
 export interface ContextMock {
   rules: Rule[];
   budget: number | null;
+  /** D#600 CX-12: each role's own stored size in the repository, and the item's own (null: none). */
+  roles: Record<string, number | null>;
+  itemBudget: number | null;
   isAdmin: boolean;
   /** Bytes a pinned path weighs when the budget is measured (default 1000). */
   size: Record<string, number>;
@@ -53,12 +56,13 @@ const MESSAGES: Record<string, string> = {
   not_found: "not found",
   tree_unavailable: "the repository could not be read just now; nothing was saved",
   validation_failed: "bad request",
+  budget_out_of_range: "The budget must be a whole number of bytes from 4096 to 86016.",
 };
 export const serverText = (code: string) => MESSAGES[code] ?? code;
 const envelope = (code: string) => ({ error: { code, message: serverText(code), request_id: "33333333-3333-4333-8333-333333333333" } });
 
 export function newContextMock(over: Partial<ContextMock> = {}): ContextMock {
-  return { rules: [], budget: null, isAdmin: true, size: {}, forced: {}, requests: [], bodies: [], ...over };
+  return { rules: [], budget: null, roles: {}, itemBudget: null, isAdmin: true, size: {}, forced: {}, requests: [], bodies: [], ...over };
 }
 
 export async function installContextRoutes(page: Page, m: ContextMock): Promise<void> {
@@ -144,25 +148,69 @@ export async function installContextRoutes(page: Page, m: ContextMock): Promise<
     return json(route, 404, envelope("not_found"));
   });
 
+  // D#600 CX-12: the precedence (item, role, repository, default), as packages/core's resolveContextBudget works it; an item or role value is held to the role's default times 2.
+  const defaults: Record<string, number> = SETTINGS_FIXTURE.role_defaults;
+  const sourceOf = (role: string, withItem: boolean) => (withItem && m.itemBudget !== null ? "item" : m.roles[role] != null ? "role" : m.budget !== null ? "repo" : "default");
+  const effOf = (role: string, withItem: boolean) => {
+    const src = sourceOf(role, withItem);
+    return src === "item" ? Math.min(m.itemBudget!, defaults[role]! * 2) : src === "role" ? Math.min(m.roles[role]!, defaults[role]! * 2) : src === "repo" ? m.budget! : defaults[role]!;
+  };
+  const byRole = <T,>(f: (role: string) => T) => Object.fromEntries(Object.keys(defaults).map((k) => [k, f(k)]));
+  const view = () => ({
+    ...SETTINGS_FIXTURE, context_budget_bytes: m.budget, effective_by_role: byRole((k) => effOf(k, false)), source_by_role: byRole((k) => sourceOf(k, false)),
+    role_budgets: byRole((k) => m.roles[k] ?? null), role_max: byRole((k) => defaults[k]! * 2), consuming_roles: ["executor"],
+  });
+  const itemMax = Math.max(...Object.values(defaults)) * 2;
+  const itemView = () => ({ item_budget_bytes: m.itemBudget, min_bytes: 4096, max_bytes: itemMax, role_defaults: defaults, effective_by_role: byRole((k) => effOf(k, true)), source_by_role: byRole((k) => sourceOf(k, true)), consuming_roles: ["executor"] });
+  const overPins = () => (pinTotal(m.rules.filter((r) => r.scope === "repo")) > effOf("executor", false) ? "over_budget" : "fit");
+  const readBody = (req: ReturnType<Route["request"]>) => {
+    const b = JSON.parse(req.postData() ?? "null");
+    m.bodies.push(b);
+    return b;
+  };
+
   await page.route("**/api/v1/repos/*/context-settings", async (route) => {
     const req = route.request();
     m.requests.push(`${req.method()} ${new URL(req.url()).pathname}`);
-    const view = () => ({
-      ...SETTINGS_FIXTURE, context_budget_bytes: m.budget,
-      effective_by_role: Object.fromEntries(Object.keys(SETTINGS_FIXTURE.role_defaults).map((k) => [k, m.budget ?? SETTINGS_FIXTURE.role_defaults[k]])),
-    });
     if (req.method() === "GET") return forced("GET settings", route) ?? json(route, 200, view());
     const f = forced("PUT settings", route);
     if (f) return f;
     if (!m.isAdmin) return json(route, 403, envelope("insufficient_role"));
-    const b = JSON.parse(req.postData() ?? "null");
-    m.bodies.push(b);
+    const b = readBody(req);
     const v = b && typeof b === "object" && Object.keys(b).join() === "context_budget_bytes" ? b.context_budget_bytes : undefined;
     if (!(v === null || (Number.isInteger(v) && v >= SETTINGS_FIXTURE.min_bytes && v <= SETTINGS_FIXTURE.max_bytes))) return json(route, 422, envelope("validation_failed"));
     const changed = m.budget !== v;
     m.budget = v;
-    const over = pinTotal(m.rules.filter((r) => r.scope === "repo")) > budgetOf();
-    return json(route, 200, { ...view(), changed, pins_status: over ? "over_budget" : "fit" });
+    return json(route, 200, { ...view(), changed, pins_status: overPins() });
+  });
+
+  await page.route("**/api/v1/repos/*/context-settings/roles/*", async (route) => {
+    const req = route.request();
+    m.requests.push(`${req.method()} ${new URL(req.url()).pathname}`);
+    const f = forced("PUT role", route);
+    if (f) return f;
+    if (!m.isAdmin) return json(route, 403, envelope("insufficient_role"));
+    const role = decodeURIComponent(new URL(req.url()).pathname.split("/").pop()!);
+    if (!(role in defaults)) return json(route, 404, envelope("not_found"));
+    const v = readBody(req)?.budget_bytes;
+    if (!(v === null || (Number.isInteger(v) && v >= 4096 && v <= defaults[role]! * 2))) return json(route, 422, envelope("budget_out_of_range"));
+    const changed = (m.roles[role] ?? null) !== v;
+    m.roles[role] = v;
+    return json(route, 200, { ...view(), changed, pins_status: overPins() });
+  });
+
+  await page.route("**/api/v1/work-items/*/context-settings", async (route) => {
+    const req = route.request();
+    m.requests.push(`${req.method()} ${new URL(req.url()).pathname}`);
+    if (req.method() === "GET") return forced("GET item settings", route) ?? json(route, 200, itemView());
+    const f = forced("PUT item settings", route);
+    if (f) return f;
+    if (!m.isAdmin) return json(route, 403, envelope("insufficient_role"));
+    const v = readBody(req)?.budget_bytes;
+    if (!(v === null || (Number.isInteger(v) && v >= 4096 && v <= itemMax))) return json(route, 422, envelope("budget_out_of_range"));
+    const changed = m.itemBudget !== v;
+    m.itemBudget = v;
+    return json(route, 200, { ...itemView(), changed, pins_status: "fit" });
   });
 
   function inForce2(rules: Rule[], itemId: string) {

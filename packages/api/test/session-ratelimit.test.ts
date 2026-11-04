@@ -350,6 +350,8 @@ describe('session rate limits', () => {
         putContextRule: 'context-rule-write',
         deleteContextRule: 'context-rule-write',
         putRepoContextSettings: 'context-rule-write',
+        putRepoRoleContextBudget: 'context-rule-write',
+        putWorkItemContextBudget: 'context-rule-write',
       });
     });
   });

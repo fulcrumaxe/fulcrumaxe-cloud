@@ -7131,6 +7131,21 @@
                         "boolean",
                         "null"
                       ]
+                    },
+                    "budget_source": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -7152,7 +7167,8 @@
                     "item_sources",
                     "repo_map_version",
                     "rescan_skipped",
-                    "rescan_unavailable"
+                    "rescan_unavailable",
+                    "budget_source"
                   ],
                   "additionalProperties": false
                 }
@@ -7883,6 +7899,218 @@
                         "debater"
                       ],
                       "additionalProperties": false
+                    },
+                    "role_budgets": {
+                      "type": "object",
+                      "properties": {
+                        "executor": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "fix": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "code-reviewer": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "acceptance-tester": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "security-reviewer": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "debater": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "executor",
+                        "fix",
+                        "code-reviewer",
+                        "acceptance-tester",
+                        "security-reviewer",
+                        "debater"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "role_max": {
+                      "type": "object",
+                      "properties": {
+                        "executor": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "fix": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "code-reviewer": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "acceptance-tester": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "security-reviewer": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "debater": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "executor",
+                        "fix",
+                        "code-reviewer",
+                        "acceptance-tester",
+                        "security-reviewer",
+                        "debater"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "source_by_role": {
+                      "type": "object",
+                      "properties": {
+                        "executor": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "fix": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "code-reviewer": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "acceptance-tester": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "security-reviewer": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "debater": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "executor",
+                        "fix",
+                        "code-reviewer",
+                        "acceptance-tester",
+                        "security-reviewer",
+                        "debater"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "consuming_roles": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "executor",
+                          "fix",
+                          "code-reviewer",
+                          "acceptance-tester",
+                          "security-reviewer",
+                          "debater"
+                        ]
+                      }
                     }
                   },
                   "required": [
@@ -7890,7 +8118,11 @@
                     "min_bytes",
                     "max_bytes",
                     "role_defaults",
-                    "effective_by_role"
+                    "effective_by_role",
+                    "role_budgets",
+                    "role_max",
+                    "source_by_role",
+                    "consuming_roles"
                   ],
                   "additionalProperties": false
                 }
@@ -8116,16 +8348,238 @@
                       ],
                       "additionalProperties": false
                     },
+                    "role_budgets": {
+                      "type": "object",
+                      "properties": {
+                        "executor": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "fix": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "code-reviewer": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "acceptance-tester": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "security-reviewer": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "debater": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "executor",
+                        "fix",
+                        "code-reviewer",
+                        "acceptance-tester",
+                        "security-reviewer",
+                        "debater"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "role_max": {
+                      "type": "object",
+                      "properties": {
+                        "executor": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "fix": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "code-reviewer": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "acceptance-tester": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "security-reviewer": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "debater": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "executor",
+                        "fix",
+                        "code-reviewer",
+                        "acceptance-tester",
+                        "security-reviewer",
+                        "debater"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "source_by_role": {
+                      "type": "object",
+                      "properties": {
+                        "executor": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "fix": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "code-reviewer": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "acceptance-tester": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "security-reviewer": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "debater": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "executor",
+                        "fix",
+                        "code-reviewer",
+                        "acceptance-tester",
+                        "security-reviewer",
+                        "debater"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "consuming_roles": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "executor",
+                          "fix",
+                          "code-reviewer",
+                          "acceptance-tester",
+                          "security-reviewer",
+                          "debater"
+                        ]
+                      }
+                    },
                     "changed": {
                       "type": "boolean"
                     },
                     "pins_status": {
-                      "type": "string",
-                      "enum": [
-                        "fit",
-                        "over_budget",
-                        "not_measured"
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "fit",
+                            "over_budget",
+                            "not_measured"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
                       ]
+                    },
+                    "applies_to_runs": {
+                      "type": "boolean"
                     }
                   },
                   "required": [
@@ -8134,8 +8588,13 @@
                     "max_bytes",
                     "role_defaults",
                     "effective_by_role",
+                    "role_budgets",
+                    "role_max",
+                    "source_by_role",
+                    "consuming_roles",
                     "changed",
-                    "pins_status"
+                    "pins_status",
+                    "applies_to_runs"
                   ],
                   "additionalProperties": false
                 }
@@ -8164,6 +8623,1155 @@
           },
           "404": {
             "description": "`not_found`: no such repository in this account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repos/{id}/context-settings/roles/{role}": {
+      "put": {
+        "operationId": "putRepoRoleContextBudget",
+        "summary": "Set or reset one role's context budget in a repository. One audit row per real change",
+        "description": "Session only, owner or admin. `budget_bytes` from 4096 to the role's default times 2 (`role_max`), or null to remove the role's own budget so the repository's, then the role default, applies. A value outside the range answers 422 `budget_out_of_range` with the bound in the message. A budget below the repository's existing pins is accepted and `pins_status` answers `over_budget`. A role whose runs use no budget yet (see `consuming_roles`) stores the number, answers `applies_to_runs: false` and `pins_status: null`. An equal value writes nothing (`changed: false`).",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "role",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "budget_bytes": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": -9007199254740991,
+                        "maximum": 9007199254740991
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "budget_bytes"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Set or reset one role's context budget in a repository. One audit row per real change",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "context_budget_bytes": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "min_bytes": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "max_bytes": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "role_defaults": {
+                      "type": "object",
+                      "properties": {
+                        "executor": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "fix": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "code-reviewer": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "acceptance-tester": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "security-reviewer": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "debater": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "executor",
+                        "fix",
+                        "code-reviewer",
+                        "acceptance-tester",
+                        "security-reviewer",
+                        "debater"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "effective_by_role": {
+                      "type": "object",
+                      "properties": {
+                        "executor": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "fix": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "code-reviewer": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "acceptance-tester": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "security-reviewer": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "debater": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "executor",
+                        "fix",
+                        "code-reviewer",
+                        "acceptance-tester",
+                        "security-reviewer",
+                        "debater"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "role_budgets": {
+                      "type": "object",
+                      "properties": {
+                        "executor": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "fix": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "code-reviewer": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "acceptance-tester": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "security-reviewer": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "debater": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "executor",
+                        "fix",
+                        "code-reviewer",
+                        "acceptance-tester",
+                        "security-reviewer",
+                        "debater"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "role_max": {
+                      "type": "object",
+                      "properties": {
+                        "executor": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "fix": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "code-reviewer": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "acceptance-tester": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "security-reviewer": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "debater": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "executor",
+                        "fix",
+                        "code-reviewer",
+                        "acceptance-tester",
+                        "security-reviewer",
+                        "debater"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "source_by_role": {
+                      "type": "object",
+                      "properties": {
+                        "executor": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "fix": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "code-reviewer": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "acceptance-tester": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "security-reviewer": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "debater": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "executor",
+                        "fix",
+                        "code-reviewer",
+                        "acceptance-tester",
+                        "security-reviewer",
+                        "debater"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "consuming_roles": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "executor",
+                          "fix",
+                          "code-reviewer",
+                          "acceptance-tester",
+                          "security-reviewer",
+                          "debater"
+                        ]
+                      }
+                    },
+                    "changed": {
+                      "type": "boolean"
+                    },
+                    "pins_status": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "fit",
+                            "over_budget",
+                            "not_measured"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "applies_to_runs": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "context_budget_bytes",
+                    "min_bytes",
+                    "max_bytes",
+                    "role_defaults",
+                    "effective_by_role",
+                    "role_budgets",
+                    "role_max",
+                    "source_by_role",
+                    "consuming_roles",
+                    "changed",
+                    "pins_status",
+                    "applies_to_runs"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not_found`: no such repository or role in this account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/work-items/{id}/context-settings": {
+      "get": {
+        "operationId": "getWorkItemContextBudget",
+        "summary": "A work item's own context budget and what each role's run on it is held to",
+        "description": "Session only, member. `item_budget_bytes` is null when the item has none.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A work item's own context budget and what each role's run on it is held to",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "item_budget_bytes": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "min_bytes": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "max_bytes": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "role_defaults": {
+                      "type": "object",
+                      "properties": {
+                        "executor": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "fix": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "code-reviewer": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "acceptance-tester": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "security-reviewer": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "debater": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "executor",
+                        "fix",
+                        "code-reviewer",
+                        "acceptance-tester",
+                        "security-reviewer",
+                        "debater"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "effective_by_role": {
+                      "type": "object",
+                      "properties": {
+                        "executor": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "fix": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "code-reviewer": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "acceptance-tester": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "security-reviewer": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "debater": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "executor",
+                        "fix",
+                        "code-reviewer",
+                        "acceptance-tester",
+                        "security-reviewer",
+                        "debater"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "source_by_role": {
+                      "type": "object",
+                      "properties": {
+                        "executor": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "fix": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "code-reviewer": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "acceptance-tester": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "security-reviewer": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "debater": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "executor",
+                        "fix",
+                        "code-reviewer",
+                        "acceptance-tester",
+                        "security-reviewer",
+                        "debater"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "consuming_roles": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "executor",
+                          "fix",
+                          "code-reviewer",
+                          "acceptance-tester",
+                          "security-reviewer",
+                          "debater"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "item_budget_bytes",
+                    "min_bytes",
+                    "max_bytes",
+                    "role_defaults",
+                    "effective_by_role",
+                    "source_by_role",
+                    "consuming_roles"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "putWorkItemContextBudget",
+        "summary": "Set or reset a work item's context budget. One audit row per real change",
+        "description": "Session only, owner or admin. `budget_bytes` from 4096 to the largest role default times 2 (`max_bytes`), or null to remove it. It applies to every role's runs on the item; a run is held to the smaller of it and its own role's default times 2. A value outside the range answers 422 `budget_out_of_range` with the bound in the message. A budget below the item's pins is accepted and `pins_status` answers `over_budget`. An equal value writes nothing (`changed: false`).",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "budget_bytes": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": -9007199254740991,
+                        "maximum": 9007199254740991
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "budget_bytes"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Set or reset a work item's context budget. One audit row per real change",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "item_budget_bytes": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "min_bytes": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "max_bytes": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "role_defaults": {
+                      "type": "object",
+                      "properties": {
+                        "executor": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "fix": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "code-reviewer": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "acceptance-tester": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "security-reviewer": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "debater": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "executor",
+                        "fix",
+                        "code-reviewer",
+                        "acceptance-tester",
+                        "security-reviewer",
+                        "debater"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "effective_by_role": {
+                      "type": "object",
+                      "properties": {
+                        "executor": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "fix": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "code-reviewer": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "acceptance-tester": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "security-reviewer": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "debater": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "executor",
+                        "fix",
+                        "code-reviewer",
+                        "acceptance-tester",
+                        "security-reviewer",
+                        "debater"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "source_by_role": {
+                      "type": "object",
+                      "properties": {
+                        "executor": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "fix": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "code-reviewer": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "acceptance-tester": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "security-reviewer": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        },
+                        "debater": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "role",
+                            "repo",
+                            "default"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "executor",
+                        "fix",
+                        "code-reviewer",
+                        "acceptance-tester",
+                        "security-reviewer",
+                        "debater"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "consuming_roles": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "executor",
+                          "fix",
+                          "code-reviewer",
+                          "acceptance-tester",
+                          "security-reviewer",
+                          "debater"
+                        ]
+                      }
+                    },
+                    "changed": {
+                      "type": "boolean"
+                    },
+                    "pins_status": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "fit",
+                            "over_budget",
+                            "not_measured"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "applies_to_runs": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "item_budget_bytes",
+                    "min_bytes",
+                    "max_bytes",
+                    "role_defaults",
+                    "effective_by_role",
+                    "source_by_role",
+                    "consuming_roles",
+                    "changed",
+                    "pins_status",
+                    "applies_to_runs"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not_found`: no such work item in this account.",
             "content": {
               "application/json": {
                 "schema": {

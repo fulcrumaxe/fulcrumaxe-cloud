@@ -30,6 +30,7 @@ export const runContextResponseSchema = z.object({
   repo_map_version: z.string().max(64).nullable(),
   rescan_skipped: count.nullable(),
   rescan_unavailable: z.boolean().nullable(),
+  budget_source: z.enum(["item", "role", "repo"]).nullable(),
 });
 
 export const runContextRoutes: RouteEntry[] = [

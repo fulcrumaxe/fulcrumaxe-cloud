@@ -65,6 +65,7 @@ export const PINS_MAX_READ = 40;
 export const UNDO_MS = 10000;
 const RULES_URL = "/api/v1/context-rules";
 const settingsUrl = (id) => "/api/v1/repos/" + encodeURIComponent(id) + "/context-settings";
+const itemUrl = (id) => "/api/v1/work-items/" + encodeURIComponent(id) + "/context-settings";
 export const ADMIN_ONLY = "Only owners and admins can change this.";
 const GENERIC = "That change couldn't be saved. Try again.";
 
@@ -83,8 +84,10 @@ export const COPY = {
   pathLabel: "Repository path", kindLabel: "Rule", kindPin: "Pin (always include)", kindExclude: "Keep out of context", adminOnly: ADMIN_ONLY,
   keepOut: "Keep out of context", added: (path) => "Saved " + path + ".", removed: (path) => "Removed " + path + ".", restored: (path) => "Restored " + path + ".", tooMany: "Too many changes.",
   budgetTitle: "Context budget", budgetLoading: "Loading budget...", budgetFailed: "The budget isn't available right now.",
-  budgetNow: (bytes) => (bytes === null ? "Now: each role's default." : "Now: " + bytes + " bytes."), budgetField: "Budget in bytes",
-  budgetRange: (lo, hi) => "Enter a whole number from " + lo + " to " + hi + ".", save: "Save budget", reset: "Reset to default", defaults: "Role defaults",
+  budgetNow: (bytes, scope = "repo") => (bytes === null ? (scope === "repo" ? "Now: each role's default." : "Now: none set for this " + scope + ".") : "Now: " + bytes + " bytes."), budgetField: "Budget in bytes",
+  consumers: "Today only the build's prompt uses a budget.", budgetFor: "Budget for", levelRepo: "Whole repository", levelItem: "This item",
+  sources: { item: "set for this item", role: "set for this role", repo: "set for this repository", default: "role default" },
+  budgetRange: (lo, hi) => "Enter a whole number from " + lo + " to " + hi + ".", save: "Save budget", reset: "Reset to default", defaults: "What each role is held to now",
   saved: "Budget saved. Applies from the next run.", fit: "Your pins fit this budget.",
   overBudget: "Your pins are over this budget. They are never cut to fit it during a run.",
   changedElsewhere: "This rule was changed somewhere else, so it was not restored. The list now shows what is there.",
@@ -97,6 +100,7 @@ export const REFUSALS = {
   pins_exceed_ceiling: "This would pass the most pinned files a run can carry, so nothing was saved.",
   excludes_exceed_cap: "This would pass the most excluded paths a run can hold, so nothing was saved.",
   exclude_readds_pins: COPY.readdsPins,
+  budget_out_of_range: "That size is outside the allowed range, so nothing was saved.",
   invalid_path: "That path can't be used. Use a path inside the repository, such as src/app.ts. A pin can't contain * or ?.",
   context_rules_busy: "Another change to this repository's rules is in progress. Try again in a moment.",
   tree_truncated: "This repository is too large to check its pins, so nothing was saved.",
@@ -171,9 +175,19 @@ export function budgetInput(text, view) {
   const n = /^\d{1,9}$/.test(String(text).trim()) ? Number(String(text).trim()) : NaN;
   return n >= view.min_bytes && n <= view.max_bytes ? { ok: true, bytes: n } : { ok: false, text: COPY.budgetRange(view.min_bytes, view.max_bytes) };
 }
-const pickView = (v) =>
-  v && Number.isInteger(v.min_bytes) && Number.isInteger(v.max_bytes) && v.role_defaults && typeof v.role_defaults === "object" && (v.context_budget_bytes === null || Number.isInteger(v.context_budget_bytes))
-    ? { bytes: v.context_budget_bytes, min_bytes: v.min_bytes, max_bytes: v.max_bytes, defaults: Object.entries(v.role_defaults).filter(([, n]) => Number.isInteger(n)) } : null;
+const intOrNull = (x) => x === null || Number.isInteger(x);
+/** The repository's answer (its own size and each role's) or an item's (its own size), as the levels a person can set and the size each role is held to, with the level that said so. */
+function pickView(v) {
+  if (!v || !Number.isInteger(v.min_bytes) || !Number.isInteger(v.max_bytes) || !v.role_defaults || typeof v.role_defaults !== "object" || !v.effective_by_role || !v.source_by_role || !Array.isArray(v.consuming_roles) || v.consuming_roles.length === 0) return null;
+  // Only roles whose runs use a budget today are shown or offered; the server names them.
+  const effective = Object.entries(v.effective_by_role).filter(([role, n]) => Number.isInteger(n) && v.consuming_roles.includes(role)).map(([role, n]) => [role, n, COPY.sources[v.source_by_role[role]] || COPY.sources.default]);
+  const defaults = Object.entries(v.role_defaults).filter(([role, n]) => Number.isInteger(n) && v.consuming_roles.includes(role));
+  const common = { min_bytes: v.min_bytes, max_bytes: v.max_bytes, defaults, effective };
+  if ("item_budget_bytes" in v) return intOrNull(v.item_budget_bytes) ? { ...common, bytes: v.item_budget_bytes, levels: [{ key: "item", scope: "item", label: COPY.levelItem, bytes: v.item_budget_bytes, min: v.min_bytes, max: v.max_bytes }] } : null;
+  if (!intOrNull(v.context_budget_bytes) || !v.role_budgets || !v.role_max) return null;
+  const roles = effective.map(([role]) => ({ key: role, scope: "role", label: ROLE_NAMES[role] || role, bytes: Number.isInteger(v.role_budgets[role]) ? v.role_budgets[role] : null, min: v.min_bytes, max: Number.isInteger(v.role_max[role]) ? v.role_max[role] : v.max_bytes }));
+  return { ...common, bytes: v.context_budget_bytes, levels: [{ key: "repo", scope: "repo", label: COPY.levelRepo, bytes: v.context_budget_bytes, min: v.min_bytes, max: v.max_bytes }, ...roles] };
+}
 const sizeText = (n) => (n % 1024 === 0 ? n / 1024 + " KiB" : n + " bytes");
 const cancelled = (e) => !!e && e.name === "AbortError";
 
@@ -259,11 +273,14 @@ export function createRulesController({ call, getAdmin, target, onChange = () =>
 }
 
 /** The budget's state and writes, no DOM. save(bytes) and reset() write, then re-read; state.status is the last write's pins_status. */
-export function createBudgetController({ call, getAdmin, repoId, onChange = () => {} }) {
-  const s = { load: "idle", view: null, isAdmin: false, busy: false, error: null, status: "", saved: false };
+export function createBudgetController({ call, getAdmin, repoId, itemId, onChange = () => {} }) {
+  const s = { load: "idle", view: null, isAdmin: false, busy: false, error: null, status: "", saved: false, level: "" };
+  // With an itemId the controller sets that item's own size; otherwise the repository's, or one role's in it (setLevel).
+  const level = () => (s.view ? s.view.levels.find((l) => l.key === s.level) || s.view.levels[0] : null);
+  const urlFor = (lv) => (itemId ? itemUrl(itemId) : lv.scope === "role" ? settingsUrl(repoId) + "/roles/" + encodeURIComponent(lv.key) : settingsUrl(repoId));
   const changed = () => onChange(s);
   async function load() {
-    try { s.view = pickView(await call("GET", settingsUrl(repoId))); s.load = s.view ? "ok" : "error"; } catch (e) { if (cancelled(e)) return; s.load = "error"; }
+    try { s.view = pickView(await call("GET", itemId ? itemUrl(itemId) : settingsUrl(repoId))); s.load = s.view ? "ok" : "error"; } catch (e) { if (cancelled(e)) return; s.load = "error"; }
     changed();
   }
   async function start() {
@@ -275,7 +292,8 @@ export function createBudgetController({ call, getAdmin, repoId, onChange = () =
     if (s.busy) return false;
     s.busy = true; s.error = null; s.status = ""; s.saved = false; changed();
     try {
-      const res = await call("PUT", settingsUrl(repoId), { context_budget_bytes: bytes });
+      const lv = level();
+      const res = await call("PUT", urlFor(lv), lv.scope === "repo" ? { context_budget_bytes: bytes } : { budget_bytes: bytes });
       s.busy = false; s.saved = true; s.status = res && typeof res.pins_status === "string" ? res.pins_status : "";
     } catch (e) {
       s.busy = false;
@@ -288,8 +306,8 @@ export function createBudgetController({ call, getAdmin, repoId, onChange = () =
     await load();
     return true;
   }
-  const save = (text) => { const v = s.view && budgetInput(text, s.view); if (!v || !v.ok) { s.error = { text: v ? v.text : GENERIC, retry: null }; s.saved = false; changed(); return false; } return write(v.bytes); };
-  return { state: s, start, load, save, reset: () => write(null) };
+  const save = (text) => { const lv = level(), v = lv && budgetInput(text, { min_bytes: lv.min, max_bytes: lv.max }); if (!v || !v.ok) { s.error = { text: v ? v.text : GENERIC, retry: null }; s.saved = false; changed(); return false; } return write(v.bytes); };
+  return { state: s, start, load, save, level, reset: () => write(null), setLevel(key) { s.level = key; s.saved = false; s.error = null; s.status = ""; changed(); } };
 }
 
 // ── the view ──────────────────────────────────────────────────────────
@@ -307,7 +325,7 @@ const CSS = `
 .ctx-form,.ctx-budget-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:8px}.ctx-form label,.ctx-budget-row label{display:flex;flex-direction:column;gap:2px;min-width:0}
 .ctx-form .ctx-grow{flex:1 1 200px}.ctx-field{max-width:100%}.ctx fieldset{margin:6px 0;padding:0;border:0;display:flex;flex-wrap:wrap;gap:4px 14px}.ctx legend{padding:0;margin-bottom:2px}
 .ctx-toast{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin:6px 0;padding:6px 10px;border:1px solid var(--accent,#1aff80);background:var(--bg-surface,#0a0a0a)}
-.ctx-defaults{display:grid;grid-template-columns:auto auto;justify-content:start;gap:2px 14px;margin:4px 0}.ctx-defaults dt,.ctx-defaults dd{margin:0}
+.ctx-defaults{display:grid;grid-template-columns:auto minmax(0,1fr);justify-content:start;gap:2px 14px;margin:4px 0}.ctx-defaults dt,.ctx-defaults dd{margin:0}
 `;
 let sheetDone = false;
 /** One constructed stylesheet for every panel (a CSSOM sheet is not blocked by a style-src that forbids inline style). */
@@ -333,7 +351,7 @@ function mountPanel(host, { target, withBudget, heading, clock = { set: (f, ms) 
   const adminRead = call("GET", "/api/cloud/auth/me").then((me) => !!me && me.is_admin === true, () => false);
   const getAdmin = () => adminRead;
   const rules = createRulesController({ call, getAdmin, target, onChange: () => paint() });
-  const budget = withBudget ? createBudgetController({ call, getAdmin, repoId: target.repoId, onChange: () => paintBudget() }) : null;
+  const budget = withBudget ? createBudgetController({ call, getAdmin, repoId: target.repoId, itemId: target.itemId, onChange: () => paintBudget() }) : null;
   const s = rules.state;
   let destroyed = false, rows = [], shownForm = "";
 
@@ -457,11 +475,15 @@ function mountPanel(host, { target, withBudget, heading, clock = { set: (f, ms) 
         ? h("div", { role: "alert", "data-testid": "ctx-budget-error" }, COPY.budgetFailed, " ", btn(COPY.retry, "ctx-budget-retry", () => budget.start()))
         : line(COPY.budgetLoading, "ctx-budget-loading", { class: "ctx-muted" }));
     }
-    const field = h("input", { type: "number", class: "ctx-field", id: id + "-budget", min: v.min_bytes, max: v.max_bytes, step: 1, value: v.bytes === null ? "" : String(v.bytes), "data-testid": "ctx-budget-input", "aria-describedby": id + "-budget-now" });
-    budgetEl.replaceChildren(h("h4", { class: "ctx-sub" }, COPY.budgetTitle), line(COPY.budgetNow(v.bytes), "ctx-budget-now", { id: id + "-budget-now" }),
-      h("dl", { class: "ctx-defaults", "aria-label": COPY.defaults, "data-testid": "ctx-defaults" }, v.defaults.flatMap(([role, n]) => [h("dt", null, ROLE_NAMES[role] || role), h("dd", null, sizeText(n))])),
-      ...(b.isAdmin ? [h("div", { class: "ctx-budget-row" }, h("label", { for: id + "-budget" }, COPY.budgetField, field),
-        btn(COPY.save, "ctx-budget-save", () => budget.save(field.value)), btn(COPY.reset, "ctx-budget-reset", () => v.bytes !== null && budget.reset(), { "aria-disabled": v.bytes === null ? "true" : null }))]
+    const lv = budget.level();
+    const field = h("input", { type: "number", class: "ctx-field", id: id + "-budget", min: lv.min, max: lv.max, step: 1, value: lv.bytes === null ? "" : String(lv.bytes), "data-testid": "ctx-budget-input", "aria-describedby": id + "-budget-now" });
+    const pick = v.levels.length < 2 ? [] : [h("label", { for: id + "-level" }, COPY.budgetFor, h("select", { id: id + "-level", class: "ctx-field", "data-testid": "ctx-budget-level",
+      onChange: (e) => { budget.setLevel(e.target.value); budgetEl.querySelector('[data-testid="ctx-budget-level"]')?.focus(); } }, v.levels.map((l) => h("option", { value: l.key, selected: l.key === lv.key }, l.label))))];
+    budgetEl.replaceChildren(h("h4", { class: "ctx-sub" }, COPY.budgetTitle), line(COPY.budgetNow(lv.bytes, lv.scope), "ctx-budget-now", { id: id + "-budget-now" }),
+      h("dl", { class: "ctx-defaults", "aria-label": COPY.defaults, "data-testid": "ctx-defaults" }, v.effective.flatMap(([role, n, src]) => [h("dt", null, ROLE_NAMES[role] || role), h("dd", null, sizeText(n) + " · " + src)])),
+      line(COPY.consumers, "ctx-budget-consumers", { class: "ctx-muted" }),
+      ...(b.isAdmin ? [h("div", { class: "ctx-budget-row" }, ...pick, h("label", { for: id + "-budget" }, COPY.budgetField, field),
+        btn(COPY.save, "ctx-budget-save", () => budget.save(field.value)), btn(COPY.reset, "ctx-budget-reset", () => lv.bytes !== null && budget.reset(), { "aria-disabled": lv.bytes === null ? "true" : null }))]
         : [line(COPY.adminOnly, "ctx-budget-admin-only", { class: "ctx-muted" })]),
       h("p", { role: "status", "data-testid": "ctx-budget-status" }, ...status),
       ...(b.error ? [h("div", { role: "alert", class: "ctx-err", "data-testid": "ctx-budget-error" }, b.error.text, ...(b.error.retry ? [" ", btn(COPY.retry, "ctx-budget-retry", () => b.error.retry())] : []))] : []));
@@ -474,4 +496,4 @@ function mountPanel(host, { target, withBudget, heading, clock = { set: (f, ms) 
 /** A repository's rules and its budget, for the Repos app. */
 export const mountRepoRules = (host, { repoId }) => mountPanel(host, { target: { repoId }, withBudget: true, heading: "h4" });
 /** One item's rules (with the repository's in force), for the Pipeline item pane. */
-export const mountItemRules = (host, { repoId, itemId }) => mountPanel(host, { target: { repoId, itemId }, withBudget: false, heading: "h3" });
+export const mountItemRules = (host, { repoId, itemId }) => mountPanel(host, { target: { repoId, itemId }, withBudget: true, heading: "h3" });
