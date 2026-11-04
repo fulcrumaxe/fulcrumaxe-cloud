@@ -21,7 +21,7 @@ function use(value: unknown): void {
 
 const OFF = { on: false, code: 'discovery_unconfigured' };
 // Test figures only. The real ones are set by hand in the environment's plan data; none lives in code.
-const block = { perRepoDailyUsd: 2, verifyPerProposalUsd: 0.5, externalVerifiesPerRepoPerDay: 10 };
+const block = { perRepoDailyUsd: 6.4, verifyPerProposalUsd: 0.5, externalVerifiesPerRepoPerDay: 10 };
 
 /** D#483 S4-b: the `discovery.*` limits, read through a reader that fails closed (missing means off, never a default). */
 describe('discovery settings', () => {
@@ -48,13 +48,13 @@ describe('discovery settings', () => {
 
   it('a partial block is refused as a whole (no figure is filled in), and so is an unknown key, a zero or negative spend, or a text figure', () => {
     for (const bad of [
-      { perRepoDailyUsd: 2, verifyPerProposalUsd: 0.5 },
+      { perRepoDailyUsd: 6.4, verifyPerProposalUsd: 0.5 },
       { ...block, extra: 1 },
       { ...block, verifyPerProposalUsd: 0 },
       { ...block, perRepoDailyUsd: -1 },
       { ...block, externalVerifiesPerRepoPerDay: -1 },
       { ...block, externalVerifiesPerRepoPerDay: 1.5 },
-      { ...block, perRepoDailyUsd: '2' },
+      { ...block, perRepoDailyUsd: '6.4' },
       { ...block, perRepoDailyUsd: null },
     ]) {
       use({ ...fixture(), discovery: bad });
