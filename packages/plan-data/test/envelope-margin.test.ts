@@ -23,7 +23,7 @@ function use(value: unknown): void {
 describe('envelope.defaultMarginPct', () => {
   it('reads the figure the data carries', () => {
     use(fixture());
-    expect(envelopeDefaultMarginPct()).toBe(20);
+    expect(envelopeDefaultMarginPct()).toBe(37);
   });
 
   it('is null (the bare estimate), not a default, when the data carries no envelope block', () => {
@@ -49,12 +49,12 @@ describe('envelope.defaultMarginPct', () => {
       use({ ...fixture(), envelope: { defaultMarginPct: ok } });
       expect(envelopeDefaultMarginPct(), String(ok)).toBe(ok);
     }
-    for (const bad of [-0.01, 500.01, '20', null, Number.POSITIVE_INFINITY]) {
+    for (const bad of [-0.01, 500.01, '37', null, Number.POSITIVE_INFINITY]) {
       use({ ...fixture(), envelope: { defaultMarginPct: bad } });
       expect(() => loadPlanData(), String(bad)).toThrow(PlanDataMissingError);
       expect(envelopeDefaultMarginPct(), String(bad)).toBeNull();
     }
-    use({ ...fixture(), envelope: { defaultMarginPct: 20, extra: 1 } });
+    use({ ...fixture(), envelope: { defaultMarginPct: 37, extra: 1 } });
     expect(() => loadPlanData()).toThrow(PlanDataMissingError);
   });
 

@@ -38,7 +38,7 @@ describe('verify_wait on the proposal detail route (D#483 S4b-12)', () => {
     process.env.FX_PLAN_DATA = JSON.stringify(discovery === null ? fixture() : { ...fixture(), discovery });
     resetPlanDataCache();
   };
-  const limitOf = (externalVerifiesPerRepoPerDay: number) => ({ perRepoDailyUsd: 2, verifyPerProposalUsd: 0.25, externalVerifiesPerRepoPerDay });
+  const limitOf = (externalVerifiesPerRepoPerDay: number) => ({ perRepoDailyUsd: 6.4, verifyPerProposalUsd: 0.65, externalVerifiesPerRepoPerDay });
 
   beforeAll(async () => {
     adminPool = createPool(process.env.API_DATABASE_URL!);
@@ -156,8 +156,8 @@ describe('verify_wait on the proposal detail route (D#483 S4b-12)', () => {
     const repo = await repoFor(who);
     const waiting = await proposalFor(who, repo);
     const inside = await proposalFor(who, repo, 'internal');
-    // 1.9 spent today plus the 0.25 the next check reserves is over the 2.0 cap; the outside-author limit (10) is far off.
-    await spentToday(who, repo, 1.9);
+    // 6.0 spent today plus the 0.65 the next check reserves is over the 6.4 cap; the outside-author limit (10) is far off.
+    await spentToday(who, repo, 6.0);
     usePlan(limitOf(10));
     expect(await waitOf(who, waiting)).toBe('daily_spend');
     // The spend cap is the repository's, so it holds an internal proposal too (which the outside limit never does).
@@ -168,7 +168,7 @@ describe('verify_wait on the proposal detail route (D#483 S4b-12)', () => {
     expect(await waitOf(who, waiting)).toBe('daily_limit');
     expect(await waitOf(who, inside)).toBe('daily_spend');
     // Raising the cap releases the hold.
-    usePlan({ ...limitOf(10), perRepoDailyUsd: 3 });
+    usePlan({ ...limitOf(10), perRepoDailyUsd: 9 });
     expect(await waitOf(who, waiting)).toBe('queued');
     expect(await waitOf(who, inside)).toBe('queued');
     // Another repository of the same account has spent nothing.
@@ -190,7 +190,7 @@ describe('verify_wait on the proposal detail route (D#483 S4b-12)', () => {
   it('plan data that is present but invalid does not fail the detail read: pending reads queued', async () => {
     const who = await seedAccountWithMember(admin, { role: 'member' });
     const id = await proposalFor(who, await repoFor(who));
-    for (const bad of ['{', '{"plans":1}', JSON.stringify({ ...fixture(), discovery: { perRepoDailyUsd: -1, verifyPerProposalUsd: 0.25, externalVerifiesPerRepoPerDay: 1 } })]) {
+    for (const bad of ['{', '{"plans":1}', JSON.stringify({ ...fixture(), discovery: { perRepoDailyUsd: -1, verifyPerProposalUsd: 0.65, externalVerifiesPerRepoPerDay: 1 } })]) {
       process.env.FX_PLAN_DATA = bad;
       resetPlanDataCache();
       expect(await waitOf(who, id), bad.slice(0, 20)).toBe('queued');

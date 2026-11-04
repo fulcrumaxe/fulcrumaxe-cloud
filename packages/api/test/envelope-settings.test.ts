@@ -405,10 +405,10 @@ describe('envelope edits, the weekly auto-start envelope and the default margin 
   describe('the default margin', () => {
     it('resolves setting, else plan data, else none, and says which', async () => {
       const t = await team();
-      usePlanData({ ...planDataFixture(), envelope: { defaultMarginPct: 20 } });
-      expect(await json<MarginBody>(await call(t.owner, 'GET', '/account/envelope-margin'))).toEqual({ margin_pct: 20, source: 'plan_data', plan_default_pct: 20, version: null, history_count: 0 });
+      usePlanData({ ...planDataFixture(), envelope: { defaultMarginPct: 37 } });
+      expect(await json<MarginBody>(await call(t.owner, 'GET', '/account/envelope-margin'))).toEqual({ margin_pct: 37, source: 'plan_data', plan_default_pct: 37, version: null, history_count: 0 });
       const put = await json<MarginBody>(await call(t.owner, 'PUT', '/account/envelope-margin', { margin_pct: 45.5 }));
-      expect(put).toEqual({ margin_pct: 45.5, source: 'setting', plan_default_pct: 20, version: 1, history_count: 1, changed: true });
+      expect(put).toEqual({ margin_pct: 45.5, source: 'setting', plan_default_pct: 37, version: 1, history_count: 1, changed: true });
       // Fail closed: with no plan data and no setting the margin is none, never a made-up default.
       usePlanData(undefined);
       const none = await team();
@@ -469,9 +469,9 @@ describe('envelope edits, the weekly auto-start envelope and the default margin 
         [proposal, t.owner.accountId, repo],
       );
       const read = async () => json<{ margin_pct: number | null; total_usd: number; prefill_usd: number }>(await call(t.owner, 'GET', `/repos/${repo}/proposals/estimate?ids=${proposal}`));
-      usePlanData({ ...planDataFixture(), envelope: { defaultMarginPct: 20 } });
+      usePlanData({ ...planDataFixture(), envelope: { defaultMarginPct: 37 } });
       const before = await read();
-      expect(before.margin_pct).toBe(20);
+      expect(before.margin_pct).toBe(37);
       await call(t.owner, 'PUT', '/account/envelope-margin', { margin_pct: 50 });
       const after = await read();
       expect(after.margin_pct).toBe(50);
