@@ -6,6 +6,7 @@ export type { RunnerDoneFacade, RunnerDoneVerdict, DoneFailureReason, BeginRunne
 export { PUBLIC_UNAVAILABLE_NOTE, mayRetryPublish, createPublishSettler, type OpenPublicResult, type PrivatePullRequest, type PlanePublish, type PlanePublishDeps, type PublishResult, type RetryFacts } from "./planePublish.js";
 // D#6 PUBLIC-MERGE PR2b: the order store's types only, never the factory that takes a pool (the composition root builds the store; apps/web reaches it as `Worker.planeMerge`).
 export type { PlaneMergeOrder, PlaneMergeState, RunnerPlaneMergeStore } from "./runnerPlaneMerge.js";
+export type { RunnerMemoryProposalsFacade } from "./runnerMemoryProposals.js";
 export type { RunnerPlanePushFacade, PlanePushGrantResult, PlanePushPairing, PlanePushPairingResult, PlanePushRecordInput, PlanePushRecordResult, PlanePushReportContextResult } from "./runnerPlanePush.js";
 export type { RunnerGitTicketFacade, GitTicketContext, GitTicketContextResult, SignGitTicketInput, SignedGitTicket } from "./runnerGitTicket.js";
 export type { RunnerLimits, RunnerLimitsSource } from "./runnerLimits.js";

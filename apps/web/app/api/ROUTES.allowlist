@@ -32,6 +32,7 @@ runner/claim/route.ts
 runner/git-ticket/route.ts
 runner/heartbeat/route.ts
 runner/hello/route.ts
+runner/memory-proposals/route.ts
 runner/plane-merge-claim/route.ts
 runner/plane-merge-report/route.ts
 runner/plane-merge-verify/route.ts

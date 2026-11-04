@@ -62,6 +62,7 @@ import { loadJobSigner } from "./jobSigner.js";
 import { loadGitTicketSigner } from "./gitTicketSigner.js";
 import { createRunnerGitTicketFacade, type RunnerGitTicketFacade } from "./runnerGitTicket.js";
 import { createRunnerPlanePushFacade, type RunnerPlanePushFacade } from "./runnerPlanePush.js";
+import { createRunnerMemoryProposalsFacade, type RunnerMemoryProposalsFacade } from "./runnerMemoryProposals.js";
 import { createRunnerPlaneMergeStore, type RunnerPlaneMergeStore } from "./runnerPlaneMerge.js";
 import { createPlanePublish, createPublishSettler, type PlanePublish, type PlanePublishDeps } from "./planePublish.js";
 import { createRunActionFacade, type RunActionFacade } from "./runActions.js";
@@ -218,7 +219,7 @@ export interface CreateWorkerOptions {
  * worker's own sweep/kick only, never directly callable from a user request.
  * H14c-3b's CARRY-28 enforces caller authorisation.
  */
-export interface Worker extends PlanePublish, RunActionFacade, RunnerLeaseFacade, RunnerClaimFacade, RunnerDoneFacade, RunnerGitTicketFacade, RunnerPlanePushFacade, RunnerQueueSweeper, RunnerLeaseSweeper, Pick<RunHandoffs, "sweepRunHandoffs" | "completeRunHandoff" | "completeHandoffOnDone">, RunnerNoticeSweeper, InvariantSweeper, Pick<StageResume, "sweepParkedStages">, Pick<GateReask, "wakeMergeGate">, PreviewFacade, RetryFacade, AdvanceFacade, ResumeFacade, ContinueFacade {
+export interface Worker extends PlanePublish, RunActionFacade, RunnerLeaseFacade, RunnerClaimFacade, RunnerDoneFacade, RunnerGitTicketFacade, RunnerPlanePushFacade, RunnerMemoryProposalsFacade, RunnerQueueSweeper, RunnerLeaseSweeper, Pick<RunHandoffs, "sweepRunHandoffs" | "completeRunHandoff" | "completeHandoffOnDone">, RunnerNoticeSweeper, InvariantSweeper, Pick<StageResume, "sweepParkedStages">, Pick<GateReask, "wakeMergeGate">, PreviewFacade, RetryFacade, AdvanceFacade, ResumeFacade, ContinueFacade {
   registry: ExecutionTargetRegistry;
   /** D#2 H14c-3-2d-2: resolves one run's card, model, limits, sandbox timeout and spend facts, or refuses with a fixed reason. Starts nothing. */
   resolveRunSeat(request: SeatRequest): Promise<SeatResult>;
@@ -542,6 +543,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       ...runnerDone,
       ...runnerGitTickets,
       ...runnerPlanePush,
+      ...createRunnerMemoryProposalsFacade(pools.runnerPool),
       ...runnerLeaseSweep,
       sweepRunHandoffs: runHandoffs.sweepRunHandoffs,
       sweepParkedStages: stageResume.sweepParkedStages,
@@ -633,6 +635,7 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
       planePushSettleGrant,
       planePushReportContext,
       planePushRecordReport,
+      memoryProposals,
       sweepRunnerLeases,
       sweepRunHandoffs,
       completeRunHandoff,
@@ -730,6 +733,7 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
         settlePairedBuild,
         openPublicPullRequest,
         planePushRecordReport,
+        memoryProposals,
         sweepRunnerLeases,
         sweepRunHandoffs,
         completeRunHandoff,

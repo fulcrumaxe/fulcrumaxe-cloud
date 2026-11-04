@@ -347,6 +347,14 @@ export interface RunnerLeaseOps {
     tokenRevoked?: boolean;
   }): Promise<{ kind: "fenced"; reason: StopReason } | { kind: "not_paired" } | { kind: "recorded"; recorded: boolean }>;
   /**
+   * D#601 MEM-6: the proposals a person said yes to at a terminal, after a run of this runner ended (packages/worker `ingestRunnerMemoryProposals`, which this package cannot import).
+   * Counts only. `run_not_yours`: no such run of this runner and account. `run_not_finished`: the run has not ended succeeded or failed. `capability_missing`: the runner's latest hello did not list `mem_proposal_v1`.
+   * Absent from an older worker: the route then answers 503 `not_configured`.
+   */
+  memoryProposals?(input: { accountId: string; runnerId: string; runId: string; proposals: ReadonlyArray<{ scope: string; kind: string; body: string }> }): Promise<
+    { kind: "run_not_yours" | "run_not_finished" | "capability_missing" } | { kind: "ingested" | "already_ingested"; stored: number; refused: number }
+  >;
+  /**
    * D#599 HO-2b: `done` from a run that has a live handoff finishes the handoff instead of judging the run: the parent ends handed off (it
    * has no result of its own) and the new run is made on the other side. `none` means no handoff was live and the ordinary `done` goes on;
    * `retry` means GitHub could not be asked and nothing was written. Absent from an older worker.

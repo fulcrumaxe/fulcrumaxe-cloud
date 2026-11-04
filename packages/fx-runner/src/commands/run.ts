@@ -41,11 +41,12 @@ import { createGitPath } from "../daemon/gitPath.js";
 import { createGitPathA } from "../daemon/gitPathA.js";
 import { createSandboxedPurge } from "../daemon/resumePurgeSandbox.js";
 import { createJobHandler } from "../daemon/jobHandler.js";
+import { createMemoryOffer, type MemoryOfferDeps } from "../memoryOffer.js";
 import { computeConflictAttestation } from "../daemon/conflictAttest.js";
 import { createPlaneBaseLedger, createPlanePushHook, type PlaneBaseLedger } from "../daemon/planePush.js";
 import { createPlanePushGithub } from "../daemon/planePushGithub.js";
 import { createPlaneMergeHandler } from "../daemon/planeMerge.js";
-import { CONFLICT_FACTS_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, type LimitedBy } from "@fulcrumaxe/runner-protocol";
+import { CONFLICT_FACTS_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy } from "@fulcrumaxe/runner-protocol";
 import { createGitTransport, createPublicHeadsReader } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
@@ -111,6 +112,8 @@ export interface RunHost {
   uid?: number | undefined;
   /** Whether standard input is a terminal. */
   interactive?: boolean | undefined;
+  /** D#601 MEM-6: one line from the terminal within `timeoutMs`, or undefined (timeout, closed input). Only a memory-proposal offer uses it; absent means those proposals are never asked about. */
+  askTimed?: ((question: string, timeoutMs: number, signal?: AbortSignal) => Promise<string | undefined>) | undefined;
   /** `XDG_RUNTIME_DIR`, looked up by name by the caller: where the user's systemd manager listens (per-job limits, D#6 C43-5). */
   xdgRuntimeDir?: string | undefined;
 }
@@ -136,6 +139,10 @@ export interface RunHooks {
   onOrderedFactsAccepted?: (accepted: boolean) => void;
   /** A test seam: told, once the hello is answered, whether a fix round that added no commit may ask to publish the branch tip. */
   onTipPublishAccepted?: (accepted: boolean) => void;
+  /** A test seam: told, once the hello is answered, whether a finished run's memory proposals may be offered to the person. */
+  onMemProposalAccepted?: (accepted: boolean) => void;
+  /** A test seam: handed the memory-offer dependencies exactly as the command built them, so a test can call the wired `enabled`. */
+  onMemoryOfferBuilt?: (deps: MemoryOfferDeps) => void;
   /** A test seam: handed the plane-push hook exactly as the command built it, so a test can drive the real construction (the `tipPublish` it was given included). */
   onPlanePushBuilt?: (planePush: { baseLedger: PlaneBaseLedger; run: ReturnType<typeof createPlanePushHook> }) => void;
 }
@@ -322,6 +329,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     let tipPublishAccepted = false;
     /** What the plane-push hook reads before it asks for the branch tip. The test seam below reads this same function, so a hook given anything else is caught. */
     const tipPublish = (): boolean => tipPublishAccepted;
+    /** D#601 MEM-6: set once the hello is answered; a finished run's memory proposals are offered at a terminal only when the cloud kept `mem_proposal_v1`. */
+    let memProposalAccepted = false;
     const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) });
     // macOS: a resumed workspace's ignored build output is purged in a child under sandbox-exec that can write below the workspace only (D#6 RESUME-CLEAN-MAC).
     const sandboxedPurge = host.platform === "darwin" && host.selfCommand !== undefined ? createSandboxedPurge({ capture: host.engine.capture, selfCommand: host.selfCommand, stateDir, isFile: host.sandbox.isFile }) : undefined;
@@ -383,7 +392,12 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       uid: host.uid,
       say: (line) => ctx.out(line),
     });
+    // D#601 MEM-6: a service has no terminal, so it never asks and never sends; a person who started `run` on a terminal is asked once per proposal, after the run ended. Ctrl-C ends an open question as no.
+    // An unattended question holds its run's handler up to the question's time limit (120 seconds) before the proposal is kept as no.
+    const memoryOfferDeps: MemoryOfferDeps = { stateDir, enabled: () => memProposalAccepted, interactive: host.interactive === true, ask: host.askTimed, signal: stopped.signal, say: (line) => ctx.out(line), send: (message) => client.memoryProposals(message) };
+    hooks.onMemoryOfferBuilt?.(memoryOfferDeps);
     const handle = createJobHandler({
+      memoryOffer: createMemoryOffer(memoryOfferDeps),
       // D#519 MQ4-e2-c1: a conflict round's attestation; the handler is handed the function and never the log it reads.
       conflictAttest: (input) => computeConflictAttestation({ ...input, scratchRoot: path.join(ctx.stateDir, "conflict-attest"), pushLog }),
       planePush,
@@ -485,6 +499,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         hooks.onOrderedFactsAccepted?.(orderedFactsAccepted);
         tipPublishAccepted = dropped !== undefined && !dropped.includes(TIP_PUBLISH_CAPABILITY);
         hooks.onTipPublishAccepted?.(tipPublish());
+        memProposalAccepted = dropped !== undefined && !dropped.includes(MEM_PROPOSAL_CAPABILITY);
+        hooks.onMemProposalAccepted?.(memProposalAccepted);
       };
       takeHello(hello);
       // A hello that was not answered (a 5xx, a network failure) is said again before a later claim, on the poll loop's own pace, until one is answered. The cloud may still list
