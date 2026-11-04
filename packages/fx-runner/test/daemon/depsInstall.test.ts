@@ -1,9 +1,9 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createDepsInstaller, pnpmArgs, type DepsOutcome } from "../../src/daemon/depsInstall.js";
+import { createDepsInstaller, LOCKFILE_OTHER_PNPM_LINE, PM_ON_FAIL_FLAG, pnpmArgs, type DepsOutcome } from "../../src/daemon/depsInstall.js";
 import type { InstallCapture } from "../../src/daemon/engineKit.js";
 import { runInstall } from "../../src/engines/claude/capture.js";
 
@@ -412,5 +412,72 @@ describe("failures never throw and never leave a process behind", () => {
     expect(await subject.run({ workspace, registryHost: HOST, storeDir: STORE })).toEqual({ kind: "failed", why: "tool_missing" });
     expect(said).toEqual(["fx-runner: dependency install did not run (deps_install_failed: pnpm not found)"]);
     expect(existsSync(path.join(workspace, "node_modules", ".fx-install"))).toBe(false);
+  });
+});
+
+/** The major of the pnpm on PATH; the switch detector below reads pnpm 11's store layout, so the real-pnpm tests run only there. */
+const PNPM_MAJOR = ((): number => {
+  try {
+    return Number(execFileSync("pnpm", ["--version"], { encoding: "utf8" }).split(".")[0]);
+  } catch {
+    return 0;
+  }
+})();
+
+describe("a repository's packageManager field does not switch pnpm", () => {
+  /** The real pnpm on this machine, started with the runner's own arguments and a scratch home, over a repo that names pnpm 10 and tries to turn the switch back on. */
+  function realInstall(repoFiles: Record<string, string>, args: string[]): { switched: boolean; out: string } {
+    const home = path.join(root, "home");
+    mkdirSync(home);
+    for (const [name, text] of Object.entries(repoFiles)) put(name, text);
+    put("pnpm-lock.yaml", "lockfileVersion: '9.0'\nimporters:\n  .: {}\n");
+    const env = { PATH: process.env.PATH ?? "", HOME: home, XDG_CACHE_HOME: path.join(home, "c"), XDG_DATA_HOME: path.join(home, "d"), XDG_STATE_HOME: path.join(home, "s"), XDG_CONFIG_HOME: path.join(home, "cfg") };
+    const out = execFileSync("pnpm", args, { cwd: workspace, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
+    // A pnpm that switched keeps the pnpm it downloaded in its store, next to the major it was fetched for.
+    return { switched: existsSync(path.join(home, "d", "pnpm", "store", "v10")), out };
+  }
+  /** Store and cache live under this test's own temp root, which `afterEach` removes. */
+  const argsFor = (): string[] => pnpmArgs({ registry: "https://registry.npmjs.org/", storeDir: path.join(root, "pm-store"), cacheDir: path.join(root, "pm-cache") });
+
+  it("the runner's arguments pin pm-on-fail=ignore", () => {
+    expect(argsFor()).toContain(PM_ON_FAIL_FLAG);
+  });
+
+  describe.skipIf(PNPM_MAJOR !== 11)("with the real pnpm 11 on PATH", () => {
+  it.each([
+    ["a field naming another pnpm", { "package.json": JSON.stringify({ name: "x", packageManager: "pnpm@10.0.0" }) }],
+    ["a field and a .npmrc that asks to download", { "package.json": JSON.stringify({ name: "x", packageManager: "pnpm@10.0.0" }), ".npmrc": "pm-on-fail=download\n" }],
+    ["a field and a workspace file that asks to download", { "package.json": JSON.stringify({ name: "x", packageManager: "pnpm@10.0.0" }), "pnpm-workspace.yaml": "pmOnFail: download\n" }],
+    ["devEngines and a pnpm key in package.json", { "package.json": JSON.stringify({ name: "x", pnpm: { pmOnFail: "download" }, devEngines: { packageManager: { name: "pnpm", version: "10.0.0", onFail: "download" } } }) }],
+  ])("%s: nothing is downloaded and the runner's pnpm installs", (_name, files) => {
+    const r = realInstall(files, argsFor());
+    expect(r.switched).toBe(false);
+    expect(r.out).toContain("using pnpm v");
+  });
+
+  it("a repository without the field, and one naming this pnpm's own version, install as before", () => {
+    const own = execFileSync("pnpm", ["--version"], { encoding: "utf8" }).trim();
+    const none = realInstall({ "package.json": JSON.stringify({ name: "x" }) }, argsFor());
+    expect(none.switched).toBe(false);
+    rmSync(path.join(root, "home"), { recursive: true, force: true });
+    const same = realInstall({ "package.json": JSON.stringify({ name: "x", packageManager: `pnpm@${own}` }) }, argsFor());
+    expect(same.switched).toBe(false);
+  });
+  });
+
+  it("the environment carries the same setting for a pnpm that reads no flag", async () => {
+    fakeManager("pnpm");
+    put("pnpm-lock.yaml", PNPM_LOCK);
+    put("package.json", JSON.stringify({ name: "x", packageManager: "pnpm@10.0.0" }));
+    expect(await installer().run()).toEqual({ kind: "installed" });
+    expect(envOfRecord().pnpm_config_pm_on_fail).toBe("ignore");
+  });
+
+  it("a lockfile from another pnpm major that cannot be read gives one fixed line, not pnpm's own text", async () => {
+    fakeManager("pnpm", `echo "[ERR_PNPM_LOCKFILE_BREAKING_CHANGE] Lockfile ${workspace}/pnpm-lock.yaml not compatible with current pnpm"; exit 1`);
+    put("pnpm-lock.yaml", PNPM_LOCK);
+    const r = installer();
+    expect(await r.run()).toEqual({ kind: "failed", why: "exit" });
+    expect(r.said).toEqual([`fx-runner: dependency install failed (deps_install_failed: exit, exit 1): ${LOCKFILE_OTHER_PNPM_LINE}`]);
   });
 });

@@ -49,6 +49,8 @@ describe("R7b: a job with allowances reaches the engine", () => {
     expect(env).toContain("BASH_MAX_TIMEOUT_MS=1500000");
     expect(env).toContain(`pnpm_config_store_dir=${path.join(rig.root, "pnpm-store", "acme__widgets")}`);
     expect(env).toContain("pnpm_config_verify_store_integrity=true");
+    expect(env).toContain("pnpm_config_pm_on_fail=ignore");
+    expect(env).toContain("npm_config_manage_package_manager_versions=false");
     expect(env).toMatch(new RegExp(`XDG_CACHE_HOME=${path.join(rig.root, "tmp").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/rn-[^/\\n]+/xdg-cache`));
     expect(settings.sandbox.network.allowedDomains).toEqual(["api.anthropic.com", "registry.npmjs.org"]);
   });
@@ -56,7 +58,7 @@ describe("R7b: a job with allowances reaches the engine", () => {
   it("a job without them starts with none of it: the same environment as before this change", async () => {
     const { out, env, settings } = await runWith(false);
     expect(out).toMatchObject({ status: "done" });
-    for (const name of ["BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS", "pnpm_config_store_dir", "XDG_CACHE_HOME", "pnpm_config_verify_store_integrity"]) expect(env, name).not.toContain(`${name}=`);
+    for (const name of ["BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS", "pnpm_config_store_dir", "XDG_CACHE_HOME", "pnpm_config_verify_store_integrity", "pnpm_config_pm_on_fail", "npm_config_manage_package_manager_versions"]) expect(env, name).not.toContain(`${name}=`);
     expect(settings.sandbox.network.allowedDomains).toEqual(["api.anthropic.com"]);
   });
 

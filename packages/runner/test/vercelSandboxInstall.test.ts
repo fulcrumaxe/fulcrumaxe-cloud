@@ -367,6 +367,8 @@ describe("the install command's environment", () => {
     expect(env.npm_config_store_dir.startsWith(`${WORKDIR}/node_modules/`)).toBe(true);
     expect(env.npm_config_cache.startsWith(`${WORKDIR}/node_modules/`)).toBe(true);
     expect(env.npm_config_manage_package_manager_versions).toBe("false");
+    // pnpm 11 dropped the setting above; this is the one that stops it fetching and running the pnpm a repo's packageManager names.
+    expect(env.pnpm_config_pm_on_fail).toBe("ignore");
   });
 });
 
@@ -490,6 +492,7 @@ describe("the fixed scripts, run for real in sh", () => {
     const pnpmCall = readFileSync(calls, "utf8").trim();
     expect(pnpmCall).toContain("pnpm install --frozen-lockfile");
     expect(pnpmCall).toContain("--config.manage-package-manager-versions=false");
+    expect(pnpmCall).toContain("--config.pm-on-fail=ignore");
     expect(pnpmCall).toContain(`--config.store-dir=${ws}/node_modules/.pnpm-store`);
     expect(pnpmCall).toContain(`--config.cache-dir=${ws}/node_modules/.pnpm-cache`);
     expect(readFileSync(path.join(ws, "node_modules/.fx-lockhash"), "utf8")).toMatch(/^pnpm:[0-9a-f]{64}$/);

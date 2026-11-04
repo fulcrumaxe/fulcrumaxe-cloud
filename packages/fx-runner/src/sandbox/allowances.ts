@@ -148,6 +148,9 @@ export function jobEnvFor(input: { tempDir: string; store?: string; commandTimeo
   return {
     XDG_CACHE_HOME: `${input.tempDir.replace(/\/+$/, "")}/xdg-cache`,
     ...(input.store === undefined ? {} : { pnpm_config_store_dir: input.store, pnpm_config_verify_store_integrity: "true" }),
+    // The agent runs `pnpm install` itself when the job allows the registry: a repo's packageManager field must not make pnpm fetch and run another pnpm (pnpm 11: pm-on-fail; pnpm 10: the older setting).
+    pnpm_config_pm_on_fail: "ignore",
+    npm_config_manage_package_manager_versions: "false",
     BASH_DEFAULT_TIMEOUT_MS: ms,
     BASH_MAX_TIMEOUT_MS: ms,
     // D#600 CX-6a: fixed constants (the longest Bash answer the model sees, the compaction point); `cleanEnv` sets them on every run.

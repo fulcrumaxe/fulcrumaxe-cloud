@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createChangedFiles } from "../../src/daemon/checkStep.js";
 import { lockfileSyncFor } from "../../src/commands/run.js";
+import { PM_ON_FAIL_FLAG } from "../../src/daemon/depsInstall.js";
 import { createLockfileSync, lockSyncArgs, type LockSyncOutcome } from "../../src/daemon/lockfileSync.js";
 import { runCapture, runInstall } from "../../src/engines/claude/capture.js";
 import { testLaunch } from "../helpers/launch.js";
@@ -405,6 +406,15 @@ describe("what the update refuses or puts back", () => {
     expect(r.said.join("\n")).not.toContain("someone");
   });
 
+  it("pnpm starts with pm-on-fail=ignore in its environment as well as on its command line", async () => {
+    put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
+    const seen: Array<Record<string, string>> = [];
+    await subject({ capture: async (_c, _a, env) => { seen.push(env); return { code: 0, timedOut: false, aborted: false, tail: "" }; } }).run();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.pnpm_config_pm_on_fail).toBe("ignore");
+    expect(seen[0]!.npm_config_manage_package_manager_versions).toBe("false");
+  });
+
   it("a run that was stopped before the update began never starts pnpm", async () => {
     put("a/package.json", pkg("@x/a", { "@x/b": "workspace:*" }));
     const calls: string[] = [];
@@ -455,7 +465,7 @@ describe("the command line", () => {
   it("is offline, lockfile-only, with no scripts and no pnpmfile, and sets registry, store and cache itself", () => {
     const args = lockSyncArgs({ registry: "https://registry.npmjs.org/", storeDir: "/s", cacheDir: "/c" });
     expect(args.slice(0, 2)).toEqual(["install", "--lockfile-only"]);
-    for (const flag of ["--offline", "--ignore-scripts", "--ignore-pnpmfile", "--registry=https://registry.npmjs.org/", "--config.store-dir=/s", "--config.cache-dir=/c"]) expect(args).toContain(flag);
+    for (const flag of ["--offline", "--ignore-scripts", "--ignore-pnpmfile", "--registry=https://registry.npmjs.org/", "--config.store-dir=/s", "--config.cache-dir=/c", PM_ON_FAIL_FLAG]) expect(args).toContain(flag);
     // Explicit, so a pnpm that defaults to frozen (CI) still rewrites the file.
     expect(args).toContain("--no-frozen-lockfile");
     expect(args).not.toContain("--frozen-lockfile");
