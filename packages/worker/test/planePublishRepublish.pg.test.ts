@@ -11,7 +11,10 @@ import { statusSentence } from "@fx/core/src/setup-requests/copy.js";
 import { listSetupRequests } from "@fx/core/src/setup-requests/store.js";
 import { checkPublicBranch } from "../src/fixRoundHeads.js";
 import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
-import { FIX_ROUND_STOP_SENTENCE, REPUBLISH_BRANCH_MOVED_SENTENCE, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE_SENTENCE, REPUBLISH_PAIRING_OFF_SENTENCE, REPUBLISH_PR_CLOSED_SENTENCE, REPUBLISH_PR_MERGED_SENTENCE, REPUBLISH_TIP_MOVED_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
+import { recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
+import { requestChanges } from "@fx/core/src/work-items/operatorMoves.js";
+import { loadPlanData } from "@fx/plan-data";
+import { FIX_ROUND_STOP_SENTENCE, REPUBLISH_BRANCH_MOVED_SENTENCE, REPUBLISH_FAILED_PRESS_SENTENCE, REPUBLISH_FAILED_ROUNDS_SENTENCE, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE_SENTENCE, REPUBLISH_PAIRING_OFF_SENTENCE, REPUBLISH_PR_CLOSED_SENTENCE, REPUBLISH_PR_MERGED_SENTENCE, REPUBLISH_TIP_MOVED_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
 import { generateKeyPairSync } from "node:crypto";
 import { createPlanePushApi, createHostedPlanePush, InstallationTokenCache } from "@fx/github";
 import { httpsRoundTrip, startStrictGithubServer, type LocalTlsServer } from "../../github/test/helpers/localTlsServer.js";
@@ -388,6 +391,37 @@ describe("a sandbox fix round updates the open public pull request [pg]", () => 
       expect(await facts()).toEqual([{ kind: "escalated", code: "republish_failed" }]);
       expect(await stageOf()).toBe("needs_human");
       expect(await noticeOf()).toEqual({ kind: "needs_human", reason: REPUBLISH_FAILED_SENTENCE });
+      expect(gh.opened).toBe(0);
+    });
+
+    it("D#6 REPUBLISH-FAILED-DEADEND: the stop names the one step that works, Request changes, in the words of what the viewer's card lists, and pressing it leads to a new republish", async () => {
+      await admin.query("UPDATE account_members SET role = 'owner' WHERE account_id = $1 AND user_id = $2", [A.accountId, A.userId]);
+      await admin.query("INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind) VALUES ($1, $2, 1, 'spec', encode(sha256(convert_to('spec', 'UTF8')), 'hex'), 'system')", [A.accountId, A.workItemId]);
+      const card = async (role: string | null) => getWorkItemActivity({ pool: adminPool, principal: { accountId: A.accountId, userId: A.userId, ...(role === null ? {} : { role }) } }, A.workItemId);
+      // The seed leaves one executor run open; here every run has ended, as it has when a person is asked.
+      await admin.query("UPDATE agent_runs SET status = 'succeeded' WHERE work_item_id = $1 AND status = 'running'", [A.workItemId]);
+      output = () => ({ exitCode: 1, stdout: "" });
+      expect((await settle(await fixRound())).publish).toMatchObject({ kind: "refused", code: "republish_failed" });
+      // The card lists Request changes; Build again's rebuild would stop at the open pull request, so the sentence must not send the person there.
+      const owner = await card("owner");
+      expect(owner.actions).toContain("request_changes");
+      expect(owner.notice).toEqual({ kind: "needs_human", reason: REPUBLISH_FAILED_PRESS_SENTENCE });
+      // A viewer who cannot press it, and a card with no role, read the sentence that is true for anyone.
+      expect((await card("member")).notice).toEqual({ kind: "needs_human", reason: REPUBLISH_FAILED_SENTENCE });
+      expect((await card(null)).notice).toEqual({ kind: "needs_human", reason: REPUBLISH_FAILED_SENTENCE });
+      for (const sentence of [REPUBLISH_FAILED_PRESS_SENTENCE, REPUBLISH_FAILED_SENTENCE, REPUBLISH_FAILED_ROUNDS_SENTENCE]) expect(sentence).not.toMatch(/Build again|null|undefined|republish_/);
+      // Every fix round used: the card no longer lists the step, and the sentence says so instead of naming it.
+      for (let i = 0; i < loadPlanData().caps.maxFixRounds; i++) await withTenant(writerPool, A.accountId, (c) => recordDriverEvent(c, A.accountId, { workItemId: A.workItemId, kind: "fix_round_started", dedupeKey: `used:${i}` }));
+      const spent = await card("owner");
+      expect(spent.actions).not.toContain("request_changes");
+      expect(spent.notice).toEqual({ kind: "needs_human", reason: REPUBLISH_FAILED_ROUNDS_SENTENCE });
+      await admin.query("DELETE FROM work_item_driver_events WHERE work_item_id = $1 AND dedupe_key LIKE 'used:%'", [A.workItemId]);
+      // The press itself: the item goes back to Changes requested, and the next fix round's republish goes through on the same pull request.
+      await requestChanges({ pool: appPool, principal: { accountId: A.accountId, userId: A.userId, role: "owner" } }, A.workItemId, "Publish this again.");
+      expect(await stageOf()).toBe("changes_requested");
+      output = () => say(updated());
+      expect((await settle(await fixRound())).publish).toMatchObject({ kind: "updated" });
+      expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: NEW_HEAD, pr_number: 9 });
       expect(gh.opened).toBe(0);
     });
 
