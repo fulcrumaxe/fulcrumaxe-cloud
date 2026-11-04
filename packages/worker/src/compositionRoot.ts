@@ -493,7 +493,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     const runnerGitTickets = createRunnerGitTicketFacade(pools.runnerPool, { signer: gitTicketSigner, audience: githubProxyForwardUrl(githubForward) });
     // D#598 P1f-2: the public-push token and report routes' database half. Needs no setting of its own.
     const publicHost = options.ports.planePublish?.hosted;
-    const runnerPlanePush = createRunnerPlanePushFacade(pools.runnerPool, publicHost?.branchHead ? { publicHead: publicHost.branchHead.bind(publicHost) } : {});
+    const runnerPlanePush = createRunnerPlanePushFacade(pools.runnerPool, { ...(publicHost?.branchHead ? { publicHead: publicHost.branchHead.bind(publicHost) } : {}), ...(publicHost?.pullRequestState ? { pullRequestState: publicHost.pullRequestState.bind(publicHost) } : {}) });
     // D#6 PUBLIC-MERGE PR2b: the merge-order store, over the same login.
     const planeMerge = createRunnerPlaneMergeStore(pools.runnerPool);
     // D#598 P1f-5b: the sandbox publish step and "Try the push again". The pool, the port and the proxy-only policy are the worker's own.

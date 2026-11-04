@@ -64,6 +64,8 @@ export interface PlanePublishDeps {
   hosted: {
     verifyPushed(input: { accountId: string; codeRepo: string; branch: string; headSha: string; tipSha: string }): Promise<boolean>;
     verifyPullRequest(input: { accountId: string; codeRepo: string; branch: string; number: number }): Promise<{ url: string } | null>;
+    /** D#6 REPUBLISH-CLOSED-PR: the public pull request's live state, read before a republish pushes. Absent, unreadable or `unknown`: the republish stops with the failed code (fail closed). A throw means GitHub could not be asked. */
+    pullRequestState?(input: { accountId: string; codeRepo: string; number: number }): Promise<"open" | "closed" | "merged" | "unknown">;
     /** D#598 P1f-5c: opens the pull request on the paired repo's already-pushed branch (base `main`), with a fresh token it revokes before it returns. No git. Throws an error with `code` `pr_failed` or `public_unavailable`. */
     openPullRequest(input: { accountId: string; codeRepo: string; branch: string; title: string; body: string }): Promise<{ number: number; url: string }>;
     /** FIXROUND-REFRESH-HEAD: the public branch's head (null: no such branch), with a fresh token revoked before it returns. Absent: a fix round of a paired item that pushed is refused. */
@@ -112,6 +114,8 @@ interface Facts {
   lastPushRuntime: RetryFacts["lastPushRuntime"];
   /** FIXROUND-REPUBLISH (R2-c2): the head the platform last left on the public branch (the stamp), the base a sandbox fix round was brought up to date with, and the update attempts this run already has. */
   stamp: string | null;
+  /** The push row's recorded pull request number (the live state is read for it). */
+  prNumber: number | null;
   /** The work item's stage now: a pull request closed or merged on GitHub leaves the push row at `pr_opened`, and it is the item that records it. */
   itemStage: string;
   fixBase: { sha: string; branch: string; conflict: boolean } | null;
@@ -157,7 +161,7 @@ async function readFacts(client: PoolClient, accountId: string, which: { runId: 
   );
   const p = pairs[0];
   const { rows: pushes } = await client.query(
-    `SELECT id, code_repo, branch, pairing_digest, state, head_sha, replace_authorized_head, managed_by_person_at IS NOT NULL AS managed FROM plane_pushes
+    `SELECT id, code_repo, branch, pairing_digest, state, head_sha, replace_authorized_head, pr_number, managed_by_person_at IS NOT NULL AS managed FROM plane_pushes
       WHERE account_id = $1 AND work_item_id = $2 AND repo_id = $3
       ORDER BY COALESCE(lower(code_repo) = lower($4::text), false) DESC, created_at DESC, id LIMIT 1`,
     [accountId, r.work_item_id, r.dispatch_repo_id, p?.code_repo ?? null],
@@ -185,7 +189,7 @@ async function readFacts(client: PoolClient, accountId: string, which: { runId: 
   );
   return {
     itemStage: r.item_stage as string,
-    stamp: typeof push.replace_authorized_head === "string" ? push.replace_authorized_head : typeof push.head_sha === "string" ? push.head_sha : null, fixBase, updateAttempts: updates[0]?.n ?? 0,
+    stamp: typeof push.replace_authorized_head === "string" ? push.replace_authorized_head : typeof push.head_sha === "string" ? push.head_sha : null, fixBase, updateAttempts: updates[0]?.n ?? 0, prNumber: typeof push.pr_number === "number" ? push.pr_number : null,
     runId: r.run_id, status: r.status, sandboxSide: r.sandbox_side === true, baseSha: buildBase, workItemId: r.work_item_id,
     repo: { id: r.dispatch_repo_id, owner: r.gh_owner, name: r.gh_name }, title: r.title,
     pushId: push.id, codeRepo: push.code_repo, branch: push.branch, stampedDigest: push.pairing_digest, state: push.state, managedByPerson: push.managed === true,
@@ -492,6 +496,17 @@ async function verifyUpdate(deps: PlanePublishDeps, accountId: string, facts: Fa
   }
 }
 
+/** The live state of the recorded public pull request; `unknown` for a missing port or number, a 404, or a read that could not be made (a rate limit or 5xx is never "closed"). */
+async function livePullRequestState(deps: PlanePublishDeps, accountId: string, facts: Facts): Promise<"open" | "closed" | "merged" | "unknown"> {
+  if (!deps.hosted.pullRequestState || facts.prNumber === null) return "unknown";
+  try {
+    return await deps.hosted.pullRequestState({ accountId, codeRepo: facts.codeRepo, number: facts.prNumber });
+  } catch {
+    // fx-swallow-ok: GitHub could not be asked; the republish stops with the failed sentence and pushes nothing
+    return "unknown";
+  }
+}
+
 /**
  * FIXROUND-REPUBLISH (R2-c2): after a SANDBOX fix round whose item has an open public pull request, replaces the head of the platform's public branch with ONE new commit on the current public main, in a
  * publish sandbox like a first push. The checks that need no sandbox come first and spend nothing: the record must still be an open, platform-owned pull request, the pairing must still name its
@@ -542,6 +557,13 @@ async function republish(deps: PlanePublishDeps, accountId: string, facts: Facts
     return stopWith(REPUBLISH_FAILED);
   }
   if (head === null || defaultTip === null || !/^[0-9a-f]{40}$/.test(defaultTip) || (fixBase.conflict && roundTip === null)) return stopWith(REPUBLISH_FAILED);
+
+  // D#6 REPUBLISH-CLOSED-PR: our record can say "open" while GitHub already shows the pull request closed or merged (the webhook has not landed). The live state is read for every attempt, before
+  // the sandbox exists, and stamped nowhere: a pull request reopened on GitHub republishes on the next try. Only an open pull request goes on; anything unreadable stops with the failed code.
+  const live = await livePullRequestState(deps, accountId, facts);
+  if (live === "closed") return stopWith(REPUBLISH_PR_CLOSED);
+  if (live === "merged") return stopWith(REPUBLISH_PR_MERGED);
+  if (live !== "open") return stopWith(REPUBLISH_FAILED);
 
   const attemptId = randomUUID();
   const name = sandboxNameFor({ role: PLANE_PUBLISH_ROLE, runId: attemptId, attemptId });

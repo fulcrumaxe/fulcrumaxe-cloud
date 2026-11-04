@@ -67,6 +67,7 @@ describe("a sandbox fix round updates the open public pull request [pg]", () => 
       hosted: {
         verifyPushed: async (i) => (gh.verified.push({ headSha: i.headSha, tipSha: i.tipSha, branch: i.branch }), gh.pushed),
         verifyPullRequest: async () => ({ url: "https://github.com/acme/widgets-public/pull/9" }),
+        pullRequestState: async () => "open",
         openPullRequest: async () => (gh.opened++, { number: 10, url: "https://github.com/acme/widgets-public/pull/10" }),
       },
       now: () => 1_000_000,
@@ -469,6 +470,7 @@ describe("a sandbox fix round updates the open public pull request [pg]", () => 
       server = await startStrictGithubServer((req): GhReply => {
         if (req.method === "DELETE" && req.path === "/installation/token") return { status: 204, headers: {}, body: "" };
         if (req.path === `${root}/installation`) return json(200, { id: 42, app_slug: "fulcrumaxe" });
+        if (req.path === `${root}/pulls/9`) return json(200, { state: "open", merged: false, html_url: "https://github.com/acme/widgets-public/pull/9", head: { ref: "x", repo: { full_name: "acme/widgets-public" } }, base: { ref: "main" } });
         const ref = req.path.startsWith(`${root}/git/ref/heads/`) ? decodeURIComponent(req.path.slice(`${root}/git/ref/heads/`.length)) : null;
         if (ref === "main" && graph.mainReads.length > 0) return json(200, { object: { sha: graph.mainReads.length > 1 ? graph.mainReads.shift()! : graph.mainReads[0]! } });
         if (ref !== null) return graph.refs.has(ref) ? json(200, { object: { sha: graph.refs.get(ref) } }) : ghError(404, "Not Found");
@@ -495,7 +497,7 @@ describe("a sandbox fix round updates the open public pull request [pg]", () => 
       const requester = async (p: { permissions?: Record<string, string>; repositories?: string[] }) => ({ token: "ghs_planepush1", expiresAt: new Date(Date.now() + 3_600_000).toISOString(), permissions: { metadata: "read", ...p.permissions }, repositories: p.repositories ?? [] });
       const api = createPlanePushApi({ appCredentials: () => ({ appId: "12345", privateKeyPem: key, webhookSecret: "unused" }), requester: requester as never, cache: new InstallationTokenCache(), fetchImpl });
       const real = createHostedPlanePush(api, { ownsInstallation: async (_a, id) => id === 42 });
-      return { verifyPushed: real.verifyPushed, verifyPullRequest: real.verifyPullRequest, openPullRequest: real.openPullRequest, branchHead: real.branchHead };
+      return { verifyPushed: real.verifyPushed, verifyPullRequest: real.verifyPullRequest, pullRequestState: real.pullRequestState, openPullRequest: real.openPullRequest, branchHead: real.branchHead };
     }
     /** The graph after the hook pushed: main is `tip`; the platform's branch holds `head`, whose parents are `parents`. */
     async function pushed(head: string, parents: string[], mainReads: string[] = [NEW_TIP]) {
@@ -639,6 +641,107 @@ describe("a sandbox fix round updates the open public pull request [pg]", () => 
       const run = await fixRound({ conflict: true });
       expect(await outcome(run)).toBe("pending");
       expect(await outcome(await fixRound())).toBe("none");
+    });
+  });
+
+  // D#6 REPUBLISH-CLOSED-PR: the record says open, GitHub may already say otherwise. The platform's real `pullRequestState` runs over the real API client and Node's TLS path, against a strict GitHub (User-Agent,
+  // bearer token, `state` and `merged` fields as GitHub names them). What it cannot fake: GitHub's real rate-limit headers and the lag between a close and the webhook.
+  describe("D#6 REPUBLISH-CLOSED-PR: the live state of the public pull request is read before anything is pushed", () => {
+    let server: LocalTlsServer;
+    let pull: GhReply;
+    let key: string;
+    beforeAll(() => {
+      key = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey as unknown as string;
+    });
+    afterEach(async () => {
+      await server?.close();
+    });
+    const json = (status: number, body: unknown): GhReply => ({ status, headers: { "content-type": "application/json; charset=utf-8" }, body: JSON.stringify(body) });
+    const prBody = (state: string, merged: boolean) => json(200, { number: 9, state, merged, html_url: "https://github.com/acme/widgets-public/pull/9", head: { ref: "fx/p-x", repo: { full_name: "acme/widgets-public" } }, base: { ref: "main" } });
+    async function live(): Promise<PlanePublishDeps["hosted"]> {
+      server = await startStrictGithubServer((req): GhReply => {
+        if (req.method === "DELETE" && req.path === "/installation/token") return { status: 204, headers: {}, body: "" };
+        if (req.path === "/repos/acme/widgets-public/installation") return json(200, { id: 42, app_slug: "fulcrumaxe" });
+        return req.path === "/repos/acme/widgets-public/pulls/9" ? pull : ghError(404, "Not Found");
+      });
+      const s = server;
+      const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input));
+        const r = await httpsRoundTrip(
+          { host: "api.github.com", port: s.port, path: url.pathname + url.search, method: init?.method ?? "GET", headers: init?.headers as Record<string, string>, ca: s.ca, servername: "api.github.com",
+            lookup: ((_h: string, o: { all?: boolean }, cb: (...a: unknown[]) => void) => (o?.all ? cb(null, [{ address: "127.0.0.1", family: 4 }]) : cb(null, "127.0.0.1", 4))) as never },
+          init?.body as string | undefined,
+        );
+        return new Response(r.status === 204 ? null : r.body, { status: r.status, headers: r.headers });
+      }) as typeof fetch;
+      const requester = async (p: { permissions?: Record<string, string>; repositories?: string[] }) => ({ token: "ghs_planepush1", expiresAt: new Date(Date.now() + 3_600_000).toISOString(), permissions: { metadata: "read", ...p.permissions }, repositories: p.repositories ?? [] });
+      const api = createPlanePushApi({ appCredentials: () => ({ appId: "12345", privateKeyPem: key, webhookSecret: "unused" }), requester: requester as never, cache: new InstallationTokenCache(), fetchImpl });
+      const real = createHostedPlanePush(api, { ownsInstallation: async (_a, id) => id === 42 });
+      return { verifyPushed: async () => true, verifyPullRequest: real.verifyPullRequest, pullRequestState: real.pullRequestState, openPullRequest: real.openPullRequest, branchHead: real.branchHead };
+    }
+    const nothingPushed = async () => {
+      expect(fake.state.created).toEqual([]);
+      expect(await attempts()).toEqual([]);
+      expect(await publishRuns()).toEqual([]);
+    };
+
+    it.each([
+      ["closed on GitHub", prBody("closed", false), "republish_pr_closed"],
+      ["merged on GitHub (state closed, merged true)", prBody("closed", true), "republish_pr_merged"],
+    ])("a record that says open while the pull request is %s stops with its own code: no sandbox, no attempt, nothing stamped from the read", async (_n, reply, code) => {
+      pull = reply;
+      const before = await planeRow();
+      expect((await settle(await fixRound(), { hosted: await live() })).publish).toEqual({ kind: "refused", code, attemptNo: null });
+      await nothingPushed();
+      const after = await planeRow();
+      expect({ state: after.state, head_sha: after.head_sha, pr_number: after.pr_number }).toEqual({ state: before.state, head_sha: before.head_sha, pr_number: before.pr_number });
+      expect(await facts()).toEqual([{ kind: "escalated", code }]);
+      expect(server.seen.map((r) => `${r.method} ${r.path}`).filter((l) => l.includes("/pulls/"))).toEqual(["GET /repos/acme/widgets-public/pulls/9"]);
+      expect(server.seen.every((r) => r.headers["user-agent"] === "fulcrumaxe-cloud")).toBe(true);
+      expect(server.seen.find((r) => r.path.endsWith("/pulls/9"))?.headers["authorization"]).toMatch(/^Bearer ghs_/);
+    });
+
+    it.each([
+      ["a 404", json(404, { message: "Not Found" })],
+      ["a 200 that is not an object", json(200, [])],
+      ["a state GitHub does not name", json(200, { state: "draft", merged: false })],
+      ["a 500", json(500, { message: "Server Error" })],
+      ["a 502", json(502, { message: "Bad Gateway" })],
+      ["a rate limit (429)", { status: 429, headers: { "content-type": "application/json", "retry-after": "60" }, body: JSON.stringify({ message: "rate limited" }) }],
+      ["a secondary rate limit (403)", json(403, { message: "You have exceeded a secondary rate limit" })],
+    ] as Array<[string, GhReply]>)("%s fails closed with the failed code and is never reported as closed: nothing is pushed", async (_n, reply) => {
+      pull = reply;
+      expect((await settle(await fixRound(), { hosted: await live() })).publish).toEqual({ kind: "refused", code: "republish_failed", attemptNo: null });
+      await nothingPushed();
+      expect(await facts()).toEqual([{ kind: "escalated", code: "republish_failed" }]);
+    });
+
+    it("an open pull request republishes exactly as before, the read comes before any sandbox, and a hosted port without the read fails closed", async () => {
+      pull = prBody("open", false);
+      const hosted = await live();
+      const order: string[] = [];
+      const base = fake.port;
+      const port = { ...base, createSandbox: async (o: Parameters<typeof base.createSandbox>[0]) => (order.push(`sandbox after ${server.seen.filter((x) => x.path.endsWith("/pulls/9")).length} read`), fake.scriptCommand(o.sandboxName, output()), base.createSandbox(o)) } as PlanePublishDeps["port"];
+      expect((await settle(await fixRound(), { hosted, port })).publish).toEqual({ kind: "updated", attemptNo: 1 });
+      expect(order).toEqual(["sandbox after 1 read"]);
+      expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: NEW_HEAD, pr_number: 9 });
+      // A port that cannot read the state is the same as no answer.
+      const bare = { ...hosted };
+      delete bare.pullRequestState;
+      await admin.query("DELETE FROM work_item_driver_events WHERE work_item_id = $1", [A.workItemId]);
+      await admin.query("UPDATE plane_pushes SET head_sha = $2 WHERE work_item_id = $1", [A.workItemId, STAMP]);
+      expect((await settle(await fixRound(), { hosted: bare })).publish).toEqual({ kind: "refused", code: "republish_failed", attemptNo: null });
+    });
+
+    it("a pull request closed and then reopened on GitHub republishes on the next try: the state is derived per attempt, never stamped", async () => {
+      pull = prBody("closed", false);
+      const hosted = await live();
+      expect((await settle(await fixRound(), { hosted })).publish).toMatchObject({ kind: "refused", code: "republish_pr_closed" });
+      await nothingPushed();
+      expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: STAMP });
+      pull = prBody("open", false);
+      await admin.query("UPDATE work_items SET stage = 'changes_requested' WHERE id = $1", [A.workItemId]);
+      expect((await settle(await fixRound(), { hosted })).publish).toEqual({ kind: "updated", attemptNo: 1 });
     });
   });
 });

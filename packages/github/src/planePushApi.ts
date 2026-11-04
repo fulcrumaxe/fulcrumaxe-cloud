@@ -211,6 +211,18 @@ export function createPlanePushApi(deps: PlanePushApiDeps) {
       return { headRef: b.head.ref, headRepo: typeof b.head.repo?.full_name === "string" ? b.head.repo.full_name : "", baseRef: b.base.ref, url: b.html_url, state: b.state === "open" && b.merged !== true ? "open" : "closed" };
     },
 
+    /** D#6 REPUBLISH-CLOSED-PR: the live state of a pull request (`GET /pulls/<n>`): `open`, `closed` (unmerged), `merged`, or `unknown` (no such pull request, or a state GitHub did not name). A rate limit or 5xx throws, never reads as closed. */
+    async pullRequestState(input: { codeRepo: string; number: number; token: string }): Promise<"open" | "closed" | "merged" | "unknown"> {
+      const { owner, name } = split(input.codeRepo);
+      if (!Number.isSafeInteger(input.number) || input.number <= 0) throw new PlanePushApiError("public_unavailable");
+      const res = await call("GET", `/repos/${owner}/${name}/pulls/${input.number}`, input.token);
+      if (res.status === 404) return "unknown";
+      const b = res.status === 200 && res.body !== null && typeof res.body === "object" ? (res.body as { state?: unknown; merged?: unknown }) : undefined;
+      if (!b) throw new PlanePushApiError("public_unavailable");
+      if (b.state === "open" && b.merged !== true) return "open";
+      return b.state === "closed" ? (b.merged === true ? "merged" : "closed") : "unknown";
+    },
+
     async branchExists(input: { codeRepo: string; branch: string; token: string }): Promise<boolean> {
       const { owner, name } = split(input.codeRepo);
       if (!BRANCH.test(input.branch) || input.branch.includes("..")) throw new PlanePushApiError("public_unavailable");

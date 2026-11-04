@@ -193,6 +193,46 @@ describe("verifyPullRequest", () => {
   });
 });
 
+describe("pullRequestState (D#6 REPUBLISH-CLOSED-PR)", () => {
+  const ask = (t: Awaited<ReturnType<typeof setup>>) => t.hosted.pullRequestState({ accountId: ACCOUNT, codeRepo: "acme/widgets", number: 9 });
+
+  it.each([
+    ["open", pr(), "open"],
+    ["closed without merging", pr({ state: "closed", merged: false }), "closed"],
+    ["closed by a merge (GitHub says state closed, merged true)", pr({ state: "closed", merged: true }), "merged"],
+    ["a state GitHub does not say", pr({ state: undefined }), "unknown"],
+    ["no such pull request (404)", undefined, "unknown"],
+  ])("says %s", async (_l, body, want) => {
+    const t = await setup({ pr: body });
+    await expect(ask(t)).resolves.toBe(want);
+    expect(t.trail().at(-1)).toBe("DELETE /installation/token ghs_hosted1");
+    expect(t.server.seen.every((r) => r.headers["user-agent"] === "fulcrumaxe-cloud")).toBe(true);
+  });
+
+  it("does not ask the head, the base or the address: a pull request of another branch still answers its own state", async () => {
+    await expect(ask(await setup({ pr: pr({ state: "closed", head: { ref: "fx/other", repo: { full_name: "evil/widgets" } }, base: { ref: "develop" } }) }))).resolves.toBe("closed");
+  });
+
+  it("a 500 and a 200 that is not a pull request throw (never closed), and the token is still revoked", async () => {
+    const t = await setup({ pr: pr(), fail: "pulls" });
+    await expect(ask(t)).rejects.toMatchObject({ code: "public_unavailable" });
+    expect(t.trail().at(-1)).toBe("DELETE /installation/token ghs_hosted1");
+    await expect(ask(await setup({ pr: "not an object" }))).rejects.toMatchObject({ code: "public_unavailable" });
+  });
+
+  it("the existing verifyPullRequest still answers null for a closed or merged pull request", async () => {
+    for (const body of [pr({ state: "closed" }), pr({ state: "closed", merged: true })]) {
+      await expect((await setup({ pr: body })).hosted.verifyPullRequest({ accountId: ACCOUNT, codeRepo: "acme/widgets", branch: BRANCH, number: 9 })).resolves.toBeNull();
+    }
+  });
+
+  it("another account's installation is refused before any read", async () => {
+    const t = await setup({ pr: pr() });
+    await expect(t.hosted.pullRequestState({ accountId: "22222222-2222-4222-8222-222222222222", codeRepo: "acme/widgets", number: 9 })).rejects.toMatchObject({ code: "code_repo_installation_not_owned" });
+    expect(t.server.seen.every((r) => r.path === "/repos/acme/widgets/installation")).toBe(true);
+  });
+});
+
 describe("branchHead (the record module's port)", () => {
   it("reads through a fresh token that is revoked after, and answers null for no branch", async () => {
     const t = await setup({ branchHead: HEAD });

@@ -125,7 +125,7 @@ describe("a planned PR child's paired publish [pg]", { timeout: 90_000 }, () => 
       identity: () => ({ name: "Fulcrumaxe Bot", email: "bot@example.com" }),
       privateHead: ({ repo, branch }) => readRef(repo, branch),
       privateDefaultHead: ({ repo }) => readRef(repo, "main"),
-      hosted: { verifyPushed: hosted.verifyPushed, verifyPullRequest: hosted.verifyPullRequest, openPullRequest: hosted.openPullRequest, branchHead: hosted.branchHead },
+      hosted: { verifyPushed: hosted.verifyPushed, verifyPullRequest: hosted.verifyPullRequest, pullRequestState: hosted.pullRequestState, openPullRequest: hosted.openPullRequest, branchHead: hosted.branchHead },
       pullRequests: draftPort,
       now: () => 1_000_000,
     };
