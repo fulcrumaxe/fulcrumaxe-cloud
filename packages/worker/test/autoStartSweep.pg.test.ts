@@ -8,6 +8,9 @@ import { autostartRoom, envelopeLockKey } from "@fx/spend";
 import { readProposal } from "@fx/core/src/plan/proposals.js";
 import { readStartDecision } from "@fx/core/src/work-items/startDecision.js";
 import { recordStartReceipt } from "@fx/core/src/decisions/startGate.js";
+import { SESSION_COOKIE_NAME, signSession } from "@fx/core/src/auth/session.js";
+import { handleApiRequest } from "@fx/api/src/handler.js";
+import { ROUTES } from "@fx/api/src/routes/index.js";
 import { createAutoStartSweep } from "../src/autoStartSweep.js";
 
 /**
@@ -512,6 +515,81 @@ describe("the auto-start sweep [pg]", { timeout: 90_000 }, () => {
       const b = await fixture({ hint: null, verified: false });
       await expect(verify(b.t, a.proposal, { category: "small" })).rejects.toMatchObject({ code: "P0002" });
       expect((await stored(a.proposal)).verifier_category).toBe("feature");
+    });
+  });
+
+  describe("DW-PRESET-ONBOARD: no row reads Balanced in the settings but starts nothing unattended until a person chooses", () => {
+    let apiPool: Pool;
+    let opsPool: Pool;
+    beforeAll(async () => {
+      apiPool = createPool(process.env.WORKER_DATABASE_URL_APP_USER!);
+      opsPool = createPool(process.env.WORKER_DATABASE_URL_PLATFORM_OPS!);
+      process.env.FX_SESSION_SECRET = "s".repeat(32);
+    });
+    afterAll(async () => {
+      delete process.env.FX_SESSION_SECRET;
+      await Promise.all([apiPool.end(), opsPool.end()]);
+    });
+    async function settings(t: SeedRefs, method: "GET" | "POST", path: string, body?: unknown): Promise<{ active_preset: string | null; dials: { decision_type: string; source: string; disposition: string }[] }> {
+      const headers = new Headers({ cookie: `${SESSION_COOKIE_NAME}=${await signSession({ accountId: t.accountId, userId: t.userId })}` });
+      if (body !== undefined) headers.set("content-type", "application/json");
+      const res = await handleApiRequest(new Request(`http://localhost/api/v1/repos/${t.repoId}/decision-settings${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }), apiPool, opsPool, ROUTES);
+      expect(res.status).toBe(200);
+      return (await res.json()) as never;
+    }
+
+    it("no row: the page reads Balanced and the sweep starts nothing; choosing Balanced writes the start rows and the proposal starts", async () => {
+      const f = await fixture({ disposition: null });
+      const before = await settings(f.t, "GET", "");
+      expect(before.active_preset).toBe("balanced");
+      expect(before.dials.find((d) => d.decision_type === "start_work_small")).toMatchObject({ disposition: "announce", source: "default" });
+      expect(await gate.gateProposal(f.t.accountId, f.proposal)).toBe("not_ready");
+      expect(await written(f.t)).toEqual(NOTHING);
+
+      const after = await settings(f.t, "POST", "/preset", { preset: "balanced" });
+      expect(after.active_preset).toBe("balanced");
+      expect(after.dials.find((d) => d.decision_type === "start_work_small")).toMatchObject({ disposition: "announce", source: "preset" });
+      expect((await admin.query("SELECT decision_type FROM decision_settings WHERE repo_id = $1 ORDER BY decision_type", [f.t.repoId])).rows.map((r) => r.decision_type)).toEqual(["start_work_bug", "start_work_doc", "start_work_small"]);
+      expect(await gate.gateProposal(f.t.accountId, f.proposal)).toBe("started");
+    });
+
+    it("the preview says what is written, and a second Balanced writes nothing more", async () => {
+      const f = await fixture({ disposition: null });
+      const preview = await settings(f.t, "POST", "/preset/preview", { preset: "balanced" });
+      expect(preview).toMatchObject({ moves: [{ from: "announce", to: "announce" }, { from: "announce", to: "announce" }, { from: "announce", to: "announce" }] });
+      expect((await admin.query("SELECT 1 FROM decision_settings WHERE repo_id = $1", [f.t.repoId])).rowCount).toBe(0);
+      await settings(f.t, "POST", "/preset", { preset: "balanced" });
+      const again = (await settings(f.t, "POST", "/preset/preview", { preset: "balanced" })) as unknown as { moves: unknown[] };
+      expect(again.moves).toEqual([]);
+    });
+
+    it("naming announce on a start dial with no row writes it, and the proposal starts", async () => {
+      const f = await fixture({ disposition: null });
+      await settings(f.t, "POST", "/dial", { decision_type: "start_work_small", disposition: "announce" });
+      expect((await admin.query("SELECT disposition, preset FROM decision_settings WHERE repo_id = $1", [f.t.repoId])).rows).toEqual([{ disposition: "announce", preset: null }]);
+      expect(await gate.gateProposal(f.t.accountId, f.proposal)).toBe("started");
+    });
+
+    it("Reset never turns unattended starts on: after Cautious and Reset the marker row reads Balanced and the sweep starts nothing", async () => {
+      const f = await fixture({ disposition: null });
+      await settings(f.t, "POST", "/preset", { preset: "cautious" });
+      const reset = await settings(f.t, "POST", "/reset", {});
+      expect(reset.active_preset).toBe("balanced");
+      expect((await admin.query("SELECT disposition, preset FROM decision_settings WHERE repo_id = $1 AND decision_type = 'start_work_small' ORDER BY version DESC LIMIT 1", [f.t.repoId])).rows).toEqual([{ disposition: "announce", preset: "default" }]);
+      expect(await gate.gateProposal(f.t.accountId, f.proposal)).toBe("not_ready");
+      expect(await written(f.t)).toEqual(NOTHING);
+      // A person chooses Balanced again over the marker row: now it is written and starts.
+      await settings(f.t, "POST", "/preset", { preset: "balanced" });
+      expect(await gate.gateProposal(f.t.accountId, f.proposal)).toBe("started");
+    });
+
+    it("a repo that never chose and never reset is unchanged: a written Balanced row still starts, and a marker with the old catalogue ask starts nothing", async () => {
+      const written1 = await fixture({ disposition: "announce" });
+      expect(await gate.gateProposal(written1.t.accountId, written1.proposal)).toBe("started");
+      const legacy = await fixture({ disposition: null });
+      await admin.query(`INSERT INTO decision_settings (account_id, repo_id, decision_type, disposition, preset, version, changed_by) VALUES ($1, $2, 'start_work_small', 'ask', 'default', 1, $3)`, [legacy.t.accountId, legacy.t.repoId, legacy.t.userId]);
+      expect(await gate.gateProposal(legacy.t.accountId, legacy.proposal)).toBe("not_ready");
+      expect(await written(legacy.t)).toEqual(NOTHING);
     });
   });
 });

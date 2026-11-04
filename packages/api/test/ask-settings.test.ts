@@ -188,11 +188,11 @@ describe('D#7 DP10b: ask settings routes', () => {
     expect(formatWindow(20160)).toBe('14 days');
   });
 
-  it('GET with nothing stored: the * row plus every asked type, in effect = the R2 and R3 defaults under Cautious, named for a person', async () => {
+  it('GET with nothing stored: the * row plus every asked type, in effect = the R2 and R3 defaults under Balanced, which a repo with no dial row runs as, named for a person', async () => {
     const f = await fixture();
     const s = await get(f.owner, f.repoId);
     expect(s.can_change).toBe(true);
-    expect(s.preset_basis).toBe('cautious');
+    expect(s.preset_basis).toBe('balanced');
     expect(s.bounds).toEqual({ min_minutes: 15, max_minutes: 20160, default_minutes: 1440 });
     expect(s.notify_values).toEqual(['email', 'none']);
     expect(s.notify_default).toBe('email');
@@ -200,7 +200,7 @@ describe('D#7 DP10b: ask settings routes', () => {
     const rows = byType(s);
     expect(rows['*']).toMatchObject({ class: null, effective: null, allowed_outcomes: ['stop_and_flag', 'proceed_recommended'], account: null, repo: null });
     for (const type of ASKED) {
-      expect(rows[type]!.effective, type).toEqual({ answer_window_minutes: 1440, answer_window_text: '1 day', timeout_outcome: 'stop_and_flag', notify: 'email' });
+      expect(rows[type]!.effective, type).toEqual({ answer_window_minutes: 1440, answer_window_text: '1 day', timeout_outcome: rows[type]!.allowed_outcomes.includes('proceed_recommended') ? 'proceed_recommended' : 'stop_and_flag', notify: 'email' });
       expect(rows[type]!.label, type).not.toBe(type);
       expect(rows[type]!.account).toBeNull();
     }
@@ -218,11 +218,11 @@ describe('D#7 DP10b: ask settings routes', () => {
     expect(res.status).toBe(200);
     const s = (await res.json()) as AskSettings;
     expect(byType(s)['*']!.account).toMatchObject({ answer_window_minutes: 90, timeout_outcome: null, notify: 'none', version: 1 });
-    expect(byType(s).test_strategy_choice!.effective).toEqual({ answer_window_minutes: 90, answer_window_text: '1 hour 30 minutes', timeout_outcome: 'stop_and_flag', notify: 'none' });
+    expect(byType(s).test_strategy_choice!.effective).toEqual({ answer_window_minutes: 90, answer_window_text: '1 hour 30 minutes', timeout_outcome: 'proceed_recommended', notify: 'none' });
     // A repo override beats the account value on that repo only.
     const repo = (await (await write(f.admin, f.repoId, { scope: 'repo', decision_type: 'test_strategy_choice', answer_window_minutes: 30, timeout_outcome: 'proceed_recommended', notify: null })).json()) as AskSettings;
     expect(byType(repo).test_strategy_choice).toMatchObject({ repo: { answer_window_minutes: 30, timeout_outcome: 'proceed_recommended', version: 1 }, effective: { answer_window_minutes: 30, timeout_outcome: 'proceed_recommended', notify: 'none' } });
-    expect(byType(await get(f.owner, f.otherRepoId)).test_strategy_choice!.effective).toMatchObject({ answer_window_minutes: 90, timeout_outcome: 'stop_and_flag' });
+    expect(byType(await get(f.owner, f.otherRepoId)).test_strategy_choice!.effective).toMatchObject({ answer_window_minutes: 90, timeout_outcome: 'proceed_recommended' });
     const rows = await versions(f.owner.accountId);
     expect(rows).toHaveLength(2);
     expect(rows.find((r) => r.decision_type === '*')).toMatchObject({ repo_id: null, changed_by: f.owner.userId });
@@ -274,7 +274,7 @@ describe('D#7 DP10b: ask settings routes', () => {
     const cleared = (await (await write(f.owner, f.repoId, { ...body, answer_window_minutes: null, timeout_outcome: null, notify: null })).json()) as AskSettings;
     expect(byType(cleared).nonbreaking_refactor_approach).toMatchObject({
       repo: null,
-      effective: { answer_window_minutes: 1440, timeout_outcome: 'stop_and_flag' },
+      effective: { answer_window_minutes: 1440, timeout_outcome: 'proceed_recommended' },
     });
     // A fresh read agrees (derived on every read), and the next write still takes the next version, so the conflict check is unchanged.
     expect(byType(await get(f.owner, f.repoId)).nonbreaking_refactor_approach!.repo).toBeNull();

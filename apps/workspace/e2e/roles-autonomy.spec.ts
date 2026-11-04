@@ -124,10 +124,10 @@ test.describe("D#7 DP10b: Roles, Autonomy", () => {
     await expect(tid(page, "au-levels")).toContainText("the team acts and you monitor it");
     await expect(tid(page, "au-levels")).toContainText("the team never goes ahead without your approval");
     await expect(tid(page, "au-roles-pointer")).toHaveText("To set the mode for each role, use the Roles tab.");
-    await expect(tid(page, "au-active")).toHaveText("Right now: the default settings.");
+    await expect(tid(page, "au-active")).toHaveText("Right now: Balanced (default)");
     await expect(tid(page, "au-preset-cautious").locator(".au-preset-role")).toHaveText("you approve");
     await expect(dialRow(page, "test_strategy_choice")).toContainText("How to test a change");
-    await expect(dialRow(page, "test_strategy_choice").getByTestId("au-dial-select")).toHaveValue("ask");
+    await expect(dialRow(page, "test_strategy_choice").getByTestId("au-dial-select")).toHaveValue("announce");
     await expect(dialRow(page, "test_strategy_choice")).toContainText("Default");
     await expect(askRow(page, "test_strategy_choice")).toContainText("In effect: 1 day, then keep waiting and flag it as overdue");
     await expect(askRow(page, "*")).toContainText("Every decision type");
@@ -159,12 +159,9 @@ test.describe("D#7 DP10b: Roles, Autonomy", () => {
     await tid(page, "au-preset-balanced").click();
     await expect(tid(page, "au-preview")).toBeVisible();
     await expect(tid(page, "au-move")).toHaveText([
-      "How to restructure code without changing what it does: Ask me first to Go ahead and tell me",
-      "How to test a change: Ask me first to Go ahead and tell me",
-      "Starting a small piece of work: Ask me first to Go ahead and tell me",
-      "Starting a bug fix: Ask me first to Go ahead and tell me",
-      "Starting a documentation change: Ask me first to Go ahead and tell me",
-      "Starting one part of a larger piece of work: Ask me first to Go ahead and tell me",
+      "Starting a small piece of work: Go ahead and tell me, saved as your choice",
+      "Starting a bug fix: Go ahead and tell me, saved as your choice",
+      "Starting a documentation change: Go ahead and tell me, saved as your choice",
     ]);
     await expect(page.locator(`${WIN} #au-preview-h`)).toBeFocused();
     expect(seen.posts.map((p) => p.tail)).toEqual(["decision-settings/preset/preview"]);
@@ -183,13 +180,13 @@ test.describe("D#7 DP10b: Roles, Autonomy", () => {
     await openAutonomy(page);
     await tid(page, "au-preset-balanced").click();
     await tid(page, "au-preview-apply").click();
-    await expect(tid(page, "au-status")).toHaveText("Balanced applied. 6 decisions changed.");
+    await expect(tid(page, "au-status")).toHaveText("Balanced applied. 3 decisions saved as your choice.");
     expect(seen.posts.map((p) => p.tail)).toEqual(["decision-settings/preset/preview", "decision-settings/preset"]);
     expect(seen.posts[1].body).toEqual({ preset: "balanced" });
     await expect(tid(page, "au-active")).toHaveText("Right now: Balanced");
     await expect(tid(page, "au-preset-balanced")).toHaveAttribute("aria-pressed", "true");
-    await expect(dialRow(page, "test_strategy_choice").getByTestId("au-dial-select")).toHaveValue("announce");
-    await expect(dialRow(page, "test_strategy_choice")).toContainText("From the Balanced preset");
+    await expect(dialRow(page, "start_work_small").getByTestId("au-dial-select")).toHaveValue("announce");
+    await expect(dialRow(page, "start_work_small")).toContainText("From the Balanced preset");
     await expect(tid(page, "au-preview")).toHaveCount(0);
     // WCAG 2.4.3: the Switch button left the page with the preview, so focus returns to the preset button that opened it, not to the page.
     await expect(tid(page, "au-preset-balanced")).toBeFocused();
@@ -207,7 +204,7 @@ test.describe("D#7 DP10b: Roles, Autonomy", () => {
     await expect(tid(page, "au-held")).toHaveText(["Running work on a team member's own plan: " + HELD_NOTE]);
     await expect(tid(page, "au-move").filter({ hasText: "team member's own plan" })).toHaveCount(0);
     await tid(page, "au-preview-apply").click();
-    await expect(tid(page, "au-status")).toContainText("Balanced applied. 6 decisions changed. Running work on a team member's own plan: " + HELD_NOTE);
+    await expect(tid(page, "au-status")).toContainText("Balanced applied. 3 decisions saved as your choice. Running work on a team member's own plan: " + HELD_NOTE);
     expect(await tid(page, "au-status").innerText()).not.toMatch(/undefined|null|NaN/);
   });
 
@@ -394,7 +391,7 @@ test.describe("D#7 DP10b: Roles, Autonomy", () => {
     await openAutonomy(page);
     await expect(tid(page, "au-readonly")).toHaveText("Only owners and admins can change these settings.");
     await expect(page.locator(`${WIN} [data-testid="au-body"] :is(button, input, select)`)).toHaveCount(0);
-    await expect(dialRow(page, "test_strategy_choice").getByTestId("au-dial-value")).toHaveText("Ask me first");
+    await expect(dialRow(page, "test_strategy_choice").getByTestId("au-dial-value")).toHaveText("Go ahead and tell me");
     await expect(askRow(page, "test_strategy_choice")).toContainText("In effect: 1 day");
     await expect(tid(page, "au-notify-value")).toHaveText("Notifications: Email me");
     await expect(tid(page, "au-levels")).toBeVisible();

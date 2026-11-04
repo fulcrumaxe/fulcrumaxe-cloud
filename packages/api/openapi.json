@@ -13589,7 +13589,7 @@
       "post": {
         "operationId": "applyDecisionPreset",
         "summary": "Adopt a preset: one new dial version per class 2 dial it changes, in one transaction",
-        "description": "Appends a `decision_settings` version for each class 2 dial the preset changes, and an audit row naming the previous and new value for each. A repo that already matches writes nothing. A preset never loosens \"run on a member's plan\": that dial is left as it is and listed in `held` with a sentence. Class 1 and class 3 are never touched. Owner or admin, session only.",
+        "description": "Appends a `decision_settings` version for each class 2 dial the preset changes, and an audit row naming the previous and new value for each. A repo that already matches writes nothing, except that a start dial with no written row (or only a \"use the default\" version) is written, because the auto-start sweep starts work only on a written row; a repo nobody chose for reads as Balanced and starts nothing unattended. A preset never loosens \"run on a member's plan\": that dial is left as it is and listed in `held` with a sentence. Class 1 and class 3 are never touched. Owner or admin, session only.",
         "security": [
           {
             "session": []
@@ -13943,7 +13943,7 @@
       "post": {
         "operationId": "setDecisionDial",
         "summary": "Set one class 2 dial to ask, announce or act",
-        "description": "Appends one `decision_settings` version and one audit row. The decision type must be a class 2 entry in the catalogue and the disposition one that entry allows; anything else, including a fixed invariant, is a 422 and writes nothing. Setting the value already in force is a no-op. Owner or admin, session only.",
+        "description": "Appends one `decision_settings` version and one audit row. The decision type must be a class 2 entry in the catalogue and the disposition one that entry allows; anything else, including a fixed invariant, is a 422 and writes nothing. Setting the value already in force is a no-op, except on a start dial with no written row (or only a \"use the default\" version): naming a value there writes it, because the auto-start sweep starts work only on a written row. Owner or admin, session only.",
         "security": [
           {
             "session": []
@@ -14232,7 +14232,7 @@
       "post": {
         "operationId": "resetDecisionDials",
         "summary": "Use the default again for one class 2 dial, or for every class 2 dial on the repo",
-        "description": "Body `{ decision_type? }`. With a decision type, that dial goes back to the catalogue default; without one, every class 2 dial on the repo does. A dial that has a version appends one new version holding the default disposition (its `source` then reads `default`) and one audit row; a dial with no version, or already on the default, writes nothing. Class 1 and class 3 are never touched. Owner or admin, session only.",
+        "description": "Body `{ decision_type? }`. With a decision type, that dial goes back to what a dial with no version means; without one, every class 2 dial on the repo does. That is Balanced's value for a dial the runtime reads as Balanced with no row, else the catalogue default. A dial that has a version appends one new version holding it (its `source` then reads `default`) and one audit row; a dial with no version, or already on it, writes nothing. A \"use the default\" version does not start work unattended, as no version does not. Class 1 and class 3 are never touched. Owner or admin, session only.",
         "security": [
           {
             "session": []

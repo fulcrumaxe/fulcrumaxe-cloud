@@ -529,7 +529,7 @@ export function mountAutonomy(host, ctx) {
     const untouched = dial.dials.filter((d) => d.adjustable).every((d) => d.source === "default");
     const section = h("section", { class: "au-section", "aria-labelledby": "au-h-presets" }, h("h3", { class: "au-h", id: "au-h-presets" }, "Presets"));
     section.append(
-      h("p", { class: "au-line", "data-testid": "au-active" }, active ? "Right now: " + active.label : untouched ? "Right now: the default settings." : "Right now: your own mix, which doesn't match a preset.")
+      h("p", { class: "au-line", "data-testid": "au-active" }, active ? "Right now: " + active.label + (active.name === "balanced" && untouched ? " (default)" : "") : untouched ? "Right now: the default settings." : "Right now: your own mix, which doesn't match a preset.")
     );
     if (!canChange()) {
       section.append(h("ul", { class: "au-list" }, dial.presets.map((p) => h("li", { class: "au-item" }, h("strong", null, p.label), " " + p.customer_role))));
@@ -573,7 +573,7 @@ export function mountAutonomy(host, ctx) {
                 "ul",
                 { class: "au-list", "data-testid": "au-moves" },
                 preview.moves.map((m) =>
-                  h("li", { class: "au-item", "data-testid": "au-move" }, dialLabel(m.decision_type) + ": " + word(DISPOSITION_TEXT, m.from) + " to " + word(DISPOSITION_TEXT, m.to))
+                  h("li", { class: "au-item", "data-testid": "au-move" }, dialLabel(m.decision_type) + ": " + (m.from === m.to ? word(DISPOSITION_TEXT, m.to) + ", saved as your choice" : word(DISPOSITION_TEXT, m.from) + " to " + word(DISPOSITION_TEXT, m.to)))
                 )
               ),
           ...(preview.held || []).map((m) => h("p", { class: "au-line", "data-testid": "au-held" }, dialLabel(m.decision_type) + ": " + m.note)), // a dial the preset would loosen, left as it is
@@ -590,6 +590,12 @@ export function mountAutonomy(host, ctx) {
     } else if (rowErrors.has("preset")) section.append(h("div", null, rowError("preset")));
     return section;
   }
+  /** "3 decisions changed.", or "3 decisions saved as your choice." when each was already at the value (a start setting nobody had written). */
+  const movedWords = (moved) => {
+    const n = moved.length;
+    const same = n > 0 && moved.every((m) => m.from === m.to);
+    return (n === 1 ? "1 decision " : n + " decisions ") + (same ? "saved as your choice." : "changed.");
+  };
   const dialLabel = (type) => {
     const d = dial.dials.find((x) => x.decision_type === type);
     return d ? d.label : "";
@@ -947,7 +953,7 @@ export function mountAutonomy(host, ctx) {
       dial = await api("POST", repoPath(repoId, "decision-settings/preset"), { preset: chosen.preset });
       ask = await api("GET", repoPath(repoId, "ask-settings"));
       preview = null;
-    }, () => chosen.label + " applied. " + (dial.moved.length === 1 ? "1 decision changed." : dial.moved.length + " decisions changed.") + (dial.held ? " " + dial.held.map((m) => dialLabel(m.decision_type) + ": " + m.note).join(" ") : ""));
+    }, () => chosen.label + " applied. " + movedWords(dial.moved) + (dial.held ? " " + dial.held.map((m) => dialLabel(m.decision_type) + ": " + m.note).join(" ") : ""));
     // The Switch button is gone once the preview closes, so focus would drop to the page: put it back on the preset that opened the preview (WCAG 2.4.3).
     if (chosen && !preview && !closed) focusAt("preset-" + chosen.preset);
   };

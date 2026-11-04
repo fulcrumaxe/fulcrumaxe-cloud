@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { evaluateRules, platformAskRequest, tightenAskDisposition, usdCeilCents, type PresetName } from "@fx/decisions";
 import { resolveActionRules } from "@fx/db/src/actionRules.js";
-import { getCurrentDialSetting } from "@fx/db/src/decisions.js";
+import { DIAL_DEFAULT_MARKER, getCurrentDialSetting } from "@fx/db/src/decisions.js";
 import { writeReceipt } from "@fx/db/src/receiptWriter.js";
 import { attachStartGate, claimStartGate, writeStartReceipt } from "@fx/db/src/startGate.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
@@ -147,9 +147,10 @@ async function gateOne(deps: AutoStartDeps, client: PoolClient, accountId: strin
   const kind = smallKind(gateCategory(p));
   if (kind === null || p.verified_run_id === null) return resolveStart(startInput(p, "cautious")).outcome === "refused" ? "not_ready" : "asked";
   const decisionType = `start_work_${kind}` as const;
-  // The dial: only a row that was written starts anything. An unknown disposition reads as Cautious.
+  // The dial: only a row a person wrote starts anything. No row, and the "use the default" marker row a Reset writes, start nothing (the settings page reads
+  // both as Balanced without turning unattended starts on). An unknown disposition reads as Cautious.
   const dial = await getCurrentDialSetting(client, p.repo_id, decisionType);
-  if (dial === null) return "not_ready";
+  if (dial === null || dial.preset === DIAL_DEFAULT_MARKER) return "not_ready";
   const resolved = resolveStart(startInput(p, PRESET_OF_DISPOSITION[dial.disposition] ?? "cautious"));
   if (resolved.outcome === "refused") return "not_ready";
   if (resolved.outcome !== "act" && resolved.outcome !== "announce") return "asked";

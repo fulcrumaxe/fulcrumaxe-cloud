@@ -27,8 +27,8 @@ import type { RouteEntry } from "../registry.js";
  *    a label of what the customer picked; a later single-dial change moves the derivation to "custom" without touching it.
  *
  * Undo: there is no delete. A change is undone by writing the earlier value (or re-applying the earlier preset), which appends a version
- * and an audit row of its own; the history keeps both. "Use the default" is the same kind of write: a version holding the catalogue's default
- * disposition and `DIAL_DEFAULT_MARKER`, which the read shows as `source: default`.
+ * and an audit row of its own; the history keeps both. "Use the default" is the same kind of write: a version holding what no version means
+ * (Balanced's value for a dial the runtime overrides, else the catalogue default) and `DIAL_DEFAULT_MARKER`, which the read shows as `source: default`.
  */
 
 const repoIdParamsSchema = z.object({ id: z.string() });
@@ -94,15 +94,44 @@ function presetDisposition(entry: CatalogueEntry, preset: PresetName): Dispositi
   return decide(entry, { preset }, { type: entry.id, options: [], proposed: "", rationale: "" }).disposition;
 }
 
-/** The disposition in force: the current version, else the catalogue default. A stored value the entry does not allow fails closed to `ask`. */
+/**
+ * The dials the runtime reads a missing row as Balanced for (owner ruling 10-25): the three start dials (`startDecide.presetFor`), the fix-round and child-launch
+ * dial (`fixRoundGate.presetOf`), and the two types the executor card declares, which the decision snapshot freezes as Balanced (`decisionSnapshot.dispositionForDial`).
+ * Pinned against the start path by `decision-settings-start.test.ts`. "Run on a member's plan" is not here: the runner claim keeps its own rule, the catalogue default,
+ * which already equals Balanced's value. A dial no runtime path reads keeps its catalogue default.
+ */
+export const RUNTIME_NO_ROW_BALANCED: ReadonlySet<string> = new Set(["start_work_small", "start_work_bug", "start_work_doc", "launch_sub_item", "nonbreaking_refactor_approach", "test_strategy_choice"]);
+
+/** What a dial with no version means: what the runtime does with it (Balanced), never the catalogue's `ask` for a dial the runtime overrides. */
+function noRowDisposition(entry: CatalogueEntry): Disposition {
+  return RUNTIME_NO_ROW_BALANCED.has(entry.id) ? presetDisposition(entry, "balanced") : entry.defaultDisposition;
+}
+
+/**
+ * The start dials. The auto-start sweep (`autoStartSweep.gateOne`) starts a proposal unattended only on a dial row a person WROTE: no row, and a "default"
+ * marker row (what Reset writes), start nothing. So a person's explicit choice writes these rows even where the value in force already matches, and
+ * skipping the choice writes nothing. Derived from the runtime list above, so a dial added later is not in it until the sweep reads it.
+ */
+const START_DIALS: ReadonlySet<string> = new Set([...RUNTIME_NO_ROW_BALANCED].filter((id) => id.startsWith("start_work_")));
+const needsWritten = (entry: CatalogueEntry, row: DecisionSetting | null): boolean => START_DIALS.has(entry.id) && isDefault(row);
+
+/**
+ * A dial no runtime path reads (it is not in the list above) and nobody has set has no opinion, so it never keeps a repo from reading Balanced, nor is
+ * Balanced written for it. A dial added to the catalogue later is treated this way until the runtime reads it and it joins the list.
+ */
+const unreadDefault = (entry: CatalogueEntry, row: DecisionSetting | null): boolean => !RUNTIME_NO_ROW_BALANCED.has(entry.id) && isDefault(row);
+const atPreset = (entry: CatalogueEntry, row: DecisionSetting | null, preset: PresetName): boolean =>
+  effective(entry, row) === presetDisposition(entry, preset) || (preset === "balanced" && unreadDefault(entry, row));
+
+/** The disposition in force: the current version, else what no version means. A stored value the entry does not allow fails closed to `ask`. */
 function effective(entry: CatalogueEntry, row: DecisionSetting | null): Disposition {
-  if (row === null) return entry.defaultDisposition;
+  if (row === null) return noRowDisposition(entry);
   const stored = row.disposition as Disposition;
   return entry.allowedDispositions.includes(stored) ? stored : "ask";
 }
 
 export function activePreset(rows: Map<string, DecisionSetting | null>): PresetName | null {
-  const match = PRESETS.find((p) => classTwo().every((e) => effective(e, rows.get(e.id) ?? null) === presetDisposition(e, p.name)));
+  const match = PRESETS.find((p) => classTwo().every((e) => atPreset(e, rows.get(e.id) ?? null, p.name)));
   return match ? match.name : null;
 }
 
@@ -117,9 +146,11 @@ function movesFor(preset: PresetName, rows: Map<string, DecisionSetting | null>)
   const moves: Move[] = [];
   const held: (Move & { note: string })[] = [];
   for (const entry of classTwo()) {
-    const from = effective(entry, rows.get(entry.id) ?? null);
+    const row = rows.get(entry.id) ?? null;
+    const from = effective(entry, row);
     const to = presetDisposition(entry, preset);
-    if (from === to) continue;
+    // A start dial nobody has written is written by a person's choice even where it already matches: the sweep starts nothing on no row or a marker row.
+    if (atPreset(entry, row, preset) && !needsWritten(entry, row)) continue;
     if (entry.id === RUNNER_RUN_DECISION_TYPE && isLoosening(from, to)) held.push({ decision_type: entry.id, from, to, note: PRESET_HELD_SENTENCE });
     else moves.push({ decision_type: entry.id, from, to });
   }
@@ -226,7 +257,7 @@ export const decisionSettingRoutes: RouteEntry[] = [
     summary: "Adopt a preset: one new dial version per class 2 dial it changes, in one transaction",
     description:
       "Appends a `decision_settings` version for each class 2 dial the preset changes, and an audit row naming the previous and new value for each. " +
-      "A repo that already matches writes nothing. A preset never loosens \"run on a member's plan\": that dial is left as it is and listed in `held` with a sentence. Class 1 and class 3 are never touched. Owner or admin, session only.",
+      "A repo that already matches writes nothing, except that a start dial with no written row (or only a \"use the default\" version) is written, because the auto-start sweep starts work only on a written row; a repo nobody chose for reads as Balanced and starts nothing unattended. A preset never loosens \"run on a member's plan\": that dial is left as it is and listed in `held` with a sentence. Class 1 and class 3 are never touched. Owner or admin, session only.",
     // principals omitted -> session-only.
     minRole: "admin",
     idempotency: "never",
@@ -246,7 +277,7 @@ export const decisionSettingRoutes: RouteEntry[] = [
           const before = await currentRows(client, repoId);
           const { moves: moved, held } = movesFor(name, before);
           for (const move of moved) {
-            await appendDialVersion(client, { accountId, repoId, decisionType: move.decision_type, disposition: move.to, preset: name, changedBy: userId });
+            await appendDialVersion(client, { accountId, repoId, decisionType: move.decision_type, disposition: move.to, preset: name, changedBy: userId, noVersionDisposition: noRowDisposition(getCatalogueEntry(move.decision_type)!) });
           }
           return { ...view(repoId, role === "owner" || role === "admin", await currentRows(client, repoId)), moved, ...(held.length > 0 ? { held } : {}) };
         });
@@ -265,7 +296,7 @@ export const decisionSettingRoutes: RouteEntry[] = [
     summary: "Set one class 2 dial to ask, announce or act",
     description:
       "Appends one `decision_settings` version and one audit row. The decision type must be a class 2 entry in the catalogue and the disposition one that entry allows; " +
-      "anything else, including a fixed invariant, is a 422 and writes nothing. Setting the value already in force is a no-op. Owner or admin, session only.",
+      "anything else, including a fixed invariant, is a 422 and writes nothing. Setting the value already in force is a no-op, except on a start dial with no written row (or only a \"use the default\" version): naming a value there writes it, because the auto-start sweep starts work only on a written row. Owner or admin, session only.",
     minRole: "admin",
     idempotency: "never",
     rateClass: "write",
@@ -288,10 +319,10 @@ export const decisionSettingRoutes: RouteEntry[] = [
         const out = await withTenant(ctx.pool, accountId, userId, async (client) => {
           await assertRepoExists(client, repoId);
           const current = await getCurrentDialSetting(client, repoId, entry.id);
-          // The value already in force (a version, else the catalogue default) is the request satisfied: no version, no audit row.
-          // With no version yet, the catalogue default is what is in force, so naming it is also the request satisfied (as the preset path does).
-          if (effective(entry, current) !== body.disposition) {
-            await appendDialVersion(client, { accountId, repoId, decisionType: entry.id, disposition: body.disposition, preset: null, changedBy: userId });
+          // The value already in force is the request satisfied: no version, no audit row. A start dial with no written row is the exception: naming a value is a
+          // person's choice, and the auto-start sweep reads only a written row.
+          if (effective(entry, current) !== body.disposition || needsWritten(entry, current)) {
+            await appendDialVersion(client, { accountId, repoId, decisionType: entry.id, disposition: body.disposition, preset: null, changedBy: userId, noVersionDisposition: noRowDisposition(entry) });
           }
           return view(repoId, role === "owner" || role === "admin", await currentRows(client, repoId));
         });
@@ -308,9 +339,9 @@ export const decisionSettingRoutes: RouteEntry[] = [
     operationId: "resetDecisionDials",
     summary: "Use the default again for one class 2 dial, or for every class 2 dial on the repo",
     description:
-      "Body `{ decision_type? }`. With a decision type, that dial goes back to the catalogue default; without one, every class 2 dial on the repo does. " +
-      "A dial that has a version appends one new version holding the default disposition (its `source` then reads `default`) and one audit row; a dial with no version, " +
-      "or already on the default, writes nothing. Class 1 and class 3 are never touched. Owner or admin, session only.",
+      "Body `{ decision_type? }`. With a decision type, that dial goes back to what a dial with no version means; without one, every class 2 dial on the repo does. " +
+      "That is Balanced's value for a dial the runtime reads as Balanced with no row, else the catalogue default. A dial that has a version appends one new version holding it (its `source` then reads `default`) and one audit row; a dial with no version, " +
+      "or already on it, writes nothing. A \"use the default\" version does not start work unattended, as no version does not. Class 1 and class 3 are never touched. Owner or admin, session only.",
     minRole: "admin",
     idempotency: "never",
     rateClass: "write",
@@ -335,8 +366,10 @@ export const decisionSettingRoutes: RouteEntry[] = [
           await assertRepoExists(client, repoId);
           for (const entry of targets) {
             const current = await getCurrentDialSetting(client, repoId, entry.id);
-            if (isDefault(current)) continue;
-            await appendDialVersion(client, { accountId, repoId, decisionType: entry.id, disposition: entry.defaultDisposition, preset: DIAL_DEFAULT_MARKER, changedBy: userId });
+            // Back to what no version means. A "default" version an earlier reset wrote with the catalogue's `ask` is a row the runtime reads as Cautious, so it is replaced.
+            const target = noRowDisposition(entry);
+            if (current === null || (current.preset === DIAL_DEFAULT_MARKER && current.disposition === target)) continue;
+            await appendDialVersion(client, { accountId, repoId, decisionType: entry.id, disposition: target, preset: DIAL_DEFAULT_MARKER, changedBy: userId });
           }
           return view(repoId, role === "owner" || role === "admin", await currentRows(client, repoId));
         });

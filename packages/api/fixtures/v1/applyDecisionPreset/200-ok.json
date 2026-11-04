@@ -58,9 +58,9 @@
         "announce",
         "ask"
       ],
-      "source": "preset",
-      "preset": "balanced",
-      "version": 1
+      "source": "default",
+      "preset": null,
+      "version": null
     },
     {
       "decision_type": "test_strategy_choice",
@@ -73,9 +73,9 @@
         "announce",
         "ask"
       ],
-      "source": "preset",
-      "preset": "balanced",
-      "version": 1
+      "source": "default",
+      "preset": null,
+      "version": null
     },
     {
       "decision_type": "runner_run_on_member_plan",
@@ -148,9 +148,9 @@
         "announce",
         "ask"
       ],
-      "source": "preset",
-      "preset": "balanced",
-      "version": 1
+      "source": "default",
+      "preset": null,
+      "version": null
     },
     {
       "decision_type": "publish_deprecation_notice",
@@ -255,33 +255,18 @@
   ],
   "moved": [
     {
-      "decision_type": "nonbreaking_refactor_approach",
-      "from": "ask",
-      "to": "announce"
-    },
-    {
-      "decision_type": "test_strategy_choice",
-      "from": "ask",
-      "to": "announce"
-    },
-    {
       "decision_type": "start_work_small",
-      "from": "ask",
+      "from": "announce",
       "to": "announce"
     },
     {
       "decision_type": "start_work_bug",
-      "from": "ask",
+      "from": "announce",
       "to": "announce"
     },
     {
       "decision_type": "start_work_doc",
-      "from": "ask",
-      "to": "announce"
-    },
-    {
-      "decision_type": "launch_sub_item",
-      "from": "ask",
+      "from": "announce",
       "to": "announce"
     }
   ]
