@@ -2,7 +2,7 @@ import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { enqueueDedupeKey, listHeadRemovals, recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "@fx/github";
-import { createPgLocalReviewOptIn, createReviewGitHubPort, loadReviewContext, mergeQueue, readItemRecordedPullRequest, readPublicPullRequest, readRepoGhId, runMergeGateForItem, type GitHubHttp, type GoAttestation, type MergeBlockReason } from "@fx/pipeline";
+import { createPgLocalReviewOptIn, createReviewGitHubPort, loadReviewContext, mergeQueue, readItemRecordedPullRequest, readPublicPullRequest, readRepoGhId, recordMergeReceipt, runMergeGateForItem, type GitHubHttp, type GoAttestation, type MergeBlockReason } from "@fx/pipeline";
 import type { PlaneMergeGoResult, PlaneMergeOrderFacts, PublicPullFacts, PublicQueueFacts } from "@fx/runner-cloud";
 import { mergeGateAuthorTrust } from "./github/authorTrust";
 import { openInstallationHttp } from "./github/installationHttp";
@@ -168,6 +168,8 @@ export function createPlaneMergeOps(deps: PlaneMergeOpsDeps) {
     const recorded = await readItemRecordedPullRequest(pool, accountId, order.workItemId);
     // The gate's own fact for a merge: the head the reviewers cleared and the item's own pull request number (as the gate records it).
     await withTenant(pool, accountId, (client) => recordDriverEvent(client, accountId, { workItemId: order.workItemId, kind: "merged_by_gate", dedupeKey: `merged:${order.expectedPublicHead}`, headSha: order.reviewedHead, ...(recorded !== null ? { prNumber: recorded.number } : {}) }));
+    // D#7 DW-R4: the receipt for a merge made by policy, after its fact; a miss is reported and never fails the merge. The dial is the version that stood when the gate delegated the merge, so a later change takes no receipt away.
+    await recordMergeReceipt(pool, { accountId, workItemId: order.workItemId, eventHead: order.reviewedHead, reviewHeads: [order.reviewedHead], outcome: "merged", decidedBy: { kind: "merge_gate", head: order.reviewedHead, code: "merge_delegated" } });
     // The item's stage follows the public pull request (the webhook usually did it already); best effort, the sweep backs it up.
     if (deps.reconcile) {
       await deps.reconcile({ accountId, workItemId: order.workItemId, github: createPrStateReader(open) }).catch((error: unknown) => {

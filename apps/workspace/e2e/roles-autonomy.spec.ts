@@ -28,6 +28,7 @@ const CLASS2 = [
   "start_work_bug",
   "start_work_doc",
   "launch_sub_item",
+  "merge_after_reviews",
   "publish_deprecation_notice",
 ];
 const ADJUSTABLE = CLASS2.length;
@@ -162,6 +163,7 @@ test.describe("D#7 DP10b: Roles, Autonomy", () => {
       "Starting a small piece of work: Go ahead and tell me, saved as your choice",
       "Starting a bug fix: Go ahead and tell me, saved as your choice",
       "Starting a documentation change: Go ahead and tell me, saved as your choice",
+      "Merging a pull request once its reviews pass: Go ahead to Go ahead and tell me",
     ]);
     await expect(page.locator(`${WIN} #au-preview-h`)).toBeFocused();
     expect(seen.posts.map((p) => p.tail)).toEqual(["decision-settings/preset/preview"]);
@@ -180,7 +182,7 @@ test.describe("D#7 DP10b: Roles, Autonomy", () => {
     await openAutonomy(page);
     await tid(page, "au-preset-balanced").click();
     await tid(page, "au-preview-apply").click();
-    await expect(tid(page, "au-status")).toHaveText("Balanced applied. 3 decisions saved as your choice.");
+    await expect(tid(page, "au-status")).toHaveText("Balanced applied. 4 decisions changed.");
     expect(seen.posts.map((p) => p.tail)).toEqual(["decision-settings/preset/preview", "decision-settings/preset"]);
     expect(seen.posts[1].body).toEqual({ preset: "balanced" });
     await expect(tid(page, "au-active")).toHaveText("Right now: Balanced");
@@ -204,7 +206,7 @@ test.describe("D#7 DP10b: Roles, Autonomy", () => {
     await expect(tid(page, "au-held")).toHaveText(["Running work on a team member's own plan: " + HELD_NOTE]);
     await expect(tid(page, "au-move").filter({ hasText: "team member's own plan" })).toHaveCount(0);
     await tid(page, "au-preview-apply").click();
-    await expect(tid(page, "au-status")).toContainText("Balanced applied. 3 decisions saved as your choice. Running work on a team member's own plan: " + HELD_NOTE);
+    await expect(tid(page, "au-status")).toContainText("Balanced applied. 4 decisions changed. Running work on a team member's own plan: " + HELD_NOTE);
     expect(await tid(page, "au-status").innerText()).not.toMatch(/undefined|null|NaN/);
   });
 

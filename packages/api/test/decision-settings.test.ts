@@ -49,7 +49,7 @@ interface ErrorBody {
   details?: { path: string; code: string }[];
 }
 
-const CLASS_2 = ['nonbreaking_refactor_approach', 'test_strategy_choice', 'runner_run_on_member_plan', 'publish_deprecation_notice', 'start_work_small', 'start_work_bug', 'start_work_doc', 'launch_sub_item', 'tool_call', 'run_extension'];
+const CLASS_2 = ['nonbreaking_refactor_approach', 'test_strategy_choice', 'runner_run_on_member_plan', 'publish_deprecation_notice', 'start_work_small', 'start_work_bug', 'start_work_doc', 'launch_sub_item', 'tool_call', 'run_extension', 'merge_after_reviews'];
 
 /**
  * D#7 DP10a: the Autonomy settings API, called through the real `handleApiRequest` against real Postgres (RLS, the owner/admin INSERT
@@ -146,7 +146,7 @@ describe('D#7 DP10a: decision settings routes', () => {
     expect(s.presets.map((p) => p.name)).toEqual(['cautious', 'balanced', 'autonomous']);
     expect(new Set(s.presets.map((p) => p.customer_role)).size).toBe(3);
     const dials = dialsByType(s);
-    expect(s.dials).toHaveLength(19);
+    expect(s.dials).toHaveLength(20);
     for (const type of CLASS_2) expect(dials[type], type).toMatchObject({ adjustable: true, source: 'default', preset: null, version: null });
     expect(dials.runner_run_on_member_plan!.disposition).toBe('announce');
     // The dials the runtime reads as Balanced with no row show announce; a dial no runtime path reads keeps the catalogue default.
@@ -183,11 +183,17 @@ describe('D#7 DP10a: decision settings routes', () => {
     // A repo with no versions already reads as Balanced, so Balanced moves nothing (the two dials no runtime path reads are not written for it).
     // ... but the three start dials are written by a person's choice (the auto-start sweep starts work only on a written row), so the preview says so.
     expect(balanced.active_preset).toBe('balanced');
-    expect(balanced.moves.map((m) => [m.decision_type, m.from, m.to]).sort()).toEqual(['start_work_bug', 'start_work_doc', 'start_work_small'].map((t) => [t, 'announce', 'announce']));
+    // The merge dial has no row and the gate reads that as the catalogue's act, which merges as announce does: it counts as Balanced, but a person's choice of Balanced
+    // writes announce for it (what the preview says is what is written).
+    expect(balanced.moves.map((m) => [m.decision_type, m.from, m.to]).sort()).toEqual([
+      ...['start_work_bug', 'start_work_doc', 'start_work_small'].map((t) => [t, 'announce', 'announce']),
+      ['merge_after_reviews', 'act', 'announce'],
+    ].sort());
     const cautious = await (await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/preset/preview`, { preset: 'cautious' })).json() as Preview;
     expect(cautious.moves.map((m) => [m.decision_type, m.from, m.to]).sort()).toEqual(
-      ['launch_sub_item', 'nonbreaking_refactor_approach', 'runner_run_on_member_plan', 'start_work_bug', 'start_work_doc', 'start_work_small', 'test_strategy_choice'].sort().map((t) => [t, 'announce', 'ask']),
+      [...['launch_sub_item', 'nonbreaking_refactor_approach', 'runner_run_on_member_plan', 'start_work_bug', 'start_work_doc', 'start_work_small', 'test_strategy_choice'].map((t) => [t, 'announce', 'ask']), ['merge_after_reviews', 'act', 'ask']].sort(),
     );
+    expect(cautious.moves).toHaveLength(8);
     const autonomous = await (await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/preset/preview`, { preset: 'autonomous' })).json() as Preview;
     expect(autonomous.moves.map((m) => [m.decision_type, m.to])).toEqual([
       ['nonbreaking_refactor_approach', 'act'],
@@ -318,15 +324,16 @@ describe('D#7 DP10a: decision settings routes', () => {
     // A repo with no versions already reads as Balanced; choosing it writes the three start dials (and nothing else), and choosing it again writes nothing.
     const chosen = (await (await call(f.owner, 'POST', base, { preset: 'balanced' })).json()) as Settings;
     expect(chosen.active_preset).toBe('balanced');
-    expect(chosen.moved!.map((m) => m.decision_type).sort()).toEqual(['start_work_bug', 'start_work_doc', 'start_work_small']);
+    expect(chosen.moved!.map((m) => m.decision_type).sort()).toEqual(['merge_after_reviews', 'start_work_bug', 'start_work_doc', 'start_work_small']);
     expect(((await (await call(f.owner, 'POST', base, { preset: 'balanced' })).json()) as Settings).moved).toEqual([]);
-    expect(await versions(f.repoId)).toHaveLength(3);
-    // Cautious moves the six dials the runtime reads, plus the member-plan dial; the two no runtime path reads already say ask.
+    const afterBalanced = (await versions(f.repoId)).length;
+    expect(afterBalanced).toBe(chosen.moved!.length);
+    // Cautious moves the six dials the runtime reads, the member-plan dial and the merge dial; the two no runtime path reads already say ask.
     const first = (await (await call(f.owner, 'POST', base, { preset: 'cautious' })).json()) as Settings;
-    expect(first.moved).toHaveLength(7);
+    expect(first.moved).toHaveLength(8);
     const again = (await (await call(f.owner, 'POST', base, { preset: 'cautious' })).json()) as Settings;
     expect(again.moved).toEqual([]);
-    expect(await versions(f.repoId)).toHaveLength(10);
+    expect(await versions(f.repoId)).toHaveLength(afterBalanced + first.moved!.length);
     expect((await get(f.owner, f.repoId)).active_preset).toBe('cautious');
     const undone = (await (await call(f.owner, 'POST', base, { preset: 'balanced' })).json()) as Settings;
     // Balanced over Cautious would loosen the member-plan dial, which stays ask: no preset matches, and the answer says which dial was held.
@@ -340,6 +347,28 @@ describe('D#7 DP10a: decision settings routes', () => {
     const runner = rows.filter((r) => r.decision_type === 'runner_run_on_member_plan');
     expect(runner.map((r) => [r.version, r.disposition])).toEqual([[1, 'ask']]);
     expect((await auditRows(f.owner.accountId)).length).toBe(rows.length);
+  });
+
+  it('D#7 DW-R4: the merge dial reads act with no row (the gate\'s default), counts as Balanced, is written as announce by choosing Balanced, and Reset returns it to the act marker the gate reads as default', async () => {
+    const f = await fixture();
+    const dial = async () => dialsByType(await get(f.owner, f.repoId)).merge_after_reviews!;
+    expect(await dial()).toMatchObject({ disposition: 'act', source: 'default', version: null });
+    expect((await get(f.owner, f.repoId)).active_preset).toBe('balanced');
+    await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/preset`, { preset: 'balanced' });
+    expect(await dial()).toMatchObject({ disposition: 'announce', source: 'preset', preset: 'balanced', version: 1 });
+    // Reset: back to the catalogue's act as a marker row, which reads as the default and which the gate (readMergeDial) reads as act.
+    await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/reset`, { decision_type: 'merge_after_reviews' });
+    expect(await dial()).toMatchObject({ disposition: 'act', source: 'default', preset: null, version: 2 });
+    const marker = (await versions(f.repoId)).filter((r) => r.decision_type === 'merge_after_reviews').map((r) => [r.version, r.disposition, r.preset]);
+    expect(marker).toEqual([[1, 'announce', 'balanced'], [2, 'act', 'default']]);
+    expect((await get(f.owner, f.repoId)).active_preset).toBe('balanced');
+    // Choosing Balanced again writes announce again (the marker is not a written choice), and Autonomous writes nothing for a merge dial already at act.
+    const again = (await (await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/reset`, {})).json()) as Settings;
+    expect(again.dials.length).toBeGreaterThan(0);
+    const auto = (await (await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/preset/preview`, { preset: 'autonomous' })).json()) as Preview;
+    expect(auto.moves.map((m) => m.decision_type)).not.toContain('merge_after_reviews');
+    const bal = (await (await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/preset/preview`, { preset: 'balanced' })).json()) as Preview;
+    expect(bal.moves.find((m) => m.decision_type === 'merge_after_reviews')).toEqual({ decision_type: 'merge_after_reviews', from: 'act', to: 'announce' });
   });
 
   it('a single dial change appends one version, leaves the preset derivation at custom, and the same value again is a no-op', async () => {

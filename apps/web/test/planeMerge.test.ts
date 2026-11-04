@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   readPublicPullRequest: vi.fn(),
   readItemRecordedPullRequest: vi.fn(),
   createReviewGitHubPort: vi.fn(),
+  recordMergeReceipt: vi.fn(async (..._args: unknown[]) => "written"),
 }));
 vi.mock("@fx/pipeline", async (original) => ({
   ...(await original<typeof import("@fx/pipeline")>()),
@@ -17,6 +18,7 @@ vi.mock("@fx/pipeline", async (original) => ({
   readPublicPullRequest: () => mocks.readPublicPullRequest,
   readItemRecordedPullRequest: mocks.readItemRecordedPullRequest,
   createReviewGitHubPort: mocks.createReviewGitHubPort,
+  recordMergeReceipt: mocks.recordMergeReceipt,
 }));
 
 import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL_REQUEST_DOCUMENT, MERGE_QUEUE_ENTRY_DOCUMENT, MERGE_QUEUE_READ_DOCUMENT } from "@fx/github";
@@ -323,6 +325,28 @@ describe("recordMerged: the fact, the reconcile and the private copy", () => {
     expect(event?.params).toEqual(expect.arrayContaining([ITEM, "merged_by_gate", SRC, 7, `merged:${PUB}`]));
     expect(t.reconcile).toHaveBeenCalledWith(expect.objectContaining({ accountId: ACCOUNT, workItemId: ITEM }));
     expect(t.closePrivate).toHaveBeenCalledWith({ id: REPO, owner: "acme", name: "widgets" }, 7);
+  });
+
+  it("D#7 DW-R4: the merge is receipted after its fact, at the reviewed head, with the dial that stood when the gate delegated it", async () => {
+    const t = ops();
+    privateOpen();
+    const order_: string[] = [];
+    mocks.recordMergeReceipt.mockImplementation(async () => {
+      order_.push(`receipt after ${t.f.statements.filter((s) => /work_item_driver_events/.test(s.sql)).length} fact statement(s)`);
+      return "written";
+    });
+    expect(await t.o.recordMerged({ accountId: ACCOUNT, order })).toEqual({ privateCopy: "closed" });
+    expect(order_).toEqual(["receipt after 1 fact statement(s)"]);
+    expect(mocks.recordMergeReceipt).toHaveBeenCalledTimes(1);
+    expect(mocks.recordMergeReceipt.mock.calls[0]![1]).toEqual({ accountId: ACCOUNT, workItemId: ITEM, eventHead: SRC, reviewHeads: [SRC], outcome: "merged", decidedBy: { kind: "merge_gate", head: SRC, code: "merge_delegated" } });
+  });
+
+  it("D#7 DW-R4: a receipt that reports a miss does not change what the record answers (the helper itself never rejects; that is pinned in the pipeline suite)", async () => {
+    const t = ops();
+    privateOpen();
+    mocks.recordMergeReceipt.mockResolvedValue("failed");
+    expect(await t.o.recordMerged({ accountId: ACCOUNT, order })).toEqual({ privateCopy: "closed" });
+    expect(t.closePrivate).toHaveBeenCalled();
   });
 
   it.each([

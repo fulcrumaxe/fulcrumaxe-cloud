@@ -33,6 +33,7 @@ const EXPECTED_V1_IDS = [
   "dependency_patch_bump",
   "external_paid_api_call",
   "launch_sub_item",
+  "merge_after_reviews",
   "nonbreaking_refactor_approach",
   "publish_deprecation_notice",
   "publish_release_artifact",
@@ -150,6 +151,28 @@ describe("DP12a-1: timeoutOutcomes (DP-C5 R2)", () => {
       timeoutOutcomes: ["stop_and_flag", "proceed_recommended"],
       reversalWindowHours: 24,
     });
+  });
+
+  it("DW-R4: merge_after_reviews is exactly the entry the row gives, defaults to act and is moved by every preset", () => {
+    expect(getCatalogueEntry("merge_after_reviews")).toEqual({
+      id: "merge_after_reviews",
+      class: "human_over_the_loop",
+      defaultDisposition: "act",
+      allowedDispositions: ["act", "announce", "ask"],
+      reversal: { availability: "not_reversible", reason: "a merge can't be undone from here; turn the setting off to stop the next one" },
+      customerProximity: "internal_only",
+      dataSensitivity: "none",
+      timeoutOutcomes: ["stop_and_flag"],
+      reversalWindowHours: 24,
+    });
+    const entry = getCatalogueEntry("merge_after_reviews")!;
+    const request = { type: "merge_after_reviews", options: [], proposed: "", rationale: "" };
+    expect(PRESETS.map((p) => decide(entry, { preset: p.name }, request).disposition)).toEqual(["ask", "announce", "act"]);
+  });
+
+  it("DW-R4: the three person-driven pipeline actions (asking for changes, building again, rechecking the merge) are not catalogue entries", () => {
+    const words = ["request_changes", "build_again", "review_passed", "check_merge", "check_the_merge"];
+    for (const id of CATALOGUE_IDS) for (const w of words) expect(id.includes(w), `${id} / ${w}`).toBe(false);
   });
 
   it("DP6a: every entry carries a reversal window of 24 hours (C23), the same whatever the preset", () => {

@@ -477,6 +477,9 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "overlap_unreviewed",
   "ordered_resource_waiting",
   "merge_hold_expired",
+  // The receipt behind a merge by policy (D#7 DW-R4): the write failed, or no review run is on the merged head. The merge itself stands.
+  "merge_receipt_failed",
+  "merge_receipt_no_run",
   "runner_ordered_unsupported",
   // Merge queue renumber round (D#519 MQ5-b2): the stop when the round changed paths outside the renamed files and their references.
   "renumber_out_of_scope",

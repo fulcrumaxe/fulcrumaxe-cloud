@@ -16,6 +16,7 @@ import { removeIntentRecent } from '@fx/core/src/work-items/queueIntent.js';
 import { reportError } from '@fx/telemetry';
 import { IllegalStageTransitionError } from '@fx/core/src/work-items/stages.js';
 import { withTenant } from '@fx/db/src/withTenant.js';
+import { recordMergeReceiptOn } from '@fx/db/src/mergeReceipt.js';
 import { queueDiscoveries, type QueuedDiscovery } from '@fx/db/src/discoveryRuns.js';
 import { reversalHoldsClose } from '@fx/db/src/reversalCompensation.js';
 import { withPlatformOps } from '@fx/core/src/tenancy/withPlatformOps.js';
@@ -660,6 +661,9 @@ async function recordQueueMerge(client: PoolClient, accountId: string, workItemI
     prNumber: mapped.prNumber,
     ...(sent.queueEntryId !== null ? { queueEntryId: sent.queueEntryId } : {}),
   });
+  // D#7 DW-R4: the receipt for a merge the gate sent to the host's queue (a merge with no `merge_enqueued` fact, a person's, returned above). The dial is the one that
+  // stood when the gate enqueued; a failed write never fails this delivery (savepoint, reported).
+  await recordMergeReceiptOn(client, { accountId, workItemId, eventHead: merged ?? sent.headSha, reviewHeads: [merged ?? sent.headSha, sent.headSha], outcome: 'merged', decidedBy: { kind: 'merge_enqueued', head: sent.headSha } });
   if (merged === sent.headSha) return;
   const { recorded } = await recordDriverEvent(client, accountId, {
     workItemId,

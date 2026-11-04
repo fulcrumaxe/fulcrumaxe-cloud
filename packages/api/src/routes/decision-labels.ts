@@ -8,7 +8,8 @@ export { DECISION_LABELS, decisionLabel } from "@fx/decisions";
 export const INVARIANT_LABELS: Readonly<Record<string, string>> = {
   cross_tenant_row_access: "One account can never read another account's data",
   role_permission_grant: "What each role is allowed to do is fixed in code",
-  merge_or_protection_change: "Merging, and changing branch protection, is always a person's call",
+  // Owner copy, proposed (DW-R4): the owner signs this off before the merge. Where auto-merge is on the gate merges, so the line says whose call each merge is.
+  merge_or_protection_change: "Changing branch protection is always a person's call, and so is any merge you haven't set to merge automatically",
   untrusted_work_creation: "Work from an untrusted source never starts automatically",
 };
 

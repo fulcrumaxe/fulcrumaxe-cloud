@@ -3,7 +3,8 @@ import type { Pool, PoolClient } from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPool } from '@fx/db/src/pool.js';
 import { withTenant } from '@fx/db/src/withTenant.js';
-import { recordDriverEvent } from '@fx/core/src/work-items/driverEvents.js';
+import { DEQUEUE_SUCCESS_CODES, recordDriverEvent } from '@fx/core/src/work-items/driverEvents.js';
+import { QUEUE_SUCCESS_DEQUEUE_CODES } from '@fx/db/src/mergeReceipt.js';
 import { reportError } from '@fx/telemetry';
 import { applyMappedEvent, mapEvent, type ApplyEventCtx, type ApplyResult, type GithubPullRequestPayload } from '../src/eventMapper.js';
 import { loadFixture } from './helpers/fixtures.js';
@@ -50,6 +51,8 @@ describe('merge-queue deliveries [pg]', () => {
   const item = async (withEnqueue = true) => {
     const gh = nextGh++;
     const workItemId = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: gh, stage: 'pr_opened' });
+    // The review run the merge's receipt points at (D#7 DW-R4); without one the receipt is reported as missing.
+    await admin.query(`INSERT INTO agent_runs (account_id, work_item_id, role, runtime, status, head_sha) VALUES ($1, $2, 'code-reviewer', 'production', 'succeeded', $3)`, [refs.accountId, workItemId, GATED]);
     if (withEnqueue) await withTenant(appUserPool, refs.accountId, (c) => recordDriverEvent(c, refs.accountId, { workItemId, kind: 'merge_enqueued', dedupeKey: `enqueued:${GATED}`, code: 'queue', headSha: GATED, prNumber: 800 + gh, queueEntryId: 'MQE_kwDOentry' }));
     return { gh, workItemId };
   };
@@ -206,5 +209,116 @@ describe('merge-queue deliveries [pg]', () => {
     expect(await apply(forked, `d-${randomUUID()}`)).toMatchObject({ applied: 'skipped' });
     expect(await apply(payload('dequeued', 987654), `d-${randomUUID()}`)).toMatchObject({ applied: 'skipped' });
     expect(await events(it1.workItemId, 'merge_dequeued')).toEqual([]);
+  });
+});
+
+describe('D#7 DW-R4: the receipt behind a merge the host queue made [pg]', () => {
+  let adminPool: Pool;
+  let appUserPool: Pool;
+  let admin: PoolClient;
+  let refs: SeedRefs;
+  let nextGh = 9000;
+
+  beforeAll(async () => {
+    adminPool = createPool(process.env.GITHUB_DATABASE_URL!);
+    appUserPool = createPool(process.env.GITHUB_DATABASE_URL_APP_USER!);
+    admin = await adminPool.connect();
+    refs = await seedAccountWithRepo(admin, 4748);
+  });
+  afterAll(async () => {
+    admin.release();
+    await appUserPool.end();
+    await adminPool.end();
+  });
+  beforeEach(() => vi.mocked(reportError).mockClear());
+
+  const apply = (p: GithubPullRequestPayload): Promise<ApplyResult> => {
+    const ctx: ApplyEventCtx = { accountId: refs.accountId, installationId: refs.installationId, repoId: refs.repoId, repo: { accountId: refs.accountId, repoId: refs.repoId, ghRepoId: refs.ghRepoId, fullName: refs.repoFullName }, deliveryId: `d-${randomUUID()}` };
+    return withTenant(appUserPool, refs.accountId, (c) => applyMappedEvent(c, ctx, mapEvent('pull_request', p, { allowlist: [] })));
+  };
+  const merged = (gh: number, head: string): GithubPullRequestPayload => {
+    const real = loadFixture<GithubPullRequestPayload>('pull_request.closed.merged.json');
+    return { ...real, action: 'closed', pull_request: { ...real.pull_request, number: 800 + gh, body: `Closes #${gh}`, head: { ...real.pull_request.head, sha: head } } } as GithubPullRequestPayload;
+  };
+  /** Appends the next version of the repository's merge dial (versions are shared by the tests below, so each sets the dial it needs). */
+  const setDial = async (disposition: string) => {
+    const version = ((await admin.query<{ v: number }>(`SELECT coalesce(max(version), 0) + 1 AS v FROM decision_settings WHERE repo_id = $1 AND decision_type = 'merge_after_reviews'`, [refs.repoId])).rows[0]!.v);
+    const user = randomUUID();
+    await admin.query('INSERT INTO users (id, email) VALUES ($1, $2)', [user, `${user}@example.test`]);
+    await admin.query(
+      `INSERT INTO decision_settings (account_id, repo_id, decision_type, disposition, preset, version, changed_by) VALUES ($1, $2, 'merge_after_reviews', $3, NULL, $4, $5)`,
+      [refs.accountId, refs.repoId, disposition, version, user],
+    );
+  };
+  /** An item the gate queued at GATED with a review run on it. */
+  const gated = async (opts: { enqueue?: boolean } = {}) => {
+    const gh = nextGh++;
+    const workItemId = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: gh, stage: 'pr_opened' });
+    await admin.query(`INSERT INTO agent_runs (account_id, work_item_id, role, runtime, status, head_sha) VALUES ($1, $2, 'code-reviewer', 'production', 'succeeded', $3)`, [refs.accountId, workItemId, GATED]);
+    if (opts.enqueue !== false) await withTenant(appUserPool, refs.accountId, (c) => recordDriverEvent(c, refs.accountId, { workItemId, kind: 'merge_enqueued', dedupeKey: `enqueued:${GATED}`, code: 'queue', headSha: GATED, prNumber: 800 + gh }));
+    return { gh, workItemId };
+  };
+  const receipts = async (workItemId: string) => (await admin.query(`SELECT chosen, dial_version, actor, class FROM decision_receipts WHERE work_item_id = $1 AND decision_type = 'merge_after_reviews'`, [workItemId])).rows;
+
+  it('a merge of an item the gate queued leaves one receipt, a replay x3 adds none, and the dial is the one that stood at the enqueue: moving it to ask afterwards takes nothing away', async () => {
+    await setDial('announce');
+    const it1 = await gated();
+    await setDial('ask');
+    for (let i = 0; i < 3; i++) await apply(merged(it1.gh, GATED));
+    expect(await receipts(it1.workItemId)).toEqual([{ chosen: 'announce', dial_version: expect.any(Number), actor: 'policy', class: 'human_over_the_loop' }]);
+    expect(vi.mocked(reportError)).not.toHaveBeenCalled();
+  });
+
+  it('a person\'s hand merge (no merge_enqueued fact from the gate) leaves no receipt', async () => {
+    await setDial('act');
+    const hand = await gated({ enqueue: false });
+    await apply(merged(hand.gh, GATED));
+    expect(await receipts(hand.workItemId)).toEqual([]);
+  });
+
+  it('the head GitHub merged is the head the fact records: a merged head other than the enqueued one is receipted at that head, with the run found on the head the gate sent', async () => {
+    await setDial('act');
+    const it1 = await gated();
+    await apply(merged(it1.gh, OTHER));
+    expect((await admin.query(`SELECT head_sha FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'merged_via_queue'`, [it1.workItemId])).rows).toEqual([{ head_sha: OTHER }]);
+    expect(await receipts(it1.workItemId)).toHaveLength(1);
+  });
+
+  it('a person who takes the pull request out of the queue and then merges it by hand gets no policy receipt; a re-enqueue by the gate after the removal makes the merge the gate\'s again; GitHub\'s own success dequeue changes nothing', async () => {
+    await setDial('act');
+    const removed = await gated();
+    await withTenant(appUserPool, refs.accountId, (c) => recordDriverEvent(c, refs.accountId, { workItemId: removed.workItemId, kind: 'merge_dequeued', dedupeKey: 'dq:user', code: 'manual', reasons: ['actor_user'], headSha: GATED, prNumber: 800 + removed.gh }));
+    await apply(merged(removed.gh, GATED));
+    expect(await receipts(removed.workItemId)).toEqual([]);
+
+    const again = await gated();
+    await withTenant(appUserPool, refs.accountId, (c) => recordDriverEvent(c, refs.accountId, { workItemId: again.workItemId, kind: 'merge_dequeued', dedupeKey: 'dq:app', code: 'merge_conflict', reasons: ['actor_app'], headSha: GATED, prNumber: 800 + again.gh }));
+    await withTenant(appUserPool, refs.accountId, (c) => recordDriverEvent(c, refs.accountId, { workItemId: again.workItemId, kind: 'merge_enqueued', dedupeKey: 'enqueued:second', code: 'queue', headSha: GATED, prNumber: 800 + again.gh }));
+    await apply(merged(again.gh, GATED));
+    expect(await receipts(again.workItemId)).toHaveLength(1);
+
+    const success = await gated();
+    await withTenant(appUserPool, refs.accountId, (c) => recordDriverEvent(c, refs.accountId, { workItemId: success.workItemId, kind: 'merge_dequeued', dedupeKey: 'dq:merge', code: 'merge', reasons: ['actor_app'], headSha: GATED, prNumber: 800 + success.gh }));
+    await apply(merged(success.gh, GATED));
+    expect(await receipts(success.workItemId)).toHaveLength(1);
+  });
+
+  it('the success reasons the receipt helper skips are the ones the event mapper treats as success', () => {
+    expect([...QUEUE_SUCCESS_DEQUEUE_CODES].sort()).toEqual([...DEQUEUE_SUCCESS_CODES].sort());
+  });
+
+  it('a failed receipt write does not fail the delivery or lose the fact and the stage move, and is reported', async () => {
+    await setDial('act');
+    const it1 = await gated();
+    await admin.query('REVOKE EXECUTE ON FUNCTION merge_receipt_write(uuid, text, uuid, text, text, integer, integer) FROM app_user');
+    try {
+      expect(await apply(merged(it1.gh, GATED))).toMatchObject({ applied: expect.any(String) });
+    } finally {
+      await admin.query('GRANT EXECUTE ON FUNCTION merge_receipt_write(uuid, text, uuid, text, text, integer, integer) TO app_user');
+    }
+    expect((await admin.query(`SELECT stage FROM work_items WHERE id = $1`, [it1.workItemId])).rows).toEqual([{ stage: 'merged' }]);
+    expect((await admin.query(`SELECT 1 FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'merged_via_queue'`, [it1.workItemId])).rowCount).toBe(1);
+    expect(await receipts(it1.workItemId)).toEqual([]);
+    expect(vi.mocked(reportError)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: 'merge_receipt_failed' }));
   });
 });

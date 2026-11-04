@@ -98,7 +98,9 @@ function presetDisposition(entry: CatalogueEntry, preset: PresetName): Dispositi
  * The dials the runtime reads a missing row as Balanced for (owner ruling 10-25): the three start dials (`startDecide.presetFor`), the fix-round and child-launch
  * dial (`fixRoundGate.presetOf`), and the two types the executor card declares, which the decision snapshot freezes as Balanced (`decisionSnapshot.dispositionForDial`).
  * Pinned against the start path by `decision-settings-start.test.ts`. "Run on a member's plan" is not here: the runner claim keeps its own rule, the catalogue default,
- * which already equals Balanced's value. A dial no runtime path reads keeps its catalogue default.
+ * which already equals Balanced's value. Neither is the merge dial (`merge_after_reviews`): the merge gate reads it and reads no row, or a "use the default" row,
+ * as the catalogue default `act`, so it keeps that value here too (it merges as Balanced's `announce` does, and the executor-card pin would fail if this list said announce).
+ * A dial no runtime path reads keeps its catalogue default.
  */
 export const RUNTIME_NO_ROW_BALANCED: ReadonlySet<string> = new Set(["start_work_small", "start_work_bug", "start_work_doc", "launch_sub_item", "nonbreaking_refactor_approach", "test_strategy_choice"]);
 
@@ -116,8 +118,16 @@ const START_DIALS: ReadonlySet<string> = new Set([...RUNTIME_NO_ROW_BALANCED].fi
 const needsWritten = (entry: CatalogueEntry, row: DecisionSetting | null): boolean => START_DIALS.has(entry.id) && isDefault(row);
 
 /**
- * A dial no runtime path reads (it is not in the list above) and nobody has set has no opinion, so it never keeps a repo from reading Balanced, nor is
- * Balanced written for it. A dial added to the catalogue later is treated this way until the runtime reads it and it joins the list.
+ * The merge dial. With no written row the gate reads `act`, which merges exactly as Balanced's `announce` does, so it counts as matching Balanced. But choosing
+ * Balanced writes `announce` for it, so the receipt and the screen say what the person chose. The preview then says what is truly written (act to announce).
+ */
+const MERGE_DIAL = "merge_after_reviews";
+const writesBalancedMerge = (entry: CatalogueEntry, row: DecisionSetting | null, preset: PresetName): boolean => entry.id === MERGE_DIAL && preset === "balanced" && isDefault(row);
+
+/**
+ * A dial that is not in the list above and nobody has set keeps its catalogue default and never keeps a repo from reading Balanced: a dial no runtime path reads
+ * has no opinion, and the merge dial is read by the gate as `act`, which merges as Balanced does (Balanced is then written for it only by a person's choice, see
+ * `writesBalancedMerge`). A dial added to the catalogue later is treated like the first kind until the runtime reads it and it joins the list.
  */
 const unreadDefault = (entry: CatalogueEntry, row: DecisionSetting | null): boolean => !RUNTIME_NO_ROW_BALANCED.has(entry.id) && isDefault(row);
 const atPreset = (entry: CatalogueEntry, row: DecisionSetting | null, preset: PresetName): boolean =>
@@ -150,7 +160,7 @@ function movesFor(preset: PresetName, rows: Map<string, DecisionSetting | null>)
     const from = effective(entry, row);
     const to = presetDisposition(entry, preset);
     // A start dial nobody has written is written by a person's choice even where it already matches: the sweep starts nothing on no row or a marker row.
-    if (atPreset(entry, row, preset) && !needsWritten(entry, row)) continue;
+    if (atPreset(entry, row, preset) && !needsWritten(entry, row) && !writesBalancedMerge(entry, row, preset)) continue;
     if (entry.id === RUNNER_RUN_DECISION_TYPE && isLoosening(from, to)) held.push({ decision_type: entry.id, from, to, note: PRESET_HELD_SENTENCE });
     else moves.push({ decision_type: entry.id, from, to });
   }

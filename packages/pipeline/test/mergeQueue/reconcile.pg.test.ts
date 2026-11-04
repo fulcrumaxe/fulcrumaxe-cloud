@@ -95,6 +95,17 @@ describe("reconcile of entries waiting in the host's queue [pg]", () => {
     expect(w.reads()).toBe(1);
   });
 
+  it("D#7 DW-R4: a lost merge settled here leaves the same one receipt the webhook would, and a replay or a later pass adds none", async () => {
+    const r = await setup([7]);
+    const it = r.items.get(7)!;
+    await db.admin.query(`INSERT INTO agent_runs (account_id, work_item_id, role, runtime, status, head_sha) VALUES ($1, $2, 'code-reviewer', 'production', 'succeeded', $3)`, [r.accountId, it.workItemId, it.head]);
+    const w = world(r, { 7: { state: "closed", merged: true } });
+    await run(r, w);
+    await run(r, w, { now: at(60) });
+    const receipts = await db.admin.query(`SELECT chosen, dial_version, actor FROM decision_receipts WHERE work_item_id = $1 AND decision_type = 'merge_after_reviews'`, [it.workItemId]);
+    expect(receipts.rows).toEqual([{ chosen: "act", dial_version: 0, actor: "policy" }]);
+  });
+
   it("a merge at a head other than the one enqueued is still recorded as the queue's merge, with the difference raised once", async () => {
     const r = await setup([7]);
     const it = r.items.get(7)!;

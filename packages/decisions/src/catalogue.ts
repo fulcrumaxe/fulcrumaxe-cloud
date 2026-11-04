@@ -31,7 +31,7 @@ import type { CatalogueEntry } from "./types.js";
  * three presets next to this number: changing either without bumping it
  * (and updating the pin) fails that test.
  */
-export const CATALOGUE_VERSION = 8;
+export const CATALOGUE_VERSION = 9;
 
 /**
  * How long a class-2 or class-3 decision stays free to reverse, in hours (D#7 C23: a per-entry catalogue field, 24 h, the same on every
@@ -196,6 +196,24 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     customerProximity: "internal_only",
     dataSensitivity: "none",
     timeoutOutcomes: ["stop_and_flag", "proceed_recommended"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
+  },
+  {
+    // D#7 DW-R4: the merge gate merging a pull request once its reviews pass. The gate reads this together with the repository's
+    // auto-merge role setting and both must allow. With no dial row the default is `act`, so a repository that never set this behaves as
+    // before (the role setting alone decides). Cautious asks (a person merges), Balanced merges and says so, Autonomous merges. No ask is
+    // raised: for `ask` the person's own merge click is the answer, so silence has one outcome, stop-and-flag.
+    id: "merge_after_reviews",
+    class: "human_over_the_loop",
+    defaultDisposition: "act",
+    allowedDispositions: ["act", "announce", "ask"],
+    reversal: {
+      availability: "not_reversible",
+      reason: "a merge can't be undone from here; turn the setting off to stop the next one",
+    },
+    customerProximity: "internal_only",
+    dataSensitivity: "none",
+    timeoutOutcomes: ["stop_and_flag"],
     reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
   },
   {

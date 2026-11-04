@@ -18,6 +18,11 @@
       "decision_type": "start_work_doc",
       "from": "announce",
       "to": "announce"
+    },
+    {
+      "decision_type": "merge_after_reviews",
+      "from": "act",
+      "to": "announce"
     }
   ]
 }
