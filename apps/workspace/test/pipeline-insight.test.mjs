@@ -1127,6 +1127,15 @@ describe("the Public change block", () => {
     const panel = await show(OK);
     expect(byId(panel.el, "pl-public-change")).toHaveLength(0);
   });
+
+  it("shows the branch cleanup sentence when the server sends one, and no line when it sends none or an empty one", async () => {
+    const sentence = "Branch cleanup left a branch in place because GitHub protects it.";
+    expect(buildInsight({ ...OK, branch_cleanup: { sentence } }).branchCleanup).toBe(sentence);
+    const panel = await show({ ...OK, branch_cleanup: { sentence } });
+    expect(byId(panel.el, "pl-branch-cleanup")[0].textContent).toBe(sentence);
+    for (const bad of [undefined, null, { sentence: "" }, { sentence: 3 }]) expect(buildInsight({ ...OK, branch_cleanup: bad }).branchCleanup).toBeNull();
+    expect(byId((await show(OK)).el, "pl-branch-cleanup")).toHaveLength(0);
+  });
 });
 
 describe("the short-Spec refusal notice (spec_refused)", () => {

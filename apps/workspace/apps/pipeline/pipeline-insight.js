@@ -917,6 +917,8 @@ export function buildInsight(data, timeZone) {
     runs,
     runsTruncated: data.runs_truncated === true,
     publicChange: publicChangeView(data),
+    // D#598 P1f-5d-ui: what the branch cleanup of the item's close did. The server writes the sentence; absent until the cleanup has recorded something.
+    branchCleanup: data.branch_cleanup && typeof data.branch_cleanup.sentence === "string" && data.branch_cleanup.sentence ? data.branch_cleanup.sentence : null,
     // D#598 P7c: the review section's line for a head that is only a merge of the base branch. The server writes the sentence; no reviewer run exists for it.
     recheck: data.review_recheck && data.review_recheck.kind === "merge_only" && typeof data.review_recheck.sentence === "string" ? data.review_recheck.sentence : null,
     rounds: groupRounds(data.comments),
@@ -1240,6 +1242,7 @@ export function createInsightPanel(deps) {
       m.runsTruncated ? h("p", { class: "pl-muted" }, SENTENCES.olderRuns) : [],
       m.recheck ? h("p", { class: "pl-muted", role: "status", "data-testid": "pl-review-recheck" }, m.recheck) : [],
       m.publicChange ? publicChangeBlock(m.publicChange) : [],
+      m.branchCleanup ? h("p", { class: "pl-muted", role: "status", "data-testid": "pl-branch-cleanup" }, m.branchCleanup) : [],
       m.receipts
         ? [
             h("h3", { class: "pl-detail-sub", "data-testid": "pl-receipts-heading" }, m.receipts.heading),
