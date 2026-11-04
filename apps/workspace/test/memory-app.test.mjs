@@ -186,9 +186,18 @@ describe("the calls", () => {
     ]);
   });
 
+  it("MEM-10: the queue read carries the entries the autonomy setting approved, drops malformed ones, and an older answer without the field reads as none", async () => {
+    const id = "6d2e1f30-4a5b-4c6d-8e7f-90a1b2c3d4e5";
+    const q = await loadQueue(fakeGet(() => ({ cards: [], truncated: false, auto_approved: [{ entry: { id }, title: "T" }, {}, null], auto_approved_truncated: true })));
+    expect(q.autoApproved.map((c) => c.entry.id)).toEqual([id]);
+    expect(q.autoTruncated).toBe(true);
+    expect((await loadQueue(fakeGet(() => ({ cards: [], truncated: false })))).autoApproved).toEqual([]);
+    expect(COPY.autoTitle).toBe("Approved by your autonomy setting");
+  });
+
   it("an empty or malformed answer reads as empty, never as a crash", async () => {
     expect(await loadList({}, fakeGet(() => null))).toEqual({ groups: [], truncated: false });
-    expect(await loadQueue(fakeGet(() => ({ cards: [{}, null, { entry: { id: "x" } }] })))).toEqual({ cards: [], truncated: false });
+    expect(await loadQueue(fakeGet(() => ({ cards: [{}, null, { entry: { id: "x" } }] })))).toEqual({ cards: [], truncated: false, autoApproved: [], autoTruncated: false });
     expect(await loadRuns("a", fakeGet(() => ({})))).toEqual({ total: 0, runs: [], truncated: false });
   });
 });

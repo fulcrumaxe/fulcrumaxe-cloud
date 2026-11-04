@@ -135,7 +135,7 @@ function mountApp(contentEl) {
   const ac = new AbortController();
   let phase = "loading"; // loading | ready | error
   let list = { groups: [], truncated: false };
-  let queue = { cards: [], truncated: false };
+  let queue = { cards: [], truncated: false, autoApproved: [], autoTruncated: false };
   let repos = [];
   let counts = null; // { repos, items } or null when the route failed
   let places = new Map(); // "scope|label" -> { kind, id }
@@ -150,6 +150,7 @@ function mountApp(contentEl) {
 
   const status = h("p", { class: "mem-status", role: "status", "aria-live": "polite", "data-testid": "mem-status" });
   const queueHost = h("section", { class: "mem-section", "aria-label": COPY.queueTitle });
+  const autoHost = h("section", { class: "mem-section", "aria-label": COPY.autoTitle, "data-testid": "mem-auto-section", hidden: true });
   const listBody = h("div", { "data-testid": "mem-list" });
   const kindSel = h("select", { id: "mem-f-kind", class: "mem-input", "data-testid": "mem-filter-kind", onChange: () => (filters.kinds = kindSel.value ? [kindSel.value] : [], load(false)) }, h("option", { value: "" }, "All kinds"), KINDS.map(([v, l]) => h("option", { value: v }, l)));
   const statusSel = h("select", { id: "mem-f-status", class: "mem-input", "data-testid": "mem-filter-status", onChange: () => (filters.statuses = statusSel.value ? [statusSel.value] : [], load(false)) }, h("option", { value: "" }, "Any status"), STATUSES.map(([v, l]) => h("option", { value: v }, l)));
@@ -164,6 +165,7 @@ function mountApp(contentEl) {
       h("h1", { class: "mem-title-h" }, COPY.title),
       status,
       queueHost,
+      autoHost,
       h("section", { class: "mem-section", "aria-label": COPY.listTitle },
         h("h2", { class: "mem-h" }, COPY.listTitle),
         h("div", { class: "mem-filters" }, h("label", { for: "mem-f-kind" }, "Kind"), kindSel, h("label", { for: "mem-f-status" }, "Status"), statusSel),
@@ -406,6 +408,7 @@ function mountApp(contentEl) {
     status.dataset.state = phase;
     root.querySelector('[data-testid="mem-deleted-note"]').hidden = filters.statuses[0] !== "deleted";
     q.set({ cards: queue.cards, truncated: queue.truncated, phase, places });
+    paintAuto();
     if (phase === "loading") listBody.replaceChildren();
     else if (phase === "error") listBody.replaceChildren(h("button", { type: "button", class: "mem-btn", "data-testid": "mem-retry", onClick: () => load(false) }, COPY.retry));
     else {
@@ -420,6 +423,47 @@ function mountApp(contentEl) {
         ...(list.truncated ? [h("p", { class: "mem-muted" }, "More memory matches than this shows. Narrow it with a kind or a status.")] : [])
       );
     }
+  }
+
+  // ── approved by the person's own autonomy setting (MEM-10): each with its place and run, and Undo, which retires it ──
+  function autoRow(c) {
+    const e = c.entry;
+    const allowed = access === "ok" && (isAdmin || e.scope === "item");
+    return h(
+      "li",
+      { class: "mem-row", "data-testid": "mem-auto-card", "data-id": e.id },
+      h("span", { class: "mem-chip" }, text(c.kind_label, "Memory")),
+      h("span", { class: "mem-row-title" }, text(c.title, COPY.unknownSource)),
+      h("span", { class: "mem-muted" }, text(c.scope_label, COPY.unknownSource) + " · " + text(c.proposed_by, COPY.unknownSource) + " · " + text(c.approved_age)),
+      h("button", { type: "button", class: "mem-btn mem-btn-quiet", disabled: !allowed || rowBusy.has(e.id), title: allowed ? "" : access === "ok" ? COPY.noRights : COPY.checkingAccess, "data-testid": "mem-auto-undo", onClick: () => undoAuto(e.id) }, COPY.autoUndo),
+      rowErr.has(e.id) ? h("p", { class: "mem-error", role: "alert", "data-testid": "mem-row-error" }, rowErr.get(e.id)) : null
+    );
+  }
+  async function undoAuto(id) {
+    if (rowBusy.has(id)) return;
+    rowBusy.add(id);
+    rowErr.delete(id);
+    paint();
+    try {
+      await revertEntries([id], "retire");
+      toasts.show({ message: COPY.autoUndone, onUndo: () => undo(() => revertEntries([id], "restore_retired"), "Restored.", id) });
+    } catch (e) {
+      rowErr.set(id, e && e.code === "conflict" ? COPY.changedSince : failureWords(e));
+    }
+    rowBusy.delete(id);
+    await load(true, undefined, true);
+  }
+  function paintAuto() {
+    const cards = phase === "ready" ? queue.autoApproved : [];
+    autoHost.hidden = cards.length === 0;
+    autoHost.replaceChildren(
+      ...(cards.length === 0 ? [] : [
+        h("h2", { class: "mem-h", "data-testid": "mem-auto-heading" }, COPY.autoTitle),
+        h("p", { class: "mem-muted" }, COPY.autoNote),
+        h("ul", { class: "mem-rows", "data-testid": "mem-auto" }, cards.map(autoRow)),
+        ...(queue.autoTruncated ? [h("p", { class: "mem-muted" }, "Showing the newest " + cards.length + ".")] : []),
+      ])
+    );
   }
 
   paint();

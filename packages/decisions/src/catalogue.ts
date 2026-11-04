@@ -31,7 +31,7 @@ import type { CatalogueEntry } from "./types.js";
  * three presets next to this number: changing either without bumping it
  * (and updating the pin) fails that test.
  */
-export const CATALOGUE_VERSION = 9;
+export const CATALOGUE_VERSION = 10;
 
 /**
  * How long a class-2 or class-3 decision stays free to reverse, in hours (D#7 C23: a per-entry catalogue field, 24 h, the same on every
@@ -213,6 +213,24 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     },
     customerProximity: "internal_only",
     dataSensitivity: "none",
+    timeoutOutcomes: ["stop_and_flag"],
+    reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
+  },
+  {
+    // D#601 MEM-10: an agent's low-risk memory proposal (a fact or a command, for one item or one repository) approved by the person's own setting
+    // instead of by a click. Default `ask`, and no preset moves it: approved memory is read into later prompts, so a person raises it on purpose,
+    // per repository, and only as far as `announce` (the review screen says what was approved and offers Undo). It is never `act`. Role and account
+    // memory, every other kind, and imported or runner-sourced proposals are outside it in code and in the database, whatever the setting says.
+    // The undo is the review screen's own (retire the entry), not a compensation, so the receipt page has nothing to offer for it.
+    id: "memory_auto_approve",
+    class: "human_over_the_loop",
+    defaultDisposition: "ask",
+    allowedDispositions: ["announce", "ask"],
+    reversal: { availability: "compensating_work" },
+    customerProximity: "internal_only",
+    dataSensitivity: "none",
+    // No ask is raised for it: at `ask` the proposal waits for a person, as every proposal did before, so silence has one outcome (the guard in
+    // catalogue.test.ts wants every class 2 entry to name it).
     timeoutOutcomes: ["stop_and_flag"],
     reversalWindowHours: DEFAULT_REVERSAL_WINDOW_HOURS,
   },

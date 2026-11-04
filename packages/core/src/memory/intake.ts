@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
+import { CATALOGUE_VERSION, getCatalogueEntry } from '@fx/decisions';
+import { getCurrentDialSetting } from '@fx/db/src/decisions.js';
+import { withReversalWindow } from '@fx/db/src/receiptWriter.js';
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { MEMORY_ROLE_MAX_ENTRIES } from './evidence.js';
@@ -57,9 +60,24 @@ export type MemoryProposalSource = Extract<MemoryAuthorKind, 'agent' | 'assistan
 
 export const MEMORY_PROPOSALS_EVENT_KIND = 'memory.proposals';
 
+/**
+ * D#601 MEM-10: what the `memory_auto_approve` dial did with a stored proposal that it could have approved. `approved`: approved in the same transaction,
+ * one receipt. `memory_full`: the place already holds its cap of approved entries, so it waits for a person. `refused`: the database declined (the dial
+ * changed, the entry is not the run's, ...), so it waits for a person. `previously_declined`: a person rejected, retired, deleted or edited away the same text (case and
+ * whitespace aside) anywhere in this repository, so the dial leaves it for a person to look at again. A proposal the dial may not touch (another kind or scope, an import, a runner
+ * proposal, a repository whose dial is at ask) carries no outcome at all.
+ */
+export const MEMORY_AUTO_APPROVE_OUTCOMES = ['approved', 'memory_full', 'refused', 'previously_declined'] as const;
+export type MemoryAutoApproveOutcome = (typeof MEMORY_AUTO_APPROVE_OUTCOMES)[number];
+/** The two kinds and two places the dial may approve; the database holds the same lists (migration 0986) and re-checks them. */
+export const MEMORY_AUTO_APPROVE_KINDS: readonly MemoryKind[] = ['fact', 'command'];
+export const MEMORY_AUTO_APPROVE_SCOPES: readonly MemoryScope[] = ['item', 'repo'];
+/** The in-product agent paths. The imported and runner-sourced ones (`MEMORY_GATED_AUTHOR_KINDS`) are never on this list. */
+export const MEMORY_AUTO_APPROVE_SOURCES: readonly MemoryProposalSource[] = ['agent', 'assistant'];
+
 export interface MemoryProposalsEvent {
   source: MemoryProposalSource;
-  stored: Array<{ index: number; id: string; scope: MemoryScope; kind: MemoryKind }>;
+  stored: Array<{ index: number; id: string; scope: MemoryScope; kind: MemoryKind; auto?: MemoryAutoApproveOutcome }>;
   refused: Array<{ index: number; reason: MemoryIntakeReason }>;
 }
 
@@ -85,6 +103,11 @@ export interface IngestMemoryProposalsInput {
   itemTerminal?: boolean | ((client: PoolClient) => Promise<boolean>);
   /** The once-per-run event this call is idempotent on. Default `memory.proposals`; the deferred role pass uses `memory.role_proposals`. */
   eventKind?: string;
+  /**
+   * D#601 MEM-10: the run's repository, whose `memory_auto_approve` dial is read inside the intake. Left out (or null), nothing is auto-approved. Only the
+   * in-product agent paths may get past it: an import or runner source never does, whatever this holds.
+   */
+  dialRepoId?: string | null;
   backend?: string;
   modelId?: string;
 }
@@ -99,6 +122,9 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
 export function normalizedMemoryHash(text: string): string {
   return createHash('sha256').update(text.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim(), 'utf8').digest('hex');
 }
+
+/** How many of a repository's most recent declined entries (rejected, retired, deleted, replaced by an edit) the dial compares a new proposal against. */
+const DECLINED_LOOKUP_MAX = 400;
 
 const intakeLockSql = `SELECT pg_advisory_xact_lock(hashtextextended('memory_intake:' || $1::text, 0))`;
 /** The per-account intake lock (transaction-scoped, re-entrant within one transaction). */
@@ -130,12 +156,14 @@ export async function ingestInClient(client: PoolClient, input: Omit<IngestMemor
 
     const event: MemoryProposalsEvent = { source: input.source, stored: [], refused: [] };
     let repoRef: string | null | undefined;
+    let dial: AutoApproveDial | undefined;
+    const readDial = async (): Promise<AutoApproveDial> => (dial ??= await currentAutoApproveDial(client, input));
     for (const [index, item] of list.entries()) {
       if (index >= MEMORY_PROPOSALS_PER_RUN) {
         event.refused.push({ index, reason: 'over_run_limit' });
         continue;
       }
-      const outcome = await considerOne(client, input, secrets, item, async () => (repoRef === undefined ? (repoRef = (await input.resolveRepoScopeRef?.(client)) ?? null) : repoRef));
+      const outcome = await considerOne(client, input, secrets, item, async () => (repoRef === undefined ? (repoRef = (await input.resolveRepoScopeRef?.(client)) ?? null) : repoRef), readDial);
       if ('reason' in outcome) event.refused.push({ index, reason: outcome.reason });
       else event.stored.push({ index, ...outcome });
     }
@@ -154,7 +182,8 @@ async function considerOne(
   secrets: readonly string[],
   item: unknown,
   repoRef: () => Promise<string | null>,
-): Promise<{ reason: MemoryIntakeReason } | { id: string; scope: MemoryScope; kind: MemoryKind }> {
+  readDial: () => Promise<AutoApproveDial>,
+): Promise<{ reason: MemoryIntakeReason } | { id: string; scope: MemoryScope; kind: MemoryKind; auto?: MemoryAutoApproveOutcome }> {
   if (!isRecord(item)) return { reason: 'invalid_proposal' };
   const { scope, kind, body, why } = item;
   if (typeof scope !== 'string' || typeof kind !== 'string' || !(MEMORY_KINDS as readonly string[]).includes(kind)) return { reason: 'invalid_proposal' };
@@ -215,5 +244,68 @@ async function considerOne(
     throw err;
   }
   if (scope === 'role') await addEvidence(client, input, id);
-  return { id, scope, kind: kind as MemoryKind };
+  // MEM-10: only now, after the shape, scope, text, duplicate and cap checks above have kept the proposal, may the dial approve it.
+  const auto = await maybeAutoApprove(client, input, { id, scope: scope as MemoryScope, kind: kind as MemoryKind, scopeRef, hash }, readDial, repoRef);
+  return { id, scope, kind: kind as MemoryKind, ...(auto === undefined ? {} : { auto }) };
+}
+
+/** The repository's `memory_auto_approve` dial as the intake sees it: the current version and whether it says `announce`. */
+export type AutoApproveDial = { raised: false } | { raised: true; repoId: string; version: number };
+
+async function currentAutoApproveDial(client: PoolClient, input: Omit<IngestMemoryProposalsInput, 'pool'>): Promise<AutoApproveDial> {
+  if (typeof input.dialRepoId !== 'string') return { raised: false };
+  const entry = getCatalogueEntry('memory_auto_approve');
+  const row = await getCurrentDialSetting(client, input.dialRepoId, 'memory_auto_approve');
+  const stored = row?.disposition;
+  // A value the entry does not allow, or anything but `announce`, is not raised (fail closed).
+  if (row === null || stored !== 'announce' || entry === undefined || !entry.allowedDispositions.includes('announce')) return { raised: false };
+  return { raised: true, repoId: input.dialRepoId, version: row.version };
+}
+
+/**
+ * MEM-10: approves a stored proposal by the repository's dial, in the intake's own transaction. The author kind is the ingest path's (`input.source`),
+ * never anything in the proposal; an import or runner source, a kind other than fact and command, a place other than an item or a repository, and a run
+ * with no work item (the receipt needs one, and so does Undo) are not touched. The database re-checks every one of those, the dial's version included.
+ * A refusal leaves the proposal waiting for a person, exactly as before the dial existed, and is recorded on the run's event with a fixed word.
+ */
+async function maybeAutoApprove(
+  client: PoolClient,
+  input: Omit<IngestMemoryProposalsInput, 'pool'>,
+  stored: { id: string; scope: MemoryScope; kind: MemoryKind; scopeRef: string; hash: string },
+  readDial: () => Promise<AutoApproveDial>,
+  repoRef: () => Promise<string | null>,
+): Promise<MemoryAutoApproveOutcome | undefined> {
+  if (!MEMORY_AUTO_APPROVE_SOURCES.includes(input.source)) return undefined;
+  if (!MEMORY_AUTO_APPROVE_KINDS.includes(stored.kind) || !MEMORY_AUTO_APPROVE_SCOPES.includes(stored.scope) || input.workItemId === null) return undefined;
+  const dial = await readDial();
+  if (!dial.raised) return undefined;
+  // A person's explicit no is left standing: the same text (case and whitespace aside) that a person rejected, retired, deleted or replaced by an edit
+  // anywhere in this repository (its repo-scope entries and the entries of its work items) waits for a person instead of being approved. This is a floor
+  // for honest repeats, not a boundary: a reworded text has another hash and is treated as new, and a deleted entry is purged after 30 days, so that no is
+  // forgotten then. Looked up only here, for the rare proposal the dial could really approve, and bounded to the most recent entries.
+  const ref = stored.scope === 'repo' ? stored.scopeRef : await repoRef();
+  const declined = await client.query<{ body: string }>(
+    `SELECT body FROM memory_entries
+      WHERE account_id = $1 AND status IN ('rejected', 'retired', 'deleted', 'superseded')
+        AND ((scope = 'repo' AND scope_ref = $2::text)
+          OR (scope = 'item' AND scope_ref IN (SELECT id::text FROM work_items WHERE account_id = $1 AND repo_id = $3::uuid)))
+      ORDER BY updated_at DESC LIMIT $4`,
+    [input.accountId, ref, dial.repoId, DECLINED_LOOKUP_MAX],
+  );
+  if (declined.rows.some((r) => normalizedMemoryHash(r.body) === stored.hash)) return 'previously_declined';
+  await client.query('SAVEPOINT memory_auto_approve_one');
+  try {
+    await withReversalWindow(client, 'memory_auto_approve', () =>
+      client.query('SELECT memory_auto_approve($1::uuid, $2::uuid, $3::uuid, $4::integer, $5::integer)', [stored.id, dial.repoId, input.runId, dial.version, CATALOGUE_VERSION]),
+    );
+    await client.query('RELEASE SAVEPOINT memory_auto_approve_one');
+    return 'approved';
+  } catch (err) {
+    await client.query('ROLLBACK TO SAVEPOINT memory_auto_approve_one');
+    const code = (err as { code?: string } | null)?.code;
+    if (code === '54000') return 'memory_full';
+    // The database's fixed refusals: not permitted, nothing eligible, invalid argument. Anything else is a real failure and is not hidden.
+    if (code === '42501' || code === 'P0002' || code === '22023') return 'refused';
+    throw err;
+  }
 }

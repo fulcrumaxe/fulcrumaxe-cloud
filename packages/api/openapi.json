@@ -40942,7 +40942,7 @@
       "get": {
         "operationId": "getMemoryQueue",
         "summary": "Memory proposals waiting for a decision",
-        "description": "Session only, member. The `proposed` entries, oldest first, each card with its body, who proposed it, its evidence, and `open_state`: for an imported or runner-sourced card, whether THIS caller opened THIS version (`opened` or `unopened`); `not_required` for every other source. A role lesson an agent proposed carries `evidence_repos` (distinct repositories behind its runs) and `needs_second_repo` (true below two: it cannot be approved yet). Reading the queue opens nothing. At most 200 cards; `truncated` says more matched.",
+        "description": "Session only, member. The `proposed` entries, oldest first, each card with its body, who proposed it, its evidence, and `open_state`: for an imported or runner-sourced card, whether THIS caller opened THIS version (`opened` or `unopened`); `not_required` for every other source. A role lesson an agent proposed carries `evidence_repos` (distinct repositories behind its runs) and `needs_second_repo` (true below two: it cannot be approved yet). Reading the queue opens nothing. At most 200 cards; `truncated` says more matched. `auto_approved` lists the entries the person's own autonomy setting approved in the last 7 days that are still approved (newest first, each with its place and the run that proposed it): the screen shows them as \"Approved by your autonomy setting\" with Undo, which is the retire step. It is read from the approval's audit row each time, so lowering the setting changes nothing already listed.",
         "security": [
           {
             "session": []
@@ -41175,11 +41175,153 @@
                     },
                     "truncated": {
                       "type": "boolean"
+                    },
+                    "auto_approved": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "entry": {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
+                              "scope": {
+                                "type": "string",
+                                "enum": [
+                                  "account",
+                                  "repo",
+                                  "item",
+                                  "role"
+                                ]
+                              },
+                              "kind": {
+                                "type": "string",
+                                "enum": [
+                                  "convention",
+                                  "command",
+                                  "fact",
+                                  "gotcha",
+                                  "preference",
+                                  "decision"
+                                ]
+                              },
+                              "body": {
+                                "type": "string"
+                              },
+                              "why": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "author_kind": {
+                                "type": "string",
+                                "enum": [
+                                  "person",
+                                  "agent",
+                                  "assistant",
+                                  "import",
+                                  "runner_agent"
+                                ]
+                              },
+                              "status": {
+                                "type": "string",
+                                "enum": [
+                                  "proposed",
+                                  "approved",
+                                  "rejected",
+                                  "expired",
+                                  "retired",
+                                  "deleted",
+                                  "archived",
+                                  "superseded"
+                                ]
+                              },
+                              "version": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 9007199254740991
+                              },
+                              "content_sha256": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$"
+                              },
+                              "created_at": {
+                                "type": "string"
+                              },
+                              "updated_at": {
+                                "type": "string"
+                              },
+                              "approved_at": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "expires_at": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "scope",
+                              "kind",
+                              "body",
+                              "why",
+                              "author_kind",
+                              "status",
+                              "version",
+                              "content_sha256",
+                              "created_at",
+                              "updated_at",
+                              "approved_at",
+                              "expires_at"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "kind_label": {
+                            "type": "string"
+                          },
+                          "proposed_by": {
+                            "type": "string"
+                          },
+                          "scope_label": {
+                            "type": "string"
+                          },
+                          "approved_age": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "entry",
+                          "title",
+                          "kind_label",
+                          "proposed_by",
+                          "scope_label",
+                          "approved_age"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "auto_approved_truncated": {
+                      "type": "boolean"
                     }
                   },
                   "required": [
                     "cards",
-                    "truncated"
+                    "truncated",
+                    "auto_approved",
+                    "auto_approved_truncated"
                   ],
                   "additionalProperties": false
                 }

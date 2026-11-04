@@ -55,5 +55,30 @@
       "needs_second_repo": false
     }
   ],
-  "truncated": false
+  "truncated": false,
+  "auto_approved": [
+    {
+      "entry": {
+        "id": "3ca04051-6e7f-4081-9293-a4b5163708e9",
+        "scope": "repo",
+        "kind": "command",
+        "body": "Run pnpm test before pushing",
+        "why": null,
+        "author_kind": "agent",
+        "status": "approved",
+        "version": 1,
+        "content_sha256": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "created_at": "2026-10-16T09:00:00.000Z",
+        "updated_at": "2026-10-16T09:00:00.000Z",
+        "approved_at": "2026-10-16T09:00:00.000Z",
+        "expires_at": null
+      },
+      "title": "Run pnpm test before pushing",
+      "kind_label": "Command",
+      "proposed_by": "Proposed by agent (run 8b2c5e74)",
+      "scope_label": "acme/widgets",
+      "approved_age": "2 hours ago"
+    }
+  ],
+  "auto_approved_truncated": false
 }

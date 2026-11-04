@@ -29,6 +29,7 @@ const CLASS2 = [
   "start_work_doc",
   "launch_sub_item",
   "merge_after_reviews",
+  "memory_auto_approve",
   "publish_deprecation_notice",
 ];
 const ADJUSTABLE = CLASS2.length;

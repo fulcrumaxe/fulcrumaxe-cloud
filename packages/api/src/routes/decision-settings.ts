@@ -130,8 +130,18 @@ const writesBalancedMerge = (entry: CatalogueEntry, row: DecisionSetting | null,
  * `writesBalancedMerge`). A dial added to the catalogue later is treated like the first kind until the runtime reads it and it joins the list.
  */
 const unreadDefault = (entry: CatalogueEntry, row: DecisionSetting | null): boolean => !RUNTIME_NO_ROW_BALANCED.has(entry.id) && isDefault(row);
+/**
+ * The dials no preset moves (D#601 MEM-10). Auto-approving memory puts text into later prompts, so a person raises it on purpose, per repository, and
+ * choosing Balanced, Autonomous or Cautious neither raises it nor lowers it. Every preset therefore matches it at any value (it never decides which preset
+ * is active), and a preset that would have moved it lists it as held with the sentence below, so a raised dial is not mistaken for one Cautious turned
+ * off. With no version it reads as the catalogue default (`ask`): it is not in the runtime Balanced list above, because nothing reads a missing row as
+ * anything else.
+ */
+export const PRESET_FIXED: ReadonlySet<string> = new Set(["memory_auto_approve"]);
+export const PRESET_FIXED_HELD_SENTENCE = "Left as you set it. No preset changes this setting, so Cautious does not turn it off; change it here to make an agent's suggestions wait for you again.";
+
 const atPreset = (entry: CatalogueEntry, row: DecisionSetting | null, preset: PresetName): boolean =>
-  effective(entry, row) === presetDisposition(entry, preset) || (preset === "balanced" && unreadDefault(entry, row));
+  PRESET_FIXED.has(entry.id) || effective(entry, row) === presetDisposition(entry, preset) || (preset === "balanced" && unreadDefault(entry, row));
 
 /** The disposition in force: the current version, else what no version means. A stored value the entry does not allow fails closed to `ask`. */
 function effective(entry: CatalogueEntry, row: DecisionSetting | null): Disposition {
@@ -158,6 +168,11 @@ function movesFor(preset: PresetName, rows: Map<string, DecisionSetting | null>)
   for (const entry of classTwo()) {
     const row = rows.get(entry.id) ?? null;
     const from = effective(entry, row);
+    // A fixed dial stays where the person put it; a preset that would have moved it (a raised dial under any preset) says so instead.
+    if (PRESET_FIXED.has(entry.id)) {
+      if (from !== entry.defaultDisposition) held.push({ decision_type: entry.id, from, to: entry.defaultDisposition, note: PRESET_FIXED_HELD_SENTENCE });
+      continue;
+    }
     const to = presetDisposition(entry, preset);
     // A start dial nobody has written is written by a person's choice even where it already matches: the sweep starts nothing on no row or a marker row.
     if (atPreset(entry, row, preset) && !needsWritten(entry, row) && !writesBalancedMerge(entry, row, preset)) continue;

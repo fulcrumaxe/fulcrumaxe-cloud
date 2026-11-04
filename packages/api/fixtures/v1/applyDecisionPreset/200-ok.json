@@ -168,6 +168,20 @@
       "version": 1
     },
     {
+      "decision_type": "memory_auto_approve",
+      "label": "Approving a fact or command an agent suggests remembering",
+      "class": "human_over_the_loop",
+      "adjustable": true,
+      "disposition": "ask",
+      "allowed_dispositions": [
+        "announce",
+        "ask"
+      ],
+      "source": "default",
+      "preset": null,
+      "version": null
+    },
+    {
       "decision_type": "publish_deprecation_notice",
       "label": "Publishing a deprecation notice",
       "class": "human_over_the_loop",

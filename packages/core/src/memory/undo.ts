@@ -1,3 +1,5 @@
+import { CATALOGUE_VERSION } from '@fx/decisions';
+import { withReversalWindow } from '@fx/db/src/receiptWriter.js';
 import { assertRoleRoomForStep } from './evidence.js';
 import { NotFoundError } from '../tenancy/errors.js';
 import { MemoryInputError, assertUuid, editMemory, inSession, readEntries, type MemoryCtx, type MemoryEntry } from './index.js';
@@ -47,6 +49,15 @@ export async function revertMemory(ctx: ReadCtx, input: { ids: readonly string[]
     for (const id of ids) {
       const { rows } = await client.query<{ r: string }>('SELECT memory_decide($1::uuid, $2) AS r', [id, step.to]);
       if (rows[0]!.r === 'decided') changed += 1;
+    }
+    // MEM-10: retiring an entry the autonomy setting approved leaves the reversal receipt, attributed to the person whose session this is. Only an entry no
+    // person approved (approved_by empty) from an agent or assistant can be one; the database decides (it answers NULL for every other entry) and its receipt
+    // is part of this transaction, so an Undo and its receipt succeed or fail together. The window is cleared first: a reversal itself has no deadline.
+    if (input.action === 'retire') {
+      for (const e of found) {
+        if (e.approvedBy !== null || (e.authorKind !== 'agent' && e.authorKind !== 'assistant')) continue;
+        await withReversalWindow(client, 'reversal_recorded', () => client.query('SELECT memory_auto_approve_reversal($1::uuid, $2::integer)', [e.id, CATALOGUE_VERSION]));
+      }
     }
     return { changed, entries: await readEntries(client, ids) };
   });

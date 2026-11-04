@@ -38,6 +38,7 @@ interface RunFacts {
   runtime: string;
   status: string;
   stage: string | null;
+  repo_id: string | null;
 }
 
 const defaultLiveSecrets: LiveSecretsSource = () => liveInstallationTokens();
@@ -74,7 +75,7 @@ const itemTerminalOf = (accountId: string, workItemId: string | null) => async (
 export async function ingestRunMemoryProposals(input: RunMemoryIntakeInput): Promise<IngestRunResult> {
   if (input.envelope === null || input.envelope.memory_proposals === undefined) return { status: "none" };
   const facts = await withTenant(input.pool, input.accountId, async (client) => {
-    const { rows } = await client.query<RunFacts>("SELECT ar.role, ar.work_item_id, ar.runtime, ar.status, w.stage FROM agent_runs ar LEFT JOIN work_items w ON w.account_id = ar.account_id AND w.id = ar.work_item_id WHERE ar.id = $1 AND ar.account_id = $2", [input.runId, input.accountId]);
+    const { rows } = await client.query<RunFacts>("SELECT ar.role, ar.work_item_id, ar.runtime, ar.status, w.stage, w.repo_id FROM agent_runs ar LEFT JOIN work_items w ON w.account_id = ar.account_id AND w.id = ar.work_item_id WHERE ar.id = $1 AND ar.account_id = $2", [input.runId, input.accountId]);
     return rows[0] ?? null;
   });
   if (facts === null) return { status: "none" };
@@ -87,6 +88,9 @@ export async function ingestRunMemoryProposals(input: RunMemoryIntakeInput): Pro
     workItemId: facts.work_item_id,
     role: facts.role,
     source: "agent",
+    // MEM-10: the repository whose auto-approve dial the intake reads. A run with no work item gets none (the receipt needs one), and neither does a
+    // failed run: only a succeeded run's proposals may be approved by the dial; a failed run's wait for a person.
+    dialRepoId: facts.status === "succeeded" ? facts.repo_id : null,
     // MEM-9: agent-proposed role lessons are accepted (as pending entries only) once the run's work item is done.
     allowRoleScope: true,
     // Read inside the intake lock, in the intake's own transaction, so a merge landing between this call and the lock is not missed.

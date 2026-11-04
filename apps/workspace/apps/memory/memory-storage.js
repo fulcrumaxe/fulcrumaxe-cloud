@@ -66,6 +66,11 @@ export const COPY = Object.freeze({
   checkingAccess: "Checking your access…",
   accessFailed: "Your access couldn't be checked, so changes are turned off. Reload to try again.",
   tooOld: "Deleted more than 30 days ago, so it can't be restored.",
+  // D#601 MEM-10: what your own autonomy setting approved
+  autoTitle: "Approved by your autonomy setting",
+  autoNote: "These were approved without a click because you turned that setting on for this repository. Undo takes one out of use.",
+  autoUndo: "Undo",
+  autoUndone: "Undone. It is no longer used in runs.",
 });
 
 /** The one formatter: a string, or the fallback. null, undefined, NaN and the strings "null" and "undefined" never reach a screen. */
@@ -138,7 +143,8 @@ export async function loadList(filters = {}, get = api, signal) {
 
 export async function loadQueue(get = api, signal) {
   const body = await get("GET", "/api/v1/memory/queue", undefined, signal);
-  return { cards: arr(body && body.cards).filter((c) => c && c.entry && isUuid(c.entry.id)), truncated: !!(body && body.truncated) };
+  const ok = (c) => c && c.entry && isUuid(c.entry.id);
+  return { cards: arr(body && body.cards).filter(ok), truncated: !!(body && body.truncated), autoApproved: arr(body && body.auto_approved).filter(ok), autoTruncated: !!(body && body.auto_approved_truncated) };
 }
 
 /** The installed repositories (id and owner/name), so a repo with no memory yet still has its header. A failure is an empty list, not an error. */
