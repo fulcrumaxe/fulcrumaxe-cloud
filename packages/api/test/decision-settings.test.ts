@@ -141,16 +141,17 @@ describe('D#7 DP10a: decision settings routes', () => {
     const f = await fixture();
     const s = await get(f.owner, f.repoId);
     expect(s.can_change).toBe(true);
-    expect(s.active_preset).toBeNull();
+    // A repo with no versions runs as Balanced (owner ruling 10-25), so that is what it reads.
+    expect(s.active_preset).toBe('balanced');
     expect(s.presets.map((p) => p.name)).toEqual(['cautious', 'balanced', 'autonomous']);
     expect(new Set(s.presets.map((p) => p.customer_role)).size).toBe(3);
     const dials = dialsByType(s);
     expect(s.dials).toHaveLength(19);
     for (const type of CLASS_2) expect(dials[type], type).toMatchObject({ adjustable: true, source: 'default', preset: null, version: null });
     expect(dials.runner_run_on_member_plan!.disposition).toBe('announce');
-    expect(dials.nonbreaking_refactor_approach!.disposition).toBe('ask');
-    // D#483 S5-a: with no dial row the starting-work dials ask (starting work is a person's approval until they choose); the always-asked ones are locked.
-    for (const type of ['start_work_small', 'start_work_bug', 'start_work_doc', 'launch_sub_item']) expect(dials[type]!.disposition, type).toBe('ask');
+    // The dials the runtime reads as Balanced with no row show announce; a dial no runtime path reads keeps the catalogue default.
+    for (const type of ['nonbreaking_refactor_approach', 'test_strategy_choice', 'start_work_small', 'start_work_bug', 'start_work_doc', 'launch_sub_item']) expect(dials[type]!.disposition, type).toBe('announce');
+    for (const type of ['tool_call', 'run_extension', 'publish_deprecation_notice']) expect(dials[type]!.disposition, type).toBe('ask');
     for (const type of ['start_parent_item', 'spend_past_envelope', 'start_after_reclassify']) {
       expect(dials[type], type).toMatchObject({ adjustable: false, disposition: 'ask', allowed_dispositions: ['ask'] });
     }
@@ -179,17 +180,14 @@ describe('D#7 DP10a: decision settings routes', () => {
   it('preview returns exactly the class 2 dials a preset moves and writes nothing', async () => {
     const f = await fixture();
     const balanced = await (await call(f.member, 'POST', `/repos/${f.repoId}/decision-settings/preset/preview`, { preset: 'balanced' })).json() as Preview;
-    // Defaults are ask, ask, announce, ask, then ask on the four starting-work dials; Balanced is announce on the eight it may and ask on the locked one.
-    expect(balanced.moves).toEqual([
-      { decision_type: 'nonbreaking_refactor_approach', from: 'ask', to: 'announce' },
-      { decision_type: 'test_strategy_choice', from: 'ask', to: 'announce' },
-      { decision_type: 'start_work_small', from: 'ask', to: 'announce' },
-      { decision_type: 'start_work_bug', from: 'ask', to: 'announce' },
-      { decision_type: 'start_work_doc', from: 'ask', to: 'announce' },
-      { decision_type: 'launch_sub_item', from: 'ask', to: 'announce' },
-      { decision_type: 'tool_call', from: 'ask', to: 'announce' },
-      { decision_type: 'run_extension', from: 'ask', to: 'announce' },
-    ]);
+    // A repo with no versions already reads as Balanced, so Balanced moves nothing (the two dials no runtime path reads are not written for it).
+    // ... but the three start dials are written by a person's choice (the auto-start sweep starts work only on a written row), so the preview says so.
+    expect(balanced.active_preset).toBe('balanced');
+    expect(balanced.moves.map((m) => [m.decision_type, m.from, m.to]).sort()).toEqual(['start_work_bug', 'start_work_doc', 'start_work_small'].map((t) => [t, 'announce', 'announce']));
+    const cautious = await (await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/preset/preview`, { preset: 'cautious' })).json() as Preview;
+    expect(cautious.moves.map((m) => [m.decision_type, m.from, m.to]).sort()).toEqual(
+      ['launch_sub_item', 'nonbreaking_refactor_approach', 'runner_run_on_member_plan', 'start_work_bug', 'start_work_doc', 'start_work_small', 'test_strategy_choice'].sort().map((t) => [t, 'announce', 'ask']),
+    );
     const autonomous = await (await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/preset/preview`, { preset: 'autonomous' })).json() as Preview;
     expect(autonomous.moves.map((m) => [m.decision_type, m.to])).toEqual([
       ['nonbreaking_refactor_approach', 'act'],
@@ -201,7 +199,7 @@ describe('D#7 DP10a: decision settings routes', () => {
       ['tool_call', 'act'],
       ['run_extension', 'act'],
     ]);
-    for (const m of [...balanced.moves, ...autonomous.moves]) expect(CLASS_2).toContain(m.decision_type);
+    for (const m of [...cautious.moves, ...autonomous.moves]) expect(CLASS_2).toContain(m.decision_type);
     expect(await versions(f.repoId)).toHaveLength(0);
     expect(await auditRows(f.owner.accountId)).toHaveLength(0);
     const bad = await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/preset/preview`, { preset: 'reckless' });
@@ -314,15 +312,21 @@ describe('D#7 DP10a: decision settings routes', () => {
     });
   });
 
-  it('re-applying the active preset writes nothing; switching away and back is the undo, and the history keeps every step', async () => {
+  it('re-applying the active preset writes nothing more; switching away and back is the undo, and the history keeps every step', async () => {
     const f = await fixture();
     const base = `/repos/${f.repoId}/decision-settings/preset`;
-    await call(f.owner, 'POST', base, { preset: 'balanced' });
-    const again = (await (await call(f.owner, 'POST', base, { preset: 'balanced' })).json()) as Settings;
+    // A repo with no versions already reads as Balanced; choosing it writes the three start dials (and nothing else), and choosing it again writes nothing.
+    const chosen = (await (await call(f.owner, 'POST', base, { preset: 'balanced' })).json()) as Settings;
+    expect(chosen.active_preset).toBe('balanced');
+    expect(chosen.moved!.map((m) => m.decision_type).sort()).toEqual(['start_work_bug', 'start_work_doc', 'start_work_small']);
+    expect(((await (await call(f.owner, 'POST', base, { preset: 'balanced' })).json()) as Settings).moved).toEqual([]);
+    expect(await versions(f.repoId)).toHaveLength(3);
+    // Cautious moves the six dials the runtime reads, plus the member-plan dial; the two no runtime path reads already say ask.
+    const first = (await (await call(f.owner, 'POST', base, { preset: 'cautious' })).json()) as Settings;
+    expect(first.moved).toHaveLength(7);
+    const again = (await (await call(f.owner, 'POST', base, { preset: 'cautious' })).json()) as Settings;
     expect(again.moved).toEqual([]);
-    expect(await versions(f.repoId)).toHaveLength(8);
-
-    await call(f.owner, 'POST', base, { preset: 'cautious' });
+    expect(await versions(f.repoId)).toHaveLength(10);
     expect((await get(f.owner, f.repoId)).active_preset).toBe('cautious');
     const undone = (await (await call(f.owner, 'POST', base, { preset: 'balanced' })).json()) as Settings;
     // Balanced over Cautious would loosen the member-plan dial, which stays ask: no preset matches, and the answer says which dial was held.
@@ -331,7 +335,7 @@ describe('D#7 DP10a: decision settings routes', () => {
 
     const rows = await versions(f.repoId);
     const refactor = rows.filter((r) => r.decision_type === 'nonbreaking_refactor_approach');
-    expect(refactor.map((r) => [r.version, r.disposition])).toEqual([[1, 'announce'], [2, 'ask'], [3, 'announce']]);
+    expect(refactor.map((r) => [r.version, r.disposition])).toEqual([[1, 'ask'], [2, 'announce']]);
     // Cautious asks for the runner dial, which was announce by default: moved, and its history starts there.
     const runner = rows.filter((r) => r.decision_type === 'runner_run_on_member_plan');
     expect(runner.map((r) => [r.version, r.disposition])).toEqual([[1, 'ask']]);
@@ -340,13 +344,12 @@ describe('D#7 DP10a: decision settings routes', () => {
 
   it('a single dial change appends one version, leaves the preset derivation at custom, and the same value again is a no-op', async () => {
     const f = await fixture();
-    await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/preset`, { preset: 'balanced' });
     const url = `/repos/${f.repoId}/decision-settings/dial`;
     const res = await call(f.owner, 'POST', url, { decision_type: 'test_strategy_choice', disposition: 'act' });
     expect(res.status).toBe(200);
     const s = (await res.json()) as Settings;
     expect(s.active_preset).toBeNull();
-    expect(dialsByType(s).test_strategy_choice).toMatchObject({ disposition: 'act', source: 'override', preset: null, version: 2 });
+    expect(dialsByType(s).test_strategy_choice).toMatchObject({ disposition: 'act', source: 'override', preset: null, version: 1 });
     const before = (await versions(f.repoId)).length;
     await call(f.owner, 'POST', url, { decision_type: 'test_strategy_choice', disposition: 'act' });
     expect((await versions(f.repoId)).length).toBe(before);
@@ -365,17 +368,17 @@ describe('D#7 DP10a: decision settings routes', () => {
     const res = await call(f.owner, 'POST', `${base}/reset`, { decision_type: 'test_strategy_choice' });
     expect(res.status).toBe(200);
     const s = (await res.json()) as Settings;
-    expect(dialsByType(s).test_strategy_choice).toMatchObject({ disposition: 'ask', source: 'default', preset: null, version: 2 });
+    expect(dialsByType(s).test_strategy_choice).toMatchObject({ disposition: 'announce', source: 'default', preset: null, version: 2 });
     // A fresh read agrees: derived, not stamped on the response.
-    expect(dialsByType(await get(f.owner, f.repoId)).test_strategy_choice).toMatchObject({ disposition: 'ask', source: 'default', preset: null });
-    expect((await versions(f.repoId)).map((v) => [v.version, v.disposition, v.preset])).toEqual([[1, 'act', null], [2, 'ask', 'default']]);
-    expect((await auditRows(f.owner.accountId)).at(-1)!.payload).toMatchObject({ decision_type: 'test_strategy_choice', previous: 'act', new: 'ask' });
+    expect(dialsByType(await get(f.owner, f.repoId)).test_strategy_choice).toMatchObject({ disposition: 'announce', source: 'default', preset: null });
+    expect((await versions(f.repoId)).map((v) => [v.version, v.disposition, v.preset])).toEqual([[1, 'act', null], [2, 'announce', 'default']]);
+    expect((await auditRows(f.owner.accountId)).at(-1)!.payload).toMatchObject({ decision_type: 'test_strategy_choice', previous: 'act', new: 'announce' });
     // Already on the default: nothing more is written.
     await call(f.owner, 'POST', `${base}/reset`, { decision_type: 'test_strategy_choice' });
     expect(await versions(f.repoId)).toHaveLength(2);
     // A later write is an override again, with the next version.
-    const again = (await (await call(f.owner, 'POST', `${base}/dial`, { decision_type: 'test_strategy_choice', disposition: 'announce' })).json()) as Settings;
-    expect(dialsByType(again).test_strategy_choice).toMatchObject({ disposition: 'announce', source: 'override', version: 3 });
+    const again = (await (await call(f.owner, 'POST', `${base}/dial`, { decision_type: 'test_strategy_choice', disposition: 'ask' })).json()) as Settings;
+    expect(dialsByType(again).test_strategy_choice).toMatchObject({ disposition: 'ask', source: 'override', version: 3 });
   });
 
   it('use the default with no decision type resets every class 2 dial the preset moved, and a repo with no versions writes nothing', async () => {
@@ -425,9 +428,9 @@ describe('D#7 DP10a: decision settings routes', () => {
 
   it('naming the catalogue default on a dial with no version is a no-op: no version, no audit row', async () => {
     const f = await fixture();
-    const res = await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/dial`, { decision_type: 'test_strategy_choice', disposition: 'ask' });
+    const res = await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/dial`, { decision_type: 'test_strategy_choice', disposition: 'announce' });
     expect(res.status).toBe(200);
-    expect(dialsByType((await res.json()) as Settings).test_strategy_choice).toMatchObject({ disposition: 'ask', source: 'default', version: null });
+    expect(dialsByType((await res.json()) as Settings).test_strategy_choice).toMatchObject({ disposition: 'announce', source: 'default', version: null });
     expect(await versions(f.repoId)).toHaveLength(0);
     expect(await auditRows(f.owner.accountId)).toHaveLength(0);
   });
@@ -435,7 +438,7 @@ describe('D#7 DP10a: decision settings routes', () => {
   it('a first dial write records the catalogue default as previous in the audit row', async () => {
     const f = await fixture();
     await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/dial`, { decision_type: 'test_strategy_choice', disposition: 'act' });
-    expect((await auditRows(f.owner.accountId)).at(-1)!.payload).toMatchObject({ decision_type: 'test_strategy_choice', previous: 'ask', new: 'act' });
+    expect((await auditRows(f.owner.accountId)).at(-1)!.payload).toMatchObject({ decision_type: 'test_strategy_choice', previous: 'announce', new: 'act' });
   });
 
   it('a writer that loses the race to a concurrent commit gets 409 dial_changed, not 500 (version trigger, 23514)', async () => {

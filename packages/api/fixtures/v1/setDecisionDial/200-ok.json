@@ -58,9 +58,9 @@
         "announce",
         "ask"
       ],
-      "source": "preset",
-      "preset": "balanced",
-      "version": 1
+      "source": "default",
+      "preset": null,
+      "version": null
     },
     {
       "decision_type": "test_strategy_choice",
@@ -75,7 +75,7 @@
       ],
       "source": "override",
       "preset": null,
-      "version": 2
+      "version": 1
     },
     {
       "decision_type": "runner_run_on_member_plan",
@@ -148,9 +148,9 @@
         "announce",
         "ask"
       ],
-      "source": "preset",
-      "preset": "balanced",
-      "version": 1
+      "source": "default",
+      "preset": null,
+      "version": null
     },
     {
       "decision_type": "publish_deprecation_notice",

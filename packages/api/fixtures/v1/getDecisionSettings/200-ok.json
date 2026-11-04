@@ -2,7 +2,7 @@
   "repo_id": "33333333-3333-4333-8333-333333333333",
   "can_change": true,
   "catalogue_version": 4,
-  "active_preset": null,
+  "active_preset": "balanced",
   "presets": [
     {
       "name": "cautious",
@@ -52,7 +52,7 @@
       "label": "How to restructure code without changing what it does",
       "class": "human_over_the_loop",
       "adjustable": true,
-      "disposition": "ask",
+      "disposition": "announce",
       "allowed_dispositions": [
         "act",
         "announce",
@@ -67,7 +67,7 @@
       "label": "How to test a change",
       "class": "human_over_the_loop",
       "adjustable": true,
-      "disposition": "ask",
+      "disposition": "announce",
       "allowed_dispositions": [
         "act",
         "announce",
@@ -97,7 +97,7 @@
       "label": "Starting a small piece of work",
       "class": "human_over_the_loop",
       "adjustable": true,
-      "disposition": "ask",
+      "disposition": "announce",
       "allowed_dispositions": [
         "act",
         "announce",
@@ -112,7 +112,7 @@
       "label": "Starting a bug fix",
       "class": "human_over_the_loop",
       "adjustable": true,
-      "disposition": "ask",
+      "disposition": "announce",
       "allowed_dispositions": [
         "act",
         "announce",
@@ -127,7 +127,7 @@
       "label": "Starting a documentation change",
       "class": "human_over_the_loop",
       "adjustable": true,
-      "disposition": "ask",
+      "disposition": "announce",
       "allowed_dispositions": [
         "act",
         "announce",
@@ -142,7 +142,7 @@
       "label": "Starting one part of a larger piece of work",
       "class": "human_over_the_loop",
       "adjustable": true,
-      "disposition": "ask",
+      "disposition": "announce",
       "allowed_dispositions": [
         "act",
         "announce",

@@ -246,6 +246,8 @@ export interface AppendDialVersionInput {
   preset: string | null;
   /** The authenticated caller; see `WriteDialSettingContext`. */
   changedBy: string;
+  /** What was in force while the dial had no version, when that is not the catalogue default (a dial the runtime reads as Balanced). Named in the audit row only. */
+  noVersionDisposition?: string;
 }
 
 /**
@@ -255,7 +257,7 @@ export interface AppendDialVersionInput {
  * dial history and its audit trail are never out of step.
  */
 export async function appendDialVersion(client: PoolClient, input: AppendDialVersionInput): Promise<DecisionSetting> {
-  const { accountId, repoId, decisionType, disposition, preset, changedBy } = input;
+  const { accountId, repoId, decisionType, disposition, preset, changedBy, noVersionDisposition } = input;
   // Deliberately NOT "... FOR UPDATE": Postgres requires the UPDATE
   // privilege (not just SELECT) to take a row lock via a locking clause,
   // and app_user is deliberately never granted UPDATE on
@@ -299,8 +301,8 @@ export async function appendDialVersion(client: PoolClient, input: AppendDialVer
         actor: changedBy,
         decision_type: decisionType,
         repo_id: repoId,
-        // First write: the value in force until now was the catalogue default (null only for a type the catalogue does not know).
-        previous: previous ? previous.disposition : (getCatalogueEntry(decisionType)?.defaultDisposition ?? null),
+        // First write: the value in force until now was what no version means (else the catalogue default; null only for a type the catalogue does not know).
+        previous: previous ? previous.disposition : (noVersionDisposition ?? getCatalogueEntry(decisionType)?.defaultDisposition ?? null),
         new: disposition,
       }),
     ],

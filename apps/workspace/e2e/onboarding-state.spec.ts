@@ -9,6 +9,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 import { bootToDesktop } from "./helpers/boot";
 
@@ -255,5 +256,241 @@ test.describe("ONBOARDING-PREVIEW-STALE: step 3's panel follows the installed re
     await deliver(page, "repos.changed", { kind: "team_readonly", inserted: 0, detached: 1 });
     await expect(start(page)).toBeHidden();
     await expect(panel(page).locator('[data-testid="ob-preview-open-repos"]')).toBeVisible();
+  });
+});
+
+// DW-PRESET-ONBOARD: the autonomy choice at the step-3 repository choice. What the server decides (a repo with no row reads Balanced, what a preset
+// writes, what the next start does) is proved against real Postgres in packages/api/test/decision-settings-start.test.ts; the subject here is the page:
+// the three presets as the server's table gives them, the preview before saving, the saved state read back after a reload, the way back, and the sizes.
+const SETTINGS = fx("getDecisionSettings", "200-ok.json");
+interface Autonomy { active: string; touched: boolean; reads: number; previews: string[]; writes: string[]; failSave: boolean; canChange: boolean }
+const nameOf = (type: string) => SETTINGS.dials.find((d: { decision_type: string }) => d.decision_type === type).label as string;
+
+/** A stand-in for the three settings routes that keeps one repo's preset, the way the server derives it: from what was last written. */
+async function autonomySetup(page: Page, a: Autonomy) {
+  const body = () => ({
+    ...SETTINGS,
+    can_change: a.canChange,
+    active_preset: a.active,
+    dials: SETTINGS.dials.map((d: object) => ({ ...d, source: a.touched ? "preset" : "default" })),
+  });
+  await page.route((u) => /^\/api\/v1\/repos\/[^/]+\/decision-settings(\/preset(\/preview)?)?$/.test(u.pathname), async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const sent = route.request().postDataJSON()?.preset as string | undefined;
+    if (route.request().method() === "GET") {
+      a.reads++;
+      return route.fulfill({ json: body() });
+    }
+    if (path.endsWith("/preview")) {
+      a.previews.push(sent!);
+      const label = SETTINGS.presets.find((p: { name: string }) => p.name === sent).label;
+      // The server writes the three start settings on a person's choice even where they already match (the auto-start sweep starts work only on a written row).
+      const written = ["start_work_small", "start_work_bug", "start_work_doc"].map((decision_type) => ({ decision_type, from: "announce", to: "announce" }));
+      const moves = sent === a.active ? (a.touched ? [] : written) : [{ decision_type: "start_work_small", from: "announce", to: "ask" }, { decision_type: "launch_sub_item", from: "announce", to: "ask" }];
+      return route.fulfill({ json: { preset: sent, label, customer_role: "", active_preset: a.active, moves } });
+    }
+    if (a.failSave) return route.fulfill({ status: 500, json: { error: { code: "internal_error", message: "x" } } });
+    a.writes.push(sent!);
+    a.active = sent!;
+    a.touched = true;
+    return route.fulfill({ json: { ...body(), moved: [] } });
+  });
+}
+
+// The three Playwright projects (desktop, phone, tablet) supply the widths; the sizes asserted below are read from the page it runs in.
+{
+  test.describe("DW-PRESET-ONBOARD: the picker", () => {
+    const picker = (page: Page) => win(page, "onboarding").locator('[data-testid="ob-presets"]');
+    const t = (page: Page, id: string) => picker(page).locator(`[data-testid="${id}"]`);
+    const box = async (loc: ReturnType<typeof t>) => (await loc.boundingBox())!;
+
+    test("the three presets from the server's table, Balanced (default) for a repo nobody chose for, sizes, and nothing blocks Start", async ({ page }) => {
+      const m: Mock = { onboarding: doneUpTo(2), repos: repos(true), reads: 0, repoReads: 0 };
+      const a: Autonomy = { active: "balanced", touched: false, reads: 0, previews: [], writes: [], failSave: false, canChange: true };
+      const problems = await setup(page, m);
+      await autonomySetup(page, a);
+      await bootToDesktop(page);
+      await expect(picker(page)).toBeVisible();
+      await expect(picker(page).locator("legend")).toHaveText("How much do you want to decide?");
+      const labels = picker(page).locator("label.ob-preset");
+      await expect(labels).toHaveCount(SETTINGS.presets.length);
+      for (const [i, p] of SETTINGS.presets.entries()) {
+        await expect(labels.nth(i)).toContainText(p.label);
+        await expect(labels.nth(i)).toContainText(p.customer_role);
+      }
+      await expect(t(page, "ob-preset-now")).toHaveText("Right now: Balanced (default)");
+      await expect(t(page, "ob-preset-balanced")).toBeChecked();
+      // Sizes: every option is a full-width block at least 44 px tall, and the buttons are too.
+      const root = await box(picker(page));
+      for (let i = 0; i < SETTINGS.presets.length; i++) {
+        const b = await box(labels.nth(i));
+        expect(b.height, `option ${i} height`).toBeGreaterThanOrEqual(44);
+        expect(b.width, `option ${i} width`).toBeGreaterThanOrEqual(Math.min(root.width - 1, 200));
+        expect(b.x + b.width, `option ${i} right edge`).toBeLessThanOrEqual(page.viewportSize()!.width);
+      }
+      const openBox = await box(t(page, "ob-preset-open"));
+      expect(openBox.height).toBeGreaterThanOrEqual(44);
+      const sizes = { viewport: page.viewportSize(), picker: [Math.round(root.width), Math.round(root.height)], options: await labels.evaluateAll((els) => els.map((e) => [Math.round(e.getBoundingClientRect().width), Math.round(e.getBoundingClientRect().height)])), open: [Math.round(openBox.width), Math.round(openBox.height)] };
+      test.info().annotations.push({ type: "sizes", description: JSON.stringify(sizes) });
+      console.log("PICKER-SIZES " + JSON.stringify(sizes));
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(page.viewportSize()!.width);
+      // Looking is not choosing: nothing was written, and Start waits on nothing.
+      expect(a.writes).toEqual([]);
+      await expect(win(page, "onboarding").locator('[data-testid="ob-preview-start"]')).toBeEnabled();
+      expect(problems).toEqual([]);
+    });
+
+    test("no serious or critical accessibility violation in the picker, before and after a choice", async ({ page }) => {
+      const m: Mock = { onboarding: doneUpTo(2), repos: repos(true), reads: 0, repoReads: 0 };
+      const a: Autonomy = { active: "balanced", touched: false, reads: 0, previews: [], writes: [], failSave: false, canChange: true };
+      await setup(page, m);
+      await autonomySetup(page, a);
+      await bootToDesktop(page);
+      const scan = async () =>
+        (await new AxeBuilder({ page }).include('.fulc-window[data-app-id="onboarding"]').exclude(".window-titlebar").withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"]).analyze()).violations
+          .filter((v) => v.impact === "serious" || v.impact === "critical")
+          .map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(" | ")}`);
+      await expect(picker(page)).toBeVisible();
+      expect(await scan()).toEqual([]);
+      await t(page, "ob-preset-cautious").check();
+      await expect(t(page, "ob-preset-save")).toBeVisible();
+      expect(await scan()).toEqual([]);
+    });
+    test("at 390 px wide the options stay 44 px tall and nothing scrolls sideways", async ({ page }, info) => {
+      test.skip(info.project.name !== "phone", "the desktop window is not narrowed by the viewport");
+      await page.setViewportSize({ width: 390, height: 844 });
+      const m: Mock = { onboarding: doneUpTo(2), repos: repos(true), reads: 0, repoReads: 0 };
+      const a: Autonomy = { active: "balanced", touched: false, reads: 0, previews: [], writes: [], failSave: false, canChange: true };
+      await setup(page, m);
+      await autonomySetup(page, a);
+      await bootToDesktop(page);
+      await t(page, "ob-preset-cautious").check();
+      await expect(t(page, "ob-preset-save")).toBeVisible();
+      const sizes = await picker(page).locator("label.ob-preset, button").evaluateAll((els) => els.map((e) => [Math.round(e.getBoundingClientRect().width), Math.round(e.getBoundingClientRect().height)]));
+      console.log("PICKER-390 " + JSON.stringify(sizes));
+      for (const [w, h] of sizes) {
+        expect(h).toBeGreaterThanOrEqual(44);
+        expect(w).toBeLessThanOrEqual(390);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+    });
+    test("choose, see what changes, save, reload and read it back, then go back to Balanced", async ({ page }) => {
+      const m: Mock = { onboarding: doneUpTo(2), repos: repos(true), reads: 0, repoReads: 0 };
+      const a: Autonomy = { active: "balanced", touched: false, reads: 0, previews: [], writes: [], failSave: false, canChange: true };
+      await setup(page, m);
+      await autonomySetup(page, a);
+      await bootToDesktop(page);
+      await t(page, "ob-preset-cautious").check();
+      // The preview comes first: it names what changes, and nothing is written yet.
+      await expect(t(page, "ob-preset-moves")).toContainText(nameOf("start_work_small") + ": go ahead and tell me to ask me first");
+      await expect(t(page, "ob-preset-moves").locator("li")).toHaveCount(2);
+      expect(a.previews).toEqual(["cautious"]);
+      expect(a.writes).toEqual([]);
+      const save = t(page, "ob-preset-save");
+      expect((await box(save)).height).toBeGreaterThanOrEqual(44);
+      await save.click();
+      // The saved state is said in the page and announced in the window's live region.
+      await expect(t(page, "ob-preset-msg")).toHaveText("Saved. This repository now runs as Cautious.");
+      await expect(win(page, "onboarding").locator('[data-testid="ob-live"]')).toHaveText("Saved. This repository now runs as Cautious.");
+      await expect(t(page, "ob-preset-now")).toHaveText("Right now: Cautious");
+      expect(a.writes).toEqual(["cautious"]);
+
+      await page.reload();
+      await bootToDesktop(page);
+      await expect(t(page, "ob-preset-now")).toHaveText("Right now: Cautious");
+      await expect(t(page, "ob-preset-cautious")).toBeChecked();
+
+      // The way back is the same two steps, and the history is the server's: this page only asks.
+      await t(page, "ob-preset-balanced").check();
+      await t(page, "ob-preset-save").click();
+      await expect(t(page, "ob-preset-now")).toHaveText("Right now: Balanced");
+      expect(a.writes).toEqual(["cautious", "balanced"]);
+      // Choosing what already holds changes nothing and offers no save.
+      await t(page, "ob-preset-autonomous").check();
+      await t(page, "ob-preset-balanced").check();
+      await expect(picker(page)).toContainText("Nothing changes: these settings already match Balanced.");
+      await expect(t(page, "ob-preset-save")).toHaveCount(0);
+    });
+
+    test("choosing Balanced for a repo nobody chose for says what is written and writes it; the arrow keys keep focus on the options, before and after the save", async ({ page }) => {
+      const m: Mock = { onboarding: doneUpTo(2), repos: repos(true), reads: 0, repoReads: 0 };
+      const a: Autonomy = { active: "balanced", touched: false, reads: 0, previews: [], writes: [], failSave: false, canChange: true };
+      await setup(page, m);
+      await autonomySetup(page, a);
+      await bootToDesktop(page);
+      await expect(t(page, "ob-preset-now")).toHaveText("Right now: Balanced (default)");
+      // Skipping writes nothing. Choosing Balanced writes the three start settings, and the preview says so.
+      await t(page, "ob-preset-autonomous").check();
+      await t(page, "ob-preset-balanced").check();
+      await expect(t(page, "ob-preset-moves").locator("li")).toHaveCount(3);
+      await expect(t(page, "ob-preset-moves")).toContainText(nameOf("start_work_small") + ": go ahead and tell me, saved as your choice");
+      expect(a.writes).toEqual([]);
+      await t(page, "ob-preset-save").click();
+      await expect(t(page, "ob-preset-now")).toHaveText("Right now: Balanced");
+      expect(a.writes).toEqual(["balanced"]);
+      // The arrow keys move the choice, and focus stays on a radio through the busy re-render and after the save.
+      const focused = () => page.evaluate(() => document.activeElement?.getAttribute("data-testid") ?? document.activeElement?.tagName ?? "");
+      await t(page, "ob-preset-balanced").focus();
+      await page.keyboard.press("ArrowUp");
+      await expect(t(page, "ob-preset-cautious")).toBeChecked();
+      await expect(t(page, "ob-preset-save")).toBeVisible();
+      expect(await focused()).toBe("ob-preset-cautious");
+      await t(page, "ob-preset-save").focus();
+      await page.keyboard.press("Enter");
+      await expect(t(page, "ob-preset-now")).toHaveText("Right now: Cautious");
+      await expect(t(page, "ob-preset-cautious")).toBeFocused();
+      await page.keyboard.press("ArrowDown");
+      await expect(t(page, "ob-preset-balanced")).toBeChecked();
+      await expect(t(page, "ob-preset-save")).toBeVisible();
+      expect(await focused()).toBe("ob-preset-balanced");
+    });
+
+    test("a failed save keeps the choice and its preview; focus order is the repository, the options, Save, then Open Autonomy", async ({ page }) => {
+      const m: Mock = { onboarding: doneUpTo(2), repos: repos(true), reads: 0, repoReads: 0 };
+      const a: Autonomy = { active: "balanced", touched: false, reads: 0, previews: [], writes: [], failSave: true, canChange: true };
+      await setup(page, m);
+      await autonomySetup(page, a);
+      await bootToDesktop(page);
+      await t(page, "ob-preset-autonomous").check();
+      await t(page, "ob-preset-save").click();
+      await expect(t(page, "ob-preset-msg")).toHaveText("That couldn't be saved. Your choice is still here; try again.");
+      await expect(t(page, "ob-preset-autonomous")).toBeChecked();
+      await expect(t(page, "ob-preset-save")).toBeVisible();
+      expect(a.writes).toEqual([]);
+      // Tab order from the repository select.
+      const order: string[] = [];
+      await win(page, "onboarding").locator('[data-testid="ob-repo"]').focus();
+      for (let i = 0; i < 4; i++) {
+        await page.keyboard.press("Tab");
+        order.push(await page.evaluate(() => document.activeElement?.getAttribute("data-testid") ?? document.activeElement?.tagName ?? ""));
+      }
+      expect(order).toEqual(["ob-preset-autonomous", "ob-preset-save", "ob-preset-open", "ob-preview-start"]);
+    });
+
+    test("a plain member sees the choice read-only, and a repo whose settings cannot be read says so without blocking Start", async ({ page }) => {
+      const m: Mock = { onboarding: doneUpTo(2), repos: repos(true), reads: 0, repoReads: 0 };
+      const a: Autonomy = { active: "balanced", touched: false, reads: 0, previews: [], writes: [], failSave: false, canChange: false };
+      await setup(page, m);
+      await autonomySetup(page, a);
+      await bootToDesktop(page);
+      await expect(picker(page)).toContainText("Only an owner or admin can change this.");
+      for (const r of await picker(page).locator("input[type=radio]").all()) await expect(r).toBeDisabled();
+      await expect(t(page, "ob-preset-save")).toHaveCount(0);
+      await expect(win(page, "onboarding").locator('[data-testid="ob-preview-start"]')).toBeEnabled();
+    });
+  });
+}
+
+test.describe("DW-PRESET-ONBOARD: settings that cannot be read", () => {
+  test("a failed read says so, writes nothing, and Start and the plan choice still work", async ({ page }) => {
+    const m: Mock = { onboarding: doneUpTo(2), repos: repos(true), reads: 0, repoReads: 0 };
+    await setup(page, m);
+    await page.route((u) => /decision-settings/.test(u.pathname), (route) => route.fulfill({ status: 500, json: { error: { code: "internal_error", message: "x" } } }));
+    await bootToDesktop(page);
+    const picker = win(page, "onboarding").locator('[data-testid="ob-presets"]');
+    await expect(picker).toContainText("The autonomy choice couldn't be loaded. You can set it later in Autonomy.");
+    await expect(picker).not.toContainText(/null|undefined|NaN/);
+    await expect(win(page, "onboarding").locator('[data-testid="ob-preview-start"]')).toBeEnabled();
+    await expect(win(page, "onboarding").locator('[data-testid="ob-skip-ahead"], [data-testid="ob-skip-preview"]').first()).toBeVisible();
   });
 });

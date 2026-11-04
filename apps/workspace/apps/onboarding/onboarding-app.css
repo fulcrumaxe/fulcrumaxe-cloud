@@ -86,3 +86,17 @@
 .ob-payoff { margin-top: 10px; }
 @media (prefers-reduced-motion: no-preference) { .ob-stage-active::before { animation: ob-pulse 1.4s ease-in-out infinite; } }
 @keyframes ob-pulse { 50% { opacity: 0.35; } }
+
+/* DW-PRESET-ONBOARD: the autonomy choice beside the repository. Each option is one 44 px label; the checked one is marked by border weight as well as colour. */
+.ob-presets { margin: 10px 0; }
+.ob-presets[hidden] { display: none; }
+.ob-fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
+.ob-preset {
+  display: flex; align-items: flex-start; gap: 10px; box-sizing: border-box; min-height: 44px; margin: 6px 0; padding: 8px 10px;
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); cursor: pointer;
+}
+.ob-preset input { flex: none; width: 24px; height: 24px; margin: 0; }
+.ob-preset:has(input:checked) { border-color: var(--accent, #1aff80); border-width: 2px; padding: 7px 9px; }
+.ob-preset:focus-within { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+.ob-preset-text { display: grid; gap: 2px; min-width: 0; }
+.ob-preset-role { opacity: 0.9; overflow-wrap: anywhere; }

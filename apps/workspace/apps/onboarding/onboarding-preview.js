@@ -8,6 +8,7 @@ import { api, ApiFailure, createRetryGate, isRateLimited, retryWords, waitSecond
 
 const REPOS_URL = "/api/v1/repos";
 const PREVIEW_URL = "/api/v1/onboarding/preview";
+const settingsUrl = (repoId) => "/api/v1/repos/" + encodeURIComponent(repoId) + "/decision-settings";
 const CAP_USD = 20;
 // Polling is bounded: every 3 seconds for the first two minutes, every 15 seconds for ten more, then it stops and says so.
 const POLL_MS = 3000;
@@ -101,6 +102,23 @@ const TEXT = {
   announceRunning: "Your preview is running.",
   announceDone: "Your preview has finished.",
   announceStopped: "Your preview stopped.",
+  // The question and the default line are owner copy (proposed). The three names and their role lines come from the server's preset table, never retyped here.
+  presetHeading: "How much do you want to decide?",
+  presetDefault: "Not sure? Skip this: {label} applies ({role}), but proposals don't start on their own until you choose.",
+  presetNow: "Right now: {label}",
+  presetCustom: "Right now: your own mix of settings, which doesn't match a preset.",
+  presetReadOnly: "Only an owner or admin can change this.",
+  presetsFailed: "The autonomy choice couldn't be loaded. You can set it later in Autonomy.",
+  presetSaveFailed: "That couldn't be saved. Your choice is still here; try again.",
+  presetPreviewFailed: "What this changes couldn't be shown. Try choosing again.",
+  presetNothing: "Nothing changes: these settings already match {label}.",
+  presetChanges: "Choosing {label} sets:",
+  presetKept: "{name}: {to}, saved as your choice",
+  presetSave: "Save {label}",
+  presetSaved: "Saved. This repository now runs as {label}.",
+  presetLater: "You can change this any time in Autonomy. Decisions that always ask you stay as they are.",
+  presetOpen: "Open Autonomy",
+  dispositions: { ask: "ask me first", announce: "go ahead and tell me", act: "go ahead" },
 };
 
 const cancelled = (e) => e && e.name === "AbortError";
@@ -200,8 +218,9 @@ export function mountPreview(host, { openApp, announce, onSettled, onChoosePlan,
   const select = h("select", { class: "ob-input", id: uid + "-repo", "data-testid": "ob-repo" });
   const startBtn = h("button", { type: "button", class: "ob-btn ob-btn-primary", "data-testid": "ob-preview-start", onClick: start },
     "Start the free preview");
+  const pickHost = h("div", { class: "ob-presets", "data-testid": "ob-presets", hidden: true });
   const form = h("div", { class: "ob-form", hidden: true },
-    h("label", { class: "ob-label", for: uid + "-repo" }, "Repository"), select,
+    h("label", { class: "ob-label", for: uid + "-repo" }, "Repository"), select, pickHost,
     h("p", { class: "ob-muted" }, "This preview may spend up to " + CAP_USD + " US dollars of model usage from your model key."), startBtn);
   const noRepos = h("div", { hidden: true }, h("p", { class: "ob-muted" }, TEXT.noRepos),
     h("button", { type: "button", class: "ob-btn", "data-testid": "ob-preview-open-repos", onClick: () => openApp("repos") }, "Open Repos"));
@@ -209,6 +228,121 @@ export function mountPreview(host, { openApp, announce, onSettled, onChoosePlan,
   const msgEl = h("p", { class: "ob-msg", "data-testid": "ob-preview-msg" });
   const keyBtn = h("button", { type: "button", class: "ob-btn", hidden: true, "data-testid": "ob-open-model-key", onClick: () => openApp("model-key") }, "Open Model Key");
   host.replaceChildren(form, noRepos, previewEl, msgEl, keyBtn);
+
+  // ---- the autonomy choice for the picked repository (D#7 DW-PRESET-ONBOARD) ----
+  // Reads and writes only the existing settings routes: GET .../decision-settings, POST .../preset/preview, POST .../preset. Nothing here waits on
+  // it: Start and the plan picker work whether or not it is touched, and a repository nobody chose for runs as Balanced, which the server reports.
+  const pz = { id: "", data: null, choice: "", preview: null, busy: false, msg: "", seq: 0 };
+  const isPresetData = (d) => !!d && typeof d.can_change === "boolean" && (d.active_preset === null || typeof d.active_preset === "string") &&
+    Array.isArray(d.dials) && Array.isArray(d.presets) && d.presets.length > 0 && d.presets.every((p) => p && isText(p.name) && isText(p.label) && isText(p.customer_role));
+  const dialName = (data, type) => { const d = data.dials.find((x) => x && x.decision_type === type); return d && isText(d.label) ? d.label : ""; };
+  const dispWord = (v) => (typeof v === "string" && Object.hasOwn(TEXT.dispositions, v) ? TEXT.dispositions[v] : "");
+
+  function renderPresets() {
+    if (destroyed) return;
+    const focusId = pickHost.contains(document.activeElement) ? document.activeElement.getAttribute("data-testid") : null;
+    const d = pz.data;
+    pickHost.hidden = !d && !pz.msg;
+    if (!d) {
+      pickHost.replaceChildren(...(pz.msg ? [txt("p", "ob-muted", pz.msg)] : []));
+      return;
+    }
+    const active = d.presets.find((p) => p.name === d.active_preset);
+    const untouched = d.dials.filter((x) => x && x.adjustable).every((x) => x.source === "default");
+    const picked = pz.choice || (active ? active.name : "");
+    const chosen = d.presets.find((p) => p.name === pz.choice);
+    const balanced = d.presets.find((p) => p.name === "balanced") || d.presets[0];
+    const now = txt("p", "ob-muted", active ? fill(TEXT.presetNow, { label: active.label + (active.name === "balanced" && untouched ? " (default)" : "") }) : TEXT.presetCustom);
+    now.setAttribute("data-testid", "ob-preset-now");
+    const options = d.presets.map((p) => h("label", { class: "ob-preset" },
+      h("input", { type: "radio", name: uid + "-preset", value: p.name, checked: p.name === picked, "data-testid": "ob-preset-" + p.name, onChange: () => choose(p.name) }),
+      h("span", { class: "ob-preset-text" }, txt("strong", "ob-preset-name", p.label), txt("span", "ob-preset-role", p.customer_role))));
+    const parts = [h("fieldset", { class: "ob-fieldset", disabled: pz.busy || !d.can_change }, h("legend", { class: "ob-label" }, TEXT.presetHeading), options),
+      txt("p", "ob-muted", d.can_change ? fill(TEXT.presetDefault, { label: balanced.label, role: balanced.customer_role }) : TEXT.presetReadOnly), now];
+    const pv = pz.preview;
+    if (chosen && pv) {
+      const held = Array.isArray(pv.held) ? pv.held.filter((m) => m && isText(m.note)) : [];
+      if (pv.moves.length === 0) parts.push(txt("p", "ob-muted", fill(TEXT.presetNothing, { label: chosen.label })));
+      else {
+        parts.push(txt("p", "ob-muted", fill(TEXT.presetChanges, { label: chosen.label })));
+        parts.push(h("ul", { class: "ob-numbers", "data-testid": "ob-preset-moves" }, pv.moves.map((m) =>
+          txt("li", "ob-number", m.from === m.to
+            ? fill(TEXT.presetKept, { name: dialName(d, m.decision_type), to: dispWord(m.to) })
+            : dialName(d, m.decision_type) + ": " + dispWord(m.from) + " to " + dispWord(m.to)))));
+      }
+      for (const m of held) parts.push(txt("p", "ob-muted", dialName(d, m.decision_type) + ": " + m.note));
+      if (pv.moves.length > 0) parts.push(h("button", { type: "button", class: "ob-btn ob-btn-primary", disabled: pz.busy, "data-testid": "ob-preset-save", onClick: savePreset }, fill(TEXT.presetSave, { label: chosen.label })));
+    }
+    parts.push(h("p", { class: "ob-msg", role: "status", "data-testid": "ob-preset-msg" }, pz.msg),
+      txt("p", "ob-muted", TEXT.presetLater),
+      h("button", { type: "button", class: "ob-btn", "data-testid": "ob-preset-open", onClick: () => openApp("roles") }, TEXT.presetOpen));
+    pickHost.replaceChildren(...parts);
+    // A render that disables the controls (busy) takes focus away; it comes back to the same control when they are enabled again.
+    if (focusId) pz.focus = focusId;
+    const again = pz.focus ? pickHost.querySelector('[data-testid="' + pz.focus + '"]') : null;
+    // Inside a disabled fieldset a control's own `disabled` property is still false, so ask the browser whether it is disabled.
+    if (again && !again.matches(":disabled")) { again.focus(); pz.focus = null; }
+  }
+
+  /** Reads the picked repository's settings. A newer read supersedes an older one. */
+  async function loadPresets() {
+    const id = select.value;
+    if (id === pz.id && (pz.data || pz.msg)) return;
+    const mine = ++pz.seq;
+    Object.assign(pz, { id, data: null, choice: "", preview: null, busy: false, msg: "" });
+    if (!id) return renderPresets();
+    try {
+      const body = await api("GET", settingsUrl(id), undefined, abort.signal);
+      if (mine !== pz.seq || destroyed) return;
+      if (!isPresetData(body)) throw new Error("shape");
+      pz.data = body;
+    } catch (e) {
+      if (cancelled(e) || destroyed || mine !== pz.seq) return;
+      pz.msg = TEXT.presetsFailed;
+    }
+    renderPresets();
+  }
+
+  async function choose(name) {
+    if (pz.busy || !pz.data) return;
+    const mine = pz.seq;
+    Object.assign(pz, { choice: name, preview: null, busy: true, msg: "" });
+    renderPresets();
+    try {
+      const r = await api("POST", settingsUrl(pz.id) + "/preset/preview", { preset: name }, abort.signal);
+      if (mine !== pz.seq || destroyed) return;
+      if (!r || !Array.isArray(r.moves)) throw new Error("shape");
+      pz.preview = r;
+    } catch (e) {
+      if (cancelled(e) || destroyed || mine !== pz.seq) return;
+      pz.msg = TEXT.presetPreviewFailed;
+    }
+    pz.busy = false;
+    renderPresets();
+  }
+
+  async function savePreset() {
+    if (pz.busy || !pz.data || !pz.choice) return;
+    const mine = pz.seq;
+    pz.busy = true;
+    pz.msg = "";
+    renderPresets();
+    try {
+      const r = await api("POST", settingsUrl(pz.id) + "/preset", { preset: pz.choice }, abort.signal);
+      if (mine !== pz.seq || destroyed) return;
+      if (!isPresetData(r)) throw new Error("shape");
+      const label = (r.presets.find((p) => p.name === pz.choice) || {}).label;
+      pz.focus = "ob-preset-" + pz.choice;
+      Object.assign(pz, { data: r, choice: "", preview: null, msg: fill(TEXT.presetSaved, { label }) });
+      announce(pz.msg);
+    } catch (e) {
+      if (cancelled(e) || destroyed || mine !== pz.seq) return;
+      pz.msg = TEXT.presetSaveFailed; // the choice and its preview stay, so nothing the person picked is lost
+    }
+    pz.busy = false;
+    renderPresets();
+  }
+  select.addEventListener("change", loadPresets);
 
   // The wait after a 429 on Start: "Try again in N seconds", with the Start button off until it ends.
   let waitOwnsMsg = false;
@@ -371,6 +505,7 @@ export function mountPreview(host, { openApp, announce, onSettled, onChoosePlan,
     select.replaceChildren(...repos.map((r) => h("option", { value: r.id }, String(r.full_name || r.product))));
     if (repos.some((r) => r.id === chosen)) select.value = chosen;
     st.repos = repos;
+    void loadPresets();
   }
 
   /** No preview yet, or the last one failed on our side before the agent started (the free preview is not used up). */
