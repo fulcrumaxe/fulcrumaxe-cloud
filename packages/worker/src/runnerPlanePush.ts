@@ -65,6 +65,8 @@ export type PlanePushGrantResult =
   /** The pairing was removed, or its digest no longer matches the one stamped at build start. */
   | { kind: "pairing_changed" }
   | { kind: "already_issued" }
+  /** D#6 REPUBLISH-CLOSED-PR: an update's live pull request read failed or could not say (or the row moved under it). Nothing is recorded, spent or granted; the route answers 503 `public_unavailable`. */
+  | { kind: "public_unavailable" }
   /**
    * FIXROUND-REPUBLISH (R2-c1): a fix round that must update the public pull request has no signed base to rebuild it from. Named; the hook reports it and the item goes to a person.
    * D#483 S5-b2c-4: also a planned PR child whose build identity the resolver refuses (its parent was deleted or closed, or re-specced and not approved again): the resolver's code.
@@ -115,6 +117,8 @@ export interface RunnerPlanePushFacade {
 export interface RunnerPlanePushDeps {
   /** The public repository's branch head (a token minted and revoked per read). Without it a conflict round's tip is not recorded and its end is judged against the tip read at the report. */
   publicHead?: (input: { accountId: string; codeRepo: string; branch: string }) => Promise<string | null>;
+  /** D#6 REPUBLISH-CLOSED-PR: the public pull request's live state (a token minted and revoked per read), read before an update is granted a token. Absent: an update is answered `public_unavailable` (fail closed). */
+  pullRequestState?: (input: { accountId: string; codeRepo: string; number: number }) => Promise<"open" | "closed" | "merged" | "unknown">;
   now?: () => number;
   limits?: RunnerLimitsSource;
 }
@@ -237,6 +241,16 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
   const grant = (input: PlanePushLeaseInput & { atTip?: true }): Promise<PlanePushGrantResult> =>
       guarded(async () => {
         requireLease(input);
+        // D#6 REPUBLISH-CLOSED-PR: the network read happens before the grant transaction, so no pool connection or lock is held across it. A short read-only look comes first and makes NO read when the lease is
+        // fenced or finished, when this lease already has its attempt (a re-ask answers `already_issued`), or when the round is not an update of an open pull request: the fence, then the read.
+        const peek = await withTenant(runnerPool, input.accountId, async (c) => {
+          if ((await fence(c, input)) !== "ok") return null;
+          const f = await runFacts(c, input);
+          if (f === null || !f.continues || !hasOpenPublicPr(f.row) || f.row.prNumber === null) return null;
+          const { rows } = await c.query("SELECT 1 FROM plane_push_attempts WHERE run_id = $1 AND lease_generation = $2 AND runtime = 'runner' AND account_id = $3", [input.runId, input.leaseGeneration, input.accountId]);
+          return rows.length > 0 ? null : { number: f.row.prNumber, codeRepo: f.row.codeRepo };
+        });
+        const live = peek === null ? null : { ...peek, state: deps.pullRequestState ? await deps.pullRequestState({ accountId: input.accountId, codeRepo: peek.codeRepo, number: peek.number }).catch(() => "unknown" as const) : ("unknown" as const) };
         return withTenant(runnerPool, input.accountId, async (client): Promise<PlanePushGrantResult> => {
           const held = await fence(client, input);
           if (held !== "ok") return { kind: "fenced", reason: stopReasonFor(held) };
@@ -259,6 +273,19 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           const update = found.continues && hasOpenPublicPr(row);
           if (found.continues && !update && !mayFirstPublish(row)) return { kind: "not_paired" };
           if (update && found.baseSha === null) return { kind: "refused", code: REPUBLISH_BASE_MISSING };
+          // D#6 REPUBLISH-CLOSED-PR: the record can say open while GitHub shows the pull request closed or merged. The live state was read for this grant before this transaction (stamped nowhere). Closed and merged
+          // are recorded like the stored-state stops. A read that failed, named nothing, or was for another number is `public_unavailable` (503): nothing is recorded, spent or refused, so a Replace
+          // round's answer stays and the runner's own report of the refusal puts the question again. A rate limit or 5xx is never "closed".
+          if (update && live !== null) {
+            // The repository cannot differ (a push row's code_repo is fixed by a trigger); the number can move, so it is compared.
+            const same = live.number === row.prNumber;
+            const stop = !same ? null : live.state === "closed" ? REPUBLISH_PR_CLOSED : live.state === "merged" ? REPUBLISH_PR_MERGED : null;
+            if (stop !== null) {
+              await recordRepublishRefusal(client, { accountId: input.accountId, workItemId: row.workItemId }, { code: stop, prNumber: null, moveToNeedsPerson: true, attempt: input.runId });
+              return { kind: "refused", code: stop };
+            }
+            if (!same || live.state !== "open") return { kind: "public_unavailable" };
+          }
 
           // The pairing as it is NOW, against the digest stamped at build start. A pairing that was removed or edited is `pairing_changed`.
           if (!(await livePairing(client, input.accountId, row))) return { kind: "pairing_changed" };
@@ -287,6 +314,8 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           if (found.continues && (locked === null || locked.id !== row.id || (update ? !hasOpenPublicPr(locked) : !mayFirstPublish(locked)))) return { kind: "not_paired" };
           const { rows: existing } = await client.query("SELECT 1 FROM plane_push_attempts WHERE run_id = $1 AND lease_generation = $2 AND runtime = 'runner' AND account_id = $3", [input.runId, input.leaseGeneration, input.accountId]);
           if (existing.length > 0) return { kind: "already_issued" };
+          // No read was made for an update (the row became an open pull request between the look and here): nothing is granted on a state nobody asked GitHub about. Only a real interleaving reaches this.
+          if (update && live === null) return { kind: "public_unavailable" };
           // An update is its own kind of attempt, numbered on its own and not held to the three pushes of a first publish (each fix round has one).
           const kind = update ? "fix_round" : "push";
           const { rows: next } = await client.query<{ n: number }>("SELECT COALESCE(MAX(attempt_no), 0) + 1 AS n FROM plane_push_attempts WHERE plane_push_id = $1 AND account_id = $2 AND kind = $3", [row.id, input.accountId, kind]);

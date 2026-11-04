@@ -37,6 +37,8 @@ export interface HostedPlanePush {
    * address is `https://github.com/<code_repo>/pull/<number>`; null otherwise.
    */
   verifyPullRequest(input: { accountId: string; codeRepo: string; branch: string; number: number }): Promise<{ url: string } | null>;
+  /** D#6 REPUBLISH-CLOSED-PR: the pull request's live state (`unknown` for no such pull request); an unreadable answer throws. Sibling of `verifyPullRequest`, which keeps returning null for everything but an open match. */
+  pullRequestState(input: { accountId: string; codeRepo: string; number: number }): Promise<"open" | "closed" | "merged" | "unknown">;
   /**
    * D#598 P1f-5c: opens the pull request on a branch the platform already pushed (base `main`), with a fresh token revoked before this returns. Nothing is pushed. A refusal throws a
    * `PlanePushApiError` (`pr_failed`, or `public_unavailable` when GitHub could not be reached).
@@ -87,6 +89,8 @@ export function createHostedPlanePush(api: PlanePushApi, deps: { now?: () => num
         if (!parents || parents.length !== 1 || parents[0] !== tipSha) return false;
         return api.inMainHistory({ codeRepo, sha: tipSha, token });
       }),
+
+    pullRequestState: ({ accountId, codeRepo, number }) => withFreshToken(accountId, codeRepo, (token) => api.pullRequestState({ codeRepo, number, token })),
 
     verifyPullRequest: ({ accountId, codeRepo, branch, number }) =>
       withFreshToken(accountId, codeRepo, async (token) => {

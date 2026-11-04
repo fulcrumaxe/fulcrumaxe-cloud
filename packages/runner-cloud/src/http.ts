@@ -307,6 +307,7 @@ export interface RunnerLeaseOps {
     | { kind: "not_paired" }
     | { kind: "pairing_changed" }
     | { kind: "already_issued" }
+    | { kind: "public_unavailable" }
     | { kind: "attempts_exhausted" }
     | { kind: "refused"; code: string }
     | { kind: "granted"; attemptId: string; id: string; codeRepo: string; branch: string; itemTitle: string; prFooter: string | null; issueNumber: number | null; child: boolean; updateOf: string | null; /** True when the run is a merge-conflict round of the item (its end is judged against the public main tip). */ conflictRound?: boolean }

@@ -1,6 +1,6 @@
 import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PLANE_PUSH_PAIRING_PATH, PLANE_PUSH_REPORT_PATH, PLANE_PUSH_TOKEN_PATH, PlanePushPairingReply, PlanePushTokenReply, STOP_REASONS, StopReply, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
@@ -72,7 +72,9 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
   let duringMint: (() => Promise<void>) | null = null;
   const revoked: string[] = [];
   let identity: { name: string; email: string } | null = { name: "Fulcrumaxe Bot", email: "bot@example.com" };
-  const facade = () => createRunnerPlanePushFacade(writerPool, { now: () => clock, publicHead: (i) => port.branchHead!(i) });
+  /** D#6 REPUBLISH-CLOSED-PR: the live pull request read the grant makes; unset (open) in every test but the ones that look at it; null is a facade built with no read at all. */
+  let livePr: ((i: { accountId: string; codeRepo: string; number: number }) => Promise<"open" | "closed" | "merged" | "unknown">) | null | undefined;
+  const facade = () => createRunnerPlanePushFacade(writerPool, { now: () => clock, publicHead: (i) => port.branchHead!(i), ...(livePr === null ? {} : { pullRequestState: livePr ?? (async () => "open" as const) }) });
   const ops = (): RunnerLeaseOps => ({ ...claims, ...facade() }) as unknown as RunnerLeaseOps;
   const deps = (): RunnerCloudDeps => ({ appUserPool: appPool, origin: ORIGIN, failRunnerLeases: null, leases: ops(), planePush: port, planePushIdentity: () => identity, now: () => new Date(clock) });
   const created = () => Math.floor(clock / 1000);
@@ -862,6 +864,184 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       }
       expect(github.mints).toEqual([]);
       expect(await attempts()).toEqual([]);
+    });
+
+    // D#6 REPUBLISH-CLOSED-PR: the token path reads the pull request's live state per grant. Order: the lease fence, then the read (a fenced, finished or already-granted request makes none), then the grant.
+    // A closed or merged pull request is recorded like the stored-state stops; a read that fails or cannot say is 503 `public_unavailable` with nothing recorded, spent or refused.
+    describe("D#6 REPUBLISH-CLOSED-PR: the live pull request read at the token", () => {
+      const SHOWN = "b".repeat(40);
+      const PERSON = "7".repeat(40);
+      type Live = "open" | "closed" | "merged" | "unknown" | "throws";
+      let answer: Live;
+      const asked: Array<{ codeRepo: string; number: number }> = [];
+      beforeEach(() => {
+        answer = "open";
+        asked.length = 0;
+        livePr = async (i) => {
+          asked.push({ codeRepo: i.codeRepo, number: i.number });
+          if (answer === "throws") throw new Error("GitHub 503");
+          return answer;
+        };
+      });
+      afterEach(() => {
+        livePr = undefined;
+      });
+      const capable = () => admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, $3::text[]) ON CONFLICT (runner_id) DO UPDATE SET capabilities = EXCLUDED.capabilities", [runner, A.accountId, ["tip_publish_v1"]]);
+      const mark = (id: string) => withTenant(writerPool, A.accountId, (c) => insertRunEvent(c, A.accountId, id, RUNNER_REPLACE_ROUND_KIND, {}));
+      const openRequests = async () => (await admin.query("SELECT seen_head FROM setup_requests WHERE account_id = $1 AND kind = 'branch_pushed_by_person' AND state = 'open'", [A.accountId])).rows;
+      const untouched = async () => {
+        expect(await facts()).toEqual([]);
+        expect(await attempts()).toEqual([]);
+        expect(github.mints).toEqual([]);
+        expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: HEAD });
+      };
+      const refuseAfter503 = async (run: { id: string; generation: number }) => {
+        const original = port.branchHead;
+        try {
+          port.branchHead = async () => PERSON;
+          return await report(run, { phase: "refused", code: "public_unavailable" });
+        } finally {
+          port.branchHead = original;
+        }
+      };
+
+      it.each([
+        ["closed", "republish_pr_closed"],
+        ["merged", "republish_pr_merged"],
+      ] as Array<[Live, string]>)("a record that says open while the pull request is %s on GitHub is refused at the token with %s: no token, no attempt, the push row untouched", async (state, code) => {
+        await open();
+        answer = state;
+        const res = await askToken(await claimedRun({ continues: { baseSha: BASE } }));
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({ error: { code } });
+        expect(await facts()).toEqual([{ kind: "escalated", code }]);
+        expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: HEAD });
+        expect(github.mints).toEqual([]);
+        expect(await attempts()).toEqual([]);
+        expect(asked).toEqual([{ codeRepo: "acme/widgets-public", number: 9 }]);
+      });
+
+      it.each([["unknown"], ["throws"]] as Array<[Live]>)("a read that %s is 503 public_unavailable: nothing recorded, no token, no attempt; the next grant reads again and goes through once it can say open", async (state) => {
+        await open();
+        answer = state;
+        const run = await claimedRun({ continues: { baseSha: BASE } });
+        const res = await askToken(run);
+        expect(res.status).toBe(503);
+        expect(res.body).toMatchObject({ error: { code: "public_unavailable" } });
+        await untouched();
+        expect(await stageOf()).toBe("changes_requested");
+        answer = "open";
+        expect((await askToken(run)).status).toBe(200);
+        expect(asked).toHaveLength(2);
+      });
+
+      it("a facade built with no live read answers 503 public_unavailable for an update and records nothing (fail closed, no refusal code)", async () => {
+        livePr = null;
+        await open();
+        const res = await askToken(await claimedRun({ continues: { baseSha: BASE } }));
+        expect(res.status).toBe(503);
+        expect(res.body).toMatchObject({ error: { code: "public_unavailable" } });
+        await untouched();
+      });
+
+      it("the read comes after the lease fence: a stale generation, an expired lease and a finished run make no read; an ordinary first push makes none either", async () => {
+        await open();
+        const run = await claimedRun({ continues: { baseSha: BASE } });
+        const leaseAt = await leaseEnd(run.id);
+        expect((await askToken({ id: run.id, generation: run.generation + 1 })).body).toEqual({ continue: false, reason: "stale_generation" });
+        clock = leaseAt + 1000;
+        expect((await askToken(run)).body).toEqual({ continue: false, reason: "lease_expired" });
+        clock = T0;
+        await admin.query("UPDATE agent_runs SET status = 'cancelled' WHERE id = $1", [run.id]);
+        expect((await askToken(run)).body).toEqual({ continue: false, reason: "run_terminal" });
+        expect(asked).toEqual([]);
+        await admin.query("DELETE FROM plane_pushes WHERE work_item_id = $1", [A.workItemId]);
+        await pair();
+        await stamp();
+        expect((await askToken(await claimedRun())).status).toBe(200);
+        expect(asked).toEqual([]);
+      });
+
+      it("a re-ask for a lease that already has its attempt makes no read and still answers already_issued", async () => {
+        await open();
+        const run = await claimedRun({ continues: { baseSha: BASE } });
+        expect((await askToken(run)).status).toBe(200);
+        expect(asked).toHaveLength(1);
+        answer = "throws";
+        const again = await askToken(run);
+        expect(again.status).toBe(409);
+        expect(again.body).toMatchObject({ error: { code: "already_issued" } });
+        expect(asked).toHaveLength(1);
+        expect(await attempts()).toHaveLength(1);
+      });
+
+      it("a row whose pull request number changed while the read was out is not believed: 503 public_unavailable, nothing granted (the repository cannot change: a trigger fixes it)", async () => {
+        await open();
+        const run = await claimedRun({ continues: { baseSha: BASE } });
+        let moved = false;
+        livePr = async (i) => (asked.push({ codeRepo: i.codeRepo, number: i.number }), await admin.query("UPDATE plane_pushes SET pr_number = 10 WHERE work_item_id = $1", [A.workItemId]), (moved = true), "open");
+        const res = await askToken(run);
+        expect(moved).toBe(true);
+        expect(res.status).toBe(503);
+        expect(res.body).toMatchObject({ error: { code: "public_unavailable" } });
+        expect(github.mints).toEqual([]);
+        expect(await attempts()).toEqual([]);
+        expect(await facts()).toEqual([]);
+      });
+
+      describe("a round a person's Replace started", () => {
+        it("a failed read on the ordinary (non-tip) round leaves the authorization unspent and records nothing; the runner's report of the 503 puts the question again with the live head", async () => {
+          await open();
+          await admin.query("UPDATE plane_pushes SET replace_authorized_head = $2 WHERE work_item_id = $1", [A.workItemId, SHOWN]);
+          const run = await claimedRun({ continues: { baseSha: BASE } });
+          await mark(run.id);
+          answer = "throws";
+          expect((await askToken(run)).status).toBe(503);
+          expect(await facts()).toEqual([]);
+          expect(await planeRow()).toMatchObject({ state: "pr_opened", head_sha: HEAD, replace_authorized_head: SHOWN });
+          expect(await openRequests()).toEqual([]);
+          expect((await refuseAfter503(run)).status).toBe(200);
+          expect(await facts()).toEqual([{ kind: "escalated", code: "republish_replace_failed" }]);
+          expect(await planeRow()).toMatchObject({ state: "waiting_person_pushed", head_sha: HEAD, replace_authorized_head: null });
+          expect(await openRequests()).toEqual([{ seen_head: PERSON }]);
+          expect(await stageOf()).toBe("needs_human");
+        });
+
+        it("a failed read on the branch-tip round (at_tip) is the same: 503, nothing recorded, and the report raises the question once", async () => {
+          await open();
+          await admin.query("UPDATE plane_pushes SET replace_authorized_head = $2 WHERE work_item_id = $1", [A.workItemId, SHOWN]);
+          await capable();
+          const run = await claimedRun({ continues: { baseSha: BASE } });
+          await mark(run.id);
+          answer = "unknown";
+          const res = await token({ run_id: run.id, lease_generation: run.generation, at_tip: true });
+          expect(res.status).toBe(503);
+          expect(res.body).toMatchObject({ error: { code: "public_unavailable" } });
+          expect(await facts()).toEqual([]);
+          expect(await planeRow()).toMatchObject({ replace_authorized_head: SHOWN });
+          expect((await refuseAfter503(run)).status).toBe(200);
+          expect(await facts()).toEqual([{ kind: "escalated", code: "republish_replace_failed" }]);
+          expect(await openRequests()).toEqual([{ seen_head: PERSON }]);
+        });
+
+        it("a live closed pull request on a Replace round is recorded under its own code (the same as the stored-state stop and the sandbox path): the item is paused with the reopen sentence and nothing is left to ask", async () => {
+          await open();
+          await admin.query("UPDATE plane_pushes SET replace_authorized_head = $2 WHERE work_item_id = $1", [A.workItemId, SHOWN]);
+          const run = await claimedRun({ continues: { baseSha: BASE } });
+          await mark(run.id);
+          answer = "closed";
+          const res = await askToken(run);
+          expect(res.status).toBe(409);
+          expect(res.body).toMatchObject({ error: { code: "republish_pr_closed" } });
+          expect(await facts()).toEqual([{ kind: "escalated", code: "republish_pr_closed" }]);
+          expect(await planeRow()).toMatchObject({ replace_authorized_head: null });
+          expect(await openRequests()).toEqual([]);
+          expect(await stageOf()).toBe("needs_human");
+          // The runner's follow-up report does not overwrite the stop.
+          expect((await refuseAfter503(run)).status).toBe(200);
+          expect(await facts()).toEqual([{ kind: "escalated", code: "republish_pr_closed" }]);
+        });
+      });
     });
 
     it("D#598 P1g-1: a runner's follow-up report after a stop-class token refusal (an old runner says public_unavailable, a new one the stop's own code) does not overwrite the stop", async () => {

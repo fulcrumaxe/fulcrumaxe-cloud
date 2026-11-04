@@ -112,6 +112,9 @@ export async function planePushTokenRun(deps: RunnerCloudDeps, req: RunnerHttpRe
       throw new RunnerHttpError(409, "pairing_changed", "the repository's pairing changed after the build started");
     case "already_issued":
       throw new RunnerHttpError(409, "already_issued", "a token was already issued for this run");
+    case "public_unavailable":
+      // D#6 REPUBLISH-CLOSED-PR: the live pull request read for an update could not be made or could not say. Nothing was recorded or spent; the runner reports this refusal like any other 503.
+      throw new RunnerHttpError(503, "public_unavailable", "GitHub could not be asked");
     case "attempts_exhausted":
       throw new RunnerHttpError(409, "attempts_exhausted", "this change has used all its push attempts");
     case "refused":
