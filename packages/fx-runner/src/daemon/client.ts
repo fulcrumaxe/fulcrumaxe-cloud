@@ -24,6 +24,8 @@ export interface CallError {
   kind: "error";
   status: number;
   code?: string;
+  /** The reply was Vercel's own Deployment Protection 401: the runner's key was never judged. */
+  protectedDeployment?: true;
 }
 
 /** `wake` is the grant the reply carried (D#6 RUNNER-WAKE), absent when it carried none. */
@@ -140,7 +142,7 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
   }
   const fail = (reply: CloudReply | undefined, code?: string): CallError => {
     const known = code ?? (reply === undefined ? undefined : errorCodeOf(reply.body));
-    return { kind: "error", status: reply?.status ?? 0, ...(known === undefined ? {} : { code: known }) };
+    return { kind: "error", status: reply?.status ?? 0, ...(known === undefined ? {} : { code: known }), ...(reply?.protectedDeployment === true ? { protectedDeployment: true as const } : {}) };
   };
 
   return {

@@ -79,6 +79,13 @@ describe("errors back off", () => {
     expect(r.clock.slept).toEqual([]);
   });
 
+  it("a 401 that was Vercel's protection ends the loop as `protected`, not as a refused key", async () => {
+    const r = rig([{ kind: "error", status: 401, protectedDeployment: true }, { kind: "idle", retryAfter: 1 }]);
+    expect(await r.run()).toBe("protected");
+    expect(r.claims()).toBe(1);
+    expect(r.clock.slept).toEqual([]);
+  });
+
   it("a run that throws is logged as a closed code, and the loop pauses and goes on", async () => {
     const r = rig([claimed, { kind: "idle", retryAfter: 1 }]);
     await r.run({ onClaimed: async () => Promise.reject(new Error("secret job text")) });

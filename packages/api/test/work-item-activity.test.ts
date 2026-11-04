@@ -668,7 +668,7 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
     it.each([
       ['public_branch_moved', "The public pull request's branch was changed outside the cloud. Nothing was started. Close it or reset its branch, then press Build again."],
       ['public_head_unavailable', "Couldn't read the public pull request's branch on GitHub, so the fix round was not started. Nothing was changed. Press Build again in a moment."],
-      ['base_sync_unavailable', "Couldn't bring the branch up to date on GitHub, so the fix round was not started. Nothing was changed. Press Build again in a moment."],
+      ['base_sync_unavailable', "Couldn't bring the branch up to date on GitHub, so the fix round was not started. Nothing was changed. An owner or admin can press Request changes, once no agents are working, to run another round."],
     ])('check_failed: a fix round refused %s gives its fixed sentence at every pull-request stage, and none at In progress', async (code, sentence) => {
       const { accountId, userId } = await seedAccountWithMember(admin);
       const { itemId } = await seedItem(accountId, { stage: 'pr_opened' });
@@ -1188,8 +1188,8 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
     it.each([
       ['public_branch_moved', "The public pull request's branch was changed outside the cloud. Nothing was started. Close it or reset its branch, then press Build again."],
       ['public_head_unavailable', "Couldn't read the public pull request's branch on GitHub, so the fix round was not started. Nothing was changed. Press Build again in a moment."],
-      ['base_sync_unavailable', "Couldn't bring the branch up to date on GitHub, so the fix round was not started. Nothing was changed. Press Build again in a moment."],
-      ['base_sync_conflict', "Main has changed in the same places as this change, so the cloud couldn't bring the branch up to date. Nothing was started. Update the branch on GitHub (fix the conflict there), then press Build again."],
+      ['base_sync_unavailable', "Couldn't bring the branch up to date on GitHub, so the fix round was not started. Nothing was changed. An owner or admin can press Request changes, once no agents are working, to run another round."],
+      ['base_sync_conflict', "Main has changed in the same places as this change, so the cloud couldn't bring the branch up to date. Nothing was started. Update the branch on GitHub (fix the conflict there). An owner or admin can press Request changes, once no agents are working, to run another round."],
       ['check_failed_outside_change', "The check failed in parts of the repo this change didn't touch, so a fix round would not help: the failure comes from the environment or from code that is already on the base branch. Nothing was started. Look at the check's output in the run, then press Build again if it was a one-off, or fix the base branch."],
     ])('FIXROUND-REFRESH-HEAD: a check fix round refused %s moves the item from In progress to Needs a person (the real markBuildNeedsHuman) and the card gives its sentence', async (code, sentence) => {
       const { accountId, userId } = await seedAccountWithMember(admin, { role: 'owner' });
@@ -1247,7 +1247,7 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       const { itemId } = await seedItem(accountId, { stage: 'needs_human' });
       await admin.query(`INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'changes_requested', 'needs_human', now(), 'control_plane', 'base-sync-conflict-x')`, [accountId, itemId]);
       await admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'escalated', 'base_sync_conflict', 'base_sync_conflict:a..b')`, [accountId, itemId]);
-      expect(((await (await get(itemId, { accountId, userId })).json()) as Activity).notice).toEqual({ kind: 'needs_human', reason: "Main has changed in the same places as this change, so the cloud couldn't bring the branch up to date. Nothing was started. Update the branch on GitHub (fix the conflict there), then press Build again." });
+      expect(((await (await get(itemId, { accountId, userId })).json()) as Activity).notice).toEqual({ kind: 'needs_human', reason: "Main has changed in the same places as this change, so the cloud couldn't bring the branch up to date. Nothing was started. Update the branch on GitHub (fix the conflict there). An owner or admin can press Request changes, once no agents are working, to run another round." });
     });
 
     it("after Back to discussion only the new panel's comments are shown, so the old panel is not read as its challenge round", async () => {

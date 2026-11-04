@@ -40,7 +40,8 @@ export type PollEvent =
   /** The classes this machine is holding back, and why; said once per change (both null: nothing is held back any more). */
   | { event: "held"; light: LimitedBy | null; heavy: LimitedBy | null };
 
-export type PollEnd = "stopped" | "unauthorized" | "restart";
+/** `protected`: Vercel's Deployment Protection answered 401 before the cloud saw the request, so the key was not judged. */
+export type PollEnd = "stopped" | "unauthorized" | "protected" | "restart";
 
 export interface PollDeps {
   /** `wake` is needed only with a `wake` tracker. */
@@ -284,7 +285,7 @@ export async function pollLoop(deps: PollDeps): Promise<PollEnd> {
         if (reply.kind === "idle") await (gate.open ? waitIdle(reply.retryAfter) : waitForWork(reply.retryAfter));
         else await wait(reply.retryAfter);
       } else {
-        if (reply.status === 401) return "unauthorized";
+        if (reply.status === 401) return reply.protectedDeployment === true ? "protected" : "unauthorized";
         const waitSeconds = backoff();
         log({ event: "error", status: reply.status, ...(reply.code === undefined ? {} : { code: reply.code }), waitSeconds });
         await wait(waitSeconds);

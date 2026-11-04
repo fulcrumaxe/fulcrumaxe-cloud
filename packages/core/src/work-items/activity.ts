@@ -15,6 +15,7 @@ import { MONTHLY_BUDGET_PARKED_STOP, RUN_LIMIT_PARKED_STOP, continuationStopSent
 import { BASE_SYNC_CONFLICT, BASE_SYNC_UNAVAILABLE, BASE_SYNC_UNAVAILABLE_SENTENCE, FIX_ROUND_STOP_SENTENCE, REPUBLISH_BASE_MISSING, REPUBLISH_BRANCH_MOVED, REPUBLISH_FAILED, REPUBLISH_FAILED_SENTENCE, REPUBLISH_NO_CHANGE, REPUBLISH_REPLACE_NO_CHANGE, REPUBLISH_REPLACE_FAILED, REPUBLISH_REPLACE_TIP_MOVED, REPUBLISH_PAIRING_OFF, REPUBLISH_PR_CLOSED, REPUBLISH_PR_MERGED, REPUBLISH_STACKED_UNSUPPORTED, REPUBLISH_TIP_MOVED, republishFailedSentence } from './baseSync.js';
 import { PUBLIC_BRANCH_MOVED, PUBLIC_BRANCH_MOVED_SENTENCE, PUBLIC_HEAD_UNAVAILABLE, PUBLIC_HEAD_UNAVAILABLE_SENTENCE } from '../repos/planePushRecord.js';
 import { CHECK_FAILED_OUTSIDE_CHANGE, CHECK_FAILED_OUTSIDE_CHANGE_SENTENCE } from './checkFailure.js';
+import { openPrStopSentence } from './baseSync.js';
 import { UNVERIFIABLE_ESCALATION_CODE } from './reviewHold.js';
 import { buildStartsByItself } from './stageApprovalGate.js';
 import { readUnverifiable } from './unverifiable.js';
@@ -1001,8 +1002,8 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
           finished_at: s.finished_at ? s.finished_at.toISOString() : null,
         }))
         .reverse(),
-      // D#6 REPUBLISH-FAILED-DEADEND: Build again stops at an open pull request, so this sentence names the step the viewer's card really lists.
-      notice: notice?.kind === 'needs_human' && notice.reason === REPUBLISH_FAILED_SENTENCE ? { ...notice, reason: republishFailedSentence(changeVerdict?.ok === true, requestChangesBlocked === 'rounds') } : notice,
+      // D#6 REPUBLISH-FAILED-DEADEND: Build again stops at an open pull request, so these sentences name the step the viewer's card really lists (any kind of notice that carries one).
+      notice: notice ? { ...notice, reason: notice.reason === REPUBLISH_FAILED_SENTENCE ? republishFailedSentence(changeVerdict?.ok === true, requestChangesBlocked === 'rounds') : openPrStopSentence(notice.reason, changeVerdict?.ok === true, requestChangesBlocked === 'rounds') } : notice,
       review_recheck: reviewRecheck,
       public_change: await readPublicChange(client, accountId, workItemId, facts),
       branch_cleanup: await readBranchCleanup(client, workItemId, item.stage),
