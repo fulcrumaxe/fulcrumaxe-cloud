@@ -469,6 +469,84 @@ describe("check fix round [pg]", () => {
       expect((await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'plane.fix_base'", [newRun])).rows.map((r) => r.payload)).toEqual([{ base_sha: B, branch: "fx/issue-42" }]);
     });
 
+    // D#6 FIXROUND-REPUBLISH-STACKED: a SANDBOX check round on a stacked change goes on while its parent is open; a runner-side round and a parent that ended are refused, with no merge.
+    describe("on a change stacked on another pull request", () => {
+      const P = "7".repeat(40);
+      const open = { state: "open", merged: false, headSha: P, headRef: "fx/parent", headInBaseRepo: true, branchTipSha: P } as const;
+      const stackedRound = async (side: "sandbox" | "runner", read: () => Promise<typeof open | Record<string, unknown>>, over: { stage?: string; retargeted?: boolean } = {}) => {
+        await publicCopy();
+        const parent = randomUUID();
+        await admin.query("INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number) VALUES ($1, $2, $3, 'issue', 'internal', 'pr_opened', 9042)", [parent, A.accountId, A.repoId]);
+        await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id, envelope) VALUES ($1, $2, $3, 'executor', 'production', 'succeeded', 'sandbox', $4, $5::jsonb)", [randomUUID(), A.accountId, parent, A.repoId, JSON.stringify({ summary: "built", pr_number: 40 })]);
+        await admin.query("UPDATE work_items SET stack_parent_id = $1 WHERE id = $2", [parent, A.workItemId]);
+        if (over.stage !== undefined) await admin.query("UPDATE work_items SET stage = $2 WHERE id = $1", [parent, over.stage]);
+        let failed: string;
+        if (side === "sandbox") {
+          failed = await ended({ reason: "check_failed", sandbox: true });
+          await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 9, 'plane.private_pr', $3::jsonb)", [A.accountId, failed, JSON.stringify({ outcome: "opened", pr: 7 })]);
+        } else {
+          await recordPr();
+          failed = await ended({ reason: "check_failed", runBranch: RUN_BRANCH });
+        }
+        const merges = vi.fn();
+        const sync = vi.fn(async (i: { publicCopy?: boolean; stackBranch?: string; readOnly?: boolean }): Promise<BranchSyncOutcome> => {
+          if (over.retargeted === true) {
+            if (i.readOnly === true) return { kind: "up_to_date", baseSha: P, baseRef: "main", stacked: false };
+            merges();
+            return { kind: "merged", sha: M, parents: [L, P], baseSha: P, baseRef: "main", stacked: false };
+          }
+          if (i.publicCopy === true && i.stackBranch !== "fx/parent") return { kind: "stacked", baseRef: "fx/parent" };
+          merges();
+          return { kind: "merged", sha: M, parents: [L, P], baseSha: P, baseRef: "fx/parent", stacked: true };
+        });
+        const readParent = vi.fn(read as never);
+        const out = await startCheckFixRound({ ...deps(), ...withSync(checkFixBeforeStart(writerPool, { privateHead: async () => L, publicHead: async () => "d".repeat(40), syncBase: sync, stackBase: { readParent } }, who())) }, who(), failed);
+        return { out, sync, merges, readParent };
+      };
+
+      it("open parent: the round starts, the sync is asked again naming the parent's branch, and the run is signed with the parent's tip", async () => {
+        const { out, sync, merges, readParent } = await stackedRound("sandbox", async () => open);
+        expect(out.ok).toBe(true);
+        expect(sync.mock.calls.map((c) => c[0].stackBranch)).toEqual([undefined, "fx/parent"]);
+        expect(readParent).toHaveBeenCalledWith({ repoId: A.repoId, owner: "acme", name: "widgets", prNumber: 40 });
+        expect(merges).toHaveBeenCalledTimes(1);
+        expect(resumed[0]!.base).toEqual({ sha: P, branch: "fx/issue-42" });
+      });
+
+      it.each([
+        ["merged", async () => ({ ...open, state: "closed", merged: true }), "republish_stack_parent_ended"],
+        ["closed", async () => ({ ...open, state: "closed", merged: false }), "republish_stack_parent_closed"],
+        ["unreadable", async () => { throw new Error("boom ghp_000"); }, "base_sync_unavailable"],
+      ])("%s parent: the round is refused with its fixed code, no merge, nothing started", async (_l, read, code) => {
+        const { out, merges } = await stackedRound("sandbox", read);
+        expect(out).toEqual({ ok: false, reason: code });
+        expect(merges).not.toHaveBeenCalled();
+        expect(resumed).toHaveLength(0);
+      });
+
+      it("a retargeted change (base main) whose parent was closed without merging is refused republish_stack_parent_closed with no merge and the parent is never read", async () => {
+        const refused = await stackedRound("sandbox", async () => open, { stage: "closed_unmerged", retargeted: true });
+        expect(refused.out).toEqual({ ok: false, reason: "republish_stack_parent_closed" });
+        expect(refused.merges).not.toHaveBeenCalled();
+        expect(refused.readParent).not.toHaveBeenCalled();
+        expect(resumed).toHaveLength(0);
+      });
+
+      it("a retargeted change whose parent merged goes on: one merge of main", async () => {
+        const ok = await stackedRound("sandbox", async () => open, { stage: "merged", retargeted: true });
+        expect(ok.out.ok).toBe(true);
+        expect(ok.merges).toHaveBeenCalledTimes(1);
+      });
+
+      it("a runner-side round on a stacked change is refused republish_stacked_unsupported and the parent is never read", async () => {
+        const { out, merges, readParent } = await stackedRound("runner", async () => open);
+        expect(out).toEqual({ ok: false, reason: "republish_stacked_unsupported" });
+        expect(readParent).not.toHaveBeenCalled();
+        expect(merges).not.toHaveBeenCalled();
+        expect(resumed).toHaveLength(0);
+      });
+    });
+
     it("SANDBOX-RERUN-BRANCH-a criterion 6: on a sandbox item built twice, the check fix round syncs and records the base on run 2's branch (the open pull request's), never the fixed name, and forces nothing", async () => {
       await publicCopy();
       const earlier = await ended({ reason: "check_failed", sandbox: true });

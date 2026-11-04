@@ -47,7 +47,7 @@ export interface CheckFixDeps {
   /** FIXROUND-REFRESH-HEAD: asked once nothing else refuses and before anything starts; a code it answers is the refusal. Absent: nothing is asked. */
   /** FIXROUND-BASE-SYNC (R2-b): read after `beforeStart`, the base tip it brought the branch up to date with; the round is signed with it as its diff base. */
   baseSync?: () => { baseSha: string | null; synced: boolean; needed?: boolean };
-  beforeStart?: (branch: { repo: { id: string; owner: string; name: string }; pr: { number: number; branch: string } } | null, attempt: string) => Promise<string | null>;
+  beforeStart?: (branch: { repo: { id: string; owner: string; name: string }; pr: { number: number; branch: string } } | null, attempt: string, sandbox: boolean) => Promise<string | null>;
 }
 
 type Started = { ok: true; runId: string } | { ok: false; reason: string };
@@ -158,7 +158,7 @@ export async function startCheckFixRound(deps: CheckFixDeps, who: { accountId: s
     const number = Number(marked.rows[0]?.pr);
     if (Number.isSafeInteger(number) && number > 0) target = { repo: { id: row.repo_id, owner: row.gh_owner, name: row.gh_name }, pr: { number, branch: itemBranch } };
   }
-  const held = deps.beforeStart ? await deps.beforeStart(target, failedRunId) : null;
+  const held = deps.beforeStart ? await deps.beforeStart(target, failedRunId, row.run_mode === "sandbox") : null;
   if (held !== null) return { ok: false, reason: held };
   const { baseSha, synced, needed } = deps.baseSync?.() ?? { baseSha: null, synced: false, needed: false };
   // D#7 DP4b-3b: what this round may decide, resolved now and written with the run; the block is in the prompt the run reads.

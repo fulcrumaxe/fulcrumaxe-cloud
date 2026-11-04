@@ -21,8 +21,9 @@ export type BranchSyncOutcome =
 
 export interface BranchSyncPort {
   /** `branch` must be one of the two shapes the platform pushes; the client refuses any other. */
+  /** `stackBranch`: the branch of the pull request this change is stacked on, which the caller verified is open (D#6 FIXROUND-REPUBLISH-STACKED). A stacked change with a public copy goes on to the merge only when the base the pull request names is exactly this branch; any other base is answered `stacked`. */
   /** `readOnly`: stops before the merge (D#519 MQ4-e1-b: a conflict round merges the base itself); a branch that is not stacked answers `up_to_date` with the base's current tip, nothing written. */
-  sync(input: { repo: { id: string; owner: string; name: string }; branch: string; prNumber: number; publicCopy?: boolean; readOnly?: boolean }): Promise<BranchSyncOutcome>;
+  sync(input: { repo: { id: string; owner: string; name: string }; branch: string; prNumber: number; publicCopy?: boolean; readOnly?: boolean; stackBranch?: string }): Promise<BranchSyncOutcome>;
 }
 
 export class BranchSyncError extends Error {
@@ -42,7 +43,7 @@ const segment = (s: string): string => s.split("/").map(encodeURIComponent).join
 
 export function createBranchSyncPort(open: (kind: InstallationHttpKind, target: InstallationHttpTarget) => Promise<InstallationHttp>): BranchSyncPort {
   return {
-    async sync({ repo, branch, prNumber, publicCopy, readOnly }) {
+    async sync({ repo, branch, prNumber, publicCopy, readOnly, stackBranch }) {
       const http = await open("branch_sync", { repoId: repo.id, owner: repo.owner, name: repo.name, branch, prNumber });
       try {
         const root = `/repos/${repo.owner}/${repo.name}`;
@@ -53,8 +54,8 @@ export function createBranchSyncPort(open: (kind: InstallationHttpKind, target: 
         const headRepo = dig(pull.body, "head", "repo", "id");
         if (typeof headRepo !== "number" || headRepo !== dig(pull.body, "base", "repo", "id")) throw new BranchSyncError("pull_request_unreadable");
         const stacked = dig(pull.body, "base", "repo", "default_branch") !== baseRef;
-        // A stacked change's public copy is not rebuilt yet, so a round on it is refused: decided here, before the base is read and before the merge.
-        if (publicCopy === true && stacked) return { kind: "stacked", baseRef };
+        // A stacked change's public copy is rebuilt only when the caller named the open parent's branch and it is this pull request's base; otherwise the round is refused here, before the base is read and before the merge.
+        if (publicCopy === true && stacked && stackBranch !== baseRef) return { kind: "stacked", baseRef };
         const ref = await http.request({ method: "GET", path: `${root}/git/ref/heads/${segment(baseRef)}` });
         const baseSha = dig(ref.body, "object", "sha");
         if (ref.status !== 200 || typeof baseSha !== "string" || !SHA.test(baseSha)) throw new BranchSyncError("base_unreadable");

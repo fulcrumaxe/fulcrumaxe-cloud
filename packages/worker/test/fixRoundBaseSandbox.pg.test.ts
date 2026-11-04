@@ -6,7 +6,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { insertAgentRun, writeRunStatus, type CancelResult, type ExecutionRun, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
-import { BASE_SYNC_CONFLICT_SENTENCE, BASE_SYNC_UNAVAILABLE_SENTENCE, REPUBLISH_STACKED_UNSUPPORTED_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
+import { BASE_SYNC_CONFLICT_SENTENCE, BASE_SYNC_UNAVAILABLE_SENTENCE, REPUBLISH_STACKED_UNSUPPORTED_SENTENCE, REPUBLISH_STACK_PARENT_ENDED_SENTENCE, REPUBLISH_STACK_PARENT_CLOSED_SENTENCE } from "@fx/core/src/work-items/baseSync.js";
+import type { StackParentFacts } from "@fx/pipeline";
 import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
 import { createAdvanceModule, type AdvanceModuleDeps, type AdvanceReviewDeps } from "../src/advance.js";
 import { BASE_SYNCED_STAGE, FIX_BASE_EVENT } from "../src/fixRoundBase.js";
@@ -496,6 +497,262 @@ describe("FIXROUND-BASE-SYNC-SANDBOX: the sandbox side gets the same base sync [
       const review = harness(heads);
       expect(await review.module.advanceStartFix(who(u), fixReq(u))).toEqual({ ok: false, reason: "public_branch_moved" });
       expect((await facts(u.w)).filter((f) => f.kind === "stopped").map((f) => f.code)).toEqual(["public_branch_moved"]);
+    });
+  });
+
+  // D#6 FIXROUND-REPUBLISH-STACKED: a sandbox round on a stacked change with a public copy goes on while the pull request it is stacked on is verifiably open.
+  describe("FIXROUND-REPUBLISH-STACKED: the parent decides", () => {
+    const PARENT_TIP = "7".repeat(40);
+    const PARENT_PR = 40;
+    const openParent: StackParentFacts = { state: "open", merged: false, headSha: PARENT_TIP, headRef: "fx/parent", headInBaseRepo: true, branchTipSha: PARENT_TIP };
+    const fixBaseOf = async (runId: string) => (await admin.query<{ payload: unknown }>("SELECT payload FROM run_events WHERE run_id = $1 AND kind = $2", [runId, FIX_BASE_EVENT])).rows.map((r) => r.payload);
+    const codes = async (w: string) => (await facts(w)).filter((f) => ["escalated", "stopped"].includes(f.kind)).map((f) => [f.kind, f.code]);
+    /** A change with a public copy whose pull request is stacked on a parent item's pull request (the number the parent's run reported). `parentPr: null`: the parent has no recorded pull request. */
+    async function stacked(side: "sandbox" | "runner" = "sandbox", parentPr: number | null = PARENT_PR) {
+      const t = await item(side);
+      await publicCopy(t);
+      const parent = randomUUID();
+      await admin.query("INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number) VALUES ($1, $2, $3, 'issue', 'internal', 'pr_opened', $4)", [parent, t.a.accountId, t.a.repoId, nextNumber++]);
+      if (parentPr !== null) {
+        await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id, envelope) VALUES ($1, $2, $3, 'executor', 'production', 'succeeded', 'sandbox', $4, $5::jsonb)", [randomUUID(), t.a.accountId, parent, t.a.repoId, JSON.stringify({ summary: "built", pr_number: parentPr })]);
+      }
+      await admin.query("UPDATE work_items SET stack_parent_id = $1 WHERE id = $2", [parent, t.w]);
+      return t;
+    }
+    /** The real port's contract (branchSync.ts): a stacked change with a public copy is answered "stacked" unless the caller named the pull request's base branch; then it merges (or is up to date). */
+    const port = (merges: () => void, over: { tip?: string; upToDate?: boolean; parents?: string[] } = {}) =>
+      vi.fn(async (i: { publicCopy?: boolean; stackBranch?: string }): Promise<BranchSyncOutcome> => {
+        if (i.publicCopy === true && i.stackBranch !== "fx/parent") return { kind: "stacked", baseRef: "fx/parent" };
+        const tip = over.tip ?? PARENT_TIP;
+        if (over.upToDate) return { kind: "up_to_date", baseSha: tip, baseRef: "fx/parent", stacked: true };
+        merges();
+        return merged({ baseSha: tip, baseRef: "fx/parent", stacked: true, parents: over.parents ?? [ASKED, tip] });
+      });
+    const parentPort = (read: () => Promise<StackParentFacts>) => ({ readParent: vi.fn(read) });
+
+    it.each([
+      ["open, the child already holds its tip", { upToDate: true }, 0],
+      ["open, moved: its new tip is merged into the child", { tip: "8".repeat(40) }, 1],
+    ])("%s: the round starts, the sync is asked again naming the parent's branch, and the run records the parent's tip as its base", async (_label, over, mergeCount) => {
+      const t = await stacked();
+      const merges = vi.fn();
+      const syncBase = port(merges, over);
+      const stackBase = parentPort(async () => ({ ...openParent, ...("tip" in over ? { headSha: over.tip, branchTipSha: over.tip } : {}) }));
+      const h = harness({ privateHead: async () => ASKED, syncBase, stackBase });
+      const req = fixReq(t);
+      const out = await h.module.advanceStartFix(who(t), req);
+      expect(out.ok).toBe(true);
+      const tip = "tip" in over ? over.tip : PARENT_TIP;
+      const repo = { id: t.a.repoId, owner: "acme", name: "widgets" };
+      expect(syncBase.mock.calls.map((c) => c[0])).toEqual([{ repo, branch: t.branch, prNumber: PR, publicCopy: true }, { repo, branch: t.branch, prNumber: PR, publicCopy: true, stackBranch: "fx/parent" }]);
+      expect(stackBase.readParent).toHaveBeenCalledWith({ repoId: t.a.repoId, owner: "acme", name: "widgets", prNumber: PARENT_PR });
+      expect(merges).toHaveBeenCalledTimes(mergeCount);
+      expect(h.resumed[0]!.base).toEqual({ sha: tip, branch: t.branch });
+      expect(await fixBaseOf((out as { runId: string }).runId)).toEqual([{ base_sha: tip, branch: t.branch }]);
+      // A replay finds its run: the parent is not merged a second time.
+      expect(await h.module.advanceStartFix(who(t), req)).toEqual(out);
+      expect(syncBase).toHaveBeenCalledTimes(2);
+      expect(merges).toHaveBeenCalledTimes(mergeCount);
+    });
+
+    it("a merge whose second parent is not the parent's tip the port read is not believed: base_sync_unavailable, nothing starts", async () => {
+      const t = await stacked();
+      const h = harness({ privateHead: async () => ASKED, syncBase: port(vi.fn(), { parents: [ASKED, "1".repeat(40)] }), stackBase: parentPort(async () => openParent) });
+      expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "base_sync_unavailable" });
+      expect(h.resume).not.toHaveBeenCalled();
+    });
+
+    const setParentStage = async (t: { w: string }, stage: string) => admin.query("UPDATE work_items SET stage = $2 WHERE id = (SELECT stack_parent_id FROM work_items WHERE id = $1)", [t.w, stage]);
+    const closedOnGithub = { ...openParent, state: "closed" as const, merged: false };
+
+    it.each([
+      ["merged on GitHub (nothing else recorded), its pull request not retargeted", "pr_opened", { ...closedOnGithub, merged: true }, "republish_stack_parent_ended", REPUBLISH_STACK_PARENT_ENDED_SENTENCE],
+      ["merged publicly (the item says merged); the sweep closed its private pull request unmerged", "merged", closedOnGithub, "republish_stack_parent_ended", REPUBLISH_STACK_PARENT_ENDED_SENTENCE],
+      ["closed without merging (the item says so)", "closed_unmerged", closedOnGithub, "republish_stack_parent_closed", REPUBLISH_STACK_PARENT_CLOSED_SENTENCE],
+      ["closed on GitHub while the item still looks open", "pr_opened", closedOnGithub, "republish_stack_parent_closed", REPUBLISH_STACK_PARENT_CLOSED_SENTENCE],
+    ])("the parent %s: refused %s BEFORE any merge, nothing starts; the card names the step that exists (Request changes), not Build again", async (_label, stage, read, code, sentence) => {
+      const t = await stacked();
+      await setParentStage(t, stage);
+      await admin.query("UPDATE account_members SET role = 'owner' WHERE account_id = $1 AND user_id = $2", [t.a.accountId, t.a.userId]);
+      const merges = vi.fn();
+      const syncBase = port(merges);
+      const h = harness({ privateHead: async () => ASKED, syncBase, stackBase: parentPort(async () => read) });
+      const before = await runs(t.w);
+      expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: code });
+      expect(merges).not.toHaveBeenCalled();
+      expect(h.resume).not.toHaveBeenCalled();
+      expect(await runs(t.w)).toBe(before);
+      expect(await stageOf(t.w)).toBe("needs_human");
+      expect(await codes(t.w)).toEqual([["escalated", code]]);
+      expect(await noticeOf(t)).toEqual({ kind: "needs_human", reason: sentence });
+      // The step the sentence names exists from this state: the owner's card lists Request changes. Build again would stop at the open pull request.
+      const card = await getWorkItemActivity({ pool: adminPool, principal: { accountId: t.a.accountId, userId: t.a.userId, role: "owner" } }, t.w);
+      expect(card.actions).toContain("request_changes");
+    });
+
+    it("every sentence of this change names Request changes and carries no raw code, null or Build again; the closed one says the work would be published and names reopening", () => {
+      for (const sentence of [REPUBLISH_STACK_PARENT_ENDED_SENTENCE, REPUBLISH_STACK_PARENT_CLOSED_SENTENCE, REPUBLISH_STACKED_UNSUPPORTED_SENTENCE]) {
+        expect(sentence).toContain("Request changes");
+        expect(sentence).not.toMatch(/Build again|null|undefined|republish_/);
+      }
+      expect(REPUBLISH_STACK_PARENT_CLOSED_SENTENCE).toMatch(/would publish it/);
+      expect(REPUBLISH_STACK_PARENT_CLOSED_SENTENCE).toMatch(/Reopen the closed pull request/);
+      expect(REPUBLISH_STACK_PARENT_CLOSED_SENTENCE).not.toMatch(/Change this pull request's base to main/);
+    });
+
+    // The hole the security review reproduced: after a hand (or GitHub) retarget to main the sync is not "stacked", the parent is never read, the base is the main tip, and the next round would publish the parent's closed work.
+    /** The real port for a change whose pull request now targets the default branch: a read-only call only reads, any other merges. */
+    const retargeted = (merges: () => void) =>
+      vi.fn(async (i: { readOnly?: boolean }): Promise<BranchSyncOutcome> => {
+        if (i.readOnly === true) return { kind: "up_to_date", baseSha: BASE, baseRef: "main", stacked: false };
+        merges();
+        return merged();
+      });
+
+    it("a retargeted child whose parent was closed without merging is refused republish_stack_parent_closed with zero merges and nothing started or published", async () => {
+      const t = await stacked();
+      await setParentStage(t, "closed_unmerged");
+      const merges = vi.fn();
+      const syncBase = retargeted(merges);
+      const stackBase = parentPort(async () => openParent);
+      const h = harness({ privateHead: async () => ASKED, syncBase, stackBase });
+      const before = await runs(t.w);
+      expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "republish_stack_parent_closed" });
+      expect(syncBase.mock.calls.map((c) => c[0])).toEqual([{ repo: { id: t.a.repoId, owner: "acme", name: "widgets" }, branch: t.branch, prNumber: PR, publicCopy: true, readOnly: true }]);
+      expect(merges).not.toHaveBeenCalled();
+      expect(h.resume).not.toHaveBeenCalled();
+      expect(await runs(t.w)).toBe(before);
+      expect((await admin.query("SELECT 1 FROM agent_runs WHERE work_item_id = $1 AND role = 'plane_publish'", [t.w])).rows).toEqual([]);
+      expect(await codes(t.w)).toEqual([["escalated", "republish_stack_parent_closed"]]);
+      // The same on the runner side and in a conflict round: the gate does not depend on which path asks.
+      const r = await stacked("runner");
+      await setParentStage(r, "closed_unmerged");
+      const hr = harness({ privateHead: async () => ASKED, syncBase: retargeted(merges), stackBase });
+      expect(await hr.module.advanceStartFix(who(r), fixReq(r))).toEqual({ ok: false, reason: "republish_stack_parent_closed" });
+      const c = await stacked();
+      await setParentStage(c, "closed_unmerged");
+      const hc = harness({ privateHead: async () => ASKED, syncBase: retargeted(merges), stackBase });
+      expect(await hc.module.advanceStartFix(who(c), { kind: "conflict" as const, issue: c.n, headSha: ASKED, prompt: "merge main", round: 1, actionId: randomUUID(), baseSha: "1".repeat(40), pr: { number: PR, branch: c.branch } })).toEqual({ ok: false, reason: "republish_stack_parent_closed" });
+      expect(merges).not.toHaveBeenCalled();
+    });
+
+    it("a retargeted child whose parent merged still works: one merge of main, the run records main's tip", async () => {
+      for (const stage of ["merged", "closed"]) {
+        const t = await stacked();
+        // `closed` after `merged` keeps its merge on record in the push row.
+        await setParentStage(t, stage);
+        if (stage === "closed") await admin.query("INSERT INTO plane_pushes (account_id, work_item_id, repo_id, code_repo, pairing_digest, head_sha, tip_sha, pr_number, pr_url, state) SELECT account_id, stack_parent_id, repo_id, 'acme/widgets-public', $2, $3, $4, 8, 'https://github.com/acme/widgets-public/pull/8', 'pr_merged' FROM work_items WHERE id = $1", [t.w, "f".repeat(64), "d".repeat(40), "e".repeat(40)]);
+        const merges = vi.fn();
+        const stackBase = parentPort(async () => openParent);
+        const h = harness({ privateHead: async () => ASKED, syncBase: retargeted(merges), stackBase });
+        const out = await h.module.advanceStartFix(who(t), fixReq(t));
+        expect(out.ok, stage).toBe(true);
+        expect(merges).toHaveBeenCalledTimes(1);
+        expect(h.resumed[0]!.base).toEqual({ sha: BASE, branch: t.branch });
+        expect(stackBase.readParent).not.toHaveBeenCalled();
+      }
+    });
+
+    it("a parent reopened on GitHub (the item row still says closed) with this change still on its branch goes on: the live read decides, the parent's tip is merged", async () => {
+      const t = await stacked();
+      await setParentStage(t, "closed_unmerged");
+      const merges = vi.fn();
+      const syncBase = port(merges);
+      const h = harness({ privateHead: async () => ASKED, syncBase, stackBase: parentPort(async () => openParent) });
+      const out = await h.module.advanceStartFix(who(t), fixReq(t));
+      expect(out.ok).toBe(true);
+      expect(syncBase.mock.calls.map((c) => c[0].stackBranch)).toEqual([undefined, "fx/parent"]);
+      expect(syncBase.mock.calls[0]![0]).toMatchObject({ readOnly: true });
+      expect(merges).toHaveBeenCalledTimes(1);
+      expect(h.resumed[0]!.base).toEqual({ sha: PARENT_TIP, branch: t.branch });
+    });
+
+    it("the second sync throwing, a stacked merge that conflicts, and a missing read port each end with their own fixed code and no run", async () => {
+      const a = await stacked();
+      const ha = harness({ privateHead: async () => ASKED, syncBase: vi.fn(async (i: { stackBranch?: string }): Promise<BranchSyncOutcome> => { if (i.stackBranch === undefined) return { kind: "stacked", baseRef: "fx/parent" }; throw new Error("boom ghp_000"); }), stackBase: parentPort(async () => openParent) });
+      expect(await ha.module.advanceStartFix(who(a), fixReq(a))).toEqual({ ok: false, reason: "base_sync_unavailable" });
+      expect(await codes(a.w)).toEqual([["stopped", "base_sync_unavailable"]]);
+      const b = await stacked();
+      const hb = harness({ privateHead: async () => ASKED, syncBase: vi.fn(async (i: { stackBranch?: string }): Promise<BranchSyncOutcome> => (i.stackBranch === undefined ? { kind: "stacked", baseRef: "fx/parent" } : { kind: "conflict", baseSha: PARENT_TIP, baseRef: "fx/parent", stacked: true })), stackBase: parentPort(async () => openParent) });
+      expect(await hb.module.advanceStartFix(who(b), fixReq(b))).toEqual({ ok: false, reason: "base_sync_conflict" });
+      expect(await codes(b.w)).toEqual([["escalated", "base_sync_conflict"]]);
+      const c = await stacked();
+      const merges = vi.fn();
+      const syncBase = port(merges);
+      const hc = harness({ privateHead: async () => ASKED, syncBase });
+      expect(await hc.module.advanceStartFix(who(c), fixReq(c))).toEqual({ ok: false, reason: "republish_stacked_unsupported" });
+      expect(syncBase).toHaveBeenCalledTimes(1);
+      expect(merges).not.toHaveBeenCalled();
+      for (const h of [ha, hb, hc]) expect(h.resume).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["GitHub cannot be asked", async () => { throw new Error("secret ghp_000 in a cause"); }],
+      ["its pull request head and branch tip differ", async () => ({ ...openParent, branchTipSha: "6".repeat(40) })],
+      ["its branch is in a fork", async () => ({ ...openParent, headInBaseRepo: false })],
+    ])("the parent cannot be read (%s): refused base_sync_unavailable with zero merge calls", async (_label, read) => {
+      const t = await stacked();
+      const merges = vi.fn();
+      const syncBase = port(merges);
+      const h = harness({ privateHead: async () => ASKED, syncBase, stackBase: parentPort(read as () => Promise<StackParentFacts>) });
+      expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "base_sync_unavailable" });
+      expect(syncBase).toHaveBeenCalledTimes(1);
+      expect(merges).not.toHaveBeenCalled();
+      expect(h.resume).not.toHaveBeenCalled();
+      expect(await codes(t.w)).toEqual([["stopped", "base_sync_unavailable"]]);
+    });
+
+    it("a parent with no recorded pull request number: refused base_sync_unavailable, the parent is never read, zero merges", async () => {
+      const t = await stacked("sandbox", null);
+      const merges = vi.fn();
+      const stackBase = parentPort(async () => openParent);
+      const h = harness({ privateHead: async () => ASKED, syncBase: port(merges), stackBase });
+      expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "base_sync_unavailable" });
+      expect(stackBase.readParent).not.toHaveBeenCalled();
+      expect(merges).not.toHaveBeenCalled();
+    });
+
+    it("the pull request's base is not the parent's branch the read found (a race between the two reads): refused republish_stacked_unsupported, zero merges", async () => {
+      const t = await stacked();
+      const merges = vi.fn();
+      const syncBase = port(merges);
+      const h = harness({ privateHead: async () => ASKED, syncBase, stackBase: parentPort(async () => ({ ...openParent, headRef: "fx/other" })) });
+      expect(await h.module.advanceStartFix(who(t), fixReq(t))).toEqual({ ok: false, reason: "republish_stacked_unsupported" });
+      expect(syncBase).toHaveBeenCalledTimes(1);
+      expect(merges).not.toHaveBeenCalled();
+      // The base changes between the parent read and the second sync: the port answers stacked again, and the round is refused with no merge.
+      const u = await stacked();
+      const hu = harness({ privateHead: async () => ASKED, syncBase: vi.fn(async (): Promise<BranchSyncOutcome> => ({ kind: "stacked", baseRef: "fx/parent" })), stackBase: parentPort(async () => openParent) });
+      expect(await hu.module.advanceStartFix(who(u), fixReq(u))).toEqual({ ok: false, reason: "republish_stacked_unsupported" });
+      expect(hu.resume).not.toHaveBeenCalled();
+    });
+
+    it("the refusal stands where the gate stays shut: a runner-side round, a conflict round, and a change with no recorded parent never read a parent", async () => {
+      const stackBase = parentPort(async () => openParent);
+      const merges = vi.fn();
+      const runner = await stacked("runner");
+      const hr = harness({ privateHead: async () => ASKED, syncBase: port(merges), stackBase });
+      expect(await hr.module.advanceStartFix(who(runner), fixReq(runner))).toEqual({ ok: false, reason: "republish_stacked_unsupported" });
+      const conflicting = await stacked();
+      const hc = harness({ privateHead: async () => ASKED, syncBase: port(merges), stackBase });
+      expect(await hc.module.advanceStartFix(who(conflicting), { kind: "conflict" as const, issue: conflicting.n, headSha: ASKED, prompt: "merge main", round: 1, actionId: randomUUID(), baseSha: "1".repeat(40), pr: { number: PR, branch: conflicting.branch } })).toEqual({ ok: false, reason: "republish_stacked_unsupported" });
+      const orphan = await item("sandbox");
+      await publicCopy(orphan);
+      const ho = harness({ privateHead: async () => ASKED, syncBase: port(merges), stackBase });
+      expect(await ho.module.advanceStartFix(who(orphan), fixReq(orphan))).toEqual({ ok: false, reason: "republish_stacked_unsupported" });
+      expect(stackBase.readParent).not.toHaveBeenCalled();
+      expect(merges).not.toHaveBeenCalled();
+      for (const h of [hr, hc, ho]) expect(h.resume).not.toHaveBeenCalled();
+    });
+
+    it("a change on the default branch (the parent merged and the pull request was retargeted) is not stacked: one sync call, the parent is never read", async () => {
+      const t = await stacked();
+      const stackBase = parentPort(async () => openParent);
+      const syncBase = vi.fn(async () => merged());
+      const h = harness({ privateHead: async () => ASKED, syncBase, stackBase });
+      expect((await h.module.advanceStartFix(who(t), fixReq(t))).ok).toBe(true);
+      expect(syncBase).toHaveBeenCalledTimes(1);
+      expect(stackBase.readParent).not.toHaveBeenCalled();
     });
   });
 });

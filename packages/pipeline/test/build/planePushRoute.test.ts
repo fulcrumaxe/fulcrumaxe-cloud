@@ -747,3 +747,85 @@ describe("the fix-round update (D#598 P1g-1): fresh-tip rebuild and the lease, o
     });
   });
 });
+
+// D#6 FIXROUND-REPUBLISH-STACKED, on real git: a stacked child's public copy is built on public main from the child's own diff against the signed parent tip. The parent's unmerged paths are never in it.
+describe("a stacked child's fix round republishes its own paths on public main", () => {
+  const headOf = (branch: string): string | null => {
+    try {
+      return sh(bare, "rev-parse", "--verify", "-q", `refs/heads/${branch}`);
+    } catch {
+      return null;
+    }
+  };
+  const api = (): PublicApi => fakeApi({ async branchHead({ branch }: { branch: string }) { return headOf(branch); } });
+  const paths = (a: string, b: string): string[] => sh(bare, "diff", "--name-only", a, b).split("\n").filter((p) => p !== "").sort();
+  let parentTip: string;
+  let first: string;
+
+  beforeEach(async () => {
+    // The parent's open pull request adds two paths; the child is built on its tip and adds one of its own. The first publication carries the child's path only.
+    sh(priv, "checkout", "-q", "-b", "parent");
+    put(priv, { "src/p.ts": "export const p = 1;\n", "src/p2.ts": "export const p2 = 1;\n" });
+    parentTip = commitAll(priv, "parent work");
+    sh(priv, "checkout", "-q", "-b", "child");
+    put(priv, { "src/c.ts": "export const c = 1;\n" });
+    commitAll(priv, "child work");
+    const r = await routeAndPush(input({ privateBase: parentTip }), deps({ api: api() }));
+    if (r.plane !== "paired") throw new Error("unreachable");
+    first = r.commit;
+  });
+
+  it("the first publication holds the child's own path only: the parent's paths are absent from the diff against public main", () => {
+    expect(paths(publicTip, first)).toEqual(["src/c.ts"]);
+    expect(sh(bare, "rev-list", "--parents", "-n1", "item-1")).toBe(`${first} ${publicTip}`);
+  });
+
+  it("a fix round on a child whose parent moved: the parent's new tip is merged privately and signed as the base; one commit on the public tip, the parent's paths still absent, the lease on the stamp", async () => {
+    sh(priv, "checkout", "-q", "parent");
+    put(priv, { "src/p3.ts": "export const p3 = 1;\n" });
+    const movedTip = commitAll(priv, "parent moves");
+    sh(priv, "checkout", "-q", "child");
+    sh(priv, "merge", "-q", "--no-edit", movedTip);
+    put(priv, { "src/c.ts": "export const c = 2;\n" });
+    commitAll(priv, "fix round");
+    const r = await routeAndPush(input({ privateBase: movedTip, updateOf: first }), deps({ api: api() }));
+    if (r.plane !== "updated") throw new Error("unreachable");
+    expect(sh(bare, "rev-list", "--parents", "-n1", "item-1")).toBe(`${r.commit} ${publicTip}`);
+    expect(paths(publicTip, r.commit)).toEqual(["src/c.ts"]);
+    expect(sh(bare, "show", `${r.commit}:src/c.ts`)).toBe("export const c = 2;");
+    expect(headOf("item-1")).toBe(r.commit);
+  });
+
+  it("the parent's pull request merged publicly after the sync: its work stays in the new commit, nothing of it is reverted", async () => {
+    put(pubWork, { "src/p.ts": "export const p = 1;\n", "src/p2.ts": "export const p2 = 1;\n" });
+    const merged = commitAll(pubWork, "parent merged");
+    sh(pubWork, "push", "-q", bare, "main");
+    put(priv, { "src/c.ts": "export const c = 3;\n" });
+    commitAll(priv, "fix round");
+    const r = await routeAndPush(input({ privateBase: parentTip, updateOf: first }), deps({ api: api() }));
+    if (r.plane !== "updated") throw new Error("unreachable");
+    expect(sh(bare, "rev-list", "--parents", "-n1", "item-1")).toBe(`${r.commit} ${merged}`);
+    expect(paths(merged, r.commit)).toEqual(["src/c.ts"]);
+    expect(sh(bare, "show", `${r.commit}:src/p.ts`)).toBe("export const p = 1;");
+    expect(sh(bare, "show", `${r.commit}:src/p2.ts`)).toBe("export const p2 = 1;");
+  });
+
+  it("why a closed parent stops the round before the sync: signed with main's tip as the base, the same round would publish the parent's closed paths", async () => {
+    put(priv, { "src/c.ts": "export const c = 2;\n" });
+    commitAll(priv, "fix round");
+    const r = await routeAndPush(input({ privateBase, updateOf: first }), deps({ api: api() }));
+    if (r.plane !== "updated") throw new Error("unreachable");
+    expect(paths(publicTip, r.commit)).toEqual(["src/c.ts", "src/p.ts", "src/p2.ts"]);
+  });
+
+  it("the parent merged with later content for a path the child's round also changed: refused base_diverged, nothing pushed, the branch stays at the stamp", async () => {
+    put(pubWork, { "src/p.ts": "export const p = 9;\n" });
+    commitAll(pubWork, "parent merged, later content");
+    sh(pubWork, "push", "-q", bare, "main");
+    put(priv, { "src/p.ts": "export const p = 2;\n" });
+    commitAll(priv, "fix round touches the parent's file");
+    const e = await refusal(routeAndPush(input({ privateBase: parentTip, updateOf: first }), deps({ api: api() })));
+    expect(e.code).toBe("base_diverged");
+    expect(headOf("item-1")).toBe(first);
+  });
+});
