@@ -314,7 +314,8 @@ export async function memoryQueue(ctx: ReadCtx, filter: Omit<MemoryScopeFilter, 
     const params: unknown[] = [ctx.principal.userId];
     const where = await scopeConditions(client, filter, params);
     if (where === null) return { rows: [] as QueueRow[], entries: [] as MemoryEntry[], repos: {} as Record<string, number> };
-    where.push(`m.status = 'proposed'`);
+    // A proposal past its expiry no longer waits for a decision, even before the sweep marks it `expired`. A row with no expiry stays.
+    where.push(`m.status = 'proposed'`, `(m.expires_at IS NULL OR m.expires_at > now())`);
     params.push(limit + 1);
     const found = (
       await client.query<QueueRow>(
@@ -380,7 +381,7 @@ export async function memoryPendingCounts(ctx: ReadCtx, input: { repoIds?: reado
       const { rows } = await client.query<{ id: string; n: number }>(
         `SELECT r.id::text AS id, count(m.id)::int AS n
            FROM repos r JOIN installations i ON i.account_id = r.account_id AND i.id = r.installation_id
-           JOIN memory_entries m ON m.account_id = r.account_id AND m.scope = 'repo' AND m.status = 'proposed' AND m.scope_ref = r.gh_node_id || '@' || i.gh_installation_id::text
+           JOIN memory_entries m ON m.account_id = r.account_id AND m.scope = 'repo' AND m.status = 'proposed' AND (m.expires_at IS NULL OR m.expires_at > now()) AND m.scope_ref = r.gh_node_id || '@' || i.gh_installation_id::text
           WHERE r.id = ANY($1::uuid[]) AND r.gh_node_id IS NOT NULL
           GROUP BY r.id`,
         [repoIds],
@@ -390,7 +391,7 @@ export async function memoryPendingCounts(ctx: ReadCtx, input: { repoIds?: reado
     if (itemIds.length > 0) {
       const { rows } = await client.query<{ id: string; n: number }>(
         `SELECT m.scope_ref AS id, count(*)::int AS n FROM memory_entries m
-          WHERE m.scope = 'item' AND m.status = 'proposed' AND m.scope_ref = ANY($1::text[]) GROUP BY m.scope_ref`,
+          WHERE m.scope = 'item' AND m.status = 'proposed' AND (m.expires_at IS NULL OR m.expires_at > now()) AND m.scope_ref = ANY($1::text[]) GROUP BY m.scope_ref`,
         [itemIds],
       );
       for (const r of rows) out.items[r.id] = r.n;
