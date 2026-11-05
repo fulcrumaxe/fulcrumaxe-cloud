@@ -22,8 +22,9 @@ const PRIVILEGES = [
   ...['id', 'account_id', 'registered_by', 'credential_mode', 'allowed_repo_ids', 'revoked_at'].map((c) => `column runners.${c} SELECT`),
   ...['account_id', 'user_id', 'role'].map((c) => `column account_members.${c} SELECT`),
   ...['account_id', 'repo_id', 'decision_type', 'disposition', 'version'].map((c) => `column decision_settings.${c} SELECT`),
-  ...['id', 'account_id', 'run_id', 'decision_type'].map((c) => `column decision_asks.${c} SELECT`),
-  ...['account_id', 'run_id'].map((c) => `column runner_plan_asks.${c} SELECT`),
+  // state and answered_option (and runner_plan_asks.ask_id) are 0987's: runner_plan_declined reads whether the ask was answered with anything but "approve".
+  ...['id', 'account_id', 'run_id', 'decision_type', 'state', 'answered_option'].map((c) => `column decision_asks.${c} SELECT`),
+  ...['account_id', 'run_id', 'ask_id'].map((c) => `column runner_plan_asks.${c} SELECT`),
   ...['account_id', 'run_id', 'ask_id', 'runner_id', 'plan_holder'].map((c) => `column runner_plan_asks.${c} INSERT`),
   'schema public USAGE',
 ].sort();
@@ -86,7 +87,7 @@ describe('migration 0982: the member-plan ask record [pg]', () => {
     ask = await raise(A, run);
   });
 
-  it('the role is a no-login role with exactly the column grants of the migration, owning exactly the one function', async () => {
+  it('the role is a no-login role with exactly the column grants of the migration, owning exactly its two functions (0987 adds runner_plan_declined)', async () => {
     const r = (await admin.query(`SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls FROM pg_roles WHERE rolname = $1`, [ROLE])).rows[0];
     expect(r).toEqual({ rolcanlogin: false, rolsuper: false, rolcreatedb: false, rolcreaterole: false, rolreplication: false, rolbypassrls: false });
     const held = await admin.query<{ x: string }>(
@@ -95,7 +96,7 @@ describe('migration 0982: the member-plan ask record [pg]', () => {
         UNION ALL SELECT 'schema ' || n.nspname || ' ' || a.privilege_type FROM pg_namespace n, aclexplode(n.nspacl) a WHERE a.grantee = $1::regrole AND n.nspname = 'public'`, [ROLE]);
     expect(held.rows.map((x) => x.x).sort()).toEqual(PRIVILEGES);
     const owned = await admin.query<{ proname: string }>(`SELECT proname FROM pg_proc WHERE proowner = $1::regrole`, [ROLE]);
-    expect(owned.rows.map((x) => x.proname)).toEqual(['runner_plan_ask_record']);
+    expect(owned.rows.map((x) => x.proname).sort()).toEqual(['runner_plan_ask_record', 'runner_plan_declined']);
     expect((await admin.query(`SELECT 1 FROM pg_auth_members WHERE roleid = $1::regrole OR member = $1::regrole`, [ROLE])).rows).toEqual([]);
   });
 

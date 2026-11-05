@@ -521,10 +521,10 @@ const WAIT_FACTS = (filter: string, tail: string, wakeEnabled: boolean): string 
          -- A runner "covers" the run when it is live (not revoked) and the run's repo is in its own list: the test the claim applies.
          -- It can take the run without a click when it is an api_key runner, when its registrant started or approved the run, or when
          -- the claim would approve the run for it by itself (the dial and its registrant's consent: runner_plan_auto_approvable, which
-         -- the claim calls too, so this and the claim cannot disagree).
+         -- the claim calls too, so this and the claim cannot disagree), unless the plan holder answered "no" to the run's ask (runner_plan_declined, 0987).
          EXISTS (SELECT 1 FROM runners r WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND a.dispatch_repo_id = ANY(r.allowed_repo_ids)
                     AND (r.credential_mode = 'api_key' OR r.registered_by IN (a.initiated_by, a.approved_by)
-                         OR (a.approved_by IS NULL AND r.credential_mode = 'subscription' AND runner_plan_auto_approvable(r.id, a.dispatch_repo_id)))) AS runnable_without_approval,
+                         OR (a.approved_by IS NULL AND r.credential_mode = 'subscription' AND runner_plan_auto_approvable(r.id, a.dispatch_repo_id) AND NOT runner_plan_declined(a.id)))) AS runnable_without_approval,
          EXISTS (SELECT 1 FROM runners r WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND a.dispatch_repo_id = ANY(r.allowed_repo_ids)
                     AND r.credential_mode = 'subscription') AS needs_approval_possible,
          EXISTS (SELECT 1 FROM runners r WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND ${live}

@@ -66,6 +66,7 @@ interface Mock {
   stalled: Req[];
   /** What the answer POST replies: the contract's body, or a number for an error status. */
   answerReply: Req | number;
+  answerCode?: string;
   /** The bodies the answer POSTs carried, by path. */
   answers: { path: string; body: unknown }[];
   notShown: number;
@@ -160,7 +161,7 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
         return route.abort("failed");
       }
       if (mock.delay > 0) await new Promise((r) => setTimeout(r, mock.delay));
-      if (typeof mock.answerReply === "number") return json(route, mock.answerReply, { error: { code: mock.answerReply === 403 ? "forbidden" : mock.answerReply === 409 ? "already_answered" : "x", message: SERVER_TEXT, request_id: "r" } });
+      if (typeof mock.answerReply === "number") return json(route, mock.answerReply, { error: { code: mock.answerCode ?? (mock.answerReply === 403 ? "forbidden" : mock.answerReply === 409 ? "already_answered" : "x"), message: SERVER_TEXT, request_id: "r" } });
       mock.asks = mock.asks.filter((a) => a.id !== answerMatch[1]);
       return json(route, 200, mock.answerReply);
     }
@@ -667,6 +668,30 @@ test.describe("D#598 P8c: Needs you", () => {
     expect(mock.answers).toEqual([]);
     await clean(page, errors);
   });
+
+  // D#7 DW-R7 follow-up: a yes the holder's runners cannot act on is refused with a sentence that names the next step; the ask stays and can still be declined.
+  const GONE = "Your runner no longer lists this repository, so this run can't start on your plan. Add the repository to your runner, then say yes again. Nothing was started.";
+  for (const width of [1280, 360]) {
+    test(`DW-R7: a yes with no runner listing the repository says what to do next, keeps the ask open and answerable, at ${width} px`, async ({ page }) => {
+      const { mock, errors } = await setup(page, { requests: [], asks: [ask({ ...PLAN_ASK, plan_holder: { name: "Priya Raman", is_you: true } })], answerReply: 409, answerCode: "runner_gone" });
+      await open(page);
+      await page.setViewportSize({ width, height: 700 });
+      await press(t(page, `ny-choice-${A1}-approve`));
+      await expect(t(page, "ny-action-error")).toHaveText(GONE);
+      await expect(t(page, "ny-row")).toHaveAttribute("data-state", "open");
+      await expect(t(page, `ny-choice-${A1}-decline`)).toBeEnabled();
+      expect(await focusedTestId(page)).toBe(`ny-choice-${A1}-approve`);
+      const m = await page.evaluate((sel) => {
+        const app = document.querySelector(sel) as HTMLElement;
+        const e = document.querySelector('[data-testid="ny-action-error"]') as HTMLElement;
+        return { over: app.scrollWidth > app.clientWidth, w: e.getBoundingClientRect().width, aw: app.clientWidth };
+      }, `${WIN} .ny-app`);
+      expect(m.over).toBe(false);
+      expect(m.w).toBeLessThanOrEqual(m.aw);
+      expect(mock.answers).toHaveLength(1);
+      await clean(page, errors);
+    });
+  }
 
   test("E6: a network error then a second press resends the same Idempotency-Key, and the replayed answer removes the row and names the response's option", async ({ page }) => {
     const { mock, errors } = await setup(page, { requests: [], asks: [ask()], dropAnswers: 1, answerReply: { ask_id: A1, receipt_id: "e1b7c3d4-2f58-4a09-8c6b-7d3e9f1a2b45", answered_option: "leave_it" } });

@@ -449,6 +449,11 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
         if (runner.allowed_repo_ids.length === 0 || roles.length === 0) return idle(accountId);
 
         const autoRepos = await autoApprovableRepos(accountId, runnerId, runner);
+        // A run on a member's plan under the repo's "ask" setting is why a subscription runner may be offered none: that run is asked about (once). Asked on every way out of this poll
+        // (nothing to hand out, the account at its ceiling, or a run handed out), so a runner that is always busy still raises the ask.
+        const askAbout = async (): Promise<void> => {
+          if (runner.credential_mode === "subscription" && deps.raiseMemberPlanAsks) await deps.raiseMemberPlanAsks({ accountId, runnerId, roles });
+        };
         // D#605 FL-4: this runner's facts and labels and its available preferred peers, read once for the poll; the rules in the candidate query only narrow what it allows.
         const routing = await withTenant(runnerPool, accountId, (client) => loadPollRouting(client, { accountId, runnerId, nowMs: now(), wakeEnabled: wakeEnabled() }));
         const tried: string[] = [];
@@ -480,7 +485,7 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
                   AND ${effectiveModeSql("w", "r")} IN (${RUNNER_MODES_SQL})
                   AND (a.execution_mode <> 'runner_verified' OR r.execution_mode IN (${RUNNER_MODES_SQL}))
                   AND a.dispatch_repo_id = ANY($2::uuid[]) AND a.role = ANY($3::text[])
-                  AND ($4 <> 'subscription' OR a.initiated_by = $5 OR a.approved_by = $5 OR (a.approved_by IS NULL AND a.dispatch_repo_id = ANY($9::uuid[])))
+                  AND ($4 <> 'subscription' OR a.initiated_by = $5 OR a.approved_by = $5 OR (a.approved_by IS NULL AND a.dispatch_repo_id = ANY($9::uuid[]) AND NOT runner_plan_declined(a.id)))
                   AND a.id <> ALL($6::uuid[]) AND a.dispatch_repo_id <> ALL($13::uuid[])
                   AND (a.excluded_runner_id IS NULL OR a.excluded_runner_id <> $7)
                   AND (a.claimable_after IS NULL OR a.claimable_after <= $8::timestamptz)
@@ -521,16 +526,19 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
             heavyBlocked = true;
             continue;
           }
-          if (claimed === "at_limit") return idle(accountId);
+          if (claimed === "at_limit") {
+            await askAbout();
+            return idle(accountId);
+          }
           // Tells the runner sweeper when this lease ends, so its cron tick does not open the database before then (D#454 H3c's
           // marker; best effort, and an earlier marker is never pushed later). Heartbeats do not mark: a tick that connects
           // re-derives the next due time from the rows.
           void markWorkPending("runner-sweeper", { since: now() + RUNNER_LEASE_SECONDS * 1000 });
           await rederiveDue(accountId);
+          await askAbout();
           return { kind: "claimed", signedJob: parsed.data, runId: candidate.id, leaseGeneration: claimed.generation };
         }
-        // Nothing was handed out: a run on a member's plan under the repo's "ask" setting is why a subscription runner may see none, so that run is asked about (once).
-        if (runner.credential_mode === "subscription" && deps.raiseMemberPlanAsks) await deps.raiseMemberPlanAsks({ accountId, runnerId, roles });
+        await askAbout();
         return idle(accountId);
       }),
 

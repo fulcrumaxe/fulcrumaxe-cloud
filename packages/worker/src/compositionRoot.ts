@@ -487,7 +487,8 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       },
       onError: (runId) => console.warn(JSON.stringify({ event: "run.handoff_failed", run_id: runId })),
     });
-    const raiseMemberPlan = createRunnerPlanAsk(pools.receiptPool);
+    // A run whose ask cannot be raised is skipped, and named here with the database's error code (never its text); the claim goes on to the next run (D#7 DW-R7).
+    const raiseMemberPlan = createRunnerPlanAsk(pools.receiptPool, { onFailure: (runId, error) => console.warn(JSON.stringify({ event: "runner.member_plan_ask_run_failed", run_id: runId, code: (error as { code?: unknown } | null)?.code ?? null })) });
     const runnerClaims = createRunnerClaimFacade(pools.runnerPool, { visibility: repoVisibility, followUp, wakeEnabled, raiseMemberPlanAsks: (i) => raiseMemberPlan(i).catch((): number => { console.warn(JSON.stringify({ event: "runner.member_plan_ask_failed", runner_id: i.runnerId })); return 0; }), onError: (runId) => console.warn(JSON.stringify({ event: "runner.follow_up_failed", run_id: runId })), onHandedOff: (i) => runHandoffs.completeRunHandoff({ ...i, forced: false }) });
     const runnerDone = createRunnerDoneFacade(pools.runnerPool);
     // D#6 R5a-2b (C27 section 1.6): the ticket key is read here, once. Without it (or without the forward host) the ticket route answers 503 and nothing else changes.

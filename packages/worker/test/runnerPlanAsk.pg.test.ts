@@ -330,12 +330,48 @@ describe("the member-plan ask [pg]", { timeout: 120_000 }, () => {
       await raise();
       const [ask] = await asks(id);
       await admin.query("UPDATE runners SET revoked_at = now(), revoked_reason = 'test' WHERE id = $1", [runner]);
-      await expect(answer(holder, ask.id, "approve")).rejects.toMatchObject({ code: "forbidden" });
+      await expect(answer(holder, ask.id, "approve")).rejects.toMatchObject({ code: "runner_gone", status: 409 });
       expect(await runRow(id)).toMatchObject({ approved_by: null });
       expect((await asks(id))[0]).toMatchObject({ state: "open" });
     });
 
-    it("the listed holder is a name two people can tell apart, never an id or empty: name, then GitHub login, then email", async () => {
+    // Follow-up 2: approved_by is written once, so a yes the holder's runners cannot act on must not write it.
+    it("a yes after the runner dropped the repository writes nothing and leaves the ask open; decline still works; adding the repository back lets the same yes through", async () => {
+      const id = await pending();
+      await raise();
+      const [ask] = await asks(id);
+      const other = randomUUID();
+      await admin.query("UPDATE runners SET allowed_repo_ids = ARRAY[$2::uuid] WHERE id = $1", [runner, other]); // still live, lists another repo only
+      await expect(answer(holder, ask.id, "approve")).rejects.toMatchObject({ code: "runner_gone", status: 409 });
+      expect(await runRow(id)).toMatchObject({ status: "pending", approved_by: null });
+      expect((await asks(id))[0]).toMatchObject({ state: "open", answered_by: null });
+      expect(await receipts(id)).toEqual([]);
+      expect(await listed(holder)).toHaveLength(1); // still in Needs you, still answerable
+      await admin.query("UPDATE runners SET allowed_repo_ids = ARRAY[$2::uuid] WHERE id = $1", [runner, A.repoId]);
+      await answer(holder, ask.id, "approve");
+      expect(await runRow(id)).toMatchObject({ approved_by: holder });
+    });
+
+    it("a yes with another runner of the holder's that still lists the repository goes through (the ask's own runner is gone)", async () => {
+      const id = await pending();
+      await raise();
+      const [ask] = await asks(id);
+      await admin.query("UPDATE runners SET revoked_at = now(), revoked_reason = 'test' WHERE id = $1", [runner]);
+      await newRunner(holder);
+      await answer(holder, ask.id, "approve");
+      expect(await runRow(id)).toMatchObject({ approved_by: holder });
+    });
+
+    it("a no after the runner dropped the repository is still taken: nothing needs a runner to say no", async () => {
+      const id = await pending();
+      await raise();
+      const [ask] = await asks(id);
+      await admin.query("UPDATE runners SET allowed_repo_ids = ARRAY[$2::uuid] WHERE id = $1", [runner, randomUUID()]);
+      await answer(holder, ask.id, "decline");
+      expect((await asks(id))[0]).toMatchObject({ state: "answered", answered_option: "decline" });
+    });
+
+    it("the listed holder is a name two people can tell apart, never an id, empty or an email: name, then GitHub login, then a fixed fallback", async () => {
       const unnamed = await member("admin", null);
       await admin.query("UPDATE users SET github_login = 'unnamed-dev' WHERE id = $1", [unnamed]);
       const r2 = await newRunner(unnamed);
@@ -343,7 +379,164 @@ describe("the member-plan ask [pg]", { timeout: 120_000 }, () => {
       expect(await raise(r2)).toBe(1);
       expect((await listed(unnamed))[0]!.planHolder).toEqual({ id: unnamed, name: "unnamed-dev" });
       await admin.query("UPDATE users SET github_login = NULL WHERE id = $1", [unnamed]);
-      expect((await listed(unnamed))[0]!.planHolder!.name).toMatch(/@example\.test$/);
+      expect((await listed(unnamed))[0]!.planHolder).toEqual({ id: unnamed, name: "a team member" });
+    });
+
+    // Follow-up 3: a member must never see another person's email, in the list or in the stored sentence.
+    it("a holder with no name and no GitHub login is shown, and written into the ask, as a fixed fallback and never as their email", async () => {
+      const unnamed = await member("admin", null);
+      const email = (await admin.query("SELECT email FROM users WHERE id = $1", [unnamed])).rows[0].email as string;
+      const r2 = await newRunner(unnamed);
+      const id = await pending();
+      expect(await raise(r2)).toBe(1);
+      const [ask] = await asks(id);
+      expect(ask.rationale).toContain(OWNER_SENTENCE("acme/app", "a team member"));
+      expect(ask.rationale).not.toContain(email);
+      for (const who of [plainMember, otherAdmin, unnamed]) expect(JSON.stringify(await listed(who))).not.toContain(email);
+    });
+  });
+
+  describe("a no stands (follow-up 1)", () => {
+    const consent = (by: string, runnerId: string, granted = true) => withTenant(receiptPool, A.accountId, by, (c) => c.query("SELECT * FROM runner_plan_consent_set($1, $2)", [runnerId, granted]));
+    const declined = (id: string, pool: Pool = receiptPool) => withTenant(pool, A.accountId, async (c) => (await c.query<{ d: boolean }>("SELECT runner_plan_declined($1) AS d", [id])).rows[0]!.d);
+
+    it("a declined run is not approved by the claim after the dial is loosened to announce or act, with the holder's standing consent on; an unasked run still is", async () => {
+      await consent(holder, runner);
+      for (const choice of ["decline", "deny"]) {
+        for (const loose of ["announce", "act"]) {
+          const id = await pending();
+          await dial("ask");
+          await raise();
+          const [ask] = (await asks(id)).slice(-1);
+          await answer(holder, ask.id, choice);
+          await dial(loose);
+          expect(await declined(id)).toBe(true);
+          expect(await declined(id, writerPool)).toBe(true);
+          expect(await claim()).toMatchObject({ kind: "idle" });
+          expect(await runRow(id)).toMatchObject({ status: "pending", approved_by: null, runner_id: null });
+          expect((await admin.query("SELECT 1 FROM audit_log WHERE account_id = $1 AND action = 'runner.run_auto_approved' AND payload ->> 'run_id' = $2", [A.accountId, id])).rowCount).toBe(0);
+          await admin.query("UPDATE agent_runs SET status = 'cancelled' WHERE id = $1", [id]);
+        }
+      }
+      // The control: a run nobody was asked about is approved at the claim under the same dial and consent, so the refusal is what stopped the others.
+      const fresh = await pending();
+      expect(await claim()).toMatchObject({ kind: "claimed", runId: fresh });
+    });
+
+    it("the claim's own approval function refuses a declined run even when it is handed the run directly (a decline landing between the candidate read and the claim)", async () => {
+      await consent(holder, runner);
+      await dial("announce");
+      const approveAtClaim = (id: string) => withTenant(writerPool, A.accountId, async (c) => (await c.query<{ ok: boolean }>("SELECT agent_run_runner_auto_approve($1::uuid, $2::uuid, now(), 1) AS ok", [id, runner])).rows[0]!.ok);
+      const asked = await pending();
+      await dial("ask");
+      await raise();
+      await answer(holder, (await asks(asked))[0].id, "decline");
+      await dial("announce");
+      expect(await approveAtClaim(asked)).toBe(false);
+      expect(await runRow(asked)).toMatchObject({ approved_by: null });
+      expect(await approveAtClaim(await pending())).toBe(true); // the control: the same call approves a run nobody declined
+    });
+
+    it("the claim's candidate list skips declined runs, so a pile of them never hides a later run", async () => {
+      await consent(holder, runner);
+      for (let i = 0; i < 6; i++) {
+        const id = await pending();
+        await raise();
+        const [ask] = (await asks(id)).slice(-1);
+        await answer(holder, ask.id, "decline");
+      }
+      await dial("announce");
+      const later = await pending();
+      expect(await claim()).toMatchObject({ kind: "claimed", runId: later });
+    });
+
+    it("a yes, silence and an open ask are not a refusal", async () => {
+      const yes = await pending();
+      const silent = await pending();
+      const open = await pending();
+      await raise();
+      const [a1, a2] = [(await asks(yes))[0], (await asks(silent))[0]];
+      await answer(holder, a1.id, "approve");
+      await admin.query("BEGIN");
+      await admin.query("SET LOCAL session_replication_role = replica");
+      await admin.query("UPDATE decision_asks SET raised_at = raised_at - interval '30 days', answer_due_at = answer_due_at - interval '30 days' WHERE id = $1", [a2.id]);
+      await admin.query("COMMIT");
+      await runAskWindowTick({ pool: receiptPool, warn: () => undefined });
+      for (const id of [yes, silent, open]) expect(await declined(id)).toBe(false);
+      expect(await declined(randomUUID())).toBe(false);
+    });
+
+    it("what a person can do after a no: Approve on the Runs card, the holder's own click, and the claim then takes the run", async () => {
+      await consent(holder, runner);
+      const id = await pending();
+      await raise();
+      const [ask] = await asks(id);
+      await answer(holder, ask.id, "decline");
+      await dial("announce");
+      expect(await claim()).toMatchObject({ kind: "idle" });
+      await withTenant(receiptPool, A.accountId, holder, (c) => c.query("SELECT agent_run_approve($1)", [id]));
+      expect(await claim()).toMatchObject({ kind: "claimed", runId: id });
+      expect(await runRow(id)).toMatchObject({ status: "running", approved_by: holder });
+    });
+
+    it("the read model does not call a declined run runnable without approval, and other roles cannot call the function", async () => {
+      await consent(holder, runner);
+      await dial("announce");
+      const id = await pending();
+      const runnable = async () => (await withTenant(receiptPool, A.accountId, (c) => c.query<{ r: boolean }>("SELECT EXISTS (SELECT 1 FROM runners r WHERE r.account_id = $1 AND r.revoked_at IS NULL AND r.credential_mode = 'subscription' AND runner_plan_auto_approvable(r.id, $2) AND NOT runner_plan_declined($3)) AS r", [A.accountId, A.repoId, id]))).rows[0]!.r;
+      expect(await runnable()).toBe(true);
+      await dial("ask");
+      await raise();
+      await answer(holder, (await asks(id))[0].id, "decline");
+      await dial("announce");
+      expect(await runnable()).toBe(false);
+      const priv = async (role: string) => (await admin.query("SELECT has_function_privilege($1, 'runner_plan_declined(uuid)', 'EXECUTE') AS ok", [role])).rows[0].ok;
+      expect([await priv("app_user"), await priv("agent_run_writer"), await priv("runner_auto_approve_definer")]).toEqual([true, true, true]);
+      expect([await priv("public"), await priv("platform_ops")]).toEqual([false, false]);
+    });
+  });
+
+  describe("one run whose ask fails does not starve the rest (follow-up 4)", () => {
+    it("the failing run is skipped and reported by its id, the others are asked about, and a later call tries the failing one again", async () => {
+      const bad = await pending();
+      const good1 = await pending();
+      const good2 = await pending();
+      await admin.query(`CREATE OR REPLACE FUNCTION fx_bad_ask() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.run_id = '${bad}' THEN RAISE EXCEPTION 'forced failure' USING ERRCODE = 'check_violation'; END IF; RETURN NEW; END $$`);
+      await admin.query("CREATE TRIGGER fx_bad_ask BEFORE INSERT ON decision_asks FOR EACH ROW EXECUTE FUNCTION fx_bad_ask()");
+      try {
+        const failed: { runId: string; code: unknown }[] = [];
+        const run = () => createRunnerPlanAsk(receiptPool, { onFailure: (runId, e) => failed.push({ runId, code: (e as { code?: unknown }).code }) })({ accountId: A.accountId, runnerId: runner, roles: ROLES });
+        expect(await run()).toBe(2);
+        expect(failed).toEqual([{ runId: bad, code: "23514" }]);
+        expect((await asks(bad))).toEqual([]);
+        expect((await links()).map((l) => l.run_id).sort()).toEqual([good1, good2].sort());
+        expect(await run()).toBe(0); // the good ones are not asked twice; the bad one fails again, visibly
+        expect(failed).toHaveLength(2);
+        // The claim path goes on: its answer is unchanged and the failure does not escape it.
+        expect(await claim()).toMatchObject({ kind: "idle" });
+        // Once the cause is gone, the same run is asked about.
+        await admin.query("DROP TRIGGER fx_bad_ask ON decision_asks");
+        expect(await run()).toBe(1);
+        expect(await asks(bad)).toHaveLength(1);
+      } finally {
+        await admin.query("DROP TRIGGER IF EXISTS fx_bad_ask ON decision_asks");
+        await admin.query("DROP FUNCTION IF EXISTS fx_bad_ask()");
+      }
+    });
+
+    it("the work per call is bounded: at most five asks are raised in one call", async () => {
+      for (let i = 0; i < 8; i++) await pending();
+      expect(await raise()).toBe(5);
+      expect(await raise()).toBe(3);
+    });
+  });
+
+  describe("a busy runner still raises the ask (follow-up check)", () => {
+    it("a claim that hands out another run still raises the waiting run's ask", async () => {
+      const own = await pending({ initiatedBy: holder });
+      const waiting = await pending();
+      expect(await claim()).toMatchObject({ kind: "claimed", runId: own });
+      expect(await asks(waiting)).toHaveLength(1);
     });
   });
 });

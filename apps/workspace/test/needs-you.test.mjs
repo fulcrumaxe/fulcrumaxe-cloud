@@ -609,6 +609,7 @@ describe("decision asks", () => {
     const cases = [
       [fail(403, "forbidden"), WORDS.onlyAdmins],
       [fail(409, "already_answered"), WORDS.alreadyAnswered],
+      [fail(409, "runner_gone"), WORDS.runnerGone],
       [fail(422, "invalid_choice"), WORDS.failed],
       [fail(404, "not_found"), WORDS.failed],
       [fail(503, "decision_answers_unavailable"), WORDS.failed],

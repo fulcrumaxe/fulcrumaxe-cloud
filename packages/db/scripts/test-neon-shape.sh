@@ -2696,17 +2696,18 @@ check_runner_auto_approve_definer_role_shape() {
   fi
 }
 
-# D#7 DW-R7 (0982): the SECURITY DEFINER function owned by runner_plan_ask_definer. Prints its oid when it is the one exact signature (matched by
-# regprocedure, not by name), pinned to search_path=pg_catalog, public, pg_temp, with an ACL that holds app_user and nobody else but the owner (no
+# D#7 DW-R7 (0982, 0987): the SECURITY DEFINER functions owned by runner_plan_ask_definer. Prints their oids when each is one of its two exact signatures (matched by
+# regprocedure, not by name), pinned to search_path=pg_catalog, public, pg_temp, with an ACL that holds app_user for the ask record, and agent_run_writer, app_user and runner_auto_approve_definer for runner_plan_declined, and nobody else but the owner (no
 # PUBLIC, no platform_ops) and no grant option; SHAPE_FAIL:<count> when any is not; nothing when the role owns none.
 check_runner_plan_ask_definer_exception_shape() {
   local dbname="$1" row rc=0 oids bad
   row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
     SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
-      SELECT p.oid, (p.oid = 'public.runner_plan_ask_record(uuid,uuid,uuid)'::regprocedure
+      SELECT p.oid, (p.oid IN ('public.runner_plan_ask_record(uuid,uuid,uuid)'::regprocedure, 'public.runner_plan_declined(uuid)'::regprocedure)
         AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable)
-        AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0) = ARRAY['app_user']
+        AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text ORDER BY pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0)
+            = CASE WHEN p.proname = 'runner_plan_declined' THEN ARRAY['agent_run_writer', 'app_user', 'runner_auto_approve_definer'] ELSE ARRAY['app_user'] END
         AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0)) AS ok
       FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'runner_plan_ask_definer') x;" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
@@ -2715,19 +2716,19 @@ check_runner_plan_ask_definer_exception_shape() {
   fi
   IFS='|' read -r oids bad <<<"$row"
   if [ "$bad" != "0" ]; then
-    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by runner_plan_ask_definer fail the exception shape (not its exact signature, a loose search_path, EXECUTE for anyone but app_user and the owner, or a grant option)"
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by runner_plan_ask_definer fail the exception shape (not its exact signature, a loose search_path, EXECUTE for anyone but its callers and the owner, or a grant option)"
     return 0
   fi
   echo "$oids"
 }
 
-# D#7 DW-R7 (0982): role shape of runner_plan_ask_definer. A no-op when the role does not exist. Every problem is named: NOLOGIN and unprivileged, no
-# member but the migration role and no live membership for it, a member of no role, privileges exactly the 35 granted by 0982 (column SELECT on accounts,
+# D#7 DW-R7 (0982, 0987): role shape of runner_plan_ask_definer. A no-op when the role does not exist. Every problem is named: NOLOGIN and unprivileged, no
+# member but the migration role and no live membership for it, a member of no role, privileges exactly the 38 granted by 0982 and 0987 (column SELECT on accounts,
 # agent_runs, runners, account_members, decision_settings, decision_asks and runner_plan_asks, column INSERT on runner_plan_asks, USAGE on public; nothing
-# table-wide, no UPDATE anywhere), owning exactly its one function and nothing else.
+# table-wide, no UPDATE anywhere), owning exactly its two functions and nothing else.
 check_runner_plan_ask_definer_role_shape() {
   local dbname="$1" out rc=0 problems
-  local expected="'column accounts.id SELECT','column accounts.deleted_at SELECT','column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.dispatch_repo_id SELECT','column agent_runs.status SELECT','column agent_runs.runtime SELECT','column agent_runs.approved_by SELECT','column agent_runs.runner_id SELECT','column runners.id SELECT','column runners.account_id SELECT','column runners.registered_by SELECT','column runners.credential_mode SELECT','column runners.allowed_repo_ids SELECT','column runners.revoked_at SELECT','column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT','column decision_settings.account_id SELECT','column decision_settings.repo_id SELECT','column decision_settings.decision_type SELECT','column decision_settings.disposition SELECT','column decision_settings.version SELECT','column decision_asks.id SELECT','column decision_asks.account_id SELECT','column decision_asks.run_id SELECT','column decision_asks.decision_type SELECT','column runner_plan_asks.account_id SELECT','column runner_plan_asks.run_id SELECT','column runner_plan_asks.account_id INSERT','column runner_plan_asks.run_id INSERT','column runner_plan_asks.ask_id INSERT','column runner_plan_asks.runner_id INSERT','column runner_plan_asks.plan_holder INSERT','schema public USAGE'"
+  local expected="'column accounts.id SELECT','column accounts.deleted_at SELECT','column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.dispatch_repo_id SELECT','column agent_runs.status SELECT','column agent_runs.runtime SELECT','column agent_runs.approved_by SELECT','column agent_runs.runner_id SELECT','column runners.id SELECT','column runners.account_id SELECT','column runners.registered_by SELECT','column runners.credential_mode SELECT','column runners.allowed_repo_ids SELECT','column runners.revoked_at SELECT','column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT','column decision_settings.account_id SELECT','column decision_settings.repo_id SELECT','column decision_settings.decision_type SELECT','column decision_settings.disposition SELECT','column decision_settings.version SELECT','column decision_asks.id SELECT','column decision_asks.account_id SELECT','column decision_asks.run_id SELECT','column decision_asks.decision_type SELECT','column decision_asks.state SELECT','column decision_asks.answered_option SELECT','column runner_plan_asks.account_id SELECT','column runner_plan_asks.run_id SELECT','column runner_plan_asks.ask_id SELECT','column runner_plan_asks.account_id INSERT','column runner_plan_asks.run_id INSERT','column runner_plan_asks.ask_id INSERT','column runner_plan_asks.runner_id INSERT','column runner_plan_asks.plan_holder INSERT','schema public USAGE'"
   out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
     WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'runner_plan_ask_definer'),
     held AS (
@@ -2742,11 +2743,11 @@ check_runner_plan_ask_definer_role_shape() {
       CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
                 OR pg_has_role('fx_migrator', 'runner_plan_ask_definer', 'USAGE') THEN 'fx_migrator holds a live membership' END,
       CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of a role' END,
-      CASE WHEN (SELECT count(*) FROM held) <> 35 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 35 granted by 0982' END,
-      CASE WHEN (SELECT count(*) FROM mine) <> 1
-              OR EXISTS (SELECT 1 FROM mine WHERE oid <> ALL (ARRAY['public.runner_plan_ask_record(uuid,uuid,uuid)'::regprocedure]::oid[]))
+      CASE WHEN (SELECT count(*) FROM held) <> 38 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 38 granted by 0982 and 0987' END,
+      CASE WHEN (SELECT count(*) FROM mine) <> 2
+              OR EXISTS (SELECT 1 FROM mine WHERE oid <> ALL (ARRAY['public.runner_plan_ask_record(uuid,uuid,uuid)'::regprocedure, 'public.runner_plan_declined(uuid)'::regprocedure]::oid[]))
               OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
-              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its one function and nothing else' END,
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its two functions and nothing else' END,
       CASE WHEN has_schema_privilege('runner_plan_ask_definer', 'public', 'CREATE') THEN 'still has CREATE on public' END)
     FROM r;" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then

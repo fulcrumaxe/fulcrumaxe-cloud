@@ -29,6 +29,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "apply_failed",
   "ask_no_run",
   "ask_receipt_mismatch",
+  "runner_gone",
   "author_check_unavailable",
   "billing_not_configured",
   "checkout_in_progress",

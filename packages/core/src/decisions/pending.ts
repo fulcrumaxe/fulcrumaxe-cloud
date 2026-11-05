@@ -59,7 +59,7 @@ export async function listPendingAsks(
     const res = await client.query<Row>(
       `SELECT id, work_item_id, decision_type, options, proposed, rationale, answer_due_at, timeout_outcome, state,
               to_char(answer_due_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS due_text,
-              (SELECT jsonb_build_object('id', p.plan_holder, 'name', COALESCE(NULLIF(u.name, ''), NULLIF(u.github_login, ''), u.email, 'a former team member'))
+              (SELECT jsonb_build_object('id', p.plan_holder, 'name', COALESCE(NULLIF(u.name, ''), NULLIF(u.github_login, ''), CASE WHEN u.id IS NULL THEN 'a former team member' ELSE 'a team member' END))
                  FROM runner_plan_asks p LEFT JOIN users u ON u.id = p.plan_holder WHERE p.ask_id = a.id) AS plan_holder
          FROM decision_asks a
         WHERE account_id = $1::uuid AND state IN ('open', 'overdue')
