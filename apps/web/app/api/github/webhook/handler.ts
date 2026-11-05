@@ -21,7 +21,7 @@ import { wakePlaneParity } from "../../../../lib/planeParityWake";
 import { intakeAllowlist } from "../../../../lib/github/intakeTrust";
 import { issueAuthorPermission } from "../../../../lib/github/issueAuthorPermission";
 import { repoHasEngineLoop } from "../../../../lib/github/repoHasEngineLoop";
-import { senderPermission } from "../../../../lib/github/senderPermission";
+import { issueHasLabel, senderPermission } from "../../../../lib/github/senderPermission";
 import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
 import { markWorkPending } from "@fx/core/src/pendingWork";
 import { markDiscoveryDrainPending } from "../../../../lib/discoveryWake";
@@ -124,6 +124,7 @@ export function defaultGithubWebhookDeps(): GithubWebhookHandlerDeps {
     allowlist: intakeAllowlist() ?? undefined,
     issueAuthorPermission,
     senderPermission,
+    issueHasLabel,
     repoHasEngineLoop,
     syncRepos: buildSyncRepos({
       platformOpsPool: cachedPlatformOpsPool,

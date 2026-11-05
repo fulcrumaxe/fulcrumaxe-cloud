@@ -1157,6 +1157,8 @@ export interface GithubWebhookDbDeps {
   repoHasEngineLoop?: (input: { repoId: string; owner: string; name: string }) => Promise<boolean>;
   /** D#483: the real permission of the person who applied or removed the product label, asked for that one delivery and never stored. Absent, or a failure: the label is not honoured. */
   senderPermission?: (input: { repoId: string; owner: string; name: string; login: string }) => Promise<RepoPermission>;
+  /** D#483: whether the issue has the label now (a live read). A label delivery acts only if this agrees with its action, so a replayed old payload moves nothing. Absent, or a failure: the label is not honoured. */
+  issueHasLabel?: (input: { repoId: string; owner: string; name: string; number: number; label: string }) => Promise<boolean>;
   /**
    * D#483 S4-c: called after the delivery's transaction (and, for added repositories, the repo sync) with the discoveries this
    * delivery queued, so a runner can start them. Queuing itself needs no hook: it is written by the delivery, once per repository and
@@ -1381,6 +1383,9 @@ async function readLabelSenderPermission(deps: GithubWebhookDbDeps, repoId: stri
     if (d.action === 'unlabeled') {
       if (!deps.repoHasEngineLoop || !(await deps.repoHasEngineLoop({ repoId, owner, name }))) return null;
     }
+    // The payload may be an old one delivered again: the live labels must agree with the action too (only a maintainer or admin gets this far).
+    if (!deps.issueHasLabel) return null;
+    if ((await deps.issueHasLabel({ repoId, owner, name, number: d.ghNumber, label: PRODUCT_LABEL })) !== (d.action === 'labeled')) return null;
     return permission;
   } catch {
     // fx-swallow-ok: fail closed by design; a fixed line is logged (no login, no repository, no driver text) and the label changes nothing

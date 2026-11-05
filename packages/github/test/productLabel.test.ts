@@ -8,10 +8,13 @@ import { InstallationTokenCache } from "../src/installationToken.js";
 import { productLabelDelivery } from "../src/productLabel.js";
 
 /** GitHub's own shape for `issues.labeled` / `.unlabeled`: the `label` object, the `sender`, the issue. */
-function payload(over: { action?: string; label?: string | null; state?: string; pull?: boolean; sender?: unknown; number?: unknown } = {}): GithubWebhookPayload {
+function payload(over: { action?: string; label?: string | null; state?: string; pull?: boolean; sender?: unknown; number?: unknown; labels?: unknown } = {}): GithubWebhookPayload {
+  const action = over.action ?? "labeled";
+  // GitHub lists the issue's labels as they are for the delivery: the label is on it after `labeled`, off it after `unlabeled`.
+  const labels = "labels" in over ? over.labels : action === "labeled" ? [{ id: 1, name: over.label ?? PRODUCT_LABEL, color: "ededed" }] : [{ id: 2, name: "bug", color: "d73a4a" }];
   return {
-    action: over.action ?? "labeled",
-    issue: { number: over.number ?? 7, title: "t", body: "b", user: { login: "someone" }, author_association: "NONE", state: over.state ?? "open", created_at: "2026-11-01T00:00:00Z", ...(over.pull ? { pull_request: { url: "https://api.github.com/x" } } : {}) },
+    action,
+    issue: { labels, number: over.number ?? 7, title: "t", body: "b", user: { login: "someone" }, author_association: "NONE", state: over.state ?? "open", created_at: "2026-11-01T00:00:00Z", ...(over.pull ? { pull_request: { url: "https://api.github.com/x" } } : {}) },
     ...(over.label === null ? {} : { label: { id: 1, name: over.label ?? PRODUCT_LABEL, color: "ededed", default: false, description: null } }),
     sender: over.sender === undefined ? { login: "boss", id: 5, type: "User" } : over.sender,
   } as unknown as GithubWebhookPayload;
@@ -39,11 +42,30 @@ describe("productLabelDelivery: which deliveries are the product label at all (n
       payload({ sender: null }),
       payload({ sender: { login: "" } }),
       payload({ sender: { login: 5 } }),
+      // The issue's own labels must agree with the action; a payload that does not say is not trusted.
+      payload({ action: "labeled", labels: [] }),
+      payload({ action: "labeled", labels: [{ name: "bug" }] }),
+      payload({ action: "unlabeled", labels: [{ name: PRODUCT_LABEL }] }),
+      payload({ labels: undefined }),
+      payload({ labels: null }),
+      payload({ action: "unlabeled", labels: "none" }),
     ]) {
       expect(productLabelDelivery("issues", bad)).toBeNull();
     }
     expect(productLabelDelivery("issue_comment", payload())).toBeNull();
+    // The label among others still counts; an unlabeled that leaves the issue with other labels counts.
+    expect(productLabelDelivery("issues", payload({ labels: [{ name: "bug" }, { name: PRODUCT_LABEL }] }))).toMatchObject({ action: "labeled" });
+    expect(productLabelDelivery("issues", payload({ action: "unlabeled", labels: [] }))).toMatchObject({ action: "unlabeled" });
     expect(productLabelDelivery("issues", null)).toBeNull();
+  });
+});
+
+describe("mapEvent: a delivery whose issue labels disagree with its action moves nothing (a labeled after the label went, an unlabeled after it came back)", () => {
+  it("ignores them even for a maintainer", () => {
+    const stale = mapEvent("issues", payload({ action: "labeled", labels: [] }), { allowlist: [], labelSenderPermission: "admin" });
+    expect(stale.kind).toBe("ignored");
+    const back = mapEvent("issues", payload({ action: "unlabeled", labels: [{ name: PRODUCT_LABEL }] }), { allowlist: [], labelSenderPermission: "admin" });
+    expect(back.kind).toBe("ignored");
   });
 });
 

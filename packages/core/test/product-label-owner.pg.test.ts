@@ -15,7 +15,7 @@ import { beginPlanImport } from '../src/plan/persist.js';
  * Postgres. The source is a fake PlanSource: what it answers for `labelActorPermission` is what the real source derives from the issue's events
  * and the permission route (that chain is exercised against the strict GitHub fake in packages/github/test/productLabel.pg.test.ts).
  */
-type Labelled = { number: number; labels?: string[]; actor?: RepoPermission | null | 'throws' | 'budget' };
+type Labelled = { number: number; labels?: string[]; actor?: RepoPermission | null | 'throws' | 'budget'; /** What the read just before the write answers (the label may have been taken off since the first read). */ later?: RepoPermission | null | 'throws' | 'budget' };
 function source(issues: Labelled[], opts: { loop: boolean; calls?: number[] }): PlanSource {
   return {
     async head() {
@@ -40,8 +40,10 @@ function source(issues: Labelled[], opts: { loop: boolean; calls?: number[] }): 
       return 'none';
     },
     async labelActorPermission(number) {
+      const seen = opts.calls?.filter((c) => c === number).length ?? 0;
       opts.calls?.push(number);
-      const a = issues.find((i) => i.number === number)?.actor;
+      const found = issues.find((i) => i.number === number);
+      const a = seen > 0 && found && 'later' in found ? found.later : found?.actor;
       if (a === 'throws') throw new Error('github down');
       if (a === 'budget') throw Object.assign(new Error('budget'), { code: 'request_budget_exceeded' });
       return a ?? null;
@@ -102,7 +104,8 @@ describe('the product label through discovery, and the owner definer (0992)', ()
     const t = await setup();
     const calls: number[] = [];
     await t.importWith([LABELLED(1, 'admin'), PLAIN(2), { number: 3, labels: ['bug'] }], true, calls);
-    expect(calls).toEqual([1]);
+    // One read to establish the actor, and one more just before the write.
+    expect(calls).toEqual([1, 1]);
     const u = await setup();
     const none: number[] = [];
     await u.importWith([LABELLED(1, 'admin'), PLAIN(2)], false, none);
@@ -177,12 +180,33 @@ describe('the product label through discovery, and the owner definer (0992)', ()
     expect((await t.row(2))!.owner_process).toBe('internal_loop');
   });
 
+  it('the label gone, unreadable or a lesser actor at the read just before the write: a new issue is the repository default and an existing proposal is not handed over; a spent budget there says the import is partial', async () => {
+    const t = await setup();
+    await t.importWith([PLAIN(1), PLAIN(2), PLAIN(3), PLAIN(4)]);
+    const out = await t.importWith([
+      { ...LABELLED(1, 'admin'), later: null },
+      { ...LABELLED(2, 'admin'), later: 'write' },
+      { ...LABELLED(3, 'admin'), later: 'throws' },
+      { ...LABELLED(4, 'admin'), later: 'budget' },
+      { ...LABELLED(5, 'admin'), later: null },
+      { ...LABELLED(6, 'admin'), later: 'maintain' },
+    ], true, []);
+    expect(await Promise.all([1, 2, 3, 4, 5, 6].map(async (n) => (await t.row(n))!.owner_process))).toEqual(['internal_loop', 'internal_loop', 'internal_loop', 'internal_loop', 'internal_loop', 'product']);
+    expect(await t.audit()).toEqual([]);
+    expect(out).toMatchObject({ truncated: true });
+    // The fresh answer's permission is the one audited.
+    const u = await setup();
+    await u.importWith([PLAIN(1)]);
+    await u.importWith([{ ...LABELLED(1, 'admin'), later: 'maintain' }], true, []);
+    expect((await u.audit())[0]!.payload).toMatchObject({ permission: 'maintain' });
+  });
+
   it('at most MAX_LABEL_CHECKS issues are read in one import; past it the import says it is partial', async () => {
     const t = await setup();
     const calls: number[] = [];
     const many = Array.from({ length: MAX_LABEL_CHECKS + 2 }, (_, i) => LABELLED(i + 1, 'admin'));
     const out = await t.importWith(many, true, calls);
-    expect(calls).toHaveLength(MAX_LABEL_CHECKS);
+    expect(calls).toHaveLength(2 * MAX_LABEL_CHECKS);
     expect(out).toMatchObject({ truncated: true });
   });
 
